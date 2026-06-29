@@ -1298,8 +1298,10 @@ fn generic_tool_timeline_kind(generic: &crate::tui::history::GenericToolCell) ->
         || name.contains("grep")
     {
         "read/search"
-    } else if matches!(name, "apply_patch" | "edit_file" | "write_file")
-        || name.contains("patch")
+    } else if matches!(
+        name,
+        "apply_patch" | "edit_file" | "write_file" | "append_file"
+    ) || name.contains("patch")
         || name.contains("edit")
         || name.contains("write")
     {

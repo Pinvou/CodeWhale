@@ -1,4 +1,4 @@
-//! File system tools: `read_file`, `write_file`, `edit_file`, `list_dir`
+//! File system tools: `read_file`, `write_file`, `append_file`, `edit_file`, `list_dir`
 //!
 //! These tools provide safe file system operations within the workspace,
 //! with path validation to prevent escaping the workspace boundary.
@@ -13,10 +13,33 @@ use serde_json::{Value, json};
 #[cfg(feature = "pdf")]
 use std::fmt::Display;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+const WRITE_FILE_INLINE_DIFF_LIMIT_BYTES: usize = 32 * 1024;
+
+/// Hard cap on a single `write_file` / `append_file` `content` argument.
+///
+/// Not a filesystem limit — a *streaming* limit. A huge content arg becomes a
+/// huge tool-call-arguments SSE stream; on slow local decoders the gap between
+/// argument chunks can exceed the idle timeout (`DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS`,
+/// 240s in pinvou3), which kills the stream mid-arguments. The truncated buffer
+/// then gets brace-repaired into a `content`-less call (→ "missing required field
+/// 'content'") or the whole turn retries the identical write (→ loop-guard block).
+/// Capping the per-call arg size keeps every tool-call stream short enough to
+/// finish inside one idle window, forcing large artifacts down the skeleton +
+/// chunked-append path the tool descriptions already recommend.
+///
+/// 64KB sits above `WRITE_FILE_INLINE_DIFF_LIMIT_BYTES` (32KB) on purpose: writes
+/// in the 32–64KB band are still legitimate (they just omit the inline diff), so
+/// the cap only rejects the egregious "whole deck/report dumped in one arg" case
+/// that reliably out-runs the idle window. `append_file` shares the same ceiling
+/// so a model can't route around the write cap by dumping everything in one append.
+const WRITE_FILE_MAX_CONTENT_BYTES: usize = 64 * 1024;
+const APPEND_FILE_MAX_CONTENT_BYTES: usize = 64 * 1024;
 
 // === ReadFileTool ===
 
@@ -676,7 +699,7 @@ impl ToolSpec for WriteFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `exec_shell` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created."
+        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `exec_shell` — diffs render inline for reasonably sized files and approval is handled cleanly. Creates or overwrites; parent directories are auto-created. **Recommended ≤ 32KB; hard limit 64KB per call** (oversized content is rejected). For larger artifacts (HTML decks / long reports / complete web pages), write a small skeleton here (≤ 8KB, placeholder markers only, no inline CSS/JS), then call append_file for chunked additions."
     }
 
     fn input_schema(&self) -> Value {
@@ -712,6 +735,18 @@ impl ToolSpec for WriteFileTool {
         let path_str = required_str(&input, "path")?;
         let file_content = required_str(&input, "content")?;
 
+        if file_content.len() > WRITE_FILE_MAX_CONTENT_BYTES {
+            return Err(ToolError::invalid_input(format!(
+                "write_file content is {} bytes — over the {}KB single-call limit. \
+                 A content arg this large can stall the SSE stream past the idle \
+                 timeout on slow local inference. Write a small skeleton here \
+                 (placeholder markers, no inline CSS/JS), then build the file up \
+                 with append_file in ≤16KB chunks.",
+                file_content.len(),
+                WRITE_FILE_MAX_CONTENT_BYTES / 1024,
+            )));
+        }
+
         let file_path = context.resolve_path(path_str)?;
 
         // Snapshot the existing contents (if any) before we overwrite — used
@@ -740,17 +775,12 @@ impl ToolSpec for WriteFileTool {
         context.note_file_read(&file_path);
 
         let display = file_path.display().to_string();
-        let diff = make_unified_diff(&display, &prior_contents, file_content);
         let summary = if existed_before {
             format!("Wrote {} bytes to {}", file_content.len(), display)
         } else {
             format!("Created {} ({} bytes)", display, file_content.len())
         };
-        let body = if diff.is_empty() {
-            format!("{summary}\n(no changes)")
-        } else {
-            format!("{diff}\n{summary}")
-        };
+        let body = write_file_result_body(&display, &prior_contents, file_content, &summary);
 
         // Append LSP diagnostics for the written file when enabled (#428).
         let diag_block = lsp_diagnostics_for_paths(context, &[file_path]).await;
@@ -758,6 +788,148 @@ impl ToolSpec for WriteFileTool {
             body
         } else {
             format!("{body}\n{diag_block}")
+        };
+
+        Ok(ToolResult::success(full_body))
+    }
+}
+
+fn write_file_result_body(
+    path: &str,
+    prior_contents: &str,
+    file_content: &str,
+    summary: &str,
+) -> String {
+    if prior_contents.len() > WRITE_FILE_INLINE_DIFF_LIMIT_BYTES
+        || file_content.len() > WRITE_FILE_INLINE_DIFF_LIMIT_BYTES
+    {
+        return format!(
+            "{summary}\n\
+             [diff omitted] {path} is too large for an inline write_file diff \
+             (old={} bytes, new={} bytes, limit={} bytes). Use read_file with line ranges to inspect it.",
+            prior_contents.len(),
+            file_content.len(),
+            WRITE_FILE_INLINE_DIFF_LIMIT_BYTES
+        );
+    }
+
+    let diff = make_unified_diff(path, prior_contents, file_content);
+    if diff.is_empty() {
+        format!("{summary}\n(no changes)")
+    } else {
+        format!("{diff}\n{summary}")
+    }
+}
+
+// === AppendFileTool ===
+
+/// Tool for appending UTF-8 content to files in the workspace.
+pub struct AppendFileTool;
+
+#[async_trait]
+impl ToolSpec for AppendFileTool {
+    fn name(&self) -> &'static str {
+        "append_file"
+    }
+
+    fn description(&self) -> &'static str {
+        "Append UTF-8 content to a file in the workspace. Use this for large generated artifacts after creating a small skeleton with write_file, instead of trying to send one huge write_file content argument. **Recommended chunk size ≤ 16KB, hard limit 64KB per call** to keep tool-arg size small and avoid SSE-timeout-on-slow-decoders failures. Creates parent directories and the target file if needed. Returns a compact byte-count summary, not a full diff."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to append"
+                }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![
+            ToolCapability::WritesFiles,
+            ToolCapability::Sandboxable,
+            ToolCapability::RequiresApproval,
+        ]
+    }
+
+    fn approval_requirement(&self) -> ApprovalRequirement {
+        ApprovalRequirement::Suggest
+    }
+
+    async fn execute(&self, input: Value, context: &ToolContext) -> Result<ToolResult, ToolError> {
+        let path_str = required_str(&input, "path")?;
+        let append_content = required_str(&input, "content")?;
+
+        if append_content.len() > APPEND_FILE_MAX_CONTENT_BYTES {
+            return Err(ToolError::invalid_input(format!(
+                "append_file content is {} bytes — over the {}KB single-call limit. \
+                 Split it into multiple append_file calls of ≤16KB each; a chunk \
+                 this large can stall the SSE stream past the idle timeout on slow \
+                 local inference.",
+                append_content.len(),
+                APPEND_FILE_MAX_CONTENT_BYTES / 1024,
+            )));
+        }
+
+        let file_path = context.resolve_path(path_str)?;
+
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                ToolError::execution_failed(format!(
+                    "Failed to create directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
+
+        let existed_before = file_path.exists();
+        let before_len = fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&file_path)
+            .map_err(|e| {
+                ToolError::execution_failed(format!(
+                    "Failed to open {}: {}",
+                    file_path.display(),
+                    e
+                ))
+            })?;
+
+        file.write_all(append_content.as_bytes()).map_err(|e| {
+            ToolError::execution_failed(format!("Failed to append {}: {}", file_path.display(), e))
+        })?;
+
+        let after_len = before_len.saturating_add(append_content.len() as u64);
+        let action = if existed_before {
+            "Appended"
+        } else {
+            "Created and appended"
+        };
+        let body = format!(
+            "{action} {} bytes to {} ({} -> {} bytes)",
+            append_content.len(),
+            file_path.display(),
+            before_len,
+            after_len
+        );
+
+        let diag_block = lsp_diagnostics_for_paths(context, &[file_path]).await;
+        let full_body = if diag_block.is_empty() {
+            body
+        } else {
+            format!("{body}\n\n{diag_block}")
         };
 
         Ok(ToolResult::success(full_body))
@@ -1716,6 +1888,13 @@ mod tests {
     }
 
     #[test]
+    fn forkguard_clean_pdf_text_chinese_trailing_no_panic() {
+        let raw = "①性能：测试\n";
+        let cleaned = super::clean_pdf_text(raw);
+        assert_eq!(cleaned, "①性能：测试");
+    }
+
+    #[test]
     fn read_pdf_via_pdf_extract_finds_known_title() {
         // Skip when the fixture isn't checked out (sparse clones, shallow
         // worktrees). Local dev + CI both have it.
@@ -1928,6 +2107,107 @@ mod tests {
         // Verify nested file was created
         let written = fs::read_to_string(tmp.path().join("subdir/nested/file.txt")).expect("read");
         assert_eq!(written, "nested content");
+    }
+
+    #[tokio::test]
+    async fn write_file_omits_inline_diff_for_large_content() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let content = "x".repeat(WRITE_FILE_INLINE_DIFF_LIMIT_BYTES + 1);
+        let tool = WriteFileTool;
+        let result = tool
+            .execute(json!({"path": "large.html", "content": content}), &ctx)
+            .await
+            .expect("execute");
+
+        assert!(result.success);
+        assert!(
+            result.content.contains("[diff omitted]"),
+            "{}",
+            result.content
+        );
+        assert!(!result.content.contains("--- a/"), "{}", result.content);
+
+        let written = fs::read_to_string(tmp.path().join("large.html")).expect("read");
+        assert_eq!(written.len(), WRITE_FILE_INLINE_DIFF_LIMIT_BYTES + 1);
+    }
+
+    #[tokio::test]
+    async fn test_append_file_tool() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+        let tool = AppendFileTool;
+        let first = tool
+            .execute(
+                json!({"path": "subdir/deck.html", "content": "<html>\n"}),
+                &ctx,
+            )
+            .await
+            .expect("first append");
+        assert!(first.success);
+        assert!(
+            first.content.contains("Created and appended"),
+            "{}",
+            first.content
+        );
+
+        let second = tool
+            .execute(
+                json!({"path": "subdir/deck.html", "content": "</html>\n"}),
+                &ctx,
+            )
+            .await
+            .expect("second append");
+        assert!(second.success);
+        assert!(second.content.contains("Appended"), "{}", second.content);
+
+        let written = fs::read_to_string(tmp.path().join("subdir/deck.html")).expect("read");
+        assert_eq!(written, "<html>\n</html>\n");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_rejects_oversized_content() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let tool = WriteFileTool;
+
+        // One byte over the cap → rejected before touching disk.
+        let huge = "x".repeat(WRITE_FILE_MAX_CONTENT_BYTES + 1);
+        let err = tool
+            .execute(json!({"path": "deck.html", "content": huge}), &ctx)
+            .await
+            .expect_err("oversized write must be rejected");
+        assert!(matches!(err, ToolError::InvalidInput { .. }), "{err:?}");
+        assert!(
+            !tmp.path().join("deck.html").exists(),
+            "rejected write must not create the file"
+        );
+
+        // Exactly at the cap → allowed.
+        let ok = "y".repeat(WRITE_FILE_MAX_CONTENT_BYTES);
+        tool.execute(json!({"path": "ok.txt", "content": ok}), &ctx)
+            .await
+            .expect("at-limit write should pass");
+    }
+
+    #[tokio::test]
+    async fn test_append_file_rejects_oversized_content() {
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let tool = AppendFileTool;
+
+        let huge = "z".repeat(APPEND_FILE_MAX_CONTENT_BYTES + 1);
+        let err = tool
+            .execute(json!({"path": "deck.html", "content": huge}), &ctx)
+            .await
+            .expect_err("oversized append must be rejected");
+        assert!(matches!(err, ToolError::InvalidInput { .. }), "{err:?}");
+        assert!(
+            !tmp.path().join("deck.html").exists(),
+            "rejected append must not create the file"
+        );
     }
 
     #[tokio::test]
@@ -2491,6 +2771,15 @@ mod tests {
     }
 
     #[test]
+    fn test_append_file_tool_properties() {
+        let tool = AppendFileTool;
+        assert_eq!(tool.name(), "append_file");
+        assert!(!tool.is_read_only());
+        assert!(tool.is_sandboxable());
+        assert_eq!(tool.approval_requirement(), ApprovalRequirement::Suggest);
+    }
+
+    #[test]
     fn test_edit_file_tool_properties() {
         let tool = EditFileTool;
         assert_eq!(tool.name(), "edit_file");
@@ -2515,10 +2804,12 @@ mod tests {
         let read_tool = ReadFileTool;
         let list_tool = ListDirTool;
         let write_tool = WriteFileTool;
+        let append_tool = AppendFileTool;
 
         assert!(read_tool.supports_parallel());
         assert!(list_tool.supports_parallel());
         assert!(!write_tool.supports_parallel());
+        assert!(!append_tool.supports_parallel());
     }
 
     #[test]
@@ -2533,6 +2824,14 @@ mod tests {
             .get("required")
             .and_then(|value| value.as_array())
             .expect("write schema should include required array");
+        assert!(required.iter().any(|v| v.as_str() == Some("path")));
+        assert!(required.iter().any(|v| v.as_str() == Some("content")));
+
+        let append_schema = AppendFileTool.input_schema();
+        let required = append_schema
+            .get("required")
+            .and_then(|value| value.as_array())
+            .expect("append schema should include required array");
         assert!(required.iter().any(|v| v.as_str() == Some("path")));
         assert!(required.iter().any(|v| v.as_str() == Some("content")));
 

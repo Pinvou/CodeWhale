@@ -202,7 +202,9 @@ fn classify_tool_name_activity(name: &str) -> ToolRunActivity {
         | "wait_for_dev_server"
         | "task_gate_run"
         | "validate_data" => ToolRunActivity::Command,
-        "edit_file" | "apply_patch" | "write_file" | "diff" => ToolRunActivity::Edit,
+        "edit_file" | "apply_patch" | "write_file" | "append_file" | "diff" => {
+            ToolRunActivity::Edit
+        }
         "agent" | "rlm_open" | "rlm_eval" | "rlm_configure" | "rlm_close" | "rlm" => {
             ToolRunActivity::Delegate
         }

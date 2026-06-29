@@ -82,7 +82,7 @@ pub fn tool_family_for_name(name: &str) -> ToolFamily {
         "read_file" | "list_dir" | "view_image" | "git_log" | "git_show" | "git_blame" => {
             ToolFamily::Read
         }
-        "edit_file" | "apply_patch" | "write_file" => ToolFamily::Patch,
+        "edit_file" | "apply_patch" | "write_file" | "append_file" => ToolFamily::Patch,
         "exec_shell"
         | "exec_shell_wait"
         | "exec_shell_interact"
@@ -354,6 +354,7 @@ mod tests {
     fn tool_names_route_to_families_by_verb() {
         assert_eq!(tool_family_for_name("read_file"), ToolFamily::Read);
         assert_eq!(tool_family_for_name("apply_patch"), ToolFamily::Patch);
+        assert_eq!(tool_family_for_name("append_file"), ToolFamily::Patch);
         assert_eq!(tool_family_for_name("exec_shell"), ToolFamily::Run);
         assert_eq!(tool_family_for_name("task_shell_start"), ToolFamily::Run);
         assert_eq!(tool_family_for_name("grep_files"), ToolFamily::Find);

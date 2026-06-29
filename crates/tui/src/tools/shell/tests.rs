@@ -282,7 +282,7 @@ async fn read_only_shell_policy_allows_readonly_inspection() {
 }
 
 #[tokio::test]
-async fn exec_shell_multiline_block_explains_allow_shell_boundary() {
+async fn exec_shell_allows_non_destructive_multiline_commands() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
 
@@ -294,25 +294,9 @@ async fn exec_shell_multiline_block_explains_allow_shell_boundary() {
         .await
         .expect("execute");
 
-    assert!(!result.success);
-    assert!(result.content.contains("Command contains multiple lines"));
     assert!(
-        result
-            .content
-            .contains("allow_shell=true exposes shell tools"),
-        "{}",
-        result.content
-    );
-    assert!(
-        result
-            .content
-            .contains("Write multiline scripts to a file first"),
-        "{}",
-        result.content
-    );
-    assert!(
-        result.content.contains("task_shell_start"),
-        "{}",
+        result.success,
+        "non-destructive multiline commands should not be blanket-blocked: {}",
         result.content
     );
 }
@@ -1639,6 +1623,48 @@ fn windows_job_kill_on_close_releases_reader_threads_when_terminate_denied() {
         "get_output waited for natural descendant exit instead of kill-on-close"
     );
     assert_eq!(done.status, ShellStatus::Completed);
+}
+
+#[cfg(windows)]
+#[test]
+fn killed_shell_does_not_wait_for_blocked_reader_threads() {
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let stdout_thread = std::thread::spawn(move || {
+        let _ = release_rx.recv();
+    });
+    let now = std::time::Instant::now();
+    let mut shell = BackgroundShell {
+        id: "killed-reader".to_string(),
+        command: "test".to_string(),
+        working_dir: std::path::PathBuf::from("."),
+        status: ShellStatus::Killed,
+        exit_code: None,
+        started_at: now,
+        last_output_at: now,
+        last_observed_output_len: 0,
+        sandbox_type: SandboxType::None,
+        linked_task_id: None,
+        owner_agent: None,
+        stdout_buffer: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        stderr_buffer: None,
+        stdout_cursor: 0,
+        stderr_cursor: 0,
+        completion_reported: false,
+        stdin: None,
+        child: None,
+        windows_job: None,
+        stdout_thread: Some(stdout_thread),
+        stderr_thread: None,
+    };
+
+    let started = std::time::Instant::now();
+    shell.collect_output();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "killed shell must not synchronously join a blocked reader"
+    );
+    release_tx.send(()).expect("release detached reader");
 }
 
 #[test]

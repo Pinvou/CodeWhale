@@ -34,6 +34,7 @@ pub mod large_output_router;
 pub mod notify;
 pub mod pandoc;
 pub mod parallel;
+pub mod pinvou3_blocklist;
 pub mod plan;
 pub mod plugin;
 pub mod project;

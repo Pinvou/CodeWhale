@@ -157,10 +157,57 @@ pub(super) fn should_default_defer_tool(name: &str, always_load: &HashSet<String
     !default_active_native_tools_set().contains(name)
 }
 
-pub(super) fn apply_native_tool_deferral(catalog: &mut [Tool], always_load: &HashSet<String>) {
-    for tool in catalog {
-        tool.defer_loading = Some(should_default_defer_tool(&tool.name, always_load));
+/// [pinvou3-fork] pinvou3 用 **blocklist 模型**(显示全部、隐藏黑名单),而上游
+/// `should_default_defer_tool` 是 **allowlist**(只显示 `DEFAULT_ACTIVE_NATIVE_TOOLS`)。
+/// 两者 philosophy 相反:上游 allowlist 会 defer 掉 `request_user_input` / `append_file`
+/// 等不在白名单但 pinvou3 必需的工具(symptom: GUI 里 request_user_input 不出气泡)。
+/// 故 Yolo(GUI 生产单 session)下只 defer 黑名单、其余全显示;非 Yolo 才叠加上游 allowlist。
+/// 单独成函数(而非塞进 should_default_defer_tool)保上游单测纯净。详见 docs/工具表精简方案.md
+///
+/// v0.8.57:上游把 `should_default_defer_tool` 改成 2 参(去掉 mode)并主张 native deferral
+/// mode 无关(catalog-head 字节稳定)。pinvou3 仍按原设计保持 **mode-aware**:上游 build_model_
+/// tool_catalog 持有 `mode`,透传进来即可。生产单 Yolo、catalog 不跨 mode 切换,不变量实践中仍成立。
+pub(super) fn pinvou3_should_defer_native_tool(
+    name: &str,
+    mode: AppMode,
+    always_load: &HashSet<String>,
+) -> bool {
+    if crate::tools::pinvou3_blocklist::is_pinvou3_hidden(name) {
+        return true;
     }
+    // request_user_input 跨所有 mode 硬保留(GUI 选择气泡来源,instructions §1.4 引导)。
+    if name == REQUEST_USER_INPUT_NAME {
+        return false;
+    }
+    if mode == AppMode::Yolo {
+        return false; // Yolo:显示全部非黑名单
+    }
+    should_default_defer_tool(name, always_load) // 非 Yolo:叠加上游 allowlist
+}
+
+pub(super) fn apply_native_tool_deferral(
+    catalog: &mut [Tool],
+    mode: AppMode,
+    always_load: &HashSet<String>,
+) {
+    for tool in &mut *catalog {
+        tool.defer_loading = Some(pinvou3_should_defer_native_tool(&tool.name, mode, always_load));
+    }
+    let active: Vec<&str> = catalog
+        .iter()
+        .filter(|t| !t.defer_loading.unwrap_or(false))
+        .map(|t| t.name.as_str())
+        .collect();
+    let deferred = catalog.len() - active.len();
+    tracing::info!(
+        target: "pinvou3.tool_catalog",
+        mode = ?mode,
+        active_count = active.len(),
+        deferred_count = deferred,
+        total = catalog.len(),
+        active = ?active,
+        "native tool catalog deferral applied"
+    );
 }
 
 fn should_keep_mcp_tool_loaded(name: &str) -> bool {
@@ -221,7 +268,7 @@ pub(super) fn build_model_tool_catalog_with_surface(
     always_load: &HashSet<String>,
     surface_budget: ToolSurfaceBudget,
 ) -> Vec<Tool> {
-    apply_native_tool_deferral(&mut native_tools, always_load);
+    apply_native_tool_deferral(&mut native_tools, mode, always_load); // [pinvou3-fork] 透传 mode(blocklist mode-aware)
     apply_mcp_tool_deferral(&mut mcp_tools, mode, always_load);
     apply_tool_surface_budget(&mut native_tools, surface_budget, always_load);
     apply_tool_surface_budget(&mut mcp_tools, surface_budget, always_load);
@@ -310,7 +357,14 @@ pub(super) fn ensure_advanced_tooling(
         catalog.push(tool);
     }
 
-    if !catalog.iter().any(|t| t.name == TOOL_SEARCH_NAME) {
+    // [pinvou3-fork] tool_search(上游 v0.8.65 折叠成单工具 + `match` 参数)让模型能搜索并激活
+    // deferred 工具。pinvou3 blocklist 是「defer 不删除」(工具仍在 catalog,只是首轮不显示),
+    // 模型可用 tool_search 激活被 blocklist 的 agent/delegate/rlm 等工具,绕过工具门控 → 前端不
+    // 认识,渲染成裸 JSON。pinvou3 把 tool_search 名加进 blocklist,is_pinvou3_hidden 为真时不注入
+    // → catalog 根本不含 tool_search → 模型无法激活任何 deferred 工具。详见 §C2 / sync §4。
+    if !catalog.iter().any(|t| t.name == TOOL_SEARCH_NAME)
+        && !crate::tools::pinvou3_blocklist::is_pinvou3_hidden(TOOL_SEARCH_NAME)
+    {
         catalog.push(Tool {
             tool_type: Some(TOOL_SEARCH_TYPE.to_string()),
             name: TOOL_SEARCH_NAME.to_string(),
@@ -341,6 +395,18 @@ pub(super) fn ensure_advanced_tooling(
             strict: None,
             cache_control: None,
         });
+    }
+}
+
+/// [pinvou3-fork] Hard tool whitelist: drop every tool whose name is not in
+/// `whitelist` from the model-visible catalog. A true allowlist, NOT a
+/// `defer_loading` soft-hide — non-whitelisted tools are removed entirely, so
+/// `tool_search` cannot re-surface them either. No-op when `whitelist` is
+/// `None`. Call AFTER `ensure_advanced_tooling` so the appended meta-tools
+/// are subject to the same restriction.
+pub(super) fn apply_tool_whitelist(catalog: &mut Vec<Tool>, whitelist: Option<&HashSet<String>>) {
+    if let Some(set) = whitelist {
+        catalog.retain(|t| set.contains(&t.name));
     }
 }
 

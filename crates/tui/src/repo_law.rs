@@ -28,7 +28,13 @@ use crate::project_context::{RepoLawAction, RepoLawRule, load_repo_law_rules};
 /// does not recognize, so a new write tool without an entry silently evades
 /// repo law. `fim_edit` was such a hole (it declares WritesFiles, takes a
 /// `path`, and `fs::write`s to it) until it was added here.
-const WRITE_TOOLS: &[&str] = &["write_file", "edit_file", "apply_patch", "fim_edit"];
+const WRITE_TOOLS: &[&str] = &[
+    "write_file",
+    "append_file",
+    "edit_file",
+    "apply_patch",
+    "fim_edit",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RepoLawPlanDecision {

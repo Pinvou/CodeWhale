@@ -608,10 +608,10 @@ impl BackgroundShell {
         #[cfg(windows)]
         terminate_and_close_windows_job(self.windows_job.take());
         if let Some(handle) = self.stdout_thread.take() {
-            let _ = handle.join();
+            finish_background_reader(handle, &self.status);
         }
         if let Some(handle) = self.stderr_thread.take() {
-            let _ = handle.join();
+            finish_background_reader(handle, &self.status);
         }
         self.stdin = None;
         self.child = None;
@@ -827,6 +827,23 @@ impl BackgroundShell {
             stderr,
         }
     }
+}
+
+fn finish_background_reader(handle: std::thread::JoinHandle<()>, status: &ShellStatus) {
+    // A killed Windows process can leave a pipe reader blocked even after its
+    // Job Object has been closed. Cancellation must return promptly instead of
+    // waiting for that reader to observe EOF. Other terminal states still join
+    // so their final output is collected before the shell is discarded.
+    #[cfg(windows)]
+    if *status == ShellStatus::Killed {
+        drop(handle);
+        return;
+    }
+
+    #[cfg(not(windows))]
+    let _ = status;
+
+    let _ = handle.join();
 }
 
 impl Drop for BackgroundShell {
@@ -2401,34 +2418,29 @@ impl ToolSpec for ExecShellTool {
             }
         }
 
-        // Safety analysis (always run for metadata, but only block when not in YOLO mode)
+        // Safety analysis: Dangerous commands are BLOCKED in ALL modes (including YOLO).
+        // Rationale: YOLO 模式只是免 approval 弹窗,不该等于"允许破坏性命令"。
+        // careful hook: 破坏性命令拦截是确定性规则,与工作流模式正交,默认始终生效。
         let safety = analyze_command(command);
-        if !context.auto_approve {
-            match safety.level {
-                SafetyLevel::Dangerous => {
-                    let reasons = safety.reasons.join("; ");
-                    let suggestions = if safety.suggestions.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\nSuggestions: {}", safety.suggestions.join("; "))
-                    };
-                    return Ok(ToolResult {
-                        content: format!(
-                            "BLOCKED: This command was blocked for safety reasons.\n\nReasons: {reasons}{suggestions}\n\nNote: allow_shell=true exposes shell tools, but it does not disable built-in shell safety validation."
-                        ),
-                        success: false,
-                        metadata: Some(json!({
-                            "safety_level": "dangerous",
-                            "blocked": true,
-                            "reasons": safety.reasons,
-                            "suggestions": safety.suggestions,
-                        })),
-                    });
-                }
-                SafetyLevel::RequiresApproval | SafetyLevel::Safe | SafetyLevel::WorkspaceSafe => {
-                    // Proceed normally
-                }
-            }
+        if matches!(safety.level, SafetyLevel::Dangerous) {
+            let reasons = safety.reasons.join("; ");
+            let suggestions = if safety.suggestions.is_empty() {
+                String::new()
+            } else {
+                format!("\nSuggestions: {}", safety.suggestions.join("; "))
+            };
+            return Ok(ToolResult {
+                content: format!(
+                    "BLOCKED: This command was blocked for safety reasons.\n\nReasons: {reasons}{suggestions}\n\nNote: allow_shell=true exposes shell tools, but it does not disable built-in shell safety validation."
+                ),
+                success: false,
+                metadata: Some(json!({
+                    "safety_level": "dangerous",
+                    "blocked": true,
+                    "reasons": safety.reasons,
+                    "suggestions": safety.suggestions,
+                })),
+            });
         }
 
         let policy_override = context.elevated_sandbox_policy.clone();

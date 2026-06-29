@@ -177,7 +177,7 @@ pub fn pre_turn_snapshot(
 }
 
 /// Take a `tool:<call_id>` workspace snapshot, taken before executing a
-/// file-modifying tool call (write_file, edit_file, apply_patch).
+/// file-modifying tool call (write_file, append_file, edit_file, apply_patch).
 ///
 /// This enables surgical undo: `/undo` can restore to the most recent
 /// `tool:<call_id>` snapshot to revert just the last file write.

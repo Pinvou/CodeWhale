@@ -495,9 +495,19 @@ impl DeepSeekClient {
                     Ok(Some(result)) => result,
                     Ok(None) => break, // Stream ended normally
                     Err(_elapsed) => {
+                        // Include byte/timing telemetry so we can distinguish a
+                        // prefill-stall (0 bytes received → backend never emitted
+                        // a first chunk) from a mid-arguments stall (bytes>0 →
+                        // stream died partway through a large tool-call arg). This
+                        // is the signal that tells the SSE-timeout-on-big-write
+                        // investigation which failure path actually fired.
                         yield Err(anyhow::anyhow!(
-                            "SSE stream idle timeout after {}s — no data received",
+                            "SSE stream idle timeout after {}s — no data received \
+                             (bytes_received={}, stream_age={}s since first byte={}s ago)",
                             idle.as_secs(),
+                            bytes_received,
+                            stream_start.elapsed().as_secs(),
+                            last_event_at.elapsed().as_secs(),
                         ));
                         break;
                     }
@@ -1439,7 +1449,10 @@ fn turn_meta_budget_json(turn_meta: &TurnMetaBudget) -> Value {
 /// tools (`read_file`, `grep_files`, `exec_shell`, …) are unaffected and
 /// still dedup normally.
 fn is_mutation_tool(tool_name: &str) -> bool {
-    matches!(tool_name, "write_file" | "edit_file" | "apply_patch")
+    matches!(
+        tool_name,
+        "write_file" | "append_file" | "edit_file" | "apply_patch"
+    )
 }
 
 fn compact_tool_result_for_wire(

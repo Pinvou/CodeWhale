@@ -131,7 +131,7 @@ fn tool_result_id(block: &ContentBlock) -> Option<&String> {
     }
 }
 
-/// Revert the most recent write tool (apply_patch/edit_file/write_file) or turn.
+/// Revert the most recent write tool (apply_patch/edit_file/append_file/write_file) or turn.
 ///
 /// Opens the side-git snapshot repo and finds the most recent snapshot,
 /// preferring per-tool snapshots (`tool:*`) over pre-turn snapshots

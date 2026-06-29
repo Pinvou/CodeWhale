@@ -12,7 +12,7 @@ use serde_json::Value;
 pub enum ToolCategory {
     /// Free, read-only operations (`list_dir`, `read_file`, todo_*)
     Safe,
-    /// File modifications (`write_file`, `edit_file`)
+    /// File modifications (`write_file`, `append_file`, `edit_file`)
     FileWrite,
     /// Shell execution (`exec_shell`)
     Shell,
@@ -69,7 +69,10 @@ pub fn get_tool_category(name: &str) -> ToolCategory {
         // Workflow is multi-agent orchestration; reuse Agent stakes/routing
         // and specialize the impact card via build_impact_summary (#4126).
         ToolCategory::Agent
-    } else if matches!(name, "write_file" | "edit_file" | "apply_patch") {
+    } else if matches!(
+        name,
+        "write_file" | "append_file" | "edit_file" | "apply_patch"
+    ) {
         ToolCategory::FileWrite
     } else if matches!(
         name,

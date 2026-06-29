@@ -18,6 +18,7 @@ use crate::client::DeepSeekClient;
 use crate::models::Tool;
 use crate::tools::goal::SharedGoalState;
 
+use super::pinvou3_blocklist;
 use super::schema_canonicalize;
 use super::schema_sanitize;
 use super::spec::{
@@ -236,7 +237,9 @@ impl ToolRegistry {
                     description: tool.description().to_string(),
                     input_schema: schema,
                     allowed_callers: Some(vec!["direct".to_string()]),
-                    defer_loading: Some(tool.defer_loading()),
+                    defer_loading: Some(
+                        tool.defer_loading() || pinvou3_blocklist::is_pinvou3_hidden(tool.name()),
+                    ),
                     input_examples: None,
                     strict: None,
                     cache_control: None,
@@ -542,12 +545,13 @@ impl ToolRegistryBuilder {
         self
     }
 
-    /// Include file tools (read, write, edit, list).
+    /// Include file tools (read, write, append, edit, list).
     #[must_use]
     pub fn with_file_tools(self) -> Self {
-        use super::file::{EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
+        use super::file::{AppendFileTool, EditFileTool, ListDirTool, ReadFileTool, WriteFileTool};
         self.with_tool(Arc::new(ReadFileTool))
             .with_tool(Arc::new(WriteFileTool))
+            .with_tool(Arc::new(AppendFileTool))
             .with_tool(Arc::new(EditFileTool))
             .with_tool(Arc::new(ListDirTool))
     }
@@ -1184,6 +1188,11 @@ impl ToolRegistryBuilder {
     }
 
     /// Include sub-agent management tools.
+    ///
+    /// [pinvou3-fork] Keeps the conversation-level multi-tool surface
+    /// (`agent_open`/`agent_eval`/`tool_agent`/`agent_close`) rather than
+    /// upstream v0.8.65's single `agent` tool — the fork harness + Qwen3.6
+    /// usability depend on these discrete tools.
     #[must_use]
     pub fn with_subagent_tools(
         self,

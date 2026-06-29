@@ -561,7 +561,10 @@ fn collect_children(
                 {
                     *network = true;
                 }
-                if matches!(name, "write_file" | "edit_file" | "apply_patch") {
+                if matches!(
+                    name,
+                    "write_file" | "append_file" | "edit_file" | "apply_patch"
+                ) {
                     *writes = true;
                 }
             }

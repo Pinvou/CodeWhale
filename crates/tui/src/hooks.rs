@@ -1018,7 +1018,7 @@ impl HookExecutor {
                 // Map tool names to categories
                 let tool_category = context.tool_name.as_ref().map(|name| match name.as_str() {
                     "exec_shell" => "shell",
-                    "write_file" | "edit_file" | "apply_patch" => "file_write",
+                    "write_file" | "append_file" | "edit_file" | "apply_patch" => "file_write",
                     "read_file" | "list_dir" | "grep_files" => "safe",
                     _ => "other",
                 });

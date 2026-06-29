@@ -342,6 +342,46 @@ fn is_transient_tool_failure(err: &ToolError, formatted_message: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// Extra guidance appended to a file-writing tool's error when the arguments
+/// came back missing a required field.
+///
+/// On a slow local backend a large `content` argument can out-run the SSE idle
+/// timeout: the stream dies mid-arguments, the truncated buffer is brace-repaired
+/// into a call that's missing `path` or `content`, and the model — seeing only a
+/// terse "missing required field" — re-emits the identical oversized call until
+/// the loop guard blocks it (wasting several idle-timeout windows). On
+/// `write_file` / `append_file` this is essentially always a truncation artifact,
+/// not a deliberate malformed call, so we redirect the model to the chunked path.
+///
+/// The missing field surfaces as **either** variant depending on the arg path:
+///   - engine taxonomy → `ToolError::MissingField`
+///   - tool validation (`required_str`) → `ToolError::InvalidInput` whose message
+///     reads "missing required field '…'"
+/// We match both. The `InvalidInput` arm is scoped to the "missing required field"
+/// signature on purpose so it does NOT overlap with `write_file`'s oversize
+/// rejection — that's also `InvalidInput`, but its message is the over-the-limit
+/// text that already carries chunking guidance.
+pub(super) fn truncated_args_hint(tool_name: &str, err: &ToolError) -> Option<&'static str> {
+    if !matches!(tool_name, "write_file" | "append_file") {
+        return None;
+    }
+    let is_truncation = match err {
+        ToolError::MissingField { .. } => true,
+        ToolError::InvalidInput { message } => message.contains("missing required field"),
+        _ => false,
+    };
+    if is_truncation {
+        return Some(
+            "\n\nThis almost always means the tool-call arguments were truncated \
+             mid-stream — a large `content` value out-ran the response idle timeout \
+             before it finished sending. Do NOT resend the same call unchanged. \
+             Instead write a small skeleton with write_file (placeholder markers, no \
+             inline CSS/JS), then build the file up with append_file in ≤16KB chunks.",
+        );
+    }
+    None
+}
+
 // === Streaming-buffer parsing =========================================
 
 /// Promote a streaming `ToolUseState` to a finalized JSON input.

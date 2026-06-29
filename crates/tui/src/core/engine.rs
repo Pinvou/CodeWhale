@@ -4051,7 +4051,7 @@ fn tool_ask_rule_decision_for_context(
 
 fn file_tool_permission_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
     match tool_name {
-        "read_file" | "write_file" | "edit_file" | "file_search" | "grep_files" => {
+        "read_file" | "write_file" | "append_file" | "edit_file" | "file_search" | "grep_files" => {
             Some(string_field(input, "path").into_iter().collect())
         }
         "list_dir" => Some(vec![

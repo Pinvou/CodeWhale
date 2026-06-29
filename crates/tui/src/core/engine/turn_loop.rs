@@ -2459,7 +2459,7 @@ impl Engine {
 
                         // Per-tool snapshot for surgical undo (#384): capture workspace
                         // state before file-modifying tools execute so `/undo` can
-                        // revert the most recent write_file/edit_file/apply_patch.
+                        // revert the most recent write_file/append_file/edit_file/apply_patch.
                         // See `should_pre_tool_snapshot` for the gating rationale (#3292).
                         if should_pre_tool_snapshot(
                             self.config.snapshots_enabled,
@@ -3004,7 +3004,10 @@ fn should_pre_tool_snapshot(
 ) -> bool {
     snapshots_enabled
         && !has_result_override
-        && matches!(tool_name, "write_file" | "edit_file" | "apply_patch")
+        && matches!(
+            tool_name,
+            "write_file" | "append_file" | "edit_file" | "apply_patch"
+        )
 }
 
 fn mode_blocks_command_execution(mode: AppMode, tool_name: &str) -> bool {
@@ -3023,8 +3026,10 @@ fn mode_blocks_command_execution(mode: AppMode, tool_name: &str) -> bool {
 
 fn mode_blocks_write_capable_tool(mode: AppMode, tool_name: &str, read_only: bool) -> bool {
     mode == AppMode::Plan
-        && (matches!(tool_name, "write_file" | "edit_file" | "apply_patch")
-            || (McpPool::is_mcp_tool(tool_name) && !read_only))
+        && (matches!(
+            tool_name,
+            "write_file" | "append_file" | "edit_file" | "apply_patch"
+        ) || (McpPool::is_mcp_tool(tool_name) && !read_only))
 }
 
 /// Synthesize the tool result recorded for a tool call that never executed
@@ -3069,7 +3074,7 @@ mod pre_tool_snapshot_gate_tests {
     // commits, just like the pre/post-turn snapshot sites.
     #[test]
     fn disabled_snapshots_suppress_per_tool_snapshot() {
-        for tool in ["write_file", "edit_file", "apply_patch"] {
+        for tool in ["write_file", "append_file", "edit_file", "apply_patch"] {
             assert!(
                 !should_pre_tool_snapshot(false, false, tool),
                 "snapshots.enabled=false must skip per-tool snapshot for {tool}"
@@ -3079,7 +3084,7 @@ mod pre_tool_snapshot_gate_tests {
 
     #[test]
     fn enabled_snapshots_snapshot_file_modifying_tools() {
-        for tool in ["write_file", "edit_file", "apply_patch"] {
+        for tool in ["write_file", "append_file", "edit_file", "apply_patch"] {
             assert!(
                 should_pre_tool_snapshot(true, false, tool),
                 "snapshots.enabled=true must snapshot {tool} before it runs"
@@ -3119,7 +3124,7 @@ mod pre_tool_snapshot_gate_tests {
             );
         }
 
-        for tool in ["write_file", "edit_file", "apply_patch"] {
+        for tool in ["write_file", "append_file", "edit_file", "apply_patch"] {
             assert!(mode_blocks_write_capable_tool(AppMode::Plan, tool, false));
             assert!(
                 !mode_blocks_write_capable_tool(AppMode::Operate, tool, false),

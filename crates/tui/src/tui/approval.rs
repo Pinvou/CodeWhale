@@ -383,7 +383,9 @@ fn build_persistent_ask_rules(
         // File writes save an exact, workspace-relative path so a later
         // edit/write of the same file is matched. read_file stays out: this
         // boundary is about persisting *write* approvals only.
-        "write_file" | "edit_file" => build_file_write_ask_rules(tool_name, params, workspace),
+        "write_file" | "append_file" | "edit_file" => {
+            build_file_write_ask_rules(tool_name, params, workspace)
+        }
         "apply_patch" => build_apply_patch_ask_rules(params, workspace),
         _ => Vec::new(),
     }
@@ -1827,6 +1829,7 @@ mod tests {
     #[test]
     fn test_get_tool_category_file_write_tools() {
         assert_eq!(get_tool_category("write_file"), ToolCategory::FileWrite);
+        assert_eq!(get_tool_category("append_file"), ToolCategory::FileWrite);
         assert_eq!(get_tool_category("edit_file"), ToolCategory::FileWrite);
         assert_eq!(get_tool_category("apply_patch"), ToolCategory::FileWrite);
     }
@@ -1897,6 +1900,7 @@ mod tests {
     fn risk_writes_shell_mcp_action_unknown_route_destructive() {
         for (name, cat) in [
             ("write_file", ToolCategory::FileWrite),
+            ("append_file", ToolCategory::FileWrite),
             ("edit_file", ToolCategory::FileWrite),
             ("apply_patch", ToolCategory::FileWrite),
             ("exec_shell", ToolCategory::Shell),
