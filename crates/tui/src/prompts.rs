@@ -11,6 +11,7 @@
 use crate::models::{SystemBlock, SystemPrompt};
 use crate::project_context::{ProjectContext, load_project_context_with_parents};
 use crate::tui::app::AppMode;
+use crate::tui::approval::ApprovalMode; // [pinvou3-fork] apply_static_prompt_composer 构造宽 ctx 用
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -165,34 +166,28 @@ for the current turn."
 ///
 /// The block is appended to the workspace-static portion of the
 /// system prompt (after mode prompt + project context, before
-/// configured instructions / skills). `locale_tag` is resolved by the caller
-/// from `Settings` so this function stays I/O-free.
-fn render_environment_block(_workspace: &Path, locale_tag: &str) -> String {
-    let codewhale_version = env!("CARGO_PKG_VERSION");
+/// configured instructions / skills) so the `## Language` directive
+/// in `prompts/constitution.md` can reference it without the model having to
+/// guess from the user's first message. `locale_tag` is resolved by
+/// the caller from `Settings` so this function stays I/O-free.
+/// [pinvou3-fork] (P2-2): dropped `lang` (redundant with locale_preamble +
+/// locale_closer + pinvou3 `<instructions>` block — already pinned three
+/// places) and `codewhale_version`(原 deepseek_version,env!("CARGO_PKG_VERSION")
+/// 返回 codewhale-tui crate 版本而非 pinvou3-app 版本 —— 对模型既confusing又unused)。
+/// `locale_tag` 参数保留作 API 兼容,改名 `_locale_tag` 消 unused 警告。
+fn render_environment_block(_workspace: &Path, _locale_tag: &str) -> String {
     let platform = std::env::consts::OS;
     let shell = crate::shell_dispatcher::global_dispatcher()
         .kind()
         .binary()
         .to_string();
 
-    // The workspace path (`pwd`) is intentionally delivered per-turn via the
-    // `<turn_meta>` block (see `turn_metadata_block`) rather than embedded here.
-    //
-    // Rationale: when the workspace path changes between sessions (e.g. an
-    // ephemeral per-session workspace), a volatile value inside the otherwise
-    // static system prefix invalidates the inference server's prefix cache at
-    // that exact point. The cache then only partially matches and the tail must
-    // be re-prefilled from the divergence boundary. On backends that pair prefix
-    // caching with speculative decoding, this partial re-prefill can perturb the
-    // logits at the boundary enough to degrade structured tool-call emission
-    // (the model regresses to bare text). Keeping the static system prefix
-    // byte-identical across sessions lets the prefix cache be reused; the live
-    // workspace path still reaches the model every turn through `turn_meta`.
+    // [pinvou3 fork] pwd 移出静态 system → 改走 per-turn <turn_meta> 的 Current workspace。
+    // 每 session 变的 workspace 路径若进 cached system prefix, vLLM prefix-cache MISS 时
+    // 工具调用会退化成裸文本(实测 single subagent 25%→~100%)。platform/shell 启动内静态,保留。
     format!(
         "## Environment\n\
          \n\
-         - lang: {locale_tag}\n\
-         - codewhale_version: {codewhale_version}\n\
          - platform: {platform}\n\
          - shell: {shell}"
     )
@@ -411,31 +406,11 @@ static LOCALE_CLOSER_JA_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceL
 static LOCALE_CLOSER_PT_BR_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static LOCALE_CLOSER_VI_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 static AUTHORITY_RECAP_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-static STATIC_PROMPT_COMPOSER: std::sync::OnceLock<Box<StaticPromptComposer>> =
-    std::sync::OnceLock::new();
 static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 
-/// Context passed to an embedder-provided static prompt composer.
-///
-/// This hook only replaces the byte-stable base/personality prompt segment.
-/// Mode deltas, approval policy, tool taxonomy, Core Execution, and the
-/// Compaction Relay stay owned by Codewhale's system prompt assembly.
-#[non_exhaustive]
-#[derive(Debug)]
-pub struct StaticPromptCtx<'a> {
-    /// Active model identifier after caller-side routing.
-    pub model_id: &'a str,
-    /// Personality overlay requested for the base static prompt.
-    pub personality: Personality,
-    /// Default base/personality prompt layers that would be used without an
-    /// override.
-    pub default_layers: &'a str,
-}
-
-/// Embedder hook for replacing Codewhale's byte-stable base/personality prompt
-/// segment.
-pub type StaticPromptComposer = dyn Fn(&StaticPromptCtx<'_>) -> String + Send + Sync + 'static;
+// [pinvou3-fork] 上游窄版 STATIC_PROMPT_COMPOSER / StaticPromptCtx{personality} / 类型
+// 定义已删——pinvou3 用宽版(见下方 `── Static-layer composer override ──[pinvou3-fork 宽版]`)。
 
 /// Replace `BASE_PROMPT` for all subsequent prompt composition. First call
 /// wins; later calls return the rejected string. Set before spawning any
@@ -489,13 +464,67 @@ pub fn set_authority_recap_override(s: String) -> Result<(), String> {
     set_prompt_override(&AUTHORITY_RECAP_OVERRIDE, s)
 }
 
-/// Replace the byte-stable base/personality prompt segment for subsequent
-/// prompt composition. First call wins; later calls return the rejected
-/// composer so embedders can preserve ownership.
-pub fn set_static_prompt_composer_override(
-    f: Box<StaticPromptComposer>,
-) -> Result<(), Box<StaticPromptComposer>> {
-    set_static_prompt_composer(&STATIC_PROMPT_COMPOSER, f)
+// ── Static-layer composer override ──[pinvou3-fork 宽版]
+// 上游 v0.8.57 自带一个**窄版** composer(StaticPromptCtx{model_id, personality,
+// default_layers},只替换 base/personality,mode/approval/taxonomy/ContextMgmt/
+// Compaction 仍由 runtime 拼)。pinvou3 需要**密封全部静态层**:本宽版接管 ALL
+// compile-time static doctrine —— tool taxonomy / base / personality / mode delta /
+// approval policy / `## Context Management` / compaction relay template,上游对这些
+// 层的新增只进 default 合成、进不了 pinvou3 prompt(prompt 瘦身的根基)。故保留本
+// 宽版,删上游窄版重复定义(见本次 sync §C7)。Dynamic 结构块(project context /
+// skills / environment / instructions / memory / goal / handoff / locale / authority)
+// 保持各自 rendering 与 hook 不变。
+//
+// app 层 compose_static_layers(ctx) 读 ctx.mode / ctx.approval_mode,故字段必须保留。
+// 生产单 Yolo-Auto,mode/approval 恒定 → 静态前缀不churn,不违反上游 prefix-cache 不变量。
+
+/// Inputs handed to a [`set_static_prompt_composer_override`] composer.
+///
+/// `#[non_exhaustive]` so upstream can add fields without breaking
+/// embedders; construct only via the composition pipeline.
+#[non_exhaustive]
+#[derive(Debug)]
+pub struct StaticPromptCtx<'a> {
+    /// Active app mode (Agent / Plan / Yolo).
+    pub mode: crate::tui::app::AppMode,
+    /// Effective approval mode for this session.
+    pub approval_mode: crate::tui::approval::ApprovalMode,
+    /// Active model identifier (replaces `{model_id}` in base prompts).
+    pub model_id: &'a str,
+    /// Whether shell tools are exposed to the model this session.
+    pub allow_shell: bool,
+    /// The static layers the default composition would have produced —
+    /// for reference or partial reuse by the composer.
+    pub default_layers: &'a str,
+}
+
+/// A composer that replaces the compile-time static prompt layers.
+pub type StaticPromptComposer = dyn Fn(&StaticPromptCtx<'_>) -> String + Send + Sync;
+
+static STATIC_PROMPT_COMPOSER: std::sync::OnceLock<Box<StaticPromptComposer>> =
+    std::sync::OnceLock::new();
+
+/// Install a composer that replaces ALL compile-time static prompt layers
+/// (taxonomy, base, personality, mode, approval, context management,
+/// compaction relay template). First call wins; later calls return
+/// `Err(())`. Set before spawning any engine. When set, the per-constant
+/// overrides for those layers are bypassed entirely.
+pub fn set_static_prompt_composer_override(f: Box<StaticPromptComposer>) -> Result<(), ()> {
+    STATIC_PROMPT_COMPOSER.set(f).map_err(|_| ())
+}
+
+fn static_prompt_composer() -> Option<&'static StaticPromptComposer> {
+    STATIC_PROMPT_COMPOSER.get().map(Box::as_ref)
+}
+
+/// [pinvou3-fork #42] Whether an embedder composer is installed. Used by
+/// turn_loop to gate the per-turn `<runtime_prompt>` tag projection: with a
+/// composer the embedder owns all mode doctrine (single fixed mode), so the
+/// tag is constant zero-information noise and its explainer (Runtime Policy
+/// Reference) is suppressed — an unexplained internal tag would only invite
+/// the model to narrate it.
+pub fn static_prompt_composer_installed() -> bool {
+    STATIC_PROMPT_COMPOSER.get().is_some()
 }
 
 // ── Config-directory prompt overrides (issue #3638) ──
@@ -631,13 +660,6 @@ fn set_prompt_override(cell: &std::sync::OnceLock<String>, s: String) -> Result<
     cell.set(s)
 }
 
-fn set_static_prompt_composer(
-    cell: &std::sync::OnceLock<Box<StaticPromptComposer>>,
-    f: Box<StaticPromptComposer>,
-) -> Result<(), Box<StaticPromptComposer>> {
-    cell.set(f)
-}
-
 fn effective_prompt_override<'a>(
     cell: &'a std::sync::OnceLock<String>,
     fallback: &'static str,
@@ -647,10 +669,6 @@ fn effective_prompt_override<'a>(
 
 fn effective_base_prompt() -> &'static str {
     effective_prompt_override(&BASE_PROMPT_OVERRIDE, BASE_PROMPT)
-}
-
-fn effective_static_prompt_composer() -> Option<&'static StaticPromptComposer> {
-    STATIC_PROMPT_COMPOSER.get().map(Box::as_ref)
 }
 
 fn effective_locale_preamble_zh_hans() -> &'static str {
@@ -982,6 +1000,91 @@ const TOOL_TAXONOMY_VERIFICATION: &[&str] = &["run_tests", "run_verifiers"];
 /// Return the core tool taxonomy body **without** a markdown heading.
 /// Suitable for embedding under a mode-specific sub-heading in the
 /// Runtime Policy Reference without producing a broken heading hierarchy.
+pub(crate) fn render_runtime_policy_reference() -> String {
+    let taxonomy_agent = render_core_tool_taxonomy_body(AppMode::Agent);
+    let taxonomy_plan = render_core_tool_taxonomy_body(AppMode::Plan);
+    let taxonomy_yolo = render_core_tool_taxonomy_body(AppMode::Yolo);
+
+    let mut out = String::with_capacity(8192);
+    out.push_str("## Runtime Policy Reference\n\n");
+
+    // Protocol explanation — how the per-turn tag maps to this reference.
+    out.push_str(
+        "Each turn, the latest message in the transcript will contain a \
+         `<runtime_prompt>` tag that specifies the currently active mode and \
+         approval policy. When you see this tag, look up the corresponding \
+         rules below and apply them for the current turn.\n\n\
+         The tag format is:\n\
+         `<runtime_prompt visibility=\"internal\" mode=\"<mode>\" approval=\"<approval>\"/>`\n\n\
+         The `visibility=\"internal\"` attribute means this tag is a runtime \
+         instruction for the model, not user input. Do not announce the \
+         current mode or restate the tag content to the user — just apply \
+         the referenced rules silently.\n\n\
+         When this tag is the only new content in a turn and there is no \
+         pending tool output, sub-agent completion handoff, or explicit user \
+         message requesting continuation, do not initiate new edits, shell \
+         commands, git commits, or sub-agent launches. End the turn and wait \
+         for the user's next message.\n\n",
+    );
+    out.push_str(
+        "If your previous assistant message asked the user a blocking choice \
+         question (for example, \"How do you want me to proceed?\" with \
+         mutually exclusive options), treat the run as paused until the user \
+         answers. Stale tool output, stale sub-agent completion events, or the \
+         runtime tag alone do not override that pause. If a question is \
+         informational and you intend to continue without waiting, say so \
+         explicitly in the same message (for example, \"I am going to keep \
+         moving unless you redirect me\").\n\n",
+    );
+
+    // ── Mode reference ─────────────────────────────────────────────────
+    out.push_str("### Modes\n\n");
+
+    out.push_str("#### agent\n\n");
+    out.push_str(&taxonomy_agent);
+    out.push_str("\n\n");
+    out.push_str(AGENT_MODE.trim());
+    out.push_str("\n\n");
+
+    out.push_str("#### plan\n\n");
+    out.push_str(&taxonomy_plan);
+    out.push_str("\n\n");
+    out.push_str(PLAN_MODE.trim());
+    out.push_str("\n\n");
+
+    out.push_str("#### yolo\n\n");
+    out.push_str(&taxonomy_yolo);
+    out.push_str("\n\n");
+    out.push_str(YOLO_MODE.trim());
+    out.push_str("\n\n");
+
+    // ── Approval policy reference ──────────────────────────────────────
+    out.push_str("### Approval Policies\n\n");
+
+    out.push_str("#### auto\n\n");
+    out.push_str(AUTO_APPROVAL.trim());
+    out.push_str("\n\n");
+
+    out.push_str("#### suggest\n\n");
+    out.push_str(SUGGEST_APPROVAL.trim());
+    out.push_str("\n\n");
+
+    out.push_str("#### never\n\n");
+    out.push_str(NEVER_APPROVAL.trim());
+    out.push_str("\n\n");
+
+    // ── Shell policy reference ──────────────────────────────────────────
+    out.push_str("### Shell Policy\n\n");
+
+    out.push_str("#### allow_shell=true\n\n");
+    out.push_str("Shell tools available as described in the base prompt.\n\n");
+
+    out.push_str("#### allow_shell=false\n\n");
+    out.push_str(SHELL_POLICY_DISABLED.trim());
+
+    out
+}
+
 pub(crate) fn render_core_tool_taxonomy_body(mode: AppMode) -> String {
     let core_tools = core_taxonomy_tools_for_mode(mode);
     let mut sentences = Vec::new();
@@ -1052,9 +1155,12 @@ pub(crate) fn compose_prompt_with_approval_model_and_shell(
     personality: Personality,
     model_id: &str,
 ) -> String {
+    // [pinvou3-fork] 采用上游 v0.8.57 的 mode-independent 静态前缀(base/personality
+    // 不随 mode/approval 变,保 prefix cache)。composer 在 apply_static_prompt_composer
+    // 里以生产常量 Yolo/Auto 构造宽 ctx,app 的 compose_static_layers 不受影响。
     let default_layers = compose_default_static_layers(personality, model_id);
     apply_static_prompt_composer(
-        effective_static_prompt_composer(),
+        static_prompt_composer(),
         personality,
         model_id,
         &default_layers,
@@ -1081,16 +1187,22 @@ fn compose_default_static_layers_with_context(
     apply_model_template(&layers, model_id, context_window_override)
 }
 
+// [pinvou3-fork] 上游签名(composer, personality, model_id, default_layers),但 pinvou3
+// 的 StaticPromptCtx 是宽版(app 的 compose_static_layers 读 ctx.mode/ctx.approval_mode)。
+// 生产单 Yolo-Auto → 以常量 Yolo / Auto / allow_shell=true 构造 ctx,app 据此走 Yolo 分支
+// 生成 mode_block,行为与上游重构前一致;personality 不进宽 ctx(app 自带 base.md)。
 fn apply_static_prompt_composer(
     composer: Option<&StaticPromptComposer>,
-    personality: Personality,
+    _personality: Personality,
     model_id: &str,
     default_layers: &str,
 ) -> String {
     match composer {
         Some(composer) => composer(&StaticPromptCtx {
+            mode: AppMode::Yolo,
+            approval_mode: ApprovalMode::Auto,
             model_id,
-            personality,
+            allow_shell: true,
             default_layers,
         }),
         None => default_layers.to_string(),
@@ -1182,7 +1294,10 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
         session_context.context_window_override,
     );
     let mode_prompt = apply_static_prompt_composer(
-        effective_static_prompt_composer(),
+        // [pinvou3-fork #42] pinvou3 的 composer 访问器名为 static_prompt_composer();
+        // 上游同语义访问器叫 effective_static_prompt_composer(),merge 时调用点取了上游名,
+        // 这里对齐 pinvou3 访问器(其 .is_none() 即 ContextMgmt/COMPACT/Runtime-Policy gate)。
+        static_prompt_composer(),
         Personality::Calm,
         session_context.model_id,
         &default_layers,
@@ -1258,6 +1373,8 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // `skills_dir` is configured, union it with the workspace view instead of
     // treating it as a fallback; the workspace view often returns Some and
     // would otherwise shadow the configured directory entirely.
+    // [pinvou3] union 接线(原 fork P0-1)v0.8.57 已被上游 harvest,取上游版。
+    // 注:pinvou3 的 #41「skills 扫描路径只留 ~/.agents/skills」收窄仍在 skills/mod.rs。
     let skill_discovery_mode = crate::skills::SkillDiscoveryMode::from_codewhale_only(
         session_context.skills_scan_codewhale_only,
     );
@@ -1283,13 +1400,36 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // 4. Lean, runtime-only coding discipline. Context pressure, prompt-cache
     // accounting, footer presentation, and automatic compaction are host
     // responsibilities; teaching their UI to the model dilutes the task.
-    full_prompt.push_str("\n\n");
-    full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
+    // pinvou3 的宽 composer 密封全部编译期 doctrine，因此新版 Core Execution
+    // 也必须和 compaction/runtime policy 一样受 composer gate。
+    if static_prompt_composer().is_none() {
+        full_prompt.push_str("\n\n");
+        full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
+    }
 
     // 5. Compaction relay template — so the model knows the format to use
     //    when writing `.codewhale/handoff.md` on exit / `/compact`.
-    full_prompt.push_str("\n\n");
-    full_prompt.push_str(COMPACT_TEMPLATE);
+    //    Also composer-owned static doctrine: a static-prompt composer
+    //    that wants the template (or a trimmed variant) includes it in
+    //    its own output.
+    if static_prompt_composer().is_none() {
+        full_prompt.push_str("\n\n");
+        full_prompt.push_str(COMPACT_TEMPLATE);
+    }
+
+    // 5a. Runtime policy reference — all mode and approval policy descriptions
+    //     live here in the frozen prefix so the per-turn <runtime_prompt> tag
+    //     can be a minimal pointer instead of repeating the full policy text
+    //     on every API request (up to ~500 tokens saved per turn).
+    // [pinvou3-fork #42] composer-owned static doctrine:pinvou3 的 composer 注入单
+    // MODE_EXECUTE_MD(生产单 Yolo-Auto 模式),不需要上游 v0.8.57 新增的全模式 Runtime
+    // Policy Reference(agent/plan/yolo + Efficient Approvals + Session Longevity ~141 行,
+    // 与 pinvou3 prompt 瘦身路线矛盾)。安装 composer 时一并 gate 掉,与 ContextMgmt/COMPACT
+    // 同理——composer 拥有全部编译期静态 mode doctrine。
+    if static_prompt_composer().is_none() {
+        full_prompt.push_str("\n\n");
+        full_prompt.push_str(&render_runtime_policy_reference());
+    }
 
     // ── Volatile-content boundary → WorldState fragments ──────────────────
     // Constitution (`full_prompt`) stays the cache-stable Blocks[0] prefix.
@@ -1439,7 +1579,15 @@ pub fn world_state_from_session_facts(
         state = state.with_workspace(body);
     }
     if let Some(body) = permissions_body.filter(|s| !s.trim().is_empty()) {
-        state = state.with_permissions(body);
+        // [pinvou3-fork T3] `instructions = [...]` 已在单文件层允许 100KB；若再走
+        // WorldState 默认 4KB，会把 pinvou3 主指令后的用户记忆静默截断。权限/指令
+        // fragment 使用同一上限，其他高频易变 fragment 仍保留默认 4KB。
+        state.upsert(crate::model_context::ModelContextFragment::with_max_bytes(
+            crate::model_context::FragmentId::Permissions,
+            crate::model_context::FragmentRole::Permissions,
+            body,
+            INSTRUCTIONS_FILE_MAX_BYTES,
+        ));
     }
     if let Some(body) = route_body.filter(|s| !s.trim().is_empty()) {
         state = state.with_route(body);
@@ -1579,72 +1727,42 @@ mod tests {
         assert_eq!(effective_prompt_override(&cell, "fallback"), "first");
     }
 
+    // NOTE: these tests inject the composer as a parameter instead of
+    // calling `set_static_prompt_composer_override` — the global is a
+    // process-wide OnceLock and setting it here would poison every other
+    // prompt test in this binary.
+    //
+    // v0.8.57:compose_default_static_layers / apply_static_prompt_composer 随上游改成
+    // 2参/4参 mode-independent;pinvou3 在 apply 内以生产常量 Yolo/Auto 构造宽 ctx,故下面
+    // 断言 ctx.mode==Yolo / ctx.approval_mode==Auto / ctx.allow_shell。
     #[test]
-    fn static_prompt_composer_storage_returns_rejected_composer() {
-        let cell = std::sync::OnceLock::new();
-        let first: Box<StaticPromptComposer> =
-            Box::new(|ctx| format!("first:{}", ctx.default_layers.len()));
-        let second: Box<StaticPromptComposer> =
-            Box::new(|ctx| format!("second:{}", ctx.default_layers.len()));
+    fn forkguard_static_prompt_composer_replaces_default_layers() {
+        let default_layers = compose_default_static_layers(Personality::Calm, "test-model");
+        // v0.9.0 constitution 使用 model-agnostic 的 "You are Codewhale"，
+        // 不再把 model id 写入静态前缀。
+        // default_layers 的稳定锚改断言 constitution preamble 串,验证 ctx 收到真
+        // default_layers——本 forkguard 测的是「宽 ctx + composer 接管」机制,非旧文案。
+        assert!(default_layers.contains("You are Codewhale"));
 
-        assert!(set_static_prompt_composer(&cell, first).is_ok());
-        let rejected = set_static_prompt_composer(&cell, second)
-            .expect_err("second composer should be rejected");
-        let ctx = StaticPromptCtx {
-            model_id: "deepseek-v4-pro",
-            personality: Personality::Calm,
-            default_layers: "fallback",
-        };
-
-        assert_eq!(rejected(&ctx), "second:8");
-        assert_eq!(
-            cell.get().expect("first composer retained")(&ctx),
-            "first:8"
-        );
-    }
-
-    #[test]
-    fn static_prompt_composer_unset_keeps_default_layers_byte_identical() {
-        for personality in [Personality::Calm, Personality::Playful] {
-            let default_layers = compose_default_static_layers(personality, "deepseek-v4-flash");
-            let composed = apply_static_prompt_composer(
-                None,
-                personality,
-                "deepseek-v4-flash",
-                &default_layers,
-            );
-
-            assert_byte_identical("unset static prompt composer", &default_layers, &composed);
-        }
-    }
-
-    #[test]
-    fn static_prompt_composer_receives_context_and_replaces_layers() {
-        let default_layers = compose_default_static_layers(Personality::Calm, "deepseek-v4-pro");
-        let composer: Box<StaticPromptComposer> = Box::new(|ctx| {
-            assert_eq!(ctx.model_id, "deepseek-v4-pro");
-            assert_eq!(ctx.personality, Personality::Calm);
-            // The 0.9.0 core is model-agnostic ("You are Codewhale") and
-            // folds tone in — no per-model id line, no separate personality
-            // section in default_layers.
+        let composer = |ctx: &StaticPromptCtx<'_>| -> String {
+            assert_eq!(ctx.mode, AppMode::Yolo);
+            assert_eq!(ctx.approval_mode, ApprovalMode::Auto);
+            assert_eq!(ctx.model_id, "test-model");
+            assert!(ctx.allow_shell);
             assert!(ctx.default_layers.contains("You are Codewhale"));
-            assert!(
-                ctx.default_layers
-                    .contains("Take the work seriously. Don't take")
-            );
-            assert!(!ctx.default_layers.contains("## Core Tool Taxonomy"));
-            assert!(!ctx.default_layers.contains("Approval Policy"));
-            "embedder static prompt".to_string()
-        });
+            "EMBEDDER STATIC LAYERS".to_string()
+        };
+        let composed =
+            apply_static_prompt_composer(Some(&composer), Personality::Calm, "test-model", &default_layers);
+        assert_eq!(composed, "EMBEDDER STATIC LAYERS");
+    }
 
-        let composed = apply_static_prompt_composer(
-            Some(composer.as_ref()),
-            Personality::Calm,
-            "deepseek-v4-pro",
-            &default_layers,
-        );
-
-        assert_eq!(composed, "embedder static prompt");
+    #[test]
+    fn forkguard_static_prompt_composer_unset_keeps_default_layers_byte_identical() {
+        let default_layers = compose_default_static_layers(Personality::Calm, "test-model");
+        let composed =
+            apply_static_prompt_composer(None, Personality::Calm, "test-model", &default_layers);
+        assert_eq!(composed, default_layers);
     }
 
     fn contains_cjk(text: &str) -> bool {
@@ -1987,6 +2105,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "pinvou3 fork(#41): workspace skill 目录不扫描,只留 ~/.agents/skills + 配置 dir"]
     fn system_prompt_merges_workspace_and_configured_skills_dir() {
         let _env_guard = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
@@ -2107,15 +2226,39 @@ mod tests {
         let tmp = tempdir().expect("tempdir");
         let block = render_environment_block(tmp.path(), "zh-Hans");
         assert!(block.starts_with("## Environment"));
-        assert!(block.contains("- lang: zh-Hans"));
-        assert!(block.contains(&format!(
-            "- codewhale_version: {}",
-            env!("CARGO_PKG_VERSION")
-        )));
-        // pwd is now delivered per-turn via `turn_meta`, not in the static block.
-        assert!(!block.contains("- pwd:"));
+        // [pinvou3-fork] lang / codewhale_version 已从 env block 砍掉,不断言。
+        // [pinvou3-fork] pwd 已移出静态 system → per-turn <turn_meta> 的 Current workspace,
+        // 以保持 system prefix 跨 session 字节静态、命中 vLLM prefix-cache(否则工具调用退化)。
+        assert!(!block.contains("- pwd:"), "pwd 应已移出 ## Environment(改走 turn_meta)");
         assert!(block.contains("- platform:"));
         assert!(block.contains("- shell:"));
+        // pinvou3 fork (P2-2): `lang` + `codewhale_version` dropped —
+        // `lang` is redundant (locale preamble/closer anchor it), and
+        // `codewhale_version` shows the wrong version (codewhale-tui
+        // crate, not the embedder's app version).
+        assert!(
+            !block.contains("- lang:"),
+            "pinvou3 fork drops `lang` field — locale_preamble/closer already anchor language"
+        );
+        assert!(
+            !block.contains("codewhale_version"),
+            "pinvou3 fork drops `codewhale_version` — wrong layer's version, confusing"
+        );
+    }
+
+    /// [pinvou3 fork] 守护"pwd 已移出 ## Environment → per-turn `<turn_meta>`"。
+    /// 每 session 变的 workspace 路径若留在静态 system prefix,会让 vLLM prefix-cache
+    /// 在 workspace 处部分命中,叠加投机解码(mtp)→ 工具调用退化成裸文本(实测 25%)。
+    /// sync 时上游若把 pwd 加回 render_environment_block,本测失败。
+    #[test]
+    fn forkguard_environment_block_omits_volatile_pwd() {
+        let tmp = tempdir().expect("tempdir");
+        let block = render_environment_block(tmp.path(), "zh-Hans");
+        assert!(
+            !block.contains("- pwd:"),
+            "[pinvou3 fork] pwd 必须移出静态 ## Environment(改走 per-turn turn_meta),\
+             否则每 session 变的 workspace 破坏 vLLM prefix-cache(部分命中×投机解码→工具调用退化)"
+        );
     }
 
     #[test]
@@ -2457,8 +2600,8 @@ mod tests {
                 },
             ));
         assert!(prompt.contains("## Environment"));
-        assert!(prompt.contains("- lang: ja"));
-        assert!(prompt.contains("- codewhale_version:"));
+        assert!(prompt.contains("- platform:"));
+        // [pinvou3-fork] (P2-2): `lang` and `codewhale_version` were dropped from env block.
     }
 
     #[test]
@@ -2503,7 +2646,7 @@ mod tests {
             .find("<codewhale_user_constitution")
             .expect("user constitution block");
         let env_at = prompt
-            .find("- codewhale_version:")
+            .find("- platform:")
             .expect("rendered environment block");
         assert!(
             base_at < user_block_at && user_block_at < env_at,
@@ -3091,6 +3234,9 @@ mod tests {
         assert!(!prompt.contains("## Current Goal"));
     }
 
+    // NOTE: forkguard_tool_selection_guide_is_embedder_aware moved to pinvou3-app.
+    // 下面是上游测试,测的是**默认** base prompt(无 composer);pinvou3 已回退
+    // prompts/*.md 到上游原文,故仍通过(composer 路径由 app 端 forkguard 守)。
     #[test]
     fn agent_mode_tool_guidance_avoids_defensive_tool_suppression() {
         let prompt = compose_prompt(Personality::Calm);
@@ -3211,6 +3357,16 @@ mod tests {
         );
     }
 
+    // NOTE: forkguard_rlm_section_removed_by_pinvou3 moved to pinvou3-app
+    // (RLM removal lives in the resources/bundle/base.md override)。下面是上游测试,
+    // 测 submodule **默认** BASE_PROMPT(无 composer);pinvou3 已回退 prompts/*.md 到上游,
+    // RLM 移除只在 app base.md override,故 submodule 默认仍含 RLM 段 → 通过。
+    /// #358: rlm guidance was reframed from "first-class" to "specialty
+    /// tool" — verify the structural markers are present so a future
+    /// change doesn't silently remove the RLM section entirely.
+    ///
+    /// Don't assert on prose. If you wouldn't fail a code review for
+    /// changing the wording, don't fail a test for it.
     #[test]
     fn rlm_specialty_tool_guidance_present() {
         assert!(AGENT_MODE.contains("Large Context Tools"));
@@ -3266,6 +3422,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "pinvou3 fork (P-brand cleanup): Tier 5 段精简后不再裸列 AGENTS.md/CLAUDE.md 品牌路径,'Local Law' anchor 仍在但其它的不在;新断言见 forkguard_local_law_tier_covers_engine_config_instructions"]
     fn workspace_orientation_guidance_present() {
         let prompt = compose_prompt(Personality::Calm);
         assert!(prompt.contains("Project law and instructions"));
@@ -3276,6 +3433,12 @@ mod tests {
         );
     }
 
+    // NOTE: three pinvou3 BASE_PROMPT forkguards moved to pinvou3-app — Tier-5
+    // EngineConfig.instructions wording, Toolbox-section removal, and
+    // DeepSeek-specific fork_context prose removal now live in the
+    // resources/bundle/base.md override + its pinvou3-tauri content tests.
+    // 下面是上游测试,测 submodule **默认** BASE_PROMPT(无 composer);pinvou3 上述移除均在
+    // app base.md override,submodule 仍是上游原文 → 通过。
     #[test]
     fn prompt_uses_single_agent_and_rlm_surface() {
         for tool in [
@@ -3827,6 +3990,32 @@ mod tests {
             !flat.contains(crate::model_context::FragmentId::SkillsTools.marker()),
             "skills remain in constitution, not a volatile SkillsTools fragment"
         );
+    }
+
+    #[test]
+    fn forkguard_permissions_fragment_preserves_instructions_beyond_default_fragment_cap() {
+        let instructions = format!(
+            "<instructions source=\"pinvou3:test\">\n{}\nPINVOU3_MEMORY_TAIL\n</instructions>",
+            "主指令".repeat(1_500)
+        );
+        assert!(
+            instructions.len() > crate::model_context::DEFAULT_FRAGMENT_MAX_BYTES,
+            "fixture must exceed the generic WorldState fragment cap"
+        );
+
+        let state = world_state_from_session_facts(
+            None,
+            Some(&instructions),
+            None,
+            None,
+            None,
+            None,
+        );
+        let permissions = state
+            .get(crate::model_context::FragmentId::Permissions)
+            .expect("permissions fragment");
+        assert!(permissions.content.contains("PINVOU3_MEMORY_TAIL"));
+        assert!(!permissions.content.contains("[…truncated:"));
     }
 
     #[test]

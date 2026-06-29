@@ -88,6 +88,14 @@ impl ToolSpec for LoadSkillTool {
             ));
         }
 
+        // [pinvou3-fork] 技能市场开关:被禁用技能已从 catalogue 隐藏,模型本不该点名;
+        // 但若点了(陈旧/幻觉名),按不可用处理,绝不端出已关技能的正文。
+        if crate::skills::is_skill_disabled(name) {
+            return Err(ToolError::execution_failed(format!(
+                "skill `{name}` is disabled"
+            )));
+        }
+
         // #432: walk every candidate skill directory (workspace
         // .agents/skills, skills, .opencode/skills, .claude/skills,
         // .cursor/skills, ~/.agents/skills, global default), merging with
@@ -317,6 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "pinvou3 fork patch #41: workspace skill dirs scrapped"]
     async fn execute_finds_skills_in_opencode_dir_via_workspace_discovery() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().to_path_buf();
@@ -405,6 +414,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "pinvou3-fork #41: skills 扫描收窄为只 ~/.agents/skills,workspace/cross-tool 目录不扫描"]
     async fn execute_returns_helpful_error_for_unknown_skill() {
         let tmp = tempdir().unwrap();
         let workspace = tmp.path().to_path_buf();

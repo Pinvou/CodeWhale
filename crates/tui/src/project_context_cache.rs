@@ -185,6 +185,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "pinvou3 fork(C5): PROJECT_CONTEXT_FILES 砍空,不读 workspace AGENTS.md,缓存签名不随其变"]
     fn signature_changes_when_agents_md_is_overwritten_same_length() {
         let workspace = tempdir().expect("workspace");
         let home = tempdir().expect("home");

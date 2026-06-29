@@ -1081,6 +1081,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "pinvou3 fork patch #41: workspace skill dirs no longer scanned"]
     fn test_list_skills_merges_workspace_and_configured_dirs() {
         let tmpdir = TempDir::new().unwrap();
         let _home = IsolatedHome::new(&tmpdir);
@@ -1141,10 +1142,9 @@ mod tests {
             "got: {msg}"
         );
         assert!(normalized.contains("Searched directories"), "got: {msg}");
-        assert!(normalized.contains(".agents/skills"), "got: {msg}");
         assert!(normalized.contains("skills"), "got: {msg}");
-        assert!(normalized.contains("Available skills (2):"), "got: {msg}");
-        assert!(normalized.contains("workspace-skill"), "got: {msg}");
+        assert!(normalized.contains("Available skills (1):"), "got: {msg}");
+        assert!(!normalized.contains("workspace-skill"), "got: {msg}");
         assert!(normalized.contains("configured-skill"), "got: {msg}");
         assert!(normalized.contains("path:"), "got: {msg}");
     }
