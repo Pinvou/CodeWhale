@@ -192,6 +192,14 @@ fn normalize_domain_candidate(value: &str) -> Option<String> {
     if looks_like_domain { Some(host) } else { None }
 }
 
+pub(super) fn registered_tool_approval_force_prompt(
+    tool_name: &str,
+    requirement: ApprovalRequirement,
+) -> bool {
+    requirement != ApprovalRequirement::Auto
+        && registered_tool_requires_non_bypassable_approval(tool_name)
+}
+
 fn registered_tool_requires_non_bypassable_approval(tool_name: &str) -> bool {
     matches!(tool_name, "rlm_eval" | "start_mcp_server")
 }
@@ -1780,11 +1788,14 @@ impl Engine {
                 } else if let Some(registry) = tool_registry
                     && let Some(spec) = registry.get(&tool_name)
                 {
+                    let approval_requirement = spec.approval_requirement_for(&tool_input);
                     approval_required = registered_tool_approval_required(
                         &tool_name,
-                        spec.approval_requirement_for(&tool_input),
+                        approval_requirement,
                         registry.context().auto_approve,
                     );
+                    approval_force_prompt =
+                        registered_tool_approval_force_prompt(&tool_name, approval_requirement);
                     approval_description = spec.description().to_string();
                     supports_parallel = spec.supports_parallel_for(&tool_input);
                     read_only = spec.is_read_only_for(&tool_input);
@@ -1823,6 +1834,7 @@ impl Engine {
                 // ORs `approval_required`.
                 if hook_requires_approval && !self.session.auto_approve {
                     approval_required = true;
+                    approval_force_prompt = true;
                 }
 
                 if blocked_error.is_none() {

@@ -43,6 +43,7 @@ impl ToolSpec for AutomationCreateTool {
                     "description": "Supported: FREQ=HOURLY;INTERVAL=N[;BYDAY=MO,TU] or FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=30"
                 },
                 "cwds": { "type": "array", "items": { "type": "string" } },
+                "model": { "type": "string", "description": "Model name for scheduled runs. Uses the task manager default when omitted." },
                 "mode": { "type": "string", "description": "Task mode for scheduled runs. Defaults to agent when omitted." },
                 "allow_shell": { "type": "boolean", "default": false },
                 "trust_mode": { "type": "boolean", "default": false },
@@ -77,6 +78,7 @@ impl ToolSpec for AutomationCreateTool {
                 .into_iter()
                 .map(PathBuf::from)
                 .collect(),
+            model: optional_str(&input, "model").map(ToString::to_string),
             mode: optional_str(&input, "mode").map(ToString::to_string),
             allow_shell: optional_bool_value(&input, "allow_shell"),
             trust_mode: optional_bool_value(&input, "trust_mode"),
@@ -199,6 +201,7 @@ impl ToolSpec for AutomationUpdateTool {
                 "prompt": { "type": "string" },
                 "rrule": { "type": "string" },
                 "cwds": { "type": "array", "items": { "type": "string" } },
+                "model": { "type": "string", "description": "Model name for scheduled runs." },
                 "mode": { "type": "string", "description": "Task mode for scheduled runs. Defaults to agent when omitted." },
                 "allow_shell": { "type": "boolean" },
                 "trust_mode": { "type": "boolean" },
@@ -243,6 +246,7 @@ impl ToolSpec for AutomationUpdateTool {
             } else {
                 None
             },
+            model: optional_str(&input, "model").map(ToString::to_string),
             mode: optional_str(&input, "mode").map(ToString::to_string),
             allow_shell: optional_bool_value(&input, "allow_shell"),
             trust_mode: optional_bool_value(&input, "trust_mode"),
@@ -401,6 +405,7 @@ mod tests {
     fn create_schema_exposes_rrule() {
         let schema = AutomationCreateTool.input_schema();
         assert!(schema["properties"]["rrule"].is_object());
+        assert!(schema["properties"]["model"].is_object());
         assert_eq!(schema["required"][0], "name");
     }
 

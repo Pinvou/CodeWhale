@@ -33,7 +33,7 @@ const DEFAULT_WORKERS: usize = 2;
 const MAX_WORKERS: usize = 8;
 const TIMELINE_SUMMARY_LIMIT: usize = 240;
 const ARTIFACT_THRESHOLD: usize = 1200;
-const CURRENT_TASK_SCHEMA_VERSION: u32 = 2;
+const CURRENT_TASK_SCHEMA_VERSION: u32 = 4;
 
 const fn default_task_schema_version() -> u32 {
     CURRENT_TASK_SCHEMA_VERSION
@@ -191,6 +191,12 @@ pub struct TaskRecord {
     pub trust_mode: bool,
     #[serde(default = "default_auto_approve")]
     pub auto_approve: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// Stable owner for executors that keep one conversation across multiple
+    /// task executions (for example, recurring automation runs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_key: Option<String>,
     pub status: TaskStatus,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
@@ -344,6 +350,7 @@ impl TaskManagerConfig {
 #[derive(Debug, Clone)]
 pub struct ExecutionTask {
     id: String,
+    conversation_key: Option<String>,
     prompt: String,
     model: String,
     workspace: PathBuf,
@@ -353,9 +360,59 @@ pub struct ExecutionTask {
     auto_approve: bool,
 }
 
+impl ExecutionTask {
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn conversation_key(&self) -> Option<&str> {
+        self.conversation_key.as_deref()
+    }
+
+    #[must_use]
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    #[must_use]
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    #[must_use]
+    pub fn mode_label(&self) -> &str {
+        &self.mode_label
+    }
+
+    #[must_use]
+    pub const fn allow_shell(&self) -> bool {
+        self.allow_shell
+    }
+
+    #[must_use]
+    pub const fn trust_mode(&self) -> bool {
+        self.trust_mode
+    }
+
+    #[must_use]
+    pub const fn auto_approve(&self) -> bool {
+        self.auto_approve
+    }
+}
+
 /// Event stream produced by an executor while a task runs.
 #[derive(Debug, Clone)]
 pub enum TaskExecutionEvent {
+    ThreadCreated {
+        thread_id: String,
+    },
     ThreadLinked {
         thread_id: String,
         turn_id: String,
@@ -840,6 +897,16 @@ impl TaskManager {
 
     /// Enqueue a new task.
     pub async fn add_task(&self, req: NewTaskRequest) -> Result<TaskRecord> {
+        self.add_task_with_conversation_key(req, None).await
+    }
+
+    /// Enqueue a task owned by a stable conversation. Recurring automation
+    /// runs use this key while retaining a distinct task id for each attempt.
+    pub(crate) async fn add_task_with_conversation_key(
+        &self,
+        req: NewTaskRequest,
+        conversation_key: Option<String>,
+    ) -> Result<TaskRecord> {
         let prompt = req.prompt.trim().to_string();
         if prompt.is_empty() {
             bail!("Task prompt cannot be empty");
@@ -866,6 +933,8 @@ impl TaskManager {
             // Auto-approval must be opted into explicitly
             // (GHSA-72w5-pf8h-xfp4).
             auto_approve: req.auto_approve.unwrap_or(false),
+            idempotency_key: None,
+            conversation_key,
             status: TaskStatus::Queued,
             created_at: Utc::now(),
             started_at: None,
@@ -926,6 +995,43 @@ impl TaskManager {
             .get(&id)
             .cloned()
             .ok_or_else(|| anyhow!("Task not found: {id_or_prefix}"))
+    }
+
+    /// Delete a terminal task and its task-owned artifacts. Automation
+    /// retention uses this together with the matching Run and Session cleanup.
+    pub async fn delete_terminal_task(&self, task_id: &str) -> Result<bool> {
+        ensure_safe_task_storage_id(task_id)?;
+        let mut state = self.state.lock().await;
+        let Some(task) = state.tasks.get(task_id) else {
+            return Ok(false);
+        };
+        if matches!(task.status, TaskStatus::Queued | TaskStatus::Running) {
+            bail!("Refusing to delete active task {task_id}");
+        }
+
+        let task_path = self.tasks_dir.join(format!("{task_id}.json"));
+        let artifacts_path = self.artifacts_dir.join(task_id);
+        if artifacts_path.exists() {
+            fs::remove_dir_all(&artifacts_path).with_context(|| {
+                format!(
+                    "Failed to delete task artifacts {}",
+                    artifacts_path.display()
+                )
+            })?;
+        }
+        match fs::remove_file(&task_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("Failed to delete task {}", task_path.display()));
+            }
+        }
+
+        state.tasks.remove(task_id);
+        state.queue.retain(|queued_id| queued_id != task_id);
+        self.persist_queue_locked(&state.queue)?;
+        Ok(true)
     }
 
     /// Cancel a queued or running task by id/prefix.
@@ -1072,6 +1178,7 @@ impl TaskManager {
                                 let request = {
                                     ExecutionTask {
                                         id: task.id.clone(),
+                                        conversation_key: task.conversation_key.clone(),
                                         prompt: task.prompt.clone(),
                                         model: task.model.clone(),
                                         workspace: task.workspace.clone(),
@@ -1155,6 +1262,15 @@ impl TaskManager {
         };
 
         match event {
+            TaskExecutionEvent::ThreadCreated { thread_id } => {
+                task.thread_id = Some(thread_id.clone());
+                task.timeline.push(TaskTimelineEntry {
+                    timestamp: Utc::now(),
+                    kind: "runtime_thread".to_string(),
+                    summary: format!("Created runtime thread {thread_id}"),
+                    detail_path: None,
+                });
+            }
             TaskExecutionEvent::ThreadLinked { thread_id, turn_id } => {
                 task.thread_id = Some(thread_id.clone());
                 task.turn_id = Some(turn_id.clone());
@@ -1641,6 +1757,17 @@ fn load_state(tasks_dir: &Path, queue_path: &Path) -> Result<LoadedTaskState> {
     })
 }
 
+fn ensure_safe_task_storage_id(value: &str) -> Result<()> {
+    let mut components = Path::new(value).components();
+    let Some(std::path::Component::Normal(component)) = components.next() else {
+        bail!("Task id must be a non-empty storage name");
+    };
+    if components.next().is_some() || component != value {
+        bail!("Task id must not contain path separators: {value}");
+    }
+    Ok(())
+}
+
 fn resolve_task_id(tasks: &HashMap<String, TaskRecord>, id_or_prefix: &str) -> Result<String> {
     if tasks.contains_key(id_or_prefix) {
         return Ok(id_or_prefix.to_string());
@@ -1784,9 +1911,34 @@ pub async fn wait_for_terminal_state(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::Mutex;
     use tokio::time::Duration;
 
     struct MockExecutor;
+
+    struct ConversationKeyExecutor {
+        seen: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    }
+
+    #[async_trait]
+    impl TaskExecutor for ConversationKeyExecutor {
+        async fn execute(
+            &self,
+            task: ExecutionTask,
+            _events: mpsc::UnboundedSender<TaskExecutionEvent>,
+            _cancel: CancellationToken,
+        ) -> TaskExecutionResult {
+            self.seen.lock().expect("capture key").push((
+                task.id().to_string(),
+                task.conversation_key().map(ToString::to_string),
+            ));
+            TaskExecutionResult {
+                status: TaskStatus::Completed,
+                result_text: Some("done".to_string()),
+                error: None,
+            }
+        }
+    }
 
     #[async_trait]
     impl TaskExecutor for MockExecutor {
@@ -1855,6 +2007,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn forkguard_v3_task_record_defaults_conversation_key() -> Result<()> {
+        let record: TaskRecord = serde_json::from_value(serde_json::json!({
+            "schema_version": 3,
+            "id": "task_v3_fixture",
+            "prompt": "legacy task",
+            "model": "legacy-model",
+            "workspace": ".",
+            "mode": "agent",
+            "allow_shell": false,
+            "trust_mode": false,
+            "auto_approve": false,
+            "status": "queued",
+            "created_at": Utc::now(),
+            "tool_calls": [],
+            "timeline": []
+        }))?;
+        assert_eq!(record.schema_version, 3);
+        assert_eq!(record.conversation_key, None);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn persists_and_recovers_task_records() -> Result<()> {
         let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
@@ -1871,6 +2045,16 @@ mod tests {
         assert_eq!(finished.turn_id.as_deref(), Some("turn_test"));
         assert_eq!(finished.checklist.items.len(), 1);
         assert_eq!(finished.checklist.in_progress_id, Some(1));
+
+        // v3 records predate conversation_key and must remain readable.
+        let mut v3_value = serde_json::to_value(&finished)?;
+        v3_value["schema_version"] = serde_json::json!(3);
+        v3_value
+            .as_object_mut()
+            .expect("task object")
+            .remove("conversation_key");
+        let v3_task: TaskRecord = serde_json::from_value(v3_value)?;
+        assert_eq!(v3_task.conversation_key, None);
 
         drop(manager);
 
@@ -1918,6 +2102,57 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn forkguard_deletes_only_terminal_task_records_and_artifacts() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let manager =
+            TaskManager::start_with_executor(test_config(root.clone()), Arc::new(MockExecutor))
+                .await?;
+        let task = manager
+            .add_task(NewTaskRequest::from_prompt("retention cleanup"))
+            .await?;
+        wait_for_terminal_state(&manager, &task.id, Duration::from_secs(10)).await?;
+
+        let artifact_dir = root.join("artifacts").join(&task.id);
+        fs::create_dir_all(&artifact_dir)?;
+        fs::write(artifact_dir.join("result.txt"), "retained by session")?;
+        assert!(root.join("tasks").join(format!("{}.json", task.id)).exists());
+
+        assert!(manager.delete_terminal_task(&task.id).await?);
+        assert!(manager.get_task(&task.id).await.is_err());
+        assert!(!root.join("tasks").join(format!("{}.json", task.id)).exists());
+        assert!(!artifact_dir.exists());
+        assert!(!manager.delete_terminal_task(&task.id).await?);
+        manager.shutdown();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worker_receives_persisted_conversation_key() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let manager = TaskManager::start_with_executor(
+            test_config(root),
+            Arc::new(ConversationKeyExecutor { seen: seen.clone() }),
+        )
+        .await?;
+
+        let queued = manager
+            .add_task_with_conversation_key(
+                NewTaskRequest::from_prompt("continue recurring conversation"),
+                Some("automation-stable-owner".to_string()),
+            )
+            .await?;
+        wait_for_terminal_state(&manager, &queued.id, Duration::from_secs(10)).await?;
+
+        assert_eq!(
+            *seen.lock().expect("read captured key"),
+            vec![(queued.id, Some("automation-stable-owner".to_string()))]
+        );
+        manager.shutdown();
+        Ok(())
+    }
+
     #[test]
     fn running_tasks_are_not_requeued_after_restart() -> Result<()> {
         let root = std::env::temp_dir().join(format!("deepseek-task-test-{}", Uuid::new_v4()));
@@ -1936,6 +2171,8 @@ mod tests {
             allow_shell: true,
             trust_mode: false,
             auto_approve: false,
+            idempotency_key: None,
+            conversation_key: None,
             status: TaskStatus::Running,
             created_at: started_at,
             started_at: Some(started_at),
