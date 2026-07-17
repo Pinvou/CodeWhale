@@ -53,10 +53,10 @@ use crate::tools::shell::{SharedShellManager, new_shared_shell_manager};
 use crate::tools::spec::RuntimeToolServices;
 use crate::tools::spec::{ApprovalRequirement, ToolError, ToolResult};
 use crate::tools::subagent::{
-    Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion, SubAgentForkContext,
-    SubAgentResult, SubAgentRuntime, SubAgentStatus, SubAgentThinking, SubAgentType,
-    ensure_subagent_model_for_provider, new_shared_subagent_manager_with_timeout,
-    resolve_subagent_assignment_route,
+    Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentAssignment, SubAgentCompletion,
+    SubAgentForkContext, SubAgentResult, SubAgentRuntime, SubAgentSpawnOptions, SubAgentStatus,
+    SubAgentThinking, SubAgentType, ensure_subagent_model_for_provider,
+    new_shared_subagent_manager_with_timeout, resolve_subagent_assignment_route,
 };
 use crate::tools::todo::{SharedTodoList, TodoListSnapshot, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
@@ -270,6 +270,16 @@ fn append_plan_list(out: &mut String, label: &str, values: &[String]) {
 
 // === Types ===
 
+/// Application-layer custom tools injected into every turn registry.
+#[derive(Clone, Default)]
+pub struct ExtraTools(pub Vec<std::sync::Arc<dyn crate::tools::spec::ToolSpec>>);
+
+impl std::fmt::Debug for ExtraTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.iter().map(|tool| tool.name())).finish()
+    }
+}
+
 /// Configuration for the engine
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -284,6 +294,10 @@ pub struct EngineConfig {
     pub allow_shell: bool,
     /// Enable trust mode (skip approvals) when true.
     pub trust_mode: bool,
+    /// Optional hard allowlist applied after all catalog expansion.
+    pub tool_whitelist: Option<HashSet<String>>,
+    /// Initial reasoning effort for hosts that may spawn work before sending a message.
+    pub reasoning_effort: Option<String>,
     /// Path to the notes file used by the notes tool.
     pub notes_path: PathBuf,
     /// Path to the MCP configuration file.
@@ -435,6 +449,8 @@ pub struct EngineConfig {
     /// Applied to the per-turn tool registry after built-in tools are registered.
     /// When `None`, no overrides or plugin loading occurs.
     pub tools: Option<crate::config::ToolsConfig>,
+    /// Application-injected tools appended after the native runtime surface.
+    pub extra_tools: ExtraTools,
     /// Whether tools should follow symbolic links. When `true`, symlinked
     /// directories are traversed by walk-based tools and symlinked paths
     /// that resolve outside the workspace are still allowed (the symlink
@@ -457,6 +473,8 @@ impl Default for EngineConfig {
             workspace: PathBuf::from("."),
             allow_shell: true,
             trust_mode: false,
+            tool_whitelist: None,
+            reasoning_effort: None,
             notes_path: PathBuf::from("notes.txt"),
             mcp_config_path: PathBuf::from("mcp.json"),
             skills_dir: crate::skills::default_skills_dir(),
@@ -521,6 +539,7 @@ impl Default for EngineConfig {
             prefer_bwrap: false,
             verbosity: None,
             tools: None,
+            extra_tools: ExtraTools::default(),
             workspace_follow_symlinks: false,
             exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
             terminal_chrome_enabled: true,
@@ -1008,6 +1027,7 @@ impl Engine {
             config.notes_path.clone(),
             config.mcp_config_path.clone(),
         );
+        session.reasoning_effort = config.reasoning_effort.clone();
         // Set up stable system prompt with project context (default to agent mode).
         // Per-turn working-set metadata is injected into the latest user
         // message at request time so file churn does not rewrite this prefix.
@@ -1614,7 +1634,23 @@ impl Engine {
                             .send(Event::status(format!("Denied tool call: {id}")))
                             .await;
                     }
-                    Op::SpawnSubAgent { prompt } => {
+                    Op::SpawnSubAgent {
+                        prompt,
+                        role_id,
+                        allowed_tools,
+                        max_steps,
+                        output_schema,
+                        expects_file_output,
+                    } => {
+                        if allowed_tools.is_empty() {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(format!(
+                                    "Cannot spawn role '{role_id}': empty allowed_tools whitelist"
+                                ))))
+                                .await;
+                            continue;
+                        }
                         let Some(client) = self.deepseek_client.clone() else {
                             let message = self
                                 .deepseek_client_error
@@ -1673,7 +1709,7 @@ impl Engine {
                             &runtime,
                             None,
                             &prompt,
-                            &SubAgentType::General,
+                            &SubAgentType::Custom,
                             ModelRoute::Inherit,
                             SubAgentThinking::Inherit,
                         )
@@ -1700,12 +1736,19 @@ impl Engine {
 
                         let result = {
                             let mut manager = self.subagent_manager.write().await;
-                            manager.spawn_background(
+                            manager.spawn_background_with_assignment_options(
                                 Arc::clone(&self.subagent_manager),
                                 runtime,
-                                SubAgentType::General,
+                                SubAgentType::Custom,
                                 prompt.clone(),
-                                None,
+                                SubAgentAssignment::new(prompt.clone(), Some(role_id.clone()))
+                                    .with_output_schema(output_schema)
+                                    .with_expects_file_output(expects_file_output),
+                                Some(allowed_tools),
+                                SubAgentSpawnOptions {
+                                    max_steps,
+                                    ..SubAgentSpawnOptions::default()
+                                },
                             )
                         };
 
@@ -1728,6 +1771,15 @@ impl Engine {
                                     .await;
                             }
                         }
+                    }
+                    Op::CancelSubAgents => {
+                        let cancelled = self.subagent_manager.write().await.cancel_all_running();
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(format!(
+                                "Cancelled {cancelled} running sub-agent(s)"
+                            )))
+                            .await;
                     }
                     Op::ListSubAgents => {
                         // #3803: the sidebar refresh is a read-only snapshot.
@@ -1846,6 +1898,13 @@ impl Engine {
                                 "Stream chunk timeout set to {timeout_secs}s"
                             )))
                             .await;
+                    }
+                    Op::SetDisallowedTools { tools } => {
+                        self.config.disallowed_tools = if tools.is_empty() {
+                            None
+                        } else {
+                            Some(tools)
+                        };
                     }
                     Op::SetSubagentRuntimeConfig {
                         enabled,
@@ -4260,10 +4319,11 @@ use self::streaming::{
 };
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,
-    REQUEST_USER_INPUT_NAME, active_tools_for_step, build_model_tool_catalog_with_surface,
-    ensure_advanced_tooling, execute_code_execution_tool, execute_tool_search,
-    initial_active_tools, is_tool_search_tool, maybe_hydrate_requested_deferred_tool,
-    missing_tool_error_message, tool_catalog_consistency_issues,
+    REQUEST_USER_INPUT_NAME, active_tools_for_step, apply_tool_whitelist,
+    build_model_tool_catalog_with_surface, ensure_advanced_tooling, execute_code_execution_tool,
+    execute_tool_search, initial_active_tools, is_tool_search_tool,
+    maybe_hydrate_requested_deferred_tool, missing_tool_error_message,
+    tool_catalog_consistency_issues,
 };
 #[cfg(test)]
 use self::tool_catalog::{

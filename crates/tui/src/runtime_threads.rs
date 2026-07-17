@@ -3327,6 +3327,9 @@ impl RuntimeThreadManager {
                 workspace: thread.workspace.clone(),
                 allow_shell: thread.allow_shell,
                 trust_mode: thread.trust_mode,
+                tool_whitelist: None,
+                reasoning_effort: None,
+                extra_tools: crate::core::engine::ExtraTools::default(),
                 notes_path: cfg.notes_path(),
                 mcp_config_path: cfg.mcp_config_path(),
                 skills_dir: cfg.skills_dir(),
@@ -4105,7 +4108,7 @@ impl RuntimeThreadManager {
                     )
                     .await?;
                 }
-                EngineEvent::AgentComplete { id, result } => {
+                EngineEvent::AgentComplete { id, result, .. } => {
                     let message = format!(
                         "Sub-agent {id} completed: {}",
                         summarize_text(&result, SUMMARY_LIMIT)

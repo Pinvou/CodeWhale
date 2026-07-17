@@ -7236,6 +7236,8 @@ mod tests {
             assignment: crate::tools::subagent::SubAgentAssignment {
                 objective: "task".to_string(),
                 role: Some("worker".to_string()),
+                output_schema: None,
+                expects_file_output: false,
             },
             model: String::new(),
             nickname: nickname.map(str::to_string),

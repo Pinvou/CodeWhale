@@ -340,6 +340,8 @@ mod tests {
             assignment: SubAgentAssignment {
                 objective: "task".to_string(),
                 role: Some("worker".to_string()),
+                output_schema: None,
+                expects_file_output: false,
             },
             model: "deepseek-v4-pro".to_string(),
             nickname: Some(nickname.to_string()),

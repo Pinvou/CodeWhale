@@ -160,7 +160,17 @@ pub enum Op {
 
     /// Spawn a sub-agent
     #[allow(dead_code)]
-    SpawnSubAgent { prompt: String },
+    SpawnSubAgent {
+        prompt: String,
+        role_id: String,
+        allowed_tools: Vec<String>,
+        max_steps: Option<u32>,
+        output_schema: Option<serde_json::Value>,
+        expects_file_output: bool,
+    },
+
+    /// Cancel every running background sub-agent owned by this engine.
+    CancelSubAgents,
 
     /// List current sub-agents and their status
     ListSubAgents,
@@ -191,6 +201,9 @@ pub enum Op {
 
     /// Update the SSE idle timeout used for subsequent streamed turns.
     SetStreamChunkTimeout { timeout_secs: u64 },
+
+    /// Replace the session-scoped model-facing tool deny-list.
+    SetDisallowedTools { tools: Vec<String> },
 
     /// Update sub-agent runtime controls for subsequent turns.
     SetSubagentRuntimeConfig {

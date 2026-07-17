@@ -1584,6 +1584,9 @@ fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         workspace: app.workspace.clone(),
         allow_shell: app.allow_shell,
         trust_mode: app.trust_mode,
+        tool_whitelist: None,
+        reasoning_effort: None,
+        extra_tools: crate::core::engine::ExtraTools::default(),
         notes_path: config.notes_path(),
         mcp_config_path: config.mcp_config_path(),
         skills_dir: app.skills_dir.clone(),
@@ -3354,7 +3357,7 @@ async fn run_event_loop(
                             received_engine_event = redraw_requested_before_event;
                         }
                     }
-                    EngineEvent::AgentComplete { id, result } => {
+                    EngineEvent::AgentComplete { id, result, .. } => {
                         execute_subagent_observer_hook(
                             app,
                             HookEvent::SubagentComplete,

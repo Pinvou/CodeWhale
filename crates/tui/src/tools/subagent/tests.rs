@@ -3446,6 +3446,45 @@ async fn test_running_count_counts_only_agents_with_live_task_handles() {
         .abort();
 }
 
+#[tokio::test]
+async fn forkguard_cancel_all_running_aborts_every_live_agent() {
+    let mut manager = SubAgentManager::new(PathBuf::from("."), 2);
+    let mut agent_ids = Vec::new();
+
+    for suffix in ["a", "b"] {
+        let agent_id = format!("agent_cancel_all_{suffix}");
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let mut agent = SubAgent::new(
+            agent_id.clone(),
+            SubAgentType::Explore,
+            "prompt".to_string(),
+            make_assignment(),
+            "deepseek-v4-flash".to_string(),
+            Some("Blue".to_string()),
+            Some(vec!["read_file".to_string()]),
+            input_tx,
+            PathBuf::from("."),
+            "boot_test".to_string(),
+        );
+        agent.status = SubAgentStatus::Running;
+        agent.task_handle = Some(tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }));
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, PathBuf::from(".")));
+        agent_ids.push(agent_id);
+    }
+
+    assert_eq!(manager.cancel_all_running(), 2);
+    assert_eq!(manager.running_count(), 0);
+    for agent_id in agent_ids {
+        assert_eq!(
+            manager.get_result(&agent_id).expect("cancelled agent").status,
+            SubAgentStatus::Cancelled
+        );
+    }
+}
+
 #[test]
 fn test_running_count_ignores_running_status_without_task_handle() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1);
@@ -8729,4 +8768,50 @@ fn test_parse_spawn_request_inherit_disallowed_tools_explicit_false() {
         !req.inherit_disallowed_tools,
         "inherit_disallowed_tools should parse an explicit false"
     );
+}
+
+#[test]
+fn forkguard_structured_output_validates_nested_required_fields() {
+    let schema = json!({
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": { "title": { "type": "string" } }
+                }
+            }
+        }
+    });
+    let error = validate_against_schema(&json!({"items": [{}]}), &schema)
+        .expect_err("nested required field must be enforced");
+    assert!(error.contains("items[0].title"));
+    validate_against_schema(&json!({"items": [{"title": "ok"}]}), &schema)
+        .expect("valid nested output");
+}
+
+#[test]
+fn forkguard_structured_output_persists_only_declared_safe_paths() {
+    let temp = tempdir().expect("tempdir");
+    let schema = json!({
+        "type": "object",
+        "required": ["brief"],
+        "properties": {
+            "brief": {
+                "type": "object",
+                "x-output-file": "outputs/brief.json"
+            }
+        }
+    });
+    let written = persist_structured_output(temp.path(), &json!({"brief": {"ok": true}}), &schema)
+        .expect("persist output");
+    assert_eq!(written, vec!["outputs/brief.json"]);
+    assert!(temp.path().join("outputs/brief.json").is_file());
+
+    let unsafe_schema = json!({"type": "object", "x-output-file": "../escape.json"});
+    assert!(persist_structured_output(temp.path(), &json!({}), &unsafe_schema).is_err());
+    assert!(!temp.path().join("../escape.json").exists());
 }

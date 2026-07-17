@@ -193,7 +193,12 @@ pub enum Event {
     },
 
     /// Sub-agent completed
-    AgentComplete { id: String, result: String },
+    AgentComplete {
+        id: String,
+        result: String,
+        role: Option<String>,
+        failed: bool,
+    },
 
     /// Sub-agent listing
     AgentList { agents: Vec<SubAgentResult> },

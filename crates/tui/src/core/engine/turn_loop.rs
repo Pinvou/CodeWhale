@@ -299,6 +299,7 @@ impl Engine {
                 );
             }
         }
+        apply_tool_whitelist(&mut tool_catalog, self.config.tool_whitelist.as_ref());
         let mut active_tool_names = initial_active_tools(&tool_catalog);
         active_tool_names.extend(
             dynamic_active_tools

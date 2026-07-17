@@ -108,6 +108,10 @@ impl Engine {
             builder = builder.with_runtime_mcp_tool(Arc::clone(pool));
         }
 
+        for tool in &self.config.extra_tools.0 {
+            builder = builder.with_tool(Arc::clone(tool));
+        }
+
         builder
     }
 }
