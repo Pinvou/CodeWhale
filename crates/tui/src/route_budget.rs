@@ -77,9 +77,16 @@ pub(crate) fn effective_max_output_tokens_for_route(
     model: &str,
     route_limits: Option<RouteLimits>,
 ) -> u32 {
-    let cap =
-        effective_max_output_tokens(model).min(provider_capability(provider, model).max_output);
-    let cap = route_output_limit_tokens(route_limits).map_or(cap, |route_cap| cap.min(route_cap));
+    let requested_cap = effective_max_output_tokens(model);
+    // A resolved route/offering is more concrete than the compatibility
+    // capability inferred from a model string. This matters for local engines
+    // whose arbitrary wire aliases cannot be represented in the static model
+    // catalogue: an explicit route output limit must replace the generic 4K
+    // fallback, while routes without that fact retain the conservative cap.
+    let cap = route_output_limit_tokens(route_limits).map_or_else(
+        || requested_cap.min(provider_capability(provider, model).max_output),
+        |route_cap| requested_cap.min(route_cap),
+    );
     let Some(window) = route_limits
         .and_then(|limits| limits.context_tokens)
         .and_then(|tokens| u32::try_from(tokens).ok())
@@ -224,6 +231,36 @@ mod tests {
         assert!(
             trigger < 209_715,
             "must fire before the old window-relative trigger"
+        );
+    }
+
+    #[test]
+    fn forkguard_explicit_route_output_limit_beats_unknown_model_name_fallback() {
+        let _lock = crate::test_support::lock_test_env();
+        let _max_output =
+            crate::test_support::EnvVarGuard::set("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576");
+        let limits = RouteLimits {
+            context_tokens: Some(262_144),
+            output_tokens: Some(24_576),
+            ..RouteLimits::default()
+        };
+
+        assert_eq!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Vllm,
+                "arbitrary-local-wire-alias",
+                Some(limits),
+            ),
+            24_576
+        );
+        assert_eq!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Vllm,
+                "arbitrary-local-wire-alias",
+                None,
+            ),
+            4_096,
+            "missing route facts must retain the conservative fallback"
         );
     }
 }

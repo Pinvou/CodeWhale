@@ -7,7 +7,7 @@ use crate::codex_model_cache::{CodexModelCacheFreshness, model_roster};
 use crate::config::{ApiProvider, Config, DEFAULT_NVIDIA_NIM_BASE_URL, ProviderIdentity};
 
 #[derive(Clone)]
-pub(crate) struct ResolvedRuntimeRoute {
+pub struct ResolvedRuntimeRoute {
     pub(crate) identity: ProviderIdentity,
     pub(crate) candidate: ReadyRouteCandidate,
     pub(crate) config: Box<Config>,
@@ -49,6 +49,12 @@ impl std::fmt::Debug for ValidatedRuntimeRoute {
 }
 
 impl ResolvedRuntimeRoute {
+    /// Non-secret wire model carried by this resolved route receipt.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     pub(crate) fn preflight(mut self) -> Result<Self, String> {
         if self.preflighted_client.is_none() {
             self.preflighted_client = Some(
@@ -86,6 +92,18 @@ impl ResolvedRuntimeRoute {
 
     pub(crate) fn take_preflighted_client(&mut self) -> Option<DeepSeekClient> {
         self.preflighted_client.take()
+    }
+}
+
+fn apply_route_limit_overrides(limits: &mut RouteLimits, overrides: RouteLimits) {
+    if overrides.context_tokens.is_some() {
+        limits.context_tokens = overrides.context_tokens;
+    }
+    if overrides.input_tokens.is_some() {
+        limits.input_tokens = overrides.input_tokens;
+    }
+    if overrides.output_tokens.is_some() {
+        limits.output_tokens = overrides.output_tokens;
     }
 }
 
@@ -149,7 +167,11 @@ fn apply_context_window_override(limits: &mut RouteLimits, context_window: Optio
     }
 }
 
-pub(crate) fn resolve_runtime_route(
+/// Resolve an exact provider/model route for an embedding host.
+///
+/// The returned descriptor intentionally keeps credentials and mutable route
+/// internals private; hosts may only pass it back through [`crate::core::ops::Op`].
+pub fn resolve_runtime_route(
     config: &Config,
     provider: ApiProvider,
     model_selector: Option<&str>,
@@ -161,6 +183,21 @@ pub(crate) fn resolve_runtime_route(
             .resolve_persisted_provider_identity(Some(provider.as_str()), Some(provider.as_str()))?
     };
     resolve_runtime_route_for_identity(config, &identity, model_selector)
+}
+
+/// Resolve a route while carrying embedding-host limit facts onto the exact
+/// executable receipt. `Some` override fields replace catalog values; `None`
+/// preserves them. This keeps arbitrary local wire aliases independent from
+/// the static model catalogue without exposing credentials or route internals.
+pub fn resolve_runtime_route_with_limits(
+    config: &Config,
+    provider: ApiProvider,
+    model_selector: Option<&str>,
+    limit_overrides: RouteLimits,
+) -> Result<ResolvedRuntimeRoute, String> {
+    let mut route = resolve_runtime_route(config, provider, model_selector)?;
+    apply_route_limit_overrides(&mut route.candidate.limits, limit_overrides);
+    Ok(route)
 }
 
 /// Resolve one persisted/live identity into a scoped runtime config and route
@@ -489,5 +526,36 @@ mod tests {
             route.candidate.endpoint.base_url,
             "http://gpu.internal.example:8000/v1"
         );
+    }
+
+    #[test]
+    fn forkguard_embedding_route_limits_preserve_wire_alias() {
+        let config = Config {
+            provider: Some("vllm".to_string()),
+            providers: Some(ProvidersConfig {
+                vllm: ProviderConfig {
+                    base_url: Some("http://127.0.0.1:8000/v1".to_string()),
+                    model: Some("local-wire-alias".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let route = resolve_runtime_route_with_limits(
+            &config,
+            ApiProvider::Vllm,
+            Some("local-wire-alias"),
+            RouteLimits {
+                context_tokens: Some(262_144),
+                output_tokens: Some(24_576),
+                ..RouteLimits::default()
+            },
+        )
+        .expect("embedding route with explicit limits");
+
+        assert_eq!(route.model(), "local-wire-alias");
+        assert_eq!(route.candidate.limits.context_tokens, Some(262_144));
+        assert_eq!(route.candidate.limits.output_tokens, Some(24_576));
     }
 }

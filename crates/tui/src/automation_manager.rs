@@ -1086,7 +1086,9 @@ fn apply_task_status(
     changed
 }
 
-async fn reconcile_run_statuses_shared(
+/// Reconcile durable automation runs without holding the manager mutex across
+/// task-manager I/O. Embedding hosts use this during boot and retention ticks.
+pub async fn reconcile_run_statuses_shared(
     automations: &SharedAutomationManager,
     task_manager: &SharedTaskManager,
 ) -> Result<()> {
