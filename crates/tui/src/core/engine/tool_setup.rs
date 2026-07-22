@@ -12,6 +12,16 @@ fn should_register_remember_tool(memory_enabled: bool, moraine_fallback: bool) -
 }
 
 impl Engine {
+    /// Append application-hosted tools after the mode-specific native surface
+    /// has been built. Keep this outside the Plan/Agent/YOLO split: injected
+    /// tools belong to the host contract and must be registered in every mode.
+    fn append_host_extra_tools(&self, mut builder: ToolRegistryBuilder) -> ToolRegistryBuilder {
+        for tool in &self.config.extra_tools.0 {
+            builder = builder.with_tool(Arc::clone(tool));
+        }
+        builder
+    }
+
     pub(super) fn agent_tool_surface_options(
         &self,
         shell_policy: ShellPolicy,
@@ -39,12 +49,14 @@ impl Engine {
     ) -> ToolRegistryBuilder {
         let shell_policy = shell_policy_for_mode(mode, self.session.allow_shell);
         if mode != AppMode::Plan {
-            return ToolRegistryBuilder::new().with_agent_runtime_surface(
-                self.deepseek_client.clone(),
-                self.session.model.clone(),
-                self.agent_tool_surface_options(shell_policy),
-                todo_list,
-                plan_state,
+            return self.append_host_extra_tools(
+                ToolRegistryBuilder::new().with_agent_runtime_surface(
+                    self.deepseek_client.clone(),
+                    self.session.model.clone(),
+                    self.agent_tool_surface_options(shell_policy),
+                    todo_list,
+                    plan_state,
+                ),
             );
         }
 
@@ -108,11 +120,7 @@ impl Engine {
             builder = builder.with_runtime_mcp_tool(Arc::clone(pool));
         }
 
-        for tool in &self.config.extra_tools.0 {
-            builder = builder.with_tool(Arc::clone(tool));
-        }
-
-        builder
+        self.append_host_extra_tools(builder)
     }
 }
 

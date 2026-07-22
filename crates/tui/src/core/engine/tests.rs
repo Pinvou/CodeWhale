@@ -21,6 +21,35 @@ use tempfile::tempdir;
 
 const WORKING_SET_SUMMARY_MARKER: &str = "## Repo Working Set";
 
+struct ForkguardHostExtraTool;
+
+#[async_trait::async_trait]
+impl crate::tools::spec::ToolSpec for ForkguardHostExtraTool {
+    fn name(&self) -> &str {
+        "host_extra_probe"
+    }
+
+    fn description(&self) -> &str {
+        "Host-injected tool registration probe."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _context: &crate::tools::spec::ToolContext,
+    ) -> Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> {
+        Ok(crate::tools::spec::ToolResult::success("ok".to_string()))
+    }
+}
+
 #[test]
 fn custom_route_identity_change_rebuilds_client_for_new_named_endpoint() {
     let mut custom = HashMap::new();
@@ -2782,6 +2811,46 @@ fn plugin_or_benchmark_tools_marked_loaded_stay_active() {
         "plugin/benchmark tools marked loaded must be callable on turn 1"
     );
     assert!(active.contains("read_file"));
+}
+
+#[test]
+fn forkguard_host_extra_tools_register_in_all_modes() {
+    let config = EngineConfig {
+        extra_tools: ExtraTools(vec![std::sync::Arc::new(ForkguardHostExtraTool)]),
+        ..EngineConfig::default()
+    };
+    let (engine, _handle) = Engine::new(config, &Config::default());
+
+    for mode in [AppMode::Plan, AppMode::Agent, AppMode::Yolo] {
+        let registry = engine
+            .build_turn_tool_registry_builder(
+                mode,
+                engine.config.todos.clone(),
+                engine.config.plan_state.clone(),
+            )
+            .build(engine.build_tool_context(mode, false));
+        assert!(
+            registry.contains("host_extra_probe"),
+            "host extra tool must be registered in {mode:?} mode"
+        );
+
+        let catalog = build_model_tool_catalog(
+            registry.to_api_tools_with_cache(true),
+            vec![],
+            mode,
+            &HashSet::new(),
+        );
+        assert!(
+            catalog.iter().any(|tool| tool.name == "host_extra_probe"),
+            "host extra tool must remain in the {mode:?} model/search catalog"
+        );
+        if mode == AppMode::Yolo {
+            assert!(
+                initial_active_tools(&catalog).contains("host_extra_probe"),
+                "pinvou3's default Yolo mode must expose host extra tools on the first request"
+            );
+        }
+    }
 }
 
 #[test]
