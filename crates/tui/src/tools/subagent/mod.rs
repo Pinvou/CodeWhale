@@ -1289,6 +1289,18 @@ fn worker_profile_for_spawn(
 ) -> WorkerRuntimeProfile {
     let mut requested = WorkerRuntimeProfile::for_role(agent_type.clone());
     requested.tools = worker_tool_scope(tool_profile);
+    // [pinvou3-fork] A Custom worker is already bounded by its mandatory,
+    // explicit tool list. Restore the parent's coarse capabilities before the
+    // normal parent/child intersection so an explicitly allowed `write_file`
+    // is not rejected by Custom's conservative default read-only posture.
+    // The explicit ToolScope still prevents access to undeclared write/shell
+    // tools, and derive_child keeps a read-only parent from being escalated.
+    if matches!(agent_type, SubAgentType::Custom)
+        && matches!(tool_profile, AgentWorkerToolProfile::Explicit(_))
+    {
+        requested.permissions = runtime.worker_profile.permissions;
+        requested.shell = runtime.worker_profile.shell;
+    }
     requested.model = model_route.unwrap_or_else(|| ModelRoute::Fixed(effective_model.to_string()));
     let provider = runtime.client.api_provider();
     requested.provider = Some(
@@ -6860,6 +6872,7 @@ async fn run_subagent(
     let mut last_structured_error: Option<String> = None;
     let mut wrote_any_file = false;
     let mut file_output_retries = 0u32;
+    let mut last_tool_error: Option<String> = None;
     // A worker is inspectable as soon as it is launched, not only after its
     // first model round trip. This gives Open a real conversation destination
     // while the worker is waiting on the provider.
@@ -7434,7 +7447,7 @@ async fn run_subagent(
                         });
                         continue;
                     }
-                    final_result = Some("未产出任何文件".to_string());
+                    final_result = Some(file_output_failure_reason(last_tool_error.as_deref()));
                     break;
                 }
                 record_agent_progress(
@@ -7531,6 +7544,10 @@ async fn run_subagent(
             };
             if tool_ok && matches!(tool_name.as_str(), "write_file" | "append_file") {
                 wrote_any_file = true;
+            }
+            if !tool_ok {
+                let detail = result.strip_prefix("Error: ").unwrap_or(&result);
+                last_tool_error = Some(format!("tool `{tool_name}` failed: {detail}"));
             }
             let (result, spilled_to) = bound_subagent_tool_result(&agent_id, &tool_id, result);
             if let Some(path) = spilled_to.as_ref() {
@@ -7632,7 +7649,7 @@ async fn run_subagent(
                 .unwrap_or_else(|| "max_structured_output_retries".to_string()),
         )
     } else if assignment.expects_file_output && !wrote_any_file {
-        SubAgentStatus::Failed("未产出任何文件".to_string())
+        SubAgentStatus::Failed(file_output_failure_reason(last_tool_error.as_deref()))
     } else if stopped_naturally {
         if has_final_summary {
             SubAgentStatus::Completed
@@ -7702,6 +7719,27 @@ async fn run_subagent(
 
 const SUBMIT_OUTPUT_TOOL: &str = "submit_output";
 const MAX_STRUCTURED_OUTPUT_RETRIES: u32 = 3;
+const FILE_OUTPUT_FAILURE_DETAIL_CHARS: usize = 2_000;
+
+fn file_output_failure_reason(last_tool_error: Option<&str>) -> String {
+    let Some(error) = last_tool_error
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+    else {
+        return "未产出任何文件".to_string();
+    };
+    let sanitized = codewhale_config::persistence::redact_secrets(error);
+    let clipped = sanitized
+        .chars()
+        .take(FILE_OUTPUT_FAILURE_DETAIL_CHARS)
+        .collect::<String>();
+    let suffix = if sanitized.chars().count() > FILE_OUTPUT_FAILURE_DETAIL_CHARS {
+        "…"
+    } else {
+        ""
+    };
+    format!("未产出任何文件；最后一次工具错误: {clipped}{suffix}")
+}
 
 fn build_submit_output_tool(output_schema: &Value) -> Tool {
     Tool {
@@ -9614,9 +9652,24 @@ impl SubAgentToolRegistry {
         }
 
         let registry = registry.build(context);
+        // The spawn-time profile already intersects the child's requested tool
+        // list with every ancestor's explicit scope. Enforce that derived scope
+        // again at the registry boundary so a nested Custom worker cannot
+        // reintroduce a tool that its parent was not allowed to call.
+        let effective_allowed_tools = match (&runtime.worker_profile.tools, explicit_allowed_tools)
+        {
+            (ToolScope::Explicit(parent), Some(child)) => Some(
+                child
+                    .into_iter()
+                    .filter(|name| parent.contains(name))
+                    .collect(),
+            ),
+            (ToolScope::Explicit(parent), None) => Some(parent.clone()),
+            (ToolScope::Inherit, child) => child,
+        };
 
         Self {
-            allowed_tools: explicit_allowed_tools,
+            allowed_tools: effective_allowed_tools,
             disallowed_tools: runtime.worker_profile.denied_tools.clone(),
             auto_approve: runtime.context.auto_approve,
             accept_edits: runtime.accept_edits,

@@ -426,6 +426,141 @@ fn agent_worker_profile_derives_from_parent_without_escalation() {
     );
 }
 
+#[tokio::test]
+async fn forkguard_custom_explicit_write_tool_can_persist_file_without_tool_escalation() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime();
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.context.auto_approve = false;
+    let allowed_tools = vec!["read_file".to_string(), "write_file".to_string()];
+    let tool_profile = AgentWorkerToolProfile::Explicit(allowed_tools.clone());
+    runtime.worker_profile = worker_profile_for_spawn(
+        &runtime,
+        &SubAgentType::Custom,
+        &tool_profile,
+        "deepseek-v4-pro",
+        None,
+    );
+    assert!(
+        runtime.worker_profile.permissions.write,
+        "an explicit Custom write_file grant must survive worker-profile derivation"
+    );
+
+    let registry = SubAgentToolRegistry::new(
+        runtime,
+        SubAgentType::Custom,
+        Some(allowed_tools),
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+    registry
+        .execute(
+            "agent_test",
+            "write_file",
+            json!({"path": "custom.txt", "content": "written"}),
+        )
+        .await
+        .expect("explicitly allowed Custom write_file should succeed");
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("custom.txt")).expect("written file"),
+        "written"
+    );
+
+    let err = registry
+        .execute(
+            "agent_test",
+            "edit_file",
+            json!({"path": "custom.txt", "old_text": "written", "new_text": "changed"}),
+        )
+        .await
+        .expect_err("undeclared write tool must remain unavailable");
+    assert!(err.to_string().contains("not allowed"), "got: {err}");
+
+    let mut read_only_runtime = stub_runtime();
+    read_only_runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    read_only_runtime.worker_profile = WorkerRuntimeProfile::for_role(SubAgentType::Explore);
+    read_only_runtime.worker_profile = worker_profile_for_spawn(
+        &read_only_runtime,
+        &SubAgentType::Custom,
+        &tool_profile,
+        "deepseek-v4-pro",
+        None,
+    );
+    assert!(
+        !read_only_runtime.worker_profile.permissions.write,
+        "an explicit Custom allowlist must not gain write permission from a read-only parent"
+    );
+
+    let read_only_registry = SubAgentToolRegistry::new(
+        read_only_runtime,
+        SubAgentType::Custom,
+        Some(vec!["read_file".to_string(), "write_file".to_string()]),
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+    let err = read_only_registry
+        .execute(
+            "agent_read_only",
+            "write_file",
+            json!({"path": "must-not-write.txt", "content": "blocked"}),
+        )
+        .await
+        .expect_err("read-only parent capability must win over the explicit child allowlist");
+    assert!(err.to_string().contains("not permitted"), "got: {err}");
+    assert!(!tmp.path().join("must-not-write.txt").exists());
+}
+
+#[tokio::test]
+async fn forkguard_nested_custom_cannot_widen_parent_explicit_tool_scope() {
+    let tmp = tempdir().expect("tempdir");
+    let mut parent_runtime = stub_runtime();
+    parent_runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    parent_runtime.worker_profile = worker_profile_for_spawn(
+        &parent_runtime,
+        &SubAgentType::Custom,
+        &AgentWorkerToolProfile::Explicit(vec!["read_file".to_string()]),
+        "deepseek-v4-pro",
+        None,
+    );
+    assert!(parent_runtime.worker_profile.permissions.write);
+
+    let child_tool_profile = AgentWorkerToolProfile::Explicit(vec!["write_file".to_string()]);
+    let child_profile = worker_profile_for_spawn(
+        &parent_runtime,
+        &SubAgentType::Custom,
+        &child_tool_profile,
+        "deepseek-v4-pro",
+        None,
+    );
+    assert_eq!(child_profile.tools, ToolScope::Explicit(Vec::new()));
+
+    parent_runtime.worker_profile = child_profile;
+    let registry = SubAgentToolRegistry::new(
+        parent_runtime,
+        SubAgentType::Custom,
+        Some(vec!["write_file".to_string()]),
+        Arc::new(Mutex::new(TodoList::new())),
+        Arc::new(Mutex::new(PlanState::default())),
+    );
+    assert!(
+        registry
+            .tools_for_model(&SubAgentType::Custom)
+            .iter()
+            .all(|tool| tool.name != "write_file"),
+        "a tool removed by the parent scope must not be exposed to the child model"
+    );
+    let err = registry
+        .execute(
+            "agent_nested",
+            "write_file",
+            json!({"path": "scope-escape.txt", "content": "must not write"}),
+        )
+        .await
+        .expect_err("parent tool scope must remain authoritative");
+    assert!(err.to_string().contains("not allowed"), "got: {err}");
+    assert!(!tmp.path().join("scope-escape.txt").exists());
+}
+
 #[test]
 fn subagent_progress_displays_shell_tools_as_bash() {
     assert_eq!(subagent_progress_tool_display_name("exec_shell"), "Bash");
@@ -5101,6 +5236,38 @@ fn subagent_request_budget_allows_large_write_file_arguments() {
         SUBAGENT_RESPONSE_MAX_TOKENS, 16_384,
         "non-streaming sub-agent tool calls need enough output budget for large write_file arguments"
     );
+}
+
+#[test]
+fn forkguard_missing_file_output_reports_last_tool_error() {
+    assert_eq!(
+        file_output_failure_reason(Some(
+            "tool `write_file` failed: Tool write_file is not permitted"
+        )),
+        "未产出任何文件；最后一次工具错误: tool `write_file` failed: Tool write_file is not permitted"
+    );
+    assert_eq!(file_output_failure_reason(None), "未产出任何文件");
+}
+
+#[test]
+fn forkguard_missing_file_output_redacts_and_bounds_last_tool_error() {
+    let secret = "sk-super-secret-value";
+    let error = format!(
+        "api_key={secret}\n{}",
+        "界".repeat(FILE_OUTPUT_FAILURE_DETAIL_CHARS + 20)
+    );
+    let reason = file_output_failure_reason(Some(&error));
+    assert!(!reason.contains(secret), "secret leaked: {reason}");
+    assert!(reason.contains("api_key=[redacted]"), "got: {reason}");
+    assert!(
+        reason.ends_with('…'),
+        "long detail must be marked: {reason}"
+    );
+    let detail = reason
+        .strip_prefix("未产出任何文件；最后一次工具错误: ")
+        .and_then(|detail| detail.strip_suffix('…'))
+        .expect("bounded failure detail");
+    assert_eq!(detail.chars().count(), FILE_OUTPUT_FAILURE_DETAIL_CHARS);
 }
 
 #[test]
