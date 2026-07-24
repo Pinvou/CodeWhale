@@ -1707,7 +1707,7 @@ mod tests {
 
     // pinvou3-fork: 多行命令逐行分析,不再一刀切 Dangerous。
     // 原硬规则 (commit b2f6ef56 在 pinvou3-patches 上加的 careful hook) 误伤
-    // LLM 用 `\n` 串多个 cp / mkdir / mv 的合理批量操作 — h3c-ppt P7 阶段
+    // LLM 用 `\n` 串多个 cp / mkdir / mv 的合理批量产物操作
     // "拷贝 5 个 template 文件" 被无差别拦死。改成逐行 recurse 评估,任一行
     // Dangerous 才拦。
     #[test]
