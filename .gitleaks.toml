@@ -1,0 +1,16 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Upstream security tests use explicit non-production credential fixtures"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''^crates/tui/src/runtime_api/web\.rs$''',
+  '''^crates/tui/src/tui/onboarding/api_key\.rs$''',
+]
+regexes = [
+  '''let session_token = "cwws_0123456789abcdef0123456789abcdef";''',
+  '''app\.api_key_input = "sk-1234567890abcdef"\.to_string\(\);''',
+]
