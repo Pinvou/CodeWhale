@@ -387,12 +387,42 @@ assert.ok(
     /modelId:\s*activeModel && activeModel\.id/.test(indexHtml),
   'scheduled model selection should use saved model ids and submit modelId with the wire model'
 );
+const modelOptionsSandbox = {};
+vm.runInNewContext(
+  modelOptionsSource.replace(/export\s*\{[^}]+\};?/, ''),
+  modelOptionsSandbox
+);
+const selectableModelFixture = [
+  { id: 'builtin_llmapi', kind: 'builtin_llmapi', name: '内置模型' },
+  { id: 'user-model', name: '用户模型' },
+];
+assert.deepStrictEqual(
+  Array.from(modelOptionsSandbox.selectableModels(selectableModelFixture, {
+    backend_user_exists: true,
+    backend_user_state: 'exists',
+    enabled: true,
+    provisioning_status: 'ready',
+  }), model => model.id),
+  ['builtin_llmapi', 'user-model'],
+  'a confirmed ready backend account should expose the built-in model in every model selector'
+);
+for (const unavailableStatus of [
+  null,
+  { backend_user_exists: false, backend_user_state: 'not_exists', enabled: false, provisioning_status: 'not_started' },
+  { backend_user_exists: false, backend_user_state: 'unknown', enabled: true, provisioning_status: 'ready' },
+  { backend_user_exists: true, backend_user_state: 'exists', enabled: false, provisioning_status: 'disabled' },
+  { backend_user_exists: true, backend_user_state: 'exists', enabled: true, provisioning_status: 'failed' },
+]) {
+  assert.deepStrictEqual(
+    Array.from(modelOptionsSandbox.selectableModels(selectableModelFixture, unavailableStatus), model => model.id),
+    ['user-model'],
+    'the built-in model should only be selectable after account existence and service readiness are confirmed'
+  );
+}
 assert.ok(
-  /builtin_llmapi/.test(modelOptionsSource) &&
-    /const savedModels = visibleUserModels\(appState\.savedModels \|\| \[\]\)/.test(indexHtml) &&
-    /const userModels = visibleSortedModels\(savedModels \|\| \[\], bs\)/.test(settingsViewSource) &&
-    /const allowBuiltin = hasLlmApiBackendUser\(bs\)/.test(settingsViewSource),
-  'scheduled tasks should hide the built-in model option while chat keeps the account-gated built-in model'
+  /selectableModels\(appState\.savedModels \|\| \[\], appState\.llmApiStatus\)/.test(indexHtml) &&
+    /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\], bs && bs\.llmApiStatus\)/.test(settingsViewSource),
+  'chat, settings, and scheduled tasks should share availability-based model selection without the old hiding rules'
 );
 assert.ok(
   !/data-testid="scheduled-task-pin"/.test(indexHtml) &&

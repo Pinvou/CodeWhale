@@ -8,7 +8,7 @@ import PetSettingsSection from '../pet/PetSettingsSection.jsx';
 import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { bridge, isLocalModel } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
-import { visibleUserModels } from '../../shared/model-options.js';
+import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
 import { can, isWeb } from '../../shared/platform.js';
 import { buildComposerToolMenuState } from './composer-tool-menu-logic.js';
 import { notifyComposerToolsChanged } from '../tools/tool-events.js';
@@ -25,24 +25,6 @@ import { invokeTauri } from '../../platform/tauri/client.js';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
-}
-
-function isBuiltinLlmApiModel(model) {
-  return !!(model && (model.kind === 'builtin_llmapi' || model.id === 'builtin_llmapi'));
-}
-
-function hasLlmApiBackendUser(bs) {
-  const status = bs && bs.llmApiStatus;
-  if (!status || status.backend_user_state === 'not_exists') return false;
-  return status.backend_user_state === 'exists' || !!status.backend_user_exists;
-}
-
-function visibleSortedModels(models, bs) {
-  const allowBuiltin = hasLlmApiBackendUser(bs);
-  return (models || [])
-    .filter(model => model && model.id && (!isBuiltinLlmApiModel(model) || allowBuiltin))
-    .slice()
-    .sort((a, b) => Number(isBuiltinLlmApiModel(b)) - Number(isBuiltinLlmApiModel(a)));
 }
 
 const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, style }, ref) => (
@@ -790,7 +772,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       const [open, setOpen] = useState(false);
       const canManageModels = can('modelManagement');
       const canSwitchModels = can('sessionModelSwitch');
-      const savedModels = visibleUserModels((bs && bs.savedModels) || []);
+      const savedModels = selectableModels((bs && bs.savedModels) || [], bs && bs.llmApiStatus);
       const activeSessionId = bs ? bs.activeSessionId : null;
       const activeModelId = bs && bs.activeModelId;
       const currentSessionModelId = bs && bs.currentSessionModelId;
@@ -848,7 +830,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       const triggerRef = useRef(null);
       const canManageModels = can('modelManagement');
       const canSwitchModels = can('sessionModelSwitch');
-      const savedModels = visibleUserModels((bs && bs.savedModels) || []);
+      const savedModels = selectableModels((bs && bs.savedModels) || [], bs && bs.llmApiStatus);
       const activeSessionId = bs ? bs.activeSessionId : null;
       const activeModelId = bs && bs.activeModelId;
       const currentSessionModelId = bs && bs.currentSessionModelId;
@@ -2229,7 +2211,9 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
             : 'bg-[#34C759]/15 text-[#248A3D]'
         }`}>{children}</span>
       );
-      const userModels = visibleSortedModels(savedModels || [], bs);
+      const userModels = selectableModels(savedModels || [], bs && bs.llmApiStatus)
+        .slice()
+        .sort((a, b) => Number(isBuiltInLlmApiModel(b)) - Number(isBuiltInLlmApiModel(a)));
       const searchOptions = [
         { key: 'bing', label: 'Bing', desc: settingsCopy.searchDescriptions.bing },
         { key: 'metaso', label: '秘塔', desc: settingsCopy.searchDescriptions.metaso },
@@ -2342,12 +2326,12 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`text-[15px] leading-5 font-normal truncate ${isDark ? 'text-[#F2F2F7]' : 'text-[#1C1C1E]'}`}>{title}</span>
                 {isLocal && <Tag tone="gray">{settingsCopy.localModel}</Tag>}
-                {isBuiltinLlmApiModel(m) && <Tag tone="gray">{settingsCopy.builtinModel}</Tag>}
+                {isBuiltInLlmApiModel(m) && <Tag tone="gray">{settingsCopy.builtinModel}</Tag>}
                 {codingPlan && <Tag tone="gray">Coding Plan</Tag>}
                 {isActive && <Tag>{settingsCopy.defaultTag}</Tag>}
               </div>
               <div className={`mt-0.5 text-[12px] leading-[17px] truncate ${isDark ? 'text-[#98989D]' : 'text-[#8A8A8E]'}`}>{providerLabel} · {m.model}</div>
-              {isBuiltinLlmApiModel(m) && (
+              {isBuiltInLlmApiModel(m) && (
                 <div className="mt-2 flex items-center gap-2 flex-wrap">
                   <span className={`text-[12px] ${isDark ? 'text-[#98989D]' : 'text-[#8A8A8E]'}`}>{t.builtinModelSelect}</span>
                   <select
