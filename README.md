@@ -7,6 +7,12 @@ commands, checks the results, and keeps going until the task is done or it
 needs you. TUI for interactive work, `codewhale exec` for scripts and CI.
 Rust, MIT, runs entirely on your machine.
 
+> **Pinvou fork notice:** the `pinvou3-clean` branch contains the small,
+> documented patch set used by
+> [Pinvou Agent](https://github.com/Pinvou/pinvou-agent). See
+> [PINVOU_FORK.md](PINVOU_FORK.md) for the upstream baseline, maintained patch
+> themes, sync policy, and verification commands.
+
 It started as `deepseek-tui`. The community that formed around it needed more
 providers, so now DeepSeek, Claude, GPT, Kimi, GLM, and 30+ others run through
 the same runtime and tools.
