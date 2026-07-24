@@ -3614,7 +3614,10 @@ async fn forkguard_cancel_all_running_aborts_every_live_agent() {
     assert_eq!(manager.running_count(), 0);
     for agent_id in agent_ids {
         assert_eq!(
-            manager.get_result(&agent_id).expect("cancelled agent").status,
+            manager
+                .get_result(&agent_id)
+                .expect("cancelled agent")
+                .status,
             SubAgentStatus::Cancelled
         );
     }

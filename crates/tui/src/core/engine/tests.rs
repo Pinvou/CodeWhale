@@ -8488,7 +8488,9 @@ fn forkguard_tool_search_not_injected_blocks_deferred_activation() {
         "tool_search 不应被注入(否则模型可借它激活被 blocklist 的 agent/delegate);catalog={:?}",
         catalog.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     );
-    assert!(crate::tools::pinvou3_blocklist::is_pinvou3_hidden("tool_search"));
+    assert!(crate::tools::pinvou3_blocklist::is_pinvou3_hidden(
+        "tool_search"
+    ));
 }
 
 #[test]

@@ -191,7 +191,11 @@ pub(super) fn apply_native_tool_deferral(
     always_load: &HashSet<String>,
 ) {
     for tool in &mut *catalog {
-        tool.defer_loading = Some(pinvou3_should_defer_native_tool(&tool.name, mode, always_load));
+        tool.defer_loading = Some(pinvou3_should_defer_native_tool(
+            &tool.name,
+            mode,
+            always_load,
+        ));
     }
     let active: Vec<&str> = catalog
         .iter()

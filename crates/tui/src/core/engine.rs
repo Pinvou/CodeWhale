@@ -276,7 +276,9 @@ pub struct ExtraTools(pub Vec<std::sync::Arc<dyn crate::tools::spec::ToolSpec>>)
 
 impl std::fmt::Debug for ExtraTools {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_list().entries(self.0.iter().map(|tool| tool.name())).finish()
+        f.debug_list()
+            .entries(self.0.iter().map(|tool| tool.name()))
+            .finish()
     }
 }
 
@@ -1900,11 +1902,8 @@ impl Engine {
                             .await;
                     }
                     Op::SetDisallowedTools { tools } => {
-                        self.config.disallowed_tools = if tools.is_empty() {
-                            None
-                        } else {
-                            Some(tools)
-                        };
+                        self.config.disallowed_tools =
+                            if tools.is_empty() { None } else { Some(tools) };
                     }
                     Op::SetSubagentRuntimeConfig {
                         enabled,

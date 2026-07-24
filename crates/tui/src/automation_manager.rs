@@ -865,9 +865,8 @@ impl AutomationManager {
         };
         let schedule = AutomationSchedule::parse_rrule(&automation.rrule)?;
         automation.updated_at = now;
-        automation.next_run_at = Some(
-            schedule.next_after_with_anchor(run.scheduled_for, automation.created_at)?,
-        );
+        automation.next_run_at =
+            Some(schedule.next_after_with_anchor(run.scheduled_for, automation.created_at)?);
         self.save_automation(&automation)
     }
 
@@ -1636,8 +1635,7 @@ mod tests {
     #[tokio::test]
     async fn forkguard_retention_keeps_latest_terminal_runs_and_all_active_runs() -> Result<()> {
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let manager =
-            AutomationManager::open(tempdir.path().join("automations")).expect("manager");
+        let manager = AutomationManager::open(tempdir.path().join("automations")).expect("manager");
         let task_manager = TaskManager::start_with_executor(
             automation_task_config(tempdir.path().join("tasks")),
             std::sync::Arc::new(AutomationNoopExecutor),
@@ -1685,14 +1683,19 @@ mod tests {
 
         let candidates = manager.terminal_run_prune_candidates(50)?;
         assert_eq!(
-            candidates.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
+            candidates
+                .iter()
+                .map(|run| run.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["terminal-00", "terminal-01"]
         );
         assert!(!candidates.iter().any(|run| run.id == active.id));
 
-        assert!(manager
-            .delete_terminal_run(&candidates[0], &task_manager)
-            .await?);
+        assert!(
+            manager
+                .delete_terminal_run(&candidates[0], &task_manager)
+                .await?
+        );
         let remaining = manager.list_runs(&automation.id, None)?;
         assert_eq!(remaining.len(), 52);
         assert!(remaining.iter().any(|run| run.id == active.id));
@@ -1791,13 +1794,8 @@ mod tests {
         assert!(!default_task.trust_mode);
         assert!(!default_task.auto_approve);
 
-        let explicit_automation = automation_record_with_settings(
-            None,
-            Some("plan"),
-            Some(true),
-            Some(true),
-            Some(true),
-        );
+        let explicit_automation =
+            automation_record_with_settings(None, Some("plan"), Some(true), Some(true), Some(true));
         let mut explicit_run = queued_run_for(&explicit_automation);
         enqueue_run_task(&explicit_automation, &mut explicit_run, &task_manager).await;
         let explicit_task = task_manager
@@ -2054,8 +2052,7 @@ mod tests {
             auto_approve: None,
             status: Some(AutomationStatus::Paused),
         })?;
-        let automation_manager: SharedAutomationManager =
-            Arc::new(Mutex::new(automation_manager));
+        let automation_manager: SharedAutomationManager = Arc::new(Mutex::new(automation_manager));
         let mut run = queued_run_for(&automation);
         enqueue_run_task(&automation, &mut run, &task_manager).await;
         automation_manager.lock().await.save_run(&run)?;

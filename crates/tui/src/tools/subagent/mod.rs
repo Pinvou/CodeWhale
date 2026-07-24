@@ -7496,10 +7496,7 @@ async fn run_subagent(
                                 Ok(written) if !written.is_empty() => {
                                     output_submitted = Some(tool_input.clone());
                                     final_result = Some(tool_input.to_string());
-                                    format!(
-                                        "结构化产出已校验并落盘: {}",
-                                        written.join(", ")
-                                    )
+                                    format!("结构化产出已校验并落盘: {}", written.join(", "))
                                 }
                                 Ok(_) => {
                                     structured_retries += 1;

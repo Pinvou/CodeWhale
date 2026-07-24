@@ -1527,10 +1527,7 @@ mod tests {
 
         assert!(PROJECT_CONTEXT_FILES.is_empty());
         assert!(RULES_DIRS.is_empty());
-        let ctx = load_project_context_with_parents_and_home(
-            workspace.path(),
-            Some(home.path()),
-        );
+        let ctx = load_project_context_with_parents_and_home(workspace.path(), Some(home.path()));
         assert!(!ctx.has_instructions());
         assert!(ctx.rules_block.is_none());
         assert!(ctx.constitution_block.is_none());

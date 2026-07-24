@@ -1,0 +1,36 @@
+name: Pinvou fork CI
+
+on:
+  push:
+    branches: [pinvou3-clean]
+  pull_request:
+    branches: [pinvou3-clean]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinvou-fork-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check all workspace targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Run Pinvou fork regression tests
+        run: cargo test -p codewhale-tui --lib forkguard_ --locked

@@ -2116,11 +2116,20 @@ mod tests {
         let artifact_dir = root.join("artifacts").join(&task.id);
         fs::create_dir_all(&artifact_dir)?;
         fs::write(artifact_dir.join("result.txt"), "retained by session")?;
-        assert!(root.join("tasks").join(format!("{}.json", task.id)).exists());
+        assert!(
+            root.join("tasks")
+                .join(format!("{}.json", task.id))
+                .exists()
+        );
 
         assert!(manager.delete_terminal_task(&task.id).await?);
         assert!(manager.get_task(&task.id).await.is_err());
-        assert!(!root.join("tasks").join(format!("{}.json", task.id)).exists());
+        assert!(
+            !root
+                .join("tasks")
+                .join(format!("{}.json", task.id))
+                .exists()
+        );
         assert!(!artifact_dir.exists());
         assert!(!manager.delete_terminal_task(&task.id).await?);
         manager.shutdown();

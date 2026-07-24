@@ -1752,8 +1752,12 @@ mod tests {
             assert!(ctx.default_layers.contains("You are Codewhale"));
             "EMBEDDER STATIC LAYERS".to_string()
         };
-        let composed =
-            apply_static_prompt_composer(Some(&composer), Personality::Calm, "test-model", &default_layers);
+        let composed = apply_static_prompt_composer(
+            Some(&composer),
+            Personality::Calm,
+            "test-model",
+            &default_layers,
+        );
         assert_eq!(composed, "EMBEDDER STATIC LAYERS");
     }
 
@@ -2229,7 +2233,10 @@ mod tests {
         // [pinvou3-fork] lang / codewhale_version 已从 env block 砍掉,不断言。
         // [pinvou3-fork] pwd 已移出静态 system → per-turn <turn_meta> 的 Current workspace,
         // 以保持 system prefix 跨 session 字节静态、命中 vLLM prefix-cache(否则工具调用退化)。
-        assert!(!block.contains("- pwd:"), "pwd 应已移出 ## Environment(改走 turn_meta)");
+        assert!(
+            !block.contains("- pwd:"),
+            "pwd 应已移出 ## Environment(改走 turn_meta)"
+        );
         assert!(block.contains("- platform:"));
         assert!(block.contains("- shell:"));
         // pinvou3 fork (P2-2): `lang` + `codewhale_version` dropped —
@@ -4003,14 +4010,8 @@ mod tests {
             "fixture must exceed the generic WorldState fragment cap"
         );
 
-        let state = world_state_from_session_facts(
-            None,
-            Some(&instructions),
-            None,
-            None,
-            None,
-            None,
-        );
+        let state =
+            world_state_from_session_facts(None, Some(&instructions), None, None, None, None);
         let permissions = state
             .get(crate::model_context::FragmentId::Permissions)
             .expect("permissions fragment");
