@@ -437,10 +437,14 @@ impl Pinvou3Bridge {
         self.default_base_url_for_preset()
     }
 
-    /// 是否要求用户配置 API Key。local_vllm 和明确指向本机 loopback 的
-    /// OpenAI-compatible 服务允许无鉴权；云端/局域网地址默认仍要求 Key。
+    /// 是否要求用户配置 API Key。内置模型的凭据由后台账户托管；local_vllm 和明确指向
+    /// 本机 loopback 的 OpenAI-compatible 服务允许无鉴权；其他云端/局域网地址默认要求 Key。
     pub fn api_key_required(&self) -> bool {
-        self.provider() != "vllm" && !base_url_uses_loopback(&self.base_url())
+        !self
+            .effective_model()
+            .is_some_and(SavedModel::is_builtin_llmapi)
+            && self.provider() != "vllm"
+            && !base_url_uses_loopback(&self.base_url())
     }
 
     /// 各厂商默认 API base URL。
@@ -1418,6 +1422,11 @@ mod tests {
             "",
         );
         assert!(cloud_compatible.api_key_required());
+
+        let mut builtin = fixture_bridge();
+        builtin.prefs.advanced.saved_models = vec![SavedModel::builtin_llmapi()];
+        builtin.prefs.advanced.active_model_id = Some("builtin_llmapi".to_string());
+        assert!(!builtin.api_key_required());
     }
 
     /// 128K 上下文的两种情况(客户翻车场景的正反面),端到端走 build_engine_config:

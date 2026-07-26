@@ -285,6 +285,83 @@ impl EnginePool {
         tools
     }
 
+    /// Ensure a backend-managed built-in model credential exists before an engine is spawned.
+    /// This is shared by interactive chat and unattended scheduled runs so neither path can
+    /// accidentally start the engine with the persisted placeholder model (which has no key).
+    pub(crate) async fn ensure_builtin_model_ready(
+        &self,
+        session_id: &str,
+        scheduled_unattended: bool,
+    ) -> std::result::Result<(), String> {
+        let prefs = UserPrefs::load();
+        let scheduled_profile = self.store.scheduled_profile(session_id);
+        let interactive_model_override = self.store.session_model_override(session_id);
+        let selected = resolve_spawn_model(
+            &prefs.advanced.saved_models,
+            scheduled_profile.as_ref(),
+            interactive_model_override.as_deref(),
+            scheduled_unattended,
+        )
+        .map_err(|error| format!("resolve model before built-in provisioning: {error:#}"))?
+        .or_else(|| prefs.active_model().cloned());
+        if !selected.as_ref().is_some_and(SavedModel::is_builtin_llmapi) {
+            return Ok(());
+        }
+
+        let started_at = std::time::Instant::now();
+        log::info!(
+            "[pinvou3][engine_pool] builtin provisioning start sid={} scheduled_unattended={}",
+            session_id,
+            scheduled_unattended
+        );
+        let provision_result = tokio::time::timeout(
+            std::time::Duration::from_secs(25),
+            tokio::task::spawn_blocking(
+                crate::features::llmapi_hub::provisioning::ensure_binding_for_current_user,
+            ),
+        )
+        .await;
+        match provision_result {
+            Ok(Ok(Ok(response))) => {
+                log::info!(
+                    "[pinvou3][engine_pool] builtin provisioning ok sid={} status={:?} elapsed_ms={}",
+                    session_id,
+                    response.status,
+                    started_at.elapsed().as_millis()
+                );
+                Ok(())
+            }
+            Ok(Ok(Err(error))) => {
+                log::warn!(
+                    "[pinvou3][engine_pool] builtin provisioning failed sid={} code={:?} retryable={} elapsed_ms={} message={}",
+                    session_id,
+                    error.code,
+                    error.retryable,
+                    started_at.elapsed().as_millis(),
+                    error.message
+                );
+                Err(error.to_tauri_error())
+            }
+            Ok(Err(error)) => {
+                log::error!(
+                    "[pinvou3][engine_pool] builtin provisioning task join failed sid={} elapsed_ms={} error={}",
+                    session_id,
+                    started_at.elapsed().as_millis(),
+                    error
+                );
+                Err(format!("内置模型凭据准备任务失败：{error}"))
+            }
+            Err(_) => {
+                log::warn!(
+                    "[pinvou3][engine_pool] builtin provisioning timeout sid={} elapsed_ms={}",
+                    session_id,
+                    started_at.elapsed().as_millis()
+                );
+                Err("内置模型凭据准备超时，请稍后重试".to_string())
+            }
+        }
+    }
+
     /// 为 spawn 构造该 session 的 bridge:从 disk 读最新 prefs(模型列表/默认可能刚被
     /// GUI 改过),再按该 session 的显式 model_id 注入 session_model(没绑定则回退全局
     /// active)。绑定指向已删模型时 `model_by_id` 返回 None,自然回退 active。
@@ -310,6 +387,20 @@ impl EnginePool {
             interactive_model_override.as_deref(),
             scheduled_unattended,
         )?;
+        if b.effective_model_owned()
+            .as_ref()
+            .is_some_and(SavedModel::is_builtin_llmapi)
+        {
+            b.session_model = Some(
+                crate::features::llmapi_hub::provisioning::ready_saved_model_from_local_binding_system()
+                    .map_err(|error| {
+                        anyhow::anyhow!(
+                            "built-in model runtime credential is not ready: {}",
+                            error.message
+                        )
+                    })?,
+            );
+        }
         // 本地 vLLM:发请求的 model 名以 vLLM 实际 served name 为准(探测 /v1/models),
         // 免去写死 qwen36_35b_256k 与 --served-model-name 不一致的 model_not_found。
         // 探测失败(vLLM 没起)保持配置值;云端 provider 不探测。
@@ -684,6 +775,9 @@ impl EnginePool {
                 .store
                 .scheduled_profile(session_id)
                 .with_context(|| format!("Scheduled session '{session_id}' has no profile"))?;
+            self.ensure_builtin_model_ready(session_id, true)
+                .await
+                .map_err(anyhow::Error::msg)?;
             // A user may have opened this conversation since the previous run.
             // Scheduled execution must rebuild from the latest task profile and
             // global model/provider settings instead of reusing that old client.

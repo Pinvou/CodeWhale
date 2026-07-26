@@ -52,6 +52,22 @@ assert.strictEqual(isLocalModel({ preset: 'openai_compatible', base_url: 'https:
 assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'chat', true), true);
 assert.strictEqual(shouldShowApiKeyGate(state('unavailable'), 'chat', true), true);
 assert.strictEqual(shouldShowApiKeyGate(state('configured'), 'chat', true), false);
+assert.strictEqual(
+  shouldShowApiKeyGate(state('missing', {
+    credential_mode: 'backend_managed',
+    requires_user_api_key: false,
+  }), 'chat', true),
+  false,
+  'backend-managed built-in credentials must not open the user API Key gate',
+);
+assert.strictEqual(
+  shouldShowApiKeyGate(state('unavailable', {
+    credential_mode: 'backend_managed',
+    requires_user_api_key: false,
+  }), 'chat', true),
+  false,
+  'temporary built-in credential failures are handled by backend provisioning',
+);
 assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'settings', true), false);
 assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'chat', false), false);
 assert.strictEqual(
@@ -80,6 +96,11 @@ assert.match(
   bridgeSource,
   /await loadSessionModel\(sessionId\)/,
   'switchModel must refresh the session-scoped credential gate after switching',
+);
+assert.match(
+  bridgeSource,
+  /await prepareBackendManagedModel\(modelId\)/,
+  'switchModel must prefetch backend-managed built-in credentials after selection',
 );
 
 console.log('api_key_gate_logic: ok');

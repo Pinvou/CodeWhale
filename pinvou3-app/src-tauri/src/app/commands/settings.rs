@@ -125,9 +125,19 @@ pub struct EffectiveModelConfig {
     pub provider_kind: Option<String>,
     pub vendor: Option<String>,
     pub endpoint_mode: Option<String>,
+    pub credential_mode: ModelCredentialMode,
+    pub requires_user_api_key: bool,
     /// 被环境变量覆盖的字段名列表（如 `["model", "base_url"]`）。
     /// 空列表表示全部走 settings.json，用户修改会生效。
     pub env_overrides: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCredentialMode {
+    None,
+    UserManaged,
+    BackendManaged,
 }
 
 fn session_model_from_prefs(
@@ -172,6 +182,17 @@ pub async fn get_effective_model_config(
         .map(|model| model.preset)
         .unwrap_or_default()
         .as_str();
+    let builtin_llmapi = effective
+        .as_ref()
+        .is_some_and(SavedModel::is_builtin_llmapi);
+    let requires_user_api_key = bridge.api_key_required();
+    let credential_mode = if builtin_llmapi {
+        ModelCredentialMode::BackendManaged
+    } else if requires_user_api_key {
+        ModelCredentialMode::UserManaged
+    } else {
+        ModelCredentialMode::None
+    };
     Ok(EffectiveModelConfig {
         preset: preset.to_string(),
         model: bridge.model(),
@@ -197,6 +218,8 @@ pub async fn get_effective_model_config(
         endpoint_mode: effective
             .as_ref()
             .and_then(|model| model.endpoint_mode.clone()),
+        credential_mode,
+        requires_user_api_key,
         env_overrides,
     })
 }

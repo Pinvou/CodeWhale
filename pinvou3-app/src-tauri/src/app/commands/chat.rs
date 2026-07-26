@@ -176,55 +176,7 @@ pub(crate) async fn chat_with_reservation(
     }
     // 取该 session 的 mode。
     let mode = store.mode_state(&sid).mode;
-    if session_uses_builtin_llmapi(&store, &sid) {
-        let provision_started_at = std::time::Instant::now();
-        log::info!("[pinvou3][chat] builtin provisioning start sid={}", sid);
-        let provision_result = tokio::time::timeout(
-            std::time::Duration::from_secs(25),
-            tokio::task::spawn_blocking(
-                crate::features::llmapi_hub::provisioning::ensure_binding_for_current_user,
-            ),
-        )
-        .await;
-        match provision_result {
-            Ok(Ok(Ok(response))) => {
-                log::info!(
-                    "[pinvou3][chat] builtin provisioning ok sid={} status={:?} elapsed_ms={}",
-                    sid,
-                    response.status,
-                    provision_started_at.elapsed().as_millis()
-                );
-            }
-            Ok(Ok(Err(err))) => {
-                log::warn!(
-                    "[pinvou3][chat] builtin provisioning failed sid={} code={:?} retryable={} elapsed_ms={} message={}",
-                    sid,
-                    err.code,
-                    err.retryable,
-                    provision_started_at.elapsed().as_millis(),
-                    err.message
-                );
-                return Err(err.to_tauri_error());
-            }
-            Ok(Err(err)) => {
-                log::error!(
-                    "[pinvou3][chat] builtin provisioning task join failed sid={} elapsed_ms={} error={}",
-                    sid,
-                    provision_started_at.elapsed().as_millis(),
-                    err
-                );
-                return Err(format!("内置模型开通任务失败: {err}"));
-            }
-            Err(_) => {
-                log::warn!(
-                    "[pinvou3][chat] builtin provisioning timeout sid={} elapsed_ms={}",
-                    sid,
-                    provision_started_at.elapsed().as_millis()
-                );
-                return Err("内置模型开通超时，请稍后重试".to_string());
-            }
-        }
-    }
+    pool.ensure_builtin_model_ready(&sid, false).await?;
     let send_started_at = std::time::Instant::now();
     crate::features::assistant::timing::start_turn(&sid);
     log::info!(
@@ -292,13 +244,4 @@ fn display_chat_message(
     } else {
         format!("{message}\n\n📎 {names}")
     }
-}
-
-fn session_uses_builtin_llmapi(store: &SessionStore, session_id: &str) -> bool {
-    let prefs = UserPrefs::load();
-    let model = store
-        .session_model_id(session_id)
-        .and_then(|model_id| prefs.model_by_id(&model_id))
-        .or_else(|| prefs.active_model());
-    model.is_some_and(|model| model.is_builtin_llmapi())
 }
