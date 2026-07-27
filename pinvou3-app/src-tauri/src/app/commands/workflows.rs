@@ -7,11 +7,11 @@
 /// (review 流程内部用),不应作为用户主动启用的工作流入口。
 ///
 /// 后续真正物理隔离会把这俩从 `bundle/skills/` 移到独立目录 +
-/// DeepSeek-TUI fork patch 让 EngineConfig 支持多 skills_dir。当前
+/// CodeWhale fork patch 让 EngineConfig 支持多 skills_dir。当前
 /// 用 skiplist 软隔离,工作量小,效果一致。
 const WORKFLOW_HIDDEN_SKILLS: &[&str] = &["pinvou-review-plan", "pinvou-review-final"];
 
-/// 工作流视图卡片渲染需要的 skill 摘要 — 跟 DeepSeek-TUI runtime_api 的
+/// 工作流视图卡片渲染需要的 skill 摘要 — 跟 CodeWhale runtime_api 的
 /// `SkillEntry` 不同,这里额外把 phases / demo 元数据序列化给前端 (底座
 /// 没把这俩字段暴露到 REST,所以 pinvou3-app 自己读 SkillRegistry 拼)。
 #[derive(Debug, Serialize)]

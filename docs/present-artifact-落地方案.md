@@ -133,4 +133,4 @@ Pinvou 产出成品.html → 调 present_artifact{path,title}
 | `src/index.html` | ArtifactCard 组件 + dispatcher | 否 |
 | `src-tauri/src/bridge/bundle.rs` | mcp.json 默认写入逻辑 + base 指纹 bump | 否(app 层) |
 
-**DeepSeek-TUI submodule:零改动。fork drift 增量 = 0。**
+**CodeWhale submodule:零改动。fork drift 增量 = 0。**

@@ -1,6 +1,6 @@
-//! Host-side shell output observation for the fixed DeepSeek-TUI runtime.
+//! Host-side shell output observation for the fixed CodeWhale runtime.
 //!
-//! DeepSeek-TUI exposes one [`SharedShellManager`] per engine session.  The
+//! CodeWhale exposes one [`SharedShellManager`] per engine session.  The
 //! manager already executes bounded foreground commands through its tracked
 //! job table, so the host can observe both foreground and detached processes
 //! without adding an engine event or replacing the built-in shell tool.

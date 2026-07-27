@@ -1,4 +1,4 @@
-//! pinvou3-app 与 DeepSeek-TUI 之间的抽象层（"bridge"）。
+//! pinvou3-app 与 CodeWhale 之间的抽象层（"bridge"）。
 //!
 //! 职责：
 //! 1. 加载/持久化 [`UserPrefs`]（GUI 可调的视觉/语言偏好，序列化在
@@ -1111,7 +1111,7 @@ impl Pinvou3Bridge {
     /// 强制特定状态行为。Qwen3.6 短期注意力强,放 message 顶端命中率高。
     /// 见决策文档 V2 §13.1。
     ///
-    /// 注：DeepSeek-TUI 当前的 `auto_approve` 字段不旁路 `await_tool_approval`
+    /// 注：CodeWhale 当前的 `auto_approve` 字段不旁路 `await_tool_approval`
     /// （上游 bug），所以 event forwarder 仍要监听 ApprovalRequired 并主动
     /// 调 `approve_tool_call`。这条逻辑见 `engine.rs::spawn_event_forwarder`。
     pub fn resolve_runtime_route_for_model(

@@ -2,7 +2,7 @@
 """
 pinvou3 天气 MCP server — 包装高德地图天气 API（零第三方依赖，纯 stdlib）。
 
-用法：由 DeepSeek-TUI MCP client 通过 stdio 启动。
+用法：由 CodeWhale MCP client 通过 stdio 启动。
 配置：~/.deepseek/mcp.json 中注册，AMAP_KEY 通过 env 传入。
 
 协议：newline-delimited JSON-RPC 2.0 over stdio。

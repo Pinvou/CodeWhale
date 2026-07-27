@@ -108,7 +108,7 @@ pub fn user_personas_dir() -> PathBuf {
     user_root().join("personas")
 }
 
-/// `~/.deepseek/skills/` — DeepSeek-TUI 标准用户 skills 目录,h3c-ppt /
+/// `~/.deepseek/skills/` — CodeWhale 标准用户 skills 目录,h3c-ppt /
 /// skill-creator 这种由 `/skill install` 装的 skill 都在这里。跟
 /// [`user_skills_dir`](pinvou3 私有 `~/.pinvou3/user/skills/`) 平行,工作流
 /// 视图 list_skills_v2 把两个目录合并去重展示 (user 覆盖 deepseek 覆盖 bundle)。

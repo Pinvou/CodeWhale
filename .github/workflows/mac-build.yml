@@ -19,7 +19,7 @@ on:
       - 'pinvou3-app/src/**'
       - 'pinvou3-app/package.json'
       - 'pinvou3-app/package-lock.json'
-      - 'DeepSeek-TUI'
+      - 'CodeWhale'
       - '.github/workflows/mac-build.yml'
       - 'scripts/run-mac-verify.sh'
       - 'scripts/release-macos.sh'

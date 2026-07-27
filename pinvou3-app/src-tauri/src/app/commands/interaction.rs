@@ -190,7 +190,7 @@ pub async fn read_skill_body(name: String) -> Result<String, String> {
 }
 
 // 修法 D 删除了 revise_plan 命令.
-// 用户点 [✏️ 改改] 时前端走 DeepSeek-TUI 底座做法:不切 phase, 仅 input 预填"修订方案:"前缀.
+// 用户点 [✏️ 改改] 时前端走 CodeWhale 底座做法:不切 phase, 仅 input 预填"修订方案:"前缀.
 // phase 保持 Ready, 下一条 chat 触发的 Ready reminder 已包含"用户发新消息=隐式修订"语义.
 
 /// 用户点 plan_card [🚪 算了]：放弃这个方案,但**留在当前模式**(Plan 不踢回 Yolo)。

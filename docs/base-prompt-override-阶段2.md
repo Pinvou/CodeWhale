@@ -1,7 +1,7 @@
 # base.md / 品牌串 override 化迁移 — 阶段 2 规格
 
 > 创建 2026-05-29。目标：把 pinvou3 对底座 prompt 文案的 fork 改动搬到 pinvou3-app，
-> DeepSeek-TUI submodule 对这些 prompt 的 fork drift → 0（hook 除外，hook 是上游 PR 候选）。
+> CodeWhale submodule 对这些 prompt 的 fork drift → 0（hook 除外，hook 是上游 PR 候选）。
 > 方案="务实大头"：只迁 `base.md` + `LOCALE_PREAMBLE_ZH_HANS` + `AUTHORITY_RECAP` 三处；
 > mode/approval/compact 小文案留 fork（边际收益低于改造成本）。
 
@@ -47,7 +47,7 @@
 
 ## 阶段 2 剩余步骤
 
-### A. DeepSeek-TUI submodule 侧（回退 fork 内容到上游）
+### A. CodeWhale submodule 侧（回退 fork 内容到上游）
 
 1. **base.md 回退上游原文**：
    `git show 54151a4b:crates/tui/src/prompts/base.md > crates/tui/src/prompts/base.md`
@@ -104,7 +104,7 @@
 1. **fork-guard.sh 指纹**：base.md/prompts.rs 品牌指纹（`#28/#32/#33/#36/#37/#38`，
    grep "CONSTITUTION OF PINVOU3" / "running inside pinvou3" / "Match the embedder's render target" /
    "concurrent cap is embedder-configured" / "你正在 pinvou3 中运行" / "Constitution of pinvou3 (Articles I-VII)"）
-   **目标文件改** `DeepSeek-TUI/crates/tui/src/prompts/base.md` → `pinvou3-app/src-tauri/resources/common/bundle/base.md`
+   **目标文件改** `CodeWhale/crates/tui/src/prompts/base.md` → `pinvou3-app/src-tauri/resources/common/bundle/base.md`
    （locale/authority 改到其 override 内容所在文件）。
    **新增 1 条**：grep `set_base_prompt_override` 在 `prompts.rs` —— 防 sync 时 hook 被冲掉、
    override 静默失效退回上游 base（这正是 fork-modifications.md 记录过的"merge 静默丢失"坑）。

@@ -40,7 +40,7 @@ pub struct ActiveSkillBinding {
 /// - YOLO + 开 = 只触发 final review(YOLO 无 plan 期)
 /// - YOLO + 关 = 现状行为
 ///
-/// careful hook 跨所有组合默认开启(由 DeepSeek-TUI shell.rs 强制 BLOCKED Dangerous 实现,
+/// careful hook 跨所有组合默认开启(由 CodeWhale shell.rs 强制 BLOCKED Dangerous 实现,
 /// 不依赖此开关)。设计依据:docs/Pinvou-品悟设计.md §5。
 ///
 /// **active_skill** 是工作流 phase 可视化 MVP1 加的 per-session 绑定字段:

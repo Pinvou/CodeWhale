@@ -72,13 +72,13 @@ React + Vite UI
        ↕ Tauri commands / events
 pinvou3-app（桌面编排层）
        ↕ EngineHandle / AgentHarness
-DeepSeek-TUI（Agent 底座 submodule）
+CodeWhale（Agent 底座 submodule）
        ├─ OpenAI-compatible 模型服务
        ├─ MCP servers / CLI connectors
        └─ Skills / Commands / Hooks / Compaction
 ```
 
-模型调用、流式输出、工具循环、Session、MCP client、Skills、Hooks 和 Compaction 由 [DeepSeek-TUI](https://github.com/h3c-hexin/DeepSeek-TUI) 底座提供。`pinvou3-app/` 负责桌面 UI、运行时配置、业务编排和系统集成，不重复实现底座能力。
+模型调用、流式输出、工具循环、Session、MCP client、Skills、Hooks 和 Compaction 由 [CodeWhale](https://github.com/Pinvou/CodeWhale) 底座提供。`pinvou3-app/` 负责桌面 UI、运行时配置、业务编排和系统集成，不重复实现底座能力。
 
 扩展能力时按以下边界落位：
 
@@ -88,7 +88,7 @@ DeepSeek-TUI（Agent 底座 submodule）
 | 接入外部 API | 独立 MCP server 或连接器 |
 | 调整模型行为 | bundle 中的 `instructions.md` |
 | 桌面 UI、系统能力或 Engine 配置 | `pinvou3-app/` |
-| 修复底座通用问题 | DeepSeek-TUI fork，并按 fork policy 维护 |
+| 修复底座通用问题 | CodeWhale fork，并按 fork policy 维护 |
 
 ## 开发启动
 
@@ -137,7 +137,7 @@ git submodule update --init --recursive
 
 ```text
 pinvou3-app/          Tauri 2.0 + React/Vite 桌面应用
-DeepSeek-TUI/         Agent 底座 submodule
+CodeWhale/         Agent 底座 submodule
 pinvou3-app/resources/mcp-servers/
                       独立 MCP 服务
 workflows/            可复用工作流
@@ -150,7 +150,7 @@ docs/                 架构设计、验证报告与维护文档
 
 - [贡献指南](CONTRIBUTING.md)
 - [macOS 运行环境要求](docs/macos-requirements.md)
-- [DeepSeek-TUI fork 策略](docs/fork-policy.md)
+- [CodeWhale fork 策略](docs/fork-policy.md)
 - [当前 fork 修改清单](docs/fork-modifications.md)
 - [工具市场设计](docs/工具市场.md)
 - [应用内升级设计](docs/应用内升级-设计.md)

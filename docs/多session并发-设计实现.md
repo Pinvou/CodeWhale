@@ -2,7 +2,7 @@
 
 > 创建：2026-05-27
 > 状态：已落地 + GUI 冒烟通过（commit e3f64a7）
-> 范围：pinvou3-app（前端 + Rust wrapper），未改 DeepSeek-TUI 底座
+> 范围：pinvou3-app（前端 + Rust wrapper），未改 CodeWhale 底座
 
 ---
 
@@ -15,7 +15,7 @@
 
 目标：**多 session 同时对话、各自跑完任务**。
 
-底座 `spawn_engine`（`DeepSeek-TUI/crates/tui/src/core/engine.rs`）是独立工厂，每调一次造一套完全独立的 Engine + channel + agent loop。所以「每 session 一个引擎」是**复用底座**、非自建调度（守 CLAUDE.md 约束 1）。
+底座 `spawn_engine`（`CodeWhale/crates/tui/src/core/engine.rs`）是独立工厂，每调一次造一套完全独立的 Engine + channel + agent loop。所以「每 session 一个引擎」是**复用底座**、非自建调度（守 CLAUDE.md 约束 1）。
 
 ---
 

@@ -93,7 +93,7 @@ jobs:
               - 'pinvou3-app/src-tauri/packaging/**'
               - 'pinvou3-app/src-tauri/resources/**'
               - 'pinvou3-app/src/platform/web/access-policy.json'
-              - 'DeepSeek-TUI'
+              - 'CodeWhale'
               - '.gitmodules'
               - '.github/workflows/pr-check.yml'
               - '.github/workflows/mac-build.yml'
@@ -105,7 +105,7 @@ jobs:
               - 'pinvou3-app/src-tauri/src/lib.rs'
               - 'pinvou3-app/src-tauri/Cargo.toml'
               - 'pinvou3-app/src-tauri/Cargo.lock'
-              - 'DeepSeek-TUI'
+              - 'CodeWhale'
               - '.github/workflows/pr-check.yml'
               - '.github/workflows/mac-build.yml'
             pet:
@@ -175,8 +175,11 @@ jobs:
           base_ref="${BASE_REF#refs/heads/}"
           python3 scripts/architecture-guard.py --base-ref "origin/$base_ref"
 
+      - name: 公开底座 gitlink 可达性
+        run: ./scripts/verify-public-submodule.sh
+
       - name: 初始化公共底座 submodule
-        run: git submodule update --init --recursive -- DeepSeek-TUI
+        run: git submodule update --init --recursive -- CodeWhale
 
       - name: fork-guard 指纹层 (秒级,不编译)
         run: ./scripts/fork-guard.sh --fast
@@ -311,7 +314,7 @@ jobs:
           submodules: false
 
       - name: 初始化公共底座 submodule
-        run: git submodule update --init --recursive -- DeepSeek-TUI
+        run: git submodule update --init --recursive -- CodeWhale
 
       # pinvou3 编译链接的系统库(本地 pkg-config 实测:gtk/webkit/soup/rsvg/openssl/
       # X11×3/appindicator)。ubuntu runner 默认没装,否则 glib-sys 等 build script 失败。
@@ -386,15 +389,15 @@ jobs:
           --test l1_dialog_harness strict_mode_
           -- --test-threads=1
 
-      - name: DeepSeek-TUI 定时任务运行时回归
+      - name: CodeWhale 定时任务运行时回归
         # 暂时关闭；底座对应运行时已回退，父仓后续另行收敛代码与 gitlink。
         if: ${{ false }}
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/pinvou3-app/src-tauri/target
         run: |
-          cargo test --manifest-path DeepSeek-TUI/Cargo.toml -p codewhale-tui --lib automation_manager -- --test-threads=1
-          cargo test --manifest-path DeepSeek-TUI/Cargo.toml -p codewhale-tui --lib task_manager -- --test-threads=1
-          cargo test --manifest-path DeepSeek-TUI/Cargo.toml -p codewhale-tui --test task_executor_contract -- --test-threads=1
+          cargo test --manifest-path CodeWhale/Cargo.toml -p codewhale-tui --lib automation_manager -- --test-threads=1
+          cargo test --manifest-path CodeWhale/Cargo.toml -p codewhale-tui --lib task_manager -- --test-threads=1
+          cargo test --manifest-path CodeWhale/Cargo.toml -p codewhale-tui --test task_executor_contract -- --test-threads=1
 
   windows-rust-test:
     name: windows-rust-test
@@ -412,7 +415,7 @@ jobs:
           submodules: false
 
       - name: 初始化公共底座 submodule
-        run: git submodule update --init --recursive -- DeepSeek-TUI
+        run: git submodule update --init --recursive -- CodeWhale
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable

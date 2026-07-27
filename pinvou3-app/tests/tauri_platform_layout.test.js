@@ -132,10 +132,10 @@ assert.match(architectureGate, /github\.event\.merge_group\.base_ref/);
 assert.match(architectureGate, /base_ref="\$\{BASE_REF#refs\/heads\/\}"/);
 assert.match(architectureGate, /architecture-guard\.py --base-ref "origin\/\$base_ref"/);
 const submoduleUpdates = workflow.match(/git submodule update[^\r\n]*/g) || [];
-assert.ok(submoduleUpdates.length > 0, "CI must initialize the public DeepSeek-TUI submodule");
+assert.ok(submoduleUpdates.length > 0, "CI must initialize the public CodeWhale submodule");
 assert.ok(
-  submoduleUpdates.every((command) => command.endsWith("-- DeepSeek-TUI")),
-  "Linux CI may only initialize DeepSeek-TUI, never the private Windows runtime",
+  submoduleUpdates.every((command) => command.endsWith("-- CodeWhale")),
+  "Linux CI may only initialize CodeWhale, never the private Windows runtime",
 );
 assert.match(workflow, /npm run test:bridge-smoke/);
 assert.doesNotMatch(workflow, /frontend-test:[\s\S]{0,300}\n\s*if:\s*\$\{\{\s*false\s*\}\}/);

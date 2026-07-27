@@ -1,6 +1,6 @@
 # pinvou3 Skill 加载 / 卡牌池 状态
 
-> 留档日期：2026-06-03。验证基线：DeepSeek-TUI submodule `0c9542dd`，pinvou3-app（card-pool-agency 分支）。
+> 留档日期：2026-06-03。验证基线：CodeWhale submodule `0c9542dd`，pinvou3-app（card-pool-agency 分支）。
 > 下面所有 file:line 是写档时的位置，改动后以代码为准。
 
 ## TL;DR
@@ -19,7 +19,7 @@
 
 底座上游 `load_skill`（#432）会扫 workspace 的 `.agents/skills`、`skills`、`.opencode/skills`、`.claude/skills`、`.cursor/skills`、`.codewhale/skills` + home + 全局，共约 10 路径。pinvou3 workspace = `$HOME`，全暴露。
 
-pinvou3 **fork patch #41**（`DeepSeek-TUI/crates/tui/src/skills/mod.rs:601` `skills_directories_with_home`）把它砍到只剩：
+pinvou3 **fork patch #41**（`CodeWhale/crates/tui/src/skills/mod.rs:601` `skills_directories_with_home`）把它砍到只剩：
 
 | 路径 | 谁读它 | 备注 |
 |---|---|---|

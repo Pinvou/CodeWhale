@@ -1,5 +1,5 @@
 # Rust build artifacts
-DeepSeek-TUI/target/
+CodeWhale/target/
 pinvou3-app/src-tauri/target/
 /target/
 debug/
@@ -49,7 +49,7 @@ scripts/.builtin-secrets.env
 specs/
 
 # 临时 PR worktree(submodule 的 git worktree,勿提交)
-/DeepSeek-TUI-*-env/
+/CodeWhale-*-env/
 
 # 本地构建日志与临时截图(勿提交)
 build-logs/

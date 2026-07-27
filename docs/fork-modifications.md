@@ -1,16 +1,17 @@
-# DeepSeek-TUI Fork 修改清单
+# CodeWhale Fork 修改清单
 
-> 本文是 pinvou3 对 DeepSeek-TUI（CodeWhale）底座 fork 的单一现状清单。
+> 本文是 pinvou3 对 CodeWhale 底座 fork 的单一现状清单。
 > 基线、主题边界、守护指纹和每次 sync 结论都以本文与 `docs/fork-policy.md` 为准。
 
-## 0. 当前状态（2026-07-23 · v0.9.0）
+## 0. 当前状态（2026-07-27 · v0.9.0）
 
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.0`，commit `d167c07c96282411956ea7f35ddb8227afa1402f` |
-| fork 分支 | `pinvou3-clean`，当前 head `c32bb73f4605` |
-| 组织方式 | **6 个长期主题 commit**，按耦合边界维护；不再保留 C1–C12 / W1–W13 批量编号 |
-| drift | 对 `v0.9.0`：**+3668 / -558，53 文件** |
+| 公开固定基线 | tag `pinvou-v0.9.0-r1`，commit `070f4413eeb0e0c4e6f2634f1ada13c60fd2e86e` |
+| fork 分支 | `Pinvou/CodeWhale` 的 `pinvou3-clean`，当前 head `070f4413eeb0` |
+| 组织方式 | **6 个长期主题 commit + 3 个维护/修复 commit + 3 个公开基线/安全维护 commit**；公开历史从上游 `v0.9.0` 重放，不复用私有 fork SHA |
+| drift | 对 `v0.9.0`：**+3878 / -550，57 文件** |
 | 守护 | `scripts/fork-guard.sh`：v0.9 主题指纹 + 宿主 ShellManager 观察器与生命周期指纹 + submodule/app `forkguard_` 行为测试 |
 | app 状态 | `pinvou3-tauri` 主库编译通过，lib test target 可完整编译；macOS 适配保留在父仓平台抽象中，不增加 fork drift |
 
@@ -22,7 +23,7 @@
 - 约 665 行是宿主编排与结构化/文件产出完成闸，属于子 agent 生命周期的原子语义，放在 app 无法可靠判断真实完成。
 - 约 633 行是 prompt/context/skill 来源密封；这是 pinvou3 单一 bundle 来源和静态前缀稳定性的产品边界。
 - 约 965 行是工具面、写入上限和命令安全，其中包含结果式 golden 测试，不能只留字符串指纹。
-- Shell 实时输出不再形成 fork drift：app 复用 `c32bb73f` 已公开的 session 级 `ShellManager`，以非破坏性完整快照计算前台/后台增量，并由主仓测试守护 UTF-8 边界和拥塞合并。
+- Shell 实时输出不再形成 fork drift：app 复用 v0.9.0 已公开的 session 级 `ShellManager`，以非破坏性完整快照计算前台/后台增量，并由主仓测试守护 UTF-8 边界和拥塞合并。
 - 已移除 v0.8.65 时代被 v0.9.0 harvest 的 MCP env、Windows 子进程、旧 request_user_input 路由、旧 subagent 自建 mailbox/温度/工具面等补丁；没有机械照搬整包旧 fork。
 
 后续减量优先级：先推动 T6 宿主接口和 T2 通用安全修复上游化，再评估 T4 automation 通用部分；T3/T5 的 pinvou3 产品语义继续留 fork。
@@ -31,7 +32,7 @@
 
 ### T1 `embed`：v0.9.0 宿主 library facade
 
-- **commit**：`99a84a092 feat(embed): 建立 v0.9.0 宿主 library facade`
+- **commit**：`052784220 feat(embed): 建立 v0.9.0 宿主 library facade`
 - **核心文件**：`crates/tui/src/lib.rs`
 - **内容**：为上游 bin-first crate 建立 library 入口，公开 pinvou3-app 实际使用的 engine、tools、automation、route、prompt、MCP 等模块。
 - **边界**：只做模块暴露，不在 facade 重写 Engine / ToolRegistry / Session。
@@ -39,7 +40,7 @@
 
 ### T2 `fork`：工具面、文件写入与执行安全
 
-- **commit**：`9e136cb11 feat(fork): 收敛工具面、文件写入与执行安全`。
+- **commit**：`092e3c885 feat(fork): 收敛工具面、文件写入与执行安全`。
 - **核心文件**：`tools/pinvou3_blocklist.rs`、`core/engine/tool_catalog.rs`、`tools/file.rs`、`core/engine/dispatch.rs`、`tools/shell.rs`、`core/engine/turn_loop.rs`、`command_safety.rs`、审批策略相关文件。
 - **内容**：
   - pinvou3 native 工具黑名单与 deferred activator 结果式 golden。
@@ -51,7 +52,7 @@
 
 ### T3 `fork`：提示词密封与 context / skill 单一来源
 
-- **commit**：`14ae5a151 feat(fork): 密封提示词并收敛上下文与技能来源`
+- **commit**：`87aef33ce feat(fork): 密封提示词并收敛上下文与技能来源`
 - **核心文件**：`prompts.rs`、`project_context.rs`、`project_context_cache.rs`、`skills/mod.rs`、`tools/skill.rs`、`working_set.rs`。
 - **内容**：
   - 静态 prompt composer 由 app 接管，默认层和运行时策略按 composer gate 密封。
@@ -64,7 +65,7 @@
 
 ### T4 `fork`：定时任务执行与历史生命周期
 
-- **commit**：`27293bd3f feat(fork): 收敛定时任务执行与历史生命周期`
+- **commit**：`06da3dfac feat(fork): 收敛定时任务执行与历史生命周期`
 - **核心文件**：`automation_manager.rs`、`task_manager.rs`、`tools/automation.rs`、`core/engine/turn_loop.rs`。
 - **内容**：
   - automation 透传选定 model，并用 automation id 作为稳定 `conversation_key`。
@@ -78,7 +79,11 @@
 
 ### T5 `fork`：宿主编排、工作流完成闸与可取消登录
 
-- **commit**：`add065123 feat(fork): 适配宿主编排与工作流完成闸`
+- **commit**：`5e5513151 feat(fork): 适配宿主编排与工作流完成闸`
+- **维护提交**：
+  - `b6991463b fix: 修复宿主工具仅在 Plan 模式注册`
+  - `c7dbe0353 fix(workflow): 修复工作流子代理写入权限丢失 (#19)`
+  - `b2e3a83bf chore(ci): 补齐 Pinvou fork 公开分支门禁`
 - **核心文件**：`core/engine.rs`、`core/engine/tool_setup.rs`、`core/engine/tests.rs`、`core/ops.rs`、`core/events.rs`、`tools/subagent/mod.rs`、`tools/subagent/tests.rs`、`mcp/oauth.rs`。
 - **内容**：
   - `EngineConfig.extra_tools`、hard `tool_whitelist`、会话 reasoning effort 和动态 disallowed tools；宿主注入工具在 Plan / Agent / Yolo 三种 turn registry 中统一注册，避免非 Plan 分支提前返回时丢失 `kb_search`。
@@ -88,12 +93,13 @@
   - 文件产出型角色必须有成功的 `write_file` / `append_file` 才能完成；重试耗尽时把最后一次工具错误带入失败信封，宿主日志无需读取私有转录即可显示具体原因。
   - `AgentComplete` 携带 role/failed；宿主可 `CancelSubAgents`，批量取消所有 live agent。
   - OAuth 登录支持 CancellationToken，返回前先 drop in-flight flow 和回调监听。
+  - standalone exec 路径显式补齐 `tool_whitelist`、`reasoning_effort`、`extra_tools`，保证 fork 作为独立项目时全目标可编译。
 - **为什么留 fork**：这些是宿主工作流的真实完成/取消语义，app 仅观察事件无法无竞态重建。
 - **守护**：宿主额外工具全模式注册、结构化 schema/安全路径、Custom 显式写工具真实落盘、文件产出失败保留并脱敏最后工具错误、父子权限不可越权、批量取消、OAuth drop-before-return 回归。
 
 ### T6 `embed`：宿主路由、预算与 shared automation 接口
 
-- **commit**：`4cff0b9e6 feat(embed): 补齐宿主路由与定时任务接口`
+- **commit**：`dadbca0d6 feat(embed): 补齐宿主路由与定时任务接口`
 - **核心文件**：`route_runtime.rs`、`route_budget.rs`、`automation_manager.rs`
 - **内容**：
   - 向 embedder 公开字段私有的 `ResolvedRuntimeRoute` 和 `resolve_runtime_route`；只暴露非敏感 model receipt。
@@ -101,6 +107,14 @@
   - route 已显式声明 output 时，以“请求意图与 route 上限的较小值”为准；只有 route 未声明时才使用模型名推断的 4K 兼容 fallback。
   - 公开 `reconcile_run_statuses_shared`，宿主不再持 automation mutex 等待 task-manager I/O。
 - **为什么单列**：这是可上游化的宿主 API 面，与 pinvou3 私有产品逻辑解耦；后续最优先提上游。
+
+### 公开基线与安全维护（不新增产品主题）
+
+- `3e8e6e7f chore(security): 配置 fork 全历史密钥扫描`
+- `23d4c9b5c docs(fork): 记录 Pinvou 公开基线`
+- `070f4413 chore(fork): 清理内部项目注释`
+
+这三个提交只增加公开 fork 的说明、全历史 Gitleaks 门禁与精确测试夹具白名单，并移除一处内部项目代号注释；不改变 T1–T6 的产品行为。父仓只固定到稳定标签 `pinvou-v0.9.0-r1`，不跟随维护分支漂移。
 
 ### T7 macOS 平台目标支持 (2026-07)
 
@@ -181,6 +195,13 @@ diff /tmp/pre-sync-prompt.txt /tmp/post-sync-prompt.txt
 本地 `/tmp` 空间不足时，显式把 `TMPDIR` 和 `CARGO_TARGET_DIR` 指到项目盘；不要用清理用户目录解决构建问题。
 
 ## 5. Sync 历史
+
+### v0.9.0 公开固定基线（2026-07-27）
+
+- 在 `Pinvou/CodeWhale` 保留上游完整 MIT 历史与作者归属，并发布不可变标签 `pinvou-v0.9.0-r1`。
+- 对 5,448 个历史 commit 执行 Gitleaks；只精确放行两个上游公开测试夹具，扫描结果为 0 个泄漏。
+- GitHub CI 已通过全 workspace/all-targets 编译、`forkguard_` 回归、格式、DCO、Gitleaks 与 CodeQL。
+- 父仓 gitlink 固定到标签解引用 commit；`.gitmodules` 不再跟随 `pinvou3-clean` 浮动分支。
 
 ### v0.9.0 clean re-fork（2026-07-17）
 

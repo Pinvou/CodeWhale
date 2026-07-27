@@ -18,7 +18,7 @@
 | 检查 | 在哪 | 红了怎么办 |
 |---|---|---|
 | **fork-guard 指纹** | fast-gate | sync/merge 静默丢了 fork patch → 对照 `docs/fork-policy.md` 找回 |
-| **fork 合规联动** | fast-gate | 改了 `DeepSeek-TUI` gitlink 没更新 `docs/fork-modifications.md` → 补登记 + 指纹(脚本报错有指引) |
+| **fork 合规联动** | fast-gate | 改了 `CodeWhale` gitlink 没更新 `docs/fork-modifications.md` → 补登记 + 指纹(脚本报错有指引) |
 | **Session replay auditor 单测** | fast-gate | session 筛选、工具配对或产物识别回归 → 本地跑 `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` |
 | **Python MCP 测试** | fast-gate | `mcp-servers/*/test_*.py` 挂 → 看 test 输出 |
 | **内置 MCP 协议与产物契约** | fast-gate | 本地跑 `python3 scripts/mcp-server-contract-smoke.py`；检查 5 个本地 server 与 QCC 清单 |
@@ -33,7 +33,7 @@ main 使用 **Merge Queue**：PR 需要 CI 通过、获得 1 个 review approval
 
 > 注:**fmt / clippy 暂未进 gate**(现有代码各 329/75 处不符合,要先清理才能加 `-D` gate),后续再说。
 
-## 改 fork(DeepSeek-TUI submodule)的铁律
+## 改 fork(CodeWhale submodule)的铁律
 
 fork patch 指纹**随 patch 同 PR**——新增 / 改 fork patch 必须**同一个 PR**带上:
 - `docs/fork-modifications.md` 登记条目

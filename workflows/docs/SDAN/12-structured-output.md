@@ -155,7 +155,7 @@ Claude Code 默认让模型改 5 次。但调研一致认为:**弱模型改 2 �
 - 本文档(设计)
 - `03-protocol.md` — Task 信封可能要加 output_schema / completion_status 字段
 - `agent_registry.json` — 4 角色 schema 规整
-- 底座 `DeepSeek-TUI/crates/tui/src/tools/subagent/mod.rs` — submit_output 主体
+- 底座 `CodeWhale/crates/tui/src/tools/subagent/mod.rs` — submit_output 主体
 
 ## 附:技术实现备注(给写码用,评审可跳过)
 

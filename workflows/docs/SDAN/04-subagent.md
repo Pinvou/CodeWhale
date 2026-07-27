@@ -50,4 +50,4 @@ Router 派 Task → SubAgent 独立 turn loop 执行（用 allowed_tools）→ �
 
 ## 实现
 
-底座（DeepSeek-TUI）已有 SubAgent 的现成实现可复用：`run_subagent`（独立 turn loop）、custom subagent type、`allowed_tools` 白名单、以及支撑卡片问答的 `request_user_input` 机制。SDAN 不重造，只规定**契约**（上面这些），具体由底座实现承载。
+底座（CodeWhale）已有 SubAgent 的现成实现可复用：`run_subagent`（独立 turn loop）、custom subagent type、`allowed_tools` 白名单、以及支撑卡片问答的 `request_user_input` 机制。SDAN 不重造，只规定**契约**（上面这些），具体由底座实现承载。

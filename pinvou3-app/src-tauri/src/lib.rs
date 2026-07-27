@@ -2,7 +2,7 @@
 //!
 //! 启动流程：
 //!  1. 注册 `chat` 命令（前端 invoke 入口）
-//!  2. setup 钩子里异步 spawn DeepSeek-TUI Engine + 启动事件转发 task
+//!  2. setup 钩子里异步 spawn CodeWhale Engine + 启动事件转发 task
 //!  3. 把 AppEngine 放进 Tauri State，命令通过 `State<AppEngine>` 拿
 //!
 //! Engine 事件（MessageDelta / ToolCallStarted / ToolCallComplete / TurnComplete）
@@ -102,7 +102,7 @@ const RELEASE_ENV_DEFAULTS: &[(&str, &str)] = &[
     ("DEEPSEEK_ALLOW_INSECURE_HTTP", "1"),
     ("DEEPSEEK_FORCE_HTTP1", "1"),
     ("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576"),
-    // 与 DeepSeek-TUI 的 stream_chunk_timeout 默认值保持一致。
+    // 与 CodeWhale 的 stream_chunk_timeout 默认值保持一致。
     ("DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS", "300"),
     // SSE 首响应头超时(open timeout):底座只认 env,默认 45s 是为云端调的。
     // 本地 GB10 大上下文 SubAgent 请求首 token TTFT 偶发 >45s → 误杀子 agent

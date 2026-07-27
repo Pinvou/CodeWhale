@@ -1,4 +1,4 @@
-//! pinvou3-app 与 DeepSeek-TUI Engine 的桥接层。
+//! pinvou3-app 与 CodeWhale Engine 的桥接层。
 //!
 //! 职责：
 //!  1. 通过 [`bridge::Pinvou3Bridge`] 把 `~/.pinvou3/settings.json` 翻译成

@@ -84,7 +84,7 @@ Scheduled model '<model>' is ambiguous without a stable model id
 
 #### 1. 后端增加定时任务模型绑定存储
 
-为了尽量减少 DeepSeek-TUI fork 改动，优先在 app 层新增 sidecar 存储，而不是直接扩展底座 `AutomationRecord`。
+为了尽量减少 CodeWhale fork 改动，优先在 app 层新增 sidecar 存储，而不是直接扩展底座 `AutomationRecord`。
 
 新增存储：
 
@@ -668,7 +668,7 @@ pinvou3-app/src/tauri-bridge.js
 
 #### 1. 新增定时任务 UI 元数据 sidecar
 
-不建议为置顶直接改 DeepSeek-TUI 的 `AutomationRecord`，避免扩大 fork 差异。推荐新增 app 层 sidecar：
+不建议为置顶直接改 CodeWhale 的 `AutomationRecord`，避免扩大 fork 差异。推荐新增 app 层 sidecar：
 
 ```text
 ~/.pinvou3/automations/task-ui-metadata.json

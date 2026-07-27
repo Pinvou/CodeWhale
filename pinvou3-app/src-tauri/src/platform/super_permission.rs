@@ -4,7 +4,7 @@
 //! 设计要点：
 //! - **源真相是文件系统**：`/etc/sudoers.d/pinvou3` 存在 = 开；不存在 = 关。不在 settings.json 里冗余存。
 //! - **写/删都走 pkexec**：用户拨开关 → 系统密码框 → root 写文件，零终端命令。
-//! - **不动 careful hook**：DeepSeek-TUI shell.rs 的 5 条硬拦（`rm -rf /` 等）跨所有模式默认开启，
+//! - **不动 careful hook**：CodeWhale shell.rs 的 5 条硬拦（`rm -rf /` 等）跨所有模式默认开启，
 //!   sudo 也过不去。本开关只是把「sudo 卡密码」变成「sudo 直接跑」。
 //!
 //! pkexec 退出码约定：

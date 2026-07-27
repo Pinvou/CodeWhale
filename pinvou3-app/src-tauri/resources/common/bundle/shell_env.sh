@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # PINVOU exec_shell 的 CLI 兼容环境 hook。
 #
-# DeepSeek-TUI 的 shell_env hook 会把本脚本 stdout 中的 KEY=VALUE 合并到
+# CodeWhale 的 shell_env hook 会把本脚本 stdout 中的 KEY=VALUE 合并到
 # exec_shell 子进程。这里读取用户登录 shell 的环境，让桌面启动的 deb 也能获得
 # 终端里的 PATH、桌面 IPC、代理、证书、SDK 和包管理器配置；同时过滤凭证、
 # credential agent 与自动代码加载入口，避免模型通过 `env` 读取 PINVOU/MCP 密钥。
@@ -15,7 +15,7 @@ fi
 
 # profile 偶尔会输出欢迎语；先写一个唯一 marker，让过滤器丢弃 marker 前噪声。
 # env -0 避免普通空格、引号和等号破坏解析。最终只输出单行 KEY=VALUE，因为
-# DeepSeek-TUI 的 shell_env 契约就是逐行解析。
+# CodeWhale 的 shell_env 契约就是逐行解析。
 "$login_shell" -lc 'printf "\0PINVOU3_SHELL_ENV_START\0"; env -0' | python3 -c '
 import os
 import re

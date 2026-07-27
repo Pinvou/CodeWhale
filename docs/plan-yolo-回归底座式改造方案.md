@@ -5,7 +5,7 @@
 
 ## 0. 背景与判断
 
-底座（DeepSeek-TUI）**本来就有**完整的 plan→执行交接闭环：
+底座（CodeWhale）**本来就有**完整的 plan→执行交接闭环：
 
 1. 模型在 Plan 模式调 `update_plan` = 交接信号（`prompts/modes/plan.md` 引导）
 2. engine 层 `should_stop_after_plan_tool`（`dispatch.rs:385`）强制结束本 turn

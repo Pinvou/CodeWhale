@@ -57,20 +57,20 @@ agent-client-protocol = { version = "1.0.0", features = [
     "unstable_session_fork",
 ] }
 
-# 底层 Agent —— DeepSeek-TUI 提供 LLM 调用 + 工具循环 + 流式事件。
+# 底层 Agent —— CodeWhale 提供 LLM 调用 + 工具循环 + 流式事件。
 # 上游 v0.8.45 起 rebrand：库 crate 改名 codewhale-tui。用 Cargo 的 `package`
 # 重命名保留本地别名 deepseek-tui，全部 `use deepseek_tui::*` 无需改动
 # （上游自己也保留 deepseek-tui bin shim 做 back-compat，做法一致）。
-deepseek-tui = { path = "../../DeepSeek-TUI/crates/tui", package = "codewhale-tui" }
+deepseek-tui = { path = "../../CodeWhale/crates/tui", package = "codewhale-tui" }
 
 # 凭证存储复用底座 codewhale-secrets(DefaultKeyringStore + FileKeyringStore 文件回退),
 # 不再在 app 层自建 keyring 封装;headless/无 D-Bus 服务器也能存凭证。
-codewhale-secrets = { path = "../../DeepSeek-TUI/crates/secrets" }
+codewhale-secrets = { path = "../../CodeWhale/crates/secrets" }
 
 # 复用底座 codewhale-config 的 RouteLimits 类型(填 active_route_limits.context_tokens,
 # 把 vLLM 探测的窗口喂给底座压缩阈值推导)。facade(deepseek-tui)不 re-export 该类型,
 # 直接引 crate;它已在依赖图内,Cargo.lock 几乎不动。
-codewhale-config = { path = "../../DeepSeek-TUI/crates/config" }
+codewhale-config = { path = "../../CodeWhale/crates/config" }
 
 # Monitor 用：vLLM HTTP probe（/v1/models + Prometheus /metrics）
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking", "stream"] }

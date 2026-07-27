@@ -446,7 +446,7 @@
       scheduleShellPoll(updatedToolItem.sessionId, true);
     }
 
-    // Careful hook：DeepSeek-TUI shell.rs 拦截 Dangerous → 红色拦截卡
+    // Careful hook：CodeWhale shell.rs 拦截 Dangerous → 红色拦截卡
     var md = p.metadata;
     if (md && md.safety_level === "dangerous" && md.blocked) {
       addChatItem({ type: "careful_blocked", args: meta && meta.args, metadata: md, time: timeStr() });

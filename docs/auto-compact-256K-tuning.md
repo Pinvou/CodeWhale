@@ -11,7 +11,7 @@
 
 ## TL;DR
 
-底座 DeepSeek-TUI **已经在 turn_loop preflight 内置了 should_compact 触发**（turn_loop.rs:90），按 `token_threshold` 直接调 `compact_messages_safe` 走 LLM 摘要。但对 pinvou3 + Qwen 原生配置仍不工作，根因有二：
+底座 CodeWhale **已经在 turn_loop preflight 内置了 should_compact 触发**（turn_loop.rs:90），按 `token_threshold` 直接调 `compact_messages_safe` 走 LLM 摘要。但对 pinvou3 + Qwen 原生配置仍不工作，根因有二：
 
 1. 模型名 `qwen36_35b` 没 `_Nk` 后缀，`context_window_for_model` 返回 `None` → preflight 二级保险 (`recover_context_overflow`) 静默禁用。
 2. 即便加了后缀让底座识别 256K，`context_input_budget` 仍按 `TURN_MAX_OUTPUT_TOKENS = 262K` 算 input budget → `256K - 262K - 1K = 负数` → 同样返回 `None`，emergency 路径静默禁用。
@@ -82,11 +82,11 @@ bridge 2 处 + fork 2 处 + 前端 1 处 + L1 harness + 回归测试：
 - **LOCAL_VLLM_MODEL**：改 `qwen36_35b_256k`（后缀让 fork B1 派生 256K 窗口）。
 - 加回归测试 `default_model_window_recognized_by_engine` 锁住"默认模型必须被底座识别窗口"。
 
-### B1. DeepSeek-TUI fork（已 commit 7e5288e3）
+### B1. CodeWhale fork（已 commit 7e5288e3）
 
 `context_window_for_model`（models.rs:212）把 `_Nk` hint 检查从 deepseek 分支内部**移到所有 vendor 分支前面**。让任意 vendor 模型名都能通过 `_Nk` 后缀声明窗口。hint 用 kilo × 1000 算，256k → 256_000，与实际 262_144 差 6K（2%），在压缩计算精度内可接受。
 
-### B2. DeepSeek-TUI fork（同上 commit）
+### B2. CodeWhale fork（同上 commit）
 
 `context_input_budget`（engine/context.rs:366）的"reserved output"项按窗口分级：
 
@@ -161,7 +161,7 @@ B1 + B2 都是上游友好的改动，可独立 PR：
 | B1 | models.rs:212 | ~5 行 | 让 `_Nk` hint 适用于任何 vendor，自托管 / 第三方部署友好 |
 | B2 | engine/context.rs:366 + 调用方 | ~25 行 | 修 < 500K 窗口模型 input budget 为负 → None 的静默禁用 bug，含双路径回归测试 |
 
-按 CLAUDE.md "修上游 bug ≤50 行 + 立即 PR" 节奏。fork 总 patch 量 ~30 行，已 commit 在 DeepSeek-TUI submodule（`pinvou3-patches` branch tip = `7e5288e3`），父仓库 gitlink 已 stage。
+按 CLAUDE.md "修上游 bug ≤50 行 + 立即 PR" 节奏。fork 总 patch 量 ~30 行，已 commit 在 CodeWhale submodule（`pinvou3-patches` branch tip = `7e5288e3`），父仓库 gitlink 已 stage。
 
 ## Codex adversarial review 反馈历程
 
@@ -202,7 +202,7 @@ codex 抓 `boot_wires_deepseek_max_output_tokens_env` 测试直接调 `Pinvou3Br
 
 codex 抓父仓库 staged gitlink 指向 `7e5288e3`，但 `pinvou3-patches` 分支领先 `fork/pinvou3-patches` 7 commit —— 包含 7e5288e3 在内的所有 [pinvou3-fork] 改动都未 push。如果先 commit/push 父仓库，干净 clone / 部署机做 `git submodule update` 会失败。
 
-修复：`git -C DeepSeek-TUI push fork pinvou3-patches`（fast-forward，7 个 commit 全是 fork 工作流 patches，最新一个是 B1+B2 7e5288e3）。push 完成后远端可达，父仓库可以 commit gitlink。
+修复：`git -C CodeWhale push fork pinvou3-patches`（fast-forward，7 个 commit 全是 fork 工作流 patches，最新一个是 B1+B2 7e5288e3）。push 完成后远端可达，父仓库可以 commit gitlink。
 
 ## 验证
 
@@ -210,7 +210,7 @@ codex 抓父仓库 staged gitlink 指向 `7e5288e3`，但 `pinvou3-patches` 分�
 - `cargo test -p pinvou3-tauri --lib` **51/51** ✅（含 round 4 新增 `wire_max_output_tokens_env_sets_default_then_respects_existing`）
 - `cargo test -p deepseek-tui --lib context_budget` 3/3 ✅（V4 路径不变 + 256K 路径）
 - `cargo test -p deepseek-tui --lib context_window` 4/4 ✅（B1 兼容性）
-- DeepSeek-TUI `pinvou3-patches` 已 push 到 fork remote（HEAD = 7e5288e3）✅
+- CodeWhale `pinvou3-patches` 已 push 到 fork remote（HEAD = 7e5288e3）✅
 
 未做：实际 256K 会话端到端验证。需用户：
 1. vLLM 重启时带 `--served-model-name qwen36_35b_256k`

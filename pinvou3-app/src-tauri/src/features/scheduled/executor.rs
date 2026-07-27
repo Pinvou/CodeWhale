@@ -102,7 +102,7 @@ impl ScheduledConversationRuntime for EngineScheduledRuntime {
     }
 }
 
-/// Host executor installed into DeepSeek-TUI's `TaskManager` for scheduled
+/// Host executor installed into CodeWhale's `TaskManager` for scheduled
 /// automations. Scheduling and durable task/run state remain base-owned.
 pub(crate) struct ScheduledChatExecutor {
     runtime: Arc<dyn ScheduledConversationRuntime>,

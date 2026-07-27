@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pinvou3 敏感目录硬拦截 hook
 #
-# DeepSeek-TUI 在 ToolCallBefore 事件 spawn 这个脚本，通过环境变量传入工具
+# CodeWhale 在 ToolCallBefore 事件 spawn 这个脚本，通过环境变量传入工具
 # 调用参数。命中敏感关键词 → exit 2 → 上游拒绝该 tool 调用。
 #
 # ⚠️ 退出码契约（v0.8.60 Hooks v2，#3026/#3049）：hard-deny 必须 **exit 2**

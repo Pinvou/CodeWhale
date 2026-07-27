@@ -2,7 +2,7 @@
 """
 pinvou3 Obsidian 知识库 MCP server —— 检索 + 管理本机 Obsidian vault（零第三方依赖，纯 stdlib）。
 
-用法：由 DeepSeek-TUI MCP client 通过 stdio 启动。
+用法：由 CodeWhale MCP client 通过 stdio 启动。
 配置：~/.pinvou3/.../mcp.json 中注册。OBSIDIAN_VAULT_PATH 可选——
       没配则自动读 Obsidian 的 obsidian.json 发现当前库（跨 Win/mac/Linux）。
 

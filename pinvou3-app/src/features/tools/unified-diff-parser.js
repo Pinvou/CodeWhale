@@ -230,7 +230,7 @@ function parseUnifiedDiff(text) {
   // 切出 LSP diagnostics 块。后端可能输出两套格式:
   //   (1) 文本 header:`Diagnostics:`/`诊断:`/`── diagnostics` 起的整段;
   //   (2) XML 块:`<diagnostics file="...">...</diagnostics>`
-  //     (diagnostics.rs::render,见 DeepSeek-TUI/crates/tui/src/lsp/diagnostics.rs)。
+  //     (diagnostics.rs::render,见 CodeWhale/crates/tui/src/lsp/diagnostics.rs)。
   // XML 块优先匹配到闭合标签;无闭合标签(被截断/旧格式)时取到行尾。
   const dm = tail.match(/(?:\n|^)(Diagnostics[^\n]*|LSP Diagnostics[^\n]*|诊断[^\n]*|── diagnostics[^\n]*|--- diagnostics|<diagnostics[^\n]*>)\n([\s\S]*?(?:<\/diagnostics>|$))/i);
   if (dm) {

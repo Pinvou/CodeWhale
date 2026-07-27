@@ -19,7 +19,7 @@
 
 ## 0. TL;DR
 
-- 底座 DeepSeek-TUI 在 `Engine::new` 里**自动跑 13 层 prompt 拼装**，pinvou3 没有绕过这个流程。
+- 底座 CodeWhale 在 `Engine::new` 里**自动跑 13 层 prompt 拼装**，pinvou3 没有绕过这个流程。
 - pinvou3 只动两个地方：
   - **第 6a 层 `<instructions>`**：通过 `EngineConfig.instructions` 把 `bundle/instructions.md` 渲染版塞进去。
   - **Per-turn `<system-reminder>`**：贴在每次 user message 头部，按 `(mode, phase)` 选段。
@@ -48,7 +48,7 @@ pinvou3-app/src-tauri/src/engine.rs:56  AppEngine::spawn_for_session()
   │    locale_tag   = "zh-Hans"
   │
   └─ spawn_engine(engine_config, dt_config)
-       └─ Engine::new(...)                                   # DeepSeek-TUI core/engine.rs:443
+       └─ Engine::new(...)                                   # CodeWhale core/engine.rs:443
             └─ prompts::system_prompt_for_mode_with_context_skills_session_and_approval(
                   AppMode::Agent,
                   &config.workspace,
@@ -67,7 +67,7 @@ pinvou3-app/src-tauri/src/engine.rs:56  AppEngine::spawn_for_session()
 
 ## 2. 13 层拼装顺序
 
-入口：`DeepSeek-TUI/crates/tui/src/prompts.rs:673` 的 `system_prompt_for_mode_with_context_skills_session_and_approval()`。
+入口：`CodeWhale/crates/tui/src/prompts.rs:673` 的 `system_prompt_for_mode_with_context_skills_session_and_approval()`。
 
 ### 静态前缀（cacheable，session 内不变，命中 KV prefix cache）
 
@@ -171,7 +171,7 @@ Op::SyncSession {
 
 ### 4.2 `rehydrate_latest_canonical_state` 行为
 
-`DeepSeek-TUI/crates/tui/src/core/engine.rs:1878 refresh_system_prompt()` 会**重新调用 13 层拼装函数**，参数照样从 `EngineConfig.instructions` 读 disk 文件。
+`CodeWhale/crates/tui/src/core/engine.rs:1878 refresh_system_prompt()` 会**重新调用 13 层拼装函数**，参数照样从 `EngineConfig.instructions` 读 disk 文件。
 
 **所以**：sync_session 传进去的 `SystemPrompt::Text` 拼装结果会被覆盖。**真正能让 AI 看到 session-specific 内容的，是改 disk 上的 instructions.md 文件本身**。
 
@@ -192,9 +192,9 @@ Op::SyncSession {
 | pinvou3 业务提示词（SKILL 路由、阶段规则、sudo、执行纪律） | `pinvou3-app/src-tauri/resources/common/bundle/instructions.md` |
 | Plan/Yolo per-turn 提醒文案 | `pinvou3-app/src-tauri/src/bridge/mod.rs:530 reminder_for()` |
 | Skill 列表（要 AI 看见的） | 往 `~/.pinvou3/bundle/skills/` 加目录，每个带 `SKILL.md` |
-| 底座 BASE_PROMPT 本身 | 上游源文件 `DeepSeek-TUI/crates/tui/src/prompts/constitution.md`（v0.9 前为 base.md）；pinvou3 文案经 override 注入，内容在 `pinvou3-app/src-tauri/resources/common/bundle/base.md`（见 [`base-prompt-override-阶段2.md`](./base-prompt-override-阶段2.md)） |
-| 模式 prompt 子段（plan.md/yolo.md/agent.md） | `DeepSeek-TUI/crates/tui/src/prompts/modes/*.md` |
-| 13 层拼装逻辑 | `DeepSeek-TUI/crates/tui/src/prompts.rs:673` |
+| 底座 BASE_PROMPT 本身 | 上游源文件 `CodeWhale/crates/tui/src/prompts/constitution.md`（v0.9 前为 base.md）；pinvou3 文案经 override 注入，内容在 `pinvou3-app/src-tauri/resources/common/bundle/base.md`（见 [`base-prompt-override-阶段2.md`](./base-prompt-override-阶段2.md)） |
+| 模式 prompt 子段（plan.md/yolo.md/agent.md） | `CodeWhale/crates/tui/src/prompts/modes/*.md` |
+| 13 层拼装逻辑 | `CodeWhale/crates/tui/src/prompts.rs:673` |
 | 查看 pinvou3 实际最终 prompt | `cargo run --manifest-path pinvou3-app/src-tauri/Cargo.toml --bin dump_system_prompt` |
 
 ---
