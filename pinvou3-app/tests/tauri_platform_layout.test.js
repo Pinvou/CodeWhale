@@ -25,7 +25,6 @@ function assertResourceSourcesExist(config, label) {
 
 const common = readJson("tauri.conf.json");
 const linux = readJson("config/platforms/linux/tauri.conf.json");
-const linuxAarch64 = readJson("config/platforms/linux/aarch64.tauri.conf.json");
 const macos = readJson("config/platforms/macos/tauri.conf.json");
 const windows = readJson("config/platforms/windows/tauri.conf.json");
 const windowsSigning = readJson("config/platforms/windows/signing.wosign.conf.json");
@@ -42,10 +41,6 @@ assert.ok(
   "Linux overlay may only package resources/platforms/linux",
 );
 assert.ok(
-  resourceSources(linuxAarch64).every((source) => source.startsWith("resources/platforms/linux/aarch64/")),
-  "Linux aarch64 overlay may only package resources/platforms/linux/aarch64",
-);
-assert.ok(
   resourceSources(macos).every((source) => source.startsWith("resources/platforms/macos/")),
   "macOS overlay may only package resources/platforms/macos",
 );
@@ -56,7 +51,6 @@ assert.ok(
 
 assertResourceSourcesExist(common, "common");
 assertResourceSourcesExist(linux, "Linux");
-assertResourceSourcesExist(linuxAarch64, "Linux aarch64");
 assertResourceSourcesExist(macos, "macOS");
 assertResourceSourcesExist(windows, "Windows");
 

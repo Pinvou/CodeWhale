@@ -7,6 +7,7 @@ const {
   platformConfigPath,
 } = require("./platform-config.js");
 const { WRAPPER_ENV } = require("./require-wrapper.js");
+const { prepareWebTemplate } = require("./web-template.js");
 const { stageWindowsRuntime } = require("./windows-runtime.js");
 
 function tauriCommandIndex(args) {
@@ -73,6 +74,7 @@ function main() {
 
   const preparedArgs = prepareTauriArgs(args);
   if (tauriCommandIndex(preparedArgs) >= 0) {
+    prepareWebTemplate();
     prepareLinuxCodexBridge();
     const artifacts = writeEffectiveArtifacts(configSpecs(preparedArgs));
     console.log(`[build] 有效 Tauri 配置: ${artifacts.effectiveConfigPath}`);

@@ -408,6 +408,9 @@ def scan_resources(root: Path) -> dict[str, Counter[str]]:
     for path in common_root.rglob("*"):
         if not path.is_file():
             continue
+        # 包管理器按 lockfile 生成的依赖不会提交，由独立打包契约负责校验。
+        if "node_modules" in path.parts:
+            continue
         try:
             magic = path.read_bytes()[:4]
         except OSError:

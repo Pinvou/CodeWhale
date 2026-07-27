@@ -56,7 +56,6 @@ const linuxArmArgs = prepareTauriArgs(
 );
 assert.deepEqual(configSpecs(linuxArmArgs), [
   platformConfigPath("linux"),
-  platformArchitectureConfigPath("linux", "arm64"),
 ]);
 
 const explicitOverlay = "src-tauri/config/platforms/windows/signing.wosign.conf.json";
@@ -93,16 +92,7 @@ assert.ok(
   linuxManifest.files.some((file) => file.destination.startsWith("runtime/codex-bridge/")),
 );
 
-const linuxAarch64 = composeEffectiveConfig([
-  platformConfigPath("linux"),
-  platformArchitectureConfigPath("linux", "arm64"),
-]).effectiveConfig;
-const linuxAarch64Manifest = buildResourceManifest(linuxAarch64, { platform: "linux" });
-assert.ok(
-  linuxAarch64Manifest.files.some(
-    (file) => file.destination === "web-template/node_modules/esbuild/bin/esbuild",
-  ),
-);
+assert.equal(platformArchitectureConfigPath("linux", "arm64"), null);
 
 const macos = composeEffectiveConfig([platformConfigPath("darwin")]).effectiveConfig;
 assert.deepEqual(macos.bundle.targets, ["app", "dmg"]);
