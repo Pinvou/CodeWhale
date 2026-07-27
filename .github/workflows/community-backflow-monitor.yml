@@ -1,0 +1,34 @@
+name: 开源 PR 回流监控
+
+on:
+  schedule:
+    # GitHub cron 使用 UTC：周一至周五 UTC+8 09:00-18:00，每小时一次。
+    - cron: "0 1-10 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: community-backflow-monitor
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: 扫描新合并 PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 登记 Official 回流 Issue
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_REPO: Pinvou/pinvou-agent
+          TARGET_REPO: ${{ github.repository }}
+          # 启用监控前已完成回流的历史 PR 不重复登记；此前尚未合并的旧编号 PR
+          # 未来合并时 merged_at 会晚于本基线，仍能被正常发现。
+          COMMUNITY_BACKFLOW_BASELINE: "2026-07-27T07:12:46Z"
+        run: python3 scripts/community-backflow-monitor.py
