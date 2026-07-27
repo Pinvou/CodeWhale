@@ -2,6 +2,7 @@ pub(crate) mod connector_cli;
 pub(crate) mod dingtalk;
 pub(crate) mod eip;
 pub(crate) mod feishu;
+pub(crate) mod ima;
 mod platform;
 pub(crate) mod tmeet;
 pub(crate) mod visibility;

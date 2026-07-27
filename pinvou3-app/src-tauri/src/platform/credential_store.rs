@@ -11,6 +11,7 @@ const LLMAPI_TOKEN_SERVICE: &str = "pinvou3-llmapi-token";
 const LLMAPI_ADMIN_SERVICE: &str = "pinvou3-llmapi-admin";
 const LLMAPI_USER_SESSION_SERVICE: &str = "pinvou3-llmapi-user-session";
 const LLMAPI_USER_PASSWORD_SERVICE: &str = "pinvou3-llmapi-user-password";
+const IMA_SECRET_SERVICE: &str = "pinvou3-ima-secret";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CredentialReference {
@@ -43,7 +44,6 @@ impl CredentialReference {
             version: 1,
         }
     }
-
     pub fn for_llmapi_token(pinvou_user_id: &str, device_binding_id: &str) -> Self {
         Self {
             service: LLMAPI_TOKEN_SERVICE.to_string(),
@@ -72,6 +72,14 @@ impl CredentialReference {
         Self {
             service: LLMAPI_USER_PASSWORD_SERVICE.to_string(),
             account: format!("llmapi-password:{pinvou_user_id}:{device_binding_id}"),
+            version: 1,
+        }
+    }
+
+    pub fn for_ima_secret(secret_name: &str) -> Self {
+        Self {
+            service: IMA_SECRET_SERVICE.to_string(),
+            account: format!("ima:{secret_name}"),
             version: 1,
         }
     }
@@ -444,6 +452,14 @@ mod tests {
         let reference = CredentialReference::for_mcp_secret("iwencai", "env", "IWENCAI_API_KEY");
         assert_eq!(reference.service, "pinvou3-mcp-secret");
         assert_eq!(reference.account, "mcp:iwencai:env:IWENCAI_API_KEY");
+        assert_eq!(reference.version, 1);
+    }
+
+    #[test]
+    fn ima_reference_uses_separate_service() {
+        let reference = CredentialReference::for_ima_secret("api_key");
+        assert_eq!(reference.service, "pinvou3-ima-secret");
+        assert_eq!(reference.account, "ima:api_key");
         assert_eq!(reference.version, 1);
     }
 
