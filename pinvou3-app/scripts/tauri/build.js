@@ -1,4 +1,5 @@
 const { spawnSync } = require("node:child_process");
+const path = require("node:path");
 const { writeEffectiveArtifacts } = require("./effective-config.js");
 const {
   APP_ROOT,
@@ -50,6 +51,19 @@ function prepareTauriArgs(
   return prepared;
 }
 
+function prepareLinuxCodexBridge({ platform = process.platform, spawn = spawnSync } = {}) {
+  if (platform !== "linux") return;
+  const script = path.join(APP_ROOT, "scripts", "prepare-codex-bridge-runtime.sh");
+  const child = spawn(script, [], {
+    cwd: APP_ROOT,
+    stdio: "inherit",
+  });
+  if (child.error) throw child.error;
+  if (child.status !== 0) {
+    throw new Error(`准备 Codex ACP Bridge 失败，退出码: ${child.status ?? "unknown"}`);
+  }
+}
+
 function main() {
   const args = process.argv.slice(2);
   const validateOnly = args[0] === "--validate-only";
@@ -59,6 +73,7 @@ function main() {
 
   const preparedArgs = prepareTauriArgs(args);
   if (tauriCommandIndex(preparedArgs) >= 0) {
+    prepareLinuxCodexBridge();
     const artifacts = writeEffectiveArtifacts(configSpecs(preparedArgs));
     console.log(`[build] 有效 Tauri 配置: ${artifacts.effectiveConfigPath}`);
     console.log(
@@ -85,4 +100,10 @@ if (require.main === module) {
   }
 }
 
-module.exports = { configSpecs, main, prepareTauriArgs, tauriCommandIndex };
+module.exports = {
+  configSpecs,
+  main,
+  prepareLinuxCodexBridge,
+  prepareTauriArgs,
+  tauriCommandIndex,
+};

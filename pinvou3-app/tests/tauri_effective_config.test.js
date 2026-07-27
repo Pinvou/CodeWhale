@@ -9,6 +9,7 @@ const {
 } = require("../scripts/tauri/effective-config.js");
 const {
   configSpecs,
+  prepareLinuxCodexBridge,
   prepareTauriArgs,
   tauriCommandIndex,
 } = require("../scripts/tauri/build.js");
@@ -20,6 +21,25 @@ const {
 const { requireWrapper, WRAPPER_ENV } = require("../scripts/tauri/require-wrapper.js");
 
 const noRuntime = () => null;
+
+let preparedBridge = null;
+prepareLinuxCodexBridge({
+  platform: "linux",
+  spawn: (command, args, options) => {
+    preparedBridge = { command, args, options };
+    return { status: 0 };
+  },
+});
+assert.match(preparedBridge.command, /prepare-codex-bridge-runtime\.sh$/);
+assert.deepEqual(preparedBridge.args, []);
+preparedBridge = null;
+prepareLinuxCodexBridge({
+  platform: "darwin",
+  spawn: () => {
+    throw new Error("macOS 不应准备 Linux Codex Bridge");
+  },
+});
+assert.equal(preparedBridge, null);
 
 assert.throws(() => requireWrapper({}), /禁止绕过平台 overlay/);
 assert.doesNotThrow(() => requireWrapper({ [WRAPPER_ENV]: "1" }));
@@ -61,10 +81,17 @@ assert.match(linux.build.beforeBuildCommand, /require-wrapper\.js build/);
 assert.match(linux.build.beforeBundleCommand, /require-wrapper\.js bundle/);
 assert.ok(linux.bundle.resources["resources/common/web-template/"]);
 assert.equal(linux.bundle.resources["resources/platforms/linux/asr/"], "runtime/asr");
+assert.equal(
+  linux.bundle.resources["resources/platforms/linux/codex-bridge/"],
+  "runtime/codex-bridge",
+);
 const linuxManifest = buildResourceManifest(linux, { platform: "linux" });
 assert.ok(linuxManifest.resourceFileCount > 0);
 assert.ok(linuxManifest.files.some((file) => file.destination.startsWith("web-template/")));
 assert.ok(linuxManifest.files.some((file) => file.destination.startsWith("runtime/asr/")));
+assert.ok(
+  linuxManifest.files.some((file) => file.destination.startsWith("runtime/codex-bridge/")),
+);
 
 const linuxAarch64 = composeEffectiveConfig([
   platformConfigPath("linux"),

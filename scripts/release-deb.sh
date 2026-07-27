@@ -35,9 +35,10 @@ echo "=== 发布 pinvou3 v$VERSION ==="
 # 模型(bge-m3)改由客户端在知识库页**按需下载**,见 scripts/release-kb-model.sh(一次性发布到
 # OTA 源 kb-model/bge-m3.tar.gz,变更模型才跑)。这里不再拷模型进 resources/bge-m3。
 
-# ── 2. 按 lockfile 安装前端工具链并构建 deb ───────────────────────
+# ── 2. 准备 Codex ACP Bridge，按 lockfile 安装前端工具链并构建 deb ──
 # Vite/React 已进入正式构建链；每次发布先 npm ci，避免旧 worktree 只有 Tauri CLI、
 # 缺少 vite/react 等新增依赖时生成坏包或直接在 beforeBuildCommand 失败。
+"$APP_DIR/scripts/prepare-codex-bridge-runtime.sh"
 (cd "$APP_DIR" && npm ci --prefer-offline --no-audit && npm run build)
 
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
