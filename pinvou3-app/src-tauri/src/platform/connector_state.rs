@@ -27,3 +27,7 @@ pub fn eip_skills_visible() -> bool {
 pub fn zhidao_skills_visible() -> bool {
     marker("zhidao").join("connected.flag").is_file()
 }
+
+pub fn tmeet_skills_visible() -> bool {
+    !marker("tmeet_disabled").is_file()
+}

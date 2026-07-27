@@ -108,7 +108,15 @@ command_protocol!(
         "zhidao_status",
         "zhidao_connect_begin",
         "zhidao_cancel",
-        "zhidao_logout"
+        "zhidao_logout",
+        "tmeet_ensure_cli",
+        "tmeet_status",
+        "tmeet_connect_begin",
+        "tmeet_cancel",
+        "tmeet_logout",
+        "tmeet_apply_skills",
+        "set_tmeet_enabled",
+        "tmeet_skills_state"
     ]
 );
 command_protocol!(

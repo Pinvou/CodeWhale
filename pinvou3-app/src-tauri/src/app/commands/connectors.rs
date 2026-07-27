@@ -27,7 +27,7 @@ pub async fn get_disabled_connectors() -> Result<Vec<String>, String> {
 
 use crate::features::connectors::{
     connector_cli as connector_cli_domain, dingtalk as dingtalk_domain, eip as eip_domain,
-    feishu as feishu_domain, wecom as wecom_domain, zhidao as zhidao_domain,
+    feishu as feishu_domain, tmeet as tmeet_domain, wecom as wecom_domain, zhidao as zhidao_domain,
 };
 use connector_cli_domain::*;
 use serde_json::Value;
@@ -70,4 +70,14 @@ async_command_passthrough!(zhidao_domain, zhidao_status() -> Result<Value, Strin
 async_command_passthrough!(zhidao_domain, zhidao_connect_begin(app: AppHandle) -> Result<Value, String>);
 async_command_passthrough!(zhidao_domain, zhidao_cancel(app: AppHandle) -> Result<Value, String>);
 async_command_passthrough!(zhidao_domain, zhidao_logout() -> Result<Value, String>);
+
+async_command_passthrough!(tmeet_domain, tmeet_ensure_cli() -> Result<Value, String>);
+async_command_passthrough!(tmeet_domain, tmeet_status() -> Result<Value, String>);
+async_command_passthrough!(tmeet_domain, tmeet_connect_begin(app: AppHandle) -> Result<Value, String>);
+async_command_passthrough!(tmeet_domain, tmeet_cancel(app: AppHandle) -> Result<Value, String>);
+async_command_passthrough!(tmeet_domain, tmeet_logout() -> Result<Value, String>);
+async_command_passthrough!(tmeet_domain, tmeet_apply_skills() -> Result<Value, String>);
+async_command_passthrough!(tmeet_domain, set_tmeet_enabled(enabled: bool) -> Result<Value, String>);
+async_command_passthrough!(tmeet_domain, tmeet_skills_state() -> Result<Value, String>);
+
 use super::prelude::*;

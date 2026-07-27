@@ -963,6 +963,8 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       const [dingtalkEnabled, setDingtalkEnabled] = useState(true); // 钉钉技能是否启用(未手动停用)
       const [eipOn, setEipOn] = useState(false); // EIP 是否已连接(SSO 路线)
       const [zhidaoOn, setZhidaoOn] = useState(false); // 知道是否已连接(SSO 路线)
+      const [tmeetOn, setTmeetOn] = useState(false); // 腾讯会议是否已连接(CLI 路线)
+      const [tmeetEnabled, setTmeetEnabled] = useState(true); // 腾讯会议技能是否启用(未手动停用)
       // 启动时加载已装工具 + 全局持久的禁用列表(持久语义:新窗口/新对话都继承)
       async function refreshToolsMenu(isAlive) {
         try {
@@ -997,6 +999,10 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
           const zs = await invokeTauri('zhidao_status');
           if (isAlive()) setZhidaoOn(!!(zs && zs.connected));
         } catch (e) { /* ignore */ }
+        try {
+          const ts = await invokeTauri('tmeet_skills_state');
+          if (isAlive()) { setTmeetOn(!!(ts && ts.connected)); setTmeetEnabled(!ts || ts.enabled !== false); }
+        } catch (e) { /* ignore */ }
       }
       useEffect(() => {
         let alive = true;
@@ -1028,6 +1034,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
           { id: 'dingtalk', title: '钉钉', connected: dingtalkOn, enabled: dingtalkEnabled },
           { id: 'eip', title: 'H3C 员工门户（EIP）', connected: eipOn },
           { id: 'zhidao', title: 'H3C 知道', connected: zhidaoOn },
+          { id: 'tmeet', title: '腾讯会议', connected: tmeetOn, enabled: tmeetEnabled },
         ],
       });
       const { connectedServices, toolRows, skillRows, enabledCount } = menuState;
