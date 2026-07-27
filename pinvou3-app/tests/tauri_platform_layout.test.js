@@ -118,6 +118,7 @@ const arm64Workflow = fs.readFileSync(
   path.join(repoRoot, ".github/workflows/arm64-connector-verify.yml"),
   "utf8",
 );
+const releaseDeb = fs.readFileSync(path.join(repoRoot, "scripts/release-deb.sh"), "utf8");
 const architectureGate = workflow.slice(
   workflow.indexOf("- name: 架构边界门禁"),
   workflow.indexOf("- name: 初始化公共底座 submodule"),
@@ -146,5 +147,16 @@ assert.match(workflow, /src\/features\/assistant\/harness\.rs/);
 assert.match(workflow, /src\/platform\/prefs\.rs/);
 assert.match(arm64Workflow, /resources\/platforms\/linux\/aarch64\/bundle\/connectors/);
 assert.match(arm64Workflow, /src\/platform\/paths\.rs/);
+assert.match(workflow, /verify-linux-arm64-connectors\.sh/);
+assert.match(releaseDeb, /verify-linux-arm64-connectors\.sh/);
+assert.match(arm64Workflow, /pull_request:/);
+assert.match(arm64Workflow, /branches:\s*\n\s*- main/);
+for (const binary of ["dws", "lark-cli", "wecom-cli"]) {
+  assert.match(
+    arm64Workflow,
+    new RegExp(`linux-arm64/bin/${binary.replace("-", "\\-")}`),
+    `ARM64 workflow must exercise ${binary}`,
+  );
+}
 
 console.log("tauri platform layout contract: ok");
