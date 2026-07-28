@@ -62,6 +62,14 @@ assert.strictEqual(
 );
 assert.strictEqual(
   shouldShowApiKeyGate(state('unavailable', {
+    credential_mode: 'backend_managed',
+    requires_user_api_key: false,
+  }), 'chat', true),
+  false,
+  'temporary backend credential failures must stay in the backend-managed flow',
+);
+assert.strictEqual(
+  shouldShowApiKeyGate(state('unavailable', {
     credential_mode: 'none',
     requires_user_api_key: false,
   }), 'chat', true),

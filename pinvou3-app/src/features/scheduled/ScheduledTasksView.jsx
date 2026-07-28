@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { Check, ChevronDown, ChevronRight, ClipboardCheck, Clock, FileChartLine, MessageCircle, Newspaper, Play, Plus, Trash2, X } from '../../components/icons.jsx';
 import { bridge, useBridgeState } from '../../hooks/useBridge.js';
-import { isBuiltInModelOption, visibleUserModels } from '../../shared/model-options.js';
+import { isBuiltInLlmApiAvailable, isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
 import { can } from '../../shared/platform.js';
 import dailyBriefImage from '../../assets/scheduled/daily-brief.jpg';
 import followUpMonitorImage from '../../assets/scheduled/follow-up-monitor.jpg';
@@ -511,11 +511,12 @@ import weeklyReviewImage from '../../assets/scheduled/weekly-review.jpg';
           </>
         );
       };
-      const savedModels = visibleUserModels(appState.savedModels || []);
+      const builtinModelAvailable = isBuiltInLlmApiAvailable(appState.llmApiStatus);
+      const savedModels = selectableModels(appState.savedModels || [], appState.llmApiStatus);
       const activeModel = savedModels.find(model => model.id === appState.activeModelId) || savedModels[0] || null;
       const modelIdForTask = (task) => {
         if (!task) return '';
-        if (task.modelId && !isBuiltInModelOption({ id: task.modelId, name: task.model, model: task.model })) return task.modelId;
+        if (task.modelId && (!isBuiltInLlmApiModel({ id: task.modelId }) || builtinModelAvailable)) return task.modelId;
         if (!task.model) return activeModel && activeModel.id || '';
         const matches = savedModels.filter(model => model.model === task.model);
         return matches.length === 1 ? matches[0].id : '';
@@ -951,14 +952,12 @@ import weeklyReviewImage from '../../assets/scheduled/weekly-review.jpg';
         label: model.name && model.name !== model.model ? `${model.name} · ${model.model}` : model.model,
         model: model.model,
       }));
-      const detailModelIsBuiltIn = detailForm && isBuiltInModelOption({
-        id: detailForm.modelId,
-        name: detailForm.model,
-        model: detailForm.model,
-      });
-      if (detailForm && detailForm.modelId && !detailModelIsBuiltIn && !modelOptions.some(option => option.value === detailForm.modelId)) {
+      const detailModelIsUnavailableBuiltin = detailForm &&
+        isBuiltInLlmApiModel({ id: detailForm.modelId }) &&
+        !builtinModelAvailable;
+      if (detailForm && detailForm.modelId && !detailModelIsUnavailableBuiltin && !modelOptions.some(option => option.value === detailForm.modelId)) {
         modelOptions.unshift({ value: detailForm.modelId, label: detailForm.model || detailForm.modelId, model: detailForm.model });
-      } else if (detailForm && !detailForm.modelId && !detailModelIsBuiltIn) {
+      } else if (detailForm && !detailForm.modelId) {
         modelOptions.unshift({ value: '', label: detailForm.model ? scheduledCopy.reselectModel(detailForm.model) : scheduledCopy.currentModel });
       }
       const repeatOptions = [

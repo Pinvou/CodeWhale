@@ -211,6 +211,23 @@
     return result;
   }
 
+  function isBuiltinLlmApiModelId(modelId) {
+    if (modelId === "builtin_llmapi") return true;
+    return (state.savedModels || []).some(function (model) {
+      return model && model.id === modelId && model.kind === "builtin_llmapi";
+    });
+  }
+
+  async function prepareBackendManagedModel(modelId) {
+    if (!isBuiltinLlmApiModelId(modelId)) return;
+    try {
+      await ensureLlmApiBinding();
+    } catch (error) {
+      // 选择动作已经生效；发送消息时会再次执行权威校验并把可读错误返回给用户。
+      console.warn("prepare built-in model credential after selection failed", error);
+    }
+  }
+
   async function loginLlmApiUser(username, password) {
     var result = await invoke("login_llmapi_user", { username: username, password: password });
     await refreshLlmApiState({ refreshSavedModels: true });
@@ -358,6 +375,7 @@
     await invoke("set_active_model", { id: id });
     await loadModels();
     await loadEffectiveModelConfig();
+    await prepareBackendManagedModel(id);
   }
   // 读某会话当前绑定的模型 id(切会话时刷新 chip)。
   async function loadSessionModel(sessionId) {
@@ -378,6 +396,7 @@
     if (sessionId) {
       await invoke("set_session_model", { sessionId: sessionId, modelId: modelId });
       await loadSessionModel(sessionId);
+      await prepareBackendManagedModel(modelId);
     } else {
       await setActiveModel(modelId);
     }

@@ -431,11 +431,14 @@ pub fn run() {
                     }
                     tools
                 });
-            match EnginePool::new_with_dependencies(
+            match EnginePool::new_with_runtime_model_provider(
                 handle.clone(),
                 store_for_engine.clone(),
                 tool_factory,
                 tool_policy,
+                std::sync::Arc::new(
+                    crate::features::llmapi_hub::runtime_model::LlmApiRuntimeModelProvider,
+                ),
             ) {
                 Ok(pool) => {
                     let scheduled_state = tauri::async_runtime::block_on(

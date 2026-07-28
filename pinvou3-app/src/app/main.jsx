@@ -2425,8 +2425,9 @@ function workspaceDisplayName(path) {
             {/* API Key 拦截遮罩 —— 云端模型未配 key 时只盖住聊天界面,强制先配置。
                 根因:此前前后端都无 key gate,空 key 打云端 → 401 静默无回应。
                 设置页必须保持可操作,否则“去配置”后遮罩仍在,用户反而无法录入 Key。
-                条件:credential_state 为 missing 或 unavailable 且非本地模型。本地 vLLM
-                和 loopback OpenAI-compatible 端点允许无鉴权。unavailable 同样需拦截:macOS 上用户在 Keychain
+                条件:credential_state 为 missing 或 unavailable、凭据由用户管理且非本地模型。内置模型凭据
+                由后台账户托管，不要求用户填写 Key。本地 vLLM 和 loopback OpenAI-compatible 端点允许无鉴权。
+                unavailable 对用户管理的凭据同样需拦截:macOS 上用户在 Keychain
                 授权弹窗点"拒绝"时 credential_state 变 unavailable(见 prefs.rs:785),
                 此时不盖遮罩用户仍可发消息 → 命中 Keychain 错误,与 missing 同等后果。 */}
             {shouldShowApiKeyGate(bs, currentView, bridge.available) && (
