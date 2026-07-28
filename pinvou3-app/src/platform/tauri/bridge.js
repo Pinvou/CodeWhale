@@ -1584,6 +1584,7 @@
   var removeAttachment = artifactsFeature.removeAttachment;
   var clearAttachments = artifactsFeature.clearAttachments;
   var pickAndAttach = artifactsFeature.pickAndAttach;
+  var uploadDeviceFiles = artifactsFeature.uploadDeviceFiles;
   var personasFeature = installBridgeFeature("personas", { state: state, notify: notify, invoke: invoke, bt: bt, addSystemItem: addSystemItem, addChatItem: addChatItem, timeStr: timeStr, ensureSession: ensureSession, personaPlaceholderTitles: personaPlaceholderTitles });
   var loadPersonas = personasFeature.loadPersonas;
   var getPersonas = personasFeature.getPersonas;
@@ -1871,6 +1872,7 @@
       removeAttachment: removeAttachment,
       clearAttachments: clearAttachments,
       pickAndAttach: pickAndAttach,
+      uploadDeviceFiles: uploadDeviceFiles,
     },
     resolutions: { markResolved: markResolved },
     workflow: {
