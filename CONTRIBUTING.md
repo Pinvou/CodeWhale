@@ -29,9 +29,21 @@
 > 1. **依赖外部资源**(网络/真 bge-m3/vLLM/真模型)的测试**必须标 `#[ignore]`** —— CI 的 bge-m3 是空占位、无网络。参照现有 `e2e_test` / `l1_harness`。
 > 2. 本地复现 CI 用 **`cargo test --lib -- --test-threads=1`** —— bridge 等测试读写全局 env,并行会竞争 flaky(CI 已锁单线程)。
 
+### Community 回流 PR 的 Rust 门控
+
+已经在 `Pinvou/pinvou-agent` 完成完整 CI 并合入的 Community PR，回流 Official 时不重复运行 PR 阶段的 `rust-test`；`rust-lint` 仍会检查 Official 私有代码的格式、编译和依赖边界，进入 Merge Queue 后再对最终组合态完整运行 `rust-test`。
+
+只有同时满足以下条件才按回流处理，缺少任一条件都会退回普通 PR 门控：
+
+- PR 分支位于本仓，且名称使用 `backflow/community-*`。
+- PR 正文包含对应来源标记：`<!-- community-backflow:Pinvou/pinvou-agent#<PR号> -->`；批次回流包含多个来源时逐行列出多个标记。
+- 创建回流 PR 前已确认来源 PR 是 `MERGED`，且其最新 head 的 `required-gate`（包含适用的 `rust-test`）成功。
+
+回流时仍须以最新 Official `main` 做语义合并并保留私有能力。来源仓测试不能替代最终组合态测试，也不能用于普通开发 PR 或外部 fork PR 跳过门控。
+
 main 使用 **Merge Queue**：PR 需要 CI 通过、获得 1 个 review approval 并解决全部对话，然后加入队列。队列会基于最新 `main` 运行完整检查并自动合入；评审和修复期间不要仅因 `main` 更新而反复 rebase，出现真实冲突时再处理。
 
-> 注:**fmt / clippy 暂未进 gate**(现有代码各 329/75 处不符合,要先清理才能加 `-D` gate),后续再说。
+> 注：`cargo fmt --check`、`cargo clippy --lib --no-deps` 和 `cargo deny check` 已由 `rust-lint` 硬门控；只对 Rust/Cargo/submodule 等相关路径触发。
 
 ## 改 fork(CodeWhale submodule)的铁律
 
