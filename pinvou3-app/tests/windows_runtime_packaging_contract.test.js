@@ -75,6 +75,14 @@ assert.ok(
   "release workflow must contain distinct Windows and macOS build jobs",
 );
 const windowsJob = releaseWorkflow.slice(windowsJobStart, macosJobStart);
+assert.ok(
+  windowsJob.includes("secrets.PINVOU3_WINDOWS_RUNTIME_TOKEN || github.token"),
+  "Windows release checkout must use the dedicated runtime token when configured",
+);
+assert.ok(
+  windowsJob.includes("npm run test:windows-runtime"),
+  "Windows release job must validate packaging contracts when private runtime access is unavailable",
+);
 const runtimeInit = windowsJob.indexOf("npm run runtime:windows:init");
 const nsisBuild = windowsJob.indexOf("npm run build:nsis");
 assert.ok(

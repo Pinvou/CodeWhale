@@ -48,6 +48,11 @@ npm run build:msi
 私有 submodule 配置为 `update = none`，普通的递归 submodule 初始化只处理公共底座，
 Windows 构建机通过 `runtime:windows:init` 显式覆盖该策略并拉取 Git LFS 对象。
 
+GitHub Actions 构建 Windows NSIS 时，需要配置仓库或组织 Secret
+`PINVOU3_WINDOWS_RUNTIME_TOKEN`。该凭据只需对主仓库和
+`Pinvou/pinvou3-windows-runtime` 具有 `Contents: read` 权限。未配置时，
+`release-packages` 只运行 Windows 打包契约测试，不会声称或上传 NSIS 产物。
+
 `scripts/tauri/build.js` 是项目内 `tauri build` / `tauri bundle` 的统一入口：Windows
 构建前自动执行 staging，所有平台都会加载对应 config overlay，并在调用 Tauri CLI 前
 生成有效合并配置和安装包资源清单。不要直接运行 `npx tauri build/bundle`。
