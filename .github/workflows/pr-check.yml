@@ -409,9 +409,9 @@ jobs:
     # changes 在 push 时被 skip,需 !cancelled() 才能让本 job 不被连带 skip。
     if: ${{ !cancelled() && github.event.action != 'closed' && (github.event_name == 'push' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
-    # Tauri + fastembed + aws-lc-sys 全冷编译耗时长;设上限避免卡死 runner 占用
-    # (GitHub 默认 6h,此处收紧到 45min,与 mac-build 的 50min 量级一致)。
-    timeout-minutes: 45
+    # Tauri + fastembed + aws-lc-sys 全冷编译实测可能超过 45min；保留 60min
+    # 恢复窗口，确保 main 能完成一次冷编译并写入暖缓存，同时避免无限占用 runner。
+    timeout-minutes: 60
     # dev profile 的 line-tables-only 已固化进 Cargo.toml [profile.dev],不再需要
     # CARGO_PROFILE_DEV_DEBUG 环境变量。
     steps:
