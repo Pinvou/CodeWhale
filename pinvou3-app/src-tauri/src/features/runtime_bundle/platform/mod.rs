@@ -25,8 +25,9 @@ static LARK_SKILLS_DIR: Dir<'_> =
 /// 卷入、跟飞书门控耦合)。启动解包到 `skills_dir/eip`,见 `write_eip_skill`。
 static EIP_SKILL_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/resources/common/bundle/eip");
 
-/// H3C 知道知识库技能(SKILL.md + zhidao CLI)。与 EIP 同属 IT 内部 CLI 连接器,
-/// 独立内嵌并解包到 `skills_dir/zhidao`,用连接标记门控 SKILL.md 可见性。
+/// H3C 知道知识库技能(SKILL.md + references/ 按需引用文档 + zhidao CLI)。与 EIP 同属
+/// IT 内部 CLI 连接器,独立内嵌并解包到 `skills_dir/zhidao`,用连接标记门控 SKILL.md
+/// 可见性;references/ 随可见性刷新每启动幂等重写(见 `apply_zhidao_skill_visibility`)。
 static ZHIDAO_SKILL_DIR: Dir<'_> =
     include_dir!("$CARGO_MANIFEST_DIR/resources/common/bundle/zhidao");
 
@@ -778,8 +779,10 @@ impl Pinvou3Bundle {
         Ok(())
     }
 
-    /// 知道技能门控:连接成功后用当前内嵌版本刷新 SKILL.md,未连接/登出时只保留
-    /// bin/。不能只在文件缺失时写:二进制健康的既有安装也必须收到技能文本更新。
+    /// 知道技能门控:连接成功后用当前内嵌版本刷新 SKILL.md 与 references/ 按需引用
+    /// 文档,未连接/登出时只保留 bin/。不能只在文件缺失时写:二进制健康的既有安装也
+    /// 必须收到技能文本与 references/ 更新;每启动幂等重写同时承担自愈(用户删了
+    /// references/ 或文本陈旧,下次启动即恢复)。
     pub fn apply_zhidao_skill_visibility(&self, show: bool) -> std::io::Result<()> {
         let skill_md = self.skills_dir.join("zhidao").join("SKILL.md");
         if show {
@@ -788,6 +791,12 @@ impl Pinvou3Bundle {
                     std::fs::create_dir_all(parent)?;
                 }
                 std::fs::write(&skill_md, f.contents())?;
+            }
+            // references/ 与 SKILL.md 同语义:每启动幂等重写。否则存量安装(二进制健康,
+            // 不触发 write_zhidao_skill)永远拿不到 references/,SKILL.md 里的
+            // "用 read_file 读取 references/xxx.md" 会指向不存在的文件。
+            if let Some(refs) = ZHIDAO_SKILL_DIR.get_dir("references") {
+                Self::extract_dir(refs, &self.skills_dir.join("zhidao"))?;
             }
         } else {
             let _ = std::fs::remove_file(&skill_md);
@@ -1155,6 +1164,37 @@ mod tests {
 
         bundle.apply_zhidao_skill_visibility(false).unwrap();
         assert!(!skill_md.exists());
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn zhidao_visibility_extracts_and_self_heals_references() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempdir();
+        std::env::set_var("PINVOU3_HOME", &tmp);
+        let bundle = Pinvou3Bundle::paths();
+        let refs_dir = bundle.skills_dir.join("zhidao").join("references");
+
+        // 存量安装场景:二进制健康但 references/ 从未落盘 → 可见性刷新必须补齐。
+        bundle.apply_zhidao_skill_visibility(true).unwrap();
+        let embedded_refs = ZHIDAO_SKILL_DIR.get_dir("references").unwrap();
+        for f in embedded_refs.files() {
+            let on_disk = std::fs::read(bundle.skills_dir.join("zhidao").join(f.path())).unwrap();
+            assert_eq!(on_disk, f.contents(), "references 落盘内容应与内嵌一致");
+        }
+
+        // 自愈:用户删掉 references/ 后,下次启动的可见性刷新必须恢复。
+        std::fs::remove_dir_all(&refs_dir).unwrap();
+        assert!(!refs_dir.exists());
+        bundle.apply_zhidao_skill_visibility(true).unwrap();
+        for f in embedded_refs.files() {
+            let on_disk = std::fs::read(bundle.skills_dir.join("zhidao").join(f.path())).unwrap();
+            assert_eq!(on_disk, f.contents(), "references 自愈内容应与内嵌一致");
+        }
+
+        // 隐藏时只摘 SKILL.md,references/ 与 bin/ 一样保留(连接后刷新会再覆写)。
+        bundle.apply_zhidao_skill_visibility(false).unwrap();
+        assert!(refs_dir.is_dir());
         cleanup(&tmp);
     }
 
