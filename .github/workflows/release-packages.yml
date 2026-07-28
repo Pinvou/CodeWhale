@@ -330,6 +330,12 @@ jobs:
         working-directory: pinvou3-app
         run: npm ci --prefer-offline --no-audit
 
+      # private-runtimes/windows 在 .gitmodules 中显式 update = none，普通递归
+      # checkout 会跳过；Windows 发布构建必须按锁定 gitlink 显式初始化并拉取 LFS。
+      - name: 初始化 Windows 私有运行时
+        working-directory: pinvou3-app
+        run: npm run runtime:windows:init
+
       - name: 同步版本号
         run: node scripts/sync-version.mjs
 

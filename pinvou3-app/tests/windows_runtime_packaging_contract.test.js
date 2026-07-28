@@ -26,6 +26,10 @@ const installerHooks = fs.readFileSync(
   ),
   "utf8",
 );
+const releaseWorkflow = fs.readFileSync(
+  path.resolve(appRoot, "..", ".github", "workflows", "release-packages.yml"),
+  "utf8",
+);
 
 const stagedBootstrapper =
   "${__FILEDIR__}\\..\\..\\..\\windows-runtime\\nsis\\vc_redist\\VC_redist.x64.exe";
@@ -62,6 +66,20 @@ assert.ok(
 assert.ok(
   runtimeScript.includes('(Get-Sha256 -Path $temporaryPath) -ne [string]$entry.sha256'),
   "the NSIS bootstrapper copy must be verified against the locked SHA-256",
+);
+
+const windowsJobStart = releaseWorkflow.indexOf("build-windows-x64:");
+const macosJobStart = releaseWorkflow.indexOf("build-macos-universal:", windowsJobStart);
+assert.ok(
+  windowsJobStart >= 0 && macosJobStart > windowsJobStart,
+  "release workflow must contain distinct Windows and macOS build jobs",
+);
+const windowsJob = releaseWorkflow.slice(windowsJobStart, macosJobStart);
+const runtimeInit = windowsJob.indexOf("npm run runtime:windows:init");
+const nsisBuild = windowsJob.indexOf("npm run build:nsis");
+assert.ok(
+  runtimeInit >= 0 && nsisBuild > runtimeInit,
+  "Windows release job must initialize the locked private runtime before building NSIS",
 );
 
 const simulatedFileDir =
