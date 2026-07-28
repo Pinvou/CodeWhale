@@ -13,11 +13,16 @@ config/
       └─ runtime/x86_64.lock.json
 ```
 
-- `tauri.conf.json`：对应平台的安装包目标、资源映射和安装器参数。
+- `tauri.conf.json`：对应平台的安装包目标、资源映射和安装器参数；macOS 额外把主窗口覆盖为原生顶栏（`decorations: true` + `titleBarStyle: "Overlay"` + `hiddenTitle`，系统红绿灯替代前端自绘三键）。
 - `signing.*.conf.json`：发布签名 overlay，仅由对应发布流程显式加载。
 - `runtime/*.lock.json`：锁定私有运行时来源和 manifest，不存放制品本身。
 
-`scripts/tauri/build.js` 根据当前操作系统加载 `platforms/<os>/tauri.conf.json`。公共配置不得引用平台专属安装器模板、签名工具或私有运行时。
+`--config` overlay 按 JSON Merge Patch 合并：对象合并、**数组整体替换**。因此 macOS overlay 中的
+`app.windows` 是基础配置主窗口定义的完整拷贝，改动基础配置 `app.windows` 字段时必须同步此处。
+
+`scripts/tauri/build.js` 根据当前操作系统在 **build / bundle** 时加载 `platforms/<os>/tauri.conf.json`
+（dev 刻意不注入 packaging overlay，见 `tests/tauri_effective_config.test.js`）；macOS 的 dev 启动由
+`run-dev.sh` 显式以 `--config` 带上同一份 overlay，保证 dev 与打包产物顶栏一致。公共配置不得引用平台专属安装器模板、签名工具或私有运行时。
 
 项目内所有 `build` / `bundle` 命令必须通过该包装器执行；`npm run tauri -- build`、
 `npm run build`、`npm run build:msi` 和 NSIS 脚本均遵循同一入口。包装器将自动 overlay
