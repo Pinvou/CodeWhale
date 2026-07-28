@@ -1147,7 +1147,9 @@
           var dap = extractArtifactPath(db.input);
           if (dap) {
             lastDirtyArtifactId[dap] = db.id;
-            if (db.name !== "edit_file") writtenArtifacts[dap] = true;
+            // 与实时 tool_end 同一门控:tmp/ 中间文件、非成品扩展名不记账,
+            // 否则实时不进面板的文件切 session 重放后反而兜底冒出成品卡。
+            if (db.name !== "edit_file" && isDeliverable(dap)) writtenArtifacts[dap] = true;
           }
         } else if (db.type === "tool_use" && isPresentArtifactTool(db.name)) {
           var pap = extractArtifactPath(db.input);

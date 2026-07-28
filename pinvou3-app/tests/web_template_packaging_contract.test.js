@@ -2,6 +2,14 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
+const {
+  npmInstallInvocation,
+  npmInvocation,
+} = require("../scripts/tauri/web-template.js");
+const {
+  WINDOWS_NPM_CI_ARGS,
+  expectedMarker: expectedBridgeMarker,
+} = require("../scripts/tauri/codex-bridge.js");
 
 const APP_ROOT = path.resolve(__dirname, "..");
 const REPO_ROOT = path.resolve(APP_ROOT, "..");
@@ -51,5 +59,60 @@ assert.match(prepareSource, /package-lock\.json/);
 assert.match(prepareSource, /"ci"/);
 assert.match(prepareSource, /platform/);
 assert.match(prepareSource, /architecture/);
+
+assert.deepEqual(
+  npmInvocation({
+    platform: "win32",
+    env: { ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+  }),
+  {
+    command: "C:\\Windows\\System32\\cmd.exe",
+    args: [
+      "/d",
+      "/s",
+      "/c",
+      "npm.cmd ci --prefer-offline --no-audit --no-fund",
+    ],
+  },
+  "Windows 必须经 cmd.exe 调用 npm.cmd，避免 Node spawnSync EINVAL",
+);
+assert.deepEqual(
+  npmInvocation({ platform: "linux" }),
+  {
+    command: "npm",
+    args: ["ci", "--prefer-offline", "--no-audit", "--no-fund"],
+  },
+  "非 Windows 平台继续直接调用 npm",
+);
+
+assert.ok(WINDOWS_NPM_CI_ARGS.includes("--omit=optional"));
+assert.equal(expectedBridgeMarker({ architecture: "x64" }).requires_managed_codex, true);
+const packageJson = JSON.parse(fs.readFileSync(path.join(APP_ROOT, "package.json"), "utf8"));
+assert.equal(
+  packageJson.scripts["prepare:codex-bridge"],
+  "node scripts/tauri/codex-bridge.js",
+);
+assert.deepEqual(
+  npmInstallInvocation({
+    platform: "win32",
+    environment: { npm_execpath: "C:\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" },
+    nodeExecutable: "C:\\nodejs\\node.exe",
+    npmArgs: ["ci", "--omit=optional"],
+  }),
+  {
+    command: "C:\\nodejs\\node.exe",
+    args: [
+      "C:\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
+      "ci",
+      "--omit=optional",
+    ],
+  },
+  "Windows 依赖准备应支持传入受控的 npm ci 参数",
+);
+assert.throws(
+  () => npmInstallInvocation({ platform: "win32", npmArgs: ["ci", "& whoami"] }),
+  /不受支持的字符/,
+  "Windows command interpreter must reject injectable npm arguments",
+);
 
 console.log("web template packaging contract ok");

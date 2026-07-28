@@ -3,6 +3,7 @@ pub mod identity;
 pub mod models;
 mod platform;
 pub mod provisioning;
+pub(crate) mod runtime_model;
 pub mod store;
 pub mod usage;
 

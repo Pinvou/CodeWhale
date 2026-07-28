@@ -2450,8 +2450,10 @@
       // 该次 Session、Run 与底座 Task,任务定义与共享工作间保留。
       await invoke("delete_session", { id: id });
       applyDeletedSession(id);
+      return true;
     } catch (e) {
       addSystemItem(bt("deleteFailed") + e);
+      return false;
     }
   }
 
@@ -2511,7 +2513,17 @@
     if (idx < 0) {
       // 定时运行会话不在 state.sessions;收起 = 从侧边栏记录移除,进设置页归档列表。
       var scheduledRun = recentScheduledRunForSession(id);
-      if (!scheduledRun) return;
+      // Codex 等独立会话也不在 state.sessions；交给后端判定并刷新统一历史列表。
+      if (!scheduledRun) {
+        try {
+          await invoke("set_session_archived", { id: id, archived: true });
+          await refreshHistoryList();
+          return true;
+        } catch (e) {
+          console.warn("set_session_archived failed", e);
+          return false;
+        }
+      }
       var previousRuns = state.scheduledTaskRecentRuns || [];
       var wasViewingRun = state.activeSessionId === id;
       var previousContext = state.scheduledRunContext;
@@ -2525,6 +2537,7 @@
       try {
         await invoke("set_session_archived", { id: id, archived: true });
         await refreshHistoryList();
+        return true;
       } catch (e) {
         state.scheduledTaskRecentRuns = previousRuns;
         if (wasViewingRun) {
@@ -2536,8 +2549,8 @@
         }
         console.warn("set_session_archived failed", e);
         notify();
+        return false;
       }
-      return;
     }
     var s = state.sessions[idx];
     var archived = Object.assign({}, s, { archived: true, archived_at: new Date().toISOString(), pinned: false, pinned_at: null });
@@ -2550,6 +2563,7 @@
     try {
       await invoke("set_session_archived", { id: id, archived: true });
       await refreshHistoryList();
+      return true;
     } catch (e) {
       state.sessions.splice(idx, 0, s);
       state.archivedSessions = (state.archivedSessions || []).filter(function (x) { return x.id !== id; });
@@ -2559,12 +2573,13 @@
       }
       console.warn("set_session_archived failed", e);
       notify();
+      return false;
     }
   }
 
   async function restoreArchivedSession(id) {
     var idx = (state.archivedSessions || []).findIndex(function (s) { return s.id === id; });
-    if (idx < 0) return;
+    if (idx < 0) return false;
     var s = state.archivedSessions[idx];
     invalidateScheduledRecentRunsForSession(id);
     var restored = Object.assign({}, s, { archived: false, archived_at: null });
@@ -2576,11 +2591,13 @@
       await refreshHistoryList();
       // 还原的定时运行会话回侧边栏"定时任务记录"(refreshHistoryList 只管普通会话)。
       if (String(id).indexOf("sched-") === 0) loadScheduledTaskRecentRuns().catch(function () {});
+      return true;
     } catch (e) {
       state.archivedSessions.splice(idx, 0, s);
       state.sessions = (state.sessions || []).filter(function (x) { return x.id !== id; });
       console.warn("restore archived session failed", e);
       notify();
+      return false;
     }
   }
 
@@ -2707,7 +2724,9 @@
           var dap = extractArtifactPath(db.input);
           if (dap) {
             lastDirtyArtifactId[dap] = db.id;
-            if (db.name !== "edit_file") writtenArtifacts[dap] = true;
+            // 与实时 tool_end 同一门控:tmp/ 中间文件、非成品扩展名不记账,
+            // 否则实时不进面板的文件切 session 重放后反而兜底冒出成品卡。
+            if (db.name !== "edit_file" && isDeliverable(dap)) writtenArtifacts[dap] = true;
           }
         } else if (db.type === "tool_use" && isPresentArtifactTool(db.name)) {
           var pap = extractArtifactPath(db.input);
@@ -3136,7 +3155,18 @@
     "pptx", "ppt", "docx", "doc", "pdf", "html", "htm", "xlsx", "xls",
     "md", "csv", "png", "jpg", "jpeg", "svg", "gif", "webp", "zip",
   ];
+  // tmp/ 是提示词约定的中间文件目录(instructions.md:中间/临时文件一律写 tmp/,
+  // 不进产出物列表)。tmp/ 下的文件即使扩展名是成品型(.md/.html 等)也不算自动成品;
+  // 确需展示只能靠模型显式 present_artifact(显式 present 不经 isDeliverable 门控)。
+  function isTmpPath(path) {
+    var segs = normalizedPath(path).split("/");
+    for (var i = 0; i < segs.length; i++) {
+      if (segs[i] === "tmp") return true;
+    }
+    return false;
+  }
   function isDeliverable(path) {
+    if (isTmpPath(path)) return false;
     var ext = (String(path || "").split(".").pop() || "").toLowerCase();
     return DELIVERABLE_EXTS.indexOf(ext) >= 0;
   }

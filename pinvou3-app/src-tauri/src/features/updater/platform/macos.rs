@@ -296,7 +296,7 @@ pub async fn download_update_package(
     }
     drop(file);
 
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = crate::platform::encoding::hex_lower(&hasher.finalize());
     if actual != expected {
         let _ = std::fs::remove_file(&temp);
         return Err(format!(
@@ -592,7 +592,7 @@ fn file_sha256(path: &Path) -> Option<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Some(format!("{:x}", hasher.finalize()))
+    Some(crate::platform::encoding::hex_lower(&hasher.finalize()))
 }
 
 /// macOS df 是 BSD 系,不支持 GNU 的 `--output=avail -B1`。用 `df -k <dir>`

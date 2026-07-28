@@ -207,13 +207,13 @@ try {
   const navigationComponents = readFileSync(path.join(root, 'src', 'components', 'layout', 'NavigationComponents.jsx'), 'utf8');
   assert.ok(main.includes("currentView === 'codex'"));
   assert.ok(main.includes('<CodexAcpView'));
-  assert.ok(main.includes('codexAcpSupported &&'), 'Codex entry must stay Linux capability-gated');
+  assert.ok(main.includes('codexAcpSupported &&'), 'Codex entry must stay platform capability-gated');
   assert.ok(main.includes(".concat(codexHistory)"),
     'Codex sessions must share the global recent-session list');
   assert.ok(main.includes("taskKind: 'codex'") && main.includes("testId: 'codex-sidebar-item'"),
     'global sessions must visually identify Codex records');
-  assert.ok(main.includes("useState('recent')"),
-    'work and code sessions must be mixed by recent update time by default');
+  assert.ok(main.includes("useState('pinned_first')"),
+    'pinned sessions float first by default; unpinned work and code sessions still mix by recent update time');
   assert.ok(main.includes("{ id: 'code', label: t.sidebarTaskFilterCode || '代码' }")
     && main.includes("if (taskListFilter === 'code') return chat.taskKind === 'codex';")
     && i18n.includes("sidebarTaskFilterCode: '代码'")
@@ -347,6 +347,10 @@ try {
     && codexView.includes('attachments: readyAttachments.map(attachment => attachment.result)')
     && codexView.includes('workspaceReferences'),
   'Codex prompts must keep external attachments and workspace references as separate inputs');
+  assert.ok(!codexView.includes('if (activeId && !sessionInfo)')
+    && !codexView.includes('throw new Error(codexCopy.sessionSyncing)')
+    && !codexView.includes('(activeId && !sessionInfo) ||'),
+  'Codex prompts must let the backend initialize or restore the ACP session instead of blocking forever on stale UI state');
   assert.ok(codexView.includes('<CodexWorkspacePanel')
     && codexView.includes('copy={t.uiCodexWorkspace}')
     && codexWorkspace.includes('copy.files')

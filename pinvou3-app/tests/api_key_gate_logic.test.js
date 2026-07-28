@@ -58,7 +58,7 @@ assert.strictEqual(
     requires_user_api_key: false,
   }), 'chat', true),
   false,
-  'backend-managed built-in credentials must not open the user API Key gate',
+  'runtime-managed credentials must not open the user API Key gate',
 );
 assert.strictEqual(
   shouldShowApiKeyGate(state('unavailable', {
@@ -66,7 +66,15 @@ assert.strictEqual(
     requires_user_api_key: false,
   }), 'chat', true),
   false,
-  'temporary built-in credential failures are handled by backend provisioning',
+  'temporary backend credential failures must stay in the backend-managed flow',
+);
+assert.strictEqual(
+  shouldShowApiKeyGate(state('unavailable', {
+    credential_mode: 'none',
+    requires_user_api_key: false,
+  }), 'chat', true),
+  false,
+  'no-auth models must not open the user API Key gate',
 );
 assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'settings', true), false);
 assert.strictEqual(shouldShowApiKeyGate(state('missing'), 'chat', false), false);
@@ -96,11 +104,6 @@ assert.match(
   bridgeSource,
   /await loadSessionModel\(sessionId\)/,
   'switchModel must refresh the session-scoped credential gate after switching',
-);
-assert.match(
-  bridgeSource,
-  /await prepareBackendManagedModel\(modelId\)/,
-  'switchModel must prefetch backend-managed built-in credentials after selection',
 );
 
 console.log('api_key_gate_logic: ok');

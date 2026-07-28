@@ -176,7 +176,6 @@ pub(crate) async fn chat_with_reservation(
     }
     // 取该 session 的 mode。
     let mode = store.mode_state(&sid).mode;
-    pool.ensure_builtin_model_ready(&sid, false).await?;
     let send_started_at = std::time::Instant::now();
     crate::features::assistant::timing::start_turn(&sid);
     log::info!(

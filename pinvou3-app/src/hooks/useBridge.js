@@ -58,8 +58,8 @@ function shouldShowApiKeyGate(bs, currentView, bridgeAvailable) {
   const config = bs && bs.effectiveModelConfig;
   const missingCredential = config
     && (config.credential_state === 'missing' || config.credential_state === 'unavailable');
-  // 后台托管凭据（例如内置模型）由发送链路按当前账户动态获取，不能要求用户手工填写 Key。
-  // `!== false` 兼容尚未返回该字段的旧后端：普通云模型仍保持原有保护行为。
+  // 旧后端没有返回 requires_user_api_key 时保持原有安全门控；显式 false 表示凭据由
+  // 运行时或无鉴权端点负责，前端不能要求用户手工填写 API Key。
   const requiresUserApiKey = config && config.requires_user_api_key !== false;
   return !!(bridgeAvailable && inChat && missingCredential && requiresUserApiKey && !isLocalModel(config));
 }

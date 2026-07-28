@@ -1970,7 +1970,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
       );
     };
 
-    const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = ['bing'], onAddSearchProvider, onDeleteSearchProvider, searchApiKey, setSearchApiKey, searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, searchNeedsRestart, languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
+    const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = ['bing'], onAddSearchProvider, onDeleteSearchProvider, searchApiKey, setSearchApiKey, searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, searchNeedsRestart, languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
       const isDark = activeTheme === 'dark';
       const settingsCopy = t.uiSettingsDetail;
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
@@ -2372,6 +2372,11 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
             </IOSRow>
             <IOSRow label={t.uiSettings.theme} desc={t.uiSettings.themeDesc}>
               <SSegmented isDark={isDark} value={activeTheme} onChange={setActiveTheme} options={[{ key: 'light', label: t.light }, { key: 'dark', label: t.dark }]} />
+            </IOSRow>
+          </IOSSection>
+          <IOSSection title={t.sidebarSection}>
+            <IOSRow label={t.sidebarDateGrouping} desc={t.sidebarDateGroupingDesc}>
+              <IOSSwitch checked={sidebarDateGrouping} onChange={onSidebarDateGroupingChange} />
             </IOSRow>
           </IOSSection>
           {canConfigureDesktopNotifications && (
