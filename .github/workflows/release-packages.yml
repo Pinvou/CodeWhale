@@ -217,9 +217,12 @@ jobs:
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
-      # 原生 ARM runner 使用 GNU ld 链接 fat-LTO 产物会长期卡在最终链接，
-      # 并在约 40 分钟后被托管 runner 回收；lld 保留 release profile，
-      # 只替换链接器以缩短打包时间。
+      # GitHub 原生 ARM runner 会在约 40 分钟后被托管服务回收；该 artifact
+      # 用于 PR 发布链路验证，保留 release 的 opt-level/strip/panic 设置，
+      # 但关闭 fat-LTO 并提高代码生成并行度。正式 Linux 发布仍由
+      # scripts/release-deb.sh 使用 Cargo.toml 中的完整 release profile。
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - name: Checkout (含 submodule)
