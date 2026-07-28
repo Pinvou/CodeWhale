@@ -217,6 +217,10 @@ jobs:
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
+      # 原生 ARM runner 使用 GNU ld 链接 fat-LTO 产物会长期卡在最终链接，
+      # 并在约 40 分钟后被托管 runner 回收；lld 保留 release profile，
+      # 只替换链接器以缩短打包时间。
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     steps:
       - name: Checkout (含 submodule)
         uses: actions/checkout@v4
@@ -241,7 +245,7 @@ jobs:
             librsvg2-dev libssl-dev \
             libx11-dev libxi-dev libxtst-dev \
             libayatana-appindicator3-dev \
-            build-essential pkg-config cmake
+            build-essential pkg-config cmake lld
 
       - name: Node.js
         uses: actions/setup-node@v4
