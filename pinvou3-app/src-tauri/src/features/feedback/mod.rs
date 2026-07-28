@@ -654,7 +654,7 @@ fn sha256_file(path: &Path) -> Result<String, FeedbackError> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::platform::encoding::hex_lower(&hasher.finalize()))
 }
 
 fn now_rfc3339() -> String {

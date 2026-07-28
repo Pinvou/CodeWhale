@@ -548,7 +548,7 @@ fn detect_hardware_identity(fallback_claim: &str) -> HardwareIdentity {
 }
 
 fn hardware_identity(claim: String, source: &str, quality: &str) -> HardwareIdentity {
-    let digest = format!("{:x}", Sha256::digest(claim.as_bytes()));
+    let digest = crate::platform::encoding::hex_lower(&Sha256::digest(claim.as_bytes()));
     HardwareIdentity {
         claim,
         source: source.to_string(),

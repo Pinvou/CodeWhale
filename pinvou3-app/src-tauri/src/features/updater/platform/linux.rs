@@ -177,7 +177,7 @@ pub async fn download_update_package(
     }
     drop(file);
 
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = crate::platform::encoding::hex_lower(&hasher.finalize());
     if actual != expected {
         let _ = std::fs::remove_file(&dest);
         return Err(format!(
@@ -240,7 +240,9 @@ pub async fn report_pending_update_result_info(
 
 fn file_sha256(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
-    Some(format!("{:x}", Sha256::digest(&bytes)))
+    Some(crate::platform::encoding::hex_lower(&Sha256::digest(
+        &bytes,
+    )))
 }
 
 fn available_bytes(dir: &Path) -> Option<u64> {
