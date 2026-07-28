@@ -6,6 +6,8 @@
 - 直接通过 URL 下载
 - 从 `search` 命令输出的 JSON 文件（或标准输入）中选择文档下载
 
+`search --raw-json` 仅允许作为本节自动下载流程的内部管道输入，不得用于面向用户展示搜索结果，也不得把原始 JSON 输出给用户。Windows 暂不支持 JSON 文件/标准输入模式，应改用 `download --url`。
+
 **语法**：
 ```bash
 # 直接 URL 模式
