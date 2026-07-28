@@ -125,6 +125,8 @@ pub struct EffectiveModelConfig {
     pub provider_kind: Option<String>,
     pub vendor: Option<String>,
     pub endpoint_mode: Option<String>,
+    pub credential_mode: crate::features::assistant::runtime_model::ModelCredentialMode,
+    pub requires_user_api_key: bool,
     /// 被环境变量覆盖的字段名列表（如 `["model", "base_url"]`）。
     /// 空列表表示全部走 settings.json，用户修改会生效。
     pub env_overrides: Vec<String>,
@@ -172,6 +174,9 @@ pub async fn get_effective_model_config(
         .map(|model| model.preset)
         .unwrap_or_default()
         .as_str();
+    let credential_mode = pool.credential_mode_for(effective.as_ref(), bridge.api_key_required());
+    let requires_user_api_key = credential_mode
+        == crate::features::assistant::runtime_model::ModelCredentialMode::UserManaged;
     Ok(EffectiveModelConfig {
         preset: preset.to_string(),
         model: bridge.model(),
@@ -197,6 +202,8 @@ pub async fn get_effective_model_config(
         endpoint_mode: effective
             .as_ref()
             .and_then(|model| model.endpoint_mode.clone()),
+        credential_mode,
+        requires_user_api_key,
         env_overrides,
     })
 }
@@ -266,16 +273,19 @@ pub async fn reveal_model_api_key(id: String) -> Result<Option<String>, String> 
 
 /// 增或改一条模型(按 id)。前端负责生成稳定 id。
 #[tauri::command]
-pub async fn save_model(model: SavedModel) -> Result<(), String> {
+pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Result<(), String> {
     if model.is_builtin_llmapi() {
         return Err("内置模型不可编辑".to_string());
     }
+    let model_id = model.id.clone();
     let mut prefs = UserPrefs::load();
     let old = prefs.model_by_id(&model.id).cloned();
     let model = apply_model_credential(model, old.as_ref())
         .map_err(|e| sanitize_command_error("save_model", e))?;
     prefs.upsert_model(model);
-    prefs.save().map_err(|e| format!("save_model: {e:?}"))
+    prefs.save().map_err(|e| format!("save_model: {e:?}"))?;
+    pool.mark_model_updated(&model_id);
+    Ok(())
 }
 
 /// 删一条模型。至少保留一条;删到当前 active 会自动回退列表首条。
