@@ -10,7 +10,7 @@ const {
 } = require("../scripts/tauri/effective-config.js");
 const {
   configSpecs,
-  prepareLinuxCodexBridge,
+  prepareCodexBridge,
   prepareWindowsCodexBridge,
   prepareTauriArgs,
   runTauri,
@@ -27,7 +27,7 @@ const { WINDOWS_BRIDGE_CONFIG_PATH } = require("../scripts/tauri/codex-bridge.js
 const noRuntime = () => null;
 
 let preparedBridge = null;
-prepareLinuxCodexBridge({
+prepareCodexBridge({
   platform: "linux",
   spawn: (command, args, options) => {
     preparedBridge = { command, args, options };
@@ -37,10 +37,20 @@ prepareLinuxCodexBridge({
 assert.match(preparedBridge.command, /prepare-codex-bridge-runtime\.sh$/);
 assert.deepEqual(preparedBridge.args, []);
 preparedBridge = null;
-prepareLinuxCodexBridge({
+prepareCodexBridge({
   platform: "darwin",
+  spawn: (command, args, options) => {
+    preparedBridge = { command, args, options };
+    return { status: 0 };
+  },
+});
+assert.match(preparedBridge.command, /prepare-codex-bridge-runtime\.sh$/);
+assert.deepEqual(preparedBridge.args, []);
+preparedBridge = null;
+prepareCodexBridge({
+  platform: "win32",
   spawn: () => {
-    throw new Error("macOS 不应准备 Linux Codex Bridge");
+    throw new Error("Windows 不应准备 Codex Bridge");
   },
 });
 assert.equal(preparedBridge, null);
@@ -163,11 +173,19 @@ const macos = composeEffectiveConfig([platformConfigPath("darwin")]).effectiveCo
 assert.deepEqual(macos.bundle.targets, ["app", "dmg"]);
 assert.ok(macos.bundle.resources["resources/common/web-template/"]);
 assert.equal(
+  macos.bundle.resources["resources/platforms/macos/codex-bridge/"],
+  "runtime/codex-bridge",
+);
+assert.equal(
   macos.bundle.resources["resources/platforms/macos/aarch64/asr/"],
   undefined,
   "macOS system Speech must not bundle the legacy SenseVoice runtime",
 );
 const macosManifest = buildResourceManifest(macos, { platform: "darwin" });
+assert.ok(
+  macosManifest.files.some((file) => file.destination.startsWith("runtime/codex-bridge/")),
+  "macOS resource manifest must contain the Codex ACP Bridge runtime",
+);
 assert.ok(
   !macosManifest.files.some((file) => file.destination.startsWith("runtime/asr/")),
   "macOS resource manifest must not contain a legacy ASR runtime",
