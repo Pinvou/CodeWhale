@@ -5,11 +5,16 @@ cd "$(dirname "$0")"
 
 OS_NAME="$(uname -s)"
 
-# Linux 开发环境自动准备与正式包一致的私有 Node + 精简 ACP Bridge。生成物被
+# Linux/macOS 开发环境自动准备与正式包一致的应用隔离 Node + 精简 ACP Bridge。生成物被
 # gitignore；已有完整 Bridge 时不重复下载和安装。
-if [ "$OS_NAME" = "Linux" ]; then
-  BRIDGE_NODE="src-tauri/resources/platforms/linux/codex-bridge/node/bin/node"
-  BRIDGE_ENTRY="src-tauri/resources/platforms/linux/codex-bridge/acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
+if [ "$OS_NAME" = "Linux" ] || [ "$OS_NAME" = "Darwin" ]; then
+  if [ "$OS_NAME" = "Linux" ]; then
+    BRIDGE_PLATFORM_DIR="linux"
+  else
+    BRIDGE_PLATFORM_DIR="macos"
+  fi
+  BRIDGE_NODE="src-tauri/resources/platforms/$BRIDGE_PLATFORM_DIR/codex-bridge/node/bin/node"
+  BRIDGE_ENTRY="src-tauri/resources/platforms/$BRIDGE_PLATFORM_DIR/codex-bridge/acp/node_modules/@agentclientprotocol/codex-acp/dist/index.js"
   if [ ! -x "$BRIDGE_NODE" ] || [ ! -f "$BRIDGE_ENTRY" ]; then
     echo "正在准备 Codex ACP Bridge(dev)..."
     ./scripts/prepare-codex-bridge-runtime.sh
@@ -61,8 +66,11 @@ export PINVOU_REMOTE_RELAY_WS_URL="${PINVOU_REMOTE_RELAY_WS_URL:-wss://pinvou.co
 # ── macOS 提示 ───────────────────────────────────────────────────
 # Mac 不需要 webkit/fcitx/X11 相关 env(那些在 lib.rs RELEASE_ENV_DEFAULTS Linux 段)。
 # 此处无需额外 Mac 专属 export,直接落到 tauri dev 即可。
+# macOS dev 同样套用平台 overlay(原生红绿灯顶栏 titleBarStyle=Overlay),
+# 与打包产物保持一致;build.js 的自动 overlay 只覆盖 build/bundle,dev 在此显式带上。
 if [ "$OS_NAME" = "Darwin" ]; then
   echo "✓ macOS dev 模式(跳过 Linux 内网 vLLM/WebKit env)"
+  exec npx tauri dev --config src-tauri/config/platforms/macos/tauri.conf.json "$@"
 fi
 
 exec npx tauri dev "$@"
