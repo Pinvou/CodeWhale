@@ -12,6 +12,12 @@ const SHELL_TOOLS = new Set([
   'shell',
 ]);
 
+export function conversationItemsForMode(chatItems = [], unified = true) {
+  const items = Array.isArray(chatItems) ? chatItems : [];
+  if (!unified) return items;
+  return items.filter(item => !(item && item.legacyConversationOnly));
+}
+
 function stableItemId(item, index) {
   return `deepseek-${item && item.id != null ? item.id : index}`;
 }
@@ -237,8 +243,9 @@ export function projectDeepSeekConversation({
   }
   const unassignedRecords = timeline.filter(record => !assigned.has(record.id));
   const unassignedTurns = userTurns.filter(turn => !turn.lifecycleKnown);
-  const trailingRecords = unassignedRecords.slice(-unassignedTurns.length);
-  const trailingTurns = unassignedTurns.slice(-trailingRecords.length);
+  const trailingPairCount = Math.min(unassignedRecords.length, unassignedTurns.length);
+  const trailingRecords = trailingPairCount > 0 ? unassignedRecords.slice(-trailingPairCount) : [];
+  const trailingTurns = trailingPairCount > 0 ? unassignedTurns.slice(-trailingPairCount) : [];
   trailingRecords.forEach((record, index) => {
     Object.assign(trailingTurns[index], {
       status: record.status,

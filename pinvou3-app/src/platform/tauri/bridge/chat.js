@@ -28,6 +28,20 @@
     var parseScheduledTaskDraftFromText = context.parseScheduledTaskDraftFromText;
     var autoCreateScheduledTaskDraft = context.autoCreateScheduledTaskDraft;
 
+  // Composer 草稿是纯前端短期状态：写入时不 notify，避免每次按键都克隆
+  // 整个 chat slice 并触发 App 重渲染。会话切换本身会 notify，ChatView 会在
+  // activeSessionId 变化后主动读取目标 working set 的草稿。
+  function getComposerDraft() {
+    return String(state.composerDraft || "");
+  }
+  function setComposerDraft(value) {
+    var text = value == null ? "" : String(value);
+    state.composerDraft = text;
+    var activeBuffer = state.activeSessionId && sessionStates[state.activeSessionId];
+    if (activeBuffer) activeBuffer.composerDraft = text;
+    return text;
+  }
+
   // ── Chat Items (display format for React) ────────────────────────
   function addChatItem(item) {
     item.id = ++context.itemIdSeq;
@@ -196,6 +210,7 @@
       turnOwnerBuffer.remoteTerminalSeen = false;
     }
     runSyncOnSession(sid, function () {
+      state.chatItems = state.chatItems.filter(function (item) { return !item.turnErrorNotice; });
       var uitem = { type: "user", text: displayText, time: timeStr() };
       if (meta && meta.pinvouTransfer) uitem.pinvouTransfer = meta.pinvouTransfer; // 仅展示层,不进 messages/LLM
       addChatItem(uitem);
@@ -239,7 +254,9 @@
         runSyncOnSession(sid, function () {
           addSystemItem(concurrentTurn
             ? bt("turnAlreadyInProgress")
-            : "⚠️ " + (err && err.toString ? err.toString() : err));
+            : "⚠️ " + (err && err.toString ? err.toString() : err), {
+            turnErrorNotice: true,
+          });
         });
         notify();
         if (surfaceFailure) throw err;
@@ -631,6 +648,8 @@
       flushQueued: flushQueued,
       sendMessageToSession: sendMessageToSession,
       sendMessage: sendMessage,
+      getComposerDraft: getComposerDraft,
+      setComposerDraft: setComposerDraft,
       prefillComposer: prefillComposer,
       removeQueued: removeQueued,
       summonPinvou: summonPinvou,
