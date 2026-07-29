@@ -19,8 +19,8 @@ $generatedConfigPath = Join-Path $tauriRoot "target\windows-runtime\tauri.genera
 $stagingParent = Join-Path $tauriRoot "target\windows-runtime"
 $sourceVerificationMarkerPath = Join-Path $stagingParent ".verified-lock"
 $resolverLockPath = Join-Path $stagingParent ".resolver.lock"
-$verificationSchemaVersion = 3
-$stageManifestSchemaVersion = 1
+$verificationSchemaVersion = 4
+$stageManifestSchemaVersion = 2
 
 if ([string]::IsNullOrWhiteSpace($LockFile)) {
   $LockFile = $defaultLockFile
@@ -176,7 +176,11 @@ function Read-CompatibleRuntimeManifest {
   param([string]$ManifestPath)
 
   $manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-  if ([int]$manifest.schemaVersion -ne 1 -or [string]$manifest.target -ne [string]$lock.target) {
+  if (
+    [int]$manifest.schemaVersion -ne 2 -or
+    [string]$manifest.target -ne [string]$lock.target -or
+    @($manifest.stagedFiles).Count -eq 0
+  ) {
     throw "Windows runtime submodule manifest schema or target is incompatible."
   }
   return $manifest
@@ -277,12 +281,17 @@ function Get-StagedRelativePaths {
     return @()
   }
   $rootPrefix = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+  $metadataPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  [void]$metadataPaths.Add(".verified-lock")
+  [void]$metadataPaths.Add(".stage-manifest.json")
   return @(
     Get-ChildItem -LiteralPath $Root -Recurse -File -Force |
-      Where-Object { $_.Name -notin @(".verified-lock", ".stage-manifest.json") } |
       ForEach-Object {
         $fullPath = [System.IO.Path]::GetFullPath($_.FullName)
-        $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
+        $relativePath = $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
+        if (-not $metadataPaths.Contains($relativePath)) {
+          $relativePath
+        }
       } |
       Sort-Object
   )
@@ -303,6 +312,62 @@ function Get-StagedRelativeFiles {
       }
     }
   )
+}
+
+function Test-StagedFilesAgainstTrustedManifest {
+  param(
+    [string]$Root,
+    $TrustedEntries
+  )
+
+  try {
+    $entries = @($TrustedEntries)
+    if ($entries.Count -eq 0) {
+      return $false
+    }
+
+    $expectedByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $entries) {
+      $relativePath = ([string]$entry.path).Replace('\', '/')
+      $sha256 = ([string]$entry.sha256).ToLowerInvariant()
+      if (
+        [string]::IsNullOrWhiteSpace($relativePath) -or
+        $relativePath.StartsWith('/') -or
+        $relativePath -match '^[A-Za-z]:' -or
+        $relativePath -match '(^|/)\.\.(/|$)' -or
+        $relativePath -in @(".verified-lock", ".stage-manifest.json") -or
+        $sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [long]$entry.bytes -lt 0 -or
+        $expectedByPath.ContainsKey($relativePath)
+      ) {
+        return $false
+      }
+
+      $fullPath = Join-Path $Root $relativePath.Replace('/', '\')
+      Assert-ChildPath -Root $Root -Path $fullPath
+      if (
+        -not (Test-Path -LiteralPath $fullPath -PathType Leaf) -or
+        [long](Get-Item -LiteralPath $fullPath).Length -ne [long]$entry.bytes -or
+        (Get-Sha256 -Path $fullPath) -ne $sha256
+      ) {
+        return $false
+      }
+      $expectedByPath.Add($relativePath, $entry)
+    }
+
+    $actualPaths = @(Get-StagedRelativePaths -Root $Root)
+    if ($actualPaths.Count -ne $expectedByPath.Count) {
+      return $false
+    }
+    foreach ($actualPath in $actualPaths) {
+      if (-not $expectedByPath.ContainsKey($actualPath)) {
+        return $false
+      }
+    }
+    return $true
+  } catch {
+    return $false
+  }
 }
 
 function Get-StageManifestContent {
@@ -330,8 +395,8 @@ function Write-StageManifest {
 
 function Test-StageManifest {
   param(
-    [string]$Root,
-    [string]$ManifestPath
+    [string]$ManifestPath,
+    $TrustedEntries
   )
 
   try {
@@ -350,34 +415,35 @@ function Test-StageManifest {
       return $false
     }
 
-    $expectedByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($entry in @($cached.files)) {
+    $trustedByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in @($TrustedEntries)) {
       $relativePath = [string]$entry.path
-      if ([string]::IsNullOrWhiteSpace($relativePath) -or $expectedByPath.ContainsKey($relativePath)) {
+      if ([string]::IsNullOrWhiteSpace($relativePath) -or $trustedByPath.ContainsKey($relativePath)) {
         return $false
       }
-      $fullPath = Join-Path $Root $relativePath.Replace('/', '\')
-      Assert-ChildPath -Root $Root -Path $fullPath
+      $trustedByPath.Add($relativePath, $entry)
+    }
+
+    $cachedByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in @($cached.files)) {
+      $relativePath = [string]$entry.path
       if (
-        -not (Test-Path -LiteralPath $fullPath -PathType Leaf) -or
-        [long](Get-Item -LiteralPath $fullPath).Length -ne [long]$entry.bytes -or
-        (Get-Sha256 -Path $fullPath) -ne [string]$entry.sha256
+        [string]::IsNullOrWhiteSpace($relativePath) -or
+        $cachedByPath.ContainsKey($relativePath) -or
+        -not $trustedByPath.ContainsKey($relativePath)
       ) {
         return $false
       }
-      $expectedByPath.Add($relativePath, $entry)
-    }
-
-    $actualPaths = @(Get-StagedRelativePaths -Root $Root)
-    if ($actualPaths.Count -ne $expectedByPath.Count) {
-      return $false
-    }
-    foreach ($actualPath in $actualPaths) {
-      if (-not $expectedByPath.ContainsKey($actualPath)) {
+      $trusted = $trustedByPath[$relativePath]
+      if (
+        [long]$entry.bytes -ne [long]$trusted.bytes -or
+        ([string]$entry.sha256).ToLowerInvariant() -ne ([string]$trusted.sha256).ToLowerInvariant()
+      ) {
         return $false
       }
+      $cachedByPath.Add($relativePath, $entry)
     }
-    return $true
+    return $cachedByPath.Count -eq $trustedByPath.Count
   } catch {
     return $false
   }
@@ -547,7 +613,10 @@ function Test-VerifiedStageReusable {
   if (-not (Test-VerificationMarker -Path $stageMarkerPath -StageManifestSha256 $stageManifestSha256)) {
     return $false
   }
-  if (-not (Test-StageManifest -Root $stagingRoot -ManifestPath $stageManifestPath)) {
+  if (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries $Manifest.stagedFiles)) {
+    return $false
+  }
+  if (-not (Test-StageManifest -ManifestPath $stageManifestPath -TrustedEntries $Manifest.stagedFiles)) {
     return $false
   }
 
@@ -614,6 +683,9 @@ function Stage-Submodule {
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "node-*-win-x64.zip" -Label "Node.js") -Destination (Join-Path $expandedRoot "node") -RequiredFile "node.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "pandoc-*-windows-x86_64.zip" -Label "Pandoc") -Destination (Join-Path $expandedRoot "pandoc") -RequiredFile "pandoc.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "onnxruntime-win-x64-*-runtime.zip" -Label "ONNX Runtime") -Destination (Join-Path $expandedRoot "onnxruntime") -RequiredFile "onnxruntime.dll" -OnnxOnly
+      if (-not (Test-StagedFilesAgainstTrustedManifest -Root $temporaryRoot -TrustedEntries $Manifest.stagedFiles)) {
+        throw "Generated Windows runtime staging does not match the locked private-runtime stagedFiles manifest."
+      }
       $temporaryStageManifestPath = Write-StageManifest -Root $temporaryRoot
       $temporaryStageManifestSha256 = Get-Sha256 -Path $temporaryStageManifestPath
       Write-Utf8WithoutBom -Path (Join-Path $temporaryRoot ".verified-lock") -Content (Get-VerificationMarkerContent -StageManifestSha256 $temporaryStageManifestSha256)

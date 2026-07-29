@@ -17,6 +17,13 @@ function Write-TestFile {
   [System.IO.File]::WriteAllText($Path, $Content, [System.Text.Encoding]::UTF8)
 }
 
+function Write-StageCacheMetadata {
+  param([string]$Root)
+  $writtenManifestPath = Write-StageManifest -Root $Root
+  $manifestSha256 = Get-Sha256 -Path $writtenManifestPath
+  Write-Utf8WithoutBom -Path (Join-Path $Root ".verified-lock") -Content (Get-VerificationMarkerContent -StageManifestSha256 $manifestSha256)
+}
+
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou3-runtime-cache-test-" + [System.Guid]::NewGuid().ToString("N"))
 try {
   $stagingParent = Join-Path $testRoot "windows-runtime"
@@ -53,12 +60,12 @@ try {
   Write-TestFile -Path $bootstrapperPath -Content "bootstrapper"
   Write-TauriOverlay -StageId $stageId
 
-  $writtenManifestPath = Write-StageManifest -Root $stagingRoot
-  $stageManifestSha256 = Get-Sha256 -Path $writtenManifestPath
-  Write-Utf8WithoutBom -Path (Join-Path $stagingRoot ".verified-lock") -Content (Get-VerificationMarkerContent -StageManifestSha256 $stageManifestSha256)
+  $trustedStagedFiles = @(Get-StagedRelativeFiles -Root $stagingRoot)
+  Write-StageCacheMetadata -Root $stagingRoot
 
   $bootstrapperItem = Get-Item -LiteralPath $bootstrapperSourcePath
   $manifest = [pscustomobject]@{
+    stagedFiles = $trustedStagedFiles
     files = @(
       [pscustomobject]@{
         path = $bootstrapperRelativePath
@@ -73,7 +80,11 @@ try {
   Write-TestFile -Path $runtimeDependencyPath -Content "xyz"
   Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "same-size staged content tampering must invalidate the cache"
 
+  Write-StageCacheMetadata -Root $stagingRoot
+  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "rewriting cached content, stage manifest and verified lock together must not forge trust"
+
   Write-TestFile -Path $runtimeDependencyPath -Content "abc"
+  Write-StageCacheMetadata -Root $stagingRoot
   Assert-True -Condition (Test-VerifiedStageReusable -Manifest $manifest) -Message "restoring the verified staged content should restore reuse"
 
   Remove-Item -LiteralPath $runtimeDependencyPath -Force
@@ -82,6 +93,23 @@ try {
   Write-TestFile -Path $runtimeDependencyPath -Content "abc"
   Write-TestFile -Path (Join-Path $stagingRoot "expanded\poppler\unexpected.dll") -Content "unexpected"
   Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "unexpected staged files must invalidate the cache"
+  Remove-Item -LiteralPath (Join-Path $stagingRoot "expanded\poppler\unexpected.dll") -Force
+
+  $nestedMarkerPath = Join-Path $stagingRoot "expanded\poppler\nested\.verified-lock"
+  $nestedManifestPath = Join-Path $stagingRoot "expanded\poppler\nested\.stage-manifest.json"
+  Write-TestFile -Path $nestedMarkerPath -Content "nested marker payload"
+  Write-TestFile -Path $nestedManifestPath -Content "nested manifest payload"
+  $stagedPaths = @(Get-StagedRelativePaths -Root $stagingRoot)
+  Assert-True -Condition ($stagedPaths -contains "expanded/poppler/nested/.verified-lock") -Message "nested .verified-lock files must remain in the complete staged-file set"
+  Assert-True -Condition ($stagedPaths -contains "expanded/poppler/nested/.stage-manifest.json") -Message "nested .stage-manifest.json files must remain in the complete staged-file set"
+  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "unexpected nested metadata-named files must invalidate the cache"
+  Remove-Item -LiteralPath $nestedMarkerPath -Force
+  Remove-Item -LiteralPath $nestedManifestPath -Force
+
+  $duplicateTrustedEntries = @($trustedStagedFiles) + @($trustedStagedFiles[0])
+  Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries $duplicateTrustedEntries)) -Message "duplicate Windows-insensitive trusted paths must be rejected"
+  $escapingEntry = [pscustomobject]@{ path = "../escape.dll"; bytes = 0; sha256 = ("0" * 64) }
+  Assert-True -Condition (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries @($escapingEntry))) -Message "trusted paths escaping the staging root must be rejected"
 
   Write-Host "Windows runtime cache behavior: ok"
 } finally {

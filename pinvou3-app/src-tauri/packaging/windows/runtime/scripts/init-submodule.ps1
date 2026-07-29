@@ -11,7 +11,7 @@ $runtimeRoot = Join-Path $repoRoot $runtimePath
 $runtimeLockPath = Join-Path $repoRoot "pinvou3-app\src-tauri\config\platforms\windows\runtime\x86_64.lock.json"
 $resolverCacheRoot = Join-Path $repoRoot "pinvou3-app\src-tauri\target\windows-runtime"
 $resolverLockPath = Join-Path $resolverCacheRoot ".resolver.lock"
-$cacheSchema = "v3"
+$cacheSchema = "v4"
 
 function Invoke-Git {
   param(

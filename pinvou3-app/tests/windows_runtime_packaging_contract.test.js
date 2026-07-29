@@ -99,6 +99,16 @@ assert.ok(
   "runtime staging reuse must validate a complete staged-file manifest",
 );
 assert.ok(
+  runtimeScript.includes("function Test-StagedFilesAgainstTrustedManifest") &&
+    runtimeScript.includes("-TrustedEntries $Manifest.stagedFiles"),
+  "runtime staging reuse must validate files against the locked private-runtime manifest",
+);
+assert.match(
+  runtimeScript,
+  /\[int\]\$manifest\.schemaVersion -ne 2/u,
+  "runtime resolution must require the trusted stagedFiles manifest schema",
+);
+assert.ok(
   runtimeScript.includes("Stage-Submodule -Manifest $verifiedManifest -Rebuild"),
   "failed staging reuse must force a complete atomic rebuild",
 );
@@ -152,6 +162,11 @@ assert.match(
   /pinvou3-windows-runtime-\$cacheSchema-\$expectedCommit-\$\(\$lockSha256\.Substring/u,
   "runtime initialization must emit a schema, commit and lock-scoped Jenkins cache key",
 );
+assert.ok(
+  runtimeInitScript.includes('$cacheSchema = "v4"') &&
+    runtimeScript.includes('$verificationSchemaVersion = 4'),
+  "the trusted-staging scheme must invalidate earlier self-attested caches",
+);
 assert.match(
   runtimeInitScript,
   /SetEnvironmentVariable\("GIT_LFS_SKIP_SMUDGE", "1", "Process"\)[\s\S]*?submodule", "update"/u,
@@ -176,6 +191,10 @@ assert.match(
   runtimeInitScript,
   /if \(\$CacheKeyOnly\)[\s\S]*?Write-Output \$cacheKey[\s\S]*?exit 0/u,
   "Jenkins must be able to resolve the runtime cache key before remote access",
+);
+assert.ok(
+  !runtimeScript.includes("sensevoice-small-q8.gguf"),
+  "the Windows installer overlay must not bundle the on-demand SenseVoice recognition model",
 );
 
 const windowsJobStart = releaseWorkflow.indexOf("build-windows-x64:");

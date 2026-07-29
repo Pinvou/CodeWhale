@@ -16,16 +16,19 @@ npm run runtime:windows:stage
 
 `runtime:windows:init` 只在当前 checkout 与主仓库 gitlink 不一致时更新私有 submodule；gitlink 未变化时直接复用。
 submodule checkout 会显式禁用 LFS smudge，随后检查受 LFS 管理的实际文件，只有仍存在 pointer 时才按路径执行
-`git lfs pull`。脚本输出 `pinvou3-windows-runtime-v3-<commit>-<lock-sha-prefix>` 形式的 Jenkins 缓存键；lock 或缓存
+`git lfs pull`。脚本输出 `pinvou3-windows-runtime-v4-<commit>-<lock-sha-prefix>` 形式的 Jenkins 缓存键；lock 或缓存
 schema 变化时不会复用旧缓存。
 
 校验内容包括 submodule commit、gitlink、origin URL、工作树状态、manifest SHA-256、文件大小与 SHA-256，以及受管理 ZIP 解压后的逐文件清单。
 
 首次完整校验后，脚本会在 `target/windows-runtime/.verified-lock` 记录 runtime commit、manifest SHA-256、lock 文件
 SHA-256、目标平台和 resolver schema。staging 同时生成包含全部暂存文件路径、大小和 SHA-256 的 `.stage-manifest.json`，
-其摘要绑定到 staging marker。后续构建会复核完整文件集合、内容哈希、VC++ 引导程序和 overlay；全部一致时跳过重复展开与复制。
+其摘要绑定到 staging marker，但这两份缓存元数据只用于快速拒绝和诊断。后续构建必须按主仓库 lock 锁定的私有 manifest
+`stagedFiles` 重新校验完整文件集合与内容哈希，并单独校验 VC++ 引导程序和 overlay；全部一致时才跳过重复展开与复制。
 任一输入或暂存产物变化、使用 `-Force`，都会重新执行源文件 SHA-256 校验并原子重建 staging。同一工作区的 resolver
 调用通过 `target/windows-runtime/.resolver.lock` 串行化，避免并发覆盖缓存。
+
+ASR 安装资源只内置 `fsmn-vad.gguf`、wrapper 和 SenseVoice backend；`sensevoice-small-*` 识别模型由应用按需下载，不进入安装包。
 
 验证后的运行时写入：
 
