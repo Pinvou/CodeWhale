@@ -675,7 +675,7 @@
     if (sid) {
       var eventBuffer = getBuffer(sid);
       var eventName = String((e && e.event) || "");
-      var isTurnEvent = /chat:(user_message|turn_started|delta|tool_start|tool_end|user_input_required|transient_error)$/.test(eventName);
+      var isTurnEvent = /chat:(user_message|turn_started|delta|reasoning_start|reasoning_delta|reasoning_done|tool_start|tool_end|user_input_required|transient_error)$/.test(eventName);
       if (eventBuffer && !eventBuffer.localTurnOwned && (eventBuffer.busy || isTurnEvent)) {
         markRemoteTurn(sid, eventBuffer);
       }
@@ -1222,6 +1222,18 @@
         var b = blocks[bi];
         if (b.type === "text") {
           textBuf += b.text;
+        } else if (b.type === "thinking") {
+          if (textBuf) {
+            addChatItem({ type: "assistant", html: renderMarkdown(textBuf), time: "", streaming: false });
+            textBuf = "";
+          }
+          var reasoningText = String(b.thinking || b.text || "");
+          if (reasoningText) {
+            addChatItem({
+              type: "reasoning", text: reasoningText, time: "", streaming: false,
+              startedAt: null, completedAt: null,
+            });
+          }
         } else if (b.type === "tool_use") {
           if (textBuf) {
             addChatItem({ type: "assistant", html: renderMarkdown(textBuf), time: "", streaming: false });
@@ -1490,6 +1502,8 @@
   var retryLlmApiProvisioning = settingsFeature.retryLlmApiProvisioning;
   var setLlmApiUserEnabled = settingsFeature.setLlmApiUserEnabled;
   var getLlmApiAdminOverview = settingsFeature.getLlmApiAdminOverview;
+  var saveSearchSettings = settingsFeature.saveSearchSettings;
+  var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
   var discoverLocalVllm = settingsFeature.discoverLocalVllm;
   var detectLocalVllmSetup = settingsFeature.detectLocalVllmSetup;
@@ -1790,6 +1804,8 @@
       setSelectedPet: setSelectedPet,
       saveSettings: saveSettings,
       saveSettingsAndRestart: saveSettingsAndRestart,
+      saveSearchSettings: saveSearchSettings,
+      saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
       testSearchProvider: testSearchProvider,
     },
     feedback: { submitFeedback: submitFeedback },
