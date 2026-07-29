@@ -407,6 +407,18 @@ fn compact_content_block(block: &ContentBlock) -> Value {
             "content": content,
         }),
         ContentBlock::ImageUrl { .. } => serde_json::Value::Null,
+        ContentBlock::LocalImage {
+            relative_path,
+            mime_type,
+            display_name,
+            byte_size,
+        } => json!({
+            "type": "local_image",
+            "relative_path": relative_path,
+            "mime_type": mime_type,
+            "display_name": display_name,
+            "byte_size": byte_size,
+        }),
     }
 }
 

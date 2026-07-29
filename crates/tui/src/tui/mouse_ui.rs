@@ -930,7 +930,22 @@ fn agent_message_text(message: &Message) -> String {
                 text.push_str(&format!("{label} ({tool_use_id})\n{content}\n"));
             }
             ContentBlock::ImageUrl { image_url } => {
-                text.push_str(&format!("[image: {}]\n", image_url.url));
+                // Transcript views render metadata placeholders only — never
+                // the data URL / Base64 payload.
+                text.push_str(&format!(
+                    "{}\n",
+                    crate::vision::image_input::data_url_placeholder(&image_url.url)
+                ));
+            }
+            ContentBlock::LocalImage {
+                mime_type,
+                byte_size,
+                ..
+            } => {
+                text.push_str(&format!(
+                    "{}\n",
+                    crate::vision::image_input::image_placeholder(mime_type, *byte_size)
+                ));
             }
             // Thinking blocks are deliberately not surfaced in the main TUI
             // and should not leak through a worker detail view either.

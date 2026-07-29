@@ -391,7 +391,8 @@ impl SeamManager {
                     ContentBlock::ServerToolUse { .. }
                     | ContentBlock::ToolSearchToolResult { .. }
                     | ContentBlock::CodeExecutionToolResult { .. }
-                    | ContentBlock::ImageUrl { .. } => {}
+                    | ContentBlock::ImageUrl { .. }
+                    | ContentBlock::LocalImage { .. } => {}
                 }
             }
         }

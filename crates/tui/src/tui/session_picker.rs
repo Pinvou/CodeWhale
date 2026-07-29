@@ -938,6 +938,9 @@ fn message_text_for_history(message: &crate::models::Message) -> String {
                 format!("tool result: {}", truncate(&content.to_string(), 220))
             }
             crate::models::ContentBlock::ImageUrl { .. } => String::from("[image]"),
+            crate::models::ContentBlock::LocalImage { display_name, .. } => {
+                format!("[image: {display_name}]")
+            }
         };
         let part = part.trim();
         if !part.is_empty() {

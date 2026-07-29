@@ -256,6 +256,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
     handle
         .send(Op::SendMessage {
             content: "verify exact route".to_string(),
+            input: None,
             mode: AppMode::Agent,
             route: Box::new(
                 resolve_runtime_route(&config, ApiProvider::Custom, Some("local-model"))
@@ -350,6 +351,7 @@ async fn goal_continuation_resolves_updated_authoritative_route_after_active_tur
     handle
         .send(Op::SendMessage {
             content: "first turn".to_string(),
+            input: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -465,6 +467,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
     handle
         .send(Op::SendMessage {
             content: "one host-owned turn".to_string(),
+            input: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -573,6 +576,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
     handle
         .send(Op::SendMessage {
             content: "claim the next turn".to_string(),
+            input: None,
             mode: AppMode::Agent,
             route: resolved_route_for_test(&config, "local-model"),
             compaction: Box::new(CompactionConfig::default()),
@@ -1160,6 +1164,7 @@ fn resolved_route_for_test(
 fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op {
     Op::SendMessage {
         content: content.to_string(),
+        input: None,
         mode,
         route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
         compaction: Box::new(CompactionConfig::default()),
@@ -1300,6 +1305,310 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
         "real stream projection must emit the final answer"
     );
     assert_eq!(mock.call_count(), 2);
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+/// PNG signature plus a few payload bytes — enough for magic-byte sniffing.
+const TEST_PNG_BYTES: [u8; 11] = [
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02, 0x03,
+];
+
+fn with_structured_input(op: &mut Op, blocks: Vec<UserInputBlock>) {
+    if let Op::SendMessage { input, .. } = op {
+        *input = Some(UserMessageInput { blocks });
+    }
+}
+
+#[tokio::test]
+async fn structured_image_input_persists_reference_and_materializes_request() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let attachments = workspace.path().join("attachments");
+    fs::create_dir_all(&attachments).expect("mkdir attachments");
+    fs::write(attachments.join("photo.png"), TEST_PNG_BYTES).expect("write png");
+
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "I see the image.",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+
+    let mut op = external_user_message_op("look at this picture", AppMode::Agent, &Config::default());
+    with_structured_input(
+        &mut op,
+        vec![
+            UserInputBlock::Text {
+                text: "look at this picture".to_string(),
+            },
+            UserInputBlock::LocalImage {
+                relative_path: PathBuf::from("attachments/photo.png"),
+                mime_type: "image/png".to_string(),
+                display_name: "photo.png".to_string(),
+            },
+        ],
+    );
+    handle.send(op).await.expect("send structured image turn");
+
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for structured image turn")
+    {
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+
+    // The provider request carries the materialized inline image on a clone...
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 1);
+    let user_message = requests[0]
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .expect("user message in request");
+    let image_url = user_message
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::ImageUrl { image_url } => Some(image_url.url.clone()),
+            _ => None,
+        })
+        .expect("materialized image block in request");
+    assert!(
+        image_url.starts_with("data:image/png;base64,"),
+        "request must inline the data URL; got {image_url}"
+    );
+    assert!(
+        user_message
+            .content
+            .iter()
+            .all(|b| !matches!(b, ContentBlock::LocalImage { .. })),
+        "no local-image reference may reach the provider request"
+    );
+    // ...and turn_meta stays the last block (prefix-cache contract).
+    assert!(
+        matches!(user_message.content.last(), Some(ContentBlock::Text { text, .. }) if text.contains("<turn_meta>")),
+        "turn_meta must remain the final block; got {:?}",
+        user_message.content.last()
+    );
+
+    // ...while the session persists only the lightweight reference.
+    let (tx, snapshot_rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("snapshot request");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), snapshot_rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    let persisted = serde_json::to_string(&snapshot.messages).expect("serialize messages");
+    assert!(
+        !persisted.contains("data:image"),
+        "session must never persist a data URL: {persisted}"
+    );
+    let (relative_path, mime_type, display_name, byte_size) = snapshot
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .find_map(|b| match b {
+            ContentBlock::LocalImage {
+                relative_path,
+                mime_type,
+                display_name,
+                byte_size,
+            } => Some((
+                relative_path.clone(),
+                mime_type.clone(),
+                display_name.clone(),
+                *byte_size,
+            )),
+            _ => None,
+        })
+        .expect("local image reference in session");
+    assert_eq!(relative_path, PathBuf::from("attachments/photo.png"));
+    assert_eq!(mime_type, "image/png");
+    assert_eq!(display_name, "photo.png");
+    assert_eq!(byte_size, TEST_PNG_BYTES.len() as u64);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[test]
+fn forkguard_structured_image_input_persists_reference_and_materializes_request() {
+    // [pinvou3-fork] forkguard 锚点:结构化图片输入的关键结果式行为——provider 请求内联
+    // data URL 且不含本地引用、turn_meta 保持消息末尾、session 只持久化轻量引用。
+    // 断言本体在上方同名测试(#[tokio::test] 展开后可直接同步调用),
+    // 此包装使其纳入 `cargo test forkguard_` 守护面。
+    structured_image_input_persists_reference_and_materializes_request();
+}
+
+#[tokio::test]
+async fn structured_pure_image_message_omits_text_block() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let attachments = workspace.path().join("attachments");
+    fs::create_dir_all(&attachments).expect("mkdir attachments");
+    fs::write(attachments.join("only.png"), TEST_PNG_BYTES).expect("write png");
+
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "described",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+
+    let mut op = external_user_message_op("", AppMode::Agent, &Config::default());
+    with_structured_input(
+        &mut op,
+        vec![UserInputBlock::LocalImage {
+            relative_path: PathBuf::from("attachments/only.png"),
+            mime_type: "image/png".to_string(),
+            display_name: "only.png".to_string(),
+        }],
+    );
+    handle.send(op).await.expect("send pure image turn");
+
+    let mut rx = handle.rx_event.write().await;
+    while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+        .await
+        .expect("timed out waiting for pure image turn")
+    {
+        if let Event::TurnComplete { status, error, .. } = event {
+            assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+            break;
+        }
+    }
+    drop(rx);
+
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 1);
+    let user_message = requests[0]
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .expect("user message in request");
+    // A pure-image message must not fabricate user text: the only text block
+    // is the trailing turn_meta.
+    let non_meta_text_blocks = user_message
+        .content
+        .iter()
+        .filter(|b| matches!(b, ContentBlock::Text { text, .. } if !text.contains("<turn_meta>")))
+        .count();
+    assert_eq!(non_meta_text_blocks, 0, "{:?}", user_message.content);
+    assert!(
+        user_message
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ImageUrl { .. })),
+        "pure image message must still carry the materialized image"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn structured_image_input_invalid_file_fails_turn_without_history() {
+    use crate::llm_client::mock::MockLlmClient;
+
+    let workspace = tempdir().expect("tempdir");
+    let attachments = workspace.path().join("attachments");
+    fs::create_dir_all(&attachments).expect("mkdir attachments");
+    // JPEG bytes staged with a declared `image/png` type.
+    fs::write(
+        attachments.join("mismatch.png"),
+        [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10],
+    )
+    .expect("write jpeg bytes");
+
+    let mock = std::sync::Arc::new(MockLlmClient::new(Vec::new()));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+
+    let cases: Vec<(Vec<UserInputBlock>, &str)> = vec![
+        (
+            vec![UserInputBlock::LocalImage {
+                relative_path: PathBuf::from("attachments/gone.png"),
+                mime_type: "image/png".to_string(),
+                display_name: "gone.png".to_string(),
+            }],
+            "原图片文件已不存在",
+        ),
+        (
+            vec![UserInputBlock::LocalImage {
+                relative_path: PathBuf::from("attachments/mismatch.png"),
+                mime_type: "image/png".to_string(),
+                display_name: "mismatch.png".to_string(),
+            }],
+            "不符",
+        ),
+    ];
+    for (blocks, expected_hint) in cases {
+        let mut op = external_user_message_op("", AppMode::Agent, &Config::default());
+        with_structured_input(&mut op, blocks);
+        handle.send(op).await.expect("send invalid image turn");
+
+        let mut rx = handle.rx_event.write().await;
+        while let Some(event) = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("timed out waiting for failed image turn")
+        {
+            if let Event::TurnComplete { status, error, .. } = event {
+                assert_eq!(status, TurnOutcomeStatus::Failed);
+                let error = error.expect("failed turn carries an error");
+                assert!(
+                    error.contains(expected_hint),
+                    "error must contain '{expected_hint}'; got {error}"
+                );
+                break;
+            }
+        }
+        drop(rx);
+    }
+
+    // Nothing reached the provider, and no broken message entered history.
+    assert_eq!(mock.call_count(), 0);
+    let (tx, snapshot_rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("snapshot request");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), snapshot_rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    assert!(
+        snapshot.messages.is_empty(),
+        "invalid image turns must not pollute session history: {:?}",
+        snapshot.messages
+    );
+
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");
 }
@@ -3859,6 +4168,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
     handle
         .send(Op::SendMessage {
             content: "write the requested local fixture".to_string(),
+            input: None,
             mode: AppMode::Operate,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -4003,6 +4313,7 @@ async fn yolo_mode_does_not_prompt_for_model_driven_typed_ask_rule() {
     handle
         .send(Op::SendMessage {
             content: "please exercise the shell path".to_string(),
+            input: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -4129,6 +4440,7 @@ async fn yolo_mode_still_prompts_for_background_destructive_shell() {
     handle
         .send(Op::SendMessage {
             content: "please run a background shell".to_string(),
+            input: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -4283,6 +4595,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
     handle
         .send(Op::SendMessage {
             content: "please run a background shell".to_string(),
+            input: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -4417,6 +4730,7 @@ async fn yolo_mode_prompts_for_publish_like_shell_safety_floor() {
     handle
         .send(Op::SendMessage {
             content: "please publish this crate".to_string(),
+            input: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),
@@ -4569,6 +4883,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
     handle
         .send(Op::SendMessage {
             content: "please open the PR".to_string(),
+            input: None,
             mode: AppMode::Yolo,
             route: resolved_route_for_test(&api_config, crate::config::DEFAULT_TEXT_MODEL),
             compaction: Box::new(CompactionConfig::default()),

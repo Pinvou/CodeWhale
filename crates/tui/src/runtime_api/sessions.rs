@@ -699,7 +699,33 @@ pub(super) fn session_to_detail(session: SavedSession) -> SessionDetailResponse 
                     } => {
                         json!({ "type": "tool_result", "tool_use_id": tool_use_id, "content": content })
                     }
-                    crate::models::ContentBlock::ImageUrl { .. } => Value::Null,
+                    crate::models::ContentBlock::ImageUrl { image_url } => {
+                        // Never echo the image payload: expose only metadata.
+                        match crate::vision::image_input::split_data_url(&image_url.url) {
+                            Some((mime_type, data)) => json!({
+                                "type": "image_url",
+                                "mime_type": mime_type,
+                                "byte_size": (data.len() / 4) * 3,
+                            }),
+                            None => json!({
+                                "type": "image_url",
+                                "mime_type": Value::Null,
+                                "byte_size": Value::Null,
+                            }),
+                        }
+                    }
+                    crate::models::ContentBlock::LocalImage {
+                        relative_path,
+                        mime_type,
+                        display_name,
+                        byte_size,
+                    } => json!({
+                        "type": "local_image",
+                        "relative_path": relative_path,
+                        "mime_type": mime_type,
+                        "display_name": display_name,
+                        "byte_size": byte_size,
+                    }),
                 })
                 .collect();
             json!({

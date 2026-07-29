@@ -249,6 +249,18 @@ fn format_content_block(buf: &mut String, blk_idx: usize, block: &ContentBlock) 
             );
         }
         ContentBlock::ImageUrl { .. } => {}
+        ContentBlock::LocalImage {
+            mime_type,
+            byte_size,
+            ..
+        } => {
+            // Inspection surfaces show metadata only — never URLs or Base64.
+            let _ = writeln!(
+                buf,
+                "  [{blk_idx}] {}",
+                crate::vision::image_input::image_placeholder(mime_type, *byte_size)
+            );
+        }
     }
 }
 

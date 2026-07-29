@@ -8021,6 +8021,7 @@ async fn dispatch_user_message(
     engine_handle
         .send(Op::SendMessage {
             content,
+            input: None,
             mode: app.mode,
             route: Box::new(turn_route),
             compaction: Box::new(turn_compaction.clone()),

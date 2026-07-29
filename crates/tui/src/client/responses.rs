@@ -500,6 +500,10 @@ fn convert_messages_to_responses_input(request: &MessageRequest) -> Vec<Value> {
                                 "image_url": image_url.url,
                             }));
                         }
+                        // Local image references are materialized into
+                        // `ImageUrl` before a request reaches the client;
+                        // they have no wire equivalent of their own.
+                        ContentBlock::LocalImage { .. } => {}
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,
@@ -787,6 +791,43 @@ mod tests {
             temperature: None,
             top_p: None,
         }
+    }
+
+    #[test]
+    fn responses_input_emits_input_image_for_inline_images() {
+        // Contract: OpenAI Responses wire shape carries inline images as
+        // `input_image` items with the data URL in `image_url`.
+        let data_url = "data:image/webp;base64,UklGRhIAAABXRUJQ";
+        let mut request = minimal_responses_request();
+        request.messages = vec![Message {
+            role: "user".to_string(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "describe".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::ImageUrl {
+                    image_url: crate::models::ImageUrlContent {
+                        url: data_url.to_string(),
+                    },
+                },
+            ],
+        }];
+
+        let items = convert_messages_to_responses_input(&request);
+
+        assert_eq!(
+            items,
+            vec![json!({
+                "type": "message",
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": "describe" },
+                    { "type": "input_image", "image_url": data_url },
+                ],
+            })],
+            "responses wire must carry input_image items; got {items:?}"
+        );
     }
 
     fn test_codex_config(server: &MockServer) -> Config {

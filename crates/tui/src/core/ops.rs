@@ -62,6 +62,36 @@ pub enum UserInputProvenance {
     AssistantGenerated,
 }
 
+/// Structured user message input: ordered text and local-image blocks.
+///
+/// Pure-text callers keep using only `Op::SendMessage::content`; hosts that
+/// stage image attachments into the session workspace additionally pass this
+/// structure so the engine can persist image *references* (never Base64) and
+/// materialize them only while building a provider request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserMessageInput {
+    pub blocks: Vec<UserInputBlock>,
+}
+
+/// One block of structured user input.
+#[allow(dead_code)] // Variants are constructed by external hosts (e.g. pinvou3-app) landing after the engine gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserInputBlock {
+    /// Plain user text.
+    Text {
+        text: String,
+    },
+    /// An image staged inside the session workspace. `relative_path` must be
+    /// a workspace-relative path; the engine re-validates it before every
+    /// request and refuses escapes. `mime_type` is the host-declared type and
+    /// is verified against the real file bytes before sending.
+    LocalImage {
+        relative_path: PathBuf,
+        mime_type: String,
+        display_name: String,
+    },
+}
+
 impl UserInputProvenance {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -85,6 +115,14 @@ pub enum Op {
     /// Send a message to the AI
     SendMessage {
         content: String,
+        /// Structured input carrying local-image references alongside text.
+        /// `None` keeps the legacy pure-text behavior: the message is built
+        /// from `content` alone. When `Some`, the engine builds the user
+        /// message from these blocks (persisting workspace-relative image
+        /// references, never Base64) while `content` remains the plain-text
+        /// rendition used for policy checks, snapshots, and transcript
+        /// summaries.
+        input: Option<UserMessageInput>,
         mode: AppMode,
         /// Exact, structurally resolved route authority for this turn. The
         /// engine activates its client before mutating turn state; injected

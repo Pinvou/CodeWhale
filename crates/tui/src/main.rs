@@ -8515,7 +8515,7 @@ fn exec_stream_input_analysis(
                         &mut analysis.tool_result_estimated_tokens,
                     );
                 }
-                ContentBlock::ImageUrl { .. } => {}
+                ContentBlock::ImageUrl { .. } | ContentBlock::LocalImage { .. } => {}
             }
         }
     }
@@ -8923,6 +8923,7 @@ async fn run_exec_agent(
     engine_handle
         .send(Op::SendMessage {
             content: prompt.to_string(),
+            input: None,
             mode,
             route: Box::new(validated_route.into_resolved()),
             compaction: Box::new(compaction.clone()),

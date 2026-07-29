@@ -2877,6 +2877,7 @@ impl RuntimeThreadManager {
         let auto_approve = req.auto_approve.unwrap_or(thread.auto_approve);
         let op = Op::SendMessage {
             content: prompt,
+            input: None,
             mode,
             route: Box::new(route),
             compaction: Box::new(compaction),

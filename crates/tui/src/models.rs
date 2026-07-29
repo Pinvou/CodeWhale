@@ -91,6 +91,22 @@ pub enum ContentBlock {
     },
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ImageUrlContent },
+    /// Reference to an image file stored inside the session workspace.
+    ///
+    /// This is the only image representation allowed in persisted session
+    /// state: it records the workspace-relative path, declared MIME type,
+    /// display name, and byte size — never Base64. Before a provider request
+    /// is built, the engine clones the message list and materializes this
+    /// block into [`ContentBlock::ImageUrl`] with a `data:` URL (see
+    /// `vision::image_input`); provider clients therefore never see it and
+    /// treat it as having no wire equivalent.
+    #[serde(rename = "local_image")]
+    LocalImage {
+        relative_path: std::path::PathBuf,
+        mime_type: String,
+        display_name: String,
+        byte_size: u64,
+    },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,

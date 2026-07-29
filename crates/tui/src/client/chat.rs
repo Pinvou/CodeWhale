@@ -1721,6 +1721,10 @@ fn build_chat_messages_with_reasoning(
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ToolSearchToolResult { .. }
                 | ContentBlock::CodeExecutionToolResult { .. } => {}
+                // Local image references are materialized into `ImageUrl`
+                // before a request reaches the client; they have no wire
+                // equivalent of their own.
+                ContentBlock::LocalImage { .. } => {}
             }
         }
 
@@ -3926,6 +3930,64 @@ mod stream_decoder_tests {
         assert_eq!(built.len(), 1);
         assert_eq!(built[0]["role"], "system");
         assert_eq!(built[0]["content"], "internal runtime event");
+    }
+
+    #[test]
+    fn request_builder_emits_openai_image_url_parts_for_inline_images() {
+        // Contract: OpenAI Chat / vLLM-compatible wire shape keeps inline
+        // images as `image_url` parts carrying the data URL verbatim.
+        let data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "what is in this picture?".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::ImageUrl {
+                    image_url: crate::models::ImageUrlContent {
+                        url: data_url.to_string(),
+                    },
+                },
+            ],
+        }];
+
+        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
+
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0]["role"], "user");
+        assert_eq!(
+            built[0]["content"],
+            json!([
+                { "type": "text", "text": "what is in this picture?" },
+                { "type": "image_url", "image_url": { "url": data_url } },
+            ]),
+            "chat wire must carry image_url parts with the data URL; got {}",
+            built[0]["content"]
+        );
+    }
+
+    #[test]
+    fn request_builder_emits_pure_image_user_message_without_text_part() {
+        let data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ImageUrl {
+                image_url: crate::models::ImageUrlContent {
+                    url: data_url.to_string(),
+                },
+            }],
+        }];
+
+        let built = build_chat_messages(None, &messages, "deepseek-v4-flash");
+
+        assert_eq!(built.len(), 1);
+        assert_eq!(
+            built[0]["content"],
+            json!([{ "type": "image_url", "image_url": { "url": data_url } }]),
+            "pure-image message must not fabricate a text part; got {}",
+            built[0]["content"]
+        );
     }
 
     fn tool_use_message(id: &str, name: &str, input: Value) -> Message {

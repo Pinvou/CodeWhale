@@ -1,6 +1,6 @@
 //! `image_analyze` tool — analyze images using a dedicated vision model.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -12,6 +12,7 @@ use crate::llm_client::{LlmError, RetryConfig, sanitize_http_error_body, with_re
 use crate::tools::spec::{
     ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec, required_str,
 };
+use crate::vision::image_input::{read_image_sniffed, resolve_workspace_image_path};
 
 const DEFAULT_VISION_MAX_OUTPUT_TOKENS: u32 = 4096;
 
@@ -31,60 +32,13 @@ impl ImageAnalyzeTool {
     }
 
     async fn read_image_file(path: &Path) -> Result<(String, String), ToolError> {
-        let bytes = tokio::fs::read(path)
+        // Size cap and real-signature detection are enforced inside the
+        // shared helper — the file extension is never trusted.
+        let (bytes, mime_type) = read_image_sniffed(path)
             .await
-            .map_err(|e| ToolError::execution_failed(format!("Failed to read image file: {e}")))?;
-
-        let mime_type = Self::detect_mime_type(path)?;
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?;
         let base64_data = BASE64.encode(&bytes);
-        Ok((base64_data, mime_type))
-    }
-
-    fn resolve_image_path(workspace: &Path, image_path: &str) -> Result<PathBuf, ToolError> {
-        let image_path_buf = Path::new(image_path);
-        if image_path_buf.components().any(|c| {
-            matches!(
-                c,
-                Component::Prefix(_) | Component::RootDir | Component::ParentDir
-            )
-        }) {
-            return Err(ToolError::execution_failed(
-                "image_path must be a relative path within the workspace and cannot escape it.",
-            ));
-        }
-
-        let workspace = workspace.canonicalize().map_err(|e| {
-            ToolError::execution_failed(format!("Failed to resolve workspace path: {e}"))
-        })?;
-        let candidate = workspace.join(image_path_buf);
-        let resolved = candidate.canonicalize().map_err(|e| {
-            ToolError::execution_failed(format!("Failed to resolve image file: {e}"))
-        })?;
-        if !resolved.starts_with(&workspace) {
-            return Err(ToolError::execution_failed(
-                "image_path must resolve within the workspace and cannot escape it.",
-            ));
-        }
-        Ok(resolved)
-    }
-
-    fn detect_mime_type(path: &Path) -> Result<String, ToolError> {
-        let extension = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        match extension.as_str() {
-            "png" => Ok("image/png".to_string()),
-            "jpg" | "jpeg" => Ok("image/jpeg".to_string()),
-            "gif" => Ok("image/gif".to_string()),
-            "webp" => Ok("image/webp".to_string()),
-            "bmp" => Ok("image/bmp".to_string()),
-            _ => Err(ToolError::execution_failed(format!(
-                "Unsupported image format: {extension}"
-            ))),
-        }
+        Ok((base64_data, mime_type.to_string()))
     }
 
     fn base_url(&self) -> String {
@@ -122,6 +76,10 @@ impl ImageAnalyzeTool {
     }
 
     fn request_payload(&self, prompt: &str, image_data: &str, mime_type: &str) -> Value {
+        // 不带 temperature:部分模型(kimi-for-coding、gpt-5 系推理模型等)只接受
+        // 默认值,显式 temperature 会被 400 拒绝("only 1 is allowed");省略时
+        // provider 应用各自默认值,对所有模型都合法。模型目录 supported_parameters
+        // 也无一声明 temperature。
         let mut payload = json!({
             "model": self.config.model,
             "messages": [
@@ -137,8 +95,7 @@ impl ImageAnalyzeTool {
                         }
                     ]
                 }
-            ],
-            "temperature": 0.7
+            ]
         });
 
         let token_limit_field = if Self::uses_max_completion_tokens(&self.config) {
@@ -159,8 +116,12 @@ impl ToolSpec for ImageAnalyzeTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze an image using the configured vision model. \
-         Supports PNG, JPEG, GIF, WebP, and BMP formats."
+        "Analyze an image in the session workspace using the configured vision model. \
+         Supports PNG, JPEG, GIF, WebP, and BMP formats. \
+         Use this only for workspace images that were NOT provided as native image blocks \
+         of the current user message; images already attached to the current message are \
+         visible to the model directly and must not be re-analyzed. \
+         仅用于读取 workspace 中未作为当前消息原生图片块提供的图片；已随当前消息提供的图片不需要重复调用。"
     }
 
     fn input_schema(&self) -> Value {
@@ -191,7 +152,8 @@ impl ToolSpec for ImageAnalyzeTool {
             .and_then(|v| v.as_str())
             .unwrap_or("Describe this image in detail.");
 
-        let resolved_path = Self::resolve_image_path(&context.workspace, image_path)?;
+        let resolved_path = resolve_workspace_image_path(&context.workspace, Path::new(image_path))
+            .map_err(|e| ToolError::execution_failed(e.to_string()))?;
         let (image_data, mime_type) = Self::read_image_file(&resolved_path).await?;
 
         let payload = self.request_payload(prompt, &image_data, &mime_type);
@@ -311,30 +273,51 @@ mod tests {
         assert!(tool.capabilities().contains(&ToolCapability::ReadOnly));
     }
 
-    #[test]
-    fn mime_type_detection_covers_common_formats() {
-        for (ext, expected) in [
-            ("png", "image/png"),
-            ("PNG", "image/png"),
-            ("jpg", "image/jpeg"),
-            ("jpeg", "image/jpeg"),
-            ("gif", "image/gif"),
-            ("webp", "image/webp"),
-            ("bmp", "image/bmp"),
-        ] {
-            let path = std::path::PathBuf::from(format!("test.{ext}"));
-            let mime = ImageAnalyzeTool::detect_mime_type(&path)
-                .unwrap_or_else(|_| panic!("must detect {ext}"));
-            assert_eq!(mime, expected);
-        }
+    #[tokio::test]
+    async fn read_image_file_sniffs_real_signature_regardless_of_extension() {
+        // A PNG file named `.jpg` must be detected as image/png — the real
+        // file header wins over the extension.
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("mislabeled.jpg");
+        std::fs::write(&path, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00])
+            .expect("write png bytes");
+
+        let (_data, mime) = ImageAnalyzeTool::read_image_file(&path)
+            .await
+            .expect("png signature detected");
+        assert_eq!(mime, "image/png");
     }
 
-    #[test]
-    fn mime_type_detection_rejects_unsupported_extension() {
-        let path = std::path::PathBuf::from("test.svg");
-        let err = ImageAnalyzeTool::detect_mime_type(&path)
-            .expect_err("svg is intentionally out of scope for vision tool");
-        assert!(err.to_string().contains("Unsupported image format"));
+    #[tokio::test]
+    async fn read_image_file_rejects_forged_extension() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("fake.png");
+        std::fs::write(&path, b"this is not a real image").expect("write garbage");
+
+        let err = ImageAnalyzeTool::read_image_file(&path)
+            .await
+            .expect_err("forged extension must reject");
+        assert!(
+            err.to_string().contains("unsupported image format"),
+            "error must call out the unrecognized signature; got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_image_file_enforces_size_cap_before_reading() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("huge.png");
+        let file = std::fs::File::create(&path).expect("create");
+        file.set_len(crate::vision::image_input::MAX_IMAGE_BYTES + 1)
+            .expect("set len");
+
+        let err = ImageAnalyzeTool::read_image_file(&path)
+            .await
+            .expect_err("oversized image must reject before reading");
+        assert!(
+            err.to_string().contains("大小上限"),
+            "error must call out the size limit; got {err}"
+        );
     }
 
     #[test]
@@ -380,6 +363,24 @@ mod tests {
             Some(u64::from(DEFAULT_VISION_MAX_OUTPUT_TOKENS))
         );
         assert!(payload.get("max_tokens").is_none());
+    }
+
+    /// pinvou3 fork 行为锚点:payload 绝不携带 temperature——kimi-for-coding 等模型
+    /// 只接受默认值,显式 temperature 会被 400 拒绝。
+    #[test]
+    fn forkguard_vision_payload_omits_temperature() {
+        for model in ["deepseek-v4-pro", "kimi-for-coding", "gpt-5.6-terra", "mimo-v2.5"] {
+            let mut config = fake_config();
+            config.model = model.to_string();
+            let tool = ImageAnalyzeTool::new(config);
+
+            let payload = tool.request_payload("describe", "abc123", "image/png");
+
+            assert!(
+                payload.get("temperature").is_none(),
+                "temperature must be omitted for {model}; got {payload}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -624,7 +624,14 @@ fn add_message_entries(builder: &mut ReportBuilder, messages: &[Message]) {
 
     for (index, message) in messages.iter().enumerate() {
         for block in &message.content {
-            let tokens = estimate_text_tokens_conservative(&content_block_text(block));
+            // Images never expand to their URL/payload here: a flat per-image
+            // estimate keeps the report honest without cloning Base64.
+            let tokens = match block {
+                ContentBlock::ImageUrl { .. } | ContentBlock::LocalImage { .. } => {
+                    IMAGE_TOKEN_ESTIMATE
+                }
+                _ => estimate_text_tokens_conservative(&content_block_text(block)),
+            };
             match block {
                 ContentBlock::ToolResult { .. }
                 | ContentBlock::ToolSearchToolResult { .. }
@@ -687,9 +694,15 @@ fn content_block_text(block: &ContentBlock) -> String {
         ContentBlock::ToolUse { input, .. } | ContentBlock::ServerToolUse { input, .. } => {
             input.to_string()
         }
-        ContentBlock::ImageUrl { image_url } => image_url.url.clone(),
+        // Image payloads are never inlined for estimation; the caller applies
+        // `IMAGE_TOKEN_ESTIMATE` instead.
+        ContentBlock::ImageUrl { .. } | ContentBlock::LocalImage { .. } => String::new(),
     }
 }
+
+/// Flat per-image token estimate, mirroring compaction's image heuristic
+/// (vision tiles are typically ~1k tokens) without reading the image payload.
+const IMAGE_TOKEN_ESTIMATE: usize = 1000;
 
 fn pressure_label(percent: Option<f64>) -> &'static str {
     // Delegate to the unified pressure thresholds so this diagnostic label can't

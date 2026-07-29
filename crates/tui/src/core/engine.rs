@@ -71,7 +71,8 @@ use super::authority::agent_approval_mode_for_turn;
 use super::authority::{TurnAuthority, effective_input_policy, shell_policy_for_mode};
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
+    Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX, UserInputBlock,
+    UserInputProvenance, UserMessageInput,
 };
 use super::session::Session;
 use super::tool_parser;
@@ -1552,6 +1553,7 @@ impl Engine {
                 EngineRunInput::Operation(op) => match *op {
                     Op::SendMessage {
                         content,
+                        input,
                         mode,
                         route,
                         compaction,
@@ -1575,6 +1577,7 @@ impl Engine {
                     } => {
                         self.handle_send_message(
                             content,
+                            input,
                             mode,
                             *route,
                             *compaction,
@@ -2091,6 +2094,7 @@ impl Engine {
                         let mode = self.current_mode;
                         self.handle_send_message(
                             new_message,
+                            None,
                             mode,
                             route,
                             self.config.compaction.clone(),
@@ -2431,6 +2435,73 @@ impl Engine {
         }
     }
 
+    /// Build a user message from structured input blocks, validating every
+    /// local image reference (workspace boundary, size cap, real signature)
+    /// before it enters session history. Persisted blocks stay references —
+    /// Base64 only ever exists on the short-lived materialized request clone.
+    ///
+    /// Block order: user text/images first, `turn_meta` last — the same
+    /// prefix-cache contract as
+    /// [`Self::user_text_message_with_turn_metadata_for_route_and_provenance`].
+    /// A pure-image message (no text block) is allowed.
+    async fn user_structured_message_with_turn_metadata(
+        &self,
+        blocks: Vec<UserInputBlock>,
+        meta_text: &str,
+        routed_model: &str,
+        auto_model: bool,
+        reasoning_effort: Option<&str>,
+        reasoning_effort_auto: bool,
+        provenance: UserInputProvenance,
+    ) -> Result<Message, crate::vision::image_input::ImageInputError> {
+        let turn_metadata = self.turn_metadata_block(
+            routed_model,
+            auto_model,
+            reasoning_effort,
+            reasoning_effort_auto,
+            provenance,
+            meta_text,
+        );
+        let mut content = Vec::with_capacity(blocks.len() + 1);
+        for block in blocks {
+            match block {
+                UserInputBlock::Text { text } => {
+                    // Drop empty text blocks: Anthropic rejects zero-length
+                    // text parts, and they carry no meaning.
+                    if !text.trim().is_empty() {
+                        content.push(ContentBlock::Text {
+                            text,
+                            cache_control: None,
+                        });
+                    }
+                }
+                UserInputBlock::LocalImage {
+                    relative_path,
+                    mime_type,
+                    display_name,
+                } => {
+                    let byte_size = crate::vision::image_input::validate_local_image_reference(
+                        &self.session.workspace,
+                        &relative_path,
+                        &mime_type,
+                    )
+                    .await?;
+                    content.push(ContentBlock::LocalImage {
+                        relative_path,
+                        mime_type,
+                        display_name,
+                        byte_size,
+                    });
+                }
+            }
+        }
+        content.push(turn_metadata);
+        Ok(Message {
+            role: "user".to_string(),
+            content,
+        })
+    }
+
     async fn handle_idle_subagent_completion(&mut self, first: SubAgentCompletion) {
         let mut completions = Vec::new();
         if let Some(completion) =
@@ -2487,6 +2558,7 @@ impl Engine {
         let recorded = self
             .handle_send_message(
                 content,
+                None,
                 self.current_mode,
                 route,
                 self.config.compaction.clone(),
@@ -2613,6 +2685,7 @@ impl Engine {
     async fn handle_send_message(
         &mut self,
         content: String,
+        input: Option<UserMessageInput>,
         mode: AppMode,
         route: ResolvedRuntimeRoute,
         compaction: CompactionConfig,
@@ -2756,15 +2829,54 @@ impl Engine {
             .observe_user_message(&content, &self.session.workspace);
         let force_update_plan_first = should_force_update_plan_first(input_policy.mode, &content);
 
-        // Add user message to session
-        let user_msg = self.user_text_message_with_turn_metadata_for_route_and_provenance(
-            content,
-            &model,
-            auto_model,
-            reasoning_effort.as_deref(),
-            reasoning_effort_auto,
-            provenance,
-        );
+        // Add user message to session. Structured input keeps local images as
+        // workspace-relative references (never Base64); every reference is
+        // preflight-validated before it enters history, and an invalid image
+        // fails the turn instead of being silently dropped.
+        let user_msg = match input {
+            Some(input) if !input.blocks.is_empty() => {
+                match self
+                    .user_structured_message_with_turn_metadata(
+                        input.blocks,
+                        &content,
+                        &model,
+                        auto_model,
+                        reasoning_effort.as_deref(),
+                        reasoning_effort_auto,
+                        provenance,
+                    )
+                    .await
+                {
+                    Ok(message) => message,
+                    Err(err) => {
+                        let message = err.to_string();
+                        let _ = self
+                            .tx_event
+                            .send(Event::error(ErrorEnvelope::classify(message.clone(), true)))
+                            .await;
+                        let _ = self
+                            .tx_event
+                            .send(Event::TurnComplete {
+                                usage: turn.usage.clone(),
+                                status: TurnOutcomeStatus::Failed,
+                                error: Some(message),
+                                tool_catalog: None,
+                                base_url: None,
+                            })
+                            .await;
+                        return false;
+                    }
+                }
+            }
+            _ => self.user_text_message_with_turn_metadata_for_route_and_provenance(
+                content,
+                &model,
+                auto_model,
+                reasoning_effort.as_deref(),
+                reasoning_effort_auto,
+                provenance,
+            ),
+        };
         self.session.add_message(user_msg);
 
         let previous_goal_objective = self.config.goal_objective.clone();
@@ -3095,6 +3207,7 @@ impl Engine {
                         .tx_op
                         .send(Op::SendMessage {
                             content: continuation,
+                            input: None,
                             mode,
                             route: Box::new(route),
                             compaction: Box::new(self.config.compaction.clone()),

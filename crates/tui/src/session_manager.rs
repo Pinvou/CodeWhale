@@ -1229,8 +1229,7 @@ mod tests {
                 forked_from_message_count: None,
                 cumulative_turn_secs: 0,
             },
-            system_prompt: None,
-            context_references: Vec::new(),
+            system_prompt: None,            context_references: Vec::new(),
             artifacts: Vec::new(),
             work_state: None,
         };
@@ -1263,6 +1262,85 @@ mod tests {
         let loaded = manager.load_session(&session_id).expect("load");
         assert_eq!(loaded.metadata.id, session_id);
         assert_eq!(loaded.messages.len(), 2);
+    }
+
+    #[test]
+    fn saved_session_with_local_image_persists_reference_without_base64() {
+        let tmp = tempdir().expect("tempdir");
+        let manager = SessionManager::new(tmp.path().join("sessions")).expect("new");
+
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "look at this picture".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::LocalImage {
+                    relative_path: PathBuf::from("attachments/photo.png"),
+                    mime_type: "image/png".to_string(),
+                    display_name: "photo.png".to_string(),
+                    byte_size: 106_138,
+                },
+            ],
+        }];
+        let session = create_saved_session(&messages, "test-model", tmp.path(), 100, None);
+        let session_id = session.metadata.id.clone();
+
+        let path = manager.save_session(&session).expect("save");
+        let raw = fs::read_to_string(&path).expect("read saved session");
+
+        // The persisted record keeps the lightweight reference only.
+        assert!(raw.contains("local_image"), "{raw}");
+        assert!(raw.contains("attachments/photo.png"), "{raw}");
+        assert!(raw.contains("106138"), "{raw}");
+        assert!(
+            !raw.contains("data:image"),
+            "persisted session must never contain a data URL: {raw}"
+        );
+        // Defense in depth: no long Base64 run anywhere in the file.
+        let mut run = 0usize;
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=') {
+                run += 1;
+                assert!(run < 64, "persisted session contains a Base64-looking run: {raw}");
+            } else {
+                run = 0;
+            }
+        }
+
+        // Round-trip keeps the reference intact.
+        let loaded = manager.load_session(&session_id).expect("load");
+        let reference = loaded.messages[0]
+            .content
+            .iter()
+            .find_map(|b| match b {
+                ContentBlock::LocalImage {
+                    relative_path,
+                    mime_type,
+                    display_name,
+                    byte_size,
+                } => Some((
+                    relative_path.clone(),
+                    mime_type.clone(),
+                    display_name.clone(),
+                    *byte_size,
+                )),
+                _ => None,
+            })
+            .expect("local image reference survives round-trip");
+        assert_eq!(reference.0, PathBuf::from("attachments/photo.png"));
+        assert_eq!(reference.1, "image/png");
+        assert_eq!(reference.2, "photo.png");
+        assert_eq!(reference.3, 106_138);
+    }
+
+    #[test]
+    fn forkguard_saved_session_with_local_image_persists_reference_without_base64() {
+        // [pinvou3-fork] forkguard 锚点:含本地图片的会话落盘只存轻量引用,绝无
+        // data URL / Base64 泄漏,且往返加载引用完好。断言本体在上方同名测试,
+        // 此包装使其纳入 `cargo test forkguard_` 守护面。
+        saved_session_with_local_image_persists_reference_without_base64();
     }
 
     #[test]

@@ -317,7 +317,8 @@ fn message_text(msg: &Message) -> String {
             ContentBlock::ServerToolUse { .. }
             | ContentBlock::ToolSearchToolResult { .. }
             | ContentBlock::CodeExecutionToolResult { .. }
-            | ContentBlock::ImageUrl { .. } => {}
+            | ContentBlock::ImageUrl { .. }
+            | ContentBlock::LocalImage { .. } => {}
         }
     }
     text
@@ -342,7 +343,8 @@ fn extract_paths_from_message(message: &Message, workspace: Option<&Path>) -> Ve
             ContentBlock::ServerToolUse { .. }
             | ContentBlock::ToolSearchToolResult { .. }
             | ContentBlock::CodeExecutionToolResult { .. }
-            | ContentBlock::ImageUrl { .. } => Vec::new(),
+            | ContentBlock::ImageUrl { .. }
+            | ContentBlock::LocalImage { .. } => Vec::new(),
         };
         paths.extend(candidates);
     }
@@ -627,7 +629,7 @@ fn estimate_tokens_for_message(message: &Message, include_thinking: bool) -> usi
             // sessions. Use a conservative flat per-image estimate (vision
             // tiles are typically ~1k tokens); erring high compacts slightly
             // early rather than overflowing.
-            ContentBlock::ImageUrl { .. } => IMAGE_TOKEN_ESTIMATE,
+            ContentBlock::ImageUrl { .. } | ContentBlock::LocalImage { .. } => IMAGE_TOKEN_ESTIMATE,
             ContentBlock::ServerToolUse { .. }
             | ContentBlock::ToolSearchToolResult { .. }
             | ContentBlock::CodeExecutionToolResult { .. } => 0,
@@ -1497,7 +1499,8 @@ fn build_formatted_summary_request(
                 ContentBlock::ServerToolUse { .. }
                 | ContentBlock::ToolSearchToolResult { .. }
                 | ContentBlock::CodeExecutionToolResult { .. }
-                | ContentBlock::ImageUrl { .. } => {}
+                | ContentBlock::ImageUrl { .. }
+                | ContentBlock::LocalImage { .. } => {}
             }
         }
     }

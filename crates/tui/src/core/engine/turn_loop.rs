@@ -605,9 +605,33 @@ impl Engine {
                 }
             }
 
+            // Materialize workspace-local image references into inline
+            // `data:` URL blocks on this request's private clone of the
+            // message list. The session (and anything persisted or recorded)
+            // keeps the lightweight `LocalImage` reference; Base64 only ever
+            // lives on this short-lived request copy. Re-materializing on
+            // every request build is what makes retries and resumed sessions
+            // re-read the file and fail clearly when it is gone — never
+            // silently drop an image.
+            let mut request_messages = self.messages_with_turn_metadata();
+            if let Err(err) = crate::vision::image_input::materialize_messages_local_images(
+                &mut request_messages,
+                &self.session.workspace,
+            )
+            .await
+            {
+                let message = err.to_string();
+                turn_error = Some(message.clone());
+                let _ = self
+                    .tx_event
+                    .send(Event::error(ErrorEnvelope::classify(message, true)))
+                    .await;
+                return (TurnOutcomeStatus::Failed, turn_error);
+            }
+
             let request = MessageRequest {
                 model: self.session.model.clone(),
-                messages: self.messages_with_turn_metadata(),
+                messages: request_messages,
                 max_tokens: effective_max_output_tokens_for_route(
                     self.api_provider,
                     &self.session.model,

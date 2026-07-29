@@ -381,10 +381,32 @@ fn content_block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             }
             Some(value)
         }
-        ContentBlock::ImageUrl { image_url } => Some(json!({
-            "type": "image",
-            "source": { "type": "url", "url": image_url.url },
-        })),
+        ContentBlock::ImageUrl { image_url } => {
+            // Anthropic Messages does not accept a `url` source carrying a
+            // `data:` URL — inline images (materialized local images) must be
+            // split into the native base64 source shape. Remote URLs keep the
+            // existing passthrough.
+            Some(
+                match crate::vision::image_input::split_data_url(&image_url.url) {
+                    Some((media_type, data)) => json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        },
+                    }),
+                    None => json!({
+                        "type": "image",
+                        "source": { "type": "url", "url": image_url.url },
+                    }),
+                },
+            )
+        }
+        // Local image references are materialized into `ImageUrl` before a
+        // request reaches the client; like server-tool blocks they have no
+        // wire equivalent of their own.
+        ContentBlock::LocalImage { .. } => None,
         // Server-tool block types are DeepSeek/internal concepts with no
         // Anthropic client-side wire equivalent.
         ContentBlock::ServerToolUse { .. }
@@ -1139,6 +1161,47 @@ mod tests {
         let (error_type, message) = parse_anthropic_error_envelope("upstream blew up");
         assert_eq!(error_type, "unknown");
         assert_eq!(message, "upstream blew up");
+    }
+
+    #[test]
+    fn image_block_with_data_url_uses_native_base64_source() {
+        // Contract: Anthropic Messages rejects a `url` source carrying a
+        // `data:` URL — inline images must be split into the native base64
+        // source shape.
+        let block = ContentBlock::ImageUrl {
+            image_url: crate::models::ImageUrlContent {
+                url: "data:image/jpeg;base64,/9j/4AAQ".to_string(),
+            },
+        };
+
+        let value = content_block_to_anthropic(&block).expect("image block converts");
+
+        assert_eq!(value["type"], json!("image"));
+        assert_eq!(
+            value["source"],
+            json!({
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": "/9j/4AAQ",
+            }),
+            "data: URL must be split into Anthropic's native base64 source; got {value}"
+        );
+    }
+
+    #[test]
+    fn image_block_with_remote_url_keeps_url_source() {
+        let block = ContentBlock::ImageUrl {
+            image_url: crate::models::ImageUrlContent {
+                url: "https://example.com/cat.png".to_string(),
+            },
+        };
+
+        let value = content_block_to_anthropic(&block).expect("image block converts");
+
+        assert_eq!(
+            value["source"],
+            json!({ "type": "url", "url": "https://example.com/cat.png" })
+        );
     }
 
     #[test]
