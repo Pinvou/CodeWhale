@@ -41,6 +41,17 @@ class ReleaseCachePolicyTests(unittest.TestCase):
         self.assertIn("shared-key: rust-test", rust_test_job)
         self.assertIn(MAIN_ONLY_SAVE, rust_test_job)
 
+    def test_arm64_release_validation_finishes_within_runner_window(self):
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        arm64_job = workflow.split("\n  build-linux-arm64:", maxsplit=1)[1].split(
+            "\n  build-windows-x64:", maxsplit=1
+        )[0]
+
+        self.assertIn('CARGO_PROFILE_RELEASE_LTO: "false"', arm64_job)
+        self.assertIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', arm64_job)
+        self.assertIn('RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', arm64_job)
+        self.assertIn("build-essential pkg-config cmake lld", arm64_job)
+
 
 if __name__ == "__main__":
     unittest.main()
