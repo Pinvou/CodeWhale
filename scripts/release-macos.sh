@@ -42,9 +42,9 @@ for t in aarch64-apple-darwin x86_64-apple-darwin; do
 done
 
 # 部署目标:与 tauri.conf.json minimumSystemVersion / Info.plist LSMinimumSystemVersion
-# 一致(14.0)。build.rs 不注入此变量;不显式 export 会用 rustc/链接器默认值(往往当前
-# SDK 版本),产出要求更高 macOS 的二进制,与声明的 14.0 不符 → 14.x 用户打不开。
-export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.0}"
+# 一致(11.0)。build.rs 不注入此变量;不显式 export 会用 rustc/链接器默认值(往往当前
+# SDK 版本),产出要求更高 macOS 的二进制,与声明的 11.0 不符 → 11.x 用户打不开。
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 
 # ── 1. 三处版本号一致校验（防版本漂移发出错包）────────────────────
 # 版本提取加 `|| true`:源文件缺该行时 grep/jq 退出非 0,在 set -e 下会直接退出并
