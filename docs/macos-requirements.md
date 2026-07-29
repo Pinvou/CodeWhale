@@ -1,13 +1,13 @@
 # macOS 运行环境要求
 
-pinvou3 在 macOS 上支持 **Apple Silicon (arm64) + Intel (x86_64)**（Universal 二进制通吃）+ **macOS 14.0 (Sonoma) 及以上**。
+pinvou3 在 macOS 上支持 **Apple Silicon (arm64) + Intel (x86_64)**（Universal 二进制通吃）+ **macOS 11.0 (Big Sur) 及以上**。
 
 ## 系统要求
 
 | 项目 | 要求 |
 |------|------|
 | 处理器 | Apple Silicon (arm64) + Intel (x86_64)，Universal 二进制通吃 |
-| macOS 版本 | 14.0 (Sonoma) 或更高 |
+| macOS 版本 | 11.0 (Big Sur) 或更高 |
 | 磁盘空间 | 应用本体约 200MB（不再打包语音引擎、不再按需下载语音模型；macOS 走系统 Speech 框架） |
 
 > 语音识别改用 macOS 系统 Speech 框架（系统自带，无需安装）。应用会按当前语言和系统识别器的运行时能力选择路径：支持端上识别时强制在本机处理，否则由 Apple Speech 在线服务处理。该能力不由 Apple Silicon / Intel 架构单独决定。当前 dmg 为 Universal 二进制（arm64 + x86_64），两类 Mac 均可直接运行。

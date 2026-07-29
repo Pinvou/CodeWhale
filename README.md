@@ -107,7 +107,7 @@ CodeWhale（Agent 底座 submodule）
 - Tauri 2.0 对应的系统依赖
 - 一个可访问的 OpenAI-compatible 模型端点
 
-> **macOS 用户**：pinvou3 支持 Apple Silicon (arm64) + macOS 14.0+。语音识别引擎已内置打包；文件解析（PDF/Office/OCR/压缩包等）依赖可选外部工具，通过 Homebrew 或各工具官网安装——详见 [macOS 运行环境要求](docs/macos-requirements.md)。
+> **macOS 用户**：pinvou3 支持 Apple Silicon (arm64) + macOS 11.0+。语音识别引擎已内置打包；文件解析（PDF/Office/OCR/压缩包等）依赖可选外部工具，通过 Homebrew 或各工具官网安装——详见 [macOS 运行环境要求](docs/macos-requirements.md)。
 
 ### 启动应用
 
