@@ -1,83 +1,99 @@
-# 贡献指南
+# Contributing to Pinvou Agent
 
-> 面向 pinvou3 协作者。配套:`CLAUDE.md`(AI agent 规则 + 核心约束)、`docs/fork-policy.md`(fork 策略)、`docs/fork-modifications.md`(fork 现状清单)。
+[English](CONTRIBUTING.md) | [简体中文](CONTRIBUTING.zh-CN.md)
 
-## 提 PR 前(自查,秒级)
+Thank you for helping improve Pinvou Agent. Bug fixes, documentation, connectors, Skills, workflows, platform support, and focused product improvements are welcome.
 
-1. **跑一遍 fork 守卫**(不编译,几秒):
-   ```bash
-   ./scripts/fork-guard.sh --fast
-   ```
-   CI 的 `fast-gate` 跑的就是它——本地先跑,别等 CI 红。
-2. 确认创建 PR 时已基于最新 `main`，并解决全部冲突。
+This document covers the contribution workflow. Project-wide implementation and quality boundaries are defined in [AGENTS.md](AGENTS.md).
 
-## main 受 CI 门控保护
+## Before you start
 
-每个 PR 按改动范围自动运行以下检查（`.github/workflows/pr-check.yml`），红的合不了：
+1. Search existing issues and pull requests to avoid duplicate work.
+2. Discuss large features, architecture changes, and breaking changes in an issue first.
+3. Follow [README.md](README.md) for development setup.
+4. Start from the latest official `main`.
 
-| 检查 | 在哪 | 红了怎么办 |
-|---|---|---|
-| **fork-guard 指纹** | fast-gate | sync/merge 静默丢了 fork patch → 对照 `docs/fork-policy.md` 找回 |
-| **fork 合规联动** | fast-gate | 改了 `CodeWhale` gitlink 没更新 `docs/fork-modifications.md` → 补登记 + 指纹(脚本报错有指引) |
-| **Session replay auditor 单测** | fast-gate | session 筛选、工具配对或产物识别回归 → 本地跑 `python3 -m unittest discover -s scripts/tests -p 'test_*.py'` |
-| **Python MCP 测试** | fast-gate | `mcp-servers/*/test_*.py` 挂 → 看 test 输出 |
-| **内置 MCP 协议与产物契约** | fast-gate | 本地跑 `python3 scripts/mcp-server-contract-smoke.py`；检查 5 个本地 server 与 QCC 清单 |
-| **前端逻辑 + Mock GUI + 完整 WebUI smoke** | frontend-test（按前端/Relay 路径触发） | 本地跑 `./scripts/run-user-journey-tests.sh`；WebUI 相关改动另跑 `npm --prefix pinvou3-app run test:webui` |
-| **cargo test --lib** | rust-test | Rust 单测挂 → 本地 `cargo test --lib -- --test-threads=1` 复现(见下) |
+Maintainers may branch from `origin/main`. External contributors should configure the official repository once and branch from `upstream/main`:
 
-> **新单测自动进 CI**:`cargo test --lib`(全跑 `src/` 下所有 `#[test]`)+ `mcp-servers/*/test_*.py`(glob)都是**通配**,新加的测试无需改 workflow 自动被跑。但有两条铁律,否则你的新测试会让 CI 红:
-> 1. **依赖外部资源**(网络/真 bge-m3/vLLM/真模型)的测试**必须标 `#[ignore]`** —— CI 的 bge-m3 是空占位、无网络。参照现有 `e2e_test` / `l1_harness`。
-> 2. 本地复现 CI 用 **`cargo test --lib -- --test-threads=1`** —— bridge 等测试读写全局 env,并行会竞争 flaky(CI 已锁单线程)。
+```bash
+git remote add upstream https://github.com/Pinvou/pinvou-agent.git
+git fetch upstream
+git switch -c feat/short-description upstream/main
+git submodule update --init --recursive
+```
 
-### Community 回流 PR 的 Rust 门控
+Sync the latest official `main` before opening a pull request and before merge. Do not repeatedly rebase only because `main` advances during review.
 
-已经在 `Pinvou/pinvou-agent` 完成完整 CI 并合入的 Community PR，回流 Official 时不重复运行 PR 阶段的 `rust-test`；`rust-lint` 仍会检查 Official 私有代码的格式、编译和依赖边界，进入 Merge Queue 后再对最终组合态完整运行 `rust-test`。
+## DCO
 
-只有同时满足以下条件才按回流处理，缺少任一条件都会退回普通 PR 门控：
+Every human-authored commit must include a valid `Signed-off-by`:
 
-- PR 分支位于本仓，且名称使用 `backflow/community-*`。
-- PR 正文包含对应来源标记：`<!-- community-backflow:Pinvou/pinvou-agent#<PR号> -->`；批次回流包含多个来源时逐行列出多个标记。
-- 创建回流 PR 前已确认来源 PR 是 `MERGED`，且其最新 head 的 `required-gate`（包含适用的 `rust-test`）成功。
+```bash
+git commit -s
+```
 
-回流时仍须以最新 Official `main` 做语义合并并保留私有能力。来源仓测试不能替代最终组合态测试，也不能用于普通开发 PR 或外部 fork PR 跳过门控。
+Use `--signoff` when amending or rebasing existing commits. See [DCO.md](DCO.md). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits are exempt.
 
-main 使用 **Merge Queue**：PR 需要 CI 通过、获得 1 个 review approval 并解决全部对话，然后加入队列。队列会基于最新 `main` 运行完整检查并自动合入；评审和修复期间不要仅因 `main` 更新而反复 rebase，出现真实冲突时再处理。
+## Where changes belong
 
-> 注：`cargo fmt --check`、`cargo clippy --lib --no-deps` 和 `cargo deny check` 已由 `rust-lint` 硬门控；只对 Rust/Cargo/submodule 等相关路径触发。
+Pinvou Agent uses [CodeWhale](https://github.com/Pinvou/CodeWhale) as its agent engine. Do not reimplement engine capabilities in the desktop layer.
 
-## 改 fork(CodeWhale submodule)的铁律
+| Goal | Location |
+|---|---|
+| Add a domain agent or tool bundle | A `SKILL.md` package |
+| Connect an external API | An independent MCP server or connector |
+| Change model guidance | Bundle `instructions.md` |
+| Change desktop UI, Tauri integration, or runtime configuration | `pinvou3-app/` |
+| Fix a reusable engine issue | CodeWhale, upstream first |
 
-fork patch 指纹**随 patch 同 PR**——新增 / 改 fork patch 必须**同一个 PR**带上:
-- `docs/fork-modifications.md` 登记条目
-- `scripts/fork-guard.sh` 指纹(+ L2 回归测试,如适用)
+CodeWhale changes must follow the fork boundary in [AGENTS.md](AGENTS.md) and [`docs/fork-policy.md`](docs/fork-policy.md), including the required same-PR documentation, fingerprints, and tests.
 
-**不拆事后 catch-up PR**(出现 catch-up PR = 原始 PR 漏了指纹)。submodule gitlink 要焊到 fork 跟踪分支(`pinvou3-clean`)上、不是游离的 PR 分支 commit。细节见 `AGENTS.md` 约束 2 + `docs/fork-policy.md`。
+## Commit messages
 
-## commit message（强制）
-
-本项目强制遵守 [`docs/Git Commit 信息规范文档.md`](docs/Git%20Commit%20信息规范文档.md)。任何方式发起的 commit 都必须使用规范格式：
+Use:
 
 ```text
-<type>[可选作用域]: <中文简短描述>
+<type>: <中文描述>
+<type>(<scope>)!: <中文描述>
 ```
 
-允许的 `type` 仅包括：`feat` / `fix` / `refactor` / `perf` / `docs` / `style` / `test` / `build` / `ci` / `chore` / `revert`。
+`scope` and `!` are optional. Allowed types are `feat`, `fix`, `refactor`, `perf`, `docs`, `style`, `test`, `build`, `ci`, `chore`, and `revert`. Descriptions must contain Chinese, be specific, be at most 50 characters, and not end with punctuation.
 
-本仓库提供 `.githooks/commit-msg` 强制校验本地提交，并由 CI 校验 PR/push 提交信息。首次克隆后执行一次：
+Issues and pull requests may use English or Chinese. See [`docs/Git Commit 信息规范文档.md`](docs/Git%20Commit%20信息规范文档.md) for full commit rules.
+
+## Local checks
+
+Run checks that match the affected area. A common baseline is:
 
 ```bash
-git config core.hooksPath .githooks
+./scripts/fork-guard.sh --fast
+python3 scripts/architecture-guard.py
+npm --prefix pinvou3-app run lint:ui
+npm --prefix pinvou3-app run build:ui
+npm --prefix pinvou3-app test
+cargo fmt --manifest-path pinvou3-app/src-tauri/Cargo.toml -- --check
+cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-threads=1
 ```
 
-> 注：本地 `git commit --no-verify` 可绕过客户端 hook，但 PR/主分支 CI 仍会拦截不合规提交；需要绝对强制时，应配合远端分支保护把该 CI 设为 required check。
+Run additional frontend, Relay, Rust, CodeWhale, or platform checks when relevant. The workflows in [`.github/workflows/`](.github/workflows/) are the source of truth for automated gates. Disclose checks that could not be run locally.
 
-## (可选)本地 pre-push hook
+Tests requiring a live model, network service, credential, or large model asset must be ignored by default and provide an explicit opt-in command.
 
-想让 push 前自动跑 fork-guard、根本不让红 PR 出门,自己装一个(git hook 不随仓库走,每人本地装一次):
-```bash
-cat > .git/hooks/pre-push <<'EOF'
-#!/usr/bin/env bash
-./scripts/fork-guard.sh --fast || { echo "fork-guard 失败,push 取消"; exit 1; }
-EOF
-chmod +x .git/hooks/pre-push
-```
+## Pull requests
+
+Review the actual diff against the target branch and complete the quality self-check required by [AGENTS.md](AGENTS.md) before submission.
+
+A pull request should explain:
+
+- what changed and why;
+- affected features, platforms, compatibility, and known risks;
+- tests actually run;
+- unverified scenarios or environment limitations.
+
+Keep changes focused. Update documentation and regression tests with behavior changes. Resolve conflicts against the latest official `main` before merge. The project uses CI-gated pull requests and squash merge by default.
+
+By participating, you agree to follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Support expectations are documented in [SUPPORT.md](SUPPORT.md).
+
+## Security
+
+Never commit credentials, tokens, passwords, customer or private data, or internal-only addresses. Report unpatched vulnerabilities privately through [SECURITY.md](SECURITY.md) or `security@pinvou.com`.
