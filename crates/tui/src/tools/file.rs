@@ -41,6 +41,16 @@ const WRITE_FILE_INLINE_DIFF_LIMIT_BYTES: usize = 32 * 1024;
 const WRITE_FILE_MAX_CONTENT_BYTES: usize = 64 * 1024;
 const APPEND_FILE_MAX_CONTENT_BYTES: usize = 64 * 1024;
 
+/// Cap on the *existing* file size for `append_file`'s inline diff.
+///
+/// Much larger than `WRITE_FILE_INLINE_DIFF_LIMIT_BYTES` on purpose: append is
+/// the chunked-artifact path, so the prior contents routinely pass 32KB after a
+/// couple of ≤16KB chunks. The appended chunk itself is already hard-capped at
+/// 64KB, and `similar` trims the shared prefix before diffing, so the emitted
+/// diff stays tiny (tail context + added lines) even for a few hundred KB of
+/// prior content. Beyond this cap we fall back to the byte-count summary.
+const APPEND_FILE_INLINE_DIFF_LIMIT_BYTES: usize = 512 * 1024;
+
 // === ReadFileTool ===
 
 fn canonical_path_for_credential_guard(path: &Path) -> PathBuf {
@@ -821,6 +831,38 @@ fn write_file_result_body(
     }
 }
 
+/// Build the `append_file` result body: unified diff of the appended chunk on
+/// top (same renderer path as `write_file`, #505), byte-count summary last.
+/// `prior_contents` is `None` when the existing file isn't readable UTF-8 —
+/// then there is nothing trustworthy to diff against, so keep the plain
+/// summary. Oversized existing files get the `[diff omitted]` note instead.
+fn append_file_result_body(
+    path: &str,
+    prior_contents: Option<&str>,
+    append_content: &str,
+    summary: &str,
+) -> String {
+    let Some(prior) = prior_contents else {
+        return summary.to_string();
+    };
+    if prior.len() > APPEND_FILE_INLINE_DIFF_LIMIT_BYTES {
+        return format!(
+            "{summary}\n\
+             [diff omitted] {path} is too large for an inline append_file diff \
+             (old={} bytes, limit={} bytes). Use read_file with line ranges to inspect it.",
+            prior.len(),
+            APPEND_FILE_INLINE_DIFF_LIMIT_BYTES
+        );
+    }
+    let new_contents = format!("{prior}{append_content}");
+    let diff = make_unified_diff(path, prior, &new_contents);
+    if diff.is_empty() {
+        summary.to_string()
+    } else {
+        format!("{diff}\n{summary}")
+    }
+}
+
 // === AppendFileTool ===
 
 /// Tool for appending UTF-8 content to files in the workspace.
@@ -833,7 +875,7 @@ impl ToolSpec for AppendFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Append UTF-8 content to a file in the workspace. Use this for large generated artifacts after creating a small skeleton with write_file, instead of trying to send one huge write_file content argument. **Recommended chunk size ≤ 16KB, hard limit 64KB per call** to keep tool-arg size small and avoid SSE-timeout-on-slow-decoders failures. Creates parent directories and the target file if needed. Returns a compact byte-count summary, not a full diff."
+        "Append UTF-8 content to a file in the workspace. Use this for large generated artifacts after creating a small skeleton with write_file, instead of trying to send one huge write_file content argument. **Recommended chunk size ≤ 16KB, hard limit 64KB per call** to keep tool-arg size small and avoid SSE-timeout-on-slow-decoders failures. Creates parent directories and the target file if needed. Returns a compact unified diff of the appended chunk (omitted when the existing file is very large) plus a byte-count summary."
     }
 
     fn input_schema(&self) -> Value {
@@ -894,6 +936,14 @@ impl ToolSpec for AppendFileTool {
 
         let existed_before = file_path.exists();
         let before_len = fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+        // Snapshot the existing contents before appending — used to render an
+        // inline diff in the tool result (same renderer path as write_file).
+        // A non-UTF-8 existing file can't be diffed as text → skip the diff.
+        let prior_contents = if existed_before {
+            fs::read_to_string(&file_path).ok()
+        } else {
+            Some(String::new())
+        };
 
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -917,12 +967,18 @@ impl ToolSpec for AppendFileTool {
         } else {
             "Created and appended"
         };
-        let body = format!(
+        let summary = format!(
             "{action} {} bytes to {} ({} -> {} bytes)",
             append_content.len(),
             file_path.display(),
             before_len,
             after_len
+        );
+        let body = append_file_result_body(
+            &file_path.display().to_string(),
+            prior_contents.as_deref(),
+            append_content,
+            &summary,
         );
 
         let diag_block = lsp_diagnostics_for_paths(context, &[file_path]).await;
@@ -2165,6 +2221,64 @@ mod tests {
 
         let written = fs::read_to_string(tmp.path().join("subdir/deck.html")).expect("read");
         assert_eq!(written, "<html>\n</html>\n");
+    }
+
+    #[tokio::test]
+    async fn forkguard_append_file_emits_inline_diff() {
+        // pinvou3's DiffView routes on the unified-diff shape (`--- ` / `+++ `
+        // headers + `@@` hunks). append_file must emit the same inline diff +
+        // trailing byte summary as write_file so appended chunks render as a
+        // diff preview instead of a bare byte count.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let tool = AppendFileTool;
+
+        let first = tool
+            .execute(json!({"path": "deck.html", "content": "<html>\n"}), &ctx)
+            .await
+            .expect("first append");
+        assert!(first.content.contains("--- a/"), "{}", first.content);
+        assert!(first.content.contains("+++ b/"), "{}", first.content);
+        assert!(first.content.contains("+<html>"), "{}", first.content);
+        assert!(
+            first.content.contains("Created and appended"),
+            "{}",
+            first.content
+        );
+
+        let second = tool
+            .execute(json!({"path": "deck.html", "content": "</html>\n"}), &ctx)
+            .await
+            .expect("second append");
+        assert!(second.content.contains("@@"), "{}", second.content);
+        assert!(second.content.contains("+</html>"), "{}", second.content);
+        // The byte-count summary stays as the trailing line (old sessions and
+        // non-diff fallbacks rely on it).
+        assert!(
+            second.content.contains("Appended 8 bytes"),
+            "{}",
+            second.content
+        );
+    }
+
+    #[tokio::test]
+    async fn forkguard_append_file_omits_inline_diff_for_huge_prior_contents() {
+        // Beyond APPEND_FILE_INLINE_DIFF_LIMIT_BYTES the append falls back to
+        // the summary + [diff omitted] note instead of diffing a huge file.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        let huge = "x".repeat(APPEND_FILE_INLINE_DIFF_LIMIT_BYTES + 1);
+        fs::write(tmp.path().join("big.txt"), huge).expect("seed big file");
+
+        let tool = AppendFileTool;
+        let result = tool
+            .execute(json!({"path": "big.txt", "content": "tail\n"}), &ctx)
+            .await
+            .expect("append");
+        assert!(result.success);
+        assert!(result.content.contains("[diff omitted]"), "{}", result.content);
+        assert!(!result.content.contains("--- a/"), "{}", result.content);
+        assert!(result.content.contains("Appended 5 bytes"), "{}", result.content);
     }
 
     #[tokio::test]
