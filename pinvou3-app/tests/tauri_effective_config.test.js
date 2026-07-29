@@ -80,6 +80,9 @@ const windowsCodexArgs = prepareTauriArgs(
   ["build", "-c", explicitOverlay],
   {
     platform: "win32",
+    // 这里只验证 Codex Bridge overlay 顺序；私有 runtime staging 由上一个用例
+    // 和独立 Windows 发布契约覆盖，不能让通用 Windows Rust CI 依赖私有仓凭据。
+    stageRuntime: noRuntime,
     additionalConfigs: [WINDOWS_BRIDGE_CONFIG_PATH],
   },
 );
