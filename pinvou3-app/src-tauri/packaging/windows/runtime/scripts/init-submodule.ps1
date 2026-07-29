@@ -1,16 +1,166 @@
+param(
+  [switch]$ForceLfsPull,
+  [switch]$CacheKeyOnly
+)
+
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..\..\..")).Path
 $runtimePath = "private-runtimes/windows"
+$runtimeRoot = Join-Path $repoRoot $runtimePath
+$runtimeLockPath = Join-Path $repoRoot "pinvou3-app\src-tauri\config\platforms\windows\runtime\x86_64.lock.json"
+$resolverCacheRoot = Join-Path $repoRoot "pinvou3-app\src-tauri\target\windows-runtime"
+$resolverLockPath = Join-Path $resolverCacheRoot ".resolver.lock"
+$cacheSchema = "v3"
 
-& git -C $repoRoot submodule update --init --checkout -- $runtimePath
-if ($LASTEXITCODE -ne 0) {
-  throw "Unable to initialize the private Windows runtime submodule. Confirm repository access and retry."
+function Invoke-Git {
+  param(
+    [string]$WorkingDirectory,
+    [string[]]$Arguments,
+    [string]$FailureMessage
+  )
+
+  $output = & git -C $WorkingDirectory @Arguments 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    throw "$FailureMessage $($output -join ' ')"
+  }
+  return @($output)
 }
 
-& git -C (Join-Path $repoRoot $runtimePath) lfs pull
-if ($LASTEXITCODE -ne 0) {
-  throw "Unable to materialize Git LFS objects for the private Windows runtime submodule."
+function Get-GitlinkCommit {
+  $lines = Invoke-Git -WorkingDirectory $repoRoot -Arguments @("ls-files", "--stage", "--", $runtimePath) -FailureMessage "Unable to inspect the Windows runtime gitlink."
+  $line = ($lines -join "`n").Trim()
+  if ($line -notmatch "^160000 ([0-9a-fA-F]{40}) 0`t") {
+    throw "Windows runtime gitlink is missing or unresolved: $runtimePath"
+  }
+  return $Matches[1].ToLowerInvariant()
 }
 
-Write-Host "Initialized private Windows runtime submodule on demand: $runtimePath"
+function Get-RuntimeLockSha256 {
+  if (-not (Test-Path -LiteralPath $runtimeLockPath -PathType Leaf)) {
+    throw "Windows runtime lock file is missing: $runtimeLockPath"
+  }
+  return (Get-FileHash -LiteralPath $runtimeLockPath -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-CurrentRuntimeCommit {
+  if (-not (Test-Path -LiteralPath (Join-Path $runtimeRoot ".git"))) {
+    return ""
+  }
+  $output = & git -C $runtimeRoot rev-parse HEAD 2>$null
+  if ($LASTEXITCODE -ne 0) {
+    return ""
+  }
+  return ($output -join "`n").Trim().ToLowerInvariant()
+}
+
+function Test-LfsPointer {
+  param([string]$Path)
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return $true
+  }
+  $item = Get-Item -LiteralPath $Path
+  if ($item.Length -gt 1024) {
+    return $false
+  }
+  $firstLine = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction SilentlyContinue
+  return [string]$firstLine -eq "version https://git-lfs.github.com/spec/v1"
+}
+
+function Get-LfsPointerPaths {
+  $trackedPaths = Invoke-Git -WorkingDirectory $runtimeRoot -Arguments @("lfs", "ls-files", "-n") -FailureMessage "Unable to list Windows runtime Git LFS files."
+  return @(
+    $trackedPaths |
+      ForEach-Object { [string]$_ } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Where-Object {
+        $fullPath = Join-Path $runtimeRoot $_.Replace('/', '\')
+        Test-LfsPointer -Path $fullPath
+      }
+  )
+}
+
+function Update-RuntimeSubmoduleWithoutLfsSmudge {
+  $previousSkipSmudge = [Environment]::GetEnvironmentVariable("GIT_LFS_SKIP_SMUDGE", "Process")
+  try {
+    [Environment]::SetEnvironmentVariable("GIT_LFS_SKIP_SMUDGE", "1", "Process")
+    Invoke-Git -WorkingDirectory $repoRoot -Arguments @(
+      "-c", "submodule.$runtimePath.update=checkout",
+      "submodule", "update", "--init", "--checkout", "--", $runtimePath
+    ) -FailureMessage "Unable to initialize the private Windows runtime submodule. Confirm repository access and retry." | Out-Null
+  } finally {
+    [Environment]::SetEnvironmentVariable("GIT_LFS_SKIP_SMUDGE", $previousSkipSmudge, "Process")
+  }
+}
+
+function Enter-RuntimeResolverLock {
+  param([int]$TimeoutSeconds = 120)
+
+  New-Item -ItemType Directory -Path $resolverCacheRoot -Force | Out-Null
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  while ($true) {
+    try {
+      return [System.IO.File]::Open(
+        $resolverLockPath,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+      )
+    } catch [System.IO.IOException] {
+      if ([DateTime]::UtcNow -ge $deadline) {
+        throw "Timed out waiting for the Windows runtime resolver lock: $resolverLockPath"
+      }
+      Start-Sleep -Milliseconds 200
+    }
+  }
+}
+
+$expectedCommit = Get-GitlinkCommit
+$lockSha256 = Get-RuntimeLockSha256
+$cacheKey = "pinvou3-windows-runtime-$cacheSchema-$expectedCommit-$($lockSha256.Substring(0, 16))"
+if ($CacheKeyOnly) {
+  Write-Output $cacheKey
+  exit 0
+}
+
+$resolverLock = Enter-RuntimeResolverLock
+try {
+  $currentCommit = Get-CurrentRuntimeCommit
+  if ($currentCommit -ne $expectedCommit) {
+    Update-RuntimeSubmoduleWithoutLfsSmudge
+
+    $currentCommit = Get-CurrentRuntimeCommit
+    if ($currentCommit -ne $expectedCommit) {
+      throw "Windows runtime submodule did not reach the expected gitlink commit. Expected $expectedCommit, found $currentCommit."
+    }
+    Write-Host "Updated private Windows runtime submodule: $expectedCommit"
+  } else {
+    Write-Host "Reused private Windows runtime submodule checkout: $expectedCommit"
+  }
+
+  $pointerPaths = @(Get-LfsPointerPaths)
+  if ($ForceLfsPull -or $pointerPaths.Count -gt 0) {
+    $lfsArguments = @("lfs", "pull")
+    if (-not $ForceLfsPull -and $pointerPaths.Count -gt 0) {
+      $lfsArguments += "--include=$($pointerPaths -join ',')"
+      $lfsArguments += "--exclude="
+    }
+    Invoke-Git -WorkingDirectory $runtimeRoot -Arguments $lfsArguments -FailureMessage "Unable to materialize Git LFS objects for the private Windows runtime submodule." | Out-Null
+
+    $remainingPointers = @(Get-LfsPointerPaths)
+    if ($remainingPointers.Count -gt 0) {
+      throw "Git LFS objects remain unmaterialized: $($remainingPointers -join ', ')"
+    }
+    Write-Host ("Materialized Windows runtime Git LFS files: {0}" -f $pointerPaths.Count)
+  } else {
+    Write-Host "Reused materialized Windows runtime Git LFS files; git lfs pull was skipped."
+  }
+
+  Write-Host "Windows runtime Jenkins cache key: $cacheKey"
+  Write-Output "PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=$cacheKey"
+} finally {
+  if ($null -ne $resolverLock) {
+    $resolverLock.Dispose()
+  }
+}

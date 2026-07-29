@@ -3,6 +3,9 @@ const fs = require("fs");
 const path = require("path");
 
 const appRoot = path.resolve(__dirname, "..");
+const packageJson = JSON.parse(
+  fs.readFileSync(path.join(appRoot, "package.json"), "utf8"),
+);
 const runtimeScript = fs.readFileSync(
   path.join(
     appRoot,
@@ -12,6 +15,18 @@ const runtimeScript = fs.readFileSync(
     "runtime",
     "scripts",
     "resolve-runtime.ps1",
+  ),
+  "utf8",
+);
+const runtimeInitScript = fs.readFileSync(
+  path.join(
+    appRoot,
+    "src-tauri",
+    "packaging",
+    "windows",
+    "runtime",
+    "scripts",
+    "init-submodule.ps1",
   ),
   "utf8",
 );
@@ -66,6 +81,101 @@ assert.ok(
 assert.ok(
   runtimeScript.includes('(Get-Sha256 -Path $temporaryPath) -ne [string]$entry.sha256'),
   "the NSIS bootstrapper copy must be verified against the locked SHA-256",
+);
+assert.ok(
+  runtimeScript.includes('$sourceVerificationMarkerPath = Join-Path $stagingParent ".verified-lock"'),
+  "runtime validation must persist a reusable source verification lock",
+);
+assert.ok(
+  runtimeScript.includes("function Get-CachedVerifiedManifest"),
+  "later build phases must reuse the verified runtime manifest",
+);
+assert.ok(
+  runtimeScript.includes("function Test-VerifiedStageReusable"),
+  "runtime staging must expose a fast verified-stage reuse check",
+);
+assert.ok(
+  runtimeScript.includes("function Test-StageManifest"),
+  "runtime staging reuse must validate a complete staged-file manifest",
+);
+assert.ok(
+  runtimeScript.includes("Stage-Submodule -Manifest $verifiedManifest -Rebuild"),
+  "failed staging reuse must force a complete atomic rebuild",
+);
+assert.match(
+  runtimeScript,
+  /Cached staging failed integrity checks; revalidating source payloads before rebuilding/u,
+  "damaged staging must trigger full source payload validation before rebuilding",
+);
+assert.ok(
+  runtimeScript.includes("Reused verified Windows runtime staging"),
+  "runtime staging must report when the generated overlay is reused",
+);
+assert.ok(
+  runtimeScript.indexOf("Get-CachedVerifiedManifest") <
+    runtimeScript.lastIndexOf("Get-VerifiedManifest"),
+  "the cache lookup must happen before full payload SHA-256 validation",
+);
+for (const lockField of [
+  "schemaVersion = $verificationSchemaVersion",
+  "sourceCommit =",
+  "manifestSha256 =",
+  "lockFileSha256 =",
+]) {
+  assert.ok(
+    runtimeScript.includes(lockField),
+    `verified-lock must bind cached staging to ${lockField}`,
+  );
+}
+assert.doesNotMatch(
+  runtimeInitScript,
+  /submodule\s+sync|submodule[^\r\n]*--recursive/u,
+  "Windows runtime initialization must not recursively sync unrelated submodules",
+);
+assert.match(
+  runtimeInitScript,
+  /currentCommit -ne \$expectedCommit/u,
+  "runtime submodule update must be gated by the locked gitlink commit",
+);
+assert.match(
+  runtimeInitScript,
+  /Get-LfsPointerPaths/u,
+  "runtime initialization must inspect materialized LFS files before pulling",
+);
+assert.match(
+  runtimeInitScript,
+  /git lfs pull was skipped/u,
+  "runtime initialization must expose the LFS reuse path",
+);
+assert.match(
+  runtimeInitScript,
+  /pinvou3-windows-runtime-\$cacheSchema-\$expectedCommit-\$\(\$lockSha256\.Substring/u,
+  "runtime initialization must emit a schema, commit and lock-scoped Jenkins cache key",
+);
+assert.match(
+  runtimeInitScript,
+  /SetEnvironmentVariable\("GIT_LFS_SKIP_SMUDGE", "1", "Process"\)[\s\S]*?submodule", "update"/u,
+  "submodule checkout must disable automatic LFS smudge before selective pulls",
+);
+assert.match(
+  runtimeInitScript,
+  /finally \{[\s\S]*?SetEnvironmentVariable\("GIT_LFS_SKIP_SMUDGE", \$previousSkipSmudge, "Process"\)/u,
+  "submodule initialization must restore the caller's LFS smudge setting",
+);
+assert.ok(
+  runtimeInitScript.includes('$resolverLockPath = Join-Path $resolverCacheRoot ".resolver.lock"') &&
+    runtimeScript.includes('$resolverLockPath = Join-Path $stagingParent ".resolver.lock"'),
+  "submodule initialization and runtime staging must share the same workspace lock",
+);
+assert.match(
+  packageJson.scripts["test:windows-runtime-cache"],
+  /windows_runtime_cache_behavior\.ps1/u,
+  "the executable cache corruption regression must be part of the npm test surface",
+);
+assert.match(
+  runtimeInitScript,
+  /if \(\$CacheKeyOnly\)[\s\S]*?Write-Output \$cacheKey[\s\S]*?exit 0/u,
+  "Jenkins must be able to resolve the runtime cache key before remote access",
 );
 
 const windowsJobStart = releaseWorkflow.indexOf("build-windows-x64:");
