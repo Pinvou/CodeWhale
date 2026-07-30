@@ -3,7 +3,8 @@ param(
   [string]$Mode = "Stage",
   [string]$RuntimeRoot = "",
   [string]$LockFile = "",
-  [switch]$Force
+  [switch]$Force,
+  [switch]$ImportFunctionsOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +16,11 @@ $appRoot = (Resolve-Path (Join-Path $tauriRoot "..")).Path
 $repoRoot = (Resolve-Path (Join-Path $appRoot "..")).Path
 $defaultLockFile = Join-Path $tauriRoot "config\platforms\windows\runtime\x86_64.lock.json"
 $generatedConfigPath = Join-Path $tauriRoot "target\windows-runtime\tauri.generated.conf.json"
+$stagingParent = Join-Path $tauriRoot "target\windows-runtime"
+$sourceVerificationMarkerPath = Join-Path $stagingParent ".verified-lock"
+$resolverLockPath = Join-Path $stagingParent ".resolver.lock"
+$verificationSchemaVersion = 4
+$stageManifestSchemaVersion = 2
 
 if ([string]::IsNullOrWhiteSpace($LockFile)) {
   $LockFile = $defaultLockFile
@@ -36,6 +42,9 @@ if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
   }
 }
 $RuntimeRoot = [System.IO.Path]::GetFullPath($RuntimeRoot)
+$stageId = ([string]$lock.source.commit).Substring(0, 12) + "-" + ([string]$lock.manifest.sha256).Substring(0, 12)
+$stagingRoot = Join-Path $stagingParent $stageId
+$stageManifestPath = Join-Path $stagingRoot ".stage-manifest.json"
 
 function Write-Utf8WithoutBom {
   param([string]$Path, [string]$Content)
@@ -45,6 +54,22 @@ function Write-Utf8WithoutBom {
   }
   $encoding = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
+function Write-Utf8Atomically {
+  param([string]$Path, [string]$Content)
+
+  $parent = Split-Path -Parent $Path
+  if ($parent) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $temporaryPath = Join-Path $parent ("." + [System.IO.Path]::GetFileName($Path) + ".tmp-" + [System.Guid]::NewGuid().ToString("N"))
+  try {
+    Write-Utf8WithoutBom -Path $temporaryPath -Content $Content
+    Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
+  } finally {
+    Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Assert-ChildPath {
@@ -59,6 +84,42 @@ function Assert-ChildPath {
 function Get-Sha256 {
   param([string]$Path)
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-VerificationMarkerState {
+  param([string]$StageManifestSha256 = "")
+
+  $state = [ordered]@{
+    schemaVersion = $verificationSchemaVersion
+    sourceCommit = ([string]$lock.source.commit).ToLowerInvariant()
+    manifestSha256 = ([string]$lock.manifest.sha256).ToLowerInvariant()
+    lockFileSha256 = Get-Sha256 -Path $LockFile
+    target = [string]$lock.target
+  }
+  if (-not [string]::IsNullOrWhiteSpace($StageManifestSha256)) {
+    $state["stageManifestSha256"] = $StageManifestSha256.ToLowerInvariant()
+  }
+  return $state
+}
+
+function Get-VerificationMarkerContent {
+  param([string]$StageManifestSha256 = "")
+
+  $state = Get-VerificationMarkerState -StageManifestSha256 $StageManifestSha256
+  return (($state | ConvertTo-Json -Depth 4) + "`n")
+}
+
+function Test-VerificationMarker {
+  param(
+    [string]$Path,
+    [string]$StageManifestSha256 = ""
+  )
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return $false
+  }
+  $actual = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
+  return $actual -eq (Get-VerificationMarkerContent -StageManifestSha256 $StageManifestSha256)
 }
 
 function Get-GitOutput {
@@ -83,21 +144,9 @@ function Get-SuperprojectGitlinkCommit {
   return $Matches[1].ToLowerInvariant()
 }
 
-function Test-LfsPointer {
-  param([string]$Path)
-  $item = Get-Item -LiteralPath $Path
-  if ($item.Length -gt 1024) { return $false }
-  $firstLine = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction SilentlyContinue
-  return [string]$firstLine -eq "version https://git-lfs.github.com/spec/v1"
-}
-
-function Get-VerifiedManifest {
-  if (-not (Test-Path -LiteralPath $RuntimeRoot -PathType Container)) {
-    throw "Windows runtime submodule is not initialized: $RuntimeRoot. Run 'npm run runtime:windows:init' from pinvou3-app."
-  }
-
+function Assert-RuntimeIdentity {
   $actualCommit = Get-GitOutput -Arguments @("rev-parse", "HEAD")
-  $expectedCommit = [string]$lock.source.commit
+  $expectedCommit = ([string]$lock.source.commit).ToLowerInvariant()
   $gitlinkCommit = Get-SuperprojectGitlinkCommit
   if ($gitlinkCommit -ne $expectedCommit) {
     throw "Windows runtime gitlink does not match the main-repository lock. Expected $expectedCommit, found $gitlinkCommit."
@@ -114,9 +163,45 @@ function Get-VerifiedManifest {
   if (-not [string]::IsNullOrWhiteSpace($dirty)) {
     throw "Windows runtime submodule contains tracked local changes; commit and update the main-repository lock first."
   }
+  return $actualCommit
+}
 
+function Get-RuntimeManifestPath {
   $manifestPath = Join-Path $RuntimeRoot ([string]$lock.manifest.path).Replace('/', '\')
   Assert-ChildPath -Root $RuntimeRoot -Path $manifestPath
+  return $manifestPath
+}
+
+function Read-CompatibleRuntimeManifest {
+  param([string]$ManifestPath)
+
+  $manifest = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if (
+    [int]$manifest.schemaVersion -ne 2 -or
+    [string]$manifest.target -ne [string]$lock.target -or
+    @($manifest.stagedFiles).Count -eq 0
+  ) {
+    throw "Windows runtime submodule manifest schema or target is incompatible."
+  }
+  return $manifest
+}
+
+function Test-LfsPointer {
+  param([string]$Path)
+  $item = Get-Item -LiteralPath $Path
+  if ($item.Length -gt 1024) { return $false }
+  $firstLine = Get-Content -LiteralPath $Path -TotalCount 1 -ErrorAction SilentlyContinue
+  return [string]$firstLine -eq "version https://git-lfs.github.com/spec/v1"
+}
+
+function Get-VerifiedManifest {
+  if (-not (Test-Path -LiteralPath $RuntimeRoot -PathType Container)) {
+    throw "Windows runtime submodule is not initialized: $RuntimeRoot. Run 'npm run runtime:windows:init' from pinvou3-app."
+  }
+
+  $actualCommit = Assert-RuntimeIdentity
+
+  $manifestPath = Get-RuntimeManifestPath
   if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     throw "Windows runtime submodule manifest is missing: $manifestPath"
   }
@@ -124,10 +209,7 @@ function Get-VerifiedManifest {
     throw "Windows runtime submodule manifest SHA-256 does not match the main-repository lock."
   }
 
-  $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-  if ([int]$manifest.schemaVersion -ne 1 -or [string]$manifest.target -ne [string]$lock.target) {
-    throw "Windows runtime submodule manifest schema or target is incompatible."
-  }
+  $manifest = Read-CompatibleRuntimeManifest -ManifestPath $manifestPath
   foreach ($entry in $manifest.files) {
     $sourcePath = Join-Path $RuntimeRoot ([string]$entry.path).Replace('/', '\')
     Assert-ChildPath -Root $RuntimeRoot -Path $sourcePath
@@ -148,6 +230,223 @@ function Get-VerifiedManifest {
 
   Write-Host ("Validated Windows runtime submodule: {0} files at {1}" -f $manifest.files.Count, $actualCommit)
   return $manifest
+}
+
+function Get-CachedVerifiedManifest {
+  param([switch]$VerifyContent)
+
+  if (-not (Test-VerificationMarker -Path $sourceVerificationMarkerPath)) {
+    return $null
+  }
+
+  $actualCommit = Assert-RuntimeIdentity
+  $manifestPath = Get-RuntimeManifestPath
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    return $null
+  }
+  if ((Get-Sha256 -Path $manifestPath) -ne [string]$lock.manifest.sha256) {
+    return $null
+  }
+
+  $manifest = Read-CompatibleRuntimeManifest -ManifestPath $manifestPath
+  foreach ($entry in $manifest.files) {
+    $sourcePath = Join-Path $RuntimeRoot ([string]$entry.path).Replace('/', '\')
+    Assert-ChildPath -Root $RuntimeRoot -Path $sourcePath
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+      return $null
+    }
+    if (Test-LfsPointer -Path $sourcePath) {
+      return $null
+    }
+    if ([long](Get-Item -LiteralPath $sourcePath).Length -ne [long]$entry.bytes) {
+      return $null
+    }
+    if ($VerifyContent -and (Get-Sha256 -Path $sourcePath) -ne [string]$entry.sha256) {
+      return $null
+    }
+  }
+
+  if ($VerifyContent) {
+    Write-Host ("Revalidated cached Windows runtime content: {0} files at {1}" -f $manifest.files.Count, $actualCommit)
+  } else {
+    Write-Host ("Reused Windows runtime verification metadata: {0} files at {1}" -f $manifest.files.Count, $actualCommit)
+  }
+  return $manifest
+}
+
+function Get-StagedRelativePaths {
+  param([string]$Root)
+
+  if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+    return @()
+  }
+  $rootPrefix = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+  $metadataPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  [void]$metadataPaths.Add(".verified-lock")
+  [void]$metadataPaths.Add(".stage-manifest.json")
+  return @(
+    Get-ChildItem -LiteralPath $Root -Recurse -File -Force |
+      ForEach-Object {
+        $fullPath = [System.IO.Path]::GetFullPath($_.FullName)
+        $relativePath = $fullPath.Substring($rootPrefix.Length).Replace('\', '/')
+        if (-not $metadataPaths.Contains($relativePath)) {
+          $relativePath
+        }
+      } |
+      Sort-Object
+  )
+}
+
+function Get-StagedRelativeFiles {
+  param([string]$Root)
+
+  return @(
+    Get-StagedRelativePaths -Root $Root | ForEach-Object {
+      $relativePath = [string]$_
+      $fullPath = Join-Path $Root $relativePath.Replace('/', '\')
+      $item = Get-Item -LiteralPath $fullPath
+      [pscustomobject]@{
+        path = $relativePath
+        bytes = [long]$item.Length
+        sha256 = Get-Sha256 -Path $fullPath
+      }
+    }
+  )
+}
+
+function Test-StagedFilesAgainstTrustedManifest {
+  param(
+    [string]$Root,
+    $TrustedEntries
+  )
+
+  try {
+    $entries = @($TrustedEntries)
+    if ($entries.Count -eq 0) {
+      return $false
+    }
+
+    $expectedByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $entries) {
+      $relativePath = ([string]$entry.path).Replace('\', '/')
+      $sha256 = ([string]$entry.sha256).ToLowerInvariant()
+      if (
+        [string]::IsNullOrWhiteSpace($relativePath) -or
+        $relativePath.StartsWith('/') -or
+        $relativePath -match '^[A-Za-z]:' -or
+        $relativePath -match '(^|/)\.\.(/|$)' -or
+        $relativePath -in @(".verified-lock", ".stage-manifest.json") -or
+        $sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [long]$entry.bytes -lt 0 -or
+        $expectedByPath.ContainsKey($relativePath)
+      ) {
+        return $false
+      }
+
+      $fullPath = Join-Path $Root $relativePath.Replace('/', '\')
+      Assert-ChildPath -Root $Root -Path $fullPath
+      if (
+        -not (Test-Path -LiteralPath $fullPath -PathType Leaf) -or
+        [long](Get-Item -LiteralPath $fullPath).Length -ne [long]$entry.bytes -or
+        (Get-Sha256 -Path $fullPath) -ne $sha256
+      ) {
+        return $false
+      }
+      $expectedByPath.Add($relativePath, $entry)
+    }
+
+    $actualPaths = @(Get-StagedRelativePaths -Root $Root)
+    if ($actualPaths.Count -ne $expectedByPath.Count) {
+      return $false
+    }
+    foreach ($actualPath in $actualPaths) {
+      if (-not $expectedByPath.ContainsKey($actualPath)) {
+        return $false
+      }
+    }
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Get-StageManifestContent {
+  param([string]$Root)
+
+  $identity = Get-VerificationMarkerState
+  $manifest = [ordered]@{
+    schemaVersion = $stageManifestSchemaVersion
+    sourceCommit = $identity.sourceCommit
+    manifestSha256 = $identity.manifestSha256
+    lockFileSha256 = $identity.lockFileSha256
+    target = $identity.target
+    files = @(Get-StagedRelativeFiles -Root $Root)
+  }
+  return (($manifest | ConvertTo-Json -Depth 6) + "`n")
+}
+
+function Write-StageManifest {
+  param([string]$Root)
+
+  $path = Join-Path $Root ".stage-manifest.json"
+  Write-Utf8WithoutBom -Path $path -Content (Get-StageManifestContent -Root $Root)
+  return $path
+}
+
+function Test-StageManifest {
+  param(
+    [string]$ManifestPath,
+    $TrustedEntries
+  )
+
+  try {
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+      return $false
+    }
+    $cached = Get-Content -LiteralPath $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $identity = Get-VerificationMarkerState
+    if (
+      [int]$cached.schemaVersion -ne $stageManifestSchemaVersion -or
+      [string]$cached.sourceCommit -ne [string]$identity.sourceCommit -or
+      [string]$cached.manifestSha256 -ne [string]$identity.manifestSha256 -or
+      [string]$cached.lockFileSha256 -ne [string]$identity.lockFileSha256 -or
+      [string]$cached.target -ne [string]$identity.target
+    ) {
+      return $false
+    }
+
+    $trustedByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in @($TrustedEntries)) {
+      $relativePath = [string]$entry.path
+      if ([string]::IsNullOrWhiteSpace($relativePath) -or $trustedByPath.ContainsKey($relativePath)) {
+        return $false
+      }
+      $trustedByPath.Add($relativePath, $entry)
+    }
+
+    $cachedByPath = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in @($cached.files)) {
+      $relativePath = [string]$entry.path
+      if (
+        [string]::IsNullOrWhiteSpace($relativePath) -or
+        $cachedByPath.ContainsKey($relativePath) -or
+        -not $trustedByPath.ContainsKey($relativePath)
+      ) {
+        return $false
+      }
+      $trusted = $trustedByPath[$relativePath]
+      if (
+        [long]$entry.bytes -ne [long]$trusted.bytes -or
+        ([string]$entry.sha256).ToLowerInvariant() -ne ([string]$trusted.sha256).ToLowerInvariant()
+      ) {
+        return $false
+      }
+      $cachedByPath.Add($relativePath, $entry)
+    }
+    return $cachedByPath.Count -eq $trustedByPath.Count
+  } catch {
+    return $false
+  }
 }
 
 function Find-ComponentArchive {
@@ -278,7 +577,7 @@ function Stage-NsisBootstrapper {
   return Join-Path $destinationRoot "vc_redist\VC_redist.x64.exe"
 }
 
-function Write-TauriOverlay {
+function Get-TauriOverlayContent {
   param([string]$StageId)
   $relativeRoot = "target/windows-runtime/$StageId"
   $resources = [ordered]@{
@@ -295,20 +594,69 @@ function Write-TauriOverlay {
     "$relativeRoot/expanded/7zip/" = "runtime/7zip"
   }
   $config = [ordered]@{ bundle = [ordered]@{ resources = $resources } }
-  Write-Utf8WithoutBom -Path $generatedConfigPath -Content (($config | ConvertTo-Json -Depth 8) + "`n")
+  return (($config | ConvertTo-Json -Depth 8) + "`n")
+}
+
+function Write-TauriOverlay {
+  param([string]$StageId)
+  Write-Utf8Atomically -Path $generatedConfigPath -Content (Get-TauriOverlayContent -StageId $StageId)
+}
+
+function Test-VerifiedStageReusable {
+  param($Manifest)
+
+  $stageMarkerPath = Join-Path $stagingRoot ".verified-lock"
+  if (-not (Test-Path -LiteralPath $stageManifestPath -PathType Leaf)) {
+    return $false
+  }
+  $stageManifestSha256 = Get-Sha256 -Path $stageManifestPath
+  if (-not (Test-VerificationMarker -Path $stageMarkerPath -StageManifestSha256 $stageManifestSha256)) {
+    return $false
+  }
+  if (-not (Test-StagedFilesAgainstTrustedManifest -Root $stagingRoot -TrustedEntries $Manifest.stagedFiles)) {
+    return $false
+  }
+  if (-not (Test-StageManifest -ManifestPath $stageManifestPath -TrustedEntries $Manifest.stagedFiles)) {
+    return $false
+  }
+
+  $bootstrapperManifestPath = "payload/vc_redist/VC_redist.x64.exe"
+  $bootstrapperEntries = @($Manifest.files | Where-Object { [string]$_.path -eq $bootstrapperManifestPath })
+  $bootstrapperPath = Join-Path $stagingParent "nsis\vc_redist\VC_redist.x64.exe"
+  if (
+    $bootstrapperEntries.Count -ne 1 -or
+    -not (Test-Path -LiteralPath $bootstrapperPath -PathType Leaf) -or
+    [long](Get-Item -LiteralPath $bootstrapperPath).Length -ne [long]$bootstrapperEntries[0].bytes -or
+    (Get-Sha256 -Path $bootstrapperPath) -ne [string]$bootstrapperEntries[0].sha256
+  ) {
+    return $false
+  }
+
+  if (-not (Test-Path -LiteralPath $generatedConfigPath -PathType Leaf)) {
+    return $false
+  }
+  $actualOverlay = [System.IO.File]::ReadAllText($generatedConfigPath, [System.Text.Encoding]::UTF8)
+  if ($actualOverlay -ne (Get-TauriOverlayContent -StageId $stageId)) {
+    return $false
+  }
+
+  return $true
 }
 
 function Stage-Submodule {
-  param($Manifest)
-  $stageId = ([string]$lock.source.commit).Substring(0, 12) + "-" + ([string]$lock.manifest.sha256).Substring(0, 12)
-  $stagingParent = Join-Path $tauriRoot "target\windows-runtime"
-  $stagingRoot = Join-Path $stagingParent $stageId
+  param(
+    $Manifest,
+    [switch]$Rebuild
+  )
   $markerPath = Join-Path $stagingRoot ".verified-lock"
-  $expectedMarker = ([string]$lock.source.commit + "`n" + [string]$lock.manifest.sha256)
   Assert-ChildPath -Root (Join-Path $tauriRoot "target") -Path $stagingRoot
 
-  $markerValid = (Test-Path -LiteralPath $markerPath -PathType Leaf) -and ((Get-Content -LiteralPath $markerPath -Raw).Trim() -eq $expectedMarker)
-  if ($Force -or -not $markerValid) {
+  $markerValid = $false
+  if (Test-Path -LiteralPath $stageManifestPath -PathType Leaf) {
+    $existingStageManifestSha256 = Get-Sha256 -Path $stageManifestPath
+    $markerValid = Test-VerificationMarker -Path $markerPath -StageManifestSha256 $existingStageManifestSha256
+  }
+  if ($Force -or $Rebuild -or -not $markerValid) {
     New-Item -ItemType Directory -Path $stagingParent -Force | Out-Null
     $temporaryRoot = Join-Path $stagingParent (".tmp-" + [System.Guid]::NewGuid().ToString("N"))
     Assert-ChildPath -Root $stagingParent -Path $temporaryRoot
@@ -335,7 +683,12 @@ function Stage-Submodule {
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "node-*-win-x64.zip" -Label "Node.js") -Destination (Join-Path $expandedRoot "node") -RequiredFile "node.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "pandoc-*-windows-x86_64.zip" -Label "Pandoc") -Destination (Join-Path $expandedRoot "pandoc") -RequiredFile "pandoc.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "onnxruntime-win-x64-*-runtime.zip" -Label "ONNX Runtime") -Destination (Join-Path $expandedRoot "onnxruntime") -RequiredFile "onnxruntime.dll" -OnnxOnly
-      Write-Utf8WithoutBom -Path (Join-Path $temporaryRoot ".verified-lock") -Content ($expectedMarker + "`n")
+      if (-not (Test-StagedFilesAgainstTrustedManifest -Root $temporaryRoot -TrustedEntries $Manifest.stagedFiles)) {
+        throw "Generated Windows runtime staging does not match the locked private-runtime stagedFiles manifest."
+      }
+      $temporaryStageManifestPath = Write-StageManifest -Root $temporaryRoot
+      $temporaryStageManifestSha256 = Get-Sha256 -Path $temporaryStageManifestPath
+      Write-Utf8WithoutBom -Path (Join-Path $temporaryRoot ".verified-lock") -Content (Get-VerificationMarkerContent -StageManifestSha256 $temporaryStageManifestSha256)
 
       if (Test-Path -LiteralPath $stagingRoot) {
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
@@ -353,7 +706,69 @@ function Stage-Submodule {
   Write-Host ("Generated Tauri overlay: {0}" -f $generatedConfigPath)
 }
 
-$verifiedManifest = Get-VerifiedManifest
-if ($Mode -eq "Stage") {
-  Stage-Submodule -Manifest $verifiedManifest
+function Enter-ResolverLock {
+  param([int]$TimeoutSeconds = 120)
+
+  New-Item -ItemType Directory -Path $stagingParent -Force | Out-Null
+  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+  while ($true) {
+    try {
+      return [System.IO.File]::Open(
+        $resolverLockPath,
+        [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite,
+        [System.IO.FileShare]::None
+      )
+    } catch [System.IO.IOException] {
+      if ([DateTime]::UtcNow -ge $deadline) {
+        throw "Timed out waiting for the Windows runtime resolver lock: $resolverLockPath"
+      }
+      Start-Sleep -Milliseconds 200
+    }
+  }
+}
+
+function Invoke-RuntimeResolution {
+  $verifiedManifest = $null
+  $sourceMetadataWasCached = $false
+  if (-not $Force) {
+    $verifiedManifest = Get-CachedVerifiedManifest -VerifyContent:($Mode -eq "Validate")
+    $sourceMetadataWasCached = $null -ne $verifiedManifest
+  }
+
+  if ($null -eq $verifiedManifest) {
+    $verifiedManifest = Get-VerifiedManifest
+    Write-Utf8Atomically -Path $sourceVerificationMarkerPath -Content (Get-VerificationMarkerContent)
+  }
+
+  if ($Mode -ne "Stage") {
+    return
+  }
+
+  if (-not $Force -and (Test-VerifiedStageReusable -Manifest $verifiedManifest)) {
+    Write-Host ("Reused verified Windows runtime staging: {0}" -f $stagingRoot)
+    Write-Host ("Reused Tauri overlay: {0}" -f $generatedConfigPath)
+    return
+  }
+
+  if ($sourceMetadataWasCached) {
+    Write-Host "Cached staging failed integrity checks; revalidating source payloads before rebuilding."
+    $verifiedManifest = Get-VerifiedManifest
+    Write-Utf8Atomically -Path $sourceVerificationMarkerPath -Content (Get-VerificationMarkerContent)
+  }
+
+  Stage-Submodule -Manifest $verifiedManifest -Rebuild
+}
+
+if ($ImportFunctionsOnly) {
+  return
+}
+
+$resolverLock = Enter-ResolverLock
+try {
+  Invoke-RuntimeResolution
+} finally {
+  if ($null -ne $resolverLock) {
+    $resolverLock.Dispose()
+  }
 }

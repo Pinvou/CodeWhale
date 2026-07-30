@@ -105,6 +105,7 @@ jobs:
       frontend: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.frontend }}
       relay: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.relay }}
       windows_codex: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.windows_codex }}
+      windows_runtime: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.windows_runtime }}
       # 三项同时满足才视为已验证回流：Official 同仓分支、约定分支前缀、PR 正文来源标记。
       # 外部 fork 或普通功能分支即使伪造正文标记，也不能跳过 PR 级 rust-test。
       community_backflow: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'backflow/community-') && contains(github.event.pull_request.body, '<!-- community-backflow:Pinvou/pinvou-agent#') }}
@@ -196,6 +197,14 @@ jobs:
               - 'pinvou3-app/tests/codex_acp_*'
               - 'pinvou3-app/package.json'
               - 'pinvou3-app/package-lock.json'
+              - '.github/workflows/pr-check.yml'
+            windows_runtime:
+              - 'pinvou3-app/src-tauri/packaging/windows/runtime/**'
+              - 'pinvou3-app/src-tauri/config/platforms/windows/runtime/**'
+              - 'pinvou3-app/tests/windows_runtime_*'
+              - 'private-runtimes/windows'
+              - '.gitmodules'
+              - 'pinvou3-app/package.json'
               - '.github/workflows/pr-check.yml'
 
   fast-gate:
@@ -605,6 +614,19 @@ jobs:
       - name: Windows Codex Runtime 原生打包冒烟
         run: npm --prefix pinvou3-app run test:codex-acp-windows-runtime
 
+  windows-runtime-test:
+    name: windows-runtime-test
+    needs: changes
+    if: ${{ needs.changes.outputs.windows_runtime == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Windows 私有 runtime 缓存行为回归
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File pinvou3-app/tests/windows_runtime_cache_behavior.ps1
+
   required-gate:
     name: required-gate
     needs:
@@ -617,6 +639,7 @@ jobs:
       - rust-lint
       - rust-test
       - windows-codex-runtime-test
+      - windows-runtime-test
     if: ${{ always() && ((github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -632,6 +655,7 @@ jobs:
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           RUST_RESULT: ${{ needs.rust-test.result }}
           WINDOWS_CODEX_RESULT: ${{ needs.windows-codex-runtime-test.result }}
+          WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
         run: |
           if [[ "$COMMIT_MESSAGE_RESULT" != success || "$VERSION_CONSISTENCY_RESULT" != success || "$CHANGES_RESULT" != success || "$FAST_GATE_RESULT" != success ]]; then
             echo "基础检查失败: commit-message=$COMMIT_MESSAGE_RESULT version-consistency=$VERSION_CONSISTENCY_RESULT changes=$CHANGES_RESULT fast-gate=$FAST_GATE_RESULT" >&2
@@ -644,7 +668,8 @@ jobs:
             "relay-test:$RELAY_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \
             "rust-test:$RUST_RESULT" \
-            "windows-codex-runtime-test:$WINDOWS_CODEX_RESULT"; do
+            "windows-codex-runtime-test:$WINDOWS_CODEX_RESULT" \
+            "windows-runtime-test:$WINDOWS_RUNTIME_RESULT"; do
             name="${item%%:*}"
             result="${item#*:}"
             case "$result" in
