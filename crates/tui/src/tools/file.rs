@@ -833,18 +833,31 @@ fn write_file_result_body(
 
 /// Build the `append_file` result body: unified diff of the appended chunk on
 /// top (same renderer path as `write_file`, #505), byte-count summary last.
-/// `prior_contents` is `None` when the existing file isn't readable UTF-8 —
-/// then there is nothing trustworthy to diff against, so keep the plain
-/// summary. Oversized existing files get the `[diff omitted]` note instead.
+/// `prior_contents` is `None` when the existing file was skipped at the call
+/// site: either it exceeds the inline-diff size cap (gated on metadata, so a
+/// huge file is never read into memory — those get the `[diff omitted]` note)
+/// or it isn't readable UTF-8 (nothing trustworthy to diff against, so keep
+/// the plain summary).
 fn append_file_result_body(
     path: &str,
     prior_contents: Option<&str>,
+    old_len: u64,
     append_content: &str,
     summary: &str,
 ) -> String {
     let Some(prior) = prior_contents else {
+        if old_len > APPEND_FILE_INLINE_DIFF_LIMIT_BYTES as u64 {
+            return format!(
+                "{summary}\n\
+                 [diff omitted] {path} is too large for an inline append_file diff \
+                 (old={old_len} bytes, limit={APPEND_FILE_INLINE_DIFF_LIMIT_BYTES} bytes). \
+                 Use read_file with line ranges to inspect it."
+            );
+        }
         return summary.to_string();
     };
+    // Belt and braces for the file growing between the metadata check and the
+    // snapshot read.
     if prior.len() > APPEND_FILE_INLINE_DIFF_LIMIT_BYTES {
         return format!(
             "{summary}\n\
@@ -938,11 +951,15 @@ impl ToolSpec for AppendFileTool {
         let before_len = fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
         // Snapshot the existing contents before appending — used to render an
         // inline diff in the tool result (same renderer path as write_file).
+        // Gate on the metadata size first: appending to a huge file must not
+        // pull the whole file into memory just to decide the diff is omitted.
         // A non-UTF-8 existing file can't be diffed as text → skip the diff.
-        let prior_contents = if existed_before {
+        let prior_contents = if !existed_before {
+            Some(String::new())
+        } else if before_len <= APPEND_FILE_INLINE_DIFF_LIMIT_BYTES as u64 {
             fs::read_to_string(&file_path).ok()
         } else {
-            Some(String::new())
+            None
         };
 
         let mut file = fs::OpenOptions::new()
@@ -977,6 +994,7 @@ impl ToolSpec for AppendFileTool {
         let body = append_file_result_body(
             &file_path.display().to_string(),
             prior_contents.as_deref(),
+            before_len,
             append_content,
             &summary,
         );
@@ -2278,6 +2296,25 @@ mod tests {
         assert!(result.success);
         assert!(result.content.contains("[diff omitted]"), "{}", result.content);
         assert!(!result.content.contains("--- a/"), "{}", result.content);
+        assert!(result.content.contains("Appended 5 bytes"), "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn forkguard_append_file_falls_back_to_summary_for_non_utf8_prior() {
+        // A non-UTF-8 existing file can't be diffed as text → plain byte-count
+        // summary, no diff headers, and the append itself still succeeds.
+        let tmp = tempdir().expect("tempdir");
+        let ctx = ToolContext::new(tmp.path().to_path_buf());
+        fs::write(tmp.path().join("bin.dat"), [0xff, 0xfe, 0x00, 0x01]).expect("seed binary");
+
+        let tool = AppendFileTool;
+        let result = tool
+            .execute(json!({"path": "bin.dat", "content": "tail\n"}), &ctx)
+            .await
+            .expect("append");
+        assert!(result.success);
+        assert!(!result.content.contains("--- a/"), "{}", result.content);
+        assert!(!result.content.contains("[diff omitted]"), "{}", result.content);
         assert!(result.content.contains("Appended 5 bytes"), "{}", result.content);
     }
 
