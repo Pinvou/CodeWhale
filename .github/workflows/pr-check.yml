@@ -1,7 +1,7 @@
 name: PR Check
 
 # Jobs:
-# - commit-message:强制校验 PR/push/Merge Queue 的 Git commit 信息规范。
+# - commit-message:强制校验 PR/push 的 Git commit 信息规范。
 # - version-consistency:强制校验 VERSION 单一事实来源与 SemVer 规则。
 # - fast-gate(秒级,每 PR 都跑):fork-guard 指纹 + fork 合规联动 + Python 确定性测试。
 # - changes:检测本 PR 有没有 Rust/依赖、L1 harness 或前端改动,给编译/前端 job 做 paths filter。
@@ -15,8 +15,9 @@ name: PR Check
 #   欠账由清理 PR(#35 及后续)消化后逐个升 deny。
 # - windows-rust-test:只在 main push 跑，不作为 PR 或 Merge Queue 合入门禁。
 # - windows-codex-runtime-test:相关 PR 在 Windows 原生准备 Node + ACP Bridge，并核对安装包资源。
-# - required-gate:汇总所有适用检查，作为 PR 与 Merge Queue 的唯一 required check。
-# - merge_group:进入 Merge Queue 后基于最新 main 跑完整检查，不要求开放 PR 反复 rebase。
+# - required-gate:PR 阶段汇总所有适用检查，作为唯一 required check。
+# - merge_group:仅复用同名 required context；完整门禁已在 PR 入队前通过。
+#   仓库 Merge Queue 当前每组最多合并 1 个 PR，因此不重复 checkout、构建和测试。
 #
 # Cache 策略(2026-07 诊断:PR cache 挂 refs/pull/N/merge 作用域互不可见 + 1.3GB/份
 # 顶死 10GB 限额被 LRU 秒驱逐 → 每轮全冷编译 ~9min):
@@ -49,7 +50,7 @@ concurrency:
 jobs:
   commit-message:
     name: commit-message
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -62,8 +63,6 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             python3 scripts/validate-commit-msg.py --range "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}"
-          elif [ "${{ github.event_name }}" = "merge_group" ]; then
-            python3 scripts/validate-commit-msg.py --range "${{ github.event.merge_group.base_sha }}" "${{ github.event.merge_group.head_sha }}"
           else
             before="${{ github.event.before }}"
             if [ "$before" = "0000000000000000000000000000000000000000" ]; then
@@ -74,7 +73,7 @@ jobs:
 
   version-consistency:
     name: version-consistency
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' || github.event_name == 'push' }}
+    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -92,21 +91,21 @@ jobs:
       - name: 校验 VERSION 与各版本文件一致
         run: node scripts/sync-version.mjs --check
 
-  # PR 按路径选择检查；Merge Queue 对最新 main 组合跑完整检查。
+  # PR 按路径选择检查；Merge Queue 不重复执行路径门禁。
   changes:
     name: changes
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      rust: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.rust }}
-      l1: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.l1 }}
-      pet: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.pet }}
-      frontend: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.frontend }}
-      relay: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.relay }}
-      acp_runtime: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.acp_runtime }}
-      windows_codex: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.windows_codex }}
-      windows_runtime: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.windows_runtime }}
+      rust: ${{ steps.filter.outputs.rust }}
+      l1: ${{ steps.filter.outputs.l1 }}
+      pet: ${{ steps.filter.outputs.pet }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      relay: ${{ steps.filter.outputs.relay }}
+      acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
+      windows_codex: ${{ steps.filter.outputs.windows_codex }}
+      windows_runtime: ${{ steps.filter.outputs.windows_runtime }}
       # 三项同时满足才视为已验证回流：Official 同仓分支、约定分支前缀、PR 正文来源标记。
       # 外部 fork 或普通功能分支即使伪造正文标记，也不能跳过 PR 级 rust-test。
       community_backflow: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.head.ref, 'backflow/community-') && contains(github.event.pull_request.body, '<!-- community-backflow:Pinvou/pinvou-agent#') }}
@@ -114,7 +113,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
         id: filter
-        if: github.event_name == 'pull_request'
         with:
           filters: |
             rust:
@@ -230,7 +228,7 @@ jobs:
 
   fast-gate:
     name: fast-gate
-    if: ${{ (github.event_name == 'pull_request' && github.event.action != 'closed') || github.event_name == 'merge_group' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -242,7 +240,7 @@ jobs:
 
       - name: 架构边界门禁
         env:
-          BASE_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           base_ref="${BASE_REF#refs/heads/}"
           python3 scripts/architecture-guard.py --base-ref "origin/$base_ref"
@@ -261,7 +259,7 @@ jobs:
 
       - name: fork 合规联动 (gitlink ↔ fork-modifications)
         env:
-          BASE_REF: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_ref || github.base_ref }}
+          BASE_REF: ${{ github.base_ref }}
         run: |
           base_ref="${BASE_REF#refs/heads/}"
           ./scripts/ci-fork-link-check.sh "origin/$base_ref"
@@ -703,6 +701,11 @@ jobs:
           WINDOWS_CODEX_RESULT: ${{ needs.windows-codex-runtime-test.result }}
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
         run: |
+          if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
+            echo "完整门禁已在 PR 入队前验证；Merge Queue 仅复用 required-gate 状态"
+            exit 0
+          fi
+
           if [[ "$COMMIT_MESSAGE_RESULT" != success || "$VERSION_CONSISTENCY_RESULT" != success || "$CHANGES_RESULT" != success || "$FAST_GATE_RESULT" != success ]]; then
             echo "基础检查失败: commit-message=$COMMIT_MESSAGE_RESULT version-consistency=$VERSION_CONSISTENCY_RESULT changes=$CHANGES_RESULT fast-gate=$FAST_GATE_RESULT" >&2
             exit 1
