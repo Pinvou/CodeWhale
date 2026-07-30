@@ -2294,9 +2294,17 @@ mod tests {
             .await
             .expect("append");
         assert!(result.success);
-        assert!(result.content.contains("[diff omitted]"), "{}", result.content);
+        assert!(
+            result.content.contains("[diff omitted]"),
+            "{}",
+            result.content
+        );
         assert!(!result.content.contains("--- a/"), "{}", result.content);
-        assert!(result.content.contains("Appended 5 bytes"), "{}", result.content);
+        assert!(
+            result.content.contains("Appended 5 bytes"),
+            "{}",
+            result.content
+        );
     }
 
     #[tokio::test]
@@ -2314,8 +2322,16 @@ mod tests {
             .expect("append");
         assert!(result.success);
         assert!(!result.content.contains("--- a/"), "{}", result.content);
-        assert!(!result.content.contains("[diff omitted]"), "{}", result.content);
-        assert!(result.content.contains("Appended 5 bytes"), "{}", result.content);
+        assert!(
+            !result.content.contains("[diff omitted]"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("Appended 5 bytes"),
+            "{}",
+            result.content
+        );
     }
 
     #[tokio::test]
