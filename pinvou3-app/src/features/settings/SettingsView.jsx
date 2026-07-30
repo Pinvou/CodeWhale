@@ -2193,9 +2193,9 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         if (id && onDeleteArchived) onDeleteArchived(id);
       };
       const refreshBuiltinModels = async () => {
-        if (!bridge.available || !bridge.llmapi.getLlmApiModels) return;
+        if (!bridge.available || !bridge.llmapi.refreshLlmApi) return;
         setLlmApiModelBusy(true);
-        try { await bridge.llmapi.getLlmApiModels(); } finally { setLlmApiModelBusy(false); }
+        try { await bridge.llmapi.refreshLlmApi(); } finally { setLlmApiModelBusy(false); }
       };
       const setBuiltinDefaultModel = async model => {
         if (!bridge.available || !bridge.llmapi.setLlmApiDefaultModel || !model) return;

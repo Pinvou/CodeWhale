@@ -27,7 +27,15 @@
     return;
   }
 
-  const { invoke } = TAURI.core;
+  var invokeErrorObserver = function () {};
+  var modelAvailabilityError = function () { return null; };
+  const rawInvoke = TAURI.core.invoke;
+  const invoke = function (command, args) {
+    return rawInvoke(command, args).catch(function (error) {
+      invokeErrorObserver(error, command);
+      throw error;
+    });
+  };
   const { listen } = TAURI.event;
   const dialogOpen = TAURI.dialog?.open;
   function startupMark(stage, detail) {
@@ -342,6 +350,7 @@
     scheduledTaskPendingGuide: null,
   };
   var initPromise = null;
+
   // 卡片池 1078 张卡的前端缓存。只读,通过 getPersonas() 取引用,不走 notify 快照。
 
   // internal streaming state
@@ -496,6 +505,7 @@
     extractArtifactPath: extractArtifactPath,
     parseScheduledTaskDraftFromText: function () { return parseScheduledTaskDraftFromText.apply(null, arguments); },
     autoCreateScheduledTaskDraft: function () { return autoCreateScheduledTaskDraft.apply(null, arguments); },
+    modelAvailabilityError: function () { return modelAvailabilityError.apply(null, arguments); },
     get currentStreamText() { return currentStreamText; },
     set currentStreamText(value) { currentStreamText = value; },
     get currentStreamId() { return currentStreamId; },
@@ -1486,6 +1496,8 @@
   var clearMonitorStats = monitorFeature.clearMonitorStats;
   var pollBackendStatus = monitorFeature.pollBackendStatus;
   var settingsFeature = installBridgeFeature("settings", { state: state, notify: notify, invoke: invoke, listen: listen });
+  invokeErrorObserver = settingsFeature.observeInvokeError;
+  modelAvailabilityError = settingsFeature.modelAvailabilityError;
   var loadSettings = settingsFeature.loadSettings;
   var loadSelectedPet = settingsFeature.loadSelectedPet;
   var setSelectedPet = settingsFeature.setSelectedPet;
@@ -1493,6 +1505,7 @@
   var saveSettings = settingsFeature.saveSettings;
   var saveSettingsAndRestart = settingsFeature.saveSettingsAndRestart;
   var refreshLlmApiOnStartup = settingsFeature.refreshLlmApiOnStartup;
+  var refreshLlmApi = settingsFeature.refreshLlmApi;
   var getLlmApiStatus = settingsFeature.getLlmApiStatus;
   var getLlmApiModels = settingsFeature.getLlmApiModels;
   var setLlmApiDefaultModel = settingsFeature.setLlmApiDefaultModel;
@@ -1810,6 +1823,7 @@
     },
     feedback: { submitFeedback: submitFeedback },
     llmapi: {
+      refreshLlmApi: refreshLlmApi,
       getLlmApiStatus: getLlmApiStatus,
       getLlmApiModels: getLlmApiModels,
       setLlmApiDefaultModel: setLlmApiDefaultModel,

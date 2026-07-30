@@ -1316,7 +1316,14 @@ fn http_error(operation: &str, status: u16, body: &str) -> LlmApiError {
 fn business_error(operation: &str, message: Option<String>) -> LlmApiError {
     let message = message.unwrap_or_else(|| "unknown New API error".to_string());
     let lower = message.to_ascii_lowercase();
-    let code = if operation == "query current user"
+    let current_user_disabled = operation == "query current user"
+        && (lower.contains("banned")
+            || lower.contains("disabled")
+            || message.contains("封禁")
+            || message.contains("禁用"));
+    let code = if current_user_disabled {
+        LlmApiErrorCode::ServiceDisabled
+    } else if operation == "query current user"
         && (lower.contains("not exist") || lower.contains("不存在"))
     {
         LlmApiErrorCode::UserNotFound
@@ -1329,7 +1336,15 @@ fn business_error(operation: &str, message: Option<String>) -> LlmApiError {
     } else {
         LlmApiErrorCode::ProvisioningFailed
     };
-    LlmApiError::new(code, format!("New API {operation} failed: {message}"), true)
+    let retryable = !matches!(
+        code,
+        LlmApiErrorCode::UserNotFound | LlmApiErrorCode::ServiceDisabled
+    );
+    LlmApiError::new(
+        code,
+        format!("New API {operation} failed: {message}"),
+        retryable,
+    )
 }
 
 #[cfg(test)]
@@ -1411,6 +1426,22 @@ pub mod tests {
             .code,
             LlmApiErrorCode::UserNotFound
         );
+    }
+
+    #[test]
+    fn current_user_disabled_business_errors_are_authoritative() {
+        for message in ["user has been banned", "当前用户已被禁用"] {
+            let error = business_error("query current user", Some(message.to_string()));
+            assert_eq!(error.code, LlmApiErrorCode::ServiceDisabled);
+            assert!(!error.retryable);
+        }
+
+        let login_error = business_error(
+            "login",
+            Some("Username or password is incorrect, or user has been banned".to_string()),
+        );
+        assert_eq!(login_error.code, LlmApiErrorCode::ProvisioningFailed);
+        assert!(login_error.retryable);
     }
 
     #[test]

@@ -13,6 +13,7 @@ import { useCompactViewport, useVisualViewportHeight } from '../hooks/useViewpor
 import { dict, LANG_TO_TAG, SEARCH_KEY_PROVIDERS, TAG_TO_LANG } from '../shared/i18n.js';
 import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared/date-utils.js';
 import { runSessionBatch, sessionRoute } from '../shared/session-management.js';
+import { isLlmApiAccountVisible } from '../shared/model-options.js';
 import { can, isWeb } from '../shared/platform.js';
 import { KnowledgeView } from '../features/knowledge/KnowledgeView.jsx';
 import { MonitorView } from '../features/monitor/MonitorView.jsx';
@@ -156,7 +157,6 @@ function workspaceDisplayName(path) {
         case 'querying_user': return '查询账户中';
         case 'creating_token': return '开通中';
         case 'configuring_policy': return '配置中';
-        case 'disabled': return '已停用';
         case 'failed': return '开通失败';
         default: return '同步中';
       }
@@ -198,7 +198,7 @@ function workspaceDisplayName(path) {
       const used = quota ? quota.used_tokens : null;
       const pct = limit ? Math.max(0, Math.min(100, Math.round((Number(remaining || 0) / Number(limit)) * 100))) : 0;
       const panelPos = collapsed ? 'left-full bottom-0 ml-3' : 'left-0 bottom-full mb-2';
-      const needsLogin = !!(llmApiStatus && llmApiStatus.auto_login_failed && !quota && onLogin);
+      const needsLogin = !!(llmApiStatus && llmApiStatus.auto_login_failed && onLogin);
       const submitLogin = async (e) => {
         e.preventDefault();
         if (!onLogin || loggingIn) return;
@@ -702,7 +702,7 @@ function workspaceDisplayName(path) {
       // 有可用新版 → 侧边栏设置图标亮红点（不弹窗不打断）
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const llmAccountStatus = bs && bs.llmApiStatus;
-      const llmAccountVisible = !!(llmAccountStatus && llmAccountStatus.backend_user_exists);
+      const llmAccountVisible = isLlmApiAccountVisible(llmAccountStatus);
       const llmAccountUsername = llmAccountStatus && llmAccountStatus.backend_username;
       const llmAccountDisplayName = llmAccountStatus && llmAccountStatus.backend_display_name;
       const llmAccountName = shortBackendUsername(llmAccountDisplayName || llmAccountUsername);
@@ -2195,6 +2195,7 @@ function workspaceDisplayName(path) {
               <div className={`relative ${isSidebarOpen ? 'w-full' : ''}`}>
                 <button
                   type="button"
+                  data-testid="llmapi-account-button"
                   onClick={() => setAccountPopoverOpen(v => !v)}
                   title={llmAccountUsername || llmAccountName}
                   className={`flex items-center rounded-xl transition-colors ${isSidebarOpen ? 'w-full px-2 py-1.5 gap-3 text-left' : 'justify-center w-10 h-10'} ${activeTheme === 'dark' ? 'hover:bg-[#333537] active:bg-[#3A3C3E]' : 'hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}

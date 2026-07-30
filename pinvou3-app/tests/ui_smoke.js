@@ -47,6 +47,7 @@ function injectSource() {
   return `(function(){
     window.__TAURI_EVENT_HANDLERS__={};
     window.__TAURI_INVOKES__=[];
+    window.__LLMAPI_STATUS__={backend_user_exists:true,backend_user_state:'exists',stale:true,enabled:true,provisioning_status:'ready'};
     const ZOMBIE={session_id:'s-zombie',project_dir:'/x/wf',scenario:'sansheng_liubu'};
     const WF_STATE={project_dir:'/x/wf',scenario:'sansheng_liubu',all_completed:false,roles:{taizi:{name:'太子',status:'running'},zhongshu:{name:'中书',status:'pending'}}};
     const WF_TEMPLATE={id:'sansheng-liubu',name:'三省六部帮你办',enabled:true,scenarios:['sansheng_liubu'],ui:{header:'🏛️ 三省六部帮你办',template:{title:'🏛️ 三省六部帮你办',badge:'11 agent',desc:'太子接旨 → 中书省起草 → 门下省审议 → 尚书省派单 → 六部并行办差 → 回奏呈报。'},agentDefs:[{id:'taizi',name:'太子',color:'#C9A227'},{id:'zhongshu',name:'中书省',color:'#4285F4'}],lanes:[{lane:0,title:'接旨',agents:['taizi']},{lane:1,title:'起草',agents:['zhongshu']}]}};
@@ -86,7 +87,7 @@ function injectSource() {
               stale:false
             });
         case 'get_llmapi_models': return window.__LLMAPI_MODELS_ERROR__
-          ? Promise.reject(new Error('temporary llmapi models failure'))
+          ? Promise.reject(new Error(window.__LLMAPI_MODELS_ERROR_MESSAGE__ || 'temporary llmapi models failure'))
           : Promise.resolve(window.__LLMAPI_MODELS__ || {available_models:[],default_model:''});
         case 'list_sessions': return Promise.resolve(SESSIONS);
         case 'list_codex_acp_sessions': return Promise.resolve(CODEX_SESSIONS);
@@ -343,11 +344,14 @@ async function expand(page) {
 
   // ①b 工作流入口已合入专家池：从「专家池 > 专家团队」进入三省六部运行态，
   // 仍可停止并预填原需求重开。
-  const llmApiCacheFallback = await page.evaluate(async () => {
+  const coldStartStaleAccountHidden = await page.evaluate(() =>
+    !document.querySelector('[data-testid="llmapi-account-button"]'));
+  await page.evaluate(async () => {
     window.__LLMAPI_STATUS__ = {
       backend_user_exists: true,
       backend_user_state: 'exists',
       stale: false,
+      enabled: true,
       provisioning_status: 'ready',
     };
     window.__LLMAPI_MODELS__ = {
@@ -356,7 +360,50 @@ async function expand(page) {
     };
     await window.TauriBridge.llmapi.getLlmApiStatus();
     await window.TauriBridge.llmapi.getLlmApiModels();
+  });
+  await page.waitForSelector('[data-testid="llmapi-account-button"]');
 
+  const llmApiRecoveryEntry = await page.evaluate(async () => {
+    window.__LLMAPI_STATUS__ = {
+      backend_user_exists: true,
+      backend_user_state: 'exists',
+      stale: true,
+      auto_login_failed: true,
+      enabled: true,
+      provisioning_status: 'ready',
+      quota: null,
+    };
+    await window.TauriBridge.llmapi.getLlmApiStatus();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    document.querySelector('[data-testid="llmapi-account-button"]')?.click();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    const recoveryStatus = window.TauriBridge.state.getMany(['llmapi']).llmApiStatus;
+    const recoveryState = {
+      stale: recoveryStatus && recoveryStatus.stale,
+      autoLoginFailed: recoveryStatus && recoveryStatus.auto_login_failed,
+      backendUserState: recoveryStatus && recoveryStatus.backend_user_state,
+    };
+    const accountButtonVisible = !!document.querySelector('[data-testid="llmapi-account-button"]');
+    const hasRecoveryForm = !!document.querySelector('input[autocomplete="username"]')
+      && !!document.querySelector('input[autocomplete="current-password"]');
+    const hasLoginCopy = document.body.innerText.includes('登录并同步额度');
+    document.querySelector('[data-testid="llmapi-account-button"]')?.click();
+    window.__LLMAPI_STATUS__ = {
+      backend_user_exists: true,
+      backend_user_state: 'exists',
+      stale: false,
+      auto_login_failed: false,
+      enabled: true,
+      provisioning_status: 'ready',
+    };
+    await window.TauriBridge.llmapi.getLlmApiStatus();
+    return { hasRecoveryForm, accountButtonVisible, recoveryState, hasLoginCopy };
+  });
+  rec('LLM API 自动登录失败时保留手工登录恢复入口',
+    llmApiRecoveryEntry.hasRecoveryForm,
+    JSON.stringify(llmApiRecoveryEntry));
+
+  const llmApiCacheFallback = await page.evaluate(async () => {
     window.__LLMAPI_STATUS__ = {
       backend_user_exists: false,
       backend_user_state: 'unknown',
@@ -377,20 +424,51 @@ async function expand(page) {
     const keptModels = retained.llmApiModels && retained.llmApiModels.default_model === 'deepseek-v4-flash';
 
     window.__LLMAPI_STATUS_ERROR__ = false;
+    window.__LLMAPI_MODELS_ERROR__ = true;
+    window.__LLMAPI_MODELS_ERROR_MESSAGE__ = 'send_user_message failed: service_disabled: user has been banned';
+    const accountUiVisibleBeforeDisabled = !!document.querySelector('[data-testid="llmapi-account-button"]');
+    try { await window.TauriBridge.llmapi.getLlmApiModels(); } catch (_) {}
+    const clearedWhenAuthoritative = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).llmApiModels === null;
+    const runtimeStatus = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).llmApiStatus;
+    window.__LLMAPI_MODELS_ERROR__ = false;
+    window.__LLMAPI_MODELS_ERROR_MESSAGE__ = '';
     window.__LLMAPI_STATUS__ = {
       backend_user_exists: false,
       backend_user_state: 'not_exists',
       stale: false,
+      enabled: false,
       provisioning_status: 'not_started',
       last_error_code: 'service_disabled',
     };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    const clearedWhenAuthoritative = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).llmApiModels === null;
-    return { keptOnUnknown, keptExisting, keptModels, clearedWhenAuthoritative };
+    const modelRefreshCallsBeforeDisabled = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'get_llmapi_models').length;
+    await window.TauriBridge.llmapi.refreshLlmApi();
+    const modelRefreshSkippedWhenDisabled = window.__TAURI_INVOKES__
+      .filter(call => call.cmd === 'get_llmapi_models').length === modelRefreshCallsBeforeDisabled;
+    return {
+      keptOnUnknown,
+      keptExisting,
+      keptModels,
+      clearedWhenAuthoritative,
+      runtimeDisabledApplied: runtimeStatus && runtimeStatus.backend_user_state === 'not_exists'
+        && runtimeStatus.last_error_code === 'service_disabled',
+      modelRefreshSkippedWhenDisabled,
+      accountUiVisibleBeforeDisabled,
+    };
   });
-  rec('LLM API 暂时失败保留账户和模型缓存，仅明确不存在或禁用时清理',
+  llmApiCacheFallback.coldStartStaleAccountHidden = coldStartStaleAccountHidden;
+  await page.waitForFunction(() => !document.querySelector('[data-testid="llmapi-account-button"]'));
+  llmApiCacheFallback.accountUiHiddenWhenDisabled = await page.evaluate(
+    () => !document.querySelector('[data-testid="llmapi-account-button"]')
+  );
+  rec('LLM API 冷启动不显示陈旧账户，运行时确认不存在或禁用后立即隐藏账户和模型',
     llmApiCacheFallback.keptOnUnknown && llmApiCacheFallback.keptExisting
-      && llmApiCacheFallback.keptModels && llmApiCacheFallback.clearedWhenAuthoritative,
+      && llmApiCacheFallback.coldStartStaleAccountHidden
+      && llmApiCacheFallback.keptModels && llmApiCacheFallback.clearedWhenAuthoritative
+      && llmApiCacheFallback.runtimeDisabledApplied
+      && llmApiCacheFallback.modelRefreshSkippedWhenDisabled
+      && llmApiCacheFallback.accountUiVisibleBeforeDisabled
+      && llmApiCacheFallback.accountUiHiddenWhenDisabled,
     JSON.stringify(llmApiCacheFallback));
 
   // 模型表单可能包含尚未保存的名称、地址和密钥，点击遮罩层不能意外丢失草稿；

@@ -6,10 +6,85 @@
   "use strict";
   var registry = root.__PINVOU_TAURI_BRIDGE_FEATURES__ = root.__PINVOU_TAURI_BRIDGE_FEATURES__ || {};
   registry["settings"] = function (context) {
-    var state = context.state;
-    var notify = context.notify;
-    var invoke = context.invoke;
-    var listen = context.listen;
+  var state = context.state;
+  var notify = context.notify;
+  var invoke = context.invoke;
+  var listen = context.listen;
+  var authoritativeAccountRevision = 0;
+
+  function isBuiltinLlmApiModelId(modelId) {
+    if (modelId === "builtin_llmapi") return true;
+    return (state.savedModels || []).some(function (model) {
+      return model && model.id === modelId && model.kind === "builtin_llmapi";
+    });
+  }
+
+  function selectedModelIdForSession(sessionId) {
+    if (!sessionId || sessionId === state.activeSessionId) {
+      return state.currentSessionModelId || state.activeModelId || null;
+    }
+    return state.activeModelId || null;
+  }
+
+  function llmApiAccountIsAuthoritativelyUnavailable(status) {
+    if (!status || status.stale === true) return false;
+    return status.backend_user_state === "not_exists"
+      || status.enabled === false
+      || String(status.provisioning_status || "").trim().toLowerCase() === "disabled";
+  }
+
+  function modelAvailabilityError(sessionId) {
+    if (!llmApiAccountIsAuthoritativelyUnavailable(state.llmApiStatus)) return null;
+    if (!isBuiltinLlmApiModelId(selectedModelIdForSession(sessionId))) return null;
+    return "当前账户的内置模型已不可用，请先选择其他模型";
+  }
+
+  function authoritativeLlmApiErrorCode(error) {
+    if (error && typeof error === "object" && (error.code === "service_disabled" || error.code === "user_not_found")) {
+      return error.code;
+    }
+    var parts = [];
+    if (typeof error === "string") parts.push(error);
+    if (error && typeof error === "object") {
+      if (error.message) parts.push(error.message);
+      try { parts.push(JSON.stringify(error)); } catch (_) {}
+    }
+    var match = parts.join(" ").toLowerCase().match(/\b(service_disabled|user_not_found)\s*:/);
+    return match ? match[1] : null;
+  }
+
+  function commandCanReportLlmApiAccountError(command) {
+    if (String(command || "").indexOf("llmapi") >= 0) return true;
+    return isBuiltinLlmApiModelId(selectedModelIdForSession(state.activeSessionId));
+  }
+
+  function applyAuthoritativeLlmApiError(error, command) {
+    var code = authoritativeLlmApiErrorCode(error);
+    if (!code || !commandCanReportLlmApiAccountError(command)) return false;
+    authoritativeAccountRevision += 1;
+    var previous = state.llmApiStatus || {};
+    state.llmApiStatus = Object.assign({}, previous, {
+      backend_user_exists: false,
+      backend_user_state: "not_exists",
+      stale: false,
+      backend_username: null,
+      backend_display_name: null,
+      quota: null,
+      auto_login_failed: true,
+      last_error_code: code,
+      last_error_message: String(error && error.message ? error.message : error || ""),
+    });
+    state.llmApiModels = null;
+    if (isBuiltinLlmApiModelId(selectedModelIdForSession(state.activeSessionId))) {
+      state.effectiveModelConfig = null;
+    }
+    notify();
+    return true;
+  }
+
+  function observeInvokeError(error, command) {
+    return applyAuthoritativeLlmApiError(error, command);
+  }
   // ── Settings ─────────────────────────────────────────────────────
   // 桌宠开关由 Rust set_pet_enabled 直接写盘(设置页/宠物右键/快捷图标共用),
   // 这里同步进内存副本，保证设置界面立即反映专用命令返回的桌宠状态。
@@ -54,7 +129,7 @@
     try {
       var config = await invoke("get_effective_model_config", { sessionId: requestedSessionId });
       if (requestedSessionId !== (state.activeSessionId || null)) return;
-      state.effectiveModelConfig = config;
+      state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : config;
     } catch (e) {
       state.effectiveModelConfig = null;
     }
@@ -117,6 +192,7 @@
 
   function llmApiBackendUserState(status) {
     if (!status) return "unknown";
+    if (status.stale === true) return "unknown";
     if (status.backend_user_state === "exists" || status.backend_user_state === "not_exists" || status.backend_user_state === "unknown") {
       return status.backend_user_state;
     }
@@ -130,6 +206,13 @@
   function llmApiAccountStateIsKnown(status) {
     var backendUserState = llmApiBackendUserState(status);
     return backendUserState === "exists" || backendUserState === "not_exists";
+  }
+
+  function llmApiBuiltinIsReady(status) {
+    return llmApiAccountKnownExists(status)
+      && status.stale !== true
+      && status.enabled === true
+      && String(status.provisioning_status || "").trim().toLowerCase() === "ready";
   }
 
   var LLMAPI_STARTUP_RETRY_DELAYS_MS = [2000, 5000, 10000, 30000];
@@ -150,12 +233,32 @@
     var refreshSavedModels = !!options.refreshSavedModels;
     var status = null;
     var models = null;
+    var refreshRevision = authoritativeAccountRevision;
     try {
       status = await invoke("get_llmapi_status");
-      // An inconclusive refresh must not change model visibility after an
-      // authoritative account result has already been observed.
-      if (llmApiAccountStateIsKnown(status) || !llmApiAccountStateIsKnown(state.llmApiStatus)) {
+      if (llmApiAccountIsAuthoritativelyUnavailable(status)) {
+        authoritativeAccountRevision += 1;
+        refreshRevision = authoritativeAccountRevision;
+      } else if (refreshRevision !== authoritativeAccountRevision) {
+        return { status: state.llmApiStatus, models: null, superseded: true };
+      }
+      // Preserve an established identity across transient failures, but expose
+      // authentication failures so the account recovery form remains reachable.
+      if (status.stale === true && status.auto_login_failed === true && llmApiAccountKnownExists(state.llmApiStatus)) {
+        status = Object.assign({}, state.llmApiStatus, status, {
+          backend_user_exists: true,
+          backend_user_state: "exists",
+        });
         state.llmApiStatus = status;
+        state.effectiveModelConfig = null;
+      } else if (llmApiAccountStateIsKnown(status) || !llmApiAccountStateIsKnown(state.llmApiStatus)) {
+        state.llmApiStatus = status;
+        if (llmApiAccountIsAuthoritativelyUnavailable(status)) {
+          state.llmApiModels = null;
+          state.effectiveModelConfig = null;
+        } else if (modelAvailabilityError(state.activeSessionId)) {
+          state.effectiveModelConfig = null;
+        }
       }
     } catch (e) {
       console.warn("get llmapi status failed", e);
@@ -164,17 +267,20 @@
       notify();
       throw e;
     }
-    if (refreshModels && llmApiAccountKnownExists(status)) {
+    if (refreshModels && llmApiBuiltinIsReady(status)) {
       try {
+        var modelsRevision = authoritativeAccountRevision;
         models = await invoke("get_llmapi_models");
-        state.llmApiModels = models;
+        if (modelsRevision === authoritativeAccountRevision && llmApiBuiltinIsReady(state.llmApiStatus)) {
+          state.llmApiModels = models;
+        }
       } catch (e) {
         console.warn("get llmapi models failed", e);
         // Preserve the last successfully synchronized model list.
         notify();
         throw e;
       }
-    } else if (llmApiBackendUserState(status) === "not_exists") {
+    } else if (llmApiAccountIsAuthoritativelyUnavailable(status)) {
       state.llmApiModels = null;
     }
     if (refreshSavedModels) await loadModels();
@@ -188,10 +294,22 @@
   }
 
   async function getLlmApiModels() {
+    if (!llmApiBuiltinIsReady(state.llmApiStatus)) {
+      state.llmApiModels = null;
+      notify();
+      return null;
+    }
+    var modelsRevision = authoritativeAccountRevision;
     var models = await invoke("get_llmapi_models");
-    state.llmApiModels = models;
+    if (modelsRevision === authoritativeAccountRevision && llmApiBuiltinIsReady(state.llmApiStatus)) {
+      state.llmApiModels = models;
+    }
     notify();
     return models;
+  }
+
+  async function refreshLlmApi() {
+    return await refreshLlmApiState({ refreshModels: true, refreshSavedModels: true });
   }
 
   async function refreshLlmApiOnStartup() {
@@ -205,7 +323,7 @@
       }
 
       if (llmApiAccountStateIsKnown(status)) {
-        if (llmApiAccountKnownExists(status)) {
+        if (llmApiBuiltinIsReady(status)) {
           try {
             await getLlmApiModels();
           } catch (e) {
@@ -240,13 +358,6 @@
     var result = await invoke("ensure_llmapi_binding");
     await refreshLlmApiState({ refreshSavedModels: true });
     return result;
-  }
-
-  function isBuiltinLlmApiModelId(modelId) {
-    if (modelId === "builtin_llmapi") return true;
-    return (state.savedModels || []).some(function (model) {
-      return model && model.id === modelId && model.kind === "builtin_llmapi";
-    });
   }
 
   async function prepareBackendManagedModel(modelId) {
@@ -422,7 +533,7 @@
     ]);
     if (requestedSessionId !== (state.activeSessionId || null)) return;
     state.currentSessionModelId = results[0];
-    state.effectiveModelConfig = results[1];
+    state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : results[1];
     notify();
   }
   // 切当前会话模型(chip 热切)。无 session(草稿态)时改全局默认。
@@ -449,7 +560,10 @@
       loadEffectiveModelConfig: loadEffectiveModelConfig,
       saveSettings: saveSettings,
       saveSettingsAndRestart: saveSettingsAndRestart,
+      observeInvokeError: observeInvokeError,
+      modelAvailabilityError: modelAvailabilityError,
       refreshLlmApiOnStartup: refreshLlmApiOnStartup,
+      refreshLlmApi: refreshLlmApi,
       getLlmApiStatus: getLlmApiStatus,
       getLlmApiModels: getLlmApiModels,
       setLlmApiDefaultModel: setLlmApiDefaultModel,

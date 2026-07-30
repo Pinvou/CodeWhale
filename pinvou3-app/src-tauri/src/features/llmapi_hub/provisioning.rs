@@ -141,14 +141,16 @@ pub fn ensure_binding_for_current_user() -> Result<EnsureLlmApiBindingResponse, 
                     err.retryable,
                     err.message
                 );
-                if err.code == LlmApiErrorCode::UserNotFound {
-                    invalidate_deleted_backend_user(
-                        &store,
-                        &credentials,
-                        &resolved,
-                        &mut binding,
-                        &err,
-                    );
+                if is_authoritative_account_error(err.code) {
+                    if err.code == LlmApiErrorCode::UserNotFound {
+                        invalidate_deleted_backend_user(
+                            &store,
+                            &credentials,
+                            &resolved,
+                            &mut binding,
+                            &err,
+                        );
+                    }
                     return Err(err);
                 }
                 if let Some(response) =
@@ -214,8 +216,10 @@ pub fn ensure_binding_for_current_user() -> Result<EnsureLlmApiBindingResponse, 
                 err.retryable,
                 err.message
             );
-            if err.code == LlmApiErrorCode::UserNotFound {
-                invalidate_current_binding_if_deleted(&store, &credentials, &resolved, &err);
+            if is_authoritative_account_error(err.code) {
+                if err.code == LlmApiErrorCode::UserNotFound {
+                    invalidate_current_binding_if_deleted(&store, &credentials, &resolved, &err);
+                }
                 return Err(err);
             }
             if let Some(response) =
@@ -939,7 +943,9 @@ pub fn available_models_system() -> Result<BuiltinLlmApiModelsResponse, LlmApiEr
     log::info!("[llmapi_hub][provisioning] available models system start");
     let cached = local_builtin_models_response();
     if let Err(err) = ensure_binding_for_current_user() {
-        if err.code != LlmApiErrorCode::UserNotFound && !cached.available_models.is_empty() {
+        if can_reuse_cached_models_after_refresh_error(err.code)
+            && !cached.available_models.is_empty()
+        {
             log::warn!(
                 "[llmapi_hub][provisioning] available models refresh failed; using cached models elapsed_ms={} count={} code={:?} retryable={} message={}",
                 started_at.elapsed().as_millis(),
@@ -960,6 +966,17 @@ pub fn available_models_system() -> Result<BuiltinLlmApiModelsResponse, LlmApiEr
         response.default_model
     );
     Ok(response)
+}
+
+fn is_authoritative_account_error(code: LlmApiErrorCode) -> bool {
+    matches!(
+        code,
+        LlmApiErrorCode::UserNotFound | LlmApiErrorCode::ServiceDisabled
+    )
+}
+
+fn can_reuse_cached_models_after_refresh_error(code: LlmApiErrorCode) -> bool {
+    !is_authoritative_account_error(code)
 }
 
 pub fn set_default_model_system(model: &str) -> Result<BuiltinLlmApiModelsResponse, LlmApiError> {
@@ -2063,6 +2080,28 @@ mod tests {
         assert!(!status.backend_user_exists);
         assert_eq!(status.backend_user_state, BackendUserState::NotExists);
         assert!(status.quota.is_none());
+    }
+
+    #[test]
+    fn authoritative_account_errors_do_not_reuse_cached_models() {
+        assert!(is_authoritative_account_error(
+            LlmApiErrorCode::UserNotFound
+        ));
+        assert!(is_authoritative_account_error(
+            LlmApiErrorCode::ServiceDisabled
+        ));
+        assert!(!is_authoritative_account_error(
+            LlmApiErrorCode::ServiceUnreachable
+        ));
+        assert!(!can_reuse_cached_models_after_refresh_error(
+            LlmApiErrorCode::UserNotFound
+        ));
+        assert!(!can_reuse_cached_models_after_refresh_error(
+            LlmApiErrorCode::ServiceDisabled
+        ));
+        assert!(can_reuse_cached_models_after_refresh_error(
+            LlmApiErrorCode::ServiceUnreachable
+        ));
     }
 
     #[test]

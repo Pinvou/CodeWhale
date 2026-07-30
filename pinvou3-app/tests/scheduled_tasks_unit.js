@@ -406,8 +406,27 @@ assert.deepStrictEqual(
   ['builtin_llmapi', 'user-model'],
   'a confirmed ready backend account should expose the built-in model in every model selector'
 );
+const recoverableStaleStatus = {
+  backend_user_exists: true,
+  backend_user_state: 'exists',
+  stale: true,
+  auto_login_failed: true,
+  enabled: true,
+  provisioning_status: 'ready',
+};
+assert.equal(
+  modelOptionsSandbox.isLlmApiAccountVisible(recoverableStaleStatus),
+  true,
+  'an authentication failure should preserve the only manual login recovery entry'
+);
+assert.equal(
+  modelOptionsSandbox.isBuiltInLlmApiAvailable(recoverableStaleStatus),
+  false,
+  'a recoverable stale account must not make the built-in model selectable before re-authentication'
+);
 for (const unavailableStatus of [
   null,
+  { backend_user_exists: true, backend_user_state: 'exists', stale: true, enabled: true, provisioning_status: 'ready' },
   { backend_user_exists: false, backend_user_state: 'not_exists', enabled: false, provisioning_status: 'not_started' },
   { backend_user_exists: false, backend_user_state: 'unknown', enabled: true, provisioning_status: 'ready' },
   { backend_user_exists: true, backend_user_state: 'exists', enabled: false, provisioning_status: 'disabled' },
@@ -780,7 +799,13 @@ async function llmApiStartupRetryBehavior() {
       return { backend_user_exists: false, backend_user_state: "unknown", stale: true };
     }
     if (statusCalls === 2) throw new Error("temporary network failure");
-    return { backend_user_exists: true, backend_user_state: "exists", stale: false };
+    return {
+      backend_user_exists: true,
+      backend_user_state: "exists",
+      stale: false,
+      enabled: true,
+      provisioning_status: "ready",
+    };
   };
   harness.handlers.get_llmapi_models = function () {
     modelCalls += 1;
@@ -836,6 +861,30 @@ async function llmApiStartupRetryBehavior() {
     missingTimers.filter(function (timer) { return timer.delay === 2000; }).length,
     0,
     "startup retries should stop after account absence is confirmed"
+  );
+
+  var disabledHarness = createBridgeHarness();
+  var disabledModelCalls = 0;
+  disabledHarness.handlers.get_llmapi_status = function () {
+    return {
+      backend_user_exists: true,
+      backend_user_state: "exists",
+      stale: false,
+      enabled: false,
+      provisioning_status: "disabled",
+    };
+  };
+  disabledHarness.handlers.get_llmapi_models = function () {
+    disabledModelCalls += 1;
+    return { available_models: ["must-not-be-used"] };
+  };
+  await disabledHarness.bridge.lifecycle.init();
+  await tick();
+  assert.strictEqual(disabledModelCalls, 0, "a disabled account must not refresh built-in models during startup");
+  assert.strictEqual(
+    disabledHarness.bridge.state.getMany(['sessions', 'chat', 'scheduled', 'llmapi']).llmApiModels,
+    null,
+    "a disabled account must clear the built-in model cache"
   );
 }
 
