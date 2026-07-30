@@ -63,6 +63,95 @@ function Normalize-Thumbprint {
   return ([regex]::Replace([string]$Value, "[^0-9A-Fa-f]", "")).ToUpperInvariant()
 }
 
+function Resolve-SignToolPath {
+  $signToolCommand = Get-Command "signtool.exe" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($null -ne $signToolCommand -and
+      -not [string]::IsNullOrWhiteSpace([string]$signToolCommand.Source) -and
+      (Test-Path -LiteralPath $signToolCommand.Source -PathType Leaf)) {
+    return [System.IO.Path]::GetFullPath($signToolCommand.Source)
+  }
+
+  $candidatePaths = [System.Collections.Generic.List[string]]::new()
+  foreach ($environmentVariableName in @("WindowsSdkVerBinPath", "WindowsSdkBinPath")) {
+    $sdkBinPath = [Environment]::GetEnvironmentVariable($environmentVariableName)
+    if ([string]::IsNullOrWhiteSpace($sdkBinPath)) {
+      continue
+    }
+    $candidatePaths.Add((Join-Path $sdkBinPath "signtool.exe"))
+    $candidatePaths.Add((Join-Path $sdkBinPath "x64\signtool.exe"))
+  }
+
+  $windowsSdkDirectory = [Environment]::GetEnvironmentVariable("WindowsSdkDir")
+  if (-not [string]::IsNullOrWhiteSpace($windowsSdkDirectory)) {
+    $windowsSdkBinDirectory = Join-Path $windowsSdkDirectory "bin"
+    $candidatePaths.Add((Join-Path $windowsSdkBinDirectory "x64\signtool.exe"))
+    if (Test-Path -LiteralPath $windowsSdkBinDirectory -PathType Container) {
+      Get-ChildItem -LiteralPath $windowsSdkBinDirectory -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        ForEach-Object {
+          $candidatePaths.Add((Join-Path $_.FullName "x64\signtool.exe"))
+        }
+    }
+  }
+
+  $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+  if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+    $windowsKitsBinDirectory = Join-Path $programFilesX86 "Windows Kits\10\bin"
+    if (Test-Path -LiteralPath $windowsKitsBinDirectory -PathType Container) {
+      Get-ChildItem -LiteralPath $windowsKitsBinDirectory -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending |
+        ForEach-Object {
+          $candidatePaths.Add((Join-Path $_.FullName "x64\signtool.exe"))
+        }
+    }
+  }
+
+  foreach ($candidatePath in $candidatePaths) {
+    if (Test-Path -LiteralPath $candidatePath -PathType Leaf) {
+      return [System.IO.Path]::GetFullPath($candidatePath)
+    }
+  }
+
+  throw "Windows SDK SignTool was not found. Install the Windows SDK signing tools or add signtool.exe to PATH."
+}
+
+function Assert-AuthenticodeSignature {
+  param(
+    [string]$Path,
+    [string]$SignToolPath,
+    [string]$ExpectedThumbprint
+  )
+
+  $verifyArguments = @("verify", "/pa", "/all", "/v", "/tw", $Path)
+  Write-Host "Authenticode policy and timestamp verification started: $Path"
+  & $SignToolPath @verifyArguments
+  $verifyExitCode = $LASTEXITCODE
+  if ($verifyExitCode -ne 0) {
+    throw "SignTool verification failed with exit code $verifyExitCode for: $Path"
+  }
+
+  try {
+    $embeddedCertificate =
+      [System.Security.Cryptography.X509Certificates.X509Certificate]::CreateFromSignedFile(
+        $Path
+      )
+    $signerCertificate =
+      [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+        $embeddedCertificate
+      )
+  } catch {
+    throw "Unable to read the embedded signer certificate after signing: $Path ($($_.Exception.Message))"
+  }
+
+  $normalizedSignerThumbprint = Normalize-Thumbprint -Value $signerCertificate.Thumbprint
+  if ($normalizedSignerThumbprint -ne $ExpectedThumbprint) {
+    throw "Embedded signer thumbprint does not match the configured certificate: $Path"
+  }
+
+  Write-Host "Authenticode policy, timestamp, and signer thumbprint verified: $normalizedSignerThumbprint"
+}
+
 $normalizedThumbprint = Normalize-Thumbprint -Value $Thumbprint
 if ($normalizedThumbprint -notmatch "^[0-9A-F]{40}$") {
   throw "The configured WoSign certificate thumbprint must contain 40 hexadecimal characters."
@@ -82,6 +171,7 @@ if (-not (Test-Path -LiteralPath $companionToolPath -PathType Leaf)) {
   throw "WoSign companion tool was not found: $companionToolPath"
 }
 $toolDirectory = [System.IO.Path]::GetDirectoryName($resolvedToolPath)
+$signToolPath = Resolve-SignToolPath
 
 $resolvedFilePath = [System.IO.Path]::GetFullPath($FilePath)
 if (-not (Test-Path -LiteralPath $resolvedFilePath -PathType Leaf)) {
@@ -100,6 +190,7 @@ if ($ValidateOnly) {
     throw "WoSign command-line tool validation failed with exit code $validationExitCode."
   }
 
+  Write-Host "Windows SDK SignTool available at: $signToolPath"
   Write-Host "WoSign configuration validated for: $resolvedFilePath"
   exit 0
 }
@@ -129,22 +220,8 @@ if ($signExitCode -ne 0) {
   throw "WoSign failed with exit code $signExitCode while signing: $resolvedFilePath"
 }
 
-$signature = Get-AuthenticodeSignature -LiteralPath $resolvedFilePath
-$signatureStatus = [string]$signature.Status
-if ($signatureStatus -ne "Valid") {
-  throw "Authenticode validation failed with status $signatureStatus after signing: $resolvedFilePath"
-}
-
-if ($null -eq $signature.SignerCertificate) {
-  throw "Authenticode validation did not return a signer certificate: $resolvedFilePath"
-}
-$normalizedSignerThumbprint = Normalize-Thumbprint -Value $signature.SignerCertificate.Thumbprint
-if ($normalizedSignerThumbprint -ne $normalizedThumbprint) {
-  throw "Authenticode signer thumbprint does not match the configured certificate: $resolvedFilePath"
-}
-
-if ($null -eq $signature.TimeStamperCertificate) {
-  throw "Authenticode validation did not return an RFC 3161 timestamp certificate: $resolvedFilePath"
-}
-
+Assert-AuthenticodeSignature `
+  -Path $resolvedFilePath `
+  -SignToolPath $signToolPath `
+  -ExpectedThumbprint $normalizedThumbprint
 Write-Host "WoSign signing completed: $resolvedFilePath"

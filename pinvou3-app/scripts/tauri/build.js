@@ -13,7 +13,13 @@ const {
 const { WRAPPER_ENV } = require("./require-wrapper.js");
 const { prepareWebTemplate } = require("./web-template.js");
 const { stageWindowsInstaller } = require("./windows-installer.js");
-const { stageWindowsRuntime } = require("./windows-runtime.js");
+const {
+  describeWindowsRuntime,
+  stageWindowsRuntime,
+} = require("./windows-runtime.js");
+
+const NSIS_STAGING_CONFIG_SUFFIX =
+  "/src-tauri/target/release/nsis-stage/tauri.nsis-stage.conf.json";
 
 function tauriCommandIndex(args) {
   return args.findIndex((argument) => argument === "build" || argument === "bundle");
@@ -49,6 +55,16 @@ function windowsBundleTargets(args) {
   return [...new Set(explicit.flatMap((value) => value.split(",")).filter(Boolean))];
 }
 
+function usesValidatedNsisStaging(args) {
+  const commandIndex = tauriCommandIndex(args);
+  if (commandIndex < 0 || args[commandIndex] !== "bundle") return false;
+
+  return configSpecs(args).some((spec) => {
+    const normalized = `/${spec.replaceAll("\\", "/")}`;
+    return normalized.endsWith(NSIS_STAGING_CONFIG_SUFFIX);
+  });
+}
+
 function prepareTauriArgs(
   args,
   {
@@ -76,7 +92,12 @@ function prepareTauriArgs(
   const automaticConfigs = [platformConfigPath(platform)];
   const architectureConfig = platformArchitectureConfigPath(platform, architecture);
   if (architectureConfig) automaticConfigs.push(architectureConfig);
-  const stagedRuntime = stageRuntime({ platform });
+  // bundle:nsis has already validated the staging overlay. Do not inject the
+  // original runtime resource mappings again or Tauri will enumerate and
+  // verify the pre-signed binaries that the NSIS hook owns.
+  const stagedRuntime = usesValidatedNsisStaging(prepared)
+    ? null
+    : stageRuntime({ platform });
   const runtimeConfig =
     typeof stagedRuntime === "string" ? stagedRuntime : stagedRuntime?.configPath;
   if (runtimeConfig) automaticConfigs.push(runtimeConfig);
@@ -109,8 +130,11 @@ function main() {
   const isDev = args.includes("dev");
   const hasTauriBuildCommand = tauriCommandIndex(args) >= 0;
   const additionalConfigs = [];
-  const windowsRuntime =
-    hasTauriBuildCommand && process.platform === "win32" ? stageWindowsRuntime() : null;
+  const windowsRuntime = hasTauriBuildCommand && process.platform === "win32"
+    ? (usesValidatedNsisStaging(args)
+        ? describeWindowsRuntime()
+        : stageWindowsRuntime())
+    : null;
   if (windowsRuntime) {
     stageWindowsInstaller({
       bundleTargets: windowsBundleTargets(args),
@@ -170,5 +194,6 @@ module.exports = {
   prepareTauriArgs,
   runTauri,
   tauriCommandIndex,
+  usesValidatedNsisStaging,
   windowsBundleTargets,
 };

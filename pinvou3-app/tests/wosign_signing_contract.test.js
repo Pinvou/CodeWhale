@@ -44,15 +44,25 @@ assert.doesNotMatch(signScript, /\$Password\s*=\s*"[^"]+"/u);
 assert.match(signScript, /"\/isf"/u);
 assert.match(signScript, /Push-Location -LiteralPath \$toolDirectory/u);
 assert.match(signScript, /"\/tr", \$TimestampUrl/u);
-assert.match(signScript, /Get-AuthenticodeSignature -LiteralPath \$resolvedFilePath/u);
-assert.match(signScript, /\$signatureStatus -ne "Valid"/u);
-assert.match(signScript, /\$signature\.SignerCertificate/u);
-assert.match(signScript, /\$normalizedSignerThumbprint -ne \$normalizedThumbprint/u);
-assert.match(signScript, /\$signature\.TimeStamperCertificate/u);
+assert.doesNotMatch(signScript, /Get-AuthenticodeSignature/u);
+assert.match(signScript, /function Resolve-SignToolPath/u);
+assert.match(signScript, /Get-Command "signtool\.exe"/u);
+assert.match(
+  signScript,
+  /\$verifyArguments = @\("verify", "\/pa", "\/all", "\/v", "\/tw", \$Path\)/u,
+);
+assert.match(signScript, /\$verifyExitCode -ne 0/u);
+assert.match(signScript, /SignTool verification failed/u);
+assert.match(signScript, /X509Certificate\]::CreateFromSignedFile/u);
+assert.match(signScript, /X509Certificate2\]::new/u);
+assert.match(signScript, /\$signerCertificate\.Thumbprint/u);
+assert.match(signScript, /\$normalizedSignerThumbprint -ne \$ExpectedThumbprint/u);
+assert.doesNotMatch(signScript, /TimeStamperCertificate/u);
+assert.match(signScript, /Authenticode policy, timestamp, and signer thumbprint verified/u);
 assert.match(signScript, /WoSign signing completed/u);
 assert.match(secretsExample, /PINVOU3_WOSIGN_THUMBPRINT=/u);
 assert.match(secretsExample, /PINVOU3_WOSIGN_PASSWORD=/u);
-assert.ok(packageJson.scripts["build:nsis"].includes("--verbose"));
+assert.ok(packageJson.scripts["build:nsis"].includes("npm run bundle:nsis"));
 assert.ok(packageJson.scripts["bundle:nsis"].includes("--verbose"));
 assert.deepEqual(signingConfig.bundle.windows.signCommand.args.slice(0, 2), [
   "-NoProfile",

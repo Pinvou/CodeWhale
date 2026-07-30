@@ -61,7 +61,13 @@ ${StrLoc}
 !define MANUKEY "Software\${MANUFACTURER}"
 !define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
-!define ESTIMATEDSIZE "{{estimated_size}}"
+!ifdef PINVOU_STAGED_RESOURCES_SIZE_KIB
+  ; Staged resources bypass Tauri's resource enumeration, so add their size
+  ; back to the value displayed by Windows Apps & Features.
+  !define /math ESTIMATEDSIZE {{estimated_size}} + ${PINVOU_STAGED_RESOURCES_SIZE_KIB}
+!else
+  !define ESTIMATEDSIZE "{{estimated_size}}"
+!endif
 !define STARTMENUFOLDER "{{start_menu_folder}}"
 
 Var PassiveMode
@@ -648,6 +654,9 @@ Section Install
   {{#each resources}}
     File /a "/oname={{this.[1]}}" "{{no-escape @key}}"
   {{/each}}
+  !ifmacrodef PINVOU_INSTALL_STAGED_RESOURCES
+    !insertmacro PINVOU_INSTALL_STAGED_RESOURCES
+  !endif
 
   ; Copy external binaries
   {{#each binaries}}
@@ -785,6 +794,9 @@ Section Uninstall
   {{#each resources}}
     Delete "$INSTDIR\\{{this.[1]}}"
   {{/each}}
+  !ifmacrodef PINVOU_UNINSTALL_STAGED_RESOURCES
+    !insertmacro PINVOU_UNINSTALL_STAGED_RESOURCES
+  !endif
 
   ; Delete external binaries
   {{#each binaries}}

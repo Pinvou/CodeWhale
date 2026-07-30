@@ -21,6 +21,10 @@ packaging/
 - `windows-installer.js`：按 bundle 目标准备 NSIS 专属资源。
 - `build.js`：组合平台配置、运行时与安装器 staging，并启动 Tauri CLI。
 
+Windows NSIS 构建会把第三方预签名运行时收集到 `target/release/nsis-stage/resources`，
+再通过生成的 NSIS hook 直接安装，避免 Tauri 将这些资源当作首方产物重复调用签名工具。
+主程序、卸载程序和安装器仍沿用 Tauri 的首方签名流程。
+
 工具市场不再在构建期注入共享 API Key；Windows WoSign 凭据仍由签名脚本从仓库外的本机配置读取。
 
 平台脚本不得修改其他平台的资源树；所有生成物必须写入 `src-tauri/target/`。Windows

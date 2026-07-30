@@ -16,6 +16,10 @@ gitignored `scripts/.builtin-secrets.env` file through
 the tools in this directory, runs the command from this directory so the companion
 executable can be resolved, and keeps `/isf` to ignore already-signed inputs. The
 command requests an RFC 3161 timestamp. A zero WoSign exit code is not sufficient:
-the script verifies the final Authenticode status, signer certificate thumbprint,
-and timestamp certificate before reporting success. Update the private secrets
-file when the signing certificate or UKey password changes.
+the script uses Windows SDK SignTool to verify every Authenticode signature against
+the default policy, certificate chain, and RFC 3161 timestamp. It then reads the
+embedded signer certificate and requires its normalized SHA-1 thumbprint to match
+the configured certificate before reporting success. The build machine must have
+the Windows SDK Signing Tools installed or expose `signtool.exe` through `PATH`.
+Update the private secrets file when the signing certificate or UKey password
+changes.

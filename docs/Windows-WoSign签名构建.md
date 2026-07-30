@@ -17,11 +17,25 @@ Windows NSIS 发布构建通过项目内的 `wosigncodecmd.exe` 完成签名，
 签名工具路径不可通过环境变量覆盖，构建始终使用项目内与 `sign.ps1` 同目录的
 `wosigncodecmd.exe` 和 `wosigncode.exe`，并以该目录作为沃通命令的工作目录。
 签名命令保留 `/isf` 以跳过已有签名，并继续通过 `/tr` 请求 RFC3161 时间戳。
-当前以沃通命令返回码判断执行结果，不再额外校验 Authenticode 状态、签名证书指纹和时间戳证书。
+沃通命令成功后，脚本使用 Windows SDK 的 SignTool 按 Authenticode 默认策略验证全部签名、证书链和
+RFC 3161 时间戳；SignTool 的失败或警告都会终止构建。随后脚本读取文件内嵌的签名者证书，并要求其
+SHA1 指纹与配置指纹一致。构建机必须安装 Windows SDK Signing Tools，或将 `signtool.exe` 加入 `PATH`。
 Tauri 的自定义签名命令从 `src-tauri` 目录执行，因此配置中的脚本路径必须写为
 `packaging/windows/signing/wosign/sign.ps1`，不得再次添加 `src-tauri/` 前缀。
 
 证书或 UKey 密码变化后，只需修改构建机器上的私密配置文件，不应将真值写回签名脚本或提交到 Git。
+
+## 预签名资源处理
+
+安装包中的第三方运行时二进制由其供应方提前签名。构建阶段先将这些资源收集到
+`target/release/nsis-stage/resources`，再由生成的 NSIS hook 直接写入安装目录；它们不进入
+Tauri 的 `bundle.resources`，因此不会被 Tauri 逐个调用签名工具，也不会因 `/isf` 被误当成
+本次首方签名成功。
+
+主程序、卸载程序和最终 NSIS 安装器仍由 Tauri 调用沃通脚本签名，并执行上述签名者指纹校验。
+这种边界使两类文件各自保持原有签名：第三方资源保留供应方签名，首方产物统一使用项目配置证书。
+卸载时，生成的 NSIS hook 只删除 staging 清单中的文件，并按从深到浅的顺序尝试移除空目录；如果用户或
+其他组件在这些目录中新增了文件，目录会被保留，不会递归删除额外内容。
 
 ## 构建命令
 

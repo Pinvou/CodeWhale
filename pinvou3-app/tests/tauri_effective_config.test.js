@@ -15,6 +15,7 @@ const {
   prepareTauriArgs,
   runTauri,
   tauriCommandIndex,
+  usesValidatedNsisStaging,
 } = require("../scripts/tauri/build.js");
 const {
   APP_ROOT,
@@ -98,6 +99,26 @@ const windowsDescriptorArgs = prepareTauriArgs(
 assert.deepEqual(configSpecs(windowsDescriptorArgs), [
   platformConfigPath("win32"),
   windowsRuntimeOverlay,
+  explicitOverlay,
+]);
+const validatedNsisOverlay =
+  "src-tauri/target/release/nsis-stage/tauri.nsis-stage.conf.json";
+let stagedRuntimeCallCount = 0;
+const validatedNsisArgs = prepareTauriArgs(
+  ["bundle", "--config", validatedNsisOverlay, "--config", explicitOverlay],
+  {
+    platform: "win32",
+    stageRuntime: () => {
+      stagedRuntimeCallCount += 1;
+      return windowsRuntimeOverlay;
+    },
+  },
+);
+assert.equal(usesValidatedNsisStaging(validatedNsisArgs), true);
+assert.equal(stagedRuntimeCallCount, 0);
+assert.deepEqual(configSpecs(validatedNsisArgs), [
+  platformConfigPath("win32"),
+  validatedNsisOverlay,
   explicitOverlay,
 ]);
 const windowsCodexArgs = prepareTauriArgs(
