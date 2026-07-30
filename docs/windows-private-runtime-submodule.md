@@ -1,25 +1,27 @@
-# Windows 私有运行时 submodule
+# Windows 独立运行时 submodule
 
 ## 目标
 
 Windows 分支只维护代码、安装器模板和 submodule gitlink。Poppler、Tesseract、Python、
-Node.js、Pandoc、ONNX Runtime、ASR 引擎、7-Zip 和 VC Runtime 存放在私有仓库：
+Node.js、Pandoc、ONNX Runtime、ASR 引擎、7-Zip 和 VC Runtime 存放在公开仓库：
 
 ```text
 https://github.com/Pinvou/pinvou3-windows-runtime.git
 ```
 
-主仓库不保存这些二进制，也不在基础 `tauri.conf.json` 中硬编码私有资源路径。
+主仓库不保存这些大型二进制，也不在基础 `tauri.conf.json` 中硬编码平台资源路径。
+`private-runtimes/windows` 是为保持 gitlink、缓存和构建脚本兼容而保留的历史路径名，
+不代表当前仓库可见性。
 
 ## 目录和版本锁定
 
 主仓库引用：
 
 ```text
-private-runtimes/windows  -> 私有仓库的确定 commit
+private-runtimes/windows  -> 公开运行时仓库的确定 commit
 ```
 
-私有仓库的 `payload/` 按组件保存资源。Poppler、Tesseract、ASR、7-Zip 分别使用一个
+运行时仓库的 `payload/` 按组件保存资源。Poppler、Tesseract、ASR、7-Zip 分别使用一个
 确定性 ZIP；Python、Node.js、Pandoc、ONNX Runtime 继续使用各自的上游组件包；
 VC Runtime 保持独立文件。二进制由 Git LFS 管理。
 
@@ -31,12 +33,12 @@ staging 会先校验 ZIP，解压后再按该 manifest 中的可信最终清单�
 主仓库 `pinvou3-app/src-tauri/config/platforms/windows/runtime/x86_64.lock.json` 再锁定：
 
 - submodule URL、路径和 commit；
-- 私有 manifest 路径及 SHA-256；
+- runtime manifest 路径及 SHA-256；
 - 目标平台 `windows-x86_64`。
 
-因此版本完整性由三层保证：主仓库 gitlink、主仓库 lock、私有文件级 manifest。缓存中的
+因此版本完整性由三层保证：主仓库 gitlink、主仓库 lock、运行时文件级 manifest。缓存中的
 `.stage-manifest.json` 和 `.verified-lock` 只用于快速拒绝和诊断；缓存能否复用最终由主仓库 lock
-锁定的私有 `stagedFiles` 清单决定，缓存元数据不能自行构造信任。
+锁定的 `stagedFiles` 清单决定，缓存元数据不能自行构造信任。
 
 ## 初始化和构建
 
@@ -48,7 +50,7 @@ npm run runtime:windows:stage
 npm run build:nsis
 ```
 
-私有 submodule 配置为 `update = none`，普通的递归 submodule 初始化只处理公共底座，
+运行时 submodule 配置为 `update = none`，普通的递归 submodule 初始化只处理公共底座，
 Windows 构建机通过 `runtime:windows:init` 显式覆盖该策略并拉取 Git LFS 对象。
 
 ### Jenkins 子模块准备
@@ -80,26 +82,26 @@ npm --prefix pinvou3-app run runtime:windows:cache-key
 取得缓存键后，Jenkins 只恢复 `pinvou3-app/src-tauri/target/windows-runtime`，再执行本节开头的 submodule 准备命令。
 其中 `lfs-storage/` 是脚本通过命令级 `lfs.storage` 使用的外置 Git LFS 对象库，其余目录保存已验证、已展开的安装资源。
 不得把 `.git/modules/private-runtimes/windows/lfs/objects` 作为独立缓存路径恢复到全新 workspace；这会提前创建不完整的
-submodule gitdir，导致后续 `git submodule update --init` 无法初始化私有 runtime。
+submodule gitdir，导致后续 `git submodule update --init` 无法初始化 runtime。
 
-恢复的 staging 会按私有 manifest 中由主仓库 lock 锁定的完整文件集合和 SHA-256 清单重新核验；缓存损坏时会先重新校验
-私有源文件，再原子重建 staging，不能把缓存本身或同缓存内的元数据视为可信发布输入。
+恢复的 staging 会按 runtime manifest 中由主仓库 lock 锁定的完整文件集合和 SHA-256 清单重新核验；缓存损坏时会先重新校验
+运行时源文件，再原子重建 staging，不能把缓存本身或同缓存内的元数据视为可信发布输入。
 
 仓库脚本只负责生成缓存键和验证恢复结果，不负责 Jenkins Job 的 restore/save 配置；构建平台必须显式配置上述缓存路径。
-GitHub Actions 当前也未跨 workflow run 持久化私有 runtime，只能复用单次构建工作区内的验证与 staging 结果。
+GitHub Actions 当前也未跨 workflow run 持久化 runtime，只能复用单次构建工作区内的验证与 staging 结果。
 
 主仓库 checkout 的 refspec、tag 获取和 shallow clone 由 Jenkins SCM 插件控制，不在仓库脚本内。发布 Job 应启用
 `Honor refspec on initial clone`、`No tags`，并把 refspec 限制为实际构建分支或 MR ref；不要在每次构建中抓取全部分支和 tag。
 
-GitHub Actions 构建 Windows NSIS 时，需要创建受保护的 GitHub Environment
-`windows-release`，并在该 Environment 内配置 Secret
-`PINVOU3_WINDOWS_RUNTIME_TOKEN`。不要把该凭据配置成仓库或组织 Secret。该凭据只需对主仓库和
-`Pinvou/pinvou3-windows-runtime` 具有 `Contents: read` 权限；Environment 应限制为受保护的
-`main` 分支，并按发布策略配置 required reviewers。
+GitHub Actions 构建 Windows NSIS 时仍进入 `windows-release` Environment，作为正式发布边界；
+job 自身只允许 `main`，Environment 可按发布策略进一步配置 protected branch 和 required reviewers。
+运行时仓库已公开，不需要仓库级、组织级或 Environment Secret。checkout 设置
+`persist-credentials: false`，初始化脚本按锁定 URL、gitlink 和 manifest 匿名拉取运行时及
+Git LFS 对象。
 
-所有 PR（包括同仓 PR）都只运行不引用私有凭据的 Windows 打包契约测试。只有 `main` 的发布链路
-push 或在 `main` 上执行的 `workflow_dispatch` 才能进入 `windows-release` 构建正式 NSIS。
-受保护构建缺少该 Secret 时会明确失败，避免产生缺少 Windows 产物的不完整发布。
+所有 PR（包括同仓 PR）只运行不拉取大型运行时的 Windows 打包契约测试。只有 `main` 的发布链路
+push 或在 `main` 上执行的 `workflow_dispatch` 才能进入 `windows-release` 构建正式 NSIS；
+运行时缺失、gitlink 不一致或 LFS 对象未物化时仍会明确失败，避免产生不完整发布。
 
 `scripts/tauri/build.js` 是项目内 `tauri build` / `tauri bundle` 的统一入口：Windows
 构建前自动执行 staging，所有平台都会加载对应 config overlay，并在调用 Tauri CLI 前
@@ -110,10 +112,10 @@ resolver 只负责验证、展开运行时并生成 `target/windows-runtime/runt
 `scripts/tauri/windows-installer.js` 只在目标包含 NSIS 时消费 descriptor 中的 VC Runtime。
 Codex Bridge 同样从 descriptor 取得已锁定 Node，不反向解析 Tauri 资源映射。
 
-迁移验证阶段可设置 `PINVOU3_WINDOWS_RUNTIME_ROOT` 指向相同 commit 的本地私有仓库；
+迁移验证阶段可设置 `PINVOU3_WINDOWS_RUNTIME_ROOT` 指向相同 commit 的本地运行时仓库；
 正式发布不得用它绕过主仓库锁定的 submodule。
 
-普通开发和检查不需要私有仓库：
+普通开发和检查不需要初始化运行时仓库：
 
 ```powershell
 cd pinvou3-app/src-tauri
@@ -125,7 +127,7 @@ cargo check
 1. 在临时目录展开并修改对应组件；
 2. 使用 `scripts/pack-component.ps1` 重新生成对应的确定性 ZIP；
 3. 执行 `scripts/update-manifest.ps1`；
-4. 提交并推送私有仓库，只有变更组件产生新的 LFS 对象；
+4. 提交并推送运行时仓库，只有变更组件产生新的 LFS 对象；
 5. 主仓库更新 submodule gitlink；
 6. 更新主仓库 lock 中的 commit 和 manifest SHA-256；
 7. 从干净 checkout 验证 staging 和安装包。
@@ -135,7 +137,7 @@ lock。若 Git LFS 没有拉取成功，resolver 会识别 pointer 文件并在�
 
 ## 多平台扩展
 
-macOS 私有运行时应使用独立路径和仓库，例如：
+macOS 平台运行时应使用独立路径和仓库，例如：
 
 ```text
 private-runtimes/windows
