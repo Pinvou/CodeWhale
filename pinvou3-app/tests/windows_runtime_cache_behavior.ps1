@@ -30,6 +30,7 @@ try {
   $stagingRoot = Join-Path $stagingParent $stageId
   $stageManifestPath = Join-Path $stagingRoot ".stage-manifest.json"
   $generatedConfigPath = Join-Path $stagingParent "tauri.generated.conf.json"
+  $runtimeDescriptorPath = Join-Path $stagingParent "runtime-descriptor.json"
   $resolverLockPath = Join-Path $stagingParent ".resolver.lock"
 
   $firstLock = Enter-ResolverLock -TimeoutSeconds 0
@@ -74,8 +75,14 @@ try {
       }
     )
   }
+  Write-RuntimeDescriptor -Manifest $manifest -StageId $stageId
 
   Assert-True -Condition (Test-VerifiedStageReusable -Manifest $manifest) -Message "fresh verified staging should be reusable"
+
+  Write-TestFile -Path $runtimeDescriptorPath -Content "tampered descriptor"
+  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "tampered runtime descriptor must invalidate the cache"
+  Write-RuntimeDescriptor -Manifest $manifest -StageId $stageId
+  Assert-True -Condition (Test-VerifiedStageReusable -Manifest $manifest) -Message "restoring the runtime descriptor should restore reuse"
 
   Write-TestFile -Path $runtimeDependencyPath -Content "xyz"
   Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "same-size staged content tampering must invalidate the cache"

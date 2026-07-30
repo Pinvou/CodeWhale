@@ -1,99 +1,181 @@
-const assert = require("assert");
-const fs = require("fs");
-const path = require("path");
+const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
+const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+
+const { windowsBundleTargets } = require("../scripts/tauri/build.js");
+const { stageWindowsInstaller } = require("../scripts/tauri/windows-installer.js");
 
 const appRoot = path.resolve(__dirname, "..");
-const packageJson = JSON.parse(
-  fs.readFileSync(path.join(appRoot, "package.json"), "utf8"),
-);
-const runtimeScript = fs.readFileSync(
-  path.join(
-    appRoot,
+const repoRoot = path.resolve(appRoot, "..");
+const readRepo = (...parts) =>
+  fs.readFileSync(path.join(repoRoot, ...parts), "utf8");
+const readApp = (...parts) => fs.readFileSync(path.join(appRoot, ...parts), "utf8");
+
+const packageJson = JSON.parse(readApp("package.json"));
+const gitmodules = readRepo(".gitmodules");
+const lock = JSON.parse(
+  readApp(
     "src-tauri",
-    "packaging",
+    "config",
+    "platforms",
     "windows",
     "runtime",
-    "scripts",
-    "resolve-runtime.ps1",
+    "x86_64.lock.json",
   ),
-  "utf8",
 );
-const runtimeInitScript = fs.readFileSync(
-  path.join(
-    appRoot,
-    "src-tauri",
-    "packaging",
-    "windows",
-    "runtime",
-    "scripts",
-    "init-submodule.ps1",
-  ),
-  "utf8",
+const windowsConfig = JSON.parse(
+  readApp("src-tauri", "config", "platforms", "windows", "tauri.conf.json"),
 );
-const installerHooks = fs.readFileSync(
-  path.join(
-    appRoot,
-    "src-tauri",
-    "packaging",
-    "windows",
-    "nsis",
-    "installer-hooks.nsh",
-  ),
-  "utf8",
+const runtimeInitScript = readApp(
+  "src-tauri",
+  "packaging",
+  "windows",
+  "runtime",
+  "scripts",
+  "init-submodule.ps1",
 );
-const releaseWorkflow = fs.readFileSync(
-  path.resolve(appRoot, "..", ".github", "workflows", "release-packages.yml"),
-  "utf8",
+const runtimeScript = readApp(
+  "src-tauri",
+  "packaging",
+  "windows",
+  "runtime",
+  "scripts",
+  "resolve-runtime.ps1",
 );
-const prCheckWorkflow = fs.readFileSync(
-  path.resolve(appRoot, "..", ".github", "workflows", "pr-check.yml"),
-  "utf8",
+const installerHook = readApp(
+  "src-tauri",
+  "packaging",
+  "windows",
+  "nsis",
+  "installer-hooks.nsh",
 );
-const runtimeGuide = fs.readFileSync(
-  path.resolve(
-    appRoot,
-    "..",
-    "docs",
-    "windows-private-runtime-submodule.md",
-  ),
-  "utf8",
+const runtimeWrapper = readApp("scripts", "tauri", "windows-runtime.js");
+const installerAdapter = readApp("scripts", "tauri", "windows-installer.js");
+const buildScript = readApp("scripts", "tauri", "build.js");
+const bridgeScript = readApp("scripts", "tauri", "codex-bridge.js");
+const prCheckWorkflow = readRepo(".github", "workflows", "pr-check.yml");
+const releaseWorkflow = readRepo(".github", "workflows", "release-packages.yml");
+const runtimeGuide = readRepo("docs", "windows-private-runtime-submodule.md");
+
+assert.match(
+  gitmodules,
+  /\[submodule "private-runtimes\/windows"\][\s\S]*?url = https:\/\/github\.com\/Pinvou\/pinvou3-windows-runtime\.git[\s\S]*?update = none/,
+  "private Windows runtime must be pinned as a non-automatic submodule",
+);
+assert.equal(lock.schemaVersion, 2);
+assert.equal(lock.target, "windows-x86_64");
+assert.equal(lock.source.type, "git-submodule");
+assert.equal(lock.source.path, "private-runtimes/windows");
+assert.equal(lock.source.url, "https://github.com/Pinvou/pinvou3-windows-runtime.git");
+assert.match(lock.source.commit, /^[0-9a-f]{40}$/u);
+assert.match(lock.manifest.sha256, /^[0-9a-f]{64}$/u);
+assert.match(lock.vcRedist.minimumVersion, /^\d+\.\d+\.\d+\.\d+$/u);
+
+const [vcMajor, vcMinor, vcBuild, vcRevision] = lock.vcRedist.minimumVersion
+  .split(".")
+  .map(Number);
+assert.ok(
+  [vcMajor, vcMinor, vcBuild, vcRevision].every(Number.isSafeInteger),
+  "VC++ minimum version components must be safe integers",
 );
 
-const stagedBootstrapper =
-  "${__FILEDIR__}\\..\\..\\..\\windows-runtime\\nsis\\vc_redist\\VC_redist.x64.exe";
-const removedBootstrapper =
-  "${__FILEDIR__}\\..\\..\\..\\..\\resources\\windows\\vc_redist\\VC_redist.x64.exe";
-const removedArchitectureBootstrapper =
-  "${__FILEDIR__}\\..\\..\\..\\..\\packaging\\windows\\vc_redist\\VC_redist.x64.exe";
-
-assert.ok(
-  installerHooks.includes(stagedBootstrapper),
-  "NSIS hook must load VC_redist from the verified target/windows-runtime staging area",
+const gitlink = spawnSync(
+  "git",
+  ["ls-files", "--stage", "--", lock.source.path],
+  { cwd: repoRoot, encoding: "utf8" },
 );
-assert.ok(
-  !installerHooks.includes(removedBootstrapper),
-  "NSIS hook must not reference the deleted source-tree vc_redist directory",
-);
-assert.ok(
-  !installerHooks.includes(removedArchitectureBootstrapper),
-  "NSIS hook must not reference an unstaged packaging/windows vc_redist directory",
+assert.equal(gitlink.error, undefined);
+assert.equal(gitlink.status, 0, gitlink.stderr);
+assert.match(
+  gitlink.stdout,
+  new RegExp(`^160000 ${lock.source.commit} 0\\t${lock.source.path.replace("/", "\\/")}`),
+  "superproject gitlink must match the runtime lock",
 );
 
-assert.ok(
-  runtimeScript.includes('function Stage-NsisBootstrapper'),
-  "runtime staging must expose a dedicated NSIS bootstrapper step",
+for (const contract of [
+  "Get-SuperprojectGitlinkCommit",
+  "Windows runtime submodule commit mismatch",
+  "manifest SHA-256",
+  "Test-LfsPointer",
+  "Test-ManagedArchiveExpansion",
+  "System.IO.Compression.ZipFile",
+  "Write-Utf8WithoutBom",
+  "Test-StageManifest",
+  ".stage-manifest.json",
+  "Get-RuntimeDescriptorContent",
+  'delivery = "download-on-first-use"',
+]) {
+  assert.ok(runtimeScript.includes(contract), `runtime staging must retain ${contract}`);
+}
+assert.match(runtimeScript, /Get-Sha256 -Path \$sourcePath/u);
+assert.match(runtimeScript, /vcRedist\.minimumVersion/u);
+assert.match(runtimeScript, /System\.Diagnostics\.FileVersionInfo/u);
+assert.match(runtimeScript, /\$vcActualVersion -lt \$vcMinimumVersion/u);
+assert.match(runtimeScript, /HashSet\[string\]/u);
+assert.match(runtimeScript, /Remove-Item -LiteralPath \$bundledAsrModelPath/u);
+for (const destination of [
+  "runtime/poppler",
+  "runtime/pandoc",
+  "runtime/tesseract",
+  "runtime/python",
+  "runtime/node",
+  "runtime/onnxruntime",
+  "runtime/asr",
+  "runtime/7zip",
+]) {
+  assert.ok(runtimeScript.includes(destination), `runtime overlay must include ${destination}`);
+}
+assert.doesNotMatch(
+  runtimeScript,
+  /sensevoice-small-q8\.gguf"\s*=\s*"runtime\/asr/u,
+  "download-on-first-use ASR model must not be mapped into the installer",
 );
-assert.ok(
-  runtimeScript.includes('$manifestPath = "payload/vc_redist/VC_redist.x64.exe"'),
-  "VC_redist must be selected from the locked private-runtime manifest",
+assert.match(runtimeScript, /Stage-NsisBootstrapper/u);
+assert.match(runtimeInitScript, /git lfs pull/);
+assert.match(runtimeInitScript, /--include=/);
+assert.match(runtimeInitScript, /pinvou3-windows-runtime-\$cacheSchema-\$expectedCommit/u);
+
+assert.match(runtimeWrapper, /runtime-descriptor\.json/);
+assert.match(runtimeWrapper, /cleanupLegacyWindowsNodeStaging/);
+assert.match(runtimeWrapper, /download-on-first-use/);
+assert.match(installerAdapter, /bundleTargets\.includes\("nsis"\)/);
+assert.equal(
+  windowsConfig.bundle.windows.nsis.installerHooks,
+  "packaging/windows/nsis/installer-hooks.nsh",
 );
-assert.ok(
-  runtimeScript.includes('$destinationRoot = Join-Path $StagingParent "nsis"'),
-  "VC_redist must be copied to the stable target/windows-runtime/nsis directory",
+assert.match(installerHook, /!macro NSIS_HOOK_PREINSTALL/);
+assert.match(installerHook, /VC_redist\.x64\.exe/);
+assert.match(installerHook, /\.\.\\\.\.\\\.\.\\windows-runtime\\nsis\\vc_redist/);
+assert.doesNotMatch(installerHook, /\.\.\\\.\.\\\.\.\\target\\windows-runtime/);
+assert.match(installerHook, /\/install \/quiet \/norestart/);
+for (const [name, version] of [
+  ["MAJOR", vcMajor],
+  ["MINOR", vcMinor],
+  ["BUILD", vcBuild],
+  ["REVISION", vcRevision],
+]) {
+  assert.ok(
+    installerHook.includes(`!define PINVOU_VC_REDIST_MIN_${name} ${version}`),
+    `NSIS VC++ ${name.toLowerCase()} minimum must match the runtime lock`,
+  );
+}
+for (const registryValue of ["Major", "Minor", "Bld", "Rbld"]) {
+  assert.match(
+    installerHook,
+    new RegExp(`ReadRegDWORD \\$\\d[^\\r\\n]+"${registryValue}"`),
+    `NSIS hook must inspect the installed VC++ ${registryValue} value`,
+  );
+}
+assert.match(
+  installerHook,
+  /IntCmpU \$1 \$\{PINVOU_VC_REDIST_MIN_MAJOR\} pinvou_vc_redist_check_minor pinvou_vc_redist_install pinvou_vc_redist_ready/,
 );
-assert.ok(
-  runtimeScript.includes('(Get-Sha256 -Path $temporaryPath) -ne [string]$entry.sha256'),
-  "the NSIS bootstrapper copy must be verified against the locked SHA-256",
+assert.match(
+  installerHook,
+  /IntCmpU \$2 \$\{PINVOU_VC_REDIST_MIN_MINOR\} pinvou_vc_redist_check_build pinvou_vc_redist_install pinvou_vc_redist_ready/,
 );
 assert.ok(
   runtimeScript.includes('$sourceVerificationMarkerPath = Join-Path $stagingParent ".verified-lock"'),
@@ -239,11 +321,6 @@ assert.match(
   /if \(\$CacheKeyOnly\)[\s\S]*?Write-Output \$cacheKey[\s\S]*?exit 0/u,
   "Jenkins must be able to resolve the runtime cache key before remote access",
 );
-assert.ok(
-  !runtimeScript.includes("sensevoice-small-q8.gguf"),
-  "the Windows installer overlay must not bundle the on-demand SenseVoice recognition model",
-);
-
 const windowsRuntimeFilterStart = prCheckWorkflow.indexOf(
   "            windows_runtime:",
 );
@@ -272,40 +349,169 @@ for (const requiredPath of [
   );
 }
 
-const windowsJobStart = releaseWorkflow.indexOf("build-windows-x64:");
-const macosJobStart = releaseWorkflow.indexOf("build-macos-universal:", windowsJobStart);
-assert.ok(
-  windowsJobStart >= 0 && macosJobStart > windowsJobStart,
-  "release workflow must contain distinct Windows and macOS build jobs",
+assert.match(
+  installerHook,
+  /IntCmpU \$3 \$\{PINVOU_VC_REDIST_MIN_BUILD\} pinvou_vc_redist_check_revision pinvou_vc_redist_install pinvou_vc_redist_ready/,
 );
-const windowsJob = releaseWorkflow.slice(windowsJobStart, macosJobStart);
+assert.match(
+  installerHook,
+  /IntCmpU \$4 \$\{PINVOU_VC_REDIST_MIN_REVISION\} pinvou_vc_redist_ready pinvou_vc_redist_install pinvou_vc_redist_ready/,
+);
+assert.match(
+  installerHook,
+  /ClearErrors\r?\n\s*ExecWait[^\r\n]+\$5\r?\n\s*IfErrors pinvou_vc_redist_exec_failed/,
+  "ExecWait errors must be cleared and handled immediately",
+);
+assert.match(installerHook, /IntCmp \$5 3010/);
+assert.match(installerHook, /IntCmp \$5 1641/);
+for (const [label, nextLabel] of [
+  ["pinvou_vc_redist_exec_failed", "pinvou_vc_redist_exit_failed"],
+  ["pinvou_vc_redist_exit_failed", "pinvou_vc_redist_reboot"],
+]) {
+  const start = installerHook.indexOf(`${label}:`);
+  const end = installerHook.indexOf(`${nextLabel}:`, start);
+  assert.notEqual(start, -1, `NSIS hook must define ${label}`);
+  assert.ok(end > start, `${label} must end before ${nextLabel}`);
+  const failureBranch = installerHook.slice(start, end);
+  assert.match(
+    failureBranch,
+    /MessageBox[^\r\n]+\/SD IDOK/,
+    `${label} must not prompt indefinitely during an unattended install`,
+  );
+  assert.match(failureBranch, /\r?\n\s*Abort\s*(?:\r?\n|$)/, `${label} must abort the install`);
+}
+
+assert.deepEqual(windowsBundleTargets(["build"]), ["msi", "nsis"]);
+assert.deepEqual(windowsBundleTargets(["build", "--bundles", "msi"]), ["msi"]);
+assert.deepEqual(windowsBundleTargets(["build", "--bundles=nsis"]), ["nsis"]);
 assert.ok(
-  windowsJob.includes("secrets.PINVOU3_WINDOWS_RUNTIME_TOKEN || github.token"),
-  "Windows release checkout must use the dedicated runtime token when configured",
+  buildScript.indexOf("stageWindowsRuntime()") <
+    buildScript.indexOf("stageWindowsInstaller({"),
+  "runtime resolver must run before the installer adapter",
 );
 assert.ok(
-  windowsJob.includes("npm run test:windows-runtime"),
-  "Windows release job must validate packaging contracts when private runtime access is unavailable",
+  buildScript.indexOf("stageWindowsInstaller({") <
+    buildScript.indexOf("prepareWindowsCodexBridge(windowsBridgeOptions)"),
+  "installer resources must be staged before the Bridge and Tauri build",
 );
-const runtimeInit = windowsJob.indexOf("npm run runtime:windows:init");
-const nsisBuild = windowsJob.indexOf("npm run build:nsis");
-assert.ok(
-  runtimeInit >= 0 && nsisBuild > runtimeInit,
-  "Windows release job must initialize the locked private runtime before building NSIS",
+assert.doesNotMatch(
+  bridgeScript,
+  /WINDOWS_NODE_VERSION|nodejs\.org\/dist|curl\.exe|tar\.exe|runtime\/codex-node/,
+  "Codex Bridge must not download or package a private Node copy",
 );
 
-const simulatedFileDir =
-  "D:\\workspace\\pinvou3-app\\src-tauri\\target\\release\\nsis\\x64";
-const resolvedHookPath = path.win32.resolve(
-  simulatedFileDir,
-  "..\\..\\..\\windows-runtime\\nsis\\vc_redist\\VC_redist.x64.exe",
+const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-nsis-adapter-"));
+try {
+  const sourcePath = path.join(temporaryRoot, "source", "VC_redist.x64.exe");
+  const destinationRoot = path.join(temporaryRoot, "output", "nsis");
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  fs.writeFileSync(sourcePath, "locked-vc-runtime");
+  const runtime = {
+    vcRedist: {
+      sourcePath,
+      bytes: fs.statSync(sourcePath).size,
+      sha256: crypto.createHash("sha256").update(fs.readFileSync(sourcePath)).digest("hex"),
+    },
+  };
+  assert.equal(
+    stageWindowsInstaller({
+      platform: "win32",
+      bundleTargets: ["msi"],
+      runtime,
+      destinationRoot,
+    }),
+    null,
+  );
+  assert.equal(fs.existsSync(destinationRoot), false);
+  const staged = stageWindowsInstaller({
+    platform: "win32",
+    bundleTargets: ["nsis"],
+    runtime,
+    destinationRoot,
+  });
+  assert.equal(fs.readFileSync(staged.vcRedistPath, "utf8"), "locked-vc-runtime");
+  fs.writeFileSync(sourcePath, "tampered-vc-runtime");
+  assert.throws(
+    () =>
+      stageWindowsInstaller({
+        platform: "win32",
+        bundleTargets: ["nsis"],
+        runtime,
+        destinationRoot,
+      }),
+    /指纹不匹配/u,
+  );
+} finally {
+  fs.rmSync(temporaryRoot, { recursive: true, force: true });
+}
+
+const prValidationJobStart = releaseWorkflow.indexOf(
+  "  validate-windows-runtime-pr:",
 );
-const expectedStagingPath =
-  "D:\\workspace\\pinvou3-app\\src-tauri\\target\\windows-runtime\\nsis\\vc_redist\\VC_redist.x64.exe";
-assert.strictEqual(
-  resolvedHookPath.toLowerCase(),
-  expectedStagingPath.toLowerCase(),
-  "NSIS relative path must resolve to the stable staging destination",
+const windowsBuildJobStart = releaseWorkflow.indexOf("  build-windows-x64:");
+const macosBuildJobStart = releaseWorkflow.indexOf(
+  "  build-macos-universal:",
+);
+assert.notEqual(prValidationJobStart, -1);
+assert.ok(windowsBuildJobStart > prValidationJobStart);
+assert.ok(macosBuildJobStart > windowsBuildJobStart);
+
+const prValidationJob = releaseWorkflow.slice(
+  prValidationJobStart,
+  windowsBuildJobStart,
+);
+const windowsBuildJob = releaseWorkflow.slice(
+  windowsBuildJobStart,
+  macosBuildJobStart,
+);
+assert.match(prValidationJob, /github\.event_name == 'pull_request'/);
+assert.match(prValidationJob, /npm run test:windows-runtime/);
+assert.match(prValidationJob, /npm run test:codex-acp-windows-runtime/);
+assert.match(prValidationJob, /submodules: false/);
+assert.doesNotMatch(
+  prValidationJob,
+  /PINVOU3_WINDOWS_RUNTIME_TOKEN|secrets\./,
+  "PR validation must never reference private credentials",
 );
 
-console.log("✅ Windows runtime NSIS bootstrapper packaging contract passed");
+assert.match(windowsBuildJob, /github\.event_name != 'pull_request'/);
+assert.match(windowsBuildJob, /github\.ref == 'refs\/heads\/main'/);
+assert.match(windowsBuildJob, /environment:\s*\n\s*name: windows-release/);
+assert.match(windowsBuildJob, /PINVOU3_WINDOWS_RUNTIME_TOKEN/);
+assert.match(
+  windowsBuildJob,
+  /正式 Windows 发布缺少 PINVOU3_WINDOWS_RUNTIME_TOKEN/,
+);
+assert.match(windowsBuildJob, /npm run runtime:windows:init/);
+assert.doesNotMatch(
+  windowsBuildJob,
+  /runtime-access|available == 'true'|available != 'true'/,
+  "protected Windows builds must not fall back to a reduced PR path",
+);
+
+for (const triggerPath of [
+  ".gitmodules",
+  "private-runtimes/windows",
+  "pinvou3-app/package-lock.json",
+  "pinvou3-app/scripts/tauri/windows-runtime.js",
+  "pinvou3-app/src-tauri/config/platforms/windows/**",
+  "pinvou3-app/src-tauri/packaging/windows/**",
+  "pinvou3-app/tests/windows_runtime_packaging_contract.test.js",
+]) {
+  const escapedPath = triggerPath.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const occurrences = releaseWorkflow.match(new RegExp(escapedPath, "gu")) ?? [];
+  assert.ok(
+    occurrences.length >= 2,
+    `${triggerPath} must trigger both pull_request and push builds`,
+  );
+}
+assert.match(
+  releaseWorkflow,
+  /git diff --name-only "\$BEFORE" "\$GITHUB_SHA"/,
+);
+assert.match(
+  releaseWorkflow,
+  /build_required: \$\{\{ steps\.diff\.outputs\.build_required \}\}/,
+);
+
+console.log("Windows private runtime packaging contract: ok");

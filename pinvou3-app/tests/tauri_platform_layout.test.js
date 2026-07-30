@@ -113,6 +113,11 @@ assert.match(
   /\[submodule "private-runtimes\/windows"\][\s\S]*?\n\s*update\s*=\s*none(?:\r?\n|$)/,
   "private Windows runtime must remain opt-in during recursive submodule updates",
 );
+assert.doesNotMatch(
+  JSON.stringify({ common, windows }),
+  /private-runtimes\/windows|target\/windows-runtime/,
+  "public Tauri configs must not hard-code private runtime sources",
+);
 const workflow = fs.readFileSync(path.join(repoRoot, ".github/workflows/pr-check.yml"), "utf8");
 const arm64Workflow = fs.readFileSync(
   path.join(repoRoot, ".github/workflows/arm64-connector-verify.yml"),

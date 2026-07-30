@@ -12,6 +12,7 @@ const {
 } = require("./platform-config.js");
 const { WRAPPER_ENV } = require("./require-wrapper.js");
 const { prepareWebTemplate } = require("./web-template.js");
+const { stageWindowsInstaller } = require("./windows-installer.js");
 const { stageWindowsRuntime } = require("./windows-runtime.js");
 
 function tauriCommandIndex(args) {
@@ -30,6 +31,22 @@ function configSpecs(args) {
     }
   }
   return specs;
+}
+
+function windowsBundleTargets(args) {
+  const explicit = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--bundles" || argument === "-b") {
+      if (!args[index + 1]) throw new Error(`${argument} 缺少 bundle 类型`);
+      explicit.push(args[index + 1]);
+      index += 1;
+    } else if (argument.startsWith("--bundles=")) {
+      explicit.push(argument.slice("--bundles=".length));
+    }
+  }
+  if (explicit.length === 0 || explicit.includes("all")) return ["msi", "nsis"];
+  return [...new Set(explicit.flatMap((value) => value.split(",")).filter(Boolean))];
 }
 
 function prepareTauriArgs(
@@ -59,7 +76,9 @@ function prepareTauriArgs(
   const automaticConfigs = [platformConfigPath(platform)];
   const architectureConfig = platformArchitectureConfigPath(platform, architecture);
   if (architectureConfig) automaticConfigs.push(architectureConfig);
-  const runtimeConfig = stageRuntime();
+  const stagedRuntime = stageRuntime({ platform });
+  const runtimeConfig =
+    typeof stagedRuntime === "string" ? stagedRuntime : stagedRuntime?.configPath;
   if (runtimeConfig) automaticConfigs.push(runtimeConfig);
   automaticConfigs.push(...additionalConfigs);
   const injected = automaticConfigs.flatMap((configPath) => ["--config", configPath]);
@@ -90,6 +109,20 @@ function main() {
   const isDev = args.includes("dev");
   const hasTauriBuildCommand = tauriCommandIndex(args) >= 0;
   const additionalConfigs = [];
+  const windowsRuntime =
+    hasTauriBuildCommand && process.platform === "win32" ? stageWindowsRuntime() : null;
+  if (windowsRuntime) {
+    stageWindowsInstaller({
+      bundleTargets: windowsBundleTargets(args),
+      runtime: windowsRuntime,
+    });
+  }
+  const windowsBridgeOptions = windowsRuntime
+    ? {
+        nodeExecutable: windowsRuntime.nodeExecutable,
+        npmExecPath: windowsRuntime.npmExecPath,
+      }
+    : undefined;
   if (isDev) {
     prepareCodexBridge();
     prepareWindowsCodexBridge();
@@ -97,13 +130,16 @@ function main() {
   if (hasTauriBuildCommand) {
     prepareWebTemplate();
     prepareCodexBridge();
-    prepareWindowsCodexBridge();
+    prepareWindowsCodexBridge(windowsBridgeOptions);
     if (process.platform === "win32") {
       additionalConfigs.push(WINDOWS_BRIDGE_CONFIG_PATH);
     }
   }
 
-  const preparedArgs = prepareTauriArgs(args, { additionalConfigs });
+  const preparedArgs = prepareTauriArgs(args, {
+    additionalConfigs,
+    stageRuntime: () => windowsRuntime,
+  });
   if (hasTauriBuildCommand) {
     const artifacts = writeEffectiveArtifacts(configSpecs(preparedArgs));
     console.log(`[build] 有效 Tauri 配置: ${artifacts.effectiveConfigPath}`);
@@ -129,7 +165,10 @@ module.exports = {
   main,
   prepareCodexBridge,
   prepareWindowsCodexBridge,
+  stageWindowsInstaller,
+  stageWindowsRuntime,
   prepareTauriArgs,
   runTauri,
   tauriCommandIndex,
+  windowsBundleTargets,
 };

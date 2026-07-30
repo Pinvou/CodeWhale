@@ -16,6 +16,7 @@ $appRoot = (Resolve-Path (Join-Path $tauriRoot "..")).Path
 $repoRoot = (Resolve-Path (Join-Path $appRoot "..")).Path
 $defaultLockFile = Join-Path $tauriRoot "config\platforms\windows\runtime\x86_64.lock.json"
 $generatedConfigPath = Join-Path $tauriRoot "target\windows-runtime\tauri.generated.conf.json"
+$runtimeDescriptorPath = Join-Path $tauriRoot "target\windows-runtime\runtime-descriptor.json"
 $stagingParent = Join-Path $tauriRoot "target\windows-runtime"
 $sourceVerificationMarkerPath = Join-Path $stagingParent ".verified-lock"
 $resolverLockPath = Join-Path $stagingParent ".resolver.lock"
@@ -32,6 +33,15 @@ if (-not (Test-Path -LiteralPath $LockFile -PathType Leaf)) {
 $lock = Get-Content -LiteralPath $LockFile -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([int]$lock.schemaVersion -ne 2 -or [string]$lock.source.type -ne "git-submodule") {
   throw "Unsupported Windows runtime lock schema or source type."
+}
+$vcMinimumVersionText = [string]$lock.vcRedist.minimumVersion
+if ($vcMinimumVersionText -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+  throw "Windows runtime lock must declare vcRedist.minimumVersion as a four-part version."
+}
+try {
+  $vcMinimumVersion = [System.Version]$vcMinimumVersionText
+} catch {
+  throw "Windows runtime lock contains an invalid VC++ minimum version: $vcMinimumVersionText"
 }
 if ([string]::IsNullOrWhiteSpace($RuntimeRoot)) {
   $runtimeRootFromEnvironment = [Environment]::GetEnvironmentVariable("PINVOU3_WINDOWS_RUNTIME_ROOT")
@@ -74,6 +84,9 @@ function Write-Utf8Atomically {
 
 function Assert-ChildPath {
   param([string]$Root, [string]$Path)
+  if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($Path)) {
+    throw "Expected non-empty root and child paths. Root='$Root' Path='$Path'"
+  }
   $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
   $pathFull = [System.IO.Path]::GetFullPath($Path)
   if (-not $pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -226,6 +239,22 @@ function Get-VerifiedManifest {
     if ((Get-Sha256 -Path $sourcePath) -ne [string]$entry.sha256) {
       throw "Locked Windows runtime file SHA-256 mismatch: $($entry.path)"
     }
+  }
+
+  $vcEntries = @($manifest.files | Where-Object { [string]$_.component -eq "vc_redist" })
+  if ($vcEntries.Count -ne 1) {
+    throw "Windows runtime manifest must contain exactly one VC++ redistributable."
+  }
+  $vcSourcePath = Join-Path $RuntimeRoot ([string]$vcEntries[0].path).Replace('/', '\')
+  $vcVersionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($vcSourcePath)
+  $vcActualVersion = [System.Version]::new(
+    $vcVersionInfo.FileMajorPart,
+    $vcVersionInfo.FileMinorPart,
+    $vcVersionInfo.FileBuildPart,
+    $vcVersionInfo.FilePrivatePart
+  )
+  if ($vcActualVersion -lt $vcMinimumVersion) {
+    throw "Locked VC++ redistributable version $vcActualVersion is older than required version $vcMinimumVersion."
   }
 
   Write-Host ("Validated Windows runtime submodule: {0} files at {1}" -f $manifest.files.Count, $actualCommit)
@@ -531,50 +560,37 @@ function Test-ManagedArchiveExpansion {
   }
 }
 
-function Stage-NsisBootstrapper {
-  param(
-    $Manifest,
-    [string]$StagingRoot,
-    [string]$StagingParent
-  )
-
-  $manifestPath = "payload/vc_redist/VC_redist.x64.exe"
-  $entries = @($Manifest.files | Where-Object { [string]$_.path -eq $manifestPath })
-  if ($entries.Count -ne 1) {
-    throw "Windows runtime manifest must contain exactly one NSIS VC++ bootstrapper: $manifestPath"
+function Get-RuntimeDescriptorContent {
+  param($Manifest, [string]$StageId)
+  $relativeRoot = "target/windows-runtime/$StageId"
+  $vcRedistPath = Join-Path $stagingParent "nsis\vc_redist\VC_redist.x64.exe"
+  if (-not (Test-Path -LiteralPath $vcRedistPath -PathType Leaf)) {
+    throw "Staged VC++ runtime is missing while generating the runtime descriptor: $vcRedistPath"
   }
-  $entry = $entries[0]
-  $sourcePath = Join-Path $StagingRoot $manifestPath.Replace('/', '\')
-  Assert-ChildPath -Root $StagingRoot -Path $sourcePath
-  if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-    throw "Staged NSIS VC++ bootstrapper is missing: $sourcePath"
-  }
-
-  $destinationRoot = Join-Path $StagingParent "nsis"
-  $temporaryRoot = Join-Path $StagingParent (".tmp-nsis-" + [System.Guid]::NewGuid().ToString("N"))
-  Assert-ChildPath -Root $StagingParent -Path $destinationRoot
-  Assert-ChildPath -Root $StagingParent -Path $temporaryRoot
-  try {
-    $temporaryPath = Join-Path $temporaryRoot "vc_redist\VC_redist.x64.exe"
-    New-Item -ItemType Directory -Path (Split-Path -Parent $temporaryPath) -Force | Out-Null
-    Copy-Item -LiteralPath $sourcePath -Destination $temporaryPath -Force
-    $temporaryItem = Get-Item -LiteralPath $temporaryPath
-    if (
-      [long]$temporaryItem.Length -ne [long]$entry.bytes -or
-      (Get-Sha256 -Path $temporaryPath) -ne [string]$entry.sha256
-    ) {
-      throw "Staged NSIS VC++ bootstrapper failed manifest verification: $temporaryPath"
+  $descriptor = [ordered]@{
+    schemaVersion = 1
+    target = [string]$lock.target
+    stageId = $StageId
+    configPath = "target/windows-runtime/tauri.generated.conf.json"
+    nodeExecutable = "$relativeRoot/expanded/node/node.exe"
+    npmExecPath = "$relativeRoot/expanded/node/node_modules/npm/bin/npm-cli.js"
+    vcRedist = [ordered]@{
+      source = "target/windows-runtime/nsis/vc_redist/VC_redist.x64.exe"
+      bytes = [long](Get-Item -LiteralPath $vcRedistPath).Length
+      sha256 = Get-Sha256 -Path $vcRedistPath
     }
-
-    if (Test-Path -LiteralPath $destinationRoot) {
-      Remove-Item -LiteralPath $destinationRoot -Recurse -Force
+    asrModel = [ordered]@{
+      delivery = "download-on-first-use"
+      bundled = $false
+      filename = "sensevoice-small-q8.gguf"
     }
-    Move-Item -LiteralPath $temporaryRoot -Destination $destinationRoot
-  } finally {
-    Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
+  return (($descriptor | ConvertTo-Json -Depth 8) + "`n")
+}
 
-  return Join-Path $destinationRoot "vc_redist\VC_redist.x64.exe"
+function Write-RuntimeDescriptor {
+  param($Manifest, [string]$StageId)
+  Write-Utf8Atomically -Path $runtimeDescriptorPath -Content (Get-RuntimeDescriptorContent -Manifest $Manifest -StageId $StageId)
 }
 
 function Get-TauriOverlayContent {
@@ -640,6 +656,14 @@ function Test-VerifiedStageReusable {
     return $false
   }
 
+  if (-not (Test-Path -LiteralPath $runtimeDescriptorPath -PathType Leaf)) {
+    return $false
+  }
+  $actualDescriptor = [System.IO.File]::ReadAllText($runtimeDescriptorPath, [System.Text.Encoding]::UTF8)
+  if ($actualDescriptor -ne (Get-RuntimeDescriptorContent -Manifest $Manifest -StageId $stageId)) {
+    return $false
+  }
+
   return $true
 }
 
@@ -659,18 +683,23 @@ function Stage-Submodule {
   if ($Force -or $Rebuild -or -not $markerValid) {
     New-Item -ItemType Directory -Path $stagingParent -Force | Out-Null
     $temporaryRoot = Join-Path $stagingParent (".tmp-" + [System.Guid]::NewGuid().ToString("N"))
-    Assert-ChildPath -Root $stagingParent -Path $temporaryRoot
+    $stageContext = [pscustomobject]@{
+      TemporaryRoot = $temporaryRoot
+      PayloadRoot = Join-Path $temporaryRoot "payload"
+      ExpandedRoot = Join-Path $temporaryRoot "expanded"
+    }
+    Assert-ChildPath -Root $stagingParent -Path $stageContext.TemporaryRoot
     try {
       foreach ($entry in $Manifest.files) {
         $sourcePath = Join-Path $RuntimeRoot ([string]$entry.path).Replace('/', '\')
-        $destinationPath = Join-Path $temporaryRoot ([string]$entry.path).Replace('/', '\')
-        Assert-ChildPath -Root $temporaryRoot -Path $destinationPath
+        $destinationPath = Join-Path $stageContext.TemporaryRoot ([string]$entry.path).Replace('/', '\')
+        Assert-ChildPath -Root $stageContext.TemporaryRoot -Path $destinationPath
         New-Item -ItemType Directory -Path (Split-Path -Parent $destinationPath) -Force | Out-Null
         Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
       }
 
-      $payloadRoot = Join-Path $temporaryRoot "payload"
-      $expandedRoot = Join-Path $temporaryRoot "expanded"
+      $payloadRoot = $stageContext.PayloadRoot
+      $expandedRoot = $stageContext.ExpandedRoot
       Expand-ComponentRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "7zip-runtime.zip" -Label "7-Zip") -Destination (Join-Path $expandedRoot "7zip") -RequiredFile "7z.exe"
       Expand-ComponentRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "asr-runtime.zip" -Label "ASR") -Destination (Join-Path $expandedRoot "asr") -RequiredFile "pinvou-asr.exe"
       Expand-ComponentRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "poppler-runtime.zip" -Label "Poppler") -Destination (Join-Path $expandedRoot "poppler") -RequiredFile "pdftotext.exe"
@@ -679,6 +708,17 @@ function Stage-Submodule {
       Test-ManagedArchiveExpansion -Manifest $Manifest -ArchiveManifestPath "payload/asr-runtime.zip" -Destination (Join-Path $expandedRoot "asr")
       Test-ManagedArchiveExpansion -Manifest $Manifest -ArchiveManifestPath "payload/poppler-runtime.zip" -Destination (Join-Path $expandedRoot "poppler")
       Test-ManagedArchiveExpansion -Manifest $Manifest -ArchiveManifestPath "payload/tesseract-runtime.zip" -Destination (Join-Path $expandedRoot "tesseract")
+
+      # The main ASR model is downloaded and verified on first use. Keep only the
+      # engine and the small VAD model in installer staging.
+      $bundledAsrModelPath = Join-Path $expandedRoot "asr\models\sensevoice-small-q8.gguf"
+      if (Test-Path -LiteralPath $bundledAsrModelPath -PathType Leaf) {
+        Remove-Item -LiteralPath $bundledAsrModelPath -Force
+      }
+      if (Test-Path -LiteralPath $bundledAsrModelPath) {
+        throw "Download-on-first-use ASR model remained in Windows runtime staging: $bundledAsrModelPath"
+      }
+
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "python-*-embed-amd64.zip" -Label "Python") -Destination (Join-Path $expandedRoot "python") -RequiredFile "pythonw.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "node-*-win-x64.zip" -Label "Node.js") -Destination (Join-Path $expandedRoot "node") -RequiredFile "node.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "pandoc-*-windows-x86_64.zip" -Label "Pandoc") -Destination (Join-Path $expandedRoot "pandoc") -RequiredFile "pandoc.exe"
@@ -693,17 +733,19 @@ function Stage-Submodule {
       if (Test-Path -LiteralPath $stagingRoot) {
         Remove-Item -LiteralPath $stagingRoot -Recurse -Force
       }
-      Move-Item -LiteralPath $temporaryRoot -Destination $stagingRoot
+      Move-Item -LiteralPath $stageContext.TemporaryRoot -Destination $stagingRoot
     } finally {
-      Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $stageContext.TemporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
   }
 
   $nsisBootstrapper = Stage-NsisBootstrapper -Manifest $Manifest -StagingRoot $stagingRoot -StagingParent $stagingParent
   Write-TauriOverlay -StageId $stageId
+  Write-RuntimeDescriptor -Manifest $Manifest -StageId $stageId
   Write-Host ("Staged Windows runtime submodule: {0}" -f $stagingRoot)
   Write-Host ("Staged NSIS VC++ bootstrapper: {0}" -f $nsisBootstrapper)
   Write-Host ("Generated Tauri overlay: {0}" -f $generatedConfigPath)
+  Write-Host ("Generated runtime descriptor: {0}" -f $runtimeDescriptorPath)
 }
 
 function Enter-ResolverLock {
@@ -748,6 +790,7 @@ function Invoke-RuntimeResolution {
   if (-not $Force -and (Test-VerifiedStageReusable -Manifest $verifiedManifest)) {
     Write-Host ("Reused verified Windows runtime staging: {0}" -f $stagingRoot)
     Write-Host ("Reused Tauri overlay: {0}" -f $generatedConfigPath)
+    Write-Host ("Reused runtime descriptor: {0}" -f $runtimeDescriptorPath)
     return
   }
 

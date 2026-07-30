@@ -17,9 +17,12 @@ packaging/
 公共构建编排位于 `../../scripts/tauri/`：
 
 - `platform-config.js`：只负责选择当前平台 overlay。
-- `windows-runtime.js`：只在 Windows 构建时触发私有 runtime staging。
-- `build.js`：组合平台配置与运行时 staging，并启动 Tauri CLI。
+- `windows-runtime.js`：触发私有 runtime staging 并读取统一 descriptor，不感知安装器细节。
+- `windows-installer.js`：按 bundle 目标准备 NSIS 专属资源。
+- `build.js`：组合平台配置、运行时与安装器 staging，并启动 Tauri CLI。
 
 工具市场不再在构建期注入共享 API Key；Windows WoSign 凭据仍由签名脚本从仓库外的本机配置读取。
 
-平台脚本不得修改其他平台的资源树；所有生成物必须写入 `src-tauri/target/`。
+平台脚本不得修改其他平台的资源树；所有生成物必须写入 `src-tauri/target/`。Windows
+安装包通过 `private-runtimes/windows` 的锁定 gitlink 合入运行时，协议和初始化方式见
+[`docs/windows-private-runtime-submodule.md`](../../../docs/windows-private-runtime-submodule.md)。
