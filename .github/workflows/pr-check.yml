@@ -200,7 +200,10 @@ jobs:
               - '.github/workflows/pr-check.yml'
             windows_runtime:
               - 'pinvou3-app/src-tauri/packaging/windows/runtime/**'
+              - 'pinvou3-app/src-tauri/config/platforms/windows/runtime/**'
               - 'pinvou3-app/tests/windows_runtime_*'
+              - 'private-runtimes/windows'
+              - '.gitmodules'
               - 'pinvou3-app/package.json'
               - '.github/workflows/pr-check.yml'
 

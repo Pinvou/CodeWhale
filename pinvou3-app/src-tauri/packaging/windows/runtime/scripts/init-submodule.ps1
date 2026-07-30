@@ -11,7 +11,8 @@ $runtimeRoot = Join-Path $repoRoot $runtimePath
 $runtimeLockPath = Join-Path $repoRoot "pinvou3-app\src-tauri\config\platforms\windows\runtime\x86_64.lock.json"
 $resolverCacheRoot = Join-Path $repoRoot "pinvou3-app\src-tauri\target\windows-runtime"
 $resolverLockPath = Join-Path $resolverCacheRoot ".resolver.lock"
-$cacheSchema = "v4"
+$lfsStorageRoot = Join-Path $resolverCacheRoot "lfs-storage"
+$cacheSchema = "v5"
 
 function Invoke-Git {
   param(
@@ -139,9 +140,10 @@ try {
     Write-Host "Reused private Windows runtime submodule checkout: $expectedCommit"
   }
 
+  New-Item -ItemType Directory -Path $lfsStorageRoot -Force | Out-Null
   $pointerPaths = @(Get-LfsPointerPaths)
   if ($ForceLfsPull -or $pointerPaths.Count -gt 0) {
-    $lfsArguments = @("lfs", "pull")
+    $lfsArguments = @("-c", "lfs.storage=$lfsStorageRoot", "lfs", "pull")
     if (-not $ForceLfsPull -and $pointerPaths.Count -gt 0) {
       $lfsArguments += "--include=$($pointerPaths -join ',')"
       $lfsArguments += "--exclude="
@@ -158,6 +160,7 @@ try {
   }
 
   Write-Host "Windows runtime Jenkins cache key: $cacheKey"
+  Write-Host "Windows runtime external Git LFS storage: $lfsStorageRoot"
   Write-Output "PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=$cacheKey"
 } finally {
   if ($null -ne $resolverLock) {

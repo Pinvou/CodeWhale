@@ -16,8 +16,9 @@ npm run runtime:windows:stage
 
 `runtime:windows:init` 只在当前 checkout 与主仓库 gitlink 不一致时更新私有 submodule；gitlink 未变化时直接复用。
 submodule checkout 会显式禁用 LFS smudge，随后检查受 LFS 管理的实际文件，只有仍存在 pointer 时才按路径执行
-`git lfs pull`。脚本输出 `pinvou3-windows-runtime-v4-<commit>-<lock-sha-prefix>` 形式的 Jenkins 缓存键；lock 或缓存
-schema 变化时不会复用旧缓存。
+`git lfs pull`。LFS 对象通过命令级 `lfs.storage` 保存在 `target/windows-runtime/lfs-storage`，不得把
+`.git/modules/private-runtimes/windows/lfs/objects` 独立恢复到全新 workspace。脚本输出
+`pinvou3-windows-runtime-v5-<commit>-<lock-sha-prefix>` 形式的 Jenkins 缓存键；lock 或缓存 schema 变化时不会复用旧缓存。
 
 校验内容包括 submodule commit、gitlink、origin URL、工作树状态、manifest SHA-256、文件大小与 SHA-256，以及受管理 ZIP 解压后的逐文件清单。
 

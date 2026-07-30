@@ -64,8 +64,8 @@ npm --prefix pinvou3-app run runtime:windows:validate
 `CodeWhale` 当前没有嵌套 submodule，因此不需要 `--recursive`。`runtime:windows:init` 会比较主仓库 gitlink 与本地 runtime
 commit；更新 checkout 时显式禁用 LFS smudge，一致且工作树中不存在 LFS pointer 时，跳过 submodule update 和
 `git lfs pull`。脚本输出的
-`PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=pinvou3-windows-runtime-v4-<commit>-<lock-sha-prefix>` 可作为 Jenkins 缓存键，
-缓存私有 runtime checkout、Git LFS objects 和 `pinvou3-app/src-tauri/target/windows-runtime`。缓存 schema、gitlink 或
+`PINVOU3_WINDOWS_RUNTIME_CACHE_KEY=pinvou3-windows-runtime-v5-<commit>-<lock-sha-prefix>` 可作为 Jenkins 缓存键，
+缓存外置 Git LFS objects 和 `pinvou3-app/src-tauri/target/windows-runtime` 中已验证的 staging。缓存 schema、gitlink 或
 主仓库 runtime lock 任一变化都会生成新键。
 
 恢复缓存前可直接从主仓库 gitlink 取得缓存键，不会访问 runtime 远端：
@@ -74,11 +74,15 @@ commit；更新 checkout 时显式禁用 LFS smudge，一致且工作树中不�
 npm --prefix pinvou3-app run runtime:windows:cache-key
 ```
 
-建议缓存 `.git/modules/private-runtimes/windows/lfs/objects` 与 `pinvou3-app/src-tauri/target/windows-runtime`；前者避免重复下载
-LFS 对象，后者复用已验证、已展开的安装资源。恢复的 staging 会按私有 manifest 中由主仓库 lock 锁定的完整文件集合和
-SHA-256 清单重新核验；缓存损坏时会先重新校验私有源文件，再原子重建 staging，不能把缓存本身或同缓存内的元数据视为可信发布输入。
+取得缓存键后，Jenkins 只恢复 `pinvou3-app/src-tauri/target/windows-runtime`，再执行本节开头的 submodule 准备命令。
+其中 `lfs-storage/` 是脚本通过命令级 `lfs.storage` 使用的外置 Git LFS 对象库，其余目录保存已验证、已展开的安装资源。
+不得把 `.git/modules/private-runtimes/windows/lfs/objects` 作为独立缓存路径恢复到全新 workspace；这会提前创建不完整的
+submodule gitdir，导致后续 `git submodule update --init` 无法初始化私有 runtime。
 
-仓库脚本只负责生成缓存键和验证恢复结果，不负责 Jenkins Job 的 restore/save 配置；构建平台必须显式配置这两个缓存路径。
+恢复的 staging 会按私有 manifest 中由主仓库 lock 锁定的完整文件集合和 SHA-256 清单重新核验；缓存损坏时会先重新校验
+私有源文件，再原子重建 staging，不能把缓存本身或同缓存内的元数据视为可信发布输入。
+
+仓库脚本只负责生成缓存键和验证恢复结果，不负责 Jenkins Job 的 restore/save 配置；构建平台必须显式配置上述缓存路径。
 GitHub Actions 当前也未跨 workflow run 持久化私有 runtime，只能复用单次构建工作区内的验证与 staging 结果。
 
 主仓库 checkout 的 refspec、tag 获取和 shallow clone 由 Jenkins SCM 插件控制，不在仓库脚本内。发布 Job 应启用

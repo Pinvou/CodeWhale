@@ -45,6 +45,19 @@ const releaseWorkflow = fs.readFileSync(
   path.resolve(appRoot, "..", ".github", "workflows", "release-packages.yml"),
   "utf8",
 );
+const prCheckWorkflow = fs.readFileSync(
+  path.resolve(appRoot, "..", ".github", "workflows", "pr-check.yml"),
+  "utf8",
+);
+const runtimeGuide = fs.readFileSync(
+  path.resolve(
+    appRoot,
+    "..",
+    "docs",
+    "windows-private-runtime-submodule.md",
+  ),
+  "utf8",
+);
 
 const stagedBootstrapper =
   "${__FILEDIR__}\\..\\..\\..\\windows-runtime\\nsis\\vc_redist\\VC_redist.x64.exe";
@@ -163,9 +176,43 @@ assert.match(
   "runtime initialization must emit a schema, commit and lock-scoped Jenkins cache key",
 );
 assert.ok(
-  runtimeInitScript.includes('$cacheSchema = "v4"') &&
+  runtimeInitScript.includes('$cacheSchema = "v5"') &&
     runtimeScript.includes('$verificationSchemaVersion = 4'),
-  "the trusted-staging scheme must invalidate earlier self-attested caches",
+  "the external LFS cache layout must invalidate v4 Jenkins caches without changing the trusted staging schema",
+);
+assert.ok(
+  runtimeInitScript.includes(
+    '$lfsStorageRoot = Join-Path $resolverCacheRoot "lfs-storage"',
+  ),
+  "Git LFS objects must be stored outside the submodule gitdir",
+);
+assert.match(
+  runtimeInitScript,
+  /\$lfsArguments = @\("-c", "lfs\.storage=\$lfsStorageRoot", "lfs", "pull"\)/u,
+  "Git LFS pulls must use the external workspace cache",
+);
+assert.ok(
+  runtimeInitScript.lastIndexOf("Update-RuntimeSubmoduleWithoutLfsSmudge") <
+    runtimeInitScript.indexOf(
+      "New-Item -ItemType Directory -Path $lfsStorageRoot",
+    ),
+  "a fresh submodule must be initialized before the external LFS cache is used",
+);
+assert.ok(
+  runtimeInitScript.indexOf("if ($CacheKeyOnly)") <
+    runtimeInitScript.indexOf(
+      "New-Item -ItemType Directory -Path $lfsStorageRoot",
+    ),
+  "cache-key discovery must not create the external LFS storage directory",
+);
+assert.ok(
+  runtimeGuide.includes(
+    "不得把 `.git/modules/private-runtimes/windows/lfs/objects` 作为独立缓存路径",
+  ) &&
+    runtimeGuide.includes(
+      "Jenkins 只恢复 `pinvou3-app/src-tauri/target/windows-runtime`",
+    ),
+  "Jenkins guidance must not restore a partial submodule gitdir into a fresh workspace",
 );
 assert.match(
   runtimeInitScript,
@@ -196,6 +243,34 @@ assert.ok(
   !runtimeScript.includes("sensevoice-small-q8.gguf"),
   "the Windows installer overlay must not bundle the on-demand SenseVoice recognition model",
 );
+
+const windowsRuntimeFilterStart = prCheckWorkflow.indexOf(
+  "            windows_runtime:",
+);
+const fastGateStart = prCheckWorkflow.indexOf(
+  "\n  fast-gate:",
+  windowsRuntimeFilterStart,
+);
+assert.ok(
+  windowsRuntimeFilterStart >= 0 && fastGateStart > windowsRuntimeFilterStart,
+  "PR checks must define a dedicated Windows runtime path filter",
+);
+const windowsRuntimeFilter = prCheckWorkflow.slice(
+  windowsRuntimeFilterStart,
+  fastGateStart,
+);
+for (const requiredPath of [
+  "pinvou3-app/src-tauri/packaging/windows/runtime/**",
+  "pinvou3-app/src-tauri/config/platforms/windows/runtime/**",
+  "pinvou3-app/tests/windows_runtime_*",
+  "private-runtimes/windows",
+  ".gitmodules",
+]) {
+  assert.ok(
+    windowsRuntimeFilter.includes(requiredPath),
+    `Windows runtime PR checks must cover ${requiredPath}`,
+  );
+}
 
 const windowsJobStart = releaseWorkflow.indexOf("build-windows-x64:");
 const macosJobStart = releaseWorkflow.indexOf("build-macos-universal:", windowsJobStart);
