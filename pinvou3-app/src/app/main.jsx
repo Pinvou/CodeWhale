@@ -15,6 +15,7 @@ import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared
 import { runSessionBatch, sessionRoute } from '../shared/session-management.js';
 import { isLlmApiAccountVisible } from '../shared/model-options.js';
 import { can, isWeb } from '../shared/platform.js';
+import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
 import { KnowledgeView } from '../features/knowledge/KnowledgeView.jsx';
 import { MonitorView } from '../features/monitor/MonitorView.jsx';
 import { SettingsView, WebAccessModal } from '../features/settings/SettingsView.jsx';
@@ -51,6 +52,7 @@ import { PinvouSummonCard } from '../features/tools/tool-renderers.jsx';
 import { CardPoolView, Lanyard, PersonaEditorModal } from '../features/personas/Personas.jsx';
 import { WorkflowView } from '../features/workflow/WorkflowView.jsx';
 
+installGlobalMarkdownRenderer(window);
 window.__PINVOU_STARTUP__.mark('app:main_module_body_enter');
 
 let appFirstRenderMarked = false;
