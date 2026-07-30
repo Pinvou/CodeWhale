@@ -563,7 +563,8 @@ function Test-ManagedArchiveExpansion {
 function Get-RuntimeDescriptorContent {
   param($Manifest, [string]$StageId)
   $relativeRoot = "target/windows-runtime/$StageId"
-  $vcRedistPath = Join-Path $stagingParent "nsis\vc_redist\VC_redist.x64.exe"
+  $vcRedistRelativePath = "payload/vc_redist/VC_redist.x64.exe"
+  $vcRedistPath = Join-Path $stagingRoot $vcRedistRelativePath.Replace('/', '\')
   if (-not (Test-Path -LiteralPath $vcRedistPath -PathType Leaf)) {
     throw "Staged VC++ runtime is missing while generating the runtime descriptor: $vcRedistPath"
   }
@@ -575,7 +576,7 @@ function Get-RuntimeDescriptorContent {
     nodeExecutable = "$relativeRoot/expanded/node/node.exe"
     npmExecPath = "$relativeRoot/expanded/node/node_modules/npm/bin/npm-cli.js"
     vcRedist = [ordered]@{
-      source = "target/windows-runtime/nsis/vc_redist/VC_redist.x64.exe"
+      source = "$relativeRoot/$vcRedistRelativePath"
       bytes = [long](Get-Item -LiteralPath $vcRedistPath).Length
       sha256 = Get-Sha256 -Path $vcRedistPath
     }
@@ -633,18 +634,6 @@ function Test-VerifiedStageReusable {
     return $false
   }
   if (-not (Test-StageManifest -ManifestPath $stageManifestPath -TrustedEntries $Manifest.stagedFiles)) {
-    return $false
-  }
-
-  $bootstrapperManifestPath = "payload/vc_redist/VC_redist.x64.exe"
-  $bootstrapperEntries = @($Manifest.files | Where-Object { [string]$_.path -eq $bootstrapperManifestPath })
-  $bootstrapperPath = Join-Path $stagingParent "nsis\vc_redist\VC_redist.x64.exe"
-  if (
-    $bootstrapperEntries.Count -ne 1 -or
-    -not (Test-Path -LiteralPath $bootstrapperPath -PathType Leaf) -or
-    [long](Get-Item -LiteralPath $bootstrapperPath).Length -ne [long]$bootstrapperEntries[0].bytes -or
-    (Get-Sha256 -Path $bootstrapperPath) -ne [string]$bootstrapperEntries[0].sha256
-  ) {
     return $false
   }
 
@@ -739,11 +728,9 @@ function Stage-Submodule {
     }
   }
 
-  $nsisBootstrapper = Stage-NsisBootstrapper -Manifest $Manifest -StagingRoot $stagingRoot -StagingParent $stagingParent
   Write-TauriOverlay -StageId $stageId
   Write-RuntimeDescriptor -Manifest $Manifest -StageId $stageId
   Write-Host ("Staged Windows runtime submodule: {0}" -f $stagingRoot)
-  Write-Host ("Staged NSIS VC++ bootstrapper: {0}" -f $nsisBootstrapper)
   Write-Host ("Generated Tauri overlay: {0}" -f $generatedConfigPath)
   Write-Host ("Generated runtime descriptor: {0}" -f $runtimeDescriptorPath)
 }

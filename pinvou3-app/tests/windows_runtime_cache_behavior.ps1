@@ -2,7 +2,9 @@ $ErrorActionPreference = "Stop"
 
 $appRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $resolverPath = Join-Path $appRoot "src-tauri\packaging\windows\runtime\scripts\resolve-runtime.ps1"
+$runtimeInitPath = Join-Path $appRoot "src-tauri\packaging\windows\runtime\scripts\init-submodule.ps1"
 . $resolverPath -ImportFunctionsOnly
+. $runtimeInitPath -ImportFunctionsOnly
 
 function Assert-True {
   param([bool]$Condition, [string]$Message)
@@ -26,6 +28,29 @@ function Write-StageCacheMetadata {
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou3-runtime-cache-test-" + [System.Guid]::NewGuid().ToString("N"))
 try {
+  New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+  $successfulGitCommand = Join-Path $testRoot "git-success.cmd"
+  $failingGitCommand = Join-Path $testRoot "git-failure.cmd"
+  [System.IO.File]::WriteAllText(
+    $successfulGitCommand,
+    "@echo off`r`necho normal git progress 1>&2`r`nexit /b 0`r`n",
+    [System.Text.Encoding]::ASCII
+  )
+  [System.IO.File]::WriteAllText(
+    $failingGitCommand,
+    "@echo off`r`necho real git failure 1>&2`r`nexit /b 7`r`n",
+    [System.Text.Encoding]::ASCII
+  )
+  $successfulGitOutput = @(Invoke-Git -WorkingDirectory $testRoot -Arguments @("status") -FailureMessage "unexpected" -GitCommand $successfulGitCommand)
+  Assert-True -Condition (($successfulGitOutput -join " ") -match "normal git progress") -Message "successful Git stderr must be retained without failing Windows PowerShell"
+  $failedGitWasRejected = $false
+  try {
+    Invoke-Git -WorkingDirectory $testRoot -Arguments @("status") -FailureMessage "expected failure:" -GitCommand $failingGitCommand | Out-Null
+  } catch {
+    $failedGitWasRejected = $_.Exception.Message -match "expected failure:.*real git failure"
+  }
+  Assert-True -Condition $failedGitWasRejected -Message "non-zero Git exit codes must fail and retain stderr diagnostics"
+
   $stagingParent = Join-Path $testRoot "windows-runtime"
   $stagingRoot = Join-Path $stagingParent $stageId
   $stageManifestPath = Join-Path $stagingRoot ".stage-manifest.json"
@@ -57,8 +82,6 @@ try {
   Write-TestFile -Path $runtimeExecutablePath -Content "executable"
   Write-TestFile -Path $runtimeDependencyPath -Content "abc"
 
-  $bootstrapperPath = Join-Path $stagingParent "nsis\vc_redist\VC_redist.x64.exe"
-  Write-TestFile -Path $bootstrapperPath -Content "bootstrapper"
   Write-TauriOverlay -StageId $stageId
 
   $trustedStagedFiles = @(Get-StagedRelativeFiles -Root $stagingRoot)

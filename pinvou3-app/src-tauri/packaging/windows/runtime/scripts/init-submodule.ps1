@@ -1,6 +1,7 @@
 param(
   [switch]$ForceLfsPull,
-  [switch]$CacheKeyOnly
+  [switch]$CacheKeyOnly,
+  [switch]$ImportFunctionsOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,11 +19,24 @@ function Invoke-Git {
   param(
     [string]$WorkingDirectory,
     [string[]]$Arguments,
-    [string]$FailureMessage
+    [string]$FailureMessage,
+    [string]$GitCommand = "git"
   )
 
-  $output = & git -C $WorkingDirectory @Arguments 2>&1
-  if ($LASTEXITCODE -ne 0) {
+  $resolvedGitCommand = Get-Command -Name $GitCommand -CommandType Application -ErrorAction Stop
+  $previousErrorActionPreference = $ErrorActionPreference
+  $exitCode = $null
+  try {
+    # Windows PowerShell 5.1 converts native stderr into ErrorRecord objects.
+    # Git writes normal fetch progress to stderr, so only its exit code may
+    # decide success; keep the captured stderr for diagnostics on real errors.
+    $ErrorActionPreference = "Continue"
+    $output = & $resolvedGitCommand.Source -C $WorkingDirectory @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  if ($exitCode -ne 0) {
     throw "$FailureMessage $($output -join ' ')"
   }
   return @($output)
@@ -115,6 +129,10 @@ function Enter-RuntimeResolverLock {
       Start-Sleep -Milliseconds 200
     }
   }
+}
+
+if ($ImportFunctionsOnly) {
+  return
 }
 
 $expectedCommit = Get-GitlinkCommit

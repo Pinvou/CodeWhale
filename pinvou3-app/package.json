@@ -23,6 +23,7 @@
     "runtime:windows:cache-key": "powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/packaging/windows/runtime/scripts/init-submodule.ps1 -CacheKeyOnly",
     "test:windows-runtime": "node tests/windows_runtime_packaging_contract.test.js",
     "test:windows-runtime-cache": "powershell -NoProfile -ExecutionPolicy Bypass -File tests/windows_runtime_cache_behavior.ps1",
+    "test:windows-runtime-installer": "node tests/windows_runtime_installer_integration.test.js",
     "test:workflow-scheduler-contract": "node tests/workflow_scheduler_contract.test.js",
     "test:workflow-python-smoke": "node tests/windows_bundled_python_scheduler_smoke.test.js",
     "check:wosign": "powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/packaging/windows/signing/wosign/sign.ps1 -FilePath package.json -ValidateOnly",

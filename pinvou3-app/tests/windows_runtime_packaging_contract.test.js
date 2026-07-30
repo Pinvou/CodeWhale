@@ -133,7 +133,19 @@ assert.doesNotMatch(
   /sensevoice-small-q8\.gguf"\s*=\s*"runtime\/asr/u,
   "download-on-first-use ASR model must not be mapped into the installer",
 );
-assert.match(runtimeScript, /Stage-NsisBootstrapper/u);
+assert.doesNotMatch(
+  runtimeScript,
+  /Stage-NsisBootstrapper/u,
+  "runtime resolution must leave NSIS bootstrapper staging to windows-installer.js",
+);
+assert.match(
+  runtimeScript,
+  /source = "\$relativeRoot\/\$vcRedistRelativePath"/u,
+  "the runtime descriptor must reference the verified staged VC++ payload",
+);
+assert.match(runtimeInitScript, /\$ErrorActionPreference = "Continue"/u);
+assert.match(runtimeInitScript, /\$exitCode = \$LASTEXITCODE/u);
+assert.match(runtimeInitScript, /if \(\$exitCode -ne 0\)/u);
 assert.match(runtimeInitScript, /git lfs pull/);
 assert.match(runtimeInitScript, /--include=/);
 assert.match(runtimeInitScript, /pinvou3-windows-runtime-\$cacheSchema-\$expectedCommit/u);
@@ -315,6 +327,11 @@ assert.match(
   packageJson.scripts["test:windows-runtime-cache"],
   /windows_runtime_cache_behavior\.ps1/u,
   "the executable cache corruption regression must be part of the npm test surface",
+);
+assert.match(
+  packageJson.scripts["test:windows-runtime-installer"],
+  /windows_runtime_installer_integration\.test\.js/u,
+  "the staged runtime and NSIS installer adapter must have an integration test entry",
 );
 assert.match(
   runtimeInitScript,
