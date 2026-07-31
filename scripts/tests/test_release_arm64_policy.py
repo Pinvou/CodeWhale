@@ -13,31 +13,25 @@ class ReleaseArm64PolicyTests(unittest.TestCase):
             "\n  build-windows-x64:", maxsplit=1
         )[0]
 
-    def test_arm64_pr_validation_uses_fast_link_profile(self):
-        pr_build = self.arm64_job.split(
-            "\n      - name: 构建 deb（PR 快速验证）", maxsplit=1
-        )[1].split("\n      - name: 构建 deb（正式发布配置）", maxsplit=1)[0]
-
-        self.assertIn("if: github.event_name == 'pull_request'", pr_build)
-        self.assertIn('CARGO_PROFILE_RELEASE_LTO: "false"', pr_build)
-        self.assertIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', pr_build)
-        self.assertIn('RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', pr_build)
-        self.assertIn("build-essential pkg-config cmake lld", self.arm64_job)
-
-    def test_arm64_formal_release_keeps_full_release_profile(self):
+    def test_arm64_all_release_events_use_hosted_runner_profile(self):
         job_env = self.arm64_job.split("\n    steps:", maxsplit=1)[0]
-        formal_build = self.arm64_job.split(
-            "\n      - name: 构建 deb（正式发布配置）", maxsplit=1
-        )[1].split("\n      # tauri deb 产物默认名", maxsplit=1)[0]
-
-        self.assertIn("if: github.event_name != 'pull_request'", formal_build)
         for setting in (
-            "CARGO_PROFILE_RELEASE_LTO",
-            "CARGO_PROFILE_RELEASE_CODEGEN_UNITS",
-            "RUSTFLAGS",
+            'CARGO_PROFILE_RELEASE_LTO: "false"',
+            'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"',
+            'RUSTFLAGS: "-C link-arg=-fuse-ld=lld"',
         ):
-            self.assertNotIn(setting, job_env)
-            self.assertNotIn(setting, formal_build)
+            self.assertIn(setting, job_env)
+
+        self.assertIn("build-essential pkg-config cmake lld", self.arm64_job)
+        self.assertIn(
+            "- name: 构建 deb（托管 ARM64 发布配置）", self.arm64_job
+        )
+        self.assertEqual(
+            self.arm64_job.count(
+                "run: node scripts/tauri/build.js build --bundles deb"
+            ),
+            1,
+        )
 
 
 if __name__ == "__main__":
