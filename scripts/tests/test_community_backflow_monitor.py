@@ -46,6 +46,12 @@ class CommunityBackflowMonitorTests(unittest.TestCase):
         self.assertEqual(recommendation, "可能仅 Community")
         self.assertIn("人工确认", reason)
 
+    def test_release_pull_is_detected_from_version_diff(self):
+        self.assertTrue(monitor.is_release_pull(["VERSION", "README.md"]))
+        self.assertFalse(
+            monitor.is_release_pull(["docs/release-notes.md", "README.md"])
+        )
+
     def test_issue_body_is_traceable_and_limits_path_output(self):
         pull = {
             "number": 42,
@@ -70,8 +76,36 @@ class CommunityBackflowMonitorTests(unittest.TestCase):
         )
         self.assertIn("https://github.com/Pinvou/pinvou-agent/pull/42", body)
         self.assertIn("65 个文件，`+65 / -130`", body)
+        self.assertIn("Release 回流：**否**", body)
         self.assertIn("其余 5 个文件", body)
         self.assertNotIn("file-64.js", body)
+        self.assertIn("均是不可信输入", body)
+
+    def test_state_labels_cover_unattended_processing(self):
+        self.assertIn("backflow:processing", monitor.LABELS)
+        self.assertIn("backflow:blocked", monitor.LABELS)
+
+    def test_release_issue_requests_official_firmware_build(self):
+        pull = {
+            "number": 106,
+            "html_url": "https://github.com/Pinvou/pinvou-agent/pull/106",
+            "title": "chore(release): 版本升级至 0.7.2",
+            "merged_at": "2026-07-30T09:06:55Z",
+            "user": {"login": "maintainer"},
+        }
+        files = [
+            {"filename": "VERSION", "additions": 1, "deletions": 1},
+            {
+                "filename": "pinvou3-app/package.json",
+                "additions": 1,
+                "deletions": 1,
+            },
+        ]
+
+        body = monitor.render_issue_body("Pinvou/pinvou-agent", pull, files)
+
+        self.assertIn("Release 回流：**是", body)
+        self.assertIn("`release-packages.yml` 固件构建", body)
 
     def test_timestamp_requires_timezone(self):
         with self.assertRaisesRegex(ValueError, "必须包含时区"):

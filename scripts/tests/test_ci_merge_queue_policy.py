@@ -35,6 +35,13 @@ class MergeQueuePolicyTests(unittest.TestCase):
         self.assertIn("完整门禁已在 PR 入队前验证", required_gate)
         self.assertIn('if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]', required_gate)
 
+    def test_backflow_rust_changes_are_tested_before_admin_merge(self):
+        rust_test = self._job("rust-test", "windows-rust-test")
+        self.assertIn("needs.changes.outputs.rust == 'true'", rust_test)
+        self.assertNotIn("community_backflow", rust_test)
+        self.assertIn("自动 --admin 合并会绕过 Merge Queue", rust_test)
+        self.assertNotIn("edited", self.workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
