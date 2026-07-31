@@ -1900,6 +1900,7 @@
   var listDeliverables = artifactsFeature.listDeliverables;
   var listDeliverableIndex = artifactsFeature.listDeliverableIndex;
   var openExternalUrl = artifactsFeature.openExternalUrl;
+  var openUserExternalUrl = artifactsFeature.openUserExternalUrl;
   var addAttachmentByPath = artifactsFeature.addAttachmentByPath;
   var addPasteImage = artifactsFeature.addPasteImage;
   var removeAttachment = artifactsFeature.removeAttachment;
@@ -2194,6 +2195,7 @@
       listDeliverables: listDeliverables,
       listDeliverableIndex: listDeliverableIndex,
       openExternalUrl: openExternalUrl,
+      openUserExternalUrl: openUserExternalUrl,
     },
     attachments: {
       addAttachmentByPath: addAttachmentByPath,
