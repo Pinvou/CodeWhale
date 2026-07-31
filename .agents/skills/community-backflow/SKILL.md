@@ -58,6 +58,17 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
    新 head 的检查。
 4. CI pending 时等待；CI failed 时查看失败日志并修复真实问题，不盲目 rerun。
 
+## Rust CI 策略
+
+- Official 同仓 `backflow/community-*` PR 不重复运行完整 `rust-test`，但仍运行
+  `rust-lint`、快速门禁及实际影响范围内的前端、平台和本地测试。
+- 当前 head 的 required checks 成功且 `rust-test` 为 skipped 是预期状态，不构成
+  blocker；外部 fork 的同名分支不适用此例外。
+- 管理员合入后，`push main` 会运行完整 Rust 测试。连续合入多个回流 PR 时，
+  main 的 concurrency 会取消旧轮次，只保留最新 main 的累计状态验证。
+- 不等待合入后的 main Rust 测试完成才关闭回流 Issue；结果由 GitHub Actions
+  独立记录。
+
 ## 自动合并
 
 满足以下条件就执行 `gh pr merge --admin --squash --delete-branch`：

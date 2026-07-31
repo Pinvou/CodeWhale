@@ -45,5 +45,14 @@ class CommunityBackflowSkillTests(unittest.TestCase):
         self.assertIn("run ID/URL", self.skill)
         self.assertIn("不发布 OTA", self.skill)
 
+    def test_backflow_pr_defers_full_rust_test_to_latest_main(self):
+        self.assertIn(
+            "Official 同仓 `backflow/community-*` PR 不重复运行完整 `rust-test`",
+            self.skill,
+        )
+        self.assertIn("外部 fork 的同名分支不适用此例外", self.skill)
+        self.assertIn("只保留最新 main 的累计状态验证", self.skill)
+        self.assertIn("不等待合入后的 main Rust 测试完成", self.skill)
+
 if __name__ == "__main__":
     unittest.main()

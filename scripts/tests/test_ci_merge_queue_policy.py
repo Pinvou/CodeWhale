@@ -35,11 +35,31 @@ class MergeQueuePolicyTests(unittest.TestCase):
         self.assertIn("完整门禁已在 PR 入队前验证", required_gate)
         self.assertIn('if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]', required_gate)
 
-    def test_backflow_rust_changes_are_tested_before_admin_merge(self):
+    def test_backflow_rust_changes_defer_full_test_to_main_push(self):
         rust_test = self._job("rust-test", "windows-rust-test")
         self.assertIn("needs.changes.outputs.rust == 'true'", rust_test)
-        self.assertNotIn("community_backflow", rust_test)
-        self.assertIn("自动 --admin 合并会绕过 Merge Queue", rust_test)
+        self.assertIn(
+            "github.event.pull_request.head.repo.full_name != github.repository",
+            rust_test,
+        )
+        self.assertIn(
+            "startsWith(github.head_ref, 'backflow/community-') == false",
+            rust_test,
+        )
+        self.assertIn("push main:始终完整跑", rust_test)
+        self.assertIn("只保留最新 main 的一轮验证", rust_test)
+
+        concurrency = self.workflow.split("\nconcurrency:", maxsplit=1)[1].split(
+            "\njobs:", maxsplit=1
+        )[0]
+        self.assertIn(
+            "group: pr-check-${{ github.event.pull_request.number || github.ref }}",
+            concurrency,
+        )
+        self.assertIn("cancel-in-progress: true", concurrency)
+
+        rust_lint = self._job("rust-lint", "rust-test")
+        self.assertNotIn("backflow/community-", rust_lint)
         self.assertNotIn("edited", self.workflow)
 
 
