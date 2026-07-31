@@ -27,6 +27,13 @@ const baseInstallerHooks = read(
   "nsis",
   "installer-hooks.nsh",
 );
+const rustToolchainGuard = read(
+  "scripts",
+  "ci",
+  "ensure-rust-toolchain.ps1",
+);
+const rustupRepairSmoke = read("tests", "windows_rustup_repair_smoke.ps1");
+const buildScript = read("scripts", "tauri", "build.js");
 const signScript = read(
   "src-tauri",
   "packaging",
@@ -99,10 +106,70 @@ assert.ok(
 
 assert.match(packageJson.scripts["build:nsis"], /npm run build:nsis:stage/u);
 assert.match(packageJson.scripts["build:nsis"], /npm run bundle:nsis/u);
+assert.match(packageJson.scripts["prebuild:nsis"], /clean-staging\.ps1/u);
+assert.doesNotMatch(
+  packageJson.scripts["prebuild:nsis"],
+  /ensure-rust-toolchain\.ps1/u,
+  "build.js must establish the isolated RUSTUP_HOME before invoking the guard",
+);
+assert.match(buildScript, /await ensureWindowsRustToolchain\(\)/u);
+assert.match(buildScript, /args: \["-CheckOnly"\]/u);
+assert.match(buildScript, /accountExitCode === 0/u);
+assert.match(buildScript, /accountExitCode !== 2/u);
+assert.match(buildScript, /PINVOU3_MANAGED_RUSTUP = "1"/u);
+assert.match(buildScript, /\.cache", "rustup"/u);
+assert.match(rustToolchainGuard, /workspace-scoped RUSTUP_HOME/u);
+assert.match(rustToolchainGuard, /if \(\$CheckOnly\)/u);
+assert.match(rustToolchainGuard, /exit 2/u);
+assert.doesNotMatch(rustToolchainGuard, /TEMPORARY|JENKINS_/u);
+assert.doesNotMatch(rustToolchainGuard, /Get-Process|Stop-Process/u);
+assert.doesNotMatch(rustToolchainGuard, /SkipProcessCleanup/u);
+assert.match(rustToolchainGuard, /\.pinvou3-managed-rustup/u);
+assert.match(rustToolchainGuard, /\.pinvou3-toolchain\.lock/u);
+assert.match(rustToolchainGuard, /shared RUSTUP_HOME/u);
+assert.match(rustToolchainGuard, /rust-toolchain\.toml/u);
+assert.match(rustToolchainGuard, /"toolchain", "install"/u);
+assert.match(rustToolchainGuard, /"--profile", "minimal"/u);
+assert.match(rustToolchainGuard, /"toolchain", "uninstall"/u);
+assert.match(rustToolchainGuard, /RUSTUP_DOWNLOAD_TIMEOUT/u);
+assert.match(rustToolchainGuard, /function Invoke-Rustup/u);
+assert.match(rustToolchainGuard, /ErrorActionPreference = "Continue"/u);
+assert.match(rustToolchainGuard, /RUSTUP_DIST_SERVER/u);
+assert.match(rustToolchainGuard, /https:\/\/static\.rust-lang\.org/u);
+assert.match(rustToolchainGuard, /mirrors\.tuna\.tsinghua\.edu\.cn\/rustup/u);
+assert.match(rustToolchainGuard, /https:\/\/rsproxy\.cn/u);
+assert.match(rustToolchainGuard, /Name = "configured source"/u);
+assert.match(rustToolchainGuard, /InstallAttemptTimeoutSeconds = 600/u);
+assert.match(rustToolchainGuard, /RepairAttemptsPerSource = 2/u);
+assert.match(
+  rustToolchainGuard,
+  /Repair attempt \$attempt\/\$RepairAttemptsPerSource/u,
+);
+assert.match(rustToolchainGuard, /WaitForExit\(\$TimeoutSeconds \* 1000\)/u);
+assert.match(rustToolchainGuard, /return 124/u);
+assert.match(rustToolchainGuard, /postInstallInvalid/u);
+assert.match(rustupRepairSmoke, /pinvou-rustup-repair-/u);
+assert.match(rustupRepairSmoke, /-CheckOnly/u);
+assert.match(rustupRepairSmoke, /127\.0\.0\.1:1/u);
+assert.match(rustupRepairSmoke, /-RepairAttemptsPerSource 1/u);
+assert.match(rustupRepairSmoke, /rust-toolchain\.toml/u);
+assert.match(rustupRepairSmoke, /\.pinvou3-managed-rustup/u);
+assert.match(rustupRepairSmoke, /Isolated inconsistent-toolchain repair: PASS/u);
+assert.match(
+  packageJson.scripts["test:windows-rustup-repair"],
+  /windows_rustup_repair_smoke\.ps1/u,
+);
+assert.match(packageJson.scripts["build:nsis:stage"], /--verbose/u);
+assert.match(packageJson.scripts["build:nsis:stage"], /--ci/u);
+assert.doesNotMatch(
+  packageJson.scripts["prebuild:nsis"],
+  /stage-runtime\.ps1|runtime:windows:stage/u,
+  "prebuild:nsis must leave runtime validation and staging to build.js",
+);
 assert.ok(
   packageJson.scripts["bundle:nsis"].indexOf("stage-resources.ps1 -ValidateOnly") <
     packageJson.scripts["bundle:nsis"].indexOf("node scripts/tauri/build.js bundle"),
-  "bundle:nsis must validate staging before Tauri bundling",
+  "bundle:nsis must validate staging before build.js skips runtime staging",
 );
 assert.match(packageJson.scripts["bundle:nsis"], /tauri\.nsis-stage\.conf\.json/u);
 

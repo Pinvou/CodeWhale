@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -9,7 +10,9 @@ const {
   mergeConfig,
 } = require("../scripts/tauri/effective-config.js");
 const {
+  configureIsolatedWindowsRustToolchain,
   configSpecs,
+  ensureWindowsRustToolchain,
   prepareCodexBridge,
   prepareWindowsCodexBridge,
   prepareTauriArgs,
@@ -26,6 +29,78 @@ const { requireWrapper, WRAPPER_ENV } = require("../scripts/tauri/require-wrappe
 const { WINDOWS_BRIDGE_CONFIG_PATH } = require("../scripts/tauri/codex-bridge.js");
 
 const noRuntime = () => null;
+
+const isolatedRustEnv = {};
+const isolatedRust = configureIsolatedWindowsRustToolchain({
+  env: isolatedRustEnv,
+  architecture: "x64",
+});
+assert.equal(isolatedRust.channel, "1.97.1");
+assert.equal(isolatedRust.hostTriple, "x86_64-pc-windows-msvc");
+assert.equal(isolatedRustEnv.RUSTUP_HOME, isolatedRust.rustupHome);
+assert.equal(isolatedRustEnv.PINVOU3_MANAGED_RUSTUP, "1");
+assert.match(
+  isolatedRust.rustupHome.replaceAll("\\", "/"),
+  /\/\.cache\/rustup\/1\.97\.1-x86_64-pc-windows-msvc$/u,
+);
+
+const customRustEnv = { PINVOU3_RUSTUP_HOME: "custom-rustup" };
+const customRust = configureIsolatedWindowsRustToolchain({
+  env: customRustEnv,
+  architecture: "arm64",
+});
+assert.equal(customRust.hostTriple, "aarch64-pc-windows-msvc");
+assert.equal(customRust.rustupHome, path.join(APP_ROOT, "custom-rustup"));
+
+function scriptedRustToolchainSpawn(exitCodes, invocations) {
+  return (command, args, options) => {
+    invocations.push({ command, args, options });
+    const child = new EventEmitter();
+    const exitCode = exitCodes.shift();
+    queueMicrotask(() => child.emit("exit", exitCode, null));
+    return child;
+  };
+}
+
+const accountRustInvocations = [];
+const accountRustEnv = {};
+const accountRustCheck = ensureWindowsRustToolchain({
+  env: accountRustEnv,
+  architecture: "x64",
+  log: () => {},
+  spawnChild: scriptedRustToolchainSpawn([0], accountRustInvocations),
+}).then((result) => {
+  assert.equal(result.source, "account");
+  assert.equal(accountRustInvocations.length, 1);
+  assert.equal(accountRustInvocations[0].command, "powershell.exe");
+  assert.equal(accountRustInvocations[0].args.at(-1), "-CheckOnly");
+  assert.equal(accountRustInvocations[0].options.env.PINVOU3_MANAGED_RUSTUP, undefined);
+  assert.equal(accountRustEnv.RUSTUP_HOME, undefined);
+  assert.equal(accountRustEnv.RUSTUP_TOOLCHAIN, "1.97.1");
+});
+
+const isolatedRustInvocations = [];
+const fallbackRustEnv = {};
+const fallbackRustCheck = ensureWindowsRustToolchain({
+  env: fallbackRustEnv,
+  architecture: "x64",
+  log: () => {},
+  spawnChild: scriptedRustToolchainSpawn([2, 0], isolatedRustInvocations),
+}).then((result) => {
+  assert.equal(result.source, "isolated");
+  assert.equal(isolatedRustInvocations.length, 2);
+  assert.equal(isolatedRustInvocations[0].args.at(-1), "-CheckOnly");
+  assert.equal(isolatedRustInvocations[1].options.env.PINVOU3_MANAGED_RUSTUP, "1");
+  assert.match(
+    isolatedRustInvocations[1].options.env.RUSTUP_HOME.replaceAll("\\", "/"),
+    /\/\.cache\/rustup\/1\.97\.1-x86_64-pc-windows-msvc$/u,
+  );
+});
+
+Promise.all([accountRustCheck, fallbackRustCheck]).catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
 
 let preparedBridge = null;
 prepareCodexBridge({
@@ -161,17 +236,47 @@ assert.match(
   "Windows dev must prepare the ACP Bridge without packaging overlays",
 );
 let tauriInvocation = null;
-assert.equal(
-  runTauri(["--version"], (command, args, options) => {
+const tauriLogs = [];
+const fakeTauriChild = new EventEmitter();
+fakeTauriChild.pid = 4242;
+let currentTime = 0;
+let heartbeatCallback = null;
+let heartbeatCleared = false;
+const tauriResult = runTauri(["build"], {
+  spawnChild: (command, args, options) => {
     tauriInvocation = { command, args, options };
-    return { status: 0 };
-  }),
-  0,
-);
+    return fakeTauriChild;
+  },
+  heartbeatIntervalMs: 60_000,
+  now: () => currentTime,
+  log: (message) => tauriLogs.push(message),
+  setIntervalFn: (callback, interval) => {
+    assert.equal(interval, 60_000);
+    heartbeatCallback = callback;
+    return { unref() {} };
+  },
+  clearIntervalFn: () => {
+    heartbeatCleared = true;
+  },
+});
 assert.equal(tauriInvocation.command, process.execPath);
 assert.match(tauriInvocation.args[0], /@tauri-apps[\\/]cli[\\/]tauri\.js$/);
-assert.equal(tauriInvocation.args[1], "--version");
+assert.equal(tauriInvocation.args[1], "build");
 assert.equal(tauriInvocation.options.env[WRAPPER_ENV], "1");
+assert.match(tauriLogs[0], /pid=4242, phase=build/);
+currentTime = 61_000;
+heartbeatCallback();
+assert.match(tauriLogs[1], /phase=build, elapsed=1m 1s/);
+fakeTauriChild.emit("exit", 0, null);
+assert.equal(heartbeatCleared, true);
+assert.match(tauriLogs[2], /phase=build, elapsed=1m 1s, exit=0/);
+tauriResult.then(
+  (exitCode) => assert.equal(exitCode, 0),
+  (error) => {
+    console.error(error);
+    process.exitCode = 1;
+  },
+);
 
 const linux = composeEffectiveConfig([platformConfigPath("linux")]).effectiveConfig;
 assert.deepEqual(linux.bundle.targets, ["deb"]);

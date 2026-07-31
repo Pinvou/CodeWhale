@@ -32,7 +32,7 @@ Every human-authored commit must include a valid `Signed-off-by`:
 git commit -s
 ```
 
-Use `--signoff` when amending or rebasing existing commits. See [DCO.md](DCO.md). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits are exempt.
+Use `--signoff` when amending or rebasing existing commits. See the [Developer Certificate of Origin](https://developercertificate.org/). CI rejects unsigned human commits; trusted Dependabot and GitHub Actions bot commits are exempt.
 
 ## Where changes belong
 
