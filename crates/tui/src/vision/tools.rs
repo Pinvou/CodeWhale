@@ -169,7 +169,7 @@ impl ToolSpec for ImageAnalyzeTool {
             "properties": {
                 "image_path": {
                     "type": "string",
-                    "description": "Path to the image file to analyze"
+                    "description": "Path to the image file to analyze. Must be a relative path within the workspace."
                 },
                 "prompt": {
                     "type": "string",

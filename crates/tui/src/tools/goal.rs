@@ -379,7 +379,7 @@ impl ToolSpec for CreateGoalTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create the current runtime goal. Use this only when the user explicitly asks to pursue a persistent objective."
+        "Create the current runtime goal, replacing any existing goal and resetting its usage accounting. Use this only when the user explicitly asks to pursue a persistent objective."
     }
 
     fn input_schema(&self) -> Value {

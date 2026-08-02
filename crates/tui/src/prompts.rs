@@ -908,7 +908,7 @@ pub const NEVER_APPROVAL: &str = include_str!("prompts/approvals/never.md");
 /// static system-prompt prefix (preserves DeepSeek prefix cache across
 /// shell-access toggles).
 pub const SHELL_POLICY_DISABLED: &str = "Shell tools unavailable. For mandatory-use items referencing \
-`exec_shell`, use `code_execution` (Python sandbox). For GitHub triage, use \
+`exec_shell`, use `code_execution` (local Python interpreter). For GitHub triage, use \
 `github_issue_context` / `github_pr_context` as primary route.";
 
 /// Compaction relay template — written into the system prompt so the
@@ -2023,7 +2023,9 @@ mod tests {
 
         let edit = EditFileTool.description();
         assert!(edit.contains("read_file"));
-        assert!(edit.contains("apply_patch") && edit.contains("write_file"));
+        // apply_patch is hidden from the pinvou3 tool surface, so edit_file
+        // points to write_file / repeated edits instead of referencing it.
+        assert!(edit.contains("write_file"));
 
         let patch = ApplyPatchTool.description();
         assert!(patch.contains("unified-diff") && patch.contains("transactional"));

@@ -136,7 +136,7 @@ impl ToolSpec for AgentsMessageTool {
     }
 
     fn description(&self) -> &'static str {
-        "Queue a parent message onto a child agent without waking it. The child receives the message on the next followup or natural resume. Use agents/followup when you also need to resume an idle or interrupted child."
+        "Queue a parent message onto a child agent without waking it. The message stays queued until a later agents/followup delivers it to the running child. Use agents/followup directly when you want that immediate delivery."
     }
 
     fn input_schema(&self) -> Value {
@@ -224,7 +224,7 @@ impl ToolSpec for AgentsFollowupTool {
     }
 
     fn description(&self) -> &'static str {
-        "Queue a message and attempt to resume an idle or interrupted child. Running children receive the message on their next step; interrupted_continuable children keep a checkpoint and return the continuation_handle — live in-place resume is not automated yet (re-dispatch via agent)."
+        "Queue a message and deliver it live to a still-running child on its next step. Interrupted children are not resumed: the message stays queued and interrupted_continuable children return their continuation_handle — live in-place resume is not automated yet (re-dispatch via agent)."
     }
 
     fn input_schema(&self) -> Value {

@@ -38,7 +38,7 @@ impl ToolSpec for GithubIssueContextTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read GitHub issue context using gh. Read-only: body/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
+        "Read GitHub issue context using gh (requires the gh CLI installed and authenticated, and a git-repository workspace). Read-only: body/comments/labels/state are summarized and large bodies become task artifacts when a durable task is active."
     }
 
     fn input_schema(&self) -> Value {
@@ -93,7 +93,7 @@ impl ToolSpec for GithubPrContextTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read GitHub PR context using gh: body/comments/reviews/check status/files and optional diff artifact. Read-only; no push/merge/close."
+        "Read GitHub PR context using gh (requires the gh CLI installed and authenticated, and a git-repository workspace): body/comments/reviews/check status/files and optional diff artifact. Read-only; no push/merge/close."
     }
 
     fn input_schema(&self) -> Value {
@@ -162,7 +162,7 @@ impl ToolSpec for GithubCommentTool {
     }
 
     fn description(&self) -> &'static str {
-        "Post an evidence-backed GitHub issue/PR comment with gh. Requires approval. Use blocker comments for partial work; do not claim closure without evidence."
+        "Post an evidence-backed GitHub issue/PR comment with gh (requires the gh CLI installed and authenticated). Requires approval. Use blocker comments for partial work; do not claim closure without evidence."
     }
 
     fn input_schema(&self) -> Value {
@@ -223,7 +223,7 @@ impl ToolSpec for GithubCloseIssueTool {
     }
 
     fn description(&self) -> &'static str {
-        "Close a GitHub issue only when structured acceptance evidence is present and approved. For pull requests use github_close_pr; do not call PRs issues in user-facing output. Never close merely because the agent is stopping."
+        "Close a GitHub issue only when structured acceptance evidence is present and approved. Requires the gh CLI installed and authenticated; refuses to close while the worktree is dirty unless allow_dirty is true. For pull requests use github_close_pr; do not call PRs issues in user-facing output. Never close merely because the agent is stopping."
     }
 
     fn input_schema(&self) -> Value {
@@ -250,7 +250,7 @@ impl ToolSpec for GithubClosePrTool {
     }
 
     fn description(&self) -> &'static str {
-        "Close a GitHub pull request only when structured acceptance evidence is present and approved. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear."
+        "Close a GitHub pull request only when structured acceptance evidence is present and approved. Requires the gh CLI installed and authenticated; refuses to close while the worktree is dirty unless allow_dirty is true. Use this for PRs instead of github_close_issue so the UI, audit trail, and comments keep PR wording clear."
     }
 
     fn input_schema(&self) -> Value {
@@ -323,7 +323,7 @@ fn close_input_schema() -> Value {
                 "required": ["files_changed", "tests_run", "final_status"]
             },
             "comment": { "type": "string" },
-            "allow_dirty": { "type": "boolean", "default": false },
+            "allow_dirty": { "type": "boolean", "default": false, "description": "Set true to allow closing with uncommitted changes; by default the close is refused while the worktree is dirty." },
             "dry_run": { "type": "boolean", "default": false }
         },
         "required": ["number", "acceptance_criteria", "evidence"],

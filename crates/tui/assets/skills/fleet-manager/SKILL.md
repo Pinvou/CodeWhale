@@ -14,8 +14,8 @@ and leave a ledgered receipt or a safe escalation draft.
 ## Authority Boundary
 
 - Prefer typed fleet surfaces over shell spelunking: `codewhale fleet status`,
-  `inspect`, `logs`, `artifacts`, `interrupt`, `restart`, `stop`, and the
-  Runtime API fleet endpoints.
+  `inspect`, `logs`, `artifacts`, `interrupt`, `restart`, `resume`, `stop`,
+  and the Runtime API fleet endpoints.
 - Do not read `.codewhale/fleet.jsonl`, host logs, or remote files directly
   unless the typed command or API is missing required evidence.
 - Do not send Slack, webhook, PagerDuty, email, or chat messages unless the
@@ -44,6 +44,8 @@ and leave a ledgered receipt or a safe escalation draft.
      conflict between artifacts and verifier.
 5. Choose one typed action:
    - transient and retry budget remains: `codewhale fleet restart <worker-id>`.
+   - stale or orphaned run with no live manager: `codewhale fleet resume
+     <run-id>`.
    - transient but unsafe to retry: draft escalation and mark needs-human.
    - task failure: preserve artifacts, summarize the failure, and avoid restart
      unless the task spec says retrying can produce new evidence.

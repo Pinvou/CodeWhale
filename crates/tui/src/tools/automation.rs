@@ -29,7 +29,7 @@ impl ToolSpec for AutomationCreateTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create a durable scheduled automation. Creation requires approval and recurrence is constrained to supported HOURLY/WEEKLY RRULE forms. Runs enqueue normal durable tasks."
+        "Create a durable scheduled automation. Creation requires approval and recurrence is constrained to supported HOURLY/WEEKLY RRULE forms. Runs enqueue normal durable tasks; runs missed while the app is not running are skipped (no backfill), and a run still queued/running blocks the next slot (no overlap)."
     }
 
     fn input_schema(&self) -> Value {
@@ -40,7 +40,7 @@ impl ToolSpec for AutomationCreateTool {
                 "prompt": { "type": "string" },
                 "rrule": {
                     "type": "string",
-                    "description": "Supported: FREQ=HOURLY;INTERVAL=N[;BYDAY=MO,TU] or FREQ=WEEKLY;BYDAY=MO;BYHOUR=9;BYMINUTE=30"
+                    "description": "Supported forms: FREQ=HOURLY[;INTERVAL=N][;BYDAY=MO,TU][;BYHOUR=H][;BYMINUTE=M] or FREQ=WEEKLY;BYDAY=MO[,TU,...];BYHOUR=9;BYMINUTE=30 (WEEKLY requires BYDAY, BYHOUR, and BYMINUTE). Times are evaluated in the machine's local timezone."
                 },
                 "cwds": { "type": "array", "items": { "type": "string" } },
                 "model": { "type": "string", "description": "Model name for scheduled runs. Uses the task manager default when omitted." },
@@ -148,7 +148,7 @@ impl ToolSpec for AutomationReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read one durable automation plus recent run records."
+        "Read one durable automation plus up to 20 recent run records."
     }
 
     fn input_schema(&self) -> Value {

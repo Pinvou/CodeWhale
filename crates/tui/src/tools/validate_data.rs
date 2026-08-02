@@ -60,11 +60,11 @@ impl ToolSpec for ValidateDataTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Optional path to a file within the workspace."
+                    "description": "Path to a file within the workspace. Exactly one of 'path' or 'content' is required; providing both is an error."
                 },
                 "content": {
                     "type": "string",
-                    "description": "Optional inline content to validate."
+                    "description": "Inline content to validate. Exactly one of 'path' or 'content' is required; providing both is an error."
                 },
                 "format": {
                     "type": "string",

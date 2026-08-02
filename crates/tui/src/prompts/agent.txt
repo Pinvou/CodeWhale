@@ -1,7 +1,7 @@
 ## Mode: agent
 
 Read-only tools (reads, searches, persistent RLM session tools, git inspection) run silently.
-Any write, patch, shell execution, sub-agent start, or CSV batch operation will ask for approval first.
+Any write, patch, shell execution, or sub-agent start will ask for approval first.
 
 Before requesting approval for multi-step writes, lay out your work with `work_update` so the user
 can see what you intend to do and approve with context. Complex changes should also get

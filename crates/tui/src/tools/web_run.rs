@@ -343,7 +343,7 @@ impl ToolSpec for WebRunTool {
     }
 
     fn description(&self) -> &'static str {
-        "Browse the web (search/open/click/find/screenshot/image_query) and return structured results with ref_ids for citations."
+        "Browse the web (search/open/click/find/screenshot/image_query) and return structured results with ref_ids for citations. `open` accepts a ref_id from earlier output or a direct http(s) URL; `click`/`find`/`screenshot` require a previously returned ref_id. `screenshot` returns the text of a single PDF page and only works for opened PDF documents."
     }
 
     fn input_schema(&self) -> Value {
@@ -356,7 +356,7 @@ impl ToolSpec for WebRunTool {
                         "type": "object",
                         "properties": {
                             "q": { "type": "string" },
-                            "recency": { "type": "integer" },
+                            "recency": { "type": "integer", "description": "Accepted for compatibility; not currently enforced." },
                             "max_results": { "type": "integer" },
                             "timeout_ms": { "type": "integer" },
                             "domains": { "type": "array", "items": { "type": "string" } }
@@ -370,7 +370,7 @@ impl ToolSpec for WebRunTool {
                         "type": "object",
                         "properties": {
                             "q": { "type": "string" },
-                            "recency": { "type": "integer" },
+                            "recency": { "type": "integer", "description": "Accepted for compatibility; not currently enforced." },
                             "max_results": { "type": "integer" },
                             "timeout_ms": { "type": "integer" },
                             "domains": { "type": "array", "items": { "type": "string" } }
@@ -425,7 +425,7 @@ impl ToolSpec for WebRunTool {
                 "response_length": {
                     "type": "string",
                     "enum": ["short", "medium", "long"],
-                    "description": "Controls result verbosity"
+                    "description": "Controls result verbosity (default: medium)"
                 }
             }
         })

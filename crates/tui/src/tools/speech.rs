@@ -105,7 +105,7 @@ impl ToolSpec for SpeechTool {
                 },
                 "clone_voice": {
                     "type": "string",
-                    "description": "Path to a .mp3 or .wav voice sample for cloning. When model is omitted this uses mimo-v2.5-tts-voiceclone."
+                    "description": "Path to a .mp3 or .wav voice sample for cloning. Mutually exclusive with voice. When model is omitted this uses mimo-v2.5-tts-voiceclone."
                 },
                 "format": {
                     "type": "string",

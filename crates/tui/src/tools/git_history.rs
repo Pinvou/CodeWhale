@@ -35,7 +35,7 @@ impl ToolSpec for GitLogTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run `git log` in the workspace with optional path and author/date filters."
+        "Run `git log` in the workspace with optional path and author/date filters. Read-only; prefer this over running `git log` in `exec_shell`."
     }
 
     fn input_schema(&self) -> Value {
@@ -152,7 +152,7 @@ impl ToolSpec for GitShowTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run `git show` for a specific revision with optional patch and stats."
+        "Run `git show` for a specific revision with optional patch and stats. Read-only; prefer this over running `git show` in `exec_shell`."
     }
 
     fn input_schema(&self) -> Value {
@@ -270,7 +270,7 @@ impl ToolSpec for GitBlameTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run `git blame` on a file with optional revision and line-range controls."
+        "Run `git blame` on a file with optional revision and line-range controls. Read-only; prefer this over running `git blame` in `exec_shell`."
     }
 
     fn input_schema(&self) -> Value {

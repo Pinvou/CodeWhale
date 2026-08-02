@@ -23,14 +23,16 @@ Discovery paths, in precedence order:
 - `<workspace>/.opencode/skills`
 - `<workspace>/.claude/skills`
 - `<workspace>/.cursor/skills`
+- `<workspace>/.codewhale/skills`
 - `~/.agents/skills`
 - `~/.claude/skills`
-- `~/.deepseek/skills`
+- `~/.codewhale/skills`
+- `~/.deepseek/skills` (legacy fallback)
 
 Use skills for model instructions, workflows, and lightweight conventions. Use
 MCP for live external APIs or durable tools. Use hooks for automatic local
-events. Use plugin folders only as packaging/scaffolding until a real plugin
-loader exists.
+events. Use plugin folders to package related skills, scripts, and MCP servers
+behind one `plugin.toml` manifest.
 
 ## Minimum Shape
 
@@ -85,7 +87,7 @@ plain single-line values. Use lower-case hyphen-case names.
    - validation checks
    - safety notes
 6. Add companion files only when they reduce real complexity.
-7. Validate by loading the skill through `/skills` or by running the relevant
+7. Validate by loading the skill through `/skill <name>` or by running the relevant
    skill discovery tests if editing this repository.
 
 ## Updating Existing Skills

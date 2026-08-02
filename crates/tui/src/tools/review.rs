@@ -428,7 +428,7 @@ impl ToolSpec for ReviewTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run a structured code review for a file, git diff, or GitHub pull request."
+        "Run a structured code review for a file, git diff, or GitHub pull request. Pull request targets are fetched with the `gh` CLI and require it to be installed."
     }
 
     fn input_schema(&self) -> Value {

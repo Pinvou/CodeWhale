@@ -569,7 +569,7 @@ impl ToolSpec for TodoWriteTool {
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
-                                "description": "Task status"
+                                "description": "Task status. At most one item may be in_progress; if several are, the last one stays in_progress."
                             }
                         },
                         "required": ["content", "status"]

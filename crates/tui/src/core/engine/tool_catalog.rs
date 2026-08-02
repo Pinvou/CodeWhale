@@ -328,7 +328,7 @@ pub(super) fn ensure_advanced_tooling(
         catalog.push(Tool {
             tool_type: Some(CODE_EXECUTION_TOOL_TYPE.to_string()),
             name: CODE_EXECUTION_TOOL_NAME.to_string(),
-            description: "Execute Python code in a local sandboxed runtime and return stdout/stderr/return_code as JSON.".to_string(),
+            description: "Execute Python code with the local Python interpreter in the workspace and return stdout/stderr/return_code as JSON.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

@@ -94,7 +94,7 @@ pub fn js_execution_tool_definition() -> Tool {
         tool_type: Some(JS_EXECUTION_TOOL_TYPE.to_string()),
         name: JS_EXECUTION_TOOL_NAME.to_string(),
         description:
-            "Execute JavaScript code in a local sandboxed Node.js runtime and return stdout/stderr/return_code as JSON."
+            "Execute JavaScript code with the local Node.js runtime in the workspace and return stdout/stderr/return_code as JSON."
                 .to_string(),
         input_schema: json!({
             "type": "object",

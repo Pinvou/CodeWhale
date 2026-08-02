@@ -271,7 +271,7 @@ impl ToolSpec for RunVerifiersTool {
                 },
                 "commands": {
                     "type": "array",
-                    "description": "Optional explicit verifier gates. Commands run directly as program+args, not through a shell. Use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
+                    "description": "Optional explicit verifier gates (at most 12). Commands run directly as program+args, not through a shell. Use program='bash', args=['-lc', '...'] only when Bash is intentionally part of the verifier.",
                     "items": {
                         "type": "object",
                         "properties": {

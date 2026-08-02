@@ -53,7 +53,7 @@ impl ToolSpec for DiagnosticsTool {
     }
 
     fn description(&self) -> &'static str {
-        "Report workspace info, git detection, sandbox availability, and Rust toolchain versions."
+        "Report workspace info, git detection, sandbox and bubblewrap availability, cgroup version, Rust toolchain versions, and trusted external paths."
     }
 
     fn input_schema(&self) -> Value {

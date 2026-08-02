@@ -32,7 +32,7 @@ Do not delegate tiny one-step tasks, ambiguous product decisions, destructive op
 
 Use `agent` for a focused child run. Launch independent children together so they can run in parallel.
 
-Prefer provider-neutral `model_strength` over hardcoded model ids — `type: "explore"` already defaults to `model_strength: "faster"` (the cheaper same-family sibling), so for read-only exploration you can usually omit it entirely:
+Prefer provider-neutral `model_strength` over hardcoded model ids. Children inherit the active model by default (`model_strength: "same"`), so pass `model_strength: "faster"` explicitly for read-only exploration that can use the cheaper same-family sibling:
 
 ```json
 {

@@ -2293,7 +2293,7 @@ impl ToolSpec for ExecShellTool {
                 },
                 "interactive": {
                     "type": "boolean",
-                    "description": "Run interactively with terminal IO (default: false)"
+                    "description": "Run interactively with terminal IO (default: false). Cannot be combined with background, tty, combined_output, or stdin."
                 },
                 "stdin": {
                     "type": "string",
@@ -3223,7 +3223,7 @@ impl ToolSpec for ShellInteractTool {
                 },
                 "input": {
                     "type": "string",
-                    "description": "Input to send to the task's stdin"
+                    "description": "Input to send to the task's stdin (sent as-is; include a trailing newline to submit a line)"
                 },
                 "stdin": {
                     "type": "string",

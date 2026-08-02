@@ -585,7 +585,7 @@ pub struct TerminalRunTool;
 impl ToolSpec for TerminalRunTool {
     terminal_tool_common!(
         "terminal/run",
-        "Run a command in a persistent PTY shell session. cd, exports, shell functions, and activated environments persist across calls in this process. Identity and a non-secret last-known summary persist across restarts; prior shells are surfaced as stale/lost and are never reattached."
+        "Run a command in a persistent PTY shell session. cd, exports, shell functions, and activated environments persist across calls in this process. Identity and a non-secret last-known summary persist across restarts; prior shells are surfaced as stale/lost and are never reattached. If the command is still running when timeout_secs elapses, it keeps running and the result reports timed_out; use terminal/wait to collect further output or terminal/send to interact."
     );
     fn input_schema(&self) -> serde_json::Value {
         json!({"type":"object","properties":{"command":{"type":"string"},"session":{"type":"string","default":"term-1"},"timeout_secs":{"type":"integer","default":120}},"required":["command"]})
@@ -632,7 +632,7 @@ pub struct TerminalSendTool;
 impl ToolSpec for TerminalSendTool {
     terminal_tool_common!(
         "terminal/send",
-        "Send raw input to a live persistent terminal session. Use a literal ETX control byte to interrupt an interactive process. A prior-process shell is reported as stale/lost rather than reattached."
+        "Send raw input to a live persistent terminal session. To interrupt the running foreground command, use terminal/cancel instead of sending a raw ETX byte. A prior-process shell is reported as stale/lost rather than reattached."
     );
     fn input_schema(&self) -> serde_json::Value {
         json!({"type":"object","properties":{"session":{"type":"string"},"text":{"type":"string"},"wait_ms":{"type":"integer","default":250}},"required":["session","text"]})

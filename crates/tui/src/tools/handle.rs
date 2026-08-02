@@ -184,8 +184,10 @@ impl ToolSpec for HandleReadTool {
          retrieve_tool_result for spilled tool results/artifacts and \
          read_file for workspace files. Provide \
          exactly one projection: `slice` for char/line slices, `range` for \
-         one-based line ranges, `count` for metadata counts, or `jsonpath` \
-         for a small JSON-path projection. This retrieves from the handle's \
+         one-based line ranges, `count` for metadata counts, `jsonpath` \
+         for a small JSON-path projection, or `introspect` for the supported \
+         projections and ready-to-copy examples of this handle. This retrieves \
+         from the handle's \
          backing environment instead of asking the parent transcript to hold \
          the full payload."
     }

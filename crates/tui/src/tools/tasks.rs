@@ -69,12 +69,12 @@ impl ToolSpec for TaskCreateTool {
             "type": "object",
             "properties": {
                 "prompt": { "type": "string", "description": "Work prompt for the durable task." },
-                "model": { "type": "string" },
+                "model": { "type": "string", "description": "Model override; defaults to the configured task model." },
                 "workspace": { "type": "string", "description": "Workspace path; defaults to current workspace." },
-                "mode": { "type": "string", "enum": ["agent", "plan", "yolo"] },
-                "allow_shell": { "type": "boolean" },
-                "trust_mode": { "type": "boolean" },
-                "auto_approve": { "type": "boolean" }
+                "mode": { "type": "string", "enum": ["agent", "plan", "yolo"], "description": "Execution mode; defaults to the configured default." },
+                "allow_shell": { "type": "boolean", "description": "Allow shell commands in the task; defaults to host configuration." },
+                "trust_mode": { "type": "boolean", "description": "Override trust mode for the task; defaults to host configuration." },
+                "auto_approve": { "type": "boolean", "description": "Auto-approve the task's tool calls; defaults to false and must be opted into explicitly." }
             },
             "required": ["prompt"],
             "additionalProperties": false
@@ -252,7 +252,7 @@ impl ToolSpec for TaskGateRunTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run an approved verification gate command and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task."
+        "Run an approved verification gate command (executed via `/bin/sh -lc`) and return structured evidence. When inside a durable task, the gate result and log artifact are attached to that task. Default timeout is 120 s (max 600 s); commands classified dangerous are blocked unless the session auto-approves."
     }
 
     fn input_schema(&self) -> Value {
@@ -409,9 +409,9 @@ impl ToolSpec for TaskShellStartTool {
             "properties": {
                 "command": { "type": "string" },
                 "cwd": { "type": "string", "description": "Optional working directory within the workspace." },
-                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 },
-                "stdin": { "type": "string" },
-                "tty": { "type": "boolean" }
+                "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000, "description": "Milliseconds; defaults to 120000." },
+                "stdin": { "type": "string", "description": "Optional standard input for the command." },
+                "tty": { "type": "boolean", "description": "Allocate a pseudo-TTY for the command." }
             },
             "required": ["command"],
             "additionalProperties": false
@@ -466,7 +466,7 @@ impl ToolSpec for TaskShellWaitTool {
     }
 
     fn description(&self) -> &'static str {
-        "Poll a background shell task without blocking the agent indefinitely. If `gate` is supplied and the shell task has completed, records structured gate evidence on the active durable task."
+        "Poll a background shell task; with `wait: true`, block until it completes or `timeout_ms` elapses instead of returning immediately. If `gate` is supplied and the shell task has completed, records structured gate evidence on the active durable task."
     }
 
     fn input_schema(&self) -> Value {
@@ -474,7 +474,7 @@ impl ToolSpec for TaskShellWaitTool {
             "type": "object",
             "properties": {
                 "task_id": { "type": "string", "description": "Background shell task id returned by task_shell_start or exec_shell." },
-                "wait": { "type": "boolean", "default": false },
+                "wait": { "type": "boolean", "default": false, "description": "Wait for completion (up to timeout_ms) instead of a non-blocking poll." },
                 "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 600000 },
                 "gate": { "type": "string", "enum": ["fmt", "check", "clippy", "test", "custom"] },
                 "command": { "type": "string", "description": "Original command, used when recording gate evidence." }
@@ -565,7 +565,7 @@ impl ToolSpec for PrAttemptRecordTool {
     }
 
     fn description(&self) -> &'static str {
-        "Capture current git diff as a durable PR work attempt with patch artifact, changed files, and verification notes."
+        "Capture the current git working-tree diff as a durable PR work attempt with patch artifact, changed files, and verification notes. Fails when there is no working-tree diff to record."
     }
 
     fn input_schema(&self) -> Value {

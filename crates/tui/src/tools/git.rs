@@ -32,7 +32,7 @@ impl ToolSpec for GitStatusTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run `git status --porcelain=v1 -b` in the workspace (optionally scoped to a path)."
+        "Run `git status --porcelain=v1 -b` in the workspace (optionally scoped to a path). Read-only; prefer this over running `git status` in `exec_shell`."
     }
 
     fn input_schema(&self) -> Value {
@@ -113,7 +113,7 @@ impl ToolSpec for GitDiffTool {
     }
 
     fn description(&self) -> &'static str {
-        "Run `git diff` in the workspace with sensible defaults and safe truncation."
+        "Run `git diff` in the workspace with sensible defaults and safe truncation. Read-only; prefer this over running `git diff` in `exec_shell`."
     }
 
     fn input_schema(&self) -> Value {

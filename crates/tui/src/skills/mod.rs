@@ -957,7 +957,7 @@ instructions when using a specific skill.\n\n",
 
     out.push_str(
         "\n### How to use skills\n\
-- Skill bodies live on disk at the listed paths. When a skill is relevant, open only that skill's `SKILL.md` and the specific companion files it references.\n\
+- Skill bodies live on disk at the listed paths. When a skill is relevant, load it with the `load_skill` tool, or open only that skill's `SKILL.md` and the specific companion files it references.\n\
 - Trigger rules: use a skill when the user names it (`$SkillName`, `/skill <name>`, or plain text) or the task clearly matches its description. Do not carry skills across turns unless re-mentioned.\n\
 - Missing/blocked: if a named skill is missing or cannot be read, say so briefly and continue with the best fallback.\n\
 - Safety: do not execute scripts from a community skill unless the user explicitly asks or the skill has been trusted for script use.\n",

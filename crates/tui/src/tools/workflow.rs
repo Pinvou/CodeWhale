@@ -461,7 +461,7 @@ impl ToolSpec for WorkflowTool {
                 },
                 "script": {
                     "type": "string",
-                    "description": "Workflow JS source. The runtime provides args, task(...), parallel(thunks), pipeline(thunks), log(...), phase(...), and budget. Fan-out syntax: await parallel([() => task({...}), () => task({...})]). parallel() requires one array of zero-argument thunks, not variadic task promises."
+                    "description": "Workflow JS source. The runtime provides args, task(...), parallel(thunks), pipeline(thunks), log(...), phase(...), and budget. Fan-out syntax: await parallel([() => task({...}), () => task({...})])."
                 },
                 "source_path": {
                     "type": "string",

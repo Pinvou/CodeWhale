@@ -257,7 +257,7 @@ impl ToolSpec for RlmEvalTool {
             "required": ["name", "code"],
             "properties": {
                 "name": { "type": "string", "description": "RLM context name returned by rlm_open." },
-                "code": { "type": "string", "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope; call FINAL(value)/finalize(...) to return a result handle. Example: print(len(SOURCE))." }
+                "code": { "type": "string", "description": "Raw Python executed against the context (no markdown fences). The loaded source is in scope as `content`; call FINAL(value)/finalize(...) to return a result handle. Example: print(len(content))." }
             }
         })
     }
@@ -279,7 +279,7 @@ impl ToolSpec for RlmEvalTool {
         let code = required_non_empty_str(&input, "code").map_err(|_| {
             ToolError::invalid_input(
                 "rlm_eval: `code` is required and runs raw Python against the RLM context (no markdown fences). \
-                 Example: {\"name\": \"<ctx>\", \"code\": \"print(len(SOURCE))\"}; call FINAL(value) to return a result handle.",
+                 Example: {\"name\": \"<ctx>\", \"code\": \"print(len(content))\"}; call FINAL(value) to return a result handle.",
             )
         })?;
         let session = get_session(context, name).await?;
@@ -859,7 +859,7 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("raw Python"), "explains it runs Python: {msg}");
         assert!(
-            msg.contains("print(len(SOURCE))") || msg.contains("FINAL"),
+            msg.contains("print(len(content))") || msg.contains("FINAL"),
             "includes an example: {msg}"
         );
     }

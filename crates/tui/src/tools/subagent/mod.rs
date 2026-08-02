@@ -4878,7 +4878,7 @@ impl ToolSpec for AgentTool {
                 },
                 "deliberate": {
                     "type": "boolean",
-                    "description": "When true, require type (or profile), workspace_policy, expected_artifact, and write_authority."
+                    "description": "When true, require type (or profile), workspace_policy (or worktree=true), expected_artifact, and write_authority."
                 }
             },
             "required": []

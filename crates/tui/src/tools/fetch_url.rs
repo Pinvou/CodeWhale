@@ -92,7 +92,7 @@ impl ToolSpec for FetchUrlTool {
     }
 
     fn description(&self) -> &'static str {
-        "Fetch a known URL directly (HTTP GET) and return its content. Use this instead of `curl` in `exec_shell` — sandboxed, network-policy aware, and properly decoded. Plain-text endpoints (`.md`, `.txt`, `.json`, `.yaml`, `raw.githubusercontent.com`, public APIs) prefer this over the browser/automation stack. For unknown queries, use `web_search` first."
+        "Fetch a known URL directly (HTTP GET) and return its content. Use this instead of `curl` in `exec_shell` — sandboxed, network-policy aware, and properly decoded. Plain-text endpoints (`.md`, `.txt`, `.json`, `.yaml`, `raw.githubusercontent.com`, public APIs) prefer this over the browser/automation stack. For unknown queries, use `web_search` first. Follows up to 5 redirects; non-2xx responses still return the body marked as a failure. Requests to localhost, private/loopback/link-local IPs, and cloud metadata addresses are rejected (SSRF protection)."
     }
 
     fn input_schema(&self) -> Value {
