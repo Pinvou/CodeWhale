@@ -570,7 +570,8 @@ impl ToolSpec for UpdatePlanTool {
     }
 
     fn capabilities(&self) -> Vec<ToolCapability> {
-        vec![ToolCapability::WritesFiles]
+        // Mutates only in-memory session plan state; no filesystem writes.
+        vec![]
     }
 
     fn approval_requirement(&self) -> ApprovalRequirement {
@@ -664,8 +665,23 @@ fn string_vec_field(input: &serde_json::Value, field: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::spec::{ToolContext, ToolSpec};
+    use crate::tools::spec::{ToolCapability, ToolContext, ToolSpec};
     use serde_json::json;
+
+    #[test]
+    fn update_plan_declares_no_filesystem_write_capability() {
+        let tool = UpdatePlanTool::new(new_shared_plan_state());
+        let capabilities = tool.capabilities();
+
+        assert!(
+            !capabilities.contains(&ToolCapability::WritesFiles),
+            "update_plan mutates only in-memory session plan state"
+        );
+        assert!(
+            !tool.is_read_only(),
+            "update_plan still mutates session state"
+        );
+    }
 
     #[test]
     fn update_plan_description_keeps_work_update_as_primary_progress() {

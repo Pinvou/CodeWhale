@@ -94,8 +94,10 @@ impl ToolSpec for FimEditTool {
     }
 
     fn capabilities(&self) -> Vec<ToolCapability> {
+        // Writes the target file atomically (see execute step 7), so ReadOnly
+        // would be false; repo_law::WRITE_TOOLS also relies on this tool being
+        // recognized as write-capable.
         vec![
-            ToolCapability::ReadOnly,
             ToolCapability::WritesFiles,
             ToolCapability::RequiresApproval,
         ]
@@ -178,5 +180,26 @@ impl ToolSpec for FimEditTool {
         };
 
         ToolResult::json(&result).map_err(|e| ToolError::execution_failed(e.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fim_edit_declares_write_capability_without_read_only() {
+        let tool = FimEditTool::new(None, "fim-model".to_string());
+        let capabilities = tool.capabilities();
+
+        assert!(
+            capabilities.contains(&ToolCapability::WritesFiles),
+            "fim_edit writes the target file atomically"
+        );
+        assert!(
+            !capabilities.contains(&ToolCapability::ReadOnly),
+            "a file-writing tool must not claim ReadOnly"
+        );
+        assert!(!tool.is_read_only());
     }
 }
