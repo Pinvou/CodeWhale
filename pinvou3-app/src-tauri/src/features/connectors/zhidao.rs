@@ -218,7 +218,11 @@ fn run_login_flow(app: &AppHandle) {
     let login = match get_sso_login() {
         Ok(login) => login,
         Err(e) => {
-            emit(app, "zhidao:error", json!({ "message": e }));
+            emit(
+                app,
+                "zhidao:error",
+                json!({ "code": "sso_start_failed", "message": e }),
+            );
             return;
         }
     };
@@ -250,7 +254,10 @@ fn run_login_flow(app: &AppHandle) {
     emit(
         app,
         "zhidao:error",
-        json!({ "message": "知道 SSO 认证超时，请重新连接" }),
+        json!({
+            "code": "sso_timeout",
+            "message": "知道 SSO 认证超时，请重新连接"
+        }),
     );
 }
 

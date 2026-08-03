@@ -1038,7 +1038,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         const outgoing = String(text || '').trim();
         let meta;
         if (outgoing || hasReadyAttachment) {
-          const scenePrompt = outgoing || '请根据附件内容继续处理。';
+          const scenePrompt = outgoing || t.uiChatScenes.attachmentPrompt;
           if (visualPosterSceneActive) meta = createVisualPosterMessageMeta(scenePrompt);
           else if (documentWritingSceneActive) meta = createDocumentWritingMessageMeta(scenePrompt);
           else if (dataVisualizationSceneActive) meta = createDataVisualizationMessageMeta(scenePrompt);

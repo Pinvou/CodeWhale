@@ -36,7 +36,8 @@
   function modelAvailabilityError(sessionId) {
     if (!llmApiAccountIsAuthoritativelyUnavailable(state.llmApiStatus)) return null;
     if (!isBuiltinLlmApiModelId(selectedModelIdForSession(sessionId))) return null;
-    return "当前账户的内置模型已不可用，请先选择其他模型";
+    var copy = root.PinvouTauriBridgeStrings || {};
+    return copy.builtinModelUnavailable || "当前账户的内置模型已不可用，请先选择其他模型";
   }
 
   function authoritativeLlmApiErrorCode(error) {

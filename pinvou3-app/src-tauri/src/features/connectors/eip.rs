@@ -281,7 +281,11 @@ fn run_login_flow(app: &AppHandle) {
     let url = match get_sso_url() {
         Ok(u) => u,
         Err(e) => {
-            emit(app, "eip:error", json!({ "message": e }));
+            emit(
+                app,
+                "eip:error",
+                json!({ "code": "sso_start_failed", "message": e }),
+            );
             return;
         }
     };
@@ -297,7 +301,10 @@ fn run_login_flow(app: &AppHandle) {
             emit(
                 app,
                 "eip:error",
-                json!({ "message": "登录超时(5 分钟内未完成)" }),
+                json!({
+                    "code": "sso_timeout",
+                    "message": "登录超时(5 分钟内未完成)"
+                }),
             );
             return;
         }

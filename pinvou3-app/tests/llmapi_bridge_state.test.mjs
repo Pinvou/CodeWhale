@@ -13,7 +13,7 @@ function loadFactories() {
   for (const file of ['settings.js', 'chat.js']) {
     vm.runInContext(fs.readFileSync(path.join(bridgeRoot, file), 'utf8'), context, { filename: file });
   }
-  return windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__;
+  return { factories: windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__, windowObject };
 }
 
 function deferred() {
@@ -47,7 +47,7 @@ function baseState() {
   };
 }
 
-const factories = loadFactories();
+const { factories, windowObject } = loadFactories();
 
 {
   const state = baseState();
@@ -65,6 +65,9 @@ const factories = loadFactories();
   assert.equal(state.llmApiModels, null);
   assert.equal(state.effectiveModelConfig, null);
   assert.match(settings.modelAvailabilityError('session-1'), /选择其他模型/);
+  windowObject.PinvouTauriBridgeStrings = { builtinModelUnavailable: 'Select another model first.' };
+  assert.equal(settings.modelAvailabilityError('session-1'), 'Select another model first.');
+  delete windowObject.PinvouTauriBridgeStrings;
 }
 
 {

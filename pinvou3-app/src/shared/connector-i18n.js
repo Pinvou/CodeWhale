@@ -1,0 +1,100 @@
+const connectorStoreCopy = {
+  zh: {
+    connectorErrors: {
+      runtime_prepare_failed: '准备连接器运行环境失败，请重试',
+      cli_install_failed: '安装连接组件失败，请检查网络后重试',
+      auth_start_failed: '无法启动登录，请重试',
+      registration_failed: '应用注册未完成，请重新连接',
+      auth_failed: '登录授权未完成，请重新连接',
+      skills_enable_failed: '已完成授权，但启用技能失败，请重试',
+      sso_start_failed: '无法启动 SSO 登录，请检查内网连接后重试',
+      sso_timeout: 'SSO 登录超时，请重新连接',
+      unknown: '连接失败，请稍后重试',
+    },
+    sso: { title:name=>`登录${name}`, hint:'扫码或在浏览器完成 SSO 登录，登录后会自动连接（需公司内网）', qrAlt:name=>`${name}登录二维码`, generating:'二维码生成中…', openBrowser:'在浏览器打开登录', waiting:'等待登录中…' },
+    internalDetailDesc: '以你本人 SSO 身份直连 H3C 集团内部系统，浏览器或扫码登录，全程不填 key；数据经公司内网，不出集团。需连接公司内网使用。',
+    internalUsageHint: '需连接公司内网 · 首次点「连接」后在浏览器或扫码完成 SSO 登录，无需填写 key',
+    feishuSteps: [
+      { key:'runtime', label:'准备运行时', sub:'解压 Node 到 ~/.pinvou3' },
+      { key:'cli', label:'安装连接组件', sub:'lark-cli · 首次约 40 秒' },
+      { key:'connect', label:'连接并授权', sub:'创建应用身份' },
+      { key:'qr', label:'扫码登录', sub:'飞书 App 扫一扫' },
+    ],
+    wecomSteps: [
+      { key:'runtime', label:'准备运行时', sub:'解压 Node 到 ~/.pinvou3' },
+      { key:'cli', label:'安装连接组件', sub:'wecom-cli · 首次约 40 秒' },
+      { key:'qr', label:'扫码登录', sub:'企业微信 App 扫一扫' },
+    ],
+    dingtalkSteps: [
+      { key:'runtime', label:'准备运行时', sub:'解压 Node 到 ~/.pinvou3' },
+      { key:'cli', label:'安装连接组件', sub:'dws · 首次约 40 秒' },
+      { key:'qr', label:'扫码登录', sub:'钉钉 App 扫一扫' },
+    ],
+  },
+  en: {
+    connectorErrors: {
+      runtime_prepare_failed: 'Failed to prepare the connector runtime. Try again.',
+      cli_install_failed: 'Failed to install the connector. Check your network and try again.',
+      auth_start_failed: 'Unable to start sign-in. Try again.',
+      registration_failed: 'App registration was not completed. Reconnect and try again.',
+      auth_failed: 'Sign-in authorization was not completed. Reconnect and try again.',
+      skills_enable_failed: 'Authorization completed, but enabling the skill failed. Try again.',
+      sso_start_failed: 'Unable to start SSO sign-in. Check your intranet connection and try again.',
+      sso_timeout: 'SSO sign-in timed out. Reconnect and try again.',
+      unknown: 'Connection failed. Try again later.',
+    },
+    sso: { title:name=>`Sign in to ${name}`, hint:'Scan the code or finish SSO sign-in in your browser. The tool connects automatically after sign-in (intranet required).', qrAlt:name=>`${name} sign-in QR code`, generating:'Generating QR code…', openBrowser:'Open sign-in in browser', waiting:'Waiting for sign-in…' },
+    internalDetailDesc: 'Connect directly to H3C internal systems with your SSO identity. Sign in in the browser or by QR code; no key is required, and data stays on the corporate intranet.',
+    internalUsageHint: 'Corporate intranet required · On first connection, complete SSO in the browser or by QR code; no key required',
+    feishuSteps: [
+      { key:'runtime', label:'Prepare runtime', sub:'Extract Node to ~/.pinvou3' },
+      { key:'cli', label:'Install connector', sub:'lark-cli · about 40 seconds on first use' },
+      { key:'connect', label:'Connect & authorize', sub:'Create app identity' },
+      { key:'qr', label:'Scan to sign in', sub:'Scan with the Feishu app' },
+    ],
+    wecomSteps: [
+      { key:'runtime', label:'Prepare runtime', sub:'Extract Node to ~/.pinvou3' },
+      { key:'cli', label:'Install connector', sub:'wecom-cli · about 40 seconds on first use' },
+      { key:'qr', label:'Scan to sign in', sub:'Scan with the WeCom app' },
+    ],
+    dingtalkSteps: [
+      { key:'runtime', label:'Prepare runtime', sub:'Extract Node to ~/.pinvou3' },
+      { key:'cli', label:'Install connector', sub:'dws · about 40 seconds on first use' },
+      { key:'qr', label:'Scan to sign in', sub:'Scan with the DingTalk app' },
+    ],
+  },
+  ja: {
+    connectorErrors: {
+      runtime_prepare_failed: 'コネクターの実行環境を準備できませんでした。再試行してください。',
+      cli_install_failed: 'コネクターをインストールできませんでした。ネットワークを確認して再試行してください。',
+      auth_start_failed: 'ログインを開始できませんでした。再試行してください。',
+      registration_failed: 'アプリの登録が完了していません。再接続してください。',
+      auth_failed: 'ログイン認証が完了していません。再接続してください。',
+      skills_enable_failed: '認証は完了しましたが、Skill を有効化できませんでした。再試行してください。',
+      sso_start_failed: 'SSO ログインを開始できません。社内ネットワークへの接続を確認して再試行してください。',
+      sso_timeout: 'SSO ログインがタイムアウトしました。再接続してください。',
+      unknown: '接続に失敗しました。後で再試行してください。',
+    },
+    sso: { title:name=>`${name} にログイン`, hint:'QR コードを読み取るか、ブラウザーで SSO ログインを完了してください。ログイン後に自動接続します（社内ネットワーク必須）。', qrAlt:name=>`${name} ログイン QR コード`, generating:'QR コードを生成中…', openBrowser:'ブラウザーでログイン', waiting:'ログインを待機中…' },
+    internalDetailDesc: '本人の SSO ID で H3C 社内システムに直接接続します。ブラウザーまたは QR コードでログインでき、キー入力は不要です。データは社内ネットワーク内で処理されます。',
+    internalUsageHint: '社内ネットワーク必須 · 初回接続時はブラウザーまたは QR コードで SSO ログインします。キー入力は不要です',
+    feishuSteps: [
+      { key:'runtime', label:'ランタイムを準備', sub:'Node を ~/.pinvou3 に展開' },
+      { key:'cli', label:'接続コンポーネントをインストール', sub:'lark-cli · 初回は約 40 秒' },
+      { key:'connect', label:'接続して認証', sub:'アプリ ID を作成' },
+      { key:'qr', label:'スキャンしてログイン', sub:'Feishu アプリでスキャン' },
+    ],
+    wecomSteps: [
+      { key:'runtime', label:'ランタイムを準備', sub:'Node を ~/.pinvou3 に展開' },
+      { key:'cli', label:'接続コンポーネントをインストール', sub:'wecom-cli · 初回は約 40 秒' },
+      { key:'qr', label:'スキャンしてログイン', sub:'WeCom アプリでスキャン' },
+    ],
+    dingtalkSteps: [
+      { key:'runtime', label:'ランタイムを準備', sub:'Node を ~/.pinvou3 に展開' },
+      { key:'cli', label:'接続コンポーネントをインストール', sub:'dws · 初回は約 40 秒' },
+      { key:'qr', label:'スキャンしてログイン', sub:'DingTalk アプリでスキャン' },
+    ],
+  },
+};
+
+export { connectorStoreCopy };

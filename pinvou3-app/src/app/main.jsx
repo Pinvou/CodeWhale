@@ -15,6 +15,7 @@ import { formatSessionDate, localDateKey, formatDateGroupLabel } from '../shared
 import { runSessionBatch } from '../shared/session-management.js';
 import { isLlmApiAccountVisible } from '../shared/model-options.js';
 import { can, isWeb } from '../shared/platform.js';
+import { errorCode, localizedErrorMessage } from '../shared/user-facing-error.js';
 import { installGlobalMarkdownRenderer } from '../shared/markdown-renderer.js';
 import { KnowledgeView } from '../features/knowledge/KnowledgeView.jsx';
 import { MonitorView } from '../features/monitor/MonitorView.jsx';
@@ -93,44 +94,40 @@ function workspaceDisplayName(path) {
   return parts[parts.length - 1] || String(path || '');
 }
 
-    const formatQuotaTokens = (value) => {
+    const formatQuotaTokens = (value, language) => {
       if (value == null || !Number.isFinite(Number(value))) return '—';
-      const n = Number(value);
-      if (n >= 100000000) return (n / 100000000).toFixed(2).replace(/\.?0+$/, '') + '亿 tokens';
-      if (n >= 10000) return (n / 10000).toFixed(1).replace(/\.?0+$/, '') + '万 tokens';
-      return n.toLocaleString('zh-CN') + ' tokens';
+      return `${Number(value).toLocaleString(language || 'en', { notation: 'compact', maximumFractionDigits: 2 })} tokens`;
     };
 
-    const shortBackendUsername = (value) => {
+    const shortBackendUsername = (value, copy) => {
       const name = String(value || '').trim();
-      if (!name) return '后台用户';
+      if (!name) return copy.backendUser;
       return name;
     };
 
-    const llmStatusText = (status, error) => {
-      if (error) return '暂不可用';
-      switch (status) {
-        case 'ready': return '已开通';
-        case 'not_started': return '未开通';
-        case 'querying_user': return '查询账户中';
-        case 'creating_token': return '开通中';
-        case 'configuring_policy': return '配置中';
-        case 'failed': return '开通失败';
-        default: return '同步中';
-      }
+    const llmStatusText = (status, error, copy) => {
+      if (error) return copy.status.unavailable;
+      return copy.status[status] || copy.status.unknown;
     };
 
-    const AccountPopover = ({ open, theme, llmApiStatus, loading, error, onClose, onRefresh, onLogin, collapsed }) => {
+    const AccountPopover = ({ open, theme, t, llmApiStatus, loading, accountErrorCode, onClose, onRefresh, onLogin, collapsed }) => {
       const ref = useRef(null);
       const [loginUsername, setLoginUsername] = useState('');
       const [loginPassword, setLoginPassword] = useState('');
-      const [loginError, setLoginError] = useState(null);
+      const [loginErrorCode, setLoginErrorCode] = useState(null);
       const [loggingIn, setLoggingIn] = useState(false);
       const isDark = theme === 'dark';
+      const accountCopy = t.uiAccount;
       const backendUsername = (llmApiStatus && llmApiStatus.backend_username) || '';
       const backendDisplayName = (llmApiStatus && llmApiStatus.backend_display_name) || '';
-      const displayName = shortBackendUsername(backendDisplayName || backendUsername);
-      const displayId = backendUsername || '后台账户';
+      const displayName = shortBackendUsername(backendDisplayName || backendUsername, accountCopy);
+      const displayId = backendUsername || accountCopy.backendAccount;
+      const accountErrorMessage = accountErrorCode
+        ? localizedErrorMessage({ code: accountErrorCode }, accountCopy.errors, accountCopy.syncFailed)
+        : '';
+      const loginErrorMessage = loginErrorCode
+        ? localizedErrorMessage({ code: loginErrorCode }, accountCopy.errors, accountCopy.builtinLoginFailed)
+        : '';
       useEffect(() => {
         if (!open) return;
         const onMouseDown = (e) => {
@@ -160,13 +157,13 @@ function workspaceDisplayName(path) {
       const submitLogin = async (e) => {
         e.preventDefault();
         if (!onLogin || loggingIn) return;
-        setLoginError(null);
+        setLoginErrorCode(null);
         setLoggingIn(true);
         try {
           await onLogin(loginUsername, loginPassword);
           setLoginPassword('');
         } catch (err) {
-          setLoginError(err && err.message ? err.message : String(err || '登录失败'));
+          setLoginErrorCode(errorCode(err) || 'unknown');
         } finally {
           setLoggingIn(false);
         }
@@ -191,7 +188,7 @@ function workspaceDisplayName(path) {
               type="button"
               onClick={onClose}
               className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}
-              title="关闭"
+              title={accountCopy.close}
             >
               <X size={16} />
             </button>
@@ -201,14 +198,14 @@ function workspaceDisplayName(path) {
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 min-w-0">
                 <Sparkles size={17} className="text-[#10B981] shrink-0" />
-                <span className="text-[14px] font-medium truncate">可用额度</span>
+                <span className="text-[14px] font-medium truncate">{accountCopy.availableQuota}</span>
               </div>
               <button
                 type="button"
                 onClick={onRefresh}
                 disabled={loading}
                 className={`w-7 h-7 rounded-full flex items-center justify-center transition-colors ${isDark ? 'hover:bg-white/10 disabled:text-[#5F6368]' : 'hover:bg-black/5 disabled:text-[#C4C7C5]'}`}
-                title="刷新额度"
+                title={accountCopy.refreshQuota}
               >
                 <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
               </button>
@@ -216,9 +213,9 @@ function workspaceDisplayName(path) {
             {quota ? (
               <div className="mt-3 space-y-1.5 text-[13px]">
                 {[
-                  ['本月额度：', formatQuotaTokens(limit)],
-                  ['已使用：', formatQuotaTokens(used)],
-                  ['剩余：', formatQuotaTokens(remaining)],
+                  [accountCopy.monthlyQuota, formatQuotaTokens(limit, t.langTag)],
+                  [accountCopy.used, formatQuotaTokens(used, t.langTag)],
+                  [accountCopy.remaining, formatQuotaTokens(remaining, t.langTag)],
                 ].map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between gap-3">
                     <span className={isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}>{label}</span>
@@ -228,7 +225,7 @@ function workspaceDisplayName(path) {
               </div>
             ) : (
               <div className={`mt-3 text-[13px] ${isDark ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>
-                {loading ? '同步中…' : llmStatusText(status, error)}
+                {loading ? accountCopy.syncing : llmStatusText(status, accountErrorCode, accountCopy)}
               </div>
             )}
             {needsLogin && (
@@ -237,7 +234,7 @@ function workspaceDisplayName(path) {
                   value={loginUsername}
                   onChange={(e) => setLoginUsername(e.target.value)}
                   disabled={loading || loggingIn}
-                  placeholder="New API 用户名"
+                  placeholder={accountCopy.username}
                   autoComplete="username"
                   className={`w-full h-9 rounded-xl px-3 text-[13px] outline-none border ${
                     isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]'
@@ -247,16 +244,16 @@ function workspaceDisplayName(path) {
                   value={loginPassword}
                   onChange={(e) => setLoginPassword(e.target.value)}
                   disabled={loading || loggingIn}
-                  placeholder="New API 密码"
+                  placeholder={accountCopy.password}
                   type="password"
                   autoComplete="current-password"
                   className={`w-full h-9 rounded-xl px-3 text-[13px] outline-none border ${
                     isDark ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]' : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]'
                   }`}
                 />
-                {(error || loginError) && (
+                {(accountErrorMessage || loginErrorMessage) && (
                   <div className="text-[12px] leading-snug text-[#EA4335] break-words">
-                    {loginError || error}
+                    {loginErrorMessage || accountErrorMessage}
                   </div>
                 )}
                 <button
@@ -266,7 +263,7 @@ function workspaceDisplayName(path) {
                     isDark ? 'bg-[#10B981] text-white disabled:bg-white/10 disabled:text-[#6F7378]' : 'bg-[#10B981] text-white disabled:bg-black/5 disabled:text-[#9AA0A6]'
                   }`}
                 >
-                  {loggingIn ? '登录中…' : '登录并同步额度'}
+                  {loggingIn ? accountCopy.loggingIn : accountCopy.loginAndSync}
                 </button>
               </form>
             )}
@@ -326,7 +323,7 @@ function workspaceDisplayName(path) {
       const [activeTheme, setActiveTheme] = useState('dark');
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
       const [llmApiLoading, setLlmApiLoading] = useState(false);
-      const [llmApiError, setLlmApiError] = useState(null);
+      const [llmApiErrorCode, setLlmApiErrorCode] = useState(null);
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showMegacubeSite = !!platformCapabilities.showMegacubeSite;
       const codexAcpSupported = !!platformCapabilities.codexAcpSupported;
@@ -627,6 +624,8 @@ function workspaceDisplayName(path) {
         window.PinvouHostFilePickerStrings = misc.hostFilePicker;
         // platform/web/bootstrap.js 的 invoke 拒绝错误文案（web bootstrap 内置中文兜底）。
         window.PinvouWebClientStrings = misc.webClientErrors;
+        // platform/tauri/bridge 下的非模块脚本通过同一入口读取当前语言。
+        window.PinvouTauriBridgeStrings = misc.tauriBridge;
       }, [t]);
       // 有可用新版 → 侧边栏设置图标亮红点（不弹窗不打断）
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
@@ -634,30 +633,35 @@ function workspaceDisplayName(path) {
       const llmAccountVisible = isLlmApiAccountVisible(llmAccountStatus);
       const llmAccountUsername = llmAccountStatus && llmAccountStatus.backend_username;
       const llmAccountDisplayName = llmAccountStatus && llmAccountStatus.backend_display_name;
-      const llmAccountName = shortBackendUsername(llmAccountDisplayName || llmAccountUsername);
+      const llmAccountName = shortBackendUsername(llmAccountDisplayName || llmAccountUsername, t.uiAccount);
       const refreshLlmApiStatus = useCallback(async () => {
         if (!bridge.available || !bridge.llmapi.getLlmApiStatus) return;
         setLlmApiLoading(true);
-        setLlmApiError(null);
+        setLlmApiErrorCode(null);
         try {
           await bridge.llmapi.getLlmApiStatus();
         } catch (e) {
-          setLlmApiError(e && e.message ? e.message : String(e || '额度同步失败'));
+          const code = errorCode(e) || 'unknown';
+          console.error('llm api quota refresh failed:', code);
+          setLlmApiErrorCode(code);
         } finally {
           setLlmApiLoading(false);
         }
       }, []);
       const loginLlmApiUser = useCallback(async (username, password) => {
-        if (!bridge.available || !bridge.llmapi.loginLlmApiUser) throw new Error('内置模型登录不可用');
+        if (!bridge.available || !bridge.llmapi.loginLlmApiUser) {
+          const error = new Error('login_unavailable');
+          error.code = 'login_unavailable';
+          throw error;
+        }
         setLlmApiLoading(true);
-        setLlmApiError(null);
+        setLlmApiErrorCode(null);
         try {
           await bridge.llmapi.loginLlmApiUser(username, password);
           if (bridge.llmapi.getLlmApiStatus) await bridge.llmapi.getLlmApiStatus();
         } catch (e) {
-          const message = e && e.message ? e.message : String(e || '内置模型登录失败');
-          setLlmApiError(message);
-          throw new Error(message);
+          console.error('llm api login failed:', errorCode(e) || 'unknown');
+          throw e;
         } finally {
           setLlmApiLoading(false);
         }
@@ -847,16 +851,6 @@ function workspaceDisplayName(path) {
       );
       // 语言已即时写盘+切 UI,但 LLM 的 locale_tag 要重启 engine 才生效 → 偏离启动语言就提示。
       const languageNeedsRestart = !!bootedLanguageRef.current && language !== bootedLanguageRef.current;
-
-      function scheduledRunLabel(value) {
-        return ({
-          queued: '等待中',
-          running: '运行中',
-          completed: '已完成',
-          failed: '失败',
-          canceled: '已取消',
-        }[value] || value || '未知');
-      }
 
       // Build chat history from sessions
       const skillBindings = (bs && bs.workflow && bs.workflow.bindings) || {};
@@ -2149,7 +2143,7 @@ function workspaceDisplayName(path) {
                   {isSidebarOpen && (
                     <span className="min-w-0 flex-1">
                       <span className="block text-[14px] font-medium leading-none truncate">{llmAccountName}</span>
-                      <span className={`block text-[11px] mt-1 truncate ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>查看可用额度</span>
+                      <span className={`block text-[11px] mt-1 truncate ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>{t.uiAccount.viewQuota}</span>
                     </span>
                   )}
                   {isSidebarOpen && <ChevronRight size={16} className="shrink-0 opacity-60" />}
@@ -2157,9 +2151,10 @@ function workspaceDisplayName(path) {
                 <AccountPopover
                   open={accountPopoverOpen}
                   theme={activeTheme}
+                  t={t}
                   llmApiStatus={bs && bs.llmApiStatus}
                   loading={llmApiLoading}
-                  error={llmApiError}
+                  accountErrorCode={llmApiErrorCode}
                   collapsed={!isSidebarOpen}
                   onClose={() => setAccountPopoverOpen(false)}
                   onRefresh={refreshLlmApiStatus}

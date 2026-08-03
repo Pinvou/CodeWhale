@@ -19,7 +19,7 @@ export function WebConnectionStatus({ theme, t }) {
 
   const copy = t.uiWebConnection;
   const [title, fallback] = copy[connection.status] || copy.error;
-  // 桌面端的已知状态可能携带旧版固定中文文案；界面统一使用当前语言字典。
+  // 已知状态始终使用当前语言；未知状态才保留诊断信息。
   const message = copy[connection.status] ? fallback : (connection.message || fallback);
   const dark = theme === 'dark';
   const card = (

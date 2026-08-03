@@ -6,10 +6,22 @@ import { notifyComposerToolsChanged } from './tool-events.js';
 import { localizeTool, TsActionBtn, tsCategories, tsFeaturedCollections, tsSkillsData, tsToolsData } from './tool-common.jsx';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
 import { can } from '../../shared/platform.js';
+import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConnectorAlert } from './connector-ui-state.js';
+import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 
 const OAUTH_UI_TIMEOUT_MS = 90_000;
 
 const canStartExternalAuth = () => can('oauth') && can('externalAuth');
+
+const reportConnectorFailure = (connector, value, phase) => {
+  const failure = connectorFailure(value, phase);
+  console.error('connector failed:', {
+    connector,
+    code: failure.errorCode,
+    step: connectorUiStep(null, phase),
+  });
+  return failure;
+};
 
 const isRestrictedExternalAuthTool = (tool) => !!tool && !!(
   tool.authRequired
@@ -150,7 +162,7 @@ const FEISHU_STEPS = [
       scanLogin:name=>`扫码登录${name}`, scanHint:name=>`用${name} App 扫一扫 → 确认`, userCode:'页面验证码',
       openBrowser:'在浏览器打开 ↗', connectionIncomplete:'连接未完成', close:'关闭', retry:'重试',
     };
-    const FeishuFlowCard = ({ flow, onRetry, onCancel, name = '飞书', twoStep = true, browserAuth = false, steps = FEISHU_STEPS, copy = DEFAULT_FLOW_COPY }) => {
+    const FeishuFlowCard = ({ flow, onRetry, onCancel, name = '飞书', twoStep = true, browserAuth = false, steps = FEISHU_STEPS, copy = DEFAULT_FLOW_COPY, errors = {} }) => {
       if (!flow) return null;
       const isErr = flow.phase === 'error';
       return (
@@ -219,7 +231,9 @@ const FEISHU_STEPS = [
             <div className="px-5 pb-5">
               <div className="rounded-xl border border-rose-200 dark:border-rose-500/30 bg-rose-50 dark:bg-rose-500/10 p-3">
                 <div className="text-[13px] font-medium text-rose-700 dark:text-rose-300 mb-1.5">{copy.connectionIncomplete}</div>
-                <pre className="text-[11.5px] leading-relaxed text-rose-800/80 dark:text-rose-200/70 whitespace-pre-wrap max-h-28 overflow-auto font-mono">{flow.err}</pre>
+                <div className="text-[12px] leading-relaxed text-rose-800/80 dark:text-rose-200/70">
+                  {errors[flow.errorCode] || errors.unknown || copy.connectionIncomplete}
+                </div>
                 <div className="flex gap-2 mt-3 justify-end">
                   <button onClick={onCancel} className="px-3 py-1.5 rounded-lg bg-slate-200 dark:bg-white/10 text-slate-700 dark:text-slate-100 text-[13px]">{copy.close}</button>
                   <button onClick={onRetry} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-[13px]">{copy.retry}</button>
@@ -266,9 +280,8 @@ const FEISHU_STEPS = [
       stopTick() { if (this.tick) { clearInterval(this.tick); this.tick = null; } },
     };
     // 后端连接事件只注册一次（幂等，跨 ToolStoreView 多次挂载不重复注册）。
-    function ensureFeishuListeners(copy = {}) {
+    function ensureFeishuListeners() {
       if (feishuConn.listenersReady) return;
-      const connFailed = copy.connFailed;
       const ev = isTauriAvailable() ? tauriEvents : null;
       if (!ev) return;
       feishuConn.listenersReady = true;
@@ -305,11 +318,9 @@ const FEISHU_STEPS = [
       });
       ev.listen('feishu:error', (e) => {
         const p = e.payload || {};
+        reportConnectorFailure('feishu', p, p.phase);
         feishuConn.stopTick();
-        feishuConn.setFlow(f => {
-          const step = (f && f.active) || 'cli';
-          return { ...(f || { steps: {} }), phase: 'error', err: String(p.message || connFailed), errStep: step, steps: { ...((f && f.steps) || {}), [step]: 'error' } };
-        });
+        feishuConn.setFlow(f => applyConnectorFailure(f, p, p.phase));
       });
     }
 
@@ -329,9 +340,8 @@ const FEISHU_STEPS = [
       },
       stopTick() { if (this.tick) { clearInterval(this.tick); this.tick = null; } },
     };
-    function ensureWecomListeners(copy = {}) {
+    function ensureWecomListeners() {
       if (wecomConn.listenersReady) return;
-      const connFailed = copy.connFailed;
       const ev = isTauriAvailable() ? tauriEvents : null;
       if (!ev) return;
       wecomConn.listenersReady = true;
@@ -353,8 +363,9 @@ const FEISHU_STEPS = [
       });
       ev.listen('wecom:error', (e) => {
         const p = e.payload || {};
+        reportConnectorFailure('wecom', p, p.phase);
         wecomConn.stopTick();
-        wecomConn.setFlow(f => { const step = (f && f.active) || 'cli'; return { ...(f || { steps: {} }), phase: 'error', err: String(p.message || connFailed), errStep: step, steps: { ...((f && f.steps) || {}), [step]: 'error' } }; });
+        wecomConn.setFlow(f => applyConnectorFailure(f, p, p.phase));
       });
     }
 
@@ -374,10 +385,8 @@ const FEISHU_STEPS = [
       },
       stopTick() { if (this.tick) { clearInterval(this.tick); this.tick = null; } },
     };
-    function ensureDingtalkListeners(copy = {}) {
+    function ensureDingtalkListeners() {
       if (dingtalkConn.listenersReady) return;
-      const connFailed = copy.connFailed;
-      const skillsFailed = copy.dingtalkSkillsFailed;
       const ev = isTauriAvailable() ? tauriEvents : null;
       if (!ev) return;
       dingtalkConn.listenersReady = true;
@@ -398,13 +407,16 @@ const FEISHU_STEPS = [
           dingtalkConn.setFlow(f => ({ ...(f || {}), phase: 'done', steps: { ...((f && f.steps) || {}), qr: 'done' } }));
           setTimeout(() => dingtalkConn.setFlow(null), 1800);
         } catch (e) {
-          dingtalkConn.setFlow(f => ({ ...(f || {}), phase: 'error', err: skillsFailed(String(e).slice(0, 220)), errStep: 'qr', steps: { ...((f && f.steps) || {}), qr: 'error' } }));
+          const failure = { code: 'skills_enable_failed' };
+          reportConnectorFailure('dingtalk', failure, 'qr');
+          dingtalkConn.setFlow(f => applyConnectorFailure(f, failure, 'qr'));
         }
       });
       ev.listen('dingtalk:error', (e) => {
         const p = e.payload || {};
+        reportConnectorFailure('dingtalk', p, p.phase);
         dingtalkConn.stopTick();
-        dingtalkConn.setFlow(f => { const step = (f && f.active) || 'cli'; return { ...(f || { steps: {} }), phase: 'error', err: String(p.message || connFailed), errStep: step, steps: { ...((f && f.steps) || {}), [step]: 'error' } }; });
+        dingtalkConn.setFlow(f => applyConnectorFailure(f, p, p.phase));
       });
     }
 
@@ -424,10 +436,8 @@ const FEISHU_STEPS = [
       },
       stopTick() { if (this.tick) { clearInterval(this.tick); this.tick = null; } },
     };
-    function ensureTmeetListeners(copy = {}) {
+    function ensureTmeetListeners() {
       if (tmeetConn.listenersReady) return;
-      const connFailed = copy.connFailed;
-      const authIncomplete = copy.tmeetAuthIncomplete;
       const ev = isTauriAvailable() ? tauriEvents : null;
       if (!ev) return;
       tmeetConn.listenersReady = true;
@@ -451,19 +461,23 @@ const FEISHU_STEPS = [
         try {
           const status = await invokeTauri('tmeet_status');
           if (!(status && status.connected)) {
-            throw new Error(authIncomplete);
+            const authError = new Error('auth_failed');
+            authError.code = 'auth_failed';
+            throw authError;
           }
           await invokeTauri('tmeet_apply_skills');
           tmeetConn.setFlow(f => ({ ...(f || {}), phase: 'done', steps: { ...((f && f.steps) || {}), qr: 'done' } }));
           setTimeout(() => tmeetConn.setFlow(null), 1800);
         } catch (e) {
-          tmeetConn.setFlow(f => ({ ...(f || {}), phase: 'error', err: String(e && e.message ? e.message : e).slice(0, 220), errStep: 'qr', steps: { ...((f && f.steps) || {}), qr: 'error' } }));
+          reportConnectorFailure('tmeet', e, 'qr');
+          tmeetConn.setFlow(f => applyConnectorFailure(f, e, 'qr'));
         }
       });
       ev.listen('tmeet:error', (e) => {
         const p = e.payload || {};
+        reportConnectorFailure('tmeet', p, p.phase);
         tmeetConn.stopTick();
-        tmeetConn.setFlow(f => { const step = (f && f.active) || 'cli'; return { ...(f || { steps: {} }), phase: 'error', err: String(p.message || connFailed), errStep: step, steps: { ...((f && f.steps) || {}), [step]: 'error' } }; });
+        tmeetConn.setFlow(f => applyConnectorFailure(f, p, p.phase));
       });
     }
 
@@ -790,7 +804,7 @@ const FEISHU_STEPS = [
       //（弹窗、刷新连接态）。真正的事件监听/秒表在模块级 feishuConn 里，切视图不丢。
       useEffect(() => {
         if (!externalAuthAvailable) return undefined;
-        ensureFeishuListeners(storeCopy);
+        ensureFeishuListeners();
         let prevPhase = feishuConn.flow && feishuConn.flow.phase;
         const unsub = feishuConn.subscribe((flow) => {
           setFeishuFlow(flow);
@@ -798,7 +812,7 @@ const FEISHU_STEPS = [
           if (ph !== prevPhase) {
             if (ph === 'done') {
               setFeishuConnected(true); setBusyId(null);
-              setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.feishu), subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId: 'feishu' });
+              setAlert({ visible: true, loading: false, connectorAlert: 'connected', showEnabled: true, isInstall: true, isError: false, toolId: 'feishu' });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
               setBusyId(null);
@@ -813,7 +827,7 @@ const FEISHU_STEPS = [
       // 订阅企业微信 store(镜像飞书):镜像进渲染 + 完成/失败收尾
       useEffect(() => {
         if (!externalAuthAvailable) return undefined;
-        ensureWecomListeners(storeCopy);
+        ensureWecomListeners();
         let prevPhase = wecomConn.flow && wecomConn.flow.phase;
         const unsub = wecomConn.subscribe((flow) => {
           setWecomFlow(flow);
@@ -821,7 +835,7 @@ const FEISHU_STEPS = [
           if (ph !== prevPhase) {
             if (ph === 'done') {
               setWecomConnected(true); setBusyId(null);
-              setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.wecom), subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId: 'wecom' });
+              setAlert({ visible: true, loading: false, connectorAlert: 'connected', showEnabled: true, isInstall: true, isError: false, toolId: 'wecom' });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
               setBusyId(null);
@@ -836,7 +850,7 @@ const FEISHU_STEPS = [
       // 订阅钉钉 store(镜像企微):镜像进渲染 + 完成/失败收尾
       useEffect(() => {
         if (!externalAuthAvailable) return undefined;
-        ensureDingtalkListeners(storeCopy);
+        ensureDingtalkListeners();
         let prevPhase = dingtalkConn.flow && dingtalkConn.flow.phase;
         const unsub = dingtalkConn.subscribe((flow) => {
           setDingtalkFlow(flow);
@@ -844,7 +858,7 @@ const FEISHU_STEPS = [
           if (ph !== prevPhase) {
             if (ph === 'done') {
               setDingtalkConnected(true); setBusyId(null);
-              setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.dingtalk), subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId: 'dingtalk' });
+              setAlert({ visible: true, loading: false, connectorAlert: 'connected', showEnabled: true, isInstall: true, isError: false, toolId: 'dingtalk' });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
               setBusyId(null);
@@ -878,7 +892,7 @@ const FEISHU_STEPS = [
       // 订阅腾讯会议 store(镜像钉钉):镜像进渲染 + 完成/失败收尾
       useEffect(() => {
         if (!externalAuthAvailable) return undefined;
-        ensureTmeetListeners(storeCopy);
+        ensureTmeetListeners();
         let prevPhase = tmeetConn.flow && tmeetConn.flow.phase;
         const unsub = tmeetConn.subscribe((flow) => {
           setTmeetFlow(flow);
@@ -886,7 +900,7 @@ const FEISHU_STEPS = [
           if (ph !== prevPhase) {
             if (ph === 'done') {
               setTmeetConnected(true); setBusyId(null);
-              setAlert({ visible: true, loading: false, title: detailCopy.actions.connectedTmeet, subtitle: detailCopy.actions.enabled, isInstall: true, isError: false, toolId: 'tmeet' });
+              setAlert({ visible: true, loading: false, connectorAlert: 'connected', showEnabled: true, isInstall: true, isError: false, toolId: 'tmeet' });
               notifyComposerToolsChanged();
             } else if (ph === 'error') {
               setBusyId(null);
@@ -913,13 +927,14 @@ const FEISHU_STEPS = [
           setWecomQr(null); setWecomConnected(true); setBusyId(null);
           // 连上 → 按规则写技能(默认启用),企微技能即刻对模型可见。
           invokeTauri('wecom_apply_skills').catch(() => {});
-          setAlert({ visible: true, loading: false, title: storeCopy.connectedTool(storeCopy.toolNames.wecom), subtitle: '', isInstall: true, isError: false, toolId: 'wecom' });
+          setAlert({ visible: true, loading: false, connectorAlert: 'connected', showEnabled: true, isInstall: true, isError: false, toolId: 'wecom' });
           notifyComposerToolsChanged();
         }).then(u => unlisten.push(u));
         ev.listen('wecom:error', (e) => {
           const p = e.payload || {};
           setWecomQr(null); setBusyId(null);
-          setAlert({ visible: true, loading: false, title: storeCopy.connectFailed(storeCopy.toolNames.wecom), subtitle: String(p.message || '').slice(0, 240), isError: true });
+          const failure = reportConnectorFailure('wecom', p, p.phase || 'authorize');
+          setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'wecom' });
         }).then(u => unlisten.push(u));
         ev.listen('eip:sso', (e) => {
           const p = e.payload || {};
@@ -927,13 +942,14 @@ const FEISHU_STEPS = [
         }).then(u => unlisten.push(u));
         ev.listen('eip:connected', () => {
           setEipSso(null); setEipConnected(true); setBusyId(null);
-          setAlert({ visible: true, loading: false, title: '已连接员工门户（EIP）', subtitle: '', isInstall: true, isError: false, toolId: 'eip' });
+          setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
         }).then(u => unlisten.push(u));
         ev.listen('eip:error', (e) => {
           const p = e.payload || {};
           setEipSso(null); setBusyId(null);
-          setAlert({ visible: true, loading: false, title: 'EIP 连接失败', subtitle: String(p.message || '').slice(0, 240), isError: true });
+          const failure = reportConnectorFailure('eip', p, 'connect');
+          setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'eip' });
         }).then(u => unlisten.push(u));
         ev.listen('zhidao:sso', (e) => {
           const p = e.payload || {};
@@ -941,13 +957,14 @@ const FEISHU_STEPS = [
         }).then(u => unlisten.push(u));
         ev.listen('zhidao:connected', () => {
           setZhidaoSso(null); setZhidaoConnected(true); setBusyId(null);
-          setAlert({ visible: true, loading: false, title: '已连接知道知识库', subtitle: '', isInstall: true, isError: false, toolId: 'zhidao' });
+          setAlert({ visible: true, loading: false, connectorAlert: 'connected', isInstall: true, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
         }).then(u => unlisten.push(u));
         ev.listen('zhidao:error', (e) => {
           const p = e.payload || {};
           setZhidaoSso(null); setBusyId(null);
-          setAlert({ visible: true, loading: false, title: '知道连接失败', subtitle: String(p.message || '').slice(0, 240), isError: true });
+          const failure = reportConnectorFailure('zhidao', p, 'connect');
+          setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'zhidao' });
         }).then(u => unlisten.push(u));
         return () => { unlisten.forEach(u => { try { u(); } catch (_) {} }); };
       }, [externalAuthAvailable]);
@@ -1375,7 +1392,7 @@ const FEISHU_STEPS = [
           }
           notifyComposerToolsChanged();
         } catch (e) {
-          console.error('ima connect failed:', e);
+          reportConnectorFailure('ima', e, 'connect');
           setImaConnected(false);
           setAlert({ visible: true, loading: false, title: detailCopy.actions.imaFailed, subtitle: detailCopy.actions.operationFailed, isInstall: false, isError: true });
         } finally {
@@ -1408,26 +1425,25 @@ const FEISHU_STEPS = [
       //(监听见下方 useEffect);这里只 ensure cli + 触发 begin。busyId 在事件里清。
       const connectFeishu = async () => {
         setBusyId('feishu');
-        ensureFeishuListeners(storeCopy);
+        ensureFeishuListeners();
         // 开流程卡（无阻塞弹窗）：先起“准备运行时”步。写进跨视图 store，切走不丢。
         feishuConn.setFlow({ phase: 'running', steps: { runtime: 'active' }, active: 'runtime', pct: 0, sec: 0, log: '' });
         // 客户端秒表 + 爬行条：后端 feishu:progress 有真实 pct 时会覆盖；没有也不至于像卡死。
         feishuConn.startTick();
+        let stage = 'cli';
         try {
           // ① 确保 CLI（B 方案下可能联网安装 ~40s，会 emit feishu:progress step=cli）
           feishuConn.setFlow(f => ({ ...(f || {}), active: 'cli', pct: 0, log: 'npm: starting…', steps: { ...((f && f.steps) || {}), runtime: 'done', cli: 'active' } }));
           await invokeTauri('feishu_ensure_cli');
           feishuConn.setFlow(f => ({ ...(f || {}), active: 'connect', pct: 100, steps: { ...((f && f.steps) || {}), cli: 'done', connect: 'active' } }));
           // ② 连接编排（后端 emit feishu:qr / connected / error）
+          stage = 'register';
           await invokeTauri('feishu_connect_begin');
         } catch (e) {
-          console.error('feishu connect failed:', e);
+          reportConnectorFailure('feishu', e, stage);
           feishuConn.stopTick();
           setBusyId(null);
-          feishuConn.setFlow(f => {
-            const step = (f && f.active) || 'cli';
-            return { ...(f || { steps: {} }), phase: 'error', err: String(e).slice(0, 300), errStep: step, steps: { ...((f && f.steps) || {}), [step]: 'error' } };
-          });
+          feishuConn.setFlow(f => applyConnectorFailure(f, e, stage));
         }
       };
       // 取消/关闭流程卡：置取消 + kill 子进程 + 清状态。
@@ -1445,7 +1461,7 @@ const FEISHU_STEPS = [
           // 断开 → 撤掉技能(should_show 变 false)+ 广播刷新。
           await invokeTauri('feishu_apply_skills').catch(() => {});
           setFeishuConnected(false);
-          setAlert({ visible: true, loading: false, title: storeCopy.disconnectedTool(storeCopy.toolNames.feishu), isInstall: false, isError: false });
+          setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'feishu' });
           notifyComposerToolsChanged();
         } catch (e) {
           console.error('feishu logout failed:', e);
@@ -1458,25 +1474,24 @@ const FEISHU_STEPS = [
       // 连接企业微信(单段扫码):流程卡驱动(镜像飞书),进度走 wecom:* 事件。
       const connectWecom = async () => {
         setBusyId('wecom');
-        ensureWecomListeners(storeCopy);
+        ensureWecomListeners();
         // 开流程卡(无阻塞弹窗):先起"准备运行时"步,写进跨视图 store,切走不丢。
         wecomConn.setFlow({ phase: 'running', steps: { runtime: 'active' }, active: 'runtime', pct: 0, sec: 0, log: '' });
         wecomConn.startTick();
+        let stage = 'cli';
         try {
           // ① 确保 CLI(首次联网装 wecom-cli ~40s)
           wecomConn.setFlow(f => ({ ...(f || {}), active: 'cli', pct: 0, log: 'npm: starting…', steps: { ...((f && f.steps) || {}), runtime: 'done', cli: 'active' } }));
           await invokeTauri('wecom_ensure_cli');
           wecomConn.setFlow(f => ({ ...(f || {}), pct: 100, steps: { ...((f && f.steps) || {}), cli: 'done' } }));
           // ② 连接编排(后端 emit wecom:qr / connected / error)
+          stage = 'authorize';
           await invokeTauri('wecom_connect_begin');
         } catch (e) {
-          console.error('wecom connect failed:', e);
+          reportConnectorFailure('wecom', e, stage);
           wecomConn.stopTick();
           setBusyId(null);
-          wecomConn.setFlow(f => {
-            const step = (f && f.active) || 'cli';
-            return { ...(f || { steps: {} }), phase: 'error', err: String(e).slice(0, 300), errStep: step, steps: { ...((f && f.steps) || {}), [step]: 'error' } };
-          });
+          wecomConn.setFlow(f => applyConnectorFailure(f, e, stage));
         }
       };
       const wecomResetFlow = () => {
@@ -1492,7 +1507,7 @@ const FEISHU_STEPS = [
           // 断开 → 撤掉技能(should_show 变 false)。
           await invokeTauri('wecom_apply_skills').catch(() => {});
           setWecomConnected(false);
-          setAlert({ visible: true, loading: false, title: storeCopy.disconnectedTool(storeCopy.toolNames.wecom), isInstall: false, isError: false });
+          setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'wecom' });
           notifyComposerToolsChanged();
         } catch (e) {
           console.error('wecom logout failed:', e);
@@ -1505,22 +1520,21 @@ const FEISHU_STEPS = [
       // 连接钉钉(单段扫码):流程卡驱动(镜像企微),进度走 dingtalk:* 事件。
       const connectDingtalk = async () => {
         setBusyId('dingtalk');
-        ensureDingtalkListeners(storeCopy);
+        ensureDingtalkListeners();
         dingtalkConn.setFlow({ phase: 'running', steps: { runtime: 'active' }, active: 'runtime', pct: 0, sec: 0, log: '' });
         dingtalkConn.startTick();
+        let stage = 'cli';
         try {
           dingtalkConn.setFlow(f => ({ ...(f || {}), active: 'cli', pct: 0, log: 'npm: starting…', steps: { ...((f && f.steps) || {}), runtime: 'done', cli: 'active' } }));
           await invokeTauri('dingtalk_ensure_cli');
           dingtalkConn.setFlow(f => ({ ...(f || {}), pct: 100, steps: { ...((f && f.steps) || {}), cli: 'done' } }));
+          stage = 'authorize';
           await invokeTauri('dingtalk_connect_begin');
         } catch (e) {
-          console.error('dingtalk connect failed:', e);
+          reportConnectorFailure('dingtalk', e, stage);
           dingtalkConn.stopTick();
           setBusyId(null);
-          dingtalkConn.setFlow(f => {
-            const step = (f && f.active) || 'cli';
-            return { ...(f || { steps: {} }), phase: 'error', err: String(e).slice(0, 300), errStep: step, steps: { ...((f && f.steps) || {}), [step]: 'error' } };
-          });
+          dingtalkConn.setFlow(f => applyConnectorFailure(f, e, stage));
         }
       };
       const dingtalkResetFlow = () => {
@@ -1535,7 +1549,7 @@ const FEISHU_STEPS = [
           await invokeTauri('dingtalk_logout');
           await invokeTauri('dingtalk_apply_skills').catch(() => {});
           setDingtalkConnected(false);
-          setAlert({ visible: true, loading: false, title: storeCopy.disconnectedTool(storeCopy.toolNames.dingtalk), isInstall: false, isError: false });
+          setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'dingtalk' });
           notifyComposerToolsChanged();
         } catch (e) {
           console.error('dingtalk logout failed:', e);
@@ -1552,9 +1566,9 @@ const FEISHU_STEPS = [
           await invokeTauri('eip_connect_begin');
           // 后续:eip:sso 出登录地址 → 用户浏览器 SSO 登录 → eip:connected 收尾。
         } catch (e) {
-          console.error('eip connect failed:', e);
           setEipSso(null); setBusyId(null);
-          setAlert({ visible: true, loading: false, title: 'EIP 连接失败', subtitle: String(e).slice(0, 240), isError: true });
+          const failure = reportConnectorFailure('eip', e, 'connect');
+          setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'eip' });
         }
       };
       const disconnectEip = async () => {
@@ -1562,11 +1576,11 @@ const FEISHU_STEPS = [
         try {
           await invokeTauri('eip_logout');
           setEipConnected(false);
-          setAlert({ visible: true, loading: false, title: '已断开员工门户（EIP）', isInstall: false, isError: false });
+          setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'eip' });
           notifyComposerToolsChanged();
         } catch (e) {
           console.error('eip logout failed:', e);
-          setAlert({ visible: true, loading: false, title: '操作失败，请重试', isError: true });
+          setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isError: true });
         } finally {
           setBusyId(null);
         }
@@ -1578,9 +1592,9 @@ const FEISHU_STEPS = [
         try {
           await invokeTauri('zhidao_connect_begin');
         } catch (e) {
-          console.error('zhidao connect failed:', e);
           setZhidaoSso(null); setBusyId(null);
-          setAlert({ visible: true, loading: false, title: '知道连接失败', subtitle: String(e).slice(0, 240), isError: true });
+          const failure = reportConnectorFailure('zhidao', e, 'connect');
+          setAlert({ visible: true, loading: false, connectorAlert: 'failed', errorCode: failure.errorCode, isError: true, toolId: 'zhidao' });
         }
       };
       const disconnectZhidao = async () => {
@@ -1588,11 +1602,11 @@ const FEISHU_STEPS = [
         try {
           await invokeTauri('zhidao_logout');
           setZhidaoConnected(false);
-          setAlert({ visible: true, loading: false, title: '已断开知道知识库', isInstall: false, isError: false });
+          setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'zhidao' });
           notifyComposerToolsChanged();
         } catch (e) {
           console.error('zhidao logout failed:', e);
-          setAlert({ visible: true, loading: false, title: '操作失败，请重试', isError: true });
+          setAlert({ visible: true, loading: false, title: detailCopy.actions.operationFailed, isError: true });
         } finally {
           setBusyId(null);
         }
@@ -1601,22 +1615,21 @@ const FEISHU_STEPS = [
       // 连接腾讯会议(单段 OAuth 授权):流程卡驱动(镜像钉钉),进度走 tmeet:* 事件。
       const connectTmeet = async () => {
         setBusyId('tmeet');
-        ensureTmeetListeners(storeCopy);
+        ensureTmeetListeners();
         tmeetConn.setFlow({ phase: 'running', steps: { runtime: 'active' }, active: 'runtime', pct: 0, sec: 0, log: '' });
         tmeetConn.startTick();
+        let stage = 'cli';
         try {
           tmeetConn.setFlow(f => ({ ...(f || {}), active: 'cli', pct: 0, log: 'npm: starting…', steps: { ...((f && f.steps) || {}), runtime: 'done', cli: 'active' } }));
           await invokeTauri('tmeet_ensure_cli');
           tmeetConn.setFlow(f => ({ ...(f || {}), pct: 100, steps: { ...((f && f.steps) || {}), cli: 'done' } }));
+          stage = 'authorize';
           await invokeTauri('tmeet_connect_begin');
         } catch (e) {
-          console.error('tmeet connect failed:', e);
+          reportConnectorFailure('tmeet', e, stage);
           tmeetConn.stopTick();
           setBusyId(null);
-          tmeetConn.setFlow(f => {
-            const step = (f && f.active) || 'cli';
-            return { ...(f || { steps: {} }), phase: 'error', err: String(e).slice(0, 300), errStep: step, steps: { ...((f && f.steps) || {}), [step]: 'error' } };
-          });
+          tmeetConn.setFlow(f => applyConnectorFailure(f, e, stage));
         }
       };
       const tmeetResetFlow = () => {
@@ -1631,7 +1644,7 @@ const FEISHU_STEPS = [
           await invokeTauri('tmeet_logout');
           await invokeTauri('tmeet_apply_skills').catch(() => {});
           setTmeetConnected(false);
-          setAlert({ visible: true, loading: false, title: detailCopy.actions.disconnectedTmeet, isInstall: false, isError: false });
+          setAlert({ visible: true, loading: false, connectorAlert: 'disconnected', isInstall: false, isError: false, toolId: 'tmeet' });
           notifyComposerToolsChanged();
         } catch (e) {
           console.error('tmeet logout failed:', e);
@@ -1796,7 +1809,7 @@ const FEISHU_STEPS = [
 
       return (
         <div className={`${isDark ? 'dark' : ''} flex-1 flex flex-col w-full h-full relative z-10 overflow-hidden antialiased selection:bg-blue-200 dark:selection:bg-blue-900`}>
-          {createPortal(<TsAlert alert={alert} theme={theme} copy={storeCopy} onDismiss={() => setAlert(a => ({ ...a, visible: false }))} onCancelLoading={cancelOAuthLoading} onNewChat={() => { const tid = alert.toolId; setAlert(a => ({ ...a, visible: false })); if (onNewChat) onNewChat(tid); }} />, document.body)}
+          {createPortal(<TsAlert alert={localizeConnectorAlert(alert, storeCopy, detailCopy)} theme={theme} copy={storeCopy} onDismiss={() => setAlert(a => ({ ...a, visible: false }))} onCancelLoading={cancelOAuthLoading} onNewChat={() => { const tid = alert.toolId; setAlert(a => ({ ...a, visible: false })); if (onNewChat) onNewChat(tid); }} />, document.body)}
           {createPortal(<TsConfigDialog
             config={externalAuthAvailable ? configDialog : null}
             theme={theme}
@@ -1839,44 +1852,12 @@ const FEISHU_STEPS = [
             </div>
             ), document.body);
           })()}
-          {eipSso && (() => {
-            const cancel = () => { invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(null); };
-            return createPortal((
-            <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(8px)' }} onClick={cancel}>
-              <div className="bg-white dark:bg-[#1C1C1E] rounded-3xl p-7 w-full max-w-[360px] flex flex-col items-center text-center shadow-2xl" onClick={e => e.stopPropagation()}>
-                <h3 className="text-[19px] font-bold text-slate-900 dark:text-white mb-1">登录员工门户（EIP）</h3>
-                <p className="text-[13px] text-slate-500 dark:text-slate-400 mb-5">扫码或在浏览器完成 SSO 登录，登录后会自动连接（需公司内网）</p>
-                {eipSso.qr
-                  ? <img src={eipSso.qr} alt="EIP 登录二维码" className="w-52 h-52 rounded-2xl border border-slate-200 dark:border-white/10 bg-white" />
-                  : <div className="w-52 h-52 rounded-2xl border border-dashed border-slate-300 dark:border-white/10 flex items-center justify-center text-[13px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-white/5">二维码生成中…</div>}
-                <button onClick={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }); }} className="mt-4 px-6 py-2.5 rounded-full text-[14px] font-semibold bg-blue-600 hover:bg-blue-700 text-white">在浏览器打开登录</button>
-                <div className="flex items-center gap-1.5 mt-5 text-[13px] text-slate-500 dark:text-slate-400">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span> 等待登录中…
-                </div>
-                <button onClick={cancel} className="mt-3 px-6 py-2 rounded-full text-[14px] font-semibold bg-slate-100 dark:bg-[#2C2C2E] text-slate-600 dark:text-slate-300">取消</button>
-              </div>
-            </div>
-            ), document.body);
-          })()}
-          {zhidaoSso && (() => {
-            const cancel = () => { invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(null); };
-            return createPortal((
-            <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(8px)' }} onClick={cancel}>
-              <div className="bg-white dark:bg-[#1C1C1E] rounded-3xl p-7 w-full max-w-[360px] flex flex-col items-center text-center shadow-2xl" onClick={e => e.stopPropagation()}>
-                <h3 className="text-[19px] font-bold text-slate-900 dark:text-white mb-1">登录知道知识库</h3>
-                <p className="text-[13px] text-slate-500 dark:text-slate-400 mb-5">扫码或在浏览器完成 SSO 登录，登录后会自动连接（需公司内网）</p>
-                {zhidaoSso.qr
-                  ? <img src={zhidaoSso.qr} alt="知道登录二维码" className="w-52 h-52 rounded-2xl border border-slate-200 dark:border-white/10 bg-white" />
-                  : <div className="w-52 h-52 rounded-2xl border border-dashed border-slate-300 dark:border-white/10 flex items-center justify-center text-[13px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-white/5">二维码生成中…</div>}
-                <button onClick={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }} className="mt-4 px-6 py-2.5 rounded-full text-[14px] font-semibold bg-blue-600 hover:bg-blue-700 text-white">在浏览器打开登录</button>
-                <div className="flex items-center gap-1.5 mt-5 text-[13px] text-slate-500 dark:text-slate-400">
-                  <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span> 等待登录中…
-                </div>
-                <button onClick={cancel} className="mt-3 px-6 py-2 rounded-full text-[14px] font-semibold bg-slate-100 dark:bg-[#2C2C2E] text-slate-600 dark:text-slate-300">取消</button>
-              </div>
-            </div>
-            ), document.body);
-          })()}
+          <ConnectorSsoDialog state={eipSso} name={storeCopy.toolNames.eip} copy={storeCopy}
+            onOpen={() => { if (eipSso.url) invokeTauri('open_external_url', { url: eipSso.url }); }}
+            onCancel={() => { invokeTauri('eip_cancel').catch(() => {}); setEipSso(null); setBusyId(null); }} />
+          <ConnectorSsoDialog state={zhidaoSso} name={storeCopy.toolNames.zhidao} copy={storeCopy}
+            onOpen={() => { if (zhidaoSso.url) invokeTauri('open_external_url', { url: zhidaoSso.url }); }}
+            onCancel={() => { invokeTauri('zhidao_cancel').catch(() => {}); setZhidaoSso(null); setBusyId(null); }} />
           <div className="flex-1 flex flex-col bg-white dark:bg-[#131314] text-slate-900 dark:text-white transition-colors duration-300 font-sans overflow-y-auto custom-scrollbar p-4 sm:p-6 lg:p-10">
 
             {/* Header */}
@@ -2201,15 +2182,15 @@ const FEISHU_STEPS = [
                 <div className="relative h-[200px] shrink-0">
                   <img src="assets/h3c-banner.jpg" alt="" className="absolute inset-0 w-full h-full object-cover" />
                   <div className="absolute inset-0 bg-gradient-to-b from-black/40 via-black/15 to-black/60" />
-                  <button onClick={() => setShowH3cModal(false)} className="absolute top-4 right-4 w-9 h-9 rounded-full bg-black/30 backdrop-blur text-white flex items-center justify-center z-10 text-[18px] leading-none">✕</button>
+                  <button onClick={() => setShowH3cModal(false)} title={detailCopy.flow.close} aria-label={detailCopy.flow.close} className="absolute top-4 right-4 w-9 h-9 rounded-full bg-black/30 backdrop-blur text-white flex items-center justify-center z-10 text-[18px] leading-none">✕</button>
                   <div className="absolute bottom-0 p-7 text-white">
-                    <span className="text-[11px] font-bold text-white/85 uppercase tracking-[0.15em] bg-white/15 backdrop-blur px-2.5 py-1 rounded-full">集团内部 · 员工专属</span>
-                    <h2 className="text-[28px] font-bold tracking-tight drop-shadow mt-2.5">H3C 办公生态 一键接入</h2>
+                    <span className="text-[11px] font-bold text-white/85 uppercase tracking-[0.15em] bg-white/15 backdrop-blur px-2.5 py-1 rounded-full">{storeCopy.internal}</span>
+                    <h2 className="text-[28px] font-bold tracking-tight drop-shadow mt-2.5 whitespace-pre-line">{storeCopy.internalTitle}</h2>
                   </div>
                 </div>
                 <div className="px-6 py-6">
-                  <p className="text-[14px] text-slate-600 dark:text-slate-300 leading-relaxed mb-6">以你<b>本人 SSO 身份</b>直连 H3C 集团内部系统，浏览器 / 扫码登录、<b>全程不填 key</b>；数据经公司内网、不出集团。<span className="text-slate-400">需连接公司内网使用。</span></p>
-                  <h3 className="text-[16px] font-bold mb-4 text-slate-900 dark:text-white">包含的工具 ({visibleInternalTools.length})</h3>
+                  <p className="text-[14px] text-slate-600 dark:text-slate-300 leading-relaxed mb-6">{storeCopy.internalDetailDesc}</p>
+                  <h3 className="text-[16px] font-bold mb-4 text-slate-900 dark:text-white">{storeCopy.internalTools} ({visibleInternalTools.length})</h3>
                   <div className="space-y-4">
                     {visibleInternalTools.map(t => (
                       <div key={t.id} className="flex items-start gap-4">
@@ -2225,7 +2206,7 @@ const FEISHU_STEPS = [
                     ))}
                   </div>
                   <div className="mt-6 pt-4 border-t border-slate-100 dark:border-white/10 text-center">
-                    <p className="text-[11px] text-slate-400 dark:text-slate-500">需连接公司内网 · 首次点「连接」浏览器 / 扫码 SSO 登录，不填 key</p>
+                    <p className="text-[11px] text-slate-400 dark:text-slate-500">{storeCopy.internalUsageHint}</p>
                   </div>
                 </div>
               </div>
@@ -2286,16 +2267,16 @@ const FEISHU_STEPS = [
                   </div>
 
                   {externalAuthAvailable && selectedTool.feishuCli && feishuFlow && (
-                    <FeishuFlowCard flow={feishuFlow} steps={storeCopy.feishuSteps} name={storeCopy.toolNames.feishu} copy={detailCopy.flow} onRetry={feishuRetry} onCancel={feishuResetFlow} />
+                    <FeishuFlowCard flow={feishuFlow} steps={storeCopy.feishuSteps} name={storeCopy.toolNames.feishu} copy={detailCopy.flow} errors={storeCopy.connectorErrors} onRetry={feishuRetry} onCancel={feishuResetFlow} />
                   )}
                   {externalAuthAvailable && selectedTool.wecomCli && wecomFlow && (
-                    <FeishuFlowCard flow={wecomFlow} steps={storeCopy.wecomSteps} name={storeCopy.toolNames.wecom} copy={detailCopy.flow} twoStep={false} onRetry={wecomRetry} onCancel={wecomResetFlow} />
+                    <FeishuFlowCard flow={wecomFlow} steps={storeCopy.wecomSteps} name={storeCopy.toolNames.wecom} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} onRetry={wecomRetry} onCancel={wecomResetFlow} />
                   )}
                   {externalAuthAvailable && selectedTool.dingtalkCli && dingtalkFlow && (
-                    <FeishuFlowCard flow={dingtalkFlow} steps={storeCopy.dingtalkSteps} name={storeCopy.toolNames.dingtalk} copy={detailCopy.flow} twoStep={false} onRetry={dingtalkRetry} onCancel={dingtalkResetFlow} />
+                    <FeishuFlowCard flow={dingtalkFlow} steps={storeCopy.dingtalkSteps} name={storeCopy.toolNames.dingtalk} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} onRetry={dingtalkRetry} onCancel={dingtalkResetFlow} />
                   )}
                   {externalAuthAvailable && selectedTool.tmeetCli && tmeetFlow && (
-                    <FeishuFlowCard flow={tmeetFlow.phase === 'error' && !detailCopy.showRawErrors ? { ...tmeetFlow, err: detailCopy.actions.operationFailed } : tmeetFlow} steps={detailCopy.tmeetSteps} name={detailCopy.tools.tmeet.title} copy={detailCopy.flow} twoStep={false} browserAuth={!!tmeetFlow.browserAuth} onRetry={tmeetRetry} onCancel={tmeetResetFlow} />
+                    <FeishuFlowCard flow={tmeetFlow} steps={detailCopy.tmeetSteps} name={detailCopy.tools.tmeet.title} copy={detailCopy.flow} errors={storeCopy.connectorErrors} twoStep={false} browserAuth={!!tmeetFlow.browserAuth} onRetry={tmeetRetry} onCancel={tmeetResetFlow} />
                   )}
                   {selectedTool.feishuCli && feishuConnected && !feishuFlow && (
                     <div className="mb-8 flex items-center gap-3 p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/30">

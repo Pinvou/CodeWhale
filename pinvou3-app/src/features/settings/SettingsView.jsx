@@ -1459,7 +1459,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         setEndpointMode(group.endpointMode || '');
         setBaseUrl(nextBaseUrl);
         setModel(nextModel);
-        if (!nameTouched) setName(p === 'local_vllm' ? settingsCopy.localModelName(nextModel) : (item.custom ? group.title : item.title));
+        if (!nameTouched) setName(p === 'local_vllm' ? settingsCopy.localModelName(nextModel) : (item.custom ? group.title : (item.title || presetProviderLabel(p, t))));
         setContextWindow(p === 'local_vllm' ? '262144' : '');
         setMaxOutput(p === 'local_vllm' ? '24576' : '');
         if (p !== 'local_vllm') {

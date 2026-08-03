@@ -148,7 +148,7 @@ fn run_connect_flow(app: &AppHandle) {
             cc::emit(
                 app,
                 "feishu:error",
-                json!({ "phase": "register", "message": e }),
+                json!({ "phase": "register", "code": "registration_failed", "message": e }),
             );
             return;
         }
@@ -157,7 +157,7 @@ fn run_connect_flow(app: &AppHandle) {
         cc::emit(
             app,
             "feishu:error",
-            json!({ "phase": "authorize", "message": e }),
+            json!({ "phase": "authorize", "code": "auth_failed", "message": e }),
         );
     }
 }
