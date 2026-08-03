@@ -2473,6 +2473,61 @@ async fn late_completion_does_not_overwrite_cancelled_outcome() {
 }
 
 #[tokio::test]
+async fn late_interruption_does_not_overwrite_cancelled_outcome() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = "agent_cancel_interrupt_race".to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "race".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        input_tx,
+        tmp.path().to_path_buf(),
+        manager.current_session_boot_id.clone(),
+    );
+    agent.mailbox = Some(mailbox);
+    manager.agents.insert(agent_id.clone(), agent);
+    manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+
+    manager.cancel_agent(&agent_id).expect("cancel wins race");
+    let checkpoint = build_subagent_checkpoint(&agent_id, "late", &[], 0, true);
+    let late = manager
+        .interrupt_with_checkpoint(&agent_id, "late interruption".to_string(), checkpoint, None)
+        .expect("late interruption is idempotently suppressed");
+
+    assert_eq!(late.status, SubAgentStatus::Cancelled);
+    assert_eq!(
+        mailbox_rx
+            .drain()
+            .into_iter()
+            .map(|envelope| envelope.message)
+            .collect::<Vec<_>>(),
+        vec![MailboxMessage::Cancelled {
+            agent_id: agent_id.clone(),
+        }],
+        "the winning cancellation must remain the only terminal mail"
+    );
+    let record = manager
+        .get_worker_record(&agent_id)
+        .expect("worker record remains");
+    assert_eq!(
+        record
+            .events
+            .iter()
+            .filter(|event| event.status.is_terminal())
+            .count(),
+        1,
+        "late interruption must not append a second terminal worker event"
+    );
+}
+
+#[tokio::test]
 async fn forkguard_explicit_cancel_publishes_reliable_terminal_mail() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
@@ -2523,6 +2578,68 @@ async fn forkguard_explicit_cancel_publishes_reliable_terminal_mail() {
     assert!(
         mailbox_rx.drain().is_empty(),
         "terminal mail must be published exactly once"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_manual_interrupt_publishes_reliable_terminal_mail() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = "agent_reliable_interrupt".to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "interrupt".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        input_tx,
+        tmp.path().to_path_buf(),
+        manager.current_session_boot_id.clone(),
+    );
+    agent.mailbox = Some(mailbox);
+    agent.task_handle = Some(tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }));
+    manager.agents.insert(agent_id.clone(), agent);
+    manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+
+    let (_, interrupted) = manager
+        .interrupt_child(&agent_id, None, "pause for review".to_string())
+        .expect("interrupt succeeds");
+
+    assert!(matches!(
+        interrupted.status,
+        SubAgentStatus::Interrupted(ref reason) if reason == "pause for review"
+    ));
+    assert!(
+        manager
+            .agents
+            .get(&agent_id)
+            .is_some_and(|agent| agent.mailbox.is_none() && agent.task_handle.is_none()),
+        "interrupted records must release runtime handles and mailbox sender"
+    );
+    assert_eq!(
+        mailbox_rx
+            .drain()
+            .into_iter()
+            .map(|envelope| envelope.message)
+            .collect::<Vec<_>>(),
+        vec![MailboxMessage::Interrupted {
+            agent_id: agent_id.clone(),
+            reason: "pause for review".to_string(),
+        }]
+    );
+
+    manager
+        .interrupt_child(&agent_id, None, "duplicate".to_string())
+        .expect("repeated interrupt stays idempotent");
+    assert!(
+        mailbox_rx.drain().is_empty(),
+        "interruption terminal mail must be published exactly once"
     );
 }
 
@@ -3208,7 +3325,7 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
     )));
     let agent_id = "agent_checkpoint_timeout".to_string();
     let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
-    let agent = SubAgent::new(
+    let mut agent = SubAgent::new(
         agent_id.clone(),
         SubAgentType::General,
         "Inspect checkpoint behavior".to_string(),
@@ -3220,12 +3337,6 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
         tmp.path().to_path_buf(),
         "boot_test".to_string(),
     );
-    {
-        let mut manager = manager.write().await;
-        manager.agents.insert(agent_id.clone(), agent);
-        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
-    }
-
     let (client, calls, _bodies) =
         delayed_chat_client(Duration::from_millis(80), "resumed answer").await;
     let mut runtime = stub_runtime().with_step_api_timeout(Duration::from_millis(50));
@@ -3234,7 +3345,13 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
     runtime.context = ToolContext::new(tmp.path());
     let (mailbox, mut mailbox_rx) =
         crate::tools::subagent::mailbox::Mailbox::new(tokio_util::sync::CancellationToken::new());
+    agent.mailbox = Some(mailbox.clone());
     runtime.mailbox = Some(mailbox);
+    {
+        let mut manager = manager.write().await;
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+    }
 
     let task = SubAgentTask {
         manager_handle: Arc::clone(&manager),
@@ -3300,6 +3417,13 @@ async fn api_timeout_preserves_checkpoint_and_returns_needs_input_without_parkin
 
     let interrupted = {
         let manager = manager.read().await;
+        assert!(
+            manager
+                .agents
+                .get(&agent_id)
+                .is_some_and(|agent| agent.mailbox.is_none()),
+            "provider interruption must release the manager mailbox sender"
+        );
         manager
             .get_result(&agent_id)
             .expect("agent should stay registered")
@@ -3797,7 +3921,7 @@ async fn admission_limit_counts_queued_and_running_workers_separately() {
 }
 
 #[tokio::test]
-async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
+async fn forkguard_cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
     let mut manager = SubAgentManager::new(PathBuf::from("."), 1)
         .with_running_heartbeat_timeout(Duration::from_millis(1));
     let (input_tx, _input_rx) = mpsc::unbounded_channel();
@@ -3816,6 +3940,8 @@ async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
     agent.task_handle = Some(tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(60)).await;
     }));
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    agent.mailbox = Some(mailbox);
     let agent_id = agent.id.clone();
     manager.agents.insert(agent_id.clone(), agent);
     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -3838,6 +3964,24 @@ async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
             .as_deref()
             .unwrap_or_default()
             .contains("Auto-cancelled")
+    );
+    assert!(
+        manager
+            .agents
+            .get(&agent_id)
+            .is_some_and(|agent| agent.mailbox.is_none()),
+        "auto-cancelled records must release the mailbox sender"
+    );
+    assert_eq!(
+        mailbox_rx
+            .drain()
+            .into_iter()
+            .map(|envelope| envelope.message)
+            .collect::<Vec<_>>(),
+        vec![MailboxMessage::Cancelled {
+            agent_id: agent_id.clone(),
+        }],
+        "auto-cleanup must publish one reliable cancellation before abort"
     );
 }
 
@@ -6357,6 +6501,37 @@ fn runtime_with_depth(
 }
 
 #[test]
+fn terminal_mailbox_message_preserves_outcome_kind() {
+    let cancelled = Ok(make_snapshot(SubAgentStatus::Cancelled));
+    assert_eq!(
+        terminal_mailbox_message("agent-cancel", &cancelled, "cancelled", None),
+        MailboxMessage::Cancelled {
+            agent_id: "agent-cancel".to_string(),
+        }
+    );
+
+    let interrupted = Ok(make_snapshot(SubAgentStatus::Interrupted(
+        "provider timed out".to_string(),
+    )));
+    assert_eq!(
+        terminal_mailbox_message("agent-interrupt", &interrupted, "interrupted", None),
+        MailboxMessage::Interrupted {
+            agent_id: "agent-interrupt".to_string(),
+            reason: "provider timed out".to_string(),
+        }
+    );
+
+    let exhausted = Ok(make_snapshot(SubAgentStatus::BudgetExhausted));
+    assert_eq!(
+        terminal_mailbox_message("agent-budget", &exhausted, "budget exhausted", None),
+        MailboxMessage::Failed {
+            agent_id: "agent-budget".to_string(),
+            error: "budget exhausted".to_string(),
+        }
+    );
+}
+
+#[test]
 fn emit_parent_completion_fires_for_direct_child() {
     let (tx, mut rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
     let runtime = runtime_with_depth(1, Some(tx));
@@ -6591,6 +6766,86 @@ async fn run_subagent_task_claims_before_delivery_and_then_finalizes() {
         "0 max_steps cannot produce a final summary, so the child must fail: {:?}",
         snapshot.status
     );
+}
+
+#[tokio::test]
+async fn forkguard_cooperative_cancel_publishes_exactly_one_cancelled_terminal_mail() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let (task_input_tx, task_input_rx) = mpsc::unbounded_channel();
+    let agent_id = "agent_cooperative_cancel".to_string();
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "cancel before first step".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        task_input_tx,
+        tmp.path().to_path_buf(),
+        "boot_test".to_string(),
+    );
+    agent.mailbox = Some(mailbox.clone());
+    {
+        let mut manager = manager.write().await;
+        manager.agents.insert(agent_id.clone(), agent);
+        manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+    }
+
+    let mut runtime = stub_runtime();
+    runtime.manager = Arc::clone(&manager);
+    runtime.context = ToolContext::new(tmp.path());
+    runtime.mailbox = Some(mailbox);
+    runtime.cancel_token.cancel();
+
+    run_subagent_task(SubAgentTask {
+        manager_handle: Arc::clone(&manager),
+        runtime,
+        agent_id: agent_id.clone(),
+        agent_type: SubAgentType::General,
+        prompt: "cancel before first step".to_string(),
+        assignment: make_assignment(),
+        allowed_tools: Some(vec![]),
+        fork_context: false,
+        started_at: Instant::now(),
+        max_steps: 1,
+        token_budget: None,
+        wall_time: DEFAULT_CHILD_WALL_TIME,
+        input_rx: task_input_rx,
+        launch_gate: None,
+    })
+    .await;
+
+    let terminal = mailbox_rx
+        .drain()
+        .into_iter()
+        .map(|envelope| envelope.message)
+        .filter(|message| {
+            matches!(
+                message,
+                MailboxMessage::Completed { .. }
+                    | MailboxMessage::Failed { .. }
+                    | MailboxMessage::Interrupted { .. }
+                    | MailboxMessage::Cancelled { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal,
+        vec![MailboxMessage::Cancelled {
+            agent_id: agent_id.clone(),
+        }]
+    );
+
+    let manager = manager.read().await;
+    let agent = manager.agents.get(&agent_id).expect("cancelled agent");
+    assert_eq!(agent.status, SubAgentStatus::Cancelled);
+    assert!(agent.mailbox.is_none());
 }
 
 #[tokio::test]
