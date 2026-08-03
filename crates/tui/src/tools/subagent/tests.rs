@@ -2642,13 +2642,9 @@ async fn forkguard_spawn_wires_lineage_and_exactly_once_terminal_mail() {
                 parent_id: "agent-parent".to_string(),
                 child_id: agent_id.clone(),
             },
-            MailboxMessage::Started {
-                agent_id: agent_id.clone(),
-                agent_type: "general".to_string(),
-            },
             MailboxMessage::Cancelled { agent_id },
         ],
-        "production spawn must publish ordered lineage and one terminal outcome"
+        "a child cancelled before its task starts must publish lineage and one terminal outcome"
     );
 }
 

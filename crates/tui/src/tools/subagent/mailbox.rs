@@ -215,22 +215,16 @@ impl Mailbox {
         Some(seq)
     }
 
-    /// Publish the authoritative lifecycle opening for an agent. Nested
-    /// agents announce their parent first so consumers can bind ownership
-    /// before observing the child's `Started` event.
-    pub(crate) fn announce_agent_started(
-        &self,
-        agent_id: &str,
-        agent_type: SubAgentType,
-        parent_agent_id: Option<&str>,
-    ) {
+    /// Publish nested-agent ownership as soon as the child is accepted. The
+    /// separate `Started` event remains owned by the execution path so a child
+    /// waiting on the launch gate is not reported as running prematurely.
+    pub(crate) fn announce_child_spawned(&self, agent_id: &str, parent_agent_id: Option<&str>) {
         if let Some(parent_id) = parent_agent_id {
             let _ = self.send(MailboxMessage::ChildSpawned {
                 parent_id: parent_id.to_string(),
                 child_id: agent_id.to_string(),
             });
         }
-        let _ = self.send(MailboxMessage::started(agent_id, agent_type));
     }
 
     /// Whether the mailbox has been closed.
@@ -351,10 +345,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forkguard_nested_agent_announces_parent_before_started() {
+    async fn forkguard_nested_agent_announces_parent_when_spawned() {
         let (mailbox, mut rx, _token) = open();
 
-        mailbox.announce_agent_started("agent-child", SubAgentType::General, Some("agent-parent"));
+        mailbox.announce_child_spawned("agent-child", Some("agent-parent"));
 
         let messages = rx
             .drain()
@@ -363,13 +357,10 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             messages,
-            vec![
-                MailboxMessage::ChildSpawned {
-                    parent_id: "agent-parent".to_string(),
-                    child_id: "agent-child".to_string(),
-                },
-                MailboxMessage::started("agent-child", SubAgentType::General),
-            ]
+            vec![MailboxMessage::ChildSpawned {
+                parent_id: "agent-parent".to_string(),
+                child_id: "agent-child".to_string(),
+            }]
         );
     }
 

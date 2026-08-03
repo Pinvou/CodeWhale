@@ -3646,11 +3646,7 @@ impl SubAgentManager {
         }
 
         if let Some(mb) = runtime.mailbox.as_ref() {
-            mb.announce_agent_started(
-                &agent_id,
-                agent_type.clone(),
-                runtime.parent_agent_id.as_deref(),
-            );
+            mb.announce_child_spawned(&agent_id, runtime.parent_agent_id.as_deref());
         }
 
         if let Some(event_tx) = runtime.event_tx.clone() {
