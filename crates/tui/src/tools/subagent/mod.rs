@@ -2178,6 +2178,11 @@ pub struct SubAgent {
     /// queued (#1961). Competing cancellation/interrupt paths must treat the
     /// claim as terminal ownership and leave the task to finalize.
     completion_claimed: bool,
+    /// Reliable lifecycle channel used by the host to converge detached
+    /// background-agent state even when the best-effort UI event queue is
+    /// saturated. Kept on the manager-owned record so explicit cancellation
+    /// can publish its terminal state before aborting the task.
+    mailbox: Option<Mailbox>,
     input_tx: Option<mpsc::UnboundedSender<SubAgentInput>>,
     task_handle: Option<JoinHandle<()>>,
 }
@@ -2221,6 +2226,7 @@ impl SubAgent {
             session_boot_id,
             workspace,
             completion_claimed: false,
+            mailbox: None,
             input_tx: Some(input_tx),
             task_handle: None,
         }
@@ -2656,6 +2662,7 @@ impl SubAgentManager {
                 // i.e. agent classified as prior-session.
                 session_boot_id: persisted.session_boot_id,
                 completion_claimed: false,
+                mailbox: None,
                 input_tx: None,
                 task_handle: None,
             };
@@ -2999,6 +3006,12 @@ impl SubAgentManager {
             agent.status = SubAgentStatus::Cancelled;
             agent.result = Some("Cancelled by parent request.".to_string());
             release_resident_leases_for(&agent.id);
+            if let Some(mailbox) = agent.mailbox.as_ref() {
+                let _ = mailbox.send(MailboxMessage::Cancelled {
+                    agent_id: agent.id.clone(),
+                });
+            }
+            agent.mailbox = None;
             if let Some(handle) = agent.task_handle.take() {
                 handle.abort();
             }
@@ -3540,6 +3553,7 @@ impl SubAgentManager {
             runtime.context.workspace.clone(),
             self.current_session_boot_id.clone(),
         );
+        agent.mailbox = runtime.mailbox.clone();
         if let Some(name) = options
             .name
             .as_deref()
@@ -3622,7 +3636,11 @@ impl SubAgentManager {
         }
 
         if let Some(mb) = runtime.mailbox.as_ref() {
-            let _ = mb.send(MailboxMessage::started(&agent_id, agent_type.clone()));
+            mb.announce_agent_started(
+                &agent_id,
+                agent_type.clone(),
+                runtime.parent_agent_id.as_deref(),
+            );
         }
 
         if let Some(event_tx) = runtime.event_tx.clone() {
@@ -3932,6 +3950,15 @@ impl SubAgentManager {
         if result.status != SubAgentStatus::Running {
             agent.input_tx = None;
         }
+        if matches!(
+            &result.status,
+            SubAgentStatus::Completed
+                | SubAgentStatus::Failed(_)
+                | SubAgentStatus::Cancelled
+                | SubAgentStatus::BudgetExhausted
+        ) {
+            agent.mailbox = None;
+        }
         agent.completion_claimed = false;
         agent.task_handle = None;
         self.complete_worker_from_result(agent_id, &result);
@@ -3951,6 +3978,7 @@ impl SubAgentManager {
         agent.status = SubAgentStatus::Failed(error.clone());
         agent.completion_claimed = false;
         release_resident_leases_for(agent_id);
+        agent.mailbox = None;
         agent.input_tx = None;
         agent.task_handle = None;
         self.fail_worker(agent_id, error);
