@@ -2473,6 +2473,60 @@ async fn late_completion_does_not_overwrite_cancelled_outcome() {
 }
 
 #[tokio::test]
+async fn forkguard_explicit_cancel_publishes_reliable_terminal_mail() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = "agent_reliable_cancel".to_string();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let mut agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "cancel".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        input_tx,
+        tmp.path().to_path_buf(),
+        manager.current_session_boot_id.clone(),
+    );
+    agent.mailbox = Some(mailbox);
+    manager.agents.insert(agent_id.clone(), agent);
+    manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+
+    manager.cancel_agent(&agent_id).expect("cancel succeeds");
+
+    assert!(
+        manager
+            .agents
+            .get(&agent_id)
+            .is_some_and(|agent| agent.mailbox.is_none()),
+        "terminal manager records must not retain the turn mailbox sender"
+    );
+
+    let messages = mailbox_rx
+        .drain()
+        .into_iter()
+        .map(|envelope| envelope.message)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        messages,
+        vec![MailboxMessage::Cancelled {
+            agent_id: agent_id.clone(),
+        }]
+    );
+
+    manager
+        .cancel_agent(&agent_id)
+        .expect("repeated cancel stays idempotent");
+    assert!(
+        mailbox_rx.drain().is_empty(),
+        "terminal mail must be published exactly once"
+    );
+}
+
+#[tokio::test]
 async fn completion_claim_preserves_running_gate_and_excludes_late_cancel() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);

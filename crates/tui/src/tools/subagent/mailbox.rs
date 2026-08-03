@@ -215,6 +215,24 @@ impl Mailbox {
         Some(seq)
     }
 
+    /// Publish the authoritative lifecycle opening for an agent. Nested
+    /// agents announce their parent first so consumers can bind ownership
+    /// before observing the child's `Started` event.
+    pub(crate) fn announce_agent_started(
+        &self,
+        agent_id: &str,
+        agent_type: SubAgentType,
+        parent_agent_id: Option<&str>,
+    ) {
+        if let Some(parent_id) = parent_agent_id {
+            let _ = self.send(MailboxMessage::ChildSpawned {
+                parent_id: parent_id.to_string(),
+                child_id: agent_id.to_string(),
+            });
+        }
+        let _ = self.send(MailboxMessage::started(agent_id, agent_type));
+    }
+
     /// Whether the mailbox has been closed.
     #[cfg(test)]
     #[must_use]
@@ -330,6 +348,29 @@ mod tests {
             MailboxMessage::Completed { .. }
         ));
         assert!(!rx.has_pending());
+    }
+
+    #[tokio::test]
+    async fn forkguard_nested_agent_announces_parent_before_started() {
+        let (mailbox, mut rx, _token) = open();
+
+        mailbox.announce_agent_started("agent-child", SubAgentType::General, Some("agent-parent"));
+
+        let messages = rx
+            .drain()
+            .into_iter()
+            .map(|envelope| envelope.message)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![
+                MailboxMessage::ChildSpawned {
+                    parent_id: "agent-parent".to_string(),
+                    child_id: "agent-child".to_string(),
+                },
+                MailboxMessage::started("agent-child", SubAgentType::General),
+            ]
+        );
     }
 
     #[tokio::test]
