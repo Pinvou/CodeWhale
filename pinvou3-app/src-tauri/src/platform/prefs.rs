@@ -136,7 +136,7 @@ pub enum ModelPreset {
     Deepseek,
     /// Kimi (Moonshot)
     Kimi,
-    /// OpenAI 兼容 API（OpenAI 官方 / 自托管 / 代理 / 其他 OpenAI 兼容厂商）
+    /// OpenAI 兼容 API（自托管 / 代理 / 其他 OpenAI 兼容厂商；OpenAI 官方请用 Openai）
     OpenaiCompatible,
     /// 通义千问 (Qwen)
     Qwen,
@@ -148,6 +148,14 @@ pub enum ModelPreset {
     Glm,
     /// 小米 MiMo
     Mimo,
+    /// OpenAI 官方 API
+    Openai,
+    /// Anthropic Claude（Messages 原生协议，底座内建 anthropic provider）
+    Anthropic,
+    /// Google Gemini（OpenAI 兼容端点）
+    Gemini,
+    /// xAI Grok
+    Xai,
 }
 
 pub const BUILTIN_LLMAPI_MODEL_ID: &str = "builtin_llmapi";
@@ -220,6 +228,9 @@ fn identify_coding_plan_endpoint(base_url: &str) -> Option<(&'static str, &'stat
         "https://open.bigmodel.cn/api/coding/paas/v4" => {
             Some(("glm", "https://open.bigmodel.cn/api/coding/paas/v4"))
         }
+        "https://api.z.ai/api/coding/paas/v4" => {
+            Some(("glm", "https://api.z.ai/api/coding/paas/v4"))
+        }
         "https://api.kimi.com/coding/v1" => Some(("kimi", "https://api.kimi.com/coding/v1")),
         "https://api.lkeap.cloud.tencent.com/coding/v3" => {
             Some(("tencent", "https://api.lkeap.cloud.tencent.com/coding/v3"))
@@ -259,6 +270,10 @@ impl ModelPreset {
             ModelPreset::Minimax => "minimax",
             ModelPreset::Glm => "glm",
             ModelPreset::Mimo => "mimo",
+            ModelPreset::Openai => "openai",
+            ModelPreset::Anthropic => "anthropic",
+            ModelPreset::Gemini => "gemini",
+            ModelPreset::Xai => "xai",
         }
     }
     /// 各预设默认 base_url(与 bridge `default_base_url_for_preset` 对齐;迁移/添加模型模板兜底)。
@@ -273,6 +288,10 @@ impl ModelPreset {
             ModelPreset::Minimax => "https://api.minimaxi.com/v1",
             ModelPreset::Glm => "https://open.bigmodel.cn/api/paas/v4",
             ModelPreset::Mimo => "https://api.xiaomimimo.com/v1",
+            ModelPreset::Openai => "https://api.openai.com/v1",
+            ModelPreset::Anthropic => "https://api.anthropic.com/v1",
+            ModelPreset::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai",
+            ModelPreset::Xai => "https://api.x.ai/v1",
         }
     }
     /// 各预设默认模型名(与 bridge `default_model_for_preset` 对齐)。
@@ -283,11 +302,15 @@ impl ModelPreset {
             ModelPreset::Deepseek => "deepseek-v4-pro",
             ModelPreset::Kimi => "kimi-k3",
             ModelPreset::OpenaiCompatible => "gpt-5.6-terra",
-            ModelPreset::Qwen => "qwen3.7-plus",
+            ModelPreset::Qwen => "qwen3.8-max",
             ModelPreset::Doubao => "doubao-seed-evolving",
             ModelPreset::Minimax => "MiniMax-M3",
             ModelPreset::Glm => "glm-5.2",
             ModelPreset::Mimo => "mimo-v2.5-pro",
+            ModelPreset::Openai => "gpt-5.6-terra",
+            ModelPreset::Anthropic => "claude-sonnet-5",
+            ModelPreset::Gemini => "gemini-3.6-flash",
+            ModelPreset::Xai => "grok-4.3",
         }
     }
 }
