@@ -78,3 +78,5 @@ Pinvou Agent 按“业务功能优先、平台适配次之”组织：
 - `pinvou3-app/src/ARCHITECTURE.md`、`pinvou3-app/src-tauri/src/README.md`、`pinvou3-app/src-tauri/config/README.md`：前端、Rust 与平台配置边界。
 - `docs/architecture-guard.md`：架构守卫规则。
 - `docs/Git Commit 信息规范文档.md`：提交信息规范。
+- `.agents/rules/windows/`：Windows 分支专属规则；在 Windows 分支工作时必须读取并遵守该目录下的全部规则文件。
+- `.agents/rules/windows-private/`：当前任务涉及私有 Windows 流程且本地目录存在时，读取其中全部规则；该目录由本地环境独立提供，不属于当前仓库。
