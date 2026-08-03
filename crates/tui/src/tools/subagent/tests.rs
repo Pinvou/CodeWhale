@@ -2582,6 +2582,77 @@ async fn forkguard_explicit_cancel_publishes_reliable_terminal_mail() {
 }
 
 #[tokio::test]
+async fn forkguard_spawn_wires_lineage_and_exactly_once_terminal_mail() {
+    let tmp = tempdir().expect("tempdir");
+    let manager = Arc::new(RwLock::new(SubAgentManager::new(
+        tmp.path().to_path_buf(),
+        2,
+    )));
+    let (mailbox, mut mailbox_rx) = Mailbox::new(CancellationToken::new());
+    let mut runtime = stub_runtime();
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    runtime.manager = Arc::clone(&manager);
+    runtime.mailbox = Some(mailbox);
+    runtime.parent_agent_id = Some("agent-parent".to_string());
+    runtime.spawn_depth = 2;
+
+    let (agent_id, cancelled) = {
+        // Keep the manager write lock from the production spawn through
+        // cancellation. The spawned task cannot claim completion first, so
+        // this test exercises the real wiring without scheduler races or a
+        // live model request.
+        let mut manager = manager.write().await;
+        let spawned = manager
+            .spawn_background_with_assignment_options(
+                Arc::clone(&runtime.manager),
+                runtime,
+                SubAgentType::General,
+                "cancel before first poll".to_string(),
+                make_assignment(),
+                Some(vec![]),
+                SubAgentSpawnOptions::default(),
+            )
+            .expect("production spawn succeeds");
+        let agent_id = spawned.agent_id;
+        let cancelled = manager
+            .cancel_agent(&agent_id)
+            .expect("immediate cancellation succeeds");
+        manager
+            .cancel_agent(&agent_id)
+            .expect("repeated cancellation remains idempotent");
+        assert!(
+            manager
+                .agents
+                .get(&agent_id)
+                .is_some_and(|agent| { agent.mailbox.is_none() && agent.task_handle.is_none() }),
+            "terminal records must release their mailbox and task handle"
+        );
+        (agent_id, cancelled)
+    };
+
+    assert_eq!(cancelled.status, SubAgentStatus::Cancelled);
+    assert_eq!(
+        mailbox_rx
+            .drain()
+            .into_iter()
+            .map(|envelope| envelope.message)
+            .collect::<Vec<_>>(),
+        vec![
+            MailboxMessage::ChildSpawned {
+                parent_id: "agent-parent".to_string(),
+                child_id: agent_id.clone(),
+            },
+            MailboxMessage::Started {
+                agent_id: agent_id.clone(),
+                agent_type: "general".to_string(),
+            },
+            MailboxMessage::Cancelled { agent_id },
+        ],
+        "production spawn must publish ordered lineage and one terminal outcome"
+    );
+}
+
+#[tokio::test]
 async fn forkguard_manual_interrupt_publishes_reliable_terminal_mail() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
@@ -6528,6 +6599,59 @@ fn terminal_mailbox_message_preserves_outcome_kind() {
             agent_id: "agent-budget".to_string(),
             error: "budget exhausted".to_string(),
         }
+    );
+}
+
+#[test]
+fn running_task_result_is_normalized_before_mailbox_and_manager_commit() {
+    let normalized = normalize_terminal_result(Ok(make_snapshot(SubAgentStatus::Running)))
+        .expect("normalization preserves a structured result");
+    let expected_error = NON_TERMINAL_SUBAGENT_RESULT_ERROR;
+    assert_eq!(
+        normalized.status,
+        SubAgentStatus::Failed(expected_error.to_string())
+    );
+    assert_eq!(normalized.result.as_deref(), Some(expected_error));
+    assert_eq!(
+        terminal_mailbox_message(
+            "agent-normalized",
+            &Ok(normalized.clone()),
+            expected_error,
+            None,
+        ),
+        MailboxMessage::Failed {
+            agent_id: "agent-normalized".to_string(),
+            error: expected_error.to_string(),
+        }
+    );
+
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = SubAgentManager::new(tmp.path().to_path_buf(), 2);
+    let agent_id = normalized.agent_id.clone();
+    let (input_tx, _input_rx) = mpsc::unbounded_channel();
+    let agent = SubAgent::new(
+        agent_id.clone(),
+        SubAgentType::General,
+        "normalize".to_string(),
+        make_assignment(),
+        "deepseek-v4-flash".to_string(),
+        None,
+        None,
+        input_tx,
+        tmp.path().to_path_buf(),
+        manager.current_session_boot_id.clone(),
+    );
+    manager.agents.insert(agent_id.clone(), agent);
+    manager.register_worker(make_worker_spec(&agent_id, tmp.path().to_path_buf()));
+    assert!(manager.claim_terminal_delivery(&agent_id));
+    assert!(manager.update_from_result(&agent_id, normalized));
+    assert_eq!(
+        manager
+            .get_result(&agent_id)
+            .expect("committed result")
+            .status,
+        SubAgentStatus::Failed(expected_error.to_string()),
+        "mailbox and manager must observe the same normalized failure"
     );
 }
 
