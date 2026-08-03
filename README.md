@@ -1,17 +1,33 @@
 # PINVOU
 
-**能调用工具、操作文件、沉淀知识并交付产物的桌面 AI 工作台。**
+**面向工作、设计与代码的桌面 AI Agent 工作台。**
 
-PINVOU 不只是一个聊天界面。它把模型、工具、个人知识、专家角色和工作流放进同一个桌面应用，让 AI 从“回答问题”进一步走到“完成任务”。模型既可以运行在本地，也可以接入 OpenAI-compatible 服务；工具与连接器按需启用。
+PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件开发放进同一个桌面应用，让 AI 从“回答问题”进一步走到“完成任务”。你可以让它调用工具、处理文件和沉淀知识，也可以通过 ACP 驱动专业代码 Agent，或把一句描述变成可继续编辑的视觉产物。
+
+模型既可以运行在本地，也可以接入 OpenAI-compatible 服务；工具、Skills 与连接器按需启用。
 
 <p align="center">
   <a href="https://pinvou.com/assets/videos/pinvou-agent-feature-update-2026-07.mp4">
-    <img src="资料包/shots-web/home.webp" alt="观看 PINVOU 90 秒功能演示">
+    <img src="docs/assets/screenshots/mode-work.webp" alt="PINVOU 工作模式">
   </a>
 </p>
 <p align="center">
   <a href="https://pinvou.com/assets/videos/pinvou-agent-feature-update-2026-07.mp4"><strong>▶ 观看 90 秒功能演示：7 月 17—23 日功能更新</strong></a>
 </p>
+
+## 三种工作方式
+
+### 工作：让 AI 处理真实任务
+
+结合文件附件、个人知识、专家角色、Skills、MCP 工具和工作流，完成资料整理、公文写作、信息检索、业务分析等任务，并把结果交付为可继续使用的文件，而不只是一段聊天回复。
+
+### 设计：从一句描述到可编辑的视觉产物
+
+用自然语言生成海报和数据可视化产物。生成后可以直接进入编辑模式，选中画面中的元素，调整文案、字体、颜色、尺寸和布局；也可以继续描述要求，让 AI 在当前设计上迭代。
+
+### 代码：把代码 Agent 带进真实项目
+
+通过 [ACP](docs/multi-agent-acp.md) 在同一工作台中使用 Codex、Claude Code 和 Kimi。代码 Agent 可以在真实项目目录或隔离的临时工作区中阅读和修改代码、运行命令，并展示计划、工具步骤、权限请求和文件变化；会话与工作区绑定，可在应用重启后继续。
 
 ## 能做什么
 
@@ -48,6 +64,14 @@ PINVOU 不只是一个聊天界面。它把模型、工具、个人知识、专�
 > 数据是否离开本机取决于你选择的模型服务和工具。使用本地模型与本地工具时可保持本地闭环；启用云模型、远程 MCP 或第三方连接器时，相关请求会发送给对应服务。
 
 <table>
+  <tr>
+    <td width="50%"><img src="docs/assets/screenshots/mode-design.webp" alt="PINVOU 设计模式"></td>
+    <td width="50%"><img src="docs/assets/screenshots/mode-code.webp" alt="PINVOU 代码模式"></td>
+  </tr>
+  <tr>
+    <td align="center">设计模式：海报与数据可视化</td>
+    <td align="center">代码模式：Codex、Claude Code 与 Kimi</td>
+  </tr>
   <tr>
     <td width="50%"><img src="资料包/shots-web/toolStore.webp" alt="工具商店"></td>
     <td width="50%"><img src="资料包/shots-web/artifacts-preview.webp" alt="产物预览"></td>
