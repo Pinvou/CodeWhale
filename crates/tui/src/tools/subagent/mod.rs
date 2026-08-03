@@ -5873,6 +5873,8 @@ struct SubAgentTask {
     launch_gate: Option<Arc<Semaphore>>,
 }
 
+const NON_TERMINAL_SUBAGENT_RESULT_ERROR: &str = "sub-agent task returned a non-terminal status";
+
 fn terminal_mailbox_message(
     agent_id: &str,
     result: &Result<SubAgentResult>,
@@ -5898,7 +5900,7 @@ fn terminal_mailbox_message(
             },
             SubAgentStatus::Running => MailboxMessage::Failed {
                 agent_id: agent_id.to_string(),
-                error: "sub-agent task returned a non-terminal status".to_string(),
+                error: NON_TERMINAL_SUBAGENT_RESULT_ERROR.to_string(),
             },
         },
         Err(_) => MailboxMessage::Failed {
@@ -5907,6 +5909,18 @@ fn terminal_mailbox_message(
                 .expect("failed task should carry annotated error")
                 .to_string(),
         },
+    }
+}
+
+fn normalize_terminal_result(result: Result<SubAgentResult>) -> Result<SubAgentResult> {
+    match result {
+        Ok(mut result) if result.status == SubAgentStatus::Running => {
+            let error = NON_TERMINAL_SUBAGENT_RESULT_ERROR.to_string();
+            result.status = SubAgentStatus::Failed(error.clone());
+            result.result = Some(error);
+            Ok(result)
+        }
+        other => other,
     }
 }
 
@@ -5969,6 +5983,7 @@ async fn run_subagent_task(task: SubAgentTask) {
         .await
         .unwrap_or_else(|_| Err(anyhow!(child_wall_time_exhausted_reason(task.wall_time))))
     };
+    let result = normalize_terminal_result(result);
 
     // Emit BOTH a human-friendly summary (rendered in the parent's
     // sidebar / cell) AND a structured sentinel the model can recognize
