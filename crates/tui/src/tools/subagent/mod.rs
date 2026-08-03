@@ -2262,6 +2262,17 @@ impl SubAgent {
             from_prior_session: false,
         }
     }
+
+    /// Publish a manager-owned terminal outcome exactly once, then release
+    /// the retained sender so terminal records cannot keep a turn mailbox
+    /// alive. Natural task completion uses the task runtime after winning the
+    /// completion claim; forced manager transitions use this path instead.
+    fn publish_terminal_mailbox(&mut self, message: MailboxMessage) {
+        debug_assert_eq!(message.agent_id(), self.id);
+        if let Some(mailbox) = self.mailbox.take() {
+            let _ = mailbox.send(message);
+        }
+    }
 }
 
 /// Manager for active sub-agents.
@@ -3006,12 +3017,9 @@ impl SubAgentManager {
             agent.status = SubAgentStatus::Cancelled;
             agent.result = Some("Cancelled by parent request.".to_string());
             release_resident_leases_for(&agent.id);
-            if let Some(mailbox) = agent.mailbox.as_ref() {
-                let _ = mailbox.send(MailboxMessage::Cancelled {
-                    agent_id: agent.id.clone(),
-                });
-            }
-            agent.mailbox = None;
+            agent.publish_terminal_mailbox(MailboxMessage::Cancelled {
+                agent_id: agent.id.clone(),
+            });
             if let Some(handle) = agent.task_handle.take() {
                 handle.abort();
             }
@@ -3210,20 +3218,22 @@ impl SubAgentManager {
             })
         };
 
-        // Abort the live task after snapshotting prior state.
-        {
+        // Detach the live handles first, publish the durable interruption, and
+        // only then abort. This preserves terminal delivery even though abort
+        // prevents the task epilogue from running.
+        let task_handle = {
             let agent = self
                 .agents
                 .get_mut(&agent_id)
                 .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
-            if let Some(handle) = agent.task_handle.take() {
-                handle.abort();
-            }
             agent.input_tx = None;
-        }
-        release_resident_leases_for(&agent_id);
+            agent.task_handle.take()
+        };
 
         let snapshot = self.interrupt_with_checkpoint(&agent_id, reason, checkpoint, None)?;
+        if let Some(handle) = task_handle {
+            handle.abort();
+        }
         Ok((prior, snapshot))
     }
 
@@ -3834,6 +3844,9 @@ impl SubAgentManager {
                     timeout.as_secs()
                 ));
                 release_resident_leases_for(&agent.id);
+                agent.publish_terminal_mailbox(MailboxMessage::Cancelled {
+                    agent_id: agent.id.clone(),
+                });
                 if let Some(handle) = agent.task_handle.take() {
                     handle.abort();
                 }
@@ -3954,6 +3967,7 @@ impl SubAgentManager {
             &result.status,
             SubAgentStatus::Completed
                 | SubAgentStatus::Failed(_)
+                | SubAgentStatus::Interrupted(_)
                 | SubAgentStatus::Cancelled
                 | SubAgentStatus::BudgetExhausted
         ) {
@@ -4012,13 +4026,22 @@ impl SubAgentManager {
                 .agents
                 .get_mut(agent_id)
                 .ok_or_else(|| anyhow!("Agent {agent_id} not found"))?;
+            if agent.status != SubAgentStatus::Running || agent.completion_claimed {
+                return Ok(agent.snapshot());
+            }
             agent.status = SubAgentStatus::Interrupted(reason.clone());
-            agent.result = Some(reason);
+            agent.result = Some(reason.clone());
             agent.steps_taken = checkpoint.steps_taken;
             agent.checkpoint = Some(checkpoint);
             agent.needs_input = needs_input;
             agent.last_activity_at = Instant::now();
             release_resident_leases_for(agent_id);
+            agent.publish_terminal_mailbox(MailboxMessage::Interrupted {
+                agent_id: agent_id.to_string(),
+                reason: reason.clone(),
+            });
+            agent.input_tx = None;
+            agent.task_handle = None;
             agent.snapshot()
         };
         self.record_worker_event(
@@ -5850,6 +5873,43 @@ struct SubAgentTask {
     launch_gate: Option<Arc<Semaphore>>,
 }
 
+fn terminal_mailbox_message(
+    agent_id: &str,
+    result: &Result<SubAgentResult>,
+    summary: &str,
+    failure_error: Option<&str>,
+) -> MailboxMessage {
+    match result {
+        Ok(res) => match &res.status {
+            SubAgentStatus::Completed => MailboxMessage::Completed {
+                agent_id: agent_id.to_string(),
+                summary: summary.to_string(),
+            },
+            SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted => MailboxMessage::Failed {
+                agent_id: agent_id.to_string(),
+                error: summary.to_string(),
+            },
+            SubAgentStatus::Interrupted(reason) => MailboxMessage::Interrupted {
+                agent_id: agent_id.to_string(),
+                reason: reason.clone(),
+            },
+            SubAgentStatus::Cancelled => MailboxMessage::Cancelled {
+                agent_id: agent_id.to_string(),
+            },
+            SubAgentStatus::Running => MailboxMessage::Failed {
+                agent_id: agent_id.to_string(),
+                error: "sub-agent task returned a non-terminal status".to_string(),
+            },
+        },
+        Err(_) => MailboxMessage::Failed {
+            agent_id: agent_id.to_string(),
+            error: failure_error
+                .expect("failed task should carry annotated error")
+                .to_string(),
+        },
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_subagent_task(task: SubAgentTask) {
     let deadline = task.started_at + task.wall_time;
@@ -5995,27 +6055,8 @@ async fn run_subagent_task(task: SubAgentTask) {
     }
 
     if let Some(mb) = task.runtime.mailbox.as_ref() {
-        let envelope = match &result {
-            Ok(res) => match &res.status {
-                SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted => {
-                    MailboxMessage::Failed {
-                        agent_id: task.agent_id.clone(),
-                        error: summary.clone(),
-                    }
-                }
-                _ => MailboxMessage::Completed {
-                    agent_id: task.agent_id.clone(),
-                    summary: summary.clone(),
-                },
-            },
-            Err(_) => MailboxMessage::Failed {
-                agent_id: task.agent_id.clone(),
-                error: failure_error
-                    .as_ref()
-                    .expect("failed task should carry annotated error")
-                    .clone(),
-            },
-        };
+        let envelope =
+            terminal_mailbox_message(&task.agent_id, &result, &summary, failure_error.as_deref());
         let _ = mb.send(envelope);
     }
 
@@ -6929,11 +6970,6 @@ async fn run_subagent(
                 &agent_id,
                 format!("{}: cancelled", format_step_counter(steps, max_steps)),
             );
-            if let Some(mb) = runtime.mailbox.as_ref() {
-                let _ = mb.send(MailboxMessage::Cancelled {
-                    agent_id: agent_id.clone(),
-                });
-            }
             let status = SubAgentStatus::Cancelled;
             let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             insert_subagent_full_transcript_handle(
@@ -7075,11 +7111,6 @@ async fn run_subagent(
                     &agent_id,
                     format!("{}: cancelled mid-request", format_step_counter(steps, max_steps)),
                 );
-                if let Some(mb) = runtime.mailbox.as_ref() {
-                    let _ = mb.send(MailboxMessage::Cancelled {
-                        agent_id: agent_id.clone(),
-                    });
-                }
                 let status = SubAgentStatus::Cancelled;
                 let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
                 insert_subagent_full_transcript_handle(
@@ -7174,6 +7205,12 @@ async fn run_subagent(
                                 Some(needs_input.clone()),
                             )?
                         };
+                        if !matches!(
+                            interrupted_snapshot.status,
+                            SubAgentStatus::Interrupted(_)
+                        ) {
+                            return Ok(interrupted_snapshot);
+                        }
                         record_agent_progress(
                             runtime,
                             &agent_id,
@@ -7183,12 +7220,6 @@ async fn run_subagent(
                                 needs_input.question
                             ),
                         );
-                        if let Some(mb) = runtime.mailbox.as_ref() {
-                            let _ = mb.send(MailboxMessage::Interrupted {
-                                agent_id: agent_id.clone(),
-                                reason: reason.clone(),
-                            });
-                        }
                         return Ok(interrupted_snapshot);
                     }
                 }
@@ -7230,11 +7261,6 @@ async fn run_subagent(
                     format_step_counter(steps, max_steps)
                 ),
             );
-            if let Some(mb) = runtime.mailbox.as_ref() {
-                let _ = mb.send(MailboxMessage::Cancelled {
-                    agent_id: agent_id.clone(),
-                });
-            }
             let status = SubAgentStatus::BudgetExhausted;
             let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
             latest_checkpoint = Some(

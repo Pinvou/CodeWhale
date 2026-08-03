@@ -55,8 +55,8 @@ pub enum MailboxMessage {
     Completed { agent_id: String, summary: String },
     /// Agent failed with the carried error message.
     Failed { agent_id: String, error: String },
-    /// Agent was interrupted (e.g. API timeout) with a continuable
-    /// checkpoint; the worker is parked waiting for continuation input.
+    /// Agent execution stopped (e.g. API timeout) with a continuable
+    /// checkpoint that can be re-dispatched explicitly.
     Interrupted { agent_id: String, reason: String },
     /// Cancellation propagated to this agent.
     Cancelled { agent_id: String },
