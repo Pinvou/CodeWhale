@@ -40,8 +40,6 @@ fn main() {
         .join(target_os)
         .join(target_arch)
         .join("bundle");
-    let connector_cli_hash = hash_dir(&platform_bundle.join("connectors"));
-    println!("cargo:rustc-env=BUNDLE_CONNECTOR_CLI_HASH={connector_cli_hash:016x}");
     let h3c_cli_hash = hash_dir(Path::new("resources/common/bundle/eip"))
         ^ hash_dir(Path::new("resources/common/bundle/zhidao"))
         ^ hash_dir(&platform_bundle.join("eip"))

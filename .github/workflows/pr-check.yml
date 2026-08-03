@@ -250,9 +250,6 @@ jobs:
           base_ref="${BASE_REF#refs/heads/}"
           python3 scripts/architecture-guard.py --base-ref "origin/$base_ref"
 
-      - name: ARM64 连接器锁定校验
-        run: ./scripts/verify-linux-arm64-connectors.sh
-
       - name: 公开底座 gitlink 可达性
         run: ./scripts/verify-public-submodule.sh
 

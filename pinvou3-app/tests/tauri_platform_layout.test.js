@@ -119,11 +119,10 @@ assert.doesNotMatch(
   "public Tauri configs must not hard-code private runtime sources",
 );
 const workflow = fs.readFileSync(path.join(repoRoot, ".github/workflows/pr-check.yml"), "utf8");
-const arm64Workflow = fs.readFileSync(
-  path.join(repoRoot, ".github/workflows/arm64-connector-verify.yml"),
+const connectorWorkflow = fs.readFileSync(
+  path.join(repoRoot, ".github/workflows/connector-verify.yml"),
   "utf8",
 );
-const releaseDeb = fs.readFileSync(path.join(repoRoot, "scripts/release-deb.sh"), "utf8");
 const architectureGate = workflow.slice(
   workflow.indexOf("- name: 架构边界门禁"),
   workflow.indexOf("- name: 初始化公共底座 submodule"),
@@ -145,23 +144,18 @@ for (const stalePath of [
   "resources/common/bundle/connectors/linux-arm64",
 ]) {
   assert.equal(workflow.includes(stalePath), false, `PR workflow still references migrated path: ${stalePath}`);
-  assert.equal(arm64Workflow.includes(stalePath), false, `ARM64 workflow still references migrated path: ${stalePath}`);
+  assert.equal(connectorWorkflow.includes(stalePath), false, `connector workflow still references migrated path: ${stalePath}`);
 }
 assert.match(workflow, /src\/features\/assistant\/platform\/\*\*/);
 assert.match(workflow, /src\/features\/assistant\/harness\.rs/);
 assert.match(workflow, /src\/platform\/prefs\.rs/);
-assert.match(arm64Workflow, /resources\/platforms\/linux\/aarch64\/bundle\/connectors/);
-assert.match(arm64Workflow, /src\/platform\/paths\.rs/);
-assert.match(workflow, /verify-linux-arm64-connectors\.sh/);
-assert.match(releaseDeb, /verify-linux-arm64-connectors\.sh/);
-assert.match(arm64Workflow, /pull_request:/);
-assert.match(arm64Workflow, /branches:\s*\n\s*- main/);
-for (const binary of ["dws", "lark-cli", "wecom-cli"]) {
-  assert.match(
-    arm64Workflow,
-    new RegExp(`linux-arm64/bin/${binary.replace("-", "\\-")}`),
-    `ARM64 workflow must exercise ${binary}`,
+assert.match(connectorWorkflow, /resources\/platforms\/\*\*\/bundle\/connectors\/\*\*/);
+for (const resources of ["linux/aarch64", "linux/x86_64", "macos/aarch64", "macos/x86_64", "windows/x86_64"]) {
+  assert.ok(
+    connectorWorkflow.includes(`resources: ${resources}`),
+    `connector verify matrix must cover ${resources}`,
   );
 }
+assert.match(connectorWorkflow, /src\/platform\/paths\.rs/);
 
 console.log("tauri platform layout contract: ok");

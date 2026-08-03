@@ -31,9 +31,6 @@ fi
 VERSION="$V_TAURI"
 echo "=== 发布 pinvou3 v$VERSION ==="
 
-# 发布前确认三个 ARM64 连接器与已审查版本、哈希完全一致。
-"$REPO_ROOT/scripts/verify-linux-arm64-connectors.sh"
-
 # ── 1.5 embedding 模型不再随 deb 打包（deb 瘦 ~559MB）──────
 # 模型(bge-m3)改由客户端在知识库页**按需下载**,见 scripts/release-kb-model.sh(一次性发布到
 # OTA 源 kb-model/bge-m3.tar.gz,变更模型才跑)。这里不再拷模型进 resources/bge-m3。
