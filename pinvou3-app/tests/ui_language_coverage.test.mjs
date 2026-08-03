@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dict } from '../src/shared/i18n.js';
+import '../src/features/settings/settings-i18n.js';
 import { errorCode, localizedErrorMessage } from '../src/shared/user-facing-error.js';
 import {
   applyConnectorFailure,

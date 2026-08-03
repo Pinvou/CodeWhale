@@ -127,350 +127,15 @@ impl Language {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelPreset {
-    /// 默认本地 vLLM：qwen36_35b_256k @ 127.0.0.1:8000/v1
-    LocalVllm,
-    /// DeepSeek 官方 API
-    Deepseek,
-    /// Kimi (Moonshot)
-    Kimi,
-    /// OpenAI 兼容 API（自托管 / 代理 / 其他 OpenAI 兼容厂商；OpenAI 官方请用 Openai）
-    OpenaiCompatible,
-    /// 通义千问 (Qwen)
-    Qwen,
-    /// 豆包 (火山方舟)
-    Doubao,
-    /// MiniMax
-    Minimax,
-    /// 智谱 GLM
-    Glm,
-    /// 小米 MiMo
-    Mimo,
-    /// OpenAI 官方 API
-    Openai,
-    /// Anthropic Claude（Messages 原生协议，底座内建 anthropic provider）
-    Anthropic,
-    /// Google Gemini（OpenAI 兼容端点）
-    Gemini,
-    /// xAI Grok
-    Xai,
-}
-
-pub const BUILTIN_LLMAPI_MODEL_ID: &str = "builtin_llmapi";
-pub const BUILTIN_LLMAPI_MODEL_NAME: &str = "内置模型";
-pub const BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL: &str = "https://www.ma-xiao.com/llmapi/v1";
-pub const BUILTIN_LLMAPI_DEFAULT_MODEL: &str = "deepseek-v4-flash";
-
-pub fn select_builtin_llmapi_model(
-    available_models: &[String],
-    configured_default: Option<&str>,
-) -> String {
-    let configured = configured_default
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(configured) = configured {
-        if available_models.iter().any(|model| model == configured) {
-            return configured.to_string();
-        }
-    }
-    if available_models
-        .iter()
-        .any(|model| model == BUILTIN_LLMAPI_DEFAULT_MODEL)
-    {
-        return BUILTIN_LLMAPI_DEFAULT_MODEL.to_string();
-    }
-    available_models
-        .first()
-        .cloned()
-        .unwrap_or_else(|| BUILTIN_LLMAPI_DEFAULT_MODEL.to_string())
-}
-
-pub const MODEL_PROVIDER_KIND_CODING_PLAN: &str = "coding_plan";
-pub const MODEL_PROVIDER_KIND_OFFICIAL_API: &str = "official_api";
-pub const MODEL_PROVIDER_KIND_CUSTOM: &str = "custom";
-
-fn trim_url_tail(value: &str) -> String {
-    value.trim().trim_end_matches('/').to_string()
-}
-
-fn strip_chat_completions_suffix(value: &str) -> String {
-    let trimmed = trim_url_tail(value);
-    let lower = trimmed.to_ascii_lowercase();
-    if lower.ends_with("/chat/completions") {
-        trimmed[..trimmed.len() - "/chat/completions".len()].to_string()
-    } else {
-        trimmed
-    }
-}
-
-fn migrated_minimax_base_url(value: &str) -> Option<String> {
-    const LEGACY_ORIGIN: &str = "https://api.minimax.chat";
-    const CURRENT_ORIGIN: &str = "https://api.minimaxi.com";
-
-    let trimmed = value.trim().trim_end_matches('/');
-    let lower = trimmed.to_ascii_lowercase();
-    if lower == LEGACY_ORIGIN {
-        return Some(CURRENT_ORIGIN.to_string());
-    }
-    lower.strip_prefix(LEGACY_ORIGIN).and_then(|suffix| {
-        suffix
-            .starts_with('/')
-            .then(|| format!("{CURRENT_ORIGIN}{}", &trimmed[LEGACY_ORIGIN.len()..]))
-    })
-}
-
-fn identify_coding_plan_endpoint(base_url: &str) -> Option<(&'static str, &'static str)> {
-    let base = strip_chat_completions_suffix(base_url);
-    let normalized = base.to_ascii_lowercase();
-    match normalized.as_str() {
-        "https://open.bigmodel.cn/api/coding/paas/v4" => {
-            Some(("glm", "https://open.bigmodel.cn/api/coding/paas/v4"))
-        }
-        "https://api.z.ai/api/coding/paas/v4" => {
-            Some(("glm", "https://api.z.ai/api/coding/paas/v4"))
-        }
-        "https://api.kimi.com/coding/v1" => Some(("kimi", "https://api.kimi.com/coding/v1")),
-        "https://api.lkeap.cloud.tencent.com/coding/v3" => {
-            Some(("tencent", "https://api.lkeap.cloud.tencent.com/coding/v3"))
-        }
-        "https://api.lkeap.cloud.tencent.com/plan/v3" => {
-            Some(("tencent", "https://api.lkeap.cloud.tencent.com/plan/v3"))
-        }
-        _ => None,
-    }
-}
-
-impl Default for ModelPreset {
-    /// 平台感知默认预设:macOS/Windows 无本地 vLLM 支持(相关后端命令已 cfg 掉),
-    /// 默认到 DeepSeek 远程 API,否则新用户首启即落在 127.0.0.1:8000 永远连不上。
-    /// Linux 保持 LocalVllm(麒麟环境默认有本地大模型)。
-    fn default() -> Self {
-        #[cfg(target_os = "linux")]
-        {
-            ModelPreset::LocalVllm
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            ModelPreset::Deepseek
-        }
-    }
-}
-impl ModelPreset {
-    /// 与前端 preset key、settings.json 序列化值一致的稳定串(snake_case)。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ModelPreset::LocalVllm => "local_vllm",
-            ModelPreset::Deepseek => "deepseek",
-            ModelPreset::Kimi => "kimi",
-            ModelPreset::OpenaiCompatible => "openai_compatible",
-            ModelPreset::Qwen => "qwen",
-            ModelPreset::Doubao => "doubao",
-            ModelPreset::Minimax => "minimax",
-            ModelPreset::Glm => "glm",
-            ModelPreset::Mimo => "mimo",
-            ModelPreset::Openai => "openai",
-            ModelPreset::Anthropic => "anthropic",
-            ModelPreset::Gemini => "gemini",
-            ModelPreset::Xai => "xai",
-        }
-    }
-    /// 各预设默认 base_url(与 bridge `default_base_url_for_preset` 对齐;迁移/添加模型模板兜底)。
-    pub fn default_base_url(&self) -> &'static str {
-        match self {
-            ModelPreset::LocalVllm => "http://127.0.0.1:8000/v1",
-            ModelPreset::Deepseek => "https://api.deepseek.com",
-            ModelPreset::Kimi => "https://api.moonshot.cn/v1",
-            ModelPreset::OpenaiCompatible => "https://api.openai.com/v1",
-            ModelPreset::Qwen => "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            ModelPreset::Doubao => "https://ark.cn-beijing.volces.com/api/v3",
-            ModelPreset::Minimax => "https://api.minimaxi.com/v1",
-            ModelPreset::Glm => "https://open.bigmodel.cn/api/paas/v4",
-            ModelPreset::Mimo => "https://api.xiaomimimo.com/v1",
-            ModelPreset::Openai => "https://api.openai.com/v1",
-            ModelPreset::Anthropic => "https://api.anthropic.com/v1",
-            ModelPreset::Gemini => "https://generativelanguage.googleapis.com/v1beta/openai",
-            ModelPreset::Xai => "https://api.x.ai/v1",
-        }
-    }
-    /// 各预设默认模型名(与 bridge `default_model_for_preset` 对齐)。
-    /// LocalVllm 的 `qwen36_35b_256k` 后缀语义见 bridge `LOCAL_VLLM_MODEL`。
-    pub fn default_model(&self) -> &'static str {
-        match self {
-            ModelPreset::LocalVllm => "qwen36_35b_256k",
-            ModelPreset::Deepseek => "deepseek-v4-pro",
-            ModelPreset::Kimi => "kimi-k3",
-            ModelPreset::OpenaiCompatible => "gpt-5.6-terra",
-            ModelPreset::Qwen => "qwen3.8-max",
-            ModelPreset::Doubao => "doubao-seed-evolving",
-            ModelPreset::Minimax => "MiniMax-M3",
-            ModelPreset::Glm => "glm-5.2",
-            ModelPreset::Mimo => "mimo-v2.5-pro",
-            ModelPreset::Openai => "gpt-5.6-terra",
-            ModelPreset::Anthropic => "claude-sonnet-5",
-            ModelPreset::Gemini => "gemini-3.6-flash",
-            ModelPreset::Xai => "grok-4.3",
-        }
-    }
-}
-
-/// Search 后端选择。
-/// - `Bing`(默认): HTML scrape,无需 key,但对中文长复合查询相关性差。
-///   DDG 在 GFW + 代理 datacenter IP 段下基本恒返 anomaly-modal,
-///   所以底座 fork patch #42 已把默认翻成 Bing,这里前端默认对齐。
-/// - `Metaso` / `Bocha` / `Baidu`: 国内 AI 搜索 API,中文场景相关性远好于 Bing scrape。
-///   Metaso 留空 key 走底座内置共享 key(~100 次/天);Bocha/Baidu 必须填 key。
-/// - `Tavily`: 海外 agent 搜索 API(<https://app.tavily.com/> 拿 `tvly-` key,API 实际打
-///   `api.tavily.com`)。结果是干净抽取的 content 而非 HTML scrape,质量好;但要稳定外网 +
-///   自带额度,key 必填(留空底座直接报 "requires API key")。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum SearchProvider {
-    Bing,
-    Metaso,
-    Bocha,
-    Baidu,
-    Tavily,
-}
-impl Default for SearchProvider {
-    fn default() -> Self {
-        SearchProvider::Bing
-    }
-}
-
-impl SearchProvider {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            SearchProvider::Bing => "bing",
-            SearchProvider::Metaso => "metaso",
-            SearchProvider::Bocha => "bocha",
-            SearchProvider::Baidu => "baidu",
-            SearchProvider::Tavily => "tavily",
-        }
-    }
-
-    pub fn supports_api_key(self) -> bool {
-        !matches!(self, SearchProvider::Bing)
-    }
-
-    pub fn env_key_names(self) -> &'static [&'static str] {
-        match self {
-            SearchProvider::Metaso => &["METASO_API_KEY"],
-            SearchProvider::Baidu => &["BAIDU_SEARCH_API_KEY"],
-            SearchProvider::Bing | SearchProvider::Bocha | SearchProvider::Tavily => &[],
-        }
-    }
-
-    pub fn credential_reference(self) -> CredentialReference {
-        CredentialReference::for_search_provider(self.as_str())
-    }
-}
-
-fn default_enabled_search_providers() -> Vec<SearchProvider> {
-    vec![SearchProvider::Bing]
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SearchCredential {
-    #[serde(default, skip_serializing)]
-    pub api_key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_ref: Option<CredentialReference>,
-    #[serde(default)]
-    pub credential_state: CredentialState,
-    #[serde(default)]
-    pub has_secret: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_action: Option<CredentialEditAction>,
-}
-
-impl SearchCredential {
-    pub fn clear_plaintext_key(&mut self) {
-        self.api_key.clear();
-        self.credential_action = None;
-    }
-
-    pub fn mark_configured(&mut self, reference: CredentialReference) {
-        self.credential_ref = Some(reference);
-        self.credential_state = CredentialState::Configured;
-        self.has_secret = true;
-        self.clear_plaintext_key();
-    }
-
-    pub fn mark_missing(&mut self) {
-        self.credential_ref = None;
-        self.credential_state = CredentialState::Missing;
-        self.has_secret = false;
-        self.clear_plaintext_key();
-    }
-
-    pub fn mark_unavailable(&mut self) {
-        self.credential_state = CredentialState::Unavailable;
-        self.has_secret = self.credential_ref.is_some();
-        self.clear_plaintext_key();
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct SearchPrefs {
-    pub provider: SearchProvider,
-    #[serde(default = "default_enabled_search_providers")]
-    pub enabled_providers: Vec<SearchProvider>,
-    /// 当 `provider = Metaso` 时:None 走底座内置共享 key。
-    /// 当 `provider = Bocha`/`Baidu` 时:None 会让 web_search 直接报错(必填)。
-    #[serde(default, skip_serializing)]
-    pub api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub credentials: BTreeMap<SearchProvider, SearchCredential>,
-}
-
-impl Default for SearchPrefs {
-    fn default() -> Self {
-        Self {
-            provider: SearchProvider::Bing,
-            enabled_providers: default_enabled_search_providers(),
-            api_key: None,
-            credentials: BTreeMap::new(),
-        }
-    }
-}
-
-impl SearchPrefs {
-    /// 传给底座前归一化 key。
-    ///
-    /// 空字符串如果透传成 `Some("")`,部分搜索 API 会返回 HTTP 200 + 业务错误体,
-    /// 底座旧版本可能误解析成 `No results found`。这里统一把空白 key 当未配置。
-    pub fn normalized_api_key(&self) -> Option<String> {
-        self.api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .map(ToString::to_string)
-    }
-
-    pub fn normalize(&mut self) {
-        self.api_key = None;
-        if self.enabled_providers.is_empty() {
-            self.enabled_providers.push(SearchProvider::Bing);
-        }
-        if !self.enabled_providers.contains(&SearchProvider::Bing) {
-            self.enabled_providers.insert(0, SearchProvider::Bing);
-        }
-        if !self.enabled_providers.contains(&self.provider) {
-            self.enabled_providers.push(self.provider);
-        }
-        self.enabled_providers.sort();
-        self.enabled_providers.dedup();
-        self.credentials
-            .retain(|_, credential| credential.has_secret || credential.credential_ref.is_some());
-        for credential in self.credentials.values_mut() {
-            credential.clear_plaintext_key();
-        }
-    }
-}
+mod model;
+use model::{
+    identify_coding_plan_endpoint, migrated_minimax_base_url, strip_chat_completions_suffix,
+};
+pub use model::{
+    select_builtin_llmapi_model, ModelPreset, BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL,
+    BUILTIN_LLMAPI_DEFAULT_MODEL, BUILTIN_LLMAPI_MODEL_ID, BUILTIN_LLMAPI_MODEL_NAME,
+    MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM, MODEL_PROVIDER_KIND_OFFICIAL_API,
+};
 
 /// 一条用户保存的模型配置:GUI「模型列表」的一项,也是热切换的最小单位。
 /// `id` 稳定(前端生成),被 `active_model_id` / session `model_id` 引用。
@@ -619,6 +284,164 @@ impl SavedModel {
         self.credential_state = CredentialState::Unavailable;
         self.has_secret = self.credential_ref.is_some();
         self.clear_plaintext_key();
+    }
+}
+
+/// Search 后端选择。
+/// - `Bing`(默认): HTML scrape,无需 key,但对中文长复合查询相关性差。
+///   DDG 在 GFW + 代理 datacenter IP 段下基本恒返 anomaly-modal,
+///   所以底座 fork patch #42 已把默认翻成 Bing,这里前端默认对齐。
+/// - `Metaso` / `Bocha` / `Baidu`: 国内 AI 搜索 API,中文场景相关性远好于 Bing scrape。
+///   Metaso 留空 key 走底座内置共享 key(~100 次/天);Bocha/Baidu 必须填 key。
+/// - `Tavily`: 海外 agent 搜索 API(<https://app.tavily.com/> 拿 `tvly-` key,API 实际打
+///   `api.tavily.com`)。结果是干净抽取的 content 而非 HTML scrape,质量好;但要稳定外网 +
+///   自带额度,key 必填(留空底座直接报 "requires API key")。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchProvider {
+    Bing,
+    Metaso,
+    Bocha,
+    Baidu,
+    Tavily,
+}
+
+impl Default for SearchProvider {
+    fn default() -> Self {
+        SearchProvider::Bing
+    }
+}
+
+impl SearchProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchProvider::Bing => "bing",
+            SearchProvider::Metaso => "metaso",
+            SearchProvider::Bocha => "bocha",
+            SearchProvider::Baidu => "baidu",
+            SearchProvider::Tavily => "tavily",
+        }
+    }
+
+    pub fn supports_api_key(self) -> bool {
+        !matches!(self, SearchProvider::Bing)
+    }
+
+    pub fn env_key_names(self) -> &'static [&'static str] {
+        match self {
+            SearchProvider::Metaso => &["METASO_API_KEY"],
+            SearchProvider::Baidu => &["BAIDU_SEARCH_API_KEY"],
+            SearchProvider::Bing | SearchProvider::Bocha | SearchProvider::Tavily => &[],
+        }
+    }
+
+    pub fn credential_reference(self) -> CredentialReference {
+        CredentialReference::for_search_provider(self.as_str())
+    }
+}
+
+fn default_enabled_search_providers() -> Vec<SearchProvider> {
+    vec![SearchProvider::Bing]
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SearchCredential {
+    #[serde(default, skip_serializing)]
+    pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<CredentialReference>,
+    #[serde(default)]
+    pub credential_state: CredentialState,
+    #[serde(default)]
+    pub has_secret: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_action: Option<CredentialEditAction>,
+}
+
+impl SearchCredential {
+    pub fn clear_plaintext_key(&mut self) {
+        self.api_key.clear();
+        self.credential_action = None;
+    }
+
+    pub fn mark_configured(&mut self, reference: CredentialReference) {
+        self.credential_ref = Some(reference);
+        self.credential_state = CredentialState::Configured;
+        self.has_secret = true;
+        self.clear_plaintext_key();
+    }
+
+    pub fn mark_missing(&mut self) {
+        self.credential_ref = None;
+        self.credential_state = CredentialState::Missing;
+        self.has_secret = false;
+        self.clear_plaintext_key();
+    }
+
+    pub fn mark_unavailable(&mut self) {
+        self.credential_state = CredentialState::Unavailable;
+        self.has_secret = self.credential_ref.is_some();
+        self.clear_plaintext_key();
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SearchPrefs {
+    pub provider: SearchProvider,
+    #[serde(default = "default_enabled_search_providers")]
+    pub enabled_providers: Vec<SearchProvider>,
+    /// 当 `provider = Metaso` 时:None 走底座内置共享 key。
+    /// 当 `provider = Bocha`/`Baidu` 时:None 会让 web_search 直接报错(必填)。
+    #[serde(default, skip_serializing)]
+    pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub credentials: BTreeMap<SearchProvider, SearchCredential>,
+}
+
+impl Default for SearchPrefs {
+    fn default() -> Self {
+        Self {
+            provider: SearchProvider::Bing,
+            enabled_providers: default_enabled_search_providers(),
+            api_key: None,
+            credentials: BTreeMap::new(),
+        }
+    }
+}
+
+impl SearchPrefs {
+    /// 传给底座前归一化 key。
+    ///
+    /// 空字符串如果透传成 `Some("")`,部分搜索 API 会返回 HTTP 200 + 业务错误体,
+    /// 底座旧版本可能误解析成 `No results found`。这里统一把空白 key 当未配置。
+    pub fn normalized_api_key(&self) -> Option<String> {
+        self.api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(ToString::to_string)
+    }
+
+    pub fn normalize(&mut self) {
+        self.api_key = None;
+        if self.enabled_providers.is_empty() {
+            self.enabled_providers.push(SearchProvider::Bing);
+        }
+        if !self.enabled_providers.contains(&SearchProvider::Bing) {
+            self.enabled_providers.insert(0, SearchProvider::Bing);
+        }
+        if !self.enabled_providers.contains(&self.provider) {
+            self.enabled_providers.push(self.provider);
+        }
+        self.enabled_providers.sort();
+        self.enabled_providers.dedup();
+        self.credentials
+            .retain(|_, credential| credential.has_secret || credential.credential_ref.is_some());
+        for credential in self.credentials.values_mut() {
+            credential.clear_plaintext_key();
+        }
     }
 }
 
@@ -879,7 +702,7 @@ impl UserPrefs {
             .advanced
             .saved_models
             .iter_mut()
-            .find(|m| m.id == BUILTIN_LLMAPI_MODEL_ID)
+            .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
         {
             model.name = BUILTIN_LLMAPI_MODEL_NAME.to_string();
             model.preset = ModelPreset::OpenaiCompatible;
