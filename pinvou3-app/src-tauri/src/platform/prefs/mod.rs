@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_builtin_llmapi_model_replaces_legacy_service_endpoint() {
+    fn ensure_builtin_llmapi_model_replaces_previous_path_endpoint() {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
         prefs.ensure_builtin_llmapi_model();
@@ -1073,7 +1073,7 @@ mod tests {
             .iter_mut()
             .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
             .expect("built-in model")
-            .base_url = "https://www.ma-xiao.com/llmapi/v1".into();
+            .base_url = "https://pinvou.com/llmapi/v1".into();
 
         prefs.ensure_builtin_llmapi_model();
 

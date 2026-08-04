@@ -39,7 +39,7 @@ pub enum ModelPreset {
 
 pub const BUILTIN_LLMAPI_MODEL_ID: &str = "builtin_llmapi";
 pub const BUILTIN_LLMAPI_MODEL_NAME: &str = "内置模型";
-pub const BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL: &str = "https://pinvou.com/llmapi/v1";
+pub const BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL: &str = "https://llmapi.pinvou.com/v1";
 pub const BUILTIN_LLMAPI_DEFAULT_MODEL: &str = "deepseek-v4-flash";
 
 pub fn select_builtin_llmapi_model(

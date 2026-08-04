@@ -7,7 +7,7 @@ pub(crate) mod runtime_model;
 pub mod store;
 pub mod usage;
 
-pub const DEFAULT_ADMIN_BASE_URL: &str = "https://pinvou.com/llmapi";
+pub const DEFAULT_ADMIN_BASE_URL: &str = "https://llmapi.pinvou.com";
 pub const DEFAULT_CHAT_BASE_URL: &str =
     crate::platform::prefs::BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL;
 pub const DEFAULT_MODEL: &str = crate::platform::prefs::BUILTIN_LLMAPI_DEFAULT_MODEL;
