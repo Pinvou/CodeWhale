@@ -256,7 +256,7 @@
       context.currentStreamText = "";
       context.currentStreamId = ++context.itemIdSeq;
       submittedStreamId = context.currentStreamId;
-      state.chatItems.push({ id: context.currentStreamId, type: "assistant", html: "", time: timeStr(), streaming: true });
+      state.chatItems.push({ id: context.currentStreamId, type: "assistant", text: "", html: "", time: timeStr(), streaming: true });
     });
     notify();
     emitPetEvent("pet:turn_start", sid);
