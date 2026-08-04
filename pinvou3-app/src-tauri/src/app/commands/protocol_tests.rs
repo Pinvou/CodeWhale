@@ -160,6 +160,7 @@ command_protocol!(
         "submit_user_input",
         "add_run_materials",
         "cancel_user_input",
+        "get_pending_user_inputs",
         "restart_engine",
         "summon_pinvou"
     ]
