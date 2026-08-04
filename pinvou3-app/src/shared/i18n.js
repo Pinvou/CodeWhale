@@ -2252,5 +2252,11 @@ Object.assign(dict.ja.uiToolStore, { storeData: {
 Object.assign(dict.zh.uiAccount, { settingsLoadFailedDetail:'设置页面暂时无法显示，请重新打开后重试。' });
 Object.assign(dict.en.uiAccount, { settingsLoadFailedDetail:'Settings cannot be displayed right now. Reopen the page and try again.' });
 Object.assign(dict.ja.uiAccount, { settingsLoadFailedDetail:'設定ページを現在表示できません。ページを開き直して、もう一度お試しください。' });
+Object.assign(dict.zh.uiSettingsDetail, { settingsLoadFailed:'设置页加载失败' });
+Object.assign(dict.en.uiSettingsDetail, { settingsLoadFailed:'Failed to load settings' });
+Object.assign(dict.ja.uiSettingsDetail, { settingsLoadFailed:'設定ページの読み込みに失敗しました' });
+Object.assign(dict.zh.uiSettingsDetail, { settingsLoadFailedDetail:'设置页面暂时无法显示，请重新打开后重试。' });
+Object.assign(dict.en.uiSettingsDetail, { settingsLoadFailedDetail:'Settings cannot be displayed right now. Reopen the page and try again.' });
+Object.assign(dict.ja.uiSettingsDetail, { settingsLoadFailedDetail:'設定ページを現在表示できません。ページを開き直して、もう一度お試しください。' });
 
 export { dict, LANG_TO_TAG, TAG_TO_LANG, SEARCH_KEY_PROVIDERS };
