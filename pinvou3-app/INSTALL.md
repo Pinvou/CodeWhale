@@ -13,6 +13,8 @@ sudo dpkg -i pinvou3_0.6.2_arm64.deb
 sudo apt-get install -f
 ```
 
+应用内 OTA 覆盖安装仅安装 Pinvou 的必需依赖，不会因缺少 LibreOffice、OCR 等推荐工具而阻断升级。若 Ubuntu 软件源索引过期导致依赖下载出现 404、哈希不一致等仓库错误，安装器会自动刷新索引并重试一次；不会执行系统升级，也不会自动修复与 Pinvou 无关的软件包。
+
 安装包会声明 Tauri UI 运行时依赖，并推荐以下文档处理工具：
 - `libwebkit2gtk-4.1-0`、`libgtk-3-0`（Tauri UI 运行时）
 - 推荐（非强制）：`poppler-utils`、`tesseract-ocr`、`tesseract-ocr-chi-sim`、`pandoc`、`p7zip-full`、`python3`（文档/图片处理工具）、`libreoffice`、`libemail-outlook-message-perl`
