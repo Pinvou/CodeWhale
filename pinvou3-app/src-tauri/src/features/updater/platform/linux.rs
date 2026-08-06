@@ -12,6 +12,57 @@ use tokio::time::timeout;
 use crate::platform::paths;
 
 const UPDATE_MANIFEST_URL: &str = "https://pinvou.com/pinvou3/latest.json";
+const APT_INDEX_REFRESH_RETRY_MARKER: &str = "PINVOU3_APT_INDEX_REFRESH_RETRY";
+
+/// OTA 覆盖安装只处理 Pinvou 本体及其必需依赖，避免 LibreOffice 等推荐包把
+/// 非核心系统依赖带入升级关键路径。首次安装仍由 deb 的 Recommends 保持原行为。
+///
+/// 软件源索引过期时，apt 常按旧索引请求已被镜像淘汰的具体版本并返回 404。
+/// 仅在明确的仓库下载错误下刷新索引并重试一次；不运行 upgrade/dist-upgrade，
+/// 也不自动修复整机 broken packages，避免扩大到 Pinvou 之外的软件包。
+/// deb 路径通过 sh 的位置参数传入，不拼进脚本文本。
+const APT_INSTALL_SCRIPT: &str = r#"
+export DEBIAN_FRONTEND=noninteractive
+export LC_ALL=C
+
+stderr_file="$(mktemp)" || exit 1
+cleanup() {
+  rm -f "$stderr_file"
+}
+trap cleanup EXIT HUP INT TERM
+
+install_deb() {
+  apt-get \
+    -o Acquire::Retries=3 \
+    -o DPkg::Lock::Timeout=60 \
+    install -y --reinstall --no-install-recommends -- "$1" \
+    2>"$stderr_file"
+}
+
+install_deb "$1"
+install_status=$?
+if [ "$install_status" -eq 0 ]; then
+  cat "$stderr_file" >&2
+  exit 0
+fi
+
+cat "$stderr_file" >&2
+if ! grep -Eiq \
+  '404[[:space:]]+Not Found|Failed to fetch|Unable to fetch some archives|Hash Sum mismatch|File has unexpected size' \
+  "$stderr_file"
+then
+  exit "$install_status"
+fi
+
+echo "PINVOU3_APT_INDEX_REFRESH_RETRY" >&2
+apt-get -o Acquire::Retries=3 update || true
+
+: >"$stderr_file"
+install_deb "$1"
+retry_status=$?
+cat "$stderr_file" >&2
+exit "$retry_status"
+"#;
 
 pub fn cleanup_stale_backup() {}
 
@@ -191,12 +242,9 @@ pub async fn download_update_package(
 
 pub fn install_update_package(path: &Path) -> Result<(), String> {
     let canon = validate_deb_path(path)?;
-    let script = format!(
-        "DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall '{}'",
-        canon.display()
-    );
     let output = Command::new("pkexec")
-        .args(["sh", "-c", &script])
+        .args(["sh", "-c", APT_INSTALL_SCRIPT, "pinvou3-updater"])
+        .arg(&canon)
         .output()
         .map_err(|e| format!("pkexec 启动失败: {e}"))?;
 
@@ -209,7 +257,12 @@ pub fn install_update_package(path: &Path) -> Result<(), String> {
         127 => "未授权或 pkexec 不可用".to_string(),
         _ => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let tail: Vec<&str> = stderr.lines().rev().take(4).collect();
+            let tail: Vec<&str> = stderr
+                .lines()
+                .filter(|line| *line != APT_INDEX_REFRESH_RETRY_MARKER)
+                .rev()
+                .take(4)
+                .collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
             format!("安装失败 (exit {code}): {}", tail.join(" / "))
         }
@@ -290,15 +343,100 @@ fn validate_deb_path(path: &Path) -> Result<PathBuf, String> {
     if canon.extension().is_none_or(|x| x != "deb") {
         return Err("非法路径：只接受 .deb 文件".to_string());
     }
-    if canon.to_string_lossy().contains('\'') {
-        return Err("非法路径：含引号".to_string());
-    }
     Ok(canon)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn run_fake_apt_scenario(scenario: &str) -> (std::process::Output, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-apt-recovery-{scenario}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bin_dir = root.join("bin");
+        let fake_apt = bin_dir.join("apt-get");
+        let log = root.join("apt.log");
+        let state = root.join("apt.state");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(
+            &fake_apt,
+            r#"#!/bin/sh
+action=""
+for arg in "$@"; do
+  case "$arg" in
+    install|update)
+      action="$arg"
+      break
+      ;;
+  esac
+done
+printf '%s|%s\n' "$action" "$*" >>"$PINVOU_TEST_APT_LOG"
+
+if [ "$action" = "update" ]; then
+  exit 0
+fi
+
+attempt=0
+if [ -f "$PINVOU_TEST_APT_STATE" ]; then
+  attempt="$(cat "$PINVOU_TEST_APT_STATE")"
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" >"$PINVOU_TEST_APT_STATE"
+
+case "$PINVOU_TEST_APT_SCENARIO" in
+  success)
+    exit 0
+    ;;
+  stale_then_success)
+    if [ "$attempt" -eq 1 ]; then
+      echo 'E: Failed to fetch package.deb  404 Not Found' >&2
+      exit 100
+    fi
+    exit 0
+    ;;
+  non_repository_failure)
+    echo 'E: dpkg was interrupted' >&2
+    exit 100
+    ;;
+  retry_failure)
+    echo 'E: Failed to fetch package.deb  404 Not Found' >&2
+    exit 100
+    ;;
+esac
+
+exit 2
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_apt, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let output = Command::new("sh")
+            .args(["-c", APT_INSTALL_SCRIPT, "pinvou3-updater"])
+            .arg("/tmp/pinvou3 package's regression.deb")
+            .env("PATH", path)
+            .env("PINVOU_TEST_APT_SCENARIO", scenario)
+            .env("PINVOU_TEST_APT_LOG", &log)
+            .env("PINVOU_TEST_APT_STATE", &state)
+            .output()
+            .unwrap();
+        let log_text = std::fs::read_to_string(&log).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        (output, log_text)
+    }
 
     #[test]
     fn semver_numeric_not_lexicographic() {
@@ -352,6 +490,55 @@ mod tests {
         assert_eq!(m.size, 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn apt_install_skips_recommends_without_refresh_on_success() {
+        let (output, log) = run_fake_apt_scenario("success");
+        assert!(output.status.success());
+        let calls: Vec<&str> = log.lines().collect();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].starts_with("install|"));
+        assert!(calls[0].contains("Acquire::Retries=3"));
+        assert!(calls[0].contains("DPkg::Lock::Timeout=60"));
+        assert!(calls[0].contains("--no-install-recommends"));
+        assert!(calls[0].contains("/tmp/pinvou3 package's regression.deb"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apt_install_refreshes_index_and_retries_once_for_404() {
+        let (output, log) = run_fake_apt_scenario("stale_then_success");
+        assert!(output.status.success());
+        let calls: Vec<&str> = log.lines().collect();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].starts_with("install|"));
+        assert!(calls[1].starts_with("update|"));
+        assert!(calls[2].starts_with("install|"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(APT_INDEX_REFRESH_RETRY_MARKER));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apt_install_does_not_refresh_for_unrelated_dpkg_failure() {
+        let (output, log) = run_fake_apt_scenario("non_repository_failure");
+        assert_eq!(output.status.code(), Some(100));
+        assert_eq!(log.lines().count(), 1);
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(APT_INDEX_REFRESH_RETRY_MARKER));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apt_install_stops_after_one_repository_retry() {
+        let (output, log) = run_fake_apt_scenario("retry_failure");
+        assert_eq!(output.status.code(), Some(100));
+        let calls: Vec<&str> = log.lines().collect();
+        assert_eq!(calls.len(), 3);
+        assert!(calls[0].starts_with("install|"));
+        assert!(calls[1].starts_with("update|"));
+        assert!(calls[2].starts_with("install|"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(APT_INDEX_REFRESH_RETRY_MARKER));
+    }
+
     #[test]
     fn validate_deb_path_whitelist() {
         let _g = crate::platform::paths::tests::ENV_LOCK
@@ -366,6 +553,10 @@ mod tests {
         let good = updates.join("pinvou3_9.9.9_amd64.deb");
         std::fs::write(&good, b"fake").unwrap();
         assert!(validate_deb_path(&good).is_ok());
+
+        let quoted = updates.join("pinvou3_o'clock_amd64.deb");
+        std::fs::write(&quoted, b"fake").unwrap();
+        assert!(validate_deb_path(&quoted).is_ok());
 
         let outside = root.join("evil.deb");
         std::fs::write(&outside, b"fake").unwrap();
