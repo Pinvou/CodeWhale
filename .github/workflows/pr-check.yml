@@ -9,7 +9,7 @@ name: PR Check
 #   Merge Queue 对最新组合提交跑完整受影响前端门禁。
 # - release-contract-test:发布链路改动只跑配置/脚本契约,不在 PR 构建安装包。
 # - rust-test(编译类):Draft/普通 PR 默认不跑;Ready 高风险 PR 可加 ci:full-rust
-#   标签提前跑；Merge Queue 对最新组合提交运行；main push 写暖 cache。
+#   标签提前跑；Merge Queue 对非可信回流组合运行；main push 写暖 cache。
 # - rust-lint:Draft 只跑 fmt；Ready/Queue/main 跑 clippy；cargo-deny 仅在依赖
 #   或策略路径变化时追加，三项均无 continue-on-error。
 #   与 rust-test 并行,各自独立 cache。clippy 规则见 Cargo.toml [lints] 表:
@@ -124,10 +124,23 @@ jobs:
       windows_codex: ${{ steps.filter.outputs.windows_codex }}
       windows_runtime: ${{ steps.filter.outputs.windows_runtime }}
       windows_rustup_repair: ${{ steps.filter.outputs.windows_rustup_repair }}
+      trusted_backflow: ${{ steps.pr-rust-policy.outputs.trusted_backflow || steps.queue-rust-policy.outputs.trusted_backflow || 'false' }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: 校验 PR 的 Community 回流来源
+        id: pr-rust-policy
+        if: ${{ github.event_name == 'pull_request' }}
+        run: python3 scripts/ci-rust-policy.py
+
+      - name: 校验 Merge Group 的 Community 回流来源
+        id: queue-rust-policy
+        if: ${{ github.event_name == 'merge_group' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci-rust-policy.py
+
       - uses: dorny/paths-filter@v4
         id: filter
         with:
@@ -541,13 +554,15 @@ jobs:
   rust-test:
     name: rust-test
     needs: changes
-    # Draft/普通 PR 默认跳过；Merge Queue 对最新组合提交跑；
-    # main push 写暖 cache；Ready 高风险 PR 可用标签提前跑。
+    # Draft/普通 PR 默认跳过；可信同仓 Community 回流在 PR 与纯回流 Merge
+    # Group 中跳过，来源解析失败、普通/混合队列均保守执行；ci:full-rust 可强制覆盖。
+    # main push 保留合入后累计状态验证；Ready 高风险 PR 可用标签提前跑。
     if: >-
       ${{
         !cancelled() &&
         github.event.action != 'closed' &&
         needs.changes.outputs.rust_code == 'true' &&
+        needs.changes.outputs.trusted_backflow != 'true' &&
         (
           github.event_name == 'merge_group' ||
           github.event_name == 'push' ||

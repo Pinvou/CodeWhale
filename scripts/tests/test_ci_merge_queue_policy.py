@@ -16,39 +16,37 @@ class MergeQueuePolicyTests(unittest.TestCase):
             f"\n  {next_name}:", maxsplit=1
         )[0]
 
-    def test_merge_queue_reuses_pr_required_gate(self):
+    def test_merge_queue_runs_the_layered_product_gate(self):
         self.assertIn("merge_group:", self.workflow)
-        for job, next_job in (
-            ("commit-message", "version-consistency"),
-            ("version-consistency", "changes"),
-            ("changes", "fast-gate"),
-            ("fast-gate", "frontend-test"),
-        ):
-            self.assertNotIn(
-                "github.event_name == 'merge_group'",
-                self._job(job, next_job),
-                f"{job} 不应在 Merge Queue 重复运行",
-            )
+        changes = self._job("changes", "fast-gate")
+        self.assertIn("github.event_name == 'merge_group'", changes)
+        self.assertIn("uses: dorny/paths-filter@v4", changes)
 
         required_gate = self.workflow.split("\n  required-gate:", maxsplit=1)[1]
         self.assertIn("github.event_name == 'merge_group'", required_gate)
-        self.assertIn("完整门禁已在 PR 入队前验证", required_gate)
-        self.assertIn('if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]', required_gate)
+        self.assertIn("Merge Queue 基础检查失败", required_gate)
+        self.assertNotIn("完整门禁已在 PR 入队前验证", required_gate)
 
-    def test_backflow_rust_changes_defer_full_test_to_main_push(self):
+    def test_trusted_backflow_skips_only_full_rust_test(self):
+        changes = self._job("changes", "fast-gate")
+        self.assertIn("trusted_backflow:", changes)
+        self.assertIn("python3 scripts/ci-rust-policy.py", changes)
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", changes)
+
         rust_test = self._job("rust-test", "windows-rust-test")
-        self.assertIn("needs.changes.outputs.rust == 'true'", rust_test)
         self.assertIn(
-            "github.event.pull_request.head.repo.full_name != github.repository",
+            "needs.changes.outputs.trusted_backflow != 'true'", rust_test
+        )
+        self.assertIn("github.event_name == 'merge_group'", rust_test)
+        self.assertIn(
+            "contains(github.event.pull_request.labels.*.name, 'ci:full-rust')",
             rust_test,
         )
-        self.assertIn(
-            "startsWith(github.head_ref, 'backflow/community-') == false",
-            rust_test,
-        )
-        self.assertIn("push main:始终完整跑", rust_test)
-        self.assertIn("只保留最新 main 的一轮验证", rust_test)
 
+        rust_lint = self._job("rust-lint", "rust-test")
+        self.assertNotIn("trusted_backflow", rust_lint)
+
+    def test_latest_main_run_remains_the_cumulative_rust_check(self):
         concurrency = self.workflow.split("\nconcurrency:", maxsplit=1)[1].split(
             "\njobs:", maxsplit=1
         )[0]
@@ -58,9 +56,9 @@ class MergeQueuePolicyTests(unittest.TestCase):
         )
         self.assertIn("cancel-in-progress: true", concurrency)
 
-        rust_lint = self._job("rust-lint", "rust-test")
-        self.assertNotIn("backflow/community-", rust_lint)
-        self.assertNotIn("edited", self.workflow)
+        rust_test = self._job("rust-test", "windows-rust-test")
+        self.assertIn("github.event_name == 'push'", rust_test)
+        self.assertIn("save-if: ${{ github.ref == 'refs/heads/main' }}", rust_test)
 
 
 if __name__ == "__main__":
