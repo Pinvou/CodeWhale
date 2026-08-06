@@ -629,31 +629,26 @@ pub fn skills_directories_for_mode(workspace: &Path, mode: SkillDiscoveryMode) -
 
 fn skills_directories_with_home_and_mode(
     _workspace: &Path,
-    home_dir: Option<&Path>,
-    mode: SkillDiscoveryMode,
+    _home_dir: Option<&Path>,
+    _mode: SkillDiscoveryMode,
 ) -> Vec<PathBuf> {
-    // pinvou3 fork (patch #41 + 技能市场 2026-06-25/29): 砍掉底座的 10 路径扫描清单
-    // (`.agents/skills`, `.opencode/skills`, `.claude/skills`, `.cursor/skills`,
-    // `.codewhale/skills` 等工具约定 + workspace + home 重叠版本),**只保留**:
+    // pinvou3 fork (patch #41 + 技能市场 2026-06-25/29 + skill-scope-governance
+    // 2026-08-06): 砍掉底座的 10 路径扫描清单(workspace/home 工具约定目录),且
+    // **不再硬编码 `~/.pinvou3/bundle/skills`** —— 技能发现完全由
+    // `EngineConfig.skills_dir` 单一配置根注入(`_and_dir` 变体的
+    // `insert_configured_skills_dir`,pinvou3 app 全链路恒设该字段)。
     //
-    //   1. `~/.pinvou3/bundle/skills/` — pinvou3 私有区(技能市场装的技能 + bundle
-    //      内置)。它就是 `EngineConfig.skills_dir`(fork patch #25/#26 注入的值)。
-    //   2. `EngineConfig.skills_dir` — union 在调用方 `_and_dir` 追加(不在本函数返回)
+    // 为什么 bundle/skills 不能留在这里:
+    //   - bundle/skills 同时是 `EngineConfig.skills_dir` 的值(fork patch #25/#26),
+    //     双入口使 app 的「按会话组合 skills_dir」永远无法从发现集排除 bundle/skills
+    //     原件 —— 组合目录过滤失效,`## Skills` 仍印出禁用技能与磁盘路径(泄露面)。
+    //   - `discover_in_workspace`(`load_skill` 的 skills_dir=None 分支)现在返回空集;
+    //     pinvou3 app 所有会话都注入 skills_dir(组合目录 / bundle/skills),不受影响。
     //
-    // ⚠️ 为什么 bundle/skills **必须**在本函数返回:`discover_in_workspace`(`load_skill`
-    //   工具用)只走本函数、**不** union `skills_dir`。不含 bundle/skills 就会出现
-    //   "catalogue 列了、load_skill 报 not found"(技能市场真机实测)。两条发现路径对齐。
-    //
-    // 2026-06-29:`~/.agents/skills` 也砍掉(用户决策)——pinvou3 技能统一走技能市场
-    // 落 bundle/skills,不再扫全局 .agents/skills。上游 v0.8.65 的 SkillDiscoveryMode
-    // (Compatible/CodeWhaleOnly)签名保留作 API 兼容,收窄后两 mode 行为一致。
-    // 纯 pinvou3 fork 决策,不适合上游 PR。
-    let _ = (_workspace, mode);
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(home) = home_dir {
-        candidates.push(home.join(".pinvou3").join("bundle").join("skills"));
-    }
-    existing_skill_dirs(candidates)
+    // 2026-06-29:`~/.agents/skills` 砍掉(用户决策);上游 v0.8.65 的
+    // SkillDiscoveryMode 签名保留作 API 兼容,两 mode 行为一致。纯 pinvou3 fork
+    // 决策,不适合上游 PR。
+    existing_skill_dirs(Vec::new())
 }
 
 pub(crate) fn codewhale_workspace_skills_dir(workspace: &Path) -> Option<PathBuf> {
@@ -1524,6 +1519,52 @@ body";
         assert!(
             registry.get("cursor-only").is_some(),
             ".cursor/skills must be scanned"
+        );
+    }
+
+    /// pinvou3 fork (skill-scope-governance 2026-08-06): 技能发现完全由
+    /// `EngineConfig.skills_dir` 单一配置根注入——无 skills_dir 的发现集为空;
+    /// `_and_dir` 变体只扫显式注入的目录。app 侧的「按会话组合 skills_dir」过滤
+    /// 依赖此单根语义（组合目录内容 = 该会话 scope 启用集，bundle/skills 不再
+    /// 出现在发现集里）。
+    #[test]
+    fn forkguard_skill_discovery_is_single_root_engine_config_skills_dir() {
+        let tmpdir = TempDir::new().unwrap();
+        let workspace = tmpdir.path();
+        // workspace 下的工具约定目录不再被扫（#41 起砍掉，现为单根注入）。
+        write_skill(
+            &workspace.join(".agents").join("skills"),
+            "agents-skill",
+            "a",
+            "b",
+        );
+        write_skill(
+            &workspace.join(".claude").join("skills"),
+            "claude-skill",
+            "c",
+            "d",
+        );
+        // 显式注入目录里的技能是唯一发现源。
+        let injected = tmpdir.path().join("injected");
+        write_skill(&injected, "injected-skill", "e", "f");
+
+        let without_dir = super::discover_in_workspace(workspace);
+        assert!(
+            without_dir.is_empty(),
+            "无 skills_dir 时发现集必须为空: {:?}",
+            without_dir
+                .list()
+                .iter()
+                .map(|s| &s.name)
+                .collect::<Vec<_>>()
+        );
+
+        let with_dir = super::discover_for_workspace_and_dir(workspace, &injected);
+        let names: Vec<&str> = with_dir.list().iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["injected-skill"],
+            "发现集 = 注入目录内容: {names:?}"
         );
     }
 

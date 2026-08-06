@@ -2737,6 +2737,7 @@ fn capability_compact_surface_defers_nonessential_core_tools() {
         AppMode::Agent,
         &always_load,
         crate::model_profile::ToolSurfaceBudget::Compact,
+        None, // [pinvou3-fork] 测试缺省：回退常量（与生产 None 等价）
     );
 
     let defer_loading = |name: &str| {
@@ -2771,6 +2772,7 @@ fn capability_full_surface_preserves_default_core_tools() {
         AppMode::Agent,
         &always_load,
         crate::model_profile::ToolSurfaceBudget::Full,
+        None, // [pinvou3-fork] 测试缺省：回退常量（与生产 None 等价）
     );
 
     for name in ["agent", "read_file", "run_tests"] {
@@ -8517,5 +8519,107 @@ fn forkguard_yolo_no_deferred_activator_first_class() {
         active, expected,
         "ensure_advanced_tooling(Yolo) 注入了非预期的首轮可见工具:多出的可能是能激活 deferred 的 \
          activator(如 tool_search 折叠改名)→ 击穿 blocklist 隔离。逐项确认后更新此 expected 集。"
+    );
+}
+
+/// fork ②（能力档案 include 通道）：hidden_tools 注入集为准——注入含 X → X
+/// 隐藏；常量含 Y 但注入集不含 → Y 放出可见。`None` 回退常量（现有行为不变，
+/// 由既有 golden 守护）。
+#[test]
+fn forkguard_hidden_tools_injectable() {
+    let always_load = HashSet::new();
+    // 模拟注入集（app 按档案算：常量 − include）：git_status 留在隐藏集、
+    // git_log 被放出（04 PR-E：首个 include 只放 git_status，其余仍隐藏）
+    let injected: HashSet<String> = ["git_status", "task_create", "web_run"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let catalog = build_model_tool_catalog_with_surface(
+        vec![
+            api_tool("git_status"),  // 常量隐藏 + 注入隐藏 → defer
+            api_tool("git_log"),     // 常量隐藏但注入集不含 → 放出（include 语义）
+            api_tool("task_create"), // 常量隐藏 + 注入隐藏 → defer
+            api_tool("read_file"),   // 常量不隐藏 → 可见
+        ],
+        Vec::new(),
+        AppMode::Yolo,
+        &always_load,
+        crate::model_profile::ToolSurfaceBudget::Full,
+        Some(&injected),
+    );
+    let defer_loading = |name: &str| {
+        catalog
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.defer_loading)
+    };
+    assert_eq!(
+        defer_loading("git_status"),
+        Some(true),
+        "注入集含 git_status → 仍隐藏"
+    );
+    assert_eq!(defer_loading("task_create"), Some(true));
+    assert_eq!(defer_loading("read_file"), Some(false));
+    assert_eq!(
+        defer_loading("git_log"),
+        Some(false),
+        "注入集不含 git_log → 放出（include 语义）"
+    );
+}
+
+/// fork ② 不变式：`request_user_input` 的硬豁免不受注入集影响（GUI 选择气泡
+/// 来源，任何模式下都必须可见）。
+#[test]
+fn forkguard_request_user_input_exempt_from_injected_hidden() {
+    let always_load = HashSet::new();
+    let injected: HashSet<String> = ["request_user_input", "read_file"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let catalog = build_model_tool_catalog_with_surface(
+        vec![api_tool("request_user_input"), api_tool("read_file")],
+        Vec::new(),
+        AppMode::Yolo,
+        &always_load,
+        crate::model_profile::ToolSurfaceBudget::Full,
+        Some(&injected),
+    );
+    let defer_loading = |name: &str| {
+        catalog
+            .iter()
+            .find(|t| t.name == name)
+            .and_then(|t| t.defer_loading)
+    };
+    assert_eq!(
+        defer_loading("request_user_input"),
+        Some(false),
+        "request_user_input 豁免不受注入集影响"
+    );
+    assert_eq!(defer_loading("read_file"), Some(false));
+}
+
+/// fork ② 不变式：`tool_search` 的 gate **恒查编译期常量、不可注入**——即使
+/// 注入集刻意"放出"tool_search（最坏情况），ensure_advanced_tooling 之后
+/// catalog 仍不含它（模型无法用搜索复活任何被藏工具）。
+#[test]
+fn forkguard_tool_search_always_gated() {
+    let always_load = HashSet::new();
+    // 最坏情况：注入集含 tool_search（若 gate 查注入集，它就会进 catalog）
+    let injected: HashSet<String> = ["read_file", "web_search", "tool_search"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let mut catalog = build_model_tool_catalog_with_surface(
+        vec![api_tool("read_file"), api_tool("web_search")],
+        Vec::new(),
+        AppMode::Yolo,
+        &always_load,
+        crate::model_profile::ToolSurfaceBudget::Full,
+        Some(&injected),
+    );
+    ensure_advanced_tooling(&mut catalog, AppMode::Yolo, &always_load);
+    assert!(
+        !catalog.iter().any(|t| t.name == "tool_search"),
+        "tool_search gate 恒查常量：注入集不得让其复活（fork ② 不变式）"
     );
 }

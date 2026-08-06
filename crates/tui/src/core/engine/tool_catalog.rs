@@ -167,12 +167,17 @@ pub(super) fn should_default_defer_tool(name: &str, always_load: &HashSet<String
 /// v0.8.57:上游把 `should_default_defer_tool` 改成 2 参(去掉 mode)并主张 native deferral
 /// mode 无关(catalog-head 字节稳定)。pinvou3 仍按原设计保持 **mode-aware**:上游 build_model_
 /// tool_catalog 持有 `mode`,透传进来即可。生产单 Yolo、catalog 不跨 mode 切换,不变量实践中仍成立。
+///
+/// fork ②(能力档案统一):隐藏判定支持按会话注入集——`hidden_tools: Some` 时
+/// 以注入值为准(app 按档案算:常量 − include),`None` 回退常量,现有行为
+/// 逐字节不变。`request_user_input` 豁免与 Yolo/非 Yolo 分支不受注入影响。
 pub(super) fn pinvou3_should_defer_native_tool(
     name: &str,
     mode: AppMode,
     always_load: &HashSet<String>,
+    hidden_tools: Option<&HashSet<String>>,
 ) -> bool {
-    if crate::tools::pinvou3_blocklist::is_pinvou3_hidden(name) {
+    if is_pinvou3_hidden_with_injection(name, hidden_tools) {
         return true;
     }
     // request_user_input 跨所有 mode 硬保留(GUI 选择气泡来源,instructions §1.4 引导)。
@@ -185,16 +190,29 @@ pub(super) fn pinvou3_should_defer_native_tool(
     should_default_defer_tool(name, always_load) // 非 Yolo:叠加上游 allowlist
 }
 
+/// pinvou3 隐藏判定（fork ②）：注入集优先、缺省回退常量。
+/// 注入路径**不查** `PINVOU3_BLOCKLIST_OVERRIDE` env（测试豁免只作用于常量
+/// 回退路径；app 注入的是已计算的完整隐藏集，由 app 侧负责按会话表达）。
+#[inline]
+fn is_pinvou3_hidden_with_injection(name: &str, hidden_tools: Option<&HashSet<String>>) -> bool {
+    match hidden_tools {
+        Some(injected) => injected.contains(name),
+        None => crate::tools::pinvou3_blocklist::is_pinvou3_hidden(name),
+    }
+}
+
 pub(super) fn apply_native_tool_deferral(
     catalog: &mut [Tool],
     mode: AppMode,
     always_load: &HashSet<String>,
+    hidden_tools: Option<&HashSet<String>>,
 ) {
     for tool in &mut *catalog {
         tool.defer_loading = Some(pinvou3_should_defer_native_tool(
             &tool.name,
             mode,
             always_load,
+            hidden_tools,
         ));
     }
     let active: Vec<&str> = catalog
@@ -262,6 +280,7 @@ pub(super) fn build_model_tool_catalog(
         mode,
         always_load,
         ToolSurfaceBudget::Standard,
+        None, // 测试缺省：回退常量（与生产 None 等价）
     )
 }
 
@@ -271,8 +290,9 @@ pub(super) fn build_model_tool_catalog_with_surface(
     mode: AppMode,
     always_load: &HashSet<String>,
     surface_budget: ToolSurfaceBudget,
+    hidden_tools: Option<&HashSet<String>>, // [pinvou3-fork] fork ②:按会话注入的隐藏集(None=常量)
 ) -> Vec<Tool> {
-    apply_native_tool_deferral(&mut native_tools, mode, always_load); // [pinvou3-fork] 透传 mode(blocklist mode-aware)
+    apply_native_tool_deferral(&mut native_tools, mode, always_load, hidden_tools); // [pinvou3-fork] 透传 mode(blocklist mode-aware)
     apply_mcp_tool_deferral(&mut mcp_tools, mode, always_load);
     apply_tool_surface_budget(&mut native_tools, surface_budget, always_load);
     apply_tool_surface_budget(&mut mcp_tools, surface_budget, always_load);
@@ -366,6 +386,9 @@ pub(super) fn ensure_advanced_tooling(
     // 模型可用 tool_search 激活被 blocklist 的 agent/delegate/rlm 等工具,绕过工具门控 → 前端不
     // 认识,渲染成裸 JSON。pinvou3 把 tool_search 名加进 blocklist,is_pinvou3_hidden 为真时不注入
     // → catalog 根本不含 tool_search → 模型无法激活任何 deferred 工具。详见 §C2 / sync §4。
+    // ⚠️ fork ② 不变式:此 gate **恒查编译期常量、不查注入集**——注入的 hidden_tools
+    // 是"按会话减少隐藏"的通道,若 tool_search 的 gate 随注入放开,模型可用搜索复活
+    // 任何被藏工具,所有隐藏语义失效(守护 forkguard_tool_search_always_gated)。
     if !catalog.iter().any(|t| t.name == TOOL_SEARCH_NAME)
         && !crate::tools::pinvou3_blocklist::is_pinvou3_hidden(TOOL_SEARCH_NAME)
     {

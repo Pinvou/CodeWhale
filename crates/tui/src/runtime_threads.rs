@@ -3402,6 +3402,7 @@ impl RuntimeThreadManager {
                 goal_status: crate::tools::goal::GoalStatus::Active,
                 allowed_tools: None,
                 disallowed_tools: None,
+                hidden_tools: None,
                 hook_executor: None,
                 locale_tag: crate::localization::resolve_locale(&settings.locale)
                     .tag()
