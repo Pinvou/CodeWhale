@@ -252,8 +252,8 @@ pub async fn add_run_materials(
         .or_else(|| store.active_id())
         .ok_or_else(|| "no active session".to_string())?;
     let workspace = store
-        .execution_workspace(&sid)
-        .map_err(|error| format!("resolve execution workspace for {sid}: {error:#}"))?;
+        .ledger_root(&sid)
+        .map_err(|error| format!("resolve ledger root for {sid}: {error:#}"))?;
     let project = crate::features::assistant::harness::find_project_dir(&workspace)
         .ok_or_else(|| "当前 session 无工作流项目".to_string())?;
     let dst_dir = project.join("配套材料");
@@ -362,8 +362,8 @@ pub async fn summon_pinvou(
         .await
         .map_err(|e| format!("summon_pinvou prepare bridge({sid}): {e:#}"))?;
     let workspace = store
-        .execution_workspace(&sid)
-        .map_err(|error| format!("resolve execution workspace for {sid}: {error:#}"))?;
+        .ledger_root(&sid)
+        .map_err(|error| format!("resolve ledger root for {sid}: {error:#}"))?;
     crate::features::review::summon(
         &bridge,
         &session.messages,
