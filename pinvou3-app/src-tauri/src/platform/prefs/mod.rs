@@ -570,13 +570,20 @@ impl UserPrefs {
                 .custom_base_url
                 .as_deref()
                 .is_some_and(|url| migrated_minimax_base_url(url).is_some());
+        let builtin_llmapi_endpoint_changed = prefs.advanced.saved_models.iter().any(|model| {
+            model.id == BUILTIN_LLMAPI_MODEL_ID
+                && model.base_url != BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL
+        });
         prefs.migrate_models();
         prefs.ensure_builtin_llmapi_model();
         prefs.normalize_saved_model_metadata();
         let migration = prefs.migrate_plaintext_api_keys_with_store(&SystemCredentialStore::new());
         let memory_policy_changed = prefs.enforce_memory_locale_policy();
         if persist_normalized
-            && (minimax_endpoint_changed || migration.settings_sanitized || memory_policy_changed)
+            && (minimax_endpoint_changed
+                || builtin_llmapi_endpoint_changed
+                || migration.settings_sanitized
+                || memory_policy_changed)
         {
             if let Err(e) = prefs.save_unlocked() {
                 eprintln!("[pinvou3-app] settings normalization save failed: {e:?}");
@@ -1005,6 +1012,36 @@ mod tests {
     use crate::platform::credential_store::MemoryCredentialStore;
     use crate::platform::paths::tests::ENV_LOCK;
 
+    struct TemporaryPrefsHome {
+        previous: Option<std::ffi::OsString>,
+        path: std::path::PathBuf,
+    }
+
+    impl TemporaryPrefsHome {
+        fn new(prefix: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "{prefix}-{}-{}",
+                std::process::id(),
+                crate::platform::paths::tests::unique_suffix()
+            ));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).expect("create temporary prefs home");
+            let previous = std::env::var_os("PINVOU3_HOME");
+            unsafe { std::env::set_var("PINVOU3_HOME", &path) };
+            Self { previous, path }
+        }
+    }
+
+    impl Drop for TemporaryPrefsHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+                None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+            }
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+
     #[test]
     fn migrate_creates_default_model_for_fresh_prefs() {
         let mut prefs = UserPrefs::default();
@@ -1053,6 +1090,76 @@ mod tests {
         assert_eq!(model.model, BUILTIN_LLMAPI_DEFAULT_MODEL);
         assert_eq!(model.base_url, BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL);
         assert!(model.credential_ref.is_none());
+    }
+
+    #[test]
+    fn ensure_builtin_llmapi_model_replaces_previous_path_endpoint() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_llmapi_model();
+        prefs
+            .advanced
+            .saved_models
+            .iter_mut()
+            .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+            .expect("built-in model")
+            .base_url = "https://pinvou.com/llmapi/v1".into();
+
+        prefs.ensure_builtin_llmapi_model();
+
+        assert_eq!(
+            prefs
+                .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                .expect("built-in model")
+                .base_url,
+            BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL
+        );
+    }
+
+    #[test]
+    fn load_persists_legacy_builtin_llmapi_endpoint_migration() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _home = TemporaryPrefsHome::new("pinvou3-prefs-builtin-llmapi-migration");
+
+        let path = super::super::paths::settings_path();
+        for legacy_endpoint in [
+            "https://www.ma-xiao.com/llmapi/v1",
+            "https://pinvou.com/llmapi/v1",
+        ] {
+            let mut prefs = UserPrefs::default();
+            prefs.migrate_models();
+            prefs.ensure_builtin_llmapi_model();
+            prefs
+                .advanced
+                .saved_models
+                .iter_mut()
+                .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+                .expect("built-in model")
+                .base_url = legacy_endpoint.into();
+            std::fs::write(
+                &path,
+                serde_json::to_string_pretty(&prefs).expect("serialize legacy prefs"),
+            )
+            .expect("write legacy prefs");
+
+            let loaded = UserPrefs::load();
+            assert_eq!(
+                loaded
+                    .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                    .map(|model| model.base_url.as_str()),
+                Some(BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL)
+            );
+
+            let persisted: UserPrefs =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read migrated prefs"))
+                    .expect("parse migrated prefs");
+            assert_eq!(
+                persisted
+                    .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                    .map(|model| model.base_url.as_str()),
+                Some(BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL)
+            );
+        }
     }
 
     #[test]
@@ -1187,14 +1294,7 @@ mod tests {
     #[test]
     fn load_persists_legacy_minimax_domain_migration() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let old_home = std::env::var_os("PINVOU3_HOME");
-        let tmp = std::env::temp_dir().join(format!(
-            "pinvou3-prefs-minimax-domain-migration-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).expect("create temporary prefs home");
-        unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
+        let _home = TemporaryPrefsHome::new("pinvou3-prefs-minimax-domain-migration");
 
         let mut prefs = UserPrefs::default();
         prefs.advanced.saved_models.push(SavedModel {
@@ -1230,12 +1330,6 @@ mod tests {
         let persisted = std::fs::read_to_string(&path).expect("read migrated prefs");
         assert!(!persisted.contains("api.minimax.chat"));
         assert!(persisted.contains("api.minimaxi.com"));
-
-        let _ = std::fs::remove_dir_all(&tmp);
-        match old_home {
-            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
-            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
-        }
     }
 
     #[test]
