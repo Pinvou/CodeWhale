@@ -17,6 +17,7 @@ const { prepareWebTemplate } = require("./web-template.js");
 const { stageWindowsInstaller } = require("./windows-installer.js");
 const {
   describeWindowsRuntime,
+  stageWindowsOnnxRuntime,
   stageWindowsRuntime,
 } = require("./windows-runtime.js");
 
@@ -273,6 +274,7 @@ function tauriPhase(preparedArgs) {
 function runTauri(
   preparedArgs,
   {
+    environment = process.env,
     spawnChild = spawn,
     heartbeatIntervalMs = 60_000,
     now = Date.now,
@@ -286,7 +288,7 @@ function runTauri(
   const phase = tauriPhase(preparedArgs);
   const child = spawnChild(process.execPath, [tauriCli, ...preparedArgs], {
     cwd: APP_ROOT,
-    env: { ...process.env, [WRAPPER_ENV]: "1" },
+    env: { ...environment, [WRAPPER_ENV]: "1" },
     stdio: "inherit",
   });
   const pid = child.pid ?? "unknown";
@@ -334,6 +336,12 @@ function runTauri(
   });
 }
 
+function tauriRuntimeEnvironment(runtime, environment = process.env) {
+  return runtime
+    ? { ...environment, ORT_DYLIB_PATH: runtime.onnxRuntimeDylib }
+    : environment;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const validateOnly = args[0] === "--validate-only";
@@ -351,6 +359,9 @@ async function main() {
     ? (usesValidatedNsisStaging(args)
         ? describeWindowsRuntime()
         : stageWindowsRuntime())
+    : null;
+  const windowsDevRuntime = isDev && process.platform === "win32"
+    ? stageWindowsOnnxRuntime()
     : null;
   if (windowsRuntime) {
     stageWindowsInstaller({
@@ -389,7 +400,9 @@ async function main() {
     );
   }
 
-  return runTauri(preparedArgs);
+  return runTauri(preparedArgs, {
+    environment: tauriRuntimeEnvironment(windowsRuntime || windowsDevRuntime),
+  });
 }
 
 if (require.main === module) {
@@ -410,9 +423,11 @@ module.exports = {
   prepareCodexBridge,
   prepareWindowsCodexBridge,
   stageWindowsInstaller,
+  stageWindowsOnnxRuntime,
   stageWindowsRuntime,
   prepareTauriArgs,
   runTauri,
+  tauriRuntimeEnvironment,
   pinnedRustToolchainChannel,
   tauriCommandIndex,
   usesValidatedNsisStaging,

@@ -1,6 +1,7 @@
 param(
   [switch]$ForceLfsPull,
   [switch]$CacheKeyOnly,
+  [switch]$OnnxOnly,
   [switch]$ImportFunctionsOnly
 )
 
@@ -83,12 +84,18 @@ function Test-LfsPointer {
   return [string]$firstLine -eq "version https://git-lfs.github.com/spec/v1"
 }
 
-function Get-LfsPointerPaths {
+function Get-LfsTrackedPaths {
   $trackedPaths = Invoke-Git -WorkingDirectory $runtimeRoot -Arguments @("lfs", "ls-files", "-n") -FailureMessage "Unable to list Windows runtime Git LFS files."
   return @(
     $trackedPaths |
       ForEach-Object { [string]$_ } |
-      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  )
+}
+
+function Get-LfsPointerPaths {
+  return @(
+    Get-LfsTrackedPaths |
       Where-Object {
         $fullPath = Join-Path $runtimeRoot $_.Replace('/', '\')
         Test-LfsPointer -Path $fullPath
@@ -159,16 +166,23 @@ try {
   }
 
   New-Item -ItemType Directory -Path $lfsStorageRoot -Force | Out-Null
-  $pointerPaths = @(Get-LfsPointerPaths)
+  $pointerPaths = if ($ForceLfsPull) { @(Get-LfsTrackedPaths) } else { @(Get-LfsPointerPaths) }
+  if ($OnnxOnly) {
+    $pointerPaths = @($pointerPaths | Where-Object { $_ -like "*/onnxruntime-win-x64-*-runtime.zip" })
+  }
   if ($ForceLfsPull -or $pointerPaths.Count -gt 0) {
     $lfsArguments = @("-c", "lfs.storage=$lfsStorageRoot", "lfs", "pull")
-    if (-not $ForceLfsPull -and $pointerPaths.Count -gt 0) {
+    if ($OnnxOnly -or (-not $ForceLfsPull -and $pointerPaths.Count -gt 0)) {
       $lfsArguments += "--include=$($pointerPaths -join ',')"
       $lfsArguments += "--exclude="
     }
     Invoke-Git -WorkingDirectory $runtimeRoot -Arguments $lfsArguments -FailureMessage "Unable to materialize Git LFS objects for the private Windows runtime submodule." | Out-Null
 
-    $remainingPointers = @(Get-LfsPointerPaths)
+    $remainingPointers = if ($OnnxOnly) {
+      @($pointerPaths | Where-Object { Test-LfsPointer -Path (Join-Path $runtimeRoot $_.Replace('/', '\')) })
+    } else {
+      @(Get-LfsPointerPaths)
+    }
     if ($remainingPointers.Count -gt 0) {
       throw "Git LFS objects remain unmaterialized: $($remainingPointers -join ', ')"
     }

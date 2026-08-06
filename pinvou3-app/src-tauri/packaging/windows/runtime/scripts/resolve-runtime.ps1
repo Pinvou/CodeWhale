@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("Validate", "Stage")]
+  [ValidateSet("Validate", "Stage", "StageOnnx")]
   [string]$Mode = "Stage",
   [string]$RuntimeRoot = "",
   [string]$LockFile = "",
@@ -17,6 +17,7 @@ $repoRoot = (Resolve-Path (Join-Path $appRoot "..")).Path
 $defaultLockFile = Join-Path $tauriRoot "config\platforms\windows\runtime\x86_64.lock.json"
 $generatedConfigPath = Join-Path $tauriRoot "target\windows-runtime\tauri.generated.conf.json"
 $runtimeDescriptorPath = Join-Path $tauriRoot "target\windows-runtime\runtime-descriptor.json"
+$onnxDevDescriptorPath = Join-Path $tauriRoot "target\windows-runtime\onnx-dev-descriptor.json"
 $stagingParent = Join-Path $tauriRoot "target\windows-runtime"
 $sourceVerificationMarkerPath = Join-Path $stagingParent ".verified-lock"
 $resolverLockPath = Join-Path $stagingParent ".resolver.lock"
@@ -92,6 +93,16 @@ function Assert-ChildPath {
   if (-not $pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to use a path outside the expected root: $Path"
   }
+}
+
+function Get-RelativeStagePath {
+  param([string]$Root, [string]$Path)
+  $rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\') + '\'
+  $pathFull = [System.IO.Path]::GetFullPath($Path)
+  if (-not $pathFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Path is outside the Windows runtime staging root: $Path"
+  }
+  return $pathFull.Substring($rootFull.Length).Replace('\', '/')
 }
 
 function Get-Sha256 {
@@ -258,6 +269,36 @@ function Get-VerifiedManifest {
   }
 
   Write-Host ("Validated Windows runtime submodule: {0} files at {1}" -f $manifest.files.Count, $actualCommit)
+  return $manifest
+}
+
+function Get-VerifiedOnnxManifest {
+  if (-not (Test-Path -LiteralPath $RuntimeRoot -PathType Container)) {
+    throw "Windows runtime submodule is not initialized: $RuntimeRoot. Run 'npm run runtime:windows:init:onnx' from pinvou3-app."
+  }
+  $actualCommit = Assert-RuntimeIdentity
+  $manifestPath = Get-RuntimeManifestPath
+  if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Windows runtime submodule manifest is missing: $manifestPath"
+  }
+  if ((Get-Sha256 -Path $manifestPath) -ne [string]$lock.manifest.sha256) {
+    throw "Windows runtime submodule manifest SHA-256 does not match the main-repository lock."
+  }
+  $manifest = Read-CompatibleRuntimeManifest -ManifestPath $manifestPath
+  $entries = @($manifest.files | Where-Object { [string]$_.path -like "*/onnxruntime-win-x64-*-runtime.zip" })
+  if ($entries.Count -ne 1) {
+    throw "Windows runtime manifest must contain exactly one ONNX Runtime archive."
+  }
+  $sourcePath = Join-Path $RuntimeRoot ([string]$entries[0].path).Replace('/', '\')
+  Assert-ChildPath -Root $RuntimeRoot -Path $sourcePath
+  if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf) -or (Test-LfsPointer -Path $sourcePath)) {
+    throw "Locked ONNX Runtime archive is unavailable: $sourcePath. Run 'npm run runtime:windows:init:onnx'."
+  }
+  $item = Get-Item -LiteralPath $sourcePath
+  if ([long]$item.Length -ne [long]$entries[0].bytes -or (Get-Sha256 -Path $sourcePath) -ne [string]$entries[0].sha256) {
+    throw "Locked ONNX Runtime archive failed verification: $sourcePath"
+  }
+  Write-Host ("Validated Windows ONNX Runtime at {0}" -f $actualCommit)
   return $manifest
 }
 
@@ -575,6 +616,7 @@ function Get-RuntimeDescriptorContent {
     configPath = "target/windows-runtime/tauri.generated.conf.json"
     nodeExecutable = "$relativeRoot/expanded/node/node.exe"
     npmExecPath = "$relativeRoot/expanded/node/node_modules/npm/bin/npm-cli.js"
+    onnxRuntimeDylib = "$relativeRoot/expanded/onnxruntime/onnxruntime.dll"
     vcRedist = [ordered]@{
       source = "$relativeRoot/$vcRedistRelativePath"
       bytes = [long](Get-Item -LiteralPath $vcRedistPath).Length
@@ -735,6 +777,68 @@ function Stage-Submodule {
   Write-Host ("Generated runtime descriptor: {0}" -f $runtimeDescriptorPath)
 }
 
+function Get-OnnxDevDescriptorContent {
+  param([string]$StageId, [string]$DylibPath)
+  $descriptor = [ordered]@{
+    schemaVersion = 1
+    target = [string]$lock.target
+    stageId = $StageId
+    onnxRuntimeDylib = Get-RelativeStagePath -Root $tauriRoot -Path $DylibPath
+    bytes = [long](Get-Item -LiteralPath $DylibPath).Length
+    sha256 = Get-Sha256 -Path $DylibPath
+  }
+  return (($descriptor | ConvertTo-Json -Depth 4) + "`n")
+}
+
+function Test-OnnxDevStageReusable {
+  param([string]$StageRoot)
+  if (-not (Test-Path -LiteralPath $onnxDevDescriptorPath -PathType Leaf)) { return $false }
+  try {
+    $descriptor = Get-Content -LiteralPath $onnxDevDescriptorPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$descriptor.schemaVersion -ne 1 -or [string]$descriptor.stageId -ne $stageId) { return $false }
+    $dylib = Join-Path $tauriRoot ([string]$descriptor.onnxRuntimeDylib).Replace('/', '\')
+    Assert-ChildPath -Root $tauriRoot -Path $dylib
+    $expectedDylib = Join-Path $StageRoot "onnxruntime\onnxruntime.dll"
+    if (-not ([System.IO.Path]::GetFullPath($dylib)).Equals([System.IO.Path]::GetFullPath($expectedDylib), [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    if (-not (Test-Path -LiteralPath $dylib -PathType Leaf)) { return $false }
+    $item = Get-Item -LiteralPath $dylib
+    return [long]$item.Length -eq [long]$descriptor.bytes -and (Get-Sha256 -Path $dylib) -eq [string]$descriptor.sha256
+  } catch {
+    return $false
+  }
+}
+
+function Stage-OnnxRuntime {
+  param($Manifest)
+  $onnxStageRoot = Join-Path $stagingParent ($stageId + "-onnx-dev")
+  if (-not $Force -and (Test-OnnxDevStageReusable -StageRoot $onnxStageRoot)) {
+    Write-Host ("Reused verified Windows ONNX Runtime staging: {0}" -f $onnxStageRoot)
+    return
+  }
+  $temporaryRoot = Join-Path $stagingParent (".onnx-tmp-" + [System.Guid]::NewGuid().ToString("N"))
+  Assert-ChildPath -Root $stagingParent -Path $temporaryRoot
+  try {
+    $payloadRoot = Join-Path $RuntimeRoot "payload"
+    $destination = Join-Path $temporaryRoot "onnxruntime"
+    $archive = Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "onnxruntime-win-x64-*-runtime.zip" -Label "ONNX Runtime"
+    Expand-FlattenedRuntime -ZipPath $archive -Destination $destination -RequiredFile "onnxruntime.dll" -OnnxOnly
+    $dylib = Join-Path $destination "onnxruntime.dll"
+    if (-not (Test-Path -LiteralPath $dylib -PathType Leaf)) {
+      throw "ONNX Runtime staging did not produce onnxruntime.dll"
+    }
+    if (Test-Path -LiteralPath $onnxStageRoot) {
+      Remove-Item -LiteralPath $onnxStageRoot -Recurse -Force
+    }
+    Move-Item -LiteralPath $temporaryRoot -Destination $onnxStageRoot
+    $finalDylib = Join-Path $onnxStageRoot "onnxruntime\onnxruntime.dll"
+    Write-Utf8Atomically -Path $onnxDevDescriptorPath -Content (Get-OnnxDevDescriptorContent -StageId $stageId -DylibPath $finalDylib)
+  } finally {
+    Remove-Item -LiteralPath $temporaryRoot -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  Write-Host ("Staged Windows ONNX Runtime for development: {0}" -f $onnxStageRoot)
+  Write-Host ("Generated ONNX development descriptor: {0}" -f $onnxDevDescriptorPath)
+}
+
 function Enter-ResolverLock {
   param([int]$TimeoutSeconds = 120)
 
@@ -758,6 +862,10 @@ function Enter-ResolverLock {
 }
 
 function Invoke-RuntimeResolution {
+  if ($Mode -eq "StageOnnx") {
+    Stage-OnnxRuntime -Manifest (Get-VerifiedOnnxManifest)
+    return
+  }
   $verifiedManifest = $null
   $sourceMetadataWasCached = $false
   if (-not $Force) {

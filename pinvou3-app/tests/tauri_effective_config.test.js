@@ -17,6 +17,7 @@ const {
   prepareWindowsCodexBridge,
   prepareTauriArgs,
   runTauri,
+  tauriRuntimeEnvironment,
   tauriCommandIndex,
   usesValidatedNsisStaging,
 } = require("../scripts/tauri/build.js");
@@ -248,6 +249,7 @@ let currentTime = 0;
 let heartbeatCallback = null;
 let heartbeatCleared = false;
 const tauriResult = runTauri(["build"], {
+  environment: { PINVOU_TEST_ENV: "kept" },
   spawnChild: (command, args, options) => {
     tauriInvocation = { command, args, options };
     return fakeTauriChild;
@@ -268,6 +270,13 @@ assert.equal(tauriInvocation.command, process.execPath);
 assert.match(tauriInvocation.args[0], /@tauri-apps[\\/]cli[\\/]tauri\.js$/);
 assert.equal(tauriInvocation.args[1], "build");
 assert.equal(tauriInvocation.options.env[WRAPPER_ENV], "1");
+assert.equal(tauriInvocation.options.env.PINVOU_TEST_ENV, "kept");
+const ortEnvironment = tauriRuntimeEnvironment(
+  { onnxRuntimeDylib: "C:\\runtime\\onnxruntime.dll" },
+  { PINVOU_TEST_ENV: "kept" },
+);
+assert.equal(ortEnvironment.PINVOU_TEST_ENV, "kept");
+assert.equal(ortEnvironment.ORT_DYLIB_PATH, "C:\\runtime\\onnxruntime.dll");
 assert.match(tauriLogs[0], /pid=4242, phase=build/);
 currentTime = 61_000;
 heartbeatCallback();
