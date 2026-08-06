@@ -470,6 +470,7 @@
       workflowMaterialsAdded: (count, names) => "✅ Added " + count + " material(s) to materials folder: " + names.join(", "),
       workflowFolderPickerUnavailable: "Cannot open the folder picker in this environment",
       workflowPickWorkDirTitle: "Choose a working directory",
+      kbPickFolderTitle: "Choose folders to import into the knowledge base",
       workflowMediaFilterName: "Images and videos",
       workflowApproveFailed: "⚠️ Approve failed: ",
       workflowRejectFailed: "⚠️ Reject failed: ",
@@ -556,6 +557,7 @@
       workflowMaterialsAdded: (count, names) => "✅ 素材を " + count + " 件、付属資料に追加しました：" + names.join("、"),
       workflowFolderPickerUnavailable: "現在の環境ではフォルダー選択を開けません",
       workflowPickWorkDirTitle: "作業ディレクトリを選択",
+      kbPickFolderTitle: "知識ベースにインポートするフォルダーを選択",
       workflowMediaFilterName: "画像と動画",
       workflowApproveFailed: "⚠️ 承認に失敗: ",
       workflowRejectFailed: "⚠️ 差し戻しに失敗: ",
@@ -642,6 +644,7 @@
       workflowMaterialsAdded: (count, names) => "✅ 已添加 " + count + " 个素材到配套材料：" + names.join("、"),
       workflowFolderPickerUnavailable: "当前环境无法打开文件夹选择器",
       workflowPickWorkDirTitle: "选择工作目录",
+      kbPickFolderTitle: "选择要导入知识库的文件夹",
       workflowMediaFilterName: "图片和视频",
       workflowApproveFailed: "⚠️ 通过失败: ",
       workflowRejectFailed: "⚠️ 打回失败: ",
@@ -2030,6 +2033,7 @@
   var pickAndAddMaterials = workflowFeature.pickAndAddMaterials;
   var pickFiles = workflowFeature.pickFiles;
   var pickFolder = workflowFeature.pickFolder;
+  var pickFolders = workflowFeature.pickFolders;
   var pickFeedbackFiles = workflowFeature.pickFeedbackFiles;
   var addMaterialsToSession = workflowFeature.addMaterialsToSession;
   var approveWorkflowGate = workflowFeature.approveWorkflowGate;
@@ -2284,6 +2288,7 @@
     },
     files: {
       pickFiles: pickFiles,
+      pickFolders: pickFolders,
       pickFeedbackFiles: pickFeedbackFiles,
     },
     personas: {
