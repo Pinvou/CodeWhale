@@ -453,6 +453,11 @@ assert.ok(
   'chat, settings, and scheduled tasks should share availability-based model selection without the old hiding rules'
 );
 assert.ok(
+  /label:\s*selectorMainLabel\(model, t\)/.test(indexHtml) &&
+    !/label:\s*model\.name && model\.name !== model\.model \?/.test(indexHtml),
+  'scheduled model selection should display the wire model instead of stale display names'
+);
+assert.ok(
   !/data-testid="scheduled-task-pin"/.test(indexHtml) &&
     !/data-testid="scheduled-task-actions"/.test(indexHtml) &&
     !/data-testid="scheduled-task-action-menu"/.test(indexHtml) &&
