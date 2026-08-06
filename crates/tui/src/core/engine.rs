@@ -406,6 +406,18 @@ pub struct EngineConfig {
     /// Tool deny-list.  Deny always wins over allow (#3027).
     /// `None` means no tools are explicitly denied.
     pub disallowed_tools: Option<Vec<String>>,
+    /// [pinvou3-fork] 按会话注入的 pinvou3 隐藏工具集（fork ②，能力档案统一
+    /// 方案的 include 通道）。`None` = 回退编译期常量 `PINVOU3_HIDDEN_TOOLS`
+    /// （现有行为逐字节不变）;`Some` = 以注入值为准——app 按会话的能力档案
+    /// 计算（常量 − 档案 tools.include），code 模式可放出个别被隐藏工具而
+    /// plain 保持隐藏。
+    ///
+    /// ⚠️ 语义边界（与 `disallowed_tools` 不同）：
+    ///   - 本字段改变**仅 respawn 生效**（catalog 构建时消费），无热刷通道；
+    ///   - `tool_search` 的 gate 恒查常量、不可注入（见 tool_catalog.rs
+    ///     `ensure_advanced_tooling`），防模型用搜索复活被藏工具；
+    ///   - `request_user_input` 跨所有模式硬保留，不受本字段影响。
+    pub hidden_tools: Option<Vec<String>>,
     /// Hook executor for control-plane hooks.
     /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
     pub hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
@@ -522,6 +534,7 @@ impl Default for EngineConfig {
             goal_status: GoalStatus::Active,
             allowed_tools: None,
             disallowed_tools: None,
+            hidden_tools: None,
             hook_executor: None,
             locale_tag: "en".to_string(),
             workshop: None,
@@ -2981,12 +2994,22 @@ impl Engine {
             if self.config.features.enabled(Feature::Mcp) {
                 always_load.insert("start_mcp_server".to_string());
             }
+            // [pinvou3-fork] fork ②:按会话注入的隐藏集(None=回退常量)。每次
+            // catalog 构建(每轮)都从 config 读——但 config 在 spawn 时定型,
+            // hidden 变化仅 respawn 生效(与 disallowed_tools 的热刷通道不同,
+            // 语义见 EngineConfig.hidden_tools 注释)。
+            let hidden_tools: Option<std::collections::HashSet<String>> = self
+                .config
+                .hidden_tools
+                .as_ref()
+                .map(|list| list.iter().cloned().collect());
             let mut catalog = build_model_tool_catalog_with_surface(
                 registry.to_api_tools_with_cache(true),
                 mcp_tools,
                 input_policy.mode,
                 &always_load,
                 capability.tool_surface_budget,
+                hidden_tools.as_ref(),
             );
             for tool in &mut catalog {
                 if plugin_tool_names.contains(&tool.name) {

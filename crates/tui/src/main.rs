@@ -8862,6 +8862,7 @@ async fn run_exec_agent(
         goal_status: crate::tools::goal::GoalStatus::Active,
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
+        hidden_tools: None, // CLI 无按会话档案注入，回退编译期常量
         hook_executor: None,
         locale_tag: crate::localization::resolve_locale(&settings.locale)
             .tag()
