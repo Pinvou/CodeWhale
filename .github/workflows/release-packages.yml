@@ -418,6 +418,10 @@ jobs:
         working-directory: pinvou3-app
         run: npm run runtime:windows:init
 
+      - name: 验证 Windows ONNX Runtime 可加载
+        working-directory: pinvou3-app
+        run: npm run runtime:windows:onnx-smoke
+
       - name: 同步版本号
         run: node scripts/sync-version.mjs
 

@@ -45,6 +45,22 @@ const runtimeScript = readApp(
   "scripts",
   "resolve-runtime.ps1",
 );
+const onnxRuntimeScript = readApp(
+  "src-tauri",
+  "packaging",
+  "windows",
+  "runtime",
+  "scripts",
+  "stage-onnx-runtime.ps1",
+);
+const onnxRuntimeSmoke = readApp(
+  "src-tauri",
+  "packaging",
+  "windows",
+  "runtime",
+  "scripts",
+  "test-onnx-runtime.ps1",
+);
 const installerHook = readApp(
   "src-tauri",
   "packaging",
@@ -148,11 +164,20 @@ assert.match(runtimeInitScript, /\$exitCode = \$LASTEXITCODE/u);
 assert.match(runtimeInitScript, /if \(\$exitCode -ne 0\)/u);
 assert.match(runtimeInitScript, /git lfs pull/);
 assert.match(runtimeInitScript, /--include=/);
+assert.match(runtimeInitScript, /\[switch\]\$OnnxOnly/);
+assert.match(runtimeInitScript, /onnxruntime-win-x64-\*-runtime\.zip/);
 assert.match(runtimeInitScript, /pinvou3-windows-runtime-\$cacheSchema-\$expectedCommit/u);
 
 assert.match(runtimeWrapper, /runtime-descriptor\.json/);
 assert.match(runtimeWrapper, /cleanupLegacyWindowsNodeStaging/);
 assert.match(runtimeWrapper, /download-on-first-use/);
+assert.match(runtimeWrapper, /onnxRuntimeDylib/);
+assert.match(runtimeWrapper, /stageWindowsOnnxRuntime/);
+assert.match(onnxRuntimeScript, /-Mode StageOnnx/);
+assert.match(runtimeScript, /Get-VerifiedOnnxManifest/);
+assert.match(runtimeScript, /Stage-OnnxRuntime/);
+assert.match(onnxRuntimeSmoke, /LoadLibraryEx/);
+assert.match(onnxRuntimeSmoke, /OrtGetApiBase/);
 assert.match(installerAdapter, /bundleTargets\.includes\("nsis"\)/);
 assert.equal(
   windowsConfig.bundle.windows.nsis.installerHooks,
@@ -406,6 +431,21 @@ assert.ok(
     buildScript.indexOf("stageWindowsInstaller({"),
   "runtime resolver must run before the installer adapter",
 );
+assert.match(
+  buildScript,
+  /isDev && process\.platform === "win32"[\s\S]*?stageWindowsOnnxRuntime\(\)/u,
+  "Windows dev must stage only the pinned ONNX Runtime before starting Tauri",
+);
+assert.doesNotMatch(
+  buildScript,
+  /\(hasTauriBuildCommand \|\| isDev\)[\s\S]*?stageWindowsRuntime\(\)/u,
+  "Windows dev must not stage the complete packaging runtime",
+);
+assert.match(
+  buildScript,
+  /ORT_DYLIB_PATH:\s*runtime\.onnxRuntimeDylib/u,
+  "Windows dev must expose the staged ONNX Runtime to fastembed",
+);
 assert.ok(
   buildScript.indexOf("stageWindowsInstaller({") <
     buildScript.indexOf("prepareWindowsCodexBridge(windowsBridgeOptions)"),
@@ -501,6 +541,7 @@ assert.doesNotMatch(
   "public Windows runtime builds must not depend on runtime repository credentials",
 );
 assert.match(windowsBuildJob, /npm run runtime:windows:init/);
+assert.match(windowsBuildJob, /npm run runtime:windows:onnx-smoke/);
 assert.doesNotMatch(
   windowsBuildJob,
   /runtime-access|available == 'true'|available != 'true'/,

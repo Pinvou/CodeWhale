@@ -14,6 +14,12 @@ npm run runtime:windows:validate
 npm run runtime:windows:stage
 ```
 
+Windows desktop development requires a one-time `npm run runtime:windows:init:onnx`.
+It initializes the pinned runtime checkout but downloads only the ONNX Runtime
+Git LFS object. `npm run dev` then verifies and expands only that component into
+`target/windows-runtime/<commit>-<manifest-sha>-onnx-dev/` and reuses the
+fingerprinted result on later starts.
+
 `runtime:windows:init` 只在当前 checkout 与主仓库 gitlink 不一致时更新 runtime submodule；gitlink 未变化时直接复用。
 submodule checkout 会显式禁用 LFS smudge，随后检查受 LFS 管理的实际文件，只有仍存在 pointer 时才按路径执行
 `git lfs pull`。LFS 对象通过命令级 `lfs.storage` 保存在 `target/windows-runtime/lfs-storage`，不得把
