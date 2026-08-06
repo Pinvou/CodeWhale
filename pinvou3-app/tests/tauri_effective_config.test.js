@@ -196,6 +196,11 @@ assert.deepEqual(configSpecs(validatedNsisArgs), [
   validatedNsisOverlay,
   explicitOverlay,
 ]);
+assert.equal(
+  usesValidatedNsisStaging(["build", "--config", validatedNsisOverlay]),
+  false,
+  "build must remain responsible for runtime validation and staging",
+);
 const windowsCodexArgs = prepareTauriArgs(
   ["build", "-c", explicitOverlay],
   {
