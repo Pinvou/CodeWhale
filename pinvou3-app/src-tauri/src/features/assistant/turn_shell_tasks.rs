@@ -1252,8 +1252,20 @@ mod tests {
             .await
             .expect("finish interrupted turn");
 
-        assert_eq!(report.killed.len(), 1);
-        assert_eq!(report.killed[0].task_id.as_deref(), Some(current.as_str()));
+        // The background supervisor may reclaim the task before inline cleanup.
+        if !report
+            .killed
+            .iter()
+            .any(|entry| entry.task_id.as_deref() == Some(current.as_str()))
+        {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while status(&manager, &current) == ShellStatus::Running {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await
+            .expect("interrupted turn should reclaim its current job");
+        }
         assert_eq!(status(&manager, &current), ShellStatus::Killed);
         assert_eq!(status(&manager, &previous), ShellStatus::Running);
         assert_eq!(status(&manager, &older_late), ShellStatus::Running);
