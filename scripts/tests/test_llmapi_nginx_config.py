@@ -4,13 +4,40 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-CONFIG_PATH = ROOT / "deploy" / "nginx-pinvou-llmapi.conf"
+LEGACY_CONFIG_PATH = ROOT / "deploy" / "nginx-pinvou-llmapi.conf"
+SUBDOMAIN_CONFIG_PATH = (
+    ROOT / "deploy" / "nginx-pinvou-llmapi-subdomain.conf"
+)
+
+PROXY_DIRECTIVES = (
+    "proxy_pass http://127.0.0.1:13000;",
+    "proxy_http_version 1.1;",
+    "proxy_set_header Host $host;",
+    "proxy_set_header X-Real-IP $remote_addr;",
+    "proxy_set_header X-Forwarded-For $remote_addr;",
+    "proxy_set_header X-Forwarded-Proto $scheme;",
+    'proxy_set_header Connection "";',
+    "proxy_buffering off;",
+    "proxy_request_buffering off;",
+    "proxy_cache off;",
+    "proxy_read_timeout 600s;",
+    "proxy_send_timeout 600s;",
+)
+
+
+def proxy_directives(config):
+    return tuple(
+        line.strip()
+        for line in config.splitlines()
+        if line.strip().startswith("proxy_")
+    )
 
 
 class LlmapiNginxConfigTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.config = CONFIG_PATH.read_text(encoding="utf-8")
+        cls.config = LEGACY_CONFIG_PATH.read_text(encoding="utf-8")
+        cls.subdomain_config = SUBDOMAIN_CONFIG_PATH.read_text(encoding="utf-8")
 
     def test_documents_snippet_install_target(self):
         self.assertIn(
@@ -65,9 +92,14 @@ class LlmapiNginxConfigTests(unittest.TestCase):
             f"https://llmapi.pinvou.com/{redirect_match.group(1)}?tab=models",
         )
 
-    def test_public_proxy_discards_client_forwarding_chain(self):
-        self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", self.config)
-        self.assertNotIn("$proxy_add_x_forwarded_for", self.config)
+    def test_public_proxies_share_hardened_proxy_contract(self):
+        for name, config in (
+            ("legacy", self.config),
+            ("subdomain", self.subdomain_config),
+        ):
+            with self.subTest(config=name):
+                self.assertEqual(PROXY_DIRECTIVES, proxy_directives(config))
+                self.assertNotIn("$proxy_add_x_forwarded_for", config)
 
 
 if __name__ == "__main__":
