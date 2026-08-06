@@ -748,6 +748,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
     const ScaledHtmlPreview = ({ html, onFrameLoad, onOpenExternal, zoomMode = 'auto-width', customScale = 1, onScaleChange, onCustomScaleChange }) => {
       const wrapRef = useRef(null);
       const frameRef = useRef(null);
+      const naturalRef = useRef(null);
       const [box, setBox] = useState(null); // { w, h, scale }
       const [ready, setReady] = useState(false);
       const managedZoom = zoomMode !== 'auto-width';
@@ -758,11 +759,18 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
           if (!fr || !wrap || !fr.contentWindow) return;
           const doc = fr.contentWindow.document;
           const de = doc.documentElement, bd = doc.body;
-          const naturalW = Math.max(de ? de.scrollWidth : 0, bd ? bd.scrollWidth : 0);
-          const h = Math.max(de ? de.scrollHeight : 0, bd ? bd.scrollHeight : 0);
           const panelW = wrap.clientWidth;
           const panelH = wrap.clientHeight;
-          const w = managedZoom ? Math.max(canvasW, naturalW || 0) : naturalW;
+          // Reusing the first natural size prevents iframe growth from feeding back into ResizeObserver.
+          let natural = naturalRef.current;
+          if (!natural) {
+            const width = Math.max(de ? de.scrollWidth : 0, bd ? bd.scrollWidth : 0);
+            const height = Math.max(de ? de.scrollHeight : 0, bd ? bd.scrollHeight : 0);
+            natural = { width, height };
+            if (width > 0 && height > 0) naturalRef.current = natural;
+          }
+          const w = managedZoom ? Math.max(canvasW, natural.width || 0) : natural.width;
+          const h = natural.height;
           let scale = 1;
           if (zoomMode === 'fit') {
             const widthScale = w > 0 && panelW > 0 ? panelW / w : 1;
@@ -788,7 +796,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
           if (onScaleChange) onScaleChange(scale);
         } catch (e) { /* 未就绪/跨域，忽略 */ }
       };
-      useEffect(() => { setReady(false); setBox(null); }, [html]);
+      useEffect(() => { setReady(false); setBox(null); naturalRef.current = null; }, [html]);
       useEffect(() => { measure(); }, [zoomMode, customScale]);
       useEffect(() => {
         if (!wrapRef.current || typeof ResizeObserver === 'undefined') return;
