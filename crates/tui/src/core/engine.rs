@@ -245,6 +245,8 @@ pub struct EngineConfig {
     pub allow_shell: bool,
     /// Enable trust mode (skip approvals) when true.
     pub trust_mode: bool,
+    /// Initial reasoning effort for hosts that may spawn work before sending a message.
+    pub reasoning_effort: Option<String>,
     /// Path to the notes file used by the notes tool.
     pub notes_path: PathBuf,
     /// Path to the MCP configuration file.
@@ -428,6 +430,7 @@ impl Default for EngineConfig {
             subagent_state_root: None,
             allow_shell: true,
             trust_mode: false,
+            reasoning_effort: None,
             notes_path: PathBuf::from("notes.txt"),
             mcp_config_path: PathBuf::from("mcp.json"),
             skills_dir: crate::skills::default_skills_dir(),
@@ -1208,6 +1211,7 @@ impl Engine {
             config.notes_path.clone(),
             config.mcp_config_path.clone(),
         );
+        session.reasoning_effort = config.reasoning_effort.clone();
         // Set up stable system prompt with project context (default to agent mode).
         // Per-turn working-set metadata is injected into the latest user
         // message at request time so file churn does not rewrite this prefix.
