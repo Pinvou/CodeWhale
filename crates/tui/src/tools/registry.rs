@@ -238,11 +238,7 @@ impl ToolRegistry {
                     input_schema: schema,
                     allowed_callers: Some(vec!["direct".to_string()]),
                     defer_loading: Some(
-                        tool.defer_loading()
-                            || pinvou3_blocklist::is_pinvou3_hidden_for_session(
-                                tool.name(),
-                                self.context.hidden_tools.as_ref(),
-                            ),
+                        tool.defer_loading() || pinvou3_blocklist::is_pinvou3_hidden(tool.name()),
                     ),
                     input_examples: None,
                     strict: None,
