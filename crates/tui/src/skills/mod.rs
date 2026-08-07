@@ -47,6 +47,27 @@ const MAX_SKILL_DESCRIPTION_CHARS: usize = 280;
 const MAX_AVAILABLE_SKILLS_CHARS: usize = 2_400;
 const MAX_SKILL_NAME_CHARS: usize = 64;
 
+// Pinvou owns the installed Skill catalogue in its bundle/marketplace. Keep
+// the runtime switch process-global so every embedded Engine sees the same
+// enabled set without another host-to-session synchronization channel.
+static DISABLED_SKILLS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// Replace the exact Skill names disabled by the embedding host.
+pub fn set_disabled_skills(names: Vec<String>) {
+    if let Ok(mut disabled) = DISABLED_SKILLS.write() {
+        *disabled = names;
+    }
+}
+
+/// Whether the embedding host disabled this exact Skill name.
+#[must_use]
+pub fn is_skill_disabled(name: &str) -> bool {
+    DISABLED_SKILLS
+        .read()
+        .map(|disabled| disabled.iter().any(|candidate| candidate == name))
+        .unwrap_or(false)
+}
+
 /// Test-only observations of the synchronous skill-discovery walk.
 ///
 /// Definitions are intentionally tied to concrete filesystem operations:
@@ -752,6 +773,7 @@ impl SkillRegistry {
                     .iter()
                     .find(|s| s.aliases.iter().any(|alias| alias == &normalized))
             })
+            .filter(|skill| !is_skill_disabled(&skill.name))
     }
 
     /// Return all loaded skills.
@@ -965,9 +987,11 @@ pub fn discover_for_workspace_and_dir_with_mode_and_plugins(
 pub fn skill_directories_for_workspace_and_dir(
     workspace: &Path,
     skills_dir: &Path,
-    mode: SkillDiscoveryMode,
+    _mode: SkillDiscoveryMode,
 ) -> Vec<PathBuf> {
-    let mut dirs = skills_directories_for_mode(workspace, mode);
+    // An explicit host-injected directory is an authority boundary, not one
+    // more candidate to union with ambient workspace/home harness roots.
+    let mut dirs = Vec::new();
     insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
     dirs
 }
@@ -1200,11 +1224,11 @@ pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode(
 pub(crate) fn discover_for_workspace_and_dir_with_home_and_mode_and_plugins(
     workspace: &Path,
     skills_dir: &Path,
-    home_dir: Option<&Path>,
-    mode: SkillDiscoveryMode,
+    _home_dir: Option<&Path>,
+    _mode: SkillDiscoveryMode,
     plugins: Option<&crate::plugins::PluginRegistry>,
 ) -> SkillRegistry {
-    let mut dirs = skills_directories_with_home_and_mode(workspace, home_dir, mode);
+    let mut dirs = Vec::new();
     insert_configured_skills_dir(&mut dirs, workspace, skills_dir);
     discover_from_directories_with_plugins(dirs, plugins)
 }
@@ -1332,7 +1356,9 @@ Skills are optional local instruction packs. This budgeted index exposes routing
     let model_selectable_skill_count = registry
         .list()
         .iter()
-        .filter(|skill| skill.invocation != SkillInvocation::ExplicitOnly)
+        .filter(|skill| {
+            skill.invocation != SkillInvocation::ExplicitOnly && !is_skill_disabled(&skill.name)
+        })
         .count();
     let skill_omission_reserve = format!(
         "- ... {} additional skills omitted; call `load_skill` with `name=\"list\"` for the complete catalogue.\n",
@@ -1354,6 +1380,9 @@ Skills are optional local instruction packs. This budgeted index exposes routing
 
     let mut omitted = 0usize;
     for skill in registry.list() {
+        if is_skill_disabled(&skill.name) {
+            continue;
+        }
         if skill.invocation == SkillInvocation::ExplicitOnly {
             // Explicit-only skills remain loadable by their canonical name or
             // alias, but must not be presented as model-selectable catalogue

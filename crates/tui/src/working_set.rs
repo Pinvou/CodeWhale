@@ -1015,7 +1015,7 @@ impl WorkingSet {
     /// Observe a user message and update the working set.
     pub fn observe_user_message(&mut self, text: &str, workspace: &Path) {
         self.next_turn();
-        let paths = extract_paths_from_text(text);
+        let paths = extract_paths_from_text(strip_leading_system_reminder(text));
         self.record_candidates(paths, workspace, WorkingSetSource::UserMessage);
     }
 
@@ -1438,7 +1438,12 @@ fn extract_paths_from_message(message: &Message) -> Vec<String> {
     for block in &message.content {
         match block {
             ContentBlock::Text { text, .. } => {
-                paths.extend(extract_paths_from_text(text));
+                let analysis_text = if message.role == "user" {
+                    strip_leading_system_reminder(text)
+                } else {
+                    text
+                };
+                paths.extend(extract_paths_from_text(analysis_text));
             }
             ContentBlock::ToolUse { input, .. } => {
                 paths.extend(extract_paths_from_value(input, None));
@@ -1454,6 +1459,24 @@ fn extract_paths_from_message(message: &Message) -> Vec<String> {
         }
     }
     paths
+}
+
+/// Internal per-turn policy is transported in a leading user-text envelope so
+/// strict chat templates can still receive it. It is not user-authored content
+/// and must not seed working-set path heuristics. Keep stored history intact;
+/// this projection is used only for path analysis and rebuilds.
+fn strip_leading_system_reminder(text: &str) -> &str {
+    const OPEN: &str = "<system-reminder>";
+    const CLOSE: &str = "</system-reminder>";
+
+    let trimmed = text.trim_start();
+    let Some(after_open) = trimmed.strip_prefix(OPEN) else {
+        return text;
+    };
+    let Some(close_index) = after_open.find(CLOSE) else {
+        return text;
+    };
+    after_open[close_index + CLOSE.len()..].trim_start()
 }
 
 fn extract_paths_from_value(value: &Value, tool_hint: Option<&str>) -> Vec<String> {
@@ -1735,6 +1758,27 @@ mod tests {
         let entry = ws.entries.get("src/lib.rs").expect("entry");
         assert!(entry.exists);
         assert!(!entry.is_dir);
+    }
+
+    #[test]
+    fn forkguard_working_set_ignores_leading_system_reminder_paths() {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::create_dir_all(tmp.path().join("internal")).expect("mkdir");
+        fs::create_dir_all(tmp.path().join("reports")).expect("mkdir");
+        fs::write(tmp.path().join("internal/policy.md"), "private").expect("write");
+        fs::write(tmp.path().join("reports/daily.md"), "report").expect("write");
+
+        let input = "<system-reminder>\nRead internal/policy.md\n</system-reminder>\n\nReview reports/daily.md";
+        let mut ws = WorkingSet::default();
+        ws.observe_user_message(input, tmp.path());
+        assert!(ws.entries.contains_key("reports/daily.md"));
+        assert!(!ws.entries.contains_key("internal/policy.md"));
+
+        let messages = vec![make_message("user", input)];
+        let mut ws = WorkingSet::default();
+        ws.rebuild_from_messages(&messages, tmp.path());
+        assert!(ws.entries.contains_key("reports/daily.md"));
+        assert!(!ws.entries.contains_key("internal/policy.md"));
     }
 
     #[test]

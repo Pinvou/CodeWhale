@@ -418,9 +418,9 @@ static PROMPT_OVERRIDE_NOTICES: LazyLock<Mutex<Vec<String>>> =
 
 /// Context passed to an embedder-provided static prompt composer.
 ///
-/// This hook only replaces the byte-stable base/personality prompt segment.
-/// Mode deltas, approval policy, Core Execution, and action-specific relay
-/// formatting stay owned by Codewhale.
+/// When installed, this hook owns the byte-stable static prefix. Dynamic
+/// environment, inline instructions, Skills, memory, route, and locale
+/// fragments remain assembled by Codewhale.
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct StaticPromptCtx<'a> {
@@ -433,9 +433,20 @@ pub struct StaticPromptCtx<'a> {
     pub default_layers: &'a str,
 }
 
-/// Embedder hook for replacing Codewhale's byte-stable base/personality prompt
-/// segment.
+/// Embedder hook for replacing Codewhale's byte-stable static prompt prefix.
 pub type StaticPromptComposer = dyn Fn(&StaticPromptCtx<'_>) -> String + Send + Sync + 'static;
+
+/// Install an embedder composer that owns the complete static prompt prefix.
+/// First call wins and must happen before any Engine is spawned.
+pub fn set_static_prompt_composer_override(f: Box<StaticPromptComposer>) -> Result<(), ()> {
+    STATIC_PROMPT_COMPOSER.set(f).map_err(|_| ())
+}
+
+/// Whether an embedder owns the complete static prompt prefix.
+#[must_use]
+pub fn static_prompt_composer_installed() -> bool {
+    STATIC_PROMPT_COMPOSER.get().is_some()
+}
 
 /// Replace `BASE_PROMPT` for all subsequent prompt composition. First call
 /// wins; later calls return the rejected string. Set before spawning any
@@ -1072,11 +1083,15 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // constitution's own layers so the model reads "which mode am I in" before
     // the general rules it modulates, and it ships exactly once per prefix
     // rather than per user message.
-    let mode_prompt = format!(
-        "{}\n\n{}",
-        mode_doctrine(session_context.mode).trim(),
-        composed.trim_start()
-    );
+    let mode_prompt = if static_prompt_composer_installed() {
+        composed
+    } else {
+        format!(
+            "{}\n\n{}",
+            mode_doctrine(session_context.mode).trim(),
+            composed.trim_start()
+        )
+    };
 
     // Load project context from workspace
     let project_context = load_project_context_with_parents(workspace);
@@ -1171,8 +1186,10 @@ pub fn system_prompt_for_mode_with_context_skills_session_and_approval(
     // 4. Lean, runtime-only coding discipline. Context pressure, prompt-cache
     // accounting, footer presentation, and automatic compaction are host
     // responsibilities; teaching their UI to the model dilutes the task.
-    full_prompt.push_str("\n\n");
-    full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
+    if !static_prompt_composer_installed() {
+        full_prompt.push_str("\n\n");
+        full_prompt.push_str(CORE_EXECUTION_PROFILE_PROMPT.trim());
+    }
 
     // The compaction/relay format is action-specific context. Automatic
     // compaction owns its structured successor brief, while `/relay` appends
@@ -1309,7 +1326,12 @@ pub fn world_state_from_session_facts(
         state = state.with_workspace(body);
     }
     if let Some(body) = permissions_body.filter(|s| !s.trim().is_empty()) {
-        state = state.with_permissions(body);
+        state.upsert(crate::model_context::ModelContextFragment::with_max_bytes(
+            crate::model_context::FragmentId::Permissions,
+            crate::model_context::FragmentRole::Permissions,
+            body,
+            INSTRUCTIONS_FILE_MAX_BYTES,
+        ));
     }
     if let Some(body) = route_body.filter(|s| !s.trim().is_empty()) {
         state = state.with_route(body);
@@ -1479,6 +1501,20 @@ mod tests {
         );
 
         assert_eq!(composed, "embedder static prompt");
+    }
+
+    #[test]
+    fn forkguard_instruction_fragment_preserves_content_beyond_default_cap() {
+        let tail = "FORKGUARD_INSTRUCTIONS_TAIL";
+        let body = format!("{}{}", "x".repeat(80 * 1024), tail);
+        let state = world_state_from_session_facts(None, Some(&body), None, None, None, None);
+        let fragment = state
+            .get(crate::model_context::FragmentId::Permissions)
+            .expect("permissions fragment");
+
+        assert_eq!(fragment.max_bytes, INSTRUCTIONS_FILE_MAX_BYTES);
+        assert!(fragment.content.ends_with(tail));
+        assert!(state.validate_caps().is_ok());
     }
 
     fn contains_cjk(text: &str) -> bool {
@@ -1884,7 +1920,7 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_merges_workspace_and_configured_skills_dir() {
+    fn system_prompt_uses_only_explicit_configured_skills_dir() {
         let _env_guard = crate::test_support::lock_test_env();
         let tmp = tempdir().expect("tempdir");
         let _home = ScopedHome::set(tmp.path().join("home"));
@@ -1905,7 +1941,7 @@ mod tests {
             None,
         ));
 
-        assert!(text.contains("workspace-skill"));
+        assert!(!text.contains("workspace-skill"));
         assert!(text.contains("configured-skill"));
     }
 

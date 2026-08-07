@@ -930,6 +930,18 @@ pub fn load_project_context(workspace: &Path) -> ProjectContext {
 ///
 /// This allows for monorepo setups where a root AGENTS.md applies to all subdirectories.
 pub fn load_project_context_with_parents(workspace: &Path) -> ProjectContext {
+    load_project_context_for_host(
+        workspace,
+        crate::prompts::static_prompt_composer_installed(),
+    )
+}
+
+fn load_project_context_for_host(workspace: &Path, embedder_owns_context: bool) -> ProjectContext {
+    if embedder_owns_context {
+        // Pinvou passes its reviewed instructions through `EngineConfig`;
+        // ambient repository/home files would create competing authority.
+        return ProjectContext::empty(canonicalize_workspace_or_keep(workspace));
+    }
     load_project_context_with_parents_cached_and_home(
         workspace,
         crate::config::effective_home_dir().as_deref(),
@@ -1529,6 +1541,23 @@ pub fn merge_contexts(contexts: &[ProjectContext]) -> Option<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn forkguard_runtime_loader_ignores_ambient_project_authority() {
+        let tmp = tempdir().expect("tempdir");
+        fs::write(tmp.path().join("AGENTS.md"), "ambient instructions").expect("write agents");
+        fs::create_dir_all(tmp.path().join(".codewhale")).expect("mkdir codewhale");
+        fs::write(
+            tmp.path().join(".codewhale/constitution.json"),
+            r#"{"protected_invariants":[{"text":"ambient law","paths":["**"],"action":"block"}]}"#,
+        )
+        .expect("write constitution");
+
+        let context = load_project_context_for_host(tmp.path(), true);
+        assert!(!context.has_instructions());
+        assert!(context.constitution_block.is_none());
+        assert_eq!(load_repo_law_rules(tmp.path()).len(), 1);
+    }
 
     #[test]
     fn mixed_advisory_and_enforced_invariants_render_and_back_compat_holds() {

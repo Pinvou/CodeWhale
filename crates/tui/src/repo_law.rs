@@ -47,6 +47,12 @@ pub(crate) fn repo_law_plan_decision(
     tool_name: &str,
     tool_input: &Value,
 ) -> Option<RepoLawPlanDecision> {
+    if crate::prompts::static_prompt_composer_installed() {
+        // The embedding host owns the reviewed authority channel and supplies
+        // it inline; ambient `.codewhale/constitution.json` must not add a
+        // second prompt or mechanical-policy source.
+        return None;
+    }
     let policy_action =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
     if !WRITE_POLICY_ACTIONS.contains(&policy_action) {
