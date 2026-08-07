@@ -28,7 +28,7 @@ class ReleaseCachePolicyTests(unittest.TestCase):
                 self.assertIn(
                     MAIN_ONLY_SAVE,
                     step,
-                    "release PR 只能读取缓存，禁止写入 pull-ref 缓存",
+                    "非 main release 只能读取缓存，禁止写入分支缓存",
                 )
 
     def test_rust_test_allows_main_to_rebuild_cold_cache(self):
