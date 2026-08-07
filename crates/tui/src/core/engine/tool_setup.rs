@@ -12,6 +12,15 @@ fn should_register_remember_tool(memory_enabled: bool) -> bool {
 }
 
 impl Engine {
+    /// Append application-hosted tools after the mode-specific native surface
+    /// has been built. Injected tools belong to the host contract in every mode.
+    fn append_host_extra_tools(&self, mut builder: ToolRegistryBuilder) -> ToolRegistryBuilder {
+        for tool in &self.config.extra_tools.0 {
+            builder = builder.with_tool(Arc::clone(tool));
+        }
+        builder
+    }
+
     pub(super) fn agent_tool_surface_options(
         &self,
         shell_policy: ShellPolicy,
@@ -84,7 +93,7 @@ impl Engine {
                     .with_runtime_mcp_tool(Arc::clone(pool))
                     .with_registry_mcp_start_tool(Arc::clone(pool));
             }
-            return builder;
+            return self.append_host_extra_tools(builder);
         }
 
         let mut builder = {
@@ -153,7 +162,7 @@ impl Engine {
                 .with_registry_mcp_start_tool(Arc::clone(pool));
         }
 
-        builder
+        self.append_host_extra_tools(builder)
     }
 }
 

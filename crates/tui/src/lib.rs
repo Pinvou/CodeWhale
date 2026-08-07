@@ -10869,7 +10869,7 @@ async fn run_exec_agent(
     plugin_registry: std::sync::Arc<crate::plugins::PluginRegistry>,
 ) -> Result<()> {
     use crate::compaction::CompactionConfig;
-    use crate::core::engine::{EngineConfig, spawn_engine};
+    use crate::core::engine::{EngineConfig, ExtraTools, spawn_engine};
     use crate::core::events::Event;
     use crate::core::ops::Op;
     use crate::tools::plan::new_shared_plan_state;
@@ -11109,6 +11109,7 @@ async fn run_exec_agent(
         } else {
             execution_config.tools.clone()
         },
+        extra_tools: ExtraTools::default(),
         verbosity: execution_config.verbosity.clone(),
         workspace_follow_symlinks: settings.workspace_follow_symlinks,
         exec_policy_engine: execution_config.exec_policy_engine.clone(),
