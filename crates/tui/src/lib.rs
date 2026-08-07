@@ -21,40 +21,42 @@ use rust_i18n::i18n;
 i18n!("locales", fallback = ["en"]);
 
 mod acp_server;
-mod artifacts;
+pub mod artifacts;
 mod audit;
 mod auto_reasoning;
-mod automation_manager;
+pub mod automation_manager;
 mod child_env;
 mod client;
 mod codex_model_cache;
 mod command_safety;
 mod commands;
-mod compaction;
+pub mod compaction;
 mod composer_history;
 mod composer_stash;
-mod config;
+pub mod config;
 mod config_persistence;
 mod config_ui;
 mod context_budget;
 mod context_report;
 mod continual_harness;
-mod core;
+pub mod core;
 mod cost_status;
 mod deepseek_theme;
 mod dependencies;
 mod doctor;
 mod elapsed;
-mod error_taxonomy;
+pub mod error_taxonomy;
 mod eval;
 mod execpolicy;
 mod external_credentials;
 mod fast_hash;
-mod features;
+pub mod features;
 mod fleet;
+pub use fleet::profile::WORKSPACE_AGENT_PROFILE_DIR;
+pub use fleet::roster::FleetRoster;
 mod goal_loop;
 mod hashing;
-mod hooks;
+pub mod hooks;
 mod image_attach;
 mod lane_control;
 mod llm_client;
@@ -62,7 +64,7 @@ mod llm_response_cache;
 mod localization;
 mod logging;
 mod lsp;
-mod mcp;
+pub mod mcp;
 mod mcp_server;
 mod model_catalog;
 mod model_context;
@@ -70,10 +72,10 @@ mod model_inventory;
 mod model_profile;
 mod model_registry;
 mod model_routing;
-mod models;
+pub mod models;
 mod models_dev_live;
 mod native_memory;
-mod network_policy;
+pub mod network_policy;
 mod oauth;
 mod palette;
 mod plugins;
@@ -82,7 +84,7 @@ mod pricing;
 mod project_context;
 mod project_context_cache;
 mod prompt_zones;
-mod prompts;
+pub mod prompts;
 mod provider_lake;
 mod provider_readiness;
 mod purge;
@@ -99,7 +101,7 @@ pub mod rlm;
 mod route_billing;
 mod route_budget;
 mod route_receipt;
-mod route_runtime;
+pub mod route_runtime;
 mod runtime_api;
 mod runtime_handoff;
 mod runtime_log;
@@ -119,7 +121,7 @@ mod doctor_loader_tests;
 #[cfg(test)]
 mod session_control_acceptance;
 #[allow(dead_code)]
-mod session_manager;
+pub mod session_manager;
 mod session_peek;
 mod session_projection;
 mod session_resume;
@@ -127,10 +129,10 @@ pub mod session_tree;
 mod settings;
 mod shell_dispatcher;
 mod skill_state;
-mod skills;
+pub mod skills;
 mod snapshot;
 mod startup_trace;
-mod task_manager;
+pub mod task_manager;
 mod telemetry_notice;
 #[cfg(test)]
 mod test_support;
@@ -138,10 +140,10 @@ mod tls;
 mod tool_history_repair;
 mod tool_inspection;
 mod tool_output_receipts;
-mod tools;
-mod tui;
+pub mod tools;
+pub mod tui;
 mod turn_route_plan;
-mod utils;
+pub mod utils;
 mod vision;
 mod work_graph;
 mod work_grounding;
@@ -150,6 +152,23 @@ mod working_set;
 mod workspace_discovery;
 mod workspace_trust;
 mod xai_oauth;
+
+#[cfg(test)]
+mod host_fleet_api_forkguard_tests {
+    use super::{FleetRoster, WORKSPACE_AGENT_PROFILE_DIR};
+
+    #[test]
+    fn forkguard_host_can_load_workspace_fleet_roster() {
+        let workspace = tempfile::tempdir().expect("create workspace");
+        let roster = FleetRoster::load(
+            &codewhale_config::FleetConfigToml::default(),
+            workspace.path(),
+        );
+
+        assert!(roster.get("verifier").is_some());
+        assert_eq!(WORKSPACE_AGENT_PROFILE_DIR, ".codewhale/agents");
+    }
+}
 
 use crate::config::{Config, DEFAULT_TEXT_MODEL, MAX_SUBAGENTS, effective_home_dir};
 use crate::eval::{EvalHarness, EvalHarnessConfig, ScenarioStepKind};
@@ -10989,6 +11008,7 @@ async fn run_exec_agent(
         ) || (!fleet_authority_active
             && (auto_approve || execution_config.allow_shell())),
         trust_mode,
+        reasoning_effort: effective_reasoning_effort.clone(),
         notes_path: execution_config.notes_path(),
         mcp_config_path: execution_config.mcp_config_path(),
         skills_dir: execution_config.skills_dir(),

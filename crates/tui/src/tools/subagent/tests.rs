@@ -8085,6 +8085,31 @@ fn explicit_state_roots_isolate_managers_for_the_same_execution_workspace() {
     );
 }
 
+#[test]
+fn forkguard_host_readonly_worker_projection_preserves_live_status() {
+    let tmp = tempdir().expect("tempdir");
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("mkdir workspace");
+
+    let state_path = default_state_path(&workspace).expect("state path");
+    let mut manager = SubAgentManager::new(workspace.clone(), 1).with_state_path(state_path);
+    manager
+        .ensure_coordination_process_lock()
+        .expect("acquire state lock");
+    manager.register_worker(make_worker_spec("agent_live", workspace.clone()));
+    manager
+        .persist_state_synchronously()
+        .expect("persist worker state");
+
+    let raw = read_persisted_agent_worker_records(&workspace).expect("read raw worker records");
+    assert_eq!(raw.len(), 1);
+    assert!(!raw[0].status.is_terminal());
+
+    let recovered =
+        load_persisted_agent_worker_records(&workspace).expect("load recovery projection");
+    assert_eq!(recovered[0].status, AgentWorkerStatus::Interrupted);
+}
+
 #[cfg(unix)]
 #[test]
 fn persist_state_rejects_symlinked_state_directory() {

@@ -6183,6 +6183,44 @@ pub fn load_persisted_agent_worker_records(workspace: &Path) -> Result<Vec<Agent
     load_persisted_agent_worker_records_with_state_root(workspace, workspace)
 }
 
+/// Read durable worker records without applying process-restart reconciliation.
+///
+/// Embedding hosts use this read-only projection while their engine is live and
+/// apply their own process-epoch check. Recovery paths should continue using
+/// [`load_persisted_agent_worker_records`], which deliberately converts
+/// orphaned non-terminal workers to `Interrupted`.
+pub fn read_persisted_agent_worker_records(workspace: &Path) -> Result<Vec<AgentWorkerRecord>> {
+    let canonical = default_state_path(workspace)?;
+    let path = if canonical.exists() {
+        canonical
+    } else {
+        let legacy = checked_subagent_state_path(
+            workspace,
+            &Path::new(".deepseek")
+                .join("state")
+                .join(SUBAGENT_STATE_FILE),
+        )?;
+        if legacy.exists() {
+            legacy
+        } else {
+            return Ok(Vec::new());
+        }
+    };
+    let raw = read_subagent_state_file(workspace, &path)?;
+    let state = serde_json::from_str::<PersistedSubAgentState>(&raw)?;
+    if state.schema_version != SUBAGENT_STATE_SCHEMA_VERSION {
+        return Err(anyhow!(
+            "Unsupported sub-agent state schema {}",
+            state.schema_version
+        ));
+    }
+    Ok(state
+        .workers
+        .into_iter()
+        .map(normalize_worker_record)
+        .collect())
+}
+
 /// Load persisted worker records from an explicit delegated-agent state root.
 pub fn load_persisted_agent_worker_records_with_state_root(
     workspace: &Path,

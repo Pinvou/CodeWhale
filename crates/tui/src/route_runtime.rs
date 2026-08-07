@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use codewhale_config::route::{
-    LimitField, LogicalModelRef, OverrideSource, ReadyRouteCandidate, RouteRequest, RouteResolver,
-    SourcedLimitOverride, WireModelId,
+    LimitField, LogicalModelRef, OverrideSource, ReadyRouteCandidate, RouteLimits, RouteRequest,
+    RouteResolver, SourcedLimitOverride, WireModelId,
 };
 use serde::Serialize;
 
@@ -21,6 +21,7 @@ use crate::models::DIRECT_KIMI_K3_MAX_OUTPUT_TOKENS;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ContextWindowSource {
+    EmbeddingHost,
     Configured,
     ProviderReported,
     StaticKimiCodeSafeFloor,
@@ -32,6 +33,7 @@ impl ContextWindowSource {
     #[must_use]
     pub(crate) const fn label(self) -> &'static str {
         match self {
+            Self::EmbeddingHost => "embedding host",
             Self::Configured => "configured",
             Self::ProviderReported => "provider-reported",
             Self::StaticKimiCodeSafeFloor => "static Kimi Code safe floor",
@@ -68,7 +70,7 @@ pub(crate) struct RouteCandidateResolution {
 }
 
 #[derive(Clone)]
-pub(crate) struct ResolvedRuntimeRoute {
+pub struct ResolvedRuntimeRoute {
     pub(crate) identity: ProviderIdentity,
     pub(crate) candidate: ReadyRouteCandidate,
     pub(crate) config: Box<Config>,
@@ -112,6 +114,12 @@ impl std::fmt::Debug for ValidatedRuntimeRoute {
 }
 
 impl ResolvedRuntimeRoute {
+    /// Non-secret wire model carried by this resolved route receipt.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     pub(crate) fn preflight(mut self) -> Result<Self, String> {
         if self.preflighted_client.is_none() {
             self.preflighted_client = Some(
@@ -311,6 +319,27 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
     context_window_override: Option<u32>,
     provider_reported_context: Option<ProviderReportedKimiCodeContext>,
 ) -> Result<RouteCandidateResolution, String> {
+    resolve_route_candidate_with_context_metadata_and_host_limits(
+        provider,
+        model_selector,
+        saved_provider_model,
+        base_url_override,
+        context_window_override,
+        provider_reported_context,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_route_candidate_with_context_metadata_and_host_limits(
+    provider: ApiProvider,
+    model_selector: Option<&str>,
+    saved_provider_model: Option<&str>,
+    base_url_override: Option<String>,
+    context_window_override: Option<u32>,
+    provider_reported_context: Option<ProviderReportedKimiCodeContext>,
+    host_limits: Option<RouteLimits>,
+) -> Result<RouteCandidateResolution, String> {
     let effective_base_url = base_url_override
         .as_deref()
         .unwrap_or_else(|| provider.default_base_url());
@@ -335,12 +364,15 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
     let resolved = resolver
         .resolve(&base_request)
         .map_err(|err| err.to_string())?;
-    let plan = plan_limit_overrides(
+    let mut plan = plan_limit_overrides(
         provider,
         &resolved,
         context_window_override,
         provider_reported_context,
     );
+    if let Some(host_limits) = host_limits {
+        append_embedding_host_limit_overrides(&mut plan, host_limits)?;
+    }
     let candidate = if plan.overrides.is_empty() {
         resolved
     } else {
@@ -355,6 +387,42 @@ pub(crate) fn resolve_route_candidate_with_context_metadata(
         candidate,
         context_window: plan.context_window,
     })
+}
+
+fn append_embedding_host_limit_overrides(
+    plan: &mut LimitOverridePlan,
+    host_limits: RouteLimits,
+) -> Result<(), String> {
+    if let Some(context_tokens) = host_limits.context_tokens {
+        let tokens = u32::try_from(context_tokens).map_err(|_| {
+            format!("Embedding host context limit {context_tokens} exceeds the supported u32 range")
+        })?;
+        if tokens == 0 {
+            return Err("Embedding host context limit must be greater than zero".to_string());
+        }
+        plan.overrides.push(SourcedLimitOverride {
+            field: LimitField::ContextTokens,
+            value: Some(context_tokens),
+            source: OverrideSource::EmbeddingHost,
+        });
+        plan.context_window = ContextWindowResolution {
+            tokens,
+            source: ContextWindowSource::EmbeddingHost,
+        };
+    }
+    for (field, value) in [
+        (LimitField::InputTokens, host_limits.input_tokens),
+        (LimitField::OutputTokens, host_limits.output_tokens),
+    ] {
+        if let Some(value) = value {
+            plan.overrides.push(SourcedLimitOverride {
+                field,
+                value: Some(value),
+                source: OverrideSource::EmbeddingHost,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The sourced limit overrides a route needs, plus the context-window receipt
@@ -509,7 +577,12 @@ fn plan_limit_overrides(
     }
 }
 
-pub(crate) fn resolve_runtime_route(
+/// Resolve an exact provider/model route for an embedding host.
+///
+/// The returned descriptor keeps credentials and mutable route internals
+/// private; hosts may only inspect the non-secret wire model and pass the
+/// descriptor back through [`crate::core::ops::Op`].
+pub fn resolve_runtime_route(
     config: &Config,
     provider: ApiProvider,
     model_selector: Option<&str>,
@@ -520,7 +593,31 @@ pub(crate) fn resolve_runtime_route(
         config
             .resolve_persisted_provider_identity(Some(provider.as_str()), Some(provider.as_str()))?
     };
-    resolve_runtime_route_for_identity(config, &identity, model_selector)
+    resolve_runtime_route_for_identity_with_limits(config, &identity, model_selector, None)
+}
+
+/// Resolve a route while carrying embedding-host limit facts onto the exact
+/// executable receipt. `Some` fields replace catalog values; `None` fields
+/// preserve them. This keeps arbitrary local wire aliases independent from
+/// the static model catalog without exposing credentials or route internals.
+pub fn resolve_runtime_route_with_limits(
+    config: &Config,
+    provider: ApiProvider,
+    model_selector: Option<&str>,
+    host_limits: RouteLimits,
+) -> Result<ResolvedRuntimeRoute, String> {
+    let identity = if provider == ApiProvider::Custom {
+        config.active_provider_identity(provider)?
+    } else {
+        config
+            .resolve_persisted_provider_identity(Some(provider.as_str()), Some(provider.as_str()))?
+    };
+    resolve_runtime_route_for_identity_with_limits(
+        config,
+        &identity,
+        model_selector,
+        Some(host_limits),
+    )
 }
 
 /// Resolve one persisted/live identity into a scoped runtime config and route
@@ -530,6 +627,15 @@ pub(crate) fn resolve_runtime_route_for_identity(
     config: &Config,
     identity: &ProviderIdentity,
     model_selector: Option<&str>,
+) -> Result<ResolvedRuntimeRoute, String> {
+    resolve_runtime_route_for_identity_with_limits(config, identity, model_selector, None)
+}
+
+fn resolve_runtime_route_for_identity_with_limits(
+    config: &Config,
+    identity: &ProviderIdentity,
+    model_selector: Option<&str>,
+    host_limits: Option<RouteLimits>,
 ) -> Result<ResolvedRuntimeRoute, String> {
     let identity = config.resolve_persisted_provider_identity(
         Some(identity.provider.as_str()),
@@ -548,13 +654,14 @@ pub(crate) fn resolve_runtime_route_for_identity(
     .then(|| model_roster().preferred_model_id().map(str::to_string))
     .flatten();
     let model_selector = model_selector.or(roster_preferred.as_deref());
-    let resolution = resolve_route_candidate_with_context_metadata(
+    let resolution = resolve_route_candidate_with_context_metadata_and_host_limits(
         provider,
         model_selector,
         saved_provider_model,
         Some(route_config.deepseek_base_url()),
         route_config.context_window_for_provider_config(provider),
         None,
+        host_limits,
     )?;
     let candidate = resolution.candidate;
     let model = candidate.wire_model_id().as_str().to_string();
@@ -1352,5 +1459,50 @@ mod tests {
             route.candidate.endpoint().base_url,
             "http://gpu.internal.example:8000/v1"
         );
+    }
+
+    #[test]
+    fn forkguard_embedding_route_limits_preserve_wire_alias() {
+        let config = Config {
+            provider: Some("vllm".to_string()),
+            providers: Some(ProvidersConfig {
+                vllm: ProviderConfig {
+                    base_url: Some("http://127.0.0.1:8000/v1".to_string()),
+                    model: Some("local-wire-alias".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let host_limits = RouteLimits {
+            context_tokens: Some(262_144),
+            input_tokens: Some(237_568),
+            output_tokens: Some(24_576),
+        };
+        let route = resolve_runtime_route_with_limits(
+            &config,
+            ApiProvider::Vllm,
+            Some("local-wire-alias"),
+            host_limits,
+        )
+        .expect("embedding route with explicit limits");
+
+        assert_eq!(route.model(), "local-wire-alias");
+        assert_eq!(route.candidate.limits(), host_limits);
+        assert_eq!(
+            route.context_window,
+            ContextWindowResolution {
+                tokens: 262_144,
+                source: ContextWindowSource::EmbeddingHost,
+            }
+        );
+        let host_overrides = route
+            .candidate
+            .applied_limit_overrides()
+            .iter()
+            .filter(|item| item.source == OverrideSource::EmbeddingHost)
+            .count();
+        assert_eq!(host_overrides, 3);
     }
 }
