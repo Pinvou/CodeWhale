@@ -890,15 +890,34 @@ impl EnginePool {
         result
     }
 
-    /// 取消指定 session 正在生成的回复。engine 没起则 no-op。
+    /// 取消指定 session 正在生成或等待提交的回复。
+    ///
+    /// 先无锁触发 Engine 取消，再持有 turn lock 清理 lifecycle 和 shell 状态，
+    /// 避免停止操作被正在发送消息的路径长期阻塞。
     pub async fn cancel(&self, session_id: &str) {
-        let turn_lock = self.turn_locks.for_session(session_id).await;
-        let _turn = turn_lock.lock().await;
-        let shell_cancellation = self.turn_shell_tasks.request_cancel(session_id);
+        // 第一阶段不等待 turn lock，让正在运行的 Engine 立即看到取消。
         if let Some(engine) = self.handle_for(session_id).await {
             engine.cancel_current();
-        } else if let Some(lifecycle) = self.turn_lifecycles.get(session_id) {
-            lifecycle.invalidate_unsubmitted_reservation();
+        }
+        let shell_cancellation = self.turn_shell_tasks.request_cancel(session_id);
+        let turn_lock = self.turn_locks.for_session(session_id).await;
+        let _turn = turn_lock.lock().await;
+
+        // lifecycle 的提交状态比 Engine 是否存在更权威：复用空闲 Engine 时也可能
+        // 正处于 reservation 已创建、消息尚未提交的窗口。
+        let lifecycle = self.turn_lifecycles.get(session_id);
+        let claimed_unsubmitted = lifecycle.as_ref().is_some_and(|lifecycle| {
+            lifecycle.emit_unsubmitted_interrupted_terminal(&self.app, session_id)
+        });
+        if !claimed_unsubmitted {
+            // 持锁后复查 Engine，覆盖第一阶段恰逢 Engine 创建中的窗口。若操作已经
+            // 提交但尚未 TurnStarted，先 arm，待转发器在 token 重置后补 cancel。
+            if let Some(engine) = self.handle_for(session_id).await {
+                if let Some(lifecycle) = lifecycle {
+                    lifecycle.arm_pending_cancel();
+                }
+                engine.cancel_current();
+            }
         }
         if let Some(cancellation) = shell_cancellation {
             cancellation.cleanup().await;
