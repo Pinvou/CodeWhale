@@ -3534,7 +3534,6 @@ impl Engine {
             self.config.skills_dir.clone(),
             self.config.skills_scan_codewhale_only,
         )
-        .with_hidden_tools(self.config.hidden_tools.clone())
         .with_session_objects(crate::rlm::session::SessionObjectSnapshot::new(
             self.session.id.clone(),
             self.session.model.clone(),
