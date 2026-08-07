@@ -8567,10 +8567,11 @@ fn forkguard_hidden_tools_injectable() {
     );
 }
 
-/// fork ② 不变式：`request_user_input` 的硬豁免不受注入集影响（GUI 选择气泡
-/// 来源，任何模式下都必须可见）。
+/// fork ② 不变式：注入集只能收窄编译期黑名单，不能隐藏常量外工具。
+/// `request_user_input` 是 GUI 选择气泡来源，任何模式下都必须可见；普通
+/// `read_file` 同样不应被越界注入改变。
 #[test]
-fn forkguard_request_user_input_exempt_from_injected_hidden() {
+fn forkguard_hidden_tools_cannot_expand_compile_time_blocklist() {
     let always_load = HashSet::new();
     let injected: HashSet<String> = ["request_user_input", "read_file"]
         .into_iter()
@@ -8593,9 +8594,13 @@ fn forkguard_request_user_input_exempt_from_injected_hidden() {
     assert_eq!(
         defer_loading("request_user_input"),
         Some(false),
-        "request_user_input 豁免不受注入集影响"
+        "会话隐藏集不得越界隐藏 request_user_input"
     );
-    assert_eq!(defer_loading("read_file"), Some(false));
+    assert_eq!(
+        defer_loading("read_file"),
+        Some(false),
+        "会话隐藏集不得越界隐藏 read_file"
+    );
 }
 
 /// fork ② 不变式：`tool_search` 的 gate **恒查编译期常量、不可注入**——即使
@@ -8604,8 +8609,9 @@ fn forkguard_request_user_input_exempt_from_injected_hidden() {
 #[test]
 fn forkguard_tool_search_always_gated() {
     let always_load = HashSet::new();
-    // 最坏情况：注入集含 tool_search（若 gate 查注入集，它就会进 catalog）
-    let injected: HashSet<String> = ["read_file", "web_search", "tool_search"]
+    // 最坏情况：注入隐藏集刻意不含 tool_search（即尝试把它从常量中放出）。
+    // gate 若错误跟随会话集，它就会进 catalog。
+    let injected: HashSet<String> = ["read_file", "web_search"]
         .into_iter()
         .map(str::to_string)
         .collect();

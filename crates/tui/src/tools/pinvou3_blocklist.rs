@@ -9,6 +9,8 @@
 //! 维护要点：上游每次 rebase 后跑漂移检测（文档 §5.3），新工具默认
 //! 进 blocklist 再单独评估是否放出来。
 
+use std::collections::HashSet;
+
 /// 默认对 LLM 隐藏的工具名。维护时请保持按 §3.2 的类别分组排列。
 pub const PINVOU3_HIDDEN_TOOLS: &[&str] = &[
     // 状态管理 - durable task（GUI 单 session 不需要持久化）
@@ -144,6 +146,19 @@ pub fn is_pinvou3_hidden(name: &str) -> bool {
         }
     }
     true
+}
+
+/// 按会话注入后的隐藏判定。
+///
+/// `injected` 是 [`PINVOU3_HIDDEN_TOOLS`] 的会话级收窄结果，只允许从编译期
+/// 黑名单中放出工具，不能把 `request_user_input`、`read_file` 等原本可见工具
+/// 纳入隐藏范围。`None` 保持现有常量 + 测试环境变量回退行为。
+#[inline]
+pub fn is_pinvou3_hidden_for_session(name: &str, injected: Option<&HashSet<String>>) -> bool {
+    match injected {
+        Some(hidden) => PINVOU3_HIDDEN_TOOLS.contains(&name) && hidden.contains(name),
+        None => is_pinvou3_hidden(name),
+    }
 }
 
 #[cfg(test)]

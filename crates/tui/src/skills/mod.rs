@@ -2172,15 +2172,12 @@ body";
         );
     }
 
-    /// pinvou3 fork-guard (patches #25/#26 + #41): the only skill sources
-    /// pinvou3 scans are `~/.agents/skills` (single global convention) and
-    /// `EngineConfig.skills_dir` (the pinvou3 bundle path). Workspace
-    /// search and other tool-convention dirs (`.opencode` / `.cursor` /
-    /// `.claude` / `.codewhale` / `.deepseek`) were removed in #41.
-    /// Regression: any of those reappear, or `skills_dir` gets short-
-    /// circuited again.
+    /// pinvou3 fork-guard (patches #25/#26 + #41 + skill-scope-governance):
+    /// skill discovery has exactly one injected root, `EngineConfig.skills_dir`.
+    /// Neither the historical `~/.pinvou3/bundle/skills` fallback nor any
+    /// workspace/home tool-convention directory may be unioned back in.
     #[test]
-    fn forkguard_skills_dir_unions_with_home_rooted_workspace_skills() {
+    fn forkguard_skills_dir_uses_only_injected_root() {
         let tmpdir = TempDir::new().unwrap();
         let workspace = tmpdir.path().join("ws");
         let bundle = tmpdir.path().join("bundle");
@@ -2189,8 +2186,7 @@ body";
         std::fs::create_dir_all(&bundle).unwrap();
         std::fs::create_dir_all(&fake_home).unwrap();
 
-        // home-rooted skill — the single home path pinvou3 keeps after #41
-        // (2026-06-29 决策:`~/.pinvou3/bundle/skills`,技能市场私有区)。
+        // Historical implicit home root: the injected-root design must ignore it.
         std::fs::create_dir_all(fake_home.join(".pinvou3/bundle/skills/from-home")).unwrap();
         std::fs::write(
             fake_home.join(".pinvou3/bundle/skills/from-home/SKILL.md"),
@@ -2214,7 +2210,7 @@ body";
         )
         .unwrap();
 
-        // bundle skill (analogous to pinvou3's `~/.pinvou3/bundle/skills`).
+        // Explicit EngineConfig.skills_dir root: the only discoverable source.
         std::fs::create_dir_all(bundle.join("from-bundle")).unwrap();
         std::fs::write(
             bundle.join("from-bundle/SKILL.md"),
@@ -2226,8 +2222,8 @@ body";
             super::discover_for_workspace_and_dir_with_home(&workspace, &bundle, Some(&fake_home));
         let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
         assert!(
-            names.contains(&"from-home"),
-            "~/.pinvou3/bundle/skills must remain visible. Got: {names:?}"
+            !names.contains(&"from-home"),
+            "implicit ~/.pinvou3/bundle/skills must stay excluded. Got: {names:?}"
         );
         assert!(
             names.contains(&"from-bundle"),
@@ -2243,6 +2239,7 @@ body";
             super::render_available_skills_context_for_workspace_and_dir(&workspace, &bundle)
                 .expect("rendered block should be non-empty");
         assert!(rendered.contains("from-bundle"));
+        assert!(!rendered.contains("from-home"));
         assert!(!rendered.contains("should-be-ignored"));
     }
 
