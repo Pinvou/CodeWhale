@@ -11379,7 +11379,7 @@ async fn run_exec_agent(
             {
                 eprintln!("sub-agent {id}: {status}");
             }
-            Event::AgentComplete { id, result }
+            Event::AgentComplete { id, result, .. }
                 if output_format == ExecOutputFormat::Text && !json_output =>
             {
                 eprintln!(

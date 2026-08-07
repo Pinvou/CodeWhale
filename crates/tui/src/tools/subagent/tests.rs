@@ -6417,7 +6417,7 @@ fn every_fleet_role_catalog_advertises_one_executable_load_skill() {
 }
 
 #[test]
-fn custom_child_allowlist_omitting_load_skill_fails_closed() {
+fn forkguard_custom_workflow_legacy_action_allowlist_is_available_without_load_skill() {
     // Custom children get exactly their explicit allow-list: load_skill is
     // never auto-injected, and listing it grants it.
     let tmp = tempdir().expect("tempdir");
@@ -6430,14 +6430,28 @@ fn custom_child_allowlist_omitting_load_skill_fails_closed() {
     let without = SubAgentToolRegistry::new(
         runtime.clone(),
         FleetRole::Custom,
-        Some(vec!["read_file".to_string()]),
+        Some(vec![
+            "read_file".to_string(),
+            "write_file".to_string(),
+            "list_dir".to_string(),
+            "request_user_input".to_string(),
+        ]),
         todo_list.clone(),
         plan_state.clone(),
+    );
+    assert_eq!(
+        without.unavailable_allowed_tools(),
+        Vec::<String>::new(),
+        "legacy action names must resolve through their registered canonical family"
     );
     let names = tool_names(without.tools_for_model(&FleetRole::Custom));
     assert!(
         names.contains("File"),
-        "explicitly listed read_file surfaces as the unified File tool: {names:?}"
+        "legacy file actions surface as the unified File tool: {names:?}"
+    );
+    assert!(
+        names.contains("request_user_input"),
+        "standalone tools remain available beside canonical action families: {names:?}"
     );
     assert!(
         !names.contains("load_skill"),
@@ -7464,7 +7478,7 @@ async fn cleanup_auto_cancels_stale_running_agent_and_releases_slot() {
     ));
     assert!(matches!(
         event_rx.try_recv(),
-        Ok(Event::AgentComplete { id, result })
+        Ok(Event::AgentComplete { id, result, .. })
             if id == agent_id && result.contains(r#""status":"cancelled""#)
     ));
     assert_eq!(
@@ -11891,8 +11905,15 @@ async fn cancellation_wins_task_race_but_still_fans_in_exactly_once() {
     assert_eq!(terminal_events.len(), 1);
     assert!(matches!(
         &terminal_events[0],
-        Event::AgentComplete { id, result }
-            if id == &snapshot.agent_id && result.contains(r#""status":"cancelled""#)
+        Event::AgentComplete {
+            id,
+            result,
+            role,
+            failed,
+        } if id == &snapshot.agent_id
+            && result.contains(r#""status":"cancelled""#)
+            && role.as_deref() == Some("worker")
+            && !failed
     ));
 }
 
@@ -12232,13 +12253,22 @@ async fn non_retryable_provider_failure_fans_in_to_every_terminal_sink() {
     ));
     let complete_events = std::iter::from_fn(|| event_rx.try_recv().ok())
         .filter_map(|event| match event {
-            Event::AgentComplete { id, result } => Some((id, result)),
+            Event::AgentComplete {
+                id,
+                result,
+                role,
+                failed,
+            } => Some((id, result, role, failed)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert!(matches!(
         complete_events.as_slice(),
-        [(id, result)] if id == &agent_id && result.contains(r#""status":"failed""#)
+        [(id, result, role, failed)]
+            if id == &agent_id
+                && result.contains(r#""status":"failed""#)
+                && role.as_deref() == Some("worker")
+                && *failed
     ));
 
     let manager = manager.read().await;
@@ -16847,4 +16877,50 @@ async fn resume_from_checkpoint_rejects_missing_continuable_checkpoint() {
         err.to_string().contains("no continuable checkpoint"),
         "{err}"
     );
+}
+
+#[test]
+fn forkguard_structured_output_validates_nested_required_fields() {
+    let schema = json!({
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["title"],
+                    "properties": { "title": { "type": "string" } }
+                }
+            }
+        }
+    });
+    let error = validate_against_schema(&json!({"items": [{}]}), &schema)
+        .expect_err("nested required field must be enforced");
+    assert!(error.contains("items[0].title"));
+    validate_against_schema(&json!({"items": [{"title": "ok"}]}), &schema)
+        .expect("valid nested output");
+}
+
+#[test]
+fn forkguard_structured_output_persists_only_declared_safe_paths() {
+    let temp = tempdir().expect("tempdir");
+    let schema = json!({
+        "type": "object",
+        "required": ["brief"],
+        "properties": {
+            "brief": {
+                "type": "object",
+                "x-output-file": "outputs/brief.json"
+            }
+        }
+    });
+    let written = persist_structured_output(temp.path(), &json!({"brief": {"ok": true}}), &schema)
+        .expect("persist output");
+    assert_eq!(written, vec!["outputs/brief.json"]);
+    assert!(temp.path().join("outputs/brief.json").is_file());
+
+    let unsafe_schema = json!({"type": "object", "x-output-file": "../escape.json"});
+    assert!(persist_structured_output(temp.path(), &json!({}), &unsafe_schema).is_err());
+    assert!(!temp.path().join("../escape.json").exists());
 }
