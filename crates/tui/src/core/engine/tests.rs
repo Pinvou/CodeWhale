@@ -98,6 +98,24 @@ fn forkguard_host_extra_tools_register_in_all_modes() {
 }
 
 #[test]
+fn forkguard_host_write_files_become_bounded_claims() {
+    let workspace = tempdir().expect("workspace");
+    let context = ToolContext::new(workspace.path());
+    let output = workspace.path().join("workflow/deliverables/result.md");
+    let claim = host_write_claim(&context, std::slice::from_ref(&output))
+        .expect("in-workspace output is valid")
+        .expect("non-empty outputs create a claim");
+
+    assert!(claim.roots.is_empty());
+    assert_eq!(claim.exact_files, ["workflow/deliverables/result.md"]);
+
+    let outside = workspace.path().parent().unwrap().join("outside.md");
+    let error = host_write_claim(&context, &[outside])
+        .expect_err("host cannot grant writes outside the engine workspace");
+    assert!(error.contains("escapes workspace"), "{error}");
+}
+
+#[test]
 fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
     let enabled = EngineConfig::default();
     let (engine, _handle) = Engine::new(enabled, &Config::default());

@@ -176,7 +176,20 @@ pub enum Op {
 
     /// Spawn a sub-agent
     #[allow(dead_code)]
-    SpawnSubAgent { prompt: String },
+    SpawnSubAgent {
+        prompt: String,
+        role_id: String,
+        allowed_tools: Vec<String>,
+        /// Host-declared output files. Absolute paths must remain inside the
+        /// engine workspace and are converted to bounded write claims before launch.
+        write_files: Vec<PathBuf>,
+        max_steps: Option<u32>,
+        output_schema: Option<serde_json::Value>,
+        expects_file_output: bool,
+    },
+
+    /// Cancel every running background sub-agent owned by this engine.
+    CancelSubAgents,
 
     /// Describe the exact request the next turn would send, without
     /// sending it (`/preview-request`, #1004).
