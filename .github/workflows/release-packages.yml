@@ -4,7 +4,7 @@ name: release-packages
 #
 # 触发条件:
 # - push main 且 VERSION 或发布链路文件被修改(paths 限定);
-# - 影响版本/打包链路的 PR:构建公开平台产物并运行无私有凭据的 Windows 静态契约;
+# - 影响版本/打包链路的 PR:仅运行版本与无私有凭据的 Windows 静态契约;
 # - push 事件按 github.event.before..github.sha 做精确发布链路 diff;
 # - workflow_dispatch 手动触发:跳过 diff,无条件全量构建(用于补打/重打某版本)。
 #
@@ -15,7 +15,7 @@ name: release-packages
 #
 # 与其他 workflow 的分工:
 # - pr-check / mac-build:每次改动跑编译验证 gate(不产出可用产物)。
-# - release-packages(本 workflow):VERSION bump 或发布链路 PR 跑,产出全平台安装包 artifact。
+# - release-packages(本 workflow):PR 只做轻量契约验证;VERSION 进入 main 或手动触发后产出全平台 artifact。
 # - 本 workflow 只上传 CI artifact,绝不创建/推送 GitHub Release，也不替代
 #   release-deb.sh / release-macos.sh 的正式 OTA 上传、签名与清单更新流程。
 #
@@ -69,13 +69,14 @@ permissions:
 
 concurrency:
   group: release-packages-${{ github.ref }}
-  # PR 连续更新时取消旧验证；main 的正式版本构建必须完整保留。
+  # PR 连续更新时取消旧契约验证；main 的正式版本构建必须完整保留。
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ── Job 1: 发布链路变更检测(gate,跑 ubuntu 快) ────────────────────
   # push 对比事件 before..sha 的实际路径,覆盖一次 push 含多个 commit 的情况。
-  # pull_request / workflow_dispatch 无条件放行,保证发布链路改动在合入前真实打包。
+  # pull_request / workflow_dispatch 无条件放行 gate:PR 只跑轻量契约,
+  # workflow_dispatch 还会让下游完整打包;push 则按实际发布链路 diff 判定。
   # 首次 push 或 before commit 不可达时直接放行,宁可多构建也不漏构建。
   # 同时用 sync-version.mjs --check 校验三处版本文件与 VERSION 一致,不一致 fail。
   check-version-bump:
@@ -115,7 +116,7 @@ jobs:
           EVENT_NAME="${{ github.event_name }}"
           BEFORE="${{ github.event.before }}"
 
-          # PR 改动需要在合入前验证公开产物和静态契约;手动触发用于补打/重打。
+          # PR 改动需要在合入前验证版本和静态契约;手动触发用于补打/重打。
           if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             echo "✓ $EVENT_NAME 触发,无条件验证"
             BUILD_REQUIRED=true
@@ -144,7 +145,10 @@ jobs:
   build-linux-x64:
     name: 构建 Linux x86_64 deb
     needs: check-version-bump
-    if: needs.check-version-bump.outputs.build_required == 'true'
+    if: >-
+      needs.check-version-bump.outputs.build_required == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -163,8 +167,8 @@ jobs:
         with:
           workspaces: pinvou3-app/src-tauri
           shared-key: release-linux-x64
-          # PR 只恢复 main 的缓存；禁止写入 refs/pull/*，避免多平台 release
-          # 缓存重复占满仓库配额并淘汰 pr-check 的 rust-test 暖缓存。
+          # 非 main 手动构建只恢复 main 缓存；禁止写入分支缓存，避免多平台
+          # release 缓存重复占满仓库配额并淘汰 pr-check 的 rust-test 暖缓存。
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # pinvou3 编译链接的系统库(gtk/webkit/soup/rsvg/openssl/X11×3/appindicator),
@@ -240,7 +244,10 @@ jobs:
   build-linux-arm64:
     name: 构建 Linux arm64 deb
     needs: check-version-bump
-    if: needs.check-version-bump.outputs.build_required == 'true'
+    if: >-
+      needs.check-version-bump.outputs.build_required == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     env:
@@ -300,8 +307,8 @@ jobs:
 
       # 连接器 CLI 不在构建期下载或打入安装包；用户首次连接时，应用按
       # connectors.lock.json 在线下载、校验并安装到用户目录。
-      # PR、main VERSION bump 和 workflow_dispatch 统一使用已验证的托管 ARM
-      # 发布配置，避免不同事件使用不同 profile 导致合入后才暴露超时。
+      # main VERSION bump 和 workflow_dispatch 统一使用已验证的托管 ARM
+      # 发布配置；PR 阶段只跑轻量契约，避免产出与最终 main 不一致的同版本包。
       - name: 构建 deb（托管 ARM64 发布配置）
         working-directory: pinvou3-app
         run: node scripts/tauri/build.js build --bundles deb
@@ -463,7 +470,10 @@ jobs:
   build-macos-universal:
     name: 构建 macOS universal dmg
     needs: check-version-bump
-    if: needs.check-version-bump.outputs.build_required == 'true'
+    if: >-
+      needs.check-version-bump.outputs.build_required == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: macos-15
     # 冷缓存双 target + fat LTO 实测可能超过 90 分钟（0.7.4 发布构建曾逼近上限），
     # 放宽至 150 分钟以覆盖冷缓存与 runner 抖动，避免发布构建被超时取消。
