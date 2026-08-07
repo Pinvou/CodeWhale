@@ -81,6 +81,12 @@ struct TurnLifecycleState {
     next_reservation_id: u64,
     active_reservation_id: Option<u64>,
     transcript_rules: Vec<TranscriptSanitizationRule>,
+    /// 用户在 turn 已提交但尚未收到 `TurnStarted` 时请求了取消。
+    ///
+    /// CodeWhale 会在新轮次入口重置 cancel token，因此这个标记由取消路径预先
+    /// 设置，再由事件转发器在 `TurnStarted` 后消费并补发一次取消，避免取消信号
+    /// 被 token 重置覆盖。
+    pending_cancel: bool,
 }
 
 /// The durable, user-visible meaning of a submitted engine operation.
@@ -376,6 +382,7 @@ impl TurnLifecycle {
             state.reclaimed = false;
             state.admission_emitted = false;
             state.active_reservation_id = Some(reservation_id);
+            state.pending_cancel = false;
             reservation_id
         };
         crate::features::connectors::visibility::turn_submitted();
@@ -756,6 +763,58 @@ impl TurnLifecycle {
         drop(state);
         crate::features::connectors::visibility::turn_finished();
         true
+    }
+
+    /// 原子认领一个尚未提交给 Engine 的 reservation，并在终态发出期间关闭
+    /// admission 闸门，避免上一轮迟到的 `chat:done` 清掉新一轮 busy 状态。
+    pub(crate) fn claim_unsubmitted_terminal(&self) -> bool {
+        let _emission = self.emission.lock();
+        let mut state = self.state.lock();
+        if !state.active || state.submitted || state.terminal_emitted {
+            return false;
+        }
+        state.reclaimed = true;
+        if let Some(reservation_id) = state.active_reservation_id.take() {
+            Self::remove_unsubmitted_rule_locked(&mut state, reservation_id);
+        }
+        state.active = false;
+        state.submitted = false;
+        state.turn_id = None;
+        state.terminal_emitted = true;
+        state.terminal_closing = true;
+        drop(state);
+        crate::features::connectors::visibility::turn_finished();
+        true
+    }
+
+    /// 认领未提交 turn、补发 Interrupted 终态，并在发送完成后重新开放闸门。
+    pub(crate) fn emit_unsubmitted_interrupted_terminal(
+        &self,
+        app: &AppHandle,
+        session_id: &str,
+    ) -> bool {
+        if !self.claim_unsubmitted_terminal() {
+            return false;
+        }
+        emit_chat_terminal(app, session_id, TurnOutcomeStatus::Interrupted, None, false);
+        self.finish_terminal_emission();
+        true
+    }
+
+    /// 仅在消息已经提交、但 `TurnStarted` 尚未抵达时记录待补发的取消。
+    /// 调用方必须先 arm 再执行 `cancel_current()`，避免事件转发器消费标记与首次
+    /// cancel 之间的竞态。
+    pub(crate) fn arm_pending_cancel(&self) {
+        let mut state = self.state.lock();
+        if state.submitted && state.turn_id.is_none() && state.active {
+            state.pending_cancel = true;
+        }
+    }
+
+    /// 在 `TurnStarted` 后原子消费待补发取消，确保标记不会跨轮泄漏。
+    pub(crate) fn take_pending_cancel(&self) -> bool {
+        let mut state = self.state.lock();
+        std::mem::take(&mut state.pending_cancel)
     }
 }
 
@@ -1573,8 +1632,16 @@ fn spawn_event_forwarder(
                     // before this serial forwarder can observe any delta or
                     // terminal event for the same turn. Reclaim uses the same
                     // emission gate, so it cannot overtake this pair.
-                    if !turn_lifecycle.emit_started_admission(&app, &session_id, turn_id.clone()) {
+                    let admitted =
+                        turn_lifecycle.emit_started_admission(&app, &session_id, turn_id.clone());
+                    // CodeWhale 已在发出 TurnStarted 前完成 cancel token 重置；此时
+                    // 补发取消才能稳定命中当前轮次。
+                    let pending_cancel = turn_lifecycle.take_pending_cancel();
+                    if !admitted {
                         continue;
+                    }
+                    if pending_cancel {
+                        approve_handle.cancel();
                     }
                     active_transcript_seen = false;
                     chat_persistence_error = None;
@@ -2963,6 +3030,74 @@ mod turn_lifecycle_tests {
         let activated = lifecycle.on_submitted();
         lifecycle.on_submission_failed(activated);
         assert_eq!(lifecycle.finish_once(|| panic!("must remain idle")), None);
+    }
+
+    #[test]
+    fn claim_unsubmitted_terminal_closes_gate_and_invalidates_reservation() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let reservation = lifecycle.reserve().expect("reserve");
+        assert!(reservation.ensure_active().is_ok());
+
+        assert!(lifecycle.claim_unsubmitted_terminal());
+        assert!(reservation.ensure_active().is_err());
+        assert!(
+            lifecycle.reserve().is_err(),
+            "terminal emission must keep admission closed"
+        );
+        reservation.mark_submitted();
+
+        lifecycle.finish_terminal_emission();
+        assert!(lifecycle.reserve().is_ok());
+    }
+
+    #[test]
+    fn submitted_reservation_cannot_be_claimed_as_unsubmitted() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let reservation = lifecycle.reserve().expect("reserve");
+        lifecycle.mark_reservation_submitted(reservation.reservation_id);
+
+        assert!(!lifecycle.claim_unsubmitted_terminal());
+        reservation.mark_submitted();
+        assert!(lifecycle.finish_once(|| {}).is_some());
+    }
+
+    #[test]
+    fn pending_cancel_requires_submission_and_is_consumed_once() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        let reservation = lifecycle.reserve().expect("reserve");
+
+        lifecycle.arm_pending_cancel();
+        assert!(!lifecycle.take_pending_cancel());
+
+        lifecycle.mark_reservation_submitted(reservation.reservation_id);
+        lifecycle.arm_pending_cancel();
+        assert!(lifecycle.take_pending_cancel());
+        assert!(!lifecycle.take_pending_cancel());
+
+        reservation.mark_submitted();
+        assert!(lifecycle.finish_once(|| {}).is_some());
+    }
+
+    #[test]
+    fn pending_cancel_is_not_armed_after_turn_started() {
+        let lifecycle = TurnLifecycle::default();
+        lifecycle.on_submitted();
+        lifecycle.on_started("turn-1".to_string());
+
+        lifecycle.arm_pending_cancel();
+        assert!(!lifecycle.take_pending_cancel());
+        assert!(lifecycle.finish_once(|| {}).is_some());
+    }
+
+    #[test]
+    fn reserve_clears_stale_pending_cancel() {
+        let lifecycle = Arc::new(TurnLifecycle::default());
+        lifecycle.on_submitted();
+        lifecycle.arm_pending_cancel();
+        assert!(lifecycle.finish_once(|| {}).is_some());
+
+        let _reservation = lifecycle.reserve().expect("reserve");
+        assert!(!lifecycle.take_pending_cancel());
     }
 
     #[test]
