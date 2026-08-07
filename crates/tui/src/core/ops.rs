@@ -230,6 +230,9 @@ pub enum Op {
     /// Update the SSE idle timeout used for subsequent streamed turns.
     SetStreamChunkTimeout { timeout_secs: u64 },
 
+    /// Replace the session-scoped model-facing tool deny-list.
+    SetDisallowedTools { tools: Vec<String> },
+
     /// Update sub-agent runtime controls for subsequent turns.
     SetSubagentRuntimeConfig {
         enabled: bool,

@@ -712,7 +712,7 @@ impl ToolRegistryBuilder {
         self
     }
 
-    /// Include file tools (read, write, edit, list).
+    /// Include the canonical file tool.
     #[must_use]
     pub fn with_file_tools(self) -> Self {
         use super::file_tool::FileTool;

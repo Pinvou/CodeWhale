@@ -701,6 +701,23 @@ async fn test_write_file_creates_dirs() {
     assert_eq!(written, "nested content");
 }
 
+#[tokio::test]
+async fn forkguard_file_content_caps_reject_before_writing() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path().to_path_buf());
+
+    let write_err = WriteFileTool
+        .execute(
+            json!({"path": "too-large.txt", "content": "x".repeat(WRITE_FILE_MAX_CONTENT_BYTES + 1)}),
+            &ctx,
+        )
+        .await
+        .expect_err("oversized write must fail");
+    assert!(matches!(write_err, ToolError::InvalidInput { .. }));
+
+    assert!(!tmp.path().join("too-large.txt").exists());
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn write_file_tool_new_file_matches_standard_creation_mode() {

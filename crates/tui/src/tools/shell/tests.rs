@@ -752,7 +752,7 @@ async fn read_only_shell_policy_allows_readonly_inspection() {
 }
 
 #[tokio::test]
-async fn exec_shell_multiline_block_explains_allow_shell_boundary() {
+async fn exec_shell_allows_safe_multiline_payloads() {
     let tmp = tempdir().expect("tempdir");
     let ctx = ToolContext::new(tmp.path());
 
@@ -764,27 +764,9 @@ async fn exec_shell_multiline_block_explains_allow_shell_boundary() {
         .await
         .expect("execute");
 
-    assert!(!result.success);
-    assert!(result.content.contains("Command contains multiple lines"));
-    assert!(
-        result
-            .content
-            .contains("allow_shell=true exposes shell tools"),
-        "{}",
-        result.content
-    );
-    assert!(
-        result
-            .content
-            .contains("Write multiline scripts to a file first"),
-        "{}",
-        result.content
-    );
-    assert!(
-        result.content.contains("task_shell_start"),
-        "{}",
-        result.content
-    );
+    assert!(result.success, "{}", result.content);
+    assert!(result.content.contains('1'), "{}", result.content);
+    assert!(result.content.contains('2'), "{}", result.content);
 }
 
 #[test]

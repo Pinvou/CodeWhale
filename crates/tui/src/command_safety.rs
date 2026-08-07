@@ -849,18 +849,6 @@ pub fn analyze_command(command: &str) -> SafetyAnalysis {
     let command_lower = command.to_lowercase();
     let command_trimmed = command.trim();
 
-    if command.contains('\n') || command.contains('\r') {
-        return SafetyAnalysis::dangerous(
-            command,
-            vec!["Command contains multiple lines".to_string()],
-            vec![
-                "Run one command at a time".to_string(),
-                "Write multiline scripts to a file first, then execute the script".to_string(),
-                "Use task_shell_start or background shell for long interactive flows".to_string(),
-            ],
-        );
-    }
-
     if command.contains('\0') {
         return SafetyAnalysis::dangerous(
             command,
@@ -1515,26 +1503,18 @@ mod tests {
     }
 
     #[test]
-    fn test_multiline_command_explains_safe_workarounds() {
+    fn test_multiline_command_is_analyzed_instead_of_blanket_blocked() {
         let analysis = analyze_command("python3 -c \"print('one')\nprint('two')\"");
+        assert!(
+            analysis.level != SafetyLevel::Dangerous,
+            "safe multiline commands should be analyzed per segment: {analysis:?}"
+        );
+    }
+
+    #[test]
+    fn forkguard_multiline_still_blocks_destructive_segments() {
+        let analysis = analyze_command("echo start\nrm -rf /\necho done");
         assert_eq!(analysis.level, SafetyLevel::Dangerous);
-        assert_eq!(analysis.reasons, vec!["Command contains multiple lines"]);
-        assert!(
-            analysis
-                .suggestions
-                .iter()
-                .any(|suggestion| suggestion.contains("Write multiline scripts to a file first")),
-            "{:?}",
-            analysis.suggestions
-        );
-        assert!(
-            analysis
-                .suggestions
-                .iter()
-                .any(|suggestion| suggestion.contains("task_shell_start")),
-            "{:?}",
-            analysis.suggestions
-        );
     }
 
     #[test]

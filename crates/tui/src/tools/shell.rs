@@ -3494,34 +3494,28 @@ impl ToolSpec for BashTool {
             }
         }
 
-        // Safety analysis (always run for metadata, but only block when not in YOLO mode)
+        // Dangerous commands stay blocked in every mode. Auto-approval removes
+        // prompts; it does not grant permission for destructive host commands.
         let safety = analyze_command(command);
-        if !context.auto_approve {
-            match safety.level {
-                SafetyLevel::Dangerous => {
-                    let reasons = safety.reasons.join("; ");
-                    let suggestions = if safety.suggestions.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\nSuggestions: {}", safety.suggestions.join("; "))
-                    };
-                    return Ok(ToolResult {
-                        content: format!(
-                            "BLOCKED: This command was blocked for safety reasons.\n\nReasons: {reasons}{suggestions}\n\nNote: allow_shell=true exposes shell tools, but it does not disable built-in shell safety validation."
-                        ),
-                        success: false,
-                        metadata: Some(json!({
-                            "safety_level": "dangerous",
-                            "blocked": true,
-                            "reasons": safety.reasons,
-                            "suggestions": safety.suggestions,
-                        })),
-                    });
-                }
-                SafetyLevel::RequiresApproval | SafetyLevel::Safe | SafetyLevel::WorkspaceSafe => {
-                    // Proceed normally
-                }
-            }
+        if matches!(safety.level, SafetyLevel::Dangerous) {
+            let reasons = safety.reasons.join("; ");
+            let suggestions = if safety.suggestions.is_empty() {
+                String::new()
+            } else {
+                format!("\nSuggestions: {}", safety.suggestions.join("; "))
+            };
+            return Ok(ToolResult {
+                content: format!(
+                    "BLOCKED: This command was blocked for safety reasons.\n\nReasons: {reasons}{suggestions}\n\nNote: allow_shell=true exposes shell tools, but it does not disable built-in shell safety validation."
+                ),
+                success: false,
+                metadata: Some(json!({
+                    "safety_level": "dangerous",
+                    "blocked": true,
+                    "reasons": safety.reasons,
+                    "suggestions": safety.suggestions,
+                })),
+            });
         }
 
         let policy_override = context.elevated_sandbox_policy.clone();
