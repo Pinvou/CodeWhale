@@ -12,7 +12,8 @@ use std::hash::{Hash, Hasher};
 
 /// Re-export the core hard caps — single source of truth.
 pub use codewhale_core::fragments::{
-    DEFAULT_FRAGMENT_MAX_BYTES, MAX_FRAGMENT_BYTES, MAX_FRAGMENT_TOKENS, MAX_FRAGMENTS_PER_CONTEXT,
+    DEFAULT_FRAGMENT_MAX_BYTES, INSTRUCTIONS_FILE_MAX_BYTES, MAX_FRAGMENT_BYTES,
+    MAX_FRAGMENT_TOKENS, MAX_FRAGMENTS_PER_CONTEXT,
 };
 
 /// Stable identity for a WorldState concern. Markers are public contract —
@@ -165,12 +166,20 @@ impl ModelContextFragment {
         raw: impl Into<String>,
         max_bytes: usize,
     ) -> Self {
-        // Clamp to the global 10K-token ceiling so callers cannot opt out.
-        let clamped_max = max_bytes.min(MAX_FRAGMENT_BYTES);
+        // Host instructions retain the existing 100 KiB product contract;
+        // every other volatile fragment stays under the upstream 10K-token
+        // ceiling.
+        let hard_max = if id == FragmentId::Permissions {
+            INSTRUCTIONS_FILE_MAX_BYTES
+        } else {
+            MAX_FRAGMENT_BYTES
+        };
+        let clamped_max = max_bytes.min(hard_max);
         let mut content = enforce_byte_cap(raw.into(), clamped_max);
-        // Token-ceiling safety net (4 bytes ≈ 1 token).
-        if content.len().div_ceil(4) > MAX_FRAGMENT_TOKENS {
-            content = enforce_byte_cap(content, MAX_FRAGMENT_BYTES);
+        // Token-ceiling safety net (4 bytes ≈ 1 token). Permissions use their
+        // explicitly bounded host-instruction ceiling instead.
+        if content.len().div_ceil(4) > hard_max.div_ceil(4) {
+            content = enforce_byte_cap(content, hard_max);
         }
         let content_hash = hash_content(&content);
         Self {

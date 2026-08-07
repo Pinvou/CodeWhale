@@ -1352,6 +1352,7 @@ mod tests {
     fn create_isolated_test_app() -> (App, tempfile::TempDir, ConfigPathGuard) {
         let tmpdir = tempfile::TempDir::new().expect("tempdir for smoke test");
         let workspace = tmpdir.path().to_path_buf();
+        std::fs::create_dir_all(workspace.join("skills")).expect("configured skills dir");
         let config_path = workspace.join(".deepseek").join("config.toml");
         std::fs::create_dir_all(config_path.parent().expect("config parent")).expect("config dir");
         let guard = ConfigPathGuard::new(&config_path);

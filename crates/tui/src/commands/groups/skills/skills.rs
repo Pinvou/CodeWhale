@@ -1383,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_skills_merges_workspace_and_configured_dirs() {
+    fn test_list_skills_uses_only_the_configured_dir() {
         let tmpdir = TempDir::new().unwrap();
         let _home = IsolatedHome::new(&tmpdir);
         let workspace_skill_dir = tmpdir
@@ -1407,7 +1407,7 @@ mod tests {
         let result = list_skills(&mut app, Some(""));
         let msg = result.message.unwrap();
 
-        assert!(msg.contains("/workspace-skill"), "got: {msg}");
+        assert!(!msg.contains("/workspace-skill"), "got: {msg}");
         assert!(msg.contains("/configured-skill"), "got: {msg}");
     }
 
@@ -1443,10 +1443,9 @@ mod tests {
             "got: {msg}"
         );
         assert!(normalized.contains("Searched directories"), "got: {msg}");
-        assert!(normalized.contains(".agents/skills"), "got: {msg}");
         assert!(normalized.contains("skills"), "got: {msg}");
-        assert!(normalized.contains("Available skills (2):"), "got: {msg}");
-        assert!(normalized.contains("workspace-skill"), "got: {msg}");
+        assert!(normalized.contains("Available skills (1):"), "got: {msg}");
+        assert!(!normalized.contains("workspace-skill"), "got: {msg}");
         assert!(normalized.contains("configured-skill"), "got: {msg}");
         assert!(normalized.contains("path:"), "got: {msg}");
     }

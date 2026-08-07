@@ -2194,7 +2194,7 @@ fn new_caches_workspace_skills_for_slash_menu() {
 }
 
 #[test]
-fn cached_skills_merges_across_candidate_directories() {
+fn cached_skills_do_not_import_ambient_candidate_directories() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let workspace = tmp.path().join("workspace");
 
@@ -2218,13 +2218,7 @@ fn cached_skills_merges_across_candidate_directories() {
     options.skills_dir = tmp.path().join("global-skills");
     let app = App::new(options, &Config::default());
 
-    assert!(
-        app.cached_skills
-            .iter()
-            .any(|(name, description)| name == "foo" && description == "Real foo skill"),
-        "cached_skills should fall through to lower-precedence dir when higher-precedence one has an empty stub: {:?}",
-        app.cached_skills,
-    );
+    assert!(app.cached_skills.is_empty(), "{:?}", app.cached_skills);
 }
 
 #[test]
@@ -2383,10 +2377,10 @@ fn cached_skills_preserve_configured_directory_in_codewhale_only_scan() {
 
     assert_eq!(app.skills_dir, configured_dir);
     assert!(
-        app.cached_skills
+        !app.cached_skills
             .iter()
             .any(|(name, _)| name == "workspace-codewhale"),
-        "workspace CodeWhale skill should still be cached: {:?}",
+        "ambient workspace Skill must stay sealed: {:?}",
         app.cached_skills
     );
     assert!(

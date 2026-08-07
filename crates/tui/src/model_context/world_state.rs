@@ -145,6 +145,7 @@ impl WorldState {
     }
 
     #[must_use]
+    #[allow(dead_code)] // generic host builder; Pinvou uses a larger explicit cap
     pub fn with_permissions(mut self, body: impl Into<String>) -> Self {
         self.upsert(ModelContextFragment::new(
             FragmentId::Permissions,
@@ -219,19 +220,29 @@ impl WorldState {
             ));
         }
         for fragment in self.fragments.values() {
-            if fragment.content.len() > MAX_FRAGMENT_BYTES {
+            let max_bytes = if fragment.id == FragmentId::Permissions {
+                crate::model_context::fragment::INSTRUCTIONS_FILE_MAX_BYTES
+            } else {
+                MAX_FRAGMENT_BYTES
+            };
+            if fragment.content.len() > max_bytes {
                 return Err(format!(
                     "fragment {:?} exceeds byte ceiling: {} > {}",
                     fragment.id,
                     fragment.content.len(),
-                    MAX_FRAGMENT_BYTES
+                    max_bytes
                 ));
             }
             let tokens = fragment.content.len().div_ceil(4);
-            if tokens > MAX_FRAGMENT_TOKENS {
+            let max_tokens = if fragment.id == FragmentId::Permissions {
+                max_bytes.div_ceil(4)
+            } else {
+                MAX_FRAGMENT_TOKENS
+            };
+            if tokens > max_tokens {
                 return Err(format!(
                     "fragment {:?} exceeds token ceiling: {} > {}",
-                    fragment.id, tokens, MAX_FRAGMENT_TOKENS
+                    fragment.id, tokens, max_tokens
                 ));
             }
         }
