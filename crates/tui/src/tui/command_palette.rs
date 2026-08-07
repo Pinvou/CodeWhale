@@ -1197,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_skills_use_workspace_and_configured_directories() {
+    fn command_palette_skills_use_only_the_configured_directory() {
         let tmp = TempDir::new().expect("tempdir");
         let workspace = tmp.path().join("workspace");
         let workspace_skill_dir = workspace
@@ -1234,7 +1234,7 @@ mod tests {
             .map(|entry| entry.label.as_str())
             .collect::<Vec<_>>();
 
-        assert!(skill_labels.contains(&"$workspace-skill"));
+        assert!(!skill_labels.contains(&"$workspace-skill"));
         assert!(skill_labels.contains(&"$configured-skill"));
     }
 

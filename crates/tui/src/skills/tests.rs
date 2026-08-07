@@ -582,6 +582,33 @@ fn write_skill(dir: &std::path::Path, name: &str, description: &str, body: &str)
     .unwrap();
 }
 
+#[test]
+fn forkguard_disabled_skill_is_neither_rendered_nor_loadable() {
+    let tmpdir = TempDir::new().unwrap();
+    let skills_dir = tmpdir.path().join("skills");
+    write_skill(
+        &skills_dir,
+        "forkguard-disabled-skill",
+        "must stay hidden",
+        "body",
+    );
+    write_skill(
+        &skills_dir,
+        "forkguard-enabled-skill",
+        "must stay visible",
+        "body",
+    );
+    let registry = super::SkillRegistry::discover(&skills_dir);
+
+    super::set_disabled_skills(vec!["forkguard-disabled-skill".to_string()]);
+    let rendered = super::render_skills_block(&registry, "en", tmpdir.path())
+        .expect("enabled skill keeps the block visible");
+    assert!(registry.get("forkguard-disabled-skill").is_none());
+    assert!(!rendered.contains("forkguard-disabled-skill"), "{rendered}");
+    assert!(rendered.contains("forkguard-enabled-skill"), "{rendered}");
+    super::set_disabled_skills(Vec::new());
+}
+
 #[cfg(unix)]
 fn create_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -593,7 +620,7 @@ fn create_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> std::
 }
 
 #[test]
-fn skills_directories_returns_existing_dirs_in_precedence_order() {
+fn explicit_skills_directory_is_the_only_runtime_disk_source() {
     let tmpdir = TempDir::new().unwrap();
     let workspace = tmpdir.path();
 
@@ -928,12 +955,7 @@ fn codewhale_only_mode_ignores_cross_tool_skill_dirs() {
     );
     let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
 
-    assert!(names.contains(&"from-codewhale"));
-    assert!(names.contains(&"configured-codewhale"));
-    assert!(
-        !names.contains(&"from-claude") && !names.contains(&"from-agents"),
-        "CodeWhale-only mode must not import cross-tool skills: {names:?}"
-    );
+    assert_eq!(names, vec!["configured-codewhale"]);
 }
 
 #[test]
@@ -990,7 +1012,7 @@ fn codewhale_only_mode_rejects_workspace_codewhale_symlink_escape() {
 }
 
 #[test]
-fn discover_for_workspace_and_dir_merges_workspace_and_configured_sources() {
+fn discover_for_workspace_and_dir_uses_only_configured_source() {
     let tmpdir = TempDir::new().unwrap();
     let workspace = tmpdir.path().join("workspace");
     let home = tmpdir.path().join("home");
@@ -1013,8 +1035,7 @@ fn discover_for_workspace_and_dir_merges_workspace_and_configured_sources() {
         super::discover_for_workspace_and_dir_with_home(&workspace, &configured_dir, Some(&home));
     let names: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
 
-    assert!(names.contains(&"workspace-skill"));
-    assert!(names.contains(&"configured-skill"));
+    assert_eq!(names, vec!["configured-skill"]);
 }
 
 #[test]
@@ -1233,12 +1254,9 @@ fn discover_honors_a_hidden_root_directory() {
     );
 }
 
-/// Mirrors the qa_pty `skills_menu_shows_local_and_global_skills`
-/// scenario without the PTY harness: a workspace-level skill in
-/// `.agents/skills/` and a global skill in `~/.codewhale/skills/`
-/// must both be discoverable.
+/// An explicit configured directory seals discovery from ambient global roots.
 #[test]
-fn discover_finds_both_workspace_and_global_skills() {
+fn configured_discovery_does_not_import_global_skills() {
     let tmpdir = TempDir::new().unwrap();
     let workspace = tmpdir.path().join("workspace");
     let home = tmpdir.path().join("home");
@@ -1266,10 +1284,7 @@ fn discover_finds_both_workspace_and_global_skills() {
         names.contains(&"workspace-beta"),
         "workspace-beta from .agents/skills must be discovered: {names:?}",
     );
-    assert!(
-        names.contains(&"global-alpha"),
-        "global-alpha from ~/.codewhale/skills must be discovered: {names:?}",
-    );
+    assert!(!names.contains(&"global-alpha"), "{names:?}");
 }
 
 // ── Block scalar parsing (YAML `>` and `|`) ────────────────

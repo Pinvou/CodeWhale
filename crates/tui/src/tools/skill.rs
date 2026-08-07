@@ -101,7 +101,11 @@ impl ToolSpec for LoadSkillTool {
 
         // Listing mode: empty name, "*", or "list" returns the full registry (#4651).
         if name.is_empty() || name == "*" || name == "list" {
-            let skills = registry.list();
+            let skills: Vec<_> = registry
+                .list()
+                .iter()
+                .filter(|skill| !crate::skills::is_skill_disabled(&skill.name))
+                .collect();
             if skills.is_empty() {
                 return Ok(ToolResult::success("No skills installed."));
             }
@@ -117,7 +121,12 @@ impl ToolSpec for LoadSkillTool {
         }
 
         let Some(skill) = registry.get(name) else {
-            let available: Vec<&str> = registry.list().iter().map(|s| s.name.as_str()).collect();
+            let available: Vec<&str> = registry
+                .list()
+                .iter()
+                .filter(|skill| !crate::skills::is_skill_disabled(&skill.name))
+                .map(|skill| skill.name.as_str())
+                .collect();
             let hint = if available.is_empty() {
                 let dirs: Vec<String> = context
                     .skills_dir
