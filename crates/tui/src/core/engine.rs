@@ -57,11 +57,13 @@ use crate::tools::spec::{
 use crate::tools::spec::{
     RuntimeToolServices, SharedFileReadTracker, new_shared_file_read_tracker,
 };
+use crate::tools::subagent::coord::WriteScopeClaim;
 use crate::tools::subagent::{
-    FleetRole, Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion,
-    SubAgentForkContext, SubAgentManager, SubAgentResult, SubAgentRuntime, SubAgentStatus,
-    SubAgentThinking, agent_worker_owner_snapshot, ensure_subagent_model_for_provider,
-    new_shared_subagent_manager_with_state_root_and_timeout, resolve_subagent_assignment_route,
+    FleetRole, Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentAssignment,
+    SubAgentCompletion, SubAgentForkContext, SubAgentManager, SubAgentResult, SubAgentRuntime,
+    SubAgentSpawnOptions, SubAgentStatus, SubAgentThinking, agent_worker_owner_snapshot,
+    ensure_subagent_model_for_provider, new_shared_subagent_manager_with_state_root_and_timeout,
+    resolve_subagent_assignment_route,
 };
 use crate::tools::todo::{SharedTodoList, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
@@ -2193,7 +2195,24 @@ impl Engine {
                             .send(Event::status(format!("Denied tool call: {id}")))
                             .await;
                     }
-                    Op::SpawnSubAgent { prompt } => {
+                    Op::SpawnSubAgent {
+                        prompt,
+                        role_id,
+                        allowed_tools,
+                        write_files,
+                        max_steps,
+                        output_schema,
+                        expects_file_output,
+                    } => {
+                        if allowed_tools.is_empty() {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(format!(
+                                    "Cannot spawn role '{role_id}': empty allowed_tools whitelist"
+                                ))))
+                                .await;
+                            continue;
+                        }
                         let Some(client) = self.deepseek_client.clone() else {
                             let message = self
                                 .deepseek_client_error
@@ -2256,7 +2275,7 @@ impl Engine {
                             &runtime,
                             None,
                             &prompt,
-                            &FleetRole::Worker,
+                            &FleetRole::Custom,
                             ModelRoute::Inherit,
                             SubAgentThinking::Inherit,
                         )
@@ -2281,14 +2300,36 @@ impl Engine {
                         runtime.reasoning_effort = route.reasoning_effort;
                         runtime.reasoning_effort_auto = false;
 
+                        let write_claim = match host_write_claim(&runtime.context, &write_files) {
+                            Ok(claim) => claim,
+                            Err(err) => {
+                                let _ = self
+                                    .tx_event
+                                    .send(Event::error(ErrorEnvelope::fatal(format!(
+                                        "Failed to spawn role '{role_id}': {err}"
+                                    ))))
+                                    .await;
+                                continue;
+                            }
+                        };
+
                         let result = {
                             let mut manager = self.subagent_manager.write().await;
-                            manager.spawn_background(
+                            manager.spawn_background_with_assignment_options(
                                 Arc::clone(&self.subagent_manager),
                                 runtime,
-                                FleetRole::Worker,
+                                FleetRole::Custom,
                                 prompt.clone(),
-                                None,
+                                SubAgentAssignment::new(prompt.clone(), Some(role_id.clone()))
+                                    .with_output_schema(output_schema)
+                                    .with_expects_file_output(expects_file_output),
+                                Some(allowed_tools),
+                                SubAgentSpawnOptions {
+                                    max_steps,
+                                    write_claim,
+                                    host_managed_explicit_tools: true,
+                                    ..SubAgentSpawnOptions::default()
+                                },
                             )
                         };
 
@@ -2335,6 +2376,15 @@ impl Engine {
                         let _ = self
                             .tx_event
                             .send(Event::RequestManifestReady { rendered })
+                            .await;
+                    }
+                    Op::CancelSubAgents => {
+                        let cancelled = self.subagent_manager.write().await.cancel_all_running();
+                        let _ = self
+                            .tx_event
+                            .send(Event::status(format!(
+                                "Cancelled {cancelled} running sub-agent(s)"
+                            )))
                             .await;
                     }
                     Op::ListSubAgents => {
@@ -5338,6 +5388,48 @@ impl Engine {
         self.session.last_system_prompt_hash = Some(system_prompt_hash(merged.as_ref()));
         self.session.system_prompt = merged;
     }
+}
+
+fn host_write_claim(
+    context: &ToolContext,
+    write_files: &[PathBuf],
+) -> std::result::Result<Option<WriteScopeClaim>, String> {
+    if write_files.is_empty() {
+        return Ok(None);
+    }
+
+    let workspace = context
+        .workspace
+        .canonicalize()
+        .unwrap_or_else(|_| context.workspace.clone());
+    let mut exact_files = Vec::with_capacity(write_files.len());
+    for file in write_files {
+        let raw = file.to_string_lossy();
+        let resolved = context
+            .resolve_path(&raw)
+            .map_err(|error| error.to_string())?;
+        let relative = resolved.strip_prefix(&workspace).map_err(|_| {
+            format!(
+                "declared write file '{}' escapes workspace '{}'",
+                file.display(),
+                workspace.display()
+            )
+        })?;
+        if relative.as_os_str().is_empty() {
+            return Err("declared write file cannot be the workspace root".to_string());
+        }
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        if !exact_files.contains(&normalized) {
+            exact_files.push(normalized);
+        }
+    }
+
+    Ok(Some(WriteScopeClaim {
+        owner: String::new(),
+        roots: Vec::new(),
+        exact_files,
+        contracts: Vec::new(),
+    }))
 }
 
 fn strip_active_operation_reanchor(prompt: Option<&SystemPrompt>) -> Option<SystemPrompt> {
