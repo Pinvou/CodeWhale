@@ -5760,6 +5760,7 @@ impl RuntimeThreadManager {
                     .map(|registry| registry.rediscover_for_workspace(&thread.workspace)),
                 allow_shell: thread.allow_shell,
                 trust_mode: thread.trust_mode,
+                reasoning_effort: None,
                 notes_path: cfg.notes_path(),
                 mcp_config_path: cfg.mcp_config_path(),
                 skills_dir: cfg.skills_dir(),
