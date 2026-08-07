@@ -410,7 +410,8 @@ pub struct EngineConfig {
     /// 方案的 include 通道）。`None` = 回退编译期常量 `PINVOU3_HIDDEN_TOOLS`
     /// （现有行为逐字节不变）;`Some` = 以注入值为准——app 按会话的能力档案
     /// 计算（常量 − 档案 tools.include），code 模式可放出个别被隐藏工具而
-    /// plain 保持隐藏。
+    /// plain 保持隐藏。注入值只能收窄编译期常量；常量外名称会被忽略，不能
+    /// 借此隐藏 `request_user_input`、`read_file` 等原本可见工具。
     ///
     /// ⚠️ 语义边界（与 `disallowed_tools` 不同）：
     ///   - 本字段改变**仅 respawn 生效**（catalog 构建时消费），无热刷通道；
@@ -3533,6 +3534,7 @@ impl Engine {
             self.config.skills_dir.clone(),
             self.config.skills_scan_codewhale_only,
         )
+        .with_hidden_tools(self.config.hidden_tools.clone())
         .with_session_objects(crate::rlm::session::SessionObjectSnapshot::new(
             self.session.id.clone(),
             self.session.model.clone(),

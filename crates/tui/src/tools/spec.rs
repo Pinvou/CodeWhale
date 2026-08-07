@@ -6,7 +6,7 @@
 //! - `ToolResult`: Unified result type for tool execution
 //! - `ToolCapability`: Capabilities and requirements of tools
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -170,6 +170,10 @@ pub struct ToolContext {
     pub skills_dir: Option<PathBuf>,
     /// Restrict skill discovery to CodeWhale-owned roots plus `skills_dir`.
     pub skills_scan_codewhale_only: bool,
+    /// Session-scoped subset of the pinvou3 compile-time hidden-tool list.
+    /// `None` preserves the compile-time default; `Some` may only release
+    /// entries and cannot hide tools outside that default list.
+    pub hidden_tools: Option<HashSet<String>>,
     /// Elevated sandbox policy override (used when retrying after sandbox denial).
     /// This overrides the default sandbox behavior for shell commands.
     pub elevated_sandbox_policy: Option<crate::sandbox::SandboxPolicy>,
@@ -274,6 +278,7 @@ impl ToolContext {
             mcp_config_path,
             skills_dir: None,
             skills_scan_codewhale_only: false,
+            hidden_tools: None,
             elevated_sandbox_policy: None,
             shell_network_denied_hint: None,
             auto_approve: false,
@@ -319,6 +324,7 @@ impl ToolContext {
             mcp_config_path: mcp_config_path.into(),
             skills_dir: None,
             skills_scan_codewhale_only: false,
+            hidden_tools: None,
             elevated_sandbox_policy: None,
             shell_network_denied_hint: None,
             auto_approve: false,
@@ -364,6 +370,7 @@ impl ToolContext {
             mcp_config_path: mcp_config_path.into(),
             skills_dir: None,
             skills_scan_codewhale_only: false,
+            hidden_tools: None,
             elevated_sandbox_policy: None,
             shell_network_denied_hint: None,
             auto_approve,
@@ -425,6 +432,14 @@ impl ToolContext {
     ) -> Self {
         self.skills_dir = Some(skills_dir.into());
         self.skills_scan_codewhale_only = scan_codewhale_only;
+        self
+    }
+
+    /// Attach the session-scoped pinvou3 hidden-tool subset. The registry
+    /// applies it while building both parent and sub-agent model catalogs.
+    #[must_use]
+    pub fn with_hidden_tools(mut self, hidden_tools: Option<Vec<String>>) -> Self {
+        self.hidden_tools = hidden_tools.map(|tools| tools.into_iter().collect());
         self
     }
 

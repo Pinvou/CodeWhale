@@ -3232,6 +3232,58 @@ fn subagent_general_catalog_matches_parent_agent_surface_when_features_enabled()
     );
 }
 
+/// fork ②: session hidden-tool narrowing lives in ToolContext so every child
+/// registry sees the same scope. It may release compile-time-hidden tools, but
+/// cannot hide tools outside the compile-time list.
+#[test]
+fn forkguard_subagent_inherits_session_hidden_tools() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime =
+        stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
+    runtime.context = ToolContext::new(tmp.path().to_path_buf()).with_hidden_tools(Some(vec![
+        "git_status".to_string(),
+        "request_user_input".to_string(),
+    ]));
+    let todo_list = crate::tools::todo::new_shared_todo_list();
+    let plan_state = crate::tools::plan::new_shared_plan_state();
+
+    let parent_registry = ToolRegistryBuilder::new()
+        .with_full_agent_surface_options(
+            Some(runtime.client.clone()),
+            runtime.model.clone(),
+            runtime.manager.clone(),
+            runtime.clone(),
+            runtime.agent_tool_surface_options.clone(),
+            todo_list.clone(),
+            plan_state.clone(),
+        )
+        .build(runtime.context.clone());
+    let child_registry =
+        SubAgentToolRegistry::new(runtime, SubAgentType::General, None, todo_list, plan_state);
+
+    for (label, tools) in [
+        ("parent", parent_registry.to_api_tools()),
+        (
+            "subagent",
+            child_registry.tools_for_model(&SubAgentType::General),
+        ),
+    ] {
+        let deferred = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .and_then(|tool| tool.defer_loading)
+        };
+        assert_eq!(deferred("git_status"), Some(true), "{label}: kept hidden");
+        assert_eq!(deferred("git_log"), Some(false), "{label}: released");
+        assert_eq!(
+            deferred("request_user_input"),
+            Some(false),
+            "{label}: injection cannot expand the compile-time blocklist"
+        );
+    }
+}
+
 #[test]
 fn subagent_feature_gates_match_parent_agent_surface() {
     let tmp = tempdir().expect("tempdir");
