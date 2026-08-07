@@ -45,6 +45,58 @@ const REPRESENTATIVE_MEMORY_CHECKPOINT: &str = "REPRESENTATIVE_MEMORY_CHECKPOINT
 const REPRESENTATIVE_GOAL_OBJECTIVE: &str = "REPRESENTATIVE_GOAL_OBJECTIVE";
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
+struct ForkguardHostExtraTool;
+
+#[async_trait::async_trait]
+impl crate::tools::spec::ToolSpec for ForkguardHostExtraTool {
+    fn name(&self) -> &str {
+        "host_extra_probe"
+    }
+
+    fn description(&self) -> &str {
+        "Host-injected tool registration probe."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _context: &crate::tools::spec::ToolContext,
+    ) -> Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> {
+        Ok(crate::tools::spec::ToolResult::success("ok".to_string()))
+    }
+}
+
+#[test]
+fn forkguard_host_extra_tools_register_in_all_modes() {
+    let config = EngineConfig {
+        extra_tools: ExtraTools(vec![Arc::new(ForkguardHostExtraTool)]),
+        ..EngineConfig::default()
+    };
+    let (engine, _handle) = Engine::new(config, &Config::default());
+
+    for mode in [AppMode::Plan, AppMode::Agent, AppMode::Yolo] {
+        let registry = engine
+            .build_turn_tool_registry_builder(
+                mode,
+                engine.config.todos.clone(),
+                engine.config.plan_state.clone(),
+            )
+            .build(engine.build_tool_context(mode, false));
+        assert!(
+            registry.contains("host_extra_probe"),
+            "host extra tool must be registered in {mode:?} mode"
+        );
+    }
+}
+
 #[test]
 fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
     let enabled = EngineConfig::default();

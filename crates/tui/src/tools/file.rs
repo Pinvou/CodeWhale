@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+const WRITE_FILE_INLINE_DIFF_LIMIT_BYTES: usize = 32 * 1024;
+const WRITE_FILE_MAX_CONTENT_BYTES: usize = 64 * 1024;
+
 // === Cross-harness parameter aliases ===
 
 /// Rewrite well-known parameter spellings from other coding harnesses onto the
@@ -887,7 +890,7 @@ impl ToolSpec for WriteFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `Bash` — diffs render inline and approval is handled cleanly. Creates or overwrites; parent directories are auto-created."
+        "Write content to a UTF-8 file in the workspace. Use this instead of heredocs (`cat <<EOF > file`) or `echo > file` in `Bash` — diffs render inline for reasonably sized files and approval is handled cleanly. Creates or overwrites; parent directories are auto-created. Recommended at most 32KB; hard limit 64KB per call."
     }
 
     fn input_schema(&self) -> Value {
@@ -927,6 +930,14 @@ impl ToolSpec for WriteFileTool {
         let path_str = required_str(&input, "path")?;
         let file_content = required_str(&input, "content")?;
 
+        if file_content.len() > WRITE_FILE_MAX_CONTENT_BYTES {
+            return Err(ToolError::invalid_input(format!(
+                "File write content is {} bytes — over the {}KB single-call limit. Split the artifact into multiple files or reduce its size.",
+                file_content.len(),
+                WRITE_FILE_MAX_CONTENT_BYTES / 1024,
+            )));
+        }
+
         let file_path = context.resolve_path(path_str)?;
 
         // Snapshot the existing contents (if any) before we overwrite — used
@@ -955,16 +966,27 @@ impl ToolSpec for WriteFileTool {
         context.note_file_read(&file_path);
 
         let display = file_path.display().to_string();
-        let diff = make_unified_diff(&display, &prior_contents, file_content);
         let summary = if existed_before {
             format!("Wrote {} bytes to {}", file_content.len(), display)
         } else {
             format!("Created {} ({} bytes)", display, file_content.len())
         };
-        let body = if diff.is_empty() {
-            format!("{summary}\n(no changes)")
+        let body = if prior_contents.len() > WRITE_FILE_INLINE_DIFF_LIMIT_BYTES
+            || file_content.len() > WRITE_FILE_INLINE_DIFF_LIMIT_BYTES
+        {
+            format!(
+                "{summary}\n[diff omitted] {display} is too large for an inline write_file diff (old={} bytes, new={} bytes, limit={} bytes). Use File action=read with line ranges to inspect it.",
+                prior_contents.len(),
+                file_content.len(),
+                WRITE_FILE_INLINE_DIFF_LIMIT_BYTES,
+            )
         } else {
-            format!("{diff}\n{summary}")
+            let diff = make_unified_diff(&display, &prior_contents, file_content);
+            if diff.is_empty() {
+                format!("{summary}\n(no changes)")
+            } else {
+                format!("{diff}\n{summary}")
+            }
         };
 
         // Append LSP diagnostics for the written file when enabled (#428).

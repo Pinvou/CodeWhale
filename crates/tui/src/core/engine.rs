@@ -221,6 +221,18 @@ fn user_shell_turn_outcome(
 
 // === Types ===
 
+/// Application-layer custom tools injected into every turn registry.
+#[derive(Clone, Default)]
+pub struct ExtraTools(pub Vec<Arc<dyn crate::tools::spec::ToolSpec>>);
+
+impl std::fmt::Debug for ExtraTools {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list()
+            .entries(self.0.iter().map(|tool| tool.name()))
+            .finish()
+    }
+}
+
 /// Configuration for the engine
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -404,6 +416,8 @@ pub struct EngineConfig {
     /// Applied to the per-turn tool registry after built-in tools are registered.
     /// When `None`, no overrides or plugin loading occurs.
     pub tools: Option<crate::config::ToolsConfig>,
+    /// Application-injected tools appended after the native runtime surface.
+    pub extra_tools: ExtraTools,
     /// Whether tools should follow symbolic links. When `true`, symlinked
     /// directories are traversed by walk-based tools and symlinked paths
     /// that resolve outside the workspace are still allowed (the symlink
@@ -496,6 +510,7 @@ impl Default for EngineConfig {
             prefer_bwrap: false,
             verbosity: None,
             tools: None,
+            extra_tools: ExtraTools::default(),
             workspace_follow_symlinks: false,
             exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
             terminal_chrome_enabled: true,
@@ -2432,6 +2447,10 @@ impl Engine {
                                 "Stream chunk timeout set to {timeout_secs}s"
                             )))
                             .await;
+                    }
+                    Op::SetDisallowedTools { tools } => {
+                        self.config.disallowed_tools =
+                            if tools.is_empty() { None } else { Some(tools) };
                     }
                     Op::SetSubagentRuntimeConfig {
                         enabled,
@@ -5704,7 +5723,8 @@ fn file_tool_permission_paths(tool_name: &str, input: &Value) -> Option<Vec<Stri
 }
 
 /// Target paths when a call is one of the canonical workspace file-write
-/// tools (`write_file` / `edit_file` / `apply_patch`), `None` for any other
+/// tools (`write_file` / `edit_file` / `apply_patch`), `None`
+/// for any other
 /// tool. Feeds the in-workspace write carve-out (#5185).
 fn file_write_tool_target_paths(tool_name: &str, input: &Value) -> Option<Vec<String>> {
     let canonical = crate::tools::canonical_action::canonical_action_alias(tool_name, input);

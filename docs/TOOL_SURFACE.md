@@ -24,10 +24,11 @@ The default-active policy contains exactly these nine names:
 3. `Git`
 4. `Run`
 5. `agent`
-6. `remember`
-7. `tasks`
-8. `todo_write`
-9. `tool_search`
+6. `load_skill`
+7. `remember`
+8. `tasks`
+9. `todo_write`
+10. `tool_search`
 
 The first eight are `DEFAULT_ACTIVE_NATIVE_TOOLS` in
 `crates/tui/src/core/engine/tool_catalog.rs`. `tool_search` is synthetic rather
@@ -47,7 +48,7 @@ compatibility tool for loading older Plan artifacts", and
 `update_plan_is_hidden_replay_compatibility` (`plan.rs:598-605`) pins that.
 
 Plan mode narrows the active set: `Bash` and `Run` drop out, leaving `File`,
-`Git`, `agent`, `tasks`, `todo_write`, `tool_search`, and — when memory is
+`Git`, `agent`, `load_skill`, `tasks`, `todo_write`, `tool_search`, and — when memory is
 enabled — `remember` (`should_register_remember_tool`,
 `crates/tui/src/core/engine/tool_setup.rs:113-118`).
 
@@ -102,7 +103,7 @@ emits no block at all.
 
 `Web` is a conditional, deferred action tool with `search`, `fetch`, and `wait`
 actions. It is discoverable through `tool_search` only when the active network
-policy and runtime backend permit it; it is not one of the nine default-active
+policy and runtime backend permit it; it is not one of the ten default-active
 names.
 
 The durable `github`, `automation`, and `rlm` action families are also deferred
@@ -319,7 +320,7 @@ misspelled filter is indistinguishable from a pass. (Three filters printed here
 before v0.9.4 named tests that did not exist.)
 
 The provider-free full-policy receipt enables built-in memory and must report the
-nine default-active names listed above. A memory-disabled receipt truthfully omits
-`remember` and reports eight. A separate repository-wide tool count may include deferred, dynamic,
+ten default-active names listed above. A memory-disabled receipt truthfully omits
+`remember` and reports nine. A separate repository-wide tool count may include deferred, dynamic,
 feature-gated, and replay-only registrations; it is not the number of tools
 placed in the first-turn model catalog.

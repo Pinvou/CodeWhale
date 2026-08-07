@@ -31,7 +31,7 @@ use crate::compaction::CompactionConfig;
 use crate::config::DEFAULT_TEXT_MODEL;
 use crate::config::{ApiProvider, Config, MAX_SUBAGENTS, ProviderIdentity};
 use crate::core::engine::{
-    EngineConfig, EngineHandle, spawn_engine_with_authoritative_route_config,
+    EngineConfig, EngineHandle, ExtraTools, spawn_engine_with_authoritative_route_config,
 };
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
 use crate::core::ops::Op;
@@ -5844,6 +5844,7 @@ impl RuntimeThreadManager {
                 search_base_url: cfg.search.as_ref().and_then(|s| s.base_url.clone()),
                 tools_always_load: cfg.tools_always_load(),
                 tools: cfg.tools.clone(),
+                extra_tools: ExtraTools::default(),
                 verbosity: cfg.verbosity.clone(),
                 workspace_follow_symlinks: settings.workspace_follow_symlinks,
                 exec_policy_engine: cfg.exec_policy_engine.clone(),
