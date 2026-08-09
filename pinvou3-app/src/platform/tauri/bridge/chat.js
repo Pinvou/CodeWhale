@@ -235,6 +235,7 @@
       turnOwnerBuffer.localTurnOwned = true;
       turnOwnerBuffer.remoteTurnActive = false;
       turnOwnerBuffer.remoteTerminalSeen = false;
+      turnOwnerBuffer.remoteCommittedRevision = "";
     }
     runSyncOnSession(sid, function () {
       state.chatItems = state.chatItems.filter(function (item) { return !item.turnErrorNotice; });
