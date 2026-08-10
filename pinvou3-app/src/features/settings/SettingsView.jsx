@@ -2546,6 +2546,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         const installing = !!(bs && bs.depsInstalling);
         const installError = bs && bs.depsInstallError;
         const missing = deps.filter(dep => !dep.installed);
+        const hasInstallableMissing = missing.some(dep => String(dep.install_action || dep.apt || '').trim());
         const checked = deps.length > 0;
         const busy = checking || installing;
         return (
@@ -2577,7 +2578,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
                     <Tag tone="gray">{settingsCopy.missing}</Tag>
                   </IOSRow>
                 ))}
-                {missing.length > 0 && (
+                {hasInstallableMissing && (
                   <IOSRow label={usesBundledDependencyInstaller ? settingsCopy.installMissing : t.depGoInstall}>
                     <button
                       onClick={() => bridge.available && bridge.dependencies.installDependencies()}
