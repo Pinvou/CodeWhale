@@ -2331,6 +2331,7 @@ function workspaceDisplayName(path) {
                 onSwitchHomeMode={handleSwitchHomeMode}
                 bs={bs}
                 onGotoModelSettings={() => openSettingsSection('model')}
+                onGotoSettings={() => openSettingsSection('general')}
                 onGotoTools={() => navigateFromScheduledRun('toolStore')}
               />
             )}
