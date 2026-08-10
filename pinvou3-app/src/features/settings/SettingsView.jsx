@@ -26,6 +26,7 @@ import {
   artifactPreviewExternalUrlFromMessage,
   buildArtifactPreviewDocument,
 } from '../artifacts/artifact-preview-navigation.js';
+import { ProvidersSection } from './ProvidersSection.jsx';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
@@ -2617,12 +2618,14 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
           </IOSRow>
         </IOSSection>
       );
+      const renderProviders = () => <ProvidersSection t={t} isDark={isDark} />;
       const renderContent = () => {
         if (activeSection === 'model') return renderModels();
         if (activeSection === 'search') return renderSearch();
         if (activeSection === 'memory') return renderMemory();
         if (activeSection === 'permissions') return renderPermissions();
         if (activeSection === 'data') return renderData();
+        if (activeSection === 'providers') return renderProviders();
         if (activeSection === 'update') return renderUpdate();
         if (activeSection === 'help') return renderHelp();
         return renderGeneral();
@@ -2634,6 +2637,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
         memory: t.uiSettings.memory,
         permissions: t.uiSettings.permissions,
         data: t.uiSettings.data,
+        providers: t.uiSettings.providers,
         update: t.uiSettings.update,
         help: t.uiSettings.help,
       }[activeSection] || t.uiSettings.general;
@@ -2766,6 +2770,7 @@ const SCard = React.forwardRef(({ isDark, title, titleAdornment, children, id, s
               </div>
               <div className={`mt-7 mb-4 px-1 text-[12px] font-semibold max-sm:hidden ${isDark ? 'text-[#8E8E93]' : 'text-[#8A8A8E]'}`}>{t.uiSettings.system}</div>
               <div className="space-y-2 max-sm:flex max-sm:space-y-0 max-sm:gap-2">
+                {!!platformCapabilities.codexAcpSupported && <SectionButton id="providers" icon={<Globe size={17} />} label={t.uiSettings.providers} />}
                 {canUseSuperPermission && <SectionButton id="permissions" icon={<Wrench size={17} />} label={t.uiSettings.permissions} />}
                 <SectionButton id="data" icon={<Archive size={17} />} label={t.uiSettings.data} />
                 {canUpdateApp && <SectionButton id="update" icon={<RefreshCw size={17} />} label={t.uiSettings.update} dot={hasUpdate} />}
