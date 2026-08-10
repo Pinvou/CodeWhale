@@ -22,7 +22,7 @@ pub(crate) use windows as platform;
 pub use interface::{
     apply_user_npm_prefix, archive_dependency_packages, archive_tool_exists, archive_tool_path,
     command_exists, configure_onnxruntime_dylib, connector_cli_command, device_serial_number,
-    disable_super_permission, email_dependency_packages, email_tool_exists,
+    disable_super_permission, email_dependency_packages, email_manual_hint, email_tool_exists,
     enable_super_permission, external_application_path, file_url_from_path,
     filesystem_path_identity_key, kill_pid_tree, libreoffice_missing_message,
     libreoffice_open_fallback_needed, libreoffice_tool_path, msg_converter_required,
