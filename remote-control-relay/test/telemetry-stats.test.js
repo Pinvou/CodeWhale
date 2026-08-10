@@ -82,7 +82,9 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
   assert.equal(list[0].device_id, "dev_a");
   assert.equal(list[0].first_seen_at, at("2026-07-06T10:00:00"));
   assert.equal(list[0].region, "广东省 / 深圳市");
+  assert.equal(list[0].turns_today, 1);
   assert.equal(list[0].turns_7d, 2);
+  assert.equal(list[1].turns_today, 1);
   assert.equal(list[1].turns_7d, 1);
   assert.equal(list[1].region, "未知");
   assert.equal("failure_rate_7d" in list[0], false);
