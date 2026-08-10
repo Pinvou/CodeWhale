@@ -109,6 +109,7 @@ function injectSource() {
     var superPerm = false;
     var calls = [];
     var updateResponse = { available: false, current_version: '0.6.1', latest_version: '0.6.1', notes: '', platform: 'windows' };
+    var updateCheckFailure = null;
     var modelTestResponse = { ok: true, code: 'ok', message: '连接成功，服务可用', detail: 'HTTP 200', http_status: 200 };
     var dependencyCheckResponse = [];
     var pendingDownloadResolve = null;
@@ -185,7 +186,10 @@ function injectSource() {
         case 'set_super_permission': return Promise.reject(new Error('pkexec unavailable'));
         case 'list_personas': return Promise.resolve([]);
         case 'get_backend_status': return Promise.resolve({ online: true, ok: true, status: 'online' });
-        case 'check_for_update': return Promise.resolve(Object.assign({}, updateResponse));
+        case 'check_for_update':
+          return updateCheckFailure
+            ? Promise.reject(new Error(updateCheckFailure))
+            : Promise.resolve(Object.assign({}, updateResponse));
         case 'download_update': return new Promise(function (resolve) { pendingDownloadResolve = resolve; });
         case 'install_update': return Promise.resolve(null);
         case 'find_resumable_run': return Promise.resolve(null);
@@ -210,6 +214,7 @@ function injectSource() {
       settings: function () { return settings; },
       activeModelId: function () { return activeModelId; },
       setUpdateResponse: function (next) { updateResponse = Object.assign({}, updateResponse, next || {}); },
+      setUpdateCheckFailure: function (message) { updateCheckFailure = message || null; },
       setModelTestResponse: function (next) { modelTestResponse = Object.assign({}, next || {}); },
       setDependencyCheckResponse: function (next) { dependencyCheckResponse = (next || []).slice(); },
       resolveDownload: function () {
@@ -371,6 +376,18 @@ async function modalWidth(page, headingText) {
 
   await clickSettingsSection(page, '更新');
   await page.evaluate(async () => {
+    window.__SETTINGS_TEST__.setUpdateCheckFailure('OTA 请求失败: error sending request for url');
+    await window.TauriBridge.updater.checkForUpdate();
+  });
+  await sleep(250);
+  const updateCheckFailureText = await page.evaluate(() => document.querySelector('#settings-version-update')?.innerText || '');
+  rec('①a 离线检查更新仅显示简洁提示',
+    updateCheckFailureText.includes('检查失败')
+    && !updateCheckFailureText.includes('OTA 请求失败')
+    && !updateCheckFailureText.includes('error sending request'),
+    updateCheckFailureText);
+  await page.evaluate(async () => {
+    window.__SETTINGS_TEST__.setUpdateCheckFailure(null);
     window.__SETTINGS_TEST__.setUpdateResponse({
       available: true,
       current_version: '0.6.1',
