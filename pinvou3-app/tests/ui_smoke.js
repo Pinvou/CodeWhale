@@ -988,10 +988,17 @@ async function expand(page) {
     trigger?.click();
     await wait(50);
     trigger?.click();
-    await wait(100);
-    const row = [...document.querySelectorAll('[data-testid="kb-mount-row"]')]
-      .find(node => (node.textContent || '').includes('团队规范'));
-    const toggle = row?.querySelector('[data-testid="kb-mount-toggle"]');
+    let toggle = null;
+    // 菜单重开后 bridge 状态会异步进入 React。merge_group 的共享 runner
+    // 偶尔超过固定 100ms，导致在权威状态落地前读取旧的可点击按钮。等待
+    // 用户可见不变量成立，同时保留上限，真实回归仍会明确失败。
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const row = [...document.querySelectorAll('[data-testid="kb-mount-row"]')]
+        .find(node => (node.textContent || '').includes('团队规范'));
+      toggle = row?.querySelector('[data-testid="kb-mount-toggle"]') || null;
+      if (toggle?.disabled && document.body.innerText.includes('Embedding 模型正在加载或加载失败')) break;
+      await wait(50);
+    }
     const before = window.__TAURI_INVOKES__.filter(call => call.cmd === 'session_add_mounted_collection').length;
     toggle?.click();
     await wait(50);
