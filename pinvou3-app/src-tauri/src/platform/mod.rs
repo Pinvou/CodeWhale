@@ -14,3 +14,4 @@ pub(crate) mod startup;
 pub mod super_permission;
 pub(crate) mod telemetry;
 pub(crate) mod ui_cache;
+pub(crate) mod window_startup;

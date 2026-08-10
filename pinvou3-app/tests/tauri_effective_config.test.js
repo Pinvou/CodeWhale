@@ -26,6 +26,10 @@ const {
   platformArchitectureConfigPath,
   platformConfigPath,
 } = require("../scripts/tauri/platform-config.js");
+const {
+  linuxStartupWindowConfig,
+  linuxStartupWindowConfigSpec,
+} = require("../scripts/tauri/startup-window-config.js");
 const { requireWrapper, WRAPPER_ENV } = require("../scripts/tauri/require-wrapper.js");
 const { WINDOWS_BRIDGE_CONFIG_PATH } = require("../scripts/tauri/codex-bridge.js");
 
@@ -140,18 +144,23 @@ assert.equal(
 assert.throws(() => requireWrapper({}), /禁止绕过平台 overlay/);
 assert.doesNotThrow(() => requireWrapper({ [WRAPPER_ENV]: "1" }));
 
+const linuxStartupOverlay = linuxStartupWindowConfigSpec();
 const buildArgs = prepareTauriArgs(
   ["--verbose", "build", "--bundles", "deb"],
   { platform: "linux", stageRuntime: noRuntime },
 );
 assert.equal(tauriCommandIndex(buildArgs), 1, "build command may follow global options");
-assert.equal(configSpecs(buildArgs)[0], platformConfigPath("linux"));
+assert.deepEqual(configSpecs(buildArgs), [
+  platformConfigPath("linux"),
+  linuxStartupOverlay,
+]);
 const linuxArmArgs = prepareTauriArgs(
   ["build", "--bundles", "deb"],
   { platform: "linux", architecture: "arm64", stageRuntime: noRuntime },
 );
 assert.deepEqual(configSpecs(linuxArmArgs), [
   platformConfigPath("linux"),
+  linuxStartupOverlay,
 ]);
 
 const explicitOverlay = "src-tauri/config/platforms/windows/signing.wosign.conf.json";
@@ -219,8 +228,18 @@ assert.deepEqual(configSpecs(windowsCodexArgs), [
 ]);
 assert.deepEqual(
   prepareTauriArgs(["dev"], { platform: "linux", stageRuntime: noRuntime }),
+  ["dev", "--config", linuxStartupOverlay],
+  "Linux dev must hide the main window until the first React commit",
+);
+assert.deepEqual(
+  prepareTauriArgs(["dev"], { platform: "win32", stageRuntime: noRuntime }),
   ["dev"],
-  "Linux/Windows dev must not receive packaging overlays",
+  "Windows dev must not receive packaging overlays",
+);
+assert.deepEqual(
+  configSpecs(prepareTauriArgs(["dev", "-c", explicitOverlay], { platform: "linux", stageRuntime: noRuntime })),
+  [linuxStartupOverlay, explicitOverlay],
+  "explicit Linux dev overlays must override the automatic cold-start overlay",
 );
 assert.deepEqual(
   prepareTauriArgs(["dev"], { platform: "darwin" }),
@@ -292,8 +311,13 @@ tauriResult.then(
   },
 );
 
-const linux = composeEffectiveConfig([platformConfigPath("linux")]).effectiveConfig;
+const linux = composeEffectiveConfig([
+  platformConfigPath("linux"),
+  linuxStartupOverlay,
+]).effectiveConfig;
 assert.deepEqual(linux.bundle.targets, ["deb"]);
+assert.equal(linux.app.windows[0].visible, false);
+assert.match(linux.app.windows[0].url, /[?&]startupWindow=hidden(?:&|$)/);
 assert.match(linux.build.beforeBuildCommand, /require-wrapper\.js build/);
 assert.match(
   linux.build.beforeBuildCommand,
@@ -321,6 +345,33 @@ assert.ok(
 );
 
 assert.equal(platformArchitectureConfigPath("linux", "arm64"), null);
+
+const linuxDev = composeEffectiveConfig([linuxStartupOverlay]).effectiveConfig;
+assert.equal(linuxDev.app.windows[0].visible, false);
+assert.match(linuxDev.app.windows[0].url, /[?&]startupWindow=hidden(?:&|$)/);
+const baseMainWindow = composeEffectiveConfig([]).effectiveConfig.app.windows[0];
+for (const [label, config] of [["packaging", linux], ["dev", linuxDev]]) {
+  const mainWindow = { ...config.app.windows[0], visible: undefined };
+  mainWindow.url = mainWindow.url.replace("&startupWindow=hidden", "");
+  assert.deepEqual(
+    mainWindow,
+    { ...baseMainWindow, visible: undefined },
+    `Linux ${label} must only override the main-window cold-start controls`,
+  );
+}
+
+const generatedFromChangedBase = linuxStartupWindowConfig({
+  readFile: () => JSON.stringify({
+    app: { windows: [{ label: "main", url: "index.html", width: 1234 }] },
+  }),
+});
+assert.equal(generatedFromChangedBase.app.windows[0].width, 1234);
+assert.equal(generatedFromChangedBase.app.windows[0].visible, false);
+assert.equal(
+  generatedFromChangedBase.app.windows[0].url,
+  "index.html?startupWindow=hidden",
+  "Linux startup overlay must derive window properties from the base config",
+);
 
 const macos = composeEffectiveConfig([platformConfigPath("darwin")]).effectiveConfig;
 assert.deepEqual(macos.bundle.targets, ["app", "dmg"]);
