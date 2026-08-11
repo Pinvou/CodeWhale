@@ -1742,6 +1742,46 @@ fn workspace_and_dir_entry_point_shares_the_same_cache() {
 }
 
 #[test]
+fn configured_skill_catalogue_uses_stable_name_reference() {
+    let _env_lock = crate::test_support::lock_test_env();
+    super::clear_skill_discovery_cache();
+    let tmpdir = TempDir::new().unwrap();
+    let home = tmpdir.path().join("home");
+    let workspace = home.clone();
+    let skills_dir = home
+        .join(".pinvou3")
+        .join("sessions")
+        .join("session-123")
+        .join("skills");
+    std::fs::create_dir_all(&home).unwrap();
+    write_skill(
+        &skills_dir,
+        "visual-design",
+        "Design assets",
+        "Instructions",
+    );
+    let _home = crate::test_support::EnvVarGuard::set("HOME", &home);
+    let _userprofile = crate::test_support::EnvVarGuard::set("USERPROFILE", &home);
+    let _codewhale_home =
+        crate::test_support::EnvVarGuard::set("CODEWHALE_HOME", home.join(".codewhale"));
+
+    let rendered =
+        super::render_available_skills_context_for_workspace_and_dir_with_mode_and_plugins(
+            &workspace,
+            &skills_dir,
+            super::SkillDiscoveryMode::Compatible,
+            "en",
+            None,
+        )
+        .expect("configured skill context");
+
+    assert!(rendered.contains("- visual-design: Design assets"));
+    assert!(rendered.contains("load_skill"));
+    assert!(!rendered.contains("session-123"), "{rendered}");
+    assert!(!rendered.contains("visual-design/SKILL.md"), "{rendered}");
+}
+
+#[test]
 fn global_skill_roots_come_from_the_os_home_only() {
     // §2.5: global skill roots resolve under the OS user's home (or an
     // explicit `$CODEWHALE_HOME`), never an account/GitHub handle. A wrong

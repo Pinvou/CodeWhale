@@ -1278,7 +1278,11 @@ pub fn render_available_skills_context_for_workspace_and_dir_with_mode_and_plugi
     let registry =
         discover_for_workspace_and_dir_with_mode_and_plugins(workspace, skills_dir, mode, plugins)
             .into_enabled();
-    render_skills_block(&registry, locale, workspace)
+    // A configured skills root may be session-specific. Keep its physical
+    // location in the registry for `load_skill`, but expose native skills to
+    // the model by stable name so a session id cannot fragment the prompt
+    // prefix cache.
+    render_skills_block_with_native_paths(&registry, locale, workspace, false)
 }
 
 /// Replace absolute path prefixes in free-form text (skill load warnings)
@@ -1337,6 +1341,15 @@ fn privacy_safe_skill_path(path: &Path, workspace: &Path) -> String {
 }
 
 fn render_skills_block(registry: &SkillRegistry, locale: &str, workspace: &Path) -> Option<String> {
+    render_skills_block_with_native_paths(registry, locale, workspace, true)
+}
+
+fn render_skills_block_with_native_paths(
+    registry: &SkillRegistry,
+    locale: &str,
+    workspace: &Path,
+    include_native_paths: bool,
+) -> Option<String> {
     if registry.is_empty() && registry.warnings().is_empty() {
         return None;
     }
@@ -1400,23 +1413,29 @@ Skills are optional local instruction packs. This budgeted index exposes routing
         // and the model would fail to open it. Rendered privacy-safe
         // (workspace-relative or ~/…) so the prompt prefix never embeds
         // absolute user paths (#4632).
-        let display_path = privacy_safe_skill_path(&skill.path, workspace);
         let description = truncate_for_prompt(
             skill.description_for_locale(locale),
             MAX_SKILL_DESCRIPTION_CHARS,
         );
         let source = match &skill.source {
-            SkillSource::Native => format!("file: {display_path}"),
+            SkillSource::Native if include_native_paths => Some(format!(
+                "file: {}",
+                privacy_safe_skill_path(&skill.path, workspace)
+            )),
+            SkillSource::Native => None,
             SkillSource::Plugin {
                 plugin_id,
                 plugin_name,
                 ..
-            } => format!("reviewed plugin snapshot: {plugin_name} ({plugin_id}); use load_skill"),
+            } => Some(format!(
+                "reviewed plugin snapshot: {plugin_name} ({plugin_id}); use load_skill"
+            )),
         };
-        let line = if description.is_empty() {
-            format!("- {}: ({source})\n", skill.name)
-        } else {
-            format!("- {}: {} ({source})\n", skill.name, description)
+        let line = match (description.is_empty(), source) {
+            (true, Some(source)) => format!("- {}: ({source})\n", skill.name),
+            (true, None) => format!("- {}\n", skill.name),
+            (false, Some(source)) => format!("- {}: {} ({source})\n", skill.name, description),
+            (false, None) => format!("- {}: {}\n", skill.name, description),
         };
 
         if out.chars().count() + line.chars().count() + fixed_reserve > MAX_AVAILABLE_SKILLS_CHARS {

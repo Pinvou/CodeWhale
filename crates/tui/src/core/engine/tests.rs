@@ -12089,7 +12089,7 @@ fn internal_context_budget_tiers_reserved_output_by_window() {
 }
 
 #[test]
-fn v4_keeps_large_file_reads_but_compacts_noisy_shell_output() {
+fn v4_keeps_large_file_reads_but_compacts_noisy_tool_output() {
     let content = "0123456789abcdef\n".repeat(2_000);
     let output = ToolResult::success(content.clone());
 
@@ -12100,6 +12100,15 @@ fn v4_keeps_large_file_reads_but_compacts_noisy_shell_output() {
         compact_tool_result_for_context("deepseek-v4-pro", "exec_shell", &output);
     assert!(v4_shell_context.contains("exec_shell output compacted to protect context"));
     assert!(v4_shell_context.len() < v4_context.len());
+
+    let v4_web_context = compact_tool_result_for_context("deepseek-v4-pro", "Web", &output);
+    assert!(v4_web_context.contains("Web output compacted to protect context"));
+    assert!(v4_web_context.len() < v4_context.len());
+
+    let v4_legacy_fetch_context =
+        compact_tool_result_for_context("deepseek-v4-pro", "fetch_url", &output);
+    assert!(v4_legacy_fetch_context.contains("fetch_url output compacted to protect context"));
+    assert!(v4_legacy_fetch_context.len() < v4_context.len());
 
     let legacy_context =
         compact_tool_result_for_context("deepseek-v3.2-128k", "read_file", &output);
