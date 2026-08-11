@@ -14,7 +14,8 @@ use base64::Engine as _;
 use parking_lot::Mutex;
 use rand::RngCore;
 use reqwest::{Client, StatusCode};
-use rusqlite::{params, Connection};
+use rusqlite::types::Type;
+use rusqlite::{params, Connection, Row};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -209,6 +210,9 @@ impl TelemetryState {
     }
 
     fn insert_event(&self, event: &UsageEvent) -> Result<()> {
+        let occurred_at = sqlite_integer(event.occurred_at, "occurred_at")?;
+        let input_tokens = sqlite_integer(event.input_tokens, "input_tokens")?;
+        let output_tokens = sqlite_integer(event.output_tokens, "output_tokens")?;
         let mut connection = self.inner.outbox.lock();
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -217,9 +221,9 @@ impl TelemetryState {
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 event.event_id,
-                event.occurred_at,
-                event.input_tokens,
-                event.output_tokens,
+                occurred_at,
+                input_tokens,
+                output_tokens,
                 event.success as u8,
             ],
         )?;
@@ -337,12 +341,13 @@ impl TelemetryState {
             "SELECT event_id, occurred_at, input_tokens, output_tokens, success
              FROM usage_events ORDER BY occurred_at ASC LIMIT ?1",
         )?;
-        let rows = statement.query_map([limit as u64], |row| {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map([limit], |row| {
             Ok(UsageEvent {
                 event_id: row.get(0)?,
-                occurred_at: row.get(1)?,
-                input_tokens: row.get(2)?,
-                output_tokens: row.get(3)?,
+                occurred_at: nonnegative_sql_integer(row, 1)?,
+                input_tokens: nonnegative_sql_integer(row, 2)?,
+                output_tokens: nonnegative_sql_integer(row, 3)?,
                 success: row.get::<_, u8>(4)? != 0,
             })
         })?;
@@ -433,7 +438,10 @@ fn initialize_outbox(connection: &mut Connection, now: u64) -> Result<()> {
 }
 
 fn prune_outbox_transaction(transaction: &rusqlite::Transaction<'_>, now: u64) -> Result<()> {
-    let cutoff = now.saturating_sub(OUTBOX_RETENTION.as_millis() as u64);
+    let cutoff = sqlite_integer(
+        now.saturating_sub(OUTBOX_RETENTION.as_millis() as u64),
+        "retention cutoff",
+    )?;
     transaction.execute("DELETE FROM usage_events WHERE occurred_at < ?1", [cutoff])?;
     transaction.execute(
         "DELETE FROM usage_events
@@ -442,9 +450,23 @@ fn prune_outbox_transaction(transaction: &rusqlite::Transaction<'_>, now: u64) -
            ORDER BY occurred_at DESC, event_id DESC
            LIMIT -1 OFFSET ?1
          )",
-        [OUTBOX_MAX_EVENTS as u64],
+        [
+            i64::try_from(OUTBOX_MAX_EVENTS)
+                .context("outbox limit exceeds SQLite INTEGER range")?,
+        ],
     )?;
     Ok(())
+}
+
+fn sqlite_integer(value: u64, name: &str) -> Result<i64> {
+    i64::try_from(value).with_context(|| format!("{name} exceeds SQLite INTEGER range"))
+}
+
+fn nonnegative_sql_integer(row: &Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value = row.get::<_, i64>(index)?;
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(error))
+    })
 }
 
 fn save_identity(path: &Path, identity: &IdentityFile) -> Result<()> {
@@ -611,6 +633,12 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_integer_rejects_values_outside_the_signed_range() {
+        assert_eq!(sqlite_integer(i64::MAX as u64, "test").unwrap(), i64::MAX);
+        assert!(sqlite_integer(i64::MAX as u64 + 1, "test").is_err());
+    }
+
+    #[test]
     fn legacy_identity_gets_registration_secret() {
         let path = std::env::temp_dir().join(format!(
             "pinvou-telemetry-identity-{}-{}.json",
@@ -644,7 +672,10 @@ mod tests {
             transaction
                 .execute(
                     "INSERT INTO usage_events VALUES (?1, ?2, 1, 1, 1)",
-                    params![format!("evt_recent_{index:08}"), now + index as u64],
+                    params![
+                        format!("evt_recent_{index:08}"),
+                        sqlite_integer(now + index as u64, "test occurred_at").unwrap()
+                    ],
                 )
                 .unwrap();
         }
