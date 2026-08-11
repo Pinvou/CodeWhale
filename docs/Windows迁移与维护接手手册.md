@@ -23,7 +23,6 @@ pinvou3 是一个本地算力桌面智能助手：`pinvou3-app/` 提供 Tauri 2.
 | `docs/` | 项目设计、阶段报告、fork 说明、测试方案 | 接手时要先读 `fork-modifications.md` 和 `process.md` |
 | `workflows/` | 开发源工作流数据与 Python 调度脚本 | `build.rs` 会同步到 Tauri bundle 快照 |
 | `scripts/` | 辅助脚本，包括 fork guard、模拟脚本、release 脚本 | 多数脚本偏 Bash/Linux，需要 Windows 适配 |
-| `.specify/`、`specs/` | Spec Kit 规格与流程产物 | 新需求按 specify/plan/tasks/implement 走 |
 
 接手时优先确认这 8 个核心模块：`pinvou3-app/src/tauri-bridge.js`、`commands.rs`、`engine_pool.rs`、`engine.rs`、`bridge/mod.rs`、`file_ingest.rs`、`harness.rs`、`DeepSeek-TUI/crates/tui`。前 7 个在 app 层，最后一个是底座依赖。
 
