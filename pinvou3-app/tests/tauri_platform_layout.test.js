@@ -170,7 +170,7 @@ assert.ok(
   submoduleUpdates.every((command) => command.endsWith("-- CodeWhale")),
   "Linux CI may only initialize CodeWhale, never the private Windows runtime",
 );
-assert.match(workflow, /npm run test:bridge-smoke/);
+assert.match(workflow, /npm run test:browser-smoke/);
 assert.doesNotMatch(workflow, /frontend-test:[\s\S]{0,300}\n\s*if:\s*\$\{\{\s*false\s*\}\}/);
 for (const stalePath of [
   "pinvou3-app/src-tauri/src/app/bridge",
