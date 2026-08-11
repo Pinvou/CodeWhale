@@ -28,6 +28,11 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 3. 收集全部开放的 `backflow:processing`、`backflow:pending` 和 `backflow:blocked`
    Issue；优先处理所有 processing 项及其 PR，再按创建时间从早到晚处理不带 blocked
    的 pending 项。blocked 项只汇总，不重复领取。
+   先读取 Issue 中的 `community-backflow-plan`，用
+   `node scripts/community-backflow.mjs plan` 生成依赖波次：无依赖项可并行，修改相同路径
+   的项目按来源合并时间串行，Release 回流最后处理。依赖未完成属于 `blocked_dependency`
+   等待；保留 `backflow:processing` 并添加 `backflow:dependency-wait`，依赖满足后移除等待
+   标签。不得通过提前创建 PR、反复 rebase 来占用处理阶段。
 4. 处理每个 pending 项前添加 `backflow:processing`；按来源 marker 和固定分支
    `backflow/community-<source-number>` 查询已有 Official PR，已有 PR 就继续处理，
    不重复创建。
@@ -53,20 +58,39 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
    做语义合并。
 5. 按影响范围运行仓库要求的检查，至少包含 `git diff --check`、
    `python3 scripts/architecture-guard.py`、`./scripts/fork-guard.sh --fast` 和
-   `node scripts/sync-version.mjs --check`。
+   `node scripts/sync-version.mjs --check`。此外必须在实际创建/处理 PR 的操作系统运行
+   `node scripts/community-backflow.mjs preflight --base origin/main --source <source-number>`；
+   不得假设实际处理平台是 Ubuntu。
 6. 使用中文规范提交并带 `Signed-off-by`。PR 正文写明来源 PR、Official Issue、
    实际变更、验证，并包含
    `<!-- community-backflow:Pinvou/pinvou-agent#<source-number> -->`。
-7. 在 Issue 评论 Official PR 链接和当前 head SHA，保持
+7. 优先使用 `node scripts/community-backflow.mjs submit` 推送并创建或更新 PR。该命令
+   使用 UTF-8 字节调用 GitHub API、写后回读标题与正文，并把实际处理平台及当前 head
+   写入 provenance；没有环境 Token 时从 GCM 获取 `zhuowp` 凭据。
+8. 在 Issue 评论 Official PR 链接和当前 head SHA，保持
    `backflow:pending`、`backflow:processing` 等待 CI。
 
 ## 推进 PR
 
 1. 回读 PR 的 base/head SHA、head repo、分支、来源 marker、mergeable 和 checks。
 2. head SHA 变化时重新查看完整 diff 和新提交，不沿用旧 head 结论。
-3. Official `main` 前进时，将分支安全 rebase 到最新 `origin/main`，推送后等待
-   新 head 的检查。
+3. 主线日常前进不手工 rebase；Merge Queue 在最新 `main` 组合提交上验证。只有真实
+   冲突或队列集成失败时才安全 rebase，并在新 head 上重新执行实际处理平台 preflight。
 4. CI pending 时等待；CI failed 时查看失败日志并修复真实问题，不盲目 rerun。
+
+## 跨平台与分层验证
+
+- 回流 PR 可以在 Windows、macOS 或 Linux 上创建和接力处理；本地 L0/L1/L2 跟随
+  实际处理平台，不属于某个固定 CI runner。
+- 每个回流 PR 和 Merge Queue 组合提交都运行 `backflow-portability` 三平台轻门禁；
+  它只检查调度契约、Git diff、路径和 provenance，不安装 npm 依赖、不初始化 submodule、
+  不编译 Rust。
+- 已证明与操作系统无关的公共 lint、类型检查和纯逻辑测试只运行一次；路径、进程、Shell、
+  文件系统、安装和原生依赖测试按改动范围路由到 Windows、macOS、Linux 对应 runner。
+- 三平台轻门禁与重型产品检查并行，最终由 `required-gate` 汇总；不得让三平台轻门禁
+  串行阻塞重型检查。
+- 本地避免重复全仓 Rust 冷构建。先运行受影响 package 的快速验证；完整编译由带缓存的
+  CI 和合入后的最新 `main` 累计验证承担。
 
 ## Rust CI 策略
 
@@ -79,15 +103,16 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 - 不等待合入后的 main Rust 测试完成才关闭回流 Issue；结果由 GitHub Actions
   独立记录。
 
-## 自动合并
+## 入队与自动合并
 
-满足以下条件就执行 `gh pr merge --admin --squash --delete-branch`：
+满足以下条件就执行 `gh pr merge --auto --squash --delete-branch`，由 Merge Queue 在最新
+`main` 组合提交上完成 required checks 后合并：
 
-- 定时任务已明确授权自动 `--admin`。
+- 定时任务已明确授权自动加入 Merge Queue。
 - 来源 PR 仍为 merged。
 - Official PR 是同仓 `backflow/community-` 分支，来源 marker 与 Issue 一致。
 - 当前 head 已完成本轮差异检查，没有未审查的新提交。
-- 分支包含刚 fetch 的最新 `origin/main`，PR 可合并且没有冲突。
+- PR 可进入 Merge Queue 且没有真实冲突；不要求为主线日常前进反复手工 rebase。
 - 当前 head 的 `gh pr checks --required` 全部成功。
 - 没有发现实际 blocker。
 
@@ -99,7 +124,7 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 - 来源、分支、marker 或 head 无法可靠对应。
 
 文件多、改动行数大、跨模块或触及某类路径本身都不是 blocker。没有上述问题时，
-不要等待人工复审，直接管理员合并。
+不要等待人工复审，直接加入 Merge Queue。
 
 ## Release 固件构建
 

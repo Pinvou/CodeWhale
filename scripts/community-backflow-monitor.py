@@ -21,6 +21,7 @@ PENDING_LABEL = "backflow:pending"
 LABELS = {
     PENDING_LABEL: ("fbca04", "开源 PR 已合并，等待评估是否回流 Official"),
     "backflow:processing": ("1d76db", "Codex 正在处理该开源回流"),
+    "backflow:dependency-wait": ("5319e7", "已领取，等待前置回流完成"),
     "backflow:blocked": ("d1242f", "开源回流存在风险或阻塞，等待人工处理"),
     "backflow:synced": ("0e8a16", "开源 PR 已完成 Official 回流"),
     "backflow:skip": ("6e7781", "开源 PR 经评估无需回流 Official"),
@@ -134,6 +135,8 @@ def render_issue_body(
     source_repo: str,
     pull: dict[str, Any],
     files: list[dict[str, Any]],
+    *,
+    depends_on: list[int] | None = None,
 ) -> str:
     number = int(pull["number"])
     paths = [str(item["filename"]) for item in files]
@@ -153,8 +156,25 @@ def render_issue_body(
         path_lines += f"\n- 其余 {len(paths) - len(listed_paths)} 个文件请在来源 PR 查看"
     if not path_lines:
         path_lines = "- 未返回文件列表，请人工打开来源 PR 核对"
+    dependencies = sorted(set(depends_on or []))
+    dependency_text = (
+        "、".join(f"Community #{number}" for number in dependencies)
+        if dependencies
+        else "无，可与同批次其他无依赖项并行"
+    )
+    plan_marker = json.dumps(
+        {
+            "schema": 1,
+            "source": number,
+            "depends_on": dependencies,
+            "release": is_release_pull(paths),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
     return f"""<!-- {marker_for(source_repo, number)} -->
+<!-- community-backflow-plan:{plan_marker} -->
 ## 来源
 
 - Community PR：{pull["html_url"]}
@@ -168,6 +188,13 @@ def render_issue_body(
 - 原因：{reason}
 - Release 回流：**{release_note}**
 - 规模：{len(paths)} 个文件，`+{additions} / -{deletions}`
+
+## 调度
+
+- 前置回流：{dependency_text}
+- 规则：相同路径按来源合并时间串行；无重叠项并行；Release 回流最后处理。
+- 状态：等待前置项时保留 `backflow:processing` 并添加 `backflow:dependency-wait`，
+  前置项完成后移除等待标签。
 
 ## 实际变更路径
 
@@ -183,6 +210,35 @@ def render_issue_body(
 3. 需要回流时以最新 Official `main` 做语义合并，保留现有私有能力。
 4. 回流 PR 合并后标记 `backflow:synced`，补充 Official PR 链接并关闭本 Issue。
 """
+
+
+def build_queue_dependencies(
+    candidates: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+) -> dict[int, list[int]]:
+    """为同一次扫描建立保守 DAG，减少重叠回流的重复 rebase。"""
+    items = [
+        (
+            int(pull["number"]),
+            {str(item["filename"]) for item in files},
+            is_release_pull([str(item["filename"]) for item in files]),
+        )
+        for pull, files in candidates
+    ]
+    dependencies: dict[int, set[int]] = {number: set() for number, _, _ in items}
+    for right, (number, paths, release) in enumerate(items):
+        for prior_number, prior_paths, prior_release in items[:right]:
+            if not paths.intersection(prior_paths):
+                continue
+            if prior_release and not release:
+                dependencies[prior_number].add(number)
+            else:
+                dependencies[number].add(prior_number)
+
+    feature_sources = {number for number, _, release in items if not release}
+    for number, _, release in items:
+        if release:
+            dependencies[number].update(feature_sources)
+    return {number: sorted(required) for number, required in dependencies.items()}
 
 
 @dataclass
@@ -291,13 +347,25 @@ def create_backflow_issues(
     if not dry_run:
         ensure_labels(api, target_repo)
 
+    candidates: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
     for pull in pulls:
         number = int(pull["number"])
         marker = marker_for(source_repo, number)
         if marker in known:
             continue
         files = api.paginated(f"/repos/{source_repo}/pulls/{number}/files")
-        body = render_issue_body(source_repo, pull, files)
+        candidates.append((pull, files))
+
+    dependencies = build_queue_dependencies(candidates)
+    for pull, files in candidates:
+        number = int(pull["number"])
+        marker = marker_for(source_repo, number)
+        body = render_issue_body(
+            source_repo,
+            pull,
+            files,
+            depends_on=dependencies[number],
+        )
         title = compact_untrusted_text(
             f"[开源回流] {source_repo.split('/')[-1]}#{number} {pull['title']}"
         )

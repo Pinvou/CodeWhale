@@ -26,6 +26,14 @@ class MergeQueuePolicyTests(unittest.TestCase):
         self.assertIn("github.event_name == 'merge_group'", required_gate)
         self.assertIn("Merge Queue 基础检查失败", required_gate)
         self.assertNotIn("完整门禁已在 PR 入队前验证", required_gate)
+        self.assertIn("backflow-portability", required_gate)
+
+    def test_backflow_portability_rechecks_merge_group_on_three_platforms(self):
+        portability = self._job("backflow-portability", "fast-gate")
+        self.assertIn("os: [ubuntu-latest, windows-latest, macos-15]", portability)
+        self.assertIn("github.event.merge_group.base_sha", portability)
+        self.assertIn("github.event.merge_group.head_sha", portability)
+        self.assertIn("github.event_name == 'pull_request'", portability)
 
     def test_trusted_backflow_skips_only_full_rust_test(self):
         changes = self._job("changes", "fast-gate")

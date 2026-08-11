@@ -1,4 +1,4 @@
 interface:
   display_name: "开源回流处理"
   short_description: "处理全部 Community 回流 Issue、PR、自动合并、收尾与固件构建"
-  default_prompt: "使用 $community-backflow 扫描并处理完整回流队列；逐项推进到 synced、skip 或 blocked，当前 head required checks 通过且无实际 blocker 时直接 --admin 合并，release 回流完成后触发 Official 固件构建。"
+  default_prompt: "使用 $community-backflow 扫描并按依赖波次处理完整回流队列；在实际处理平台执行 preflight，逐项推进到 synced、skip 或 blocked，当前 head required checks 通过且无实际 blocker 时直接加入 Merge Queue，release 回流完成后触发 Official 固件构建。"
