@@ -2497,7 +2497,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         const updateReady = !!(bs && bs.updateReady);
         const updateProgress = (bs && bs.updateProgress) || 0;
         const isWindowsUpdate = upd && upd.platform === 'windows';
-        const updateError = (bs && bs.updateError) || (bs && bs.updateCheckError && bs.updateCheckError !== 'latest' ? bs.updateCheckError : '');
+        const updateError = (bs && bs.updateError) || (bs && bs.updateCheckError && bs.updateCheckError !== 'latest' ? t.updateCheckFailed : '');
         const updateStatusDesc = updateDownloading
           ? (updateProgress >= 100 ? t.uiSettings.installingUpdate : t.uiSettings.downloading(updateProgress))
           : updateReady
