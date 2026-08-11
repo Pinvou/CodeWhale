@@ -399,6 +399,12 @@ pub struct SubAgentAssignment {
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_schema: Option<Value>,
+    /// Host-bound, workspace-relative root for `submit_output` persistence.
+    ///
+    /// This is deliberately explicit: structured workers must never guess a
+    /// project from mutable workspace state (for example, newest mtime).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output_root: Option<PathBuf>,
     #[serde(default)]
     pub expects_file_output: bool,
 }
@@ -409,6 +415,7 @@ impl SubAgentAssignment {
             objective,
             role,
             output_schema: None,
+            structured_output_root: None,
             expects_file_output: false,
         }
     }
@@ -416,6 +423,12 @@ impl SubAgentAssignment {
     #[must_use]
     pub fn with_output_schema(mut self, output_schema: Option<Value>) -> Self {
         self.output_schema = output_schema;
+        self
+    }
+
+    #[must_use]
+    pub fn with_structured_output_root(mut self, root: Option<PathBuf>) -> Self {
+        self.structured_output_root = root;
         self
     }
 
@@ -9979,8 +9992,24 @@ async fn run_subagent(
     if let Some(schema) = output_schema.as_ref() {
         tools.push(build_submit_output_tool(schema));
     }
-    let project_dir = find_project_dir_in_workspace(&runtime.context.workspace)
-        .unwrap_or_else(|| runtime.context.workspace.clone());
+    let structured_output_root = match output_schema.as_ref() {
+        Some(_) => {
+            let relative = assignment.structured_output_root.as_ref().ok_or_else(|| {
+                anyhow!("structured output requires an explicit workspace-relative output root")
+            })?;
+            let raw = relative.to_str().ok_or_else(|| {
+                anyhow!(
+                    "structured output root is not valid UTF-8: {}",
+                    relative.display()
+                )
+            })?;
+            Some(
+                crate::tools::spec::resolve_strict_authority_path(&runtime.context, raw)
+                    .map_err(|error| anyhow!(error.to_string()))?,
+            )
+        }
+        None => None,
+    };
     if let Some(mb) = runtime.mailbox.as_ref() {
         let _ = mb.send(MailboxMessage::started(&agent_id, agent_type.clone()));
     }
@@ -10717,7 +10746,10 @@ async fn run_subagent(
                 match output_schema.as_ref() {
                     Some(schema) => match validate_against_schema(&tool_input, schema) {
                         Ok(()) => {
-                            match persist_structured_output(&project_dir, &tool_input, schema) {
+                            let project_dir = structured_output_root
+                                .as_deref()
+                                .expect("structured output root validated before the loop");
+                            match persist_structured_output(project_dir, &tool_input, schema) {
                                 Ok(written) if !written.is_empty() => {
                                     output_submitted = Some(tool_input.clone());
                                     final_result = Some(tool_input.to_string());
@@ -11098,32 +11130,62 @@ fn validate_schema_node(
     }
 }
 
-fn find_project_dir_in_workspace(workspace: &Path) -> Option<PathBuf> {
-    let mut best: Option<(SystemTime, PathBuf)> = None;
-    for entry in fs::read_dir(workspace).ok()?.flatten() {
-        let path = entry.path();
-        let progress = path.join("_state").join("workflow_progress.json");
-        let Ok(metadata) = progress.metadata() else {
-            continue;
-        };
-        let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-        if best.as_ref().is_none_or(|(current, _)| modified > *current) {
-            best = Some((modified, path));
-        }
-    }
-    best.map(|(_, path)| path)
-}
-
 fn safe_output_path(project_dir: &Path, relative: &str) -> Result<PathBuf, String> {
     let path = Path::new(relative);
-    if path.is_absolute()
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
         || path
             .components()
             .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
     {
         return Err(format!("x-output-file 不是安全相对路径: {relative}"));
     }
-    Ok(project_dir.join(path))
+    let root = project_dir
+        .canonicalize()
+        .map_err(|error| format!("结构化产出根目录不可用: {error}"))?;
+    if !root.is_dir() {
+        return Err(format!("结构化产出根目录不是目录: {}", root.display()));
+    }
+
+    let components = path.components().collect::<Vec<_>>();
+    let mut current = root.clone();
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(segment) = component else {
+            return Err(format!("x-output-file 不是安全相对路径: {relative}"));
+        };
+        current.push(segment);
+        let is_file = index + 1 == components.len();
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "x-output-file 不得经过符号链接: {}",
+                    current.display()
+                ));
+            }
+            Ok(metadata) if is_file && metadata.is_dir() => {
+                return Err(format!("x-output-file 指向目录: {}", current.display()));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !is_file => {
+                fs::create_dir(&current)
+                    .map_err(|error| format!("创建目录 {relative} 失败: {error}"))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!("检查输出路径 {relative} 失败: {error}"));
+            }
+        }
+        if !is_file {
+            let canonical = current
+                .canonicalize()
+                .map_err(|error| format!("检查输出目录 {relative} 失败: {error}"))?;
+            if !canonical.starts_with(&root) {
+                return Err(format!("x-output-file 逃逸结构化产出根目录: {relative}"));
+            }
+            current = canonical;
+        }
+    }
+    Ok(current)
 }
 
 fn persist_structured_output(
@@ -11134,10 +11196,6 @@ fn persist_structured_output(
     let mut outputs = Vec::new();
     let mut write_output = |relative: &str, content: &Value| -> Result<(), String> {
         let path = safe_output_path(project_dir, relative)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("创建目录 {relative} 失败: {error}"))?;
-        }
         let body = serde_json::to_string_pretty(content)
             .map_err(|error| format!("序列化 {relative} 失败: {error}"))?;
         fs::write(&path, body).map_err(|error| format!("写入 {relative} 失败: {error}"))?;

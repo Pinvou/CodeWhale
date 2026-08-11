@@ -16949,3 +16949,22 @@ fn forkguard_structured_output_persists_only_declared_safe_paths() {
     assert!(persist_structured_output(temp.path(), &json!({}), &unsafe_schema).is_err());
     assert!(!temp.path().join("../escape.json").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn forkguard_structured_output_rejects_symlink_components() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempdir().expect("project");
+    let outside = tempdir().expect("outside");
+    symlink(outside.path(), project.path().join("linked")).expect("create symlink");
+    let schema = json!({
+        "type": "object",
+        "x-output-file": "linked/escape.json"
+    });
+
+    let error = persist_structured_output(project.path(), &json!({"ok": true}), &schema)
+        .expect_err("structured output must not traverse a symlink");
+    assert!(error.contains("符号链接"), "{error}");
+    assert!(!outside.path().join("escape.json").exists());
+}
