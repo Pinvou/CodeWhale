@@ -1,0 +1,48 @@
+name: Pinvou fork CI
+
+on:
+  push:
+    branches: [pinvou3-clean]
+  pull_request:
+    branches: [pinvou3-clean]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pinvou-fork-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  secrets:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan repository and history
+        uses: docker://ghcr.io/gitleaks/gitleaks:v8.30.1
+        with:
+          args: detect --source=/github/workspace --redact --verbose
+
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install Linux build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check all workspace targets
+        run: cargo check --workspace --all-targets --locked
+      - name: Run Pinvou fork regression tests
+        run: cargo test -p codewhale-tui --lib forkguard_ --locked
