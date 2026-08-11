@@ -161,7 +161,7 @@ B1 + B2 都是上游友好的改动，可独立 PR：
 | B1 | models.rs:212 | ~5 行 | 让 `_Nk` hint 适用于任何 vendor，自托管 / 第三方部署友好 |
 | B2 | engine/context.rs:366 + 调用方 | ~25 行 | 修 < 500K 窗口模型 input budget 为负 → None 的静默禁用 bug，含双路径回归测试 |
 
-按 CLAUDE.md "修上游 bug ≤50 行 + 立即 PR" 节奏。fork 总 patch 量 ~30 行，已 commit 在 CodeWhale submodule（`pinvou3-patches` branch tip = `7e5288e3`），父仓库 gitlink 已 stage。
+按 `docs/fork-policy.md` 的上游回流约束处理。fork 总 patch 量 ~30 行，已 commit 在 CodeWhale submodule（`pinvou3-patches` branch tip = `7e5288e3`），父仓库 gitlink 已 stage。
 
 ## Codex adversarial review 反馈历程
 

@@ -15,7 +15,7 @@
 
 目标：**多 session 同时对话、各自跑完任务**。
 
-底座 `spawn_engine`（`CodeWhale/crates/tui/src/core/engine.rs`）是独立工厂，每调一次造一套完全独立的 Engine + channel + agent loop。所以「每 session 一个引擎」是**复用底座**、非自建调度（守 CLAUDE.md 约束 1）。
+底座 `spawn_engine`（`CodeWhale/crates/tui/src/core/engine.rs`）是独立工厂，每调一次造一套完全独立的 Engine + channel + agent loop。所以「每 session 一个引擎」是**复用底座**、非自建调度（遵循 `AGENTS.md` 的复用边界）。
 
 ---
 
@@ -76,7 +76,7 @@
 ## 4. 当前边界
 
 - **active-only 渲染**：后台 session 的流式输出不实时显示，切回才 `rerenderFromMessages`；会话列表用小圆点转圈表示「工作中」。后端已支持完整并发，**后台流式实时视图是后续可选项**（未做）。
-- vLLM 单端点靠 continuous batching 扛 N 并发，个位数 session 可接受；不自建调度（守 CLAUDE.md）。
+- vLLM 单端点靠 continuous batching 扛 N 并发，个位数 session 可接受；不自建调度（遵循 `AGENTS.md`）。
 - 专属气泡（plan_card / user_input / pinvou_actions）不进 messages，切换还原仍靠 `rerenderFromMessages`（见 commit 历史 / memory）。
 
 ## 5. 验证

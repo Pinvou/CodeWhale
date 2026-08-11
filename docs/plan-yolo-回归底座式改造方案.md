@@ -14,7 +14,7 @@
 
 pinvou3 是 GUI，用不了 TUI 的 ratatui 弹窗，所以**确认 UI 必须是卡片**——这部分 pinvou3 已经有（`chat:plan_ready` 事件 → PlanCard → `accept_plan`）。pinvou3 真正多包的是 `Planning/Ready/Executing` 四态 enum + M2 自驱 + M3 兜底。
 
-**改造 = 减法**：剥掉 phase 状态机，让卡片直接挂底座的 `update_plan` 交接信号，符合 CLAUDE.md 约束1（不重复造轮子）。
+**改造 = 减法**：剥掉 phase 状态机，让卡片直接挂底座的 `update_plan` 交接信号，符合 `AGENTS.md` 的复用边界（不重复造轮子）。
 
 ## 1. 目标形态
 
