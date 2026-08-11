@@ -118,6 +118,13 @@ fn route_declares_unknown_output_ceiling(provider: ApiProvider, model: &str) -> 
         // Operator-owned engines: the local server, not this process, owns the
         // output ceiling, and it is routinely far above any catalogue row.
         ApiProvider::Ollama | ApiProvider::Sglang | ApiProvider::Vllm => true,
+        // Pinvou fork: custom OpenAI-compatible endpoints (the `openai` wire
+        // route with a user-configured base_url) are operator-owned routes
+        // too — the user configures the endpoint and owns the ceiling. An
+        // unregistered alias there aligns with the window heuristic
+        // (requested_cap ≤ 65536) instead of the conservative 4096/8192
+        // uncatalogued clamp, so 128K-window endpoints keep 64K output room.
+        ApiProvider::Openai => true,
         // Kimi Code membership ids publish their limits in the membership
         // catalog rather than the static model catalogue.
         ApiProvider::Moonshot => crate::config::is_kimi_code_membership_model(model),
@@ -239,9 +246,11 @@ mod tests {
     /// Absence of a catalogue row is not evidence of a large ceiling. An
     /// unrecognized wire alias on a remote OpenAI-compatible route keeps the
     /// conservative compatibility ceiling, with an attributable source.
+    /// (Pinvou fork: `Openai` itself is now operator-owned-unknown; this test
+    /// pins the conservative clamp on a provider still outside the allowlist.)
     #[test]
     fn uncatalogued_remote_model_keeps_a_conservative_ceiling() {
-        let source = output_ceiling_source(ApiProvider::Openai, "totally-unknown-alias-v9");
+        let source = output_ceiling_source(ApiProvider::Novita, "totally-unknown-alias-v9");
         assert_eq!(
             source,
             OutputCeilingSource::Uncatalogued(UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS)
@@ -252,7 +261,7 @@ mod tests {
         );
         assert!(
             effective_max_output_tokens_for_route(
-                ApiProvider::Openai,
+                ApiProvider::Novita,
                 "totally-unknown-alias-v9",
                 None
             ) <= UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS
@@ -266,6 +275,8 @@ mod tests {
             (ApiProvider::Moonshot, "kimi-for-coding"),
             (ApiProvider::Moonshot, "kimi-for-coding-highspeed"),
             (ApiProvider::Ollama, "some-local-build"),
+            // Pinvou fork: custom OpenAI-compatible endpoints are operator-owned.
+            (ApiProvider::Openai, "totally-unregistered-cloud-model"),
         ] {
             assert_eq!(
                 output_ceiling_source(provider, model),
