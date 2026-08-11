@@ -91,7 +91,6 @@ function Ensure-SystemDirectory {
 function Repair-MachineTempVariable {
   param(
     [string]$Name,
-    [string]$FallbackValue,
     [string]$FallbackPath
   )
 
@@ -107,8 +106,8 @@ function Repair-MachineTempVariable {
     (Test-Path -LiteralPath $expanded -PathType Container)
 
   if (-not $valid) {
-    [Environment]::SetEnvironmentVariable($Name, $FallbackValue, "Machine")
-    Write-Output "Repaired machine $Name to $FallbackValue"
+    [Environment]::SetEnvironmentVariable($Name, $FallbackPath, "Machine")
+    Write-Output "Repaired machine $Name to $FallbackPath"
     return $FallbackPath
   }
   Write-Output "Machine $Name is ready: $expanded"
@@ -133,11 +132,9 @@ Ensure-SystemDirectory -Path $windowsInstallerPath -HiddenSystem
 if (-not $SkipMachineEnvironment) {
   $machineTemp = Repair-MachineTempVariable `
     -Name "TEMP" `
-    -FallbackValue "%SystemRoot%\Temp" `
     -FallbackPath $windowsTempPath
   $machineTmp = Repair-MachineTempVariable `
     -Name "TMP" `
-    -FallbackValue "%SystemRoot%\Temp" `
     -FallbackPath $windowsTempPath
   Add-RequiredAccess -Path $machineTemp
   if (-not [string]::Equals($machineTemp, $machineTmp, [System.StringComparison]::OrdinalIgnoreCase)) {

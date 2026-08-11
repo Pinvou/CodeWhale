@@ -205,10 +205,31 @@ assert.ok(
 );
 assert.match(installerHook, /SetEnvironmentVariableW\(w "TEMP", w "\$WINDIR\\Temp"\)/);
 assert.match(installerHook, /IntCmp \$5 1632 pinvou_vc_redist_temp_failed/);
+assert.match(installerHook, /IntCmp \$5 -2147023264 pinvou_vc_redist_temp_failed/);
 assert.match(installerHook, /Pinvou3-vcredist\.log/);
+for (const recoveryHint of [
+  "释放系统盘空间",
+  "检查系统临时目录权限",
+  "重启 Windows 后重试",
+  "日志：$WINDIR\\Temp\\Pinvou3-vcredist.log",
+]) {
+  assert.ok(
+    installerHook.includes(recoveryHint),
+    `VC++ temp failure prompt must include: ${recoveryHint}`,
+  );
+}
 assert.match(vcRedistTempPreflight, /S-1-5-18/);
 assert.match(vcRedistTempPreflight, /S-1-5-32-544/);
-assert.match(vcRedistTempPreflight, /SetEnvironmentVariable\(\$Name, \$FallbackValue, "Machine"\)/);
+assert.match(
+  vcRedistTempPreflight,
+  /SetEnvironmentVariable\(\$Name, \$FallbackPath, "Machine"\)/,
+  "machine TEMP/TMP repair must persist the resolved absolute fallback path",
+);
+assert.doesNotMatch(
+  vcRedistTempPreflight,
+  /FallbackValue|%SystemRoot%\\Temp/u,
+  "machine TEMP/TMP repair must not persist an unexpanded REG_SZ value",
+);
 assert.doesNotMatch(
   vcRedistTempPreflight,
   /Remove-Item|RemoveAccessRule|PurgeAccessRules/u,

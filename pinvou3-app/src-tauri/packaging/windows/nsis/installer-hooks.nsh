@@ -62,6 +62,7 @@ pinvou_vc_redist_install:
   IntCmp $5 0 pinvou_vc_redist_ready 0 0
   IntCmp $5 3010 pinvou_vc_redist_reboot 0 0
   IntCmp $5 1632 pinvou_vc_redist_temp_failed 0 0
+  IntCmp $5 -2147023264 pinvou_vc_redist_temp_failed 0 0
   IntCmp $5 1641 pinvou_vc_redist_reboot pinvou_vc_redist_exit_failed pinvou_vc_redist_exit_failed
 
 pinvou_vc_redist_exec_failed:
@@ -72,8 +73,8 @@ pinvou_vc_redist_exec_failed:
 
 pinvou_vc_redist_temp_failed:
   SetRegView lastused
-  DetailPrint "Microsoft Visual C++ Redistributable still cannot access Windows Installer temporary directories (exit code 1632)."
-  MessageBox MB_ICONSTOP|MB_OK "Windows Installer 仍无法访问系统临时目录（错误 1632）。请重启 Windows 后重试；日志：$WINDIR\Temp\Pinvou3-vcredist.log$\r$\nWindows Installer cannot access its temporary directories. Restart Windows and retry." /SD IDOK
+  DetailPrint "Microsoft Visual C++ Redistributable still cannot access Windows Installer temporary directories (exit code: $5; 1632 / 0x80070660)."
+  MessageBox MB_ICONSTOP|MB_OK "Windows Installer 仍无法访问系统临时目录（错误 1632 / 0x80070660）。请释放系统盘空间，检查系统临时目录权限，重启 Windows 后重试。日志：$WINDIR\Temp\Pinvou3-vcredist.log$\r$\nWindows Installer cannot access its temporary directories. Free space on the system drive, check temporary-directory permissions, restart Windows, and retry. Log: $WINDIR\Temp\Pinvou3-vcredist.log" /SD IDOK
   Abort
 
 pinvou_vc_redist_exit_failed:
