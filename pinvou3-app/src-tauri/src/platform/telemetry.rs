@@ -682,17 +682,17 @@ mod tests {
         transaction.commit().unwrap();
 
         prune_outbox(&mut connection, now + OUTBOX_MAX_EVENTS as u64).unwrap();
-        let count: usize = connection
+        let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
             .unwrap();
-        let expired: usize = connection
+        let expired: i64 = connection
             .query_row(
                 "SELECT COUNT(*) FROM usage_events WHERE event_id = 'evt_expired_0001'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, OUTBOX_MAX_EVENTS);
+        assert_eq!(count, OUTBOX_MAX_EVENTS as i64);
         assert_eq!(expired, 0);
     }
 
