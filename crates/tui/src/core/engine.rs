@@ -56,6 +56,7 @@ use crate::tools::spec::{
 };
 use crate::tools::spec::{
     RuntimeToolServices, SharedFileReadTracker, new_shared_file_read_tracker,
+    resolve_strict_authority_path,
 };
 use crate::tools::subagent::coord::WriteScopeClaim;
 use crate::tools::subagent::{
@@ -112,7 +113,7 @@ fn agent_list_event(manager: &SubAgentManager) -> Event {
 }
 
 const MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE: &str = "runtime:mcp-registry-first";
-const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync {}` before `exec_shell`, `fetch_url`, code execution, local programs, custom code, or a manual implementation. Compare the user's complete task yourself against every returned server name and description; wording need not be exact. If any server plausibly covers the core capability, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, when every Registry entry is clearly irrelevant, or after the matching server fails to start.";
+const MCP_REGISTRY_FIRST_INSTRUCTION: &str = "## MCP Registry-first policy\n\nFor any task centered on a specialized capability, including media or document conversion, data transformation, browser automation, database or service access, or a developer utility, you must call `registry_sync {}` before `Bash(action=\"run\")`, `Web(action=\"fetch\")`, code execution, local programs, custom code, or a manual implementation. Compare the user's complete task yourself against every returned server name and description; wording need not be exact. If any server plausibly covers the core capability, you must call `start_registry_mcp_server` with its exact name and inspect its tools before considering a local alternative. An installed or familiar shell command is not a reason to skip Registry discovery. Use local tools directly only for ordinary repo-native work and simple file operations, when every Registry entry is clearly irrelevant, or after the matching server fails to start.";
 
 /// Snapshot of parent state that can be passed to forked sub-agents without
 /// rewriting the parent transcript.
@@ -2202,6 +2203,7 @@ impl Engine {
                         write_files,
                         max_steps,
                         output_schema,
+                        structured_output_root,
                         expects_file_output,
                     } => {
                         if allowed_tools.is_empty() {
@@ -2312,6 +2314,37 @@ impl Engine {
                                 continue;
                             }
                         };
+                        let structured_output_root = match output_schema.as_ref() {
+                            Some(schema) => match structured_output_root.as_deref() {
+                                Some(root) => match host_structured_output_root(
+                                    &runtime.context,
+                                    root,
+                                    schema,
+                                    write_claim.as_ref(),
+                                ) {
+                                    Ok(root) => Some(root),
+                                    Err(err) => {
+                                        let _ = self
+                                            .tx_event
+                                            .send(Event::error(ErrorEnvelope::fatal(format!(
+                                                "Failed to spawn role '{role_id}': {err}"
+                                            ))))
+                                            .await;
+                                        continue;
+                                    }
+                                },
+                                None => {
+                                    let _ = self
+                                        .tx_event
+                                        .send(Event::error(ErrorEnvelope::fatal(format!(
+                                            "Failed to spawn role '{role_id}': structured output requires an explicit project root"
+                                        ))))
+                                        .await;
+                                    continue;
+                                }
+                            },
+                            None => None,
+                        };
 
                         let result = {
                             let mut manager = self.subagent_manager.write().await;
@@ -2322,6 +2355,7 @@ impl Engine {
                                 prompt.clone(),
                                 SubAgentAssignment::new(prompt.clone(), Some(role_id.clone()))
                                     .with_output_schema(output_schema)
+                                    .with_structured_output_root(structured_output_root)
                                     .with_expects_file_output(expects_file_output),
                                 Some(allowed_tools),
                                 SubAgentSpawnOptions {
@@ -5398,23 +5432,10 @@ fn host_write_claim(
         return Ok(None);
     }
 
-    let workspace = context
-        .workspace
-        .canonicalize()
-        .unwrap_or_else(|_| context.workspace.clone());
     let mut exact_files = Vec::with_capacity(write_files.len());
     for file in write_files {
-        let raw = file.to_string_lossy();
-        let resolved = context
-            .resolve_path(&raw)
-            .map_err(|error| error.to_string())?;
-        let relative = resolved.strip_prefix(&workspace).map_err(|_| {
-            format!(
-                "declared write file '{}' escapes workspace '{}'",
-                file.display(),
-                workspace.display()
-            )
-        })?;
+        let relative = strict_workspace_relative_path(context, file)
+            .map_err(|error| format!("declared write file '{}': {error}", file.display()))?;
         if relative.as_os_str().is_empty() {
             return Err("declared write file cannot be the workspace root".to_string());
         }
@@ -5430,6 +5451,97 @@ fn host_write_claim(
         exact_files,
         contracts: Vec::new(),
     }))
+}
+
+fn strict_workspace_relative_path(
+    context: &ToolContext,
+    requested: &Path,
+) -> std::result::Result<PathBuf, String> {
+    let workspace = context.workspace.canonicalize().map_err(|error| {
+        format!(
+            "cannot canonicalize workspace '{}': {error}",
+            context.workspace.display()
+        )
+    })?;
+    let relative = if requested.is_absolute() {
+        requested
+            .strip_prefix(&context.workspace)
+            .or_else(|_| requested.strip_prefix(&workspace))
+            .map_err(|_| format!("path escapes workspace '{}'", context.workspace.display()))?
+            .to_path_buf()
+    } else {
+        requested.to_path_buf()
+    };
+    let raw = relative
+        .to_str()
+        .ok_or_else(|| format!("path is not valid UTF-8: {}", requested.display()))?;
+    let resolved =
+        resolve_strict_authority_path(context, raw).map_err(|error| error.to_string())?;
+    resolved
+        .strip_prefix(&workspace)
+        .map(Path::to_path_buf)
+        .map_err(|_| format!("path escapes workspace '{}'", context.workspace.display()))
+}
+
+fn structured_output_files(schema: &Value) -> std::result::Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
+    if let Some(path) = schema.get("x-output-file").and_then(Value::as_str) {
+        files.push(PathBuf::from(path));
+    }
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for property in properties.values() {
+            if let Some(path) = property.get("x-output-file").and_then(Value::as_str) {
+                files.push(PathBuf::from(path));
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err("structured output schema does not declare x-output-file".to_string());
+    }
+    for file in &files {
+        if file.as_os_str().is_empty()
+            || file.is_absolute()
+            || file.components().any(|component| {
+                !matches!(
+                    component,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(format!(
+                "structured output path is not a safe relative path: {}",
+                file.display()
+            ));
+        }
+    }
+    Ok(files)
+}
+
+fn host_structured_output_root(
+    context: &ToolContext,
+    requested_root: &Path,
+    schema: &Value,
+    write_claim: Option<&WriteScopeClaim>,
+) -> std::result::Result<PathBuf, String> {
+    let root = strict_workspace_relative_path(context, requested_root).map_err(|error| {
+        format!(
+            "structured output root '{}': {error}",
+            requested_root.display()
+        )
+    })?;
+    let claim = write_claim
+        .ok_or_else(|| "structured output requires host-declared exact write files".to_string())?;
+    for relative in structured_output_files(schema)? {
+        let target = root.join(relative);
+        let target = strict_workspace_relative_path(context, &target)?;
+        let normalized = target.to_string_lossy().replace('\\', "/");
+        if !claim.exact_files.contains(&normalized) {
+            return Err(format!(
+                "structured output file '{normalized}' is outside the host-declared exact write claim"
+            ));
+        }
+    }
+    Ok(root)
 }
 
 fn strip_active_operation_reanchor(prompt: Option<&SystemPrompt>) -> Option<SystemPrompt> {

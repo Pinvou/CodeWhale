@@ -185,6 +185,9 @@ pub enum Op {
         write_files: Vec<PathBuf>,
         max_steps: Option<u32>,
         output_schema: Option<serde_json::Value>,
+        /// Explicit host-selected project root for structured output.
+        /// The engine validates and stores it workspace-relative.
+        structured_output_root: Option<PathBuf>,
         expects_file_output: bool,
     },
 

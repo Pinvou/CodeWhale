@@ -1912,6 +1912,7 @@ mod tests {
                 objective: "task".to_string(),
                 role: Some("worker".to_string()),
                 output_schema: None,
+                structured_output_root: None,
                 expects_file_output: false,
             },
             model: String::new(),
