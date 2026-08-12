@@ -33,7 +33,7 @@
     "build:nsis": "npm run check:wosign && npm run build:nsis:stage && npm run bundle:nsis",
     "build:nsis:stage": "npm run prebuild:nsis && node scripts/tauri/build.js build --verbose --ci --features dev-tools --no-bundle && powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/packaging/windows/nsis/scripts/stage-resources.ps1",
     "bundle:nsis": "npm run check:wosign && powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/packaging/windows/nsis/scripts/stage-resources.ps1 -ValidateOnly && node scripts/tauri/build.js bundle --verbose --features dev-tools --bundles nsis --config src-tauri/target/release/nsis-stage/tauri.nsis-stage.conf.json --config src-tauri/config/platforms/windows/signing.wosign.conf.json",
-    "build:nsis:local": "npm run build:nsis:stage:local && npm run bundle:nsis:local",
+    "build:nsis:local": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/tauri/build-local-nsis.ps1",
     "build:nsis:stage:local": "npm run prebuild:nsis && node scripts/tauri/build.js build --verbose --ci --no-bundle && powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/packaging/windows/nsis/scripts/stage-resources.ps1",
     "bundle:nsis:local": "powershell -NoProfile -ExecutionPolicy Bypass -File src-tauri/packaging/windows/nsis/scripts/stage-resources.ps1 -ValidateOnly && node scripts/tauri/build.js bundle --verbose --bundles nsis --config src-tauri/target/release/nsis-stage/tauri.nsis-stage.conf.json",
     "test:wosign": "node tests/wosign_signing_contract.test.js",
