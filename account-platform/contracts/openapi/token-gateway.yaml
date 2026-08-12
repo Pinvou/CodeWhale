@@ -91,6 +91,122 @@ paths:
           description: Credential validated and activated
         "422":
           $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/status:
+    patch:
+      operationId: setTokenAccountStatus
+      summary: Disable or reactivate an owned Token account with an audit reason
+      parameters:
+        - $ref: "#/components/parameters/TokenAccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status, reason]
+              properties:
+                status:
+                  type: string
+                  enum: [ACTIVE, DISABLED]
+                reason:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          description: Updated Token account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenAccount"
+        "403":
+          $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/sharing:
+    put:
+      operationId: replaceTokenSharingPolicy
+      summary: Atomically replace the sharing scope and explicit-member set
+      parameters:
+        - $ref: "#/components/parameters/TokenAccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [share_scope, explicit_user_ids]
+              properties:
+                share_scope:
+                  $ref: "#/components/schemas/ShareScope"
+                explicit_user_ids:
+                  type: array
+                  uniqueItems: true
+                  items:
+                    type: string
+                    format: uuid
+      responses:
+        "200":
+          description: Updated sharing policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenAccount"
+        "403":
+          $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/routes:
+    put:
+      operationId: upsertTokenRoute
+      summary: Configure deterministic routing for one allowed model
+      parameters:
+        - $ref: "#/components/parameters/TokenAccountId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoutePolicy"
+      responses:
+        "200":
+          description: Updated route policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutePolicy"
+        "404":
+          $ref: "#/components/responses/Error"
+  /token-accounts/{token_account_id}/credentials/{credential_id}/revoke:
+    post:
+      operationId: revokeProviderCredential
+      summary: Irreversibly revoke an active or retired provider credential
+      parameters:
+        - $ref: "#/components/parameters/TokenAccountId"
+        - name: credential_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+      responses:
+        "200":
+          description: Revoked credential metadata; secret material is never returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredential"
+        "404":
+          $ref: "#/components/responses/Error"
   /token-accounts/eligible:
     get:
       operationId: listEligibleTokenAccounts
@@ -281,7 +397,109 @@ components:
         application/json:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
+  parameters:
+    TokenAccountId:
+      name: token_account_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
   schemas:
+    ShareScope:
+      type: string
+      enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS]
+    TokenAccount:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, default_priority]
+      properties:
+        token_account_id:
+          type: string
+          format: uuid
+        owner_type:
+          type: string
+          enum: [USER, ORG, ORG_UNIT]
+        owner_id:
+          type: string
+          format: uuid
+        owner_organization_id:
+          type: string
+          format: uuid
+        owner_unit_id:
+          type: string
+          format: uuid
+        wallet_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED, FROZEN]
+        share_scope:
+          $ref: "#/components/schemas/ShareScope"
+        default_priority:
+          type: integer
+          minimum: 0
+          maximum: 10000
+    ProviderCredential:
+      type: object
+      additionalProperties: false
+      required: [credential_id, token_account_id, provider, base_url, fingerprint, version, status, allowed_models]
+      properties:
+        credential_id:
+          type: string
+          format: uuid
+        token_account_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+        base_url:
+          type: string
+          format: uri
+        fingerprint:
+          type: string
+        version:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [PENDING, ACTIVE, RETIRED, REVOKED]
+        allowed_models:
+          type: array
+          items:
+            type: string
+        validated_at:
+          type: string
+          format: date-time
+    RoutePolicy:
+      type: object
+      additionalProperties: false
+      required: [model, priority, default_scope, health_status]
+      properties:
+        token_account_id:
+          type: string
+          format: uuid
+          readOnly: true
+        model:
+          type: string
+          minLength: 1
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        default_scope:
+          type: string
+          enum: [NONE, UNIT, ORG]
+        health_status:
+          type: string
+          enum: [HEALTHY, DEGRADED, UNHEALTHY]
+        updated_at:
+          type: string
+          format: date-time
+          readOnly: true
     EligibleTokenAccount:
       type: object
       additionalProperties: false

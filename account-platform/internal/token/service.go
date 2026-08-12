@@ -54,7 +54,11 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/token-accounts", s.createTokenAccount)
+	mux.HandleFunc("PATCH /v1/token-accounts/{token_account_id}/status", s.setTokenAccountStatus)
+	mux.HandleFunc("PUT /v1/token-accounts/{token_account_id}/sharing", s.updateTokenSharing)
+	mux.HandleFunc("PUT /v1/token-accounts/{token_account_id}/routes", s.upsertTokenRoute)
 	mux.HandleFunc("POST /v1/token-accounts/{token_account_id}/credentials", s.rotateCredential)
+	mux.HandleFunc("POST /v1/token-accounts/{token_account_id}/credentials/{credential_id}/revoke", s.revokeCredential)
 	mux.HandleFunc("GET /v1/token-accounts/eligible", s.listEligible)
 	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
 	mux.HandleFunc("GET /v1/recharge/products", s.rechargeProducts)
@@ -63,6 +67,111 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux.HandleFunc("POST /v1/recharge/orders/{order_id}/close", s.closeRechargeOrder)
 	mux.HandleFunc("GET /v1/me/balance", s.getBalance)
 	return identity.Middleware(verify, mux)
+}
+
+func (s *Service) setTokenAccountStatus(w http.ResponseWriter, r *http.Request) {
+	resolved, account, ok := s.resolveOwnedAccount(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	if strings.TrimSpace(body.Reason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a status change reason is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	updated, err := s.repository.SetAccountStatus(r.Context(), account.ID, body.Status, resolved.UserID, body.Reason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, updated)
+}
+
+func (s *Service) updateTokenSharing(w http.ResponseWriter, r *http.Request) {
+	resolved, account, ok := s.resolveOwnedAccount(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		ShareScope    string      `json:"share_scope"`
+		ExplicitUsers []uuid.UUID `json:"explicit_user_ids"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	updated, err := s.repository.UpdateSharePolicy(r.Context(), account.ID, body.ShareScope, body.ExplicitUsers, resolved.UserID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, updated)
+}
+
+func (s *Service) upsertTokenRoute(w http.ResponseWriter, r *http.Request) {
+	resolved, account, ok := s.resolveOwnedAccount(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Model        string `json:"model"`
+		Priority     int    `json:"priority"`
+		DefaultScope string `json:"default_scope"`
+		HealthStatus string `json:"health_status"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	policy, err := s.repository.UpsertRoute(r.Context(), account.ID, body.Model, body.Priority, body.DefaultScope, body.HealthStatus, resolved.UserID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, policy)
+}
+
+func (s *Service) revokeCredential(w http.ResponseWriter, r *http.Request) {
+	resolved, account, ok := s.resolveOwnedAccount(w, r)
+	if !ok {
+		return
+	}
+	credentialID, err := uuid.Parse(r.PathValue("credential_id"))
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid credential revocation", httpserver.RequestID(r.Context()))
+		return
+	}
+	credential, err := s.repository.RevokeCredential(r.Context(), account.ID, credentialID, resolved.UserID, body.Reason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, credential)
+}
+
+func (s *Service) resolveOwnedAccount(w http.ResponseWriter, r *http.Request) (AuthorizationContext, TokenAccount, bool) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return AuthorizationContext{}, TokenAccount{}, false
+	}
+	accountID, err := uuid.Parse(r.PathValue("token_account_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid token account", httpserver.RequestID(r.Context()))
+		return AuthorizationContext{}, TokenAccount{}, false
+	}
+	account, err := s.repository.GetAccount(r.Context(), accountID)
+	if err != nil || !authorizeOwner(resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
+		s.writeError(w, r, ErrForbidden)
+		return AuthorizationContext{}, TokenAccount{}, false
+	}
+	return resolved, account, true
 }
 
 func (s *Service) rechargeProducts(w http.ResponseWriter, r *http.Request) {

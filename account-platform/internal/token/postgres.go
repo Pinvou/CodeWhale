@@ -39,6 +39,15 @@ type Credential struct {
 	ValidatedAt    *time.Time `json:"validated_at,omitempty"`
 }
 
+type RoutingPolicy struct {
+	TokenAccountID uuid.UUID `json:"token_account_id"`
+	Model          string    `json:"model"`
+	Priority       int       `json:"priority"`
+	DefaultScope   string    `json:"default_scope"`
+	HealthStatus   string    `json:"health_status"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 type CreateAccountRequest struct {
 	OwnerType         string
 	OwnerID           uuid.UUID
@@ -61,6 +70,10 @@ type Repository interface {
 	CreateAccount(context.Context, CreateAccountRequest) (TokenAccount, error)
 	GetAccount(context.Context, uuid.UUID) (TokenAccount, error)
 	RotateCredential(context.Context, uuid.UUID, uuid.UUID, string, string, []byte, []string) (Credential, error)
+	SetAccountStatus(context.Context, uuid.UUID, string, uuid.UUID, string) (TokenAccount, error)
+	RevokeCredential(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (Credential, error)
+	UpdateSharePolicy(context.Context, uuid.UUID, string, []uuid.UUID, uuid.UUID) (TokenAccount, error)
+	UpsertRoute(context.Context, uuid.UUID, string, int, string, string, uuid.UUID) (RoutingPolicy, error)
 	ListCandidates(context.Context, string) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
 	UsageStore
