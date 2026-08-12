@@ -31,7 +31,12 @@ func FromContext(ctx context.Context) (Principal, bool) {
 }
 
 func NewOIDCVerifyFunc(ctx context.Context, issuer, audience, environment string) (VerifyFunc, error) {
+	return NewOIDCVerifyFuncWithJWKS(ctx, issuer, "", audience, environment)
+}
+
+func NewOIDCVerifyFuncWithJWKS(ctx context.Context, issuer, jwksURL, audience, environment string) (VerifyFunc, error) {
 	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
+	jwksURL = strings.TrimSpace(jwksURL)
 	audience = strings.TrimSpace(audience)
 	parsed, err := url.Parse(issuer)
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
@@ -43,8 +48,18 @@ func NewOIDCVerifyFunc(ctx context.Context, issuer, audience, environment string
 	if audience == "" {
 		return nil, errors.New("OIDC_AUDIENCE is required")
 	}
+	if jwksURL == "" {
+		jwksURL = issuer + "/protocol/openid-connect/certs"
+	}
+	parsedJWKS, err := url.Parse(jwksURL)
+	if err != nil || parsedJWKS.Host == "" || (parsedJWKS.Scheme != "https" && parsedJWKS.Scheme != "http") {
+		return nil, errors.New("OIDC_JWKS_URL must be an absolute HTTP(S) URL")
+	}
+	if environment != "development" && environment != "test" && parsedJWKS.Scheme != "https" {
+		return nil, errors.New("OIDC_JWKS_URL must use HTTPS outside development and test")
+	}
 
-	keySet := oidc.NewRemoteKeySet(ctx, issuer+"/protocol/openid-connect/certs")
+	keySet := oidc.NewRemoteKeySet(ctx, jwksURL)
 	verifier := oidc.NewVerifier(issuer, keySet, &oidc.Config{ClientID: audience})
 	return func(ctx context.Context, raw string) (Principal, error) {
 		token, err := verifier.Verify(ctx, raw)
