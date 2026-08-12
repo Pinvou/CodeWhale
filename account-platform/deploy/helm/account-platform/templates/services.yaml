@@ -1,0 +1,19 @@
+{{- $root := . -}}
+{{- range $component := list "account-service" "billing-service" "token-gateway" "token-portal" "keycloak" "redis" "nats" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pinvou.fullname" $root }}-{{ $component }}
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+spec:
+  selector:
+    {{- include "pinvou.selector" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+  ports:
+    - name: http
+      port: {{ if eq $component "redis" }}6379{{ else if eq $component "nats" }}4222{{ else }}8080{{ end }}
+      targetPort: {{ if eq $component "redis" }}redis{{ else if eq $component "nats" }}client{{ else }}http{{ end }}
+{{- end }}

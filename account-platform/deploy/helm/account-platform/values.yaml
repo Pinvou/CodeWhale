@@ -1,0 +1,75 @@
+global:
+  environment: staging
+  runtimeSecret: pinvou-account-platform-runtime
+  imagePullSecrets: []
+  podLabels: {}
+
+images:
+  accountService: { repository: pinvou/account-service, tag: dev, pullPolicy: IfNotPresent }
+  billingService: { repository: pinvou/billing-service, tag: dev, pullPolicy: IfNotPresent }
+  tokenGateway: { repository: pinvou/token-gateway, tag: dev, pullPolicy: IfNotPresent }
+  tokenPortal: { repository: pinvou/token-portal, tag: dev, pullPolicy: IfNotPresent }
+  migrate: { repository: pinvou/account-platform-migrate, tag: dev, pullPolicy: IfNotPresent }
+  keycloak: { repository: quay.io/keycloak/keycloak, tag: "26.7.0", pullPolicy: IfNotPresent }
+  redis: { repository: redis, tag: "8.2-alpine", pullPolicy: IfNotPresent }
+  nats: { repository: nats, tag: "2.11-alpine", pullPolicy: IfNotPresent }
+
+replicas:
+  accountService: 2
+  billingService: 2
+  tokenGateway: 2
+  tokenPortal: 2
+
+oidc:
+  issuer: https://accounts.example.invalid/realms/pinvou
+  jwksUrl: ""
+  tokenUrl: ""
+  audience: pinvou-desktop
+  portalClientId: pinvou-token-portal
+
+public:
+  portalUrl: https://tokens.example.invalid
+  paymentCallbackUrl: https://billing.example.invalid/internal/payment/notifications
+
+tokenGateway:
+  secretProvider: remote
+  secretKeyId: ""
+  providerAllowedHosts: []
+  maxInputTokens: 128000
+
+external:
+  postgresCidrs: []
+  paymentProviderCidrs: []
+  secretProviderCidrs: []
+  modelProviderCidrs: []
+
+ingress:
+  enabled: false
+  className: ""
+  portalHost: tokens.example.invalid
+  keycloakHost: accounts.example.invalid
+  tlsSecretName: ""
+
+keycloak:
+  enabled: true
+  hostname: https://accounts.example.invalid
+  replicas: 2
+
+redis:
+  enabled: true
+  storage: 2Gi
+
+nats:
+  enabled: true
+  storage: 10Gi
+
+networkPolicy:
+  enabled: true
+  ingressNamespaceSelector:
+    matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+  ingressPodSelector:
+    matchLabels: { app.kubernetes.io/name: ingress-nginx }
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: "1", memory: 512Mi }
