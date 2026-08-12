@@ -537,6 +537,40 @@ const teamRelayJa = {
   toasts: { assigned: '仕事を送信し、相手の承認を待っています', transferAccepted: '承認しました。リレーはあなたの手元にあります', transferDeclined: '辞退し、送信者へ通知しました', transferWithdrawn: '撤回しました。別の受取人を選べます', transferRerouted: '新しい受取人へ送信しました', progressUpdated: '進捗を更新しました。リレーは引き続きあなたの担当です', handedOff: 'リレー招待を送信しました。承認まではあなたが担当します', delivered: '最終提出を送りました', supplementRequested: '責任者へ修正のため戻しました', returned: '協力者から返却され、あなたの番になりました', accepted: '提出を承認し、仕事を終了しました', cancelled: '仕事を取り消し、履歴を保持しました', pinned: '自分の一覧で固定しました', unpinned: '固定を解除しました', hidden: 'アーカイブしました。「アーカイブ」から戻せます', restored: '仕事一覧へ戻しました' },
 };
 
+Object.assign(teamRelayZh.errorMessages, {
+  avatar_too_large: '头像超过 5 MiB 限制。',
+  avatar_type_not_allowed: '头像仅支持 PNG、JPEG、WebP 和 GIF。',
+  avatar_unreadable: '无法读取所选头像文件，请重新选择。',
+  avatar_invalid_name: '头像文件名无效，请重命名后重试。',
+});
+Object.assign(teamRelayZh.profile, {
+  open: '账户与头像', title: '账户与头像', subtitle: '头像和名字会显示在你加入的所有团队中。', avatar: '接力头像',
+  avatarHint: '支持 PNG、JPEG、WebP 和 GIF 动图，最大 5 MiB。未上传时显示名字首字。', uploadAvatar: '上传头像', changeAvatar: '更换头像',
+  removeAvatar: '移除', removeAvatarConfirm: '移除自定义头像并恢复为名字首字吗？', avatarUpdated: '头像已更新', avatarRemoved: '已恢复名字首字头像',
+});
+Object.assign(teamRelayEn.errorMessages, {
+  avatar_too_large: 'The avatar exceeds the 5 MiB limit.',
+  avatar_type_not_allowed: 'Avatars support PNG, JPEG, WebP, and GIF only.',
+  avatar_unreadable: 'The selected avatar could not be read. Choose it again.',
+  avatar_invalid_name: 'The avatar filename is invalid. Rename it and try again.',
+});
+Object.assign(teamRelayEn.profile, {
+  open: 'Account and avatar', title: 'Account and avatar', subtitle: 'Your avatar and name are shown in every team you join.', avatar: 'Relay avatar',
+  avatarHint: 'PNG, JPEG, WebP, or animated GIF, up to 5 MiB. Without one, your first name character is shown.', uploadAvatar: 'Upload avatar', changeAvatar: 'Change avatar',
+  removeAvatar: 'Remove', removeAvatarConfirm: 'Remove the custom avatar and use your name character?', avatarUpdated: 'Avatar updated', avatarRemoved: 'Name avatar restored',
+});
+Object.assign(teamRelayJa.errorMessages, {
+  avatar_too_large: 'アバターが 5 MiB の上限を超えています。',
+  avatar_type_not_allowed: 'アバターは PNG、JPEG、WebP、GIF のみ対応しています。',
+  avatar_unreadable: '選択したアバターを読み取れません。選び直してください。',
+  avatar_invalid_name: 'アバターのファイル名が無効です。名前を変更して再試行してください。',
+});
+Object.assign(teamRelayJa.profile, {
+  open: 'アカウントとアバター', title: 'アカウントとアバター', subtitle: 'アバターと名前は参加中のすべてのチームに表示されます。', avatar: 'リレーアバター',
+  avatarHint: 'PNG、JPEG、WebP、アニメーション GIF（最大 5 MiB）。未設定時は名前の先頭文字を表示します。', uploadAvatar: 'アップロード', changeAvatar: '変更',
+  removeAvatar: '削除', removeAvatarConfirm: 'カスタムアバターを削除して名前の先頭文字に戻しますか？', avatarUpdated: 'アバターを更新しました', avatarRemoved: '名前のアバターに戻しました',
+});
+
 const dict = {
       zh: {
         langTag: 'zh',

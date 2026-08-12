@@ -289,6 +289,87 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /v1/me/avatar:
+    put:
+      tags: [Enrollment]
+      operationId: uploadCurrentPrincipalAvatar
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: PNG, JPEG, WebP, or GIF content, at most 5 MiB.
+      responses:
+        "200":
+          description: The Hub-wide Principal avatar was replaced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvatarMutationResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "413":
+          description: Avatar exceeds the configured 5 MiB maximum.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Avatar content or extension is not allowed, or they do not match.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [Enrollment]
+      operationId: deleteCurrentPrincipalAvatar
+      responses:
+        "204":
+          description: Custom avatar removed; clients fall back to the Principal name.
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+
+  /v1/principals/{principal_id}/avatar:
+    parameters:
+      - $ref: "#/components/parameters/PrincipalId"
+    get:
+      tags: [Enrollment]
+      operationId: downloadPrincipalAvatar
+      parameters:
+        - $ref: "#/components/parameters/TeamIdQuery"
+      responses:
+        "200":
+          description: Verified avatar bytes for a Principal sharing the requested active team.
+          headers:
+            Digest:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+
   /v1/teams/{team_id}/members:
     parameters:
       - $ref: "#/components/parameters/TeamId"
@@ -1187,6 +1268,32 @@ components:
         principal:
           $ref: "#/components/schemas/Principal"
 
+    AvatarMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [avatar]
+      properties:
+        avatar:
+          $ref: "#/components/schemas/Avatar"
+
+    Avatar:
+      type: object
+      additionalProperties: false
+      required: [content_type, byte_size, sha256, updated_at]
+      properties:
+        content_type:
+          type: string
+          enum: [image/png, image/jpeg, image/webp, image/gif]
+        byte_size:
+          type: integer
+          minimum: 1
+          maximum: 5242880
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
     Principal:
       type: object
       additionalProperties: false
@@ -1204,6 +1311,10 @@ components:
           type: string
         created_at:
           $ref: "#/components/schemas/Timestamp"
+        avatar:
+          oneOf:
+            - $ref: "#/components/schemas/Avatar"
+            - type: "null"
 
     Device:
       type: object
@@ -1279,6 +1390,10 @@ components:
         confirmed_transfers_supported:
           type: boolean
           description: True when at least one active device declared protocol 0.2 within the last 30 days.
+        avatar:
+          oneOf:
+            - $ref: "#/components/schemas/Avatar"
+            - type: "null"
 
     CreateInviteRequest:
       type: object

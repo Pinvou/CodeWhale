@@ -255,18 +255,21 @@
   border-radius: 50%;
   display: inline-flex;
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: 15px;
   height: 28px;
   justify-content: center;
   width: 28px;
 }
-.team-relay-avatar.tone-blue { background: #dcecff; color: #1462c4; }
-.team-relay-avatar.tone-green { background: #dff4eb; color: #21815f; }
-.team-relay-avatar.tone-orange { background: #fff0d5; color: #bd6d00; }
-.team-relay-avatar.tone-gray { background: var(--relay-panel-soft); color: var(--relay-muted); }
-.team-relay-expert-avatar { overflow: hidden; position: relative; }
-.team-relay-expert-avatar > span { align-items: center; display: flex; height: 100%; justify-content: center; width: 100%; }
-.team-relay-expert-avatar > img { display: block; height: 100%; inset: 0; object-fit: cover; position: absolute; width: 100%; }
+.team-relay-user-avatar {
+  background: var(--relay-avatar-bg);
+  color: var(--relay-avatar-fg);
+  font-weight: 800;
+  line-height: 1;
+  overflow: hidden;
+  position: relative;
+}
+.team-relay-user-avatar > span { align-items: center; display: flex; height: 100%; justify-content: center; width: 100%; }
+.team-relay-user-avatar > img { display: block; height: 100%; inset: 0; object-fit: cover; position: absolute; width: 100%; }
 
 .team-relay-detail { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
 .team-relay-detail-header { flex: 0 0 auto; min-height: 82px; padding: 0 24px; }
@@ -829,11 +832,7 @@
 .team-relay-card-meta { color: var(--relay-muted); font-size: 9px; }
 .team-relay-card-meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .team-relay-card-meta small { flex: 0 0 auto; font-size: 9px; }
-.team-relay-avatar { font-size: 8px; height: 24px; width: 24px; }
-.theme-dark .team-relay-avatar.tone-blue { background: #1d3857; color: #8cc0ff; }
-.theme-dark .team-relay-avatar.tone-green { background: #1b3b31; color: #77dab4; }
-.theme-dark .team-relay-avatar.tone-orange { background: #44331b; color: #e5ad59; }
-.theme-dark .team-relay-avatar.tone-gray { background: #303135; color: #c9c9cc; }
+.team-relay-avatar { font-size: 13px; height: 24px; width: 24px; }
 .team-relay-detail { background: color-mix(in srgb, var(--relay-panel) 86%, var(--relay-bg)); }
 .team-relay-detail-header { align-items: flex-start; min-height: 0; padding: 16px 20px 13px; }
 .team-relay-detail-heading h2 { font-size: 18px; font-weight: 600; }
@@ -976,7 +975,7 @@
 .team-relay-member-card { background: var(--relay-panel); border: 1px solid var(--relay-border); border-radius: 13px; min-width: 0; overflow: hidden; padding: 15px; }
 .team-relay-member-card.is-owner { border-color: color-mix(in srgb, var(--relay-blue) 28%, var(--relay-border)); }
 .team-relay-member-card > header { align-items: center; display: flex; gap: 10px; }
-.team-relay-member-avatar { align-items: center; background: var(--relay-panel-soft); border-radius: 50%; color: var(--relay-muted); display: flex; flex: 0 0 auto; font-size: 11px; height: 40px; justify-content: center; width: 40px; }
+.team-relay-member-avatar { align-items: center; background: var(--relay-panel-soft); border-radius: 50%; color: var(--relay-muted); display: flex; flex: 0 0 auto; font-size: 20px; height: 40px; justify-content: center; width: 40px; }
 .team-relay-member-avatar.is-me { background: var(--relay-blue-soft); color: var(--relay-blue); }
 .team-relay-member-card > header > span:nth-child(2) { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
 .team-relay-member-card > header strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -995,6 +994,13 @@
 .team-relay-member-card > footer button:disabled { cursor: default; opacity: .5; }
 .team-relay-team-dialog { max-width: 480px; }
 .team-relay-team-dialog .team-relay-setup-form { margin-top: 0; padding: 20px 22px 22px; }
+.team-relay-profile-avatar-editor { align-items: center; background: var(--relay-panel-soft); border: 1px solid var(--relay-border); border-radius: 12px; display: grid; gap: 14px; grid-template-columns: 76px minmax(0, 1fr); padding: 14px; }
+.team-relay-profile-avatar-preview { align-items: center; border: 2px solid color-mix(in srgb, var(--relay-panel) 78%, transparent); border-radius: 50%; box-shadow: 0 0 0 1px var(--relay-border); display: inline-flex; font-size: 34px; height: 76px; justify-content: center; width: 76px; }
+.team-relay-profile-avatar-editor > div { min-width: 0; }
+.team-relay-profile-avatar-editor strong { display: block; font-size: 13px; }
+.team-relay-profile-avatar-editor p { color: var(--relay-muted); font-size: 10px; line-height: 1.45; margin: 5px 0 10px; }
+.team-relay-profile-avatar-editor > div > span { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; }
+.team-relay-profile-avatar-editor button { align-items: center; display: inline-flex; gap: 5px; }
 .team-relay-team-dialog .team-relay-form-hint { color: var(--relay-muted); font-size: 10px; gap: 5px; line-height: 1.4; margin: -2px 0 0; opacity: .7; }
 .team-relay-team-dialog .team-relay-form-hint > svg { flex: 0 0 auto; height: 11px; width: 11px; }
 .team-relay-team-dialog form footer { display: flex; gap: 9px; justify-content: flex-end; }
@@ -1187,8 +1193,8 @@
   border-radius: 50%;
   color: var(--relay-blue);
   display: flex;
-  font-size: 11px;
-  font-weight: 750;
+  font-size: 16px;
+  font-weight: 800;
   height: 30px;
   justify-content: center;
   width: 30px;
@@ -1299,14 +1305,14 @@
 .team-relay-thread-summary { border-bottom: 1px solid var(--relay-border); display: grid; gap: 24px 48px; grid-template-columns: minmax(190px, .72fr) minmax(300px, 1.28fr); margin: 0 40px; padding: 30px 0 25px; }
 .team-relay-thread-summary > section > small { color: var(--relay-muted); display: block; font-size: 13px; margin-bottom: 14px; }
 .team-relay-thread-summary > section:first-child > div { align-items: center; display: flex; gap: 13px; }
-.team-relay-thread-summary > section:first-child .team-relay-avatar { height: 42px; width: 42px; }
+.team-relay-thread-summary > section:first-child .team-relay-avatar { font-size: 21px; height: 42px; width: 42px; }
 .team-relay-thread-summary > section:first-child span { display: flex; flex-direction: column; gap: 3px; }
 .team-relay-thread-summary > section:first-child strong { font-size: 15px; }
 .team-relay-thread-summary > section:first-child b { color: var(--relay-muted); font-size: 12px; font-weight: 500; }
 .team-relay-baton { background: transparent; border: 0; gap: 9px; margin: 0; padding: 0; }
 .team-relay-baton span { align-items: center; background: transparent; display: inline-flex; font-size: 13px; gap: 8px; padding: 0; }
 .team-relay-baton span.is-current { background: var(--relay-blue-soft); border-radius: 7px; padding: 5px 8px; }
-.team-relay-baton .team-relay-avatar { height: 28px; width: 28px; }
+.team-relay-baton .team-relay-avatar { font-size: 15px; height: 28px; width: 28px; }
 .team-relay-role-row { color: var(--relay-muted); display: flex; font-size: 10px; grid-column: 1 / -1; margin: -6px 0 0; }
 .team-relay-role-row span { padding-right: 18px; }
 .team-relay-role-row b { color: var(--relay-muted); font-weight: 550; }
@@ -1357,10 +1363,10 @@
 .team-relay-detail-heading h2 { font-size: 25px; margin-top: 7px; }
 .team-relay-thread-summary { background: var(--relay-panel-soft); border: 0; border-radius: 14px; gap: 17px; grid-template-columns: 1fr; margin: 0 32px; padding: 18px 20px; }
 .team-relay-thread-summary > section > small { font-size: 11px; margin-bottom: 9px; }
-.team-relay-thread-summary > section:first-child .team-relay-avatar { height: 36px; width: 36px; }
+.team-relay-thread-summary > section:first-child .team-relay-avatar { font-size: 19px; height: 36px; width: 36px; }
 .team-relay-thread-summary > section:first-child strong { font-size: 14px; }
 .team-relay-baton span { font-size: 12px; }
-.team-relay-baton .team-relay-avatar { height: 24px; width: 24px; }
+.team-relay-baton .team-relay-avatar { font-size: 13px; height: 24px; width: 24px; }
 .team-relay-banner { background: transparent; border-radius: 0; border-top: 1px solid var(--relay-border); grid-column: 1 / -1; margin: 0; padding: 13px 0 0; }
 .team-relay-banner strong { font-size: 13px; }
 .team-relay-banner p { font-size: 11px; margin-top: 3px; }

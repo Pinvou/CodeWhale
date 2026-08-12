@@ -8,12 +8,22 @@ pub struct TeamRelaySettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamRelayAvatar {
+    pub content_type: String,
+    pub byte_size: u64,
+    pub sha256: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Principal {
     pub id: String,
     #[serde(default)]
     pub email: Option<String>,
     pub display_name: String,
     pub created_at: String,
+    #[serde(default)]
+    pub avatar: Option<TeamRelayAvatar>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +86,8 @@ pub struct TeamMember {
     pub last_seen_at: Option<String>,
     #[serde(default)]
     pub confirmed_transfers_supported: bool,
+    #[serde(default)]
+    pub avatar: Option<TeamRelayAvatar>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -388,6 +400,11 @@ pub struct UpdateProfileInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateProfileResponse {
     pub principal: Principal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AvatarMutationResponse {
+    pub avatar: TeamRelayAvatar,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

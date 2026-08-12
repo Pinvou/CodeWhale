@@ -10,7 +10,12 @@ import {
 } from "./crypto.js";
 import { inTransaction } from "./db.js";
 import { AppError } from "./errors.js";
-import { emailHint, membershipFromRow, principalFromRow, teamFromRow } from "./serializers.js";
+import {
+  membershipFromRow,
+  principalFromRow,
+  teamFromRow,
+  teamMemberFromRow,
+} from "./serializers.js";
 import { email, exactKeys, integer, text, uuid } from "./validation.js";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -350,11 +355,20 @@ export async function updateProfile(pool, token, body) {
     }
     try {
       const updated = await client.query(
-        `UPDATE principals
-            SET display_name = $2,
-                email = coalesce(email, $3)
-          WHERE id = $1
-          RETURNING id, email, display_name, created_at`,
+        `WITH updated AS (
+           UPDATE principals
+              SET display_name = $2,
+                  email = coalesce(email, $3)
+            WHERE id = $1
+            RETURNING id, email, display_name, created_at
+         )
+         SELECT updated.*,
+                avatar.content_type AS avatar_content_type,
+                avatar.byte_size AS avatar_byte_size,
+                avatar.sha256 AS avatar_sha256,
+                avatar.updated_at AS avatar_updated_at
+           FROM updated
+           LEFT JOIN principal_avatars avatar ON avatar.principal_id = updated.id`,
         [auth.principalId, displayName, requestedEmail],
       );
       const memberships = await client.query(
@@ -487,16 +501,22 @@ export async function listTeamMembers(pool, token, rawTeamId) {
             coalesce(bool_or(
               d.relay_protocol_version = '0.2'
               AND d.relay_protocol_seen_at >= now() - ($2 * interval '1 day')
-            ), false) AS confirmed_transfers_supported
+            ), false) AS confirmed_transfers_supported,
+            avatar.content_type AS avatar_content_type,
+            avatar.byte_size AS avatar_byte_size,
+            avatar.sha256 AS avatar_sha256,
+            avatar.updated_at AS avatar_updated_at
        FROM memberships m
        JOIN principals p ON p.id = m.principal_id
        LEFT JOIN devices d ON d.principal_id = p.id AND d.revoked_at IS NULL
+       LEFT JOIN principal_avatars avatar ON avatar.principal_id = p.id
       WHERE m.team_id = $1 AND m.removed_at IS NULL AND p.disabled_at IS NULL
-      GROUP BY p.id, p.email, p.display_name, p.created_at, m.role
+      GROUP BY p.id, p.email, p.display_name, p.created_at, m.role,
+               avatar.content_type, avatar.byte_size, avatar.sha256, avatar.updated_at
       ORDER BY p.created_at, p.id`,
     [teamId, CONFIRMED_TRANSFER_CAPABILITY_DAYS],
   );
-  return { members: result.rows.map(row => ({ ...row, email: undefined, email_hint: emailHint(row.email) })) };
+  return { members: result.rows.map(teamMemberFromRow) };
 }
 
 export async function createTeamInvite(pool, token, rawTeamId, body) {

@@ -5,10 +5,11 @@ pub use types::*;
 use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use futures_util::{future::join_all, StreamExt};
 use reqwest::{
-    header::{HeaderMap, HeaderValue},
+    header::{HeaderMap, HeaderValue, CONTENT_TYPE},
     multipart, Client, Response, StatusCode, Url,
 };
 use serde::de::DeserializeOwned;
@@ -23,6 +24,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_AVATAR_BYTES: u64 = 5 * 1024 * 1024;
 const DEFAULT_TEAM_RELAY_HUB_URL: &str = "https://pinvou.com/pinvou3/team-relay";
 
 #[derive(Debug, serde::Deserialize)]
@@ -285,6 +287,142 @@ impl TeamRelayManager {
             .map_err(network_error)?;
         let _: UpdateProfileResponse = decode(response).await?;
         self.bootstrap_for(&settings, &token).await
+    }
+
+    pub async fn upload_avatar(&self, path: &Path) -> Result<TeamRelaySnapshot, String> {
+        let metadata =
+            std::fs::metadata(path).map_err(|error| format!("avatar_unreadable: {error}"))?;
+        if !metadata.is_file() {
+            return Err("avatar_unreadable: selected path is not a file".to_string());
+        }
+        if metadata.len() == 0 {
+            return Err("avatar_unreadable: selected file is empty".to_string());
+        }
+        if metadata.len() > MAX_AVATAR_BYTES {
+            return Err("avatar_too_large: avatar exceeds 5 MiB".to_string());
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "avatar_invalid_name: filename is not valid UTF-8".to_string())?;
+        if !avatar_extension_allowed(path) {
+            return Err(
+                "avatar_type_not_allowed: select a PNG, JPEG, WebP or GIF image".to_string(),
+            );
+        }
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| format!("avatar_unreadable: {error}"))?;
+        let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+        let (settings, token) = self.configured()?;
+        let form = multipart::Form::new().part(
+            "file",
+            multipart::Part::stream_with_length(body, metadata.len())
+                .file_name(file_name.to_string()),
+        );
+        let response = self
+            .client
+            .put(endpoint(&settings.hub_url, "v1/me/avatar"))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let _: AvatarMutationResponse = decode(response).await?;
+        self.bootstrap_for(&settings, &token).await
+    }
+
+    pub async fn remove_avatar(&self) -> Result<TeamRelaySnapshot, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .delete(endpoint(&settings.hub_url, "v1/me/avatar"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        self.bootstrap_for(&settings, &token).await
+    }
+
+    pub async fn avatar_data_url(
+        &self,
+        principal_id: &str,
+        expected_sha256: &str,
+    ) -> Result<Option<String>, String> {
+        validate_local_identifier("principal_id", principal_id)?;
+        let expected_sha256 = expected_sha256.trim().to_ascii_lowercase();
+        if expected_sha256.len() != 64
+            || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("avatar_digest_invalid: expected SHA-256 digest is invalid".to_string());
+        }
+        let (settings, token) = self.configured()?;
+        if settings.team_id.is_empty() {
+            return Err("team_relay_team_required: select a team first".to_string());
+        }
+        let response = self
+            .client
+            .get(endpoint(
+                &settings.hub_url,
+                &format!("v1/principals/{principal_id}/avatar"),
+            ))
+            .bearer_auth(&token)
+            .query(&[("team_id", settings.team_id.as_str())])
+            .send()
+            .await
+            .map_err(network_error)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .filter(|value| avatar_content_type_allowed(value))
+            .ok_or_else(|| {
+                "avatar_type_not_allowed: Hub returned an unsupported image".to_string()
+            })?;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_AVATAR_BYTES)
+        {
+            return Err("avatar_too_large: Hub returned more than 5 MiB".to_string());
+        }
+        let mut bytes = Vec::new();
+        let mut digest = Sha256::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(network_error)?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_AVATAR_BYTES as usize {
+                return Err("avatar_too_large: Hub returned more than 5 MiB".to_string());
+            }
+            digest.update(&chunk);
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Err("hub_response_invalid: Hub returned an empty avatar".to_string());
+        }
+        let actual_sha256 = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if actual_sha256 != expected_sha256 {
+            return Err(
+                "avatar_digest_mismatch: Hub avatar failed integrity validation".to_string(),
+            );
+        }
+        Ok(Some(format!(
+            "data:{content_type};base64,{}",
+            BASE64_STANDARD.encode(bytes)
+        )))
     }
 
     async fn bootstrap_for(
@@ -1375,6 +1513,24 @@ async fn sha256_file(path: &Path) -> Result<String, String> {
         .collect())
 }
 
+fn avatar_extension_allowed(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif"
+            )
+        })
+}
+
+fn avatar_content_type_allowed(value: &str) -> bool {
+    matches!(
+        value,
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    )
+}
+
 fn endpoint(hub_url: &str, path: &str) -> String {
     format!(
         "{}/{}",
@@ -1621,5 +1777,23 @@ mod tests {
         assert_eq!(link.agent_id, None);
         assert!(link.material_ids.is_empty());
         assert_eq!(link.last_synced_sequence, 0);
+    }
+
+    #[test]
+    fn avatar_allowlist_supports_static_images_and_gif_only() {
+        for name in [
+            "avatar.png",
+            "avatar.JPG",
+            "avatar.jpeg",
+            "avatar.webp",
+            "avatar.gif",
+        ] {
+            assert!(avatar_extension_allowed(Path::new(name)), "{name}");
+        }
+        for name in ["avatar.svg", "avatar.html", "avatar.gif.exe", "avatar"] {
+            assert!(!avatar_extension_allowed(Path::new(name)), "{name}");
+        }
+        assert!(avatar_content_type_allowed("image/gif"));
+        assert!(!avatar_content_type_allowed("image/svg+xml"));
     }
 }

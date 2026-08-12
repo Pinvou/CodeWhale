@@ -13,6 +13,7 @@ import {
   actionFromRow,
   emailHint,
   teamFromRow,
+  teamMemberFromRow,
   threadFromRow,
   threadPreferenceFromRow,
   threadReadStateFromRow,
@@ -612,12 +613,18 @@ export async function getBootstrap(pool, token, rawTeamId, protocolVersion = "0.
             coalesce(bool_or(
               d.relay_protocol_version = '0.2'
               AND d.relay_protocol_seen_at >= now() - ($2 * interval '1 day')
-            ), false) AS confirmed_transfers_supported
+            ), false) AS confirmed_transfers_supported,
+            avatar.content_type AS avatar_content_type,
+            avatar.byte_size AS avatar_byte_size,
+            avatar.sha256 AS avatar_sha256,
+            avatar.updated_at AS avatar_updated_at
        FROM memberships m
        JOIN principals p ON p.id = m.principal_id
        LEFT JOIN devices d ON d.principal_id = p.id AND d.revoked_at IS NULL
+       LEFT JOIN principal_avatars avatar ON avatar.principal_id = p.id
       WHERE m.team_id = $1 AND m.removed_at IS NULL AND p.disabled_at IS NULL
-      GROUP BY p.id, p.email, p.display_name, p.created_at, m.role
+      GROUP BY p.id, p.email, p.display_name, p.created_at, m.role,
+               avatar.content_type, avatar.byte_size, avatar.sha256, avatar.updated_at
       ORDER BY p.created_at, p.id`,
     [teamId, CONFIRMED_TRANSFER_CAPABILITY_DAYS],
   );
@@ -636,7 +643,7 @@ export async function getBootstrap(pool, token, rawTeamId, protocolVersion = "0.
     generated_at: new Date(),
     team: teamFromRow(teamResult.rows[0]),
     me: auth.principal,
-    members: members.rows.map(row => ({ ...row, email: undefined, email_hint: emailHint(row.email) })),
+    members: members.rows.map(teamMemberFromRow),
     threads: details,
   };
 }

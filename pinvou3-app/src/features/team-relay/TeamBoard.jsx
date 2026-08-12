@@ -7,12 +7,12 @@ function displayTime(value) {
   return Number.isNaN(date.getTime()) ? String(value || '') : date.toLocaleString();
 }
 
-function MemberRow({ copy, member, duplicateName, canManage, busy, onRemove }) {
+function MemberRow({ copy, member, duplicateName, canManage, busy, loadAvatarSource, onRemove }) {
   const workload = member.activeCount + member.waitingCount + member.acceptanceCount;
   const groupLabel = member.role === 'owner' ? copy.board.groups.owners : copy.board.groups.members;
   return <article className={`team-relay-member-card${member.role === 'owner' ? ' is-owner' : ''}`} aria-label={`${groupLabel} · ${member.display_name}`}>
     <div className="team-relay-member-identity">
-      <RelayAvatar name={member.display_name} seed={member.id} className={`team-relay-member-avatar${member.isMe ? ' is-me' : ''}`} />
+      <RelayAvatar name={member.display_name} seed={member.id} avatar={member.avatar} loadSource={loadAvatarSource} className={`team-relay-member-avatar${member.isMe ? ' is-me' : ''}`} />
       <span><strong>{member.display_name}{member.isMe ? ` · ${copy.board.me}` : ''}</strong><small>{duplicateName && member.email_hint ? `${member.email_hint} · ` : ''}{copy.board.roles[member.role] || member.role}</small></span>
       {member.role === 'owner' && <b>{copy.board.roles.owner}</b>}
     </div>
@@ -59,7 +59,7 @@ function AcceptanceReminder({ copy, tasks, onOpenTask }) {
   </section>;
 }
 
-export function TeamBoard({ copy, teamName, board, tasks, canManage, busy, joinCodeOpen, joinCodeBanner, onBack, onInvite, onAssign, onOpenTask, onRemove }) {
+export function TeamBoard({ copy, teamName, board, tasks, canManage, busy, joinCodeOpen, joinCodeBanner, loadAvatarSource, onBack, onInvite, onAssign, onOpenTask, onRemove }) {
   const nameCounts = new Map();
   board.members.forEach(member => nameCounts.set(member.display_name, (nameCounts.get(member.display_name) || 0) + 1));
   const duplicateNames = new Set([...nameCounts].filter(([, count]) => count > 1).map(([name]) => name));
@@ -84,7 +84,7 @@ export function TeamBoard({ copy, teamName, board, tasks, canManage, busy, joinC
       <div className="team-relay-board-grid">
         <section className="team-relay-member-group">
           <header><div><h3>{copy.board.loadTitle}</h3><p>{copy.board.loadSubtitle}</p></div></header>
-          <div>{board.members.map(member => <MemberRow copy={copy} member={member} duplicateName={duplicateNames.has(member.display_name)} canManage={canManage} busy={busy} onRemove={onRemove} key={member.id} />)}</div>
+          <div>{board.members.map(member => <MemberRow copy={copy} member={member} duplicateName={duplicateNames.has(member.display_name)} canManage={canManage} busy={busy} loadAvatarSource={loadAvatarSource} onRemove={onRemove} key={member.id} />)}</div>
         </section>
         <aside className="team-relay-board-side">
           <RelayQueue copy={copy} tasks={tasks} onOpenTask={onOpenTask} />

@@ -27,7 +27,11 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
   notify() {},
   async refreshHistoryList() {},
   listen(name, handler) { eventHandlers.set(name, handler); return Promise.resolve(() => {}); },
-  dialogOpen: async options => options.directory ? '/projects/pinvou' : ['/private/manual/brief.pdf'],
+  dialogOpen: async options => options.directory
+    ? '/projects/pinvou'
+    : options.filters?.[0]?.extensions?.includes('gif')
+      ? ['/private/avatar/liu.gif']
+      : ['/private/manual/brief.pdf'],
   dialogSave: async () => null,
   async invoke(command, args) {
     calls.push({ command, args });
@@ -41,6 +45,9 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
     }
     if (command === 'team_relay_create_first_team') return teamSnapshot('first-team');
     if (command === 'team_relay_update_profile') return teamSnapshot('team', args.input.display_name);
+    if (command === 'team_relay_avatar_data_url') return 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yw=';
+    if (command === 'team_relay_upload_avatar') return teamSnapshot('team');
+    if (command === 'team_relay_remove_avatar') return teamSnapshot('team');
     if (command === 'team_relay_create_team') return teamSnapshot('created-team');
     if (command === 'team_relay_join_team') return teamSnapshot('joined-team');
     if (command === 'team_relay_switch_team') {
@@ -95,7 +102,7 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
   },
 });
 
-assert.deepEqual(Object.keys(feature).sort(), ['claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'listDraftSourceSessions', 'load', 'markThreadRead', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'updateProfile', 'verifyAccess']);
+assert.deepEqual(Object.keys(feature).sort(), ['avatarSource', 'claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'listDraftSourceSessions', 'load', 'markThreadRead', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeAvatar', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'updateProfile', 'uploadAvatar', 'verifyAccess']);
 assert.equal(await feature.verifyAccess('test-only-access-code'), true);
 assert.equal(await feature.verifyAccess('incorrect'), false);
 await feature.load();
@@ -128,6 +135,18 @@ assert.equal(state.teamRelay.error, null, 'an unsupported old Hub read endpoint 
 await feature.switchTeam('team-two');
 await feature.updateProfile({ display_name: 'New name' });
 assert.equal(state.teamRelay.snapshot.bootstrap.me.display_name, 'New name');
+const avatarMetadata = { sha256: 'a'.repeat(64), content_type: 'image/gif', byte_size: 32 };
+const [avatarSource, cachedAvatarSource] = await Promise.all([
+  feature.avatarSource('member-one', avatarMetadata),
+  feature.avatarSource('member-one', avatarMetadata),
+]);
+assert.equal(avatarSource, 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yw=');
+assert.equal(cachedAvatarSource, avatarSource);
+assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url').length, 1, 'concurrent avatar reads must share one authenticated request');
+await feature.uploadAvatar();
+assert.ok(calls.some(call => call.command === 'team_relay_upload_avatar' && call.args.path === '/private/avatar/liu.gif'));
+await feature.removeAvatar();
+assert.ok(calls.some(call => call.command === 'team_relay_remove_avatar'));
 await feature.removeMember('member-two');
 assert.ok(calls.some(call => call.command === 'team_relay_remove_member' && call.args.principalId === 'member-two'));
 assert.ok(calls.some(call => call.command === 'team_relay_get_join_password'));

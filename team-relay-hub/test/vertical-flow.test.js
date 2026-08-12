@@ -19,7 +19,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const database = await pool.query("SELECT current_database() AS name");
   assert.match(database.rows[0].name, /_test$/, "integration test requires an isolated *_test database");
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", "0009_confirmed_transfers.sql"];
+  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", "0008_principal_avatars.sql", "0009_confirmed_transfers.sql"];
   async function applyMigration(migrationName) {
     const migration = await readFile(
       new URL(`../../docs/team-relay/migrations/${migrationName}`, import.meta.url),
@@ -92,6 +92,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     maxJsonBytes: 1024 * 1024,
     attachmentDir,
     maxAttachmentBytes: 2048,
+    maxAvatarBytes: 2048,
     maxTeamAttachmentBytes: 1600,
     orphanAttachmentHours: 1,
     closedAttachmentDays: 30,
@@ -193,6 +194,29 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
       body: form,
     });
     return { status: response.status, value: await response.json(), uploadId };
+  }
+
+  async function uploadAvatar(member, content, filename) {
+    const form = new FormData();
+    form.append("file", new Blob([content]), filename);
+    const response = await fetch(`${origin}/v1/me/avatar`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${member.device_token}` },
+      body: form,
+    });
+    return { status: response.status, value: await response.json() };
+  }
+
+  async function readAvatar(member, principalId, teamId) {
+    const response = await fetch(
+      `${origin}/v1/principals/${principalId}/avatar?team_id=${teamId}`,
+      { headers: { Authorization: `Bearer ${member.device_token}` } },
+    );
+    return {
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      bytes: Buffer.from(await response.arrayBuffer()),
+    };
   }
 
   async function readSseUntil(reader, pattern) {
@@ -445,6 +469,31 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     body: { display_name: "B" },
   });
   assert.equal(restoredB.status, 200);
+
+  const animatedGif = Buffer.from(
+    "R0lGODlhAQABAIEAAAAAAP///wAAACH5BAEAAAEALAAAAAABAAEAAAICRAEAIfkEAQAAAQAsAAAAAAEAAQAAAgJEADs=",
+    "base64",
+  );
+  const uploadedAvatar = await uploadAvatar(a, animatedGif, "avatar.gif");
+  assert.equal(uploadedAvatar.status, 200);
+  assert.equal(uploadedAvatar.value.avatar.content_type, "image/gif");
+  assert.equal(uploadedAvatar.value.avatar.byte_size, animatedGif.length);
+  const avatarBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
+  const avatarMember = avatarBootstrap.value.members.find(member => member.id === a.principal.id);
+  assert.equal(avatarMember.avatar.sha256, uploadedAvatar.value.avatar.sha256);
+  const downloadedAvatar = await readAvatar(b, a.principal.id, initial.team_id);
+  assert.equal(downloadedAvatar.status, 200);
+  assert.equal(downloadedAvatar.contentType, "image/gif");
+  assert.deepEqual(downloadedAvatar.bytes, animatedGif, "animated GIF bytes must remain unchanged");
+  const outsideTeamAvatar = await readAvatar(accountEnrollment.value, a.principal.id, initial.team_id);
+  assert.equal(outsideTeamAvatar.status, 403, "avatars are visible only inside a shared active team");
+  const rejectedAvatar = await uploadAvatar(a, Buffer.from("<svg></svg>"), "avatar.svg");
+  assert.equal(rejectedAvatar.status, 415);
+  assert.equal(rejectedAvatar.value.error.code, "avatar_type_not_allowed");
+  const removedAvatar = await api("/v1/me/avatar", { method: "DELETE", token: a.device_token });
+  assert.equal(removedAvatar.status, 204);
+  const missingAvatar = await readAvatar(b, a.principal.id, initial.team_id);
+  assert.equal(missingAvatar.status, 404);
 
   const createdTeam = await api("/v1/teams", { method: "POST", token: a.device_token, body: { name: "Release group" } });
   assert.equal(createdTeam.status, 201);

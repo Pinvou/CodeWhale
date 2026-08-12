@@ -13,6 +13,7 @@ Team Relay Hub 是“人派活给人、Handoff、回传和最终交付”的独�
 - team owner 移除成员的安全限制。
 - 显式文件上传、类型识别、SHA-256、团队容量和动作原子绑定；
 - 线程参与者鉴权下载，以及孤儿和已结束线程文件清理。
+- 独立的 Principal 头像上传、GIF 动图保留、内容类型校验和同团队鉴权读取。
 
 服务尚未部署，也不应替代已有 collaboration 或 Remote Relay。
 
@@ -48,7 +49,7 @@ Hub 默认对未登记用户按客户端地址、已登记用户按设备凭据�
 
 服务默认只监听 `127.0.0.1:8791`，默认基础路径为 `/pinvou3/team-relay`。正式演示部署必须由 HTTPS 入口代理，且不能把数据库端口暴露到公网。
 
-附件默认保存在仅服务账号可读的 `data/attachments`；服务器部署必须通过 `TEAM_RELAY_ATTACHMENT_DIR` 指向独立持久化目录。默认单文件 20 MiB、单团队 2 GiB、未绑定文件 24 小时清理、已结束线程文件 30 天后删除内容并保留元数据。部署时应定时执行 `attachments:cleanup`。
+附件和头像默认保存在仅服务账号可读的 `data/attachments`；服务器部署必须通过 `TEAM_RELAY_ATTACHMENT_DIR` 指向独立持久化目录。普通附件默认单文件 20 MiB、单团队 2 GiB、未绑定文件 24 小时清理、已结束线程文件 30 天后删除内容并保留元数据。头像独立存入 `avatars/` 子目录，只接受 PNG、JPEG、WebP 和 GIF，默认最大 5 MiB（`TEAM_RELAY_MAX_AVATAR_BYTES`），更换或移除时删除旧文件。部署时应定时执行 `attachments:cleanup`。
 
 ## 测试
 

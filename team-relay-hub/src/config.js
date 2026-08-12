@@ -75,6 +75,12 @@ export function loadConfig(env = process.env) {
       1024,
       20 * 1024 * 1024,
     ),
+    maxAvatarBytes: integer(
+      env.TEAM_RELAY_MAX_AVATAR_BYTES,
+      5 * 1024 * 1024,
+      1024,
+      5 * 1024 * 1024,
+    ),
     maxTeamAttachmentBytes: integer(
       env.TEAM_RELAY_MAX_TEAM_ATTACHMENT_BYTES,
       2 * 1024 * 1024 * 1024,

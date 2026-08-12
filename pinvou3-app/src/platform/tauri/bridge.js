@@ -2285,6 +2285,9 @@
   var claimTeamRelay = teamRelayFeature.claim;
   var createFirstTeamRelayTeam = teamRelayFeature.createFirstTeam;
   var updateTeamRelayProfile = teamRelayFeature.updateProfile;
+  var getTeamRelayAvatarSource = teamRelayFeature.avatarSource;
+  var uploadTeamRelayAvatar = teamRelayFeature.uploadAvatar;
+  var removeTeamRelayAvatar = teamRelayFeature.removeAvatar;
   var createTeamRelayTeam = teamRelayFeature.createTeam;
   var joinTeamRelayTeam = teamRelayFeature.joinTeam;
   var switchTeamRelayTeam = teamRelayFeature.switchTeam;
@@ -2612,6 +2615,9 @@
       claim: claimTeamRelay,
       createFirstTeam: createFirstTeamRelayTeam,
       updateProfile: updateTeamRelayProfile,
+      avatarSource: getTeamRelayAvatarSource,
+      uploadAvatar: uploadTeamRelayAvatar,
+      removeAvatar: removeTeamRelayAvatar,
       createTeam: createTeamRelayTeam,
       joinTeam: joinTeamRelayTeam,
       switchTeam: switchTeamRelayTeam,

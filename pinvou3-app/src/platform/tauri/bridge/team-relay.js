@@ -18,6 +18,8 @@
     var legacyReadCursorKey = "pinvou.team-relay.read-cursors.v1";
     var legacyReadCursors = loadLegacyReadCursors();
     var connectionGeneration = 0;
+    var avatarSources = new Map();
+    var avatarRequests = new Map();
 
     function uuid() {
       if (root.crypto && typeof root.crypto.randomUUID === "function") return root.crypto.randomUUID();
@@ -188,6 +190,65 @@
 
     async function updateProfile(input) {
       return mutate("team_relay_update_profile", { input: input });
+    }
+
+    function avatarCacheKey(principalId, avatar) {
+      var digest = String(avatar && avatar.sha256 || "").trim().toLowerCase();
+      var id = String(principalId || "").trim();
+      return id && /^[0-9a-f]{64}$/.test(digest) ? id + ":" + digest : "";
+    }
+
+    async function avatarSource(principalId, avatar) {
+      var key = avatarCacheKey(principalId, avatar);
+      if (!key) return null;
+      if (avatarSources.has(key)) return avatarSources.get(key);
+      if (avatarRequests.has(key)) return avatarRequests.get(key);
+      var request = invoke("team_relay_avatar_data_url", {
+        principalId: String(principalId),
+        expectedSha256: String(avatar.sha256),
+      }).then(function (source) {
+        if (source && avatarRequests.get(key) === request) avatarSources.set(key, source);
+        return source || null;
+      }).finally(function () {
+        if (avatarRequests.get(key) === request) avatarRequests.delete(key);
+      });
+      avatarRequests.set(key, request);
+      return request;
+    }
+
+    function forgetAvatarSources(principalId) {
+      var prefix = String(principalId || "") + ":";
+      for (var key of avatarSources.keys()) {
+        if (key.startsWith(prefix)) avatarSources.delete(key);
+      }
+      for (var pendingKey of avatarRequests.keys()) {
+        if (pendingKey.startsWith(prefix)) avatarRequests.delete(pendingKey);
+      }
+    }
+
+    async function uploadAvatar() {
+      if (!dialogOpen) throw new Error("File picker is unavailable");
+      var selected = await dialogOpen({
+        multiple: false,
+        filters: [{ name: "PNG, JPEG, WebP, GIF", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+      });
+      var path = Array.isArray(selected) ? selected[0] : selected;
+      if (!path) return null;
+      var principalId = state.teamRelay.snapshot && state.teamRelay.snapshot.bootstrap
+        ? state.teamRelay.snapshot.bootstrap.me.id
+        : null;
+      var result = await mutate("team_relay_upload_avatar", { path: String(path) });
+      forgetAvatarSources(principalId);
+      return result;
+    }
+
+    async function removeAvatar() {
+      var principalId = state.teamRelay.snapshot && state.teamRelay.snapshot.bootstrap
+        ? state.teamRelay.snapshot.bootstrap.me.id
+        : null;
+      var result = await mutate("team_relay_remove_avatar");
+      forgetAvatarSources(principalId);
+      return result;
     }
 
     async function mutate(command, args) {
@@ -684,6 +745,9 @@
       claim: claim,
       createFirstTeam: createFirstTeam,
       updateProfile: updateProfile,
+      avatarSource: avatarSource,
+      uploadAvatar: uploadAvatar,
+      removeAvatar: removeAvatar,
       createTeam: createTeam,
       joinTeam: joinTeam,
       switchTeam: switchTeam,

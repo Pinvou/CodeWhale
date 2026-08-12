@@ -6,6 +6,7 @@ import {
   openAttachmentContent,
   uploadAttachment,
 } from "./attachment-service.js";
+import { deleteAvatar, openAvatarContent, uploadAvatar } from "./avatar-service.js";
 import { asAppError, AppError } from "./errors.js";
 import { sha256 } from "./crypto.js";
 import { JoinRateLimiter } from "./join-rate-limiter.js";
@@ -273,6 +274,22 @@ export function createHubServer({ pool, config }) {
         sendJson(response, 200, { principal: result.principal }, requestId);
         return;
       }
+      if (method === "PUT" && pathname === "/v1/me/avatar") {
+        const result = await uploadAvatar(pool, token, request, config);
+        for (const teamId of result.teamIds) notify(teamId, "profile.changed");
+        sendJson(response, 200, { avatar: result.avatar }, requestId);
+        return;
+      }
+      if (method === "DELETE" && pathname === "/v1/me/avatar") {
+        const result = await deleteAvatar(pool, token, config);
+        for (const teamId of result.teamIds) notify(teamId, "profile.changed");
+        response.writeHead(204, {
+          "Cache-Control": "no-store",
+          "X-Request-Id": requestId,
+        });
+        response.end();
+        return;
+      }
       if (method === "GET" && pathname === "/v1/teams") {
         sendJson(response, 200, await listTeams(pool, token), requestId);
         return;
@@ -365,6 +382,32 @@ export function createHubServer({ pool, config }) {
         notify(teamId, "membership.changed");
         response.writeHead(204, { "X-Request-Id": requestId, "Cache-Control": "no-store" });
         response.end();
+        return;
+      }
+
+      params = pathMatch(pathname, /^\/v1\/principals\/([^/]+)\/avatar$/);
+      if (params && method === "GET") {
+        const { row, handle } = await openAvatarContent(
+          pool,
+          token,
+          params[0],
+          url.searchParams.get("team_id"),
+          config,
+        );
+        response.writeHead(200, {
+          "Content-Type": row.content_type,
+          "Content-Length": String(row.byte_size),
+          "Content-Disposition": "inline",
+          Digest: `sha-256=${Buffer.from(row.sha256, "hex").toString("base64")}`,
+          ETag: `"${row.sha256}"`,
+          "Cache-Control": "private, no-store",
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+          "X-Content-Type-Options": "nosniff",
+          "X-Request-Id": requestId,
+        });
+        const stream = handle.createReadStream();
+        stream.once("error", () => response.destroy());
+        stream.pipe(response);
         return;
       }
 
