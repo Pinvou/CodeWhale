@@ -69,6 +69,8 @@ type PostgresRepository struct {
 type Repository interface {
 	CreateAccount(context.Context, CreateAccountRequest) (TokenAccount, error)
 	GetAccount(context.Context, uuid.UUID) (TokenAccount, error)
+	ListManagedAccounts(context.Context, AuthorizationContext) ([]TokenAccount, error)
+	ListCredentials(context.Context, uuid.UUID) ([]Credential, error)
 	RotateCredential(context.Context, uuid.UUID, uuid.UUID, string, string, []byte, []string) (Credential, error)
 	SetAccountStatus(context.Context, uuid.UUID, string, uuid.UUID, string) (TokenAccount, error)
 	RevokeCredential(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (Credential, error)
@@ -257,6 +259,48 @@ func (r *PostgresRepository) GetAccount(ctx context.Context, accountID uuid.UUID
 		return TokenAccount{}, ErrNotFound
 	}
 	return account, err
+}
+
+func (r *PostgresRepository) ListManagedAccounts(ctx context.Context, resolved AuthorizationContext) ([]TokenAccount, error) {
+	var rows pgx.Rows
+	var err error
+	if resolved.ContextType == "PERSONAL" {
+		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_type='USER' AND ta.owner_id=$1 ORDER BY ta.name,ta.id`, resolved.UserID)
+	} else if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && (slices.Contains(resolved.Roles, "OWNER") || slices.Contains(resolved.Roles, "ORG_ADMIN")) {
+		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_organization_id=$1 ORDER BY ta.name,ta.id`, *resolved.OrganizationID)
+	} else {
+		return []TokenAccount{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]TokenAccount, 0)
+	for rows.Next() {
+		var item TokenAccount
+		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.DefaultPriority); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) ListCredentials(ctx context.Context, accountID uuid.UUID) ([]Credential, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,token_account_id,provider,base_url,fingerprint,version,status,allowed_models,validated_at FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]Credential, 0)
+	for rows.Next() {
+		var item Credential
+		if err := rows.Scan(&item.ID, &item.TokenAccountID, &item.Provider, &item.BaseURL, &item.Fingerprint, &item.Version, &item.Status, &item.AllowedModels, &item.ValidatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, actorID uuid.UUID, provider, baseURL string, secret []byte, models []string) (Credential, error) {

@@ -11,6 +11,25 @@ security:
   - oidc: []
 paths:
   /token-accounts:
+    get:
+      operationId: listManagedTokenAccounts
+      summary: List Token accounts managed in the active personal or organization context
+      responses:
+        "200":
+          description: Managed Token accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TokenAccount"
+        "403":
+          $ref: "#/components/responses/Error"
     post:
       operationId: createTokenAccount
       summary: Create a personal or organization Token account
@@ -52,6 +71,32 @@ paths:
         "403":
           $ref: "#/components/responses/Error"
   /token-accounts/{token_account_id}/credentials:
+    get:
+      operationId: listProviderCredentials
+      summary: List credential metadata without secret material
+      parameters:
+        - name: token_account_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Credential metadata newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderCredential"
+        "403":
+          $ref: "#/components/responses/Error"
     post:
       operationId: rotateProviderCredential
       summary: Validate and atomically activate a new provider credential

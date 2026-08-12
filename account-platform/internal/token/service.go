@@ -53,11 +53,13 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/token-accounts", s.listManagedTokenAccounts)
 	mux.HandleFunc("POST /v1/token-accounts", s.createTokenAccount)
 	mux.HandleFunc("PATCH /v1/token-accounts/{token_account_id}/status", s.setTokenAccountStatus)
 	mux.HandleFunc("PUT /v1/token-accounts/{token_account_id}/sharing", s.updateTokenSharing)
 	mux.HandleFunc("PUT /v1/token-accounts/{token_account_id}/routes", s.upsertTokenRoute)
 	mux.HandleFunc("POST /v1/token-accounts/{token_account_id}/credentials", s.rotateCredential)
+	mux.HandleFunc("GET /v1/token-accounts/{token_account_id}/credentials", s.listCredentials)
 	mux.HandleFunc("POST /v1/token-accounts/{token_account_id}/credentials/{credential_id}/revoke", s.revokeCredential)
 	mux.HandleFunc("GET /v1/token-accounts/eligible", s.listEligible)
 	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
@@ -67,6 +69,32 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux.HandleFunc("POST /v1/recharge/orders/{order_id}/close", s.closeRechargeOrder)
 	mux.HandleFunc("GET /v1/me/balance", s.getBalance)
 	return identity.Middleware(verify, mux)
+}
+
+func (s *Service) listManagedTokenAccounts(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.repository.ListManagedAccounts(r.Context(), resolved)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) listCredentials(w http.ResponseWriter, r *http.Request) {
+	_, account, ok := s.resolveOwnedAccount(w, r)
+	if !ok {
+		return
+	}
+	items, err := s.repository.ListCredentials(r.Context(), account.ID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Service) setTokenAccountStatus(w http.ResponseWriter, r *http.Request) {
