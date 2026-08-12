@@ -1,4 +1,5 @@
 import { connectorStoreCopy } from './connector-i18n.js';
+import { accountPlatformCopy } from './account-platform-i18n.js';
 
 const conversationZh = {
   completed:'已完成', failed:'失败', interrupted:'已中断', limitReached:'达到限制', processing:'处理中', processingActive:'正在处理',
@@ -2674,6 +2675,9 @@ dict.ja.uiTeamRelayAccess = {
   enabledTitle:'チームリレーは有効です', enabledDesc:'サイドバーの入口が表示され、PINVOU を再起動しても有効なままです。',
   disable:'リレーを無効化', disabling:'無効化中…', disableUnavailable:'チームリレーを無効にできませんでした。もう一度お試しください。',
 };
+dict.zh.uiAccountPlatform = accountPlatformCopy.zh;
+dict.en.uiAccountPlatform = accountPlatformCopy.en;
+dict.ja.uiAccountPlatform = accountPlatformCopy.ja;
 // 静态桥脚本（vite 原样拷贝，不能 ES import）经此读取共享词典，
 // personas-i18n.js 的 window.PERSONA_I18N 同款模式。唯一可译源在本文件。
 if (typeof window !== 'undefined') window.__PINVOU_SHARED_I18N__ = dict;

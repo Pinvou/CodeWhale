@@ -63,6 +63,7 @@ function copyRuntimeAssets() {
 
 export default defineConfig(({ mode }) => {
   const webBuild = mode === 'web';
+  const accountPortalBuild = mode === 'account-portal';
   return {
   root: 'src',
   // The Relay and Vite build intentionally share one deployment variable;
@@ -74,12 +75,14 @@ export default defineConfig(({ mode }) => {
     port: Number(process.env.PINVOU3_UI_DEV_PORT || 1420),
     strictPort: true,
   },
-  plugins: [react(), copyRuntimeAssets()],
+  plugins: [react(), ...(accountPortalBuild ? [] : [copyRuntimeAssets()])],
   build: {
-    outDir: webBuild ? '../../remote-control-relay/web/dist' : '../dist',
+    outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',
     emptyOutDir: true,
     rolldownOptions: {
-      input: webBuild
+      input: accountPortalBuild
+        ? { account: resolve(sourceRoot, 'account.html') }
+        : webBuild
         ? { main: resolve(sourceRoot, 'index.html') }
         : {
             main: resolve(sourceRoot, 'index.html'),
