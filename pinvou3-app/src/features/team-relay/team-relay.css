@@ -189,6 +189,21 @@
   padding: 8px 4px;
   width: 86px;
 }
+.team-relay-list > header.has-source-filters { align-items: stretch; flex-direction: column; gap: 8px; }
+.team-relay-source-filters { display: flex; gap: 5px; overflow-x: auto; scrollbar-width: none; }
+.team-relay-source-filters::-webkit-scrollbar { display: none; }
+.team-relay-source-filters button {
+  background: transparent;
+  border: 1px solid var(--relay-border);
+  border-radius: 999px;
+  color: var(--relay-muted);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 11px;
+  padding: 5px 9px;
+}
+.team-relay-source-filters button.is-active { background: var(--relay-blue-soft); border-color: transparent; color: var(--relay-blue); font-weight: 700; }
 .team-relay-list-scroll { min-height: 0; overflow: auto; padding: 0 12px 18px; }
 .team-relay-card {
   background: var(--relay-panel);
@@ -219,6 +234,19 @@
 .team-relay-card > strong { font-size: 16px; }
 .team-relay-card > span:not(.team-relay-card-status), .team-relay-card small { color: var(--relay-muted); font-size: 12px; }
 .team-relay-card-status { font-size: 13px; gap: 7px; }
+.team-relay-card-status-text { flex: 1; min-width: 0; }
+.team-relay-card-status em {
+  background: var(--relay-panel-soft);
+  border-radius: 999px;
+  color: var(--relay-muted);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  padding: 3px 7px;
+}
+.team-relay-card-status em.tone-receive { background: #fff0d5; color: #a95e00; }
+.team-relay-card-status em.tone-pending { background: var(--relay-blue-soft); color: var(--relay-blue); }
 
 .team-relay-avatar {
   align-items: center;
@@ -1189,6 +1217,7 @@
 .team-relay-list { background: var(--relay-panel); }
 .theme-dark .team-relay-list { background: var(--relay-panel); }
 .team-relay-list > header { border-bottom: 0; min-height: 74px; padding: 18px 10px 8px; }
+.team-relay-list > header.has-source-filters { min-height: 112px; }
 .team-relay-list > header label { background: var(--relay-panel-soft); border: 0; border-radius: 9px; height: 44px; padding: 0 13px; width: 100%; }
 .team-relay-list > header input { font-size: 14px; padding-left: 8px; width: 100%; }
 .team-relay-list-scroll { padding: 4px 10px 18px; }
