@@ -52,13 +52,65 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux.HandleFunc("GET /v1/me/organizations", s.listOrganizations)
 	mux.HandleFunc("POST /v1/sessions/current/active-context", s.setActiveContext)
 	mux.HandleFunc("POST /v1/organizations", s.createOrganization)
+	mux.HandleFunc("GET /v1/organizations/{organization_id}/units", s.listUnits)
 	mux.HandleFunc("POST /v1/organizations/{organization_id}/units", s.createUnit)
+	mux.HandleFunc("GET /v1/organizations/{organization_id}/members", s.listMembers)
+	mux.HandleFunc("PUT /v1/organizations/{organization_id}/members/{user_id}/roles", s.replaceMemberRoles)
 	mux.HandleFunc("PATCH /v1/organizations/{organization_id}/units/{unit_id}/parent", s.moveUnit)
 	mux.HandleFunc("POST /v1/organizations/{organization_id}/invitations", s.createInvitation)
 	mux.HandleFunc("POST /v1/invitations/accept", s.acceptInvitation)
 	mux.HandleFunc("DELETE /v1/organizations/{organization_id}/members/{user_id}", s.revokeMembership)
 	mux.HandleFunc("POST /v1/organizations/{organization_id}/ownership", s.transferOwnership)
 	return identity.Middleware(verify, mux)
+}
+
+func (s *Service) listUnits(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	units, err := s.repository.ListUnits(r.Context(), mustPrincipal(r.Context()), organizationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": units})
+}
+
+func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	members, err := s.repository.ListMembers(r.Context(), mustPrincipal(r.Context()), organizationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
+}
+
+func (s *Service) replaceMemberRoles(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	userID, ok := pathUUID(w, r, "user_id")
+	if !ok {
+		return
+	}
+	var body struct {
+		Roles []string `json:"roles"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	member, err := s.repository.ReplaceMemberRoles(r.Context(), mustPrincipal(r.Context()), organizationID, userID, body.Roles)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, member)
 }
 
 func (s *Service) bootstrap(w http.ResponseWriter, r *http.Request) {

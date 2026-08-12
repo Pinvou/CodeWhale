@@ -59,6 +59,18 @@ type Unit struct {
 	Version        int64      `json:"version"`
 }
 
+type Member struct {
+	UserID       uuid.UUID   `json:"user_id"`
+	DisplayName  *string     `json:"display_name"`
+	Email        *string     `json:"email"`
+	Status       string      `json:"status"`
+	Version      int64       `json:"version"`
+	Roles        []string    `json:"roles"`
+	UnitIDs      []uuid.UUID `json:"unit_ids"`
+	JoinedAt     time.Time   `json:"joined_at"`
+	MembershipID uuid.UUID   `json:"membership_id"`
+}
+
 type Invitation struct {
 	ID             uuid.UUID `json:"invitation_id"`
 	OrganizationID uuid.UUID `json:"organization_id"`
@@ -76,6 +88,9 @@ type Repository interface {
 	ListOrganizations(context.Context, identity.Principal) ([]Organization, error)
 	SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error)
 	CreateOrganization(context.Context, identity.Principal, string) (Organization, error)
+	ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error)
+	ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error)
+	ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error)
 	CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string) (Unit, error)
 	MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64) (Unit, error)
 	CreateInvitation(context.Context, identity.Principal, uuid.UUID, string, []string, time.Time) (Invitation, error)

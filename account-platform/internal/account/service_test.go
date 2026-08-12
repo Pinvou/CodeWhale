@@ -41,6 +41,15 @@ func (*fakeRepository) SetActiveContext(context.Context, identity.Principal, *uu
 func (*fakeRepository) CreateOrganization(context.Context, identity.Principal, string) (Organization, error) {
 	panic("not used")
 }
+func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error) {
+	panic("not used")
+}
+func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error) {
+	panic("not used")
+}
+func (*fakeRepository) ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error) {
+	panic("not used")
+}
 func (*fakeRepository) CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string) (Unit, error) {
 	panic("not used")
 }
@@ -104,5 +113,18 @@ func TestInvitationRolesAreRestrictedAndMemberIsImplicit(t *testing.T) {
 	}
 	if _, err := validateInvitationRoles([]string{"OWNER"}); err == nil {
 		t.Fatal("owner must be transferred, not invited")
+	}
+}
+
+func TestManagedRolesCannotGrantOwnership(t *testing.T) {
+	roles, err := validateManagedRoles([]string{"AUDITOR", "AUDITOR"})
+	if err != nil || len(roles) != 2 || roles[0] != "AUDITOR" || roles[1] != "MEMBER" {
+		t.Fatalf("roles=%v error=%v", roles, err)
+	}
+	if _, err := validateManagedRoles([]string{"OWNER"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("owner grant must use ownership transfer: %v", err)
+	}
+	if _, err := validateManagedRoles([]string{"UNIT_ADMIN"}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("unit admin requires a scoped assignment workflow: %v", err)
 	}
 }
