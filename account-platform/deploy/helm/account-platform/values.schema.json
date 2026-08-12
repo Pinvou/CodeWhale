@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "images", "oidc", "public", "tokenGateway", "external", "ingress", "networkPolicy"],
+  "required": ["global", "images", "oidc", "public", "observability", "tokenGateway", "external", "ingress", "networkPolicy"],
   "properties": {
     "global": {
       "type": "object",
@@ -46,6 +46,11 @@
         "paymentCallbackUrl": { "type": "string", "format": "uri" }
       }
     },
+    "observability": {
+      "type": "object",
+      "required": ["otlpEndpoint", "prometheusRulesEnabled"],
+      "properties": { "otlpEndpoint": { "type": "string" }, "prometheusRulesEnabled": { "type": "boolean" } }
+    },
     "tokenGateway": {
       "type": "object",
       "required": ["secretProvider", "secretKeyId", "providerAllowedHosts", "maxInputTokens"],
@@ -58,12 +63,13 @@
     },
     "external": {
       "type": "object",
-      "required": ["postgresCidrs", "paymentProviderCidrs", "secretProviderCidrs", "modelProviderCidrs"],
+      "required": ["postgresCidrs", "paymentProviderCidrs", "secretProviderCidrs", "modelProviderCidrs", "telemetryCollectorCidrs"],
       "properties": {
         "postgresCidrs": { "$ref": "#/definitions/cidrs" },
         "paymentProviderCidrs": { "$ref": "#/definitions/cidrs" },
         "secretProviderCidrs": { "$ref": "#/definitions/cidrs" },
-        "modelProviderCidrs": { "$ref": "#/definitions/cidrs" }
+        "modelProviderCidrs": { "$ref": "#/definitions/cidrs" },
+        "telemetryCollectorCidrs": { "$ref": "#/definitions/cidrs" }
       }
     },
     "ingress": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } },
@@ -117,9 +123,11 @@
               "postgresCidrs": { "type": "array", "minItems": 1 },
               "paymentProviderCidrs": { "type": "array", "minItems": 1 },
               "secretProviderCidrs": { "type": "array", "minItems": 1 },
-              "modelProviderCidrs": { "type": "array", "minItems": 1 }
+              "modelProviderCidrs": { "type": "array", "minItems": 1 },
+              "telemetryCollectorCidrs": { "type": "array", "minItems": 1 }
             }
           },
+          "observability": { "type": "object", "properties": { "otlpEndpoint": { "type": "string", "pattern": "^https://" }, "prometheusRulesEnabled": { "const": true } } },
           "ingress": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } },
           "networkPolicy": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } }
         }

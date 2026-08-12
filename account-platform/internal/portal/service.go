@@ -18,6 +18,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 )
 
 type Config struct {
@@ -44,7 +45,7 @@ func NewService(config Config, store Store) (*Service, error) {
 	if config.PublicURL.Scheme != "https" && config.SecureCookies {
 		return nil, errors.New("secure portal cookies require an HTTPS public URL")
 	}
-	return &Service{config: config, store: store, client: &http.Client{Timeout: 15 * time.Second}, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{config: config, store: store, client: observability.NewHTTPClient(15 * time.Second), now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func (s *Service) Handler(static http.Handler) http.Handler {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
@@ -118,5 +119,28 @@ func TestTraceIDIsAcceptedOnlyFromValidTraceparent(t *testing.T) {
 				t.Fatalf("generated trace ID length = %d, want 32", len(traceID))
 			}
 		})
+	}
+}
+
+func TestMetricsUseRouteTemplatesWithoutRequestIdentifiers(t *testing.T) {
+	handler, registry := handlerWithMetrics(config.Config{ServiceName: "test-service"}, nil, nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/live", nil))
+	metrics := httptest.NewRecorder()
+	registry.handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := metrics.Body.String()
+	if !strings.Contains(body, `pinvou_http_requests_total{method="GET",route="GET /health/live",service="test-service",status="200"} 1`) {
+		t.Fatalf("route-safe request metric not found:\n%s", body)
+	}
+	if strings.Contains(body, "request_id") || strings.Contains(body, "trace_id") {
+		t.Fatal("high-cardinality correlation identifier leaked into metrics")
+	}
+}
+
+func TestMetricsAreNotMountedOnTheApplicationListener(t *testing.T) {
+	response := httptest.NewRecorder()
+	Handler(config.Config{ServiceName: "test"}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("application listener exposed metrics with status %d", response.Code)
 	}
 }

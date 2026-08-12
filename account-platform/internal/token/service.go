@@ -16,6 +16,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 )
 
@@ -532,7 +533,7 @@ func NewHTTPContextResolver(rawURL string) (*HTTPContextResolver, error) {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errors.New("ACCOUNT_HTTP_URL must be an absolute URL")
 	}
-	return &HTTPContextResolver{baseURL: parsed, client: &http.Client{Timeout: 5 * time.Second}}, nil
+	return &HTTPContextResolver{baseURL: parsed, client: observability.NewHTTPClient(5 * time.Second)}, nil
 }
 
 func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string) (AuthorizationContext, error) {
@@ -576,7 +577,7 @@ func NewHTTPWalletResolver(rawURL, serviceToken string) (*HTTPWalletResolver, er
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || strings.TrimSpace(serviceToken) == "" {
 		return nil, errors.New("invalid Billing wallet resolver configuration")
 	}
-	return &HTTPWalletResolver{baseURL: parsed, serviceToken: serviceToken, client: &http.Client{Timeout: 5 * time.Second}}, nil
+	return &HTTPWalletResolver{baseURL: parsed, serviceToken: serviceToken, client: observability.NewHTTPClient(5 * time.Second)}, nil
 }
 
 func (r *HTTPWalletResolver) Ensure(ctx context.Context, ownerType string, ownerID uuid.UUID) (uuid.UUID, error) {
@@ -640,7 +641,7 @@ type HTTPModelValidator struct {
 }
 
 func NewHTTPModelValidator(policy ProviderURLPolicy) *HTTPModelValidator {
-	return &HTTPModelValidator{client: &http.Client{Timeout: 10 * time.Second}, policy: policy}
+	return &HTTPModelValidator{client: observability.NewHTTPClient(10 * time.Second), policy: policy}
 }
 
 func (v *HTTPModelValidator) Validate(ctx context.Context, rawURL string, secret []byte, models []string) error {

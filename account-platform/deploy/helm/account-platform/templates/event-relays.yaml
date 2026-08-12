@@ -17,6 +17,7 @@ spec:
       app.kubernetes.io/component: {{ $source }}-event-relay
   template:
     metadata:
+      annotations: { prometheus.io/scrape: "true", prometheus.io/path: "/metrics", prometheus.io/port: "9090" }
       labels:
         {{- include "pinvou.selector" $root | nindent 8 }}
         app.kubernetes.io/component: {{ $source }}-event-relay
@@ -28,6 +29,7 @@ spec:
         - name: event-relay
           image: "{{ $root.Values.images.eventRelay.repository }}:{{ $root.Values.images.eventRelay.tag }}"
           imagePullPolicy: {{ $root.Values.images.eventRelay.pullPolicy }}
+          ports: [{ name: metrics, containerPort: 9090 }]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
           resources: {{ toYaml $root.Values.resources | nindent 12 }}
           env:
@@ -35,6 +37,8 @@ spec:
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "%s-service-database-url" $source }} } }
             - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
+          readinessProbe: { httpGet: { path: /health/live, port: metrics }, periodSeconds: 10, timeoutSeconds: 3 }
+          livenessProbe: { httpGet: { path: /health/live, port: metrics }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts: [{ name: tmp, mountPath: /tmp }]
       volumes: [{ name: tmp, emptyDir: { sizeLimit: 16Mi } }]
 {{- end }}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -299,7 +300,7 @@ func NewSimulatorProvider(raw, token string) (*SimulatorProvider, error) {
 	if e != nil || u.Host == "" || token == "" {
 		return nil, errors.New("invalid payment simulator configuration")
 	}
-	return &SimulatorProvider{u, token, &http.Client{Timeout: 5 * time.Second}}, nil
+	return &SimulatorProvider{u, token, observability.NewHTTPClient(5 * time.Second)}, nil
 }
 func (p *SimulatorProvider) Create(ctx context.Context, o PaymentOrder, callback string) (ProviderOrder, error) {
 	var result ProviderOrder

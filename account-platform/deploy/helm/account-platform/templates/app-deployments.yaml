@@ -29,6 +29,7 @@ spec:
       app.kubernetes.io/component: {{ $app.name }}
   template:
     metadata:
+      annotations: { prometheus.io/scrape: "true", prometheus.io/path: "/metrics", prometheus.io/port: "9090" }
       labels:
         {{- include "pinvou.selector" $root | nindent 8 }}
         app.kubernetes.io/component: {{ $app.name }}
@@ -44,12 +45,14 @@ spec:
         - name: {{ $app.name }}
           image: "{{ $app.image.repository }}:{{ $app.image.tag }}"
           imagePullPolicy: {{ $app.image.pullPolicy }}
-          ports: [{ name: http, containerPort: 8080 }]
+          ports: [{ name: http, containerPort: 8080 }, { name: metrics, containerPort: 9090 }]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
           resources: {{ toYaml $root.Values.resources | nindent 12 }}
           env:
             - { name: APP_ENV, value: {{ $root.Values.global.environment | quote }} }
             - { name: PORT, value: "8080" }
+            - { name: METRICS_ADDRESS, value: ":9090" }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
             {{- if ne $app.name "token-portal" }}
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $app.name }}-database-url } }

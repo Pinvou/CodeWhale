@@ -33,6 +33,10 @@ public:
   portalUrl: https://tokens.example.invalid
   paymentCallbackUrl: https://billing.example.invalid/internal/payment/notifications
 
+observability:
+  otlpEndpoint: ""
+  prometheusRulesEnabled: false
+
 tokenGateway:
   secretProvider: remote
   secretKeyId: ""
@@ -44,6 +48,7 @@ external:
   paymentProviderCidrs: []
   secretProviderCidrs: []
   modelProviderCidrs: []
+  telemetryCollectorCidrs: []
 
 ingress:
   enabled: false
@@ -71,6 +76,10 @@ networkPolicy:
     matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
   ingressPodSelector:
     matchLabels: { app.kubernetes.io/name: ingress-nginx }
+  metricsNamespaceSelector:
+    matchLabels: { kubernetes.io/metadata.name: monitoring }
+  metricsPodSelector:
+    matchLabels: { app.kubernetes.io/name: prometheus }
 
 resources:
   requests: { cpu: 100m, memory: 128Mi }

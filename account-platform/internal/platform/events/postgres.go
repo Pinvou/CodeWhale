@@ -16,6 +16,12 @@ type PostgresStore struct {
 	pool *pgxpool.Pool
 }
 
+type OutboxStats struct {
+	Pending          int64
+	DeadLettered     int64
+	OldestPendingAge time.Duration
+}
+
 func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, error) {
 	configuration, err := pgxpool.ParseConfig(databaseURL)
 	if err != nil {
@@ -35,6 +41,14 @@ func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, 
 }
 
 func (store *PostgresStore) Close() { store.pool.Close() }
+
+func (store *PostgresStore) Stats(ctx context.Context) (OutboxStats, error) {
+	var stats OutboxStats
+	var oldestSeconds float64
+	err := store.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL),count(*) FILTER (WHERE dead_lettered_at IS NOT NULL),COALESCE(EXTRACT(EPOCH FROM now()-min(occurred_at) FILTER (WHERE published_at IS NULL AND dead_lettered_at IS NULL)),0) FROM outbox_events`).Scan(&stats.Pending, &stats.DeadLettered, &oldestSeconds)
+	stats.OldestPendingAge = time.Duration(oldestSeconds * float64(time.Second))
+	return stats, err
+}
 
 func (store *PostgresStore) Claim(ctx context.Context, workerID string, limit int, lease time.Duration) ([]Event, error) {
 	rows, err := store.pool.Query(ctx, `

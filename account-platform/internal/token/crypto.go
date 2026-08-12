@@ -18,6 +18,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 )
 
 type SecretProvider interface {
@@ -114,10 +116,9 @@ func NewRemoteEnvelopeProvider(environment, keyID, rawURL, token string) (*Remot
 	if (production && parsed.Scheme != "https") || (!production && parsed.Scheme != "https" && parsed.Scheme != "http") {
 		return nil, errors.New("remote secret provider requires HTTPS in production")
 	}
-	return &RemoteEnvelopeProvider{
-		keyID: keyID, baseURL: parsed, token: token,
-		client: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }},
-	}, nil
+	client := observability.NewHTTPClient(10 * time.Second)
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	return &RemoteEnvelopeProvider{keyID: keyID, baseURL: parsed, token: token, client: client}, nil
 }
 
 func (p *RemoteEnvelopeProvider) KeyID() string { return p.keyID }
