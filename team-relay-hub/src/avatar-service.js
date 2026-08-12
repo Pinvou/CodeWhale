@@ -86,7 +86,9 @@ async function receiveAvatarMultipart(request, config) {
         fieldSize: 1,
         fields: 0,
         files: 1,
-        parts: 1,
+        // Busboy emits partsLimit when the parsed count reaches this value,
+        // so keep one sentinel slot beyond the single allowed file part.
+        parts: 2,
         fileSize: config.maxAvatarBytes + 1,
         headerPairs: 64,
       },
@@ -323,4 +325,5 @@ export {
   avatarStoragePath,
   detectAvatarContent,
   isPathInside,
+  receiveAvatarMultipart,
 };
