@@ -115,6 +115,16 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 	return request, true, tx.Commit(ctx)
 }
 
+func (r *PostgresRepository) GetUsage(ctx context.Context, usageID uuid.UUID) (UsageRequest, error) {
+	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at FROM usage_requests WHERE id=$1`
+	var usage UsageRequest
+	err := r.pool.QueryRow(ctx, query, usageID).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UsageRequest{}, ErrNotFound
+	}
+	return usage, err
+}
+
 func (r *PostgresRepository) MarkReserved(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {
 	command, err := r.pool.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',hold_id=$2,price_version_id=$3,updated_at=$4 WHERE id=$1 AND status='CREATED'`, usageID, holdID, priceVersionID, r.now())
 	if err != nil {
@@ -180,7 +190,12 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 	if err != nil {
 		return err
 	}
-	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET status='REVIEW',error_class=$2,usage_snapshot=$3,updated_at=$4 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, strings.TrimSpace(reason), encoded, r.now())
+	reason = strings.TrimSpace(reason)
+	status := "REVIEW"
+	if reason == "settlement_pending" || reason == "local_commit_record_pending" {
+		status = "SETTLEMENT_PENDING"
+	}
+	_, err = r.pool.Exec(ctx, `UPDATE usage_requests SET status=$2,error_class=$3,usage_snapshot=$4,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, status, reason, encoded, r.now())
 	return err
 }
 
@@ -200,12 +215,12 @@ func (r *PostgresRepository) ensureUsageState(ctx context.Context, usageID uuid.
 func getUsageByIdempotency(ctx context.Context, database interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, key string, lock bool) (UsageRequest, error) {
-	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,started_at FROM usage_requests WHERE idempotency_key=$1`
+	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at FROM usage_requests WHERE idempotency_key=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var usage UsageRequest
-	err := database.QueryRow(ctx, query, key).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.StartedAt)
+	err := database.QueryRow(ctx, query, key).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
 	return usage, err
 }
 

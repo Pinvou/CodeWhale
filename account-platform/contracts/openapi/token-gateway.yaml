@@ -278,6 +278,32 @@ paths:
                       $ref: "#/components/schemas/EligibleTokenAccount"
         "403":
           $ref: "#/components/responses/Error"
+  /usage-requests/{usage_request_id}:
+    get:
+      operationId: getUsageRequestStatus
+      summary: Read settlement state for a usage request in the same session and active context
+      parameters:
+        - name: usage_request_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Context-bound usage and settlement status
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageRequestStatus"
+        "404":
+          $ref: "#/components/responses/Error"
   /chat/completions:
     post:
       operationId: createChatCompletion
@@ -586,3 +612,39 @@ components:
         health_status:
           type: string
           enum: [HEALTHY, DEGRADED]
+    UsageRequestStatus:
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, status, display_status, token_account_id, wallet_id, model, maximum_microcredits, started_at, updated_at]
+      properties:
+        usage_request_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [CREATED, RESERVED, UPSTREAM_ACTIVE, SETTLEMENT_PENDING, COMMITTED, RELEASED, REVIEW]
+        display_status:
+          type: string
+          enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW]
+        token_account_id:
+          type: string
+          format: uuid
+        wallet_id:
+          type: string
+          format: uuid
+        model:
+          type: string
+        maximum_microcredits:
+          type: integer
+          format: int64
+          minimum: 1
+        actual_microcredits:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        started_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
