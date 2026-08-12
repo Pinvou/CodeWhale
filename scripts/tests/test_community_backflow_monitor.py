@@ -80,9 +80,49 @@ class CommunityBackflowMonitorTests(unittest.TestCase):
         self.assertIn("其余 5 个文件", body)
         self.assertNotIn("file-64.js", body)
         self.assertIn("均是不可信输入", body)
+        self.assertIn("community-backflow-plan:", body)
+        self.assertIn("无，可与同批次其他无依赖项并行", body)
+
+    def test_queue_plan_parallelizes_independent_pulls_and_orders_overlaps(self):
+        candidates = [
+            (
+                {"number": 40},
+                [{"filename": "src/a.js"}],
+            ),
+            (
+                {"number": 41},
+                [{"filename": "src/b.js"}],
+            ),
+            (
+                {"number": 42},
+                [{"filename": "src/a.js"}],
+            ),
+            (
+                {"number": 43},
+                [{"filename": "VERSION"}],
+            ),
+        ]
+
+        self.assertEqual(
+            monitor.build_queue_dependencies(candidates),
+            {40: [], 41: [], 42: [40], 43: [40, 41, 42]},
+        )
+
+    def test_queue_plan_always_puts_release_after_features(self):
+        candidates = [
+            ({"number": 50}, [{"filename": "VERSION"}, {"filename": "src/a.js"}]),
+            ({"number": 51}, [{"filename": "src/a.js"}]),
+            ({"number": 52}, [{"filename": "src/b.js"}]),
+        ]
+
+        self.assertEqual(
+            monitor.build_queue_dependencies(candidates),
+            {50: [51, 52], 51: [], 52: []},
+        )
 
     def test_state_labels_cover_unattended_processing(self):
         self.assertIn("backflow:processing", monitor.LABELS)
+        self.assertIn("backflow:dependency-wait", monitor.LABELS)
         self.assertIn("backflow:blocked", monitor.LABELS)
 
     def test_release_issue_requests_official_firmware_build(self):

@@ -54,6 +54,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "windows_codex",
             "windows_runtime",
             "windows_rustup_repair",
+            "backflow_infra",
         ):
             self.assertIn(
                 f"{output}: ${{{{ steps.filter.outputs.{output} }}}}",
@@ -64,6 +65,7 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("Merge Queue 基础检查失败", required_gate)
         for job in (
             "team-relay-hub-test",
+            "backflow-portability",
             "release-contract-test",
             "windows-runtime-test",
             "windows-rustup-repair-test",
@@ -84,6 +86,25 @@ class CiGatePolicyTests(unittest.TestCase):
             "--registry=https://registry.npmjs.org --audit-level=high",
             hub_job,
         )
+
+    def test_trusted_backflow_has_parallel_three_platform_light_gate(self):
+        portability = self.workflow.split(
+            "\n  backflow-portability:", maxsplit=1
+        )[1].split("\n  fast-gate:", maxsplit=1)[0]
+        self.assertIn("needs.changes.outputs.trusted_backflow == 'true'", portability)
+        self.assertIn("needs.changes.outputs.backflow_infra == 'true'", portability)
+        self.assertIn("os: [ubuntu-latest, windows-latest, macos-15]", portability)
+        self.assertIn("runs-on: ${{ matrix.os }}", portability)
+        self.assertIn("fail-fast: false", portability)
+        self.assertIn("scripts/community-backflow.mjs preflight", portability)
+        self.assertIn("scripts/community-backflow.mjs verify", portability)
+        self.assertIn(
+            "github.event_name == 'pull_request' && needs.changes.outputs.trusted_backflow == 'true'",
+            portability,
+        )
+        self.assertNotIn("npm ci", portability)
+        self.assertNotIn("cargo ", portability)
+        self.assertNotIn("submodule update", portability)
 
     def test_rust_modes_preserve_fast_drafts_and_queue_validation(self):
         rust_lint = self.workflow.split("\n  rust-lint:", maxsplit=1)[1].split(

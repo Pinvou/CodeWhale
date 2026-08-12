@@ -18,13 +18,23 @@ class CommunityBackflowSkillTests(unittest.TestCase):
         self.assertIn("backflow/community-<source-number>", self.skill)
         self.assertIn("不重复创建", self.skill)
 
-    def test_admin_merge_requires_current_head_gates(self):
+    def test_merge_queue_requires_current_head_gates(self):
         self.assertIn(
-            "gh pr merge --admin --squash --delete-branch",
+            "gh pr merge --auto --squash --delete-branch",
             self.skill,
         )
         self.assertIn("当前 head SHA", self.skill)
         self.assertIn("gh pr checks --required", self.skill)
+
+    def test_cross_platform_fast_path_and_dependency_waves_are_required(self):
+        self.assertIn("node scripts/community-backflow.mjs plan", self.skill)
+        self.assertIn("node scripts/community-backflow.mjs queue", self.skill)
+        self.assertIn("node scripts/community-backflow.mjs preflight", self.skill)
+        self.assertIn("不得假设实际处理平台是 Ubuntu", self.skill)
+        self.assertIn("backflow-portability", self.skill)
+        self.assertIn("主线日常前进不手工 rebase", self.skill)
+        self.assertIn("--credential <github-username>", self.skill)
+        self.assertNotIn("GCM 获取 `zhuowp`", self.skill)
 
     def test_skill_has_no_artificial_size_or_path_blocklist(self):
         self.assertIn("不按文件数、代码行数或路径名单", self.skill)
@@ -35,7 +45,7 @@ class CommunityBackflowSkillTests(unittest.TestCase):
     def test_ui_prompt_explicitly_invokes_skill(self):
         self.assertIn("$community-backflow", self.openai_yaml)
         self.assertIn("required checks 通过", self.openai_yaml)
-        self.assertIn("直接 --admin 合并", self.openai_yaml)
+        self.assertIn("直接加入 Merge Queue", self.openai_yaml)
 
     def test_release_backflow_triggers_deduplicated_firmware_build(self):
         self.assertIn("base→head diff 包含 `VERSION`", self.skill)
