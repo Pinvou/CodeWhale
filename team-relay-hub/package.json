@@ -1,0 +1,21 @@
+{
+  "name": "pinvou-team-relay-hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "db:migrate": "node src/migrate.js",
+    "team:create": "node src/create-team.js",
+    "attachments:cleanup": "node src/cleanup-attachments.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
+  },
+  "dependencies": {
+    "busboy": "^1.6.0",
+    "file-type": "^21.3.4",
+    "pg": "^8.16.3"
+  }
+}

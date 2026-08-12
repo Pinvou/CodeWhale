@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import '../styles/base.css';
-import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, Terminal, ChevronDown, IconGrid, IconList, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, FolderOpen, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon } from '../components/icons.jsx';
+import { I, Plus, Edit2, Trash2, ClipboardList, BarChart2, Settings, Monitor, Smartphone, Brain, BrainCircuit, Clock, Sun, Moon, Zap, Package, RefreshCw, RotateCcw, Search, Upload, Lightbulb, Paperclip, Mic, Send, Store, Terminal, ChevronDown, IconGrid, IconList, ChevronRight, Copy, CheckCircle2, AlertTriangle, Menu, MoreHorizontal, Check, Filter, Database, Download, FolderPlus, Award, Feather, AppWindow, Radio, Palette, Briefcase, Sparkles, StopCircle, XCircle, Wrench, User, Layers, MessageSquare, X, ArrowLeft, FolderOpen, ExternalLink, BookOpen, Code, FileText, Hexagon, Layout, Presentation, Mail, MessageCircle, Navigation, Video, Puzzle, LineChart, Building2, Cpu, Server, Globe, ChevronLeft, XIcon, CloudSun, TrendingUp, TrendingDown, GridIcon, TableIcon, PresentationIcon, ImageIcon, Archive, PetPawIcon, Users } from '../components/icons.jsx';
 import { ArchiveConfirmDialog, ArchiveToast, NavItem, RecentItem } from '../components/layout/NavigationComponents.jsx';
 import { AcpAgentLogo } from '../features/codex/AcpAgentLogo.jsx';
 import { PinvouLogo } from '../components/PinvouLogo.jsx';
@@ -57,6 +57,8 @@ import { PinvouSummonCard } from '../features/tools/tool-renderers.jsx';
 import { CardPoolView, Lanyard, PersonaEditorModal } from '../features/personas/Personas.jsx';
 import { WorkflowView } from '../features/workflow/WorkflowView.jsx';
 import { SearchView } from '../features/search/SearchView.jsx';
+import { TeamRelayView } from '../features/team-relay/TeamRelayView.jsx';
+import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../features/team-relay/team-relay-access.js';
 import { SearchOverlay } from '../features/search/SearchOverlay.jsx';
 import { UpdateNoticeButton } from '../features/updater/UpdateNoticeButton.jsx';
 import { DetachedShell } from './DetachedShell.jsx';
@@ -337,11 +339,14 @@ function workspaceDisplayName(path) {
       const [accountPopoverOpen, setAccountPopoverOpen] = useState(false);
       const [llmApiLoading, setLlmApiLoading] = useState(false);
       const [llmApiErrorCode, setLlmApiErrorCode] = useState(null);
+      const [teamRelayEnabled, setTeamRelayEnabled] = useState(() => loadTeamRelayAccess());
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showMegacubeSite = !!platformCapabilities.showMegacubeSite;
       const codexAcpSupported = !!platformCapabilities.codexAcpSupported;
+      const teamRelayAvailable = teamRelayEnabled && platformCapabilities.teamRelaySupported === true;
       const [codexSessions, setCodexSessions] = useState([]);
       const [codexDraftEpoch, setCodexDraftEpoch] = useState(0);
+      const [codexRelayLaunch, setCodexRelayLaunch] = useState(null);
       const [activeCodexId, setActiveCodexId] = useState(() => {
         try {
           return localStorage.getItem('pinvou_codex_active_session') || null;
@@ -370,6 +375,20 @@ function workspaceDisplayName(path) {
         setCodexSessions(next);
         return next;
       }, [codexAcpSupported]);
+      const loadTeamRelayCodeAgents = useCallback(async () => {
+        if (!codexAcpSupported || !isTauriAvailable()) return [];
+        const agents = await invokeTauri('list_acp_agents');
+        return Array.isArray(agents) ? agents : [];
+      }, [codexAcpSupported]);
+      const handleUnlockTeamRelay = useCallback(async accessCode => {
+        const unlocked = await unlockTeamRelayAccess(accessCode, bridge.teamRelay.verifyAccess);
+        if (unlocked) setTeamRelayEnabled(true);
+        return unlocked;
+      }, []);
+      const handleDisableTeamRelay = useCallback(() => {
+        disableTeamRelayAccess();
+        setTeamRelayEnabled(false);
+      }, []);
       const updateActiveCodexSession = useCallback((id) => {
         const next = id || null;
         setActiveCodexId(next);
@@ -847,10 +866,12 @@ function workspaceDisplayName(path) {
       useEffect(() => {
         if (!SCHEDULED_TASKS_ENTRY_ENABLED && currentView === 'scheduled') {
           setCurrentView('chat');
+        } else if (!teamRelayAvailable && currentView === 'teamRelay') {
+          setCurrentView('chat');
         } else if (currentView === 'workflow') {
           setCurrentView('cardpool');
         }
-      }, [currentView]);
+      }, [currentView, teamRelayAvailable]);
 
       // 草稿 vs 已保存基线 → 模型卡是否显示「保存并重启」操作条
       const savedModel = savedModelConfigRef.current;
@@ -1224,6 +1245,85 @@ function workspaceDisplayName(path) {
           setCurrentView('chat');
         }
         closeMobileSidebar();
+      }
+
+      async function handleTeamRelayUseAgent(input) {
+        const request = input || {};
+        const existing = request.existingLink;
+        const materialPaths = (request.materials || []).map(material => material.local_path).filter(Boolean);
+        const initialMaterialPaths = (request.allMaterials || request.materials || []).map(material => material.local_path).filter(Boolean);
+        const linkedMaterialIds = [...new Set([...(existing?.material_ids || []), ...(request.materialIds || [])])];
+        const linkedSequence = Math.max(Number(existing?.last_synced_sequence || 0), Number(request.latestSequence || 0));
+        const linkResult = (kind, sessionId, agentId, workspacePath, reused) => ({
+          kind,
+          session_id: sessionId,
+          agent_id: agentId || null,
+          workspace_path: workspacePath || null,
+          material_ids: reused
+            ? linkedMaterialIds
+            : [...new Set(existing ? (request.allMaterialIds || []) : (request.materialIds || []))],
+          last_synced_sequence: linkedSequence,
+        });
+        if (existing?.kind === 'chat' && bridge.available && bridge.sessions.switchToSession) {
+          const switched = await bridge.sessions.switchToSession(existing.session_id);
+          if (switched) {
+            if (request.contextUpdate && bridge.attachments.addAttachmentByPath) {
+              for (const path of materialPaths) await bridge.attachments.addAttachmentByPath(path);
+            }
+            if (request.contextUpdate) setChatPrefill(String(request.prompt || ''));
+            setActiveChat(existing.session_id);
+            setCurrentView('chat');
+            closeMobileSidebar();
+            return linkResult('chat', existing.session_id, null, null, true);
+          }
+        }
+        if (existing?.kind === 'coding' && codexAcpSupported && isTauriAvailable()) {
+          const sessions = await refreshCodexSessions();
+          if (sessions.some(session => session.id === existing.session_id)) {
+            if (request.contextUpdate) {
+              setCodexRelayLaunch({
+                key: `${request.taskId}:${existing.session_id}:${Date.now()}`,
+                sessionId: existing.session_id,
+                prompt: String(request.prompt || ''),
+                materialPaths,
+              });
+            }
+            updateActiveCodexSession(existing.session_id);
+            setCurrentView('codex');
+            closeMobileSidebar();
+            return linkResult('coding', existing.session_id, existing.agent_id || request.agentId || 'pinvou', existing.workspace_path, true);
+          }
+        }
+        if (request.mode === 'coding' && codexAcpSupported && isTauriAvailable()) {
+          const metadata = await invokeTauri('create_codex_acp_session', {
+            workspacePath: request.codingWorkspace || null,
+            agentId: request.agentId || 'pinvou',
+          });
+          await refreshCodexSessions();
+          updateActiveCodexSession(metadata.id);
+          setCodexRelayLaunch({
+            key: `${request.taskId}:${metadata.id}:${Date.now()}`,
+            sessionId: metadata.id,
+            prompt: String(existing ? request.initialPrompt || '' : request.prompt || ''),
+            materialPaths: existing ? initialMaterialPaths : materialPaths,
+          });
+          setCurrentView('codex');
+          closeMobileSidebar();
+          return linkResult('coding', metadata.id, request.agentId || 'pinvou', request.codingWorkspace, false);
+        }
+
+        const sessionId = bridge.available && bridge.sessions.materializeSession
+          ? await bridge.sessions.materializeSession()
+          : null;
+        if (!sessionId) throw new Error('team_relay_agent_session_unavailable');
+        if (bridge.sessions.renameSession) await bridge.sessions.renameSession(sessionId, request.sessionTitle || request.title || '');
+        if (bridge.attachments.addAttachmentByPath) {
+          for (const path of existing ? initialMaterialPaths : materialPaths) await bridge.attachments.addAttachmentByPath(path);
+        }
+        setActiveChat(sessionId);
+        setChatPrefill(String(existing ? request.initialPrompt || '' : request.prompt || ''));
+        await navigateFromScheduledRun('chat');
+        return linkResult('chat', sessionId, null, null, false);
       }
 
       function handleSwitchHomeMode(mode) {
@@ -1811,12 +1911,12 @@ function workspaceDisplayName(path) {
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.sidebarTaskFilterCode)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, workflow: t.workflow, toolStore: t.toolStore, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, workflow: t.workflow, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);
       };
-      const mobileMoreViews = ['search', 'outputs', 'knowledge', 'toolStore', 'settings'];
+      const mobileMoreViews = ['search', ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', 'settings'];
       const mobileMoreActive = mobileMoreViews.includes(currentView)
         || (currentView === 'scheduled' && !(bs && bs.scheduledRunContext));
 
@@ -2012,6 +2112,15 @@ function workspaceDisplayName(path) {
                   t={t}
                   isSidebarOpen={isSidebarOpen}
                   onClick={() => navigateFromScheduledRun('scheduled')}
+                />
+              )}
+              {teamRelayAvailable && (
+                <NavItem
+                  icon={<Users size={18} />} label={t.teamRelay}
+                  active={currentView === 'teamRelay'}
+                  theme={activeTheme}
+                  isSidebarOpen={isSidebarOpen}
+                  onClick={() => navigateFromScheduledRun('teamRelay')}
                 />
               )}
               <NavItem
@@ -2343,6 +2452,9 @@ function workspaceDisplayName(path) {
                   onConfirmSearchConfig={handleConfirmSearchConfig}
                   onMemoryEnabledChange={handleSetMemoryEnabled}
                   onPetEnabledChange={handleSetPetEnabled}
+                  teamRelayEnabled={teamRelayEnabled}
+                  onUnlockTeamRelay={handleUnlockTeamRelay}
+                  onDisableTeamRelay={handleDisableTeamRelay}
                   searchNeedsRestart={searchNeedsRestart}
                   languageNeedsRestart={languageNeedsRestart}
                   bs={bs}
@@ -2358,6 +2470,7 @@ function workspaceDisplayName(path) {
               </SettingsErrorBoundary>
             )}
             {currentView === 'workflow' && <WorkflowView theme={activeTheme} t={t} bs={bs} />}
+            {teamRelayAvailable && currentView === 'teamRelay' && <TeamRelayView theme={activeTheme} t={t} onThemeChange={handleSetTheme} onUseAgent={handleTeamRelayUseAgent} onLoadCodeAgents={loadTeamRelayCodeAgents} />}
             {currentView === 'toolStore' && <ToolStoreView theme={activeTheme} t={t} onNewChat={handleNewChat} />}
             {currentView === 'cardpool' && <CardPoolView theme={activeTheme} t={t} bs={bs} onEquipped={() => setCurrentView('chat')} onAICreate={startAICard} initialMyOnly={poolMyOnly} />}
             {currentView === 'chat' && <ChatView theme={activeTheme} t={t} bs={bs} prefill={chatPrefill} focusComposerTick={petFocusComposerTick} onPrefillConsumed={() => setChatPrefill('')} onOpenEditor={(initial) => setPersonaEditor({ initial })} justInstalledTool={justInstalledTool} setJustInstalledTool={setJustInstalledTool} onGotoSettings={() => openSettingsSection('general')} onGotoModelSettings={() => openSettingsSection('model')} onGotoTools={() => navigateFromScheduledRun('toolStore')} onBackScheduledRun={() => navigateFromScheduledRun('scheduled')} codeModeAvailable={codexAcpSupported} onSwitchHomeMode={handleSwitchHomeMode} />}
@@ -2368,6 +2481,7 @@ function workspaceDisplayName(path) {
                 sessions={codexSessions}
                 activeId={activeCodexId}
                 draftEpoch={codexDraftEpoch}
+                relayLaunch={codexRelayLaunch}
                 onActiveSessionChange={updateActiveCodexSession}
                 onSessionsChange={setCodexSessions}
                 onSwitchHomeMode={handleSwitchHomeMode}
@@ -2582,6 +2696,8 @@ function workspaceDisplayName(path) {
               ...(SCHEDULED_TASKS_ENTRY_ENABLED ? [{ key: 'scheduled', label: t.scheduledPlans, icon: <Clock size={18} />,
                 active: currentView === 'scheduled', dot: scheduledUnread,
                 onClick: () => mobileNavigate('scheduled') }] : []),
+              ...(teamRelayAvailable ? [{ key: 'teamRelay', label: t.teamRelay, icon: <Users size={18} />,
+                active: currentView === 'teamRelay', onClick: () => mobileNavigate('teamRelay') }] : []),
               { key: 'outputs', label: t.outputs, icon: <Package size={18} />,
                 active: currentView === 'outputs', onClick: () => mobileNavigate('outputs') },
               { key: 'knowledge', label: t.knowledge, icon: <BookOpen size={18} />,

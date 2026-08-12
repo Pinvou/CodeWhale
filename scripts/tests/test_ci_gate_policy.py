@@ -49,6 +49,7 @@ class CiGatePolicyTests(unittest.TestCase):
             "release_contract",
             "frontend",
             "relay",
+            "team_relay_hub",
             "acp_runtime",
             "windows_codex",
             "windows_runtime",
@@ -62,12 +63,27 @@ class CiGatePolicyTests(unittest.TestCase):
         required_gate = self.workflow.split("\n  required-gate:", maxsplit=1)[1]
         self.assertIn("Merge Queue 基础检查失败", required_gate)
         for job in (
+            "team-relay-hub-test",
             "release-contract-test",
             "windows-runtime-test",
             "windows-rustup-repair-test",
         ):
             self.assertIn(f"- {job}", required_gate)
             self.assertIn(f'"{job}:$', required_gate)
+
+        hub_job = self.workflow.split(
+            "\n  team-relay-hub-test:", maxsplit=1
+        )[1].split("\n  release-contract-test:", maxsplit=1)[0]
+        self.assertIn("needs.changes.outputs.team_relay_hub == 'true'", hub_job)
+        self.assertIn("postgres:16-alpine", hub_job)
+        self.assertIn("TEAM_RELAY_TEST_DATABASE_URL", hub_job)
+        self.assertIn("npm --prefix team-relay-hub ci", hub_job)
+        self.assertIn("npm --prefix team-relay-hub test", hub_job)
+        self.assertIn(
+            "npm --prefix team-relay-hub audit "
+            "--registry=https://registry.npmjs.org --audit-level=high",
+            hub_job,
+        )
 
     def test_rust_modes_preserve_fast_drafts_and_queue_validation(self):
         rust_lint = self.workflow.split("\n  rust-lint:", maxsplit=1)[1].split(

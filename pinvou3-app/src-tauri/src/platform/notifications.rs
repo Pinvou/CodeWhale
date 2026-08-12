@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use parking_lot::Mutex;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 const TASK_COMPLETED_TITLE: &str = "任务已完成";
@@ -35,11 +35,13 @@ pub fn task_completion_enabled() -> bool {
 pub fn notify_task_completed(app: &AppHandle) {
     #[cfg(target_os = "linux")]
     {
-        if let Err(e) = send_notify_send() {
+        if let Err(e) = send_notify_send(TASK_COMPLETED_TITLE, TASK_COMPLETED_BODY) {
             eprintln!(
                 "[pinvou3-app] notify-send task completion notification failed: {e}; trying native notification"
             );
-            if let Err(native) = send_native_notification(app) {
+            if let Err(native) =
+                send_native_notification(app, TASK_COMPLETED_TITLE, TASK_COMPLETED_BODY)
+            {
                 eprintln!("[pinvou3-app] native task completion notification failed: {native}");
             }
         }
@@ -47,28 +49,82 @@ pub fn notify_task_completed(app: &AppHandle) {
 
     #[cfg(not(target_os = "linux"))]
     {
-        if let Err(e) = send_native_notification(app) {
+        if let Err(e) = send_native_notification(app, TASK_COMPLETED_TITLE, TASK_COMPLETED_BODY) {
             eprintln!("[pinvou3-app] native task completion notification failed: {e}");
         }
     }
 }
 
-fn send_native_notification(app: &AppHandle) -> Result<(), String> {
+pub fn notify_team_relay_changed(app: &AppHandle) {
+    if !notifications_enabled() {
+        return;
+    }
+    if app
+        .get_webview_window("main")
+        .and_then(|window| window.is_focused().ok())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let (title, body) =
+        team_relay_notification_copy(crate::platform::prefs::UserPrefs::load().language);
+
+    #[cfg(target_os = "linux")]
+    if let Err(error) = send_notify_send(title, body) {
+        log::warn!("Team Relay notify-send failed: {error}; trying native notification");
+        if let Err(native) = send_native_notification(app, title, body) {
+            log::warn!("Team Relay native notification failed: {native}");
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if let Err(error) = send_native_notification(app, title, body) {
+        log::warn!("Team Relay native notification failed: {error}");
+    }
+}
+
+fn notifications_enabled() -> bool {
+    let prefs = std::fs::read_to_string(crate::platform::paths::settings_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str::<NotificationPrefsOnly>(&raw).ok())
+        .unwrap_or_default();
+    prefs.notifications.enabled
+}
+
+fn team_relay_notification_copy(
+    language: crate::platform::prefs::Language,
+) -> (&'static str, &'static str) {
+    match language {
+        crate::platform::prefs::Language::ZhHans => {
+            ("团队接力有更新", "有新的工作接力动态，请打开 Pinvou 查看。")
+        }
+        crate::platform::prefs::Language::En => (
+            "Team Relay updated",
+            "New relay activity is ready to review in Pinvou.",
+        ),
+        crate::platform::prefs::Language::Ja => (
+            "チームリレーが更新されました",
+            "新しいリレーの動きがあります。Pinvou で確認してください。",
+        ),
+    }
+}
+
+fn send_native_notification(app: &AppHandle, title: &str, body: &str) -> Result<(), String> {
     app.notification()
         .builder()
-        .title(TASK_COMPLETED_TITLE)
-        .body(TASK_COMPLETED_BODY)
+        .title(title)
+        .body(body)
         .show()
         .map_err(|e| e.to_string())
 }
 
 #[cfg(target_os = "linux")]
-fn send_notify_send() -> Result<(), String> {
+fn send_notify_send(title: &str, body: &str) -> Result<(), String> {
     use std::process::Command;
 
     Command::new("notify-send")
-        .arg(TASK_COMPLETED_TITLE)
-        .arg(TASK_COMPLETED_BODY)
+        .arg(title)
+        .arg(body)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -137,5 +193,18 @@ mod tests {
         assert!(state.should_notify("session:turn".to_string()));
         assert!(!state.should_notify("session:turn".to_string()));
         assert!(state.should_notify("session:next-turn".to_string()));
+    }
+
+    #[test]
+    fn team_relay_notification_copy_covers_all_languages() {
+        for language in [
+            crate::platform::prefs::Language::ZhHans,
+            crate::platform::prefs::Language::En,
+            crate::platform::prefs::Language::Ja,
+        ] {
+            let (title, body) = team_relay_notification_copy(language);
+            assert!(!title.is_empty());
+            assert!(!body.is_empty());
+        }
     }
 }

@@ -56,6 +56,8 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiAcpProviders',
     'uiArtifacts',
     'uiToolDetails',
+    'uiTeamRelay',
+    'uiTeamRelayAccess',
   ]) {
     assert.ok(dict[language][section], `${language}.${section} must exist`);
   }
@@ -208,6 +210,15 @@ assert.doesNotMatch(toolStore, /ev\.listen\('eip:error'[\s\S]{0,500}subtitle: St
 assert.doesNotMatch(toolStore, /ev\.listen\('zhidao:error'[\s\S]{0,500}subtitle: String\(p\.message/);
 assert.doesNotMatch(toolStore, />登录员工门户（EIP）</);
 assert.doesNotMatch(toolStore, /title:\s*'EIP 连接失败'/);
+const teamRelay = source('features/team-relay/TeamRelayView.jsx');
+assert.match(teamRelay, /const copy = t\.uiTeamRelay/);
+assert.doesNotMatch(teamRelay, />团队接力</);
+assert.doesNotMatch(teamRelay, />最终交付</);
+const teamRelayAccess = source('features/team-relay/TeamRelayAccessSettings.jsx');
+assert.match(teamRelayAccess, /copy\.notice/);
+assert.match(teamRelayAccess, /type="password"/);
+assert.match(teamRelayAccess, /copy\.disable/);
+assert.doesNotMatch(teamRelayAccess, /当前功能内测中/);
 const settings = source('features/settings/SettingsView.jsx');
 assert.match(settings, /t\.uiSettings/);
 assert.match(settings, /const settingsCopy = t\.uiSettingsDetail/);
@@ -215,6 +226,8 @@ assert.match(settings, /settingsCopy\.addSearch/);
 assert.match(settings, /settingsCopy\.deleteModelTitle/);
 assert.match(settings, /item\.title \|\| presetProviderLabel\(p, t\)/);
 assert.doesNotMatch(settings, />添加搜索源</);
+const generalSettings = settings.slice(settings.indexOf('const renderGeneral'), settings.indexOf('const renderModels'));
+assert.ok(generalSettings.indexOf('<TeamRelayAccessSettings') > generalSettings.indexOf('<PetSettingsSection'));
 const chat = source('features/chat/ChatView.jsx');
 assert.match(chat, /const chatCopy = t\.uiChat/);
 assert.match(chat, /chatCopy\.asrDownloadTitle/);

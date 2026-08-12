@@ -1,0 +1,1603 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Team Relay Demo API
+  version: 0.1.0
+  description: |
+    Human-owned team handoff protocol for the Pinvou demo. PostgreSQL state is
+    authoritative; SSE is only a refresh hint. See protocol.md for invariants.
+servers:
+  - url: https://team-relay.example.com/pinvou3/team-relay
+    description: User-configured Team Relay Hub
+security:
+  - deviceBearer: []
+tags:
+  - name: Enrollment
+  - name: Team
+  - name: Threads
+  - name: Attachments
+  - name: Sync
+
+paths:
+  /v1/healthz:
+    get:
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Hub and database are ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/beta-access/verify:
+    post:
+      tags: [Enrollment]
+      operationId: verifyBetaAccess
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BetaAccessRequest"
+      responses:
+        "200":
+          description: The server-side beta access code matched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BetaAccessResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          description: Beta access is disabled or the supplied code is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/enrollments/account:
+    post:
+      tags: [Enrollment]
+      operationId: registerAccount
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccountEnrollmentRequest"
+      responses:
+        "201":
+          description: Account registered or reused and a new device credential issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountEnrollmentResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          description: Self-service enrollment is disabled or the account is disabled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/enrollments/claim:
+    post:
+      tags: [Enrollment]
+      operationId: claimEnrollment
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClaimEnrollmentRequest"
+      responses:
+        "201":
+          description: Invitation consumed and device enrolled. The token is shown once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClaimEnrollmentResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "409":
+          description: Invitation was already consumed or the email is already registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "410":
+          description: Invitation expired or was revoked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/enrollments/join:
+    post:
+      tags: [Enrollment]
+      operationId: joinEnrollment
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JoinEnrollmentRequest"
+      responses:
+        "201":
+          description: Member and device enrolled with the team's reusable join code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClaimEnrollmentResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          description: The team join code is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: The email is already registered on this Team Relay service.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/enrollments/create-team:
+    post:
+      tags: [Enrollment]
+      operationId: createEnrollmentWithTeam
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTeamEnrollmentRequest"
+      responses:
+        "201":
+          description: A principal, device, first team and owner membership were created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClaimEnrollmentResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "409":
+          description: The email is already registered on this Team Relay service.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/teams:
+    get:
+      tags: [Team]
+      operationId: listTeams
+      responses:
+        "200":
+          description: All active teams joined by the current principal.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [teams]
+                properties:
+                  teams:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TeamSummary"
+    post:
+      tags: [Team]
+      operationId: createTeam
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTeamRequest"
+      responses:
+        "201":
+          description: Team created with the current principal as owner.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMembershipResponse"
+
+  /v1/teams/join:
+    post:
+      tags: [Team]
+      operationId: joinTeam
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JoinTeamRequest"
+      responses:
+        "200":
+          description: Existing principal joined another team.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMembershipResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          description: The team join code is invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/me:
+    get:
+      tags: [Enrollment]
+      operationId: getCurrentPrincipal
+      responses:
+        "200":
+          description: Current principal, device and active memberships.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeResponse"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+    patch:
+      tags: [Enrollment]
+      operationId: updateCurrentPrincipal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfileRequest"
+      responses:
+        "200":
+          description: The Hub-wide display name was updated, and a legacy principal optionally bound an email.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateProfileResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "409":
+          description: The email is already registered or an existing registered email was changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/teams/{team_id}/members:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    get:
+      tags: [Team]
+      operationId: listTeamMembers
+      responses:
+        "200":
+          description: Active members of the team.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [members]
+                properties:
+                  members:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TeamMember"
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+
+  /v1/teams/{team_id}/invites:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    post:
+      tags: [Team]
+      operationId: createTeamInvite
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateInviteRequest"
+      responses:
+        "201":
+          description: Single-use invitation. invite_code is returned once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateInviteResponse"
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+
+  /v1/teams/{team_id}/join-password:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    get:
+      tags: [Team]
+      operationId: getTeamJoinPassword
+      description: Returns the current reusable join code when the active member is allowed to see it. This never rotates the code.
+      responses:
+        "200":
+          description: Current join code state. join_password is null when joining is paused, the caller cannot view it, or a legacy code is not recoverable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamJoinCodeState"
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+    post:
+      tags: [Team]
+      operationId: rotateTeamJoinPassword
+      description: Generates or rotates the reusable 8-character team join code. Owner only; the encrypted value remains recoverable by authorized members.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+      responses:
+        "200":
+          description: New join code state. The previous code is already invalid.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamJoinCodeState"
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+    patch:
+      tags: [Team]
+      operationId: setTeamJoinPasswordVisibility
+      description: Changes whether every active member or only owners may retrieve the code. Owner only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [visibility]
+              properties:
+                visibility:
+                  type: string
+                  enum: [members, owners]
+      responses:
+        "200":
+          description: Updated join code state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamJoinCodeState"
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+    delete:
+      tags: [Team]
+      operationId: disableTeamJoinPassword
+      description: Pauses joining and immediately invalidates the current code. Owner only.
+      responses:
+        "200":
+          description: Disabled join code state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamJoinCodeState"
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+
+  /v1/teams/{team_id}/members/{principal_id}:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+      - $ref: "#/components/parameters/PrincipalId"
+    delete:
+      tags: [Team]
+      operationId: removeTeamMember
+      responses:
+        "204":
+          description: Membership removed. The credential may still belong to other teams. If joining is enabled, its code is atomically rotated.
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "409":
+          description: The last team owner or a member with open work cannot be removed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/threads:
+    get:
+      tags: [Threads]
+      operationId: listThreads
+      parameters:
+        - $ref: "#/components/parameters/TeamIdQuery"
+        - name: view
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [open, closed, all]
+            default: open
+      responses:
+        "200":
+          description: Visible threads. UI inbox categories are derived by the client.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [threads]
+                properties:
+                  threads:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WorkThreadSummary"
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+    post:
+      tags: [Threads]
+      operationId: createThread
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateThreadRequest"
+      responses:
+        "201":
+          description: Thread and initial assign action created atomically.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreadMutationResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "422":
+          $ref: "#/components/responses/AttachmentNotReady"
+
+  /v1/threads/{thread_id}:
+    parameters:
+      - $ref: "#/components/parameters/ThreadId"
+    get:
+      tags: [Threads]
+      operationId: getThread
+      responses:
+        "200":
+          description: Thread with immutable action history.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreadDetail"
+        "403":
+          $ref: "#/components/responses/ThreadAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+
+  /v1/threads/{thread_id}/actions:
+    parameters:
+      - $ref: "#/components/parameters/ThreadId"
+    post:
+      tags: [Threads]
+      operationId: createRelayAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateActionRequest"
+      responses:
+        "201":
+          description: Action appended and thread updated atomically.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreadMutationResponse"
+        "200":
+          description: Idempotent replay with the original action and current authoritative thread.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreadMutationResponse"
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+        "409":
+          description: Revision conflict or idempotency key reuse.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          $ref: "#/components/responses/AttachmentNotReady"
+
+  /v1/threads/{thread_id}/preference:
+    parameters:
+      - $ref: "#/components/parameters/ThreadId"
+    put:
+      tags: [Threads]
+      operationId: setThreadPreference
+      description: Sets the current principal personal, cross-device list preference. Hiding is allowed only for closed or cancelled work.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetThreadPreferenceRequest"
+      responses:
+        "200":
+          description: Personal preference updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreadPreference"
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+
+  /v1/attachments:
+    post:
+      tags: [Attachments]
+      operationId: uploadAttachment
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            $ref: "#/components/schemas/Uuid"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [team_id, file]
+              properties:
+                team_id:
+                  $ref: "#/components/schemas/Uuid"
+                file:
+                  type: string
+                  format: binary
+                  description: >-
+                    Allowed document/image/archive types plus UTF-8 code snapshots
+                    (html, css, JavaScript, TypeScript, JSON and YAML). Code
+                    snapshots are returned as text/plain and are never served as
+                    executable Hub content.
+      responses:
+        "201":
+          description: Unbound attachment stored and checked.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attachment"
+        "200":
+          description: Idempotent replay of an upload with identical content.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attachment"
+        "409":
+          $ref: "#/components/responses/IdempotencyConflict"
+        "413":
+          description: File is larger than its limit or the team storage capacity would be exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: File type is not allowed or MIME conflicts with extension.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/attachments/{attachment_id}:
+    parameters:
+      - $ref: "#/components/parameters/AttachmentId"
+    get:
+      tags: [Attachments]
+      operationId: getAttachment
+      responses:
+        "200":
+          description: Attachment metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Attachment"
+        "403":
+          $ref: "#/components/responses/ThreadAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+
+  /v1/attachments/{attachment_id}/content:
+    parameters:
+      - $ref: "#/components/parameters/AttachmentId"
+    get:
+      tags: [Attachments]
+      operationId: downloadAttachment
+      responses:
+        "200":
+          description: Authorized attachment content.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            Digest:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "403":
+          $ref: "#/components/responses/ThreadAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "410":
+          description: Attachment metadata remains but content exceeded its retention period.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/bootstrap:
+    get:
+      tags: [Sync]
+      operationId: getBootstrap
+      parameters:
+        - $ref: "#/components/parameters/TeamIdQuery"
+      responses:
+        "200":
+          description: Authoritative demo snapshot used on start and reconnect.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapResponse"
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+
+  /v1/events:
+    get:
+      tags: [Sync]
+      operationId: streamEvents
+      parameters:
+        - $ref: "#/components/parameters/TeamIdQuery"
+      responses:
+        "200":
+          description: |
+            SSE refresh hints. Reconnect is followed by a full bootstrap; no cursor
+            replay is guaranteed in the demo.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              examples:
+                threadChanged:
+                  value: |-
+                    event: thread.changed
+                    data: {"team_id":"018f70e8-2c96-7a1c-9d6b-23b05b799999","thread_id":"018f70e8-2c96-7a1c-9d6b-23b05b788888","revision":4}
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+
+components:
+  securitySchemes:
+    deviceBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-device-token
+
+  parameters:
+    TeamId:
+      name: team_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    TeamIdQuery:
+      name: team_id
+      in: query
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    PrincipalId:
+      name: principal_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    ThreadId:
+      name: thread_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    AttachmentId:
+      name: attachment_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+
+  responses:
+    InvalidRequest:
+      description: Request fields or combinations are invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AuthenticationRequired:
+      description: Device credential is absent, invalid or revoked.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    MembershipRequired:
+      description: Principal is not an active team member.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ThreadAccessDenied:
+      description: Principal is not allowed to read this thread or attachment.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ActionNotAllowed:
+      description: Current actor, role or thread state does not permit the action.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ResourceNotFound:
+      description: Resource is absent or intentionally hidden from this principal.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    IdempotencyConflict:
+      description: Idempotency key was reused for a different normalized request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AttachmentNotReady:
+      description: Attachment is unavailable, already bound or owned by another principal.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: A required database or storage dependency is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RateLimited:
+      description: Too many invalid join code attempts. Retry after the number of seconds in Retry-After.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+    Timestamp:
+      type: string
+      format: date-time
+    ActionKind:
+      type: string
+      enum: [assign, note, handoff, return, final_deliver, request_changes, accept, cancel]
+    ThreadPhase:
+      type: string
+      enum: [active, awaiting_acceptance, closed, cancelled]
+    MemberRole:
+      type: string
+      enum: [owner, member]
+    ArtifactRole:
+      type: string
+      enum: [input, intermediate, final, evidence]
+
+    GitReference:
+      type: object
+      additionalProperties: false
+      required: [repository_url, commit_sha, branch, pull_request_url, paths, note]
+      properties:
+        repository_url:
+          type: string
+          format: uri
+          maxLength: 2000
+          description: HTTP(S) repository identity only. Credentials, query and fragment are forbidden; the Hub never fetches it.
+        commit_sha:
+          type: string
+          pattern: "^$|^[a-f0-9]{7,64}$"
+          description: Pinned revision used as delivery evidence. Empty is accepted for compatibility but shown as mutable.
+        branch:
+          type: string
+          maxLength: 255
+        pull_request_url:
+          type: string
+          maxLength: 2000
+        paths:
+          type: array
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 500
+        note:
+          type: string
+          maxLength: 2000
+
+    DeliveryPackage:
+      type: object
+      additionalProperties: false
+      required: [schema_version, artifact_role, expected_next, open_questions, git_references]
+      properties:
+        schema_version:
+          type: integer
+          const: 1
+        artifact_role:
+          $ref: "#/components/schemas/ArtifactRole"
+        expected_next:
+          type: string
+          maxLength: 2000
+        open_questions:
+          type: string
+          maxLength: 2000
+        git_references:
+          type: array
+          maxItems: 5
+          items:
+            $ref: "#/components/schemas/GitReference"
+
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, database]
+      properties:
+        status:
+          type: string
+          const: ok
+        database:
+          type: string
+          const: ready
+
+    BetaAccessRequest:
+      type: object
+      additionalProperties: false
+      required: [access_code]
+      properties:
+        access_code:
+          type: string
+          minLength: 1
+          maxLength: 256
+
+    BetaAccessResponse:
+      type: object
+      additionalProperties: false
+      required: [authorized]
+      properties:
+        authorized:
+          type: boolean
+          const: true
+
+    AccountEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [email, display_name]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+
+    ClaimEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [invite_code, display_name]
+      properties:
+        invite_code:
+          type: string
+          minLength: 32
+          maxLength: 256
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Hub-local unique account email. Optional only for rolling compatibility with legacy clients.
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+
+    JoinEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [join_password, display_name]
+      properties:
+        join_password:
+          type: string
+          minLength: 8
+          maxLength: 256
+          description: An 8-character team join code, with optional hyphen, or a legacy long code.
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Hub-local unique account email. Optional only for rolling compatibility with legacy clients.
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+
+    CreateTeamEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [team_name, display_name]
+      properties:
+        team_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: Hub-local unique account email. Optional only for rolling compatibility with legacy clients.
+        device_name:
+          type: string
+          minLength: 1
+          maxLength: 120
+
+    CreateTeamRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+
+    JoinTeamRequest:
+      type: object
+      additionalProperties: false
+      required: [join_code]
+      properties:
+        join_code:
+          type: string
+          minLength: 8
+          maxLength: 256
+          description: An 8-character team join code, with optional hyphen, or a legacy long code.
+
+    ClaimEnrollmentResponse:
+      type: object
+      additionalProperties: false
+      required: [device_token, principal, device, team, membership]
+      properties:
+        device_token:
+          type: string
+          minLength: 32
+          description: Returned once; persist only in the OS credential store.
+        principal:
+          $ref: "#/components/schemas/Principal"
+        device:
+          $ref: "#/components/schemas/Device"
+        team:
+          $ref: "#/components/schemas/Team"
+        membership:
+          $ref: "#/components/schemas/Membership"
+
+    AccountEnrollmentResponse:
+      type: object
+      additionalProperties: false
+      required: [device_token, principal, device]
+      properties:
+        device_token:
+          type: string
+          minLength: 32
+          description: Returned once; persist only in the OS credential store.
+        principal:
+          $ref: "#/components/schemas/Principal"
+        device:
+          $ref: "#/components/schemas/Device"
+
+    TeamMembershipResponse:
+      type: object
+      additionalProperties: false
+      required: [team, membership]
+      properties:
+        team:
+          $ref: "#/components/schemas/Team"
+        membership:
+          $ref: "#/components/schemas/Membership"
+
+    TeamSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, created_by, created_at, join_password_configured, role, joined_at, member_count, open_work_count]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        name:
+          type: string
+        created_by:
+          $ref: "#/components/schemas/Uuid"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        join_password_configured:
+          type: boolean
+        role:
+          type: string
+          enum: [owner, member]
+        joined_at:
+          $ref: "#/components/schemas/Timestamp"
+        member_count:
+          type: integer
+          minimum: 1
+        open_work_count:
+          type: integer
+          minimum: 0
+
+    MeResponse:
+      type: object
+      additionalProperties: false
+      required: [principal, device, memberships]
+      properties:
+        principal:
+          $ref: "#/components/schemas/Principal"
+        device:
+          $ref: "#/components/schemas/Device"
+        memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/Membership"
+
+    UpdateProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name]
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        email:
+          type: string
+          format: email
+          maxLength: 254
+          description: May only bind an email to a legacy principal; changing an existing email is not supported.
+
+    UpdateProfileResponse:
+      type: object
+      additionalProperties: false
+      required: [principal]
+      properties:
+        principal:
+          $ref: "#/components/schemas/Principal"
+
+    Principal:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, created_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        email:
+          oneOf:
+            - type: string
+              format: email
+            - type: "null"
+          description: Returned only for the authenticated principal; null for an unbound legacy identity.
+        display_name:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    Device:
+      type: object
+      additionalProperties: false
+      required: [id, principal_id, name, created_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        principal_id:
+          $ref: "#/components/schemas/Uuid"
+        name:
+          type: string
+        last_seen_at:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    Team:
+      type: object
+      additionalProperties: false
+      required: [id, name, created_by, created_at, join_password_configured]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        name:
+          type: string
+        created_by:
+          $ref: "#/components/schemas/Uuid"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        join_password_configured:
+          type: boolean
+          description: Whether an owner has generated a reusable join password; never exposes its digest or plaintext.
+
+    Membership:
+      type: object
+      additionalProperties: false
+      required: [team_id, principal_id, role, joined_at]
+      properties:
+        team_id:
+          $ref: "#/components/schemas/Uuid"
+        principal_id:
+          $ref: "#/components/schemas/Uuid"
+        role:
+          $ref: "#/components/schemas/MemberRole"
+        joined_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    TeamMember:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, created_at, role, last_seen_at]
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        display_name:
+          type: string
+        email_hint:
+          oneOf:
+            - type: string
+            - type: "null"
+          description: Masked hint used only to disambiguate duplicate display names; never the full account email.
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        role:
+          $ref: "#/components/schemas/MemberRole"
+        last_seen_at:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+
+    CreateInviteRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        expires_in_hours:
+          type: integer
+          minimum: 1
+          maximum: 168
+          default: 24
+
+    CreateInviteResponse:
+      type: object
+      additionalProperties: false
+      required: [invite_id, invite_code, role, expires_at]
+      properties:
+        invite_id:
+          $ref: "#/components/schemas/Uuid"
+        invite_code:
+          type: string
+          minLength: 32
+        role:
+          type: string
+          const: member
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    TeamJoinCodeState:
+      type: object
+      additionalProperties: false
+      required: [configured, visible, recoverable, visibility, join_password, updated_at]
+      properties:
+        configured:
+          type: boolean
+          description: Whether joining is currently enabled.
+        visible:
+          type: boolean
+          description: Whether this caller is allowed to retrieve the current code.
+        recoverable:
+          type: boolean
+          description: Whether the current code has a recoverable encrypted value. Legacy hash-only codes return false.
+        visibility:
+          type: string
+          enum: [members, owners]
+        join_password:
+          oneOf:
+            - type: string
+              minLength: 9
+              maxLength: 9
+              pattern: "^[23456789ABCDEFGHJKMNPQRSTVWXYZ]{4}-[23456789ABCDEFGHJKMNPQRSTVWXYZ]{4}$"
+            - type: "null"
+          description: Decrypted only for an authorized active member; never persisted as plaintext.
+        updated_at:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+
+    WorkThreadSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - team_id
+        - title
+        - initiator_id
+        - owner_id
+        - current_actor_id
+        - return_to_id
+        - final_recipient_id
+        - phase
+        - revision
+        - created_at
+        - updated_at
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        team_id:
+          $ref: "#/components/schemas/Uuid"
+        title:
+          type: string
+        initiator_id:
+          $ref: "#/components/schemas/Uuid"
+        owner_id:
+          $ref: "#/components/schemas/Uuid"
+        current_actor_id:
+          oneOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+        return_to_id:
+          oneOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+        final_recipient_id:
+          $ref: "#/components/schemas/Uuid"
+        phase:
+          $ref: "#/components/schemas/ThreadPhase"
+        revision:
+          type: integer
+          minimum: 1
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    ThreadDetail:
+      type: object
+      additionalProperties: false
+      required: [thread, preference, participants, actions]
+      properties:
+        thread:
+          $ref: "#/components/schemas/WorkThreadSummary"
+        preference:
+          $ref: "#/components/schemas/ThreadPreference"
+        participants:
+          type: array
+          items:
+            $ref: "#/components/schemas/Uuid"
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RelayAction"
+
+    RelayAction:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - thread_id
+        - sequence
+        - kind
+        - actor_id
+        - recipient_id
+        - return_to_id
+        - message
+        - base_revision
+        - idempotency_key
+        - attachment_ids
+        - delivery
+        - created_at
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        thread_id:
+          $ref: "#/components/schemas/Uuid"
+        sequence:
+          type: integer
+          minimum: 1
+        kind:
+          $ref: "#/components/schemas/ActionKind"
+        actor_id:
+          $ref: "#/components/schemas/Uuid"
+        recipient_id:
+          oneOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+        return_to_id:
+          oneOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+        message:
+          type: string
+          maxLength: 10000
+        base_revision:
+          type: integer
+          minimum: 0
+        idempotency_key:
+          $ref: "#/components/schemas/Uuid"
+        attachment_ids:
+          type: array
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/Uuid"
+        delivery:
+          $ref: "#/components/schemas/DeliveryPackage"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    CreateThreadRequest:
+      type: object
+      additionalProperties: false
+      required: [team_id, title, assignee_id, message, attachment_ids, idempotency_key]
+      properties:
+        team_id:
+          $ref: "#/components/schemas/Uuid"
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        assignee_id:
+          $ref: "#/components/schemas/Uuid"
+        message:
+          type: string
+          maxLength: 10000
+        attachment_ids:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Uuid"
+        delivery:
+          $ref: "#/components/schemas/DeliveryPackage"
+        idempotency_key:
+          $ref: "#/components/schemas/Uuid"
+
+    CreateActionRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, message, attachment_ids, expected_revision, idempotency_key]
+      properties:
+        kind:
+          type: string
+          enum: [note, handoff, return, final_deliver, request_changes, accept, cancel]
+        recipient_id:
+          description: Required only for handoff; forbidden for other action kinds.
+          oneOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+        message:
+          type: string
+          maxLength: 10000
+        attachment_ids:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Uuid"
+        delivery:
+          $ref: "#/components/schemas/DeliveryPackage"
+        expected_revision:
+          type: integer
+          minimum: 1
+        idempotency_key:
+          $ref: "#/components/schemas/Uuid"
+
+    SetThreadPreferenceRequest:
+      type: object
+      additionalProperties: false
+      required: [pinned, hidden]
+      properties:
+        pinned:
+          type: boolean
+        hidden:
+          type: boolean
+
+    ThreadPreference:
+      type: object
+      additionalProperties: false
+      required: [thread_id, pinned, hidden, pinned_at, hidden_at, updated_at]
+      properties:
+        thread_id:
+          $ref: "#/components/schemas/Uuid"
+        pinned:
+          type: boolean
+        hidden:
+          type: boolean
+        pinned_at:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        hidden_at:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+        updated_at:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
+
+    ThreadMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [thread, action, replayed]
+      properties:
+        thread:
+          $ref: "#/components/schemas/WorkThreadSummary"
+        action:
+          $ref: "#/components/schemas/RelayAction"
+        replayed:
+          type: boolean
+          description: True when no write occurred because this idempotency key already succeeded.
+
+    Attachment:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - team_id
+        - uploaded_by
+        - original_name
+        - content_type
+        - byte_size
+        - sha256
+        - bound
+        - available
+        - created_at
+      properties:
+        id:
+          $ref: "#/components/schemas/Uuid"
+        team_id:
+          $ref: "#/components/schemas/Uuid"
+        uploaded_by:
+          $ref: "#/components/schemas/Uuid"
+        original_name:
+          type: string
+        content_type:
+          type: string
+        byte_size:
+          type: integer
+          minimum: 0
+          maximum: 20971520
+        sha256:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        bound:
+          type: boolean
+        available:
+          type: boolean
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    BootstrapResponse:
+      type: object
+      additionalProperties: false
+      required: [protocol_version, generated_at, team, me, members, threads]
+      properties:
+        protocol_version:
+          type: string
+          const: "0.1"
+        generated_at:
+          $ref: "#/components/schemas/Timestamp"
+        team:
+          $ref: "#/components/schemas/Team"
+        me:
+          $ref: "#/components/schemas/Principal"
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/TeamMember"
+        threads:
+          type: array
+          items:
+            $ref: "#/components/schemas/ThreadDetail"
+
+    ErrorDetail:
+      type: object
+      additionalProperties: true
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          enum:
+            - invalid_request
+            - authentication_required
+            - device_revoked
+            - membership_required
+            - thread_access_denied
+            - action_not_allowed
+            - resource_not_found
+            - revision_conflict
+            - idempotency_key_reused
+            - invite_already_claimed
+            - last_team_owner
+            - member_has_open_work
+            - invite_expired
+            - attachment_expired
+            - attachment_too_large
+            - team_attachment_capacity_exceeded
+            - attachment_type_not_allowed
+            - attachment_not_ready
+            - rate_limited
+            - service_unavailable
+        message:
+          type: string
+        request_id:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorDetail"

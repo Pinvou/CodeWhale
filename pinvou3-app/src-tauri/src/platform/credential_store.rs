@@ -73,6 +73,7 @@ const LLMAPI_USER_SESSION_SERVICE: &str = "pinvou3-llmapi-user-session";
 const LLMAPI_USER_PASSWORD_SERVICE: &str = "pinvou3-llmapi-user-password";
 const IMA_SECRET_SERVICE: &str = "pinvou3-ima-secret";
 const ACP_PROVIDER_KEY_SERVICE: &str = "pinvou3-acp-provider-key";
+const TEAM_RELAY_DEVICE_SERVICE: &str = "pinvou3-team-relay-device";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CredentialReference {
@@ -151,6 +152,16 @@ impl CredentialReference {
         Self {
             service: ACP_PROVIDER_KEY_SERVICE.to_string(),
             account: format!("{agent}:{provider_id}"),
+            version: 1,
+        }
+    }
+
+    /// Team Relay 的设备令牌按规范化 Hub 地址隔离，避免切换 Hub 后把令牌
+    /// 发送到另一个服务。account 只保存地址摘要，不泄露服务地址或令牌。
+    pub fn for_team_relay_device(hub_fingerprint: &str) -> Self {
+        Self {
+            service: TEAM_RELAY_DEVICE_SERVICE.to_string(),
+            account: format!("hub:{hub_fingerprint}"),
             version: 1,
         }
     }

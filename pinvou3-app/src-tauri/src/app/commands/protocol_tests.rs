@@ -448,6 +448,39 @@ command_protocol!(
     ["report_frontend_startup", "reveal_startup_window"]
 );
 command_protocol!(
+    team_relay_protocol,
+    "team_relay.rs",
+    [
+        "team_relay_status",
+        "team_relay_verify_beta_access",
+        "team_relay_register_account",
+        "team_relay_account",
+        "team_relay_claim",
+        "team_relay_create_first_team",
+        "team_relay_bootstrap",
+        "team_relay_update_profile",
+        "team_relay_create_team",
+        "team_relay_join_team",
+        "team_relay_switch_team",
+        "team_relay_create_invite",
+        "team_relay_get_join_password",
+        "team_relay_rotate_join_password",
+        "team_relay_set_join_password_visibility",
+        "team_relay_disable_join_password",
+        "team_relay_remove_member",
+        "team_relay_create_thread",
+        "team_relay_create_action",
+        "team_relay_set_thread_preference",
+        "team_relay_upload_attachment",
+        "team_relay_download_attachment",
+        "team_relay_task_workspace_status",
+        "team_relay_prepare_task_workspace",
+        "team_relay_reveal_prepared_material",
+        "team_relay_set_task_agent_session",
+        "team_relay_disconnect"
+    ]
+);
+command_protocol!(
     updater_protocol,
     "updater.rs",
     [

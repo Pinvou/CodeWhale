@@ -1,0 +1,8 @@
+**/node_modules
+**/npm-debug.log
+team-relay-hub/data
+**/.env
+.git
+.gitmodules
+pinvou3-app
+CodeWhale

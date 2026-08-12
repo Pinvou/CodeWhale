@@ -38,6 +38,7 @@
   };
   const { listen } = TAURI.event;
   const dialogOpen = TAURI.dialog?.open;
+  const dialogSave = TAURI.dialog?.save;
   function startupMark(stage, detail) {
     if (window.__PINVOU_STARTUP__) window.__PINVOU_STARTUP__.mark(stage, detail);
   }
@@ -238,6 +239,7 @@
       taskCompletionNotificationsDefault: true,
       localVllmSupported: false,
       codexAcpSupported: false,
+      teamRelaySupported: true,
     },
     settings: null,
     selectedPet: "lingling",
@@ -391,6 +393,19 @@
     scheduledTaskCreationSessionId: null,
     scheduledTaskAutoOpenId: null,
     scheduledRunContext: null,
+    teamRelay: {
+      loading: false,
+      mutating: false,
+      error: null,
+      status: { configured: false, hub_url: null, team_id: null },
+      snapshot: null,
+      account: null,
+      taskWorkspaces: {},
+      preparingWorkspace: null,
+      workspaceError: null,
+      uploadProgress: null,
+      lastSyncedAt: null,
+    },
     // 「通过聊天创建」的引导词:只随该会话首条消息发给模型,永不显示在气泡里。
     scheduledTaskPendingGuide: null,
   };
@@ -967,6 +982,7 @@
   var refreshHistoryList = sessionsFeature.refreshHistoryList;
   var enterDraft = sessionsFeature.enterDraft;
   var createNewSession = sessionsFeature.createNewSession;
+  var materializeSession = sessionsFeature.materializeSession;
   var ensureSession = sessionsFeature.ensureSession;
   var reportSessionSwitchFailure = sessionsFeature.reportSessionSwitchFailure;
   var hydratedMessageKey = sessionsFeature.hydratedMessageKey;
@@ -1260,6 +1276,7 @@
     remoteControl: ["webAccess"],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstallProgress", "depsInstalling"],
+    teamRelay: ["teamRelay"],
   };
   function snapshotStateSlice(domain) {
     var fields = STATE_SLICE_FIELDS[domain];
@@ -2100,6 +2117,46 @@
   var approveWorkflowGate = workflowFeature.approveWorkflowGate;
   var rejectWorkflowGate = workflowFeature.rejectWorkflowGate;
   var retryWorkflowRole = workflowFeature.retryWorkflowRole;
+  var teamRelayFeature = installBridgeFeature("team-relay", {
+    state: state,
+    notify: notify,
+    invoke: invoke,
+    listen: listen,
+    dialogOpen: dialogOpen,
+    dialogSave: dialogSave,
+    refreshHistoryList: refreshHistoryList,
+  });
+  var loadTeamRelay = teamRelayFeature.load;
+  var refreshTeamRelay = teamRelayFeature.refresh;
+  var verifyTeamRelayAccess = teamRelayFeature.verifyAccess;
+  var registerTeamRelayAccount = teamRelayFeature.registerAccount;
+  var claimTeamRelay = teamRelayFeature.claim;
+  var createFirstTeamRelayTeam = teamRelayFeature.createFirstTeam;
+  var updateTeamRelayProfile = teamRelayFeature.updateProfile;
+  var createTeamRelayTeam = teamRelayFeature.createTeam;
+  var joinTeamRelayTeam = teamRelayFeature.joinTeam;
+  var switchTeamRelayTeam = teamRelayFeature.switchTeam;
+  var removeTeamRelayMember = teamRelayFeature.removeMember;
+  var createTeamRelayInvite = teamRelayFeature.createInvite;
+  var getTeamRelayJoinPassword = teamRelayFeature.getJoinPassword;
+  var rotateTeamRelayJoinPassword = teamRelayFeature.rotateJoinPassword;
+  var setTeamRelayJoinPasswordVisibility = teamRelayFeature.setJoinPasswordVisibility;
+  var disableTeamRelayJoinPassword = teamRelayFeature.disableJoinPassword;
+  var createTeamRelayThread = teamRelayFeature.createThread;
+  var createTeamRelayAction = teamRelayFeature.createAction;
+  var setTeamRelayThreadPreference = teamRelayFeature.setThreadPreference;
+  var listTeamRelayDraftSourceSessions = teamRelayFeature.listDraftSourceSessions;
+  var readTeamRelayDraftSourceSession = teamRelayFeature.readDraftSourceSession;
+  var mountTeamRelayDraftMaterials = teamRelayFeature.mountDraftMaterials;
+  var pickTeamRelayAttachments = teamRelayFeature.pickDraftAttachments;
+  var downloadTeamRelayAttachment = teamRelayFeature.downloadAttachment;
+  var teamRelayTaskWorkspaceStatus = teamRelayFeature.taskWorkspaceStatus;
+  var prepareTeamRelayTaskWorkspace = teamRelayFeature.prepareTaskWorkspace;
+  var setTeamRelayTaskAgentSession = teamRelayFeature.setTaskAgentSession;
+  var pickTeamRelayAgentWorkspace = teamRelayFeature.pickAgentWorkspace;
+  var openTeamRelayPreparedMaterial = teamRelayFeature.openPreparedMaterial;
+  var revealTeamRelayPreparedMaterial = teamRelayFeature.revealPreparedMaterial;
+  var disconnectTeamRelay = teamRelayFeature.disconnect;
   // ── Init ─────────────────────────────────────────────────────────
   async function init() {
     if (initPromise) return initPromise;
@@ -2232,6 +2289,7 @@
     },
     sessions: {
       createNewSession: createNewSession,
+      materializeSession: materializeSession,
       switchToSession: switchToSession,
       deleteSession: deleteSession,
       renameSession: renameSession,
@@ -2409,6 +2467,39 @@
     dependencies: {
       checkDependencies: checkDependencies,
       installDependencies: installDependencies,
+    },
+    teamRelay: {
+      load: loadTeamRelay,
+      refresh: refreshTeamRelay,
+      verifyAccess: verifyTeamRelayAccess,
+      registerAccount: registerTeamRelayAccount,
+      claim: claimTeamRelay,
+      createFirstTeam: createFirstTeamRelayTeam,
+      updateProfile: updateTeamRelayProfile,
+      createTeam: createTeamRelayTeam,
+      joinTeam: joinTeamRelayTeam,
+      switchTeam: switchTeamRelayTeam,
+      removeMember: removeTeamRelayMember,
+      createInvite: createTeamRelayInvite,
+      getJoinPassword: getTeamRelayJoinPassword,
+      rotateJoinPassword: rotateTeamRelayJoinPassword,
+      setJoinPasswordVisibility: setTeamRelayJoinPasswordVisibility,
+      disableJoinPassword: disableTeamRelayJoinPassword,
+      createThread: createTeamRelayThread,
+      createAction: createTeamRelayAction,
+      setThreadPreference: setTeamRelayThreadPreference,
+      listDraftSourceSessions: listTeamRelayDraftSourceSessions,
+      readDraftSourceSession: readTeamRelayDraftSourceSession,
+      mountDraftMaterials: mountTeamRelayDraftMaterials,
+      pickDraftAttachments: pickTeamRelayAttachments,
+      downloadAttachment: downloadTeamRelayAttachment,
+      taskWorkspaceStatus: teamRelayTaskWorkspaceStatus,
+      prepareTaskWorkspace: prepareTeamRelayTaskWorkspace,
+      setTaskAgentSession: setTeamRelayTaskAgentSession,
+      pickAgentWorkspace: pickTeamRelayAgentWorkspace,
+      openPreparedMaterial: openTeamRelayPreparedMaterial,
+      revealPreparedMaterial: revealTeamRelayPreparedMaterial,
+      disconnect: disconnectTeamRelay,
     },
   };
 

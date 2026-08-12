@@ -30,6 +30,7 @@
     remoteControl: ["webAccess"],
     updater: ["updateCancelling", "updateCheckError", "updateChecking", "updateDownloading", "updateError", "updateInfo", "updateProgress", "updateReady"],
     dependencies: ["deps", "depsChecking", "depsInstallError", "depsInstalling"]
+    ,teamRelay: ["teamRelay"]
   };
 
   function clone(value) {
@@ -79,6 +80,10 @@
     return result;
   }
 
+  function unsupportedTeamRelay() {
+    return Promise.reject(new Error("Team Relay is only available in the Pinvou desktop app"));
+  }
+
   window.TauriBridge = {
     available: true,
     lifecycle: { init: flat.init },
@@ -88,7 +93,7 @@
     voice: domain(["startVoiceInput", "installVoiceAsr", "closeVoiceAsrSetup", "cancelVoiceInput", "clearVoiceInput", "appendVoiceText", "runVoiceInputDebugAssertions"]),
     knowledge: domain(["downloadKbModel", "cancelKbModel", "mountCollection", "setCollectionEnabled", "removeCollection", "unmountCollection", "listCollections", "kbModelStatus"]),
     scheduled: domain(["loadScheduledTasks", "readScheduledTask", "loadScheduledTaskRuns", "loadScheduledTaskRecentRuns", "selectScheduledTask", "refreshScheduledTaskData", "clearScheduledTaskSelection", "dismissScheduledTaskError", "createScheduledTask", "updateScheduledTask", "pauseScheduledTask", "resumeScheduledTask", "toggleScheduledTaskPinned", "deleteScheduledTask", "runScheduledTaskNow", "pickFolder", "startScheduledTaskChat", "confirmScheduledTaskDraft", "clearScheduledTaskDraft", "openScheduledRunChat", "exitScheduledRunChat"]),
-    sessions: domain(["createNewSession", "switchToSession", "deleteSession", "renameSession", "toggleSessionPinned", "archiveSession", "restoreArchivedSession"]),
+    sessions: domain(["createNewSession", "materializeSession", "switchToSession", "deleteSession", "renameSession", "toggleSessionPinned", "archiveSession", "restoreArchivedSession"]),
     monitor: domain(["startMonitorPolling", "stopMonitorPolling", "clearMonitorStats"]),
     settings: domain(["setSelectedPet", "saveSettings", "saveSettingsAndRestart", "saveSearchSettings", "saveSearchSettingsAndRestart", "testSearchProvider"]),
     feedback: domain(["submitFeedback"]),
@@ -111,6 +116,39 @@
     personas: domain(["loadPersonas", "getPersonas", "readPersonaBody", "equipPersona", "unequipPersona", "postCardCreatorIntro", "createPersona", "updatePersona", "deletePersona"]),
     memory: domain(["loadMemoryOverview", "saveMemoryProfilePatch", "deleteMemoryPreference", "updateMemoryItem", "deleteMemoryItem", "archiveRecentWorkMemory", "confirmMemoryCandidate", "ignoreMemoryCandidate", "neverMemoryCandidate"]),
     updater: domain(["checkForUpdate", "downloadAndInstallUpdate", "cancelUpdate", "restartApp"]),
-    dependencies: domain(["checkDependencies", "installDependencies"])
+    dependencies: domain(["checkDependencies", "installDependencies"]),
+    teamRelay: {
+      load: unsupportedTeamRelay,
+      refresh: unsupportedTeamRelay,
+      verifyAccess: unsupportedTeamRelay,
+      registerAccount: unsupportedTeamRelay,
+      claim: unsupportedTeamRelay,
+      createFirstTeam: unsupportedTeamRelay,
+      updateProfile: unsupportedTeamRelay,
+      createTeam: unsupportedTeamRelay,
+      joinTeam: unsupportedTeamRelay,
+      switchTeam: unsupportedTeamRelay,
+      removeMember: unsupportedTeamRelay,
+      createInvite: unsupportedTeamRelay,
+      getJoinPassword: unsupportedTeamRelay,
+      rotateJoinPassword: unsupportedTeamRelay,
+      setJoinPasswordVisibility: unsupportedTeamRelay,
+      disableJoinPassword: unsupportedTeamRelay,
+      createThread: unsupportedTeamRelay,
+      createAction: unsupportedTeamRelay,
+      setThreadPreference: unsupportedTeamRelay,
+      listDraftSourceSessions: unsupportedTeamRelay,
+      readDraftSourceSession: unsupportedTeamRelay,
+      mountDraftMaterials: unsupportedTeamRelay,
+      pickDraftAttachments: unsupportedTeamRelay,
+      downloadAttachment: unsupportedTeamRelay,
+      taskWorkspaceStatus: unsupportedTeamRelay,
+      prepareTaskWorkspace: unsupportedTeamRelay,
+      setTaskAgentSession: unsupportedTeamRelay,
+      pickAgentWorkspace: unsupportedTeamRelay,
+      openPreparedMaterial: unsupportedTeamRelay,
+      revealPreparedMaterial: unsupportedTeamRelay,
+      disconnect: unsupportedTeamRelay
+    }
   };
 })();

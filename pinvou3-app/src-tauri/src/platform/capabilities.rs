@@ -8,6 +8,7 @@ pub(crate) struct DesktopCapabilities {
     pub(crate) task_completion_notifications_default: bool,
     pub(crate) local_vllm_supported: bool,
     pub(crate) codex_acp_supported: bool,
+    pub(crate) team_relay_supported: bool,
 }
 
 pub(crate) fn current() -> DesktopCapabilities {
@@ -22,6 +23,7 @@ pub(crate) fn current() -> DesktopCapabilities {
         task_completion_notifications_default: !cfg!(target_os = "linux"),
         local_vllm_supported: cfg!(target_os = "linux"),
         codex_acp_supported: supports_codex_acp(std::env::consts::OS),
+        team_relay_supported: true,
     }
 }
 

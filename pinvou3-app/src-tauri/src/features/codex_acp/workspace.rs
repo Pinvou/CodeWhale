@@ -80,6 +80,8 @@ pub struct WorkspaceChange {
 pub struct WorkspaceChanges {
     pub git: bool,
     pub branch: Option<String>,
+    pub repository_url: Option<String>,
+    pub commit_sha: Option<String>,
     pub baseline_available: bool,
     pub changes: Vec<WorkspaceChange>,
 }
@@ -318,6 +320,8 @@ pub fn workspace_changes(session_id: &str, root: &Path) -> Result<WorkspaceChang
     Ok(WorkspaceChanges {
         git,
         branch: git.then(|| git_branch(&root)).flatten(),
+        repository_url: git.then(|| git_repository_url(&root)).flatten(),
+        commit_sha: git.then(|| git_commit_sha(&root)).flatten(),
         baseline_available,
         changes,
     })
@@ -980,6 +984,50 @@ fn git_branch(root: &Path) -> Option<String> {
     (!branch.is_empty()).then(|| branch.to_string())
 }
 
+fn git_commit_sha(root: &Path) -> Option<String> {
+    let commit = git_output(root, &["rev-parse", "HEAD"]).ok()?;
+    let commit = commit.trim().to_ascii_lowercase();
+    (commit.len() >= 7 && commit.len() <= 64 && commit.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .then_some(commit)
+}
+
+fn git_repository_url(root: &Path) -> Option<String> {
+    let remote = git_output(root, &["remote", "get-url", "origin"]).ok()?;
+    sanitize_git_remote_url(remote.trim())
+}
+
+fn sanitize_git_remote_url(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    if remote.is_empty() {
+        return None;
+    }
+    let candidate = if let Some(rest) = remote.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        format!("https://{host}/{path}")
+    } else if remote.starts_with("ssh://") || remote.starts_with("git://") {
+        let parsed = reqwest::Url::parse(remote).ok()?;
+        let host = parsed.host_str()?;
+        format!("https://{host}{}", parsed.path())
+    } else {
+        remote.to_string()
+    };
+    let mut parsed = reqwest::Url::parse(&candidate).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.set_username("").ok()?;
+    parsed.set_password(None).ok()?;
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let clean_path = parsed
+        .path()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_string();
+    parsed.set_path(&clean_path);
+    Some(parsed.to_string().trim_end_matches('/').to_string())
+}
+
 fn git_status_entries(root: &Path) -> Result<Vec<WorkspaceChange>> {
     let output = crate::platform::process::HiddenCommand::new("git")
         .current_dir(root)
@@ -1331,5 +1379,21 @@ mod tests {
             classify_origin(root.path(), Some(&baseline), "new.txt").unwrap(),
             "session"
         );
+    }
+
+    #[test]
+    fn git_remote_url_is_shareable_and_drops_credentials() {
+        assert_eq!(
+            sanitize_git_remote_url("git@github.com:pinvou/pinvou-agent.git").as_deref(),
+            Some("https://github.com/pinvou/pinvou-agent")
+        );
+        assert_eq!(
+            sanitize_git_remote_url(
+                "https://token:secret@example.com/team/repo.git?ref=main#readme"
+            )
+            .as_deref(),
+            Some("https://example.com/team/repo")
+        );
+        assert_eq!(sanitize_git_remote_url("/private/local/repo"), None);
     }
 }

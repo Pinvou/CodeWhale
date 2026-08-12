@@ -368,6 +368,12 @@ try {
     && codexView.includes("useState(loadAgentSelection() || 'pinvou')")
     && codexView.includes('saveAgentSelection(agentId)'),
   'code draft agent must default to Pinwu and persist the user-selected agent across reopens');
+  assert.ok(codexView.includes('const composerRef = useRef(null)')
+    && codexView.includes('<textarea ref={composerRef} value={draft}')
+    && codexView.includes("element.style.height = 'auto'")
+    && codexView.includes('Math.min(Math.max(element.scrollHeight, 48), 192)')
+    && /useLayoutEffect\(\(\) => \{[\s\S]{0,420}?composerRef\.current[\s\S]{0,420}?\}, \[activeId, draft, sessionLoading\]\)/.test(codexView),
+  'code composer must resize for both typed and programmatically prefilled drafts');
   assert.ok(codexView.includes("invoke('login_acp_agent'")
     && codexView.includes("invoke('open_acp_agent_login_url'")
     && codexView.includes("invoke('submit_acp_agent_login_code'")

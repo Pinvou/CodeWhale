@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { AppWindow, Award, Briefcase, Check, ChevronLeft, ChevronRight, Cpu, Feather, Globe, Palette, Plus, Radio, Sparkles, Terminal, TrendingUp, User, X } from '../../components/icons.jsx';
 import { IosSearchField, IosSegmentedControl } from '../../components/IosControls.jsx';
 import { bridge } from '../../hooks/useBridge.js';
+import { EXPERT_AVATAR_COUNT as AVATAR_N, expertAvatarSrc as avatarSrc } from '../../shared/expert-avatar.mjs';
 import { ExpertTeamsPanel } from '../workflow/WorkflowView.jsx';
 
 const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', finance:'金融', 'game-development':'游戏', hr:'人力', legal:'法务', marketing:'营销', 'paid-media':'投放', product:'产品', 'project-management':'项管', sales:'销售', 'spatial-computing':'空间计算', specialized:'专项', 'supply-chain':'供应链', support:'客服', testing:'测试', tool:'工具' };
@@ -24,13 +25,6 @@ const DEPT_LABELS = { academic:'学术', design:'设计', engineering:'工程', 
     const DEPT_OPTIONS = DEPT_ORDER.filter(function(d){ return d !== 'tool'; });
     const deptColor = (d) => DEPT_COLOR[d] || '#9aa0a6';
     // 本地内置头像(50 张 Micah,src/avatars/),按卡 id 哈希固定分配
-    const AVATAR_N = 50;
-    function avatarSrc(id) {
-      let h = 0; const s = String(id || '');
-      for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-      const n = (h % AVATAR_N) + 1;
-      return 'avatars/avatar-' + (n < 10 ? '0' + n : n) + '.svg';
-    }
     // 头像加载失败时按部门降级到本地图标
     const DEPT_ICON = { engineering: Terminal, design: Palette, product: AppWindow, marketing: TrendingUp, finance: Briefcase, sales: TrendingUp, testing: Cpu, 'project-management': Briefcase, 'paid-media': Radio, support: User, academic: Award, 'game-development': Cpu, 'spatial-computing': Globe, 'supply-chain': Briefcase, hr: User, legal: Award, specialized: Feather, tool: Cpu };
     // App Store 风头像块:本地头像图,失败降级图标(绝不显示文字)

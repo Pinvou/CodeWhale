@@ -1,0 +1,481 @@
+import http from "node:http";
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import { authenticate, requireMembership } from "./auth.js";
+import {
+  getAttachment,
+  openAttachmentContent,
+  uploadAttachment,
+} from "./attachment-service.js";
+import { asAppError, AppError } from "./errors.js";
+import { sha256 } from "./crypto.js";
+import { JoinRateLimiter } from "./join-rate-limiter.js";
+import {
+  claimEnrollment,
+  createEnrollmentWithTeam,
+  createTeam,
+  createTeamInvite,
+  disableTeamJoinPassword,
+  getMe,
+  getTeamJoinPassword,
+  joinEnrollment,
+  joinTeam,
+  listTeams,
+  listTeamMembers,
+  registerAccount,
+  removeTeamMember,
+  rotateTeamJoinPassword,
+  setTeamJoinPasswordVisibility,
+  updateProfile,
+} from "./identity-service.js";
+import {
+  createAction,
+  createThread,
+  getBootstrap,
+  getThread,
+  listThreads,
+  setThreadPreference,
+} from "./thread-service.js";
+import { exactKeys, text, uuid } from "./validation.js";
+
+function bearerToken(request) {
+  const header = request.headers.authorization;
+  if (typeof header !== "string") return null;
+  const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/.exec(header);
+  return match?.[1] || null;
+}
+
+function sendJson(response, status, value, requestId, extraHeaders = {}) {
+  if (response.headersSent) return;
+  const body = value === undefined ? "" : JSON.stringify(value);
+  response.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "X-Request-Id": requestId,
+    ...extraHeaders,
+  });
+  response.end(body);
+}
+
+function clientAddress(request, trustProxy) {
+  if (trustProxy) {
+    const forwarded = request.headers["x-real-ip"];
+    if (typeof forwarded === "string" && forwarded.length <= 64 && forwarded.trim()) {
+      return forwarded.trim();
+    }
+  }
+  return request.socket.remoteAddress || "unknown";
+}
+
+async function readJson(request, maximumBytes) {
+  const contentType = String(request.headers["content-type"] || "").split(";", 1)[0].trim();
+  if (contentType !== "application/json") {
+    throw new AppError(400, "invalid_request", "Content-Type must be application/json.");
+  }
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    bytes += chunk.length;
+    if (bytes > maximumBytes) {
+      throw new AppError(413, "invalid_request", "The JSON request body is too large.");
+    }
+    chunks.push(chunk);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new AppError(400, "invalid_request", "The JSON request body is invalid.");
+  }
+}
+
+class EventBroker {
+  constructor() {
+    this.teams = new Map();
+  }
+
+  subscribe(teamId, principalId, response) {
+    let responses = this.teams.get(teamId);
+    if (!responses) {
+      responses = new Set();
+      this.teams.set(teamId, responses);
+    }
+    const subscription = { principalId, response };
+    responses.add(subscription);
+    return () => {
+      responses.delete(subscription);
+      if (responses.size === 0) this.teams.delete(teamId);
+    };
+  }
+
+  publish(teamId, event, resource = {}) {
+    const data = JSON.stringify({
+      team_id: teamId,
+      thread_id: resource.id,
+      revision: resource.revision,
+    });
+    for (const subscription of this.teams.get(teamId) || []) {
+      if (resource.principal_id && subscription.principalId !== resource.principal_id) continue;
+      try {
+        subscription.response.write(`event: ${event}\ndata: ${data}\n\n`);
+      } catch {
+        subscription.response.destroy();
+      }
+    }
+  }
+
+  revoke(teamId, principalId) {
+    const responses = this.teams.get(teamId);
+    if (!responses) return;
+    for (const subscription of [...responses]) {
+      if (subscription.principalId !== principalId) continue;
+      responses.delete(subscription);
+      try {
+        subscription.response.end();
+      } catch {
+        subscription.response.destroy();
+      }
+    }
+    if (responses.size === 0) this.teams.delete(teamId);
+  }
+
+  closeAll() {
+    for (const responses of this.teams.values()) {
+      for (const subscription of responses) subscription.response.end();
+    }
+    this.teams.clear();
+  }
+}
+
+function pathMatch(pathname, pattern) {
+  const match = pattern.exec(pathname);
+  return match ? match.slice(1) : null;
+}
+
+function contentDisposition(filename) {
+  return `attachment; filename="download"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+export function createHubServer({ pool, config }) {
+  const events = new EventBroker();
+  const notify = events.publish.bind(events);
+  const joinRateLimiter = new JoinRateLimiter({
+    maximumFailures: config.joinRateLimitFailures ?? 5,
+    windowMs: (config.joinRateLimitWindowSeconds ?? 600) * 1000,
+    blockMs: (config.joinRateLimitBlockSeconds ?? 900) * 1000,
+  });
+  const betaAccessRateLimiter = new JoinRateLimiter({
+    maximumFailures: config.joinRateLimitFailures ?? 5,
+    windowMs: (config.joinRateLimitWindowSeconds ?? 600) * 1000,
+    blockMs: (config.joinRateLimitBlockSeconds ?? 900) * 1000,
+  });
+
+  async function verifyBetaAccess(request) {
+    if (!config.betaAccessPasswordHash) {
+      throw new AppError(403, "action_not_allowed", "Beta access verification is disabled on this Hub.");
+    }
+    const rateLimitKey = `beta-access:${clientAddress(request, config.trustProxy)}`;
+    betaAccessRateLimiter.check(rateLimitKey);
+    const body = exactKeys(await readJson(request, config.maxJsonBytes), ["access_code"]);
+    const accessCode = text(body.access_code, "access_code", { minimum: 1, maximum: 256 }).trim();
+    const actual = Buffer.from(sha256(accessCode), "hex");
+    const expected = Buffer.from(config.betaAccessPasswordHash, "hex");
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+      betaAccessRateLimiter.recordFailure(rateLimitKey);
+      throw new AppError(403, "beta_access_invalid", "The beta access code is invalid.");
+    }
+    betaAccessRateLimiter.recordSuccess(rateLimitKey);
+    return { authorized: true };
+  }
+
+  async function joinWithRateLimit(request, operation, authenticatedKey = null) {
+    const rateLimitKey = authenticatedKey || `ip:${clientAddress(request, config.trustProxy)}`;
+    joinRateLimiter.check(rateLimitKey);
+    try {
+      const result = await operation();
+      joinRateLimiter.recordSuccess(rateLimitKey);
+      return result;
+    } catch (error) {
+      if (asAppError(error).code === "join_password_invalid") {
+        joinRateLimiter.recordFailure(rateLimitKey);
+      }
+      throw error;
+    }
+  }
+
+  const server = http.createServer(async (request, response) => {
+    const requestId = `req_${randomUUID()}`;
+    response.on("error", () => {});
+    try {
+      const url = new URL(request.url || "/", "http://team-relay.local");
+      if (config.publicBasePath && !url.pathname.startsWith(`${config.publicBasePath}/`)) {
+        throw new AppError(404, "resource_not_found", "The endpoint was not found.");
+      }
+      const pathname = config.publicBasePath
+        ? url.pathname.slice(config.publicBasePath.length)
+        : url.pathname;
+      const method = request.method || "GET";
+      const token = bearerToken(request);
+
+      if (method === "GET" && pathname === "/v1/healthz") {
+        await pool.query("SELECT 1");
+        sendJson(response, 200, { status: "ok", database: "ready" }, requestId);
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/beta-access/verify") {
+        sendJson(response, 200, await verifyBetaAccess(request), requestId);
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/enrollments/claim") {
+        const result = await claimEnrollment(pool, await readJson(request, config.maxJsonBytes));
+        notify(result.team.id, "membership.changed");
+        sendJson(response, 201, result, requestId);
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/enrollments/account") {
+        if (!config.allowSelfServiceEnrollment) {
+          throw new AppError(403, "action_not_allowed", "Self-service account enrollment is disabled on this Hub.");
+        }
+        const result = await registerAccount(pool, await readJson(request, config.maxJsonBytes));
+        for (const teamId of result.team_ids) notify(teamId, "profile.changed");
+        const { team_ids: _teamIds, ...responseBody } = result;
+        sendJson(response, 201, responseBody, requestId);
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/enrollments/create-team") {
+        if (!config.allowSelfServiceEnrollment) {
+          throw new AppError(403, "action_not_allowed", "Self-service team enrollment is disabled on this Hub.");
+        }
+        const result = await createEnrollmentWithTeam(pool, await readJson(request, config.maxJsonBytes));
+        notify(result.team.id, "membership.changed");
+        sendJson(response, 201, result, requestId);
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/enrollments/join") {
+        const body = await readJson(request, config.maxJsonBytes);
+        const result = await joinWithRateLimit(request, () => joinEnrollment(pool, body));
+        notify(result.team.id, "membership.changed");
+        sendJson(response, 201, result, requestId);
+        return;
+      }
+      if (method === "GET" && pathname === "/v1/me") {
+        sendJson(response, 200, await getMe(pool, token), requestId);
+        return;
+      }
+      if (method === "PATCH" && pathname === "/v1/me") {
+        const result = await updateProfile(pool, token, await readJson(request, config.maxJsonBytes));
+        for (const teamId of result.team_ids) notify(teamId, "profile.changed");
+        sendJson(response, 200, { principal: result.principal }, requestId);
+        return;
+      }
+      if (method === "GET" && pathname === "/v1/teams") {
+        sendJson(response, 200, await listTeams(pool, token), requestId);
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/teams") {
+        sendJson(response, 201, await createTeam(pool, token, await readJson(request, config.maxJsonBytes)), requestId);
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/teams/join") {
+        const body = await readJson(request, config.maxJsonBytes);
+        const result = await joinWithRateLimit(
+          request,
+          () => joinTeam(pool, token, body),
+          token ? `device:${sha256(token)}` : null,
+        );
+        notify(result.team.id, "membership.changed");
+        sendJson(response, 200, result, requestId);
+        return;
+      }
+
+      let params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/members$/);
+      if (params && method === "GET") {
+        sendJson(response, 200, await listTeamMembers(pool, token, params[0]), requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/invites$/);
+      if (params && method === "POST") {
+        const body = await readJson(request, config.maxJsonBytes);
+        sendJson(response, 201, await createTeamInvite(pool, token, params[0], body), requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/join-password$/);
+      if (params && method === "GET") {
+        sendJson(
+          response,
+          200,
+          await getTeamJoinPassword(pool, token, params[0], config.joinCodeEncryptionKey),
+          requestId,
+        );
+        return;
+      }
+      if (params && method === "POST") {
+        const body = await readJson(request, config.maxJsonBytes);
+        sendJson(
+          response,
+          200,
+          await rotateTeamJoinPassword(
+            pool,
+            token,
+            params[0],
+            body,
+            config.joinCodeEncryptionKey,
+          ),
+          requestId,
+        );
+        return;
+      }
+      if (params && method === "PATCH") {
+        const body = await readJson(request, config.maxJsonBytes);
+        await setTeamJoinPasswordVisibility(pool, token, params[0], body);
+        sendJson(
+          response,
+          200,
+          await getTeamJoinPassword(pool, token, params[0], config.joinCodeEncryptionKey),
+          requestId,
+        );
+        return;
+      }
+      if (params && method === "DELETE") {
+        sendJson(
+          response,
+          200,
+          await disableTeamJoinPassword(pool, token, params[0]),
+          requestId,
+        );
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/members\/([^/]+)$/);
+      if (params && method === "DELETE") {
+        const teamId = uuid(params[0], "team_id");
+        const principalId = uuid(params[1], "principal_id");
+        await removeTeamMember(
+          pool,
+          token,
+          teamId,
+          principalId,
+          config.joinCodeEncryptionKey,
+        );
+        events.revoke(teamId, principalId);
+        notify(teamId, "membership.changed");
+        response.writeHead(204, { "X-Request-Id": requestId, "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
+
+      if (method === "GET" && pathname === "/v1/threads") {
+        sendJson(
+          response,
+          200,
+          await listThreads(pool, token, url.searchParams.get("team_id"), url.searchParams.get("view") || "open"),
+          requestId,
+        );
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/threads") {
+        const body = await readJson(request, config.maxJsonBytes);
+        const result = await createThread(pool, token, body, notify);
+        sendJson(response, result.replayed ? 200 : 201, result, requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/threads\/([^/]+)$/);
+      if (params && method === "GET") {
+        sendJson(response, 200, await getThread(pool, token, params[0]), requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/threads\/([^/]+)\/actions$/);
+      if (params && method === "POST") {
+        const body = await readJson(request, config.maxJsonBytes);
+        const result = await createAction(pool, token, params[0], body, notify);
+        sendJson(response, result.replayed ? 200 : 201, result, requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/threads\/([^/]+)\/preference$/);
+      if (params && method === "PUT") {
+        const body = await readJson(request, config.maxJsonBytes);
+        sendJson(response, 200, await setThreadPreference(pool, token, params[0], body, notify), requestId);
+        return;
+      }
+      if (method === "POST" && pathname === "/v1/attachments") {
+        const result = await uploadAttachment(
+          pool,
+          token,
+          request.headers["idempotency-key"],
+          request,
+          config,
+        );
+        sendJson(response, result.replayed ? 200 : 201, result.attachment, requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/attachments\/([^/]+)$/);
+      if (params && method === "GET") {
+        sendJson(response, 200, await getAttachment(pool, token, params[0]), requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/attachments\/([^/]+)\/content$/);
+      if (params && method === "GET") {
+        const { row, handle } = await openAttachmentContent(pool, token, params[0], config);
+        response.writeHead(200, {
+          "Content-Type": row.content_type,
+          "Content-Length": String(row.byte_size),
+          "Content-Disposition": contentDisposition(row.original_name),
+          Digest: `sha-256=${Buffer.from(row.sha256, "hex").toString("base64")}`,
+          "Cache-Control": "private, no-store",
+          "X-Content-Type-Options": "nosniff",
+          "X-Request-Id": requestId,
+        });
+        const stream = handle.createReadStream();
+        stream.once("error", () => response.destroy());
+        stream.pipe(response);
+        return;
+      }
+      if (method === "GET" && pathname === "/v1/bootstrap") {
+        sendJson(
+          response,
+          200,
+          await getBootstrap(pool, token, url.searchParams.get("team_id")),
+          requestId,
+        );
+        return;
+      }
+      if (method === "GET" && pathname === "/v1/events") {
+        const teamId = uuid(url.searchParams.get("team_id"), "team_id");
+        const auth = await authenticate(pool, token);
+        await requireMembership(pool, teamId, auth.principalId);
+        response.writeHead(200, {
+          "Content-Type": "text/event-stream; charset=utf-8",
+          "Cache-Control": "no-cache, no-transform",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+          "X-Request-Id": requestId,
+        });
+        response.write("retry: 3000\nevent: ready\ndata: {}\n\n");
+        const unsubscribe = events.subscribe(teamId, auth.principalId, response);
+        const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 20_000);
+        heartbeat.unref();
+        const cleanup = () => {
+          clearInterval(heartbeat);
+          unsubscribe();
+        };
+        request.once("close", cleanup);
+        response.once("close", cleanup);
+        return;
+      }
+
+      throw new AppError(404, "resource_not_found", "The endpoint was not found.");
+    } catch (error) {
+      const appError = asAppError(error);
+      const retryAfterSeconds = appError.details?.retry_after_seconds;
+      sendJson(response, appError.status, {
+        error: {
+          code: appError.code,
+          message: appError.message,
+          request_id: requestId,
+          ...(appError.details ? { details: appError.details } : {}),
+        },
+      }, requestId, retryAfterSeconds ? { "Retry-After": String(retryAfterSeconds) } : {});
+    }
+  });
+  server.closeEventStreams = () => events.closeAll();
+  return server;
+}

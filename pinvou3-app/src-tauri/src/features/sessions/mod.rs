@@ -41,7 +41,6 @@ use crate::platform::prefs::{CodePermissionPrefs, UserPrefs};
 
 const SCHEDULED_PROFILE_SCHEMA_VERSION: u32 = 1;
 const MAX_SESSIONS_PER_KIND: usize = 50;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionKind {
     Chat,

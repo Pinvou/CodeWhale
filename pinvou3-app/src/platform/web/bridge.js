@@ -2446,6 +2446,12 @@
   // 公开「新建对话」入口(侧边栏按钮)= 进草稿态。名字保留以兼容前端调用。
   async function createNewSession() { enterDraft(); }
 
+  // 与桌面域契约保持一致；显式工作流需要一个可持久关联的 session id。
+  async function materializeSession() {
+    enterDraft();
+    return ensureSession();
+  }
+
   // 草稿态首次有实质内容时真正向后端创建 session 并切为 active;已有 active 直接返回。
   // 返回新 session id,创建失败返回 null。调用方:sendMessage(首条消息) / equipPersona(加卡)。
   async function ensureSession() {
@@ -8504,6 +8510,7 @@
     cancelGeneration: cancelGeneration,
     cancelShellTask: cancelShellTask,
     createNewSession: createNewSession,
+    materializeSession: materializeSession,
     switchToSession: switchToSession,
     openScheduledRunChat: openScheduledRunChat,
     exitScheduledRunChat: exitScheduledRunChat,

@@ -1,0 +1,235 @@
+use crate::features::team_relay::{
+    AccountEnrollmentInput, Attachment, ClaimEnrollmentInput, CreateActionInput,
+    CreateInviteResponse, CreateTeamEnrollmentInput, CreateThreadInput,
+    SetTeamRelayAgentSessionInput, SetThreadPreferenceInput, TeamJoinCodeState,
+    TeamRelayAccountState, TeamRelayManager, TeamRelaySnapshot, TeamRelayStatus,
+    TeamRelayTaskWorkspaceStatus, ThreadMutationResponse, ThreadPreference, UpdateProfileInput,
+};
+use std::path::PathBuf;
+use tauri::{AppHandle, State};
+
+#[tauri::command]
+pub fn team_relay_status(manager: State<'_, TeamRelayManager>) -> Result<TeamRelayStatus, String> {
+    manager.status()
+}
+
+#[tauri::command]
+pub async fn team_relay_verify_beta_access(
+    access_code: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<bool, String> {
+    manager.verify_beta_access(access_code).await
+}
+
+#[tauri::command]
+pub async fn team_relay_register_account(
+    input: AccountEnrollmentInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayAccountState, String> {
+    manager.register_account(input).await
+}
+
+#[tauri::command]
+pub async fn team_relay_account(
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayAccountState, String> {
+    manager.account_state().await
+}
+
+#[tauri::command]
+pub async fn team_relay_claim(
+    input: ClaimEnrollmentInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    manager.claim(input).await
+}
+
+#[tauri::command]
+pub async fn team_relay_create_first_team(
+    input: CreateTeamEnrollmentInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    manager.create_first_team(input).await
+}
+
+#[tauri::command]
+pub async fn team_relay_bootstrap(
+    app: AppHandle,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    let snapshot = manager.bootstrap().await?;
+    manager.start_events(app)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn team_relay_update_profile(
+    input: UpdateProfileInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    manager.update_profile(input).await
+}
+
+#[tauri::command]
+pub async fn team_relay_create_team(
+    app: AppHandle,
+    name: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    let snapshot = manager.create_team(&name).await?;
+    manager.start_events(app)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn team_relay_join_team(
+    app: AppHandle,
+    join_code: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    let snapshot = manager.join_team(&join_code).await?;
+    manager.start_events(app)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn team_relay_switch_team(
+    app: AppHandle,
+    team_id: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    let snapshot = manager.switch_team(&team_id).await?;
+    manager.start_events(app)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn team_relay_create_invite(
+    expires_in_hours: u16,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<CreateInviteResponse, String> {
+    manager.create_invite(expires_in_hours).await
+}
+
+#[tauri::command]
+pub async fn team_relay_get_join_password(
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamJoinCodeState, String> {
+    manager.get_join_password().await
+}
+
+#[tauri::command]
+pub async fn team_relay_rotate_join_password(
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamJoinCodeState, String> {
+    manager.rotate_join_password().await
+}
+
+#[tauri::command]
+pub async fn team_relay_set_join_password_visibility(
+    visibility: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamJoinCodeState, String> {
+    manager.set_join_password_visibility(&visibility).await
+}
+
+#[tauri::command]
+pub async fn team_relay_disable_join_password(
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamJoinCodeState, String> {
+    manager.disable_join_password().await
+}
+
+#[tauri::command]
+pub async fn team_relay_remove_member(
+    principal_id: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<(), String> {
+    manager.remove_member(&principal_id).await
+}
+
+#[tauri::command]
+pub async fn team_relay_create_thread(
+    input: CreateThreadInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<ThreadMutationResponse, String> {
+    manager.create_thread(input).await
+}
+
+#[tauri::command]
+pub async fn team_relay_create_action(
+    thread_id: String,
+    input: CreateActionInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<ThreadMutationResponse, String> {
+    manager.create_action(&thread_id, input).await
+}
+
+#[tauri::command]
+pub async fn team_relay_set_thread_preference(
+    thread_id: String,
+    input: SetThreadPreferenceInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<ThreadPreference, String> {
+    manager.set_thread_preference(&thread_id, input).await
+}
+
+#[tauri::command]
+pub async fn team_relay_upload_attachment(
+    app: AppHandle,
+    path: PathBuf,
+    upload_id: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<Attachment, String> {
+    manager.upload_attachment(app, &path, &upload_id).await
+}
+
+#[tauri::command]
+pub async fn team_relay_download_attachment(
+    attachment_id: String,
+    destination: PathBuf,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<(), String> {
+    manager
+        .download_attachment(&attachment_id, &destination)
+        .await
+}
+
+#[tauri::command]
+pub fn team_relay_task_workspace_status(
+    thread_id: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayTaskWorkspaceStatus, String> {
+    manager.task_workspace_status(&thread_id)
+}
+
+#[tauri::command]
+pub async fn team_relay_prepare_task_workspace(
+    thread_id: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayTaskWorkspaceStatus, String> {
+    manager.prepare_task_workspace(&thread_id).await
+}
+
+#[tauri::command]
+pub fn team_relay_reveal_prepared_material(
+    thread_id: String,
+    attachment_id: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<(), String> {
+    manager.reveal_prepared_material(&thread_id, &attachment_id)
+}
+
+#[tauri::command]
+pub fn team_relay_set_task_agent_session(
+    thread_id: String,
+    input: SetTeamRelayAgentSessionInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayTaskWorkspaceStatus, String> {
+    manager.set_task_agent_session(&thread_id, input)
+}
+
+#[tauri::command]
+pub fn team_relay_disconnect(manager: State<'_, TeamRelayManager>) -> Result<(), String> {
+    manager.disconnect()
+}

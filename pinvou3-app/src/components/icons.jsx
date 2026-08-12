@@ -61,6 +61,7 @@ const I = ({size=24,className='',children}) => (
     const XCircle = (p) => <I {...p}><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></I>;
     const Wrench = (p) => <I {...p}><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76Z"/></I>;
     const User = (p) => <I {...p}><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></I>;
+    const Users = (p) => <I {...p}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></I>;
     const Layers = (p) => <I {...p}><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 12.5-9.17 4.17a2 2 0 0 1-1.66 0L2 12.5"/><path d="m22 17.5-9.17 4.17a2 2 0 0 1-1.66 0L2 17.5"/></I>;
     const MessageSquare = (p) => <I {...p}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></I>;
     const X = (p) => <I {...p}><path d="M18 6 6 18"/><path d="m6 6 12 12"/></I>;
@@ -101,7 +102,6 @@ const I = ({size=24,className='',children}) => (
     const PinIcon = (p) => <I {...p}><path d="M12 17v5"/><path d="M5 17h14"/><path d="M8 3h8"/><path d="M9 3l1 9-3 5h10l-3-5 1-9"/></I>;
     const PinOffIcon = (p) => <I {...p}><path d="M12 17v5"/><path d="M5 17h12"/><path d="M8 3h8"/><path d="M9 3l1 9-2 3"/><path d="M14 12l1-9"/><path d="M3 3l18 18"/></I>;
     const PetPawIcon = (p) => <I size={18} {...p}><circle cx="11" cy="4" r="2"/><circle cx="18" cy="8" r="2"/><circle cx="4" cy="8" r="2"/><path d="M14.35 13.5a4 4 0 0 0-6.7 0c-.63 1.4-1.6 2.4-2.25 3.3-.72 1 .16 3.2 1.9 3.2 1.4 0 2.3-1 4.35-1s2.95 1 4.35 1c1.74 0 2.62-2.2 1.9-3.2-.65-.9-1.62-1.9-2.25-3.3z"/></I>;
-    const Users = (p) => <I {...p}><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></I>;
     /* ==========================================
        i18n dictionary — 1:1 from 前端.html
        ========================================== */

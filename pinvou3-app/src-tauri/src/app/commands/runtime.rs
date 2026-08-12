@@ -34,6 +34,7 @@ pub struct PlatformCapabilities {
     pub task_completion_notifications_default: bool,
     pub local_vllm_supported: bool,
     pub codex_acp_supported: bool,
+    pub team_relay_supported: bool,
 }
 
 impl PlatformCapabilities {
@@ -49,6 +50,7 @@ impl PlatformCapabilities {
                 .task_completion_notifications_default,
             local_vllm_supported: capabilities.local_vllm_supported,
             codex_acp_supported: capabilities.codex_acp_supported,
+            team_relay_supported: capabilities.team_relay_supported,
         }
     }
 }

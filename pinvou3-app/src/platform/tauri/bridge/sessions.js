@@ -440,6 +440,13 @@
   // 公开「新建对话」入口(侧边栏按钮)= 进草稿态。名字保留以兼容前端调用。
   async function createNewSession() { enterDraft(); }
 
+  // 团队接力等显式工作入口需要立即获得稳定 session id 以建立本机关联；
+  // 这类用户动作已经确认要开始工作，不适用侧边栏空草稿的 lazy 语义。
+  async function materializeSession() {
+    enterDraft();
+    return ensureSession();
+  }
+
   // 草稿态首次有实质内容时真正向后端创建 session 并切为 active;已有 active 直接返回。
   // 返回新 session id,创建失败返回 null。调用方:sendMessage(首条消息) / equipPersona(加卡)。
   async function ensureSession() {
@@ -1142,6 +1149,7 @@
       refreshHistoryList: refreshHistoryList,
       enterDraft: enterDraft,
       createNewSession: createNewSession,
+      materializeSession: materializeSession,
       ensureSession: ensureSession,
       reportSessionSwitchFailure: reportSessionSwitchFailure,
       hydratedMessageKey: hydratedMessageKey,

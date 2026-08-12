@@ -18,6 +18,7 @@ pub(crate) mod review;
 pub(crate) mod runtime_bundle;
 pub(crate) mod scheduled;
 pub mod sessions;
+pub(crate) mod team_relay;
 pub(crate) mod updater;
 pub(crate) mod voice;
 pub(crate) mod workflow;

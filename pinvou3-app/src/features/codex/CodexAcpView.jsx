@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { FileTypeIcon } from '../../components/files/FileTypeIcon.jsx';
 import { isImeComposing } from '../../shared/ime-guard.mjs';
 import { can } from '../../shared/platform.js';
@@ -1185,6 +1185,7 @@ export function CodexAcpView({
   sessions = [],
   activeId = null,
   draftEpoch = 0,
+  relayLaunch = null,
   onActiveSessionChange,
   onSessionsChange,
   onSwitchHomeMode,
@@ -1236,13 +1237,23 @@ export function CodexAcpView({
   const scroller = useRef(null);
   const autoScrollRef = useRef(true);
   const lastScrollTopRef = useRef(0);
+  const composerRef = useRef(null);
   const attachmentIdRef = useRef(0);
   const skipNextActiveLoadRef = useRef(null);
+  const relayLaunchConsumedRef = useRef('');
   const sessionLoadRequestRef = useRef(0);
   const preserveDraftWorkspaceRef = useRef(false);
   const draftEpochRef = useRef(draftEpoch);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  useLayoutEffect(() => {
+    const element = composerRef.current;
+    if (!element) return;
+    element.style.height = 'auto';
+    const nextHeight = Math.min(Math.max(element.scrollHeight, 48), 192);
+    element.style.height = `${nextHeight}px`;
+    element.style.overflowY = element.scrollHeight > 192 ? 'auto' : 'hidden';
+  }, [activeId, draft, sessionLoading]);
   const projection = useMemo(() => projectAcpTimeline(events), [events]);
   // 草稿态（!activeId）没有会话，退回使用该 agent 缓存的配置快照来预展示选项。
   const draftControlsInfo = !activeId ? draftControlsCache[draftAgentId] || null : null;
@@ -1919,6 +1930,13 @@ export function CodexAcpView({
       )));
     }
   }
+
+  useEffect(() => {
+    if (!relayLaunch || relayLaunch.sessionId !== activeId || relayLaunchConsumedRef.current === relayLaunch.key) return;
+    relayLaunchConsumedRef.current = relayLaunch.key;
+    setDraft(String(relayLaunch.prompt || ''));
+    Promise.all((relayLaunch.materialPaths || []).map(path => addAttachmentByPath(path, activeId))).catch(showError);
+  }, [activeId, relayLaunch]);
 
   async function pickAttachments() {
     const selected = await openTauriDialog({
@@ -3035,7 +3053,7 @@ export function CodexAcpView({
                   </div>
                 </>
               )}
-              <textarea value={draft} onChange={event => setDraft(event.target.value)}
+              <textarea ref={composerRef} value={draft} onChange={event => setDraft(event.target.value)}
                 onPaste={handlePaste}
                 onKeyDown={event => {
                   // 输入法合成期间(例如中文输入法敲回车确认候选词)不要触发发送,

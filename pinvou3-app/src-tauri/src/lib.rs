@@ -404,6 +404,9 @@ pub fn run() {
                     eprintln!("[pinvou3-app] device telemetry init failed: {error:#}")
                 }
             }
+            let team_relay_manager = crate::features::team_relay::TeamRelayManager::new()
+                .map_err(std::io::Error::other)?;
+            app.handle().manage(team_relay_manager);
             // 多 session 并发:存 EnginePool(lazy spawn,首条消息才为该 session 起 engine)。
             // boot bridge 在 pool::new 里做一次(写盘 / 设 env 只能一次)。
             let handle = app.handle().clone();
@@ -685,6 +688,33 @@ pub fn run() {
             commands::connectors::ima_logout,
             commands::settings::get_settings,
             commands::runtime::get_platform_capabilities,
+            commands::team_relay::team_relay_status,
+            commands::team_relay::team_relay_verify_beta_access,
+            commands::team_relay::team_relay_register_account,
+            commands::team_relay::team_relay_account,
+            commands::team_relay::team_relay_claim,
+            commands::team_relay::team_relay_create_first_team,
+            commands::team_relay::team_relay_bootstrap,
+            commands::team_relay::team_relay_update_profile,
+            commands::team_relay::team_relay_create_team,
+            commands::team_relay::team_relay_join_team,
+            commands::team_relay::team_relay_switch_team,
+            commands::team_relay::team_relay_create_invite,
+            commands::team_relay::team_relay_get_join_password,
+            commands::team_relay::team_relay_rotate_join_password,
+            commands::team_relay::team_relay_set_join_password_visibility,
+            commands::team_relay::team_relay_disable_join_password,
+            commands::team_relay::team_relay_remove_member,
+            commands::team_relay::team_relay_create_thread,
+            commands::team_relay::team_relay_create_action,
+            commands::team_relay::team_relay_set_thread_preference,
+            commands::team_relay::team_relay_upload_attachment,
+            commands::team_relay::team_relay_download_attachment,
+            commands::team_relay::team_relay_task_workspace_status,
+            commands::team_relay::team_relay_prepare_task_workspace,
+            commands::team_relay::team_relay_reveal_prepared_material,
+            commands::team_relay::team_relay_set_task_agent_session,
+            commands::team_relay::team_relay_disconnect,
             commands::settings::submit_feedback,
             commands::settings::get_effective_model_config,
             commands::settings::update_settings,

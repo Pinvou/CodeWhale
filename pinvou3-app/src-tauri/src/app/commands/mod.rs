@@ -38,6 +38,7 @@ pub(crate) mod scheduled;
 pub(crate) mod sessions;
 pub(crate) mod settings;
 pub(crate) mod startup;
+pub(crate) mod team_relay;
 pub(crate) mod timeline;
 pub(crate) mod updater;
 pub(crate) mod voice;

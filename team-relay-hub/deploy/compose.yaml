@@ -1,0 +1,74 @@
+name: pinvou-team-relay
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: team_relay
+      POSTGRES_USER: team_relay
+      POSTGRES_PASSWORD: ${TEAM_RELAY_DB_PASSWORD:?set TEAM_RELAY_DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U team_relay -d team_relay"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [relay-private]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  hub:
+    build:
+      context: ../..
+      dockerfile: team-relay-hub/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    command: ["sh", "-c", "npm run db:migrate && exec npm start"]
+    environment:
+      TEAM_RELAY_DATABASE_URL: postgresql://team_relay:${TEAM_RELAY_DB_PASSWORD}@postgres:5432/team_relay
+      TEAM_RELAY_DB_SSL: "false"
+      TEAM_RELAY_HOST: 0.0.0.0
+      TEAM_RELAY_PORT: 8791
+      TEAM_RELAY_PUBLIC_BASE_PATH: /pinvou3/team-relay
+      TEAM_RELAY_ALLOW_SELF_SERVICE_ENROLLMENT: ${TEAM_RELAY_ALLOW_SELF_SERVICE_ENROLLMENT:-false}
+      TEAM_RELAY_BETA_ACCESS_PASSWORD_HASH: ${TEAM_RELAY_BETA_ACCESS_PASSWORD_HASH:-}
+      TEAM_RELAY_TRUST_PROXY: ${TEAM_RELAY_TRUST_PROXY:-false}
+      TEAM_RELAY_JOIN_RATE_LIMIT_FAILURES: ${TEAM_RELAY_JOIN_RATE_LIMIT_FAILURES:-5}
+      TEAM_RELAY_JOIN_RATE_LIMIT_WINDOW_SECONDS: ${TEAM_RELAY_JOIN_RATE_LIMIT_WINDOW_SECONDS:-600}
+      TEAM_RELAY_JOIN_RATE_LIMIT_BLOCK_SECONDS: ${TEAM_RELAY_JOIN_RATE_LIMIT_BLOCK_SECONDS:-900}
+      TEAM_RELAY_JOIN_CODE_ENCRYPTION_KEY: ${TEAM_RELAY_JOIN_CODE_ENCRYPTION_KEY:?set TEAM_RELAY_JOIN_CODE_ENCRYPTION_KEY}
+      TEAM_RELAY_ATTACHMENT_DIR: /var/lib/pinvou-team-relay/attachments
+      TEAM_RELAY_MAX_ATTACHMENT_BYTES: 20971520
+      TEAM_RELAY_MAX_TEAM_ATTACHMENT_BYTES: 2147483648
+      TEAM_RELAY_ORPHAN_ATTACHMENT_HOURS: 24
+      TEAM_RELAY_CLOSED_ATTACHMENT_DAYS: 30
+    ports:
+      - "127.0.0.1:8791:8791"
+    volumes:
+      - attachment-data:/var/lib/pinvou-team-relay/attachments
+    networks: [relay-private]
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8791/pinvou3/team-relay/v1/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  relay-private:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  attachment-data:
