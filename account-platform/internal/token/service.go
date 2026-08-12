@@ -65,6 +65,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", s.chatCompletions)
 	mux.HandleFunc("GET /v1/recharge/products", s.rechargeProducts)
 	mux.HandleFunc("POST /v1/recharge/orders", s.createRechargeOrder)
+	mux.HandleFunc("GET /v1/recharge/orders/recent", s.getRecentRechargeOrder)
 	mux.HandleFunc("GET /v1/recharge/orders/{order_id}", s.getRechargeOrder)
 	mux.HandleFunc("POST /v1/recharge/orders/{order_id}/close", s.closeRechargeOrder)
 	mux.HandleFunc("GET /v1/me/balance", s.getBalance)
@@ -256,6 +257,24 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	payload, err := s.billing.RechargeOrder(r.Context(), orderID, resolved.UserID)
 	if err != nil {
 		api.WriteError(w, http.StatusNotFound, "RECHARGE_ORDER_NOT_FOUND", "the recharge order was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) getRecentRechargeOrder(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	walletID, err := s.activeWallet(r.Context(), resolved)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := s.billing.RecentRechargeOrder(r.Context(), resolved.UserID, walletID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the recent recharge order is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)

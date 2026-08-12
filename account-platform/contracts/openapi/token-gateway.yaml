@@ -375,6 +375,27 @@ paths:
                 const: no-store
         "422":
           $ref: "#/components/responses/Error"
+  /recharge/orders/recent:
+    get:
+      operationId: getRecentRechargeOrder
+      summary: Restore the newest recharge order in the active wallet context
+      responses:
+        "200":
+          description: The newest active-context order, or null when none exists
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "billing.yaml#/components/schemas/RecentRechargeOrder"
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /recharge/orders/{order_id}:
     get:
       operationId: getRechargeOrder

@@ -51,6 +51,7 @@ export class AccountPlatformBffClient {
   products(signal) { return this.request('token', '/v1/recharge/products', { signal }); }
   balance(signal) { return this.request('token', '/v1/me/balance?consistency=strong', { signal }); }
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', headers: { 'Idempotency-Key': key }, body: { product_id: productId, channel } }); }
+  recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
   managedTokens(signal) { return this.request('token', '/v1/token-accounts', { signal }); }
   eligibleTokens(model, signal) { return this.request('token', `/v1/token-accounts/eligible?model=${encodeURIComponent(model)}`, { signal }); }

@@ -40,3 +40,21 @@ test('BFF client keeps CSRF on mutations and never persists OIDC tokens', async 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('BFF client restores the recent order without browser persistence', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    return new Response(JSON.stringify({ order: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const client = new AccountPlatformBffClient('/portal');
+    assert.deepEqual(await client.recentRechargeOrder(), { order: null });
+    assert.equal(calls[0].url, '/portal/api/token/v1/recharge/orders/recent');
+    assert.equal(calls[0].options.cache, 'no-store');
+    assert.equal('recentOrder' in client, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

@@ -44,6 +44,7 @@ func (s *Service) Handler(serviceToken string) http.Handler {
 	mux.HandleFunc("GET /v1/wallets/{wallet_id}/balance", s.getBalance)
 	if s.payments != nil {
 		mux.HandleFunc("POST /internal/v1/recharge/orders", s.createRechargeOrder)
+		mux.HandleFunc("GET /internal/v1/recharge/orders/recent", s.getRecentRechargeOrder)
 		mux.HandleFunc("GET /internal/v1/recharge/orders/{order_id}", s.getRechargeOrder)
 		mux.HandleFunc("POST /internal/v1/recharge/orders/{order_id}/close", s.closeRechargeOrder)
 		mux.HandleFunc("POST /internal/v1/recharge/orders/{order_id}/refunds", s.createRefund)
@@ -148,6 +149,22 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, order)
+}
+
+func (s *Service) getRecentRechargeOrder(w http.ResponseWriter, r *http.Request) {
+	requesterID, requesterErr := uuid.Parse(r.URL.Query().Get("requester_id"))
+	walletID, walletErr := uuid.Parse(r.URL.Query().Get("wallet_id"))
+	if requesterErr != nil || walletErr != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recent recharge order lookup", httpserver.RequestID(r.Context()))
+		return
+	}
+	order, err := s.payments.RecentOrder(r.Context(), requesterID, walletID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"order": order})
 }
 
 func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {

@@ -36,6 +36,18 @@ test('billing products are server-authoritative and fixed to the approved catalo
   assert.deepEqual(createProperties.channel.$ref, '#/components/schemas/PaymentChannel');
 });
 
+test('recent recharge lookup is wallet-scoped internally and context-scoped publicly', async () => {
+  const billing = await readYaml('contracts/openapi/billing.yaml');
+  const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
+  const internalParameters = billing.paths['/recharge/orders/recent'].get.parameters.map(({ name }) => name).sort();
+  assert.deepEqual(internalParameters, ['requester_id', 'wallet_id']);
+  assert.equal(gateway.paths['/recharge/orders/recent'].get.parameters, undefined);
+  assert.equal(
+    gateway.paths['/recharge/orders/recent'].get.responses['200'].content['application/json'].schema.$ref,
+    'billing.yaml#/components/schemas/RecentRechargeOrder',
+  );
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));

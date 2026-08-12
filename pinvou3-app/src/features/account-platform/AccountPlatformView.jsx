@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import './account-platform.css';
 
-const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'REFUNDED']);
+const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'MANUAL_REVIEW']);
 const idempotencyKey = prefix => `${prefix}-${globalThis.crypto.randomUUID()}`;
 
 function Field({ label, children }) {
@@ -35,8 +35,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     setError('');
     const organizationId = nextMe?.active_context?.organization_id;
     try {
-      const [orgResult, productResult, balanceResult, tokenResult, unitResult, memberResult] = await Promise.all([
+      const [orgResult, productResult, balanceResult, tokenResult, recentOrderResult, unitResult, memberResult] = await Promise.all([
         client.organizations(request.signal), client.products(request.signal), client.balance(request.signal), client.managedTokens(request.signal),
+        client.recentRechargeOrder(request.signal),
         organizationId ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }),
         organizationId ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }),
       ]);
@@ -45,6 +46,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setProducts(productResult.items || []);
       setBalance(balanceResult);
       setTokens(tokenResult.items || []);
+      setOrder(recentOrderResult.order || null);
       setUnits(unitResult.items || []);
       setMembers(memberResult.items || []);
     } catch (reason) {
@@ -80,7 +82,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [order?.payment_url, order?.qr_content]);
 
   useEffect(() => {
-    if (!order?.order_id || terminalOrderStates.has(order.status)) return undefined;
+    if (!order?.order_id || terminalOrderStates.has(order.status) || new Date(order.expires_at).getTime() <= Date.now()) return undefined;
     let stopped = false;
     let timer;
     let attempt = 0;
@@ -157,9 +159,19 @@ function Organization({ copy, organization, units, members, busy, onCreateUnit, 
 
 function Wallet({ copy, products, balance, order, qrData, busy, onRecharge }) {
   const [productId, setProductId] = useState(''); const [channel, setChannel] = useState('ALIPAY');
+  const [now, setNow] = useState(Date.now());
   useEffect(() => { if (!productId && products[0]) setProductId(products[0].product_id); }, [products, productId]);
+  useEffect(() => {
+    if (!order || terminalOrderStates.has(order.status)) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [order?.order_id, order?.status]);
   const selected = products.find(item => item.product_id === productId);
-  return <section><p className="ap-eyebrow">{copy.sections.wallet}</p><h2>{copy.walletTitle}</h2><div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{balance ? balance.available_microcredits.toLocaleString() : '—'}</strong><small>{copy.reservedCredits}: {balance ? balance.reserved_microcredits.toLocaleString() : '—'}</small></div><div className="ap-card"><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} onClick={() => setProductId(product.product_id)}><strong>¥{(product.amount_fen / 100).toFixed(2)}</strong><span>{product.display_points.toLocaleString()} {copy.points}</span></button>)}</div><div className="ap-inline"><select value={channel} onChange={event => setChannel(event.target.value)}>{['UNIONPAY', 'ALIPAY', 'WECHAT'].map(item => <option key={item} value={item}>{copy.channels[item]}</option>)}</select><button className="ap-primary" disabled={busy || !selected} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{order.status}</span><h3>{copy.scanToPay}</h3><p>{copy.orderExpires(new Date(order.expires_at).toLocaleTimeString())}</p>{(order.payment_url || order.qr_content) && <a href={order.payment_url || order.qr_content} target="_blank" rel="noreferrer">{copy.openPayment}</a>}</div></div>}</div></section>;
+  const remainingSeconds = order ? Math.max(0, Math.ceil((new Date(order.expires_at).getTime() - now) / 1000)) : 0;
+  const displayStatus = order && remainingSeconds === 0 && !terminalOrderStates.has(order.status) ? 'EXPIRED' : order?.status;
+  const countdown = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
+  return <section><p className="ap-eyebrow">{copy.sections.wallet}</p><h2>{copy.walletTitle}</h2><div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{balance ? balance.available_microcredits.toLocaleString() : '—'}</strong><small>{copy.reservedCredits}: {balance ? balance.reserved_microcredits.toLocaleString() : '—'}</small></div><div className="ap-card"><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} onClick={() => setProductId(product.product_id)}><strong>¥{(product.amount_fen / 100).toFixed(2)}</strong><span>{product.display_points.toLocaleString()} {copy.points}</span></button>)}</div><div className="ap-inline"><select value={channel} onChange={event => setChannel(event.target.value)}>{['UNIONPAY', 'ALIPAY', 'WECHAT'].map(item => <option key={item} value={item}>{copy.channels[item]}</option>)}</select><button className="ap-primary" disabled={busy || !selected} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span><h3>¥{(order.amount_fen / 100).toFixed(2)} · {copy.scanToPay}</h3><p>{remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderExpires(new Date(order.expires_at).toLocaleTimeString())}</p>{remainingSeconds > 0 && (order.payment_url || order.qr_content) && <a href={order.payment_url || order.qr_content} target="_blank" rel="noreferrer">{copy.openPayment}</a>}</div></div>}</div></section>;
 }
 
 function Tokens({ copy, client, me, organization, tokens, busy, run, reload }) {
