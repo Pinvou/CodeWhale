@@ -28,7 +28,7 @@
 | 安装包 | NSIS，`perMachine` 安装模式，简体中文和英文安装界面，LZMA 压缩 |
 | 应用窗口 | Tauri 2 桌面窗口，默认最大化、无系统装饰栏、支持调整大小 |
 | 安装权限 | 机器级安装和运行时环境变量配置需要管理员权限 |
-| VC++ 运行库 | 安装前检查 Microsoft Visual C++ 2015-2022 x64；缺失或版本不足时静默安装 |
+| VC++ 运行库 | 安装前检查 Microsoft Visual C++ 2015-2022 x64；缺失或版本不足时先补齐 Windows Installer 必需的临时目录和权限，再静默安装 |
 | 卸载数据 | 卸载器提供删除用户数据选项；勾选后删除当前用户 `%USERPROFILE%\.pinvou3`，升级模式不删除 |
 | 分离窗口 | 主窗口与 `detached-*` 窗口均在 Tauri capability 中授权 |
 
@@ -320,6 +320,7 @@ Windows 下 `~/.pinvou3` 等价于 `%USERPROFILE%\.pinvou3`。主要数据包括
 | WIN-INSTALL-001 | P0 | 干净 Windows x64，管理员账号 | 运行 NSIS 安装包并完成安装 | 安装成功；开始菜单/卸载信息正确；应用可启动 |
 | WIN-INSTALL-002 | P0 | 未安装目标版本 VC++ 运行库 | 安装应用 | 安装器静默安装 VC++；失败时中止并显示退出码，不留下不可运行安装 |
 | WIN-INSTALL-003 | P1 | 已安装满足版本的 VC++ 运行库 | 安装应用 | 跳过重复安装，原运行库不被破坏 |
+| WIN-INSTALL-009 | P1 | `C:\Windows\Temp` 或 `C:\Windows\Installer` 缺失，或缺少 SYSTEM/Administrators 必需权限 | 安装应用 | 安装器仅补齐缺失目录、权限和无效机器级 TEMP/TMP，随后完成 VC++ 安装；不清理已有 Installer 缓存 |
 | WIN-INSTALL-004 | P0 | 普通用户无提权 | 尝试机器级安装并拒绝 UAC | 安装安全退出，不产生残缺运行时和错误 PATH 项 |
 | WIN-INSTALL-005 | P1 | 安装目录含空格或中文 | 安装并启动 | Python、Node、Pandoc、Poppler、OCR、7-Zip 和 ASR 路径解析正常 |
 | WIN-INSTALL-006 | P0 | 已有旧版本及用户会话 | 覆盖升级 | 用户数据保留；新版本可读取原会话、设置、工具状态 |

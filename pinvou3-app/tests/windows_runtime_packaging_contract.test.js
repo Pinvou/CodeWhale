@@ -68,6 +68,15 @@ const installerHook = readApp(
   "nsis",
   "installer-hooks.nsh",
 );
+const vcRedistTempPreflightPath = path.join(
+  appRoot,
+  "src-tauri",
+  "packaging",
+  "windows",
+  "nsis",
+  "vcredist-temp-preflight.ps1",
+);
+const vcRedistTempPreflight = fs.readFileSync(vcRedistTempPreflightPath, "utf8");
 const runtimeWrapper = readApp("scripts", "tauri", "windows-runtime.js");
 const installerAdapter = readApp("scripts", "tauri", "windows-installer.js");
 const buildScript = readApp("scripts", "tauri", "build.js");
@@ -188,6 +197,98 @@ assert.match(installerHook, /VC_redist\.x64\.exe/);
 assert.match(installerHook, /\.\.\\\.\.\\\.\.\\windows-runtime\\nsis\\vc_redist/);
 assert.doesNotMatch(installerHook, /\.\.\\\.\.\\\.\.\\target\\windows-runtime/);
 assert.match(installerHook, /\/install \/quiet \/norestart/);
+assert.match(installerHook, /pinvou-vcredist-temp-preflight\.ps1/);
+assert.match(
+  installerHook,
+  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\vcredist-temp-preflight\.ps1/,
+  "preflight script File source must resolve from the installer.nsi output directory",
+);
+assert.doesNotMatch(
+  installerHook,
+  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\vcredist-temp-preflight\.ps1/,
+  "preflight script File source must not resolve past src-tauri",
+);
+assert.match(
+  installerHook,
+  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\runtime-env\.ps1/,
+  "runtime-env script File source must resolve from the installer.nsi output directory",
+);
+assert.doesNotMatch(
+  installerHook,
+  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\runtime-env\.ps1/,
+  "runtime-env script File source must not resolve past src-tauri",
+);
+assert.ok(
+  installerHook.indexOf("pinvou-vcredist-temp-preflight.ps1") <
+    installerHook.indexOf('ExecWait \'"$PLUGINSDIR\\VC_redist.x64.exe"'),
+  "Windows Installer temp preflight must run before VC++ starts",
+);
+assert.match(installerHook, /SetEnvironmentVariableW\(w "TEMP", w "\$WINDIR\\Temp"\)/);
+assert.match(installerHook, /IntCmp \$5 1632 pinvou_vc_redist_temp_failed/);
+assert.match(installerHook, /IntCmp \$5 -2147023264 pinvou_vc_redist_temp_failed/);
+assert.match(installerHook, /Pinvou3-vcredist\.log/);
+for (const recoveryHint of [
+  "释放系统盘空间",
+  "检查系统临时目录权限",
+  "重启 Windows 后重试",
+  "日志：$WINDIR\\Temp\\Pinvou3-vcredist.log",
+]) {
+  assert.ok(
+    installerHook.includes(recoveryHint),
+    `VC++ temp failure prompt must include: ${recoveryHint}`,
+  );
+}
+assert.match(vcRedistTempPreflight, /S-1-5-18/);
+assert.match(vcRedistTempPreflight, /S-1-5-32-544/);
+assert.match(
+  vcRedistTempPreflight,
+  /SetEnvironmentVariable\(\$Name, \$FallbackPath, "Machine"\)/,
+  "machine TEMP/TMP repair must persist the resolved absolute fallback path",
+);
+assert.doesNotMatch(
+  vcRedistTempPreflight,
+  /FallbackValue|%SystemRoot%\\Temp/u,
+  "machine TEMP/TMP repair must not persist an unexpanded REG_SZ value",
+);
+assert.doesNotMatch(
+  vcRedistTempPreflight,
+  /Remove-Item|RemoveAccessRule|PurgeAccessRules/u,
+  "VC++ temp repair must not delete installer cache or existing ACL entries",
+);
+
+if (process.platform === "win32") {
+  const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-vcredist-preflight-"));
+  const fakeWindowsRoot = path.join(smokeRoot, "Windows");
+  try {
+    const runPreflight = () =>
+      spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          vcRedistTempPreflightPath,
+          "-WindowsRoot",
+          fakeWindowsRoot,
+          "-SkipMachineEnvironment",
+        ],
+        { encoding: "utf8" },
+      );
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const result = runPreflight();
+      assert.equal(
+        result.status,
+        0,
+        `VC++ temp preflight attempt ${attempt} failed: ${result.stderr || result.stdout}`,
+      );
+    }
+    assert.ok(fs.statSync(path.join(fakeWindowsRoot, "Temp")).isDirectory());
+    assert.ok(fs.statSync(path.join(fakeWindowsRoot, "Installer")).isDirectory());
+  } finally {
+    fs.rmSync(smokeRoot, { recursive: true, force: true });
+  }
+}
 for (const [name, version] of [
   ["MAJOR", vcMajor],
   ["MINOR", vcMinor],
