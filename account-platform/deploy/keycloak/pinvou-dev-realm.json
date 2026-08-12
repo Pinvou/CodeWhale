@@ -24,7 +24,22 @@
       "redirectUris": [
         "http://127.0.0.1/*"
       ],
-      "webOrigins": []
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "pinvou-desktop-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "pinvou-desktop-dev",
+            "access.token.claim": "true"
+          }
+        }
+      ]
     }
   ]
 }

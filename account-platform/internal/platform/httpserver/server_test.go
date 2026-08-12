@@ -1,7 +1,9 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -42,6 +44,33 @@ func TestHealthEndpoints(t *testing.T) {
 				t.Fatalf("unexpected response: %+v", body)
 			}
 		})
+	}
+}
+
+func TestReadinessFailureIsUnavailable(t *testing.T) {
+	handler := HandlerWithApplication(
+		config.Config{ServiceName: "test"},
+		nil,
+		func(context.Context) error { return errors.New("database unavailable") },
+	)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/ready", nil))
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status code = %d, want 503", response.Code)
+	}
+}
+
+func TestApplicationHandlerIsMounted(t *testing.T) {
+	application := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	response := httptest.NewRecorder()
+	HandlerWithApplication(config.Config{ServiceName: "test"}, application, nil).ServeHTTP(
+		response,
+		httptest.NewRequest(http.MethodGet, "/v1/example", nil),
+	)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status code = %d, want 204", response.Code)
 	}
 }
 

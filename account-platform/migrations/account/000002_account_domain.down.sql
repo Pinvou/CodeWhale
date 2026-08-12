@@ -1,0 +1,11 @@
+ALTER TABLE audit_logs DROP CONSTRAINT audit_logs_actor_user_fk;
+DROP TABLE user_sessions;
+DROP TABLE invitations;
+DROP TABLE role_bindings;
+DROP TABLE membership_units;
+DROP TABLE memberships;
+DROP TABLE organization_unit_closure;
+DROP TABLE organization_units;
+DROP TABLE organizations;
+DROP TABLE identities;
+DROP TABLE users;

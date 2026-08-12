@@ -1,0 +1,268 @@
+package billing
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+type PaymentOrder struct {
+	ID                   uuid.UUID  `json:"order_id"`
+	MerchantOrderNo      string     `json:"merchant_order_no"`
+	RequesterID          uuid.UUID  `json:"requester_id"`
+	WalletID             uuid.UUID  `json:"wallet_id"`
+	ProductID            string     `json:"product_id"`
+	Channel              string     `json:"channel"`
+	AmountFen            int64      `json:"amount_fen"`
+	Currency             string     `json:"currency"`
+	CreditMicrocredits   int64      `json:"credit_microcredits"`
+	Status               string     `json:"status"`
+	FulfillmentStatus    string     `json:"fulfillment_status"`
+	PaymentURL           string     `json:"payment_url,omitempty"`
+	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
+	ExpiresAt            time.Time  `json:"expires_at"`
+	PaidAt               *time.Time `json:"paid_at,omitempty"`
+}
+
+type PaymentCoordinator struct {
+	repository *PostgresRepository
+	provider   *SimulatorProvider
+	secrets    map[string][]byte
+	merchantID string
+	now        func() time.Time
+}
+
+func NewPaymentCoordinator(repository *PostgresRepository, providerURL, serviceToken, merchantID string, secrets map[string]string) (*PaymentCoordinator, error) {
+	provider, err := NewSimulatorProvider(providerURL, serviceToken)
+	if err != nil {
+		return nil, err
+	}
+	parsedSecrets := make(map[string][]byte)
+	for _, channel := range []string{"UNIONPAY", "ALIPAY", "WECHAT"} {
+		if len(secrets[channel]) < 32 {
+			return nil, fmt.Errorf("%s notification secret must contain at least 32 characters", channel)
+		}
+		parsedSecrets[channel] = []byte(secrets[channel])
+	}
+	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey, callbackURL string) (PaymentOrder, bool, error) {
+	channel = strings.ToUpper(channel)
+	if len(idempotencyKey) < 16 || !validPaymentChannel(channel) {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	tx, err := p.repository.pool.Begin(ctx)
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	requestDigest := sha256.Sum256([]byte(requesterID.String() + "|" + walletID.String() + "|" + productID + "|" + channel))
+	requestHash := hex.EncodeToString(requestDigest[:])
+	var existingHash string
+	var existingBody []byte
+	err = tx.QueryRow(ctx, `SELECT request_hash, response_body FROM idempotency_records WHERE scope = 'payment.create' AND idempotency_key = $1 FOR UPDATE`, idempotencyKey).Scan(&existingHash, &existingBody)
+	if err == nil {
+		if existingHash != requestHash {
+			return PaymentOrder{}, false, ErrConflict
+		}
+		var order PaymentOrder
+		if err := json.Unmarshal(existingBody, &order); err != nil {
+			return PaymentOrder{}, false, err
+		}
+		return order, false, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, false, err
+	}
+	var product Product
+	err = tx.QueryRow(ctx, `SELECT product_id, amount_fen, credit_microcredits, display_points, currency, channels, catalog_version FROM recharge_products WHERE product_id = $1 AND enabled AND $2 = ANY(channels)`, productID, channel).Scan(&product.ProductID, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.Currency, &product.Channels, &product.CatalogVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	if _, err := getWallet(ctx, tx, walletID, false); err != nil {
+		return PaymentOrder{}, false, ErrNotFound
+	}
+	now := p.now()
+	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + uuid.Must(uuid.NewV7()).String(), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute)}
+	snapshot, _ := json.Marshal(product)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED','PENDING',$11,$12,$12)`, order.ID, order.MerchantOrderNo, requesterID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now)
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	providerOrder, err := p.provider.Create(ctx, order, callbackURL)
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	order.Status = "PENDING"
+	order.PaymentURL = providerOrder.PaymentURL
+	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status = 'PENDING', payment_url = $2, updated_at = $3 WHERE id = $1`, order.ID, order.PaymentURL, p.now())
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	responseBody, _ := json.Marshal(order)
+	_, err = tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES ('payment.create',$1,$2,201,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour))
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	return order, true, tx.Commit(ctx)
+}
+
+func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, signature string, body []byte) error {
+	channel = strings.ToUpper(channel)
+	secret := p.secrets[channel]
+	expected := paymentSignature(secret, body)
+	if len(signature) != len(expected) || subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) != 1 {
+		return ErrForbiddenPayment
+	}
+	var notification struct {
+		NotificationID     uuid.UUID `json:"notification_id"`
+		MerchantID         string    `json:"merchant_id"`
+		MerchantOrderNo    string    `json:"merchant_order_no"`
+		ChannelTransaction string    `json:"channel_transaction_id"`
+		Channel            string    `json:"channel"`
+		Status             string    `json:"status"`
+		AmountFen          int64     `json:"amount_fen"`
+		Currency           string    `json:"currency"`
+		PaidAt             time.Time `json:"paid_at"`
+		Timestamp          int64     `json:"timestamp"`
+	}
+	if err := json.Unmarshal(body, &notification); err != nil || notification.NotificationID == uuid.Nil || time.Unix(notification.Timestamp, 0).Before(p.now().Add(-5*time.Minute)) || time.Unix(notification.Timestamp, 0).After(p.now().Add(5*time.Minute)) {
+		return ErrForbiddenPayment
+	}
+	tx, err := p.repository.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	digest := sha256.Sum256(body)
+	command, err := tx.Exec(ctx, `INSERT INTO payment_notifications(notification_id,channel,request_hash,payload,received_at,result) VALUES ($1,$2,$3,$4,$5,'RECEIVED') ON CONFLICT DO NOTHING`, notification.NotificationID, channel, hex.EncodeToString(digest[:]), body, p.now())
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		return tx.Commit(ctx)
+	}
+	order, err := getPaymentOrderForUpdate(ctx, tx, notification.MerchantOrderNo)
+	if err != nil {
+		return err
+	}
+	if notification.MerchantID != p.merchantID || notification.Channel != order.Channel || channel != order.Channel || notification.AmountFen != order.AmountFen || notification.Currency != order.Currency || notification.Status != "SUCCESS" {
+		return ErrForbiddenPayment
+	}
+	if order.FulfillmentStatus == "CREDITED" {
+		return tx.Commit(ctx)
+	}
+	status := "PAID"
+	if !order.ExpiresAt.After(notification.PaidAt) {
+		status = "PAID_LATE"
+	}
+	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2, fulfillment_status='CREDITED', channel_transaction_id=$3, paid_at=$4, updated_at=$5 WHERE id=$1`, order.ID, status, notification.ChannelTransaction, notification.PaidAt, p.now())
+	if err != nil {
+		return err
+	}
+	if err := creditWithinTransaction(ctx, tx, order.WalletID, "recharge:"+order.ID.String(), order.CreditMicrocredits, p.now()); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE payment_notifications SET result='PROCESSED', processed_at=$2 WHERE notification_id=$1`, notification.NotificationID, p.now())
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+var ErrForbiddenPayment = errors.New("payment notification rejected")
+
+func creditWithinTransaction(ctx context.Context, tx pgx.Tx, walletID uuid.UUID, reference string, amount int64, now time.Time) error {
+	wallet, err := getWallet(ctx, tx, walletID, true)
+	if err != nil || wallet.Status != "ACTIVE" {
+		return ErrWalletUnavailable
+	}
+	entryID, lotID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	if err := insertJournal(ctx, tx, entryID, "RECHARGE", reference, "payment recharge", now); err != nil {
+		return err
+	}
+	accountID, err := walletLedgerAccount(ctx, tx, walletID)
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,true,$5)`, lotID, walletID, reference, amount, now); err != nil {
+		return err
+	}
+	if err = insertPosting(ctx, tx, entryID, accountID, amount, &lotID, now); err != nil {
+		return err
+	}
+	if err = insertPosting(ctx, tx, entryID, paymentClearingAccount, -amount, nil, now); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1`, walletID, amount, now)
+	return err
+}
+
+func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
+	var o PaymentOrder
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,payment_url,channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
+	return o, err
+}
+
+type SimulatorProvider struct {
+	base   *url.URL
+	token  string
+	client *http.Client
+}
+
+func NewSimulatorProvider(raw, token string) (*SimulatorProvider, error) {
+	u, e := url.Parse(strings.TrimRight(raw, "/"))
+	if e != nil || u.Host == "" || token == "" {
+		return nil, errors.New("invalid payment simulator configuration")
+	}
+	return &SimulatorProvider{u, token, &http.Client{Timeout: 5 * time.Second}}, nil
+}
+func (p *SimulatorProvider) Create(ctx context.Context, o PaymentOrder, callback string) (struct {
+	PaymentURL string `json:"payment_url"`
+}, error) {
+	var result struct {
+		PaymentURL string `json:"payment_url"`
+	}
+	body, _ := json.Marshal(map[string]any{"merchant_order_no": o.MerchantOrderNo, "channel": o.Channel, "amount_fen": o.AmountFen, "currency": o.Currency, "callback_url": callback, "scenario": "SUCCESS", "expires_in_seconds": 900})
+	req, e := http.NewRequestWithContext(ctx, http.MethodPost, p.base.String()+"/internal/v1/orders", bytes.NewReader(body))
+	if e != nil {
+		return result, e
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, e := p.client.Do(req)
+	if e != nil {
+		return result, e
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return result, fmt.Errorf("simulator HTTP %d: %s", resp.StatusCode, data)
+	}
+	return result, json.NewDecoder(resp.Body).Decode(&result)
+}
+func paymentSignature(secret, body []byte) string {
+	m := hmac.New(sha256.New, secret)
+	_, _ = m.Write(body)
+	return base64.StdEncoding.EncodeToString(m.Sum(nil))
+}
+func validPaymentChannel(v string) bool { return v == "UNIONPAY" || v == "ALIPAY" || v == "WECHAT" }

@@ -96,11 +96,15 @@ services:
       PORT: 8080
       DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
       OIDC_ISSUER: http://keycloak:8080/realms/pinvou
-      BILLING_GRPC_ADDRESS: billing-service:9090
+      OIDC_AUDIENCE: pinvou-desktop-dev
+      BILLING_HTTP_URL: http://billing-service:8080
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       NATS_URL: nats://nats:4222
     depends_on:
       postgres:
         condition: service_healthy
+      account-migrate:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     ports:
@@ -118,9 +122,15 @@ services:
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
       NATS_URL: nats://nats:4222
       PAYMENT_SIMULATOR_URL: http://payment-simulator:8080
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
+      PAYMENT_SIM_HMAC_UNIONPAY: ${PAYMENT_SIM_HMAC_UNIONPAY:?set PAYMENT_SIM_HMAC_UNIONPAY}
+      PAYMENT_SIM_HMAC_ALIPAY: ${PAYMENT_SIM_HMAC_ALIPAY:?set PAYMENT_SIM_HMAC_ALIPAY}
+      PAYMENT_SIM_HMAC_WECHAT: ${PAYMENT_SIM_HMAC_WECHAT:?set PAYMENT_SIM_HMAC_WECHAT}
     depends_on:
       postgres:
         condition: service_healthy
+      billing-migrate:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     ports:
@@ -143,6 +153,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      token-migrate:
+        condition: service_completed_successfully
       nats:
         condition: service_healthy
     ports:
@@ -159,14 +171,75 @@ services:
       PORT: 8080
       DATABASE_URL: postgresql://payment_simulator:${PAYMENT_SIM_DB_PASSWORD}@postgres:5432/account_platform_payment_sim?sslmode=disable
       BILLING_CALLBACK_URL: http://billing-service:8080/internal/payment/notifications
+      PAYMENT_SIM_PUBLIC_URL: http://127.0.0.1:18104
+      PAYMENT_SIM_PAY_TOKEN_SECRET: ${PAYMENT_SIM_PAY_TOKEN_SECRET:?set PAYMENT_SIM_PAY_TOKEN_SECRET}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       PAYMENT_SIM_HMAC_UNIONPAY: ${PAYMENT_SIM_HMAC_UNIONPAY:?set PAYMENT_SIM_HMAC_UNIONPAY}
       PAYMENT_SIM_HMAC_ALIPAY: ${PAYMENT_SIM_HMAC_ALIPAY:?set PAYMENT_SIM_HMAC_ALIPAY}
       PAYMENT_SIM_HMAC_WECHAT: ${PAYMENT_SIM_HMAC_WECHAT:?set PAYMENT_SIM_HMAC_WECHAT}
     depends_on:
       postgres:
         condition: service_healthy
+      payment-simulator-migrate:
+        condition: service_completed_successfully
     ports:
       - "127.0.0.1:18104:8080"
+
+  account-migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        SERVICE: migrate
+    command: ["--dir", "/migrations/account"]
+    environment:
+      DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  billing-migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        SERVICE: migrate
+    command: ["--dir", "/migrations/billing"]
+    environment:
+      DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  token-migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        SERVICE: migrate
+    command: ["--dir", "/migrations/token"]
+    environment:
+      DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  payment-simulator-migrate:
+    <<: *service-defaults
+    restart: "no"
+    build:
+      <<: *service-build
+      args:
+        SERVICE: migrate
+    command: ["--dir", "/migrations/payment-simulator"]
+    environment:
+      DATABASE_URL: postgresql://payment_simulator:${PAYMENT_SIM_DB_PASSWORD}@postgres:5432/account_platform_payment_sim?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 networks:
   backend:

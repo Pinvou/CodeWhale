@@ -16,6 +16,13 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 )
 
+type requestIDContextKey struct{}
+
+func RequestID(ctx context.Context) string {
+	value, _ := ctx.Value(requestIDContextKey{}).(string)
+	return value
+}
+
 var (
 	version = "dev"
 	commit  = "unknown"
@@ -29,25 +36,50 @@ type statusResponse struct {
 }
 
 func Handler(cfg config.Config) http.Handler {
+	return HandlerWithApplication(cfg, nil, nil)
+}
+
+// HandlerWithApplication mounts a service handler behind the common health,
+// request-correlation and cache-safety middleware. A readiness check should
+// verify only dependencies required for safe request handling.
+func HandlerWithApplication(cfg config.Config, application http.Handler, ready func(context.Context) error) http.Handler {
 	mux := http.NewServeMux()
-	status := func(state string) http.HandlerFunc {
+	status := func(state string, check func(context.Context) error) http.HandlerFunc {
 		return func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Type", "application/json")
+			statusCode := http.StatusOK
+			responseState := state
+			if check != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				if err := check(ctx); err != nil {
+					responseState = "not_ready"
+					statusCode = http.StatusServiceUnavailable
+				}
+			}
+			w.WriteHeader(statusCode)
 			_ = json.NewEncoder(w).Encode(statusResponse{
 				Service: cfg.ServiceName,
-				Status:  state,
+				Status:  responseState,
 				Version: version,
 				Commit:  commit,
 			})
 		}
 	}
-	mux.HandleFunc("GET /health/live", status("ok"))
-	mux.HandleFunc("GET /health/ready", status("ready"))
+	mux.HandleFunc("GET /health/live", status("ok", nil))
+	mux.HandleFunc("GET /health/ready", status("ready", ready))
+	if application != nil {
+		mux.Handle("/", application)
+	}
 	return withRequestID(mux)
 }
 
 func Run(serviceName string) error {
+	return RunWithApplication(serviceName, nil, nil)
+}
+
+func RunWithApplication(serviceName string, application http.Handler, ready func(context.Context) error) error {
 	cfg, err := config.Load(serviceName)
 	if err != nil {
 		return err
@@ -59,7 +91,7 @@ func Run(serviceName string) error {
 	)
 	server := &http.Server{
 		Addr:              cfg.Address,
-		Handler:           Handler(cfg),
+		Handler:           HandlerWithApplication(cfg, application, ready),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -96,7 +128,7 @@ func withRequestID(next http.Handler) http.Handler {
 			requestID = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, requestID)))
 	})
 }
 

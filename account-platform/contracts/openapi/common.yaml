@@ -25,6 +25,17 @@ components:
             - USAGE_ALREADY_SETTLED
             - PAYMENT_PROVIDER_UNAVAILABLE
             - BILLING_UNAVAILABLE
+            - INVALID_REQUEST
+            - NOT_FOUND
+            - ACCOUNT_FORBIDDEN
+            - ACCOUNT_CONFLICT
+            - LAST_OWNER_REQUIRED
+            - ORG_UNIT_HIERARCHY_INVALID
+            - INVITATION_EXPIRED
+            - SERVICE_AUTH_REQUIRED
+            - BILLING_CONFLICT
+            - WALLET_UNAVAILABLE
+            - INTERNAL_ERROR
         message:
           type: string
         request_id:
@@ -35,11 +46,14 @@ components:
     Context:
       type: object
       additionalProperties: false
-      required: [type]
+      required: [context_type, membership_version]
       properties:
-        type:
+        context_type:
           type: string
           enum: [PERSONAL, ORGANIZATION]
         organization_id:
           type: [string, "null"]
           format: uuid
+        membership_version:
+          type: integer
+          minimum: 1

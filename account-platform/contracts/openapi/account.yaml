@@ -77,6 +77,218 @@ paths:
                 $ref: "common.yaml#/components/schemas/Context"
         "403":
           $ref: "#/components/responses/Error"
+  /organizations:
+    post:
+      operationId: createOrganization
+      summary: Create an organization owned by the current user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+      responses:
+        "201":
+          description: Created organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "400":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/units:
+    post:
+      operationId: createOrganizationUnit
+      summary: Create an internal organization unit
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                parent_id:
+                  type: [string, "null"]
+                  format: uuid
+      responses:
+        "201":
+          description: Created organization unit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationUnit"
+        "400":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/units/{unit_id}/parent:
+    patch:
+      operationId: moveOrganizationUnit
+      summary: Move an organization unit with optimistic concurrency
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - name: unit_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version]
+              properties:
+                parent_id:
+                  type: [string, "null"]
+                  format: uuid
+                expected_version:
+                  type: integer
+                  minimum: 1
+      responses:
+        "200":
+          description: Moved organization unit
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationUnit"
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/invitations:
+    post:
+      operationId: createOrganizationInvitation
+      summary: Create a one-time organization invitation
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, roles, expires_in_hours]
+              properties:
+                email:
+                  type: string
+                  format: email
+                roles:
+                  type: array
+                  uniqueItems: true
+                  items:
+                    type: string
+                    enum: [ORG_ADMIN, BILLING_ADMIN, MEMBER, AUDITOR]
+                expires_in_hours:
+                  type: integer
+                  minimum: 1
+                  maximum: 720
+      responses:
+        "201":
+          description: Invitation; token is returned only on creation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invitation"
+        "400":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /invitations/accept:
+    post:
+      operationId: acceptOrganizationInvitation
+      summary: Idempotently accept a one-time invitation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  minLength: 32
+                  maxLength: 128
+      responses:
+        "200":
+          description: Joined organization
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Organization"
+        "403":
+          $ref: "#/components/responses/Error"
+        "410":
+          $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/members/{user_id}:
+    delete:
+      operationId: revokeOrganizationMembership
+      summary: Revoke a membership while preserving the final owner invariant
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Membership revoked
+        "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/ownership:
+    post:
+      operationId: transferOrganizationOwnership
+      summary: Atomically transfer organization ownership
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [new_owner_user_id]
+              properties:
+                new_owner_user_id:
+                  type: string
+                  format: uuid
+      responses:
+        "204":
+          description: Ownership transferred
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     oidc:
@@ -89,6 +301,14 @@ components:
         application/json:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
+  parameters:
+    OrganizationId:
+      name: organization_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
   schemas:
     Me:
       type: object
@@ -121,6 +341,74 @@ components:
           items:
             type: string
             enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
+    Organization:
+      type: object
+      additionalProperties: false
+      required: [organization_id, name, status, version]
+      properties:
+        organization_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        version:
+          type: integer
+          minimum: 1
+        roles:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
+    OrganizationUnit:
+      type: object
+      additionalProperties: false
+      required: [unit_id, organization_id, name, status, version]
+      properties:
+        unit_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+        parent_id:
+          type: [string, "null"]
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED]
+        version:
+          type: integer
+          minimum: 1
+    Invitation:
+      type: object
+      additionalProperties: false
+      required: [invitation_id, organization_id, email, roles, expires_at, token]
+      properties:
+        invitation_id:
+          type: string
+          format: uuid
+        organization_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        roles:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
+        token:
+          type: string
     SetActiveContextRequest:
       oneOf:
         - type: object
