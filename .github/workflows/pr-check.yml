@@ -8,6 +8,7 @@ name: PR Check
 # - frontend-test:Draft 跑 lint/build/逻辑测试；Ready PR 跑定向浏览器 smoke；
 #   Merge Queue 对最新组合提交跑完整受影响前端门禁。
 # - team-relay-hub-test:Hub 或迁移变化时使用隔离 PostgreSQL 跑完整测试与依赖审计。
+# - account-platform-test:账号平台变化时验证 Go、API/事件契约、迁移和 Compose 构建。
 # - release-contract-test:发布链路改动只跑配置/脚本契约,不在 PR 构建安装包。
 # - rust-test(编译类):Draft/普通 PR 默认不跑;Ready 高风险 PR 可加 ci:full-rust
 #   标签提前跑；Merge Queue 对非可信回流组合运行；main push 写暖 cache。
@@ -125,6 +126,7 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       relay: ${{ steps.filter.outputs.relay }}
       team_relay_hub: ${{ steps.filter.outputs.team_relay_hub }}
+      account_platform: ${{ steps.filter.outputs.account_platform }}
       acp_runtime: ${{ steps.filter.outputs.acp_runtime }}
       windows_codex: ${{ steps.filter.outputs.windows_codex }}
       windows_runtime: ${{ steps.filter.outputs.windows_runtime }}
@@ -252,6 +254,12 @@ jobs:
             team_relay_hub:
               - 'team-relay-hub/**'
               - 'docs/team-relay/migrations/**'
+              - '.github/workflows/pr-check.yml'
+            account_platform:
+              - 'account-platform/**'
+              - 'scripts/account-platform.mjs'
+              - 'docs/账号组织Token与计费系统-架构设计.md'
+              - 'docs/账号组织Token与计费系统-实施任务与验证计划.md'
               - '.github/workflows/pr-check.yml'
             acp_runtime:
               - 'pinvou3-app/scripts/codex-bridge-runtime/**'
@@ -543,6 +551,88 @@ jobs:
 
       - name: Hub 依赖审计
         run: npm --prefix team-relay-hub audit --registry=https://registry.npmjs.org --audit-level=high
+
+  account-platform-test:
+    name: account-platform-test
+    needs: changes
+    if: ${{ !cancelled() && github.event.action != 'closed' && needs.changes.outputs.account_platform == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: account_platform_test
+          POSTGRES_PASSWORD: account_platform_test
+          POSTGRES_DB: account_platform_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U account_platform_test -d account_platform_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.5'
+          cache-dependency-path: account-platform/go.sum
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: account-platform/package-lock.json
+
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: '1.57.0'
+
+      - name: 安装契约测试依赖
+        run: npm --prefix account-platform ci --prefer-offline --no-audit
+
+      - name: Go 格式、测试与静态检查
+        working-directory: account-platform
+        run: |
+          test -z "$(gofmt -l .)"
+          go test -race ./...
+          go vet ./...
+
+      - name: OpenAPI、事件与迁移契约
+        run: |
+          npm --prefix account-platform test
+          buf lint account-platform/contracts/proto
+
+      - name: PostgreSQL 迁移正反向验证
+        working-directory: account-platform
+        env:
+          DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
+        run: |
+          for domain in account billing token payment-simulator; do
+            go run ./cmd/migrate --dir "migrations/$domain"
+            go run ./cmd/migrate --dir "migrations/$domain" --direction down
+            go run ./cmd/migrate --dir "migrations/$domain"
+            go run ./cmd/migrate --dir "migrations/$domain" --direction down
+          done
+
+      - name: Compose 配置和服务镜像构建
+        run: |
+          docker compose \
+            --env-file account-platform/deploy/compose/.env.example \
+            -f account-platform/deploy/compose/compose.yaml \
+            config --quiet
+          docker compose \
+            --env-file account-platform/deploy/compose/.env.example \
+            -f account-platform/deploy/compose/compose.yaml \
+            build account-service billing-service token-gateway payment-simulator
+
+      - name: Go 与 Node 高危依赖审计
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.2
+          (cd account-platform && govulncheck ./...)
+          npm --prefix account-platform audit --registry=https://registry.npmjs.org --audit-level=high
 
   release-contract-test:
     name: release-contract-test
@@ -935,6 +1025,7 @@ jobs:
       - frontend-test
       - relay-test
       - team-relay-hub-test
+      - account-platform-test
       - release-contract-test
       - rust-lint
       - rust-test
@@ -956,6 +1047,7 @@ jobs:
           FRONTEND_RESULT: ${{ needs.frontend-test.result }}
           RELAY_RESULT: ${{ needs.relay-test.result }}
           TEAM_RELAY_HUB_RESULT: ${{ needs.team-relay-hub-test.result }}
+          ACCOUNT_PLATFORM_RESULT: ${{ needs.account-platform-test.result }}
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           RUST_RESULT: ${{ needs.rust-test.result }}
@@ -982,6 +1074,7 @@ jobs:
             "frontend-test:$FRONTEND_RESULT" \
             "relay-test:$RELAY_RESULT" \
             "team-relay-hub-test:$TEAM_RELAY_HUB_RESULT" \
+            "account-platform-test:$ACCOUNT_PLATFORM_RESULT" \
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \
             "rust-test:$RUST_RESULT" \

@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package pinvou.account.v1;
+
+option go_package = "github.com/Pinvou/pinvou3/account-platform/contracts/generated/go/pinvou/account/v1;accountv1";
+
+service AccountService {
+  rpc ResolveContext(ResolveContextRequest) returns (ResolveContextResponse);
+  rpc AuthorizeTokenAccount(AuthorizeTokenAccountRequest) returns (AuthorizeTokenAccountResponse);
+}
+
+message ResolveContextRequest {
+  string user_id = 1;
+  string session_id = 2;
+}
+
+message ResolveContextResponse {
+  string user_id = 1;
+  optional string active_organization_id = 2;
+  uint64 membership_version = 3;
+}
+
+message AuthorizeTokenAccountRequest {
+  string user_id = 1;
+  optional string active_organization_id = 2;
+  string token_account_id = 3;
+}
+
+message AuthorizeTokenAccountResponse {
+  bool allowed = 1;
+  string reason_code = 2;
+  uint64 membership_version = 3;
+}

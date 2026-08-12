@@ -1,0 +1,230 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Billing Service API
+  version: 0.1.0
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /v1
+security:
+  - serviceToken: []
+paths:
+  /recharge/products:
+    get:
+      operationId: listRechargeProducts
+      summary: List server-authoritative recharge products
+      parameters:
+        - name: channel
+          in: query
+          schema:
+            $ref: "#/components/schemas/PaymentChannel"
+      responses:
+        "200":
+          description: Recharge product catalog
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [catalog_version, items]
+                properties:
+                  catalog_version:
+                    type: integer
+                    minimum: 1
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RechargeProduct"
+        "401":
+          $ref: "#/components/responses/Error"
+  /recharge/orders:
+    post:
+      operationId: createRechargeOrder
+      summary: Create or replay a recharge order
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRechargeOrderRequest"
+      responses:
+        "201":
+          description: Recharge order
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RechargeOrder"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+  /recharge/orders/{order_id}:
+    get:
+      operationId: getRechargeOrder
+      summary: Read a recharge order
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Recharge order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RechargeOrder"
+        "404":
+          $ref: "#/components/responses/Error"
+  /wallets/{wallet_id}/balance:
+    get:
+      operationId: getBalance
+      summary: Read a strongly consistent wallet balance
+      parameters:
+        - name: wallet_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Wallet balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletBalance"
+        "404":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    serviceToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+  responses:
+    Error:
+      description: Stable error response
+      content:
+        application/json:
+          schema:
+            $ref: "common.yaml#/components/schemas/Error"
+  schemas:
+    PaymentChannel:
+      type: string
+      enum: [UNIONPAY, ALIPAY, WECHAT]
+    RechargeProduct:
+      type: object
+      additionalProperties: false
+      required: [product_id, amount_fen, credit_microcredits, display_points, channels]
+      properties:
+        product_id:
+          type: string
+          enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+        amount_fen:
+          type: integer
+          format: int64
+          minimum: 1
+        credit_microcredits:
+          type: integer
+          format: int64
+          minimum: 1
+        display_points:
+          type: integer
+          format: int64
+          minimum: 1
+        channels:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/PaymentChannel"
+    CreateRechargeOrderRequest:
+      type: object
+      additionalProperties: false
+      required: [wallet_id, requester_user_id, product_id, channel]
+      properties:
+        wallet_id:
+          type: string
+          format: uuid
+        requester_user_id:
+          type: string
+          format: uuid
+        product_id:
+          type: string
+          enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+        channel:
+          $ref: "#/components/schemas/PaymentChannel"
+    RechargeOrder:
+      type: object
+      additionalProperties: false
+      required: [order_id, status, fulfillment_status, product_id, amount_fen, credit_microcredits, channel, expires_at]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [CREATED, PENDING, PAID, PAID_LATE, CLOSED, EXPIRED, FAILED, REFUND_PENDING, PARTIALLY_REFUNDED, REFUNDED, REFUND_FAILED]
+        fulfillment_status:
+          type: string
+          enum: [NOT_CREDITED, CREDITED, PARTIALLY_REVERSED, REVERSED]
+        product_id:
+          type: string
+        amount_fen:
+          type: integer
+          format: int64
+        credit_microcredits:
+          type: integer
+          format: int64
+        channel:
+          $ref: "#/components/schemas/PaymentChannel"
+        qr_content:
+          type: [string, "null"]
+          maxLength: 2048
+        expires_at:
+          type: string
+          format: date-time
+    WalletBalance:
+      type: object
+      additionalProperties: false
+      required: [wallet_id, posted_microcredits, reserved_microcredits, available_microcredits, version]
+      properties:
+        wallet_id:
+          type: string
+          format: uuid
+        posted_microcredits:
+          type: integer
+          format: int64
+          minimum: 0
+        reserved_microcredits:
+          type: integer
+          format: int64
+          minimum: 0
+        available_microcredits:
+          type: integer
+          format: int64
+          minimum: 0
+        version:
+          type: integer
+          format: int64
+          minimum: 0

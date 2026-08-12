@@ -1,0 +1,126 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Token Gateway API
+  version: 0.1.0
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /v1
+security:
+  - oidc: []
+paths:
+  /token-accounts/eligible:
+    get:
+      operationId: listEligibleTokenAccounts
+      summary: List Token accounts authorized for the active context
+      responses:
+        "200":
+          description: Eligible Token accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EligibleTokenAccount"
+        "403":
+          $ref: "#/components/responses/Error"
+  /recharge/products:
+    get:
+      operationId: listRechargeProducts
+      summary: Proxy the Billing recharge catalog
+      responses:
+        "200":
+          description: Billing recharge catalog
+        "401":
+          $ref: "#/components/responses/Error"
+  /recharge/orders:
+    post:
+      operationId: createRechargeOrder
+      summary: Create a recharge order for the current permitted wallet
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 16
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [product_id, channel]
+              properties:
+                product_id:
+                  type: string
+                  enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+                channel:
+                  type: string
+                  enum: [UNIONPAY, ALIPAY, WECHAT]
+      responses:
+        "201":
+          description: Recharge order created by Billing Service
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+        "422":
+          $ref: "#/components/responses/Error"
+  /me/balance:
+    get:
+      operationId: getMyBalance
+      summary: Read the active context wallet directly from Billing
+      parameters:
+        - name: consistency
+          in: query
+          schema:
+            type: string
+            const: strong
+      responses:
+        "200":
+          description: Strongly consistent active-context balance
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://identity.example.invalid/realms/pinvou/.well-known/openid-configuration
+  responses:
+    Error:
+      description: Stable error response
+      content:
+        application/json:
+          schema:
+            $ref: "common.yaml#/components/schemas/Error"
+  schemas:
+    EligibleTokenAccount:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, name, owner_type, allowed_models]
+      properties:
+        token_account_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        owner_type:
+          type: string
+          enum: [USER, ORG, ORG_UNIT]
+        allowed_models:
+          type: array
+          items:
+            type: string

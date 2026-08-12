@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package pinvou.billing.v1;
+
+option go_package = "github.com/Pinvou/pinvou3/account-platform/contracts/generated/go/pinvou/billing/v1;billingv1";
+
+service BillingService {
+  rpc EnsureWallet(EnsureWalletRequest) returns (EnsureWalletResponse);
+  rpc ReserveCredits(ReserveCreditsRequest) returns (ReserveCreditsResponse);
+  rpc CommitUsage(CommitUsageRequest) returns (CommitUsageResponse);
+  rpc ReleaseHold(ReleaseHoldRequest) returns (ReleaseHoldResponse);
+}
+
+enum OwnerType {
+  OWNER_TYPE_UNSPECIFIED = 0;
+  OWNER_TYPE_USER = 1;
+  OWNER_TYPE_ORGANIZATION = 2;
+}
+
+message EnsureWalletRequest {
+  OwnerType owner_type = 1;
+  string owner_id = 2;
+}
+
+message EnsureWalletResponse {
+  string wallet_id = 1;
+  int64 posted_microcredits = 2;
+  int64 reserved_microcredits = 3;
+  uint64 version = 4;
+}
+
+message ReserveCreditsRequest {
+  string usage_request_id = 1;
+  string wallet_id = 2;
+  int64 maximum_microcredits = 3;
+  string price_version_id = 4;
+}
+
+message ReserveCreditsResponse {
+  string hold_id = 1;
+  int64 reserved_microcredits = 2;
+}
+
+message CommitUsageRequest {
+  string usage_request_id = 1;
+  string hold_id = 2;
+  int64 actual_microcredits = 3;
+  uint64 prompt_tokens = 4;
+  uint64 completion_tokens = 5;
+}
+
+message CommitUsageResponse {
+  int64 charged_microcredits = 1;
+  int64 released_microcredits = 2;
+}
+
+message ReleaseHoldRequest {
+  string usage_request_id = 1;
+  string hold_id = 2;
+  string reason = 3;
+}
+
+message ReleaseHoldResponse {
+  int64 released_microcredits = 1;
+}

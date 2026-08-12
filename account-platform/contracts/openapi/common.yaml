@@ -1,0 +1,45 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Account Platform Common Types
+  version: 0.1.0
+paths: {}
+components:
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          enum:
+            - AUTH_REQUIRED
+            - ACTIVE_ORG_FORBIDDEN
+            - MEMBERSHIP_REVOKED
+            - TOKEN_ACCOUNT_NOT_ELIGIBLE
+            - IDEMPOTENCY_CONFLICT
+            - CONTEXT_CHANGED
+            - ORDER_PRODUCT_INVALID
+            - ORDER_EXPIRED
+            - WALLET_INSUFFICIENT
+            - USAGE_ALREADY_SETTLED
+            - PAYMENT_PROVIDER_UNAVAILABLE
+            - BILLING_UNAVAILABLE
+        message:
+          type: string
+        request_id:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+    Context:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [PERSONAL, ORGANIZATION]
+        organization_id:
+          type: [string, "null"]
+          format: uuid
