@@ -144,3 +144,19 @@ func TestMetricsAreNotMountedOnTheApplicationListener(t *testing.T) {
 		t.Fatalf("application listener exposed metrics with status %d", response.Code)
 	}
 }
+
+func TestProductionSecurityHeadersAreFailClosed(t *testing.T) {
+	response := httptest.NewRecorder()
+	Handler(config.Config{ServiceName: "test", Environment: "production-new"}).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/live", nil))
+	for header, expected := range map[string]string{
+		"X-Content-Type-Options":    "nosniff",
+		"X-Frame-Options":           "DENY",
+		"Referrer-Policy":           "no-referrer",
+		"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+		"Content-Security-Policy":   "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+	} {
+		if response.Header().Get(header) != expected {
+			t.Fatalf("%s = %q, want %q", header, response.Header().Get(header), expected)
+		}
+	}
+}

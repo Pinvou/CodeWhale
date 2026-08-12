@@ -52,6 +52,8 @@ spec:
             - { name: APP_ENV, value: {{ $root.Values.global.environment | quote }} }
             - { name: PORT, value: "8080" }
             - { name: METRICS_ADDRESS, value: ":9090" }
+            - { name: RATE_LIMIT_RPS, value: {{ $root.Values.security.rateLimitRPS | quote }} }
+            - { name: RATE_LIMIT_BURST, value: {{ $root.Values.security.rateLimitBurst | quote }} }
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
             {{- if ne $app.name "token-portal" }}
             - name: DATABASE_URL

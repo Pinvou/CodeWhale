@@ -92,8 +92,23 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 	if application != nil {
 		mux.Handle("/", application)
 	}
-	observed := metrics.middleware(mux, newLogger(cfg))
-	return otelhttp.NewHandler(withRequestID(observed), cfg.ServiceName), metrics
+	observed := metrics.middleware(withRateLimit(cfg, mux), newLogger(cfg))
+	return otelhttp.NewHandler(withRequestID(withSecurityHeaders(cfg, observed)), cfg.ServiceName), metrics
+}
+
+func withSecurityHeaders(cfg config.Config, next http.Handler) http.Handler {
+	production := cfg.Environment == "production" || cfg.Environment == "production-new"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
+		if production {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func Run(serviceName string) error {
