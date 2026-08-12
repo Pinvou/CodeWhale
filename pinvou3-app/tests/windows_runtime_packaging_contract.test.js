@@ -198,6 +198,26 @@ assert.match(installerHook, /\.\.\\\.\.\\\.\.\\windows-runtime\\nsis\\vc_redist/
 assert.doesNotMatch(installerHook, /\.\.\\\.\.\\\.\.\\target\\windows-runtime/);
 assert.match(installerHook, /\/install \/quiet \/norestart/);
 assert.match(installerHook, /pinvou-vcredist-temp-preflight\.ps1/);
+assert.match(
+  installerHook,
+  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\vcredist-temp-preflight\.ps1/,
+  "preflight script File source must resolve from the installer.nsi output directory",
+);
+assert.doesNotMatch(
+  installerHook,
+  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\vcredist-temp-preflight\.ps1/,
+  "preflight script File source must not resolve past src-tauri",
+);
+assert.match(
+  installerHook,
+  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\runtime-env\.ps1/,
+  "runtime-env script File source must resolve from the installer.nsi output directory",
+);
+assert.doesNotMatch(
+  installerHook,
+  /\$\{__FILEDIR__\}\\.\.\\.\.\\.\.\\packaging\\windows\\nsis\\runtime-env\.ps1/,
+  "runtime-env script File source must not resolve past src-tauri",
+);
 assert.ok(
   installerHook.indexOf("pinvou-vcredist-temp-preflight.ps1") <
     installerHook.indexOf('ExecWait \'"$PLUGINSDIR\\VC_redist.x64.exe"'),
