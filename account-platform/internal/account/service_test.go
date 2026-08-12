@@ -29,6 +29,9 @@ func (f *fakeRepository) ActivateUser(_ context.Context, userID uuid.UUID) error
 func (f *fakeRepository) GetMe(context.Context, identity.Principal) (Me, error) {
 	return f.me, nil
 }
+func (*fakeRepository) ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error) {
+	panic("not used")
+}
 func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
 	panic("not used")
 }

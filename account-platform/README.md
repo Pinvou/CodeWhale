@@ -13,7 +13,17 @@
 - `token-gateway`：Token 授权、路由、New API 代理和计费编排。
 - `payment-simulator`：仅开发/测试使用的三渠道支付模拟器。
 
-当前 foundation 阶段只提供服务进程、健康检查、正式契约、迁移与部署骨架。业务功能按实施计划的门禁逐批进入。
+当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、退款与对账基础、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、充值 BFF 和本地 Mock New API。桌面端、Web Portal、生产 Helm、真实支付与真实 New API 仍按实施计划的后续门禁推进。
+
+## Token Gateway 安全默认值
+
+- `TOKEN_LOCAL_KEK_BASE64` 必须解码为 32 字节，仅允许开发/测试环境使用。
+- `production`/`production-new` 会拒绝本地密钥 Provider，必须接入 KMS/Vault 实现。
+- `TOKEN_PROVIDER_ALLOWED_HOSTS` 是逗号分隔的精确主机白名单；生产环境同时强制 HTTPS。
+- Gateway 不重试模型调用。上游结果不确定、流式断开或缺失 usage 时保留 Hold 并进入 `REVIEW`。
+- 支付回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置，客户端不能提交回调 URL。
+
+`mock-newapi` 只属于开发 Compose 后端网络，不发布宿主机端口；可用于验证正常、限流、断流和缺失 usage 场景。
 
 ## 本地命令
 

@@ -122,6 +122,7 @@ services:
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
       NATS_URL: nats://nats:4222
       PAYMENT_SIMULATOR_URL: http://payment-simulator:8080
+      BILLING_PAYMENT_CALLBACK_URL: http://billing-service:8080/internal/payment/notifications
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       PAYMENT_SIM_HMAC_UNIONPAY: ${PAYMENT_SIM_HMAC_UNIONPAY:?set PAYMENT_SIM_HMAC_UNIONPAY}
       PAYMENT_SIM_HMAC_ALIPAY: ${PAYMENT_SIM_HMAC_ALIPAY:?set PAYMENT_SIM_HMAC_ALIPAY}
@@ -147,8 +148,15 @@ services:
       PORT: 8080
       DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
       OIDC_ISSUER: http://keycloak:8080/realms/pinvou
-      ACCOUNT_GRPC_ADDRESS: account-service:9090
-      BILLING_GRPC_ADDRESS: billing-service:9090
+      OIDC_AUDIENCE: pinvou-desktop-dev
+      ACCOUNT_HTTP_URL: http://account-service:8080
+      BILLING_HTTP_URL: http://billing-service:8080
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
+      TOKEN_SECRET_PROVIDER: local
+      TOKEN_SECRET_KEY_ID: pinvou-development-local-v1
+      TOKEN_LOCAL_KEK_BASE64: ${TOKEN_LOCAL_KEK_BASE64:?set TOKEN_LOCAL_KEK_BASE64}
+      TOKEN_GATEWAY_MAX_INPUT_TOKENS: "128000"
+      TOKEN_PROVIDER_ALLOWED_HOSTS: mock-newapi
       NATS_URL: nats://nats:4222
     depends_on:
       postgres:
@@ -160,6 +168,16 @@ services:
     ports:
       - "127.0.0.1:18103:8080"
 
+  mock-newapi:
+    <<: *service-defaults
+    build:
+      <<: *service-build
+      args:
+        SERVICE: mock-newapi
+    environment:
+      APP_ENV: development
+      PORT: 8080
+      MOCK_NEWAPI_KEY: ${MOCK_NEWAPI_KEY:?set MOCK_NEWAPI_KEY}
   payment-simulator:
     <<: *service-defaults
     build:

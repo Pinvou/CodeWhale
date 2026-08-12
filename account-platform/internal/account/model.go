@@ -31,6 +31,17 @@ type Me struct {
 	ActiveContext Context   `json:"active_context"`
 }
 
+type AuthorizationContext struct {
+	UserID            uuid.UUID   `json:"user_id"`
+	SessionID         string      `json:"session_id"`
+	ContextType       string      `json:"context_type"`
+	OrganizationID    *uuid.UUID  `json:"organization_id,omitempty"`
+	MembershipVersion int64       `json:"membership_version"`
+	UnitIDs           []uuid.UUID `json:"unit_ids"`
+	AncestorUnitIDs   []uuid.UUID `json:"ancestor_unit_ids"`
+	Roles             []string    `json:"roles"`
+}
+
 type Organization struct {
 	ID      uuid.UUID `json:"organization_id"`
 	Name    string    `json:"name"`
@@ -61,6 +72,7 @@ type Repository interface {
 	Bootstrap(context.Context, identity.Principal) (Me, bool, error)
 	ActivateUser(context.Context, uuid.UUID) error
 	GetMe(context.Context, identity.Principal) (Me, error)
+	ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error)
 	ListOrganizations(context.Context, identity.Principal) ([]Organization, error)
 	SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error)
 	CreateOrganization(context.Context, identity.Principal, string) (Organization, error)

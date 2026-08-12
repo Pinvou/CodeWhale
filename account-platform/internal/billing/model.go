@@ -48,10 +48,20 @@ type Hold struct {
 	ExpiresAt          time.Time  `json:"expires_at"`
 }
 
+type PriceVersion struct {
+	ID                    uuid.UUID `json:"price_version_id"`
+	Model                 string    `json:"model"`
+	InputPerMillion       int64     `json:"input_per_million"`
+	OutputPerMillion      int64     `json:"output_per_million"`
+	CachedInputPerMillion int64     `json:"cached_input_per_million"`
+	EffectiveFrom         time.Time `json:"effective_from"`
+}
+
 type Repository interface {
 	EnsureWallet(context.Context, string, uuid.UUID) (Wallet, bool, error)
 	GetWallet(context.Context, uuid.UUID) (Wallet, error)
 	ListProducts(context.Context, string, string) ([]Product, error)
+	CurrentPrice(context.Context, string) (PriceVersion, error)
 	Credit(context.Context, uuid.UUID, string, int64, bool) (Wallet, error)
 	Reserve(context.Context, uuid.UUID, uuid.UUID, int64, *uuid.UUID, time.Time) (Hold, error)
 	Commit(context.Context, uuid.UUID, uuid.UUID, int64, map[string]any) (Hold, error)

@@ -30,6 +30,9 @@ func (s *Service) Handler(serviceToken string) http.Handler {
 	management := http.NewServeMux()
 	management.HandleFunc("POST /internal/v1/orders", s.createOrder)
 	management.HandleFunc("GET /internal/v1/orders/{merchant_order_no}", s.getOrder)
+	management.HandleFunc("POST /internal/v1/orders/{merchant_order_no}/close", s.closeOrder)
+	management.HandleFunc("POST /internal/v1/orders/{merchant_order_no}/refunds", s.refundOrder)
+	management.HandleFunc("GET /internal/v1/bills/{business_date}", s.getBill)
 	root.Handle("/internal/", serviceauth.Middleware(serviceToken, management))
 	root.HandleFunc("GET /pay/{token}", s.paymentPage)
 	root.HandleFunc("POST /pay/{token}/complete", s.completePayment)
@@ -72,6 +75,51 @@ func (s *Service) getOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, order)
+}
+
+func (s *Service) closeOrder(w http.ResponseWriter, r *http.Request) {
+	order, err := s.repository.CloseOrder(r.Context(), r.PathValue("merchant_order_no"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, order)
+}
+
+func (s *Service) refundOrder(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MerchantRefundNo string `json:"merchant_refund_no"`
+		AmountFen        int64  `json:"amount_fen"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.MerchantRefundNo) == "" || body.AmountFen <= 0 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid simulated refund", httpserver.RequestID(r.Context()))
+		return
+	}
+	refund, created, err := s.repository.Refund(r.Context(), r.PathValue("merchant_order_no"), body.MerchantRefundNo, body.AmountFen)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	api.WriteJSON(w, status, refund)
+}
+
+func (s *Service) getBill(w http.ResponseWriter, r *http.Request) {
+	businessDate, err := time.Parse("2006-01-02", r.PathValue("business_date"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid business date", httpserver.RequestID(r.Context()))
+		return
+	}
+	channel := strings.ToUpper(r.URL.Query().Get("channel"))
+	items, err := s.repository.ListBill(r.Context(), channel, businessDate)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"business_date": businessDate.Format("2006-01-02"), "channel": channel, "items": items})
 }
 
 var paymentTemplate = template.Must(template.New("payment").Parse(`<!doctype html>

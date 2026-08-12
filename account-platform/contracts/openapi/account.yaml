@@ -38,6 +38,60 @@ paths:
                 $ref: "#/components/schemas/Me"
         "401":
           $ref: "#/components/responses/Error"
+  /me/authorization-context:
+    get:
+      operationId: resolveAuthorizationContext
+      summary: Resolve the current user, session, organization, units, ancestors, roles, and membership version
+      responses:
+        "200":
+          description: Session-scoped authorization context
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [user_id, session_id, context_type, membership_version, unit_ids, ancestor_unit_ids, roles]
+                properties:
+                  user_id:
+                    type: string
+                    format: uuid
+                  session_id:
+                    type: string
+                  context_type:
+                    type: string
+                    enum: [PERSONAL, ORGANIZATION]
+                  organization_id:
+                    type: [string, "null"]
+                    format: uuid
+                  membership_version:
+                    type: integer
+                    format: int64
+                    minimum: 1
+                  unit_ids:
+                    type: array
+                    uniqueItems: true
+                    items:
+                      type: string
+                      format: uuid
+                  ancestor_unit_ids:
+                    type: array
+                    uniqueItems: true
+                    items:
+                      type: string
+                      format: uuid
+                  roles:
+                    type: array
+                    uniqueItems: true
+                    items:
+                      type: string
+        "401":
+          $ref: "#/components/responses/Error"
   /me/organizations:
     get:
       operationId: listMyOrganizations

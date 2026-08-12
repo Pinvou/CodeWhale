@@ -184,10 +184,10 @@ components:
           format: uuid
         status:
           type: string
-          enum: [CREATED, PENDING, PAID, PAID_LATE, CLOSED, EXPIRED, FAILED, REFUND_PENDING, PARTIALLY_REFUNDED, REFUNDED, REFUND_FAILED]
+          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW]
         fulfillment_status:
           type: string
-          enum: [NOT_CREDITED, CREDITED, PARTIALLY_REVERSED, REVERSED]
+          enum: [PENDING, CREDITED, REFUNDED, MANUAL_REVIEW]
         product_id:
           type: string
         amount_fen:

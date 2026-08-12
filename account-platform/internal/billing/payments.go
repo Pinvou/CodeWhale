@@ -40,14 +40,51 @@ type PaymentOrder struct {
 }
 
 type PaymentCoordinator struct {
-	repository *PostgresRepository
-	provider   *SimulatorProvider
-	secrets    map[string][]byte
-	merchantID string
-	now        func() time.Time
+	repository  *PostgresRepository
+	provider    PaymentProvider
+	secrets     map[string][]byte
+	merchantID  string
+	callbackURL string
+	now         func() time.Time
 }
 
-func NewPaymentCoordinator(repository *PostgresRepository, providerURL, serviceToken, merchantID string, secrets map[string]string) (*PaymentCoordinator, error) {
+type ProviderOrder struct {
+	MerchantOrderNo      string     `json:"merchant_order_no"`
+	PaymentURL           string     `json:"payment_url"`
+	Status               string     `json:"status"`
+	Channel              string     `json:"channel"`
+	AmountFen            int64      `json:"amount_fen"`
+	Currency             string     `json:"currency"`
+	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
+	PaidAt               *time.Time `json:"paid_at,omitempty"`
+}
+
+type ProviderRefund struct {
+	MerchantRefundNo string `json:"merchant_refund_no"`
+	ChannelRefundID  string `json:"channel_refund_id,omitempty"`
+	AmountFen        int64  `json:"amount_fen"`
+	Status           string `json:"status"`
+}
+
+type ProviderBillEntry struct {
+	MerchantOrderNo      string    `json:"merchant_order_no"`
+	ChannelTransactionID string    `json:"channel_transaction_id"`
+	Channel              string    `json:"channel"`
+	AmountFen            int64     `json:"amount_fen"`
+	Currency             string    `json:"currency"`
+	Status               string    `json:"status"`
+	PaidAt               time.Time `json:"paid_at"`
+}
+
+type PaymentProvider interface {
+	Create(context.Context, PaymentOrder, string) (ProviderOrder, error)
+	Get(context.Context, string) (ProviderOrder, error)
+	Close(context.Context, string) (ProviderOrder, error)
+	Refund(context.Context, string, string, int64) (ProviderRefund, error)
+	Bill(context.Context, string, time.Time) ([]ProviderBillEntry, error)
+}
+
+func NewPaymentCoordinator(repository *PostgresRepository, providerURL, serviceToken, merchantID, callbackURL string, secrets map[string]string) (*PaymentCoordinator, error) {
 	provider, err := NewSimulatorProvider(providerURL, serviceToken)
 	if err != nil {
 		return nil, err
@@ -59,10 +96,14 @@ func NewPaymentCoordinator(repository *PostgresRepository, providerURL, serviceT
 		}
 		parsedSecrets[channel] = []byte(secrets[channel])
 	}
-	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, now: func() time.Time { return time.Now().UTC() }}, nil
+	parsedCallback, err := url.Parse(strings.TrimSpace(callbackURL))
+	if err != nil || parsedCallback.Scheme == "" || parsedCallback.Host == "" {
+		return nil, errors.New("invalid Billing payment callback URL")
+	}
+	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, callbackURL: parsedCallback.String(), now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
-func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey, callbackURL string) (PaymentOrder, bool, error) {
+func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey string) (PaymentOrder, bool, error) {
 	channel = strings.ToUpper(channel)
 	if len(idempotencyKey) < 16 || !validPaymentChannel(channel) {
 		return PaymentOrder{}, false, ErrConflict
@@ -108,7 +149,7 @@ func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walle
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
-	providerOrder, err := p.provider.Create(ctx, order, callbackURL)
+	providerOrder, err := p.provider.Create(ctx, order, p.callbackURL)
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
@@ -159,6 +200,10 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 		return err
 	}
 	if command.RowsAffected() == 0 {
+		var existingHash string
+		if err := tx.QueryRow(ctx, `SELECT request_hash FROM payment_notifications WHERE notification_id=$1`, notification.NotificationID).Scan(&existingHash); err != nil || existingHash != hex.EncodeToString(digest[:]) {
+			return ErrForbiddenPayment
+		}
 		return tx.Commit(ctx)
 	}
 	order, err := getPaymentOrderForUpdate(ctx, tx, notification.MerchantOrderNo)
@@ -169,11 +214,25 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 		return ErrForbiddenPayment
 	}
 	if order.FulfillmentStatus == "CREDITED" {
+		if order.ChannelTransactionID == nil || *order.ChannelTransactionID != notification.ChannelTransaction {
+			return ErrConflict
+		}
 		return tx.Commit(ctx)
 	}
 	status := "PAID"
 	if !order.ExpiresAt.After(notification.PaidAt) {
 		status = "PAID_LATE"
+	}
+	transactionID := uuid.Must(uuid.NewV7())
+	command, err = tx.Exec(ctx, `INSERT INTO payment_transactions(id,payment_order_id,channel,channel_transaction_id,status,amount_fen,currency,source,verified_at,created_at,updated_at) VALUES($1,$2,$3,$4,'SUCCEEDED',$5,$6,'NOTIFICATION',$7,$7,$7) ON CONFLICT (channel_transaction_id) DO NOTHING`, transactionID, order.ID, order.Channel, notification.ChannelTransaction, order.AmountFen, order.Currency, p.now())
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() == 0 {
+		var existingOrderID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT payment_order_id FROM payment_transactions WHERE channel_transaction_id=$1`, notification.ChannelTransaction).Scan(&existingOrderID); err != nil || existingOrderID != order.ID {
+			return ErrConflict
+		}
 	}
 	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2, fulfillment_status='CREDITED', channel_transaction_id=$3, paid_at=$4, updated_at=$5 WHERE id=$1`, order.ID, status, notification.ChannelTransaction, notification.PaidAt, p.now())
 	if err != nil {
@@ -236,12 +295,8 @@ func NewSimulatorProvider(raw, token string) (*SimulatorProvider, error) {
 	}
 	return &SimulatorProvider{u, token, &http.Client{Timeout: 5 * time.Second}}, nil
 }
-func (p *SimulatorProvider) Create(ctx context.Context, o PaymentOrder, callback string) (struct {
-	PaymentURL string `json:"payment_url"`
-}, error) {
-	var result struct {
-		PaymentURL string `json:"payment_url"`
-	}
+func (p *SimulatorProvider) Create(ctx context.Context, o PaymentOrder, callback string) (ProviderOrder, error) {
+	var result ProviderOrder
 	body, _ := json.Marshal(map[string]any{"merchant_order_no": o.MerchantOrderNo, "channel": o.Channel, "amount_fen": o.AmountFen, "currency": o.Currency, "callback_url": callback, "scenario": "SUCCESS", "expires_in_seconds": 900})
 	req, e := http.NewRequestWithContext(ctx, http.MethodPost, p.base.String()+"/internal/v1/orders", bytes.NewReader(body))
 	if e != nil {
@@ -259,6 +314,65 @@ func (p *SimulatorProvider) Create(ctx context.Context, o PaymentOrder, callback
 		return result, fmt.Errorf("simulator HTTP %d: %s", resp.StatusCode, data)
 	}
 	return result, json.NewDecoder(resp.Body).Decode(&result)
+}
+
+func (p *SimulatorProvider) Get(ctx context.Context, merchantOrderNo string) (ProviderOrder, error) {
+	var result ProviderOrder
+	err := p.doJSON(ctx, http.MethodGet, "/internal/v1/orders/"+url.PathEscape(merchantOrderNo), nil, &result)
+	return result, err
+}
+
+func (p *SimulatorProvider) Close(ctx context.Context, merchantOrderNo string) (ProviderOrder, error) {
+	var result ProviderOrder
+	err := p.doJSON(ctx, http.MethodPost, "/internal/v1/orders/"+url.PathEscape(merchantOrderNo)+"/close", map[string]any{}, &result)
+	return result, err
+}
+
+func (p *SimulatorProvider) Refund(ctx context.Context, merchantOrderNo, merchantRefundNo string, amountFen int64) (ProviderRefund, error) {
+	var result ProviderRefund
+	err := p.doJSON(ctx, http.MethodPost, "/internal/v1/orders/"+url.PathEscape(merchantOrderNo)+"/refunds", map[string]any{"merchant_refund_no": merchantRefundNo, "amount_fen": amountFen}, &result)
+	return result, err
+}
+
+func (p *SimulatorProvider) Bill(ctx context.Context, channel string, businessDate time.Time) ([]ProviderBillEntry, error) {
+	var result struct {
+		Items []ProviderBillEntry `json:"items"`
+	}
+	path := "/internal/v1/bills/" + businessDate.UTC().Format("2006-01-02") + "?channel=" + url.QueryEscape(strings.ToUpper(channel))
+	err := p.doJSON(ctx, http.MethodGet, path, nil, &result)
+	return result.Items, err
+}
+
+func (p *SimulatorProvider) doJSON(ctx context.Context, method, path string, input any, output any) error {
+	var body io.Reader
+	if input != nil {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, p.base.String()+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+p.token)
+	if input != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return fmt.Errorf("simulator HTTP %d: %s", resp.StatusCode, data)
+	}
+	if output == nil || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(output)
 }
 func paymentSignature(secret, body []byte) string {
 	m := hmac.New(sha256.New, secret)

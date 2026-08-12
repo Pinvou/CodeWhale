@@ -172,6 +172,111 @@ func (r *PostgresRepository) Complete(ctx context.Context, token string) (Order,
 	return order, tx.Commit(ctx)
 }
 
+func (r *PostgresRepository) CloseOrder(ctx context.Context, merchantOrderNo string) (Order, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Order{}, err
+	}
+	defer tx.Rollback(ctx)
+	order, err := getOrderByMerchantForUpdate(ctx, tx, merchantOrderNo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Order{}, ErrNotFound
+	}
+	if err != nil {
+		return Order{}, err
+	}
+	if order.Status == "CLOSED" {
+		return order, tx.Commit(ctx)
+	}
+	if order.Status != "PENDING" {
+		return Order{}, ErrConflict
+	}
+	order.Status = "CLOSED"
+	_, err = tx.Exec(ctx, `UPDATE simulator_orders SET status='CLOSED', updated_at=$2 WHERE id=$1`, order.ID, r.now())
+	if err != nil {
+		return Order{}, err
+	}
+	return order, tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) Refund(ctx context.Context, merchantOrderNo, merchantRefundNo string, amountFen int64) (Refund, bool, error) {
+	if strings.TrimSpace(merchantRefundNo) == "" || amountFen <= 0 {
+		return Refund{}, false, ErrConflict
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Refund{}, false, err
+	}
+	defer tx.Rollback(ctx)
+	var existing Refund
+	var existingMerchantOrderNo string
+	err = tx.QueryRow(ctx, `SELECT r.merchant_refund_no,COALESCE(r.channel_refund_id,''),r.amount_fen,r.status,r.updated_at,o.merchant_order_no FROM simulator_refunds r JOIN simulator_orders o ON o.id=r.order_id WHERE r.merchant_refund_no=$1 FOR UPDATE OF r`, merchantRefundNo).Scan(&existing.MerchantRefundNo, &existing.ChannelRefundID, &existing.AmountFen, &existing.Status, &existing.UpdatedAt, &existingMerchantOrderNo)
+	if err == nil {
+		if existing.AmountFen != amountFen || existingMerchantOrderNo != merchantOrderNo {
+			return Refund{}, false, ErrConflict
+		}
+		return existing, false, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return Refund{}, false, err
+	}
+	order, err := getOrderByMerchantForUpdate(ctx, tx, merchantOrderNo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Refund{}, false, ErrNotFound
+	}
+	if err != nil || (order.Status != "SUCCESS" && order.Status != "PARTIALLY_REFUNDED") || amountFen > order.AmountFen-order.RefundedAmountFen {
+		return Refund{}, false, ErrConflict
+	}
+	now := r.now()
+	refund := Refund{MerchantRefundNo: merchantRefundNo, AmountFen: amountFen, UpdatedAt: now}
+	if order.Scenario == "REFUND_FAIL" {
+		refund.Status = "FAILED"
+		_, err = tx.Exec(ctx, `INSERT INTO simulator_refunds(id,order_id,merchant_refund_no,amount_fen,status,created_at,updated_at) VALUES($1,$2,$3,$4,'FAILED',$5,$5)`, uuid.Must(uuid.NewV7()), order.ID, merchantRefundNo, amountFen, now)
+		if err != nil {
+			return Refund{}, false, err
+		}
+		return refund, true, tx.Commit(ctx)
+	}
+	refund.Status = "SUCCESS"
+	refund.ChannelRefundID = strings.ToLower(order.Channel) + "-refund-" + uuid.Must(uuid.NewV7()).String()
+	newRefunded := order.RefundedAmountFen + amountFen
+	newStatus := "PARTIALLY_REFUNDED"
+	if newRefunded == order.AmountFen {
+		newStatus = "REFUNDED"
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO simulator_refunds(id,order_id,merchant_refund_no,amount_fen,status,channel_refund_id,created_at,updated_at) VALUES($1,$2,$3,$4,'SUCCESS',$5,$6,$6)`, uuid.Must(uuid.NewV7()), order.ID, merchantRefundNo, amountFen, refund.ChannelRefundID, now)
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE simulator_orders SET refunded_amount_fen=$2,status=$3,updated_at=$4 WHERE id=$1`, order.ID, newRefunded, newStatus, now)
+	}
+	if err != nil {
+		return Refund{}, false, err
+	}
+	return refund, true, tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) ListBill(ctx context.Context, channel string, businessDate time.Time) ([]BillEntry, error) {
+	channel = strings.ToUpper(channel)
+	if !validChannel(channel) {
+		return nil, ErrConflict
+	}
+	start := businessDate.UTC()
+	end := start.AddDate(0, 0, 1)
+	rows, err := r.pool.Query(ctx, `SELECT merchant_order_no,channel_transaction_id,channel,amount_fen,currency,status,paid_at FROM simulator_orders WHERE channel=$1 AND paid_at >= $2 AND paid_at < $3 AND channel_transaction_id IS NOT NULL ORDER BY paid_at,merchant_order_no`, channel, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]BillEntry, 0)
+	for rows.Next() {
+		var item BillEntry
+		if err := rows.Scan(&item.MerchantOrderNo, &item.ChannelTransactionID, &item.Channel, &item.AmountFen, &item.Currency, &item.Status, &item.PaidAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (r *PostgresRepository) enqueueNotification(ctx context.Context, tx pgx.Tx, order Order, now time.Time) error {
 	notificationID := uuid.Must(uuid.NewV7())
 	payload := map[string]any{
@@ -264,17 +369,23 @@ type queryable interface {
 
 func getOrderByMerchant(ctx context.Context, database queryable, merchantOrderNo string) (Order, error) {
 	var order Order
-	err := database.QueryRow(ctx, `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at FROM simulator_orders WHERE merchant_order_no = $1`, merchantOrderNo).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
+	err := database.QueryRow(ctx, `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen FROM simulator_orders WHERE merchant_order_no = $1`, merchantOrderNo).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen)
+	return order, err
+}
+
+func getOrderByMerchantForUpdate(ctx context.Context, database queryable, merchantOrderNo string) (Order, error) {
+	var order Order
+	err := database.QueryRow(ctx, `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen FROM simulator_orders WHERE merchant_order_no = $1 FOR UPDATE`, merchantOrderNo).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen)
 	return order, err
 }
 
 func getOrderByTokenHash(ctx context.Context, database queryable, hash []byte, lock bool) (Order, error) {
-	query := `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at FROM simulator_orders WHERE pay_token_hash = $1`
+	query := `SELECT id, merchant_order_no, channel, amount_fen, currency, status, scenario, channel_transaction_id, expires_at, paid_at, refunded_amount_fen FROM simulator_orders WHERE pay_token_hash = $1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var order Order
-	err := database.QueryRow(ctx, query, hash).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
+	err := database.QueryRow(ctx, query, hash).Scan(&order.ID, &order.MerchantOrderNo, &order.Channel, &order.AmountFen, &order.Currency, &order.Status, &order.Scenario, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.RefundedAmountFen)
 	return order, err
 }
 
@@ -300,7 +411,7 @@ func validChannel(channel string) bool {
 
 func validScenario(scenario string) bool {
 	switch scenario {
-	case "SUCCESS", "FAIL", "CANCEL", "TIMEOUT", "LATE_SUCCESS", "DROP_NOTIFY", "DUPLICATE_NOTIFY", "BAD_AMOUNT", "BAD_CURRENCY", "BAD_MERCHANT", "BAD_SIGNATURE":
+	case "SUCCESS", "FAIL", "CANCEL", "TIMEOUT", "LATE_SUCCESS", "DROP_NOTIFY", "DUPLICATE_NOTIFY", "BAD_AMOUNT", "BAD_CURRENCY", "BAD_MERCHANT", "BAD_SIGNATURE", "REFUND_FAIL":
 		return true
 	default:
 		return false

@@ -36,6 +36,25 @@ type Order struct {
 	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
 	ExpiresAt            time.Time  `json:"expires_at"`
 	PaidAt               *time.Time `json:"paid_at,omitempty"`
+	RefundedAmountFen    int64      `json:"refunded_amount_fen"`
+}
+
+type Refund struct {
+	MerchantRefundNo string    `json:"merchant_refund_no"`
+	ChannelRefundID  string    `json:"channel_refund_id,omitempty"`
+	AmountFen        int64     `json:"amount_fen"`
+	Status           string    `json:"status"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type BillEntry struct {
+	MerchantOrderNo      string    `json:"merchant_order_no"`
+	ChannelTransactionID string    `json:"channel_transaction_id"`
+	Channel              string    `json:"channel"`
+	AmountFen            int64     `json:"amount_fen"`
+	Currency             string    `json:"currency"`
+	Status               string    `json:"status"`
+	PaidAt               time.Time `json:"paid_at"`
 }
 
 type Notification struct {
@@ -54,6 +73,9 @@ type Repository interface {
 	GetByMerchantOrder(context.Context, string) (Order, error)
 	GetByPaymentToken(context.Context, string) (Order, error)
 	Complete(context.Context, string) (Order, error)
+	CloseOrder(context.Context, string) (Order, error)
+	Refund(context.Context, string, string, int64) (Refund, bool, error)
+	ListBill(context.Context, string, time.Time) ([]BillEntry, error)
 	ClaimNotifications(context.Context, int) ([]Notification, error)
 	MarkNotification(context.Context, Notification, error) error
 	Ping(context.Context) error

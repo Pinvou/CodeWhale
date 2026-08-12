@@ -36,10 +36,16 @@ func (s *Service) Handler(serviceToken string) http.Handler {
 	mux.HandleFunc("POST /internal/v1/holds/reserve", s.reserve)
 	mux.HandleFunc("POST /internal/v1/holds/commit", s.commit)
 	mux.HandleFunc("POST /internal/v1/holds/release", s.release)
+	mux.HandleFunc("GET /internal/v1/pricing/current", s.currentPrice)
 	mux.HandleFunc("GET /v1/recharge/products", s.listProducts)
 	mux.HandleFunc("GET /v1/wallets/{wallet_id}/balance", s.getBalance)
 	if s.payments != nil {
 		mux.HandleFunc("POST /internal/v1/recharge/orders", s.createRechargeOrder)
+		mux.HandleFunc("GET /internal/v1/recharge/orders/{order_id}", s.getRechargeOrder)
+		mux.HandleFunc("POST /internal/v1/recharge/orders/{order_id}/close", s.closeRechargeOrder)
+		mux.HandleFunc("POST /internal/v1/recharge/orders/{order_id}/refunds", s.createRefund)
+		mux.HandleFunc("POST /internal/v1/recharge/orders/{order_id}/sync", s.syncRechargeOrder)
+		mux.HandleFunc("POST /internal/v1/reconciliation/runs", s.runReconciliation)
 		root.HandleFunc("POST /internal/payment/notifications", s.paymentNotification)
 	}
 	root.Handle("/", serviceauth.Middleware(serviceToken, mux))
@@ -52,13 +58,12 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		WalletID    uuid.UUID `json:"wallet_id"`
 		ProductID   string    `json:"product_id"`
 		Channel     string    `json:"channel"`
-		CallbackURL string    `json:"callback_url"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" || body.CallbackURL == "" {
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
 		return
 	}
-	order, created, err := s.payments.CreateOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, r.Header.Get("Idempotency-Key"), body.CallbackURL)
+	order, created, err := s.payments.CreateOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -67,7 +72,101 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	if created {
 		status = http.StatusCreated
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, status, order)
+}
+
+func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	requesterID, requesterErr := uuid.Parse(r.URL.Query().Get("requester_id"))
+	if err != nil || requesterErr != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order lookup", httpserver.RequestID(r.Context()))
+		return
+	}
+	order, err := s.payments.GetOrder(r.Context(), orderID, requesterID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, order)
+}
+
+func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	var body struct {
+		RequesterID uuid.UUID `json:"requester_id"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.RequesterID == uuid.Nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order close request", httpserver.RequestID(r.Context()))
+		return
+	}
+	order, err := s.payments.CloseOrder(r.Context(), orderID, body.RequesterID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, order)
+}
+
+func (s *Service) createRefund(w http.ResponseWriter, r *http.Request) {
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	var body struct {
+		RequesterID uuid.UUID `json:"requester_id"`
+		AmountFen   int64     `json:"amount_fen"`
+		Reason      string    `json:"reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.RequesterID == uuid.Nil || body.AmountFen <= 0 || strings.TrimSpace(body.Reason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid refund request", httpserver.RequestID(r.Context()))
+		return
+	}
+	refund, created, err := s.payments.CreateRefund(r.Context(), orderID, body.RequesterID, body.AmountFen, r.Header.Get("Idempotency-Key"), body.Reason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	api.WriteJSON(w, status, refund)
+}
+
+func (s *Service) syncRechargeOrder(w http.ResponseWriter, r *http.Request) {
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
+		return
+	}
+	order, err := s.payments.SyncOrder(r.Context(), orderID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, order)
+}
+
+func (s *Service) runReconciliation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Channel      string `json:"channel"`
+		BusinessDate string `json:"business_date"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	businessDate, err := time.Parse("2006-01-02", body.BusinessDate)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid reconciliation date", httpserver.RequestID(r.Context()))
+		return
+	}
+	run, err := s.payments.RunReconciliation(r.Context(), body.Channel, businessDate)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, run)
 }
 
 func (s *Service) paymentNotification(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +239,20 @@ func (s *Service) listProducts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{"catalog_version": version, "items": products})
+}
+
+func (s *Service) currentPrice(w http.ResponseWriter, r *http.Request) {
+	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	if model == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "model is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	price, err := s.repository.CurrentPrice(r.Context(), model)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, price)
 }
 
 func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +332,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusLocked, "WALLET_UNAVAILABLE", "the wallet is not active"
 	case errors.Is(err, ErrUsageAlreadyTerminal):
 		status, code, message = http.StatusConflict, "USAGE_ALREADY_SETTLED", "the usage hold is already terminal"
+	case errors.Is(err, ErrPaymentProvider):
+		status, code, message = http.StatusBadGateway, "PAYMENT_PROVIDER_UNAVAILABLE", "the payment provider request could not be completed"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

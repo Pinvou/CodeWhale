@@ -48,6 +48,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/account/bootstrap", s.bootstrap)
 	mux.HandleFunc("GET /v1/me", s.getMe)
+	mux.HandleFunc("GET /v1/me/authorization-context", s.getAuthorizationContext)
 	mux.HandleFunc("GET /v1/me/organizations", s.listOrganizations)
 	mux.HandleFunc("POST /v1/sessions/current/active-context", s.setActiveContext)
 	mux.HandleFunc("POST /v1/organizations", s.createOrganization)
@@ -82,6 +83,16 @@ func (s *Service) getMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, me)
+}
+
+func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request) {
+	resolved, err := s.repository.ResolveAuthorizationContext(r.Context(), mustPrincipal(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, resolved)
 }
 
 func (s *Service) listOrganizations(w http.ResponseWriter, r *http.Request) {

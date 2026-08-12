@@ -147,6 +147,45 @@ WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, pr
 	return me, err
 }
 
+func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, principal identity.Principal) (AuthorizationContext, error) {
+	var resolved AuthorizationContext
+	err := r.pool.QueryRow(ctx, `
+SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version,
+       COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
+       COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
+       COALESCE(array_agg(DISTINCT rb.role) FILTER (WHERE rb.role IS NOT NULL),'{}')
+FROM identities i
+JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
+JOIN user_sessions s ON s.user_id=u.id AND s.issuer=i.issuer AND s.session_id=$3
+LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=s.active_organization_id AND m.status='ACTIVE'
+LEFT JOIN membership_units mu ON mu.membership_id=m.id
+LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
+LEFT JOIN role_bindings rb ON rb.membership_id=m.id
+WHERE i.issuer=$1 AND i.subject=$2
+GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
+		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AuthorizationContext{}, ErrNotFound
+	}
+	if err != nil {
+		return AuthorizationContext{}, err
+	}
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && len(resolved.Roles) == 0 {
+		return AuthorizationContext{}, ErrForbidden
+	}
+	if resolved.UnitIDs == nil {
+		resolved.UnitIDs = []uuid.UUID{}
+	}
+	if resolved.AncestorUnitIDs == nil {
+		resolved.AncestorUnitIDs = []uuid.UUID{}
+	}
+	if resolved.Roles == nil {
+		resolved.Roles = []string{}
+	}
+	return resolved, nil
+}
+
 func (r *PostgresRepository) ListOrganizations(ctx context.Context, principal identity.Principal) ([]Organization, error) {
 	rows, err := r.pool.Query(ctx, `
 SELECT o.id, o.name, o.status, o.version, array_agg(rb.role ORDER BY rb.role)

@@ -16,6 +16,7 @@ import (
 var (
 	paymentClearingAccount = uuid.MustParse("00000000-0000-7000-8000-000000000001")
 	usageRevenueAccount    = uuid.MustParse("00000000-0000-7000-8000-000000000002")
+	refundClearingAccount  = uuid.MustParse("00000000-0000-7000-8000-000000000003")
 )
 
 type PostgresRepository struct {
@@ -105,6 +106,15 @@ ORDER BY amount_fen`, currency, channel)
 		products = append(products, product)
 	}
 	return products, rows.Err()
+}
+
+func (r *PostgresRepository) CurrentPrice(ctx context.Context, model string) (PriceVersion, error) {
+	var price PriceVersion
+	err := r.pool.QueryRow(ctx, `SELECT id,model,input_per_million,output_per_million,cached_input_per_million,effective_from FROM pricing_versions WHERE model=$1 AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2) ORDER BY effective_from DESC LIMIT 1`, strings.TrimSpace(model), r.now()).Scan(&price.ID, &price.Model, &price.InputPerMillion, &price.OutputPerMillion, &price.CachedInputPerMillion, &price.EffectiveFrom)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PriceVersion{}, ErrNotFound
+	}
+	return price, err
 }
 
 func (r *PostgresRepository) Credit(ctx context.Context, walletID uuid.UUID, businessReference string, amount int64, refundable bool) (Wallet, error) {
