@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -239,6 +240,11 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 		return err
 	}
 	if err := creditWithinTransaction(ctx, tx, order.WalletID, "recharge:"+order.ID.String(), order.CreditMicrocredits, p.now()); err != nil {
+		return err
+	}
+	if err := events.AppendOutbox(ctx, tx, "billing.recharge.succeeded.v1", order.ID, 1, map[string]any{
+		"order_id": order.ID, "wallet_id": order.WalletID, "channel": order.Channel, "amount_fen": order.AmountFen, "credit_microcredits": order.CreditMicrocredits,
+	}); err != nil {
 		return err
 	}
 	_, err = tx.Exec(ctx, `UPDATE payment_notifications SET result='PROCESSED', processed_at=$2 WHERE notification_id=$1`, notification.NotificationID, p.now())

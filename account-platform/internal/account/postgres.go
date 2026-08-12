@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
@@ -506,12 +507,13 @@ func (r *PostgresRepository) AcceptInvitation(ctx context.Context, principal ide
 	}
 	now := r.now()
 	membershipID := uuid.Must(uuid.NewV7())
+	var membershipVersion int64
 	err = tx.QueryRow(ctx, `
 INSERT INTO memberships(id, organization_id, user_id, status, joined_at, updated_at)
 VALUES ($1, $2, $3, 'ACTIVE', $4, $4)
 ON CONFLICT (organization_id, user_id) DO UPDATE
 SET status = 'ACTIVE', version = memberships.version + 1, updated_at = EXCLUDED.updated_at
-RETURNING id`, membershipID, organizationID, userID, now).Scan(&membershipID)
+RETURNING id,version`, membershipID, organizationID, userID, now).Scan(&membershipID, &membershipVersion)
 	if err != nil {
 		return Organization{}, err
 	}
@@ -531,7 +533,7 @@ RETURNING id`, membershipID, organizationID, userID, now).Scan(&membershipID)
 	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "invitation.accept", "invitation", invitationID.String(), "SUCCEEDED", nil); err != nil {
 		return Organization{}, err
 	}
-	if err := appendOutbox(ctx, tx, "account.membership.changed.v1", membershipID, 1, map[string]any{"organization_id": organizationID, "user_id": userID, "status": "ACTIVE"}); err != nil {
+	if err := appendOutbox(ctx, tx, "account.membership.changed.v1", membershipID, membershipVersion, map[string]any{"organization_id": organizationID, "user_id": userID, "membership_status": "ACTIVE", "membership_version": membershipVersion}); err != nil {
 		return Organization{}, err
 	}
 	organization, err := loadOrganization(ctx, tx, organizationID)
@@ -555,10 +557,11 @@ func (r *PostgresRepository) RevokeMembership(ctx context.Context, principal ide
 		return err
 	}
 	var membershipID uuid.UUID
+	var membershipVersion int64
 	var isOwner bool
 	err = tx.QueryRow(ctx, `
-SELECT m.id, EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id = m.id AND rb.role = 'OWNER')
-FROM memberships m WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE' FOR UPDATE`, organizationID, targetUserID).Scan(&membershipID, &isOwner)
+SELECT m.id,m.version,EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id = m.id AND rb.role = 'OWNER')
+FROM memberships m WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE' FOR UPDATE`, organizationID, targetUserID).Scan(&membershipID, &membershipVersion, &isOwner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -575,6 +578,7 @@ FROM memberships m WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status 
 		}
 	}
 	now := r.now()
+	membershipVersion++
 	_, err = tx.Exec(ctx, `UPDATE memberships SET status = 'REVOKED', version = version + 1, updated_at = $2 WHERE id = $1`, membershipID, now)
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE users SET membership_version = membership_version + 1, updated_at = $2 WHERE id = $1`, targetUserID, now)
@@ -588,7 +592,7 @@ FROM memberships m WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status 
 	if err := appendAudit(ctx, tx, actorID, principal.SessionID, &organizationID, "membership.revoke", "membership", membershipID.String(), "SUCCEEDED", map[string]any{"target_user_id": targetUserID}); err != nil {
 		return err
 	}
-	if err := appendOutbox(ctx, tx, "account.membership.changed.v1", membershipID, 2, map[string]any{"organization_id": organizationID, "user_id": targetUserID, "status": "REVOKED"}); err != nil {
+	if err := appendOutbox(ctx, tx, "account.membership.changed.v1", membershipID, membershipVersion, map[string]any{"organization_id": organizationID, "user_id": targetUserID, "membership_status": "REVOKED", "membership_version": membershipVersion}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -729,16 +733,7 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, now())`, uuid.Must(uuid.New
 }
 
 func appendOutbox(ctx context.Context, tx pgx.Tx, eventType string, aggregateID uuid.UUID, aggregateVersion int64, payload map[string]any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	traceID := httpserver.RequestID(ctx)
-	if traceID == "" {
-		traceID = "internal"
-	}
-	_, err = tx.Exec(ctx, `INSERT INTO outbox_events(event_id, event_type, aggregate_id, aggregate_version, payload, trace_id, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, now())`, uuid.Must(uuid.NewV7()), eventType, aggregateID, aggregateVersion, body, traceID)
-	return err
+	return events.AppendOutbox(ctx, tx, eventType, aggregateID, aggregateVersion, payload)
 }
 
 func mapConstraintError(err error) error {

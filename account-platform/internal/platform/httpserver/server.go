@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,9 +18,15 @@ import (
 )
 
 type requestIDContextKey struct{}
+type traceIDContextKey struct{}
 
 func RequestID(ctx context.Context) string {
 	value, _ := ctx.Value(requestIDContextKey{}).(string)
+	return value
+}
+
+func TraceID(ctx context.Context) string {
+	value, _ := ctx.Value(traceIDContextKey{}).(string)
 	return value
 }
 
@@ -127,9 +134,27 @@ func withRequestID(next http.Handler) http.Handler {
 		if requestID == "" {
 			requestID = newRequestID()
 		}
+		traceID := traceIDFromParent(r.Header.Get("traceparent"))
+		if traceID == "" {
+			traceID = newRequestID()
+		}
 		w.Header().Set("X-Request-ID", requestID)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDContextKey{}, requestID)))
+		w.Header().Set("X-Trace-ID", traceID)
+		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
+		ctx = context.WithValue(ctx, traceIDContextKey{}, traceID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func traceIDFromParent(value string) string {
+	parts := strings.Split(value, "-")
+	if len(parts) != 4 || len(parts[1]) != 32 || parts[1] == strings.Repeat("0", 32) {
+		return ""
+	}
+	if _, err := hex.DecodeString(parts[1]); err != nil {
+		return ""
+	}
+	return strings.ToLower(parts[1])
 }
 
 func newRequestID() string {

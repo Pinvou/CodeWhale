@@ -1,0 +1,40 @@
+{{- $root := . -}}
+{{- $fullname := include "pinvou.fullname" . -}}
+{{- range $source := list "account" "billing" "token" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-{{ $source }}-event-relay
+  labels:
+    {{- include "pinvou.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $source }}-event-relay
+spec:
+  replicas: {{ $root.Values.replicas.eventRelay }}
+  selector:
+    matchLabels:
+      {{- include "pinvou.selector" $root | nindent 6 }}
+      app.kubernetes.io/component: {{ $source }}-event-relay
+  template:
+    metadata:
+      labels:
+        {{- include "pinvou.selector" $root | nindent 8 }}
+        app.kubernetes.io/component: {{ $source }}-event-relay
+    spec:
+      serviceAccountName: {{ $fullname }}
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: event-relay
+          image: "{{ $root.Values.images.eventRelay.repository }}:{{ $root.Values.images.eventRelay.tag }}"
+          imagePullPolicy: {{ $root.Values.images.eventRelay.pullPolicy }}
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
+          resources: {{ toYaml $root.Values.resources | nindent 12 }}
+          env:
+            - { name: EVENT_SOURCE, value: {{ $source | quote }} }
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "%s-service-database-url" $source }} } }
+            - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: { sizeLimit: 16Mi } }]
+{{- end }}

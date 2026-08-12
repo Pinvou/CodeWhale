@@ -129,7 +129,7 @@ func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal i
 	if err := appendAudit(ctx, tx, actorID, principal.SessionID, &organizationID, "membership.roles.replace", "membership", membershipID.String(), "SUCCEEDED", map[string]any{"target_user_id": targetUserID, "roles": roles}); err != nil {
 		return Member{}, err
 	}
-	if err := appendOutbox(ctx, tx, "account.membership.changed.v1", membershipID, version, map[string]any{"organization_id": organizationID, "user_id": targetUserID, "status": "ACTIVE", "roles": roles}); err != nil {
+	if err := appendOutbox(ctx, tx, "account.membership.changed.v1", membershipID, version, map[string]any{"organization_id": organizationID, "user_id": targetUserID, "membership_status": "ACTIVE", "membership_version": version}); err != nil {
 		return Member{}, err
 	}
 	member, err := getMember(ctx, tx, membershipID)

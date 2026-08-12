@@ -9,6 +9,7 @@ images:
   billingService: { repository: pinvou/billing-service, tag: dev, pullPolicy: IfNotPresent }
   tokenGateway: { repository: pinvou/token-gateway, tag: dev, pullPolicy: IfNotPresent }
   tokenPortal: { repository: pinvou/token-portal, tag: dev, pullPolicy: IfNotPresent }
+  eventRelay: { repository: pinvou/account-platform-event-relay, tag: dev, pullPolicy: IfNotPresent }
   migrate: { repository: pinvou/account-platform-migrate, tag: dev, pullPolicy: IfNotPresent }
   keycloak: { repository: quay.io/keycloak/keycloak, tag: "26.7.0", pullPolicy: IfNotPresent }
   redis: { repository: redis, tag: "8.2-alpine", pullPolicy: IfNotPresent }
@@ -19,6 +20,7 @@ replicas:
   billingService: 2
   tokenGateway: 2
   tokenPortal: 2
+  eventRelay: 1
 
 oidc:
   issuer: https://accounts.example.invalid/realms/pinvou

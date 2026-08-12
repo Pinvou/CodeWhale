@@ -95,3 +95,28 @@ func TestRequestIDIsGeneratedWhenMissing(t *testing.T) {
 		t.Fatalf("generated request id length = %d, want 32", len(requestID))
 	}
 }
+
+func TestTraceIDIsAcceptedOnlyFromValidTraceparent(t *testing.T) {
+	for _, item := range []struct {
+		name       string
+		parent     string
+		expectedID string
+	}{
+		{name: "valid", parent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", expectedID: "4bf92f3577b34da6a3ce929d0e0e4736"},
+		{name: "invalid", parent: "00-not-a-trace-id-00f067aa0ba902b7-01"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+			request.Header.Set("traceparent", item.parent)
+			Handler(config.Config{ServiceName: "test"}).ServeHTTP(response, request)
+			traceID := response.Header().Get("X-Trace-ID")
+			if item.expectedID != "" && traceID != item.expectedID {
+				t.Fatalf("trace ID = %q, want %q", traceID, item.expectedID)
+			}
+			if item.expectedID == "" && len(traceID) != 32 {
+				t.Fatalf("generated trace ID length = %d, want 32", len(traceID))
+			}
+		})
+	}
+}

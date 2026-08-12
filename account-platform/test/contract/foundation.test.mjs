@@ -76,6 +76,12 @@ test('Compose keeps data stores private and simulator development-only', async (
     compose.services['billing-service'].environment.DATABASE_URL,
     compose.services['account-service'].environment.DATABASE_URL,
   );
+  for (const source of ['account', 'billing', 'token']) {
+    const relay = compose.services[`${source}-event-relay`];
+    assert.equal(relay.environment.EVENT_SOURCE, source);
+    assert.equal(relay.environment.NATS_URL, 'nats://nats:4222');
+    assert.equal(relay.environment.DATABASE_URL, compose.services[`${source === 'token' ? 'token-gateway' : `${source}-service`}`].environment.DATABASE_URL);
+  }
 });
 
 test('Keycloak development client disables unsafe grants', async () => {

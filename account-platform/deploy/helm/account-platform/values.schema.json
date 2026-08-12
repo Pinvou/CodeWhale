@@ -13,13 +13,14 @@
     },
     "images": {
       "type": "object",
-      "required": ["accountService", "billingService", "tokenGateway", "tokenPortal", "migrate", "keycloak", "redis", "nats"],
+      "required": ["accountService", "billingService", "tokenGateway", "tokenPortal", "eventRelay", "migrate", "keycloak", "redis", "nats"],
       "additionalProperties": false,
       "properties": {
         "accountService": { "$ref": "#/definitions/image" },
         "billingService": { "$ref": "#/definitions/image" },
         "tokenGateway": { "$ref": "#/definitions/image" },
         "tokenPortal": { "$ref": "#/definitions/image" },
+        "eventRelay": { "$ref": "#/definitions/image" },
         "migrate": { "$ref": "#/definitions/image" },
         "keycloak": { "$ref": "#/definitions/image" },
         "redis": { "$ref": "#/definitions/image" },

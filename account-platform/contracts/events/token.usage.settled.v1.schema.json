@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pinvou.com/schemas/token.usage.settled.v1.json",
+  "title": "token.usage.settled.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "aggregate_id", "aggregate_version", "occurred_at", "trace_id", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "const": "token.usage.settled.v1" },
+    "aggregate_id": { "type": "string", "format": "uuid" },
+    "aggregate_version": { "type": "integer", "const": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["usage_request_id", "wallet_id", "token_account_id", "actual_microcredits"],
+      "properties": {
+        "usage_request_id": { "type": "string", "format": "uuid" },
+        "wallet_id": { "type": "string", "format": "uuid" },
+        "token_account_id": { "type": "string", "format": "uuid" },
+        "actual_microcredits": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
