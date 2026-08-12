@@ -1,4 +1,5 @@
-export const TEAM_RELAY_CATEGORIES = ['pending', 'waiting', 'receive', 'sent', 'ended', 'hidden'];
+export const TEAM_RELAY_VIEWS = ['attention', 'waiting', 'all', 'ended', 'hidden'];
+export const TEAM_RELAY_SOURCE_FILTERS = ['all', 'sent', 'received', 'collaborating'];
 export const TEAM_RELAY_BOARD_COLUMNS = ['active', 'collaborating', 'acceptance', 'ended'];
 
 function defaultDelivery(kind) {
@@ -30,9 +31,25 @@ export function deriveCategory(thread, meId) {
   if (thread.phase === 'closed' || thread.phase === 'cancelled') return 'ended';
   if (thread.phase === 'awaiting_acceptance' && thread.current_actor_id === meId) return 'receive';
   if (thread.phase === 'active' && thread.current_actor_id === meId) return 'pending';
-  if (thread.phase === 'active' && thread.return_to_id === meId && thread.current_actor_id !== meId) return 'waiting';
-  if (thread.initiator_id === meId || thread.owner_id === meId) return 'sent';
-  return 'sent';
+  return 'waiting';
+}
+
+export function matchesRelayView(task, view, meId) {
+  if (view === 'hidden') return task.category === 'hidden';
+  if (view === 'ended') return task.category === 'ended';
+  if (view === 'attention') return task.category === 'pending' || task.category === 'receive';
+  if (view === 'waiting') {
+    return task.category === 'waiting'
+      && (task.raw.initiator_id === meId || task.raw.owner_id === meId);
+  }
+  return task.category !== 'hidden';
+}
+
+export function matchesSourceFilter(task, filter, meId) {
+  if (filter === 'sent') return task.raw.initiator_id === meId;
+  if (filter === 'received') return task.raw.initiator_id !== meId && task.raw.owner_id === meId;
+  if (filter === 'collaborating') return task.raw.initiator_id !== meId && task.raw.owner_id !== meId;
+  return true;
 }
 
 export function projectSnapshot(snapshot, copy) {
@@ -99,9 +116,9 @@ export function projectSnapshot(snapshot, copy) {
   });
 }
 
-export function categoryCounts(tasks) {
-  return TEAM_RELAY_CATEGORIES.reduce((counts, category) => {
-    counts[category] = tasks.filter(task => task.category === category).length;
+export function relayViewCounts(tasks, meId) {
+  return TEAM_RELAY_VIEWS.reduce((counts, view) => {
+    counts[view] = tasks.filter(task => matchesRelayView(task, view, meId)).length;
     return counts;
   }, {});
 }

@@ -170,16 +170,25 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 - 客户端收到事件后重新读取资源；SSE 重连后必须重新 bootstrap。
 - 演示阶段不提供 cursor replay，也不承诺发送方离线时自动恢复未确认请求。
 
-## 10. 收发箱推导
+## 10. 工作箱推导
 
-同一线程只进入一个主分类，优先级如下：
+客户端先为每个线程推导一个互斥状态：
 
-1. 当前 Principal 设置了 `hidden_at`：已隐藏；
+1. 当前 Principal 设置了 `hidden_at`：已归档；
 2. `phase=closed/cancelled`：已结束；
-3. `phase=awaiting_acceptance && current_actor=me`：待我接收；
+3. `phase=awaiting_acceptance && current_actor=me`：待我验收；
 4. `phase=active && current_actor=me`：待我处理；
-5. `phase=active && return_to=me && current_actor!=me`：等别人回传；
-6. `initiator=me || owner=me`：我派出去的。
+5. 其余未结束参与线程：对方处理中。
+
+侧栏按行动需求提供视图，而不是把来源与状态混成互斥分类：
+
+- 需要我处理：待我处理和待我验收，待验收优先排列；
+- 等待对方：对方处理中，且当前 Principal 是发起人或负责人；
+- 全部接力：当前 Principal 参与的所有未归档线程，包括已结束线程；
+- 已结束：已结束且未归档；
+- 已归档：当前 Principal 已归档的线程。
+
+“全部接力”提供可重叠的来源筛选：`initiator=me` 为“我派出的”；`initiator!=me && owner=me` 为“派给我的”；当前 Principal 是参与者且既非发起人也非负责人时为“我协作的”。历史协作者不会因为仍是线程参与者而进入“等待对方”。
 
 前端实现必须使用共享纯函数推导，不能信任预览数据中的 `category`、`status` 或 `banner`。
 

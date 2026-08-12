@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dict } from '../src/shared/i18n.js';
-import { categoryCounts, deriveBoardColumn, deriveCategory, projectMaterialPackages, projectSnapshot, projectTeamBoard } from '../src/features/team-relay/team-relay-state.js';
+import {
+  deriveBoardColumn, deriveCategory, matchesRelayView, matchesSourceFilter,
+  projectMaterialPackages, projectSnapshot, projectTeamBoard, relayViewCounts,
+} from '../src/features/team-relay/team-relay-state.js';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../src/features/team-relay/team-relay-access.js';
 
 assert.equal(loadTeamRelayAccess({ getItem: () => null }), false);
@@ -32,7 +35,8 @@ assert.equal(deriveCategory({ phase: 'cancelled' }, 'me'), 'ended');
 assert.equal(deriveCategory({ phase: 'awaiting_acceptance', current_actor_id: 'me' }, 'me'), 'receive');
 assert.equal(deriveCategory({ phase: 'active', current_actor_id: 'me' }, 'me'), 'pending');
 assert.equal(deriveCategory({ phase: 'active', current_actor_id: 'other', return_to_id: 'me' }, 'me'), 'waiting');
-assert.equal(deriveCategory({ phase: 'active', current_actor_id: 'other', initiator_id: 'me' }, 'me'), 'sent');
+assert.equal(deriveCategory({ phase: 'active', current_actor_id: 'other', initiator_id: 'me' }, 'me'), 'waiting');
+assert.equal(deriveCategory({ phase: 'awaiting_acceptance', current_actor_id: 'other' }, 'me'), 'waiting');
 assert.equal(deriveBoardColumn({ phase: 'active', current_actor_id: 'owner', owner_id: 'owner' }), 'active');
 assert.equal(deriveBoardColumn({ phase: 'active', current_actor_id: 'helper', owner_id: 'owner' }), 'collaborating');
 assert.equal(deriveBoardColumn({ phase: 'awaiting_acceptance' }), 'acceptance');
@@ -57,7 +61,15 @@ assert.equal(tasks[0].owner, 'B');
 assert.equal(tasks[0].files[0].original_name, '方案.md');
 assert.equal(tasks[0].events[0].delivery.artifact_role, 'input');
 assert.equal(tasks[0].events[0].sequence, 1);
-assert.deepEqual(categoryCounts(tasks), { pending: 0, waiting: 1, receive: 0, sent: 0, ended: 0, hidden: 0 });
+assert.deepEqual(relayViewCounts(tasks, 'me'), { attention: 0, waiting: 1, all: 1, ended: 0, hidden: 0 });
+assert.equal(matchesSourceFilter(tasks[0], 'sent', 'me'), true);
+assert.equal(matchesSourceFilter(tasks[0], 'received', 'me'), false);
+assert.equal(matchesSourceFilter(tasks[0], 'collaborating', 'me'), false);
+assert.equal(matchesRelayView({ category: 'pending', raw: { initiator_id: 'other', owner_id: 'me' } }, 'attention', 'me'), true);
+assert.equal(matchesSourceFilter({ raw: { initiator_id: 'other', owner_id: 'me' } }, 'received', 'me'), true);
+assert.equal(matchesSourceFilter({ raw: { initiator_id: 'other', owner_id: 'other' } }, 'collaborating', 'me'), true);
+assert.equal(matchesRelayView({ category: 'waiting', raw: { initiator_id: 'other', owner_id: 'other' } }, 'waiting', 'me'), false);
+assert.equal(matchesRelayView({ category: 'waiting', raw: { initiator_id: 'other', owner_id: 'other' } }, 'all', 'me'), true);
 const board = projectTeamBoard(snapshot, tasks);
 assert.deepEqual(board.summary, { members: 2, inProgress: 1, acceptance: 0, completed: 0 });
 assert.equal(board.columns.active[0].id, 'thread');
@@ -93,10 +105,14 @@ closedSnapshot.bootstrap.threads[0].actions.push({
 const closedTask = projectSnapshot(closedSnapshot, dict.zh.uiTeamRelay)[0];
 assert.equal(closedTask.acceptedPackage.id, 'delivery');
 assert.equal(closedTask.acceptedPackage.sequence, 2);
+assert.equal(matchesRelayView(closedTask, 'all', 'me'), true);
+assert.equal(matchesRelayView(closedTask, 'ended', 'me'), true);
 closedSnapshot.bootstrap.threads[0].preference = { pinned: true, hidden: true };
 const hiddenTask = projectSnapshot(closedSnapshot, dict.zh.uiTeamRelay)[0];
 assert.equal(hiddenTask.category, 'hidden');
 assert.equal(hiddenTask.pinned, true);
+assert.equal(matchesRelayView(hiddenTask, 'all', 'me'), false);
+assert.equal(matchesRelayView(hiddenTask, 'hidden', 'me'), true);
 
 for (const language of ['zh', 'en', 'ja']) {
   const copy = dict[language].uiTeamRelay;
@@ -118,6 +134,12 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(copy.joinCode.memberVisibility);
   assert.ok(copy.joinCode.ownerOnly);
   assert.ok(copy.joinCode.disableConfirm);
+  assert.ok(copy.categories.attention);
+  assert.ok(copy.categories.all);
+  assert.ok(copy.statuses.receive);
+  assert.ok(copy.sourceFilters.sent);
+  assert.ok(copy.sourceFilters.received);
+  assert.ok(copy.sourceFilters.collaborating);
   assert.ok(copy.errorMessages.join_password_invalid);
   assert.ok(copy.errorMessages.join_code_storage_unavailable);
   assert.ok(copy.errorMessages.rate_limited);
