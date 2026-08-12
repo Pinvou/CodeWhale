@@ -63,7 +63,9 @@ test('event schemas compile as JSON Schema 2020-12 and reject secrets', async ()
 });
 
 test('Compose keeps data stores private and simulator development-only', async () => {
-  const compose = await readYaml('deploy/compose/compose.yaml');
+  const composePath = path.join(root, 'deploy/compose/compose.yaml');
+  const composeRaw = await readFile(composePath, 'utf8');
+  const compose = YAML.parse(composeRaw);
   assert.equal(compose.networks.backend.internal, true);
   for (const service of ['postgres', 'redis', 'nats']) {
     assert.equal(compose.services[service].ports, undefined, `${service} must not publish ports`);
@@ -81,6 +83,11 @@ test('Compose keeps data stores private and simulator development-only', async (
     assert.equal(relay.environment.EVENT_SOURCE, source);
     assert.equal(relay.environment.NATS_URL, 'nats://nats:4222');
     assert.equal(relay.environment.DATABASE_URL, compose.services[`${source === 'token' ? 'token-gateway' : `${source}-service`}`].environment.DATABASE_URL);
+  }
+  const example = await readFile(path.join(root, 'deploy/compose/.env.example'), 'utf8');
+  const names = new Set(example.split(/\r?\n/).filter(Boolean).map((line) => line.split('=', 1)[0]));
+  for (const match of composeRaw.matchAll(/\$\{([A-Z0-9_]+):\?/g)) {
+    assert.ok(names.has(match[1]), `${match[1]} is required by Compose but missing from .env.example`);
   }
 });
 

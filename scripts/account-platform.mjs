@@ -40,7 +40,16 @@ function run(command, args, options = {}) {
     shell: false,
   });
   if (result.error) throw result.error;
-  if (result.status !== 0) process.exit(result.status ?? 1);
+  if (result.status !== 0) {
+    const error = new Error(`${command} exited with status ${result.status ?? 1}`);
+    error.exitCode = result.status ?? 1;
+    throw error;
+  }
+}
+
+function commandAvailable(command, args = ['--version']) {
+  const result = spawnSync(command, args, { cwd: repositoryRoot, env: process.env, stdio: 'ignore', shell: false });
+  return !result.error && result.status === 0;
 }
 
 function ensureNodeModules() {
@@ -65,6 +74,33 @@ function compose(action) {
   run('docker', ['compose', '--env-file', composeEnv, '-f', composeFile, action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
 }
 
+function integration() {
+  if (!commandAvailable('docker', ['version'])) throw new Error('Docker is required for integration tests');
+  const environment = { COMPOSE_PROJECT_NAME: 'pinvou-account-platform-test' };
+  const args = ['compose', '--env-file', `${composeEnv}.example`, '-f', composeFile];
+  let failure;
+  try {
+    run('docker', [...args, 'up', '--build', '-d', '--wait'], { env: environment });
+    run(process.execPath, [path.join(platformRoot, 'test', 'integration', 'compose-smoke.mjs')]);
+  } catch (error) {
+    failure = error;
+  } finally {
+    try {
+      run('docker', [...args, 'down', '--volumes', '--remove-orphans'], { env: environment });
+    } catch (cleanupError) {
+      if (!failure) throw cleanupError;
+      console.error(`[account-platform] cleanup failed: ${cleanupError.message}`);
+    }
+  }
+  if (failure) throw failure;
+}
+
+function security() {
+  ensureNodeModules();
+  run(executable('go'), ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', './...'], { cwd: platformRoot });
+  runNpm(['audit', '--registry=https://registry.npmjs.org', '--audit-level=high'], { cwd: platformRoot });
+}
+
 const [scope, action] = process.argv.slice(2);
 try {
   if (scope === 'verify' && action === undefined) verify();
@@ -74,10 +110,12 @@ try {
   else if (scope === 'test' && action === 'contract') {
     ensureNodeModules();
     runNpm(['test'], { cwd: platformRoot });
-  } else {
-    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract>');
+  } else if (scope === 'test' && action === 'integration') integration();
+  else if (scope === 'test' && action === 'security') security();
+  else {
+    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract|integration|security>');
   }
 } catch (error) {
   console.error(`[account-platform] ${error.message}`);
-  process.exit(1);
+  process.exitCode = error.exitCode || 1;
 }

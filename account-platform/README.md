@@ -14,7 +14,7 @@
 - `token-portal`：OIDC Authorization Code + PKCE、Redis 服务端会话和同源 CSRF 保护的 Web BFF；OIDC Token 不进入浏览器 JavaScript。
 - `payment-simulator`：仅开发/测试使用的三渠道支付模拟器。
 
-当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、退款与对账基础、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、充值 BFF 和本地 Mock New API。桌面端、Web Portal、生产 Helm、真实支付与真实 New API 仍按实施计划的后续门禁推进。
+当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、退款与对账基础、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、可靠领域事件、OpenTelemetry/Prometheus 可观测性、生产 Helm 和恢复 Runbook。桌面端 OIDC、真实支付、真实 New API 和生产集群演练仍按实施计划的后续门禁推进。
 
 ## Token Gateway 安全默认值
 
@@ -34,6 +34,8 @@
 node scripts/account-platform.mjs verify
 node scripts/account-platform.mjs dev up
 node scripts/account-platform.mjs dev down
+node scripts/account-platform.mjs test integration
+node scripts/account-platform.mjs test security
 ```
 
-真实 New API 和真实支付测试需要明确 opt-in，普通测试不读取真实凭据或访问生产服务。
+Integration 使用独立 Compose project 并在结束后删除测试卷；不得指向开发或生产 project。真实 New API 和真实支付测试需要明确 opt-in，普通测试不读取真实凭据或访问生产服务。运维入口见 [`deploy/runbooks/`](deploy/runbooks/README.md)。

@@ -96,6 +96,11 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("postgres:17-alpine", account_job)
         self.assertIn("go test -race ./...", account_job)
         self.assertIn("buf lint account-platform/contracts/proto", account_job)
+        self.assertIn("account_platform_test_${domain//-/_}", account_job)
+        self.assertIn("token-portal", account_job)
+        self.assertIn("account-event-relay", account_job)
+        self.assertIn("alpine/helm:4.2.3", account_job)
+        self.assertIn("govulncheck@v1.6.0", account_job)
         self.assertIn("docker compose", account_job)
 
     def test_trusted_backflow_has_parallel_three_platform_light_gate(self):

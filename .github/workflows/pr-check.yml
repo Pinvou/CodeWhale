@@ -608,13 +608,17 @@ jobs:
       - name: PostgreSQL 迁移正反向验证
         working-directory: account-platform
         env:
-          DATABASE_URL: postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/account_platform_test?sslmode=disable
+          PGPASSWORD: account_platform_test
         run: |
           for domain in account billing token payment-simulator; do
+            database="account_platform_test_${domain//-/_}"
+            createdb --host 127.0.0.1 --username account_platform_test "$database"
+            export DATABASE_URL="postgresql://account_platform_test:account_platform_test@127.0.0.1:5432/$database?sslmode=disable"
             go run ./cmd/migrate --dir "migrations/$domain"
-            go run ./cmd/migrate --dir "migrations/$domain" --direction down
+            while psql "$DATABASE_URL" --tuples-only --no-align --command "SELECT EXISTS(SELECT 1 FROM schema_migrations)" | grep -qx t; do
+              go run ./cmd/migrate --dir "migrations/$domain" --direction down
+            done
             go run ./cmd/migrate --dir "migrations/$domain"
-            go run ./cmd/migrate --dir "migrations/$domain" --direction down
           done
 
       - name: Compose 配置和服务镜像构建
@@ -626,11 +630,15 @@ jobs:
           docker compose \
             --env-file account-platform/deploy/compose/.env.example \
             -f account-platform/deploy/compose/compose.yaml \
-            build account-service billing-service token-gateway payment-simulator
+            build account-service billing-service token-gateway token-portal payment-simulator account-event-relay account-migrate
+          docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-staging.yaml
+          docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 lint /chart -f /chart/values-production-new.yaml
+          docker run --rm -v "$PWD/account-platform/deploy/helm/account-platform:/chart:ro" alpine/helm:4.2.3 template pinvou /chart -f /chart/values-production-new.yaml > /tmp/account-platform-production.yaml
+          ! grep -E 'payment-simulator|mock-newapi|TOKEN_LOCAL_KEK_BASE64|kind: Secret' /tmp/account-platform-production.yaml
 
       - name: Go 与 Node 高危依赖审计
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@v1.1.2
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
           (cd account-platform && govulncheck ./...)
           npm --prefix account-platform audit --registry=https://registry.npmjs.org --audit-level=high
 
