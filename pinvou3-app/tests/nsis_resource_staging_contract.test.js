@@ -106,6 +106,18 @@ assert.ok(
 
 assert.match(packageJson.scripts["build:nsis"], /npm run build:nsis:stage/u);
 assert.match(packageJson.scripts["build:nsis"], /npm run bundle:nsis/u);
+assert.equal(
+  packageJson.scripts["build:nsis:local"],
+  "npm run build:nsis:stage:local && npm run bundle:nsis:local",
+);
+assert.match(packageJson.scripts["build:nsis:stage:local"], /--no-bundle/u);
+assert.doesNotMatch(packageJson.scripts["build:nsis:stage:local"], /--features/u);
+assert.doesNotMatch(packageJson.scripts["build:nsis:stage:local"], /check:wosign/u);
+assert.match(packageJson.scripts["bundle:nsis:local"], /--bundles nsis/u);
+assert.match(packageJson.scripts["bundle:nsis:local"], /tauri\.nsis-stage\.conf\.json/u);
+assert.doesNotMatch(packageJson.scripts["bundle:nsis:local"], /--features/u);
+assert.doesNotMatch(packageJson.scripts["bundle:nsis:local"], /check:wosign/u);
+assert.doesNotMatch(packageJson.scripts["bundle:nsis:local"], /signing\.wosign\.conf\.json/u);
 assert.match(packageJson.scripts["prebuild:nsis"], /clean-staging\.ps1/u);
 assert.doesNotMatch(
   packageJson.scripts["prebuild:nsis"],

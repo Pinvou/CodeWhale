@@ -39,6 +39,14 @@ Tauri 的 `bundle.resources`，因此不会被 Tauri 逐个调用签名工具，
 
 ## 构建命令
 
+本地完整编译并生成未签名的 NSIS 测试安装包：
+
+```powershell
+npm --prefix pinvou3-app run build:nsis:local
+```
+
+该命令不加载沃通签名配置，也不启用 `dev-tools` 调试二进制；生成的安装包仅供本地验证，Windows 可能显示“未知发布者”，不得作为正式发布包。
+
 直接编译并生成 NSIS 安装器：
 
 ```powershell
