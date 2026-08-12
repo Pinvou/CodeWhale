@@ -43,7 +43,12 @@ Windows / macOS / Linux 处理节点
 `scripts/community-backflow.mjs` 仅依赖 Node.js 22 和 Git：
 
 ```shell
-# 根据路径重叠、显式依赖和 Release 顺序生成可并行波次
+# 从开放的 pending/processing Issue 聚合 community-backflow-plan marker
+node scripts/community-backflow.mjs queue \
+  --repo Pinvou/pinvou3 \
+  --output queue.json
+
+# 根据显式依赖、路径重叠和 Release 顺序生成可并行波次
 node scripts/community-backflow.mjs plan --input queue.json --output plan.json
 
 # 在实际处理平台运行；不安装依赖、不编译 Rust
@@ -58,8 +63,9 @@ node scripts/community-backflow.mjs submit \
   --body-file pr-body.md
 ```
 
-`submit` 优先使用 `GITHUB_TOKEN` 或 `GH_TOKEN`；未提供时通过 Git Credential Manager
-请求名为 `zhuowp` 的 GitHub 凭据。请求正文始终以 UTF-8 字节发送，创建或更新后逐字回读
+`queue` 和 `submit` 优先使用 `GITHUB_TOKEN` 或 `GH_TOKEN`；使用 Git Credential Manager
+时由操作者显式传入 `--credential <github-username>`，工具不内置个人账号。GitHub API 请求
+使用 15 秒超时，并对网络错误、限流和临时 5xx 最多重试 3 次。请求正文始终以 UTF-8 字节发送，创建或更新后逐字回读
 标题和正文。Token 不写入输出、文件或 PR。
 
 PR 正文包含与当前 head 绑定的 provenance，记录实际处理 OS、CLI 版本、base/head SHA
@@ -72,7 +78,8 @@ PR 正文包含与当前 head 绑定的 provenance，记录实际处理 OS、CLI
 - 没有依赖且路径不重叠的回流位于同一波次，可以由不同平台并行处理。
 - 修改相同路径的回流按来源合并时间串行，减少冲突和重复 rebase。
 - Release 回流依赖同批次更早的非 Release 回流。
-- Issue 中的 `community-backflow-plan` 是可恢复的远端 checkpoint；换处理机器时无需重做扫描。
+- Issue 中的 `community-backflow-plan` 是可恢复的远端 checkpoint；`queue` 命令从全部开放的
+  `backflow:pending`/`backflow:processing` Issue 聚合 marker，换处理机器时无需重做扫描。
 
 依赖等待应单独统计为 `blocked_dependency`，不能混入代码准备或 CI。只有依赖满足后才创建
 最终 PR；可以提前分析和准备补丁，但依赖合入后只做一次最终整合。
@@ -85,6 +92,8 @@ PR 正文包含与当前 head 绑定的 provenance，记录实际处理 OS、CLI
 - 不运行 `npm ci`，不初始化 CodeWhale，不调用 Cargo。
 - 检查调度算法、Git diff、跨平台路径和 PR provenance。
 - 目标时长 2～4 分钟，超时上限 5 分钟。
+- 修改回流基础设施自身（包括 `pr-check.yml`）的普通 PR 也会触发三平台轻门禁；这是为了让
+  门禁定义在影响回流前先完成跨平台自验证，会增加少量并行 runner 计算分钟。
 
 现有前端、Rust、Windows runtime 和 macOS runtime 任务继续按路径路由。三平台轻门禁与这些
 任务并行，并由 `required-gate` 汇总，因此不会把三个操作系统串成三倍墙钟时间。

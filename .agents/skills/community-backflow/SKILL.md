@@ -28,8 +28,10 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 3. 收集全部开放的 `backflow:processing`、`backflow:pending` 和 `backflow:blocked`
    Issue；优先处理所有 processing 项及其 PR，再按创建时间从早到晚处理不带 blocked
    的 pending 项。blocked 项只汇总，不重复领取。
-   先读取 Issue 中的 `community-backflow-plan`，用
-   `node scripts/community-backflow.mjs plan` 生成依赖波次：无依赖项可并行，修改相同路径
+   先用 `node scripts/community-backflow.mjs queue --repo Pinvou/pinvou3 --output queue.json`
+   聚合所有 pending/processing Issue 中的 `community-backflow-plan`（没有环境 Token 时由操作者
+   显式传入 `--credential <github-username>`），再用
+   `node scripts/community-backflow.mjs plan --input queue.json` 生成依赖波次：无依赖项可并行，修改相同路径
    的项目按来源合并时间串行，Release 回流最后处理。依赖未完成属于 `blocked_dependency`
    等待；保留 `backflow:processing` 并添加 `backflow:dependency-wait`，依赖满足后移除等待
    标签。不得通过提前创建 PR、反复 rebase 来占用处理阶段。
@@ -66,7 +68,8 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
    `<!-- community-backflow:Pinvou/pinvou-agent#<source-number> -->`。
 7. 优先使用 `node scripts/community-backflow.mjs submit` 推送并创建或更新 PR。该命令
    使用 UTF-8 字节调用 GitHub API、写后回读标题与正文，并把实际处理平台及当前 head
-   写入 provenance；没有环境 Token 时从 GCM 获取 `zhuowp` 凭据。
+   写入 provenance；默认只读取 `GITHUB_TOKEN`/`GH_TOKEN`，需要 GCM 时必须显式传入
+   `--credential <github-username>`，不得在公开仓库固化个人账号。
 8. 在 Issue 评论 Official PR 链接和当前 head SHA，保持
    `backflow:pending`、`backflow:processing` 等待 CI。
 

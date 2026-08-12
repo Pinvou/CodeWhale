@@ -120,6 +120,9 @@
 - bundle instructions、按会话 Skill 组合目录、用户 AGENTS 注入。
 - UI、Tauri IPC、工作区与产物卡、Shell 输出观察和前端终态对账。
 - 定时任务页面、通知、三省六部页面和业务日志展示。
+- Community 回流扫描、依赖调度、跨平台 preflight、PR provenance、Merge Queue 策略及其
+  三平台 CI 门禁。这些属于父仓治理基础设施，不修改 CodeWhale gitlink 或 fork 行为；由
+  `community-backflow`、CI 策略测试和 `fork-guard.sh --fast` 的父仓联动检查守护。
 
 CodeWhale fork 只提供这些产品能力不可缺少的底座生命周期入口和原子不变量。
 

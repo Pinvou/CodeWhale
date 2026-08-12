@@ -5,10 +5,73 @@ import {
   buildSchedule,
   createProvenance,
   encodeProvenanceMarker,
+  githubRequest,
+  githubToken,
   parseProvenanceMarker,
+  parseQueueIssues,
   validateChangedPaths,
   verifyPullBody,
 } from "../community-backflow.mjs";
+
+test("Issue marker 可以闭环聚合为调度输入", () => {
+  const queue = parseQueueIssues([
+    {
+      number: 601,
+      body: '<!-- community-backflow-plan:{"schema":1,"source":241,"depends_on":[],"release":false} -->',
+    },
+    {
+      number: 602,
+      body: '<!-- community-backflow-plan:{"schema":1,"source":242,"depends_on":[241],"release":true} -->',
+    },
+  ]);
+
+  assert.deepEqual(queue, [
+    { source: 241, issue: 601, paths: [], release: false, depends_on: [] },
+    { source: 242, issue: 602, paths: [], release: true, depends_on: [241] },
+  ]);
+  assert.deepEqual(buildSchedule(queue).waves, [[241], [242]]);
+
+  assert.deepEqual(parseQueueIssues([{
+    number: 603,
+    body: '<!-- community-backflow-plan:{"schema":1,"source":243,"depends_on":[241],"release":false} -->',
+  }])[0].depends_on, [], "已关闭的前置 Issue 应在重新聚合时视为完成");
+});
+
+test("缺少环境 Token 时不再隐式选择个人 GCM 账号", () => {
+  const githubTokenValue = process.env.GITHUB_TOKEN;
+  const ghTokenValue = process.env.GH_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.GH_TOKEN;
+  try {
+    assert.throws(() => githubToken({}), /显式传入 --credential/);
+  } finally {
+    if (githubTokenValue === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = githubTokenValue;
+    if (ghTokenValue === undefined) delete process.env.GH_TOKEN;
+    else process.env.GH_TOKEN = ghTokenValue;
+  }
+});
+
+test("GitHub API 对临时 5xx 自动重试", { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch;
+  const originalDelay = process.env.COMMUNITY_BACKFLOW_RETRY_BASE_MS;
+  let attempts = 0;
+  process.env.COMMUNITY_BACKFLOW_RETRY_BASE_MS = "1";
+  globalThis.fetch = async () => {
+    attempts += 1;
+    return attempts === 1
+      ? new Response("temporary", { status: 503 })
+      : new Response('{"ok":true}', { status: 200 });
+  };
+  try {
+    assert.deepEqual(await githubRequest("test-token", "GET", "/test"), { ok: true });
+    assert.equal(attempts, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalDelay === undefined) delete process.env.COMMUNITY_BACKFLOW_RETRY_BASE_MS;
+    else process.env.COMMUNITY_BACKFLOW_RETRY_BASE_MS = originalDelay;
+  }
+});
 
 test("调度器并行无依赖项并串行化重叠路径", () => {
   const plan = buildSchedule([

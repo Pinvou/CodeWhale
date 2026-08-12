@@ -28,10 +28,13 @@ class CommunityBackflowSkillTests(unittest.TestCase):
 
     def test_cross_platform_fast_path_and_dependency_waves_are_required(self):
         self.assertIn("node scripts/community-backflow.mjs plan", self.skill)
+        self.assertIn("node scripts/community-backflow.mjs queue", self.skill)
         self.assertIn("node scripts/community-backflow.mjs preflight", self.skill)
         self.assertIn("不得假设实际处理平台是 Ubuntu", self.skill)
         self.assertIn("backflow-portability", self.skill)
         self.assertIn("主线日常前进不手工 rebase", self.skill)
+        self.assertIn("--credential <github-username>", self.skill)
+        self.assertNotIn("GCM 获取 `zhuowp`", self.skill)
 
     def test_skill_has_no_artificial_size_or_path_blocklist(self):
         self.assertIn("不按文件数、代码行数或路径名单", self.skill)

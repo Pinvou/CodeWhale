@@ -18,6 +18,10 @@ export const BACKFLOW_MARKER_RE =
   /<!--\s*community-backflow:Pinvou\/pinvou-agent#(\d+)\s*-->/;
 export const PROVENANCE_MARKER_RE =
   /<!--\s*community-backflow-provenance:([A-Za-z0-9_-]+)\s*-->/;
+export const PLAN_MARKER_RE =
+  /<!--\s*community-backflow-plan:(\{[^\r\n]*\})\s*-->/;
+
+const RETRYABLE_GITHUB_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 const WINDOWS_RESERVED_NAMES = new Set([
   "con",
@@ -190,6 +194,35 @@ export function buildSchedule(items) {
   };
 }
 
+export function parseQueueIssues(issues) {
+  if (!Array.isArray(issues)) fail("Issue 队列必须是数组");
+  const items = issues.map((issue) => {
+    const issueNumber = Number(issue?.number);
+    const match = PLAN_MARKER_RE.exec(String(issue?.body || ""));
+    if (!match) fail(`Issue #${issueNumber || "unknown"} 缺少 community-backflow-plan marker`);
+    let marker;
+    try {
+      marker = JSON.parse(match[1]);
+    } catch {
+      fail(`Issue #${issueNumber || "unknown"} 的 community-backflow-plan marker 无法解析`);
+    }
+    return {
+      source: Number(marker.source),
+      issue: issueNumber,
+      paths: Array.isArray(marker.paths) ? marker.paths : [],
+      release: Boolean(marker.release),
+      depends_on: Array.isArray(marker.depends_on) ? marker.depends_on : [],
+    };
+  });
+  const openSources = new Set(items.map((item) => item.source));
+  // marker 记录创建批次的完整依赖；已合并并关闭的前置 Issue 不再出现在开放队列中，
+  // 聚合时把这些依赖视为已完成，避免下一轮 plan 因“依赖不在计划中”而失效。
+  return items.map((item) => ({
+    ...item,
+    depends_on: item.depends_on.filter((source) => openSources.has(Number(source))),
+  }));
+}
+
 export function encodeProvenanceMarker(provenance) {
   const encoded = Buffer.from(JSON.stringify(provenance), "utf8").toString("base64url");
   return `<!-- community-backflow-provenance:${encoded} -->`;
@@ -280,6 +313,11 @@ function credentialFromGcm(username) {
   const result = spawnSync("git", ["credential", "fill"], {
     input: `protocol=https\nhost=github.com\nusername=${username}\n\n`,
     encoding: "utf8",
+    env: {
+      ...process.env,
+      GCM_INTERACTIVE: "Never",
+      GIT_TERMINAL_PROMPT: "0",
+    },
   });
   if (result.status !== 0) fail("无法从 Git Credential Manager 取得 GitHub 凭据");
   const password = result.stdout
@@ -290,29 +328,95 @@ function credentialFromGcm(username) {
   return password;
 }
 
-function githubToken(options) {
-  return (
-    process.env.GITHUB_TOKEN ||
-    process.env.GH_TOKEN ||
-    credentialFromGcm(String(options.credential || "zhuowp"))
-  );
+export function githubToken(options = {}) {
+  const environmentToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  if (environmentToken) return environmentToken;
+  if (typeof options.credential === "string" && options.credential.trim()) {
+    return credentialFromGcm(options.credential.trim());
+  }
+  fail("缺少 GITHUB_TOKEN/GH_TOKEN；如需使用 GCM，请显式传入 --credential <github-username>");
 }
 
-async function githubRequest(token, method, path, payload) {
+function retryDelayMs(response, attempt) {
+  const retryAfter = Number(response?.headers?.get("retry-after"));
+  if (Number.isFinite(retryAfter) && retryAfter >= 0) return Math.min(retryAfter * 1000, 30_000);
+  const base = Number(process.env.COMMUNITY_BACKFLOW_RETRY_BASE_MS || 500);
+  return Math.max(0, Number.isFinite(base) ? base : 500) * (2 ** (attempt - 1));
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
+}
+
+export async function githubRequest(token, method, path, payload) {
   const body = payload == null ? undefined : Buffer.from(JSON.stringify(payload), "utf8");
-  const response = await fetch(`${process.env.GITHUB_API_URL || "https://api.github.com"}${path}`, {
-    method,
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json; charset=utf-8",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    body,
-  });
-  const text = await response.text();
-  if (!response.ok) fail(`GitHub API ${method} ${path} 失败：HTTP ${response.status} ${text}`);
-  return text ? JSON.parse(text) : null;
+  const timeout = Number(process.env.COMMUNITY_BACKFLOW_GITHUB_TIMEOUT_MS || 15_000);
+  const timeoutMs = Number.isFinite(timeout) && timeout > 0 ? timeout : 15_000;
+  const maxAttempts = 3;
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    let text;
+    try {
+      response = await fetch(`${process.env.GITHUB_API_URL || "https://api.github.com"}${path}`, {
+        method,
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json; charset=utf-8",
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+        body,
+        signal: controller.signal,
+      });
+      // 保持 timeout 覆盖响应体读取，避免只收到 headers 后 body 无限挂起。
+      text = await response.text();
+    } catch (error) {
+      lastError = error;
+      if (attempt === maxAttempts) {
+        fail(`GitHub API ${method} ${path} 连续 ${maxAttempts} 次网络请求失败：${error.message || error}`);
+      }
+      await sleep(retryDelayMs(null, attempt));
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (response.ok) return text ? JSON.parse(text) : null;
+    const rateLimited = response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0";
+    if ((RETRYABLE_GITHUB_STATUS.has(response.status) || rateLimited) && attempt < maxAttempts) {
+      await sleep(retryDelayMs(response, attempt));
+      continue;
+    }
+    fail(`GitHub API ${method} ${path} 失败：HTTP ${response.status} ${text}`);
+  }
+  fail(`GitHub API ${method} ${path} 失败：${lastError || "未知错误"}`);
+}
+
+async function collectQueue(options) {
+  if (!options.repo) fail("queue 缺少 --repo");
+  const token = githubToken(options);
+  const byNumber = new Map();
+  for (const label of ["backflow:pending", "backflow:processing"]) {
+    for (let page = 1; ; page += 1) {
+      const issues = await githubRequest(
+        token,
+        "GET",
+        `/repos/${options.repo}/issues?state=open&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`,
+      );
+      for (const issue of issues) {
+        if (!issue.pull_request) byNumber.set(Number(issue.number), issue);
+      }
+      if (issues.length < 100) break;
+    }
+  }
+  const issues = [...byNumber.values()].sort((left, right) =>
+    String(left.created_at || "").localeCompare(String(right.created_at || "")) ||
+    Number(left.number) - Number(right.number));
+  return parseQueueIssues(issues);
 }
 
 function appendMarker(body, markerRegex, marker) {
@@ -392,10 +496,11 @@ async function submit(options) {
 
 function help() {
   return `用法：
+  node scripts/community-backflow.mjs queue --repo OWNER/REPO [--output queue.json] [--credential USERNAME]
   node scripts/community-backflow.mjs plan --input queue.json [--output plan.json]
   node scripts/community-backflow.mjs preflight [--base origin/main] [--head HEAD] [--source N]
   node scripts/community-backflow.mjs verify --body-file pr-body.txt --head SHA [--source N]
-  node scripts/community-backflow.mjs submit --repo OWNER/REPO --issue N --source N --title TITLE --body-file FILE [--credential zhuowp] [--no-push]
+  node scripts/community-backflow.mjs submit --repo OWNER/REPO --issue N --source N --title TITLE --body-file FILE [--credential USERNAME] [--no-push]
 `;
 }
 
@@ -409,6 +514,12 @@ async function main(argv = process.argv.slice(2)) {
     if (!options.input) fail("plan 缺少 --input");
     const plan = buildSchedule(JSON.parse(readFileSync(resolve(String(options.input)), "utf8")));
     const output = `${JSON.stringify(plan, null, 2)}\n`;
+    if (options.output) writeFileSync(resolve(String(options.output)), output, "utf8");
+    process.stdout.write(output);
+    return;
+  }
+  if (command === "queue") {
+    const output = `${JSON.stringify(await collectQueue(options), null, 2)}\n`;
     if (options.output) writeFileSync(resolve(String(options.output)), output, "utf8");
     process.stdout.write(output);
     return;
