@@ -17,6 +17,7 @@ var (
 	paymentClearingAccount = uuid.MustParse("00000000-0000-7000-8000-000000000001")
 	usageRevenueAccount    = uuid.MustParse("00000000-0000-7000-8000-000000000002")
 	refundClearingAccount  = uuid.MustParse("00000000-0000-7000-8000-000000000003")
+	adjustmentAccount      = uuid.MustParse("00000000-0000-7000-8000-000000000004")
 )
 
 type PostgresRepository struct {

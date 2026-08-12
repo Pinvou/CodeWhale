@@ -37,6 +37,9 @@ func (s *Service) Handler(serviceToken string) http.Handler {
 	mux.HandleFunc("POST /internal/v1/holds/commit", s.commit)
 	mux.HandleFunc("POST /internal/v1/holds/release", s.release)
 	mux.HandleFunc("GET /internal/v1/pricing/current", s.currentPrice)
+	mux.HandleFunc("POST /internal/v1/adjustments", s.requestAdjustment)
+	mux.HandleFunc("POST /internal/v1/adjustments/{adjustment_id}/approve", s.approveAdjustment)
+	mux.HandleFunc("POST /internal/v1/adjustments/{adjustment_id}/reject", s.rejectAdjustment)
 	mux.HandleFunc("GET /v1/recharge/products", s.listProducts)
 	mux.HandleFunc("GET /v1/wallets/{wallet_id}/balance", s.getBalance)
 	if s.payments != nil {
@@ -50,6 +53,61 @@ func (s *Service) Handler(serviceToken string) http.Handler {
 	}
 	root.Handle("/", serviceauth.Middleware(serviceToken, mux))
 	return root
+}
+
+func (s *Service) requestAdjustment(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WalletID           uuid.UUID `json:"wallet_id"`
+		AmountMicrocredits int64     `json:"amount_microcredits"`
+		Reason             string    `json:"reason"`
+		RequestedBy        uuid.UUID `json:"requested_by"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.WalletID == uuid.Nil || body.RequestedBy == uuid.Nil || body.AmountMicrocredits == 0 || strings.TrimSpace(body.Reason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid manual adjustment request", httpserver.RequestID(r.Context()))
+		return
+	}
+	adjustment, err := s.repository.RequestAdjustment(r.Context(), body.WalletID, body.AmountMicrocredits, body.Reason, body.RequestedBy)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusCreated, adjustment)
+}
+
+func (s *Service) approveAdjustment(w http.ResponseWriter, r *http.Request) {
+	adjustmentID, err := uuid.Parse(r.PathValue("adjustment_id"))
+	var body struct {
+		ApprovedBy     uuid.UUID `json:"approved_by"`
+		DecisionReason string    `json:"decision_reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.ApprovedBy == uuid.Nil || strings.TrimSpace(body.DecisionReason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid adjustment approval", httpserver.RequestID(r.Context()))
+		return
+	}
+	adjustment, err := s.repository.ApproveAdjustment(r.Context(), adjustmentID, body.ApprovedBy, body.DecisionReason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, adjustment)
+}
+
+func (s *Service) rejectAdjustment(w http.ResponseWriter, r *http.Request) {
+	adjustmentID, err := uuid.Parse(r.PathValue("adjustment_id"))
+	var body struct {
+		RejectedBy     uuid.UUID `json:"rejected_by"`
+		DecisionReason string    `json:"decision_reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.RejectedBy == uuid.Nil || strings.TrimSpace(body.DecisionReason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid adjustment rejection", httpserver.RequestID(r.Context()))
+		return
+	}
+	adjustment, err := s.repository.RejectAdjustment(r.Context(), adjustmentID, body.RejectedBy, body.DecisionReason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, adjustment)
 }
 
 func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
