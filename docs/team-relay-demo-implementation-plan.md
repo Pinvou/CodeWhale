@@ -31,7 +31,7 @@ A 派活给 B
 - 团队接力入口；
 - 需要我处理、等待对方、全部接力、已结束、已归档，以及全部接力中的来源筛选；
 - 工作线程与接力路径；
-- 派活、Handoff、回传、最终交付、要求补充、接收结束；
+- 派活、当前持有人更新进展、Handoff、回传、最终交付、要求补充、接收结束；
 - 明确选择文件和私人 Agent 工作区提示；
 - 中、英、日三语和桌面/窄屏适配。
 
@@ -74,6 +74,7 @@ PR #109 当前部署实例继续保持独立。新演示 Hub 使用新的服务�
 - 成员列表和基本在线/最近同步状态；
 - 创建工作线程并派活；
 - 单一当前行动人；
+- 当前行动人可追加进展说明和明确选择的文件，动作进入历史但不移动接力棒；
 - Handoff 给协作者并明确 `return_to`；
 - 演示阶段只允许负责人把工作 Handoff 给一名协作者，协作者完成后必须回传，暂不支持嵌套 Handoff；
 - 回传给原负责人；
@@ -324,7 +325,7 @@ accept
 | active | `final_deliver` | owner 且 current=owner | current=final_recipient，phase=awaiting_acceptance |
 | awaiting_acceptance | `request_changes` | final_recipient | current=owner，return_to=final_recipient，phase=active |
 | awaiting_acceptance | `accept` | final_recipient | current/return_to 为空，phase=closed |
-| active/awaiting_acceptance | `note` | 线程参与者 | 不移动接力棒 |
+| active/awaiting_acceptance | `note` | 线程参与者 | 追加过程记录，不移动接力棒；桌面端“更新进展”入口仅在 active 时向 current_actor 展示 |
 
 所有业务写入在同一个数据库事务中完成：
 

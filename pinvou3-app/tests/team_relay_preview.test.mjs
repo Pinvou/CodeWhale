@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dict } from '../src/shared/i18n.js';
 import {
-  deriveBoardColumn, deriveCategory, matchesRelayView, matchesSourceFilter,
-  projectMaterialPackages, projectSnapshot, projectTeamBoard, relayViewCounts,
+  canUpdateRelayProgress, deriveBoardColumn, deriveCategory, matchesRelayView,
+  matchesSourceFilter, projectMaterialPackages, projectSnapshot, projectTeamBoard,
+  relayViewCounts,
 } from '../src/features/team-relay/team-relay-state.js';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../src/features/team-relay/team-relay-access.js';
 
@@ -41,6 +42,10 @@ assert.equal(deriveBoardColumn({ phase: 'active', current_actor_id: 'owner', own
 assert.equal(deriveBoardColumn({ phase: 'active', current_actor_id: 'helper', owner_id: 'owner' }), 'collaborating');
 assert.equal(deriveBoardColumn({ phase: 'awaiting_acceptance' }), 'acceptance');
 assert.equal(deriveBoardColumn({ phase: 'closed' }), 'ended');
+assert.equal(canUpdateRelayProgress({ phase: 'active', current_actor_id: 'me' }, 'me'), true);
+assert.equal(canUpdateRelayProgress({ phase: 'active', current_actor_id: 'other' }, 'me'), false);
+assert.equal(canUpdateRelayProgress({ phase: 'awaiting_acceptance', current_actor_id: 'me' }, 'me'), false);
+assert.equal(canUpdateRelayProgress({ phase: 'closed', current_actor_id: null }, 'me'), false);
 
 const snapshot = {
   bootstrap: {
@@ -144,6 +149,7 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(copy.errorMessages.join_code_storage_unavailable);
   assert.ok(copy.errorMessages.rate_limited);
   assert.ok(copy.actionKinds.handoff);
+  assert.ok(copy.actionKinds.note);
   assert.ok(copy.actionKinds.cancel);
   assert.equal(typeof copy.live.actionTitle, 'function');
   assert.equal(typeof copy.buildAgentPrompt, 'function');
@@ -194,6 +200,9 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.doesNotMatch(copy.acceptedPackageSummary(1, 0), /Git/);
   assert.match(copy.acceptedPackageSummary(1, 1), /Git/);
   assert.equal(copy.dialogs.return.artifactRole, 'intermediate');
+  assert.equal(copy.dialogs.progress.artifactRole, 'evidence');
+  assert.equal(copy.dialogs.progress.acceptanceOptional, true);
+  assert.ok(copy.dialogs.progress.acceptancePlaceholder);
   assert.ok(copy.dialogs.assign.routeLabel);
   assert.ok(copy.dialogs.handoff.taskLabel);
   assert.ok(copy.dialogs.deliver.acceptanceLabel);
@@ -247,6 +256,10 @@ assert.match(viewSource, /team-relay-session-summary/);
 assert.match(viewSource, /team-relay-code-reference/);
 assert.match(viewSource, /team-relay-direct-attachments/);
 assert.match(viewSource, /team-relay-direct-footer/);
+assert.match(viewSource, /canUpdateRelayProgress\(task\.raw, meId\)/);
+assert.match(viewSource, /onDialog\('progress'\)/);
+assert.match(viewSource, /dialog === 'progress'[^\n]+runAction\('note'/);
+assert.match(viewSource, /required=\{!dialogCopy\.acceptanceOptional\}/);
 assert.match(viewSource, /team-relay-sync-button/);
 assert.match(viewSource, /bridge\.teamRelay\.refresh\(\)/);
 assert.match(viewSource, /attachmentCount \? copy\.uploadingAndSending : copy\.sending/);

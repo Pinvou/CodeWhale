@@ -80,6 +80,8 @@ revision=1
 | active/awaiting_acceptance | `note` | 线程参与者 | 不可指定 | 不移动接力棒，revision 仍递增 |
 | active/awaiting_acceptance | `cancel` | initiator | 不可指定 | current/return_to=null，cancelled；必须填写原因 |
 
+桌面端把当前 `active` 线程的 `note` 暴露为“更新进展”：只有 `current_actor` 看到该入口，可填写进展、可选下一步并附加明确选择的文件。提交后新增不可变动作和交付包、revision 递增，但 owner、current_actor、return_to、final_recipient 和 phase 均不改变。协议仍保留其他线程参与者提交通用 `note` 的能力，避免把 UI 入口约束误当成服务端权限收紧。
+
 演示阶段禁止：
 
 - current_actor 不是 owner 时再次 Handoff；

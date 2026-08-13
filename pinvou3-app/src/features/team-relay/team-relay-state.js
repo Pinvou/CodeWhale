@@ -34,6 +34,10 @@ export function deriveCategory(thread, meId) {
   return 'waiting';
 }
 
+export function canUpdateRelayProgress(thread, meId) {
+  return thread?.phase === 'active' && thread.current_actor_id === meId;
+}
+
 export function matchesRelayView(task, view, meId) {
   if (view === 'hidden') return task.category === 'hidden';
   if (view === 'ended') return task.category === 'ended';

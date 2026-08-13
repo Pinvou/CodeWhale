@@ -47,6 +47,22 @@ test("a collaborator cannot hand off again or make the final delivery", () => {
   );
 });
 
+test("a progress note keeps the active relay with its current actor", () => {
+  const thread = {
+    ...assignedThread(),
+    current_actor_id: ids.collaborator,
+    return_to_id: ids.owner,
+  };
+  assert.deepEqual(transition(thread, ids.collaborator, "note", null), {
+    recipientId: null,
+    actionReturnToId: null,
+    currentActorId: ids.collaborator,
+    threadReturnToId: ids.owner,
+    phase: "active",
+    addParticipantId: null,
+  });
+});
+
 test("accept closes the thread only for the final recipient", () => {
   const thread = {
     ...assignedThread(),
