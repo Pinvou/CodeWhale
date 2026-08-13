@@ -21,6 +21,7 @@ export const FULL_FRONTEND_SMOKES = Object.freeze([
   command("npm", "test:diff-ui"),
   command("node", "tests/pet_selector_ui_smoke.js"),
   command("npm", "test:tool-store-import"),
+  command("npm", "test:tool-store-grouping"),
   command("npm", "test:webui"),
 ]);
 
@@ -32,7 +33,7 @@ const FEATURE_COMMANDS = new Map([
   ["scheduled", [command("node", "tests/scheduled_tasks_smoke.js")]],
   ["settings", [command("npm", "test:settings-ui")]],
   ["team-relay", [command("npm", "test:team-relay-ui")]],
-  ["tools", [command("npm", "test:tool-store"), command("npm", "test:tool-store-import")]],
+  ["tools", [command("npm", "test:tool-store"), command("npm", "test:tool-store-import"), command("npm", "test:tool-store-grouping")]],
   ["updater", [command("node", "tests/update_notice_ui_smoke.js")]],
   ["web", [command("npm", "test:webui")]],
   ["workflow", [command("node", "tests/scheduled_tasks_smoke.js")]],
