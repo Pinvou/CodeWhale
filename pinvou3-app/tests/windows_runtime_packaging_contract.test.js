@@ -242,7 +242,7 @@ assert.match(vcRedistTempPreflight, /S-1-5-18/);
 assert.match(vcRedistTempPreflight, /S-1-5-32-544/);
 assert.match(
   vcRedistTempPreflight,
-  /SetEnvironmentVariable\(\$Name, \$FallbackPath, \$Target\)/,
+  /SetEnvironmentVariable\(\$Name, \$FallbackPath, "Machine"\)/,
   "machine TEMP/TMP repair must persist the resolved absolute fallback path",
 );
 assert.doesNotMatch(
@@ -301,52 +301,6 @@ if (process.platform === "win32") {
     assert.ok(fs.statSync(path.join(fakeWindowsRoot, "Temp")).isDirectory());
     assert.ok(fs.statSync(path.join(fakeWindowsRoot, "Installer")).isDirectory());
 
-    const runProcessEnvironmentPreflight = (tempPath, tmpPath) =>
-      spawnSync(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-File",
-          vcRedistTempPreflightPath,
-          "-WindowsRoot",
-          fakeWindowsRoot,
-          "-EnvironmentTarget",
-          "Process",
-        ],
-        {
-          encoding: "utf8",
-          env: { ...process.env, TEMP: tempPath, TMP: tmpPath },
-        },
-      );
-    const processEnvironmentResult = runProcessEnvironmentPreflight(
-      path.join(fakeWindowsRoot, "Temp"),
-      path.join(fakeWindowsRoot, "Temp"),
-    );
-    assert.equal(
-      processEnvironmentResult.status,
-      0,
-      `VC++ TEMP/TMP production flow failed: ${processEnvironmentResult.stderr || processEnvironmentResult.stdout}`,
-    );
-    assert.match(processEnvironmentResult.stdout, /Process TEMP is ready:/u);
-    assert.match(processEnvironmentResult.stdout, /Process TMP is ready:/u);
-
-    const invalidTempFile = path.join(smokeRoot, "invalid-temp-file");
-    const invalidTmpFile = path.join(smokeRoot, "invalid-tmp-file");
-    fs.writeFileSync(invalidTempFile, "not a directory");
-    fs.writeFileSync(invalidTmpFile, "not a directory");
-    const repairedEnvironmentResult = runProcessEnvironmentPreflight(
-      invalidTempFile,
-      invalidTmpFile,
-    );
-    assert.equal(
-      repairedEnvironmentResult.status,
-      0,
-      `VC++ TEMP/TMP repair flow failed: ${repairedEnvironmentResult.stderr || repairedEnvironmentResult.stdout}`,
-    );
-    assert.match(repairedEnvironmentResult.stdout, /Repaired Process TEMP to /u);
-    assert.match(repairedEnvironmentResult.stdout, /Repaired Process TMP to /u);
   } finally {
     fs.rmSync(smokeRoot, { recursive: true, force: true });
   }

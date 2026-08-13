@@ -1,9 +1,7 @@
 [CmdletBinding()]
 param(
   [string]$WindowsRoot = $env:SystemRoot,
-  [switch]$SkipMachineEnvironment,
-  [ValidateSet("Machine", "Process")]
-  [string]$EnvironmentTarget = "Machine"
+  [switch]$SkipMachineEnvironment
 )
 
 $ErrorActionPreference = "Stop"
@@ -94,11 +92,10 @@ function Repair-MachineTempVariable {
   param(
     [string]$Name,
     [string]$FallbackPath,
-    [System.EnvironmentVariableTarget]$Target,
     [ref]$ResolvedPath
   )
 
-  $current = [Environment]::GetEnvironmentVariable($Name, $Target)
+  $current = [Environment]::GetEnvironmentVariable($Name, "Machine")
   $expanded = if ([string]::IsNullOrWhiteSpace($current)) {
     ""
   } else {
@@ -110,12 +107,12 @@ function Repair-MachineTempVariable {
     (Test-Path -LiteralPath $expanded -PathType Container)
 
   if (-not $valid) {
-    [Environment]::SetEnvironmentVariable($Name, $FallbackPath, $Target)
-    Write-Host "Repaired $Target $Name to $FallbackPath"
+    [Environment]::SetEnvironmentVariable($Name, $FallbackPath, "Machine")
+    Write-Host "Repaired machine $Name to $FallbackPath"
     $ResolvedPath.Value = $FallbackPath
     return
   }
-  Write-Host "$Target $Name is ready: $expanded"
+  Write-Host "Machine $Name is ready: $expanded"
   $ResolvedPath.Value = $expanded
 }
 
@@ -123,10 +120,7 @@ if ([string]::IsNullOrWhiteSpace($WindowsRoot) -or
     -not [System.IO.Path]::IsPathRooted($WindowsRoot)) {
   throw "WindowsRoot must be an absolute path."
 }
-$environmentVariableTarget = [System.EnvironmentVariableTarget]$EnvironmentTarget
-if (-not $SkipMachineEnvironment -and
-    $environmentVariableTarget -eq [System.EnvironmentVariableTarget]::Machine -and
-    -not (Test-Administrator)) {
+if (-not $SkipMachineEnvironment -and -not (Test-Administrator)) {
   throw "Administrator privileges are required to repair Windows Installer directories."
 }
 
@@ -143,12 +137,10 @@ if (-not $SkipMachineEnvironment) {
   Repair-MachineTempVariable `
     -Name "TEMP" `
     -FallbackPath $windowsTempPath `
-    -Target $environmentVariableTarget `
     -ResolvedPath ([ref]$machineTemp)
   Repair-MachineTempVariable `
     -Name "TMP" `
     -FallbackPath $windowsTempPath `
-    -Target $environmentVariableTarget `
     -ResolvedPath ([ref]$machineTmp)
   Add-RequiredAccess -Path $machineTemp
   if (-not [string]::Equals($machineTemp, $machineTmp, [System.StringComparison]::OrdinalIgnoreCase)) {
