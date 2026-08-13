@@ -111,6 +111,8 @@ pub struct GitReference {
 pub struct DeliveryPackage {
     pub schema_version: u8,
     pub artifact_role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subtype: String,
     #[serde(default)]
     pub expected_next: String,
     #[serde(default)]
@@ -124,6 +126,7 @@ impl Default for DeliveryPackage {
         Self {
             schema_version: 1,
             artifact_role: "intermediate".to_string(),
+            subtype: String::new(),
             expected_next: String::new(),
             open_questions: String::new(),
             git_references: Vec::new(),

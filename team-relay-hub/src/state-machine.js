@@ -14,7 +14,7 @@ function denied(message) {
   throw new AppError(403, "action_not_allowed", message);
 }
 
-export function transition(thread, actorId, kind, recipientId) {
+export function transition(thread, actorId, kind, recipientId, deliverySubtype = "") {
   if (!ACTION_KINDS.has(kind)) denied("The action kind is not available on this endpoint.");
   if (kind !== "handoff" && recipientId !== null && recipientId !== undefined) {
     denied("Only handoff accepts a recipient_id.");
@@ -36,6 +36,10 @@ export function transition(thread, actorId, kind, recipientId) {
   }
 
   if (kind === "note") {
+    if (deliverySubtype === "progress"
+        && (thread.phase !== "active" || thread.current_actor_id !== actorId)) {
+      denied("Only the current actor can submit a progress update for active work.");
+    }
     return {
       recipientId: null,
       actionReturnToId: null,
