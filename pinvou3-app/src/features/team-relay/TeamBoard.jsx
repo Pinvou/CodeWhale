@@ -41,6 +41,7 @@ function RelayQueue({ copy, tasks, onOpenTask }) {
       {rows.map(task => <button type="button" onClick={() => onOpenTask(task)} key={task.id}>
         <i className={`tone-${task.category}`} />
         <span><strong>{task.title}</strong><small>{task.initiator} → {task.current} · {task.status}</small></span>
+        {!!task.unreadCount && <b className="team-relay-unread-badge" aria-label={copy.unread.updates(task.unreadCount)}>{task.unreadCount > 99 ? '99+' : task.unreadCount}</b>}
       </button>)}
       {!rows.length && <p>{copy.board.queue.empty}</p>}
     </div>

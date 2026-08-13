@@ -568,6 +568,26 @@ impl TeamRelayManager {
         decode(response).await
     }
 
+    pub async fn mark_thread_read(
+        &self,
+        thread_id: &str,
+        input: MarkThreadReadInput,
+    ) -> Result<ThreadReadState, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .put(endpoint(
+                &settings.hub_url,
+                &format!("v1/threads/{thread_id}/read"),
+            ))
+            .bearer_auth(token)
+            .json(&input)
+            .send()
+            .await
+            .map_err(network_error)?;
+        decode(response).await
+    }
+
     pub async fn upload_attachment(
         &self,
         app: AppHandle,
@@ -1020,10 +1040,14 @@ impl TeamRelayManager {
                                 buffer.drain(..index + 2);
                                 let event =
                                     frame.lines().find_map(|line| line.strip_prefix("event: "));
-                                if event.is_some_and(|name| name != "ready") {
-                                    crate::platform::notifications::notify_team_relay_changed(&app);
+                                if let Some(name) = event.filter(|name| *name != "ready") {
+                                    if name != "thread.read.changed" {
+                                        crate::platform::notifications::notify_team_relay_changed(
+                                            &app,
+                                        );
+                                    }
                                     let _ =
-                                        app.emit("team_relay:changed", json!({ "event": event }));
+                                        app.emit("team_relay:changed", json!({ "event": name }));
                                 }
                             }
                         }

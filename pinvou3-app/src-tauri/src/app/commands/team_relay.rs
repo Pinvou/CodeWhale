@@ -1,9 +1,10 @@
 use crate::features::team_relay::{
     AccountEnrollmentInput, Attachment, ClaimEnrollmentInput, CreateActionInput,
-    CreateInviteResponse, CreateTeamEnrollmentInput, CreateThreadInput,
+    CreateInviteResponse, CreateTeamEnrollmentInput, CreateThreadInput, MarkThreadReadInput,
     SetTeamRelayAgentSessionInput, SetThreadPreferenceInput, TeamJoinCodeState,
     TeamRelayAccountState, TeamRelayManager, TeamRelaySnapshot, TeamRelayStatus,
-    TeamRelayTaskWorkspaceStatus, ThreadMutationResponse, ThreadPreference, UpdateProfileInput,
+    TeamRelayTaskWorkspaceStatus, ThreadMutationResponse, ThreadPreference, ThreadReadState,
+    UpdateProfileInput,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
@@ -200,6 +201,15 @@ pub async fn team_relay_set_thread_preference(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<ThreadPreference, String> {
     manager.set_thread_preference(&thread_id, input).await
+}
+
+#[tauri::command]
+pub async fn team_relay_mark_thread_read(
+    thread_id: String,
+    input: MarkThreadReadInput,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<ThreadReadState, String> {
+    manager.mark_thread_read(&thread_id, input).await
 }
 
 #[tauri::command]

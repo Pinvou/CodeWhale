@@ -19,7 +19,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const database = await pool.query("SELECT current_database() AS name");
   assert.match(database.rows[0].name, /_test$/, "integration test requires an isolated *_test database");
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-  for (const migrationName of ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql"]) {
+  for (const migrationName of ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql"]) {
     const migration = await readFile(
       new URL(`../../docs/team-relay/migrations/${migrationName}`, import.meta.url),
       "utf8",
@@ -721,6 +721,41 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(created.value.action.delivery.git_references[0].commit_sha, "abcdef1234567");
   const threadId = created.value.thread.id;
 
+  const aInitialReadState = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: a.device_token,
+  });
+  const bInitialReadState = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+  });
+  assert.equal(aInitialReadState.value.threads[0].unread_count, 0, "the assigning member must not notify themselves");
+  assert.equal(aInitialReadState.value.threads[0].read_state.last_read_sequence, 1);
+  assert.equal(bInitialReadState.value.threads[0].unread_count, 1, "a new assignment is the recipient's first unread update");
+  assert.equal(bInitialReadState.value.threads[0].read_state.last_read_sequence, 0);
+
+  const bMarkedRead = await api(`/v1/threads/${threadId}/read`, {
+    method: "PUT",
+    token: b.device_token,
+    body: { read_through_sequence: 1 },
+  });
+  assert.equal(bMarkedRead.status, 200);
+  assert.equal(bMarkedRead.value.last_read_sequence, 1);
+  const bAfterRead = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
+  assert.equal(bAfterRead.value.threads[0].unread_count, 0);
+  const futureRead = await api(`/v1/threads/${threadId}/read`, {
+    method: "PUT",
+    token: b.device_token,
+    body: { read_through_sequence: 2 },
+  });
+  assert.equal(futureRead.status, 400);
+  assert.equal(futureRead.value.error.code, "invalid_request");
+  const nonParticipantRead = await api(`/v1/threads/${threadId}/read`, {
+    method: "PUT",
+    token: c.device_token,
+    body: { read_through_sequence: 1 },
+  });
+  assert.equal(nonParticipantRead.status, 403);
+  assert.equal(nonParticipantRead.value.error.code, "thread_access_denied");
+
   const bDownload = await fetch(`${origin}/v1/attachments/${planUpload.value.id}/content`, {
     headers: { Authorization: `Bearer ${b.device_token}` },
   });
@@ -778,6 +813,19 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(handedOff.status, 201);
   assert.equal(handedOff.value.thread.current_actor_id, c.principal.id);
   assert.equal(handedOff.value.thread.owner_id, b.principal.id);
+  const aAfterHandoff = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: a.device_token });
+  const bAfterOwnHandoff = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
+  const cAfterJoiningThread = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: c.device_token });
+  assert.equal(aAfterHandoff.value.threads[0].unread_count, 1);
+  assert.equal(bAfterOwnHandoff.value.threads[0].unread_count, 0, "an actor's own update must not notify that actor");
+  assert.equal(cAfterJoiningThread.value.threads[0].unread_count, 1, "a collaborator starts unread at the handoff that added them");
+  const bStaleRead = await api(`/v1/threads/${threadId}/read`, {
+    method: "PUT",
+    token: b.device_token,
+    body: { read_through_sequence: 0 },
+  });
+  assert.equal(bStaleRead.status, 200);
+  assert.equal(bStaleRead.value.last_read_sequence, 1, "a stale device must not move the read cursor backwards");
   const cAfterHandoff = await api(`/v1/attachments/${planUpload.value.id}`, {
     token: c.device_token,
   });
