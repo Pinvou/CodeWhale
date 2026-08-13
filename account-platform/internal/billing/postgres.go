@@ -388,7 +388,8 @@ type queryable interface {
 // this transaction-scoped lock concurrent first requests can all pass the
 // lookup and then race on a unique constraint.
 func lockTransactionKey(ctx context.Context, tx pgx.Tx, scope, key string) error {
-	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, scope+"\x00"+key)
+	lockKey := fmt.Sprintf("%d:%s%s", len(scope), scope, key)
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockKey)
 	return err
 }
 

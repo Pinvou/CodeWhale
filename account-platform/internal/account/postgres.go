@@ -54,7 +54,8 @@ func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.P
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, principal.Issuer+"\x00"+principal.Subject); err != nil {
+	lockKey := fmt.Sprintf("%d:%s%s", len(principal.Issuer), principal.Issuer, principal.Subject)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
 		return Me{}, false, err
 	}
 	user, err := loadUserByIdentity(ctx, tx, principal)

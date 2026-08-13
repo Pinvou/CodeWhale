@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 
-const billingOrigin = 'http://127.0.0.1:18102';
+const billingOrigin = process.env.PINVOU_TEST_BILLING_ORIGIN || 'http://127.0.0.1:18102';
+const paymentOrigin = process.env.PINVOU_TEST_PAYMENT_ORIGIN || 'http://127.0.0.1:18104';
 const serviceToken = process.env.INTERNAL_SERVICE_TOKEN;
 assert.ok(serviceToken, 'the E2E runner must inject a generated internal service token');
 
@@ -62,7 +63,9 @@ async function getOrder(orderID, requesterID) {
 }
 
 async function completePayment(paymentURL) {
-  const response = await fetch(paymentURL, { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10_000) });
+  const publicURL = new URL(paymentURL);
+  const requestURL = new URL(`${publicURL.pathname}/complete${publicURL.search}`, process.env.PINVOU_TEST_PAYMENT_REQUEST_ORIGIN || publicURL.origin);
+  const response = await fetch(requestURL, { method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(10_000) });
   assert.equal(response.status, 200, `simulated payment completion returned ${response.status}`);
   await response.arrayBuffer();
 }
@@ -87,7 +90,9 @@ for (const channel of ['UNIONPAY', 'ALIPAY', 'WECHAT']) {
   assert.equal(new Set(orders.map((order) => order.order_id)).size, 1, `${channel} idempotent creates must return one order`);
   const order = orders[0];
   assert.equal(order.channel, channel);
-  assert.match(order.payment_url, /^http:\/\/127\.0\.0\.1:18104\/pay\//);
+  const paymentURL = new URL(order.payment_url);
+  assert.equal(paymentURL.origin, paymentOrigin, 'payment URL must use the configured public origin');
+  assert.match(paymentURL.pathname, /^\/pay\//);
 
   const completions = channel === 'UNIONPAY' ? 100 : 1;
   await Promise.all(Array.from({ length: completions }, () => completePayment(order.payment_url)));

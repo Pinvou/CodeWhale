@@ -78,7 +78,7 @@ services:
       KC_HOSTNAME: http://127.0.0.1:18080
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
     volumes:
-      - ../keycloak/pinvou-dev-realm.json:/opt/keycloak/data/import/pinvou-dev-realm.json:ro
+      - ../keycloak/pinvou-dev-realm.json:/opt/keycloak/data/import/pinvou-realm.json:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -86,6 +86,7 @@ services:
       - "127.0.0.1:18080:8080"
     networks:
       - backend
+      - edge
 
   account-service:
     <<: *service-defaults
@@ -112,6 +113,9 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:18101:8080"
+    networks:
+      - backend
+      - edge
 
   billing-service:
     <<: *service-defaults
@@ -139,6 +143,9 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:18102:8080"
+    networks:
+      - backend
+      - edge
 
   token-gateway:
     <<: *service-defaults
@@ -171,6 +178,9 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:18103:8080"
+    networks:
+      - backend
+      - edge
 
   account-event-relay:
     <<: *service-defaults
@@ -179,6 +189,7 @@ services:
       args: { SERVICE: event-relay }
     environment:
       EVENT_SOURCE: account
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
       DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
       NATS_URL: nats://nats:4222
     depends_on:
@@ -192,6 +203,7 @@ services:
       args: { SERVICE: event-relay }
     environment:
       EVENT_SOURCE: billing
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
       NATS_URL: nats://nats:4222
     depends_on:
@@ -205,6 +217,7 @@ services:
       args: { SERVICE: event-relay }
     environment:
       EVENT_SOURCE: token
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
       DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
       NATS_URL: nats://nats:4222
     depends_on:
@@ -238,6 +251,9 @@ services:
         condition: service_started
     ports:
       - "127.0.0.1:18105:8080"
+    networks:
+      - backend
+      - edge
 
   mock-newapi:
     <<: *service-defaults
@@ -273,6 +289,9 @@ services:
         condition: service_completed_successfully
     ports:
       - "127.0.0.1:18104:8080"
+    networks:
+      - backend
+      - edge
 
   account-migrate:
     <<: *service-defaults
@@ -333,6 +352,7 @@ services:
 networks:
   backend:
     internal: true
+  edge:
 
 volumes:
   postgres-data:

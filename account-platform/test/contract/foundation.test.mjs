@@ -69,6 +69,10 @@ test('Compose keeps data stores private and simulator development-only', async (
   assert.equal(compose.networks.backend.internal, true);
   for (const service of ['postgres', 'redis', 'nats']) {
     assert.equal(compose.services[service].ports, undefined, `${service} must not publish ports`);
+    assert.deepEqual(compose.services[service].networks, ['backend'], `${service} must stay off the edge network`);
+  }
+  for (const service of ['keycloak', 'account-service', 'billing-service', 'token-gateway', 'payment-simulator', 'token-portal']) {
+    assert.deepEqual(compose.services[service].networks, ['backend', 'edge'], `${service} must publish only through loopback edge bindings`);
   }
   assert.equal(compose.services['payment-simulator'].environment.APP_ENV, 'development');
   assert.match(compose.services['billing-service'].environment.DATABASE_URL, /account_platform_billing/);
@@ -111,4 +115,13 @@ test('every migration up script has a matching down script', async () => {
     assert.ok(up.length > 0, `${domain} must contain migrations`);
     for (const migration of up) assert.ok(down.has(migration), `${domain}/${migration} has no down migration`);
   }
+});
+
+test('payment simulator preserves the exact signed callback payload', async () => {
+  const migration = await readFile(
+    path.join(root, 'migrations/payment-simulator/000004_exact_notification_payload.up.sql'),
+    'utf8',
+  );
+  assert.match(migration, /ALTER COLUMN payload TYPE BYTEA/);
+  assert.doesNotMatch(migration, /ALTER COLUMN payload TYPE JSONB/);
 });
