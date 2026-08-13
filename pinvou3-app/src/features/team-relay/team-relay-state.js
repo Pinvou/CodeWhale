@@ -65,7 +65,12 @@ export function matchesSourceFilter(task, filter, meId) {
 
 export function projectSnapshot(snapshot, copy) {
   if (!snapshot?.bootstrap) return [];
-  const { bootstrap, attachments = {} } = snapshot;
+  const { attachments = {} } = snapshot;
+  const bootstraps = snapshot.team_bootstraps?.length ? snapshot.team_bootstraps : [snapshot.bootstrap];
+  return bootstraps.flatMap(bootstrap => projectTeamSnapshot(bootstrap, attachments, copy));
+}
+
+function projectTeamSnapshot(bootstrap, attachments, copy) {
   const names = new Map(bootstrap.members.map(member => [member.id, member.display_name]));
   names.set(bootstrap.me.id, bootstrap.me.display_name);
   const nameOf = id => id ? (names.get(id) || id.slice(0, 8)) : copy.dash;
@@ -104,6 +109,8 @@ export function projectSnapshot(snapshot, copy) {
       id: thread.id,
       category,
       title: thread.title,
+      teamId: bootstrap.team.id,
+      teamName: bootstrap.team.name,
       initiator: nameOf(thread.initiator_id),
       owner: nameOf(thread.owner_id),
       current,

@@ -167,7 +167,8 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 ## 9. Bootstrap 与 SSE
 
 - `GET /v1/bootstrap?team_id=...` 返回成员、演示保留期内的线程及动作摘要。
-- `GET /v1/events?team_id=...` 通过 SSE 发送 `thread.changed`、`membership.changed` 等轻量提示。
+- 客户端的“我的工作”依次读取当前 Principal 已加入团队的 bootstrap，在本机按团队标签汇总；团队筛选只改变展示，不改变当前任务状态。
+- `GET /v1/events?team_id=...` 只订阅指定团队；省略 `team_id` 时订阅当前 Principal 所有有效团队，并通过 SSE 发送 `thread.changed`、`membership.changed` 等轻量提示。
 - 事件只包含资源 ID 和最新 revision，不包含 token、邀请码、文件内容或完整消息。
 - 客户端收到事件后重新读取资源；SSE 重连后必须重新 bootstrap。
 - 演示阶段不提供 cursor replay，也不承诺发送方离线时自动恢复未确认请求。

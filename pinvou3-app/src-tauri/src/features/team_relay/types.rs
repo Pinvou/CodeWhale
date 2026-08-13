@@ -205,6 +205,8 @@ pub struct AttachmentUploadProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamRelaySnapshot {
     pub bootstrap: BootstrapResponse,
+    #[serde(default)]
+    pub team_bootstraps: Vec<BootstrapResponse>,
     pub attachments: HashMap<String, Attachment>,
     #[serde(default)]
     pub teams: Vec<TeamSummary>,
@@ -367,6 +369,7 @@ pub struct UpdateProfileResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateThreadInput {
+    pub team_id: String,
     pub title: String,
     pub assignee_id: String,
     pub message: String,

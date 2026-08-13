@@ -96,6 +96,7 @@ await feature.joinTeam('x'.repeat(32));
 assert.equal(state.teamRelay.snapshot.bootstrap.team.id, 'joined-team');
 await feature.switchTeam('team-two');
 assert.equal(state.teamRelay.snapshot.bootstrap.team.id, 'team-two');
+assert.equal(state.teamRelay.status.team_id, 'team-two');
 await feature.updateProfile({ display_name: 'New name' });
 assert.equal(state.teamRelay.snapshot.bootstrap.me.display_name, 'New name');
 await feature.removeMember('member-two');
@@ -111,7 +112,7 @@ const disabledPassword = await feature.disableJoinPassword();
 assert.equal(disabledPassword.configured, false);
 assert.ok(calls.some(call => call.command === 'team_relay_disable_join_password'));
 
-const request = { title: 'Proposal', assignee_id: 'b', message: 'Please draft', attachment_ids: [] };
+const request = { team_id: 'team-two', title: 'Proposal', assignee_id: 'b', message: 'Please draft', attachment_ids: [] };
 await assert.rejects(feature.createThread(request), /connection lost/);
 await feature.createThread(request);
 const writes = calls.filter(call => call.command === 'team_relay_create_thread');
@@ -119,12 +120,13 @@ assert.equal(writes.length, 2);
 assert.equal(writes[0].args.input.idempotency_key, writes[1].args.input.idempotency_key, 'manual retry must reuse the idempotency key');
 await feature.setThreadPreference('thread', { pinned: true, hidden: false });
 assert.ok(calls.some(call => call.command === 'team_relay_set_thread_preference' && call.args.threadId === 'thread'));
-const emptyWorkspace = await feature.taskWorkspaceStatus('thread');
+const emptyWorkspace = await feature.taskWorkspaceStatus('thread', 'team-two');
 assert.equal(emptyWorkspace.thread_id, 'thread');
+assert.ok(calls.some(call => call.command === 'team_relay_task_workspace_status' && call.args.teamId === 'team-two'));
 const preparedWorkspace = await feature.prepareTaskWorkspace('thread');
 assert.equal(preparedWorkspace.materials[0].local_path, '/private/relay/thread/materials/P01-brief.pdf');
 assert.equal(state.teamRelay.taskWorkspaces.thread.materials.length, 1);
-const linkedWorkspace = await feature.setTaskAgentSession('thread', { kind: 'coding', session_id: 'coding-source', agent_id: 'claude', workspace_path: '/projects/pinvou', material_ids: ['attachment-1'], last_synced_sequence: 3 });
+const linkedWorkspace = await feature.setTaskAgentSession('thread', { kind: 'coding', session_id: 'coding-source', agent_id: 'claude', workspace_path: '/projects/pinvou', material_ids: ['attachment-1'], last_synced_sequence: 3 }, 'team-two');
 assert.equal(linkedWorkspace.agent_session.session_id, 'coding-source');
 assert.equal(linkedWorkspace.agent_session.agent_id, 'claude');
 assert.deepEqual(linkedWorkspace.agent_session.material_ids, ['attachment-1']);
@@ -134,8 +136,9 @@ await feature.openPreparedMaterial('/private/relay/thread/materials/P01-brief.pd
 assert.ok(calls.some(call => call.command === 'open_in_system' && call.args.path === '/private/relay/thread/materials/P01-brief.pdf'));
 await feature.openPreparedMaterial('/private/relay/thread/materials/P02-report.html');
 assert.ok(calls.some(call => call.command === 'open_artifact_window' && call.args.path === '/private/relay/thread/materials/P02-report.html' && call.args.sessionId === null));
-await feature.revealPreparedMaterial('thread', 'attachment-1');
+await feature.revealPreparedMaterial('thread', 'attachment-1', 'team-two');
 assert.ok(calls.some(call => call.command === 'team_relay_reveal_prepared_material' && call.args.threadId === 'thread' && call.args.attachmentId === 'attachment-1'));
+assert.ok(calls.some(call => call.command === 'team_relay_reveal_prepared_material' && call.args.teamId === 'team-two'));
 
 const eventHandler = eventHandlers.get('team_relay:changed');
 assert.equal(typeof eventHandler, 'function');
@@ -174,8 +177,9 @@ assert.equal(codingContext.materials[0].localPath, '/projects/pinvou/src/relay.j
 assert.ok(calls.some(call => call.command === 'load_session' && call.args.setActive === false));
 assert.ok(calls.some(call => call.command === 'get_codex_workspace_changes' && call.args.sessionId === 'coding-source'));
 
-const mounted = await feature.mountDraftMaterials(codingContext.materials);
+const mounted = await feature.mountDraftMaterials(codingContext.materials, 'team-two');
 assert.equal(mounted[0].original_name, 'relay.js');
+assert.ok(calls.some(call => call.command === 'team_relay_upload_attachment' && call.args.teamId === 'team-two'));
 const mountedChatFile = await feature.mountDraftMaterials([chatContext.materials[1]]);
 assert.equal(mountedChatFile[0].original_name, 'index.html');
 const uploadCountBeforePick = calls.filter(call => call.command === 'team_relay_upload_attachment').length;

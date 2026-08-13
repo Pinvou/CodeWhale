@@ -67,6 +67,21 @@ assert.equal(tasks[0].files[0].original_name, '方案.md');
 assert.equal(tasks[0].events[0].delivery.artifact_role, 'input');
 assert.equal(tasks[0].events[0].delivery.subtype, '');
 assert.equal(tasks[0].events[0].sequence, 1);
+assert.equal(tasks[0].teamId, 'team');
+assert.equal(tasks[0].teamName, 'Demo');
+
+const secondBootstrap = JSON.parse(JSON.stringify(snapshot.bootstrap));
+secondBootstrap.team = { id: 'team-two', name: 'Second team' };
+secondBootstrap.threads[0].thread.id = 'thread-two';
+secondBootstrap.threads[0].thread.team_id = 'team-two';
+secondBootstrap.threads[0].thread.title = '跨团队任务';
+secondBootstrap.threads[0].actions[0].id = 'action-two';
+secondBootstrap.threads[0].actions[0].thread_id = 'thread-two';
+const crossTeamTasks = projectSnapshot({ ...snapshot, team_bootstraps: [snapshot.bootstrap, secondBootstrap] }, dict.zh.uiTeamRelay);
+assert.deepEqual(crossTeamTasks.map(task => [task.id, task.teamId, task.teamName]), [
+  ['thread', 'team', 'Demo'],
+  ['thread-two', 'team-two', 'Second team'],
+]);
 assert.deepEqual(relayViewCounts(tasks, 'me'), { attention: 0, waiting: 1, all: 1, ended: 0, hidden: 0 });
 assert.equal(matchesSourceFilter(tasks[0], 'sent', 'me'), true);
 assert.equal(matchesSourceFilter(tasks[0], 'received', 'me'), false);
@@ -178,6 +193,7 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(copy.materialInspector.revealPrepared);
   assert.ok(copy.taskInfo);
   assert.ok(copy.views.board);
+  assert.ok(copy.views.teams);
   assert.ok(copy.teams.create);
   assert.equal(typeof copy.teams.openWork, 'function');
   assert.ok(copy.teams.createDialog.confirm);
@@ -310,6 +326,7 @@ assert.match(viewSource, /final_recipient_id !== task\.raw\.initiator_id/);
 assert.match(viewSource, /team-relay-task-info/);
 assert.match(viewSource, /TeamBoard/);
 assert.match(viewSource, /team-relay-view-switch/);
+assert.match(viewSource, /const openTeam = teamId => \{[\s\S]*setSelectedTeamId\(teamId\);[\s\S]*setViewMode\('board'\);[\s\S]*bridge\.teamRelay\.switchTeam\(teamId\)/);
 assert.match(viewSource, /rotateJoinPassword\(\)/);
 assert.match(viewSource, /getJoinPassword\(\)/);
 assert.match(viewSource, /joinCodeRequestRef\.current/);

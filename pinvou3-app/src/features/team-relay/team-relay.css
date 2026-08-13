@@ -1213,6 +1213,9 @@
 .team-relay-categories button.is-active svg { color: var(--relay-blue); }
 .team-relay-categories button span { flex: 1; }
 .team-relay-categories b { background: transparent; color: var(--relay-muted); font-size: 12px; height: auto; min-width: 0; padding: 0; }
+.team-relay-team-filter { border-bottom: 1px solid var(--relay-border); margin: 0 6px 14px; padding: 0 8px 16px; }
+.team-relay-team-filter > small { color: var(--relay-muted); display: block; font-size: 11px; margin-bottom: 8px; }
+.team-relay-team-filter .team-relay-select-trigger { background: var(--relay-panel); border: 1px solid var(--relay-border); height: 38px; padding: 0 10px; }
 
 .team-relay-list { background: var(--relay-panel); }
 .theme-dark .team-relay-list { background: var(--relay-panel); }
@@ -1238,12 +1241,36 @@
 .team-relay-card-heading time { color: var(--relay-muted); font-size: 11px; }
 .team-relay-card-status { color: var(--relay-muted); font-size: 12px; }
 .team-relay-card-meta { color: var(--relay-muted); font-size: 10px; }
+.team-relay-card-team { align-items: center; display: inline-flex; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-relay-card-meta small { align-items: center; display: inline-flex; gap: 4px; }
 .team-relay-card.is-selected .team-relay-card-heading,
 .team-relay-card.is-selected .team-relay-card-heading time,
 .team-relay-card.is-selected .team-relay-card-status,
 .team-relay-card.is-selected .team-relay-card-meta,
 .team-relay-card.is-selected .team-relay-card-meta small { color: #fff; }
 .team-relay-card.is-selected .team-relay-avatar { box-shadow: 0 0 0 2px rgba(255,255,255,.28); }
+
+.team-relay-directory { flex: 1; min-height: 0; overflow: auto; padding: 42px clamp(24px, 4vw, 72px); }
+.team-relay-directory > header { align-items: flex-end; display: flex; justify-content: space-between; margin: 0 auto 28px; max-width: 1240px; }
+.team-relay-directory > header > div:first-child > span { color: var(--relay-blue); font-size: 12px; font-weight: 700; }
+.team-relay-directory h1 { font-size: 30px; margin: 8px 0 7px; }
+.team-relay-directory p { color: var(--relay-muted); margin: 0; }
+.team-relay-directory > header > div:last-child { display: flex; gap: 10px; }
+.team-relay-directory-summary { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 240px)); margin: 0 auto 24px; max-width: 1240px; }
+.team-relay-directory-summary > span { background: var(--relay-panel); border: 1px solid var(--relay-border); border-radius: 16px; display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; }
+.team-relay-directory-summary small { color: var(--relay-muted); }
+.team-relay-directory-summary strong { font-size: 24px; }
+.team-relay-directory-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); margin: 0 auto; max-width: 1240px; }
+.team-relay-directory-card { align-items: center; background: var(--relay-panel); border: 1px solid var(--relay-border); border-radius: 18px; color: var(--relay-text); cursor: pointer; display: grid; font: inherit; gap: 14px; grid-template-columns: auto minmax(0, 1fr) auto; padding: 22px; text-align: left; transition: border-color 150ms ease, transform 150ms ease; }
+.team-relay-directory-card:hover { border-color: color-mix(in srgb, var(--relay-blue) 50%, var(--relay-border)); transform: translateY(-2px); }
+.team-relay-directory-avatar { align-items: center; background: var(--relay-blue-soft); border-radius: 13px; color: var(--relay-blue); display: flex; height: 48px; justify-content: center; width: 48px; }
+.team-relay-directory-card > span:nth-child(2) { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.team-relay-directory-card > span:nth-child(2) strong { font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.team-relay-directory-card > span:nth-child(2) small { color: var(--relay-muted); }
+.team-relay-directory-card > b { background: var(--relay-panel-soft); border-radius: 999px; color: var(--relay-muted); font-size: 11px; padding: 5px 8px; }
+.team-relay-directory-card > em { color: var(--relay-blue); font-size: 12px; font-style: normal; grid-column: 2 / -1; }
+.team-relay-team-back { align-items: center; background: transparent; border: 0; color: var(--relay-muted); cursor: pointer; display: inline-flex; font: inherit; font-size: 12px; gap: 5px; margin: 0 0 9px; padding: 0; }
+.team-relay-team-back:hover { color: var(--relay-blue); }
 
 .team-relay-workspace { grid-template-columns: minmax(480px, 1fr) clamp(300px, 18cqw, 370px); }
 .team-relay-detail { background: var(--relay-panel); }
