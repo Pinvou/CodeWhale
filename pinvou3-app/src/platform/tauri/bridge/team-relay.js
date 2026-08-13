@@ -156,8 +156,12 @@
       return snapshot;
     }
 
-    function switchTeam(teamId) {
-      return mutate("team_relay_switch_team", { teamId: teamId });
+    async function switchTeam(teamId) {
+      var snapshot = await mutate("team_relay_switch_team", { teamId: teamId });
+      if (snapshot && snapshot.bootstrap) {
+        patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }) });
+      }
+      return snapshot;
     }
 
     function removeMember(principalId) {
@@ -257,8 +261,8 @@
       return workspace;
     }
 
-    async function taskWorkspaceStatus(threadId) {
-      var workspace = await invoke("team_relay_task_workspace_status", { threadId: threadId });
+    async function taskWorkspaceStatus(threadId, teamId) {
+      var workspace = await invoke("team_relay_task_workspace_status", { threadId: threadId, teamId: teamId || null });
       return rememberTaskWorkspace(workspace);
     }
 
@@ -275,10 +279,11 @@
       }
     }
 
-    async function setTaskAgentSession(threadId, input) {
+    async function setTaskAgentSession(threadId, input, teamId) {
       var workspace = await invoke("team_relay_set_task_agent_session", {
         threadId: threadId,
         input: input,
+        teamId: teamId || null,
       });
       return rememberTaskWorkspace(workspace);
     }
@@ -295,10 +300,11 @@
       return invoke(command, { path: path, sessionId: null });
     }
 
-    function revealPreparedMaterial(threadId, attachmentId) {
+    function revealPreparedMaterial(threadId, attachmentId, teamId) {
       return invoke("team_relay_reveal_prepared_material", {
         threadId: threadId,
         attachmentId: attachmentId,
+        teamId: teamId || null,
       });
     }
 
@@ -495,8 +501,10 @@
       };
     }
 
-    async function mountDraftMaterials(materials) {
+    async function mountDraftMaterials(materials, teamId) {
       var selected = Array.isArray(materials) ? materials : [];
+      teamId = teamId || state.teamRelay?.snapshot?.bootstrap?.team?.id || state.teamRelay?.status?.team_id;
+      if (!teamId) throw new Error("team_relay_team_required");
       var uploaded = [];
       for (var index = 0; index < selected.length; index++) {
         var material = selected[index] || {};
@@ -504,6 +512,7 @@
         uploaded.push(await invoke("team_relay_upload_attachment", {
           path: material.localPath,
           uploadId: material.uploadId,
+          teamId: teamId,
         }));
       }
       return uploaded;

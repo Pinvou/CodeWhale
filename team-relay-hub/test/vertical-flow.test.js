@@ -761,7 +761,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
 
   const sseController = new AbortController();
   t.after(() => sseController.abort());
-  const sse = await fetch(`${origin}/v1/events?team_id=${initial.team_id}`, {
+  const sse = await fetch(`${origin}/v1/events`, {
     headers: { Authorization: `Bearer ${a.device_token}` },
     signal: sseController.signal,
   });

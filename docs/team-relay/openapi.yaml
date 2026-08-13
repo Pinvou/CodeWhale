@@ -682,12 +682,13 @@ paths:
       tags: [Sync]
       operationId: streamEvents
       parameters:
-        - $ref: "#/components/parameters/TeamIdQuery"
+        - $ref: "#/components/parameters/OptionalTeamIdQuery"
       responses:
         "200":
           description: |
-            SSE refresh hints. Reconnect is followed by a full bootstrap; no cursor
-            replay is guaranteed in the demo.
+            SSE refresh hints. When team_id is omitted, the stream subscribes to every
+            team in which the authenticated Principal has an active membership. Reconnect
+            is followed by a full bootstrap; no cursor replay is guaranteed in the demo.
           content:
             text/event-stream:
               schema:
@@ -718,6 +719,13 @@ components:
       name: team_id
       in: query
       required: true
+      schema:
+        $ref: "#/components/schemas/Uuid"
+    OptionalTeamIdQuery:
+      name: team_id
+      in: query
+      required: false
+      description: Omit to subscribe to all teams joined by the authenticated Principal.
       schema:
         $ref: "#/components/schemas/Uuid"
     PrincipalId:

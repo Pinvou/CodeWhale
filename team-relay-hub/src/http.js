@@ -439,9 +439,17 @@ export function createHubServer({ pool, config }) {
         return;
       }
       if (method === "GET" && pathname === "/v1/events") {
-        const teamId = uuid(url.searchParams.get("team_id"), "team_id");
         const auth = await authenticate(pool, token);
-        await requireMembership(pool, teamId, auth.principalId);
+        const requestedTeamId = url.searchParams.get("team_id");
+        let teamIds;
+        if (requestedTeamId) {
+          const teamId = uuid(requestedTeamId, "team_id");
+          await requireMembership(pool, teamId, auth.principalId);
+          teamIds = [teamId];
+        } else {
+          const memberships = await listTeams(pool, token);
+          teamIds = memberships.teams.map(team => team.id);
+        }
         response.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
           "Cache-Control": "no-cache, no-transform",
@@ -450,12 +458,12 @@ export function createHubServer({ pool, config }) {
           "X-Request-Id": requestId,
         });
         response.write("retry: 3000\nevent: ready\ndata: {}\n\n");
-        const unsubscribe = events.subscribe(teamId, auth.principalId, response);
+        const unsubscribes = teamIds.map(teamId => events.subscribe(teamId, auth.principalId, response));
         const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 20_000);
         heartbeat.unref();
         const cleanup = () => {
           clearInterval(heartbeat);
-          unsubscribe();
+          for (const unsubscribe of unsubscribes) unsubscribe();
         };
         request.once("close", cleanup);
         response.once("close", cleanup);

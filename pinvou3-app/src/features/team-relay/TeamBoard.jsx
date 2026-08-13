@@ -1,5 +1,5 @@
 import React from 'react';
-import { CheckCircle2, Plus, Send, Trash2 } from '../../components/icons.jsx';
+import { ArrowLeft, CheckCircle2, Plus, Send, Trash2 } from '../../components/icons.jsx';
 import { RelayAvatar } from './RelayAvatar.jsx';
 
 function displayTime(value) {
@@ -58,7 +58,7 @@ function AcceptanceReminder({ copy, tasks, onOpenTask }) {
   </section>;
 }
 
-export function TeamBoard({ copy, board, tasks, canManage, busy, joinCodeOpen, joinCodeBanner, onInvite, onJoin, onCreate, onAssign, onOpenTask, onRemove }) {
+export function TeamBoard({ copy, teamName, board, tasks, canManage, busy, joinCodeOpen, joinCodeBanner, onBack, onInvite, onAssign, onOpenTask, onRemove }) {
   const nameCounts = new Map();
   board.members.forEach(member => nameCounts.set(member.display_name, (nameCounts.get(member.display_name) || 0) + 1));
   const duplicateNames = new Set([...nameCounts].filter(([, count]) => count > 1).map(([name]) => name));
@@ -67,15 +67,13 @@ export function TeamBoard({ copy, board, tasks, canManage, busy, joinCodeOpen, j
   return <section className="team-relay-team" data-testid="team-relay-board">
     <div className="team-relay-board-content">
       <header className="team-relay-team-overview">
-        <div><div className="team-relay-board-title-row"><h2>{copy.board.title}</h2><span>{copy.liveBadge}</span></div><p>{copy.board.subtitle}</p></div>
+        <div><button type="button" className="team-relay-team-back" onClick={onBack}><ArrowLeft size={15} />{copy.teams.backToDirectory}</button><div className="team-relay-board-title-row"><h2>{teamName}</h2><span>{copy.liveBadge}</span></div><p>{copy.board.subtitle}</p></div>
         <div className="team-relay-team-overview-actions">
-          <button type="button" className="team-relay-secondary" disabled={busy} onClick={onJoin}>{copy.teams.join}</button>
-          <button type="button" className="team-relay-secondary" disabled={busy} onClick={onCreate}>{copy.teams.create}</button>
           <button type="button" className={`team-relay-secondary${joinCodeOpen ? ' is-active' : ''}`} aria-pressed={joinCodeOpen} disabled={busy} onClick={onInvite}>{copy.inviteMembers}</button>
           <button type="button" className="team-relay-primary" disabled={busy} onClick={onAssign}><Plus size={16} />{copy.assign}</button>
         </div>
       </header>
-      {joinCodeBanner}
+      {joinCodeOpen && joinCodeBanner}
       <div className="team-relay-board-metrics">
         <span><small>{copy.board.summary.members}</small><strong>{board.summary.members || 0}</strong></span>
         <button type="button" disabled={!inProgressTask} onClick={() => onOpenTask(inProgressTask)}><small>{copy.board.summary.inProgress}</small><strong>{board.summary.inProgress || 0}</strong></button>
