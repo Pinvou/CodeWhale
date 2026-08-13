@@ -10,7 +10,7 @@ function defaultDelivery(kind) {
       : kind === 'note' || kind === 'cancel'
         ? 'evidence'
         : 'intermediate';
-  return { schema_version: 1, artifact_role: artifactRole, expected_next: '', open_questions: '', git_references: [] };
+  return { schema_version: 1, artifact_role: artifactRole, subtype: '', expected_next: '', open_questions: '', git_references: [] };
 }
 
 function projectDelivery(action) {
@@ -25,6 +25,13 @@ function projectDelivery(action) {
     artifact_role: artifactRole,
     git_references: Array.isArray(delivery.git_references) ? delivery.git_references : [],
   };
+}
+
+function actionKindLabel(action, copy) {
+  if (action.kind === 'note' && action.delivery?.subtype === 'progress') {
+    return copy.actionKinds.progress;
+  }
+  return copy.actionKinds[action.kind] || action.kind;
 }
 
 export function deriveCategory(thread, meId) {
@@ -83,7 +90,8 @@ export function projectSnapshot(snapshot, copy) {
       actorId: action.actor_id,
       actor: nameOf(action.actor_id),
       avatar: nameOf(action.actor_id),
-      title: copy.live.actionTitle(copy.actionKinds[action.kind] || action.kind, nameOf(action.actor_id), nameOf(action.recipient_id)),
+      kindLabel: actionKindLabel(action, copy),
+      title: copy.live.actionTitle(actionKindLabel(action, copy), nameOf(action.actor_id), nameOf(action.recipient_id)),
       message: action.message,
       time: action.created_at,
       files: action.attachment_ids.map(id => attachments[id]).filter(Boolean),
