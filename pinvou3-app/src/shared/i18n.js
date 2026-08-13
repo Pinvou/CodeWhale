@@ -688,7 +688,7 @@ const dict = {
         uiAccount: { backendUser:'后台用户', backendAccount:'后台账户', close:'关闭', availableQuota:'可用额度', refreshQuota:'刷新额度', monthlyQuota:'本月额度：', used:'已使用：', remaining:'剩余：', syncing:'同步中…', username:'New API 用户名', password:'New API 密码', loginFailed:'登录失败', loginUnavailable:'内置模型登录不可用', builtinLoginFailed:'内置模型登录失败', loggingIn:'登录中…', loginAndSync:'登录并同步额度', syncFailed:'额度同步失败', viewQuota:'查看可用额度', errors:{ login_unavailable:'内置模型登录不可用', not_logged_in:'尚未登录内置模型账户', unsupported_platform:'当前系统不支持内置模型账户', device_not_bound:'当前设备尚未绑定', device_binding_failed:'设备绑定失败', admin_credential_missing:'内置模型服务配置不完整', provisioning_failed:'内置模型开通失败', service_unreachable:'暂时无法连接内置模型服务', rate_limited:'请求过于频繁，请稍后重试', service_disabled:'内置模型服务已停用', unavailable:'内置模型服务暂不可用', user_not_found:'未找到对应的内置模型账户', permission_denied:'当前账户没有访问权限' }, status:{ unavailable:'暂不可用', ready:'已开通', not_started:'未开通', querying_user:'查询账户中', creating_token:'开通中', configuring_policy:'配置中', disabled:'已停用', failed:'开通失败', unknown:'同步中' }, settingsLoadFailed:'设置页加载失败' },
         expertPoolIndividualTab:'个人专家', expertPoolTeamTab:'专家团队',
         uiWorkflow: { pick:'选择一个工作流模板开始', empty:'没有可用的工作流（请检查工作流资源）', workflow:'工作流', stopFailed:e=>`停止工作流失败：${e}`, completed:'🎉 工作流完成' },
-        uiToolStore: { title:'工具商店', search:'搜索连接器、技能、插件等', card:'卡片', list:'列表', myTools:'我的工具', featured:'精选连接器', skills:'独家技能', results:'检索结果', back:'返回商店', internal:'集团内部 · 员工专属', internalTitle:'H3C 办公生态\n一键接入', internalDesc:'以你本人 SSO 身份直连集团内部系统，全程不填 key', internalTools:'H3C 集团内部工具', internalCount:n=>`${n} 个工具 · 需内网`, view:'查看' },
+        uiToolStore: { title:'工具商店', search:'搜索连接器、技能、插件等', myTools:'我的工具', results:'检索结果', back:'返回商店', internal:'集团内部 · 员工专属', internalTitle:'H3C 办公生态\n一键接入', internalDesc:'以你本人 SSO 身份直连集团内部系统，全程不填 key', internalTools:'H3C 集团内部工具', internalCount:n=>`${n} 个工具 · 需内网`, view:'查看' },
         uiToolDetails: { tools:{
           ima:{ title:'腾讯 ima', subtitle:'用 OpenAPI 操作 ima 笔记与知识库', latency:'云端', desc:'接入腾讯 ima OpenAPI Skill，可搜索、读取、创建和追加笔记，也可搜索、浏览知识库并导入网页或内容。凭据只保存在本机。', configTitle:'连接腾讯 ima', configDescription:'凭据只保存在本机，用于启用 IMA OpenAPI Skill。', configDocLabel:'获取 Client ID / API Key', welcomeQueries:['搜索我的 ima 知识库','列出我有哪些 ima 笔记','把这段内容新建为 ima 笔记','在 ima 知识库里查产品方案'] },
           tmeet:{ title:'腾讯会议', subtitle:'以本人身份管理会议、录制、纪要和参会报告', type:'CLI + 官方技能', latency:'云端', desc:'接入腾讯会议官方 CLI 和技能，可创建、查询、修改和取消会议，查询参会报告、录制、转写与智能纪要。连接时会打开授权页扫码登录。', welcomeQueries:['帮我创建一个腾讯会议','查一下我的腾讯会议录制','看看最近会议的智能纪要','查询这场腾讯会议的参会人'] },
@@ -1042,7 +1042,7 @@ const dict = {
         uiAccount: { backendUser:'Backend user', backendAccount:'Backend account', close:'Close', availableQuota:'Available quota', refreshQuota:'Refresh quota', monthlyQuota:'Monthly quota:', used:'Used:', remaining:'Remaining:', syncing:'Syncing…', username:'New API username', password:'New API password', loginFailed:'Login failed', loginUnavailable:'Built-in model sign-in is unavailable', builtinLoginFailed:'Built-in model sign-in failed', loggingIn:'Signing in…', loginAndSync:'Sign in and sync quota', syncFailed:'Quota sync failed', viewQuota:'View available quota', errors:{ login_unavailable:'Built-in model sign-in is unavailable', not_logged_in:'Sign in to the built-in model account first', unsupported_platform:'Built-in model accounts are not supported on this system', device_not_bound:'This device is not bound yet', device_binding_failed:'Device binding failed', admin_credential_missing:'The built-in model service configuration is incomplete', provisioning_failed:'Built-in model setup failed', service_unreachable:'The built-in model service is temporarily unreachable', rate_limited:'Too many requests. Try again later', service_disabled:'The built-in model service is disabled', unavailable:'The built-in model service is temporarily unavailable', user_not_found:'The built-in model account could not be found', permission_denied:'This account does not have access' }, status:{ unavailable:'Temporarily unavailable', ready:'Enabled', not_started:'Not enabled', querying_user:'Checking account', creating_token:'Enabling', configuring_policy:'Configuring', disabled:'Disabled', failed:'Setup failed', unknown:'Syncing' }, settingsLoadFailed:'Failed to load settings' },
         expertPoolIndividualTab:'Individual Experts', expertPoolTeamTab:'Expert Teams',
         uiWorkflow: { pick:'Choose a workflow template to begin', empty:'No workflows are available. Check the bundled workflow resources.', workflow:'Workflow', stopFailed:e=>`Failed to stop workflow: ${e}`, completed:'🎉 Workflow complete' },
-        uiToolStore: { title:'Tool Store', search:'Search connectors, skills, and plugins', card:'Cards', list:'List', myTools:'My Tools', featured:'Featured Connectors', skills:'Exclusive Skills', results:'Search Results', back:'Back to Store', internal:'Internal · Employees only', internalTitle:'H3C Workplace\nOne-click Access', internalDesc:'Connect to internal systems with your SSO identity—no key required', internalTools:'H3C Internal Tools', internalCount:n=>`${n} tools · Intranet required`, view:'View' },
+        uiToolStore: { title:'Tool Store', search:'Search connectors, skills, and plugins', myTools:'My Tools', results:'Search Results', back:'Back to Store', internal:'Internal · Employees only', internalTitle:'H3C Workplace\nOne-click Access', internalDesc:'Connect to internal systems with your SSO identity—no key required', internalTools:'H3C Internal Tools', internalCount:n=>`${n} tools · Intranet required`, view:'View' },
         uiToolDetails: { tools:{
           ima:{ title:'Tencent ima', subtitle:'Manage ima notes and knowledge bases through OpenAPI', latency:'Cloud', desc:'Connect the Tencent ima OpenAPI Skill to search, read, create, and append notes, or search and browse knowledge bases and import web pages or content. Credentials stay on this device.', configTitle:'Connect Tencent ima', configDescription:'Credentials stay on this device and are used only to enable the IMA OpenAPI Skill.', configDocLabel:'Get Client ID / API Key', welcomeQueries:['Search my ima knowledge bases','List my ima notes','Create an ima note from this content','Find the product plan in my ima knowledge base'] },
           tmeet:{ title:'Tencent Meeting', subtitle:'Manage meetings, recordings, minutes, and attendance reports as yourself', type:'CLI + Official Skill', latency:'Cloud', desc:'Connect the official Tencent Meeting CLI and skill to create, query, update, and cancel meetings, and access attendance reports, recordings, transcripts, and AI minutes. Connecting opens the authorization page for QR-code sign-in.', welcomeQueries:['Create a Tencent Meeting for me','Show my Tencent Meeting recordings','Show the latest meeting minutes','List the attendees of this Tencent Meeting'] },
@@ -1395,7 +1395,7 @@ const dict = {
         uiAccount: { backendUser:'バックエンドユーザー', backendAccount:'バックエンドアカウント', close:'閉じる', availableQuota:'利用可能枠', refreshQuota:'利用枠を更新', monthlyQuota:'月間利用枠：', used:'使用済み：', remaining:'残り：', syncing:'同期中…', username:'New API ユーザー名', password:'New API パスワード', loginFailed:'ログインに失敗しました', loginUnavailable:'内蔵モデルのログインを利用できません', builtinLoginFailed:'内蔵モデルのログインに失敗しました', loggingIn:'ログイン中…', loginAndSync:'ログインして利用枠を同期', syncFailed:'利用枠の同期に失敗しました', viewQuota:'利用可能枠を表示', errors:{ login_unavailable:'内蔵モデルのログインを利用できません', not_logged_in:'先に内蔵モデルアカウントにログインしてください', unsupported_platform:'このシステムでは内蔵モデルアカウントを利用できません', device_not_bound:'このデバイスはまだ紐付けられていません', device_binding_failed:'デバイスの紐付けに失敗しました', admin_credential_missing:'内蔵モデルサービスの設定が完了していません', provisioning_failed:'内蔵モデルのセットアップに失敗しました', service_unreachable:'内蔵モデルサービスに一時的に接続できません', rate_limited:'リクエストが多すぎます。後で再試行してください', service_disabled:'内蔵モデルサービスは無効です', unavailable:'内蔵モデルサービスは一時的に利用できません', user_not_found:'内蔵モデルアカウントが見つかりません', permission_denied:'このアカウントにはアクセス権がありません' }, status:{ unavailable:'一時的に利用できません', ready:'有効', not_started:'未開通', querying_user:'アカウントを確認中', creating_token:'有効化中', configuring_policy:'設定中', disabled:'無効', failed:'有効化に失敗', unknown:'同期中' }, settingsLoadFailed:'設定ページの読み込みに失敗しました' },
         expertPoolIndividualTab:'個人エキスパート', expertPoolTeamTab:'エキスパートチーム',
         uiWorkflow: { pick:'ワークフローテンプレートを選択してください', empty:'利用可能なワークフローがありません。リソースを確認してください。', workflow:'ワークフロー', stopFailed:e=>`ワークフローの停止に失敗: ${e}`, completed:'🎉 ワークフロー完了' },
-        uiToolStore: { title:'ツールストア', search:'コネクター、スキル、プラグインを検索', card:'カード', list:'リスト', myTools:'マイツール', featured:'注目のコネクター', skills:'限定スキル', results:'検索結果', back:'ストアに戻る', internal:'社内限定 · 従業員向け', internalTitle:'H3C オフィス連携\nワンクリック接続', internalDesc:'本人の SSO ID で社内システムに接続。キー入力は不要です', internalTools:'H3C 社内ツール', internalCount:n=>`${n} 個のツール · 社内ネットワーク必須`, view:'表示' },
+        uiToolStore: { title:'ツールストア', search:'コネクター、スキル、プラグインを検索', myTools:'マイツール', results:'検索結果', back:'ストアに戻る', internal:'社内限定 · 従業員向け', internalTitle:'H3C オフィス連携\nワンクリック接続', internalDesc:'本人の SSO ID で社内システムに接続。キー入力は不要です', internalTools:'H3C 社内ツール', internalCount:n=>`${n} 個のツール · 社内ネットワーク必須`, view:'表示' },
         uiToolDetails: { tools:{
           ima:{ title:'Tencent ima', subtitle:'OpenAPI で ima のノートとナレッジベースを操作', latency:'クラウド', desc:'Tencent ima OpenAPI Skill に接続し、ノートの検索、閲覧、作成、追記や、ナレッジベースの検索、閲覧、Web ページとコンテンツの追加ができます。認証情報はこの端末だけに保存されます。', configTitle:'Tencent ima に接続', configDescription:'認証情報はこの端末だけに保存され、IMA OpenAPI Skill の有効化にのみ使用されます。', configDocLabel:'Client ID / API Key を取得', welcomeQueries:['ima のナレッジベースを検索','ima のノート一覧を表示','この内容から ima ノートを作成','ima のナレッジベースで製品案を検索'] },
           tmeet:{ title:'Tencent Meeting', subtitle:'本人として会議、録画、議事録、参加レポートを管理', type:'CLI + 公式 Skill', latency:'クラウド', desc:'Tencent Meeting 公式 CLI と Skill に接続し、会議の作成、検索、変更、キャンセルや、参加レポート、録画、文字起こし、AI 議事録の取得ができます。接続時は認証ページで QR コードによりログインします。', welcomeQueries:['Tencent Meeting を作成','Tencent Meeting の録画を検索','最近の会議の AI 議事録を表示','Tencent Meeting の参加者を確認'] },
@@ -2528,9 +2528,26 @@ Object.assign(dict.zh.uiToolStore, {
   notConnectedYet:name=>`尚未连接「${name}」。`,
   loginFrameTitle:name=>`${name}登录`, loginPageLoadFailed:'登录页加载失败，请用下方浏览器授权', waitingAuth:'等待授权中…', openInBrowser:'在浏览器打开',
   mini:{ scan:'待扫码', install:pct=>`装 ${pct}%`, extract:pct=>`解压 ${pct}%`, connecting:'接入中', title:'点开查看进度' },
-  emptyNoMatch:'未找到匹配的工具', emptyNoInstalled:'还没有已安装的工具', emptyNoSkills:'没有技能', emptyNoTools:'未检索到工具',
+  feishuSteps:[
+    { key:'runtime', label:'准备运行时', sub:'使用应用自带 Node' },
+    { key:'cli', label:'安装连接组件', sub:'lark-cli · 首次约 40 秒' },
+    { key:'connect', label:'连接并授权', sub:'创建应用身份' },
+    { key:'qr', label:'扫码登录', sub:'飞书 App 扫一扫' },
+  ],
+  wecomSteps:[
+    { key:'runtime', label:'准备运行时', sub:'使用应用自带 Node' },
+    { key:'cli', label:'安装连接组件', sub:'wecom-cli · 首次约 40 秒' },
+    { key:'qr', label:'扫码登录', sub:'企业微信 App 扫一扫' },
+  ],
+  dingtalkSteps:[
+    { key:'runtime', label:'准备运行时', sub:'使用应用自带 Node' },
+    { key:'cli', label:'安装连接组件', sub:'dws · 首次约 40 秒' },
+    { key:'qr', label:'扫码登录', sub:'钉钉 App 扫一扫' },
+  ],
+  connFailed:'连接失败', dingtalkSkillsFailed:err=>`钉钉已授权，但技能启用失败：${err}`, tmeetAuthIncomplete:'腾讯会议授权未完成，请完成浏览器登录后重试',
+  emptyNoMatch:'未找到匹配的工具', emptyNoInstalled:'还没有已安装的工具', emptyNoTools:'未检索到工具',
   emptyNoMatchHint:'换个关键词试试，或检查一下拼写。', emptyNoInstalledHint:'去商店安装连接器或技能后，会出现在这里。', emptyNoInstalledHintReadonly:'桌面端尚未安装工具或技能。',
-  emptyNoSkillsHint:'点右上「上传技能包」导入 zip。', emptyNoSkillsHintReadonly:'当前没有可浏览的技能。', emptyNoToolsHint:'请尝试修改搜索词或查阅 API 开发文档。',
+  emptyNoToolsHint:'请尝试修改搜索词或查阅 API 开发文档。',
   detailInterfaceType:'接口类型', detailOfficialSupport:'官方支持', detailVersion:'当前版本', detailStableRelease:'稳定版发布', detailLatency:'平均延迟', detailGlobalAccel:'全球加速',
   aboutTitle:'关于此能力',
   oauthOutcome:{
@@ -2570,9 +2587,26 @@ Object.assign(dict.en.uiToolStore, {
   notConnectedYet:name=>`"${name}" is not connected yet.`,
   loginFrameTitle:name=>`${name} sign-in`, loginPageLoadFailed:'Failed to load the sign-in page—use browser authorization below', waitingAuth:'Waiting for authorization…', openInBrowser:'Open in browser',
   mini:{ scan:'Scan pending', install:pct=>`Installing ${pct}%`, extract:pct=>`Extracting ${pct}%`, connecting:'Connecting', title:'Tap to view progress' },
-  emptyNoMatch:'No matching tools found', emptyNoInstalled:'No tools installed yet', emptyNoSkills:'No skills', emptyNoTools:'No tools found',
+  feishuSteps:[
+    { key:'runtime', label:'Prepare runtime', sub:'Use the app-provided Node runtime' },
+    { key:'cli', label:'Install connector', sub:'lark-cli · about 40 seconds on first use' },
+    { key:'connect', label:'Connect & authorize', sub:'Create app identity' },
+    { key:'qr', label:'Scan to sign in', sub:'Scan with the Feishu app' },
+  ],
+  wecomSteps:[
+    { key:'runtime', label:'Prepare runtime', sub:'Use the app-provided Node runtime' },
+    { key:'cli', label:'Install connector', sub:'wecom-cli · about 40 seconds on first use' },
+    { key:'qr', label:'Scan to sign in', sub:'Scan with the WeCom app' },
+  ],
+  dingtalkSteps:[
+    { key:'runtime', label:'Prepare runtime', sub:'Use the app-provided Node runtime' },
+    { key:'cli', label:'Install connector', sub:'dws · about 40 seconds on first use' },
+    { key:'qr', label:'Scan to sign in', sub:'Scan with the DingTalk app' },
+  ],
+  connFailed:'Connection failed', dingtalkSkillsFailed:err=>`DingTalk authorized, but enabling the skill failed: ${err}`, tmeetAuthIncomplete:'Tencent Meeting authorization is incomplete—finish signing in in the browser and retry',
+  emptyNoMatch:'No matching tools found', emptyNoInstalled:'No tools installed yet', emptyNoTools:'No tools found',
   emptyNoMatchHint:'Try a different keyword, or check the spelling.', emptyNoInstalledHint:'Install connectors or skills from the store and they will appear here.', emptyNoInstalledHintReadonly:'No tools or skills installed on the desktop yet.',
-  emptyNoSkillsHint:'Import a zip via "Upload Skill Package" at the top right.', emptyNoSkillsHintReadonly:'No skills available to browse.', emptyNoToolsHint:'Try another search term or check the API documentation.',
+  emptyNoToolsHint:'Try another search term or check the API documentation.',
   detailInterfaceType:'Interface Type', detailOfficialSupport:'Official support', detailVersion:'Version', detailStableRelease:'Stable release', detailLatency:'Avg Latency', detailGlobalAccel:'Global acceleration',
   aboutTitle:'About',
   oauthOutcome:{
@@ -2612,9 +2646,26 @@ Object.assign(dict.ja.uiToolStore, {
   notConnectedYet:name=>`「${name}」はまだ接続されていません。`,
   loginFrameTitle:name=>`${name} ログイン`, loginPageLoadFailed:'ログインページを読み込めませんでした。下のブラウザー認証をご利用ください', waitingAuth:'認証を待機中…', openInBrowser:'ブラウザーで開く',
   mini:{ scan:'スキャン待ち', install:pct=>`インストール ${pct}%`, extract:pct=>`展開 ${pct}%`, connecting:'接続中', title:'タップして進捗を表示' },
-  emptyNoMatch:'一致するツールが見つかりません', emptyNoInstalled:'インストール済みのツールはまだありません', emptyNoSkills:'スキルがありません', emptyNoTools:'ツールが見つかりません',
+  feishuSteps:[
+    { key:'runtime', label:'ランタイムを準備', sub:'アプリ同梱の Node を使用' },
+    { key:'cli', label:'接続コンポーネントをインストール', sub:'lark-cli · 初回は約 40 秒' },
+    { key:'connect', label:'接続して認証', sub:'アプリ ID を作成' },
+    { key:'qr', label:'スキャンしてログイン', sub:'Feishu アプリでスキャン' },
+  ],
+  wecomSteps:[
+    { key:'runtime', label:'ランタイムを準備', sub:'アプリ同梱の Node を使用' },
+    { key:'cli', label:'接続コンポーネントをインストール', sub:'wecom-cli · 初回は約 40 秒' },
+    { key:'qr', label:'スキャンしてログイン', sub:'WeCom アプリでスキャン' },
+  ],
+  dingtalkSteps:[
+    { key:'runtime', label:'ランタイムを準備', sub:'アプリ同梱の Node を使用' },
+    { key:'cli', label:'接続コンポーネントをインストール', sub:'dws · 初回は約 40 秒' },
+    { key:'qr', label:'スキャンしてログイン', sub:'DingTalk アプリでスキャン' },
+  ],
+  connFailed:'接続に失敗しました', dingtalkSkillsFailed:err=>`DingTalk は認証されましたが、スキルの有効化に失敗しました：${err}`, tmeetAuthIncomplete:'Tencent Meeting の認証が完了していません。ブラウザーでログインを完了してから再試行してください',
+  emptyNoMatch:'一致するツールが見つかりません', emptyNoInstalled:'インストール済みのツールはまだありません', emptyNoTools:'ツールが見つかりません',
   emptyNoMatchHint:'別のキーワードを試すか、綴りを確認してください。', emptyNoInstalledHint:'ストアでコネクターやスキルをインストールすると、ここに表示されます。', emptyNoInstalledHintReadonly:'デスクトップにツールやスキルはまだインストールされていません。',
-  emptyNoSkillsHint:'右上の「スキルパッケージをアップロード」から zip をインポートしてください。', emptyNoSkillsHintReadonly:'閲覧できるスキルは現在ありません。', emptyNoToolsHint:'検索語を変更するか、API 開発ドキュメントをご確認ください。',
+  emptyNoToolsHint:'検索語を変更するか、API 開発ドキュメントをご確認ください。',
   detailInterfaceType:'インターフェース種別', detailOfficialSupport:'公式サポート', detailVersion:'現在のバージョン', detailStableRelease:'安定版リリース', detailLatency:'平均レイテンシー', detailGlobalAccel:'グローバルアクセラレーション',
   aboutTitle:'この機能について',
   oauthOutcome:{
@@ -2629,8 +2680,8 @@ Object.assign(dict.zh.uiChatView, { memStatusRemembered:'已记住', memStatusAr
 Object.assign(dict.en.uiChatView, { memStatusRemembered:'Remembered', memStatusArchived:'Archived', memStatusDeleted:'Deleted', memStatusArchivedNotice:'Memory archived', memStatusDeletedNotice:'Memory deleted' });
 Object.assign(dict.ja.uiChatView, { memStatusRemembered:'記憶しました', memStatusArchived:'アーカイブしました', memStatusDeleted:'削除しました', memStatusArchivedNotice:'メモリをアーカイブしました', memStatusDeletedNotice:'メモリを削除しました' });
 
-// tool-common.jsx 内容数据（tsSkillsData / tsCategories / tsFeaturedCollections）的三语 overlay：
-// ToolStoreView 渲染处按 localizeTool() 同款模式消费（localizeSkill / localizeCategory / localizeCollection），数据文件本身不改。
+// tool-common.jsx 内容数据（tsSkillsData / tsCategories）的三语 overlay：
+// ToolStoreView 渲染处按 localizeTool() 同款模式消费（localizeSkill / localizeCategory），数据文件本身不改。
 Object.assign(dict.zh.uiToolStore, { storeData: {
   skills: {
     'government-writing': { title:'党政机关公文写作', subtitle:'通知/意见等法定文种，套话术、层级序号、自检', desc:'撰写规范的党政机关公文（通知、意见…）：内置文种结构骨架、固定话术库、层级序号体系与立账核账自检，产出结构化公文内容。配合工具商店的「公文写作」工具即可直出 GB/T 9704 合规 .docx。', todayLabel:'编辑之选 · 专业辅助', todayTitle:'规范公文\n一键起草', latency:'本地' },
@@ -2639,14 +2690,6 @@ Object.assign(dict.zh.uiToolStore, { storeData: {
     s5: { title:'视觉设计', subtitle:'设计系统直出网页 / banner / 海报 / 简历', desc:'内置自动技能:模型按需自动加载,以设计系统级审美直出网页 / banner / 海报 / 简历等。无需安装、随时可用。', todayLabel:'创意探索', todayTitle:'视觉设计\n信手拈来', version:'内置', latency:'本地' },
   },
   categories: { all:'全部', collab:'沟通协作', docs:'文档知识', dev:'研发', finance:'金融数据', life:'生活实用', skill:'技能' },
-  featuredCollections: {
-    f6: { label:'即装即用', title:'实时天气随口问', subtitle:'接入高德天气 API，自然语言查全国城市实时天气与多日预报，零配置一键安装。' },
-    f4: { label:'数据引擎', title:'打造智能投研助理', subtitle:'集成同花顺问财 12 项金融工具，利用大模型快速输出深度个股诊断报告。' },
-    f7: { label:'企业数据', title:'一键查透企业全貌', subtitle:'接入企查查 182 个工具，工商/风控/知产/经营数据信手拈来，免配置即装即用。' },
-    f1: { label:'即时沟通', title:'打通企业微信', subtitle:'以你本人身份操作企微消息、文档、会议与日程，扫码授权、全程不填 key。' },
-    f2: { label:'个人知识', title:'激活你的本地笔记', subtitle:'接入本机 Obsidian 笔记库，全文检索、读写与维护双链，让 AI 基于你的知识作答。' },
-    f3: { label:'效率编排', title:'跨平台消息中转', subtitle:'无缝打通企微、飞书与钉钉，实现重要告警与工作流消息的自动化流转。' },
-  },
 } });
 Object.assign(dict.en.uiToolStore, { storeData: {
   skills: {
@@ -2656,14 +2699,6 @@ Object.assign(dict.en.uiToolStore, { storeData: {
     s5: { title:'Visual Design', subtitle:'Design-system-grade webpages / banners / posters / resumes', desc:'Built-in automatic skill: the model loads it on demand to produce webpages, banners, posters, resumes, and more with design-system-grade aesthetics. No installation needed—always available.', todayLabel:'Creative Exploration', todayTitle:'Visual design,\neffortlessly', version:'Built-in', latency:'Local' },
   },
   categories: { all:'All', collab:'Collaboration', docs:'Docs & Knowledge', dev:'Development', finance:'Financial Data', life:'Daily Life', skill:'Skills' },
-  featuredCollections: {
-    f6: { label:'Ready to Install', title:'Ask for Real-Time Weather', subtitle:'Powered by the Amap Weather API—ask in natural language for real-time weather and multi-day forecasts in cities nationwide. Zero configuration, one-click install.' },
-    f4: { label:'Data Engine', title:'Build a Smart Investment Research Assistant', subtitle:'Integrates 12 financial tools from THS iWencai, using LLMs to quickly produce in-depth stock diagnostic reports.' },
-    f7: { label:'Enterprise Data', title:'See Through Any Company in One Click', subtitle:'Connects 182 Qichacha tools—business registration, risk control, IP, and operations data at your fingertips. No configuration; install and use.' },
-    f1: { label:'Instant Messaging', title:'Connect WeCom', subtitle:'Act as yourself across WeCom messages, docs, meetings, and calendars—scan to authorize, no keys required.' },
-    f2: { label:'Personal Knowledge', title:'Activate Your Local Notes', subtitle:'Connect your local Obsidian vault—full-text search, read/write, and backlink maintenance, so AI answers based on your knowledge.' },
-    f3: { label:'Workflow Orchestration', title:'Cross-Platform Message Relay', subtitle:'Seamlessly connect WeCom, Feishu, and DingTalk to automate the flow of critical alerts and workflow messages.' },
-  },
 } });
 Object.assign(dict.ja.uiToolStore, { storeData: {
   skills: {
@@ -2673,14 +2708,6 @@ Object.assign(dict.ja.uiToolStore, { storeData: {
     s5: { title:'ビジュアルデザイン', subtitle:'デザインシステム級の Web ページ / バナー / ポスター / レジュメを直接生成', desc:'内蔵の自動スキル：モデルが必要に応じて自動で読み込み、デザインシステム級の美観で Web ページ / バナー / ポスター / レジュメなどを直接生成します。インストール不要でいつでも利用できます。', todayLabel:'クリエイティブ探索', todayTitle:'ビジュアルデザインを\n手軽に', version:'内蔵', latency:'ローカル' },
   },
   categories: { all:'すべて', collab:'連携・コラボ', docs:'ドキュメント・ナレッジ', dev:'開発', finance:'金融データ', life:'生活・実用', skill:'スキル' },
-  featuredCollections: {
-    f6: { label:'すぐに使える', title:'リアルタイムの天気を気軽に', subtitle:'高徳地図（Amap）天気 API に接続。自然言語で全国の都市のリアルタイム天気と多日予報を確認できます。設定不要でワンクリックインストール。' },
-    f4: { label:'データエンジン', title:'スマート投資リサーチアシスタントを構築', subtitle:'同花順 iWencai の 12 の金融ツールを統合し、大規模モデルで個別株の詳細な診断レポートをすばやく出力します。' },
-    f7: { label:'企業データ', title:'ワンクリックで企業の全貌を把握', subtitle:'企查查（Qichacha）の 182 のツールに接続。工商登記・リスク管理・知的財産・経営データを自在に取得。設定不要でインストール後すぐ使えます。' },
-    f1: { label:'インスタントコミュニケーション', title:'WeCom と連携', subtitle:'本人のIDで WeCom のメッセージ・ドキュメント・会議・スケジュールを操作。スキャン認証でキー入力は一切不要。' },
-    f2: { label:'個人ナレッジ', title:'ローカルノートを活性化', subtitle:'本機の Obsidian 保管庫に接続。全文検索・読み書き・バックリンクの保守ができ、AI があなたの知識に基づいて回答します。' },
-    f3: { label:'効率オーケストレーション', title:'クロスプラットフォームのメッセージ中継', subtitle:'WeCom・Feishu・DingTalk をシームレスに連携し、重要なアラートやワークフローメッセージの自動転送を実現します。' },
-  },
 } });
 
 Object.assign(dict.zh.uiAccount, { settingsLoadFailedDetail:'设置页面暂时无法显示，请重新打开后重试。' });
