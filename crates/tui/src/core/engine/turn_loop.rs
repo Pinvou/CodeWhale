@@ -5,7 +5,9 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
-use super::dispatch::{ReadRepeatExecutionPlan, plan_read_repeat_execution};
+use super::dispatch::{
+    ReadRepeatExecutionPlan, normalize_schema_json_containers, plan_read_repeat_execution,
+};
 use super::read_repeat_guard::{RECEIPT_THRESHOLD, ReadRepeatGuard};
 use super::stuck_guard::{
     RUNTIME_NOTICE as STUCK_RUNTIME_NOTICE, StepFingerprint, StuckGuard, StuckSignal,
@@ -23,6 +25,10 @@ use crate::tools::tool_call_budget::ToolCallBudget;
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 const TOOL_ERROR_DEGRADATION_THRESHOLD: u32 = 2;
+
+pub(super) fn append_stuck_runtime_notice(content: String) -> String {
+    format!("{content}\n\n{STUCK_RUNTIME_NOTICE}")
+}
 
 fn approval_intent_summary(text: &str) -> Option<String> {
     let trimmed = text.trim();
@@ -1686,6 +1692,23 @@ impl Engine {
                         input_buffer: String::new(),
                         input_parse_error: None,
                     });
+                }
+            }
+
+            for tool in &mut tool_uses {
+                let Some(schema) = tool_catalog
+                    .iter()
+                    .find(|candidate| candidate.name == tool.name)
+                    .map(|candidate| &candidate.input_schema)
+                else {
+                    continue;
+                };
+                let repaired = normalize_schema_json_containers(&mut tool.input, schema);
+                if repaired > 0 {
+                    crate::logging::info(format!(
+                        "Normalized {repaired} schema-declared JSON container(s) for tool '{}'",
+                        tool.name
+                    ));
                 }
             }
 
@@ -3620,6 +3643,8 @@ impl Engine {
                             )),
                         }
                     };
+                let attach_stuck_notice =
+                    matches!(&observed_signal, Some(StuckSignal::Warn { .. }));
                 match observed_signal {
                     Some(stop @ StuckSignal::Stop { .. }) => {
                         stuck_signal = Some(stop);
@@ -3700,12 +3725,15 @@ impl Engine {
                         // aggregate by the fold, so what lands here is already
                         // capped — the number of tokens this adds to the turn
                         // is knowable rather than whatever the hook printed.
-                        let output_for_context = match hook_contexts.get(&outcome.id) {
+                        let mut output_for_context = match hook_contexts.get(&outcome.id) {
                             Some(context) => {
                                 format!("{output_for_context}\n\n[hook context] {context}")
                             }
                             None => output_for_context,
                         };
+                        if attach_stuck_notice {
+                            output_for_context = append_stuck_runtime_notice(output_for_context);
+                        }
 
                         self.add_session_message(Message {
                             role: "user".to_string(),
@@ -3758,11 +3786,15 @@ impl Engine {
                                 &self.session.workspace,
                             );
                         }
+                        let mut error_for_context = format!("Error: {error}");
+                        if attach_stuck_notice {
+                            error_for_context = append_stuck_runtime_notice(error_for_context);
+                        }
                         self.add_session_message(Message {
                             role: "user".to_string(),
                             content: vec![ContentBlock::ToolResult {
                                 tool_use_id: outcome.id,
-                                content: format!("Error: {error}"),
+                                content: error_for_context,
                                 is_error: Some(true),
                                 content_blocks: None,
                             }],
@@ -3799,11 +3831,6 @@ impl Engine {
                             no_progress_warning_started_at.get_or_insert_with(Instant::now);
                         let status = no_progress_status_message(&reason, started.elapsed());
                         let _ = self.tx_event.send(Event::status(status)).await;
-                        self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                            STUCK_RUNTIME_NOTICE.to_string(),
-                            UserInputProvenance::Runtime,
-                        ))
-                        .await;
                     }
                     StuckSignal::Stop { reason } => {
                         let elapsed = no_progress_warning_started_at

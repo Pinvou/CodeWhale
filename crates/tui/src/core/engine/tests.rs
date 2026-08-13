@@ -1,9 +1,10 @@
 use super::*;
 
 use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
+use super::dispatch::normalize_schema_json_containers;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
-    merge_new_runtime_mcp_tools, registered_tool_approval_required,
+    append_stuck_runtime_notice, merge_new_runtime_mcp_tools, registered_tool_approval_required,
     registered_tool_blocked_in_full_access, registered_tool_forces_prompt,
     tool_error_degradation_runtime_hint, workspace_write_carve_out_applies,
 };
@@ -46,6 +47,90 @@ const REPRESENTATIVE_GOAL_OBJECTIVE: &str = "REPRESENTATIVE_GOAL_OBJECTIVE";
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
 struct ForkguardHostExtraTool;
+
+#[test]
+fn forkguard_schema_bound_json_container_repair_accepts_nested_payload() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "questions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "header": { "type": "string" },
+                        "id": { "type": "string" },
+                        "question": { "type": "string" },
+                        "options": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": { "type": "string" },
+                                    "description": { "type": "string" }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "unchanged_text": { "type": "string" },
+            "unchanged_number": { "type": "integer" }
+        }
+    });
+    let encoded_questions = serde_json::to_string(&json!([{
+        "header": "报告范围",
+        "id": "scope",
+        "question": "请选择调研范围",
+        "options": [
+            { "label": "南京市", "description": "覆盖南京市高校" },
+            { "label": "江苏省", "description": "覆盖全省高校" }
+        ]
+    }]))
+    .expect("encode fixture");
+    let mut input = json!({
+        "questions": encoded_questions,
+        "unchanged_text": "{\"looks\":\"like json\"}",
+        "unchanged_number": "10"
+    });
+
+    assert_eq!(normalize_schema_json_containers(&mut input, &schema), 1);
+    assert!(input["questions"].is_array());
+    assert_eq!(input["questions"][0]["id"], "scope");
+    assert_eq!(input["unchanged_text"], "{\"looks\":\"like json\"}");
+    assert_eq!(input["unchanged_number"], "10");
+    crate::tools::user_input::UserInputRequest::from_value(&input)
+        .expect("normalized payload must pass request_user_input validation");
+}
+
+#[test]
+fn forkguard_schema_bound_json_container_repair_rejects_wrong_or_unbounded_values() {
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "items": { "type": "array" },
+            "oversized": { "type": "array" }
+        }
+    });
+    let oversized = format!("[\"{}\"]", "x".repeat(64 * 1024));
+    let mut input = json!({
+        "items": "{\"wrong\":\"container\"}",
+        "oversized": oversized
+    });
+    let before = input.clone();
+
+    assert_eq!(normalize_schema_json_containers(&mut input, &schema), 0);
+    assert_eq!(input, before);
+}
+
+#[test]
+fn forkguard_stuck_guard_warning_is_embedded_in_tool_result_content() {
+    let content = append_stuck_runtime_notice("tool validation failed".to_string());
+
+    assert!(content.starts_with("tool validation failed\n\n"));
+    assert!(content.contains("kind=\"stuck_guard\""));
+    assert!(content.ends_with("</codewhale:runtime_event>"));
+}
 
 #[async_trait::async_trait]
 impl crate::tools::spec::ToolSpec for ForkguardHostExtraTool {
@@ -3404,6 +3489,79 @@ async fn denied_synthetic_tool_is_blocked_by_the_same_turn_policy_at_execution()
         error.to_string().contains("disallowed-tools list"),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn forkguard_stuck_guard_tool_warning_preserves_provider_role_sequence() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let repeated_call = || {
+        canned::tool_call_turn(
+            "call-denied-search",
+            TOOL_SEARCH_NAME,
+            r#"{"query":"File"}"#,
+        )
+    };
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        repeated_call(),
+        repeated_call(),
+        repeated_call(),
+        canned::simple_text_turn("Changed strategy after the warning."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let policy = policy_for_catalog(
+        vec![catalog_tool("read_file")],
+        Some(vec![TOOL_SEARCH_NAME.to_string()]),
+        Some(vec![TOOL_SEARCH_NAME.to_string()]),
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(6);
+
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, policy, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 4, "three retries followed by recovery");
+    let continuation = &requests[3];
+    let mut tool_result_notices = 0usize;
+    let mut standalone_user_notices = 0usize;
+    for message in &continuation.messages {
+        for block in &message.content {
+            match block {
+                ContentBlock::ToolResult { content, .. }
+                    if content.contains("kind=\"stuck_guard\"") =>
+                {
+                    tool_result_notices += 1;
+                }
+                ContentBlock::Text { text, .. }
+                    if message.role == "user" && text.contains("kind=\"stuck_guard\"") =>
+                {
+                    standalone_user_notices += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        tool_result_notices, 1,
+        "warning must decorate one tool result"
+    );
+    assert_eq!(
+        standalone_user_notices, 0,
+        "warning must not create a second consecutive user-role message"
+    );
+    let tail = continuation.messages.last().expect("continuation tail");
+    assert_eq!(tail.role, "user");
+    assert!(matches!(
+        tail.content.as_slice(),
+        [ContentBlock::ToolResult { .. }]
+    ));
 }
 
 /// Compose one assistant turn that proposes `calls` as a single parallel
