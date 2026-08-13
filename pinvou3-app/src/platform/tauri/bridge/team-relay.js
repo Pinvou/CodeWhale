@@ -15,6 +15,7 @@
     var joinPasswordReadPromise = null;
     var refreshTimer = null;
     var pendingRequests = {};
+    var connectionGeneration = 0;
 
     function uuid() {
       if (root.crypto && typeof root.crypto.randomUUID === "function") return root.crypto.randomUUID();
@@ -28,12 +29,16 @@
 
     async function load() {
       if (refreshPromise) return refreshPromise;
-      refreshPromise = (async function () {
-        patch({ loading: true, error: null });
+      var generation = connectionGeneration;
+      function patchCurrent(value) {
+        if (generation === connectionGeneration) patch(value);
+      }
+      var request = (async function () {
+        patchCurrent({ loading: true, error: null });
         try {
           var status = await invoke("team_relay_status");
           if (!status.configured) {
-            patch({ loading: false, status: status, snapshot: null, account: null });
+            patchCurrent({ loading: false, status: status, snapshot: null, account: null });
             return null;
           }
           if (!status.team_id) {
@@ -41,23 +46,24 @@
             if (account.teams && account.teams.length) {
               var restoredSnapshot = await invoke("team_relay_switch_team", { teamId: account.teams[0].id });
               var restoredStatus = Object.assign({}, status, { team_id: restoredSnapshot.bootstrap.team.id });
-              patch({ loading: false, status: restoredStatus, snapshot: restoredSnapshot, account: { principal: restoredSnapshot.bootstrap.me, teams: restoredSnapshot.teams || account.teams }, lastSyncedAt: Date.now() });
+              patchCurrent({ loading: false, status: restoredStatus, snapshot: restoredSnapshot, account: { principal: restoredSnapshot.bootstrap.me, teams: restoredSnapshot.teams || account.teams }, lastSyncedAt: Date.now() });
               return restoredSnapshot;
             }
-            patch({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now() });
+            patchCurrent({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now() });
             return account;
           }
           var snapshot = await invoke("team_relay_bootstrap");
-          patch({ loading: false, status: status, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
+          patchCurrent({ loading: false, status: status, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
           return snapshot;
         } catch (error) {
-          patch({ loading: false, error: String(error) });
+          patchCurrent({ loading: false, error: String(error) });
           throw error;
         } finally {
-          refreshPromise = null;
+          if (refreshPromise === request) refreshPromise = null;
         }
       })();
-      return refreshPromise;
+      refreshPromise = request;
+      return request;
     }
 
     function verifyAccess(accessCode) {
@@ -303,8 +309,31 @@
     }
 
     async function disconnect() {
-      await invoke("team_relay_disconnect");
-      patch({ status: { configured: false, hub_url: null, team_id: null }, snapshot: null, account: null, error: null });
+      patch({ mutating: true, error: null });
+      try {
+        await invoke("team_relay_disconnect");
+        connectionGeneration += 1;
+        refreshPromise = null;
+        if (refreshTimer) root.clearTimeout(refreshTimer);
+        refreshTimer = null;
+        joinPasswordReadPromise = null;
+        pendingRequests = {};
+        patch({
+          status: { configured: false, hub_url: null, team_id: null },
+          snapshot: null,
+          account: null,
+          taskWorkspaces: {},
+          uploadProgress: null,
+          preparingWorkspace: null,
+          workspaceError: null,
+          error: null,
+        });
+      } catch (error) {
+        patch({ error: String(error) });
+        throw error;
+      } finally {
+        patch({ mutating: false });
+      }
     }
 
     function pathName(path) {

@@ -13,6 +13,7 @@ vm.runInContext(source, vm.createContext({ window: windowObject, console, setTim
 
 const calls = [];
 let createAttempts = 0;
+let deferredBootstrap = null;
 const eventHandlers = new Map();
 const state = { sessions: [{ id: 'chat-source', title: 'Product discussion', updated_at: '2026-08-06T01:00:00Z' }], teamRelay: { status: { configured: false }, snapshot: null } };
 const teamSnapshot = (id, displayName = 'Me') => ({ bootstrap: { protocol_version: '0.1', team: { id, name: id }, threads: [], members: [], me: { id: 'me', email: 'me@example.com', display_name: displayName } }, attachments: {}, teams: [{ id, name: id, role: 'owner', member_count: 1, open_work_count: 0 }] });
@@ -29,7 +30,10 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
     if (command === 'team_relay_status') return { configured: true, hub_url: 'https://hub.test', team_id: 'team' };
     if (command === 'team_relay_account') return { principal: { id: 'me', email: 'me@example.com', display_name: 'Me' }, teams: [] };
     if (command === 'team_relay_register_account') return { principal: { id: 'me', email: args.input.email, display_name: args.input.display_name }, teams: args.input.email === 'existing@example.com' ? [{ id: 'existing-team', name: 'Existing team' }] : [] };
-    if (command === 'team_relay_bootstrap') return teamSnapshot('team');
+    if (command === 'team_relay_bootstrap') {
+      if (deferredBootstrap) await deferredBootstrap;
+      return teamSnapshot('team');
+    }
     if (command === 'team_relay_create_first_team') return teamSnapshot('first-team');
     if (command === 'team_relay_update_profile') return teamSnapshot('team', args.input.display_name);
     if (command === 'team_relay_create_team') return teamSnapshot('created-team');
@@ -186,5 +190,22 @@ assert.equal(picked[0].source, 'manual');
 assert.equal(calls.filter(call => call.command === 'team_relay_upload_attachment').length, uploadCountBeforePick, 'picking a file must not upload before confirmation');
 await feature.mountDraftMaterials(picked);
 assert.ok(calls.some(call => call.command === 'team_relay_upload_attachment' && call.args.path === '/private/manual/brief.pdf'));
+
+await feature.disconnect();
+assert.ok(calls.some(call => call.command === 'team_relay_disconnect'));
+assert.deepEqual(JSON.parse(JSON.stringify(state.teamRelay.status)), { configured: false, hub_url: null, team_id: null });
+assert.equal(state.teamRelay.snapshot, null);
+assert.equal(state.teamRelay.account, null);
+assert.deepEqual(Object.keys(state.teamRelay.taskWorkspaces), []);
+assert.equal(state.teamRelay.mutating, false);
+
+let releaseBootstrap;
+deferredBootstrap = new Promise(resolve => { releaseBootstrap = resolve; });
+const staleLoad = feature.load();
+await new Promise(resolve => setTimeout(resolve, 0));
+await feature.disconnect();
+releaseBootstrap();
+await staleLoad;
+assert.equal(state.teamRelay.status.configured, false, 'an in-flight refresh must not restore signed-out state');
 
 console.log('Team Relay bridge tests passed');
