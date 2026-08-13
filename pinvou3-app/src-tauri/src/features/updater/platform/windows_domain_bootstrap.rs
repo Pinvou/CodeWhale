@@ -13,8 +13,9 @@ use crate::platform::paths;
 pub(crate) const FORMAL_BOOTSTRAP_HOST: &str = "https://bootstrap.magic.h3c.com";
 // Internal beta default. Switch back to FORMAL_BOOTSTRAP_HOST for formal releases.
 pub(crate) const DEFAULT_BOOTSTRAP_HOST: &str = "https://sohord10.h3c.com";
-// The bootstrap service only recognizes this built-in identity. A machine BIOS SN
-// remains relevant to the subsequent OTA request, but must never select this value.
+// `device_id` is a registered bootstrap identity, not a routing key: the service
+// returns the same `smarthubOta` for every device. Keep this built-in identity for
+// both beta and formal bootstrap hosts; the BIOS SN is used only by the later OTA query.
 pub(crate) const BUILTIN_BOOTSTRAP_SN: &str = "219904A17T4257W00018";
 pub(crate) const SMARTHUB_OTA_KEY: &str = "smarthubOta";
 const MISSING_BIOS_SN_ERROR: &str = "读取设备 BIOS SN 失败，无法执行更新查询";
