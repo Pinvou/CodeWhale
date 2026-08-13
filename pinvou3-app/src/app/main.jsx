@@ -59,6 +59,7 @@ import { WorkflowView } from '../features/workflow/WorkflowView.jsx';
 import { SearchView } from '../features/search/SearchView.jsx';
 import { TeamRelayView } from '../features/team-relay/TeamRelayView.jsx';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../features/team-relay/team-relay-access.js';
+import { teamRelayHasUnread } from '../features/team-relay/team-relay-state.js';
 import { SearchOverlay } from '../features/search/SearchOverlay.jsx';
 import { UpdateNoticeButton } from '../features/updater/UpdateNoticeButton.jsx';
 import { DetachedShell } from './DetachedShell.jsx';
@@ -72,7 +73,7 @@ let appFirstRenderMarked = false;
 const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
   'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas', 'workflow',
-  'memory', 'remoteControl', 'updater', 'dependencies',
+  'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
 ];
 
 function emitPetEvent(ev, name, payload) {
@@ -344,6 +345,7 @@ function workspaceDisplayName(path) {
       const showMegacubeSite = !!platformCapabilities.showMegacubeSite;
       const codexAcpSupported = !!platformCapabilities.codexAcpSupported;
       const teamRelayAvailable = teamRelayEnabled && platformCapabilities.teamRelaySupported === true;
+      const teamRelayUnread = teamRelayHasUnread(bs && bs.teamRelay && bs.teamRelay.snapshot);
       const [codexSessions, setCodexSessions] = useState([]);
       const [codexDraftEpoch, setCodexDraftEpoch] = useState(0);
       const [codexRelayLaunch, setCodexRelayLaunch] = useState(null);
@@ -389,6 +391,20 @@ function workspaceDisplayName(path) {
         disableTeamRelayAccess();
         setTeamRelayEnabled(false);
       }, []);
+      useEffect(() => {
+        if (!teamRelayAvailable || !bridge?.teamRelay?.refresh) return undefined;
+        const refresh = () => bridge.teamRelay.refresh({ silent: true }).catch(() => {});
+        const onVisibilityChange = () => { if (document.visibilityState === 'visible') refresh(); };
+        refresh();
+        const timer = window.setInterval(refresh, 15_000);
+        window.addEventListener('focus', refresh);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        return () => {
+          window.clearInterval(timer);
+          window.removeEventListener('focus', refresh);
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+        };
+      }, [teamRelayAvailable]);
       const updateActiveCodexSession = useCallback((id) => {
         const next = id || null;
         setActiveCodexId(next);
@@ -2118,6 +2134,10 @@ function workspaceDisplayName(path) {
                 <NavItem
                   icon={<Users size={18} />} label={t.teamRelay}
                   active={currentView === 'teamRelay'}
+                  unread={teamRelayUnread}
+                  unreadLabel={t.uiTeamRelay.unread.nav}
+                  unreadTestId="team-relay-nav-unread"
+                  unreadTone="danger"
                   theme={activeTheme}
                   isSidebarOpen={isSidebarOpen}
                   onClick={() => navigateFromScheduledRun('teamRelay')}
@@ -2684,7 +2704,7 @@ function workspaceDisplayName(path) {
                   if (liveBridge && typeof liveBridge.startMonitorPolling === 'function') liveBridge.startMonitorPolling();
                 }) },
               { key: 'more', label: t.mobileMore, icon: <MoreHorizontal size={18} />,
-                active: mobileMoreActive, dot: hasUpdate || scheduledUnread,
+                active: mobileMoreActive, dot: hasUpdate || scheduledUnread || teamRelayUnread,
                 onClick: () => setMobileMoreOpen(true) },
             ]} />
           )}
@@ -2697,7 +2717,7 @@ function workspaceDisplayName(path) {
                 active: currentView === 'scheduled', dot: scheduledUnread,
                 onClick: () => mobileNavigate('scheduled') }] : []),
               ...(teamRelayAvailable ? [{ key: 'teamRelay', label: t.teamRelay, icon: <Users size={18} />,
-                active: currentView === 'teamRelay', onClick: () => mobileNavigate('teamRelay') }] : []),
+                active: currentView === 'teamRelay', dot: teamRelayUnread, onClick: () => mobileNavigate('teamRelay') }] : []),
               { key: 'outputs', label: t.outputs, icon: <Package size={18} />,
                 active: currentView === 'outputs', onClick: () => mobileNavigate('outputs') },
               { key: 'knowledge', label: t.knowledge, icon: <BookOpen size={18} />,

@@ -4,7 +4,7 @@ import { dict } from '../src/shared/i18n.js';
 import {
   canUpdateRelayProgress, deriveBoardColumn, deriveCategory, matchesRelayView,
   matchesSourceFilter, projectMaterialPackages, projectSnapshot, projectTeamBoard,
-  relayViewCounts,
+  relayViewCounts, teamRelayHasUnread,
 } from '../src/features/team-relay/team-relay-state.js';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../src/features/team-relay/team-relay-access.js';
 
@@ -72,6 +72,13 @@ assert.equal(tasks[0].teamId, 'team');
 assert.equal(tasks[0].teamName, 'Demo');
 assert.equal(tasks[0].unreadCount, 2);
 assert.equal(tasks[0].readState.last_read_sequence, 0);
+assert.equal(teamRelayHasUnread(snapshot), true);
+const noUnreadSnapshot = JSON.parse(JSON.stringify(snapshot));
+noUnreadSnapshot.bootstrap.threads[0].unread_count = 0;
+assert.equal(teamRelayHasUnread(noUnreadSnapshot), false);
+const hiddenUnreadSnapshot = JSON.parse(JSON.stringify(snapshot));
+hiddenUnreadSnapshot.bootstrap.threads[0].preference = { hidden: true };
+assert.equal(teamRelayHasUnread(hiddenUnreadSnapshot), false);
 const optimisticallyReadTasks = projectSnapshot(snapshot, dict.zh.uiTeamRelay, { thread: 1 });
 assert.equal(optimisticallyReadTasks[0].unreadCount, 0, 'a click cursor must clear an authoritative badge before the Hub round trip finishes');
 assert.equal(optimisticallyReadTasks[0].readState.last_read_sequence, 1);
@@ -325,9 +332,11 @@ assert.match(viewSource, /team-relay-view-switch/);
 assert.match(viewSource, /team-relay-unread-badge/);
 assert.match(viewSource, /markThreadRead\(task\.id, task\.revision\)/);
 assert.match(viewSource, /pinvou\.team-relay\.read-cursors\.v1/);
-assert.match(viewSource, /setInterval\(refresh, 15_000\)/);
-assert.match(viewSource, /addEventListener\('focus', refresh\)/);
-assert.match(viewSource, /visibilitychange/);
+assert.match(mainSource, /setInterval\(refresh, 15_000\)/);
+assert.match(mainSource, /addEventListener\('focus', refresh\)/);
+assert.match(mainSource, /visibilitychange/);
+assert.match(mainSource, /unreadTestId="team-relay-nav-unread"/);
+assert.match(mainSource, /unreadTone="danger"/);
 assert.match(viewSource, /const openTeam = teamId => \{[\s\S]*setSelectedTeamId\(teamId\);[\s\S]*setViewMode\('board'\);[\s\S]*bridge\.teamRelay\.switchTeam\(teamId\)/);
 assert.match(viewSource, /rotateJoinPassword\(\)/);
 assert.match(viewSource, /getJoinPassword\(\)/);

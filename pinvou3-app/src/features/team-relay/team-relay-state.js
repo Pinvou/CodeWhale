@@ -63,6 +63,13 @@ export function projectSnapshot(snapshot, copy, legacyReadCursors = {}) {
   return bootstraps.flatMap(bootstrap => projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors));
 }
 
+export function teamRelayHasUnread(snapshot) {
+  if (!snapshot?.bootstrap) return false;
+  const bootstraps = snapshot.team_bootstraps?.length ? snapshot.team_bootstraps : [snapshot.bootstrap];
+  return bootstraps.some(bootstrap => (bootstrap.threads || []).some(detail =>
+    !detail?.preference?.hidden && Number(detail?.unread_count || 0) > 0));
+}
+
 function projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors) {
   const names = new Map(bootstrap.members.map(member => [member.id, member.display_name]));
   names.set(bootstrap.me.id, bootstrap.me.display_name);
