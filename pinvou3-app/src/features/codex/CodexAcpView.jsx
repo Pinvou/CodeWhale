@@ -1355,6 +1355,7 @@ export function CodexAcpView({
     mountedId: null,
     mode: CODE_MODE_FALLBACK,
     multiAgent: false,
+    multiAgentAvailable: false,
   });
   const [nativeDraftControls, setNativeDraftControls] = useState({});
   // nativeControls 的会话归属：切会话后、refresh 返回前不展示上一会话的控件值。
@@ -1399,9 +1400,16 @@ export function CodexAcpView({
   const nativeMountedId = activeId
     ? (nativeControlsSessionRef.current === activeId ? nativeControls.mountedId : null)
     : (nativeDraftControls.mountedId ?? null);
-  const nativeMultiAgentEnabled = activeId
+  const nativeMultiAgentSelected = activeId
     ? (nativeControlsSessionRef.current === activeId && Boolean(nativeControls.multiAgent))
     : Boolean(nativeDraftControls.multiAgent);
+  // Existing sessions use the backend SessionPolicy result. A Pinvou draft is
+  // known to become a native Code session, so it may stage the same control
+  // before a session id exists.
+  const nativeMultiAgentAvailable = activeId
+    ? (nativeControlsSessionRef.current === activeId && Boolean(nativeControls.multiAgentAvailable))
+    : isNativeAgent;
+  const nativeMultiAgentEnabled = nativeMultiAgentAvailable && nativeMultiAgentSelected;
   const activeAgentName = activeSession?.agent_name
     || agents.find(agent => agent.agent_id === activeAgentId)?.agent_name
     || (activeAgentId === 'pinvou' ? '品悟' : activeAgentId === 'claude' ? 'Claude Code' : activeAgentId === 'kimi' ? 'Kimi' : 'Codex');
@@ -1568,6 +1576,7 @@ export function CodexAcpView({
       // 读取失败兜底走全局默认（首次使用 → Plan 只读），不回退写死 yolo。
       mode: (modeState && modeState.mode) || nativeModeFallback(codePermPrefs),
       multiAgent: Boolean(modeState && modeState.multi_agent),
+      multiAgentAvailable: Boolean(modeState && modeState.multi_agent_available),
     };
     // 请求期间可能切换会话；旧响应不得覆盖新会话的模型/模式/多智能体展示。
     if (sessionId !== activeIdRef.current) return controls;
@@ -1641,6 +1650,7 @@ export function CodexAcpView({
   }
 
   async function switchNativeMultiAgent(enabled) {
+    if (!nativeMultiAgentAvailable) return;
     if (!activeId) {
       setNativeDraftControls(current => ({ ...current, multiAgent: Boolean(enabled) }));
       return;
@@ -2530,6 +2540,10 @@ export function CodexAcpView({
         targetId = created.id;
         // 草稿态暂存的模型/知识库/模式/多智能体选择先落到新会话（失败会显式报错）。
         await applyNativeDraftControls(targetId);
+        // createSession 内的首次 load 发生在草稿控件落盘之前；若用户在草稿态
+        // 开启了多智能体，那次 load 读到的是旧的 false。首条消息发送前必须
+        // 再读一次后端权威状态，保证输入框开关及时反映刚落盘的会话配置。
+        await refreshNativeControls(targetId);
         setAttachmentDrafts(current => {
           const draftAttachments = current[DRAFT_ATTACHMENT_KEY] || [];
           const next = { ...current, [targetId]: draftAttachments };
@@ -3309,7 +3323,7 @@ export function CodexAcpView({
                           busy={busy || working}
                           onSwitchModel={(sessionId, modelId) => switchNativeModel(sessionId, String(modelId))}
                           multiAgentEnabled={nativeMultiAgentEnabled}
-                          multiAgentAvailable
+                          multiAgentAvailable={nativeMultiAgentAvailable}
                           onToggleMultiAgent={switchNativeMultiAgent}
                         />
                       )}
