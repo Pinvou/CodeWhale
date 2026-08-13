@@ -84,6 +84,10 @@
     return Promise.reject(new Error("Team Relay is only available in the Pinvou desktop app"));
   }
 
+  function unsupportedAccountPlatform() {
+    return Promise.reject(new Error("Account Platform desktop authentication is unavailable in this web host"));
+  }
+
   window.TauriBridge = {
     available: true,
     lifecycle: { init: flat.init },
@@ -117,6 +121,12 @@
     memory: domain(["loadMemoryOverview", "saveMemoryProfilePatch", "deleteMemoryPreference", "updateMemoryItem", "deleteMemoryItem", "archiveRecentWorkMemory", "confirmMemoryCandidate", "ignoreMemoryCandidate", "neverMemoryCandidate"]),
     updater: domain(["checkForUpdate", "downloadAndInstallUpdate", "cancelUpdate", "restartApp"]),
     dependencies: domain(["checkDependencies", "installDependencies"]),
+    accountPlatform: {
+      session: function () { return Promise.resolve({ enabled: false, configured: false, authenticated: false, errorCode: "unsupported_platform" }); },
+      login: unsupportedAccountPlatform,
+      logout: unsupportedAccountPlatform,
+      request: unsupportedAccountPlatform,
+    },
     teamRelay: {
       load: unsupportedTeamRelay,
       refresh: unsupportedTeamRelay,

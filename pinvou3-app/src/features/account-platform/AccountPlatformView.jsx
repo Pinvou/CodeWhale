@@ -11,7 +11,13 @@ function Field({ label, children }) {
 
 function Empty({ children }) { return <div className="ap-empty">{children}</div>; }
 
-export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false }) {
+function localizedError(copy, reason) {
+  const raw = String(reason?.code || reason?.message || reason || '');
+  const code = raw.split(':', 1)[0].trim();
+  return copy.errors?.[code] || (reason?.message && typeof reason.message === 'string' ? reason.message : copy.requestFailed);
+}
+
+export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false, onClose }) {
   const [auth, setAuth] = useState('loading');
   const [me, setMe] = useState(null);
   const [organizations, setOrganizations] = useState([]);
@@ -65,7 +71,11 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       try {
         const session = await client.session();
         if (!active) return;
-        if (!session.authenticated) { setAuth('guest'); return; }
+        if (!session.authenticated) {
+          setAuth('guest');
+          if (session.errorCode && session.errorCode !== 'account_platform_disabled') setError(localizedError(copy, session.errorCode));
+          return;
+        }
         const account = await client.bootstrap();
         if (!active) return;
         setMe(account);
@@ -114,9 +124,25 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
 
   const run = async action => {
     setBusy(true); setError(''); setNotice('');
-    try { await action(); } catch (reason) { setError(reason?.message || copy.requestFailed); }
+    try { await action(); } catch (reason) { setError(localizedError(copy, reason)); }
     finally { setBusy(false); }
   };
+
+  const login = () => run(async () => {
+    await client.login();
+    const account = await client.bootstrap();
+    setMe(account);
+    setAuth('ready');
+    await loadContext(account);
+  });
+
+  const logout = () => run(async () => {
+    await client.logout();
+    guardRef.current.cancel();
+    setMe(null); setOrganizations([]); setUnits([]); setMembers([]); setProducts([]);
+    setBalance(null); setTokens([]); setOrder(null); setQrData(''); setAuth('guest');
+    if (portal) window.location.reload();
+  });
 
   const switchContext = value => run(async () => {
     guardRef.current.cancel();
@@ -128,16 +154,17 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     await loadContext(updated);
   });
 
-  if (auth === 'loading') return <div className="ap-centered"><div className="ap-spinner" />{copy.loading}</div>;
-  if (auth === 'guest') return <div className="ap-login"><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{copy.loginIntro}</p><a className="ap-primary" href="/auth/login">{copy.login}</a></div></div>;
+  if (auth === 'loading') return <div className={`ap-shell ap-centered ${portal ? 'ap-portal' : 'ap-desktop'}`}><div className="ap-spinner" />{copy.loading}</div>;
+  if (auth === 'guest' || auth === 'error') return <div className={`ap-shell ap-login ${portal ? 'ap-portal' : 'ap-desktop'}`}><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{copy.loginIntro}</p>{error && <div role="alert" className="ap-alert error">{error}</div>}{portal ? <a className="ap-primary" href="/auth/login">{copy.login}</a> : <button className="ap-primary" disabled={busy} onClick={login}>{copy.login}</button>}{onClose && <button className="ap-close" onClick={onClose}>{copy.close}</button>}</div></div>;
 
-  return <div className="ap-app">
+  return <div className={`ap-shell ap-app ${portal ? 'ap-portal' : 'ap-desktop'}`}>
     <aside className="ap-sidebar">
       <div><p className="ap-eyebrow">PINVOU</p><h1>{copy.title}</h1></div>
       <nav>{['overview', 'organization', 'wallet', 'tokens'].map(key => <button key={key} className={section === key ? 'active' : ''} onClick={() => setSection(key)}>{copy.sections[key]}</button>)}</nav>
       <div className="ap-sidebar-foot">
         <select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}><option value="zh">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select>
-        {portal && <button onClick={() => run(async () => { await client.logout(); window.location.reload(); })}>{copy.logout}</button>}
+        <button onClick={logout}>{copy.logout}</button>
+        {onClose && <button onClick={onClose}>{copy.close}</button>}
       </div>
     </aside>
     <main className="ap-main">

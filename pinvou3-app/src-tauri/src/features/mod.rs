@@ -1,3 +1,4 @@
+pub(crate) mod account_platform;
 pub mod assistant;
 pub(crate) mod codex_acp;
 pub(crate) mod connectors;

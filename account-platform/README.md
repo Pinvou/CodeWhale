@@ -14,7 +14,18 @@
 - `token-portal`：OIDC Authorization Code + PKCE、Redis 服务端会话和同源 CSRF 保护的 Web BFF；OIDC Token 不进入浏览器 JavaScript。
 - `payment-simulator`：仅开发/测试使用的三渠道支付模拟器。
 
-当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、退款与对账基础、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、可靠领域事件、OpenTelemetry/Prometheus 可观测性、生产 Helm 和恢复 Runbook。桌面端 OIDC、真实支付、真实 New API 和生产集群演练仍按实施计划的后续门禁推进。
+当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、退款与对账基础、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、生产 Helm 和恢复 Runbook。真实支付、真实 New API 和生产集群演练仍按实施计划的后续门禁推进。
+
+## 桌面端 OIDC
+
+新账号入口由 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 显式开启，默认关闭，关闭时原有 `llmapi_hub` 入口和模型路径不变。开启时还需配置：
+
+- `PINVOU_ACCOUNT_OIDC_ISSUER`，或分别配置 `PINVOU_ACCOUNT_OIDC_AUTHORIZATION_URL` 与 `PINVOU_ACCOUNT_OIDC_TOKEN_URL`；
+- `PINVOU_ACCOUNT_OIDC_CLIENT_ID`（公开客户端，必须启用 Authorization Code、PKCE S256 和 loopback redirect）；
+- `PINVOU_ACCOUNT_SERVICE_URL`；
+- `PINVOU_TOKEN_GATEWAY_URL`。
+
+远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端使用系统浏览器和临时 loopback 回调，Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。
 
 ## Token Gateway 安全默认值
 

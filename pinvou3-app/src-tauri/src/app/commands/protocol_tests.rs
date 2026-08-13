@@ -70,6 +70,16 @@ command_protocol!(
     ]
 );
 command_protocol!(attachments_protocol, "attachments.rs", []);
+command_protocol!(
+    account_platform_protocol,
+    "account_platform.rs",
+    [
+        "account_platform_session",
+        "account_platform_login",
+        "account_platform_logout",
+        "account_platform_request"
+    ]
+);
 command_protocol!(chat_protocol, "chat.rs", ["chat"]);
 command_protocol!(
     connectors_protocol,

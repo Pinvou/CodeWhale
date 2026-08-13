@@ -240,6 +240,7 @@
       localVllmSupported: false,
       codexAcpSupported: false,
       teamRelaySupported: true,
+      accountPlatformEnabled: false,
     },
     settings: null,
     selectedPet: "lingling",
@@ -2117,6 +2118,7 @@
   var approveWorkflowGate = workflowFeature.approveWorkflowGate;
   var rejectWorkflowGate = workflowFeature.rejectWorkflowGate;
   var retryWorkflowRole = workflowFeature.retryWorkflowRole;
+  var accountPlatformFeature = installBridgeFeature("account-platform", { invoke: invoke });
   var teamRelayFeature = installBridgeFeature("team-relay", {
     state: state,
     notify: notify,
@@ -2467,6 +2469,12 @@
     dependencies: {
       checkDependencies: checkDependencies,
       installDependencies: installDependencies,
+    },
+    accountPlatform: {
+      session: accountPlatformFeature.session,
+      login: accountPlatformFeature.login,
+      logout: accountPlatformFeature.logout,
+      request: accountPlatformFeature.request,
     },
     teamRelay: {
       load: loadTeamRelay,

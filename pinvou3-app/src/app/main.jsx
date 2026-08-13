@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import '../styles/base.css';
@@ -58,6 +58,8 @@ import { CardPoolView, Lanyard, PersonaEditorModal } from '../features/personas/
 import { WorkflowView } from '../features/workflow/WorkflowView.jsx';
 import { SearchView } from '../features/search/SearchView.jsx';
 import { TeamRelayView } from '../features/team-relay/TeamRelayView.jsx';
+import { AccountPlatformView } from '../features/account-platform/AccountPlatformView.jsx';
+import { AccountPlatformDesktopClient } from '../features/account-platform/desktop-client.js';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../features/team-relay/team-relay-access.js';
 import { SearchOverlay } from '../features/search/SearchOverlay.jsx';
 import { UpdateNoticeButton } from '../features/updater/UpdateNoticeButton.jsx';
@@ -344,6 +346,11 @@ function workspaceDisplayName(path) {
       const showMegacubeSite = !!platformCapabilities.showMegacubeSite;
       const codexAcpSupported = !!platformCapabilities.codexAcpSupported;
       const teamRelayAvailable = teamRelayEnabled && platformCapabilities.teamRelaySupported === true;
+      const accountPlatformEnabled = platformCapabilities.accountPlatformEnabled === true;
+      const accountPlatformClient = useMemo(
+        () => accountPlatformEnabled ? new AccountPlatformDesktopClient() : null,
+        [accountPlatformEnabled],
+      );
       const [codexSessions, setCodexSessions] = useState([]);
       const [codexDraftEpoch, setCodexDraftEpoch] = useState(0);
       const [codexRelayLaunch, setCodexRelayLaunch] = useState(null);
@@ -775,7 +782,7 @@ function workspaceDisplayName(path) {
         // monitor/settings 拽走。
         if (bs.activeSessionId !== activeChat) {
           setActiveChat(bs.activeSessionId);
-          if (bs.activeSessionId && currentView !== 'codex' && currentView !== 'monitor' && currentView !== 'settings' && currentView !== 'search' && currentView !== 'scheduled') {
+          if (bs.activeSessionId && currentView !== 'codex' && currentView !== 'monitor' && currentView !== 'settings' && currentView !== 'search' && currentView !== 'scheduled' && currentView !== 'accountPlatform') {
             setCurrentView('chat');
           }
         }
@@ -1911,12 +1918,12 @@ function workspaceDisplayName(path) {
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.sidebarTaskFilterCode)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, workflow: t.workflow, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, workflow: t.workflow, toolStore: t.toolStore, teamRelay: t.teamRelay, accountPlatform: t.uiAccountPlatform.title, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);
       };
-      const mobileMoreViews = ['search', ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', 'settings'];
+      const mobileMoreViews = ['search', ...(accountPlatformEnabled ? ['accountPlatform'] : []), ...(teamRelayAvailable ? ['teamRelay'] : []), 'outputs', 'knowledge', 'toolStore', 'settings'];
       const mobileMoreActive = mobileMoreViews.includes(currentView)
         || (currentView === 'scheduled' && !(bs && bs.scheduledRunContext));
 
@@ -2307,7 +2314,20 @@ function workspaceDisplayName(path) {
 
             {/* Footer Profile */}
             <div className={`p-3 mt-auto ${isSidebarOpen ? 'space-y-2' : 'flex flex-col items-center gap-3 pb-6'}`}>
-              {llmAccountVisible && (
+              {accountPlatformEnabled && (
+              <button
+                type="button"
+                data-testid="account-platform-button"
+                onClick={() => { setAccountPopoverOpen(false); navigateFromScheduledRun('accountPlatform'); }}
+                title={t.uiAccountPlatform.title}
+                className={`flex items-center rounded-xl transition-colors ${isSidebarOpen ? 'w-full px-2 py-1.5 gap-3 text-left' : 'justify-center w-10 h-10'} ${currentView === 'accountPlatform' ? (activeTheme === 'dark' ? 'bg-[#333537]' : 'bg-[#E1E5EA]') : ''} ${activeTheme === 'dark' ? 'hover:bg-[#333537] active:bg-[#3A3C3E]' : 'hover:bg-[#E1E5EA] active:bg-[#D8DCE1]'}`}
+              >
+                <span className="w-8 h-8 shrink-0 rounded-lg bg-gradient-to-br from-[#19D3A2] to-[#0B57D0] flex items-center justify-center text-white"><User size={17} /></span>
+                {isSidebarOpen && <span className="min-w-0 flex-1"><span className="block text-[14px] font-medium leading-none truncate">{t.uiAccountPlatform.title}</span><span className={`block text-[11px] mt-1 truncate ${activeTheme === 'dark' ? 'text-[#9AA0A6]' : 'text-[#6F7378]'}`}>{t.uiAccountPlatform.activeContext}</span></span>}
+                {isSidebarOpen && <ChevronRight size={16} className="shrink-0 opacity-60" />}
+              </button>
+              )}
+              {!accountPlatformEnabled && llmAccountVisible && (
               <div className={`relative ${isSidebarOpen ? 'w-full' : ''}`}>
                 <button
                   type="button"
@@ -2429,6 +2449,15 @@ function workspaceDisplayName(path) {
             )}
 
             {currentView === 'monitor' && <MonitorView theme={activeTheme} t={t} bs={bs} />}
+            {accountPlatformEnabled && accountPlatformClient && currentView === 'accountPlatform' && (
+              <AccountPlatformView
+                client={accountPlatformClient}
+                copy={t.uiAccountPlatform}
+                language={language}
+                onLanguageChange={handleSetLanguage}
+                onClose={() => navigateFromScheduledRun('chat')}
+              />
+            )}
             {currentView === 'settings' && (
               <SettingsErrorBoundary theme={activeTheme} t={t}>
                 <SettingsView
@@ -2698,6 +2727,8 @@ function workspaceDisplayName(path) {
                 onClick: () => mobileNavigate('scheduled') }] : []),
               ...(teamRelayAvailable ? [{ key: 'teamRelay', label: t.teamRelay, icon: <Users size={18} />,
                 active: currentView === 'teamRelay', onClick: () => mobileNavigate('teamRelay') }] : []),
+              ...(accountPlatformEnabled ? [{ key: 'accountPlatform', label: t.uiAccountPlatform.title, icon: <User size={18} />,
+                active: currentView === 'accountPlatform', onClick: () => mobileNavigate('accountPlatform') }] : []),
               { key: 'outputs', label: t.outputs, icon: <Package size={18} />,
                 active: currentView === 'outputs', onClick: () => mobileNavigate('outputs') },
               { key: 'knowledge', label: t.knowledge, icon: <BookOpen size={18} />,

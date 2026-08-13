@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
+import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 
 test('context guard invalidates and aborts stale organization loads', () => {
   const guard = createContextRequestGuard();
@@ -83,4 +84,40 @@ test('settlement status is queried once and never resends a model request', asyn
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('desktop client keeps OAuth tokens behind the account-platform Bridge', async () => {
+  const calls = [];
+  const transport = {
+    session: async () => ({ enabled: true, configured: true, authenticated: true }),
+    login: async () => ({ authenticated: true }),
+    logout: async () => ({ authenticated: false }),
+    request: async request => {
+      calls.push(request);
+      return { status: 200, body: { items: [] } };
+    },
+  };
+  const client = new AccountPlatformDesktopClient(transport);
+  assert.equal((await client.session()).authenticated, true);
+  await client.createRecharge('product-10', 'ALIPAY', 'recharge-id');
+  assert.deepEqual(calls[0], {
+    area: 'token',
+    resource: '/v1/recharge/orders',
+    method: 'POST',
+    body: { product_id: 'product-10', channel: 'ALIPAY' },
+    idempotencyKey: 'recharge-id',
+  });
+  assert.equal('accessToken' in client, false);
+  assert.equal('refreshToken' in client, false);
+});
+
+test('desktop client surfaces backend error codes without exposing auth state', async () => {
+  const client = new AccountPlatformDesktopClient({
+    request: async () => ({ status: 403, body: { code: 'permission_denied', message: 'denied' } }),
+  });
+  await assert.rejects(client.organizations(), error => {
+    assert.equal(error.code, 'permission_denied');
+    assert.equal(error.status, 403);
+    return true;
+  });
 });

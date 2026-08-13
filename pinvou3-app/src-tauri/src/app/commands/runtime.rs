@@ -35,6 +35,7 @@ pub struct PlatformCapabilities {
     pub local_vllm_supported: bool,
     pub codex_acp_supported: bool,
     pub team_relay_supported: bool,
+    pub account_platform_enabled: bool,
 }
 
 impl PlatformCapabilities {
@@ -51,6 +52,7 @@ impl PlatformCapabilities {
             local_vllm_supported: capabilities.local_vllm_supported,
             codex_acp_supported: capabilities.codex_acp_supported,
             team_relay_supported: capabilities.team_relay_supported,
+            account_platform_enabled: crate::features::account_platform::account_platform_enabled(),
         }
     }
 }
