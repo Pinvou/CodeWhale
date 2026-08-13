@@ -70,6 +70,7 @@ const tasks = projectSnapshot(snapshot, dict.zh.uiTeamRelay);
 assert.equal(tasks.length, 1);
 assert.equal(tasks[0].category, 'waiting');
 assert.equal(tasks[0].owner, 'B');
+assert.equal(tasks[0].ownerAvatar, null);
 assert.equal(tasks[0].files[0].original_name, '方案.md');
 assert.equal(tasks[0].events[0].delivery.artifact_role, 'input');
 assert.equal(tasks[0].events[0].delivery.subtype, '');
@@ -167,6 +168,9 @@ assert.equal(materialPackages[0].files[0].prepared.local_path, '/private/relay/�
 assert.equal(materialPackages[0].files[0].introduced, true);
 
 const closedSnapshot = JSON.parse(JSON.stringify(snapshot));
+closedSnapshot.bootstrap.members.find(member => member.id === 'b').avatar = {
+  sha256: 'b'.repeat(64), media_type: 'image/gif', byte_size: 1024, updated_at: '2026-08-04T00:00:00Z',
+};
 closedSnapshot.bootstrap.threads[0].thread.phase = 'closed';
 closedSnapshot.bootstrap.threads[0].thread.current_actor_id = null;
 closedSnapshot.bootstrap.threads[0].thread.return_to_id = null;
@@ -177,6 +181,8 @@ closedSnapshot.bootstrap.threads[0].actions.push({
   id: 'accept', thread_id: 'thread', sequence: 3, kind: 'accept', actor_id: 'me', recipient_id: null, return_to_id: null, message: '接受', base_revision: 2, idempotency_key: 'accept-key', attachment_ids: [], created_at: '2026-08-04T02:00:00Z',
 });
 const closedTask = projectSnapshot(closedSnapshot, dict.zh.uiTeamRelay)[0];
+assert.equal(closedTask.currentAvatar, null);
+assert.equal(closedTask.ownerAvatar.sha256, 'b'.repeat(64));
 assert.equal(closedTask.acceptedPackage.id, 'delivery');
 assert.equal(closedTask.acceptedPackage.sequence, 2);
 assert.equal(matchesRelayView(closedTask, 'all', 'me'), true);

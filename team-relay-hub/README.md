@@ -25,7 +25,7 @@ Team Relay Hub 是“人派活给人、Handoff、回传和最终交付”的独�
 
 ## 本地运行
 
-需要 Node.js 20+ 和 PostgreSQL 15+。参考 `environment.example` 把变量注入自己的进程环境，真实密码不得提交到仓库。
+需要 Node.js 20.9+ 和 PostgreSQL 15+。参考 `environment.example` 把变量注入自己的进程环境，真实密码不得提交到仓库。
 
 ```bash
 npm ci

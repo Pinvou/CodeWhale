@@ -1868,6 +1868,19 @@ components:
             - attachment_type_not_allowed
             - attachment_not_ready
             - rate_limited
+            - beta_access_invalid
+            - email_already_registered
+            - email_change_not_supported
+            - join_code_storage_unavailable
+            - join_password_invalid
+            - avatar_upload_in_progress
+            - avatar_too_large
+            - avatar_processed_too_large
+            - avatar_type_not_allowed
+            - avatar_image_invalid
+            - avatar_image_limits_exceeded
+            - avatar_processing_busy
+            - avatar_upload_rate_limited
             - service_unavailable
         message:
           type: string

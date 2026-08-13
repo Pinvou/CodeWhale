@@ -241,6 +241,18 @@
       avatarPrincipalVersions.clear();
     }
 
+    async function acrossAvatarCacheBoundary(operation) {
+      // Scope-changing requests can overlap renders from the old screen. Clear
+      // on both sides so neither an old cached entry nor a response completed
+      // during the transition can cross Principal, Hub, or team boundaries.
+      clearAvatarSources();
+      try {
+        return await operation();
+      } finally {
+        clearAvatarSources();
+      }
+    }
+
     function currentAvatarVersion(principalId, digest) {
       var current = avatarPrincipalVersions.get(principalId);
       if (current && current.digest === digest) return current;
@@ -380,22 +392,25 @@
     }
 
     async function createTeam(name) {
-      clearAvatarSources();
-      var snapshot = await mutate("team_relay_create_team", { name: name });
+      var snapshot = await acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_create_team", { name: name });
+      });
       if (snapshot && snapshot.bootstrap) patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }), account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] } });
       return snapshot;
     }
 
     async function joinTeam(joinCode) {
-      clearAvatarSources();
-      var snapshot = await mutate("team_relay_join_team", { joinCode: joinCode });
+      var snapshot = await acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_join_team", { joinCode: joinCode });
+      });
       if (snapshot && snapshot.bootstrap) patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }), account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] } });
       return snapshot;
     }
 
     async function switchTeam(teamId) {
-      clearAvatarSources();
-      var snapshot = await mutate("team_relay_switch_team", { teamId: teamId });
+      var snapshot = await acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_switch_team", { teamId: teamId });
+      });
       if (snapshot && snapshot.bootstrap) {
         patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }) });
       }
@@ -600,8 +615,9 @@
     async function disconnect() {
       patch({ mutating: true, error: null });
       try {
-        await invoke("team_relay_disconnect");
-        clearAvatarSources();
+        await acrossAvatarCacheBoundary(function () {
+          return invoke("team_relay_disconnect");
+        });
         connectionGeneration += 1;
         refreshPromise = null;
         if (refreshTimer) root.clearTimeout(refreshTimer);

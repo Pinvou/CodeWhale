@@ -46,6 +46,10 @@ test('Team Relay member styles preserve stable avatar colors and mark self witho
   assert.ok(selfRule, 'the current member must have a visible marker');
   assert.match(selfRule[1], /box-shadow\s*:/);
   assert.doesNotMatch(selfRule[1], /(?:^|;)\s*(?:background|color)\s*:/, 'the current member marker must not replace the stable palette');
+  const profileRule = stylesheet.match(/\.team-relay-profile-button\s*>\s*span\s*\{([^}]*)\}/);
+  assert.ok(profileRule, 'the header avatar must define its compact presentation');
+  assert.match(profileRule[1], /background\s*:\s*var\(--relay-avatar-bg\)/);
+  assert.match(profileRule[1], /(?:^|;)\s*color\s*:\s*var\(--relay-avatar-fg\)/);
 });
 
 test('Team Relay fallback colors meet WCAG AA contrast for a broad stable palette', () => {
@@ -69,10 +73,15 @@ test('Team Relay requests compact animated avatar variants for rendered density'
     new URL('../src/features/team-relay/RelayAvatar.jsx', import.meta.url),
     'utf8',
   );
+  const view = fs.readFileSync(
+    new URL('../src/features/team-relay/TeamRelayView.jsx', import.meta.url),
+    'utf8',
+  );
   assert.match(component, /requestedDisplaySize/);
   assert.match(component, /getBoundingClientRect/);
   assert.match(component, /typeof window === 'undefined'/);
-  assert.match(component, /team-relay-profile-avatar-preview/);
+  assert.match(component, /const useOriginal = displaySize === null/);
+  assert.match(view, /team-relay-profile-avatar-preview[^>]+displaySize=\{null\}/);
   assert.match(component, /let avatarIntersectionObserver = null/);
   assert.match(component, /rootMargin: '200px'/);
   assert.match(component, /avatarIntersectionObserver\?\.unobserve\(entry\.target\)/);
@@ -80,6 +89,7 @@ test('Team Relay requests compact animated avatar variants for rendered density'
   assert.match(component, /if \(!ready\) return/);
   assert.match(component, /loading="lazy"/);
   assert.match(component, /decoding="async"/);
+  assert.match(component, /\{!source && <span>\{relayAvatarFallback\(name\)\}<\/span>\}/, 'transparent custom avatars must not reveal the fallback glyph underneath');
   assert.match(component, /Promise\.resolve\(\)\s*\.then\(\(\) => active \? loadSource/);
   assert.match(component, /if \(active\) setSource/);
   assert.match(component, /return \(\) => \{ active = false; \}/);

@@ -232,7 +232,7 @@ function ProfileDialog({ copy, theme, principal, busy, loadAvatarSource, onClose
       <header><div><h2 id="team-relay-profile-dialog-title">{copy.profile.title}</h2><p>{copy.profile.subtitle}</p></div><button type="button" className="team-relay-icon-button" onClick={onClose} aria-label={copy.close}><X size={18} /></button></header>
       <form className="team-relay-setup-form" onSubmit={event => { event.preventDefault(); onSubmit(Object.fromEntries(new window.FormData(event.currentTarget).entries())); }}>
         <section className="team-relay-profile-avatar-editor">
-          <RelayAvatar name={principal.display_name} seed={principal.id} avatar={principal.avatar} loadSource={loadAvatarSource} className="team-relay-profile-avatar-preview" />
+          <RelayAvatar name={principal.display_name} seed={principal.id} avatar={principal.avatar} loadSource={loadAvatarSource} className="team-relay-profile-avatar-preview" displaySize={null} />
           <div><strong>{copy.profile.avatar}</strong><p>{copy.profile.avatarHint}</p><span>
             <button type="button" className="team-relay-secondary" disabled={busy} onClick={onUploadAvatar}><Upload size={14} />{principal.avatar ? copy.profile.changeAvatar : copy.profile.uploadAvatar}</button>
             {principal.avatar && <button type="button" className="team-relay-text-danger" disabled={busy} onClick={onRemoveAvatar}><Trash2 size={14} />{copy.profile.removeAvatar}</button>}
@@ -565,7 +565,7 @@ function WorkCard({ copy, task, selected, loadAvatarSource, onClick }) {
   const lastEvent = task.events[task.events.length - 1];
   return <button type="button" className={`team-relay-card${selected ? ' is-selected' : ''}${task.pinned ? ' is-pinned' : ''}`} onClick={onClick} aria-pressed={selected} data-testid={`team-relay-task-${task.id}`}>
     <span className="team-relay-card-heading"><strong>{task.pinned && <PinIcon size={13} aria-label={copy.pinned} />}{task.title}</strong><span className="team-relay-card-heading-meta">{!!task.unreadCount && <b className="team-relay-unread-badge" aria-label={copy.unread.updates(task.unreadCount)}>{task.unreadCount > 99 ? '99+' : task.unreadCount}</b>}<time>{displayListTime(lastEvent?.time || task.updated)}</time></span></span>
-    <span className="team-relay-card-status"><PersonAvatar name={task.current === copy.dash ? task.owner : task.current} seed={task.currentActorId || task.raw.owner_id} avatar={task.currentAvatar} loadAvatarSource={loadAvatarSource} /><span className="team-relay-card-status-text">{task.status}</span><em className={`tone-${task.category}`}>{copy.statuses[task.category]}</em></span>
+    <span className="team-relay-card-status"><PersonAvatar name={task.current === copy.dash ? task.owner : task.current} seed={task.currentActorId || task.raw.owner_id} avatar={task.currentActorId ? task.currentAvatar : task.ownerAvatar} loadAvatarSource={loadAvatarSource} /><span className="team-relay-card-status-text">{task.status}</span><em className={`tone-${task.category}`}>{copy.statuses[task.category]}</em></span>
     <span className="team-relay-card-meta"><span className="team-relay-card-team"><Users size={12} />{task.teamName}</span>{!!task.files.length && <small><Paperclip size={11} />{copy.attachments(task.files.length)}</small>}</span>
   </button>;
 }

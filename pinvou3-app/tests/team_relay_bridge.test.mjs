@@ -379,4 +379,22 @@ await lifecycleFeature.disconnect();
 await lifecycleFeature.avatarSource('lifecycle-member', lifecycleAvatar, 48);
 assert.equal(lifecycleCalls.filter(call => call.command === 'team_relay_avatar_data_url').length, 3, 'team switches and disconnects must clear every cached source');
 
+const transitionCalls = [];
+let finishSwitch;
+const transitionFeature = isolatedRelayFeature((command, args) => {
+  transitionCalls.push({ command, args });
+  if (command === 'team_relay_avatar_data_url') return 'data:image/gif;base64,transition';
+  if (command === 'team_relay_switch_team') {
+    return new Promise(resolve => { finishSwitch = () => resolve(teamSnapshot(args.teamId)); });
+  }
+  return null;
+});
+await transitionFeature.avatarSource('transition-member', lifecycleAvatar, 48);
+const pendingSwitch = transitionFeature.switchTeam('transition-team');
+await transitionFeature.avatarSource('transition-member', lifecycleAvatar, 48);
+finishSwitch();
+await pendingSwitch;
+await transitionFeature.avatarSource('transition-member', lifecycleAvatar, 48);
+assert.equal(transitionCalls.filter(call => call.command === 'team_relay_avatar_data_url').length, 3, 'avatar reads completed during a team transition must be cleared when the transition settles');
+
 console.log('Team Relay bridge tests passed');

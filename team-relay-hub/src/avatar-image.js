@@ -134,7 +134,9 @@ async function encodeAttempt(input, descriptor, edge, setting) {
         effort: 7,
         colours: setting,
         dither: 0.8,
-        loop: descriptor.loop ?? 0,
+        // Relay avatars stay animated while visible, including source GIFs
+        // that were exported with a finite loop count.
+        loop: 0,
         delay: descriptor.delay,
       }).toBuffer();
     case "jpeg":
@@ -209,7 +211,11 @@ export async function processAvatarImage(upload, config) {
     metadata = await sharp(upload.temporaryPath, {
       animated: true,
       failOn: "error",
-      limitInputPixels: MAX_STATIC_SOURCE_PIXELS,
+      // Metadata inspection does not allocate the decoded bitmap. Read the
+      // declared dimensions first so policy violations receive the precise
+      // limits error; every subsequent full decode still enforces libvips'
+      // pixel cap in transform().
+      limitInputPixels: false,
       sequentialRead: true,
     }).metadata();
   } catch {

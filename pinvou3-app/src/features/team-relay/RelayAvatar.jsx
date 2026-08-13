@@ -71,16 +71,16 @@ function observeAvatarSize(element, measure) {
 
 export function RelayAvatar({ name, seed, avatar = null, loadSource = null, className = 'team-relay-avatar', displaySize }) {
   const rootRef = useRef(null);
+  const useOriginal = displaySize === null;
   const [source, setSource] = useState(null);
   const [renderedPixels, setRenderedPixels] = useState(null);
   const [pixelRatio, setPixelRatio] = useState(browserPixelRatio);
   const [ready, setReady] = useState(() => {
-    if (String(className || '').includes('team-relay-profile-avatar-preview') || displaySize === null) return true;
+    if (useOriginal) return true;
     return typeof window === 'undefined' || !window.IntersectionObserver;
   });
   const digest = avatar?.sha256 || '';
   const tone = useMemo(() => relayAvatarTone(seed || name), [name, seed]);
-  const useOriginal = String(className || '').includes('team-relay-profile-avatar-preview') || displaySize === null;
   const requestedDisplaySize = useMemo(() => {
     if (useOriginal) return null;
     if (displaySize === 48 || displaySize === 96) return displaySize;
@@ -130,7 +130,7 @@ export function RelayAvatar({ name, seed, avatar = null, loadSource = null, clas
     }}
     aria-hidden="true"
   >
-    <span>{relayAvatarFallback(name)}</span>
+    {!source && <span>{relayAvatarFallback(name)}</span>}
     {source && <img src={source} alt="" loading="lazy" decoding="async" onError={() => setSource(null)} />}
   </span>;
 }

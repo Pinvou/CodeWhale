@@ -40,7 +40,7 @@ const ANIMATED_GIF = Buffer.from(
   "base64",
 );
 
-async function animatedGif({ width = 2, height = 2, frames = 2 } = {}) {
+async function animatedGif({ width = 2, height = 2, frames = 2, loop = 0 } = {}) {
   const pixels = Buffer.alloc(width * height * frames * 4);
   for (let frame = 0; frame < frames; frame += 1) {
     const start = frame * width * height * 4;
@@ -53,7 +53,7 @@ async function animatedGif({ width = 2, height = 2, frames = 2 } = {}) {
   }
   return sharp(pixels, {
     raw: { width, height: height * frames, channels: 4, pageHeight: height },
-  }).gif({ delay: Array(frames).fill(80), loop: 0 }).toBuffer();
+  }).gif({ delay: Array(frames).fill(80), loop }).toBuffer();
 }
 
 async function writeUpload(directory, filename, bytes) {
@@ -131,10 +131,11 @@ test("avatar processing fully decodes, bounds, and sanitizes static images", asy
   assert.equal(processed.variants.get(96).width, 96);
 });
 
-test("GIF processing preserves animation while bounding main and display variants", async (t) => {
+test("GIF processing keeps avatars continuously animated while bounding main and display variants", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "team-relay-avatar-gif-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const input = await animatedGif({ width: 400, height: 100, frames: 3 });
+  const input = await animatedGif({ width: 400, height: 100, frames: 3, loop: 2 });
+  assert.equal((await sharp(input, { animated: true }).metadata()).loop, 2);
   const processed = await processAvatarImage(
     await writeUpload(directory, "avatar.gif", input),
     { maxAvatarBytes: MAX_AVATAR_BYTES },
@@ -186,6 +187,15 @@ test("GIF re-encoding removes comment extensions from every animated output", as
 test("metadata policy rejects excessive frames and decoded pixels before full decode", () => {
   assert.throws(
     () => validateAvatarMetadata({
+      format: "png",
+      width: 3_000,
+      height: 3_000,
+      pages: 1,
+    }, "image/png"),
+    error => error?.code === "avatar_image_limits_exceeded",
+  );
+  assert.throws(
+    () => validateAvatarMetadata({
       format: "gif",
       width: 64,
       height: 64 * (MAX_GIF_FRAMES + 1),
@@ -204,6 +214,22 @@ test("metadata policy rejects excessive frames and decoded pixels before full de
     }, "image/gif"),
     error => error?.code === "avatar_image_limits_exceeded"
       && 384 * 384 * 28 > MAX_GIF_PIXELS,
+  );
+});
+
+test("oversized static sources are rejected before full bitmap decode", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "team-relay-avatar-static-limits-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const input = await sharp({
+    create: { width: 3_000, height: 3_000, channels: 3, background: "#2878d0" },
+  }).png({ compressionLevel: 9 }).toBuffer();
+  assert.ok(input.length < MAX_AVATAR_BYTES, "fixture must reach the decoded-pixel guard");
+  await assert.rejects(
+    processAvatarImage(
+      await writeUpload(directory, "too-many-pixels.png", input),
+      { maxAvatarBytes: MAX_AVATAR_BYTES },
+    ),
+    error => error?.status === 422 && error?.code === "avatar_image_limits_exceeded",
   );
 });
 

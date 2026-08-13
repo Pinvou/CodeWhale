@@ -157,6 +157,7 @@ function projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors) {
       teamName: bootstrap.team.name,
       initiator: nameOf(thread.initiator_id),
       owner: nameOf(thread.owner_id),
+      ownerAvatar: avatarOf(thread.owner_id),
       current,
       currentActorId: thread.current_actor_id,
       pendingSender,
