@@ -724,7 +724,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
     try {
       let mutationResult = null;
       if (dialog === 'assign') mutationResult = await bridge.teamRelay.createThread({ team_id: payload.team_id, title: payload.title, assignee_id: payload.receiver, message: payload.message, attachment_ids: payload.attachment_ids, delivery: payload.delivery });
-      else if (dialog === 'progress' && !await runAction('note', payload.message, payload.attachment_ids, null, payload.delivery)) return;
+      else if (dialog === 'progress' && !await runAction('note', payload.message, payload.attachment_ids, null, { ...payload.delivery, subtype: 'progress' })) return;
       else if (dialog === 'handoff') await runAction('handoff', payload.message, payload.attachment_ids, payload.receiver, payload.delivery);
       else if (dialog === 'return') await runAction('return', payload.message, payload.attachment_ids, null, payload.delivery);
       else if (dialog === 'deliver') await runAction('final_deliver', payload.message, payload.attachment_ids, null, payload.delivery);

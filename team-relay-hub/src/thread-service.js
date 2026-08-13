@@ -377,7 +377,14 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
       ? await supportsConfirmedTransfers(client, input.recipientId)
       : true;
     const confirmedTransfers = protocolVersion === "0.2" && recipientSupportsConfirmation;
-    const next = transition(locked, auth.principalId, input.kind, input.recipientId, confirmedTransfers);
+    const next = transition(
+      locked,
+      auth.principalId,
+      input.kind,
+      input.recipientId,
+      confirmedTransfers,
+      input.delivery.subtype,
+    );
     const nextRevision = Number(locked.revision) + 1;
     const actionId = newId();
     const threadResult = await client.query(

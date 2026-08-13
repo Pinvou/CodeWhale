@@ -154,6 +154,43 @@ test("a collaborator cannot hand off again or make the final delivery", () => {
   );
 });
 
+test("a progress note keeps the active relay with its current actor", () => {
+  const thread = {
+    ...assignedThread(),
+    current_actor_id: ids.collaborator,
+    return_to_id: ids.owner,
+  };
+  const progress = transition(thread, ids.collaborator, "note", null, true, "progress");
+  assert.equal(progress.currentActorId, ids.collaborator);
+  assert.equal(progress.threadReturnToId, ids.owner);
+  assert.equal(progress.phase, "active");
+  const genericNote = transition(thread, ids.initiator, "note", null);
+  assert.equal(genericNote.currentActorId, ids.collaborator);
+  assert.equal(genericNote.phase, "active");
+  assert.throws(
+    () => transition(thread, ids.initiator, "note", null, true, "progress"),
+    (error) => error.code === "action_not_allowed",
+  );
+  assert.throws(
+    () => transition({ ...thread, phase: "awaiting_acceptance" }, ids.collaborator, "note", null, true, "progress"),
+    (error) => error.code === "action_not_allowed",
+  );
+  const pendingHandoff = {
+    ...assignedThread(),
+    phase: "pending_transfer",
+    pending_transfer_kind: "handoff",
+    pending_sender_id: ids.owner,
+    pending_recipient_id: ids.collaborator,
+  };
+  const pendingProgress = transition(pendingHandoff, ids.owner, "note", null, true, "progress");
+  assert.equal(pendingProgress.phase, "pending_transfer");
+  assert.equal(pendingProgress.pendingRecipientId, ids.collaborator);
+  assert.throws(
+    () => transition({ ...pendingHandoff, pending_transfer_kind: "assignment" }, ids.owner, "note", null, true, "progress"),
+    (error) => error.code === "action_not_allowed",
+  );
+});
+
 test("accept closes the thread only for the final recipient", () => {
   const thread = assignedThread({
     phase: "awaiting_acceptance",

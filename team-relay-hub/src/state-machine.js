@@ -59,7 +59,14 @@ function transferFallback(thread, patch = {}) {
   return clearPending(thread, { phase: "active", ...patch });
 }
 
-export function transition(thread, actorId, kind, recipientId, confirmedTransfers = true) {
+export function transition(
+  thread,
+  actorId,
+  kind,
+  recipientId,
+  confirmedTransfers = true,
+  deliverySubtype = "",
+) {
   if (!ACTION_KINDS.has(kind)) denied("The action kind is not available on this endpoint.");
   if (!new Set(["handoff", "reroute_transfer"]).has(kind) && recipientId !== null && recipientId !== undefined) {
     denied("Only handoff and reroute_transfer accept a recipient_id.");
@@ -78,7 +85,15 @@ export function transition(thread, actorId, kind, recipientId, confirmedTransfer
     });
   }
 
-  if (kind === "note") return nextState(thread);
+  if (kind === "note") {
+    const canSubmitProgress = thread.current_actor_id === actorId
+      && (thread.phase === "active"
+        || (thread.phase === "pending_transfer" && thread.pending_transfer_kind === "handoff"));
+    if (deliverySubtype === "progress" && !canSubmitProgress) {
+      denied("Only the current actor can submit a progress update while they hold the relay.");
+    }
+    return nextState(thread);
+  }
 
   if (kind === "reroute_transfer") {
     const canReroutePending = thread.phase === "pending_transfer" && thread.pending_sender_id === actorId;
