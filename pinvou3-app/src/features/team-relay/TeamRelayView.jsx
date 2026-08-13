@@ -620,6 +620,20 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const supported = !webHost && viewState.platformCapabilities?.teamRelaySupported === true;
   useEffect(() => bridge?.state?.subscribeMany ? bridge.state.subscribeMany(['platform', 'teamRelay'], setViewState) : undefined, [bridge]);
   useEffect(() => { if (supported && bridge?.teamRelay) bridge.teamRelay.load().catch(() => {}); }, [bridge, supported]);
+  useEffect(() => {
+    if (!supported || viewMode !== 'personal' || !bridge?.teamRelay?.refresh) return undefined;
+    const refresh = () => bridge.teamRelay.refresh({ silent: true }).catch(() => {});
+    const onVisibilityChange = () => { if (document.visibilityState === 'visible') refresh(); };
+    refresh();
+    const timer = window.setInterval(refresh, 15_000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [bridge, supported, viewMode]);
   useEffect(() => { if (!toast) return undefined; const timer = window.setTimeout(() => setToast(''), 2600); return () => window.clearTimeout(timer); }, [toast]);
 
   const snapshot = relay.snapshot;

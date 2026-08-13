@@ -95,10 +95,11 @@
       return next;
     }
 
-    async function load() {
+    async function load(options) {
       if (refreshPromise) return refreshPromise;
+      var silent = options && options.silent === true;
       refreshPromise = (async function () {
-        patch({ loading: true, error: null });
+        if (!silent) patch({ loading: true, error: null });
         try {
           var status = await invoke("team_relay_status");
           if (!status.configured) {
@@ -120,7 +121,7 @@
           patch({ loading: false, status: status, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
           return snapshot;
         } catch (error) {
-          patch({ loading: false, error: String(error) });
+          if (!silent) patch({ loading: false, error: String(error) });
           throw error;
         } finally {
           refreshPromise = null;
