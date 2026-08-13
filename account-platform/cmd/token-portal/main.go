@@ -21,14 +21,15 @@ func main() {
 		log.Fatal(err)
 	}
 	defer store.Close()
+	publicURL := mustURL("PORTAL_PUBLIC_URL")
 	service, err := portal.NewService(portal.Config{
-		PublicURL:        mustURL("PORTAL_PUBLIC_URL"),
+		PublicURL:        publicURL,
 		AuthorizationURL: mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
 		TokenURL:         mustURL("PORTAL_OIDC_TOKEN_URL"),
 		ClientID:         os.Getenv("PORTAL_OIDC_CLIENT_ID"),
 		AccountURL:       mustURL("ACCOUNT_HTTP_URL"),
 		TokenGatewayURL:  mustURL("TOKEN_GATEWAY_HTTP_URL"),
-		SecureCookies:    cfg.Environment == "production" || cfg.Environment == "production-new",
+		SecureCookies:    publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
 	}, store)
 	if err != nil {
 		log.Fatal(err)

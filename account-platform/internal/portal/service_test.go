@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -126,6 +127,61 @@ func TestSessionEndpointDoesNotExposeOIDCTokens(t *testing.T) {
 	body := response.Body.String()
 	if response.Code != http.StatusOK || strings.Contains(body, "access-secret") || strings.Contains(body, "refresh-secret") || !strings.Contains(body, session.CSRFToken) {
 		t.Fatalf("unexpected session response: %d %s", response.Code, body)
+	}
+}
+
+func TestCallbackAcceptsNonExpiringOfflineRefreshTokenWithBoundedSession(t *testing.T) {
+	store := newMemoryStore()
+	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("grant_type") != "authorization_code" || r.Form.Get("code_verifier") != "verifier" {
+			t.Fatalf("unexpected token request: %v", r.Form)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"access","refresh_token":"refresh","token_type":"Bearer","expires_in":300,"refresh_expires_in":0}`)
+	}))
+	defer tokenServer.Close()
+
+	parse := func(raw string) *url.URL {
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	service, err := NewService(Config{
+		PublicURL:        parse("https://portal.example"),
+		AuthorizationURL: parse("https://identity.example/auth"),
+		TokenURL:         parse(tokenServer.URL),
+		ClientID:         "portal",
+		AccountURL:       parse("https://account.internal"),
+		TokenGatewayURL:  parse("https://token.internal"),
+		SecureCookies:    true,
+	}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 13, 0, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	store.flows["state"] = LoginFlow{Verifier: "verifier", ExpiresAt: now.Add(time.Minute), ReturnTo: "/wallet"}
+
+	request := httptest.NewRequest(http.MethodGet, "/auth/callback?state=state&code=code", nil)
+	request.AddCookie(&http.Cookie{Name: "__Host-portal_flow", Value: "state"})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/wallet" {
+		t.Fatalf("callback response = %d %s", response.Code, response.Body.String())
+	}
+	if len(store.sessions) != 1 {
+		t.Fatalf("saved sessions = %d", len(store.sessions))
+	}
+	for _, session := range store.sessions {
+		if got, want := session.RefreshExpiresAt, now.Add(defaultSessionMaxAge); !got.Equal(want) {
+			t.Fatalf("refresh expiry = %s, want %s", got, want)
+		}
 	}
 }
 

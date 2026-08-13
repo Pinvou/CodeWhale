@@ -29,7 +29,10 @@ type Config struct {
 	AccountURL       *url.URL
 	TokenGatewayURL  *url.URL
 	SecureCookies    bool
+	SessionMaxAge    time.Duration
 }
+
+const defaultSessionMaxAge = 30 * 24 * time.Hour
 
 type Service struct {
 	config Config
@@ -44,6 +47,9 @@ func NewService(config Config, store Store) (*Service, error) {
 	}
 	if config.PublicURL.Scheme != "https" && config.SecureCookies {
 		return nil, errors.New("secure portal cookies require an HTTPS public URL")
+	}
+	if config.SessionMaxAge <= 0 {
+		config.SessionMaxAge = defaultSessionMaxAge
 	}
 	return &Service{config: config, store: store, client: observability.NewHTTPClient(15 * time.Second), now: func() time.Time { return time.Now().UTC() }}, nil
 }
@@ -135,8 +141,8 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	sessionID, sessionIDErr := randomToken(32)
 	csrfToken, csrfErr := randomToken(32)
-	session := Session{ID: sessionID, AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, AccessExpiresAt: now.Add(time.Duration(tokens.ExpiresIn) * time.Second), RefreshExpiresAt: now.Add(time.Duration(tokens.RefreshExpiresIn) * time.Second), CSRFToken: csrfToken, CreatedAt: now}
-	if sessionIDErr != nil || csrfErr != nil || session.AccessToken == "" || session.RefreshToken == "" || tokens.ExpiresIn <= 0 || tokens.RefreshExpiresIn <= 0 || !strings.EqualFold(tokens.TokenType, "Bearer") || s.store.SaveSession(r.Context(), session) != nil {
+	session := Session{ID: sessionID, AccessToken: tokens.AccessToken, RefreshToken: tokens.RefreshToken, AccessExpiresAt: now.Add(time.Duration(tokens.ExpiresIn) * time.Second), RefreshExpiresAt: s.refreshExpiry(now, tokens.RefreshExpiresIn, now.Add(s.config.SessionMaxAge)), CSRFToken: csrfToken, CreatedAt: now}
+	if sessionIDErr != nil || csrfErr != nil || session.AccessToken == "" || session.RefreshToken == "" || tokens.ExpiresIn <= 0 || !strings.EqualFold(tokens.TokenType, "Bearer") || s.store.SaveSession(r.Context(), session) != nil {
 		api.WriteError(w, http.StatusBadGateway, "LOGIN_SESSION_FAILED", "login session could not be created", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -259,7 +265,7 @@ func (s *Service) refreshSession(ctx context.Context, session Session) (Session,
 				latest.RefreshToken = tokens.RefreshToken
 			}
 			if tokens.RefreshExpiresIn > 0 {
-				latest.RefreshExpiresAt = now.Add(time.Duration(tokens.RefreshExpiresIn) * time.Second)
+				latest.RefreshExpiresAt = s.refreshExpiry(now, tokens.RefreshExpiresIn, latest.CreatedAt.Add(s.config.SessionMaxAge))
 			}
 			return latest, s.store.SaveSession(ctx, latest)
 		}
@@ -276,6 +282,17 @@ func (s *Service) refreshSession(ctx context.Context, session Session) (Session,
 			}
 		}
 	}
+}
+
+func (s *Service) refreshExpiry(now time.Time, seconds int64, limit time.Time) time.Time {
+	if seconds <= 0 || seconds >= int64(s.config.SessionMaxAge/time.Second) {
+		return limit
+	}
+	candidate := now.Add(time.Duration(seconds) * time.Second)
+	if candidate.After(limit) {
+		return limit
+	}
+	return candidate
 }
 
 func (s *Service) exchange(ctx context.Context, form url.Values) (TokenResponse, error) {
