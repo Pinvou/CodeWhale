@@ -868,6 +868,11 @@ components:
           const: 1
         artifact_role:
           $ref: "#/components/schemas/ArtifactRole"
+        subtype:
+          type: string
+          enum: ["", progress]
+          default: ""
+          description: Optional semantic label. `progress` is valid only for a `note` submitted through the current actor progress UI.
         expected_next:
           type: string
           maxLength: 2000

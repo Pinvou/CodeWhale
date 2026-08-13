@@ -10,8 +10,8 @@ import { MaterialInspector } from './MaterialInspector.jsx';
 import { RelayAvatar } from './RelayAvatar.jsx';
 import { TeamBoard } from './TeamBoard.jsx';
 import {
-  TEAM_RELAY_SOURCE_FILTERS, TEAM_RELAY_VIEWS, matchesRelayView, matchesSourceFilter,
-  projectSnapshot, projectTeamBoard, relayViewCounts,
+  TEAM_RELAY_SOURCE_FILTERS, TEAM_RELAY_VIEWS, canUpdateRelayProgress, matchesRelayView,
+  matchesSourceFilter, projectSnapshot, projectTeamBoard, relayViewCounts,
 } from './team-relay-state.js';
 import './team-relay.css';
 
@@ -418,7 +418,8 @@ function RelayDialog({ copy, theme, type, task, members, busy, uploadProgress, t
   const selectedSourceSession = sourceSessions.find(session => `${session.kind}:${session.id}` === sourceSessionKey) || null;
   const targetName = type === 'assign' || type === 'handoff'
     ? members.find(member => member.id === receiverId)?.display_name || copy.dash
-    : type === 'deliver' ? task.finalRecipient : task.owner;
+    : type === 'progress' ? task.current
+      : type === 'deliver' ? task.finalRecipient : task.owner;
   const selectedSourceMaterials = (sourceContext?.materials || []).filter(material => selectedSourceMaterialIds.includes(material.id));
   const combinedPaths = new Set([...selectedSourceMaterials, ...files].map(material => material.localPath));
   const attachmentCount = combinedPaths.size;
@@ -503,7 +504,7 @@ function RelayDialog({ copy, theme, type, task, members, busy, uploadProgress, t
             </section>
             <section className="team-relay-compose-request">
               <label className="team-relay-prompt-card"><span><b>01</b>{dialogCopy.taskLabel}</span><textarea name="source_message" rows="4" required maxLength="10000" value={draft.message} onChange={event => setDraft(current => ({ ...current, message: event.target.value }))} placeholder={dialogCopy.messagePlaceholder} autoFocus /></label>
-              <label className="team-relay-prompt-card"><span><b>02</b>{dialogCopy.acceptanceLabel}</span><textarea name="source_expected_next" rows="3" required maxLength="2000" value={draft.expectedNext} onChange={event => setDraft(current => ({ ...current, expectedNext: event.target.value }))} placeholder={copy.deliveryGoalPlaceholder} /></label>
+              <label className="team-relay-prompt-card"><span><b>02</b>{dialogCopy.acceptanceLabel}</span><textarea name="source_expected_next" rows="3" required={!dialogCopy.acceptanceOptional} maxLength="2000" value={draft.expectedNext} onChange={event => setDraft(current => ({ ...current, expectedNext: event.target.value }))} placeholder={dialogCopy.acceptancePlaceholder || copy.deliveryGoalPlaceholder} /></label>
               <fieldset className="team-relay-direct-attachments"><div className="team-relay-attachment-icon"><Paperclip size={17} /></div><div className="team-relay-attachment-copy"><legend>{copy.uploadAttachments}</legend><span>{copy.selectedAttachmentCount(attachmentCount)} · {copy.attachmentUploadHint}</span></div><button type="button" className="team-relay-secondary" onClick={pick} disabled={mountingMaterials}><Plus size={14} />{copy.addFiles}</button>
                 <MaterialChips copy={copy} materials={files} onRemove={id => setFiles(current => current.filter(material => material.id !== id))} />
                 {mountingMaterials && uploadProgress && <progress value={uploadProgress.sent_bytes} max={uploadProgress.total_bytes || 1} aria-label={copy.uploading} />}
@@ -512,7 +513,7 @@ function RelayDialog({ copy, theme, type, task, members, busy, uploadProgress, t
               {materialError && <p className="team-relay-error" role="alert">{copy.materialMountFailed}</p>}
             </section>
           </div>
-          <footer className="team-relay-direct-footer"><p><Lock size={13} /><span>{copy.attachmentUploadHint} {copy.sourceSessionPrivacy}</span></p><div><button type="button" className="team-relay-secondary" onClick={onClose} disabled={mountingMaterials}>{copy.cancel}</button><button type="submit" className="team-relay-primary" disabled={busy || mountingMaterials || sourcePending || attachmentOverflow || !draft.message.trim() || !draft.expectedNext.trim() || (type === 'assign' || type === 'handoff') && !receiverId}><CheckCircle2 size={16} />{mountingMaterials ? attachmentCount ? copy.uploadingAndSending : copy.sending : dialogCopy.confirm}</button></div></footer>
+          <footer className="team-relay-direct-footer"><p><Lock size={13} /><span>{copy.attachmentUploadHint} {copy.sourceSessionPrivacy}</span></p><div><button type="button" className="team-relay-secondary" onClick={onClose} disabled={mountingMaterials}>{copy.cancel}</button><button type="submit" className="team-relay-primary" disabled={busy || mountingMaterials || sourcePending || attachmentOverflow || !draft.message.trim() || (!dialogCopy.acceptanceOptional && !draft.expectedNext.trim()) || ((type === 'assign' || type === 'handoff') && !receiverId)}><CheckCircle2 size={16} />{mountingMaterials ? attachmentCount ? copy.uploadingAndSending : copy.sending : dialogCopy.confirm}</button></div></footer>
         </form>}
       </section>
     </div>, document.body,
@@ -550,6 +551,7 @@ function WorkThread({ copy, task, meId, taskWorkspace, onBack, onDialog, onActio
     <footer className="team-relay-action-bar"><p><Lock size={15} />{copy.privacyNotice}</p><div>
       {task.category === 'pending' && task.currentActorId === meId && <>
         <button type="button" className="team-relay-secondary" onClick={() => onDialog('agent')}><BrainCircuit size={17} />{taskWorkspace?.agent_session ? copy.continueWithAgent : copy.useMyAgent}</button>
+        {canUpdateRelayProgress(task.raw, meId) && <button type="button" className="team-relay-secondary" onClick={() => onDialog('progress')}><ClipboardList size={17} />{copy.updateProgress}</button>}
         {task.raw.owner_id === meId && <button type="button" className="team-relay-secondary" onClick={() => onDialog('handoff')}><User size={17} />{copy.askForHelp}</button>}
         {task.raw.owner_id !== meId && <button type="button" className="team-relay-primary" onClick={() => onDialog('return')}><RotateCcw size={17} />{copy.returning}</button>}
         {task.raw.owner_id === meId && <button type="button" className="team-relay-primary" onClick={() => onDialog('deliver')}><Send size={17} />{copy.finalDelivery}</button>}
@@ -630,7 +632,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
     try {
       const artifactRole = kind === 'request_changes' ? 'input' : kind === 'final_deliver' || kind === 'accept' ? 'final' : kind === 'note' || kind === 'cancel' ? 'evidence' : 'intermediate';
       await bridge.teamRelay.createAction(selectedTask.id, { kind, recipient_id: recipientId, message, attachment_ids: attachmentIds, delivery: delivery || { schema_version: 1, artifact_role: artifactRole, expected_next: '', open_questions: '', git_references: [] }, expected_revision: selectedTask.revision });
-      const toastKey = { accept: 'accepted', return: 'returned', handoff: 'handedOff', final_deliver: 'delivered', request_changes: 'supplementRequested', cancel: 'cancelled' }[kind];
+      const toastKey = { accept: 'accepted', note: 'progressUpdated', return: 'returned', handoff: 'handedOff', final_deliver: 'delivered', request_changes: 'supplementRequested', cancel: 'cancelled' }[kind];
       setDialog(null); setToast(toastKey ? copy.toasts[toastKey] : '');
       return true;
     } catch {
@@ -641,6 +643,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const submitDialog = async payload => {
     try {
       if (dialog === 'assign') await bridge.teamRelay.createThread({ title: payload.title, assignee_id: payload.receiver, message: payload.message, attachment_ids: payload.attachment_ids, delivery: payload.delivery });
+      else if (dialog === 'progress' && !await runAction('note', payload.message, payload.attachment_ids, null, { ...payload.delivery, subtype: 'progress' })) return;
       else if (dialog === 'handoff') await runAction('handoff', payload.message, payload.attachment_ids, payload.receiver, payload.delivery);
       else if (dialog === 'return') await runAction('return', payload.message, payload.attachment_ids, null, payload.delivery);
       else if (dialog === 'deliver') await runAction('final_deliver', payload.message, payload.attachment_ids, null, payload.delivery);

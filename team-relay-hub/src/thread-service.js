@@ -274,7 +274,13 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
       await lockTeamMembershipChanges(client, locked.team_id);
       await requireMembership(client, locked.team_id, input.recipientId);
     }
-    const next = transition(locked, auth.principalId, input.kind, input.recipientId);
+    const next = transition(
+      locked,
+      auth.principalId,
+      input.kind,
+      input.recipientId,
+      input.delivery.subtype,
+    );
     const nextRevision = Number(locked.revision) + 1;
     const actionId = newId();
     const threadResult = await client.query(
