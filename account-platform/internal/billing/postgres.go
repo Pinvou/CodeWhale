@@ -189,6 +189,9 @@ func (r *PostgresRepository) Reserve(ctx context.Context, usageRequestID, wallet
 		return Hold{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockTransactionKey(ctx, tx, "usage.reserve", usageRequestID.String()); err != nil {
+		return Hold{}, err
+	}
 	existing, err := getHoldByUsage(ctx, tx, usageRequestID, true)
 	if err == nil {
 		if existing.WalletID != walletID || existing.MaxMicrocredits != maxAmount || !equalUUID(existing.PriceVersionID, priceVersionID) {
@@ -378,6 +381,15 @@ func (r *PostgresRepository) ExpireHolds(ctx context.Context, limit int) (int, e
 
 type queryable interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// lockTransactionKey serializes the first insert for an idempotency scope.
+// SELECT ... FOR UPDATE cannot lock a row that does not exist yet, so without
+// this transaction-scoped lock concurrent first requests can all pass the
+// lookup and then race on a unique constraint.
+func lockTransactionKey(ctx context.Context, tx pgx.Tx, scope, key string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, scope+"\x00"+key)
+	return err
 }
 
 func getWallet(ctx context.Context, database queryable, walletID uuid.UUID, lock bool) (Wallet, error) {

@@ -118,6 +118,9 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 		return Refund{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockTransactionKey(ctx, tx, "payment.refund", idempotencyKey); err != nil {
+		return Refund{}, false, err
+	}
 	refund, err := getRefundByIdempotency(ctx, tx, idempotencyKey, true)
 	if err == nil {
 		if refund.PaymentOrderID != orderID || refund.RequesterID != requesterID || refund.AmountFen != amountFen {

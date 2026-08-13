@@ -115,6 +115,9 @@ func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockTransactionKey(ctx, tx, "payment.create", idempotencyKey); err != nil {
+		return PaymentOrder{}, false, err
+	}
 	requestDigest := sha256.Sum256([]byte(requesterID.String() + "|" + walletID.String() + "|" + productID + "|" + channel))
 	requestHash := hex.EncodeToString(requestDigest[:])
 	var existingHash string

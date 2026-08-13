@@ -46,7 +46,8 @@ node scripts/account-platform.mjs verify
 node scripts/account-platform.mjs dev up
 node scripts/account-platform.mjs dev down
 node scripts/account-platform.mjs test integration
+node scripts/account-platform.mjs test e2e
 node scripts/account-platform.mjs test security
 ```
 
-Integration 使用独立 Compose project 并在结束后删除测试卷；不得指向开发或生产 project。真实 New API 和真实支付测试需要明确 opt-in，普通测试不读取真实凭据或访问生产服务。运维入口见 [`deploy/runbooks/`](deploy/runbooks/README.md)。
+Integration 使用独立 Compose project 并在结束后删除测试卷；不得指向开发或生产 project。`e2e` 进一步执行三种模拟支付渠道、并发幂等、Hold 结算、部分退款和对账旅程。两者都在每次运行时只在内存中生成 Compose 凭据，不会写入仓库。真实 New API 和真实支付测试需要明确 opt-in，普通测试不读取真实凭据或访问生产服务。运维入口见 [`deploy/runbooks/`](deploy/runbooks/README.md)。

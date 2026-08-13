@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -52,6 +53,28 @@ function commandAvailable(command, args = ['--version']) {
   return !result.error && result.status === 0;
 }
 
+function generatedComposeEnvironment() {
+  const secret = (bytes = 32) => randomBytes(bytes).toString('base64url');
+  return {
+    COMPOSE_PROJECT_NAME: `pinvou-account-platform-test-${process.pid}`,
+    ACCOUNT_PLATFORM_POSTGRES_PASSWORD: secret(),
+    ACCOUNT_DB_PASSWORD: secret(),
+    BILLING_DB_PASSWORD: secret(),
+    TOKEN_DB_PASSWORD: secret(),
+    PAYMENT_SIM_DB_PASSWORD: secret(),
+    KEYCLOAK_DB_PASSWORD: secret(),
+    KEYCLOAK_ADMIN_USERNAME: `pinvou-test-${randomBytes(8).toString('hex')}`,
+    KEYCLOAK_ADMIN_PASSWORD: secret(),
+    PAYMENT_SIM_HMAC_UNIONPAY: secret(),
+    PAYMENT_SIM_HMAC_ALIPAY: secret(),
+    PAYMENT_SIM_HMAC_WECHAT: secret(),
+    INTERNAL_SERVICE_TOKEN: secret(48),
+    PAYMENT_SIM_PAY_TOKEN_SECRET: secret(48),
+    TOKEN_LOCAL_KEK_BASE64: randomBytes(32).toString('base64'),
+    MOCK_NEWAPI_KEY: secret(48),
+  };
+}
+
 function ensureNodeModules() {
   if (!existsSync(path.join(platformRoot, 'node_modules'))) {
     throw new Error('account-platform dependencies are missing; run npm --prefix account-platform ci');
@@ -74,14 +97,16 @@ function compose(action) {
   run('docker', ['compose', '--env-file', composeEnv, '-f', composeFile, action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
 }
 
-function integration() {
+function composeTest(testFiles) {
   if (!commandAvailable('docker', ['version'])) throw new Error('Docker is required for integration tests');
-  const environment = { COMPOSE_PROJECT_NAME: 'pinvou-account-platform-test' };
+  const environment = generatedComposeEnvironment();
   const args = ['compose', '--env-file', `${composeEnv}.example`, '-f', composeFile];
   let failure;
   try {
     run('docker', [...args, 'up', '--build', '-d', '--wait'], { env: environment });
-    run(process.execPath, [path.join(platformRoot, 'test', 'integration', 'compose-smoke.mjs')]);
+    for (const testFile of testFiles) {
+      run(process.execPath, [path.join(platformRoot, 'test', 'integration', testFile)], { env: environment });
+    }
   } catch (error) {
     failure = error;
   } finally {
@@ -93,6 +118,14 @@ function integration() {
     }
   }
   if (failure) throw failure;
+}
+
+function integration() {
+  composeTest(['compose-smoke.mjs']);
+}
+
+function e2e() {
+  composeTest(['compose-smoke.mjs', 'compose-acceptance.mjs']);
 }
 
 function security() {
@@ -111,9 +144,10 @@ try {
     ensureNodeModules();
     runNpm(['test'], { cwd: platformRoot });
   } else if (scope === 'test' && action === 'integration') integration();
+  else if (scope === 'test' && action === 'e2e') e2e();
   else if (scope === 'test' && action === 'security') security();
   else {
-    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract|integration|security>');
+    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract|integration|e2e|security>');
   }
 } catch (error) {
   console.error(`[account-platform] ${error.message}`);
