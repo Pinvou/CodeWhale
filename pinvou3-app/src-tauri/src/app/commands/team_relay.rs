@@ -58,7 +58,14 @@ pub async fn team_relay_bootstrap(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelaySnapshot, String> {
     let snapshot = manager.bootstrap().await?;
-    manager.start_events(app)?;
+    manager.start_events(
+        app,
+        &snapshot
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
     Ok(snapshot)
 }
 
@@ -77,7 +84,14 @@ pub async fn team_relay_create_team(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelaySnapshot, String> {
     let snapshot = manager.create_team(&name).await?;
-    manager.start_events(app)?;
+    manager.start_events(
+        app,
+        &snapshot
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
     Ok(snapshot)
 }
 
@@ -88,7 +102,14 @@ pub async fn team_relay_join_team(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelaySnapshot, String> {
     let snapshot = manager.join_team(&join_code).await?;
-    manager.start_events(app)?;
+    manager.start_events(
+        app,
+        &snapshot
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
     Ok(snapshot)
 }
 
@@ -99,7 +120,14 @@ pub async fn team_relay_switch_team(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelaySnapshot, String> {
     let snapshot = manager.switch_team(&team_id).await?;
-    manager.start_events(app)?;
+    manager.start_events(
+        app,
+        &snapshot
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
     Ok(snapshot)
 }
 
@@ -179,9 +207,12 @@ pub async fn team_relay_upload_attachment(
     app: AppHandle,
     path: PathBuf,
     upload_id: String,
+    team_id: String,
     manager: State<'_, TeamRelayManager>,
 ) -> Result<Attachment, String> {
-    manager.upload_attachment(app, &path, &upload_id).await
+    manager
+        .upload_attachment(app, &path, &upload_id, &team_id)
+        .await
 }
 
 #[tauri::command]
@@ -198,9 +229,10 @@ pub async fn team_relay_download_attachment(
 #[tauri::command]
 pub fn team_relay_task_workspace_status(
     thread_id: String,
+    team_id: Option<String>,
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
-    manager.task_workspace_status(&thread_id)
+    manager.task_workspace_status(&thread_id, team_id.as_deref())
 }
 
 #[tauri::command]
@@ -215,18 +247,20 @@ pub async fn team_relay_prepare_task_workspace(
 pub fn team_relay_reveal_prepared_material(
     thread_id: String,
     attachment_id: String,
+    team_id: Option<String>,
     manager: State<'_, TeamRelayManager>,
 ) -> Result<(), String> {
-    manager.reveal_prepared_material(&thread_id, &attachment_id)
+    manager.reveal_prepared_material(&thread_id, &attachment_id, team_id.as_deref())
 }
 
 #[tauri::command]
 pub fn team_relay_set_task_agent_session(
     thread_id: String,
     input: SetTeamRelayAgentSessionInput,
+    team_id: Option<String>,
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
-    manager.set_task_agent_session(&thread_id, input)
+    manager.set_task_agent_session(&thread_id, input, team_id.as_deref())
 }
 
 #[tauri::command]

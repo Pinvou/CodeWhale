@@ -6,7 +6,7 @@ use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{future::join_all, StreamExt};
 use reqwest::{multipart, Client, Response, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -50,7 +50,7 @@ pub struct TeamRelayManager {
 
 #[derive(Debug)]
 struct TeamRelayEventTask {
-    team_id: String,
+    scope_key: String,
     handle: tauri::async_runtime::JoinHandle<()>,
 }
 
@@ -290,30 +290,43 @@ impl TeamRelayManager {
             .await
             .map_err(network_error)?;
         let teams: ListTeamsResponse = decode(teams_response).await?;
-        let response = self
-            .client
-            .get(endpoint(&settings.hub_url, "v1/bootstrap"))
-            .bearer_auth(&token)
-            .query(&[("team_id", settings.team_id.as_str())])
-            .send()
+        let bootstrap_requests = teams.teams.iter().map(|team| async {
+            let response = self
+                .client
+                .get(endpoint(&settings.hub_url, "v1/bootstrap"))
+                .bearer_auth(token)
+                .query(&[("team_id", team.id.as_str())])
+                .send()
+                .await
+                .map_err(network_error)?;
+            decode::<BootstrapResponse>(response).await
+        });
+        let team_bootstraps = join_all(bootstrap_requests)
             .await
-            .map_err(network_error)?;
-        let bootstrap: BootstrapResponse = decode(response).await?;
-        if bootstrap.protocol_version != "0.1" {
-            return Err(format!(
-                "protocol_version_unsupported: {}",
-                bootstrap.protocol_version
-            ));
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        for bootstrap in &team_bootstraps {
+            if bootstrap.protocol_version != "0.1" {
+                return Err(format!(
+                    "protocol_version_unsupported: {}",
+                    bootstrap.protocol_version
+                ));
+            }
         }
-
-        let attachment_ids: HashSet<String> = bootstrap
-            .threads
+        let bootstrap = team_bootstraps
             .iter()
+            .find(|item| item.team.id == settings.team_id)
+            .or_else(|| team_bootstraps.first())
+            .cloned()
+            .ok_or_else(|| "team_relay_team_required: create or join a team first".to_string())?;
+
+        let attachment_ids: HashSet<String> = team_bootstraps
+            .iter()
+            .flat_map(|item| item.threads.iter())
             .flat_map(|thread| thread.actions.iter())
             .flat_map(|action| action.attachment_ids.iter().cloned())
             .collect();
-        let mut attachments = HashMap::new();
-        for attachment_id in attachment_ids {
+        let attachment_requests = attachment_ids.into_iter().map(|attachment_id| async move {
             let response = self
                 .client
                 .get(endpoint(
@@ -324,11 +337,16 @@ impl TeamRelayManager {
                 .send()
                 .await
                 .map_err(network_error)?;
-            let attachment: Attachment = decode(response).await?;
+            decode::<Attachment>(response).await
+        });
+        let mut attachments = HashMap::new();
+        for attachment in join_all(attachment_requests).await {
+            let attachment = attachment?;
             attachments.insert(attachment.id.clone(), attachment);
         }
         Ok(TeamRelaySnapshot {
             bootstrap,
+            team_bootstraps,
             attachments,
             teams: teams.teams,
         })
@@ -488,7 +506,7 @@ impl TeamRelayManager {
             .post(endpoint(&settings.hub_url, "v1/threads"))
             .bearer_auth(token)
             .json(&json!({
-                "team_id": settings.team_id,
+                "team_id": input.team_id,
                 "title": input.title,
                 "assignee_id": input.assignee_id,
                 "message": input.message,
@@ -555,6 +573,7 @@ impl TeamRelayManager {
         app: AppHandle,
         path: &Path,
         upload_id: &str,
+        team_id: &str,
     ) -> Result<Attachment, String> {
         let metadata =
             std::fs::metadata(path).map_err(|error| format!("attachment_unreadable: {error}"))?;
@@ -591,7 +610,7 @@ impl TeamRelayManager {
         let body = reqwest::Body::wrap_stream(stream);
         let (settings, token) = self.configured()?;
         let form = multipart::Form::new()
-            .text("team_id", settings.team_id)
+            .text("team_id", team_id.to_string())
             .part(
                 "file",
                 multipart::Part::stream_with_length(body, total_bytes)
@@ -722,13 +741,18 @@ impl TeamRelayManager {
     pub fn task_workspace_status(
         &self,
         thread_id: &str,
+        team_id: Option<&str>,
     ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
         validate_local_identifier("thread_id", thread_id)?;
         let settings = self
             .load_settings()?
             .ok_or_else(|| "team_relay_not_configured: join a team first".to_string())?;
-        let root = self.task_workspace_root(&settings, thread_id);
-        let manifest = self.load_task_workspace_manifest(&root, &settings.team_id, thread_id)?;
+        let team_id = team_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&settings.team_id);
+        validate_local_identifier("team_id", team_id)?;
+        let root = self.task_workspace_root(team_id, thread_id);
+        let manifest = self.load_task_workspace_manifest(&root, team_id, thread_id)?;
         let materials_dir = root.join("materials");
         let materials = manifest
             .materials
@@ -755,20 +779,17 @@ impl TeamRelayManager {
         validate_local_identifier("thread_id", thread_id)?;
         let snapshot = self.bootstrap().await?;
         let detail = snapshot
-            .bootstrap
-            .threads
+            .team_bootstraps
             .iter()
+            .flat_map(|bootstrap| bootstrap.threads.iter())
             .find(|detail| detail.thread.id == thread_id)
             .ok_or_else(|| "thread_not_found: the work item is not available".to_string())?;
-        let settings = self
-            .load_settings()?
-            .ok_or_else(|| "team_relay_not_configured: join a team first".to_string())?;
-        let root = self.task_workspace_root(&settings, thread_id);
+        let team_id = detail.thread.team_id.as_str();
+        let root = self.task_workspace_root(team_id, thread_id);
         let materials_dir = root.join("materials");
         std::fs::create_dir_all(&materials_dir)
             .map_err(|error| format!("team_relay_workspace_write_failed: {error}"))?;
-        let mut manifest =
-            self.load_task_workspace_manifest(&root, &settings.team_id, thread_id)?;
+        let mut manifest = self.load_task_workspace_manifest(&root, team_id, thread_id)?;
         let mut actions = detail.actions.iter().collect::<Vec<_>>();
         actions.sort_by_key(|action| action.sequence);
         let mut seen = HashSet::new();
@@ -860,14 +881,19 @@ impl TeamRelayManager {
         &self,
         thread_id: &str,
         attachment_id: &str,
+        team_id: Option<&str>,
     ) -> Result<(), String> {
         validate_local_identifier("thread_id", thread_id)?;
         validate_local_identifier("attachment_id", attachment_id)?;
         let settings = self
             .load_settings()?
             .ok_or_else(|| "team_relay_not_configured: join a team first".to_string())?;
-        let root = self.task_workspace_root(&settings, thread_id);
-        let manifest = self.load_task_workspace_manifest(&root, &settings.team_id, thread_id)?;
+        let team_id = team_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&settings.team_id);
+        validate_local_identifier("team_id", team_id)?;
+        let root = self.task_workspace_root(team_id, thread_id);
+        let manifest = self.load_task_workspace_manifest(&root, team_id, thread_id)?;
         let material = manifest
             .materials
             .iter()
@@ -893,6 +919,7 @@ impl TeamRelayManager {
         &self,
         thread_id: &str,
         input: SetTeamRelayAgentSessionInput,
+        team_id: Option<&str>,
     ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
         validate_local_identifier("thread_id", thread_id)?;
         validate_local_identifier("session_id", &input.session_id)?;
@@ -921,9 +948,12 @@ impl TeamRelayManager {
         let settings = self
             .load_settings()?
             .ok_or_else(|| "team_relay_not_configured: join a team first".to_string())?;
-        let root = self.task_workspace_root(&settings, thread_id);
-        let mut manifest =
-            self.load_task_workspace_manifest(&root, &settings.team_id, thread_id)?;
+        let team_id = team_id
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&settings.team_id);
+        validate_local_identifier("team_id", team_id)?;
+        let root = self.task_workspace_root(team_id, thread_id);
+        let mut manifest = self.load_task_workspace_manifest(&root, team_id, thread_id)?;
         manifest.agent_session = Some(TeamRelayAgentSessionLink {
             kind: input.kind,
             session_id: input.session_id,
@@ -934,18 +964,21 @@ impl TeamRelayManager {
             linked_at: Utc::now().to_rfc3339(),
         });
         self.save_task_workspace_manifest(&root, &manifest)?;
-        self.task_workspace_status(thread_id)
+        self.task_workspace_status(thread_id, Some(team_id))
     }
 
-    pub fn start_events(&self, app: AppHandle) -> Result<(), String> {
+    pub fn start_events(&self, app: AppHandle, team_ids: &[String]) -> Result<(), String> {
         let (settings, token) = self.configured()?;
+        let mut subscribed_team_ids = team_ids.to_vec();
+        subscribed_team_ids.sort();
+        let scope_key = format!("{}:{}", settings.hub_url, subscribed_team_ids.join(","));
         let mut task = self
             .event_task
             .lock()
             .map_err(|_| "team_relay_runtime_unavailable".to_string())?;
         if task
             .as_ref()
-            .is_some_and(|active| active.team_id == settings.team_id)
+            .is_some_and(|active| active.scope_key == scope_key)
         {
             return Ok(());
         }
@@ -953,13 +986,11 @@ impl TeamRelayManager {
             active.handle.abort();
         }
         let client = self.event_client.clone();
-        let team_id = settings.team_id.clone();
         let handle = tauri::async_runtime::spawn(async move {
             loop {
                 let request = client
                     .get(endpoint(&settings.hub_url, "v1/events"))
                     .bearer_auth(&token)
-                    .query(&[("team_id", settings.team_id.as_str())])
                     .send()
                     .await;
                 if let Ok(response) = request {
@@ -1001,7 +1032,7 @@ impl TeamRelayManager {
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
         });
-        *task = Some(TeamRelayEventTask { team_id, handle });
+        *task = Some(TeamRelayEventTask { scope_key, handle });
         Ok(())
     }
 
@@ -1066,12 +1097,12 @@ impl TeamRelayManager {
             .map_err(|error| format!("team_relay_settings_write_failed: {error}"))
     }
 
-    fn task_workspace_root(&self, settings: &TeamRelaySettings, thread_id: &str) -> PathBuf {
+    fn task_workspace_root(&self, team_id: &str, thread_id: &str) -> PathBuf {
         self.settings_path
             .parent()
             .expect("team relay settings parent")
             .join("workspaces")
-            .join(path_fingerprint(&settings.team_id))
+            .join(path_fingerprint(team_id))
             .join(path_fingerprint(thread_id))
     }
 
