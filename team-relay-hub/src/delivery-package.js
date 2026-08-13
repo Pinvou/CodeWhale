@@ -6,7 +6,7 @@ const ARTIFACT_ROLES = new Set(["input", "intermediate", "final", "evidence"]);
 function defaultArtifactRole(kind) {
   if (kind === "assign" || kind === "request_changes") return "input";
   if (kind === "final_deliver" || kind === "accept") return "final";
-  if (kind === "note" || kind === "cancel") return "evidence";
+  if (kind === "note" || kind === "cancel" || kind.endsWith("_transfer")) return "evidence";
   return "intermediate";
 }
 

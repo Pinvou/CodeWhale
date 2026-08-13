@@ -247,6 +247,8 @@
 }
 .team-relay-card-status em.tone-receive { background: #fff0d5; color: #a95e00; }
 .team-relay-card-status em.tone-pending { background: var(--relay-blue-soft); color: var(--relay-blue); }
+.team-relay-card-status em.tone-offer,
+.team-relay-card-status em.tone-reroute { background: #fff0d5; color: #a95e00; }
 
 .team-relay-avatar {
   align-items: center;
@@ -342,6 +344,8 @@
 .team-relay-banner strong { display: block; font-size: 15px; }
 .team-relay-banner p { color: var(--relay-text); font-size: 13px; margin: 5px 0 0; }
 .team-relay-banner.tone-ended { background: color-mix(in srgb, #2ea477 13%, var(--relay-panel)); color: #2ea477; }
+.team-relay-banner.tone-offer,
+.team-relay-banner.tone-reroute { background: color-mix(in srgb, var(--relay-orange) 14%, var(--relay-panel)); color: var(--relay-orange); }
 .team-relay-accepted-package { align-items: flex-start; background: color-mix(in srgb, #2ea477 9%, var(--relay-panel)); border: 1px solid color-mix(in srgb, #2ea477 24%, var(--relay-border)); border-radius: 9px; color: #258361; display: flex; flex: 0 0 auto; gap: 9px; margin: 0 24px 10px; padding: 10px 12px; }
 .team-relay-accepted-package p { color: var(--relay-text); font-size: 12px; margin: 4px 0; }
 .team-relay-accepted-package small { color: var(--relay-muted); }
@@ -447,6 +451,8 @@
 
 .team-relay-cancel-form { padding: 22px; }
 .team-relay-cancel-form label > span { display: block; font-size: 13px; font-weight: 650; margin-bottom: 8px; }
+.team-relay-cancel-form label + label { display: block; margin-top: 16px; }
+.team-relay-cancel-form .team-relay-select { width: 100%; }
 .team-relay-cancel-form textarea { min-height: 132px; padding: 11px 12px; resize: vertical; }
 .team-relay-cancel-form > p { align-items: center; color: var(--relay-muted); display: flex; font-size: 11px; gap: 6px; line-height: 1.5; margin: 12px 0 20px; }
 .team-relay-cancel-form footer { display: flex; gap: 9px; justify-content: flex-end; }

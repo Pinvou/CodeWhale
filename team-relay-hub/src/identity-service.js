@@ -1,4 +1,4 @@
-import { authenticate, requireMembership } from "./auth.js";
+import { authenticate, CONFIRMED_TRANSFER_CAPABILITY_DAYS, requireMembership } from "./auth.js";
 import {
   decryptJoinCode,
   encryptJoinCode,
@@ -482,14 +482,19 @@ export async function listTeamMembers(pool, token, rawTeamId) {
   const auth = await authenticate(pool, token);
   await requireMembership(pool, teamId, auth.principalId);
   const result = await pool.query(
-    `SELECT p.id, p.email, p.display_name, p.created_at, m.role, max(d.last_seen_at) AS last_seen_at
+    `SELECT p.id, p.email, p.display_name, p.created_at, m.role,
+            max(d.last_seen_at) AS last_seen_at,
+            coalesce(bool_or(
+              d.relay_protocol_version = '0.2'
+              AND d.relay_protocol_seen_at >= now() - ($2 * interval '1 day')
+            ), false) AS confirmed_transfers_supported
        FROM memberships m
        JOIN principals p ON p.id = m.principal_id
        LEFT JOIN devices d ON d.principal_id = p.id AND d.revoked_at IS NULL
       WHERE m.team_id = $1 AND m.removed_at IS NULL AND p.disabled_at IS NULL
       GROUP BY p.id, p.email, p.display_name, p.created_at, m.role
       ORDER BY p.created_at, p.id`,
-    [teamId],
+    [teamId, CONFIRMED_TRANSFER_CAPABILITY_DAYS],
   );
   return { members: result.rows.map(row => ({ ...row, email: undefined, email_hint: emailHint(row.email) })) };
 }
@@ -693,7 +698,8 @@ export async function removeTeamMember(pool, token, rawTeamId, rawPrincipalId, e
     const openWork = await client.query(
       `SELECT id FROM work_threads
         WHERE team_id = $1 AND phase NOT IN ('closed', 'cancelled')
-          AND $2 IN (initiator_id, owner_id, current_actor_id, return_to_id, final_recipient_id)
+          AND $2 IN (initiator_id, owner_id, current_actor_id, return_to_id, final_recipient_id,
+                     pending_sender_id, pending_recipient_id)
         LIMIT 1`,
       [teamId, principalId],
     );

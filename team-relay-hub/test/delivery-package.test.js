@@ -7,6 +7,7 @@ test("missing delivery package gets an action-specific compatible default", () =
   assert.equal(normalizeDelivery(undefined, "return").artifact_role, "intermediate");
   assert.equal(normalizeDelivery(undefined, "final_deliver").artifact_role, "final");
   assert.equal(normalizeDelivery(undefined, "cancel").artifact_role, "evidence");
+  assert.equal(normalizeDelivery(undefined, "decline_transfer").artifact_role, "evidence");
 });
 
 test("Git delivery references are normalized without accessing the repository", () => {

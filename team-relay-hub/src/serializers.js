@@ -43,6 +43,9 @@ export function threadFromRow(row) {
     current_actor_id: row.current_actor_id,
     return_to_id: row.return_to_id,
     final_recipient_id: row.final_recipient_id,
+    pending_transfer_kind: row.pending_transfer_kind || null,
+    pending_sender_id: row.pending_sender_id || null,
+    pending_recipient_id: row.pending_recipient_id || null,
     phase: row.phase,
     revision: Number(row.revision),
     created_at: row.created_at,
@@ -81,6 +84,7 @@ export function actionFromRow(row, attachmentIds = []) {
     message: row.message,
     base_revision: Number(row.base_revision),
     idempotency_key: row.idempotency_key,
+    transfer_mode: row.transfer_mode || null,
     attachment_ids: attachmentIds,
     delivery: row.delivery || {
       schema_version: 1,

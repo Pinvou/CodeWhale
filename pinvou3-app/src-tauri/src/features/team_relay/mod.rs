@@ -7,7 +7,10 @@ use crate::platform::credential_store::{
 };
 use chrono::Utc;
 use futures_util::{future::join_all, StreamExt};
-use reqwest::{multipart, Client, Response, StatusCode, Url};
+use reqwest::{
+    header::{HeaderMap, HeaderValue},
+    multipart, Client, Response, StatusCode, Url,
+};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -56,10 +59,16 @@ struct TeamRelayEventTask {
 
 impl TeamRelayManager {
     pub fn new() -> Result<Self, String> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-pinvou-team-relay-protocol",
+            HeaderValue::from_static("0.2"),
+        );
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(45))
             .user_agent(concat!("Pinvou-Team-Relay/", env!("CARGO_PKG_VERSION")))
+            .default_headers(headers.clone())
             .build()
             .map_err(|error| format!("team_relay_client_unavailable: {error}"))?;
         // SSE is an intentionally long-lived response. A total request timeout would
@@ -67,6 +76,7 @@ impl TeamRelayManager {
         let event_client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .user_agent(concat!("Pinvou-Team-Relay/", env!("CARGO_PKG_VERSION")))
+            .default_headers(headers)
             .build()
             .map_err(|error| format!("team_relay_event_client_unavailable: {error}"))?;
         Ok(Self {
@@ -306,7 +316,7 @@ impl TeamRelayManager {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         for bootstrap in &team_bootstraps {
-            if bootstrap.protocol_version != "0.1" {
+            if !matches!(bootstrap.protocol_version.as_str(), "0.1" | "0.2") {
                 return Err(format!(
                     "protocol_version_unsupported: {}",
                     bootstrap.protocol_version
@@ -1041,7 +1051,7 @@ impl TeamRelayManager {
                                 let event =
                                     frame.lines().find_map(|line| line.strip_prefix("event: "));
                                 if let Some(name) = event.filter(|name| *name != "ready") {
-                                    if name != "thread.read.changed" {
+                                    if name == "thread.attention" {
                                         crate::platform::notifications::notify_team_relay_changed(
                                             &app,
                                         );

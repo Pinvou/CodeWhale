@@ -19,13 +19,70 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const database = await pool.query("SELECT current_database() AS name");
   assert.match(database.rows[0].name, /_test$/, "integration test requires an isolated *_test database");
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-  for (const migrationName of ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql"]) {
+  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", "0009_confirmed_transfers.sql"];
+  async function applyMigration(migrationName) {
     const migration = await readFile(
       new URL(`../../docs/team-relay/migrations/${migrationName}`, import.meta.url),
       "utf8",
     );
     await pool.query(migration);
   }
+  for (const migrationName of migrationNames.slice(0, -1)) await applyMigration(migrationName);
+  const migrationPrincipalA = randomUUID();
+  const migrationPrincipalB = randomUUID();
+  const migrationTeam = randomUUID();
+  const migrationThread = randomUUID();
+  await pool.query(
+    "INSERT INTO principals (id, email, display_name) VALUES ($1, $2, 'Migration A'), ($3, $4, 'Migration B')",
+    [migrationPrincipalA, "migration-a@example.com", migrationPrincipalB, "migration-b@example.com"],
+  );
+  await pool.query(
+    "INSERT INTO devices (id, principal_id, name, token_hash) VALUES ($1, $2, 'Legacy device', $3)",
+    [randomUUID(), migrationPrincipalA, createHash("sha256").update("migration-device").digest("hex")],
+  );
+  await pool.query(
+    "INSERT INTO teams (id, name, created_by) VALUES ($1, 'Migration team', $2)",
+    [migrationTeam, migrationPrincipalA],
+  );
+  await pool.query(
+    "INSERT INTO memberships (team_id, principal_id, role) VALUES ($1, $2, 'owner'), ($1, $3, 'member')",
+    [migrationTeam, migrationPrincipalA, migrationPrincipalB],
+  );
+  await pool.query(
+    `INSERT INTO work_threads (id, team_id, title, initiator_id, owner_id, current_actor_id, return_to_id, final_recipient_id, phase, revision)
+     VALUES ($1, $2, 'Existing work', $3, $4, $4, $3, $3, 'active', 1)`,
+    [migrationThread, migrationTeam, migrationPrincipalA, migrationPrincipalB],
+  );
+  await pool.query(
+    "INSERT INTO thread_participants (thread_id, principal_id, first_action_sequence) VALUES ($1, $2, 1), ($1, $3, 1)",
+    [migrationThread, migrationPrincipalA, migrationPrincipalB],
+  );
+  await pool.query(
+    `INSERT INTO relay_actions (id, thread_id, sequence, kind, actor_id, recipient_id, return_to_id, message, base_revision, idempotency_key, request_hash)
+     VALUES ($1, $2, 1, 'assign', $3, $4, $3, 'Existing assignment', 0, $5, $6)`,
+    [
+      randomUUID(),
+      migrationThread,
+      migrationPrincipalA,
+      migrationPrincipalB,
+      randomUUID(),
+      createHash("sha256").update("migration-request").digest("hex"),
+    ],
+  );
+  await applyMigration(migrationNames.at(-1));
+  const migratedCompatibility = await pool.query(
+    `SELECT a.transfer_mode, d.relay_protocol_version, tp.material_access_at
+       FROM relay_actions a
+       JOIN devices d ON d.principal_id = a.actor_id
+       JOIN thread_participants tp ON tp.thread_id = a.thread_id AND tp.principal_id = a.recipient_id
+      WHERE a.thread_id = $1`,
+    [migrationThread],
+  );
+  assert.equal(migratedCompatibility.rows[0].transfer_mode, "direct_legacy");
+  assert.equal(migratedCompatibility.rows[0].relay_protocol_version, "0.1");
+  assert.ok(migratedCompatibility.rows[0].material_access_at, "existing participants keep material access");
+  await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
+  for (const migrationName of migrationNames) await applyMigration(migrationName);
   const attachmentDir = await mkdtemp(join(tmpdir(), "pinvou-team-relay-attachments-"));
 
   const config = {
@@ -110,6 +167,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     return api(`/v1/threads/${threadId}/actions`, {
       method: "POST",
       token: member.device_token,
+      headers: options.headers || {},
       body: {
         kind,
         message: options.message || "",
@@ -913,6 +971,300 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(accepted.value.thread.revision, 8);
   assert.equal(accepted.value.thread.current_actor_id, null);
 
+  const protocol02 = { "X-Pinvou-Team-Relay-Protocol": "0.2" };
+  for (const member of [a, b, c]) {
+    const capabilityBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+      token: member.device_token,
+      headers: protocol02,
+    });
+    assert.equal(capabilityBootstrap.status, 200);
+  }
+  const capabilityView = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: a.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    capabilityView.value.members.find(member => member.id === b.principal.id).confirmed_transfers_supported,
+    true,
+  );
+  const legacyRecipient = await joinTeam(activePassword.value.join_password, "Legacy recipient");
+  const directForLegacy = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: {
+      team_id: initial.team_id,
+      title: "Mixed version assignment",
+      assignee_id: legacyRecipient.principal.id,
+      message: "This must not wait for an unsupported client.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(directForLegacy.status, 201);
+  assert.equal(directForLegacy.value.transfer_mode, "direct_legacy");
+  assert.equal(directForLegacy.value.action.transfer_mode, "direct_legacy");
+  assert.equal(directForLegacy.value.thread.phase, "active");
+  assert.equal(directForLegacy.value.thread.owner_id, legacyRecipient.principal.id);
+  const cancelDirectLegacy = await action(a, directForLegacy.value.thread.id, "cancel", 1, {
+    headers: protocol02,
+    message: "Mixed version behavior verified.",
+  });
+  assert.equal(cancelDirectLegacy.status, 201);
+
+  const confirmedCreateKey = randomUUID();
+  const confirmedCreateBody = {
+    team_id: initial.team_id,
+    title: "Confirm each transfer",
+    assignee_id: b.principal.id,
+    message: "Accept before material access moves.",
+    attachment_ids: [ownerOnlyUpload.value.id],
+    idempotency_key: confirmedCreateKey,
+  };
+  const confirmed = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: confirmedCreateBody,
+  });
+  assert.equal(confirmed.status, 201);
+  assert.equal(confirmed.value.transfer_mode, "confirmed");
+  assert.equal(confirmed.value.action.transfer_mode, "confirmed");
+  assert.equal(confirmed.value.thread.phase, "pending_transfer");
+  assert.equal(confirmed.value.thread.owner_id, a.principal.id);
+  assert.equal(confirmed.value.thread.current_actor_id, a.principal.id);
+  assert.equal(confirmed.value.thread.pending_transfer_kind, "assignment");
+  assert.equal(confirmed.value.thread.pending_recipient_id, b.principal.id);
+  const confirmedThreadId = confirmed.value.thread.id;
+  const confirmedReplay = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: confirmedCreateBody,
+  });
+  assert.equal(confirmedReplay.status, 200);
+  assert.equal(confirmedReplay.value.replayed, true);
+  assert.equal(confirmedReplay.value.thread.id, confirmedThreadId);
+  const crossProtocolReplay = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    body: confirmedCreateBody,
+  });
+  assert.equal(crossProtocolReplay.status, 409);
+  assert.equal(crossProtocolReplay.value.error.code, "idempotency_key_reused");
+
+  const bPendingBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+    headers: protocol02,
+  });
+  const bPending = bPendingBootstrap.value.threads.find((detail) => detail.thread.id === confirmedThreadId);
+  assert.deepEqual(bPending.actions[0].attachment_ids, [], "a pending recipient only receives the task summary");
+  const bPendingAttachment = await api(`/v1/attachments/${ownerOnlyUpload.value.id}`, { token: b.device_token });
+  assert.equal(bPendingAttachment.status, 403);
+
+  const reroutedToC = await action(a, confirmedThreadId, "reroute_transfer", 1, {
+    headers: protocol02,
+    recipientId: c.principal.id,
+    message: "C is a better first recipient.",
+  });
+  assert.equal(reroutedToC.status, 201);
+  assert.equal(reroutedToC.value.thread.pending_recipient_id, c.principal.id);
+  const bAfterReroute = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    bAfterReroute.value.threads.some(detail => detail.thread.id === confirmedThreadId),
+    false,
+    "an unaccepted candidate loses visibility after rerouting",
+  );
+  const staleRecipientAccept = await action(b, confirmedThreadId, "accept_transfer", 2, {
+    headers: protocol02,
+    message: "Too late.",
+  });
+  assert.equal(staleRecipientAccept.status, 403);
+  const cDeclined = await action(c, confirmedThreadId, "decline_transfer", 2, {
+    headers: protocol02,
+    message: "This belongs with B.",
+  });
+  assert.equal(cDeclined.status, 201);
+  assert.equal(cDeclined.value.thread.phase, "awaiting_reassignment");
+  const cAfterDecline = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: c.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    cAfterDecline.value.threads.some(detail => detail.thread.id === confirmedThreadId),
+    false,
+    "an unaccepted candidate loses visibility after declining",
+  );
+
+  const reroutedToB = await action(a, confirmedThreadId, "reroute_transfer", 3, {
+    headers: protocol02,
+    recipientId: b.principal.id,
+    message: "Returning to the original owner.",
+  });
+  assert.equal(reroutedToB.status, 201);
+  const bAccepted = await action(b, confirmedThreadId, "accept_transfer", 4, {
+    headers: protocol02,
+    message: "Accepted.",
+  });
+  assert.equal(bAccepted.status, 201);
+  assert.equal(bAccepted.value.thread.phase, "active");
+  assert.equal(bAccepted.value.thread.owner_id, b.principal.id);
+  const bAcceptedAttachment = await api(`/v1/attachments/${ownerOnlyUpload.value.id}`, { token: b.device_token });
+  assert.equal(bAcceptedAttachment.status, 200, "acceptance grants access to all immutable task materials");
+
+  const directLegacyCollaboration = await action(b, confirmedThreadId, "handoff", 5, {
+    headers: protocol02,
+    recipientId: legacyRecipient.principal.id,
+    message: "Collaborate from an older client.",
+  });
+  assert.equal(directLegacyCollaboration.status, 201);
+  assert.equal(directLegacyCollaboration.value.transfer_mode, "direct_legacy");
+  assert.equal(directLegacyCollaboration.value.thread.phase, "active");
+  assert.equal(directLegacyCollaboration.value.thread.current_actor_id, legacyRecipient.principal.id);
+  const legacyCollaborationReturn = await action(
+    legacyRecipient,
+    confirmedThreadId,
+    "return",
+    6,
+    { message: "Returning from the legacy client." },
+  );
+  assert.equal(legacyCollaborationReturn.status, 201);
+  assert.equal(legacyCollaborationReturn.value.thread.current_actor_id, b.principal.id);
+
+  const firstCollaborationInvite = await action(b, confirmedThreadId, "handoff", 7, {
+    headers: protocol02,
+    recipientId: c.principal.id,
+    message: "Please collaborate.",
+  });
+  assert.equal(firstCollaborationInvite.status, 201);
+  assert.equal(firstCollaborationInvite.value.thread.phase, "pending_transfer");
+  assert.equal(firstCollaborationInvite.value.thread.current_actor_id, b.principal.id, "the baton stays with the owner before acceptance");
+  const withdrawnCollaboration = await action(b, confirmedThreadId, "withdraw_transfer", 8, {
+    headers: protocol02,
+    message: "The scope changed.",
+  });
+  assert.equal(withdrawnCollaboration.status, 201);
+  assert.equal(withdrawnCollaboration.value.thread.phase, "active");
+  assert.equal(withdrawnCollaboration.value.thread.current_actor_id, b.principal.id);
+  const cAfterWithdrawal = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: c.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    cAfterWithdrawal.value.threads.some(detail => detail.thread.id === confirmedThreadId),
+    false,
+    "a first-time collaborator loses visibility when the invitation is withdrawn",
+  );
+  const secondCollaborationInvite = await action(b, confirmedThreadId, "handoff", 9, {
+    headers: protocol02,
+    recipientId: c.principal.id,
+    message: "The updated scope is ready.",
+  });
+  assert.equal(secondCollaborationInvite.status, 201);
+  const cAcceptedRelay = await action(c, confirmedThreadId, "accept_transfer", 10, {
+    headers: protocol02,
+    message: "I can take this relay.",
+  });
+  assert.equal(cAcceptedRelay.status, 201);
+  assert.equal(cAcceptedRelay.value.thread.owner_id, b.principal.id);
+  assert.equal(cAcceptedRelay.value.thread.current_actor_id, c.principal.id);
+  const confirmedReturned = await action(c, confirmedThreadId, "return", 11, {
+    headers: protocol02,
+    message: "Returning to the previous relay owner.",
+  });
+  assert.equal(confirmedReturned.status, 201);
+  assert.equal(confirmedReturned.value.thread.current_actor_id, b.principal.id);
+  const confirmedCancelled = await action(a, confirmedThreadId, "cancel", 12, {
+    headers: protocol02,
+    message: "Confirmed transfer test complete.",
+  });
+  assert.equal(confirmedCancelled.status, 201);
+  assert.equal(confirmedCancelled.value.thread.phase, "cancelled");
+
+  const pendingForLegacyReroute = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: {
+      team_id: initial.team_id,
+      title: "Reroute to a legacy recipient",
+      assignee_id: b.principal.id,
+      message: "Start with a confirmation-capable member.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(pendingForLegacyReroute.value.transfer_mode, "confirmed");
+  const directLegacyReroute = await action(
+    a,
+    pendingForLegacyReroute.value.thread.id,
+    "reroute_transfer",
+    1,
+    {
+      headers: protocol02,
+      recipientId: legacyRecipient.principal.id,
+      message: "The legacy recipient should not be blocked on confirmation.",
+    },
+  );
+  assert.equal(directLegacyReroute.status, 201);
+  assert.equal(directLegacyReroute.value.transfer_mode, "direct_legacy");
+  assert.equal(directLegacyReroute.value.thread.phase, "active");
+  assert.equal(directLegacyReroute.value.thread.owner_id, legacyRecipient.principal.id);
+  const cancelLegacyReroute = await action(
+    a,
+    pendingForLegacyReroute.value.thread.id,
+    "cancel",
+    2,
+    { headers: protocol02, message: "Legacy reroute behavior verified." },
+  );
+  assert.equal(cancelLegacyReroute.status, 201);
+
+  await pool.query(
+    "UPDATE devices SET relay_protocol_seen_at = now() - interval '31 days' WHERE principal_id = $1",
+    [b.principal.id],
+  );
+  const expiredCapabilityView = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: a.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    expiredCapabilityView.value.members.find(member => member.id === b.principal.id).confirmed_transfers_supported,
+    false,
+  );
+  const directForExpiredCapability = await api("/v1/threads", {
+    method: "POST",
+    token: a.device_token,
+    headers: protocol02,
+    body: {
+      team_id: initial.team_id,
+      title: "Expired recipient capability",
+      assignee_id: b.principal.id,
+      message: "An expired capability must fail safe to direct transfer.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(directForExpiredCapability.value.transfer_mode, "direct_legacy");
+  const cancelExpiredCapability = await action(
+    a,
+    directForExpiredCapability.value.thread.id,
+    "cancel",
+    1,
+    { headers: protocol02, message: "Capability expiry verified." },
+  );
+  assert.equal(cancelExpiredCapability.status, 201);
+  const refreshedBCapability = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+    headers: protocol02,
+  });
+  assert.equal(
+    refreshedBCapability.value.members.find(member => member.id === b.principal.id).confirmed_transfers_supported,
+    true,
+  );
+
   const bPinned = await api(`/v1/threads/${threadId}/preference`, {
     method: "PUT",
     token: b.device_token,
@@ -922,8 +1274,8 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(bPinned.value.pinned, true);
   const bPreferences = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
   const aPreferences = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: a.device_token });
-  assert.equal(bPreferences.value.threads[0].preference.pinned, true);
-  assert.equal(aPreferences.value.threads[0].preference.pinned, false);
+  assert.equal(bPreferences.value.threads.find(item => item.thread.id === threadId).preference.pinned, true);
+  assert.equal(aPreferences.value.threads.find(item => item.thread.id === threadId).preference.pinned, false);
 
   const bHidden = await api(`/v1/threads/${threadId}/preference`, {
     method: "PUT",

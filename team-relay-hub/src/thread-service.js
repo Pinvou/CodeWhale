@@ -1,4 +1,9 @@
-import { authenticate, requireMembership } from "./auth.js";
+import {
+  authenticate,
+  CONFIRMED_TRANSFER_CAPABILITY_DAYS,
+  registerDeviceProtocol,
+  requireMembership,
+} from "./auth.js";
 import { bindAttachments } from "./attachment-service.js";
 import { newId, requestHash } from "./crypto.js";
 import { inTransaction } from "./db.js";
@@ -18,7 +23,8 @@ import { boolean, exactKeys, integer, text, uuid, uuidArray } from "./validation
 async function selectThread(db, threadId, lock = false) {
   const result = await db.query(
     `SELECT id, team_id, title, initiator_id, owner_id, current_actor_id,
-            return_to_id, final_recipient_id, phase, revision, created_at, updated_at
+            return_to_id, final_recipient_id, pending_transfer_kind,
+            pending_sender_id, pending_recipient_id, phase, revision, created_at, updated_at
        FROM work_threads
       WHERE id = $1${lock ? " FOR UPDATE" : ""}`,
     [threadId],
@@ -50,6 +56,26 @@ async function requireParticipant(db, threadId, principalId) {
   }
 }
 
+async function supportsConfirmedTransfers(db, principalId) {
+  const result = await db.query(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM devices
+        WHERE principal_id = $1
+          AND revoked_at IS NULL
+          AND relay_protocol_version = '0.2'
+          AND relay_protocol_seen_at >= now() - ($2 * interval '1 day')
+     ) AS supported`,
+    [principalId, CONFIRMED_TRANSFER_CAPABILITY_DAYS],
+  );
+  return result.rows[0].supported;
+}
+
+async function registerProtocolAndNotify(pool, auth, protocolVersion, notify) {
+  const changedTeamIds = await registerDeviceProtocol(pool, auth, protocolVersion);
+  for (const changedTeamId of changedTeamIds) notify(changedTeamId, "membership.changed");
+}
+
 async function selectAction(db, actionId) {
   const result = await db.query(
     `SELECT a.*,
@@ -67,7 +93,7 @@ async function selectAction(db, actionId) {
 
 async function threadDetail(db, threadRow, principalId) {
   const participants = await db.query(
-    `SELECT principal_id FROM thread_participants
+    `SELECT principal_id, material_access_at FROM thread_participants
       WHERE thread_id = $1 ORDER BY first_action_sequence, principal_id`,
     [threadRow.id],
   );
@@ -105,13 +131,14 @@ async function threadDetail(db, threadRow, principalId) {
     [threadRow.id, principalId],
   );
   const readRow = readState.rows[0] || { id: threadRow.id, unread_count: 0 };
+  const materialAccess = participants.rows.find((row) => row.principal_id === principalId)?.material_access_at;
   return {
     thread: threadFromRow(threadRow),
     preference: preference.rowCount
       ? threadPreferenceFromRow(preference.rows[0])
       : threadPreferenceFromRow({ id: threadRow.id }),
     participants: participants.rows.map((row) => row.principal_id),
-    actions: actions.rows.map((row) => actionFromRow(row, row.attachment_ids)),
+    actions: actions.rows.map((row) => actionFromRow(row, materialAccess ? row.attachment_ids : [])),
     read_state: threadReadStateFromRow(readRow),
     unread_count: Number(readRow.unread_count || 0),
   };
@@ -171,7 +198,10 @@ function actionInput(body) {
     ["recipient_id", "delivery"],
   );
   const kind = text(body.kind, "kind", { minimum: 1, maximum: 32 });
-  if (!new Set(["note", "handoff", "return", "final_deliver", "request_changes", "accept", "cancel"]).has(kind)) {
+  if (!new Set([
+    "note", "handoff", "accept_transfer", "decline_transfer", "withdraw_transfer",
+    "reroute_transfer", "return", "final_deliver", "request_changes", "accept", "cancel",
+  ]).has(kind)) {
     throw new AppError(400, "invalid_request", "The action kind is invalid.");
   }
   const input = {
@@ -185,14 +215,15 @@ function actionInput(body) {
     idempotencyKey: uuid(body.idempotency_key, "idempotency_key"),
     delivery: normalizeDelivery(body.delivery, kind),
   };
-  if (kind === "cancel" && !input.message.trim()) {
-    throw new AppError(400, "invalid_request", "A cancellation reason is required.");
+  if (new Set(["cancel", "decline_transfer", "withdraw_transfer", "reroute_transfer"]).has(kind) && !input.message.trim()) {
+    throw new AppError(400, "invalid_request", "A reason is required for this action.");
   }
   return input;
 }
 
-export async function createThread(pool, token, body, notify = () => {}) {
+export async function createThread(pool, token, body, notify = () => {}, protocolVersion = "0.1") {
   const auth = await authenticate(pool, token);
+  await registerProtocolAndNotify(pool, auth, protocolVersion, notify);
   const input = createThreadInput(body);
   if (input.assigneeId === auth.principalId) {
     throw new AppError(400, "invalid_request", "The demo requires assigning work to another member.");
@@ -205,6 +236,7 @@ export async function createThread(pool, token, body, notify = () => {}) {
     message: input.message,
     attachment_ids: input.attachmentIds,
     delivery: input.delivery,
+    ...(protocolVersion === "0.2" ? { protocol_version: "0.2" } : {}),
   });
 
   const perform = () => inTransaction(pool, async (client) => {
@@ -213,21 +245,37 @@ export async function createThread(pool, token, body, notify = () => {}) {
     await lockTeamMembershipChanges(client, input.teamId);
     await requireMembership(client, input.teamId, auth.principalId);
     await requireMembership(client, input.teamId, input.assigneeId);
+    const confirmedTransfers = protocolVersion === "0.2"
+      && await supportsConfirmedTransfers(client, input.assigneeId);
+    const transferMode = confirmedTransfers ? "confirmed" : "direct_legacy";
     const threadId = newId();
     const actionId = newId();
     const threadResult = await client.query(
       `INSERT INTO work_threads (
          id, team_id, title, initiator_id, owner_id, current_actor_id,
-         return_to_id, final_recipient_id, phase, revision
-       ) VALUES ($1, $2, $3, $4, $5, $5, $4, $4, 'active', 1)
+         return_to_id, final_recipient_id, pending_transfer_kind,
+         pending_sender_id, pending_recipient_id, phase, revision
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, $9, $10, $11, 1)
        RETURNING *`,
-      [threadId, input.teamId, input.title, auth.principalId, input.assigneeId],
+      [
+        threadId,
+        input.teamId,
+        input.title,
+        auth.principalId,
+        confirmedTransfers ? auth.principalId : input.assigneeId,
+        confirmedTransfers ? auth.principalId : input.assigneeId,
+        auth.principalId,
+        confirmedTransfers ? "assignment" : null,
+        confirmedTransfers ? auth.principalId : null,
+        confirmedTransfers ? input.assigneeId : null,
+        confirmedTransfers ? "pending_transfer" : "active",
+      ],
     );
     await client.query(
-      `INSERT INTO thread_participants (thread_id, principal_id, first_action_sequence)
-       VALUES ($1, $2, 1), ($1, $3, 1)
+      `INSERT INTO thread_participants (thread_id, principal_id, first_action_sequence, material_access_at)
+       VALUES ($1, $2, 1, now()), ($1, $3, 1, CASE WHEN $4 THEN NULL ELSE now() END)
        ON CONFLICT (thread_id, principal_id) DO NOTHING`,
-      [threadId, auth.principalId, input.assigneeId],
+      [threadId, auth.principalId, input.assigneeId, confirmedTransfers],
     );
     await client.query(
       `INSERT INTO thread_read_states (principal_id, thread_id, last_read_sequence)
@@ -237,8 +285,8 @@ export async function createThread(pool, token, body, notify = () => {}) {
     await client.query(
       `INSERT INTO relay_actions (
          id, thread_id, sequence, kind, actor_id, recipient_id, return_to_id,
-         message, base_revision, idempotency_key, request_hash, delivery
-       ) VALUES ($1, $2, 1, 'assign', $3, $4, $3, $5, 0, $6, $7, $8)`,
+         message, base_revision, idempotency_key, request_hash, delivery, transfer_mode
+       ) VALUES ($1, $2, 1, 'assign', $3, $4, $3, $5, 0, $6, $7, $8, $9)`,
       [
         actionId,
         threadId,
@@ -248,6 +296,7 @@ export async function createThread(pool, token, body, notify = () => {}) {
         input.idempotencyKey,
         hash,
         input.delivery,
+        transferMode,
       ],
     );
     await bindAttachments(client, {
@@ -259,6 +308,7 @@ export async function createThread(pool, token, body, notify = () => {}) {
     return {
       thread: threadFromRow(threadResult.rows[0]),
       action: await selectAction(client, actionId),
+      transfer_mode: transferMode,
       replayed: false,
     };
   });
@@ -271,13 +321,22 @@ export async function createThread(pool, token, body, notify = () => {}) {
     result = await findReplay(pool, auth.principalId, input.idempotencyKey, hash);
     if (!result) throw error;
   }
-  if (!result.replayed) notify(input.teamId, "thread.changed", result.thread);
+  result.transfer_mode = result.action.transfer_mode;
+  if (!result.replayed) {
+    notify(input.teamId, "thread.changed", result.thread);
+    notify(input.teamId, "thread.attention", {
+      id: result.thread.id,
+      revision: result.thread.revision,
+      principal_id: input.assigneeId,
+    });
+  }
   return result;
 }
 
-export async function createAction(pool, token, rawThreadId, body, notify = () => {}) {
+export async function createAction(pool, token, rawThreadId, body, notify = () => {}, protocolVersion = "0.1") {
   const threadId = uuid(rawThreadId, "thread_id");
   const auth = await authenticate(pool, token);
+  await registerProtocolAndNotify(pool, auth, protocolVersion, notify);
   const input = actionInput(body);
   const hash = requestHash({
     operation: "create_action",
@@ -288,7 +347,10 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
     attachment_ids: input.attachmentIds,
     expected_revision: input.expectedRevision,
     delivery: input.delivery,
+    ...(protocolVersion === "0.2" ? { protocol_version: "0.2" } : {}),
   });
+
+  let displacedPendingRecipientId = null;
 
   const perform = () => inTransaction(pool, async (client) => {
     const replay = await findReplay(client, auth.principalId, input.idempotencyKey, hash);
@@ -301,34 +363,62 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
         current_revision: Number(locked.revision),
       });
     }
-    if (input.kind === "handoff") {
+    if (new Set(["handoff", "reroute_transfer", "accept_transfer"]).has(input.kind)) {
       await lockTeamMembershipChanges(client, locked.team_id);
-      await requireMembership(client, locked.team_id, input.recipientId);
+      if (input.recipientId) await requireMembership(client, locked.team_id, input.recipientId);
+      if (input.kind === "accept_transfer") {
+        await requireMembership(client, locked.team_id, auth.principalId);
+      }
     }
-    const next = transition(locked, auth.principalId, input.kind, input.recipientId);
+    if (new Set(["withdraw_transfer", "reroute_transfer"]).has(input.kind)) {
+      displacedPendingRecipientId = locked.pending_recipient_id;
+    }
+    const recipientSupportsConfirmation = input.recipientId
+      ? await supportsConfirmedTransfers(client, input.recipientId)
+      : true;
+    const confirmedTransfers = protocolVersion === "0.2" && recipientSupportsConfirmation;
+    const next = transition(locked, auth.principalId, input.kind, input.recipientId, confirmedTransfers);
     const nextRevision = Number(locked.revision) + 1;
     const actionId = newId();
     const threadResult = await client.query(
       `UPDATE work_threads
-          SET current_actor_id = $2, return_to_id = $3, phase = $4,
-              revision = $5, updated_at = now()
+          SET owner_id = $2, current_actor_id = $3, return_to_id = $4, phase = $5,
+              pending_transfer_kind = $6, pending_sender_id = $7,
+              pending_recipient_id = $8, revision = $9, updated_at = now()
         WHERE id = $1
         RETURNING *`,
-      [threadId, next.currentActorId, next.threadReturnToId, next.phase, nextRevision],
+      [
+        threadId, next.ownerId, next.currentActorId, next.threadReturnToId, next.phase,
+        next.pendingTransferKind, next.pendingSenderId, next.pendingRecipientId, nextRevision,
+      ],
     );
     if (next.addParticipantId) {
       await client.query(
-        `INSERT INTO thread_participants (thread_id, principal_id, first_action_sequence)
-         VALUES ($1, $2, $3)
+        `INSERT INTO thread_participants (thread_id, principal_id, first_action_sequence, material_access_at)
+         VALUES ($1, $2, $3, NULL)
          ON CONFLICT (thread_id, principal_id) DO NOTHING`,
         [threadId, next.addParticipantId, nextRevision],
+      );
+    }
+    if (next.removeParticipantId) {
+      await client.query(
+        `DELETE FROM thread_participants
+          WHERE thread_id = $1 AND principal_id = $2 AND material_access_at IS NULL`,
+        [threadId, next.removeParticipantId],
+      );
+    }
+    if (next.grantMaterialAccessId) {
+      await client.query(
+        `UPDATE thread_participants SET material_access_at = coalesce(material_access_at, now())
+          WHERE thread_id = $1 AND principal_id = $2`,
+        [threadId, next.grantMaterialAccessId],
       );
     }
     await client.query(
       `INSERT INTO relay_actions (
          id, thread_id, sequence, kind, actor_id, recipient_id, return_to_id,
-         message, base_revision, idempotency_key, request_hash, delivery
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+         message, base_revision, idempotency_key, request_hash, delivery, transfer_mode
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         actionId,
         threadId,
@@ -342,6 +432,7 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
         input.idempotencyKey,
         hash,
         input.delivery,
+        next.transferMode,
       ],
     );
     await bindAttachments(client, {
@@ -353,6 +444,7 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
     return {
       thread: threadFromRow(threadResult.rows[0]),
       action: await selectAction(client, actionId),
+      transfer_mode: next.transferMode,
       replayed: false,
     };
   });
@@ -365,7 +457,25 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
     result = await findReplay(pool, auth.principalId, input.idempotencyKey, hash);
     if (!result) throw error;
   }
-  if (!result.replayed) notify(result.thread.team_id, "thread.changed", result.thread);
+  result.transfer_mode = result.action.transfer_mode;
+  if (!result.replayed) {
+    notify(result.thread.team_id, "thread.changed", result.thread);
+    const attentionPrincipalIds = new Set([
+      result.action.recipient_id,
+      result.action.kind === "accept" ? result.thread.owner_id : null,
+      displacedPendingRecipientId,
+    ]);
+    attentionPrincipalIds.delete(null);
+    attentionPrincipalIds.delete(undefined);
+    attentionPrincipalIds.delete(result.action.actor_id);
+    for (const attentionPrincipalId of attentionPrincipalIds) {
+      notify(result.thread.team_id, "thread.attention", {
+        id: result.thread.id,
+        revision: result.thread.revision,
+        principal_id: attentionPrincipalId,
+      });
+    }
+  }
   return result;
 }
 
@@ -475,9 +585,10 @@ export async function markThreadRead(pool, token, rawThreadId, body, notify = ()
   return result.readState;
 }
 
-export async function getBootstrap(pool, token, rawTeamId) {
+export async function getBootstrap(pool, token, rawTeamId, protocolVersion = "0.1", notify = () => {}) {
   const teamId = uuid(rawTeamId, "team_id");
   const auth = await authenticate(pool, token);
+  await registerProtocolAndNotify(pool, auth, protocolVersion, notify);
   await requireMembership(pool, teamId, auth.principalId);
   const teamResult = await pool.query(
     `SELECT id, name, created_by, created_at,
@@ -489,14 +600,19 @@ export async function getBootstrap(pool, token, rawTeamId) {
     throw new AppError(404, "resource_not_found", "The team was not found.");
   }
   const members = await pool.query(
-    `SELECT p.id, p.email, p.display_name, p.created_at, m.role, max(d.last_seen_at) AS last_seen_at
+    `SELECT p.id, p.email, p.display_name, p.created_at, m.role,
+            max(d.last_seen_at) AS last_seen_at,
+            coalesce(bool_or(
+              d.relay_protocol_version = '0.2'
+              AND d.relay_protocol_seen_at >= now() - ($2 * interval '1 day')
+            ), false) AS confirmed_transfers_supported
        FROM memberships m
        JOIN principals p ON p.id = m.principal_id
        LEFT JOIN devices d ON d.principal_id = p.id AND d.revoked_at IS NULL
       WHERE m.team_id = $1 AND m.removed_at IS NULL AND p.disabled_at IS NULL
       GROUP BY p.id, p.email, p.display_name, p.created_at, m.role
       ORDER BY p.created_at, p.id`,
-    [teamId],
+    [teamId, CONFIRMED_TRANSFER_CAPABILITY_DAYS],
   );
   const visibleThreads = await pool.query(
     `SELECT w.*
@@ -509,7 +625,7 @@ export async function getBootstrap(pool, token, rawTeamId) {
   const details = [];
   for (const row of visibleThreads.rows) details.push(await threadDetail(pool, row, auth.principalId));
   return {
-    protocol_version: "0.1",
+    protocol_version: protocolVersion,
     generated_at: new Date(),
     team: teamFromRow(teamResult.rows[0]),
     me: auth.principal,

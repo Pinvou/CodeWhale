@@ -74,6 +74,8 @@ pub struct TeamMember {
     pub created_at: String,
     pub role: String,
     pub last_seen_at: Option<String>,
+    #[serde(default)]
+    pub confirmed_transfers_supported: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +88,12 @@ pub struct WorkThread {
     pub current_actor_id: Option<String>,
     pub return_to_id: Option<String>,
     pub final_recipient_id: String,
+    #[serde(default)]
+    pub pending_transfer_kind: Option<String>,
+    #[serde(default)]
+    pub pending_sender_id: Option<String>,
+    #[serde(default)]
+    pub pending_recipient_id: Option<String>,
     pub phase: String,
     pub revision: u64,
     pub created_at: String,
@@ -143,6 +151,8 @@ pub struct RelayAction {
     pub message: String,
     pub base_revision: u64,
     pub idempotency_key: String,
+    #[serde(default)]
+    pub transfer_mode: Option<String>,
     pub attachment_ids: Vec<String>,
     #[serde(default)]
     pub delivery: DeliveryPackage,
@@ -272,6 +282,8 @@ pub struct ThreadMutationResponse {
     pub thread: WorkThread,
     pub action: RelayAction,
     pub replayed: bool,
+    #[serde(default)]
+    pub transfer_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

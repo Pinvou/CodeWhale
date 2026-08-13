@@ -38,6 +38,10 @@ import {
 } from "./thread-service.js";
 import { exactKeys, text, uuid } from "./validation.js";
 
+function requestedProtocol(request) {
+  return request.headers["x-pinvou-team-relay-protocol"] === "0.2" ? "0.2" : "0.1";
+}
+
 function bearerToken(request) {
   const header = request.headers.authorization;
   if (typeof header !== "string") return null;
@@ -375,7 +379,7 @@ export function createHubServer({ pool, config }) {
       }
       if (method === "POST" && pathname === "/v1/threads") {
         const body = await readJson(request, config.maxJsonBytes);
-        const result = await createThread(pool, token, body, notify);
+        const result = await createThread(pool, token, body, notify, requestedProtocol(request));
         sendJson(response, result.replayed ? 200 : 201, result, requestId);
         return;
       }
@@ -387,7 +391,7 @@ export function createHubServer({ pool, config }) {
       params = pathMatch(pathname, /^\/v1\/threads\/([^/]+)\/actions$/);
       if (params && method === "POST") {
         const body = await readJson(request, config.maxJsonBytes);
-        const result = await createAction(pool, token, params[0], body, notify);
+        const result = await createAction(pool, token, params[0], body, notify, requestedProtocol(request));
         sendJson(response, result.replayed ? 200 : 201, result, requestId);
         return;
       }
@@ -440,7 +444,13 @@ export function createHubServer({ pool, config }) {
         sendJson(
           response,
           200,
-          await getBootstrap(pool, token, url.searchParams.get("team_id")),
+          await getBootstrap(
+            pool,
+            token,
+            url.searchParams.get("team_id"),
+            requestedProtocol(request),
+            notify,
+          ),
           requestId,
         );
         return;
