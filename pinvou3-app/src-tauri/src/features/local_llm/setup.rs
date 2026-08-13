@@ -567,6 +567,7 @@ pub async fn bootstrap_local_vllm(app: tauri::AppHandle) -> Result<BootstrapResu
         preset: ModelPreset::LocalVllm,
         context_window_tokens: None,
         max_output_tokens: None,
+        reasoning_effort: None,
         model: model.clone(),
         base_url: base_url.clone(),
         provider_kind: Some(crate::platform::prefs::MODEL_PROVIDER_KIND_CUSTOM.to_string()),
