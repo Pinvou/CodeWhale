@@ -77,9 +77,27 @@ export function loadConfig(env = process.env) {
     ),
     maxAvatarBytes: integer(
       env.TEAM_RELAY_MAX_AVATAR_BYTES,
-      5 * 1024 * 1024,
+      1_572_864,
       1024,
-      5 * 1024 * 1024,
+      1_572_864,
+    ),
+    avatarProcessingConcurrency: integer(
+      env.TEAM_RELAY_AVATAR_PROCESSING_CONCURRENCY,
+      2,
+      1,
+      8,
+    ),
+    avatarUploadRateLimitAttempts: integer(
+      env.TEAM_RELAY_AVATAR_UPLOAD_RATE_LIMIT_ATTEMPTS,
+      6,
+      1,
+      100,
+    ),
+    avatarUploadRateLimitWindowSeconds: integer(
+      env.TEAM_RELAY_AVATAR_UPLOAD_RATE_LIMIT_WINDOW_SECONDS,
+      60,
+      1,
+      3600,
     ),
     maxTeamAttachmentBytes: integer(
       env.TEAM_RELAY_MAX_TEAM_ATTACHMENT_BYTES,

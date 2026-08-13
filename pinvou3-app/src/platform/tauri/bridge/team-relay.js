@@ -18,8 +18,14 @@
     var legacyReadCursorKey = "pinvou.team-relay.read-cursors.v1";
     var legacyReadCursors = loadLegacyReadCursors();
     var connectionGeneration = 0;
+    var AVATAR_CACHE_MAX_BYTES = 32 * 1024 * 1024;
+    var AVATAR_CACHE_MAX_ENTRIES = 256;
+    var AVATAR_CACHE_ENTRY_OVERHEAD_BYTES = 256;
     var avatarSources = new Map();
     var avatarRequests = new Map();
+    var avatarPrincipalVersions = new Map();
+    var avatarCacheBytes = 0;
+    var avatarCacheEpoch = 0;
 
     function uuid() {
       if (root.crypto && typeof root.crypto.randomUUID === "function") return root.crypto.randomUUID();
@@ -192,38 +198,130 @@
       return mutate("team_relay_update_profile", { input: input });
     }
 
-    function avatarCacheKey(principalId, avatar) {
+    function avatarDigest(avatar) {
       var digest = String(avatar && avatar.sha256 || "").trim().toLowerCase();
-      var id = String(principalId || "").trim();
-      return id && /^[0-9a-f]{64}$/.test(digest) ? id + ":" + digest : "";
+      return /^[0-9a-f]{64}$/.test(digest) ? digest : "";
     }
 
-    async function avatarSource(principalId, avatar) {
-      var key = avatarCacheKey(principalId, avatar);
-      if (!key) return null;
-      if (avatarSources.has(key)) return avatarSources.get(key);
-      if (avatarRequests.has(key)) return avatarRequests.get(key);
-      var request = invoke("team_relay_avatar_data_url", {
-        principalId: String(principalId),
-        expectedSha256: String(avatar.sha256),
-      }).then(function (source) {
-        if (source && avatarRequests.get(key) === request) avatarSources.set(key, source);
-        return source || null;
-      }).finally(function () {
-        if (avatarRequests.get(key) === request) avatarRequests.delete(key);
-      });
-      avatarRequests.set(key, request);
-      return request;
+    function avatarDisplaySize(value) {
+      var size = Number(value);
+      return size === 48 || size === 96 ? size : null;
+    }
+
+    function avatarCacheKey(principalId, digest, displaySize) {
+      var id = String(principalId || "").trim();
+      if (!id || !digest) return "";
+      return id + ":" + digest + ":" + (displaySize || "original");
+    }
+
+    function removeAvatarCacheEntry(key) {
+      var entry = avatarSources.get(key);
+      if (!entry) return;
+      avatarCacheBytes = Math.max(0, avatarCacheBytes - entry.byteSize);
+      avatarSources.delete(key);
     }
 
     function forgetAvatarSources(principalId) {
-      var prefix = String(principalId || "") + ":";
-      for (var key of avatarSources.keys()) {
-        if (key.startsWith(prefix)) avatarSources.delete(key);
+      var id = String(principalId || "").trim();
+      if (!id || !avatarPrincipalVersions.has(id)) return;
+      avatarPrincipalVersions.delete(id);
+      for (var entry of avatarSources.entries()) {
+        if (entry[1].principalId === id) removeAvatarCacheEntry(entry[0]);
       }
-      for (var pendingKey of avatarRequests.keys()) {
-        if (pendingKey.startsWith(prefix)) avatarRequests.delete(pendingKey);
+      for (var pending of avatarRequests.entries()) {
+        if (pending[1].principalId === id) avatarRequests.delete(pending[0]);
       }
+    }
+
+    function clearAvatarSources() {
+      avatarCacheEpoch += 1;
+      avatarCacheBytes = 0;
+      avatarSources.clear();
+      avatarRequests.clear();
+      avatarPrincipalVersions.clear();
+    }
+
+    function currentAvatarVersion(principalId, digest) {
+      var current = avatarPrincipalVersions.get(principalId);
+      if (current && current.digest === digest) return current;
+      if (current) forgetAvatarSources(principalId);
+      var version = { digest: digest };
+      avatarPrincipalVersions.set(principalId, version);
+      return version;
+    }
+
+    function avatarSourceByteSize(key, source) {
+      // JavaScript engines may store strings as UTF-16. Count that conservative
+      // representation plus a small entry/key allowance when enforcing the cap.
+      return ((key.length + source.length) * 2) + AVATAR_CACHE_ENTRY_OVERHEAD_BYTES;
+    }
+
+    function rememberAvatarSource(key, entry) {
+      entry.byteSize = avatarSourceByteSize(key, entry.source);
+      if (entry.byteSize > AVATAR_CACHE_MAX_BYTES) return;
+      removeAvatarCacheEntry(key);
+      avatarSources.set(key, entry);
+      avatarCacheBytes += entry.byteSize;
+      while (avatarSources.size > AVATAR_CACHE_MAX_ENTRIES || avatarCacheBytes > AVATAR_CACHE_MAX_BYTES) {
+        var oldestKey = avatarSources.keys().next().value;
+        if (oldestKey === undefined) break;
+        removeAvatarCacheEntry(oldestKey);
+      }
+    }
+
+    async function avatarSource(principalId, avatar, requestedDisplaySize) {
+      var id = String(principalId || "").trim();
+      var digest = avatarDigest(avatar);
+      if (!id || !digest) {
+        if (id) forgetAvatarSources(id);
+        return null;
+      }
+      var displaySize = avatarDisplaySize(requestedDisplaySize);
+      var version = currentAvatarVersion(id, digest);
+      var key = avatarCacheKey(id, digest, displaySize);
+      var cached = avatarSources.get(key);
+      if (cached) {
+        // Map insertion order doubles as an O(1) LRU queue.
+        avatarSources.delete(key);
+        avatarSources.set(key, cached);
+        return cached.source;
+      }
+      var pending = avatarRequests.get(key);
+      if (pending) return pending.promise;
+      var epoch = avatarCacheEpoch;
+      var requestEntry = {
+        principalId: id,
+        digest: digest,
+        displaySize: displaySize,
+        version: version,
+        promise: null,
+      };
+      var args = {
+        principalId: id,
+        expectedSha256: digest,
+      };
+      if (displaySize) args.displaySize = displaySize;
+      requestEntry.promise = invoke("team_relay_avatar_data_url", args).then(function (source) {
+        var normalizedSource = typeof source === "string" && source ? source : null;
+        var latest = avatarPrincipalVersions.get(id);
+        if (normalizedSource
+          && avatarRequests.get(key) === requestEntry
+          && avatarCacheEpoch === epoch
+          && latest === requestEntry.version) {
+          rememberAvatarSource(key, {
+            source: normalizedSource,
+            principalId: id,
+            digest: digest,
+            displaySize: displaySize,
+            byteSize: 0,
+          });
+        }
+        return normalizedSource;
+      }).finally(function () {
+        if (avatarRequests.get(key) === requestEntry) avatarRequests.delete(key);
+      });
+      avatarRequests.set(key, requestEntry);
+      return requestEntry.promise;
     }
 
     async function uploadAvatar() {
@@ -282,18 +380,21 @@
     }
 
     async function createTeam(name) {
+      clearAvatarSources();
       var snapshot = await mutate("team_relay_create_team", { name: name });
       if (snapshot && snapshot.bootstrap) patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }), account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] } });
       return snapshot;
     }
 
     async function joinTeam(joinCode) {
+      clearAvatarSources();
       var snapshot = await mutate("team_relay_join_team", { joinCode: joinCode });
       if (snapshot && snapshot.bootstrap) patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }), account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] } });
       return snapshot;
     }
 
     async function switchTeam(teamId) {
+      clearAvatarSources();
       var snapshot = await mutate("team_relay_switch_team", { teamId: teamId });
       if (snapshot && snapshot.bootstrap) {
         patch({ status: Object.assign({}, state.teamRelay.status, { team_id: snapshot.bootstrap.team.id }) });
@@ -500,6 +601,7 @@
       patch({ mutating: true, error: null });
       try {
         await invoke("team_relay_disconnect");
+        clearAvatarSources();
         connectionGeneration += 1;
         refreshPromise = null;
         if (refreshTimer) root.clearTimeout(refreshTimer);

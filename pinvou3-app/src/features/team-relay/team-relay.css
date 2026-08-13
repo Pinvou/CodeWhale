@@ -975,8 +975,8 @@
 .team-relay-member-card { background: var(--relay-panel); border: 1px solid var(--relay-border); border-radius: 13px; min-width: 0; overflow: hidden; padding: 15px; }
 .team-relay-member-card.is-owner { border-color: color-mix(in srgb, var(--relay-blue) 28%, var(--relay-border)); }
 .team-relay-member-card > header { align-items: center; display: flex; gap: 10px; }
-.team-relay-member-avatar { align-items: center; background: var(--relay-panel-soft); border-radius: 50%; color: var(--relay-muted); display: flex; flex: 0 0 auto; font-size: 20px; height: 40px; justify-content: center; width: 40px; }
-.team-relay-member-avatar.is-me { background: var(--relay-blue-soft); color: var(--relay-blue); }
+.team-relay-member-avatar { align-items: center; background: var(--relay-avatar-bg); border-radius: 50%; color: var(--relay-avatar-fg); display: flex; flex: 0 0 auto; font-size: 20px; height: 40px; justify-content: center; width: 40px; }
+.team-relay-member-avatar.is-me { box-shadow: 0 0 0 2px var(--relay-panel), 0 0 0 4px color-mix(in srgb, var(--relay-blue) 72%, transparent); }
 .team-relay-member-card > header > span:nth-child(2) { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
 .team-relay-member-card > header strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .team-relay-member-card > header small { color: var(--relay-muted); font-size: 10px; }

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import pg from "pg";
+import sharp from "sharp";
 import { cleanupAttachments } from "../src/attachment-cleanup.js";
 import { createHubServer } from "../src/http.js";
 import { createTeamWithOwnerInvite } from "../src/identity-service.js";
@@ -19,7 +20,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const database = await pool.query("SELECT current_database() AS name");
   assert.match(database.rows[0].name, /_test$/, "integration test requires an isolated *_test database");
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", "0008_principal_avatars.sql", "0009_confirmed_transfers.sql"];
+  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", "0008_principal_avatars.sql", "0009_avatar_hardening.sql", "0009_confirmed_transfers.sql"];
   async function applyMigration(migrationName) {
     const migration = await readFile(
       new URL(`../../docs/team-relay/migrations/${migrationName}`, import.meta.url),
@@ -207,14 +208,16 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     return { status: response.status, value: await response.json() };
   }
 
-  async function readAvatar(member, principalId, teamId) {
+  async function readAvatar(member, principalId, teamId, size) {
     const response = await fetch(
-      `${origin}/v1/principals/${principalId}/avatar?team_id=${teamId}`,
+      `${origin}/v1/principals/${principalId}/avatar?team_id=${teamId}${size ? `&size=${size}` : ""}`,
       { headers: { Authorization: `Bearer ${member.device_token}` } },
     );
     return {
       status: response.status,
       contentType: response.headers.get("content-type"),
+      digest: response.headers.get("digest"),
+      sourceSha256: response.headers.get("x-avatar-source-sha256"),
       bytes: Buffer.from(await response.arrayBuffer()),
     };
   }
@@ -470,21 +473,32 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(restoredB.status, 200);
 
-  const animatedGif = Buffer.from(
-    "R0lGODlhAQABAIEAAAAAAP///wAAACH5BAEAAAEALAAAAAABAAEAAAICRAEAIfkEAQAAAQAsAAAAAAEAAQAAAgJEADs=",
-    "base64",
-  );
+  const animatedPixels = Buffer.from([
+    255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255,
+    0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+  ]);
+  const animatedGif = await sharp(animatedPixels, {
+    raw: { width: 2, height: 4, channels: 4, pageHeight: 2 },
+  }).gif({ delay: [80, 120], loop: 0 }).toBuffer();
   const uploadedAvatar = await uploadAvatar(a, animatedGif, "avatar.gif");
   assert.equal(uploadedAvatar.status, 200);
   assert.equal(uploadedAvatar.value.avatar.content_type, "image/gif");
-  assert.equal(uploadedAvatar.value.avatar.byte_size, animatedGif.length);
+  assert.ok(uploadedAvatar.value.avatar.byte_size <= config.maxAvatarBytes);
   const avatarBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, { token: b.device_token });
   const avatarMember = avatarBootstrap.value.members.find(member => member.id === a.principal.id);
   assert.equal(avatarMember.avatar.sha256, uploadedAvatar.value.avatar.sha256);
   const downloadedAvatar = await readAvatar(b, a.principal.id, initial.team_id);
   assert.equal(downloadedAvatar.status, 200);
   assert.equal(downloadedAvatar.contentType, "image/gif");
-  assert.deepEqual(downloadedAvatar.bytes, animatedGif, "animated GIF bytes must remain unchanged");
+  assert.equal(downloadedAvatar.sourceSha256, uploadedAvatar.value.avatar.sha256);
+  assert.equal((await sharp(downloadedAvatar.bytes, { animated: true }).metadata()).pages, 2);
+  const thumbnailAvatar = await readAvatar(b, a.principal.id, initial.team_id, 48);
+  assert.equal(thumbnailAvatar.status, 200);
+  assert.equal(thumbnailAvatar.contentType, "image/gif");
+  assert.equal(thumbnailAvatar.sourceSha256, uploadedAvatar.value.avatar.sha256);
+  assert.equal((await sharp(thumbnailAvatar.bytes, { animated: true }).metadata()).pages, 2);
+  const invalidAvatarSize = await readAvatar(b, a.principal.id, initial.team_id, 64);
+  assert.equal(invalidAvatarSize.status, 400);
   const outsideTeamAvatar = await readAvatar(accountEnrollment.value, a.principal.id, initial.team_id);
   assert.equal(outsideTeamAvatar.status, 403, "avatars are visible only inside a shared active team");
   const rejectedAvatar = await uploadAvatar(a, Buffer.from("<svg></svg>"), "avatar.svg");
@@ -1387,7 +1401,13 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
   await utimes(staleTemporary, staleTime, staleTime);
   const cleaned = await cleanupAttachments(pool, config);
-  assert.deepEqual(cleaned, { temporary: 1, orphaned: 2, expired: 1 });
+  assert.deepEqual(cleaned, {
+    temporary: 1,
+    orphaned: 2,
+    expired: 1,
+    avatarTemporary: 0,
+    avatarOrphaned: 0,
+  });
   const orphanMetadata = await api(`/v1/attachments/${largeOrphan.value.id}`, {
     token: a.device_token,
   });

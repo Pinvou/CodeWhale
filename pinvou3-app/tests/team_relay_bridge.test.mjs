@@ -137,12 +137,18 @@ await feature.updateProfile({ display_name: 'New name' });
 assert.equal(state.teamRelay.snapshot.bootstrap.me.display_name, 'New name');
 const avatarMetadata = { sha256: 'a'.repeat(64), content_type: 'image/gif', byte_size: 32 };
 const [avatarSource, cachedAvatarSource] = await Promise.all([
-  feature.avatarSource('member-one', avatarMetadata),
-  feature.avatarSource('member-one', avatarMetadata),
+  feature.avatarSource('member-one', avatarMetadata, 48),
+  feature.avatarSource('member-one', avatarMetadata, 48),
 ]);
 assert.equal(avatarSource, 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yw=');
 assert.equal(cachedAvatarSource, avatarSource);
 assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url').length, 1, 'concurrent avatar reads must share one authenticated request');
+assert.equal(calls.find(call => call.command === 'team_relay_avatar_data_url').args.displaySize, 48);
+await feature.avatarSource('member-one', avatarMetadata, 96);
+assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url').length, 2, '48px and 96px variants must have independent bounded cache entries');
+await feature.avatarSource('member-original', avatarMetadata, null);
+const originalAvatarCall = calls.find(call => call.command === 'team_relay_avatar_data_url' && call.args.principalId === 'member-original');
+assert.equal(Object.hasOwn(originalAvatarCall.args, 'displaySize'), false, 'the profile preview must be able to request the processed original');
 await feature.uploadAvatar();
 assert.ok(calls.some(call => call.command === 'team_relay_upload_avatar' && call.args.path === '/private/avatar/liu.gif'));
 await feature.removeAvatar();
@@ -279,5 +285,98 @@ await feature.disconnect();
 releaseBootstrap();
 await staleLoad;
 assert.equal(state.teamRelay.status.configured, false, 'an in-flight refresh must not restore signed-out state');
+function isolatedRelayFeature(invoke) {
+  return windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
+    state: { sessions: [], teamRelay: { status: { configured: true, team_id: 'team' }, snapshot: teamSnapshot('team') } },
+    notify() {},
+    listen() { return Promise.resolve(() => {}); },
+    async invoke(command, args) { return invoke(command, args); },
+  });
+}
+
+const versionCalls = [];
+const versionedFeature = isolatedRelayFeature(async (command, args) => {
+  versionCalls.push({ command, args });
+  return command === 'team_relay_avatar_data_url'
+    ? `data:image/gif;base64,${args.expectedSha256.slice(0, 8)}`
+    : null;
+});
+for (let version = 0; version < 50; version += 1) {
+  await versionedFeature.avatarSource('changing-member', {
+    sha256: version.toString(16).padStart(64, '0'),
+  }, 48);
+}
+const latestDigest = (49).toString(16).padStart(64, '0');
+await versionedFeature.avatarSource('changing-member', { sha256: latestDigest }, 48);
+assert.equal(versionCalls.filter(call => call.command === 'team_relay_avatar_data_url').length, 50, 'only the current digest should remain cached after 50 changes');
+await versionedFeature.avatarSource('changing-member', { sha256: '0'.repeat(64) }, 48);
+assert.equal(versionCalls.filter(call => call.command === 'team_relay_avatar_data_url').length, 51, 'an obsolete digest must have been evicted');
+
+const lruCalls = [];
+const largeAvatarPayload = 'A'.repeat(9 * 1024 * 1024);
+const byteLimitedFeature = isolatedRelayFeature(async (command, args) => {
+  lruCalls.push({ command, args });
+  return command === 'team_relay_avatar_data_url'
+    ? `data:image/gif;base64,${args.principalId}:${largeAvatarPayload}`
+    : null;
+});
+const digestA = 'a'.repeat(64);
+const digestB = 'b'.repeat(64);
+await byteLimitedFeature.avatarSource('large-a', { sha256: digestA }, 96);
+await byteLimitedFeature.avatarSource('large-b', { sha256: digestB }, 96);
+await byteLimitedFeature.avatarSource('large-a', { sha256: digestA }, 96);
+assert.equal(lruCalls.filter(call => call.command === 'team_relay_avatar_data_url' && call.args.principalId === 'large-a').length, 2, 'the 32 MiB byte budget must evict the least recently used source');
+
+const entryCalls = [];
+const entryLimitedFeature = isolatedRelayFeature(async (command, args) => {
+  entryCalls.push({ command, args });
+  return command === 'team_relay_avatar_data_url' ? `data:image/gif;base64,${args.principalId}` : null;
+});
+for (let member = 0; member < 256; member += 1) {
+  await entryLimitedFeature.avatarSource(`entry-${member}`, { sha256: member.toString(16).padStart(64, '0') }, 48);
+}
+await entryLimitedFeature.avatarSource('entry-0', { sha256: '0'.repeat(64) }, 48);
+await entryLimitedFeature.avatarSource('entry-256', { sha256: (256).toString(16).padStart(64, '0') }, 48);
+await entryLimitedFeature.avatarSource('entry-1', { sha256: '1'.padStart(64, '0') }, 48);
+await entryLimitedFeature.avatarSource('entry-0', { sha256: '0'.repeat(64) }, 48);
+assert.equal(entryCalls.filter(call => call.command === 'team_relay_avatar_data_url' && call.args.principalId === 'entry-1').length, 2, 'the entry budget must evict the true LRU entry');
+assert.equal(entryCalls.filter(call => call.command === 'team_relay_avatar_data_url' && call.args.principalId === 'entry-0').length, 1, 'a recently read entry must stay cached');
+
+const raceCalls = [];
+const raceResolvers = new Map();
+const raceFeature = isolatedRelayFeature((command, args) => {
+  raceCalls.push({ command, args });
+  if (command !== 'team_relay_avatar_data_url') return null;
+  const priorCalls = raceCalls.filter(call => call.command === command && call.args.expectedSha256 === args.expectedSha256).length;
+  if (priorCalls > 1) return `data:image/gif;base64,retry-${args.expectedSha256.slice(0, 1)}`;
+  return new Promise(resolve => raceResolvers.set(args.expectedSha256, resolve));
+});
+const oldDigest = 'c'.repeat(64);
+const newDigest = 'd'.repeat(64);
+const oldRequest = raceFeature.avatarSource('racing-member', { sha256: oldDigest }, 48);
+const newRequest = raceFeature.avatarSource('racing-member', { sha256: newDigest }, 48);
+raceResolvers.get(newDigest)('data:image/gif;base64,new');
+await newRequest;
+raceResolvers.get(oldDigest)('data:image/gif;base64,old');
+await oldRequest;
+await raceFeature.avatarSource('racing-member', { sha256: newDigest }, 48);
+assert.equal(raceCalls.filter(call => call.command === 'team_relay_avatar_data_url' && call.args.expectedSha256 === newDigest).length, 1, 'the current version must remain cached');
+await raceFeature.avatarSource('racing-member', { sha256: oldDigest }, 48);
+assert.equal(raceCalls.filter(call => call.command === 'team_relay_avatar_data_url' && call.args.expectedSha256 === oldDigest).length, 2, 'a late obsolete response must never re-enter the cache');
+
+const lifecycleCalls = [];
+const lifecycleFeature = isolatedRelayFeature(async (command, args) => {
+  lifecycleCalls.push({ command, args });
+  if (command === 'team_relay_avatar_data_url') return 'data:image/gif;base64,lifecycle';
+  if (command === 'team_relay_switch_team') return teamSnapshot(args.teamId);
+  return null;
+});
+const lifecycleAvatar = { sha256: 'e'.repeat(64) };
+await lifecycleFeature.avatarSource('lifecycle-member', lifecycleAvatar, 48);
+await lifecycleFeature.switchTeam('other-team');
+await lifecycleFeature.avatarSource('lifecycle-member', lifecycleAvatar, 48);
+await lifecycleFeature.disconnect();
+await lifecycleFeature.avatarSource('lifecycle-member', lifecycleAvatar, 48);
+assert.equal(lifecycleCalls.filter(call => call.command === 'team_relay_avatar_data_url').length, 3, 'team switches and disconnects must clear every cached source');
 
 console.log('Team Relay bridge tests passed');

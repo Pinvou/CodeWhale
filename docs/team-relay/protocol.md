@@ -45,7 +45,7 @@ team owner 和 WorkThread owner 是两个独立概念。例如演示链路中 A 
 
 一次性邀请码只能成功消费一次。团队列表、线程、附件、头像内容和 SSE 始终按 `team_id` 授权隔离；头像元数据可出现在成员快照中，但 `GET /v1/principals/{principal_id}/avatar?team_id=...` 只有双方都是该团队有效成员时才返回内容。设备被撤销或成员被移除后，旧 token 不得继续读取该团队数据、头像或提交动作，但不影响该 Principal 的其他有效团队。
 
-头像上传最大 5 MiB，只接受经文件内容识别并与扩展名一致的 PNG、JPEG、WebP 和 GIF；SVG 与其他可执行格式不接受。Hub 原样保存通过校验的 GIF，以保留动画，并返回 SHA-256 元数据供桌面客户端下载后校验。头像字节保存在仅服务账号可读的持久化目录，HTTP 响应使用 `nosniff`、私有且不缓存的策略。
+头像输入与处理后的主图均不得超过 1.5 MiB，只接受经文件内容识别并与扩展名一致的 PNG、JPEG、WebP 和 GIF；SVG 与其他可执行格式不接受。Hub 必须完整解码后重新编码，剥离 EXIF、GPS、文本和注释等元数据；静态图输入最多 800 万像素并缩放到最长边 512 px，GIF 缩放到最长边 384 px，最多 60 帧且总动画像素不超过 400 万。Hub 另外生成 48 px 和 96 px 的同格式显示变体；GIF 主图和变体均保留受限动画，成员列表按显示密度读取小变体并持续播放，资料预览读取主图。响应中的 `X-Avatar-Source-SHA256` 绑定当前 Principal 元数据摘要，`Digest` 校验实际返回的主图或变体字节。头像处理按 Principal 单并发且受全局并发上限保护，默认每个 Principal 每 60 秒最多尝试上传 6 次；中断请求、事务失败、超时临时文件和数据库未引用文件均须可清理。头像字节保存在仅服务账号可读的持久化目录，HTTP 响应使用 `nosniff`、私有且不缓存的策略。
 
 ## 3. 线程建立
 
@@ -269,13 +269,19 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 | 409 | `email_change_not_supported` | 尝试更换已绑定邮箱 | 当前版本不支持 |
 | 409 | `last_team_owner` | 试图移除最后一位 team owner | 先增加 owner |
 | 409 | `member_has_open_work` | 成员仍承担未结束线程的关键角色 | 先结束工作 |
+| 409 | `avatar_upload_in_progress` | 同一 Principal 已有头像正在处理 | 等待当前上传完成 |
 | 410 | `invite_expired` | 邀请过期或已撤销 | 重新邀请 |
 | 410 | `attachment_expired` | 已结束线程的文件超过保留期 | 否 |
 | 413 | `attachment_too_large` | 文件超过限制 | 否 |
+| 413 | `avatar_too_large` / `avatar_processed_too_large` | 头像输入或安全重编码产物超过 1.5 MiB | 缩小或压缩后重试 |
 | 413 | `team_attachment_capacity_exceeded` | 团队文件总量超过限制 | 清理后 |
 | 415 | `attachment_type_not_allowed` | 类型不允许或 MIME 冲突 | 否 |
+| 415 | `avatar_type_not_allowed` | 头像格式不受支持或内容与扩展名不符 | 重新导出后重试 |
 | 422 | `attachment_not_ready` | 附件不属于提交者、已绑定或不可用 | 修正后 |
+| 422 | `avatar_image_invalid` / `avatar_image_limits_exceeded` | 头像损坏，或尺寸、帧数、总动画像素超过安全限制 | 重新导出或缩小后重试 |
 | 429 | `rate_limited` | 请求频率过高 | 按 Retry-After |
+| 429 | `avatar_processing_busy` | 有界头像处理器已满载 | 按 Retry-After |
+| 429 | `avatar_upload_rate_limited` | 同一 Principal 在上传窗口内尝试过多 | 按 Retry-After |
 | 503 | `service_unavailable` | 数据库或必要存储不可用 | 稍后重试 |
 
 Hub 不得在数据库写入失败时返回业务成功。

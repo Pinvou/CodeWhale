@@ -538,36 +538,54 @@ const teamRelayJa = {
 };
 
 Object.assign(teamRelayZh.errorMessages, {
-  avatar_too_large: '头像超过 5 MiB 限制。',
-  avatar_type_not_allowed: '头像仅支持 PNG、JPEG、WebP 和 GIF。',
+  avatar_too_large: '头像超过 1.5 MiB 限制。',
+  avatar_processed_too_large: '头像安全处理后仍超过 1.5 MiB，请缩小或压缩后重试。',
+  avatar_type_not_allowed: '头像仅支持 PNG、JPEG、WebP 和 GIF，且内容必须与扩展名一致。',
+  avatar_image_invalid: '头像已损坏或无法完整解码，请重新导出后重试。',
+  avatar_image_limits_exceeded: '头像尺寸、GIF 帧数或总动画像素超过安全限制。',
+  avatar_upload_in_progress: '该账户已有头像正在处理，请稍后重试。',
+  avatar_processing_busy: '头像处理暂时繁忙，请稍后重试。',
+  avatar_upload_rate_limited: '头像更新过于频繁，请稍后重试。',
   avatar_unreadable: '无法读取所选头像文件，请重新选择。',
   avatar_invalid_name: '头像文件名无效，请重命名后重试。',
 });
 Object.assign(teamRelayZh.profile, {
   open: '账户与头像', title: '账户与头像', subtitle: '头像和名字会显示在你加入的所有团队中。', avatar: '接力头像',
-  avatarHint: '支持 PNG、JPEG、WebP 和 GIF 动图，最大 5 MiB。未上传时显示名字首字。', uploadAvatar: '上传头像', changeAvatar: '更换头像',
+  avatarHint: '最大 1.5 MiB；静态图最长边缩至 512px，GIF 缩至 384px 且最多 60 帧、400 万总像素。未上传时显示名字首字。', uploadAvatar: '上传头像', changeAvatar: '更换头像',
   removeAvatar: '移除', removeAvatarConfirm: '移除自定义头像并恢复为名字首字吗？', avatarUpdated: '头像已更新', avatarRemoved: '已恢复名字首字头像',
 });
 Object.assign(teamRelayEn.errorMessages, {
-  avatar_too_large: 'The avatar exceeds the 5 MiB limit.',
-  avatar_type_not_allowed: 'Avatars support PNG, JPEG, WebP, and GIF only.',
+  avatar_too_large: 'The avatar exceeds the 1.5 MiB limit.',
+  avatar_processed_too_large: 'The safely processed avatar still exceeds 1.5 MiB. Resize or compress it and try again.',
+  avatar_type_not_allowed: 'Avatars support PNG, JPEG, WebP, and GIF only, and the content must match the extension.',
+  avatar_image_invalid: 'The avatar is damaged or could not be fully decoded. Export it again and retry.',
+  avatar_image_limits_exceeded: 'The avatar dimensions, GIF frame count, or total animated pixels exceed the safe limit.',
+  avatar_upload_in_progress: 'An avatar for this account is already being processed. Try again shortly.',
+  avatar_processing_busy: 'Avatar processing is busy. Try again shortly.',
+  avatar_upload_rate_limited: 'The avatar was updated too often. Try again shortly.',
   avatar_unreadable: 'The selected avatar could not be read. Choose it again.',
   avatar_invalid_name: 'The avatar filename is invalid. Rename it and try again.',
 });
 Object.assign(teamRelayEn.profile, {
   open: 'Account and avatar', title: 'Account and avatar', subtitle: 'Your avatar and name are shown in every team you join.', avatar: 'Relay avatar',
-  avatarHint: 'PNG, JPEG, WebP, or animated GIF, up to 5 MiB. Without one, your first name character is shown.', uploadAvatar: 'Upload avatar', changeAvatar: 'Change avatar',
+  avatarHint: 'Up to 1.5 MiB. Static images are resized to 512px; GIFs to 384px with at most 60 frames and 4M total pixels. Without one, your name initial is shown.', uploadAvatar: 'Upload avatar', changeAvatar: 'Change avatar',
   removeAvatar: 'Remove', removeAvatarConfirm: 'Remove the custom avatar and use your name character?', avatarUpdated: 'Avatar updated', avatarRemoved: 'Name avatar restored',
 });
 Object.assign(teamRelayJa.errorMessages, {
-  avatar_too_large: 'アバターが 5 MiB の上限を超えています。',
-  avatar_type_not_allowed: 'アバターは PNG、JPEG、WebP、GIF のみ対応しています。',
+  avatar_too_large: 'アバターが 1.5 MiB の上限を超えています。',
+  avatar_processed_too_large: '安全処理後のアバターが 1.5 MiB を超えています。縮小または圧縮して再試行してください。',
+  avatar_type_not_allowed: 'アバターは PNG、JPEG、WebP、GIF のみ対応し、内容と拡張子が一致する必要があります。',
+  avatar_image_invalid: 'アバターが破損しているか、完全にデコードできません。再書き出ししてお試しください。',
+  avatar_image_limits_exceeded: 'アバターの寸法、GIF フレーム数、または総アニメーション画素数が安全上限を超えています。',
+  avatar_upload_in_progress: 'このアカウントのアバターを処理中です。しばらくしてから再試行してください。',
+  avatar_processing_busy: 'アバター処理が混雑しています。しばらくしてから再試行してください。',
+  avatar_upload_rate_limited: 'アバターの更新回数が多すぎます。しばらくしてから再試行してください。',
   avatar_unreadable: '選択したアバターを読み取れません。選び直してください。',
   avatar_invalid_name: 'アバターのファイル名が無効です。名前を変更して再試行してください。',
 });
 Object.assign(teamRelayJa.profile, {
   open: 'アカウントとアバター', title: 'アカウントとアバター', subtitle: 'アバターと名前は参加中のすべてのチームに表示されます。', avatar: 'リレーアバター',
-  avatarHint: 'PNG、JPEG、WebP、アニメーション GIF（最大 5 MiB）。未設定時は名前の先頭文字を表示します。', uploadAvatar: 'アップロード', changeAvatar: '変更',
+  avatarHint: '最大 1.5 MiB。静止画は 512px、GIF は 384px に縮小し、最大 60 フレーム・総計 400 万画素です。未設定時は名前の先頭文字を表示します。', uploadAvatar: 'アップロード', changeAvatar: '変更',
   removeAvatar: '削除', removeAvatarConfirm: 'カスタムアバターを削除して名前の先頭文字に戻しますか？', avatarUpdated: 'アバターを更新しました', avatarRemoved: '名前のアバターに戻しました',
 });
 

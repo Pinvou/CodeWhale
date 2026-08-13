@@ -1,53 +1,22 @@
 import { constants, createWriteStream } from "node:fs";
-import { chmod, link, mkdir, open, rm } from "node:fs/promises";
-import { createHash, randomUUID } from "node:crypto";
-import { extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { chmod, link, mkdir, open, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import { pipeline } from "node:stream/promises";
 import Busboy from "busboy";
-import { fileTypeFromFile } from "file-type";
 import { authenticate, requireMembership } from "./auth.js";
+import { avatarRoot, avatarStoragePath, isPathInside } from "./avatar-storage.js";
+import {
+  AVATAR_VARIANT_SIZES,
+  detectAvatarContent,
+  MAX_AVATAR_BYTES,
+  processAvatarImage,
+} from "./avatar-image.js";
 import { newId } from "./crypto.js";
 import { inTransaction } from "./db.js";
 import { AppError, invalidRequest } from "./errors.js";
 import { avatarFromRow } from "./serializers.js";
 import { uuid } from "./validation.js";
-
-const ALLOWED_AVATAR_EXTENSIONS = new Map([
-  ["png", "png"],
-  ["jpg", "jpg"],
-  ["jpeg", "jpg"],
-  ["webp", "webp"],
-  ["gif", "gif"],
-]);
-const ALLOWED_AVATAR_CONTENT_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/webp",
-  "image/gif",
-]);
-const STORAGE_KEY_PATTERN = /^[0-9a-f]{2}\/[0-9a-f-]{36}$/;
-
-function isPathInside(root, candidate, pathApi = { isAbsolute, relative, sep }) {
-  const relativePath = pathApi.relative(root, candidate);
-  return relativePath !== ""
-    && relativePath !== ".."
-    && !relativePath.startsWith(`..${pathApi.sep}`)
-    && !pathApi.isAbsolute(relativePath);
-}
-
-function avatarRoot(config) {
-  return resolve(config.attachmentDir, "avatars");
-}
-
-function avatarStoragePath(config, storageKey) {
-  if (!STORAGE_KEY_PATTERN.test(storageKey)) throw new Error("invalid avatar storage key");
-  const root = avatarRoot(config);
-  const candidate = resolve(root, storageKey);
-  if (!isPathInside(root, candidate, { isAbsolute, relative, sep })) {
-    throw new Error("avatar path escaped storage root");
-  }
-  return candidate;
-}
 
 async function prepareStorage(config) {
   const root = avatarRoot(config);
@@ -75,6 +44,7 @@ function safeFilename(value) {
 async function receiveAvatarMultipart(request, config) {
   const temporaryDir = await prepareStorage(config);
   const temporaryPath = resolve(temporaryDir, randomUUID());
+  const maximumBytes = Math.min(config.maxAvatarBytes, MAX_AVATAR_BYTES);
   let parser;
   try {
     parser = Busboy({
@@ -86,10 +56,9 @@ async function receiveAvatarMultipart(request, config) {
         fieldSize: 1,
         fields: 0,
         files: 1,
-        // Busboy emits partsLimit when the parsed count reaches this value,
-        // so keep one sentinel slot beyond the single allowed file part.
+        // Busboy emits partsLimit when the parsed count reaches this value.
         parts: 2,
-        fileSize: config.maxAvatarBytes + 1,
+        fileSize: maximumBytes + 1,
         headerPairs: 64,
       },
     });
@@ -103,10 +72,27 @@ async function receiveAvatarMultipart(request, config) {
   let tooLarge = false;
   let limitError;
   let byteSize = 0;
-  const hash = createHash("sha256");
+  let activeFileStream;
+  let activeFileWriter;
+  const interrupted = invalidRequest("The avatar upload was interrupted.");
 
   try {
     await new Promise((resolvePromise, rejectPromise) => {
+      let settled = false;
+      const settle = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        request.off("aborted", onInterrupted);
+        request.off("error", onInterrupted);
+        callback(value);
+      };
+      const onInterrupted = () => {
+        request.unpipe(parser);
+        activeFileStream?.destroy(interrupted);
+        activeFileWriter?.destroy(interrupted);
+        parser.destroy(interrupted);
+        settle(rejectPromise, interrupted);
+      };
       parser.on("field", () => {
         limitError ||= invalidRequest("The avatar upload cannot contain form fields.");
       });
@@ -117,6 +103,7 @@ async function receiveAvatarMultipart(request, config) {
           return;
         }
         fileSeen = true;
+        activeFileStream = stream;
         try {
           filename = safeFilename(info.filename);
         } catch (error) {
@@ -129,12 +116,9 @@ async function receiveAvatarMultipart(request, config) {
         });
         stream.on("data", (chunk) => {
           byteSize += chunk.length;
-          hash.update(chunk);
         });
-        filePromise = pipeline(
-          stream,
-          createWriteStream(temporaryPath, { flags: "wx", mode: 0o600 }),
-        );
+        activeFileWriter = createWriteStream(temporaryPath, { flags: "wx", mode: 0o600 });
+        filePromise = pipeline(stream, activeFileWriter);
         filePromise.catch(() => {});
       });
       for (const event of ["fieldsLimit", "filesLimit", "partsLimit"]) {
@@ -142,11 +126,15 @@ async function receiveAvatarMultipart(request, config) {
           limitError ||= invalidRequest("The avatar upload has too many parts.");
         });
       }
-      parser.once("error", rejectPromise);
-      parser.once("close", resolvePromise);
-      request.pipe(parser);
+      parser.once("error", error => settle(rejectPromise, error));
+      parser.once("close", () => settle(resolvePromise));
+      request.once("aborted", onInterrupted);
+      request.once("error", onInterrupted);
+      if (request.aborted || request.destroyed) onInterrupted();
+      else request.pipe(parser);
     });
   } catch (error) {
+    if (filePromise) await filePromise.catch(() => {});
     await rm(temporaryPath, { force: true });
     throw error;
   }
@@ -157,103 +145,181 @@ async function receiveAvatarMultipart(request, config) {
     if (!fileSeen || !filePromise || !filename || byteSize === 0) {
       throw invalidRequest("One non-empty avatar file is required.");
     }
-    if (tooLarge || byteSize > config.maxAvatarBytes) {
+    if (tooLarge || byteSize > maximumBytes) {
       throw new AppError(413, "avatar_too_large", "The avatar exceeds the size limit.");
     }
-    return {
-      filename,
-      temporaryPath,
-      byteSize,
-      sha256: hash.digest("hex"),
-    };
+    return { filename, temporaryPath, byteSize };
   } catch (error) {
     await rm(temporaryPath, { force: true });
     throw error;
   }
 }
 
-async function detectAvatarContent(upload) {
-  const expected = ALLOWED_AVATAR_EXTENSIONS.get(
-    extname(upload.filename).slice(1).toLowerCase(),
-  );
-  if (!expected) {
-    throw new AppError(415, "avatar_type_not_allowed", "The avatar file type is not allowed.");
-  }
-  let detected;
+async function persistAssets(
+  config,
+  processed,
+  fileOperations = { chmod, link, mkdir, rm, writeFile },
+) {
+  const temporaryDir = await prepareStorage(config);
+  const entries = [
+    { size: null, asset: processed.main },
+    ...AVATAR_VARIANT_SIZES.map(size => ({ size, asset: processed.variants.get(size) })),
+  ];
+  const stored = [];
   try {
-    detected = await fileTypeFromFile(upload.temporaryPath);
-  } catch {
-    detected = undefined;
+    for (const entry of entries) {
+      const id = newId();
+      const storageKey = `${id.slice(0, 2)}/${id}`;
+      const directory = resolve(avatarRoot(config), id.slice(0, 2));
+      const finalPath = avatarStoragePath(config, storageKey);
+      const temporaryPath = resolve(temporaryDir, randomUUID());
+      try {
+        await fileOperations.writeFile(temporaryPath, entry.asset.data, { flag: "wx", mode: 0o600 });
+        await fileOperations.mkdir(directory, { recursive: true, mode: 0o700 });
+        await fileOperations.chmod(directory, 0o700);
+        await fileOperations.link(temporaryPath, finalPath);
+        // Register immediately after the hard link becomes observable so every
+        // later error includes it in synchronous rollback.
+        stored.push({ ...entry, storageKey, finalPath });
+        await fileOperations.chmod(finalPath, 0o600);
+      } finally {
+        await fileOperations.rm(temporaryPath, { force: true });
+      }
+    }
+    return stored;
+  } catch (error) {
+    await Promise.all(stored
+      .map(entry => fileOperations.rm(entry.finalPath, { force: true }).catch(() => {})));
+    throw error;
   }
-  if (
-    !detected
-    || detected.ext !== expected
-    || !ALLOWED_AVATAR_CONTENT_TYPES.has(detected.mime)
-  ) {
-    throw new AppError(415, "avatar_type_not_allowed", "The avatar content does not match its extension.");
-  }
-  return detected.mime;
 }
 
-export async function uploadAvatar(pool, token, request, config) {
-  const auth = await authenticate(pool, token);
-  const upload = await receiveAvatarMultipart(request, config);
-  try {
-    const contentType = await detectAvatarContent(upload);
-    const avatarId = newId();
-    const storageKey = `${avatarId.slice(0, 2)}/${avatarId}`;
-    const directory = resolve(avatarRoot(config), avatarId.slice(0, 2));
-    const finalPath = avatarStoragePath(config, storageKey);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await chmod(directory, 0o700);
-    await link(upload.temporaryPath, finalPath);
-    await rm(upload.temporaryPath, { force: true });
-    await chmod(finalPath, 0o600);
+async function removeStored(entries) {
+  await Promise.all(entries.map(entry => rm(entry.finalPath, { force: true }).catch(() => {})));
+}
 
-    let result;
+async function commitAvatarAssets(
+  pool,
+  principalId,
+  stored,
+  config,
+  runTransaction = inTransaction,
+) {
+  const main = stored.find(entry => entry.size === null);
+  const variants = stored.filter(entry => entry.size !== null);
+  let result;
+  try {
+    result = await runTransaction(pool, async (client) => {
+      await client.query("SELECT id FROM principals WHERE id = $1 FOR UPDATE", [principalId]);
+      const previousMain = await client.query(
+        "SELECT storage_key FROM principal_avatars WHERE principal_id = $1",
+        [principalId],
+      );
+      const previousVariants = await client.query(
+        "SELECT storage_key FROM principal_avatar_variants WHERE principal_id = $1",
+        [principalId],
+      );
+      const updated = await client.query(
+        `INSERT INTO principal_avatars (
+           principal_id, storage_key, content_type, byte_size, sha256
+         ) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (principal_id) DO UPDATE SET
+           storage_key = EXCLUDED.storage_key,
+           content_type = EXCLUDED.content_type,
+           byte_size = EXCLUDED.byte_size,
+           sha256 = EXCLUDED.sha256,
+           updated_at = clock_timestamp()
+         RETURNING content_type AS avatar_content_type,
+                   byte_size AS avatar_byte_size,
+                   sha256 AS avatar_sha256,
+                   updated_at AS avatar_updated_at`,
+        [
+          principalId,
+          main.storageKey,
+          main.asset.contentType,
+          main.asset.byteSize,
+          main.asset.sha256,
+        ],
+      );
+      await client.query("DELETE FROM principal_avatar_variants WHERE principal_id = $1", [principalId]);
+      for (const variant of variants) {
+        await client.query(
+          `INSERT INTO principal_avatar_variants (
+             principal_id, size, storage_key, content_type, byte_size, sha256
+           ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            principalId,
+            variant.size,
+            variant.storageKey,
+            variant.asset.contentType,
+            variant.asset.byteSize,
+            variant.asset.sha256,
+          ],
+        );
+      }
+      const memberships = await client.query(
+        "SELECT team_id FROM memberships WHERE principal_id = $1 AND removed_at IS NULL",
+        [principalId],
+      );
+      return {
+        avatar: avatarFromRow(updated.rows[0]),
+        previousStorageKeys: [
+          previousMain.rows[0]?.storage_key,
+          ...previousVariants.rows.map(row => row.storage_key),
+        ].filter(Boolean),
+        teamIds: memberships.rows.map(row => row.team_id),
+      };
+    });
+  } catch (error) {
+    await removeStored(stored);
+    throw error;
+  }
+
+  const currentKeys = new Set(stored.map(entry => entry.storageKey));
+  await Promise.all(result.previousStorageKeys
+    .filter(storageKey => !currentKeys.has(storageKey))
+    // Deletion is best effort after the transaction commits. Any failure leaves
+    // an unreferenced file that the scheduled avatar orphan scan will remove.
+    .map(storageKey => rm(avatarStoragePath(config, storageKey), { force: true }).catch(() => {})));
+  return result;
+}
+
+export async function uploadAvatar(pool, token, request, config, processingGate) {
+  const auth = await authenticate(pool, token);
+  let upload;
+  let release;
+  try {
+    ({ upload, release } = await receiveAvatarWithGate(
+      request,
+      config,
+      processingGate,
+      auth.principalId,
+    ));
+    let stored = [];
+    const processed = await processAvatarImage(upload, config);
+    stored = await persistAssets(config, processed);
+    return await commitAvatarAssets(pool, auth.principalId, stored, config);
+  } finally {
+    release?.();
+    if (upload) await rm(upload.temporaryPath, { force: true });
+  }
+}
+
+async function receiveAvatarWithGate(request, config, processingGate, principalId) {
+  let release;
+  try {
     try {
-      result = await inTransaction(pool, async (client) => {
-        await client.query("SELECT id FROM principals WHERE id = $1 FOR UPDATE", [auth.principalId]);
-        const previous = await client.query(
-          "SELECT storage_key FROM principal_avatars WHERE principal_id = $1",
-          [auth.principalId],
-        );
-        const updated = await client.query(
-          `INSERT INTO principal_avatars (
-             principal_id, storage_key, content_type, byte_size, sha256
-           ) VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (principal_id) DO UPDATE SET
-             storage_key = EXCLUDED.storage_key,
-             content_type = EXCLUDED.content_type,
-             byte_size = EXCLUDED.byte_size,
-             sha256 = EXCLUDED.sha256,
-             updated_at = clock_timestamp()
-           RETURNING content_type AS avatar_content_type,
-                     byte_size AS avatar_byte_size,
-                     sha256 AS avatar_sha256,
-                     updated_at AS avatar_updated_at`,
-          [auth.principalId, storageKey, contentType, upload.byteSize, upload.sha256],
-        );
-        const memberships = await client.query(
-          "SELECT team_id FROM memberships WHERE principal_id = $1 AND removed_at IS NULL",
-          [auth.principalId],
-        );
-        return {
-          avatar: avatarFromRow(updated.rows[0]),
-          previousStorageKey: previous.rows[0]?.storage_key,
-          teamIds: memberships.rows.map((row) => row.team_id),
-        };
-      });
+      release = processingGate?.enter(principalId);
     } catch (error) {
-      await rm(finalPath, { force: true });
+      // Drain the rejected body without piping it into storage so the HTTP
+      // connection remains reusable and concurrent uploads consume no disk.
+      request.resume?.();
       throw error;
     }
-    if (result.previousStorageKey && result.previousStorageKey !== storageKey) {
-      await rm(avatarStoragePath(config, result.previousStorageKey), { force: true }).catch(() => {});
-    }
-    return result;
+    const upload = await receiveAvatarMultipart(request, config);
+    return { upload, release };
   } catch (error) {
-    await rm(upload.temporaryPath, { force: true });
+    release?.();
     throw error;
   }
 }
@@ -262,6 +328,10 @@ export async function deleteAvatar(pool, token, config) {
   const auth = await authenticate(pool, token);
   const result = await inTransaction(pool, async (client) => {
     await client.query("SELECT id FROM principals WHERE id = $1 FOR UPDATE", [auth.principalId]);
+    const variants = await client.query(
+      "SELECT storage_key FROM principal_avatar_variants WHERE principal_id = $1",
+      [auth.principalId],
+    );
     const deleted = await client.query(
       "DELETE FROM principal_avatars WHERE principal_id = $1 RETURNING storage_key",
       [auth.principalId],
@@ -271,36 +341,59 @@ export async function deleteAvatar(pool, token, config) {
       [auth.principalId],
     );
     return {
-      storageKey: deleted.rows[0]?.storage_key,
-      teamIds: memberships.rows.map((row) => row.team_id),
+      storageKeys: [
+        deleted.rows[0]?.storage_key,
+        ...variants.rows.map(row => row.storage_key),
+      ].filter(Boolean),
+      teamIds: memberships.rows.map(row => row.team_id),
     };
   });
-  if (result.storageKey) {
-    await rm(avatarStoragePath(config, result.storageKey), { force: true }).catch(() => {});
-  }
+  await Promise.all(result.storageKeys
+    .map(storageKey => rm(avatarStoragePath(config, storageKey), { force: true }).catch(() => {})));
   return result;
 }
 
-async function authorizedAvatar(pool, token, rawPrincipalId, rawTeamId) {
+function avatarVariantSize(rawSize) {
+  if (rawSize === null || rawSize === undefined || rawSize === "") return null;
+  if (!/^(48|96)$/.test(String(rawSize))) {
+    throw invalidRequest("Avatar size must be 48 or 96.");
+  }
+  return Number(rawSize);
+}
+
+async function authorizedAvatar(pool, token, rawPrincipalId, rawTeamId, rawSize) {
   const principalId = uuid(rawPrincipalId, "principal_id");
   const teamId = uuid(rawTeamId, "team_id");
+  const size = avatarVariantSize(rawSize);
   const auth = await authenticate(pool, token);
   await requireMembership(pool, teamId, auth.principalId);
   await requireMembership(pool, teamId, principalId);
-  const result = await pool.query(
-    `SELECT principal_id, storage_key, content_type, byte_size, sha256, updated_at
-       FROM principal_avatars
-      WHERE principal_id = $1`,
-    [principalId],
-  );
+  const result = size === null
+    ? await pool.query(
+      `SELECT principal_id, storage_key, content_type, byte_size, sha256,
+              sha256 AS source_sha256, updated_at
+         FROM principal_avatars
+        WHERE principal_id = $1`,
+      [principalId],
+    )
+    : await pool.query(
+      `SELECT avatar.principal_id, variant.storage_key, variant.content_type,
+              variant.byte_size, variant.sha256, avatar.sha256 AS source_sha256,
+              avatar.updated_at
+         FROM principal_avatars avatar
+         JOIN principal_avatar_variants variant
+           ON variant.principal_id = avatar.principal_id AND variant.size = $2
+        WHERE avatar.principal_id = $1`,
+      [principalId, size],
+    );
   if (result.rowCount === 0) {
     throw new AppError(404, "resource_not_found", "The avatar was not found.");
   }
   return result.rows[0];
 }
 
-export async function openAvatarContent(pool, token, principalId, teamId, config) {
-  const row = await authorizedAvatar(pool, token, principalId, teamId);
+export async function openAvatarContent(pool, token, principalId, teamId, size, config) {
+  const row = await authorizedAvatar(pool, token, principalId, teamId, size);
   let handle;
   try {
     handle = await open(
@@ -323,7 +416,11 @@ export async function openAvatarContent(pool, token, principalId, teamId, config
 
 export {
   avatarStoragePath,
+  avatarVariantSize,
+  commitAvatarAssets,
   detectAvatarContent,
   isPathInside,
+  persistAssets,
+  receiveAvatarWithGate,
   receiveAvatarMultipart,
 };

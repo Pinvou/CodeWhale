@@ -97,10 +97,11 @@ pub async fn team_relay_remove_avatar(
 pub async fn team_relay_avatar_data_url(
     principal_id: String,
     expected_sha256: String,
+    display_size: Option<u16>,
     manager: State<'_, TeamRelayManager>,
 ) -> Result<Option<String>, String> {
     manager
-        .avatar_data_url(&principal_id, &expected_sha256)
+        .avatar_data_url(&principal_id, &expected_sha256, display_size)
         .await
 }
 
