@@ -65,6 +65,7 @@ assert.equal(tasks[0].category, 'waiting');
 assert.equal(tasks[0].owner, 'B');
 assert.equal(tasks[0].files[0].original_name, '方案.md');
 assert.equal(tasks[0].events[0].delivery.artifact_role, 'input');
+assert.equal(tasks[0].events[0].delivery.subtype, '');
 assert.equal(tasks[0].events[0].sequence, 1);
 assert.equal(tasks[0].teamId, 'team');
 assert.equal(tasks[0].teamName, 'Demo');
@@ -97,6 +98,23 @@ assert.equal(board.members[0].isMe, true);
 assert.equal(board.members.find(member => member.id === 'b').activeCount, 1);
 assert.equal(board.members.find(member => member.id === 'b').waitingCount, 0);
 assert.equal(board.members.find(member => member.id === 'b').ownedCount, 1);
+
+const noteSnapshot = JSON.parse(JSON.stringify(snapshot));
+noteSnapshot.bootstrap.threads[0].actions.push(
+  { id: 'legacy-note', thread_id: 'thread', sequence: 2, kind: 'note', actor_id: 'me', recipient_id: null, return_to_id: null, message: '旧版备注', base_revision: 1, idempotency_key: 'legacy-note-key', attachment_ids: [], created_at: '2026-08-04T01:00:00Z' },
+  { id: 'progress-note', thread_id: 'thread', sequence: 3, kind: 'note', actor_id: 'b', recipient_id: null, return_to_id: null, message: '当前进展', base_revision: 2, idempotency_key: 'progress-note-key', attachment_ids: [], delivery: { schema_version: 1, artifact_role: 'evidence', subtype: 'progress', expected_next: '', open_questions: '', git_references: [] }, created_at: '2026-08-04T02:00:00Z' },
+);
+const noteTask = projectSnapshot(noteSnapshot, dict.zh.uiTeamRelay)[0];
+assert.equal(noteTask.events.find(event => event.id === 'legacy-note').kindLabel, '补充说明');
+assert.match(noteTask.events.find(event => event.id === 'legacy-note').title, /补充说明/);
+assert.equal(noteTask.events.find(event => event.id === 'progress-note').kindLabel, '进展更新');
+assert.match(noteTask.events.find(event => event.id === 'progress-note').title, /进展更新/);
+const acceptanceNoteSnapshot = JSON.parse(JSON.stringify(noteSnapshot));
+acceptanceNoteSnapshot.bootstrap.threads[0].thread.phase = 'awaiting_acceptance';
+acceptanceNoteSnapshot.bootstrap.threads[0].thread.current_actor_id = 'me';
+acceptanceNoteSnapshot.bootstrap.threads[0].actions.push({ id: 'acceptance-note', thread_id: 'thread', sequence: 4, kind: 'note', actor_id: 'me', recipient_id: null, return_to_id: null, message: '验收备注', base_revision: 3, idempotency_key: 'acceptance-note-key', attachment_ids: [], delivery: { schema_version: 1, artifact_role: 'evidence', expected_next: '', open_questions: '', git_references: [] }, created_at: '2026-08-04T03:00:00Z' });
+const acceptanceNote = projectSnapshot(acceptanceNoteSnapshot, dict.zh.uiTeamRelay)[0].events.find(event => event.id === 'acceptance-note');
+assert.equal(acceptanceNote.kindLabel, '补充说明');
 
 const materialTask = JSON.parse(JSON.stringify(tasks[0]));
 materialTask.events.push({
@@ -165,6 +183,7 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(copy.errorMessages.rate_limited);
   assert.ok(copy.actionKinds.handoff);
   assert.ok(copy.actionKinds.note);
+  assert.ok(copy.actionKinds.progress);
   assert.ok(copy.actionKinds.cancel);
   assert.equal(typeof copy.live.actionTitle, 'function');
   assert.equal(typeof copy.buildAgentPrompt, 'function');
@@ -274,7 +293,8 @@ assert.match(viewSource, /team-relay-direct-attachments/);
 assert.match(viewSource, /team-relay-direct-footer/);
 assert.match(viewSource, /canUpdateRelayProgress\(task\.raw, meId\)/);
 assert.match(viewSource, /onDialog\('progress'\)/);
-assert.match(viewSource, /dialog === 'progress'[^\n]+runAction\('note'/);
+assert.match(viewSource, /dialog === 'progress'[^\n]+runAction\('note'[^\n]+subtype: 'progress'/);
+assert.match(readFileSync(new URL('../src/features/team-relay/MaterialInspector.jsx', import.meta.url), 'utf8'), /item\.kindLabel/);
 assert.match(viewSource, /required=\{!dialogCopy\.acceptanceOptional\}/);
 assert.match(viewSource, /team-relay-sync-button/);
 assert.match(viewSource, /bridge\.teamRelay\.refresh\(\)/);

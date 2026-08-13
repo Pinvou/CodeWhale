@@ -45,7 +45,7 @@ export function MaterialInspector({
           <span><Package size={13} />{copy.packageId(item.sequence)} · {copy.artifactRoles[item.delivery.artifact_role]}</span>
           <time>{displayTime(item.time)}</time>
         </button>
-        <p>{item.actor} · {copy.actionKinds[item.kind] || item.kind}</p>
+        <p>{item.actor} · {item.kindLabel || copy.actionKinds[item.kind] || item.kind}</p>
         {item.agentContextUpdated && <div className="team-relay-material-inspector-update"><BrainCircuit size={12} />{copy.materialInspector.agentUpdate}</div>}
         {item.files.map(itemFile => {
           const { file, prepared, introduced } = itemFile;
