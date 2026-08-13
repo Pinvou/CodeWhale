@@ -4,7 +4,8 @@ use super::context::{COMPACTION_SUMMARY_MARKER, TURN_MAX_OUTPUT_TOKENS};
 use super::dispatch::normalize_schema_json_containers;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
-    append_stuck_runtime_notice, merge_new_runtime_mcp_tools, registered_tool_approval_required,
+    append_stuck_runtime_notice, append_tool_error_degradation_runtime_notice,
+    merge_new_runtime_mcp_tools, registered_tool_approval_required,
     registered_tool_blocked_in_full_access, registered_tool_forces_prompt,
     tool_error_degradation_runtime_hint, workspace_write_carve_out_applies,
 };
@@ -48,6 +49,8 @@ const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
 
 struct ForkguardHostExtraTool;
 
+struct ForkguardAlwaysFailsTool;
+
 #[test]
 fn forkguard_schema_bound_json_container_repair_accepts_nested_payload() {
     let schema = json!({
@@ -78,14 +81,16 @@ fn forkguard_schema_bound_json_container_repair_accepts_nested_payload() {
             "unchanged_number": { "type": "integer" }
         }
     });
+    let encoded_options = serde_json::to_string(&json!([
+        { "label": "范围 A", "description": "覆盖第一组样本" },
+        { "label": "范围 B", "description": "覆盖第二组样本" }
+    ]))
+    .expect("encode nested options fixture");
     let encoded_questions = serde_json::to_string(&json!([{
         "header": "报告范围",
         "id": "scope",
         "question": "请选择调研范围",
-        "options": [
-            { "label": "南京市", "description": "覆盖南京市高校" },
-            { "label": "江苏省", "description": "覆盖全省高校" }
-        ]
+        "options": encoded_options
     }]))
     .expect("encode fixture");
     let mut input = json!({
@@ -94,9 +99,10 @@ fn forkguard_schema_bound_json_container_repair_accepts_nested_payload() {
         "unchanged_number": "10"
     });
 
-    assert_eq!(normalize_schema_json_containers(&mut input, &schema), 1);
+    assert_eq!(normalize_schema_json_containers(&mut input, &schema), 2);
     assert!(input["questions"].is_array());
     assert_eq!(input["questions"][0]["id"], "scope");
+    assert!(input["questions"][0]["options"].is_array());
     assert_eq!(input["unchanged_text"], "{\"looks\":\"like json\"}");
     assert_eq!(input["unchanged_number"], "10");
     crate::tools::user_input::UserInputRequest::from_value(&input)
@@ -132,6 +138,20 @@ fn forkguard_stuck_guard_warning_is_embedded_in_tool_result_content() {
     assert!(content.ends_with("</codewhale:runtime_event>"));
 }
 
+#[test]
+fn forkguard_tool_error_degradation_is_embedded_as_internal_runtime_content() {
+    let content = append_tool_error_degradation_runtime_notice(
+        "Error: network unavailable".to_string(),
+        "switch to an alternate source",
+    );
+
+    assert!(content.starts_with("Error: network unavailable\n\n"));
+    assert!(content.contains("kind=\"tool_error_degradation\""));
+    assert!(content.contains("visibility=\"internal\""));
+    assert!(content.contains("switch to an alternate source"));
+    assert!(content.ends_with("</codewhale:runtime_event>"));
+}
+
 #[async_trait::async_trait]
 impl crate::tools::spec::ToolSpec for ForkguardHostExtraTool {
     fn name(&self) -> &str {
@@ -156,6 +176,35 @@ impl crate::tools::spec::ToolSpec for ForkguardHostExtraTool {
         _context: &crate::tools::spec::ToolContext,
     ) -> Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> {
         Ok(crate::tools::spec::ToolResult::success("ok".to_string()))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tools::spec::ToolSpec for ForkguardAlwaysFailsTool {
+    fn name(&self) -> &str {
+        "host_failure_probe"
+    }
+
+    fn description(&self) -> &str {
+        "Deterministic failing tool for provider-role regression coverage."
+    }
+
+    fn input_schema(&self) -> serde_json::Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn capabilities(&self) -> Vec<ToolCapability> {
+        vec![ToolCapability::ReadOnly]
+    }
+
+    async fn execute(
+        &self,
+        _input: serde_json::Value,
+        _context: &crate::tools::spec::ToolContext,
+    ) -> Result<crate::tools::spec::ToolResult, crate::tools::spec::ToolError> {
+        Err(crate::tools::spec::ToolError::execution_failed(
+            "deterministic provider failure",
+        ))
     }
 }
 
@@ -3562,6 +3611,103 @@ async fn forkguard_stuck_guard_tool_warning_preserves_provider_role_sequence() {
         tail.content.as_slice(),
         [ContentBlock::ToolResult { .. }]
     ));
+
+    let wire = crate::client::build_chat_messages(
+        continuation.system.as_ref(),
+        &continuation.messages,
+        &continuation.model,
+    );
+    assert!(
+        !wire.windows(2).any(|pair| {
+            pair[0].get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                && pair[1].get("role").and_then(serde_json::Value::as_str) == Some("user")
+        }),
+        "stuck continuation must not serialize as tool -> user: {wire:?}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_tool_error_degradation_preserves_provider_role_sequence() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let failing_call = |id: &str| canned::tool_call_turn(id, "host_failure_probe", r#"{}"#);
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        failing_call("call-failure-1"),
+        failing_call("call-failure-2"),
+        canned::simple_text_turn("Changed strategy after degradation guidance."),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, _handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let mut registry =
+        crate::tools::ToolRegistry::new(crate::tools::ToolContext::new(workspace.path()));
+    registry.register(Arc::new(ForkguardAlwaysFailsTool));
+    let policy = ToolSurfacePolicy::new(
+        registry,
+        Some(vec![catalog_tool("host_failure_probe")]),
+        AppMode::Agent,
+        &HashSet::new(),
+        &[],
+        false,
+        Some(vec!["host_failure_probe".to_string()]),
+        None,
+        None,
+        crate::tui::approval::ApprovalMode::Suggest,
+    );
+    let mut turn = crate::core::turn::TurnContext::new(5);
+
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, policy, None).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+
+    let requests = mock.captured_requests();
+    assert_eq!(requests.len(), 3, "two failures followed by recovery");
+    let continuation = &requests[2];
+    let mut tool_result_notices = 0usize;
+    let mut standalone_user_notices = 0usize;
+    for message in &continuation.messages {
+        for block in &message.content {
+            match block {
+                ContentBlock::ToolResult { content, .. }
+                    if content.contains("kind=\"tool_error_degradation\"") =>
+                {
+                    tool_result_notices += 1;
+                }
+                ContentBlock::Text { text, .. }
+                    if message.role == "user"
+                        && text.contains("Tool calls have failed for 2 consecutive steps") =>
+                {
+                    standalone_user_notices += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        tool_result_notices, 1,
+        "degradation guidance must decorate one error tool result: {:?}",
+        continuation.messages
+    );
+    assert_eq!(
+        standalone_user_notices, 0,
+        "degradation guidance must not create a standalone user message"
+    );
+
+    let wire = crate::client::build_chat_messages(
+        continuation.system.as_ref(),
+        &continuation.messages,
+        &continuation.model,
+    );
+    assert!(
+        !wire.windows(2).any(|pair| {
+            pair[0].get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                && pair[1].get("role").and_then(serde_json::Value::as_str) == Some("user")
+        }),
+        "degradation continuation must not serialize as tool -> user: {wire:?}"
+    );
 }
 
 /// Compose one assistant turn that proposes `calls` as a single parallel

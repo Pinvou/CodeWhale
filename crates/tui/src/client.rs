@@ -3541,6 +3541,8 @@ fn take_sse_line(buffer: &mut Vec<u8>) -> Option<String> {
     Some(line)
 }
 
+#[cfg(test)]
+pub(crate) use chat::build_chat_messages;
 pub(crate) use chat::{CacheWarmupKey, PromptInspection};
 pub(crate) use prepared::{
     CallerStreamMode, EndpointIdentity, PreparedOutboundRequest, RouteShape, WireBodyView,

@@ -1131,7 +1131,7 @@ impl DeepSeekClient {
 // === Chat Completions Helpers ===
 
 #[cfg(test)]
-pub(super) fn build_chat_messages(
+pub(crate) fn build_chat_messages(
     system: Option<&SystemPrompt>,
     messages: &[Message],
     model: &str,
