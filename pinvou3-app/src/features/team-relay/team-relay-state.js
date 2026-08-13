@@ -98,16 +98,22 @@ function projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors) {
       ? [...events].reverse().find(event => event.kind === 'final_deliver') || null
       : null;
     const hubHasReadState = Object.prototype.hasOwnProperty.call(detail, 'unread_count');
+    const revision = Number(thread.revision || 0);
     const legacyCursorValue = Number(legacyReadCursors[thread.id]);
-    const legacyCursor = Number.isFinite(legacyCursorValue)
+    const hasLocalCursor = Number.isFinite(legacyCursorValue) && legacyCursorValue >= 0 && legacyCursorValue <= revision;
+    const legacyCursor = hasLocalCursor
       ? legacyCursorValue
-      : Math.max(0, Number(thread.revision || 0) - 1);
+      : Math.max(0, revision - 1);
+    const hubReadState = detail.read_state || { thread_id: thread.id, last_read_sequence: 0, last_read_at: null };
+    const hubCursor = Number(hubReadState.last_read_sequence || 0);
+    const effectiveCursor = hasLocalCursor ? Math.max(hubCursor, legacyCursor) : hubCursor;
+    const localCursorIsAhead = hasLocalCursor && legacyCursor > hubCursor;
     const readState = hubHasReadState
-      ? detail.read_state || { thread_id: thread.id, last_read_sequence: 0, last_read_at: null }
+      ? { ...hubReadState, last_read_sequence: effectiveCursor }
       : { thread_id: thread.id, last_read_sequence: legacyCursor, last_read_at: null };
-    const unreadCount = hubHasReadState
+    const unreadCount = hubHasReadState && !localCursorIsAhead
       ? Number(detail.unread_count || 0)
-      : detail.actions.filter(action => Number(action.sequence || 0) > legacyCursor && action.actor_id !== bootstrap.me.id).length;
+      : detail.actions.filter(action => Number(action.sequence || 0) > readState.last_read_sequence && action.actor_id !== bootstrap.me.id).length;
     return {
       id: thread.id,
       category,

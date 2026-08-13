@@ -137,6 +137,7 @@
       createThread: unsupportedTeamRelay,
       createAction: unsupportedTeamRelay,
       setThreadPreference: unsupportedTeamRelay,
+      markThreadRead: unsupportedTeamRelay,
       listDraftSourceSessions: unsupportedTeamRelay,
       readDraftSourceSession: unsupportedTeamRelay,
       mountDraftMaterials: unsupportedTeamRelay,
