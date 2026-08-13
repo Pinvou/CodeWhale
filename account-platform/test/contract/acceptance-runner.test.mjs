@@ -8,6 +8,7 @@ const root = path.resolve(import.meta.dirname, '../../..');
 test('E2E runner generates secrets and exercises financial idempotency', async () => {
   const runner = await readFile(path.join(root, 'scripts/account-platform.mjs'), 'utf8');
   const acceptance = await readFile(path.join(root, 'account-platform/test/integration/compose-acceptance.mjs'), 'utf8');
+  const fault = await readFile(path.join(root, 'account-platform/test/integration/compose-fault.mjs'), 'utf8');
 
   assert.match(runner, /generatedComposeEnvironment/);
   assert.match(runner, /randomBytes\(32\)/);
@@ -20,4 +21,9 @@ test('E2E runner generates secrets and exercises financial idempotency', async (
   assert.match(acceptance, /partial-refund acceptance/);
   assert.match(acceptance, /reconciliation must close without mismatches/);
   assert.doesNotMatch(acceptance, /replace-with-|Bearer [A-Za-z0-9_-]{20,}/);
+  assert.match(fault, /stop', 'billing-service/);
+  assert.match(fault, /start', 'billing-service/);
+  assert.match(fault, /stop', 'nats/);
+  assert.match(fault, /payment callback must converge after Billing restarts/);
+  assert.doesNotMatch(fault, /replace-with-|Bearer [A-Za-z0-9_-]{20,}/);
 });

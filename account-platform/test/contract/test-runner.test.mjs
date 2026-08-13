@@ -11,6 +11,7 @@ test('unified runner exposes deterministic integration and security gates', asyn
   assert.match(runner, /generatedComposeEnvironment/);
   assert.match(runner, /COMPOSE_PROJECT_NAME: `pinvou-account-platform-test-\$\{process\.pid\}`/);
   assert.match(runner, /test.*e2e/);
+  assert.match(runner, /test.*fault/);
   assert.match(runner, /down', '--volumes', '--remove-orphans'/);
   assert.match(runner, /govulncheck@v1\.6\.0/);
   assert.match(runner, /audit-level=high/);

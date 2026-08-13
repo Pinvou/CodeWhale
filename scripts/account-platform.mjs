@@ -105,7 +105,13 @@ function composeTest(testFiles) {
   try {
     run('docker', [...args, 'up', '--build', '-d', '--wait'], { env: environment });
     for (const testFile of testFiles) {
-      run(process.execPath, [path.join(platformRoot, 'test', 'integration', testFile)], { env: environment });
+      run(process.execPath, [path.join(platformRoot, 'test', 'integration', testFile)], {
+        env: {
+          ...environment,
+          PINVOU_TEST_COMPOSE_FILE: composeFile,
+          PINVOU_TEST_COMPOSE_ENV_FILE: `${composeEnv}.example`,
+        },
+      });
     }
   } catch (error) {
     failure = error;
@@ -128,6 +134,10 @@ function e2e() {
   composeTest(['compose-smoke.mjs', 'compose-acceptance.mjs']);
 }
 
+function fault() {
+  composeTest(['compose-smoke.mjs', 'compose-fault.mjs']);
+}
+
 function security() {
   ensureNodeModules();
   run(executable('go'), ['run', 'golang.org/x/vuln/cmd/govulncheck@v1.6.0', './...'], { cwd: platformRoot });
@@ -145,9 +155,10 @@ try {
     runNpm(['test'], { cwd: platformRoot });
   } else if (scope === 'test' && action === 'integration') integration();
   else if (scope === 'test' && action === 'e2e') e2e();
+  else if (scope === 'test' && action === 'fault') fault();
   else if (scope === 'test' && action === 'security') security();
   else {
-    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract|integration|e2e|security>');
+    throw new Error('usage: account-platform.mjs verify | dev <up|down> | test <unit|contract|integration|e2e|fault|security>');
   }
 } catch (error) {
   console.error(`[account-platform] ${error.message}`);
