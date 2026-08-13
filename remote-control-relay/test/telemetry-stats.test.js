@@ -6,6 +6,11 @@ import test from "node:test";
 
 import {
   TelemetryStore,
+  buildBehaviorModelRanking,
+  buildBehaviorOverview,
+  buildBehaviorSceneRanking,
+  buildBehaviorToolRanking,
+  buildCommercialMock,
   buildDeviceList,
   buildStatsOverview,
   formatDeviceRegion,
@@ -88,6 +93,128 @@ test("dashboard metrics use unique devices and 30 complete Beijing calendar days
   assert.equal(list[1].turns_7d, 1);
   assert.equal(list[1].region, "未知");
   assert.equal("failure_rate_7d" in list[0], false);
+});
+
+test("behavior analytics aggregates tasks voice tools installs scenes and models", () => {
+  const now = at("2026-08-12T12:00:00");
+  const devices = [
+    { device_id: "dev_a", last_active_at: at("2026-08-12T09:00:00") },
+    { device_id: "dev_b", last_active_at: at("2026-08-12T10:00:00") },
+    { device_id: "dev_c", last_active_at: null },
+  ];
+  const usageEvents = [
+    { event_id: "usage_a", device_id: "dev_a", occurred_at: at("2026-08-12T09:00:00") },
+    { event_id: "usage_b", device_id: "dev_b", occurred_at: at("2026-08-12T10:00:00") },
+  ];
+  const behaviorEvents = [
+    { event_id: "task_a", event_name: "task_started", identity_id: "dev_a", occurred_at: at("2026-08-12T09:01:00") },
+    { event_id: "task_done_a", event_name: "task_finished", identity_id: "dev_a", status: "success", occurred_at: at("2026-08-12T09:02:00") },
+    { event_id: "task_done_b", event_name: "task_finished", identity_id: "dev_b", status: "interrupted", occurred_at: at("2026-08-12T10:02:00") },
+    { event_id: "voice_a", event_name: "voice_started", identity_id: "dev_a", occurred_at: at("2026-08-12T09:03:00") },
+    { event_id: "voice_c", event_name: "voice_started", identity_id: "dev_c", occurred_at: at("2026-08-12T11:03:00") },
+    { event_id: "tool_a", event_name: "tool_call_completed", identity_id: "dev_a", tool_key: "search", tool_name: "Search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T09:04:00") },
+    { event_id: "tool_b", event_name: "tool_call_completed", identity_id: "dev_b", tool_key: "search", tool_name: "Search", tool_type: "builtin", success: false, occurred_at: at("2026-08-12T10:04:00") },
+    { event_id: "install_a", event_name: "tool_install_completed", identity_id: "dev_a", tool_key: "search", tool_name: "Search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T09:05:00") },
+    { event_id: "scene_a", event_name: "scene_triggered", identity_id: "dev_a", scene_l1: "work", scene_l2: "document-writing", occurred_at: at("2026-08-12T09:06:00") },
+    { event_id: "model_a", event_name: "model_used", identity_id: "dev_a", provider_key: "deepseek", provider_name: "DeepSeek", model_id: "deepseek-chat", model_name: "DeepSeek Chat", occurred_at: at("2026-08-12T09:07:00") },
+    { event_id: "model_b", event_name: "model_used", identity_id: "dev_b", provider_key: "deepseek", provider_name: "DeepSeek", model_id: "deepseek-chat", model_name: "DeepSeek Chat", occurred_at: at("2026-08-12T10:07:00") },
+    { event_id: "model_c", event_name: "model_used", identity_id: "dev_a", provider_key: "openai", provider_name: "OpenAI", model_id: "gpt-5", model_name: "GPT-5", occurred_at: at("2026-08-12T11:07:00") },
+  ];
+
+  const overview = buildBehaviorOverview(devices, usageEvents, behaviorEvents, "today", now);
+  assert.equal(overview.active_users, 3);
+  assert.equal(overview.metrics.task_started_count, 1);
+  assert.equal(overview.metrics.task_success_count, 1);
+  assert.equal(overview.metrics.task_interrupted_count, 1);
+  assert.equal(overview.metrics.voice_started_users, 2);
+  assert.equal(overview.metrics.voice_penetration_rate, 2 / 3);
+
+  const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "today", "call", now);
+    assert.equal(tools.rows[0].tool_key, "search");
+    assert.equal(tools.rows[0].call_count, 2);
+    assert.equal(tools.rows[0].user_count, 2);
+    assert.equal(tools.rows[0].tool_type, "mcp");
+    assert.equal(tools.rows[0].success_rate, 0.5);
+
+  const installs = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "today", "install", now);
+  assert.equal(installs.rows[0].install_count, 1);
+
+  const scenes = buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, "today", now);
+  assert.equal(scenes.rows[0].scene_l1, "work");
+  assert.equal(scenes.rows[0].trigger_count, 1);
+
+  const models = buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, "today", now);
+  assert.equal(models.rows[0].provider_key, "deepseek");
+  assert.equal(models.rows[0].model_id, "deepseek-chat");
+  assert.equal(models.rows[0].user_count, 2);
+  assert.equal(models.rows[0].use_count, 2);
+  assert.equal(models.rows[1].model_id, "gpt-5");
+
+  const commercial = buildCommercialMock("30", now);
+  assert.equal(commercial.mock, true);
+  assert.equal(typeof commercial.metrics.arpu, "number");
+});
+
+test("behavior event store requires authenticated device identity and deduplicates", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-events-"));
+  try {
+    const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars", {
+      eventRatePerMinute: 1_000,
+      globalEventRatePerMinute: 2_000,
+    });
+    const credential = store.register({
+      hardware_claim: "behavior-hardware-0001",
+      registration_secret: "registration-secret-behavior-00001",
+      hardware_source: "test",
+      identity_quality: "hardware_serial",
+      app_version: "0.5.10",
+      platform: "windows",
+      arch: "x64",
+    }, null);
+    const device = store.authenticate(credential.device_id, credential.device_token);
+    const result = store.appendBehaviorEvents(device, [
+      {
+        event_id: "behavior_evt_000001",
+        event_name: "voice_started",
+        identity_id: credential.device_id,
+        identity_type: "device",
+        app_version: "0.8.1",
+        platform: "windows",
+        tool_type: "builtin",
+        provider_key: "deepseek",
+        provider_name: "DeepSeek",
+        model_id: "deepseek-chat",
+        model_name: "DeepSeek Chat",
+        occurred_at: Date.now(),
+      },
+      {
+        event_id: "behavior_evt_000001",
+        event_name: "voice_started",
+        identity_id: credential.device_id,
+        identity_type: "device",
+        occurred_at: Date.now(),
+      },
+      {
+        event_id: "behavior_evt_000002",
+        event_name: "voice_started",
+        identity_id: "spoofed",
+        identity_type: "device",
+        occurred_at: Date.now(),
+      },
+    ]);
+    assert.deepEqual(result.accepted, ["behavior_evt_000001"]);
+    assert.deepEqual(result.duplicates, ["behavior_evt_000001"]);
+    assert.deepEqual(result.rejected, ["behavior_evt_000002"]);
+    assert.equal(store.behaviorEvents.length, 1);
+    assert.equal(store.behaviorEvents[0].app_version, "0.8.1");
+    assert.equal(store.behaviorEvents[0].platform, "windows");
+    assert.equal(store.behaviorEvents[0].tool_type, "unknown");
+    assert.equal(store.behaviorEvents[0].provider_key, "deepseek");
+    assert.equal(store.behaviorEvents[0].model_id, "deepseek-chat");
+    assert.equal(readFileSync(join(dataDir, "behavior-events.jsonl"), "utf8").trim().split("\n").length, 1);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("offline IP region data keeps only coarse location fields", () => {

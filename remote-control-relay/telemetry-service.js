@@ -23,6 +23,20 @@ const TELEMETRY_PREFIX = "/pinvou3/telemetry";
 const STATS_PREFIX = "/pinvou3/stats";
 const MAX_JSON_BYTES = 256 * 1024;
 const MAX_EVENTS_PER_BATCH = 200;
+const BEHAVIOR_EVENT_NAMES = new Set([
+  "task_started",
+  "task_finished",
+  "voice_started",
+  "tool_call_completed",
+  "tool_install_completed",
+  "scene_triggered",
+  "model_used",
+]);
+const RANGE_DAYS = new Map([
+  ["today", 1],
+  ["7", 7],
+  ["30", 30],
+]);
 const ONLINE_WINDOW_MS = 5 * 60_000;
 const ADMIN_SESSION_MS = 12 * 60 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
@@ -35,6 +49,7 @@ const DEFAULT_EVENT_RATE_PER_MINUTE = 2_000;
 const DEFAULT_GLOBAL_EVENT_RATE_PER_MINUTE = 20_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_RATE_LIMIT_BUCKETS = 20_000;
+const MAX_CLIENT_FUTURE_SKEW_MS = 5 * 60_000;
 
 function json(res, status, value, headers = {}) {
   res.writeHead(status, {
@@ -267,6 +282,265 @@ export function buildDeviceList(devices, events, now = Date.now()) {
       || Number(b.last_active_at || 0) - Number(a.last_active_at || 0));
 }
 
+function rangeDays(value) {
+  return RANGE_DAYS.get(String(value || "30")) || 30;
+}
+
+function rangeWindow(range, now = Date.now()) {
+  const days = rangeDays(range);
+  const endDay = statsDay(now);
+  return { range: days === 1 ? "today" : String(days), days, startDay: endDay - days + 1, endDay };
+}
+
+function dayRows(window) {
+  const rows = [];
+  for (let day = window.startDay; day <= window.endDay; day += 1) rows.push(day);
+  return rows;
+}
+
+function eventIdentity(event) {
+  return boundedText(event.identity_id || event.device_id, 128);
+}
+
+function activeIdentityByDay(devices, usageEvents, behaviorEvents, window) {
+  const activeByDay = new Map(dayRows(window).map((day) => [day, new Set()]));
+  for (const event of usageEvents) {
+    const day = statsDay(event.occurred_at);
+    const bucket = activeByDay.get(day);
+    if (bucket && event.device_id) bucket.add(event.device_id);
+  }
+  for (const event of behaviorEvents) {
+    const day = statsDay(event.occurred_at);
+    const bucket = activeByDay.get(day);
+    const identity = eventIdentity(event);
+    if (bucket && identity) bucket.add(identity);
+  }
+  for (const device of devices) {
+    const day = statsDay(device.last_active_at || 0);
+    const bucket = activeByDay.get(day);
+    if (bucket && device.device_id) bucket.add(device.device_id);
+  }
+  return activeByDay;
+}
+
+function filteredBehaviorEvents(events, window, eventName = null) {
+  return events.filter((event) => {
+    if (eventName && event.event_name !== eventName) return false;
+    const day = statsDay(event.occurred_at);
+    return day >= window.startDay && day <= window.endDay;
+  });
+}
+
+function dailyAveragePerActive(events, activeByDay, window) {
+  const countByDay = new Map(dayRows(window).map((day) => [day, 0]));
+  for (const event of events) {
+    const day = statsDay(event.occurred_at);
+    if (countByDay.has(day)) countByDay.set(day, countByDay.get(day) + 1);
+  }
+  const values = dayRows(window).map((day) => {
+    const dau = activeByDay.get(day)?.size || 0;
+    return dau ? (countByDay.get(day) || 0) / dau : 0;
+  });
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function periodActiveCount(activeByDay) {
+  const identities = new Set();
+  for (const bucket of activeByDay.values()) {
+    for (const identity of bucket) identities.add(identity);
+  }
+  return identities.size;
+}
+
+function rate(part, total) {
+  return total ? part / total : 0;
+}
+
+function behaviorToolType(value) {
+  const type = boundedText(value, 32);
+  return ["skill", "mcp", "cli", "unknown"].includes(type) ? type : "unknown";
+}
+
+export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now()) {
+  const window = rangeWindow(range, now);
+  const activeByDay = activeIdentityByDay(devices, usageEvents, behaviorEvents, window);
+  const activeTotal = periodActiveCount(activeByDay);
+  const taskStarted = filteredBehaviorEvents(behaviorEvents, window, "task_started");
+  const taskFinished = filteredBehaviorEvents(behaviorEvents, window, "task_finished");
+  const voiceStarted = filteredBehaviorEvents(behaviorEvents, window, "voice_started");
+  const taskUsers = new Set(taskStarted.map(eventIdentity).filter(Boolean));
+  const voiceUsers = new Set(voiceStarted.map(eventIdentity).filter(Boolean));
+  const taskStatus = { success: 0, interrupted: 0, failed: 0 };
+  for (const event of taskFinished) {
+    if (event.status in taskStatus) taskStatus[event.status] += 1;
+  }
+  return {
+    generated_at: now,
+    range: window.range,
+    active_users: activeTotal,
+    metrics: {
+      task_started_count: taskStarted.length,
+      task_started_users: taskUsers.size,
+      task_started_per_active: dailyAveragePerActive(taskStarted, activeByDay, window),
+      task_success_count: taskStatus.success,
+      task_interrupted_count: taskStatus.interrupted,
+      task_failed_count: taskStatus.failed,
+      voice_penetration_rate: rate(voiceUsers.size, activeTotal),
+      voice_started_users: voiceUsers.size,
+      voice_started_count: voiceStarted.length,
+      voice_starts_per_voice_user: rate(voiceStarted.length, voiceUsers.size),
+    },
+  };
+}
+
+function sortedRankingRows(groups, countKey, activeTotal, limit = 50) {
+  return [...groups.values()]
+    .map((row) => ({
+      ...row,
+      user_count: row.users.size,
+      penetration_rate: rate(row.users.size, activeTotal),
+      success_rate: row.total ? row.success_count / row.total : 0,
+      [countKey]: row.total,
+      users: undefined,
+      total: undefined,
+    }))
+    .sort((a, b) => b[countKey] - a[countKey] || b.user_count - a.user_count
+      || String(a.name || a.tool_name || a.scene_l2).localeCompare(String(b.name || b.tool_name || b.scene_l2), "zh-CN"))
+    .slice(0, limit);
+}
+
+export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, range = "30", type = "call", now = Date.now()) {
+  const window = rangeWindow(range, now);
+  const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
+  const eventName = type === "install" ? "tool_install_completed" : "tool_call_completed";
+  const countKey = type === "install" ? "install_count" : "call_count";
+  const groups = new Map();
+  for (const event of filteredBehaviorEvents(behaviorEvents, window, eventName)) {
+    if (eventName === "tool_install_completed" && event.success !== true) continue;
+    const toolKey = boundedText(event.tool_key || event.tool_name, 128) || "unknown";
+    const row = groups.get(toolKey) || {
+      tool_key: toolKey,
+      tool_name: boundedText(event.tool_name, 128) || toolKey,
+      tool_type: behaviorToolType(event.tool_type),
+      total: 0,
+      success_count: 0,
+      users: new Set(),
+    };
+    row.total += 1;
+    if (event.success !== false) row.success_count += 1;
+    const identity = eventIdentity(event);
+    if (identity) row.users.add(identity);
+    groups.set(toolKey, row);
+  }
+  return { generated_at: now, range: window.range, type, rows: sortedRankingRows(groups, countKey, activeTotal) };
+}
+
+export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now()) {
+  const window = rangeWindow(range, now);
+  const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
+  const groups = new Map();
+  for (const event of filteredBehaviorEvents(behaviorEvents, window, "scene_triggered")) {
+    const sceneL1 = boundedText(event.scene_l1, 64) || "unknown";
+    const sceneL2 = boundedText(event.scene_l2, 96) || "unknown";
+    const key = `${sceneL1}:${sceneL2}`;
+    const row = groups.get(key) || {
+      scene_l1: sceneL1,
+      scene_l2: sceneL2,
+      total: 0,
+      success_count: 0,
+      users: new Set(),
+    };
+    row.total += 1;
+    row.success_count += 1;
+    const identity = eventIdentity(event);
+    if (identity) row.users.add(identity);
+    groups.set(key, row);
+  }
+  return {
+    generated_at: now,
+    range: window.range,
+    rows: sortedRankingRows(groups, "trigger_count", activeTotal),
+  };
+}
+
+export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now()) {
+  const window = rangeWindow(range, now);
+  const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
+  const groups = new Map();
+  for (const event of filteredBehaviorEvents(behaviorEvents, window, "model_used")) {
+    const modelId = boundedText(event.model_id || event.model_name, 128);
+    if (!modelId) continue;
+    const providerKey = boundedText(event.provider_key, 64) || "unknown";
+    const key = `${providerKey}:${modelId}`;
+    const row = groups.get(key) || {
+      provider_key: providerKey,
+      provider_name: boundedText(event.provider_name, 128) || providerKey,
+      model_id: modelId,
+      model_name: boundedText(event.model_name, 128) || modelId,
+      total: 0,
+      success_count: 0,
+      users: new Set(),
+    };
+    row.total += 1;
+    row.success_count += 1;
+    const identity = eventIdentity(event);
+    if (identity) row.users.add(identity);
+    groups.set(key, row);
+  }
+  return {
+    generated_at: now,
+    range: window.range,
+    rows: [...groups.values()]
+      .map((row) => ({
+        ...row,
+        user_count: row.users.size,
+        penetration_rate: rate(row.users.size, activeTotal),
+        use_count: row.total,
+        users: undefined,
+        total: undefined,
+        success_count: undefined,
+      }))
+      .sort((a, b) => b.user_count - a.user_count || b.use_count - a.use_count
+        || String(a.model_name || a.model_id).localeCompare(String(b.model_name || b.model_id), "zh-CN"))
+      .slice(0, 50),
+  };
+}
+
+export function buildCommercialMock(range = "30", now = Date.now()) {
+  const window = rangeWindow(range, now);
+  const trend = dayRows(window).map((day, index) => ({
+    day: statsDayLabel(day),
+    revenue: 680 + index * 38 + (index % 5) * 42,
+    paid_users: 108 + Math.floor(index * 1.7),
+  }));
+  return {
+    generated_at: now,
+    range: window.range,
+    mock: true,
+    metrics: {
+      paid_penetration_rate: 0.082,
+      paid_users: 128,
+      arpu: 18.6,
+      arppu: 226.8,
+      mrr: 29030,
+      new_paid_users: 21,
+      renewal_rate: 0.74,
+      trial_to_paid_rate: 0.16,
+    },
+    revenue_trend: trend,
+    plan_distribution: [
+      { plan: "Pro 月付", users: 74 },
+      { plan: "Pro 年付", users: 39 },
+      { plan: "Team", users: 15 },
+    ],
+    conversion_funnel: [
+      { stage: "激活", count: 1420 },
+      { stage: "试用", count: 318 },
+      { stage: "付费", count: 128 },
+    ],
+  };
+}
+
 function readCookies(req) {
   const values = {};
   for (const part of String(req.headers.cookie || "").split(";")) {
@@ -323,11 +597,14 @@ export class TelemetryStore {
     this.pepper = pepper;
     this.devicesPath = join(dataDir, "devices.json");
     this.eventsPath = join(dataDir, "usage-events.jsonl");
+    this.behaviorEventsPath = join(dataDir, "behavior-events.jsonl");
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     this.devices = new Map();
     this.devicesByHardwareHash = new Map();
     this.events = [];
     this.eventIds = new Set();
+    this.behaviorEvents = [];
+    this.behaviorEventIds = new Set();
     this.saveTimer = null;
     this.lastEventCompactionAt = 0;
     this.eventRateBuckets = new Map();
@@ -368,6 +645,7 @@ export class TelemetryStore {
       this.devicesByHardwareHash.set(device.hardware_hash, normalized);
     }
     this.loadEvents();
+    this.loadBehaviorEvents();
   }
 
   loadEvents() {
@@ -396,6 +674,29 @@ export class TelemetryStore {
     }
     this.compactEvents(Date.now(), rewriteNeeded);
     this.rebuildUsageCounters();
+  }
+
+  loadBehaviorEvents() {
+    if (!existsSync(this.behaviorEventsPath)) return;
+    const lines = readFileSync(this.behaviorEventsPath, "utf8").split("\n");
+    let rewriteNeeded = false;
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        if (!event.event_id || this.behaviorEventIds.has(event.event_id)
+          || !BEHAVIOR_EVENT_NAMES.has(event.event_name)) {
+          rewriteNeeded = true;
+          continue;
+        }
+        this.behaviorEventIds.add(event.event_id);
+        this.behaviorEvents.push(event);
+      } catch (error) {
+        rewriteNeeded = true;
+        console.error("[telemetry] skipped malformed behavior event:", error);
+      }
+    }
+    this.compactBehaviorEvents(Date.now(), rewriteNeeded);
   }
 
   hardwareHash(claim) {
@@ -548,7 +849,20 @@ export class TelemetryStore {
 
   compactExpiredEventsIfDue(now = Date.now()) {
     if (now - this.lastEventCompactionAt < 60 * 60_000) return false;
-    return this.compactEvents(now);
+    const usageChanged = this.compactEvents(now);
+    this.compactBehaviorEvents(now);
+    return usageChanged;
+  }
+
+  compactBehaviorEvents(now = Date.now(), force = false) {
+    const cutoff = now - this.eventRetentionMs;
+    let retained = this.behaviorEvents.filter((event) => Number(event.received_at || event.occurred_at) >= cutoff);
+    if (retained.length > this.maxEvents) retained = retained.slice(-this.eventCompactionTarget);
+    const changed = force || retained.length !== this.behaviorEvents.length;
+    this.behaviorEvents = retained;
+    this.behaviorEventIds = new Set(retained.map((event) => event.event_id));
+    if (changed) atomicWriteJsonLines(this.behaviorEventsPath, retained);
+    return changed;
   }
 
   eventRateLimited(deviceId, count, now = Date.now()) {
@@ -618,6 +932,82 @@ export class TelemetryStore {
     return { accepted: accepted.map((event) => event.event_id), duplicates };
   }
 
+  normalizedOccurredAt(value, now = Date.now()) {
+    const occurredAt = Number(value);
+    if (!Number.isFinite(occurredAt) || occurredAt <= 0) return now;
+    if (occurredAt > now + MAX_CLIENT_FUTURE_SKEW_MS) return now;
+    if (occurredAt < now - this.eventRetentionMs) return now;
+    return occurredAt;
+  }
+
+  appendBehaviorEvents(device, inputEvents) {
+    const accepted = [];
+    const duplicates = [];
+    const rejected = [];
+    const now = Date.now();
+    this.compactExpiredEventsIfDue(now);
+    if (this.eventRateLimited(device.device_id, inputEvents.length, now)) {
+      throw new TelemetryHttpError(429, "event_rate_limited");
+    }
+    const batchEventIds = new Set();
+    for (const raw of inputEvents.slice(0, MAX_EVENTS_PER_BATCH)) {
+      const eventId = boundedText(raw?.event_id, 96);
+      const eventName = boundedText(raw?.event_name, 64);
+      if (eventId.length < 12 || !BEHAVIOR_EVENT_NAMES.has(eventName)) {
+        rejected.push(eventId || eventName || "invalid_event");
+        continue;
+      }
+      if (this.behaviorEventIds.has(eventId) || batchEventIds.has(eventId)) {
+        duplicates.push(eventId);
+        continue;
+      }
+      const identityType = boundedText(raw.identity_type, 16) || "device";
+      const identityId = boundedText(raw.identity_id, 128) || device.device_id;
+      if (identityType !== "device" || identityId !== device.device_id) {
+        rejected.push(eventId);
+        continue;
+      }
+      batchEventIds.add(eventId);
+      const event = {
+        event_id: eventId,
+        event_name: eventName,
+        occurred_at: this.normalizedOccurredAt(raw.occurred_at, now),
+        received_at: now,
+        app_version: boundedText(raw.app_version, 48) || boundedText(device.app_version, 48),
+        platform: boundedText(raw.platform, 32) || boundedText(device.platform, 32),
+        identity_id: device.device_id,
+        identity_type: "device",
+        session_id: boundedText(raw.session_id, 128),
+        turn_id: boundedText(raw.turn_id, 128),
+        input_type: boundedText(raw.input_type, 32),
+        status: ["success", "failed", "interrupted"].includes(raw.status) ? raw.status : undefined,
+        stage: boundedText(raw.stage, 32),
+        tool_key: boundedText(raw.tool_key, 128),
+        tool_name: boundedText(raw.tool_name, 128),
+        tool_type: behaviorToolType(raw.tool_type),
+        success: raw.success !== false,
+        scene_l1: boundedText(raw.scene_l1, 64),
+        scene_l2: boundedText(raw.scene_l2, 96),
+        provider_key: boundedText(raw.provider_key, 64),
+        provider_name: boundedText(raw.provider_name, 128),
+        model_id: boundedText(raw.model_id, 128),
+        model_name: boundedText(raw.model_name, 128),
+      };
+      accepted.push(event);
+    }
+    if (accepted.length) {
+      appendFileSync(this.behaviorEventsPath, accepted.map((event) => JSON.stringify(event)).join("\n") + "\n", { mode: 0o600 });
+      for (const event of accepted) {
+        this.behaviorEventIds.add(event.event_id);
+        this.behaviorEvents.push(event);
+      }
+      if (this.behaviorEvents.length > this.maxEvents) this.compactBehaviorEvents(now, true);
+      device.last_seen_at = now;
+      this.saveSoon();
+    }
+    return { accepted: accepted.map((event) => event.event_id), duplicates, rejected };
+  }
+
   overview() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
     return buildStatsOverview([...this.devices.values()], this.events);
@@ -626,6 +1016,30 @@ export class TelemetryStore {
   deviceList() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
     return buildDeviceList([...this.devices.values()], this.events);
+  }
+
+  behaviorOverview(range) {
+    if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
+    return buildBehaviorOverview([...this.devices.values()], this.events, this.behaviorEvents, range);
+  }
+
+  behaviorTools(range, type) {
+    if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
+    return buildBehaviorToolRanking([...this.devices.values()], this.events, this.behaviorEvents, range, type);
+  }
+
+  behaviorScenes(range) {
+    if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
+    return buildBehaviorSceneRanking([...this.devices.values()], this.events, this.behaviorEvents, range);
+  }
+
+  behaviorModels(range) {
+    if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
+    return buildBehaviorModelRanking([...this.devices.values()], this.events, this.behaviorEvents, range);
+  }
+
+  commercialOverview(range) {
+    return buildCommercialMock(range);
   }
 }
 
@@ -760,6 +1174,21 @@ export function createTelemetryService(options = {}) {
         json(res, 200, store.appendEvents(device, events));
         return true;
       }
+      if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/events`) {
+        const input = await readJson(req);
+        const device = store.authenticate(input.device_id, bearer(req));
+        if (!device) {
+          json(res, 401, { error: "invalid_device_token" });
+          return true;
+        }
+        const events = Array.isArray(input.events) ? input.events : [];
+        if (events.length > MAX_EVENTS_PER_BATCH) {
+          json(res, 413, { error: "too_many_events" });
+          return true;
+        }
+        json(res, 200, store.appendBehaviorEvents(device, events));
+        return true;
+      }
       if (req.method === "GET" && (routePath === STATS_PREFIX || routePath === `${STATS_PREFIX}/`)) {
         html(res, 200, readFileSync(statsPage, "utf8"));
         return true;
@@ -799,6 +1228,27 @@ export function createTelemetryService(options = {}) {
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/devices`) {
         json(res, 200, { devices: store.deviceList() });
+        return true;
+      }
+      if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/overview`) {
+        json(res, 200, store.behaviorOverview(new URL(req.url, "http://localhost").searchParams.get("range")));
+        return true;
+      }
+      if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/tools`) {
+        const params = new URL(req.url, "http://localhost").searchParams;
+        json(res, 200, store.behaviorTools(params.get("range"), params.get("type")));
+        return true;
+      }
+      if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/scenes`) {
+        json(res, 200, store.behaviorScenes(new URL(req.url, "http://localhost").searchParams.get("range")));
+        return true;
+      }
+      if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/models`) {
+        json(res, 200, store.behaviorModels(new URL(req.url, "http://localhost").searchParams.get("range")));
+        return true;
+      }
+      if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/commercial/overview`) {
+        json(res, 200, store.commercialOverview(new URL(req.url, "http://localhost").searchParams.get("range")));
         return true;
       }
       json(res, 404, { error: "not_found" });
