@@ -126,7 +126,7 @@ tauri-bridge.js listen("chat:*")
 
 `lib.rs::run()` 做这些事：
 
-1. `ensure_release_env()` 注入默认环境变量，如 `DEEPSEEK_PROVIDER=vllm`、`DEEPSEEK_REASONING_EFFORT=off`、`DEEPSEEK_MAX_OUTPUT_TOKENS=24576`、SSE timeout、Linux WebKit/GTK 输入法相关变量。
+1. `ensure_release_env()` 注入 reasoning、HTTP/SSE timeout 和平台 UI 等运行时默认值；provider 由当前模型预设决定，输出上限也不再通过全局环境变量注入。
 2. 初始化 Tauri builder 和插件。
 3. 执行工作流迁移 `workflow_migrate::migrate_if_needed()`。
 4. 启动 `SessionStore::boot()`，加载 `~/.pinvou3/sessions/`。
@@ -302,9 +302,9 @@ vllm serve /path/to/model \
 | 项 | 值 |
 |---|---|
 | `DEEPSEEK_BASE_URL` 默认 | `http://127.0.0.1:8000/v1` |
-| `DEEPSEEK_PROVIDER` | `vllm` |
+| `DEEPSEEK_PROVIDER` | 不全局注入，由当前模型预设决定 |
 | `DEEPSEEK_REASONING_EFFORT` | `off` |
-| `DEEPSEEK_MAX_OUTPUT_TOKENS` | `24576` |
+| 输出上限 | 本地 vLLM route 显式为 `24576`；云端由底座请求上限、厂商及 route 能力共同决定 |
 | compaction token threshold | 约 `190000` |
 | emergency input budget | 约 `230400` |
 
