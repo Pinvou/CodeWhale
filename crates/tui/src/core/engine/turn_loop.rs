@@ -5,7 +5,9 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
-use super::dispatch::{ReadRepeatExecutionPlan, plan_read_repeat_execution};
+use super::dispatch::{
+    ReadRepeatExecutionPlan, normalize_schema_json_containers, plan_read_repeat_execution,
+};
 use super::read_repeat_guard::{RECEIPT_THRESHOLD, ReadRepeatGuard};
 use super::stuck_guard::{
     RUNTIME_NOTICE as STUCK_RUNTIME_NOTICE, StepFingerprint, StuckGuard, StuckSignal,
@@ -23,6 +25,16 @@ use crate::tools::tool_call_budget::ToolCallBudget;
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 const TOOL_ERROR_DEGRADATION_THRESHOLD: u32 = 2;
+
+pub(super) fn append_stuck_runtime_notice(content: String) -> String {
+    format!("{content}\n\n{STUCK_RUNTIME_NOTICE}")
+}
+
+pub(super) fn append_tool_error_degradation_runtime_notice(content: String, hint: &str) -> String {
+    format!(
+        "{content}\n\n<codewhale:runtime_event kind=\"tool_error_degradation\" visibility=\"internal\">\n{hint}\n</codewhale:runtime_event>"
+    )
+}
 
 fn approval_intent_summary(text: &str) -> Option<String> {
     let trimmed = text.trim();
@@ -1686,6 +1698,23 @@ impl Engine {
                         input_buffer: String::new(),
                         input_parse_error: None,
                     });
+                }
+            }
+
+            for tool in &mut tool_uses {
+                let Some(schema) = tool_catalog
+                    .iter()
+                    .find(|candidate| candidate.name == tool.name)
+                    .map(|candidate| &candidate.input_schema)
+                else {
+                    continue;
+                };
+                let repaired = normalize_schema_json_containers(&mut tool.input, schema);
+                if repaired > 0 {
+                    crate::logging::info(format!(
+                        "Normalized {repaired} schema-declared JSON container(s) for tool '{}'",
+                        tool.name
+                    ));
                 }
             }
 
@@ -3567,14 +3596,51 @@ impl Engine {
                 });
             }
 
-            let mut step_error_count = 0usize;
+            let step_errors = outcomes
+                .iter()
+                .flatten()
+                .filter_map(|outcome| {
+                    let error = outcome.terminal.legacy_result().err()?;
+                    let envelope: ErrorEnvelope = error.into();
+                    Some((
+                        outcome.index,
+                        outcome.name.clone(),
+                        outcome.input.clone(),
+                        envelope.category,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            let step_error_count = step_errors.len();
             // Categorized tool errors collected this step. Feeds the capacity
             // controller's error-escalation checkpoint so it can distinguish
             // (e.g.) a Tool failure that should escalate from a permission
             // denial that should not.
-            let mut step_error_categories: Vec<ErrorCategory> = Vec::new();
-            let mut step_error_tool_names: Vec<String> = Vec::new();
-            let mut step_error_tool_inputs: Vec<serde_json::Value> = Vec::new();
+            let step_error_categories = step_errors
+                .iter()
+                .map(|(_, _, _, category)| *category)
+                .collect::<Vec<_>>();
+            let step_error_tool_names = step_errors
+                .iter()
+                .map(|(_, name, _, _)| name.clone())
+                .collect::<Vec<_>>();
+            let step_error_tool_inputs = step_errors
+                .iter()
+                .map(|(_, _, input, _)| input.clone())
+                .collect::<Vec<_>>();
+            let next_consecutive_tool_error_steps = if step_error_count > 0 {
+                consecutive_tool_error_steps.saturating_add(1)
+            } else {
+                0
+            };
+            let degradation_hint = tool_error_degradation_runtime_hint(
+                next_consecutive_tool_error_steps,
+                &step_error_tool_names,
+                &step_error_categories,
+                &step_error_tool_inputs,
+            );
+            let degradation_target_index = degradation_hint
+                .as_ref()
+                .and_then(|_| step_errors.last().map(|(index, _, _, _)| *index));
             // #dogfood 0.8.67: if the model mutates the goal mid-turn via
             // create_goal/update_goal, push the change to the sidebar right after
             // this tool batch instead of waiting for turn end — otherwise the
@@ -3620,6 +3686,9 @@ impl Engine {
                             )),
                         }
                     };
+                let attach_stuck_notice =
+                    matches!(&observed_signal, Some(StuckSignal::Warn { .. }));
+                let attach_degradation_hint = degradation_target_index == Some(outcome.index);
                 match observed_signal {
                     Some(stop @ StuckSignal::Stop { .. }) => {
                         stuck_signal = Some(stop);
@@ -3700,12 +3769,15 @@ impl Engine {
                         // aggregate by the fold, so what lands here is already
                         // capped — the number of tokens this adds to the turn
                         // is knowable rather than whatever the hook printed.
-                        let output_for_context = match hook_contexts.get(&outcome.id) {
+                        let mut output_for_context = match hook_contexts.get(&outcome.id) {
                             Some(context) => {
                                 format!("{output_for_context}\n\n[hook context] {context}")
                             }
                             None => output_for_context,
                         };
+                        if attach_stuck_notice {
+                            output_for_context = append_stuck_runtime_notice(output_for_context);
+                        }
 
                         self.add_session_message(Message {
                             role: "user".to_string(),
@@ -3730,10 +3802,6 @@ impl Engine {
                             "category": envelope.category.to_string(),
                             "severity": envelope.severity.to_string(),
                         }));
-                        step_error_count += 1;
-                        step_error_categories.push(envelope.category);
-                        step_error_tool_names.push(outcome.name.clone());
-                        step_error_tool_inputs.push(tool_input.clone());
                         let input_schema = tool_catalog
                             .iter()
                             .find(|tool| tool.name == outcome.name)
@@ -3758,11 +3826,21 @@ impl Engine {
                                 &self.session.workspace,
                             );
                         }
+                        let mut error_for_context = format!("Error: {error}");
+                        if attach_stuck_notice {
+                            error_for_context = append_stuck_runtime_notice(error_for_context);
+                        }
+                        if attach_degradation_hint && let Some(hint) = degradation_hint.as_deref() {
+                            error_for_context = append_tool_error_degradation_runtime_notice(
+                                error_for_context,
+                                hint,
+                            );
+                        }
                         self.add_session_message(Message {
                             role: "user".to_string(),
                             content: vec![ContentBlock::ToolResult {
                                 tool_use_id: outcome.id,
-                                content: format!("Error: {error}"),
+                                content: error_for_context,
                                 is_error: Some(true),
                                 content_blocks: None,
                             }],
@@ -3799,11 +3877,6 @@ impl Engine {
                             no_progress_warning_started_at.get_or_insert_with(Instant::now);
                         let status = no_progress_status_message(&reason, started.elapsed());
                         let _ = self.tx_event.send(Event::status(status)).await;
-                        self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                            STUCK_RUNTIME_NOTICE.to_string(),
-                            UserInputProvenance::Runtime,
-                        ))
-                        .await;
                     }
                     StuckSignal::Stop { reason } => {
                         let elapsed = no_progress_warning_started_at
@@ -3830,19 +3903,7 @@ impl Engine {
             }
 
             if step_error_count > 0 {
-                consecutive_tool_error_steps = consecutive_tool_error_steps.saturating_add(1);
-                if let Some(hint) = tool_error_degradation_runtime_hint(
-                    consecutive_tool_error_steps,
-                    &step_error_tool_names,
-                    &step_error_categories,
-                    &step_error_tool_inputs,
-                ) {
-                    self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                        hint,
-                        UserInputProvenance::Runtime,
-                    ))
-                    .await;
-                }
+                consecutive_tool_error_steps = next_consecutive_tool_error_steps;
             } else {
                 consecutive_tool_error_steps = 0;
             }

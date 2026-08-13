@@ -26,6 +26,8 @@ use crate::tools::spec::{
 use super::ToolUseState;
 use super::read_repeat_guard::{ReadRepeatGuard, ReadRepeatOccurrence};
 
+const MAX_SCHEMA_CONTAINER_REPAIR_BYTES: usize = 64 * 1024;
+
 // === Types ============================================================
 
 #[allow(dead_code)] // `index` mirrors batch order for diagnostic ergonomics.
@@ -409,6 +411,70 @@ pub(super) fn parse_tool_input(buffer: &str) -> Option<serde_json::Value> {
     }
     extract_json_segment(trimmed)
         .and_then(|segment| serde_json::from_str::<serde_json::Value>(&segment).ok())
+}
+
+/// Repair JSON containers that a provider/model encoded as a JSON string.
+///
+/// This is deliberately narrower than general argument coercion: a value is
+/// decoded only when the tool schema explicitly requires an object or array,
+/// the string is bounded, and strict JSON parsing produces that exact
+/// container type. Primitive strings are never coerced.
+pub(super) fn normalize_schema_json_containers(
+    value: &mut serde_json::Value,
+    schema: &serde_json::Value,
+) -> usize {
+    let expected_container = if schema_declares_type(schema, "object") {
+        Some("object")
+    } else if schema_declares_type(schema, "array") {
+        Some("array")
+    } else {
+        None
+    };
+
+    if let (Some(expected), serde_json::Value::String(encoded)) = (expected_container, &*value)
+        && encoded.len() <= MAX_SCHEMA_CONTAINER_REPAIR_BYTES
+        && let Ok(decoded) = serde_json::from_str::<serde_json::Value>(encoded)
+        && ((expected == "object" && decoded.is_object())
+            || (expected == "array" && decoded.is_array()))
+    {
+        *value = decoded;
+        return 1 + normalize_schema_json_containers(value, schema);
+    }
+
+    match value {
+        serde_json::Value::Object(object) => {
+            let properties = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object);
+            object
+                .iter_mut()
+                .map(|(key, child)| {
+                    properties
+                        .and_then(|items| items.get(key))
+                        .map(|child_schema| normalize_schema_json_containers(child, child_schema))
+                        .unwrap_or(0)
+                })
+                .sum()
+        }
+        serde_json::Value::Array(items) => schema
+            .get("items")
+            .map(|item_schema| {
+                items
+                    .iter_mut()
+                    .map(|item| normalize_schema_json_containers(item, item_schema))
+                    .sum()
+            })
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn schema_declares_type(schema: &serde_json::Value, expected: &str) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::String(value)) => value == expected,
+        Some(serde_json::Value::Array(values)) => values.iter().any(|value| value == expected),
+        _ => false,
+    }
 }
 
 pub(super) fn malformed_tool_arguments_input(buffer: &str) -> serde_json::Value {
