@@ -10,7 +10,7 @@ function defaultDelivery(kind) {
       : kind === 'note' || kind === 'cancel'
         ? 'evidence'
         : 'intermediate';
-  return { schema_version: 1, artifact_role: artifactRole, expected_next: '', open_questions: '', git_references: [] };
+  return { schema_version: 1, artifact_role: artifactRole, subtype: '', expected_next: '', open_questions: '', git_references: [] };
 }
 
 function projectDelivery(action) {
@@ -27,11 +27,22 @@ function projectDelivery(action) {
   };
 }
 
+function actionKindLabel(action, copy) {
+  if (action.kind === 'note' && action.delivery?.subtype === 'progress') {
+    return copy.actionKinds.progress;
+  }
+  return copy.actionKinds[action.kind] || action.kind;
+}
+
 export function deriveCategory(thread, meId) {
   if (thread.phase === 'closed' || thread.phase === 'cancelled') return 'ended';
   if (thread.phase === 'awaiting_acceptance' && thread.current_actor_id === meId) return 'receive';
   if (thread.phase === 'active' && thread.current_actor_id === meId) return 'pending';
   return 'waiting';
+}
+
+export function canUpdateRelayProgress(thread, meId) {
+  return thread?.phase === 'active' && thread.current_actor_id === meId;
 }
 
 export function matchesRelayView(task, view, meId) {
@@ -54,7 +65,12 @@ export function matchesSourceFilter(task, filter, meId) {
 
 export function projectSnapshot(snapshot, copy) {
   if (!snapshot?.bootstrap) return [];
-  const { bootstrap, attachments = {} } = snapshot;
+  const { attachments = {} } = snapshot;
+  const bootstraps = snapshot.team_bootstraps?.length ? snapshot.team_bootstraps : [snapshot.bootstrap];
+  return bootstraps.flatMap(bootstrap => projectTeamSnapshot(bootstrap, attachments, copy));
+}
+
+function projectTeamSnapshot(bootstrap, attachments, copy) {
   const names = new Map(bootstrap.members.map(member => [member.id, member.display_name]));
   names.set(bootstrap.me.id, bootstrap.me.display_name);
   const nameOf = id => id ? (names.get(id) || id.slice(0, 8)) : copy.dash;
@@ -79,7 +95,8 @@ export function projectSnapshot(snapshot, copy) {
       actorId: action.actor_id,
       actor: nameOf(action.actor_id),
       avatar: nameOf(action.actor_id),
-      title: copy.live.actionTitle(copy.actionKinds[action.kind] || action.kind, nameOf(action.actor_id), nameOf(action.recipient_id)),
+      kindLabel: actionKindLabel(action, copy),
+      title: copy.live.actionTitle(actionKindLabel(action, copy), nameOf(action.actor_id), nameOf(action.recipient_id)),
       message: action.message,
       time: action.created_at,
       files: action.attachment_ids.map(id => attachments[id]).filter(Boolean),
@@ -92,6 +109,8 @@ export function projectSnapshot(snapshot, copy) {
       id: thread.id,
       category,
       title: thread.title,
+      teamId: bootstrap.team.id,
+      teamName: bootstrap.team.name,
       initiator: nameOf(thread.initiator_id),
       owner: nameOf(thread.owner_id),
       current,

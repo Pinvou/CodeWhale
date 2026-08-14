@@ -8,7 +8,7 @@
 - `Membership.role=owner`：团队管理员，可以管理团队加入码或移除成员；本文称为 team owner。
 - `WorkThread`：一次从派活到接收结束的接力线程。
 - `RelayAction`：线程中不可变、只追加的业务动作。
-- `DeliveryPackage`：随 RelayAction 固化的一次交付快照，包含说明、文件角色、下一步、未决问题和 Git 引用；动作 ID 与 sequence 就是交付包标识。
+- `DeliveryPackage`：随 RelayAction 固化的一次交付快照，包含说明、文件角色、可选语义子类型、下一步、未决问题和 Git 引用；动作 ID 与 sequence 就是交付包标识。
 - `owner`：对最终结果负责的人；Handoff 不改变 owner。
 - `current_actor`：当前应该行动的人。
 - `return_to`：当前行动完成后应该回给的人。
@@ -80,6 +80,8 @@ revision=1
 | awaiting_acceptance | `accept` | final_recipient | 不可指定 | current/return_to=null，closed |
 | active/awaiting_acceptance | `note` | 线程参与者 | 不可指定 | 不移动接力棒，revision 仍递增 |
 | active/awaiting_acceptance | `cancel` | initiator | 不可指定 | current/return_to=null，cancelled；必须填写原因 |
+
+桌面端把当前 `active` 线程的 `note` 暴露为“更新进展”：只有 `current_actor` 看到该入口，可填写进展、可选下一步并附加明确选择的文件。该入口把交付包的可选 `subtype` 固化为 `progress`，客户端仅对这一明确标记显示“进展更新”；字段缺失或为空的既有及通用 `note` 仍显示“补充说明”。Hub 只允许 `active` 线程的 `current_actor` 提交 `note + progress`，其他动作、其他参与者或其他阶段携带该值必须拒绝。提交后新增不可变动作和交付包、revision 递增，但 owner、current_actor、return_to、final_recipient 和 phase 均不改变。协议仍保留其他线程参与者提交通用 `note` 的能力，避免把 UI 入口约束误当成服务端权限收紧。
 
 演示阶段禁止：
 
@@ -166,7 +168,8 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 ## 9. Bootstrap 与 SSE
 
 - `GET /v1/bootstrap?team_id=...` 返回成员、演示保留期内的线程及动作摘要。
-- `GET /v1/events?team_id=...` 通过 SSE 发送 `thread.changed`、`membership.changed` 等轻量提示。
+- 客户端的“我的工作”依次读取当前 Principal 已加入团队的 bootstrap，在本机按团队标签汇总；团队筛选只改变展示，不改变当前任务状态。
+- `GET /v1/events?team_id=...` 只订阅指定团队；省略 `team_id` 时订阅当前 Principal 所有有效团队，并通过 SSE 发送 `thread.changed`、`membership.changed` 等轻量提示。
 - 事件只包含资源 ID 和最新 revision，不包含 token、邀请码、文件内容或完整消息。
 - 客户端收到事件后重新读取资源；SSE 重连后必须重新 bootstrap。
 - 演示阶段不提供 cursor replay，也不承诺发送方离线时自动恢复未确认请求。

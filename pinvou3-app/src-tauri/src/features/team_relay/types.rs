@@ -111,6 +111,8 @@ pub struct GitReference {
 pub struct DeliveryPackage {
     pub schema_version: u8,
     pub artifact_role: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subtype: String,
     #[serde(default)]
     pub expected_next: String,
     #[serde(default)]
@@ -124,6 +126,7 @@ impl Default for DeliveryPackage {
         Self {
             schema_version: 1,
             artifact_role: "intermediate".to_string(),
+            subtype: String::new(),
             expected_next: String::new(),
             open_questions: String::new(),
             git_references: Vec::new(),
@@ -202,6 +205,8 @@ pub struct AttachmentUploadProgress {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamRelaySnapshot {
     pub bootstrap: BootstrapResponse,
+    #[serde(default)]
+    pub team_bootstraps: Vec<BootstrapResponse>,
     pub attachments: HashMap<String, Attachment>,
     #[serde(default)]
     pub teams: Vec<TeamSummary>,
@@ -364,6 +369,7 @@ pub struct UpdateProfileResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateThreadInput {
+    pub team_id: String,
     pub title: String,
     pub assignee_id: String,
     pub message: String,
