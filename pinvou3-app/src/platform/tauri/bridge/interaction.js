@@ -50,15 +50,39 @@
   }
 
   // ── Mode state ───────────────────────────────────────────────────
+  // 会话级读取。必须防住的竞态：
+  // 1. await 挂起期间用户切走：响应返回后不能写当前 active 会话的显示（否则
+  //    上一个会话的开关/模式状态会串台到新会话）。校验发起时的 sid 仍是 active，
+  //    否则把结果定向写回 sid 自己的 buffer，不碰当前显示。
+  // 2. 多智能体开关翻转/模式切换的本地权威改写：乐观翻转已把新状态显示出来，
+  //    或权威写回已完成，此时在途的 get_mode_state 只会拿到旧值。使用
+  //    per-session epoch 让本地权威改写期间发起的旧读取失效。
+  var modeStateEpochs = {};
+  function bumpModeStateEpoch(sid) {
+    if (!sid) return;
+    modeStateEpochs[sid] = (modeStateEpochs[sid] || 0) + 1;
+  }
   async function syncModeState() {
-    if (!state.activeSessionId) {
+    var sid = state.activeSessionId;
+    if (!sid) {
       state.modeState = { mode: "yolo", multiAgent: false };
       return;
     }
+    if (multiAgentToggleInFlight.has(sid)) return;
+    var epoch = modeStateEpochs[sid] || 0;
     try {
       var ms = await invoke("get_mode_state", { sessionId: state.activeSessionId });
+      if ((modeStateEpochs[sid] || 0) !== epoch) return;
+      if (state.activeSessionId !== sid) {
+        runSyncOnSession(sid, function () {
+          state.modeState = { mode: ms.mode || "yolo", multiAgent: !!ms.multi_agent };
+        });
+        return;
+      }
       state.modeState = { mode: ms.mode || "yolo", multiAgent: !!ms.multi_agent };
     } catch (e) {
+      if ((modeStateEpochs[sid] || 0) !== epoch) return;
+      if (state.activeSessionId !== sid) return;
       state.modeState = { mode: "yolo", multiAgent: false };
     }
   }
@@ -150,6 +174,7 @@
         displayMessage: displayEcho,
       });
       if (planBuffer) planBuffer.deferredRemoteUserEvent = null;
+      bumpModeStateEpoch(sid);
       runOnSession(sid, function () { applyModeFromState(st); });
     } catch (e) {
       var errorText = String(e && e.message ? e.message : e || "");
@@ -170,6 +195,7 @@
       if (concurrentTurn && planBuffer) markRemoteTurn(sid, planBuffer);
       try {
         var currentMode = await invoke("get_mode_state", { sessionId: sid });
+        bumpModeStateEpoch(sid);
         runOnSession(sid, function () { applyModeFromState(currentMode); });
       } catch (_) {}
       addSystemItemFor(sid, bt("acceptPlanFailed") + e);
@@ -187,6 +213,7 @@
     notify();
     try {
       var st = await invoke("discard_plan", { sessionId: sid, planId: planTicket });
+      bumpModeStateEpoch(sid);
       runOnSession(sid, function () { applyModeFromState(st); });
       patchItemByIdFor(sid, itemId, { planResolutionConfirmed: true });
     } catch (e) {
@@ -211,6 +238,7 @@
       if (planNotActive) {
         try {
           var currentMode = await invoke("get_mode_state", { sessionId: sid });
+          bumpModeStateEpoch(sid);
           runOnSession(sid, function () { applyModeFromState(currentMode); });
         } catch (_) {}
       }
@@ -269,6 +297,9 @@
       // 等返回再翻拨杆会像"点了没反应"。先翻显示并 notify，成功后用后端
       // 权威状态复核；失败回滚显示并提示。in-flight 闸已挡并发重入。
       var previousMultiAgent = !!(state.modeState && state.modeState.multiAgent);
+      // 翻转即刻 bump 该会话 epoch：让在途的 get_mode_state 读取全部作废，
+      // 无论其响应在 toggle 进行中还是完成后返回。
+      bumpModeStateEpoch(sid);
       state.modeState = {
         mode: (state.modeState && state.modeState.mode) || "yolo",
         multiAgent: !!enabled,
