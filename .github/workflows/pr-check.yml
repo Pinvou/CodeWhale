@@ -54,10 +54,13 @@ permissions:
   pull-requests: read   # dorny/paths-filter 调 API 读 PR 改了哪些文件
 
 # 同一 PR 连续 push 或被合并/关闭时,取消上一次未跑完的检查,省 runner。
-# main push 使用 refs/heads/main 分组，不会被 PR closed 事件取消，仍跑完整 Rust 验证。
+# main push 保留当前正在运行的暖缓存任务；GitHub 同一 concurrency group 最多保留
+# 一个 running 和一个 pending，新 push 会替换旧 pending。为避免被替换的 pending
+# 恰好包含 Rust 变更、而保留下来的后续 push 只看相邻非 Rust diff，main 的 Linux
+# 与 Windows Rust job 均无条件执行累计验证，不依赖单次 push 的 paths-filter。
 concurrency:
   group: pr-check-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'push' }}
 
 jobs:
   commit-message:
@@ -313,12 +316,12 @@ jobs:
               - 'scripts/tests/test_ci_merge_queue_policy.py'
 
   # 回流可以在 Windows、macOS 或 Linux 上创建和处理。本 job 不替代实际处理
-  # 平台的本地 preflight，而是在服务端用三平台对同一提交执行一致的无依赖门禁。
-  # 重型产品测试仍由下方 paths filter 路由，避免把全部构建机械复制三遍。
+  # 平台的本地 preflight，而是在 PR current head 与 Merge Queue 组合提交上都用
+  # 三平台执行一致的无依赖门禁。main push 不重复，重型产品测试仍按路径路由。
   backflow-portability:
     name: backflow-portability (${{ matrix.os }})
     needs: changes
-    if: ${{ !cancelled() && github.event.action != 'closed' && (needs.changes.outputs.trusted_backflow == 'true' || needs.changes.outputs.backflow_infra == 'true') }}
+    if: ${{ !cancelled() && github.event.action != 'closed' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.trusted_backflow == 'true' || needs.changes.outputs.backflow_infra == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -664,20 +667,25 @@ jobs:
     needs: changes
     # Draft/普通 PR 默认跳过；可信同仓 Community 回流在 PR 与纯回流 Merge
     # Group 中跳过，来源解析失败、普通/混合队列均保守执行；ci:full-rust 可强制覆盖。
-    # main push 保留合入后累计状态验证；Ready 高风险 PR 可用标签提前跑。
+    # main push 无条件执行累计状态验证，避免 concurrency 替换含 Rust 变更的 pending
+    # run 后，后续非 Rust push 只看相邻 diff 而漏检；Ready 高风险 PR 可用标签提前跑。
     if: >-
       ${{
         !cancelled() &&
         github.event.action != 'closed' &&
-        needs.changes.outputs.rust_code == 'true' &&
-        needs.changes.outputs.trusted_backflow != 'true' &&
         (
-          github.event_name == 'merge_group' ||
           github.event_name == 'push' ||
           (
-            github.event_name == 'pull_request' &&
-            github.event.pull_request.draft == false &&
-            contains(github.event.pull_request.labels.*.name, 'ci:full-rust')
+            needs.changes.outputs.rust_code == 'true' &&
+            needs.changes.outputs.trusted_backflow != 'true' &&
+            (
+              github.event_name == 'merge_group' ||
+              (
+                github.event_name == 'pull_request' &&
+                github.event.pull_request.draft == false &&
+                contains(github.event.pull_request.labels.*.name, 'ci:full-rust')
+              )
+            )
           )
         )
       }}
@@ -783,7 +791,9 @@ jobs:
         with:
           workspaces: pinvou3-app/src-tauri
           # 稳定 key 前缀(跨 PR/push 一致);restore 按前缀回退,lock 变了也增量。
-          shared-key: rust-test
+          # v1 命名空间已有一个仅含元数据的空缓存；GitHub cache key 不可覆盖，
+          # 使用新命名空间让下一次完成的 main run 真正保存 target 编译产物。
+          shared-key: rust-test-v2
           # 只在 main 保存(暖 cache 唯一来源);PR 侧只读,不占 10GB 限额。
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -824,10 +834,10 @@ jobs:
   windows-rust-test:
     name: windows-rust-test
     needs: changes
-    # 跨平台构建不作为 PR 检测项；合入 main 后按路径做 Windows 原生验证:
-    # 仅 rust 相关改动才跑(docs-only 推送烧 Windows runner 零收益——其 cache
-    # shared-key 只被自身消费,不为 PR 提供暖 cache)。
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.changes.outputs.rust_code == 'true' }}
+    # 跨平台构建不作为 PR 检测项。main 每次保留下来的 push 都执行 Windows 原生
+    # 累计验证，避免 concurrency 用后续非 Rust pending 替换含 Rust 变更的 pending
+    # 后，按相邻 diff 路由导致中间提交永远未经过 Windows 编译。
+    if: ${{ !cancelled() && github.event_name == 'push' }}
     runs-on: windows-latest
     # 全量 cargo check --all-targets + lib 链接检查,无暖 cache,挂死会长时间烧 runner 分钟。
     # 90min:aws-lc-sys(NASM 预生成对象)冷编译比纯 Rust 图更久,留足余量。

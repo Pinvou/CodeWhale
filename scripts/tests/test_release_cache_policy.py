@@ -38,7 +38,7 @@ class ReleaseCachePolicyTests(unittest.TestCase):
         )[0]
 
         self.assertIn("timeout-minutes: 90", rust_test_job)
-        self.assertIn("shared-key: rust-test", rust_test_job)
+        self.assertIn("shared-key: rust-test-v2", rust_test_job)
         self.assertIn(MAIN_ONLY_SAVE, rust_test_job)
 
     def test_rust_test_restores_lint_cache_before_its_own_cache(self):
