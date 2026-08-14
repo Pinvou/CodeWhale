@@ -2,7 +2,7 @@
 
 本目录是团队接力演示阶段的协议基线，供 Team Relay Hub、Pinvou Rust 客户端和前端共同使用。
 
-当前协议版本为 `0.1`。批次 1 开始后，任何状态语义变更都必须同步修改本目录中的三份契约并重新执行迁移与一致性检查。
+当前协议版本为 `0.2`；Hub 对未声明协议版本的旧客户端继续提供 `0.1` 直接转交语义。任何状态语义变更都必须同步修改本目录中的三份契约并重新执行迁移与一致性检查。
 
 ## 文档入口
 
@@ -16,6 +16,7 @@
 - [`migrations/0006_persistent_join_code.sql`](migrations/0006_persistent_join_code.sql)：加入可恢复的加密加入码与成员可见性策略；
 - [`migrations/0007_principal_email.sql`](migrations/0007_principal_email.sql)：加入服务内唯一邮箱账户，并允许旧成员后续绑定；
 - [`migrations/0008_thread_read_states.sql`](migrations/0008_thread_read_states.sql)：持久化跨设备已读游标，并提供任务未读更新计数；
+- [`migrations/0009_confirmed_transfers.sql`](migrations/0009_confirmed_transfers.sql)：加入接单确认、拒绝、撤回、改派、接受后材料授权，以及设备协议能力和实际转交模式；
 - [`../team-relay-demo-implementation-plan.md`](../team-relay-demo-implementation-plan.md)：范围、部署、批次与验收计划。
 
 发生冲突时，以 `protocol.md` 的业务不变量为准；实现修改契约时必须在同一变更中同步 OpenAPI、数据库迁移草案和契约测试。
@@ -25,8 +26,8 @@
 唯一必须跑通的业务链路是：
 
 ```text
-A 派活给 B
-→ B Handoff 给 C
+A 派活给 B → B 接受任务
+→ B Handoff 给 C → C 接受接力
 → C 回传给 B
 → B 最终交付给 A
 → A 要求补充

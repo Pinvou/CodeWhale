@@ -5,7 +5,7 @@ Team Relay Hub 是“人派活给人、Handoff、回传和最终交付”的独�
 当前实现覆盖演示批次 1：
 
 - Team、邮箱唯一的 Principal、底层 Device 凭据、Membership、初始化单次邀请和 owner 可轮换的 8 位团队加入码；
-- A → B → C → B → A 接力状态机；
+- A → B → C → B → A 接力状态机，以及派发/协作邀请的接受、拒绝、撤回和改派；Hub 按接收人的近期设备协议能力自动选择确认式或旧版直接生效；
 - 不可变动作日志；
 - 发起人可审计取消，以及按 Principal 隔离的置顶/隐藏偏好；
 - revision 乐观并发与幂等重放；
@@ -19,6 +19,8 @@ Team Relay Hub 是“人派活给人、Handoff、回传和最终交付”的独�
 不含凭据的容器和 Nginx 模板位于 [`deploy/`](deploy/)；它们必须先在本地通过 `docker compose config/build`，再经独立授权部署。
 
 协议基线见 [`../docs/team-relay/`](../docs/team-relay/)。
+
+当前 Hub 支持协议 `0.2`。新客户端发送 `X-Pinvou-Team-Relay-Protocol: 0.2` 后，派发任务和邀请协作都必须由接收人确认才移动责任或接力棒；未发送该请求头的 `0.1` 客户端继续使用直接生效语义。`0009_confirmed_transfers.sql` 与 Hub 新代码必须在同一维护窗口切换：停止所有旧 Hub 写入，备份数据库，执行迁移，再启动新 Hub 并完成健康检查。不得在执行 `0009` 后重新启动旧 Hub，也不得在迁移前启动新 Hub；桌面端则可在 Hub 升级前后滚动更新。
 
 ## 本地运行
 

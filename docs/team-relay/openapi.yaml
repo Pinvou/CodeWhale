@@ -1,10 +1,14 @@
 openapi: 3.1.0
 info:
   title: Pinvou Team Relay Demo API
-  version: 0.1.0
+  version: 0.2.0
   description: |
     Human-owned team handoff protocol for the Pinvou demo. PostgreSQL state is
-    authoritative; SSE is only a refresh hint. See protocol.md for invariants.
+    authoritative; SSE is only a refresh hint. Clients send
+    `X-Pinvou-Team-Relay-Protocol: 0.2` to register device capability. A transfer
+    is confirmed only when both the request and a recipient device seen within
+    30 days support 0.2; otherwise the Hub preserves direct-transfer behavior.
+    See protocol.md for invariants.
 servers:
   - url: https://team-relay.example.com/pinvou3/team-relay
     description: User-configured Team Relay Hub
@@ -456,6 +460,8 @@ paths:
     post:
       tags: [Threads]
       operationId: createThread
+      parameters:
+        - $ref: "#/components/parameters/RelayProtocolVersion"
       requestBody:
         required: true
         content:
@@ -464,7 +470,7 @@ paths:
               $ref: "#/components/schemas/CreateThreadRequest"
       responses:
         "201":
-          description: Thread and initial assign action created atomically.
+          description: Thread and initial assign action created atomically. Protocol 0.2 keeps responsibility with the sender until acceptance; omission uses protocol 0.1 direct assignment.
           content:
             application/json:
               schema:
@@ -502,6 +508,8 @@ paths:
     post:
       tags: [Threads]
       operationId: createRelayAction
+      parameters:
+        - $ref: "#/components/parameters/RelayProtocolVersion"
       requestBody:
         required: true
         content:
@@ -694,6 +702,7 @@ paths:
       operationId: getBootstrap
       parameters:
         - $ref: "#/components/parameters/TeamIdQuery"
+        - $ref: "#/components/parameters/RelayProtocolVersion"
       responses:
         "200":
           description: Authoritative demo snapshot used on start and reconnect.
@@ -725,6 +734,10 @@ paths:
                   value: |-
                     event: thread.changed
                     data: {"team_id":"018f70e8-2c96-7a1c-9d6b-23b05b799999","thread_id":"018f70e8-2c96-7a1c-9d6b-23b05b788888","revision":4}
+                threadAttention:
+                  value: |-
+                    event: thread.attention
+                    data: {"team_id":"018f70e8-2c96-7a1c-9d6b-23b05b799999","thread_id":"018f70e8-2c96-7a1c-9d6b-23b05b788888","revision":4}
         "403":
           $ref: "#/components/responses/MembershipRequired"
 
@@ -736,6 +749,14 @@ components:
       bearerFormat: opaque-device-token
 
   parameters:
+    RelayProtocolVersion:
+      name: X-Pinvou-Team-Relay-Protocol
+      in: header
+      required: false
+      description: Send 0.2 to register this device as confirmation-capable. The Hub confirms a transfer only when both the sender request and a recipient device seen within 30 days support 0.2; otherwise it selects direct_legacy. Omission registers the calling device as 0.1 during rolling upgrades.
+      schema:
+        type: string
+        enum: ["0.1", "0.2"]
     TeamId:
       name: team_id
       in: path
@@ -850,10 +871,10 @@ components:
       format: date-time
     ActionKind:
       type: string
-      enum: [assign, note, handoff, return, final_deliver, request_changes, accept, cancel]
+      enum: [assign, note, handoff, accept_transfer, decline_transfer, withdraw_transfer, reroute_transfer, return, final_deliver, request_changes, accept, cancel]
     ThreadPhase:
       type: string
-      enum: [active, awaiting_acceptance, closed, cancelled]
+      enum: [pending_transfer, awaiting_reassignment, active, awaiting_acceptance, closed, cancelled]
     MemberRole:
       type: string
       enum: [owner, member]
@@ -1236,7 +1257,7 @@ components:
     TeamMember:
       type: object
       additionalProperties: false
-      required: [id, display_name, created_at, role, last_seen_at]
+      required: [id, display_name, created_at, role, last_seen_at, confirmed_transfers_supported]
       properties:
         id:
           $ref: "#/components/schemas/Uuid"
@@ -1255,6 +1276,9 @@ components:
           oneOf:
             - $ref: "#/components/schemas/Timestamp"
             - type: "null"
+        confirmed_transfers_supported:
+          type: boolean
+          description: True when at least one active device declared protocol 0.2 within the last 30 days.
 
     CreateInviteRequest:
       type: object
@@ -1324,6 +1348,9 @@ components:
         - current_actor_id
         - return_to_id
         - final_recipient_id
+        - pending_transfer_kind
+        - pending_sender_id
+        - pending_recipient_id
         - phase
         - revision
         - created_at
@@ -1349,6 +1376,19 @@ components:
             - type: "null"
         final_recipient_id:
           $ref: "#/components/schemas/Uuid"
+        pending_transfer_kind:
+          oneOf:
+            - type: string
+              enum: [assignment, handoff]
+            - type: "null"
+        pending_sender_id:
+          oneOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
+        pending_recipient_id:
+          oneOf:
+            - $ref: "#/components/schemas/Uuid"
+            - type: "null"
         phase:
           $ref: "#/components/schemas/ThreadPhase"
         revision:
@@ -1396,6 +1436,7 @@ components:
         - message
         - base_revision
         - idempotency_key
+        - transfer_mode
         - attachment_ids
         - delivery
         - created_at
@@ -1427,6 +1468,12 @@ components:
           minimum: 0
         idempotency_key:
           $ref: "#/components/schemas/Uuid"
+        transfer_mode:
+          description: Authoritative Hub choice for assignment, handoff and reroute actions; null for other actions.
+          oneOf:
+            - type: string
+              enum: [confirmed, direct_legacy]
+            - type: "null"
         attachment_ids:
           type: array
           maxItems: 10
@@ -1471,9 +1518,9 @@ components:
       properties:
         kind:
           type: string
-          enum: [note, handoff, return, final_deliver, request_changes, accept, cancel]
+          enum: [note, handoff, accept_transfer, decline_transfer, withdraw_transfer, reroute_transfer, return, final_deliver, request_changes, accept, cancel]
         recipient_id:
-          description: Required only for handoff; forbidden for other action kinds.
+          description: Required for handoff and reroute_transfer; forbidden for other action kinds.
           oneOf:
             - $ref: "#/components/schemas/Uuid"
             - type: "null"
@@ -1555,7 +1602,7 @@ components:
     ThreadMutationResponse:
       type: object
       additionalProperties: false
-      required: [thread, action, replayed]
+      required: [thread, action, replayed, transfer_mode]
       properties:
         thread:
           $ref: "#/components/schemas/WorkThreadSummary"
@@ -1564,6 +1611,12 @@ components:
         replayed:
           type: boolean
           description: True when no write occurred because this idempotency key already succeeded.
+        transfer_mode:
+          description: Mirrors action.transfer_mode so the sender can report whether the transfer awaits confirmation or took effect directly.
+          oneOf:
+            - type: string
+              enum: [confirmed, direct_legacy]
+            - type: "null"
 
     Attachment:
       type: object
@@ -1611,7 +1664,7 @@ components:
       properties:
         protocol_version:
           type: string
-          const: "0.1"
+          enum: ["0.1", "0.2"]
         generated_at:
           $ref: "#/components/schemas/Timestamp"
         team:

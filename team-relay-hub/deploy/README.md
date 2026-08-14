@@ -48,5 +48,7 @@ docker compose --env-file team-relay-hub/deploy/.env \
 
 - PostgreSQL 与附件使用独立命名卷；回滚应用时不删除数据卷。
 - 升级前用 `pg_dump --format=custom` 备份数据库，并单独备份附件卷。
+- 升级到协议 `0.2` 时，`0009_confirmed_transfers.sql` 与新 Hub 必须在同一维护窗口切换：先停止所有旧 Hub 实例和写入，完成数据库备份，使用待发布版本执行 `npm run db:migrate`，再启动同一版本的 Hub 并检查内网、公网健康入口。旧 Hub 在 `0009` 后继续写入会违反新动作约束，新 Hub 在 `0009` 前启动则会访问尚不存在的字段，因此 Hub 不支持跨 `0009` 的滚动升级。
 - 回滚只撤销新 Nginx location、停止新 Hub 和恢复上一镜像；不要修改其他 Pinvou 服务。
+- `0009` 已成功应用后，不得只回滚 Hub 镜像到旧版本；需要回滚时保持新 Hub 停止，并按已演练的数据恢复方案还原升级前备份。
 - 定时执行 `npm run attachments:cleanup`，并监控数据库、附件卷和容器日志大小。

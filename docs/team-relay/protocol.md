@@ -54,17 +54,24 @@ team owner 和 WorkThread owner 是两个独立概念。例如演示链路中 A 
 - 可选说明和已上传附件；
 - `idempotency_key`。
 
-服务端创建线程并追加第一条 `assign` 动作，派活者为 initiator 和 final_recipient，被派活者为 owner 和 current_actor：
+协议 `0.2` 客户端在 bootstrap 和写请求中发送 `X-Pinvou-Team-Relay-Protocol: 0.2`，Hub 以设备为单位自动登记最近声明的协议能力。只有发送请求声明 `0.2`，且接收人至少有一台未撤销设备在最近 30 天声明过 `0.2` 时，Hub 才选择 `transfer_mode=confirmed`。服务端创建线程并追加第一条 `assign` 动作，但在接收人确认前，发起人仍持有责任和接力棒，待接收人只获得任务摘要：
 
 ```text
 initiator=A
-owner=B
-current_actor=B
+owner=A
+current_actor=A
 return_to=A
 final_recipient=A
-phase=active
+pending_transfer_kind=assignment
+pending_sender=A
+pending_recipient=B
+phase=pending_transfer
 revision=1
 ```
+
+B 提交 `accept_transfer` 后才变为 `owner/current_actor=B`、`return_to=A`、`phase=active`，并获得线程完整材料访问权限。B 拒绝，或 A 撤回、改派后，从未获得材料权限的旧候选人不再保留线程可见性。
+
+接收人的能力未知、过期或仅有旧客户端时，Hub 选择 `transfer_mode=direct_legacy`，派发、Handoff 或改派立即生效。每条 `assign`、`handoff`、`reroute_transfer` 动作持久化实际模式，写响应也返回同名字段，客户端必须以 Hub 结果为准显示“等待确认”或“直接生效”。能力是设备自动上报的协议事实，不提供人工开关，也不按应用版本字符串推断。未发送协议头的旧客户端登记为 `0.1` 并保持直接转交语义，以支持 Hub 与桌面端滚动升级。
 
 客户端不能直接提交或修改 owner、current_actor、return_to、final_recipient、phase、revision 和 action sequence。
 
@@ -72,21 +79,25 @@ revision=1
 
 | 当前状态 | 动作 | 允许者 | 客户端可指定接收人 | 服务端结果 |
 |---|---|---|---|---|
-| 新建 | `assign` | 发起人 | `assignee_id=B` | owner/current=B，return_to/final=A，active |
-| active，current=owner | `handoff` | owner | `recipient_id=C` | owner 不变，current=C，return_to=owner |
+| 新建 | `assign` | 发起人 | `assignee_id=B` | confirmed：pending_transfer(assignment)，接力棒仍在 A；direct_legacy：owner/current=B，立即生效 |
+| pending_transfer | `accept_transfer` | pending_recipient | 不可指定 | 初次派发：owner/current=B；协作：current=C、owner 不变 |
+| pending_transfer | `decline_transfer` | pending_recipient | 不可指定 | 初次派发进入 awaiting_reassignment；协作邀请恢复 active |
+| pending_transfer | `withdraw_transfer` | pending_sender | 不可指定 | 初次派发进入 awaiting_reassignment；协作邀请恢复 active |
+| pending_transfer / awaiting_reassignment | `reroute_transfer` | pending_sender / initiator | `recipient_id` | 原请求失效；confirmed：新接收人进入 pending_transfer；direct_legacy：接力立即转移 |
+| active，current=owner | `handoff` | owner | `recipient_id=C` | confirmed：pending_transfer(handoff)，owner/current 暂时不变；direct_legacy：current=C |
 | active，current≠owner | `return` | current_actor | 不可指定 | current=owner，return_to=final_recipient |
 | active，current=owner | `final_deliver` | owner | 不可指定 | current=final_recipient，return_to=null，awaiting_acceptance |
 | awaiting_acceptance | `request_changes` | final_recipient | 不可指定 | current=owner，return_to=final_recipient，active |
 | awaiting_acceptance | `accept` | final_recipient | 不可指定 | current/return_to=null，closed |
-| active/awaiting_acceptance | `note` | 线程参与者 | 不可指定 | 不移动接力棒，revision 仍递增 |
-| active/awaiting_acceptance | `cancel` | initiator | 不可指定 | current/return_to=null，cancelled；必须填写原因 |
+| 任意未结束状态 | `note` | 线程参与者 | 不可指定 | 不移动接力棒，revision 仍递增 |
+| 任意未结束状态 | `cancel` | initiator | 不可指定 | 清除待确认转移，current/return_to=null，cancelled；必须填写原因 |
 
-桌面端把当前 `active` 线程的 `note` 暴露为“更新进展”：只有 `current_actor` 看到该入口，可填写进展、可选下一步并附加明确选择的文件。该入口把交付包的可选 `subtype` 固化为 `progress`，客户端仅对这一明确标记显示“进展更新”；字段缺失或为空的既有及通用 `note` 仍显示“补充说明”。Hub 只允许 `active` 线程的 `current_actor` 提交 `note + progress`，其他动作、其他参与者或其他阶段携带该值必须拒绝。提交后新增不可变动作和交付包、revision 递增，但 owner、current_actor、return_to、final_recipient 和 phase 均不改变。协议仍保留其他线程参与者提交通用 `note` 的能力，避免把 UI 入口约束误当成服务端权限收紧。
+桌面端把当前 `active` 线程，以及等待协作者确认且接力棒仍在 owner 手上的 `pending_transfer(handoff)` 线程的 `note` 暴露为“更新进展”。该入口把交付包的可选 `subtype` 固化为 `progress`，客户端仅对这一明确标记显示“进展更新”；字段缺失或为空的既有及通用 `note` 仍显示“补充说明”。Hub 只允许仍持有接力棒的 `current_actor` 在上述状态提交 `note + progress`，其他动作、其他参与者或其他阶段携带该值必须拒绝。提交后新增不可变动作和交付包、revision 递增，但责任关系和待确认转移均不改变。协议仍保留其他线程参与者提交通用 `note` 的能力，避免把 UI 入口约束误当成服务端权限收紧。
 
 演示阶段禁止：
 
 - current_actor 不是 owner 时再次 Handoff；
-- 修改 owner 或 final_recipient；
+- 除接受初次派发外修改 owner，或修改 final_recipient；
 - 多个 current_actor；
 - closed/cancelled 后追加动作；
 - 跳过 owner，由协作者直接最终交付；
@@ -96,16 +107,18 @@ revision=1
 
 每次事务提交后必须满足：
 
-1. `phase=active` 时 current_actor 和 return_to 均非空。
-2. `phase=awaiting_acceptance` 时 current_actor 等于 final_recipient，return_to 为空。
-3. `phase=closed/cancelled` 时 current_actor 和 return_to 均为空。
-4. 未结束线程的 initiator、owner、current_actor、return_to 和 final_recipient 都是有效团队成员；closed 历史可以保留已移除成员的归属记录。
-5. 能读取线程的人必须同时是有效团队成员和 ThreadParticipant。
-6. `revision` 等于最后一条动作的 `sequence`，两者从 1 单调递增。
-7. RelayAction 只追加，不修改、不删除；展示修订通过新动作表达。
-8. 附件只能绑定一次已成功提交的动作，绑定后内容不可替换。
-9. 同一 `(actor_id, idempotency_key)` 只对应一个规范化请求和一个结果。
-10. 收发箱分类由结构化线程字段和当前 Principal 的 ThreadPreference 推导，服务端不保存本地化状态文案或 UI category。
+1. `phase=pending_transfer` 时 current_actor、return_to、pending_kind、pending_sender 和 pending_recipient 均非空；发送人与接收人不同。
+2. `phase=awaiting_reassignment` 时 owner/current_actor 等于 initiator，且没有 pending transfer。
+3. `phase=active` 时 current_actor 和 return_to 均非空，且没有 pending transfer。
+4. `phase=awaiting_acceptance` 时 current_actor 等于 final_recipient，return_to 为空。
+5. `phase=closed/cancelled` 时 current_actor 和 return_to 均为空。
+6. 未结束线程的 initiator、owner、current_actor、return_to、final_recipient、pending_sender 和 pending_recipient 都是有效团队成员；closed 历史可以保留已移除成员的归属记录。
+7. 能读取线程的人必须同时是有效团队成员和 ThreadParticipant；待确认接收人可以读取摘要，但 `material_access_at` 为空时不能读取附件元数据或内容。拒绝、撤回或被改派后，尚未获得材料权限的候选人从 ThreadParticipant 移除。
+8. `revision` 等于最后一条动作的 `sequence`，两者从 1 单调递增。
+9. RelayAction 只追加，不修改、不删除；拒绝、撤回、改派和展示修订都通过新动作表达。
+10. 附件只能绑定一次已成功提交的动作，绑定后内容不可替换。
+11. 同一 `(actor_id, idempotency_key)` 只对应一个规范化请求和一个结果。
+12. 收发箱分类由结构化线程字段和当前 Principal 的 ThreadPreference 推导，服务端不保存本地化状态文案或 UI category。
 
 ## 6. 写入事务与并发
 
@@ -128,7 +141,7 @@ SSE 失败不能回滚业务事务。客户端在 SSE 断开、应用启动和�
 
 - `idempotency_key` 使用客户端生成的随机 UUID，每次用户确认的业务提交生成一次。
 - 网络失败后的手动重试必须复用原 key。
-- Hub 对请求体做确定性规范化后计算 SHA-256 `request_hash`；忽略 JSON 对象键顺序，但不忽略业务字段。
+- Hub 对请求体做确定性规范化后计算 SHA-256 `request_hash`；忽略 JSON 对象键顺序，但不忽略业务字段。协议 `0.2` 的创建线程和动作请求把协议版本纳入哈希，避免同一幂等键跨直接转交与确认式转交重放。
 - 创建线程的幂等重放返回同一个 WorkThread、第一条 assign 动作和 `replayed=true`。
 - 动作提交的幂等重放返回同一条 RelayAction 和当前权威 WorkThread；线程可能已经被后续动作推进，客户端不能把旧动作当成当前状态。
 - 上传附件单独使用 `upload_id`；相同 upload_id 与相同内容可返回原附件，不同内容返回冲突。
@@ -169,7 +182,7 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 
 - `GET /v1/bootstrap?team_id=...` 返回成员、演示保留期内的线程及动作摘要。
 - 客户端的“我的工作”依次读取当前 Principal 已加入团队的 bootstrap，在本机按团队标签汇总；团队筛选只改变展示，不改变当前任务状态。
-- `GET /v1/events?team_id=...` 只订阅指定团队；省略 `team_id` 时订阅当前 Principal 所有有效团队，并通过 SSE 发送 `thread.changed`、`membership.changed` 等轻量提示。
+- `GET /v1/events?team_id=...` 只订阅指定团队；省略 `team_id` 时订阅当前 Principal 所有有效团队。`thread.changed` 供参与者刷新权威快照；`thread.attention` 只定向发送给下一行动人或被撤回、被改派的受影响成员，用于系统通知。
 - 事件只包含资源 ID 和最新 revision，不包含 token、邀请码、文件内容或完整消息。
 - 客户端收到事件后重新读取资源；SSE 重连后必须重新 bootstrap。
 - 演示阶段不提供 cursor replay，也不承诺发送方离线时自动恢复未确认请求。
@@ -180,13 +193,15 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 
 1. 当前 Principal 设置了 `hidden_at`：已归档；
 2. `phase=closed/cancelled`：已结束；
-3. `phase=awaiting_acceptance && current_actor=me`：待我验收；
-4. `phase=active && current_actor=me`：待我处理；
-5. 其余未结束参与线程：对方处理中。
+3. `phase=pending_transfer && pending_recipient=me`：待我确认；
+4. `phase=awaiting_reassignment && initiator=me`：待重新派发；
+5. `phase=awaiting_acceptance && current_actor=me`：待我验收；
+6. `phase=active && current_actor=me`：待我处理；
+7. 其余未结束参与线程：等待对方。
 
 侧栏按行动需求提供视图，而不是把来源与状态混成互斥分类：
 
-- 需要我处理：待我处理和待我验收，待验收优先排列；
+- 需要我处理：待确认、待重新派发、待我处理和待我验收；打开任务只清除未读，不清除尚未完成的行动提醒；
 - 等待对方：对方处理中，且当前 Principal 是发起人或负责人；
 - 全部接力：当前 Principal 参与的所有未归档线程，包括已结束线程；
 - 已结束：已结束且未归档；

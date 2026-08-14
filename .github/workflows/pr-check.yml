@@ -755,7 +755,17 @@ jobs:
         # 因此直接用 package-lock 驱动的 npm ci，避免额外维护一份硬编码版本并保证可复现。
         run: npm --prefix pinvou3-app ci --prefer-offline --no-audit
 
-      - name: Cargo cache
+      # rust-test 的独立缓存缺失时，全冷测试会超过当前 runner 的执行窗口。
+      # 先只读恢复同一工具链与锁文件下已由 main 保存的 rust-lint 目标缓存，
+      # 再恢复/保存独立 rust-test 缓存；不降低测试范围，也不让 PR 写缓存。
+      - name: 恢复 Rust lint 暖缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: pinvou3-app/src-tauri
+          shared-key: rust-lint
+          save-if: false
+
+      - name: Cargo test cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri

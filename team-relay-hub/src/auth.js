@@ -1,6 +1,8 @@
 import { AppError } from "./errors.js";
 import { sha256 } from "./crypto.js";
 
+export const CONFIRMED_TRANSFER_CAPABILITY_DAYS = 30;
+
 export async function authenticate(pool, token) {
   if (!token) {
     throw new AppError(401, "authentication_required", "A device credential is required.");
@@ -8,6 +10,7 @@ export async function authenticate(pool, token) {
   const result = await pool.query(
     `SELECT d.id AS device_id, d.principal_id, d.name AS device_name,
             d.revoked_at, d.created_at AS device_created_at,
+            d.relay_protocol_version, d.relay_protocol_seen_at,
             p.email, p.display_name, p.created_at AS principal_created_at, p.disabled_at
        FROM devices d
        JOIN principals p ON p.id = d.principal_id
@@ -39,6 +42,35 @@ export async function authenticate(pool, token) {
       created_at: row.device_created_at,
     },
   };
+}
+
+export async function registerDeviceProtocol(pool, auth, protocolVersion) {
+  const result = await pool.query(
+    `WITH previous AS (
+       SELECT id, principal_id,
+              (relay_protocol_version = '0.2'
+                AND relay_protocol_seen_at >= now() - ($3 * interval '1 day')) AS supported
+         FROM devices
+        WHERE id = $1
+        FOR UPDATE
+     ), updated AS (
+       UPDATE devices d
+          SET relay_protocol_version = $2, relay_protocol_seen_at = now()
+         FROM previous p
+        WHERE d.id = p.id
+       RETURNING d.principal_id, p.supported AS previously_supported
+     )
+     SELECT principal_id, previously_supported, ($2 = '0.2') AS supported
+       FROM updated`,
+    [auth.deviceId, protocolVersion, CONFIRMED_TRANSFER_CAPABILITY_DAYS],
+  );
+  const row = result.rows[0];
+  if (!row || row.previously_supported === row.supported) return [];
+  const memberships = await pool.query(
+    "SELECT team_id FROM memberships WHERE principal_id = $1 AND removed_at IS NULL",
+    [row.principal_id],
+  );
+  return memberships.rows.map(item => item.team_id);
 }
 
 export async function requireMembership(db, teamId, principalId, requiredRole = undefined) {

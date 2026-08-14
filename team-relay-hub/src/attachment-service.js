@@ -442,7 +442,7 @@ async function authorizedAttachment(pool, token, rawAttachmentId) {
   } else {
     const participant = await pool.query(
       `SELECT 1 FROM thread_participants
-        WHERE thread_id = $1 AND principal_id = $2`,
+        WHERE thread_id = $1 AND principal_id = $2 AND material_access_at IS NOT NULL`,
       [row.thread_id, auth.principalId],
     );
     if (participant.rowCount === 0) {
