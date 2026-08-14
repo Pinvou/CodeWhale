@@ -37,9 +37,12 @@ try {
     projectAcpTimeline,
     resolveAcpSessionControls,
     stripTerminalControlSequences,
+  } = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
+  const {
+    collectToolWorkspaceResources,
     toolWorkspaceResources,
     workspaceMarkdownResource,
-  } = await import(`${pathToFileURL(modulePath).href}?t=${Date.now()}`);
+  } = await import(`${pathToFileURL(path.join(conversationDir, 'conversation-model.js')).href}?t=${Date.now()}`);
   const events = [
     event(1, 'user_message', {
       content: [{ type: 'text', text: '修改 README' }],
@@ -210,6 +213,13 @@ try {
     { path: '/workspace/docs/diagram.svg', name: 'diagram.svg' },
     { path: '/workspace/docs/generated.svg', name: 'generated.svg' },
   ]);
+  assert.deepEqual(collectToolWorkspaceResources([
+    { tool: { locations: [{ path: '/workspace/docs/report.md' }] } },
+    { tool: { locations: [{ path: '/workspace/docs/report.md' }, { path: '/workspace/docs/diagram.svg' }] } },
+  ]), [
+    { path: '/workspace/docs/report.md', name: 'report.md' },
+    { path: '/workspace/docs/diagram.svg', name: 'diagram.svg' },
+  ]);
   assert.equal(
     stripTerminalControlSequences('\u009b32m✓ passed\u009b0m'),
     '✓ passed',
@@ -378,7 +388,8 @@ try {
   assert.ok(codexView.includes("open_codex_workspace_resource")
     && conversationView.includes('onOpenResource={onOpenResource}')
     && codexWorkspace.includes("const loadedDirectories = ['', ...expanded]")
-    && codexWorkspace.includes('window.setInterval'),
+    && codexWorkspace.includes("document.visibilityState !== 'visible'")
+    && codexWorkspace.includes("sessionId && tab === 'changes'"),
   'ACP workspace resources must open in the preview and event refreshes must reload expanded directories');
   assert.ok(codexView.includes('workspacePath'), 'selected project directory must reach the Tauri command');
   assert.ok(!codexView.includes('data-testid="acp-agent-selector"')
