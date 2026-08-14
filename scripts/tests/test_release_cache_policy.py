@@ -41,6 +41,20 @@ class ReleaseCachePolicyTests(unittest.TestCase):
         self.assertIn("shared-key: rust-test", rust_test_job)
         self.assertIn(MAIN_ONLY_SAVE, rust_test_job)
 
+    def test_rust_test_restores_lint_cache_before_its_own_cache(self):
+        workflow = PR_CHECK_WORKFLOW.read_text(encoding="utf-8")
+        rust_test_job = workflow.split("\n  rust-test:", maxsplit=1)[1].split(
+            "\n  windows-rust-test:", maxsplit=1
+        )[0]
+        lint_cache = rust_test_job.index("shared-key: rust-lint")
+        test_cache = rust_test_job.index("shared-key: rust-test")
+        warm_cache_step = rust_test_job.split(
+            "- name: 恢复 Rust lint 暖缓存", maxsplit=1
+        )[1].split("- name: Cargo test cache", maxsplit=1)[0]
+
+        self.assertLess(lint_cache, test_cache)
+        self.assertIn("save-if: false", warm_cache_step)
+
     def test_arm64_release_validation_finishes_within_runner_window(self):
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         arm64_job = workflow.split("\n  build-linux-arm64:", maxsplit=1)[1].split(
