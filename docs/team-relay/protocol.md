@@ -32,6 +32,7 @@ team owner 和 WorkThread owner 是两个独立概念。例如演示链路中 A 
 10. 已登记用户在团队页面调用 `POST /v1/teams/join`，使用一次性邀请码或固定加入码把现有 Principal 加入另一个 Team。
 11. `POST /v1/enrollments/create-team` 和 `POST /v1/enrollments/join` 继续服务旧客户端；新客户端不得在账号登录表单中要求团队名或加入码。
 12. 迁移前已有 Principal 保持原 ID、Membership 和历史记录，邮箱暂为空；用户可在认证后通过 `PATCH /v1/me` 一次性绑定邮箱。当前版本不支持更换已绑定邮箱。
+13. 桌面端“退出账号”只退出当前设备：停止 SSE 同步，删除系统 credential store 中的 device token 和本机接力连接配置，并清空当前进程中的账号缓存。它不删除 Principal、Membership、接力记录或本机任务材料，也不影响其他设备；用户再次登录后可恢复仍有效的团队。
 
 桌面端的日常邀请入口由 team owner 生成或轮换可重复使用的团队加入码；一次性成员邀请码接口保留为协议兼容能力，不作为当前界面的默认入口。
 

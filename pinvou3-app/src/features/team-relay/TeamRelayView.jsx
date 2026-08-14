@@ -201,7 +201,7 @@ function TeamDialog({ copy, theme, mode, busy, onClose, onSubmit }) {
   </div>, window.document.body);
 }
 
-function NoTeam({ copy, theme, busy, error, principal, onCreate, onJoin }) {
+function NoTeam({ copy, theme, busy, error, principal, onCreate, onJoin, onLogout }) {
   const [mode, setMode] = useState(null);
   const submit = async payload => {
     try {
@@ -213,7 +213,7 @@ function NoTeam({ copy, theme, busy, error, principal, onCreate, onJoin }) {
   return <>
     <header className="team-relay-page-header">
       <div className="team-relay-brand"><PinvouLogo className="team-relay-brand-logo" /><strong>{copy.brand}</strong></div>
-      {principal && <RelayAvatar name={principal.display_name} seed={principal.id} />}
+      {principal && <div className="team-relay-header-actions"><RelayAvatar name={principal.display_name} seed={principal.id} /><button type="button" className="team-relay-secondary team-relay-no-team-logout" onClick={onLogout}>{copy.profile.logout}</button></div>}
     </header>
     <CenterCard title={copy.teams.emptyTitle} body={copy.teams.emptyBody}>
       <div className="team-relay-empty-team-actions">
@@ -226,7 +226,7 @@ function NoTeam({ copy, theme, busy, error, principal, onCreate, onJoin }) {
   </>;
 }
 
-function ProfileDialog({ copy, theme, principal, busy, onClose, onSubmit }) {
+function ProfileDialog({ copy, theme, principal, busy, onClose, onSubmit, onLogout }) {
   return createPortal(<div className="team-relay-modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <section className={`team-relay-modal team-relay-team-dialog theme-${theme === 'dark' ? 'dark' : 'light'}`} role="dialog" aria-modal="true" aria-labelledby="team-relay-profile-dialog-title">
       <header><div><h2 id="team-relay-profile-dialog-title">{copy.profile.title}</h2><p>{copy.profile.subtitle}</p></div><button type="button" className="team-relay-icon-button" onClick={onClose} aria-label={copy.close}><X size={18} /></button></header>
@@ -234,8 +234,20 @@ function ProfileDialog({ copy, theme, principal, busy, onClose, onSubmit }) {
         <label><span>{copy.profile.email}</span><input name="email" type="email" defaultValue={principal.email || ''} required={!principal.email} disabled={!!principal.email} maxLength="254" autoComplete="email" placeholder={copy.setup.emailPlaceholder} /></label>
         <label><span>{copy.profile.displayName}</span><input name="display_name" defaultValue={principal.display_name} required maxLength="80" autoFocus /></label>
         <p className="team-relay-form-hint"><Lock size={14} />{principal.email ? copy.profile.emailLocked : copy.profile.bindEmail}</p>
-        <footer><button type="button" className="team-relay-secondary" onClick={onClose}>{copy.cancel}</button><button type="submit" className="team-relay-primary" disabled={busy}>{busy ? copy.syncing : copy.profile.confirm}</button></footer>
+        <footer className="team-relay-profile-footer"><button type="button" className="team-relay-text-danger" disabled={busy} onClick={onLogout}>{copy.profile.logout}</button><button type="button" className="team-relay-secondary" onClick={onClose}>{copy.cancel}</button><button type="submit" className="team-relay-primary" disabled={busy}>{busy ? copy.syncing : copy.profile.confirm}</button></footer>
       </form>
+    </section>
+  </div>, window.document.body);
+}
+
+function LogoutDialog({ copy, theme, busy, error, onClose, onConfirm }) {
+  return createPortal(<div className="team-relay-modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
+    <section className={`team-relay-modal team-relay-team-dialog theme-${theme === 'dark' ? 'dark' : 'light'}`} role="alertdialog" aria-modal="true" aria-labelledby="team-relay-logout-dialog-title" aria-describedby="team-relay-logout-dialog-body">
+      <header><div><h2 id="team-relay-logout-dialog-title">{copy.profile.logoutTitle}</h2><p id="team-relay-logout-dialog-body">{copy.profile.logoutBody}</p></div><button type="button" className="team-relay-icon-button" disabled={busy} onClick={onClose} aria-label={copy.close}><X size={18} /></button></header>
+      <div className="team-relay-logout-confirm">
+        {error && <p className="team-relay-error" role="alert">{relayError(copy, error)}</p>}
+        <footer><button type="button" className="team-relay-secondary" disabled={busy} onClick={onClose}>{copy.cancel}</button><button type="button" className="team-relay-danger" disabled={busy} onClick={onConfirm}>{busy ? copy.profile.loggingOut : copy.profile.logoutConfirm}</button></footer>
+      </div>
     </section>
   </div>, window.document.body);
 }
@@ -598,6 +610,8 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const [dialog, setDialog] = useState(null);
   const [teamDialog, setTeamDialog] = useState(null);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [logoutOpen, setLogoutOpen] = useState(false);
+  const [logoutAttempted, setLogoutAttempted] = useState(false);
   const [toast, setToast] = useState('');
   const [teamJoinCode, setTeamJoinCode] = useState(null);
   const [teamJoinCodeOpen, setTeamJoinCodeOpen] = useState(false);
@@ -656,10 +670,40 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
     return () => { active = false; };
   }, [bridge, selectedTask?.id, selectedTask?.teamId]);
 
+  const updateProfile = async payload => {
+    try {
+      await bridge.teamRelay.updateProfile({
+        display_name: payload.display_name,
+        ...(payload.email ? { email: payload.email } : {}),
+      });
+      setProfileOpen(false);
+      setToast(copy.profile.updated);
+    } catch { /* state */ }
+  };
+  const openLogout = () => {
+    setProfileOpen(false);
+    setLogoutAttempted(false);
+    setLogoutOpen(true);
+  };
+  const disconnectAccount = async () => {
+    setLogoutAttempted(true);
+    try {
+      await bridge.teamRelay.disconnect();
+      setLogoutOpen(false);
+      setProfileOpen(false);
+      setDialog(null);
+      setTeamDialog(null);
+      setSelectedId(null);
+      setTeamJoinCode(null);
+      setTeamJoinCodeOpen(false);
+      setMobileDetailOpen(false);
+    } catch { /* Logout dialog keeps the localized retryable error visible. */ }
+  };
+
   if (capabilitiesLoaded && !supported) return <div className={`team-relay-root theme-${theme === 'dark' ? 'dark' : 'light'}`}><CenterCard title={copy.unsupportedTitle} body={copy.unsupportedBody} /></div>;
   if (!capabilitiesLoaded || relay.loading && !relay.status?.configured) return <div className={`team-relay-root theme-${theme === 'dark' ? 'dark' : 'light'}`}><CenterCard title={copy.title} body={copy.syncing} /></div>;
   if (!relay.status?.configured) return <div className={`team-relay-root theme-${theme === 'dark' ? 'dark' : 'light'}`}><AccountLogin copy={copy} busy={relay.loading} error={relay.error} onSubmit={input => bridge.teamRelay.registerAccount(input).catch(() => {})} /></div>;
-  if (!snapshot) return <div className={`team-relay-root theme-${theme === 'dark' ? 'dark' : 'light'}`}><NoTeam copy={copy} theme={theme} busy={relay.mutating} error={relay.error} principal={relay.account?.principal} onCreate={name => bridge.teamRelay.createTeam(name)} onJoin={code => bridge.teamRelay.joinTeam(code)} /></div>;
+  if (!snapshot) return <div className={`team-relay-root theme-${theme === 'dark' ? 'dark' : 'light'}`}><NoTeam copy={copy} theme={theme} busy={relay.mutating} error={relay.error} principal={relay.account?.principal} onCreate={name => bridge.teamRelay.createTeam(name)} onJoin={code => bridge.teamRelay.joinTeam(code)} onLogout={openLogout} />{logoutOpen && <LogoutDialog copy={copy} theme={theme} busy={relay.mutating} error={logoutAttempted ? relay.error : null} onClose={() => setLogoutOpen(false)} onConfirm={disconnectAccount} />}{toast && <div className="team-relay-toast" role="status"><CheckCircle2 size={18} />{toast}</div>}</div>;
 
   const runAction = async (kind, message, attachmentIds = [], recipientId = null, delivery = null) => {
     if (!selectedTask) return false;
@@ -796,16 +840,6 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
       setToast(activeBootstrap.team.join_password_configured ? copy.board.removedAndCodeRotated(member.display_name) : copy.board.removed(member.display_name));
     } catch { /* state */ }
   };
-  const updateProfile = async payload => {
-    try {
-      await bridge.teamRelay.updateProfile({
-        display_name: payload.display_name,
-        ...(payload.email ? { email: payload.email } : {}),
-      });
-      setProfileOpen(false);
-      setToast(copy.profile.updated);
-    } catch { /* state */ }
-  };
   const locateMaterialPackage = actionId => {
     window.document.getElementById(`team-relay-package-${actionId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
@@ -852,7 +886,8 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
     </div>}
     {dialog && <RelayDialog copy={copy} theme={theme} type={dialog} task={selectedTask || { title: '', files: [], events: [] }} teams={teams} teamId={dialogTeamId} onTeamChange={setAssignmentTeamId} members={members} busy={relay.mutating} uploadProgress={relay.uploadProgress} taskWorkspace={taskWorkspace} workspaceLoading={workspaceLoading || relay.preparingWorkspace === selectedTask?.id} onClose={() => setDialog(null)} onSubmit={submitDialog} onLoadSourceSessions={bridge.teamRelay.listDraftSourceSessions} onReadSourceSession={bridge.teamRelay.readDraftSourceSession} onPickFiles={() => bridge.teamRelay.pickDraftAttachments()} onMountMaterials={(materials, teamId) => bridge.teamRelay.mountDraftMaterials(materials, teamId)} onPickAgentWorkspace={() => bridge.teamRelay.pickAgentWorkspace()} onLoadCodeAgents={onLoadCodeAgents} />}
     {teamDialog && <TeamDialog copy={copy} theme={theme} mode={teamDialog} busy={relay.mutating} onClose={() => setTeamDialog(null)} onSubmit={submitTeamDialog} />}
-    {profileOpen && <ProfileDialog copy={copy} theme={theme} principal={snapshot.bootstrap.me} busy={relay.mutating} onClose={() => setProfileOpen(false)} onSubmit={updateProfile} />}
+    {profileOpen && <ProfileDialog copy={copy} theme={theme} principal={snapshot.bootstrap.me} busy={relay.mutating} onClose={() => setProfileOpen(false)} onSubmit={updateProfile} onLogout={openLogout} />}
+    {logoutOpen && <LogoutDialog copy={copy} theme={theme} busy={relay.mutating} error={logoutAttempted ? relay.error : null} onClose={() => setLogoutOpen(false)} onConfirm={disconnectAccount} />}
     {toast && <div className="team-relay-toast" role="status"><CheckCircle2 size={18} />{toast}</div>}
   </div>;
 }
