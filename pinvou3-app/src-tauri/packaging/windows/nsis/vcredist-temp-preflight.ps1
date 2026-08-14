@@ -60,9 +60,9 @@ function Add-RequiredAccess {
   }
   if ($changed) {
     Set-Acl -LiteralPath $Path -AclObject $acl
-    Write-Output "Repaired required ACL entries: $Path"
+    Write-Host "Repaired required ACL entries: $Path"
   } else {
-    Write-Output "Required ACL entries are ready: $Path"
+    Write-Host "Required ACL entries are ready: $Path"
   }
 }
 
@@ -75,7 +75,7 @@ function Ensure-SystemDirectory {
   $created = -not (Test-Path -LiteralPath $Path -PathType Container)
   if ($created) {
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
-    Write-Output "Created required directory: $Path"
+    Write-Host "Created required directory: $Path"
   }
   if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
     throw "Required Windows Installer directory is unavailable: $Path"
@@ -91,7 +91,8 @@ function Ensure-SystemDirectory {
 function Repair-MachineTempVariable {
   param(
     [string]$Name,
-    [string]$FallbackPath
+    [string]$FallbackPath,
+    [ref]$ResolvedPath
   )
 
   $current = [Environment]::GetEnvironmentVariable($Name, "Machine")
@@ -107,11 +108,12 @@ function Repair-MachineTempVariable {
 
   if (-not $valid) {
     [Environment]::SetEnvironmentVariable($Name, $FallbackPath, "Machine")
-    Write-Output "Repaired machine $Name to $FallbackPath"
-    return $FallbackPath
+    Write-Host "Repaired machine $Name to $FallbackPath"
+    $ResolvedPath.Value = $FallbackPath
+    return
   }
-  Write-Output "Machine $Name is ready: $expanded"
-  return $expanded
+  Write-Host "Machine $Name is ready: $expanded"
+  $ResolvedPath.Value = $expanded
 }
 
 if ([string]::IsNullOrWhiteSpace($WindowsRoot) -or
@@ -130,16 +132,20 @@ Ensure-SystemDirectory -Path $windowsTempPath
 Ensure-SystemDirectory -Path $windowsInstallerPath -HiddenSystem
 
 if (-not $SkipMachineEnvironment) {
-  $machineTemp = Repair-MachineTempVariable `
+  [string]$machineTemp = ""
+  [string]$machineTmp = ""
+  Repair-MachineTempVariable `
     -Name "TEMP" `
-    -FallbackPath $windowsTempPath
-  $machineTmp = Repair-MachineTempVariable `
+    -FallbackPath $windowsTempPath `
+    -ResolvedPath ([ref]$machineTemp)
+  Repair-MachineTempVariable `
     -Name "TMP" `
-    -FallbackPath $windowsTempPath
+    -FallbackPath $windowsTempPath `
+    -ResolvedPath ([ref]$machineTmp)
   Add-RequiredAccess -Path $machineTemp
   if (-not [string]::Equals($machineTemp, $machineTmp, [System.StringComparison]::OrdinalIgnoreCase)) {
     Add-RequiredAccess -Path $machineTmp
   }
 }
 
-Write-Output "VC++ prerequisite temp preflight completed."
+Write-Host "VC++ prerequisite temp preflight completed."
