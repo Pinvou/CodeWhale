@@ -255,6 +255,21 @@ assert.doesNotMatch(
   /Remove-Item|RemoveAccessRule|PurgeAccessRules/u,
   "VC++ temp repair must not delete installer cache or existing ACL entries",
 );
+assert.match(
+  vcRedistTempPreflight,
+  /-ResolvedPath \(\[ref\]\$machineTemp\)/u,
+  "TEMP repair must return its path separately from diagnostic output",
+);
+assert.match(
+  vcRedistTempPreflight,
+  /-ResolvedPath \(\[ref\]\$machineTmp\)/u,
+  "TMP repair must return its path separately from diagnostic output",
+);
+assert.doesNotMatch(
+  vcRedistTempPreflight,
+  /Write-Output "(?:Repaired|required|Created|Machine|\$Target)/iu,
+  "preflight diagnostics must not contaminate PowerShell function return values",
+);
 
 if (process.platform === "win32") {
   const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-vcredist-preflight-"));
@@ -285,6 +300,7 @@ if (process.platform === "win32") {
     }
     assert.ok(fs.statSync(path.join(fakeWindowsRoot, "Temp")).isDirectory());
     assert.ok(fs.statSync(path.join(fakeWindowsRoot, "Installer")).isDirectory());
+
   } finally {
     fs.rmSync(smokeRoot, { recursive: true, force: true });
   }
