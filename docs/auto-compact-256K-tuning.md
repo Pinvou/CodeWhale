@@ -36,11 +36,11 @@ turn_loop 一个 turn 内:先判 `should_compact`(:116),后判 emergency(:201),�
 
 **修复①:`token_threshold` 200K → 190K**;锚定不变式 `token_threshold + 20K margin ≤ context_input_budget`,由回归测试 `compaction_threshold_stays_below_emergency_budget`(按 `max_output_tokens()` 动态算 budget)锁住。
 
-**修复②:`max_output_tokens` 默认 64K → 24K**(`bridge::max_output_tokens()` + `lib.rs` DEFAULTS + run-dev + L1 harness 一致)。
+**修复②：本地 vLLM 的 `max_output_tokens` 由 64K → 24K**（`route_limits_for_model` 与 L1 harness 一致；正式 App 不再通过全局 env 限制云端模型）。
 - 依据:系统 prompt(`bundle/instructions.md` §4)**强制大产物分块写**——write_file skeleton ≤8KB → append_file chunks **≤16KB/次**;Pinvou 审查 skill 把单写 >20KB 判 `CRITICAL`。thinking 关 → 单次回复 ≈ ≤16KB chunk ≈ **3-5K tokens**。
-- 故 64K 是 ~4x 设计上限的过度预留。24K 覆盖 ≤16KB 设计 + 弱模型偶尔超写到 ~24KB 的 margin,同时把**输入预算 189K(74%)→ 230,400(90%)**,自动压缩更晚触发、保留更多历史。
+- 对本地 vLLM，64K 是 ~4x 设计上限的过度预留。24K 覆盖 ≤16KB 设计 + 弱模型偶尔超写到 ~24KB 的 margin，同时把**输入预算 189K(74%)→ 230,400(90%)**，自动压缩更晚触发、保留更多历史。云端 route 不复用该本地预算。
 
-### 完整阈值表（当前生效，output=24K）
+### 完整阈值表（当前本地 vLLM，output=24K）
 
 | 阈值/常量 | 值 | 作用 | 层级 |
 |---|---|---|---|
@@ -48,7 +48,7 @@ turn_loop 一个 turn 内:先判 `should_compact`(:116),后判 emergency(:201),�
 | **token_threshold** | **190,000 (~74%)** | should_compact 放行 LLM 摘要主线 | ② nice 主路径,总量 ~195K 触发 |
 | context_input_budget | **230,400 (90%)** | emergency 强制压缩硬天花板 = 256K−24,576−1,024 | ③ 安全网 |
 | emergency 时 token_threshold / auto_floor | min(190K, budget−1) / **0** | 强制压缩(绕地板) | ③ |
-| **effective_max_output** | **24,576 (24K)** | 单次回复输出上限(env `DEEPSEEK_MAX_OUTPUT_TOKENS`)+ 预留输出 | — |
+| **effective_max_output** | **24,576 (24K)** | 本地 vLLM route 显式输出上限及预留；云端由底座/provider/route 能力计算 | — |
 | CONTEXT_HEADROOM | 1,024 | 余量 | — |
 | MAX_CONTEXT_RECOVERY_ATTEMPTS | 2 | emergency 救不回才报 overflow | ③ |
 | KEEP_RECENT / MIN_SUMMARIZE | 4 / 6 | 保留近 N 条 / 最少摘要条数 | — |
@@ -56,9 +56,9 @@ turn_loop 一个 turn 内:先判 `should_compact`(:116),后判 emergency(:201),�
 | cycle 子系统 | enabled=false | checkpoint-restart,故意关(saturating_sub bug) | — |
 | 上游默认 token_threshold / floor | 800K / 500K | 被 bridge 覆写,256K 上永远撞不到 | — |
 
-稳态(总量 token,从小到大):`60K 下限 < ~195K should_compact(nice) < 230,400 emergency(网) < 256K 墙`。
+本地 256K vLLM 稳态（总量 token，从小到大）：`60K 下限 < ~195K should_compact(nice) < 230,400 emergency(网) < 256K 墙`。
 
-> 单次回复 ≈ ≤16KB chunk ≈ 3-5K tokens ≪ 24K 输出预留,设计上不会截断;弱模型若无视分块规则一次写 >24KB 才会在 24K 处截断,Pinvou 审查在 plan 期已拦(yolo/execute 不过 Pinvou,靠这 margin 兜)。
+> 本地 vLLM 单次回复 ≈ ≤16KB chunk ≈ 3-5K tokens ≪ 24K 输出预留，设计上不会截断；云端不受该 24K 本地 route 上限约束。
 
 ## 全套修复
 
@@ -91,7 +91,7 @@ bridge 2 处 + fork 2 处 + 前端 1 处 + L1 harness + 回归测试：
 `context_input_budget`（engine/context.rs:366）的"reserved output"项按窗口分级：
 
 - `window ≥ 500K`（V4-class）：仍用 `TURN_MAX_OUTPUT_TOKENS` —— 保持上游 V4 interleaved thinking 的保守预算契约（被 `internal_context_budget_unaffected_by_api_request_cap` 测试锁定）
-- `window < 500K`（自托管/小窗口）：用 `effective_max_output_tokens(model)` —— 即 API 实际发的 `max_tokens`（受 `DEEPSEEK_MAX_OUTPUT_TOKENS` env 控制，pinvou3 设 16384）
+- `window < 500K`（自托管/小窗口）：使用 route-effective 输出上限；本地 vLLM route 显式携带 24K，未显式声明的云端 route 落到底座普通请求上限，并继续受 provider/catalog/route 能力收窄。App 不再默认注入 `DEEPSEEK_MAX_OUTPUT_TOKENS`。
 
 副作用：`context_input_budget` 签名简化为 `fn(model: &str) -> Option<usize>`，三处调用点（turn_loop / capacity_flow / engine）同步删第二参数；`recover_context_overflow` 删 `requested_output_tokens` 参数。
 
@@ -107,7 +107,7 @@ bridge 2 处 + fork 2 处 + 前端 1 处 + L1 harness + 回归测试：
 
 vLLM 启动加 `--served-model-name qwen36_35b_256k`。OpenAI-compat API 协议要求 `model` 字段匹配 served name，不改的话启动后立刻报 `model_not_found`（显式失败，不会再有静默退化）。
 
-## 触发线全景（2026-06-03 最终值，output=24K）
+## 触发线全景（本地 256K vLLM，output=24K）
 
 ```
 0K ─────── 60K ──────────────── ~195K ───── 230,400 ──── 256K
@@ -134,7 +134,7 @@ vLLM 启动加 `--served-model-name qwen36_35b_256k`。OpenAI-compat API 协议�
 > 关键不变式:`token_threshold(190K) + 20K margin ≤ context_input_budget(230,400)`,由回归测试
 > `compaction_threshold_stays_below_emergency_budget` 按 `max_output_tokens()` 动态算 budget 锁住——
 > 改 output 预留(影响 budget)或 token_threshold 导致倒置都会被它挡下。
-> output=24K 的依据见上文「修复②」(系统 prompt 强制 ≤16KB 分块写,单次回复 ≈ 3-5K tokens)。
+> 本地 vLLM output=24K 的依据见上文「修复②」（系统 prompt 强制 ≤16KB 分块写，单次回复 ≈ 3-5K tokens）；云端不套用该值。
 
 ## 大工具输出的上下文 bound（A1 调研结论:不需额外配置，2026-06-03）
 
@@ -181,14 +181,14 @@ codex 抓 cycle_manager.rs:184 在 256K 窗口下 `trigger_floor=0`（saturating
 
 教训：每次扩展底座识别（B1 让派生路径生效）都要同时审 cycle / capacity / compaction 三个相互独立的"context 管理子系统"是否都按窗口分级算预算。底座是为 V4 1M context 设计的，把它接到 256K 窗口必然踩边缘条件。
 
-**Round 4（codex 抓出生产路径未 wire max_output_tokens）**
+**Round 4（历史方案：生产路径 wire max_output_tokens，现已被 route 级预算取代）**
 
 codex 抓 `build_dt_config` 没 export `DEEPSEEK_MAX_OUTPUT_TOKENS`。`effective_max_output_tokens` 只读这个 env，clean env 启动时（用户直接双击 Tauri app，不走 `run-dev.sh`）返回 fallback：
 - `min(window/2, API_MAX_OUTPUT_TOKENS) = min(128K, 64K) = 64K`
 
 → B2 算 `context_input_budget = 256K - 64K - 1K = 191K`（而非文档承诺的 ~239K），preflight emergency 提前 48K 触发，长 turn 可能因输出预算太满而被强制压缩或 provider 400。`PINVOU3_MAX_OUTPUT_TOKENS` 和 `prefs.advanced.max_output_tokens` 的接入点（`Pinvou3Bridge::max_output_tokens()`）建好了但**没有 wire 给 engine**。
 
-修复：`boot()` 里 `if env::var_os("DEEPSEEK_MAX_OUTPUT_TOKENS").is_none() { env::set_var("DEEPSEEK_MAX_OUTPUT_TOKENS", self.max_output_tokens().to_string()) }`。已有 env 时不覆盖（允许 run-dev.sh / L1 harness / 用户 override）。回归测试 `boot_wires_deepseek_max_output_tokens_env` 锁住两个语义（clean env set 16384 + 已有 env 不覆盖）。
+当时的修复是在 `boot()` 中补写全局 `DEEPSEEK_MAX_OUTPUT_TOKENS`。Community #210 后该方案已撤销：全局变量会同时限制云端模型；现在本地 vLLM 由 `RouteLimits.output_tokens=24576` 显式约束，云端未声明输出上限时落到底座/provider/route 能力，boot 与 release 默认环境均不再注入该变量。L1 harness 仍可为本地测试显式设置 24K。
 
 同时 round 4 把 bridge 自己的 compaction 注释里 "60K-200K 区间纯本地去重" 也删了（round 3 只改了 docs，bridge 注释漏改）。
 
