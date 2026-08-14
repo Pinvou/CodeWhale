@@ -523,7 +523,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(reducedMotionAvatar.status, 200);
   assert.equal(reducedMotionAvatar.contentType, "image/png");
   assert.equal(reducedMotionAvatar.sourceSha256, uploadedAvatar.value.avatar.sha256);
-  assert.equal((await sharp(reducedMotionAvatar.bytes).metadata()).pages, 1);
+  assert.equal((await sharp(reducedMotionAvatar.bytes).metadata()).pages ?? 1, 1);
   const invalidAvatarSize = await readAvatar(b, a.principal.id, initial.team_id, 64);
   assert.equal(invalidAvatarSize.status, 400);
   const outsideTeamAvatar = await readAvatar(accountEnrollment.value, a.principal.id, initial.team_id);
