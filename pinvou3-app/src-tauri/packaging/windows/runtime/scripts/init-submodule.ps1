@@ -24,7 +24,13 @@ function Invoke-Git {
     [string]$GitCommand = "git"
   )
 
-  $resolvedGitCommand = Get-Command -Name $GitCommand -CommandType Application -ErrorAction Stop
+  $gitExecutable = [string](
+    Get-Command -Name $GitCommand -CommandType Application -ErrorAction Stop |
+      Select-Object -First 1 -ExpandProperty Source
+  )
+  if ([string]::IsNullOrWhiteSpace($gitExecutable)) {
+    throw "Unable to resolve the Git executable: $GitCommand"
+  }
   $previousErrorActionPreference = $ErrorActionPreference
   $exitCode = $null
   try {
@@ -32,7 +38,7 @@ function Invoke-Git {
     # Git writes normal fetch progress to stderr, so only its exit code may
     # decide success; keep the captured stderr for diagnostics on real errors.
     $ErrorActionPreference = "Continue"
-    $output = & $resolvedGitCommand.Source -C $WorkingDirectory @Arguments 2>&1
+    $output = & $gitExecutable -C $WorkingDirectory @Arguments 2>&1
     $exitCode = $LASTEXITCODE
   } finally {
     $ErrorActionPreference = $previousErrorActionPreference
