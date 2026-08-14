@@ -93,6 +93,8 @@ class CiGatePolicyTests(unittest.TestCase):
         )[1].split("\n  fast-gate:", maxsplit=1)[0]
         self.assertIn("needs.changes.outputs.trusted_backflow == 'true'", portability)
         self.assertIn("needs.changes.outputs.backflow_infra == 'true'", portability)
+        self.assertIn("github.event_name == 'pull_request'", portability)
+        self.assertIn("github.event_name == 'merge_group'", portability)
         self.assertIn("os: [ubuntu-latest, windows-latest, macos-15]", portability)
         self.assertIn("runs-on: ${{ matrix.os }}", portability)
         self.assertIn("fail-fast: false", portability)
@@ -126,14 +128,14 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn("github.event_name == 'push'", rust_test)
 
-    def test_windows_rust_test_runs_only_on_main_push_with_path_filter(self):
-        # windows-rust-test 不作为 PR / Merge Queue 合入门禁，只在 main push 且 rust
-        # 相关路径变更时跑(docs-only 推送不烧 Windows runner)。
+    def test_windows_rust_test_runs_on_every_retained_main_push(self):
+        # concurrency 可能用后续非 Rust pending 替换含 Rust 变更的 pending；Windows
+        # 累计验证不得依赖单次 push 的相邻路径 diff。
         windows_rust_test = self.workflow.split("\n  windows-rust-test:", maxsplit=1)[
             1
         ].split("\n  windows-rustup-repair-test:", maxsplit=1)[0]
-        self.assertIn("needs.changes.outputs.rust_code == 'true'", windows_rust_test)
         self.assertIn("github.event_name == 'push'", windows_rust_test)
+        self.assertNotIn("needs.changes.outputs.rust_code == 'true'", windows_rust_test)
         self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
         self.assertNotIn("github.event.pull_request.draft == false", windows_rust_test)
 

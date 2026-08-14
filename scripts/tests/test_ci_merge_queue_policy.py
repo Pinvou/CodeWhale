@@ -31,9 +31,10 @@ class MergeQueuePolicyTests(unittest.TestCase):
     def test_backflow_portability_rechecks_merge_group_on_three_platforms(self):
         portability = self._job("backflow-portability", "fast-gate")
         self.assertIn("os: [ubuntu-latest, windows-latest, macos-15]", portability)
+        self.assertIn("github.event_name == 'pull_request'", portability)
+        self.assertIn("github.event_name == 'merge_group'", portability)
         self.assertIn("github.event.merge_group.base_sha", portability)
         self.assertIn("github.event.merge_group.head_sha", portability)
-        self.assertIn("github.event_name == 'pull_request'", portability)
 
     def test_trusted_backflow_skips_only_full_rust_test(self):
         changes = self._job("changes", "fast-gate")
@@ -54,7 +55,7 @@ class MergeQueuePolicyTests(unittest.TestCase):
         rust_lint = self._job("rust-lint", "rust-test")
         self.assertNotIn("trusted_backflow", rust_lint)
 
-    def test_latest_main_run_remains_the_cumulative_rust_check(self):
+    def test_running_main_cache_warmer_and_cumulative_checks_are_preserved(self):
         concurrency = self.workflow.split("\nconcurrency:", maxsplit=1)[1].split(
             "\njobs:", maxsplit=1
         )[0]
@@ -62,11 +63,17 @@ class MergeQueuePolicyTests(unittest.TestCase):
             "group: pr-check-${{ github.event.pull_request.number || github.ref }}",
             concurrency,
         )
-        self.assertIn("cancel-in-progress: true", concurrency)
+        self.assertIn(
+            "cancel-in-progress: ${{ github.event_name != 'push' }}", concurrency
+        )
 
         rust_test = self._job("rust-test", "windows-rust-test")
-        self.assertIn("github.event_name == 'push'", rust_test)
+        self.assertIn("github.event_name == 'push' ||", rust_test)
         self.assertIn("save-if: ${{ github.ref == 'refs/heads/main' }}", rust_test)
+
+        windows_rust_test = self._job("windows-rust-test", "windows-rustup-repair-test")
+        self.assertIn("github.event_name == 'push'", windows_rust_test)
+        self.assertNotIn("needs.changes.outputs.rust_code", windows_rust_test)
 
 
 if __name__ == "__main__":
