@@ -743,25 +743,21 @@ impl TeamRelayManager {
         }
         drop(file);
         let replace_result = if destination.exists() {
-            crate::platform::filesystem::replace_file_atomically(&temporary, destination, &backup)
+            replace_downloaded_attachment(&temporary, destination, &backup)
         } else {
             match std::fs::rename(&temporary, destination) {
                 Ok(()) => Ok(()),
                 Err(_) if destination.exists() => {
-                    crate::platform::filesystem::replace_file_atomically(
-                        &temporary,
-                        destination,
-                        &backup,
-                    )
+                    replace_downloaded_attachment(&temporary, destination, &backup)
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temporary);
+                    let _ = std::fs::remove_file(&backup);
+                    Err(format!("attachment_save_failed: {error}"))
+                }
             }
         };
-        if let Err(error) = replace_result {
-            let _ = std::fs::remove_file(&temporary);
-            let _ = std::fs::remove_file(&backup);
-            return Err(format!("attachment_save_failed: {error}"));
-        }
+        replace_result?;
         if let Ok(directory) = std::fs::File::open(parent) {
             let _ = directory.sync_all();
         }
@@ -1187,6 +1183,45 @@ impl TeamRelayManager {
     }
 }
 
+fn replace_downloaded_attachment(
+    temporary: &Path,
+    destination: &Path,
+    backup: &Path,
+) -> Result<(), String> {
+    replace_downloaded_attachment_with(temporary, destination, backup, |tmp, target, backup| {
+        crate::platform::filesystem::replace_file_atomically(tmp, target, backup)
+    })
+}
+
+fn replace_downloaded_attachment_with<F>(
+    temporary: &Path,
+    destination: &Path,
+    backup: &Path,
+    replace: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path, &Path, &Path) -> crate::platform::filesystem::ReplaceResult,
+{
+    use crate::platform::filesystem::ReplaceState;
+
+    match replace(temporary, destination, backup) {
+        Ok(ReplaceState::Committed) => Ok(()),
+        Ok(state) => Err(format!(
+            "attachment_save_failed: unexpected atomic replacement state: {state:?}"
+        )),
+        Err(error) => {
+            // A rolled-back write has a confirmed authoritative destination, so the
+            // transaction-owned candidates may be removed. RecoveryRequired must
+            // preserve every candidate for the next recovery attempt.
+            if error.state() == ReplaceState::RolledBack {
+                let _ = std::fs::remove_file(temporary);
+                let _ = std::fs::remove_file(backup);
+            }
+            Err(format!("attachment_save_failed: {error}"))
+        }
+    }
+}
+
 fn validate_local_identifier(label: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 160
@@ -1412,6 +1447,64 @@ fn network_error(error: reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn atomic_replace_fixture(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "pinvou-team-relay-atomic-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("attachment.txt");
+        let temporary = root.join("attachment.tmp");
+        let backup = root.join("attachment.bak");
+        std::fs::write(&destination, "authoritative").unwrap();
+        std::fs::write(&temporary, "replacement").unwrap();
+        std::fs::write(&backup, "backup").unwrap();
+        (root, destination, temporary, backup)
+    }
+
+    #[test]
+    fn attachment_replace_cleans_candidates_after_confirmed_rollback() {
+        let (root, destination, temporary, backup) = atomic_replace_fixture("rollback");
+        let error =
+            replace_downloaded_attachment_with(&temporary, &destination, &backup, |_, _, _| {
+                Err(crate::platform::filesystem::ReplaceError::new(
+                    crate::platform::filesystem::ReplaceState::RolledBack,
+                    std::io::Error::other("rolled back"),
+                ))
+            })
+            .unwrap_err();
+
+        assert!(error.contains("RolledBack"));
+        assert!(destination.is_file());
+        assert!(!temporary.exists());
+        assert!(!backup.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn attachment_replace_preserves_candidates_when_recovery_is_required() {
+        let (root, destination, temporary, backup) = atomic_replace_fixture("recovery");
+        let error =
+            replace_downloaded_attachment_with(&temporary, &destination, &backup, |_, _, _| {
+                Err(crate::platform::filesystem::ReplaceError::new(
+                    crate::platform::filesystem::ReplaceState::RecoveryRequired,
+                    std::io::Error::other("recovery required"),
+                ))
+            })
+            .unwrap_err();
+
+        assert!(error.contains("RecoveryRequired"));
+        assert!(destination.is_file());
+        assert!(temporary.is_file());
+        assert!(backup.is_file());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn normalizes_https_hub_with_base_path() {
