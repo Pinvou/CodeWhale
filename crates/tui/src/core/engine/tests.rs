@@ -232,69 +232,6 @@ fn forkguard_host_extra_tools_register_in_all_modes() {
 }
 
 #[test]
-fn forkguard_host_write_files_become_bounded_claims() {
-    let workspace = tempdir().expect("workspace");
-    let context = ToolContext::new(workspace.path());
-    let output = workspace.path().join("workflow/deliverables/result.md");
-    let claim = host_write_claim(&context, std::slice::from_ref(&output))
-        .expect("in-workspace output is valid")
-        .expect("non-empty outputs create a claim");
-
-    assert!(claim.roots.is_empty());
-    assert_eq!(claim.exact_files, ["workflow/deliverables/result.md"]);
-
-    let outside = workspace.path().parent().unwrap().join("outside.md");
-    let error = host_write_claim(&context, &[outside])
-        .expect_err("host cannot grant writes outside the engine workspace");
-    assert!(error.contains("escapes workspace"), "{error}");
-}
-
-#[test]
-fn forkguard_structured_output_root_is_explicit_and_claim_bounded() {
-    let workspace = tempdir().expect("workspace");
-    let context = ToolContext::new(workspace.path());
-    let selected = workspace.path().join("project-selected");
-    let other = workspace.path().join("project-other");
-    std::fs::create_dir_all(selected.join("_state")).expect("selected project");
-    std::fs::create_dir_all(other.join("_state")).expect("other project");
-    let output = selected.join("_state/result.json");
-    let claim = host_write_claim(&context, std::slice::from_ref(&output))
-        .expect("claim")
-        .expect("bounded claim");
-    let schema = json!({
-        "type": "object",
-        "x-output-file": "_state/result.json"
-    });
-
-    let root = host_structured_output_root(&context, &selected, &schema, Some(&claim))
-        .expect("selected project is explicitly bound");
-    assert_eq!(root, PathBuf::from("project-selected"));
-
-    let error = host_structured_output_root(&context, &other, &schema, Some(&claim))
-        .expect_err("another project must not inherit the selected project's claim");
-    assert!(
-        error.contains("outside the host-declared exact write claim"),
-        "{error}"
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn forkguard_host_write_claim_rejects_symlink_even_in_trust_mode() {
-    use std::os::unix::fs::symlink;
-
-    let workspace = tempdir().expect("workspace");
-    let outside = tempdir().expect("outside");
-    symlink(outside.path(), workspace.path().join("linked")).expect("create symlink");
-    let context = ToolContext::new(workspace.path()).with_trust_mode(true);
-    let output = workspace.path().join("linked/result.json");
-
-    let error = host_write_claim(&context, &[output])
-        .expect_err("machine-readable host claims must ignore trust-mode bypasses");
-    assert!(error.contains("must not traverse symlinks"), "{error}");
-}
-
-#[test]
 fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
     let enabled = EngineConfig::default();
     let (engine, _handle) = Engine::new(enabled, &Config::default());
@@ -306,7 +243,7 @@ fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
             .expect("system prompt"),
     );
     assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
-    assert!(prompt.contains("must call `registry_sync {}` before `Bash(action=\"run\")`"));
+    assert!(prompt.contains("must call `registry_sync {}` before `exec_shell`"));
 
     let mut disabled = EngineConfig::default();
     disabled.features.disable(Feature::Mcp);

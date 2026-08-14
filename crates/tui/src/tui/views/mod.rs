@@ -4061,9 +4061,6 @@ fn live_subagent_result(
         assignment: SubAgentAssignment {
             objective: summarize_tool_output(objective),
             role: role.map(str::to_string),
-            output_schema: None,
-            structured_output_root: None,
-            expects_file_output: false,
         },
         model: String::new(),
         nickname,
@@ -4975,9 +4972,6 @@ mod tests {
             assignment: SubAgentAssignment {
                 objective: "read the docs".to_string(),
                 role: None,
-                output_schema: None,
-                structured_output_root: None,
-                expects_file_output: false,
             },
             model: "deepseek-v4-flash".to_string(),
             nickname: None,

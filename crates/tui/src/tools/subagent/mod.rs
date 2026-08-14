@@ -397,45 +397,11 @@ pub struct SubAgentAssignment {
     pub objective: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_schema: Option<Value>,
-    /// Host-bound, workspace-relative root for `submit_output` persistence.
-    ///
-    /// This is deliberately explicit: structured workers must never guess a
-    /// project from mutable workspace state (for example, newest mtime).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structured_output_root: Option<PathBuf>,
-    #[serde(default)]
-    pub expects_file_output: bool,
 }
 
 impl SubAgentAssignment {
-    pub(crate) fn new(objective: String, role: Option<String>) -> Self {
-        Self {
-            objective,
-            role,
-            output_schema: None,
-            structured_output_root: None,
-            expects_file_output: false,
-        }
-    }
-
-    #[must_use]
-    pub fn with_output_schema(mut self, output_schema: Option<Value>) -> Self {
-        self.output_schema = output_schema;
-        self
-    }
-
-    #[must_use]
-    pub fn with_structured_output_root(mut self, root: Option<PathBuf>) -> Self {
-        self.structured_output_root = root;
-        self
-    }
-
-    #[must_use]
-    pub fn with_expects_file_output(mut self, expects_file_output: bool) -> Self {
-        self.expects_file_output = expects_file_output;
-        self
+    fn new(objective: String, role: Option<String>) -> Self {
+        Self { objective, role }
     }
 }
 
@@ -1572,9 +1538,6 @@ pub(crate) struct SubAgentSpawnOptions {
     /// Checkpoint resume: preserve the interrupted child's runtime posture
     /// instead of rebuilding it from the caller's role.
     pub preserve_runtime_profile: Option<WorkerRuntimeProfile>,
-    /// Host-created Custom workers are already bounded by a mandatory explicit
-    /// tool list, so they may inherit the parent's coarse write/shell ceiling.
-    pub host_managed_explicit_tools: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2029,7 +1992,6 @@ impl SubAgentTerminalDeliveryContext {
             let _ = event_tx.try_send(Event::AgentComplete {
                 id: result.agent_id.clone(),
                 result: completion.payload,
-                role: result.assignment.role.clone(),
                 failed: matches!(
                     result.status,
                     SubAgentStatus::Failed(_) | SubAgentStatus::BudgetExhausted
@@ -4654,7 +4616,7 @@ impl SubAgentManager {
         self.get_result(&agent_id)
     }
 
-    /// Cancel all running background agents owned by this manager.
+    /// Cancel all running children and return how many were cancelled.
     pub fn cancel_all_running(&mut self) -> usize {
         let running = self
             .agents
@@ -4662,6 +4624,7 @@ impl SubAgentManager {
             .filter(|(_, agent)| agent.status == SubAgentStatus::Running)
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
+
         running
             .into_iter()
             .filter(|id| self.cancel_agent(id).is_ok())
@@ -5504,7 +5467,7 @@ impl SubAgentManager {
                     &tool_profile,
                     &agent.model,
                     options.model_route.clone(),
-                    options.write_claim.is_some() || options.host_managed_explicit_tools,
+                    options.write_claim.is_some(),
                 );
                 runtime.worker_profile = profile.clone();
                 profile
@@ -8329,7 +8292,6 @@ async fn spawn_subagent_from_input(
             resume_from_agent_id: resume_from_agent_id.clone(),
             claim_pre_namespaced: false,
             preserve_runtime_profile: None,
-            host_managed_explicit_tools: false,
         },
     );
     let result = match result {
@@ -9987,29 +9949,7 @@ async fn run_subagent(
             unavailable_tools.join(", ")
         ));
     }
-    let mut tools = tool_registry.tools_for_model(&agent_type);
-    let output_schema = assignment.output_schema.clone();
-    if let Some(schema) = output_schema.as_ref() {
-        tools.push(build_submit_output_tool(schema));
-    }
-    let structured_output_root = match output_schema.as_ref() {
-        Some(_) => {
-            let relative = assignment.structured_output_root.as_ref().ok_or_else(|| {
-                anyhow!("structured output requires an explicit workspace-relative output root")
-            })?;
-            let raw = relative.to_str().ok_or_else(|| {
-                anyhow!(
-                    "structured output root is not valid UTF-8: {}",
-                    relative.display()
-                )
-            })?;
-            Some(
-                crate::tools::spec::resolve_strict_authority_path(&runtime.context, raw)
-                    .map_err(|error| anyhow!(error.to_string()))?,
-            )
-        }
-        None => None,
-    };
+    let tools = tool_registry.tools_for_model(&agent_type);
     if let Some(mb) = runtime.mailbox.as_ref() {
         let _ = mb.send(MailboxMessage::started(&agent_id, agent_type.clone()));
     }
@@ -10032,13 +9972,6 @@ async fn run_subagent(
     // genuine success; everything else must surface its stop reason instead of
     // reporting a completed child with no payload.
     let mut stopped_naturally = false;
-    let mut output_submitted: Option<Value> = None;
-    let mut structured_retries = 0u32;
-    let mut structured_failed = false;
-    let mut last_structured_error: Option<String> = None;
-    let mut wrote_any_file = false;
-    let mut file_output_retries = 0u32;
-    let mut last_tool_error: Option<String> = None;
     // A worker is inspectable as soon as it is launched, not only after its
     // first model round trip. This gives Open a real conversation destination
     // while the worker is waiting on the provider.
@@ -10656,48 +10589,6 @@ async fn run_subagent(
                 pending_inputs.push_back(input);
             }
             if pending_inputs.is_empty() {
-                if output_schema.is_some() && output_submitted.is_none() {
-                    if structured_retries < MAX_STRUCTURED_OUTPUT_RETRIES {
-                        structured_retries += 1;
-                        let prompt = format!(
-                            "你还没有调用 submit_output 提交结构化产出。必须严格按 schema 调用 submit_output，这是完成任务的唯一方式。第 {structured_retries}/{MAX_STRUCTURED_OUTPUT_RETRIES} 次提醒。"
-                        );
-                        last_structured_error = Some(prompt.clone());
-                        messages.push(Message {
-                            role: "user".to_string(),
-                            content: vec![ContentBlock::Text {
-                                text: prompt,
-                                cache_control: None,
-                            }],
-                        });
-                        continue;
-                    }
-                    structured_failed = true;
-                    final_result = Some(format!(
-                        "max_structured_output_retries: 经 {MAX_STRUCTURED_OUTPUT_RETRIES} 次仍未提交合格产出。最后错误: {}",
-                        last_structured_error
-                            .as_deref()
-                            .unwrap_or("missing submit_output")
-                    ));
-                    break;
-                }
-                if assignment.expects_file_output && !wrote_any_file {
-                    if file_output_retries < MAX_STRUCTURED_OUTPUT_RETRIES {
-                        file_output_retries += 1;
-                        messages.push(Message {
-                            role: "user".to_string(),
-                            content: vec![ContentBlock::Text {
-                                text: format!(
-                                    "你还没有通过文件写入工具产出文件。请先完成真实文件写入再结束。第 {file_output_retries}/{MAX_STRUCTURED_OUTPUT_RETRIES} 次提醒。"
-                                ),
-                                cache_control: None,
-                            }],
-                        });
-                        continue;
-                    }
-                    final_result = Some(file_output_failure_reason(last_tool_error.as_deref()));
-                    break;
-                }
                 record_agent_progress(
                     runtime,
                     &agent_id,
@@ -10742,72 +10633,18 @@ async fn run_subagent(
                     step: steps,
                 });
             }
-            let result = if tool_name == SUBMIT_OUTPUT_TOOL {
-                match output_schema.as_ref() {
-                    Some(schema) => match validate_against_schema(&tool_input, schema) {
-                        Ok(()) => {
-                            let project_dir = structured_output_root
-                                .as_deref()
-                                .expect("structured output root validated before the loop");
-                            match persist_structured_output(project_dir, &tool_input, schema) {
-                                Ok(written) if !written.is_empty() => {
-                                    output_submitted = Some(tool_input.clone());
-                                    final_result = Some(tool_input.to_string());
-                                    format!("结构化产出已校验并落盘: {}", written.join(", "))
-                                }
-                                Ok(_) => {
-                                    structured_retries += 1;
-                                    last_structured_error =
-                                        Some("schema 未声明 x-output-file".to_string());
-                                    "Error: schema 未声明 x-output-file，产出未落盘".to_string()
-                                }
-                                Err(error) => {
-                                    structured_retries += 1;
-                                    last_structured_error = Some(error.clone());
-                                    format!("Error: 结构化产出落盘失败: {error}")
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            structured_retries += 1;
-                            last_structured_error = Some(error.clone());
-                            format!("Error: 提交未通过校验:\n{error}")
-                        }
-                    },
-                    None => {
-                        "Error: submit_output is unavailable without an output schema".to_string()
-                    }
-                }
-            } else {
-                match tokio::time::timeout(runtime.tool_timeout, async {
-                    tool_registry
-                        .execute(&agent_id, &tool_name, tool_input)
-                        .await
-                })
-                .await
-                {
-                    Ok(Ok(output)) => output,
-                    Ok(Err(e)) => format!("Error: {e}"),
-                    Err(_) => format!("Error: Tool {tool_name} timed out"),
-                }
-            };
-            let tool_ok = if tool_name == SUBMIT_OUTPUT_TOOL {
-                output_submitted.is_some()
-            } else {
-                !result.starts_with("Error:")
-            };
-            if tool_ok
-                && matches!(
-                    activity_tool_name.as_str(),
-                    "write_file" | "edit_file" | "apply_patch" | "fim_edit"
-                )
+            let result = match tokio::time::timeout(runtime.tool_timeout, async {
+                tool_registry
+                    .execute(&agent_id, &tool_name, tool_input)
+                    .await
+            })
+            .await
             {
-                wrote_any_file = true;
-            }
-            if !tool_ok {
-                let detail = result.strip_prefix("Error: ").unwrap_or(&result);
-                last_tool_error = Some(format!("tool `{tool_name}` failed: {detail}"));
-            }
+                Ok(Ok(output)) => output,
+                Ok(Err(e)) => format!("Error: {e}"),
+                Err(_) => format!("Error: Tool {tool_name} timed out"),
+            };
+            let tool_ok = !result.starts_with("Error:");
             let (result, spilled_to) = bound_subagent_tool_result(
                 &agent_id,
                 &tool_id,
@@ -10898,23 +10735,6 @@ async fn run_subagent(
             )
             .await;
         }
-        if output_submitted.is_some() {
-            stopped_naturally = true;
-            break;
-        }
-        if output_schema.is_some()
-            && output_submitted.is_none()
-            && structured_retries >= MAX_STRUCTURED_OUTPUT_RETRIES
-        {
-            structured_failed = true;
-            final_result = Some(format!(
-                "max_structured_output_retries: 经 {MAX_STRUCTURED_OUTPUT_RETRIES} 次提交仍未通过。最后错误: {}",
-                last_structured_error
-                    .as_deref()
-                    .unwrap_or("missing submit_output")
-            ));
-            break;
-        }
     }
 
     release_resident_leases_for(&agent_id);
@@ -10923,15 +10743,7 @@ async fn run_subagent(
         .map(|text| !text.trim().is_empty())
         .unwrap_or(false);
     // #4050: only a natural stop with a final summary is a real success.
-    let status = if structured_failed {
-        SubAgentStatus::Failed(
-            final_result
-                .clone()
-                .unwrap_or_else(|| "max_structured_output_retries".to_string()),
-        )
-    } else if assignment.expects_file_output && !wrote_any_file {
-        SubAgentStatus::Failed(file_output_failure_reason(last_tool_error.as_deref()))
-    } else if stopped_naturally {
+    let status = if stopped_naturally {
         if has_final_summary {
             SubAgentStatus::Completed
         } else {
@@ -10998,230 +10810,6 @@ async fn run_subagent(
         started_at: Some(started_at),
         from_prior_session: false,
     })
-}
-
-const SUBMIT_OUTPUT_TOOL: &str = "submit_output";
-const MAX_STRUCTURED_OUTPUT_RETRIES: u32 = 3;
-const FILE_OUTPUT_FAILURE_DETAIL_CHARS: usize = 2_000;
-
-fn file_output_failure_reason(last_tool_error: Option<&str>) -> String {
-    let Some(error) = last_tool_error
-        .map(str::trim)
-        .filter(|error| !error.is_empty())
-    else {
-        return "未产出任何文件".to_string();
-    };
-    let sanitized = codewhale_config::persistence::redact_secrets(error);
-    let clipped = sanitized
-        .chars()
-        .take(FILE_OUTPUT_FAILURE_DETAIL_CHARS)
-        .collect::<String>();
-    let suffix = if sanitized.chars().count() > FILE_OUTPUT_FAILURE_DETAIL_CHARS {
-        "…"
-    } else {
-        ""
-    };
-    format!("未产出任何文件；最后一次工具错误: {clipped}{suffix}")
-}
-
-fn build_submit_output_tool(output_schema: &Value) -> Tool {
-    Tool {
-        tool_type: None,
-        name: SUBMIT_OUTPUT_TOOL.to_string(),
-        description: "提交本角色的最终结构化产出。参数必须严格符合 schema；校验通过后由系统写入 schema 声明的输出文件。"
-            .to_string(),
-        input_schema: output_schema.clone(),
-        allowed_callers: None,
-        defer_loading: None,
-        input_examples: None,
-        strict: None,
-        cache_control: None,
-    }
-}
-
-fn validate_against_schema(value: &Value, schema: &Value) -> Result<(), String> {
-    let mut errors = Vec::new();
-    validate_schema_node(value, schema, "(根)", 0, &mut errors);
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("\n"))
-    }
-}
-
-fn validate_schema_node(
-    value: &Value,
-    schema: &Value,
-    path: &str,
-    depth: usize,
-    errors: &mut Vec<String>,
-) {
-    if depth > 32 {
-        errors.push(format!("字段 {path}: schema 嵌套超过 32 层"));
-        return;
-    }
-    if schema.get("$ref").is_some() {
-        errors.push(format!("字段 {path}: 当前不支持 $ref，请使用内联 schema"));
-        return;
-    }
-    if let Some(expected) = schema.get("type").and_then(Value::as_str) {
-        let valid = match expected {
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "integer" => value.is_i64() || value.is_u64(),
-            "boolean" => value.is_boolean(),
-            _ => true,
-        };
-        if !valid {
-            errors.push(format!("字段 {path}: 类型应为 {expected}"));
-            return;
-        }
-    }
-    if let Some(values) = schema.get("enum").and_then(Value::as_array)
-        && !values.iter().any(|allowed| allowed == value)
-    {
-        errors.push(format!("字段 {path}: 取值不在 enum 范围内"));
-    }
-    if let Some(object) = value.as_object() {
-        if let Some(required) = schema.get("required").and_then(Value::as_array) {
-            for field in required.iter().filter_map(Value::as_str) {
-                let field_path = if path == "(根)" {
-                    field.to_string()
-                } else {
-                    format!("{path}.{field}")
-                };
-                match object.get(field) {
-                    None | Some(Value::Null) => errors.push(format!("缺少必填字段 {field_path}")),
-                    Some(Value::String(text)) if text.trim().is_empty() => {
-                        errors.push(format!("必填字段 {field_path} 不能为空"));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-            for (field, field_schema) in properties {
-                let Some(actual) = object.get(field) else {
-                    continue;
-                };
-                let field_path = if path == "(根)" {
-                    field.to_string()
-                } else {
-                    format!("{path}.{field}")
-                };
-                validate_schema_node(actual, field_schema, &field_path, depth + 1, errors);
-            }
-        }
-    }
-    if let Some(items_schema) = schema.get("items")
-        && let Some(items) = value.as_array()
-    {
-        for (index, item) in items.iter().enumerate() {
-            validate_schema_node(
-                item,
-                items_schema,
-                &format!("{path}[{index}]"),
-                depth + 1,
-                errors,
-            );
-        }
-    }
-}
-
-fn safe_output_path(project_dir: &Path, relative: &str) -> Result<PathBuf, String> {
-    let path = Path::new(relative);
-    if path.as_os_str().is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
-    {
-        return Err(format!("x-output-file 不是安全相对路径: {relative}"));
-    }
-    let root = project_dir
-        .canonicalize()
-        .map_err(|error| format!("结构化产出根目录不可用: {error}"))?;
-    if !root.is_dir() {
-        return Err(format!("结构化产出根目录不是目录: {}", root.display()));
-    }
-
-    let components = path.components().collect::<Vec<_>>();
-    let mut current = root.clone();
-    for (index, component) in components.iter().enumerate() {
-        let Component::Normal(segment) = component else {
-            return Err(format!("x-output-file 不是安全相对路径: {relative}"));
-        };
-        current.push(segment);
-        let is_file = index + 1 == components.len();
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(format!(
-                    "x-output-file 不得经过符号链接: {}",
-                    current.display()
-                ));
-            }
-            Ok(metadata) if is_file && metadata.is_dir() => {
-                return Err(format!("x-output-file 指向目录: {}", current.display()));
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !is_file => {
-                fs::create_dir(&current)
-                    .map_err(|error| format!("创建目录 {relative} 失败: {error}"))?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!("检查输出路径 {relative} 失败: {error}"));
-            }
-        }
-        if !is_file {
-            let canonical = current
-                .canonicalize()
-                .map_err(|error| format!("检查输出目录 {relative} 失败: {error}"))?;
-            if !canonical.starts_with(&root) {
-                return Err(format!("x-output-file 逃逸结构化产出根目录: {relative}"));
-            }
-            current = canonical;
-        }
-    }
-    Ok(current)
-}
-
-fn persist_structured_output(
-    project_dir: &Path,
-    value: &Value,
-    schema: &Value,
-) -> Result<Vec<String>, String> {
-    let mut outputs = Vec::new();
-    let mut write_output = |relative: &str, content: &Value| -> Result<(), String> {
-        let path = safe_output_path(project_dir, relative)?;
-        let body = serde_json::to_string_pretty(content)
-            .map_err(|error| format!("序列化 {relative} 失败: {error}"))?;
-        fs::write(&path, body).map_err(|error| format!("写入 {relative} 失败: {error}"))?;
-        outputs.push(relative.to_string());
-        Ok(())
-    };
-    if let Some(relative) = schema.get("x-output-file").and_then(Value::as_str) {
-        write_output(relative, value)?;
-        return Ok(outputs);
-    }
-    if let (Some(object), Some(properties)) = (
-        value.as_object(),
-        schema.get("properties").and_then(Value::as_object),
-    ) {
-        for (field, content) in object {
-            let Some(relative) = properties
-                .get(field)
-                .and_then(|property| property.get("x-output-file"))
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            write_output(relative, content)?;
-        }
-    }
-    Ok(outputs)
 }
 
 /// First non-empty string among `keys`, refusing a wrong type.
@@ -13579,30 +13167,11 @@ impl SubAgentToolRegistry {
     fn unavailable_allowed_tools(&self) -> Vec<String> {
         match &self.allowed_tools {
             None => Vec::new(),
-            Some(list) => {
-                let api_tools = self.registry.to_api_tools();
-                list.iter()
-                    .filter(|name| {
-                        !self.registry.contains(name)
-                            && !CANONICAL_ACTION_ALIASES
-                                .iter()
-                                .any(|(family, action, alias)| {
-                                    alias == name
-                                        && api_tools.iter().any(|tool| {
-                                            tool.name == *family
-                                                && tool.input_schema["properties"]["action"]["enum"]
-                                                    .as_array()
-                                                    .is_some_and(|actions| {
-                                                        actions.iter().any(|value| {
-                                                            value.as_str() == Some(*action)
-                                                        })
-                                                    })
-                                        })
-                                })
-                    })
-                    .cloned()
-                    .collect()
-            }
+            Some(list) => list
+                .iter()
+                .filter(|name| !self.registry.contains(name))
+                .cloned()
+                .collect(),
         }
     }
 

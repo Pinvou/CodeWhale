@@ -507,9 +507,6 @@ mod tests {
             assignment: SubAgentAssignment {
                 objective: "Implement the bounded details route".to_string(),
                 role: Some("worker".to_string()),
-                output_schema: None,
-                structured_output_root: None,
-                expects_file_output: false,
             },
             model: "deepseek-v4-pro".to_string(),
             nickname: Some("Blue Whale".to_string()),

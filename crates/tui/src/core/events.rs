@@ -358,7 +358,7 @@ pub enum Event {
     AgentComplete {
         id: String,
         result: String,
-        role: Option<String>,
+        /// Whether the child ended in a terminal failure state.
         failed: bool,
     },
 

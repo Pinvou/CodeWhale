@@ -957,9 +957,6 @@ mod tests {
             assignment: SubAgentAssignment {
                 objective: "Wire settled file activity".to_string(),
                 role: Some("worker".to_string()),
-                output_schema: None,
-                structured_output_root: None,
-                expects_file_output: false,
             },
             model: "test-model".to_string(),
             nickname: Some("Blue Whale".to_string()),
@@ -1038,9 +1035,6 @@ mod tests {
             assignment: SubAgentAssignment {
                 objective: format!("objective for {id}"),
                 role: Some(role.to_string()),
-                output_schema: None,
-                structured_output_root: None,
-                expects_file_output: false,
             },
             model: "test-model".to_string(),
             nickname: nickname.map(str::to_string),
@@ -1649,9 +1643,6 @@ mod tests {
                 assignment: SubAgentAssignment {
                     objective: "Verify keyboard and mouse convergence".to_string(),
                     role: Some("worker".to_string()),
-                    output_schema: None,
-                    structured_output_root: None,
-                    expects_file_output: false,
                 },
                 model: "test-model".to_string(),
                 nickname: Some("Blue Whale".to_string()),

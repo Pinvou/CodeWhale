@@ -176,22 +176,12 @@ pub enum Op {
 
     /// Spawn a sub-agent
     #[allow(dead_code)]
-    SpawnSubAgent {
-        prompt: String,
-        role_id: String,
-        allowed_tools: Vec<String>,
-        /// Host-declared output files. Absolute paths must remain inside the
-        /// engine workspace and are converted to bounded write claims before launch.
-        write_files: Vec<PathBuf>,
-        max_steps: Option<u32>,
-        output_schema: Option<serde_json::Value>,
-        /// Explicit host-selected project root for structured output.
-        /// The engine validates and stores it workspace-relative.
-        structured_output_root: Option<PathBuf>,
-        expects_file_output: bool,
-    },
+    SpawnSubAgent { prompt: String },
 
-    /// Cancel every running background sub-agent owned by this engine.
+    /// Cancel every currently running sub-agent for this engine.
+    ///
+    /// Hosts use this during session cancellation and engine shutdown so no
+    /// child work survives after its owning turn has been reclaimed.
     CancelSubAgents,
 
     /// Describe the exact request the next turn would send, without

@@ -2105,12 +2105,7 @@ pub(crate) async fn run_event_loop(
                             received_engine_event = redraw_requested_before_event;
                         }
                     }
-                    EngineEvent::AgentComplete {
-                        id,
-                        result,
-                        role: _,
-                        failed: _,
-                    } => {
+                    EngineEvent::AgentComplete { id, result, .. } => {
                         let subagent_elapsed = app
                             .agent_activity_started_at
                             .or(app.turn_started_at)
