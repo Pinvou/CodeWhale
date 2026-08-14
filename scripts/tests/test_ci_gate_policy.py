@@ -126,6 +126,29 @@ class CiGatePolicyTests(unittest.TestCase):
         )
         self.assertIn("github.event_name == 'push'", rust_test)
 
+    def test_windows_rust_test_runs_only_on_main_push_with_path_filter(self):
+        # windows-rust-test 不作为 PR / Merge Queue 合入门禁，只在 main push 且 rust
+        # 相关路径变更时跑(docs-only 推送不烧 Windows runner)。
+        windows_rust_test = self.workflow.split("\n  windows-rust-test:", maxsplit=1)[
+            1
+        ].split("\n  windows-rustup-repair-test:", maxsplit=1)[0]
+        self.assertIn("needs.changes.outputs.rust_code == 'true'", windows_rust_test)
+        self.assertIn("github.event_name == 'push'", windows_rust_test)
+        self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
+        self.assertNotIn("github.event.pull_request.draft == false", windows_rust_test)
+
+    def test_windows_rust_test_wired_into_required_gate(self):
+        required_gate = self.workflow.split("\n  required-gate:", maxsplit=1)[1]
+        self.assertIn("- windows-rust-test", required_gate)
+        self.assertIn(
+            "WINDOWS_RUST_RESULT: ${{ needs.windows-rust-test.result }}",
+            required_gate,
+        )
+        self.assertIn(
+            '"windows-rust-test:$WINDOWS_RUST_RESULT"',
+            required_gate,
+        )
+
     def test_release_and_platform_contracts_skip_drafts_but_run_in_queue(self):
         release_contract = self.workflow.split(
             "\n  release-contract-test:", maxsplit=1

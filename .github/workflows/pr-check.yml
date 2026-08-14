@@ -16,7 +16,7 @@ name: PR Check
 #   与 rust-test 并行,各自独立 cache。clippy 规则见 Cargo.toml [lints] 表:
 #   只启用实测零欠账的 lint(deny),有欠账的 lint/group 显式 allow,
 #   欠账由清理 PR(#35 及后续)消化后逐个升 deny。
-# - windows-rust-test:只在 main push 跑，不作为 PR 或 Merge Queue 合入门禁。
+# - windows-rust-test:只在 main push 且 rust 相关路径变更时跑，不作为 PR 或 Merge Queue 合入门禁。
 # - windows-rustup-repair-test:相关 PR 在隔离目录破坏工具链并验证下载源回退与重装。
 # - windows-codex-runtime-test:相关 PR 在 Windows 原生准备 Node + ACP Bridge，并核对安装包资源。
 # - backflow-portability:可信回流 PR/Queue 在 Windows、macOS、Linux 并行运行
@@ -584,6 +584,10 @@ jobs:
     env:
       # Draft 只跑无系统依赖的 fmt 快检；Ready PR、Queue 与 main 跑 clippy。
       RUN_HEAVY_RUST_CHECKS: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+      # clippy 编译依赖(codewhale-tui)时同样可能触发 rustc/LLVM 栈溢出
+      # (v0.9.5 升级后 O2 同源风险)。正式入口按平台注入 RUSTC_WRAPPER
+      # (见 config.toml 注释),与 rust-test 保持一致。
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
     steps:
       - name: Checkout (含 submodule)
         uses: actions/checkout@v7
@@ -682,6 +686,14 @@ jobs:
     timeout-minutes: 60
     # dev profile 的 line-tables-only 已固化进 Cargo.toml [profile.dev],不再需要
     # CARGO_PROFILE_DEV_DEBUG 环境变量。
+    env:
+      # v0.9.5 升级后 dev 对依赖开 O2 + 256 codegen-units 时,rustc/LLVM 编译
+      # codewhale-tui 会在 MachineLateinstrsCleanup 递归中栈溢出(SIGBUS)。
+      # .cargo/config.toml 不设置 rustc-wrapper(全局键无法按平台条件化,且
+      # Windows 上指向无扩展名 sh 会 os error 193),由本 job 显式注入
+      # RUSTC_WRAPPER 指向 sh 版(wrapper 只作用于编译期 rustc 进程,
+      # cargo run / cargo test 目标进程不继承 RUST_MIN_STACK)。
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper
     steps:
       - name: Checkout (含 submodule)
         uses: actions/checkout@v7
@@ -785,16 +797,26 @@ jobs:
 
   windows-rust-test:
     name: windows-rust-test
-    # 跨平台构建不作为 PR 检测项；合入 main 后再做 Windows 原生验证。
-    if: ${{ github.event_name == 'push' }}
+    needs: changes
+    # 跨平台构建不作为 PR 检测项；合入 main 后按路径做 Windows 原生验证:
+    # 仅 rust 相关改动才跑(docs-only 推送烧 Windows runner 零收益——其 cache
+    # shared-key 只被自身消费,不为 PR 提供暖 cache)。
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.changes.outputs.rust_code == 'true' }}
     runs-on: windows-latest
     # 全量 cargo check --all-targets + lib 链接检查,无暖 cache,挂死会长时间烧 runner 分钟。
-    # 45min:aws-lc-sys(NASM 预生成对象)冷编译比纯 Rust 图更久。
-    timeout-minutes: 45
+    # 90min:aws-lc-sys(NASM 预生成对象)冷编译比纯 Rust 图更久,留足余量。
+    timeout-minutes: 90
     env:
       # reqwest 0.13 → aws-lc-sys(非 FIPS)。Windows x86_64 需 NASM 汇编;runner 默认无 NASM,
       # 用预生成 NASM 对象规避(aws-lc-rs 官方支持,无需额外装 NASM)。
       AWS_LC_SYS_PREBUILT_NASM: "1"
+      # Windows 经 RUSTC_WRAPPER 注入 rustc-stack-wrapper.exe(本 job 先编译)。
+      # .cmd 经 cmd /C 执行,cmd.exe 命令行上限 8191 字符,windows-sys/windows 等
+      # 大型 crate 的 rustc 命令行(数千个 --cfg feature=...)会超限报
+      # "The command line is too long";.exe 经 CreateProcess 直启(上限 32767),
+      # 只在编译期 rustc 注入 RUST_MIN_STACK=16MiB,不泄漏到 cargo test 目标进程。
+      # 必须用 ${{ github.workspace }} 绝对路径(避免按 cwd 双拼解析)。
+      RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -813,6 +835,12 @@ jobs:
         working-directory: pinvou3-app/src-tauri
         shell: bash
         run: rustup default "$(rustup show active-toolchain | awk '{print $1}')"
+
+      # 编译 Windows 专用 .exe 栈 wrapper(源码 scripts/rustc-stack-wrapper.rs)。
+      # 直接调 rustc 编译、不经 cargo,故不受本 job 的 RUSTC_WRAPPER 影响,无自举依赖。
+      - name: 编译 Windows 栈 wrapper(.exe)
+        shell: bash
+        run: rustc -O pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.rs -o pinvou3-app/src-tauri/scripts/rustc-stack-wrapper.exe
 
       - name: Node.js
         uses: actions/setup-node@v7
@@ -947,6 +975,7 @@ jobs:
       - release-contract-test
       - rust-lint
       - rust-test
+      - windows-rust-test
       - macos-codex-runtime-test
       - windows-codex-runtime-test
       - windows-runtime-test
@@ -968,6 +997,7 @@ jobs:
           RELEASE_CONTRACT_RESULT: ${{ needs.release-contract-test.result }}
           RUST_LINT_RESULT: ${{ needs.rust-lint.result }}
           RUST_RESULT: ${{ needs.rust-test.result }}
+          WINDOWS_RUST_RESULT: ${{ needs.windows-rust-test.result }}
           MACOS_CODEX_RESULT: ${{ needs.macos-codex-runtime-test.result }}
           WINDOWS_CODEX_RESULT: ${{ needs.windows-codex-runtime-test.result }}
           WINDOWS_RUNTIME_RESULT: ${{ needs.windows-runtime-test.result }}
@@ -994,6 +1024,7 @@ jobs:
             "release-contract-test:$RELEASE_CONTRACT_RESULT" \
             "rust-lint:$RUST_LINT_RESULT" \
             "rust-test:$RUST_RESULT" \
+            "windows-rust-test:$WINDOWS_RUST_RESULT" \
             "macos-codex-runtime-test:$MACOS_CODEX_RESULT" \
             "windows-codex-runtime-test:$WINDOWS_CODEX_RESULT" \
             "windows-runtime-test:$WINDOWS_RUNTIME_RESULT" \
