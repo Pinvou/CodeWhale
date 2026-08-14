@@ -51,6 +51,32 @@ try {
   }
   Assert-True -Condition $failedGitWasRejected -Message "non-zero Git exit codes must fail and retain stderr diagnostics"
 
+  $firstGitDirectory = Join-Path $testRoot "git-first"
+  $secondGitDirectory = Join-Path $testRoot "git-second"
+  $duplicateGitName = "git-duplicate.cmd"
+  New-Item -ItemType Directory -Path $firstGitDirectory, $secondGitDirectory -Force | Out-Null
+  [System.IO.File]::WriteAllText(
+    (Join-Path $firstGitDirectory $duplicateGitName),
+    "@echo off`r`necho first git executable`r`nexit /b 0`r`n",
+    [System.Text.Encoding]::ASCII
+  )
+  [System.IO.File]::WriteAllText(
+    (Join-Path $secondGitDirectory $duplicateGitName),
+    "@echo off`r`necho second git executable`r`nexit /b 0`r`n",
+    [System.Text.Encoding]::ASCII
+  )
+  $previousPath = $env:PATH
+  try {
+    $env:PATH = "$firstGitDirectory;$secondGitDirectory;$previousPath"
+    $duplicateCommands = @(Get-Command -Name "git-duplicate" -CommandType Application -ErrorAction Stop)
+    Assert-True -Condition ($duplicateCommands.Count -ge 2) -Message "duplicate Git command test requires at least two PATH matches"
+    $duplicateGitOutput = @(Invoke-Git -WorkingDirectory $testRoot -Arguments @("status") -FailureMessage "unexpected" -GitCommand "git-duplicate")
+    Assert-True -Condition (($duplicateGitOutput -join " ") -match "first git executable") -Message "Invoke-Git must select one executable instead of concatenating duplicate PATH matches"
+    Assert-True -Condition (($duplicateGitOutput -join " ") -notmatch "second git executable") -Message "Invoke-Git must use only the highest-precedence executable"
+  } finally {
+    $env:PATH = $previousPath
+  }
+
   $stagingParent = Join-Path $testRoot "windows-runtime"
   $stagingRoot = Join-Path $stagingParent $stageId
   $stageManifestPath = Join-Path $stagingRoot ".stage-manifest.json"

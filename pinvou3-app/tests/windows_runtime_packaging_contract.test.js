@@ -169,6 +169,8 @@ assert.match(
   "the runtime descriptor must reference the verified staged VC++ payload",
 );
 assert.match(runtimeInitScript, /\$ErrorActionPreference = "Continue"/u);
+assert.match(runtimeInitScript, /Select-Object -First 1 -ExpandProperty Source/u);
+assert.match(runtimeInitScript, /& \$gitExecutable -C/u);
 assert.match(runtimeInitScript, /\$exitCode = \$LASTEXITCODE/u);
 assert.match(runtimeInitScript, /if \(\$exitCode -ne 0\)/u);
 assert.match(runtimeInitScript, /git lfs pull/);
