@@ -37,7 +37,7 @@ class ReleaseCachePolicyTests(unittest.TestCase):
             "\n  windows-rust-test:", maxsplit=1
         )[0]
 
-        self.assertIn("timeout-minutes: 60", rust_test_job)
+        self.assertIn("timeout-minutes: 90", rust_test_job)
         self.assertIn("shared-key: rust-test", rust_test_job)
         self.assertIn(MAIN_ONLY_SAVE, rust_test_job)
 
@@ -61,10 +61,11 @@ class ReleaseCachePolicyTests(unittest.TestCase):
             "\n  build-windows-x64:", maxsplit=1
         )[0]
 
-        self.assertIn('CARGO_PROFILE_RELEASE_LTO: "false"', arm64_job)
-        self.assertIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', arm64_job)
+        # release profile 已设 thin LTO(thin 替代 fat),ARM 不再需要 env 覆盖;
+        # 保留 lld(thin LTO 的 link 阶段需要支持 LLVM bitcode 的链接器)。
         self.assertIn('RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', arm64_job)
-        self.assertIn("build-essential pkg-config cmake lld", arm64_job)
+        self.assertNotIn('CARGO_PROFILE_RELEASE_LTO', arm64_job)
+        self.assertNotIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', arm64_job)
 
 
 if __name__ == "__main__":

@@ -43,12 +43,11 @@ class ReleaseArm64PolicyTests(unittest.TestCase):
 
     def test_arm64_all_release_events_use_hosted_runner_profile(self):
         job_env = self.arm64_job.split("\n    steps:", maxsplit=1)[0]
-        for setting in (
-            'CARGO_PROFILE_RELEASE_LTO: "false"',
-            'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"',
-            'RUSTFLAGS: "-C link-arg=-fuse-ld=lld"',
-        ):
-            self.assertIn(setting, job_env)
+        # release profile 已设 thin LTO(thin 替代 fat),ARM 不再需要 env 覆盖;
+        # 保留 lld(thin LTO 的 link 阶段需要支持 LLVM bitcode 的链接器)。
+        self.assertIn('RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', job_env)
+        self.assertNotIn('CARGO_PROFILE_RELEASE_LTO', job_env)
+        self.assertNotIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', job_env)
 
         self.assertIn("build-essential pkg-config cmake lld", self.arm64_job)
         self.assertIn(
