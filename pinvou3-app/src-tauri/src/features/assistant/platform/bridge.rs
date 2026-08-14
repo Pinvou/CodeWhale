@@ -185,10 +185,21 @@ impl Pinvou3Bridge {
     /// 找到用户在桌面/文档/下载里的真实文件。配套敏感目录禁令在
     /// `bundle/instructions.md` 里引导，硬拦截后续走 deepseek-tui hook 注册。
     ///
-    /// **$PINVOU3_SESSION_ARTIFACTS** 环境变量在这里 set 到公共 MCP 产物目录。
-    /// PPT / 公文等 MCP server 是 stdio 子进程，不能可靠感知当前 GUI session；
-    /// 因此二进制办公产物固定落到 `sessions/default/artifacts/`，具体归属由带
-    /// `session_id` 的工具事件和前端持久化决定。
+    /// boot 路径的 env 注入唯一收口（Community #210 守卫目标）：只写会话产物目录
+    /// `PINVOU3_SESSION_ARTIFACTS`。PPT / 公文等 MCP server 是 stdio 子进程，
+    /// 不能可靠感知当前 GUI session，故二进制办公产物固定落到
+    /// `sessions/default/artifacts/`，具体归属由带 `session_id` 的工具事件和前端
+    /// 持久化决定。
+    ///
+    /// ⚠️ 不得在这里（或 boot 其它位置）注入 `DEEPSEEK_MAX_OUTPUT_TOKENS` /
+    /// `PINVOU3_MAX_OUTPUT_TOKENS`：底座 `effective_max_output_tokens()` 优先读
+    /// 前者，一旦回归会把所有模型（含云端）输出上限重新钉死 24576。
+    /// lib.rs `release_env_defaults_guard` 守 run() 的 release env 注入，本函数与
+    /// `forkguard_boot_env_must_not_pin_global_output_cap` 守 boot 注入源头。
+    fn wire_boot_env(artifacts_dir: &std::path::Path) {
+        std::env::set_var("PINVOU3_SESSION_ARTIFACTS", artifacts_dir);
+    }
+
     pub fn boot() -> Result<Self> {
         // ⓪ 注入 pinvou3 版 prompt 文案到底座 prompt 合成层(base/locale/authority)。
         // 幂等(底座 OnceLock 首次生效、后续 Err 被忽略),必须早于任何 engine spawn。
@@ -221,7 +232,7 @@ impl Pinvou3Bridge {
             prefs.save().ok();
         }
         let artifacts = paths::default_session_artifacts_dir();
-        std::env::set_var("PINVOU3_SESSION_ARTIFACTS", &artifacts);
+        Self::wire_boot_env(&artifacts);
         let this = Self {
             prefs,
             bundle,
@@ -232,7 +243,6 @@ impl Pinvou3Bridge {
             execution_root_resolver: None,
             code_session_predicate: None,
         };
-        this.wire_max_output_tokens_env();
         // C 方案(P-no-disk)最终版: 清理所有 pinvou3 历史 disk 残留:
         //   • `~/.pinvou3/sessions/<sid>/instructions.md`(per-session inline 前路径)
         //   • `~/.pinvou3/workspace_context.md`(workspace context 已合并进 INSTRUCTIONS_MD §0)
@@ -284,26 +294,6 @@ impl Pinvou3Bridge {
             eprintln!(
                 "[pinvou3-app] cleaned up {removed} legacy disk file(s) \
                  (C-fork P-no-disk: prompt content now Inline in memory)"
-            );
-        }
-    }
-
-    /// 把 `self.max_output_tokens()` 写到底座读取的 `DEEPSEEK_MAX_OUTPUT_TOKENS`
-    /// env (核心:底座 `effective_max_output_tokens()` 只读这个 env)。
-    ///
-    /// 生产 Tauri 启动不走 run-dev.sh (clean env), 没这一步会让底座回到
-    /// 模型表启发式。这里显式写入 pinvou3 的本地 vLLM 输出预算,确保 dev /
-    /// release / headless harness 行为一致。
-    ///
-    /// 已有 env 时不覆盖 (允许 run-dev.sh / L1 harness / 用户 override)。
-    ///
-    /// 单独抽 helper 让测试可以不走 boot() (避免 ensure_dirs / extract_bundle
-    /// 写盘到真实 ~/.pinvou3 + 不需要拿 PINVOU3_HOME ENV_LOCK)。
-    pub fn wire_max_output_tokens_env(&self) {
-        if std::env::var_os("DEEPSEEK_MAX_OUTPUT_TOKENS").is_none() {
-            std::env::set_var(
-                "DEEPSEEK_MAX_OUTPUT_TOKENS",
-                self.max_output_tokens().to_string(),
             );
         }
     }
@@ -717,32 +707,30 @@ impl Pinvou3Bridge {
         None
     }
 
-    /// 当前 route 发给模型的思考开关。
+    /// 当前 route 发给模型的思考深度档位（透传底座 `reasoning_effort`）。
     ///
-    /// 字段解析与请求开关是两件事：`reasoning_stream_style` 只决定收到
-    /// `reasoning_content` 后如何分类，不会让服务端开始输出 reasoning。
-    /// Kimi Code 的 `kimi-for-coding` 是 always-thinking 模型，官方接入方式
-    /// 要求 Thinking 保持开启；若省略该参数，工具调用前的计划可能落入普通
-    /// `content`，而 `reasoning_content` 为空。底座会把 `high` 翻译成
-    /// `thinking: {"type":"enabled"}`。未知 OpenAI 兼容端点继续不注入。
-    fn moonshot_model_requires_explicit_thinking(&self) -> bool {
-        matches!(
-            self.model().trim().to_ascii_lowercase().as_str(),
-            "k3" | "k3-256k"
-                | "kimi-k3"
-                | "kimi-k2.7-code"
-                | "kimi-k2.7-code-highspeed"
-                | "kimi-for-coding"
-                | "kimi-for-coding-highspeed"
-                | "kimi-k2.6"
-        )
-    }
-
-    fn request_reasoning_effort(&self) -> Option<&'static str> {
+    /// 优先级：用户显式设置的 `SavedModel.reasoning_effort` > provider 默认
+    /// （本地 vLLM 保持 off 防 SSE timeout；其余默认 high——底座自身默认是 Max，
+    /// 品悟统一收口到 high，符合产品默认思考强度）。
+    ///
+    /// 本地 OpenAI 兼容端点（loopback 的 LM Studio/Ollama 等）保持旧行为不注入
+    /// 档位（None），避免改造前不存在的 `reasoning_effort` 请求参数引起漂移。
+    ///
+    /// 注意：Kimi Code 的 `kimi-for-coding` 等是 always-thinking 模型，官方
+    /// 接入要求 Thinking 保持开启；默认 high 由底座翻译成
+    /// `thinking: {"type":"enabled"}`，天然满足该要求，无需特判模型名。
+    fn request_reasoning_effort(&self) -> Option<String> {
+        if let Some(effort) = self
+            .effective_model()
+            .and_then(|model| model.reasoning_effort.as_deref())
+        {
+            return Some(effort.to_string());
+        }
         match self.provider().as_str() {
-            "vllm" => Some("off"),
-            "moonshot" if self.moonshot_model_requires_explicit_thinking() => Some("high"),
-            _ => None,
+            "vllm" => Some("off".to_string()),
+            // 本地 OpenAI 兼容端点（loopback 服务）不注入，保持旧行为。
+            "openai" if base_url_uses_loopback(&self.base_url()) => None,
+            _ => Some("high".to_string()),
         }
     }
 
@@ -904,8 +892,9 @@ impl Pinvou3Bridge {
 
     /// 为一个具体 wire model 生成宿主已知的 route facts：
     /// SavedModel 显式能力与实时 probe 取更小值；两者都没有时复用运行状态页同一份
-    /// 模型 catalog，未知本地 vLLM 才使用 128K 保守值。output 始终不超过 Pinvou
-    /// 全局 24K 请求意图。
+    /// 模型 catalog，未知本地 vLLM 才使用 128K 保守值。
+    /// output_tokens：本地 vLLM 显式携带 Pinvou 24K 预算（防 SSE timeout 既有约束），
+    /// 云端模型不声明（SavedModel.max_output_tokens 默认 None）→ 底座按 64K/厂商能力兜底。
     fn route_limits_for_model(&self, model: &str) -> Option<codewhale_config::route::RouteLimits> {
         let saved = self.effective_model().filter(|saved| saved.model == model);
         let configured_context = saved.and_then(|saved| saved.context_window_tokens);
@@ -1262,7 +1251,7 @@ impl Pinvou3Bridge {
             // 关键:工作流会话只走 SpawnSubAgent、不发 SendMessage(对话型品悟
             // 已取消),session 拿不到 SendMessage 里那份 off → 角色全员 thinking
             // 全开(6/12 taizi 思考失控实证)。在 engine 配置层钉死,不依赖对话。
-            reasoning_effort: self.request_reasoning_effort().map(str::to_string),
+            reasoning_effort: self.request_reasoning_effort(),
             // Pinvou 产品工具面使用 CodeWhale 0.9.5 原生 hard allowlist。它约束
             // 初始目录、tool_search 与 dispatch；SubAgent 角色仍会在此基础上进一步收窄。
             allowed_tools: Some(crate::features::assistant::tool_policy::allowed_tool_names()),
@@ -1505,9 +1494,8 @@ impl Pinvou3Bridge {
             }
         }
         cfg.default_text_model = Some(model);
-        // 本地 vLLM 必须关 thinking；Kimi Code 必须显式开启，其他远程
-        // provider 保留底座默认。
-        cfg.reasoning_effort = self.request_reasoning_effort().map(str::to_string);
+        // 本地 vLLM 必须关 thinking（防 SSE timeout）；其余默认 high。
+        cfg.reasoning_effort = self.request_reasoning_effort();
         cfg
     }
 
@@ -1785,9 +1773,8 @@ impl Pinvou3Bridge {
             // v0.8.59 上游新增 /goal 目标管理;pinvou3 GUI 不用,取默认(无预算/Active)。
             goal_token_budget: None,
             goal_status: deepseek_tui::tools::goal::GoalStatus::Active,
-            // 本地 vLLM 关 thinking；Kimi Code 显式开启；其他远程 provider
-            // 传 None 让底座沿用各自默认。
-            reasoning_effort: self.request_reasoning_effort().map(str::to_string),
+            // 本地 vLLM 关 thinking（防 SSE timeout）；其余默认 high。
+            reasoning_effort: self.request_reasoning_effort(),
             reasoning_effort_auto: false,
             auto_model: false,
             allow_shell,
@@ -1797,6 +1784,7 @@ impl Pinvou3Bridge {
             auto_approve,
             approval_mode,
             translation_enabled: false,
+
             // v0.8.49 上游新增。Some(空表) = 本轮零工具:底座 filter_tool_catalog_for_gates
             // 直接从发给模型的 schema 里 retain 掉全部工具,模型根本看不到 write_file /
             // present_artifact 等。卡牌制造专家等"纯对话元卡"用它,从工具层杜绝小模型误走
@@ -2478,6 +2466,7 @@ mod tests {
             preset,
             context_window_tokens: None,
             max_output_tokens: None,
+            reasoning_effort: None,
             model: model.to_string(),
             base_url: base_url.to_string(),
             provider_kind: None,
@@ -2578,11 +2567,11 @@ mod tests {
     fn forkguard_compaction_128k_scenarios() {
         let (_lock, _env) =
             locked_env(&["DEEPSEEK_MAX_OUTPUT_TOKENS", "PINVOU3_MAX_OUTPUT_TOKENS"]);
-        // [根治后] derive_compaction_threshold 经底座 context_input_budget_for_route 读
-        // DEEPSEEK_MAX_OUTPUT_TOKENS 算 output 预留(不再镜像 24576)。测试须钉死生产 env 值,
-        // 否则底座默认 API_MAX_OUTPUT_TOKENS=65536 → E 偏小 → T 偏小(fixture 的 wire 用 is_none
-        // 检查,env 被其它测试污染时不覆盖)。生产由 Bridge::boot → wire_max_output_tokens_env 保证。
-        std::env::set_var("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576");
+        // [根因] derive_compaction_threshold 经底座 context_input_budget_for_route 算
+        // output 预留：本地 vLLM 的 24576 由 route_limits_for_model 的 is_local_vllm
+        // 分支显式携带进 RouteLimits.output_tokens，主导预留计算（min(requested_cap,
+        // route_cap)=24576），不依赖 DEEPSEEK_MAX_OUTPUT_TOKENS env。云端模型不再
+        // 被品悟钉死 24576，落底座 64K/厂商能力兜底。
         // A. 真实 128K 部署:探测拿到 131072
         // 默认预设已平台感知(macOS/Windows→Deepseek),显式设 LocalVllm 才测 128K vLLM compaction。
         let mut a = fixture_bridge();
@@ -2676,6 +2665,147 @@ mod tests {
             t_c, 133_029,
             "256K/24K profile 的 Compact 阈值应稳定为 133029"
         );
+    }
+
+    /// Community #210 回归：云端模型不再被全局输出环境变量钉死到 24K，
+    /// 本地 vLLM 则继续通过 route limits 显式携带 24K 预算。
+    #[test]
+    fn forkguard_cloud_route_output_not_pinned_by_global_env() {
+        let (_lock, _env) =
+            locked_env(&["DEEPSEEK_MAX_OUTPUT_TOKENS", "PINVOU3_MAX_OUTPUT_TOKENS"]);
+        std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        std::env::remove_var("PINVOU3_MAX_OUTPUT_TOKENS");
+
+        let mut cloud = fixture_bridge();
+        set_active_model(
+            &mut cloud,
+            ModelPreset::Deepseek,
+            "deepseek-v4-pro",
+            "https://api.deepseek.com",
+            "",
+        );
+        let cloud_limits = cloud.route_limits_for_model("deepseek-v4-pro");
+        assert_eq!(
+            cloud_limits
+                .as_ref()
+                .and_then(|limits| limits.output_tokens),
+            None,
+            "云端 route 不声明输出上限，应落到底座与厂商能力兜底"
+        );
+
+        let mut local = fixture_bridge();
+        set_active_model(
+            &mut local,
+            ModelPreset::LocalVllm,
+            ModelPreset::LocalVllm.default_model(),
+            ModelPreset::LocalVllm.default_base_url(),
+            "",
+        );
+        let local_limits = local.route_limits_for_model(&local.model());
+        assert_eq!(
+            local_limits
+                .as_ref()
+                .and_then(|limits| limits.output_tokens),
+            Some(24_576),
+            "本地 vLLM 必须继续显式携带 24K 预算"
+        );
+
+        // 品悟 route 中间层不读取这个底座变量；残留变量的影响发生在底座最终预算链。
+        std::env::set_var("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576");
+        let cloud_limits_env = cloud.route_limits_for_model("deepseek-v4-pro");
+        assert_eq!(
+            cloud_limits_env
+                .as_ref()
+                .and_then(|limits| limits.output_tokens),
+            None,
+            "云端 route 中间层不得把全局环境变量镜像进 RouteLimits"
+        );
+
+        // 256K 小于底座 500K 大窗口分界，预算会走 route-effective request cap。
+        let route_limits_256k = codewhale_config::route::RouteLimits {
+            context_tokens: Some(256_000),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let budget_clean = deepseek_tui::core::engine::context_input_budget_for_route(
+            deepseek_tui::config::ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+            Some(route_limits_256k),
+            0,
+        )
+        .expect("显式 256K route 必须能算出输入预算");
+        std::env::set_var("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576");
+        let budget_env = deepseek_tui::core::engine::context_input_budget_for_route(
+            deepseek_tui::config::ApiProvider::Deepseek,
+            "deepseek-v4-pro",
+            Some(route_limits_256k),
+            0,
+        )
+        .expect("显式 256K route 必须能算出输入预算");
+        assert_eq!(
+            budget_env - budget_clean,
+            65_536 - 24_576,
+            "残留环境变量应使底座输出预留从 64K 降到 24K，证明生产路径必须停止注入"
+        );
+        std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS");
+    }
+
+    /// 在三平台 home 全隔离后执行真实 boot，守住启动环境变量的最终状态。
+    #[test]
+    fn forkguard_boot_env_must_not_pin_global_output_cap() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MAX_OUTPUT_TOKENS",
+            "PINVOU3_MAX_OUTPUT_TOKENS",
+            "PINVOU3_SESSION_ARTIFACTS",
+            "PINVOU3_HOME",
+            "HOME",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+        ]);
+        std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        std::env::remove_var("PINVOU3_MAX_OUTPUT_TOKENS");
+
+        struct TempDirGuard(std::path::PathBuf);
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "pinvou3-boot-env-guard-{}-{}",
+            std::process::id(),
+            crate::bridge::paths::tests::unique_suffix()
+        ));
+        let _temp = TempDirGuard(root.clone());
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("创建隔离 home");
+        std::env::set_var("PINVOU3_HOME", &root);
+        std::env::set_var("HOME", &root);
+        std::env::set_var("USERPROFILE", &root);
+        std::env::remove_var("HOMEDRIVE");
+        std::env::remove_var("HOMEPATH");
+
+        let bridge = super::Pinvou3Bridge::boot().expect("隔离 home 下 boot 必须成功");
+
+        assert!(
+            std::env::var_os("DEEPSEEK_MAX_OUTPUT_TOKENS").is_none(),
+            "boot 不得注入 DEEPSEEK_MAX_OUTPUT_TOKENS"
+        );
+        assert!(
+            std::env::var_os("PINVOU3_MAX_OUTPUT_TOKENS").is_none(),
+            "boot 不得注入 PINVOU3_MAX_OUTPUT_TOKENS"
+        );
+        let artifacts = paths::default_session_artifacts_dir();
+        assert_eq!(
+            std::env::var("PINVOU3_SESSION_ARTIFACTS").as_deref(),
+            Ok(artifacts.to_str().expect("隔离 home 路径必须是 UTF-8")),
+            "boot 仍应写入会话产物目录"
+        );
+
+        drop(bridge);
     }
 
     /// route profile 属于具体部署，不属于 vLLM/Qwen 特例。任何 OpenAI-compatible
@@ -2910,41 +3040,6 @@ mod tests {
             Some(crate::features::assistant::tool_policy::allowed_tool_names()),
             "code 会话未限制时必须恢复 Pinvou 基础白名单"
         );
-    }
-
-    /// `wire_max_output_tokens_env` 必须把 self.max_output_tokens() 设给底座
-    /// env,让 dev / release / headless harness 对同一个本地 vLLM cap 达成一致。
-    ///
-    /// 走 fixture_bridge() + helper (而非 boot()),避免:
-    ///   - 写真实 ~/.pinvou3 (codex round 5 finding)
-    ///   - 跟 PINVOU3_HOME ENV_LOCK 持有者冲突
-    ///
-    /// 两个语义合并一个测试避免并发 race (Rust env process-global,
-    /// 后续多测试可以拿 DEEPSEEK_MAX_OUTPUT_TOKENS 专属锁,但目前只此一处)。
-    #[test]
-    fn wire_max_output_tokens_env_sets_default_then_respects_existing() {
-        let (_lock, _env) =
-            locked_env(&["DEEPSEEK_MAX_OUTPUT_TOKENS", "PINVOU3_MAX_OUTPUT_TOKENS"]);
-        // clean env 路径:helper 应 set 默认 24576
-        std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS");
-        std::env::remove_var("PINVOU3_MAX_OUTPUT_TOKENS");
-        fixture_bridge().wire_max_output_tokens_env();
-        assert_eq!(
-            std::env::var("DEEPSEEK_MAX_OUTPUT_TOKENS").as_deref(),
-            Ok("24576"),
-            "wire helper 必须 set DEEPSEEK_MAX_OUTPUT_TOKENS=24576, 让底座 \
-             effective_max_output_tokens 走 pinvou3 显式 cap (24K,见 max_output_tokens 注释)"
-        );
-
-        // 已有 env 不覆盖路径:helper 是 no-op
-        std::env::set_var("DEEPSEEK_MAX_OUTPUT_TOKENS", "32768");
-        fixture_bridge().wire_max_output_tokens_env();
-        assert_eq!(
-            std::env::var("DEEPSEEK_MAX_OUTPUT_TOKENS").as_deref(),
-            Ok("32768"),
-            "已有 env 必须保留,不能被 helper 覆盖 (允许 run-dev.sh / L1 / 用户 override)"
-        );
-        std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS");
     }
 
     /// 安全敏感字段必须固定——这些值改了会让 pinvou3 出现奇怪行为或越权。
@@ -3831,8 +3926,8 @@ mod tests {
             assert_eq!(cfg.api_provider(), expected_api_provider, "{model}");
             assert_eq!(
                 cfg.reasoning_effort.as_deref(),
-                (expected_provider == "moonshot").then_some("high"),
-                "{model} must use the provider-specific request-side thinking policy"
+                Some("high"),
+                "{model} must default to high reasoning effort"
             );
             bridge
                 .resolve_runtime_route_for_model(model)
@@ -3902,8 +3997,8 @@ mod tests {
             assert_eq!(cfg.api_provider(), expected_api_provider, "{model}");
             assert_eq!(
                 cfg.reasoning_effort.as_deref(),
-                (expected_provider == "moonshot").then_some("high"),
-                "{model} must use only its own request-side thinking policy"
+                Some("high"),
+                "{model} must default to high reasoning effort"
             );
             bridge
                 .resolve_runtime_route_for_model(model)
@@ -3924,7 +4019,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_moonshot_model_does_not_receive_vendor_specific_thinking_parameter() {
+    fn moonshot_model_defaults_to_high_reasoning_effort() {
         let (_lock, _env) = locked_env(&[
             "DEEPSEEK_MODEL",
             "DEEPSEEK_PROVIDER",
@@ -3941,8 +4036,58 @@ mod tests {
         );
 
         assert_eq!(bridge.provider(), "moonshot");
-        assert_eq!(bridge.request_reasoning_effort(), None);
-        assert_eq!(bridge.build_dt_config().reasoning_effort, None);
+        assert_eq!(bridge.request_reasoning_effort().as_deref(), Some("high"));
+        assert_eq!(
+            bridge.build_dt_config().reasoning_effort.as_deref(),
+            Some("high")
+        );
+    }
+
+    /// 用户显式设置的 `SavedModel.reasoning_effort` 必须覆盖 provider 默认
+    /// （此处验证 off 覆盖 moonshot 默认 high），且三个注入点保持一致。
+    #[test]
+    fn explicit_reasoning_effort_overrides_provider_default() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::Kimi,
+            "moonshot-v1-8k",
+            "https://api.moonshot.cn/v1",
+            "sk-test",
+        );
+        bridge.prefs.advanced.saved_models[0].reasoning_effort = Some("off".to_string());
+
+        assert_eq!(bridge.request_reasoning_effort().as_deref(), Some("off"));
+        assert_eq!(
+            bridge.build_dt_config().reasoning_effort.as_deref(),
+            Some("off"),
+            "DtConfig 注入点必须透传显式档位"
+        );
+        assert_eq!(
+            bridge.build_engine_config().reasoning_effort.as_deref(),
+            Some("off"),
+            "EngineConfig 注入点必须透传显式档位"
+        );
+        let op = bridge
+            .build_send_message_op("sess-plain", "hi".to_string(), AppMode::Yolo, None, false)
+            .expect("resolve test route");
+        let Op::SendMessage {
+            reasoning_effort, ..
+        } = op
+        else {
+            panic!("期望 SendMessage");
+        };
+        assert_eq!(
+            reasoning_effort.as_deref(),
+            Some("off"),
+            "SendMessage 注入点必须透传显式档位"
+        );
     }
 
     /// env 优先级始终高于 settings.json（兼容 run-dev.sh / harness）。
@@ -4014,9 +4159,9 @@ mod tests {
         assert_eq!(bridge.api_key(), "saved-key");
     }
 
-    /// DtConfig 在 OpenaiCompatible 模式下不应强制 reasoning_effort=off。
+    /// DtConfig 在 OpenaiCompatible 模式下默认思考深度为 high（不强制 off）。
     #[test]
-    fn remote_provider_keeps_default_reasoning_effort() {
+    fn remote_provider_defaults_to_high_reasoning_effort() {
         let (_lock, _env) = locked_env(&[
             "DEEPSEEK_MODEL",
             "DEEPSEEK_PROVIDER",
@@ -4032,7 +4177,30 @@ mod tests {
             "",
         );
         let cfg = bridge.build_dt_config();
-        assert_eq!(cfg.reasoning_effort, None);
+        assert_eq!(cfg.reasoning_effort.as_deref(), Some("high"));
+    }
+
+    /// 本地 OpenAI 兼容端点（loopback，如 LM Studio/Ollama）保持旧行为：
+    /// 不注入 reasoning_effort（None），避免行为漂移。
+    #[test]
+    fn local_openai_compatible_endpoint_keeps_none_reasoning_effort() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        let mut bridge = fixture_bridge();
+        set_active_model(
+            &mut bridge,
+            ModelPreset::OpenaiCompatible,
+            "local-model",
+            "http://127.0.0.1:1234/v1",
+            "",
+        );
+        assert_eq!(bridge.provider(), "openai");
+        assert_eq!(bridge.request_reasoning_effort(), None);
+        assert_eq!(bridge.build_dt_config().reasoning_effort, None);
     }
 
     /// Deepseek preset 应返回正确的默认 URL 和模型。
@@ -4080,7 +4248,7 @@ mod tests {
         );
         assert_eq!(cfg.deepseek_base_url(), "https://api.deepseek.com");
         assert_eq!(cfg.default_model(), "deepseek-v4-pro");
-        assert_eq!(cfg.reasoning_effort, None);
+        assert_eq!(cfg.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(
             deepseek_tui::config::wire_model_for_provider(cfg.api_provider(), &bridge.model()),
             "deepseek-v4-pro"
@@ -4117,7 +4285,7 @@ mod tests {
             deepseek_tui::config::ApiProvider::Deepseek
         );
         assert_eq!(cfg.default_model(), "deepseek-v4-pro");
-        assert_eq!(cfg.reasoning_effort, None);
+        assert_eq!(cfg.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(
             deepseek_tui::config::wire_model_for_provider(cfg.api_provider(), &bridge.model()),
             "deepseek-v4-pro"

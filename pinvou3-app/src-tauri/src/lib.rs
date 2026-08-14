@@ -98,10 +98,11 @@ const RELEASE_ENV_DEFAULTS: &[(&str, &str)] = &[
     //   （env 优先级高于 preset），在「添加模型」多 provider 方案下钉死路由——
     //   切到 kimi/openai/qwen 等仍被当 vllm，且设置页误报「环境变量已锁定 provider」。
     //   provider 现由 active_model.preset 决定（LocalVllm→vllm 默认仍成立）。
-    ("DEEPSEEK_REASONING_EFFORT", "off"),
     ("DEEPSEEK_ALLOW_INSECURE_HTTP", "1"),
     ("DEEPSEEK_FORCE_HTTP1", "1"),
-    ("DEEPSEEK_MAX_OUTPUT_TOKENS", "24576"),
+    // 不再注入 DEEPSEEK_MAX_OUTPUT_TOKENS：它会把所有模型（含云端）的输出上限
+    // 钉死在 24576。云端模型应落到底座请求上限与厂商能力兜底；本地 vLLM 的
+    // 24K 预算由 route_limits_for_model 的 is_local_vllm 分支显式携带。
     // 与 CodeWhale 的 stream_chunk_timeout 默认值保持一致。
     ("DEEPSEEK_STREAM_IDLE_TIMEOUT_SECS", "300"),
     // SSE 首响应头超时(open timeout):底座只认 env,默认 45s 是为云端调的。
@@ -1037,6 +1038,7 @@ pub fn run() {
             commands::marketplace::list_marketplace_skills,
             commands::marketplace::install_marketplace_skill,
             commands::marketplace::import_skill_package,
+            commands::marketplace::import_skill_package_bytes,
             commands::marketplace::uninstall_marketplace_skill,
             commands::files::verify_upload,
         ]);
@@ -1197,5 +1199,78 @@ mod web_template_seed {
     #[test]
     fn web_template_dir_named_web_template() {
         assert!(crate::platform::paths::web_template_dir().ends_with("web-template"));
+    }
+}
+
+#[cfg(test)]
+mod release_env_defaults_guard {
+    /// 全量快照进程环境，保证调用真实 `ensure_release_env` 后完整还原 PATH、UI 环境
+    /// 及测试原有变量；使用 OsString 兼容 POSIX 非 UTF-8 环境变量。
+    struct EnvSnapshot(std::collections::HashMap<std::ffi::OsString, Option<std::ffi::OsString>>);
+
+    impl EnvSnapshot {
+        fn take() -> Self {
+            let mut map = std::collections::HashMap::new();
+            for (key, value) in std::env::vars_os() {
+                map.insert(key, Some(value));
+            }
+            for key in ["DEEPSEEK_MAX_OUTPUT_TOKENS", "PINVOU3_MAX_OUTPUT_TOKENS"] {
+                map.entry(std::ffi::OsString::from(key)).or_insert(None);
+            }
+            Self(map)
+        }
+    }
+
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            let keep: std::collections::HashSet<&std::ffi::OsString> = self.0.keys().collect();
+            let stale: Vec<std::ffi::OsString> = std::env::vars_os()
+                .map(|(key, _)| key)
+                .filter(|key| !keep.contains(key))
+                .collect();
+            for key in stale {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    /// Community #210 守卫：release 启动路径不得重新注入全局输出上限。
+    #[test]
+    fn release_env_defaults_must_not_pin_global_output_cap() {
+        let _lock = crate::platform::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _snapshot = EnvSnapshot::take();
+
+        assert!(
+            !super::RELEASE_ENV_DEFAULTS
+                .iter()
+                .any(|(key, _)| *key == "DEEPSEEK_MAX_OUTPUT_TOKENS"),
+            "RELEASE_ENV_DEFAULTS 不得包含 DEEPSEEK_MAX_OUTPUT_TOKENS"
+        );
+        assert!(
+            !super::RELEASE_ENV_DEFAULTS
+                .iter()
+                .any(|(key, _)| *key == "PINVOU3_MAX_OUTPUT_TOKENS"),
+            "RELEASE_ENV_DEFAULTS 不得包含 PINVOU3_MAX_OUTPUT_TOKENS"
+        );
+
+        std::env::remove_var("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        std::env::remove_var("PINVOU3_MAX_OUTPUT_TOKENS");
+        super::ensure_release_env();
+        assert!(
+            std::env::var_os("DEEPSEEK_MAX_OUTPUT_TOKENS").is_none(),
+            "ensure_release_env 不得重新注入 DEEPSEEK_MAX_OUTPUT_TOKENS"
+        );
+        assert!(
+            std::env::var_os("PINVOU3_MAX_OUTPUT_TOKENS").is_none(),
+            "ensure_release_env 不得重新注入 PINVOU3_MAX_OUTPUT_TOKENS"
+        );
     }
 }

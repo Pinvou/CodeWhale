@@ -13,7 +13,10 @@ use crate::platform::paths;
 pub(crate) const FORMAL_BOOTSTRAP_HOST: &str = "https://bootstrap.magic.h3c.com";
 // Internal beta default. Switch back to FORMAL_BOOTSTRAP_HOST for formal releases.
 pub(crate) const DEFAULT_BOOTSTRAP_HOST: &str = "https://sohord10.h3c.com";
-pub(crate) const FALLBACK_SN: &str = "219904A17T4257W00018";
+// `device_id` is a registered bootstrap identity, not a routing key: the service
+// returns the same `smarthubOta` for every device. Keep this built-in identity for
+// both beta and formal bootstrap hosts; the BIOS SN is used only by the later OTA query.
+pub(crate) const BUILTIN_BOOTSTRAP_SN: &str = "219904A17T4257W00018";
 pub(crate) const SMARTHUB_OTA_KEY: &str = "smarthubOta";
 const MISSING_BIOS_SN_ERROR: &str = "读取设备 BIOS SN 失败，无法执行更新查询";
 
@@ -38,20 +41,6 @@ pub(crate) struct WindowsOtaBootstrapConfig {
 pub(crate) enum BootstrapConfigSource {
     Default,
     File,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WindowsBootstrapIdentity {
-    pub raw_bios_sn: Option<String>,
-    pub effective_sn: String,
-    pub source: BootstrapSnSource,
-    pub matched_prefix: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum BootstrapSnSource {
-    Bios,
-    Fallback,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,28 +114,26 @@ pub(crate) async fn resolve_ota_host(
     client: &reqwest::Client,
 ) -> Result<BootstrapResolution, String> {
     let config = WindowsOtaBootstrapConfig::load();
-    let identity = WindowsBootstrapIdentity::from_bios_sn(read_bios_sn().await.as_deref());
-    let ota_host = request_smarthub_ota(client, &config.bootstrap_host, &identity.effective_sn)
+    let ota_host = request_smarthub_ota(client, &config.bootstrap_host)
         .await
         .map_err(|e| format!("获取域名引导失败：{e}"))?;
-    let update_sn = identity
-        .update_sn()
+    let update_sn = read_bios_sn()
+        .await
         .ok_or_else(|| MISSING_BIOS_SN_ERROR.to_string())?;
     Ok(BootstrapResolution {
         ota_host,
-        sn: update_sn.to_string(),
+        sn: update_sn,
     })
 }
 
 pub(crate) async fn request_smarthub_ota(
     client: &reqwest::Client,
     bootstrap_host: &str,
-    device_id: &str,
 ) -> Result<String, String> {
     let host = normalize_http_url(bootstrap_host)
         .ok_or_else(|| "域名引导地址无效，无法请求更新服务".to_string())?;
     let timestamp = Utc::now().timestamp_millis().to_string();
-    let request = DomainBootstrapRequest::new(device_id, &timestamp);
+    let request = DomainBootstrapRequest::new(&timestamp);
     let url = format!("{host}{BOOTSTRAP_PATH}");
     let response = client
         .post(&url)
@@ -163,39 +150,14 @@ pub(crate) async fn request_smarthub_ota(
 }
 
 impl DomainBootstrapRequest {
-    fn new(device_id: &str, timestamp: &str) -> Self {
+    fn new(timestamp: &str) -> Self {
         Self {
-            device_id: device_id.to_string(),
+            device_id: BUILTIN_BOOTSTRAP_SN.to_string(),
             product_id: PRODUCT_ID.to_string(),
             timestamp: timestamp.to_string(),
-            sign: bootstrap_sign(device_id, timestamp),
+            sign: bootstrap_sign(BUILTIN_BOOTSTRAP_SN, timestamp),
             sign_type: SIGN_TYPE.to_string(),
         }
-    }
-}
-
-impl WindowsBootstrapIdentity {
-    pub(crate) fn from_bios_sn(raw: Option<&str>) -> Self {
-        let trimmed = raw.map(str::trim).filter(|v| !v.is_empty());
-        let matched = trimmed.is_some_and(is_target_sn);
-        if let Some(sn) = trimmed.filter(|_| matched) {
-            return Self {
-                raw_bios_sn: Some(sn.to_string()),
-                effective_sn: sn.to_string(),
-                source: BootstrapSnSource::Bios,
-                matched_prefix: true,
-            };
-        }
-        Self {
-            raw_bios_sn: trimmed.map(ToString::to_string),
-            effective_sn: FALLBACK_SN.to_string(),
-            source: BootstrapSnSource::Fallback,
-            matched_prefix: false,
-        }
-    }
-
-    pub(crate) fn update_sn(&self) -> Option<&str> {
-        self.raw_bios_sn.as_deref()
     }
 }
 
@@ -253,10 +215,6 @@ fn bootstrap_sign(device_id: &str, timestamp: &str) -> String {
     format!("{:x}", md5::compute(input.as_bytes()))
 }
 
-fn is_target_sn(sn: &str) -> bool {
-    sn.starts_with("2198") || sn.starts_with("2199")
-}
-
 async fn read_bios_sn() -> Option<String> {
     let output = timeout(Duration::from_secs(3), async {
         crate::platform::process::HiddenTokioCommand::new("powershell.exe")
@@ -294,7 +252,7 @@ mod tests {
     #[test]
     fn bootstrap_sign_matches_csharp_contract() {
         assert_eq!(
-            bootstrap_sign(FALLBACK_SN, "1700000000000"),
+            bootstrap_sign(BUILTIN_BOOTSTRAP_SN, "1700000000000"),
             "39e4e4aa0e6e9acb7377e97f25dc8c45"
         );
     }
@@ -419,39 +377,10 @@ mod tests {
     }
 
     #[test]
-    fn identity_uses_bios_sn_only_for_target_prefixes() {
-        let id = WindowsBootstrapIdentity::from_bios_sn(Some(" 2198ABC "));
-        assert_eq!(id.effective_sn, "2198ABC");
-        assert_eq!(id.update_sn(), Some("2198ABC"));
-        assert_eq!(id.source, BootstrapSnSource::Bios);
-        assert!(id.matched_prefix);
-
-        let id = WindowsBootstrapIdentity::from_bios_sn(Some("2199XYZ"));
-        assert_eq!(id.effective_sn, "2199XYZ");
-        assert_eq!(id.update_sn(), Some("2199XYZ"));
-        assert_eq!(id.source, BootstrapSnSource::Bios);
-
-        let id = WindowsBootstrapIdentity::from_bios_sn(Some("1199XYZ"));
-        assert_eq!(id.effective_sn, FALLBACK_SN);
-        assert_eq!(id.update_sn(), Some("1199XYZ"));
-        assert_eq!(id.source, BootstrapSnSource::Fallback);
-        assert!(!id.matched_prefix);
-
-        for raw in [Some(""), Some("   "), None] {
-            let id = WindowsBootstrapIdentity::from_bios_sn(raw);
-            assert_eq!(id.effective_sn, FALLBACK_SN);
-            assert_eq!(id.update_sn(), None);
-            assert_eq!(id.source, BootstrapSnSource::Fallback);
-            assert!(!id.matched_prefix);
-        }
-    }
-
-    #[test]
-    fn request_body_uses_effective_sn() {
-        let id = WindowsBootstrapIdentity::from_bios_sn(Some("BADSN"));
-        let req = DomainBootstrapRequest::new(&id.effective_sn, "1700000000000");
+    fn request_body_always_uses_builtin_sn() {
+        let req = DomainBootstrapRequest::new("1700000000000");
         let value = serde_json::to_value(req).unwrap();
-        assert_eq!(value["device_id"], FALLBACK_SN);
+        assert_eq!(value["device_id"], BUILTIN_BOOTSTRAP_SN);
         assert_eq!(value["product_id"], PRODUCT_ID);
         assert_eq!(value["sign_type"], SIGN_TYPE);
         assert_eq!(value["sign"], "39e4e4aa0e6e9acb7377e97f25dc8c45");
