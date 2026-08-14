@@ -998,6 +998,11 @@
 .team-relay-team-dialog .team-relay-form-hint { color: var(--relay-muted); font-size: 10px; gap: 5px; line-height: 1.4; margin: -2px 0 0; opacity: .7; }
 .team-relay-team-dialog .team-relay-form-hint > svg { flex: 0 0 auto; height: 11px; width: 11px; }
 .team-relay-team-dialog form footer { display: flex; gap: 9px; justify-content: flex-end; }
+.team-relay-team-dialog form footer.team-relay-profile-footer > .team-relay-text-danger { margin-right: auto; }
+.team-relay-logout-confirm { padding: 20px 22px 22px; }
+.team-relay-logout-confirm > .team-relay-error { margin: 0 0 16px; }
+.team-relay-logout-confirm footer { display: flex; gap: 9px; justify-content: flex-end; }
+.team-relay-no-team-logout { min-height: 36px; }
 .team-relay-setup { align-items: center; display: flex; flex: 1; justify-content: center; min-height: 420px; padding: 32px; }
 .team-relay-setup > section { background: var(--relay-panel); border: 1px solid var(--relay-border); border-radius: 16px; box-shadow: var(--relay-shadow); max-width: 560px; padding: 30px; width: 100%; }
 .team-relay-setup > section > p { color: var(--relay-muted); line-height: 1.6; }
