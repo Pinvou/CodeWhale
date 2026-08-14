@@ -1,5 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { relayAvatarAssetSize, relayAvatarFallback, relayAvatarTone } from './relay-avatar.mjs';
+import { useReducedMotion } from '../../hooks/useReducedMotion.js';
+import {
+  relayAvatarAssetSize,
+  relayAvatarFallback,
+  relayAvatarSourceRequest,
+  relayAvatarTone,
+} from './relay-avatar.mjs';
 
 function browserPixelRatio() {
   return typeof window === 'undefined' ? 1 : window.devicePixelRatio || 1;
@@ -72,6 +78,7 @@ function observeAvatarSize(element, measure) {
 export function RelayAvatar({ name, seed, avatar = null, loadSource = null, className = 'team-relay-avatar', displaySize }) {
   const rootRef = useRef(null);
   const useOriginal = displaySize === null;
+  const reducedMotion = useReducedMotion();
   const [source, setSource] = useState(null);
   const [renderedPixels, setRenderedPixels] = useState(null);
   const [pixelRatio, setPixelRatio] = useState(browserPixelRatio);
@@ -81,11 +88,16 @@ export function RelayAvatar({ name, seed, avatar = null, loadSource = null, clas
   });
   const digest = avatar?.sha256 || '';
   const tone = useMemo(() => relayAvatarTone(seed || name), [name, seed]);
-  const requestedDisplaySize = useMemo(() => {
+  const measuredDisplaySize = useMemo(() => {
     if (useOriginal) return null;
     if (displaySize === 48 || displaySize === 96) return displaySize;
     return renderedPixels == null ? undefined : relayAvatarAssetSize(renderedPixels, pixelRatio);
   }, [displaySize, pixelRatio, renderedPixels, useOriginal]);
+  const sourceRequest = useMemo(() => relayAvatarSourceRequest(
+    avatar?.content_type,
+    measuredDisplaySize,
+    reducedMotion,
+  ), [avatar?.content_type, measuredDisplaySize, reducedMotion]);
 
   useEffect(() => {
     if (useOriginal || displaySize === 48 || displaySize === 96) return undefined;
@@ -113,13 +125,18 @@ export function RelayAvatar({ name, seed, avatar = null, loadSource = null, clas
     setSource(null);
     if (typeof loadSource !== 'function') return () => { active = false; };
     if (!ready) return () => { active = false; };
-    if (digest && requestedDisplaySize === undefined) return () => { active = false; };
+    if (digest && sourceRequest.displaySize === undefined) return () => { active = false; };
     Promise.resolve()
-      .then(() => active ? loadSource(seed || name, digest ? { sha256: digest } : null, requestedDisplaySize) : null)
+      .then(() => active ? loadSource(
+        seed || name,
+        digest ? { sha256: digest } : null,
+        sourceRequest.displaySize,
+        sourceRequest.reducedMotion,
+      ) : null)
       .then(value => { if (active) setSource(value || null); })
       .catch(() => { if (active) setSource(null); });
     return () => { active = false; };
-  }, [digest, loadSource, name, ready, requestedDisplaySize, seed]);
+  }, [digest, loadSource, name, ready, seed, sourceRequest]);
 
   return <span
     ref={rootRef}

@@ -238,5 +238,32 @@ export async function processAvatarImage(upload, config) {
     const data = await encodeBounded(mainData, descriptor, size, maximumBytes, true);
     variants.set(size, await outputAsset(data, descriptor, maximumBytes));
   }
-  return { main, variants };
+
+  const reducedMotionVariants = new Map();
+  if (descriptor.format === "gif") {
+    const firstFrameDescriptor = {
+      ...descriptor,
+      format: "png",
+      contentType: "image/png",
+      frames: 1,
+      delay: undefined,
+      loop: undefined,
+    };
+    for (const size of AVATAR_VARIANT_SIZES) {
+      // Opening the GIF without `animated` decodes only page zero. The PNG
+      // boundary makes reduced-motion rendering static in every WebView.
+      const data = await encodeBounded(
+        mainData,
+        firstFrameDescriptor,
+        size,
+        maximumBytes,
+        true,
+      );
+      reducedMotionVariants.set(
+        size,
+        await outputAsset(data, firstFrameDescriptor, maximumBytes),
+      );
+    }
+  }
+  return { main, variants, reducedMotionVariants };
 }

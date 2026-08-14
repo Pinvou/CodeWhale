@@ -98,10 +98,16 @@ pub async fn team_relay_avatar_data_url(
     principal_id: String,
     expected_sha256: String,
     display_size: Option<u16>,
+    reduced_motion: Option<bool>,
     manager: State<'_, TeamRelayManager>,
 ) -> Result<Option<String>, String> {
     manager
-        .avatar_data_url(&principal_id, &expected_sha256, display_size)
+        .avatar_data_url(
+            &principal_id,
+            &expected_sha256,
+            display_size,
+            reduced_motion.unwrap_or(false),
+        )
         .await
 }
 

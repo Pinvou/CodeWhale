@@ -7,7 +7,7 @@ import {
   uploadAttachment,
 } from "./attachment-service.js";
 import { deleteAvatar, openAvatarContent, uploadAvatar } from "./avatar-service.js";
-import { AvatarProcessingGate } from "./avatar-processing-gate.js";
+import { AvatarProcessingGate, AvatarUploadGate } from "./avatar-processing-gate.js";
 import { asAppError, AppError } from "./errors.js";
 import { sha256 } from "./crypto.js";
 import { JoinRateLimiter } from "./join-rate-limiter.js";
@@ -176,10 +176,12 @@ export function createHubServer({ pool, config }) {
     windowMs: (config.joinRateLimitWindowSeconds ?? 600) * 1000,
     blockMs: (config.joinRateLimitBlockSeconds ?? 900) * 1000,
   });
-  const avatarProcessingGate = new AvatarProcessingGate({
-    maximumConcurrent: config.avatarProcessingConcurrency ?? 2,
+  const avatarUploadGate = new AvatarUploadGate({
     maximumAttempts: config.avatarUploadRateLimitAttempts ?? 6,
     windowMs: (config.avatarUploadRateLimitWindowSeconds ?? 60) * 1000,
+  });
+  const avatarProcessingGate = new AvatarProcessingGate({
+    maximumConcurrent: config.avatarProcessingConcurrency ?? 2,
   });
 
   async function verifyBetaAccess(request) {
@@ -281,7 +283,14 @@ export function createHubServer({ pool, config }) {
         return;
       }
       if (method === "PUT" && pathname === "/v1/me/avatar") {
-        const result = await uploadAvatar(pool, token, request, config, avatarProcessingGate);
+        const result = await uploadAvatar(
+          pool,
+          token,
+          request,
+          config,
+          avatarUploadGate,
+          avatarProcessingGate,
+        );
         for (const teamId of result.teamIds) notify(teamId, "profile.changed");
         sendJson(response, 200, { avatar: result.avatar }, requestId);
         return;
@@ -399,6 +408,7 @@ export function createHubServer({ pool, config }) {
           params[0],
           url.searchParams.get("team_id"),
           url.searchParams.get("size"),
+          url.searchParams.get("reduced_motion"),
           config,
         );
         response.writeHead(200, {

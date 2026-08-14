@@ -1,15 +1,13 @@
 import { AppError } from "./errors.js";
 
-export class AvatarProcessingGate {
+export class AvatarUploadGate {
   constructor({
-    maximumConcurrent = 2,
     maximumAttempts = 6,
     windowMs = 60_000,
     maximumEntries = 10_000,
     now = () => Date.now(),
   } = {}) {
     for (const [name, value] of Object.entries({
-      maximumConcurrent,
       maximumAttempts,
       windowMs,
       maximumEntries,
@@ -18,7 +16,6 @@ export class AvatarProcessingGate {
         throw new TypeError(`${name} must be a positive safe integer`);
       }
     }
-    this.maximumConcurrent = maximumConcurrent;
     this.maximumAttempts = maximumAttempts;
     this.windowMs = windowMs;
     this.maximumEntries = maximumEntries;
@@ -70,14 +67,6 @@ export class AvatarProcessingGate {
         "An avatar upload is already in progress for this account.",
       );
     }
-    if (this.activePrincipals.size >= this.maximumConcurrent) {
-      throw new AppError(
-        429,
-        "avatar_processing_busy",
-        "Avatar processing is busy. Retry shortly.",
-        { retry_after_seconds: 2 },
-      );
-    }
     this.#recordAttempt(principalId);
     this.activePrincipals.add(principalId);
     let released = false;
@@ -85,6 +74,34 @@ export class AvatarProcessingGate {
       if (released) return;
       released = true;
       this.activePrincipals.delete(principalId);
+    };
+  }
+}
+
+export class AvatarProcessingGate {
+  constructor({ maximumConcurrent = 2 } = {}) {
+    if (!Number.isSafeInteger(maximumConcurrent) || maximumConcurrent < 1) {
+      throw new TypeError("maximumConcurrent must be a positive safe integer");
+    }
+    this.maximumConcurrent = maximumConcurrent;
+    this.active = 0;
+  }
+
+  enter() {
+    if (this.active >= this.maximumConcurrent) {
+      throw new AppError(
+        429,
+        "avatar_processing_busy",
+        "Avatar processing is busy. Retry shortly.",
+        { retry_after_seconds: 2 },
+      );
+    }
+    this.active += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active -= 1;
     };
   }
 }

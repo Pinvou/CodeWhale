@@ -382,11 +382,21 @@ paths:
           schema:
             type: integer
             enum: [48, 96]
+        - name: reduced_motion
+          in: query
+          required: false
+          description: >-
+            When true, return the static first-frame PNG for an animated GIF.
+            Requires size; static source images keep their normal display variant.
+          schema:
+            type: boolean
+            default: false
       responses:
         "200":
           description: >-
             Verified processed avatar bytes for a Principal sharing the requested
-            active team. Animated GIF variants retain their bounded animation.
+            active team. Animated GIF variants retain their bounded animation;
+            reduced-motion variants contain only a sanitized static first frame.
           headers:
             Digest:
               description: SHA-256 digest of the response bytes, encoded as base64.

@@ -13,7 +13,7 @@ Team Relay Hub 是“人派活给人、Handoff、回传和最终交付”的独�
 - team owner 移除成员的安全限制。
 - 显式文件上传、类型识别、SHA-256、团队容量和动作原子绑定；
 - 线程参与者鉴权下载，以及孤儿和已结束线程文件清理。
-- 独立的 Principal 头像上传、完整解码重编码、受限 GIF 动图、48/96 px 显示变体和同团队鉴权读取。
+- 独立的 Principal 头像上传、完整解码重编码、受限 GIF 动图、48/96 px 动态及首帧静态变体和同团队鉴权读取。
 
 服务尚未部署，也不应替代已有 collaboration 或 Remote Relay。
 
@@ -49,9 +49,9 @@ Hub 默认对未登记用户按客户端地址、已登记用户按设备凭据�
 
 服务默认只监听 `127.0.0.1:8791`，默认基础路径为 `/pinvou3/team-relay`。正式演示部署必须由 HTTPS 入口代理，且不能把数据库端口暴露到公网。
 
-附件和头像默认保存在仅服务账号可读的 `data/attachments`；服务器部署必须通过 `TEAM_RELAY_ATTACHMENT_DIR` 指向独立持久化目录。普通附件默认单文件 20 MiB、单团队 2 GiB、未绑定文件 24 小时清理、已结束线程文件 30 天后删除内容并保留元数据。头像独立存入 `avatars/` 子目录，只接受 PNG、JPEG、WebP 和 GIF，输入与处理后主图的硬上限均为 1.5 MiB（`TEAM_RELAY_MAX_AVATAR_BYTES` 只能继续收紧）。Hub 完整解码并重新编码头像以剥离元数据：静态图最长边 512 px，GIF 最长边 384 px、最多 60 帧且总动画像素不超过 400 万；同时生成持续保留动画的 48/96 px 显示变体。处理采用 Principal 单并发与全局并发上限（`TEAM_RELAY_AVATAR_PROCESSING_CONCURRENCY`）；默认每个 Principal 每 60 秒最多尝试 6 次，可通过 `TEAM_RELAY_AVATAR_UPLOAD_RATE_LIMIT_ATTEMPTS` 和 `TEAM_RELAY_AVATAR_UPLOAD_RATE_LIMIT_WINDOW_SECONDS` 调整。清理任务会回收超时临时文件及数据库未引用的头像文件。部署时应定时执行 `attachments:cleanup`。
+附件和头像默认保存在仅服务账号可读的 `data/attachments`；服务器部署必须通过 `TEAM_RELAY_ATTACHMENT_DIR` 指向独立持久化目录。普通附件默认单文件 20 MiB、单团队 2 GiB、未绑定文件 24 小时清理、已结束线程文件 30 天后删除内容并保留元数据。头像独立存入 `avatars/` 子目录，只接受 PNG、JPEG、WebP 和 GIF，输入与处理后主图的硬上限均为 1.5 MiB（`TEAM_RELAY_MAX_AVATAR_BYTES` 只能继续收紧）。Hub 完整解码并重新编码头像以剥离元数据：静态图最长边 512 px，GIF 最长边 384 px、最多 60 帧且总动画像素不超过 400 万；同时生成持续保留动画的 48/96 px 显示变体，并为 GIF 生成对应的首帧 PNG，供客户端在系统减少动态效果模式下加载。Principal 单并发与频控覆盖整个上传生命周期；全局并发上限（`TEAM_RELAY_AVATAR_PROCESSING_CONCURRENCY`）只覆盖完整文件落盘后的图片解码与重编码，慢速请求体不会占用 Sharp 处理槽。默认每个 Principal 每 60 秒最多尝试 6 次，可通过 `TEAM_RELAY_AVATAR_UPLOAD_RATE_LIMIT_ATTEMPTS` 和 `TEAM_RELAY_AVATAR_UPLOAD_RATE_LIMIT_WINDOW_SECONDS` 调整。清理任务会回收超时临时文件及数据库未引用的头像文件。部署时应定时执行 `attachments:cleanup`。
 
-`0009_avatar_hardening` 会使此前 Draft 版本上传、但未经完整解码重编码的头像安全失效；升级后用户需重新上传，旧文件会在宽限期后由孤儿清理任务回收。正式发布前采用这一策略，避免把无法证明安全且没有显示变体的历史文件继续分发给客户端。
+`0011_avatar_hardening` 会使此前 Draft 版本上传、但未经完整解码重编码的头像安全失效；升级后用户需重新上传，旧文件会在宽限期后由孤儿清理任务回收。正式发布前采用这一策略，避免把无法证明安全且没有显示变体的历史文件继续分发给客户端。
 
 ## 测试
 

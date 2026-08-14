@@ -24,8 +24,9 @@ import {
   processAvatarImage,
   validateAvatarMetadata,
 } from "../src/avatar-image.js";
-import { AvatarProcessingGate } from "../src/avatar-processing-gate.js";
+import { AvatarProcessingGate, AvatarUploadGate } from "../src/avatar-processing-gate.js";
 import {
+  avatarReducedMotion,
   avatarStoragePath,
   avatarVariantSize,
   commitAvatarAssets,
@@ -129,6 +130,7 @@ test("avatar processing fully decodes, bounds, and sanitizes static images", asy
   assert.deepEqual([...processed.variants.keys()], [48, 96]);
   assert.equal(processed.variants.get(48).width, 48);
   assert.equal(processed.variants.get(96).width, 96);
+  assert.equal(processed.reducedMotionVariants.size, 0);
 });
 
 test("GIF processing keeps avatars continuously animated while bounding main and display variants", async (t) => {
@@ -157,6 +159,16 @@ test("GIF processing keeps avatars continuously animated while bounding main and
     assert.equal(metadata.loop, 0);
     assert.deepEqual(metadata.delay, [80, 80, 80]);
   }
+  assert.deepEqual([...processed.reducedMotionVariants.keys()], [48, 96]);
+  for (const [size, variant] of processed.reducedMotionVariants) {
+    assert.equal(variant.contentType, "image/png");
+    assert.equal(variant.width, size);
+    assert.equal(variant.frames, 1);
+    assert.ok(variant.byteSize <= MAX_AVATAR_BYTES);
+    const metadata = await sharp(variant.data).metadata();
+    assert.equal(metadata.format, "png");
+    assert.equal(metadata.pages, undefined);
+  }
 });
 
 test("GIF re-encoding removes comment extensions from every animated output", async (t) => {
@@ -177,10 +189,14 @@ test("GIF re-encoding removes comment extensions from every animated output", as
     { maxAvatarBytes: MAX_AVATAR_BYTES },
   );
 
-  for (const asset of [processed.main, ...processed.variants.values()]) {
+  for (const asset of [
+    processed.main,
+    ...processed.variants.values(),
+    ...processed.reducedMotionVariants.values(),
+  ]) {
     assert.equal(asset.data.indexOf(comment), -1, "GIF comment payload must be stripped");
     const metadata = await sharp(asset.data, { animated: true }).metadata();
-    assert.equal(metadata.pages, 3);
+    assert.equal(metadata.pages ?? 1, asset.contentType === "image/gif" ? 3 : 1);
   }
 });
 
@@ -271,26 +287,82 @@ test("avatar variant size accepts only the published display variants", () => {
   assert.equal(avatarVariantSize(96), 96);
   assert.throws(() => avatarVariantSize("64"), error => error?.status === 400);
   assert.throws(() => avatarVariantSize("48px"), error => error?.status === 400);
+  assert.equal(avatarReducedMotion(null), false);
+  assert.equal(avatarReducedMotion("false"), false);
+  assert.equal(avatarReducedMotion("true"), true);
+  assert.throws(() => avatarReducedMotion("1"), error => error?.status === 400);
 });
 
-test("processing gate rejects duplicate principals and caps global work", () => {
-  const gate = new AvatarProcessingGate({ maximumConcurrent: 2 });
-  const releaseA = gate.enter("principal-a");
+test("upload lifecycle gate rejects duplicate principals without consuming Sharp slots", () => {
+  const uploadGate = new AvatarUploadGate();
+  const releaseA = uploadGate.enter("principal-a");
   assert.throws(
-    () => gate.enter("principal-a"),
+    () => uploadGate.enter("principal-a"),
     error => error?.status === 409 && error?.code === "avatar_upload_in_progress",
   );
-  const releaseB = gate.enter("principal-b");
-  assert.throws(
-    () => gate.enter("principal-c"),
-    error => error?.status === 429 && error?.code === "avatar_processing_busy",
-  );
-  releaseA();
-  const releaseC = gate.enter("principal-c");
+  const releaseB = uploadGate.enter("principal-b");
+  const releaseC = uploadGate.enter("principal-c");
   releaseA();
   releaseB();
   releaseC();
-  assert.doesNotThrow(() => gate.enter("principal-a")());
+});
+
+test("processing gate caps only active image processing", () => {
+  const gate = new AvatarProcessingGate({ maximumConcurrent: 2 });
+  const releaseA = gate.enter();
+  const releaseB = gate.enter();
+  assert.throws(
+    () => gate.enter(),
+    error => error?.status === 429 && error?.code === "avatar_processing_busy",
+  );
+  releaseA();
+  const releaseC = gate.enter();
+  releaseA();
+  releaseB();
+  releaseC();
+  assert.doesNotThrow(() => gate.enter()());
+});
+
+test("slow request bodies do not reserve global image-processing slots", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "team-relay-avatar-slow-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const uploadGate = new AvatarUploadGate();
+  const boundary = "pinvou-avatar-slow-boundary";
+  const partialBody = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="avatar.gif"\r\nContent-Type: image/gif\r\n\r\n`;
+  const slowRequests = ["principal-a", "principal-b"].map(principalId => {
+    const request = new PassThrough();
+    request.headers = { "content-type": `multipart/form-data; boundary=${boundary}` };
+    const receiving = receiveAvatarWithGate(
+      request,
+      { attachmentDir: directory, maxAvatarBytes: MAX_AVATAR_BYTES },
+      uploadGate,
+      principalId,
+    );
+    request.write(partialBody);
+    request.write(ANIMATED_GIF.subarray(0, 8));
+    return { request, receiving };
+  });
+
+  const complete = Readable.from([
+    Buffer.from(partialBody),
+    ANIMATED_GIF,
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  complete.headers = { "content-type": `multipart/form-data; boundary=${boundary}` };
+  const received = await receiveAvatarWithGate(
+    complete,
+    { attachmentDir: directory, maxAvatarBytes: MAX_AVATAR_BYTES },
+    uploadGate,
+    "principal-c",
+  );
+  received.release();
+  await rm(received.upload.temporaryPath, { force: true });
+
+  for (const { request } of slowRequests) request.emit("aborted");
+  const interrupted = await Promise.allSettled(slowRequests.map(entry => entry.receiving));
+  assert.ok(interrupted.every(result => result.status === "rejected"));
+  assert.equal(uploadGate.activePrincipals.size, 0);
+  assert.deepEqual(await readdir(join(directory, "avatars", ".tmp")), []);
 });
 
 test("gate rejection drains the body without creating avatar storage", async (t) => {
@@ -324,10 +396,9 @@ test("gate rejection drains the body without creating avatar storage", async (t)
   );
 });
 
-test("processing gate rate-limits each principal with bounded expiring state", () => {
+test("upload lifecycle gate rate-limits each principal with bounded expiring state", () => {
   let now = 10_000;
-  const gate = new AvatarProcessingGate({
-    maximumConcurrent: 2,
+  const gate = new AvatarUploadGate({
     maximumAttempts: 2,
     windowMs: 1_000,
     maximumEntries: 2,
@@ -349,20 +420,25 @@ test("processing gate rate-limits each principal with bounded expiring state", (
   assert.equal(gate.attempts.size, 1);
 });
 
-test("processing gate validates every resource-bound option", () => {
+test("avatar gates validate every resource-bound option", () => {
   for (const option of [
-    "maximumConcurrent",
     "maximumAttempts",
     "windowMs",
     "maximumEntries",
   ]) {
     assert.throws(
-      () => new AvatarProcessingGate({ [option]: 0 }),
+      () => new AvatarUploadGate({ [option]: 0 }),
       error => error instanceof TypeError && error.message.includes(option),
     );
     assert.throws(
-      () => new AvatarProcessingGate({ [option]: Number.MAX_SAFE_INTEGER + 1 }),
+      () => new AvatarUploadGate({ [option]: Number.MAX_SAFE_INTEGER + 1 }),
       error => error instanceof TypeError && error.message.includes(option),
+    );
+  }
+  for (const value of [0, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => new AvatarProcessingGate({ maximumConcurrent: value }),
+      error => error instanceof TypeError && error.message.includes("maximumConcurrent"),
     );
   }
 });
@@ -430,7 +506,11 @@ test("post-link persistence errors immediately remove the observable final file"
   await assert.rejects(
     persistAssets(
       { attachmentDir: directory },
-      { main: asset, variants: new Map([[48, asset], [96, asset]]) },
+      {
+        main: asset,
+        variants: new Map([[48, asset], [96, asset]]),
+        reducedMotionVariants: new Map(),
+      },
       fileOperations,
     ),
     /simulated final chmod failure/,
@@ -459,6 +539,27 @@ test("interrupted multipart uploads remove their temporary file", async (t) => {
   await assert.rejects(
     receiving,
     error => error?.status === 400 && /interrupted/i.test(error.message),
+  );
+  assert.deepEqual(await readdir(join(directory, "avatars", ".tmp")), []);
+});
+
+test("truncated multipart uploads are client errors and remove temporary files", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "team-relay-avatar-truncated-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const boundary = "pinvou-avatar-truncated-boundary";
+  const request = Readable.from([
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="avatar.gif"\r\nContent-Type: image/gif\r\n\r\n`,
+    ),
+    ANIMATED_GIF,
+  ]);
+  request.headers = { "content-type": `multipart/form-data; boundary=${boundary}` };
+  await assert.rejects(
+    receiveAvatarMultipart(request, {
+      attachmentDir: directory,
+      maxAvatarBytes: MAX_AVATAR_BYTES,
+    }),
+    error => error?.status === 400 && error?.code === "invalid_request",
   );
   assert.deepEqual(await readdir(join(directory, "avatars", ".tmp")), []);
 });
@@ -550,7 +651,7 @@ test("referenced avatar batches cannot starve later orphan cleanup", async (t) =
 
 test("hardening migration invalidates every unsanitized legacy avatar before tightening limits", async () => {
   const migration = await readFile(
-    new URL("../../docs/team-relay/migrations/0009_avatar_hardening.sql", import.meta.url),
+    new URL("../../docs/team-relay/migrations/0011_avatar_hardening.sql", import.meta.url),
     "utf8",
   );
   const deleteLegacy = migration.indexOf("DELETE FROM principal_avatars;");
@@ -559,4 +660,14 @@ test("hardening migration invalidates every unsanitized legacy avatar before tig
   assert.ok(deleteLegacy >= 0, "legacy raw avatar rows must be invalidated");
   assert.ok(deleteLegacy < tightenLimit, "old 1.5–5 MiB rows must not make the new constraint fail");
   assert.ok(deleteLegacy < createVariants, "legacy rows cannot be treated as safely processed variants");
+});
+
+test("reduced-motion migration stores static and animated variants independently", async () => {
+  const migration = await readFile(
+    new URL("../../docs/team-relay/migrations/0012_avatar_reduced_motion.sql", import.meta.url),
+    "utf8",
+  );
+  assert.match(migration, /animation_mode varchar\(16\) NOT NULL DEFAULT 'animated'/);
+  assert.match(migration, /PRIMARY KEY \(principal_id, size, animation_mode\)/);
+  assert.match(migration, /0012_avatar_reduced_motion/);
 });

@@ -21,6 +21,6 @@ CREATE TABLE principal_avatars (
 COMMENT ON TABLE principal_avatars IS
     'Verified custom Team Relay avatars. Bytes are private and require shared-team authorization.';
 
-INSERT INTO team_relay_schema_migrations (version) VALUES ('0008_principal_avatars');
+INSERT INTO team_relay_schema_migrations (version) VALUES ('0010_principal_avatars');
 
 COMMIT;

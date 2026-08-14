@@ -36,6 +36,6 @@ CREATE TABLE principal_avatar_variants (
 COMMENT ON TABLE principal_avatar_variants IS
     'Sanitized 48/96 px avatar variants for bounded, continuously animated UI display.';
 
-INSERT INTO team_relay_schema_migrations (version) VALUES ('0009_avatar_hardening');
+INSERT INTO team_relay_schema_migrations (version) VALUES ('0011_avatar_hardening');
 
 COMMIT;

@@ -126,7 +126,12 @@ async function receiveAvatarMultipart(request, config) {
           limitError ||= invalidRequest("The avatar upload has too many parts.");
         });
       }
-      parser.once("error", error => settle(rejectPromise, error));
+      parser.once("error", error => settle(
+        rejectPromise,
+        error instanceof AppError
+          ? error
+          : invalidRequest("A valid multipart/form-data request is required."),
+      ));
       parser.once("close", () => settle(resolvePromise));
       request.once("aborted", onInterrupted);
       request.once("error", onInterrupted);
@@ -162,8 +167,17 @@ async function persistAssets(
 ) {
   const temporaryDir = await prepareStorage(config);
   const entries = [
-    { size: null, asset: processed.main },
-    ...AVATAR_VARIANT_SIZES.map(size => ({ size, asset: processed.variants.get(size) })),
+    { size: null, animationMode: "animated", asset: processed.main },
+    ...AVATAR_VARIANT_SIZES.map(size => ({
+      size,
+      animationMode: "animated",
+      asset: processed.variants.get(size),
+    })),
+    ...[...(processed.reducedMotionVariants ?? new Map())].map(([size, asset]) => ({
+      size,
+      animationMode: "static",
+      asset,
+    })),
   ];
   const stored = [];
   try {
@@ -245,11 +259,12 @@ async function commitAvatarAssets(
       for (const variant of variants) {
         await client.query(
           `INSERT INTO principal_avatar_variants (
-             principal_id, size, storage_key, content_type, byte_size, sha256
-           ) VALUES ($1, $2, $3, $4, $5, $6)`,
+             principal_id, size, animation_mode, storage_key, content_type, byte_size, sha256
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             principalId,
             variant.size,
+            variant.animationMode,
             variant.storageKey,
             variant.asset.contentType,
             variant.asset.byteSize,
@@ -284,32 +299,45 @@ async function commitAvatarAssets(
   return result;
 }
 
-export async function uploadAvatar(pool, token, request, config, processingGate) {
+export async function uploadAvatar(
+  pool,
+  token,
+  request,
+  config,
+  uploadGate,
+  processingGate,
+) {
   const auth = await authenticate(pool, token);
   let upload;
-  let release;
+  let releaseUpload;
   try {
-    ({ upload, release } = await receiveAvatarWithGate(
+    ({ upload, release: releaseUpload } = await receiveAvatarWithGate(
       request,
       config,
-      processingGate,
+      uploadGate,
       auth.principalId,
     ));
-    let stored = [];
-    const processed = await processAvatarImage(upload, config);
-    stored = await persistAssets(config, processed);
+    let releaseProcessing;
+    let processed;
+    try {
+      releaseProcessing = processingGate?.enter();
+      processed = await processAvatarImage(upload, config);
+    } finally {
+      releaseProcessing?.();
+    }
+    const stored = await persistAssets(config, processed);
     return await commitAvatarAssets(pool, auth.principalId, stored, config);
   } finally {
-    release?.();
+    releaseUpload?.();
     if (upload) await rm(upload.temporaryPath, { force: true });
   }
 }
 
-async function receiveAvatarWithGate(request, config, processingGate, principalId) {
+async function receiveAvatarWithGate(request, config, uploadGate, principalId) {
   let release;
   try {
     try {
-      release = processingGate?.enter(principalId);
+      release = uploadGate?.enter(principalId);
     } catch (error) {
       // Drain the rejected body without piping it into storage so the HTTP
       // connection remains reusable and concurrent uploads consume no disk.
@@ -361,10 +389,28 @@ function avatarVariantSize(rawSize) {
   return Number(rawSize);
 }
 
-async function authorizedAvatar(pool, token, rawPrincipalId, rawTeamId, rawSize) {
+function avatarReducedMotion(rawValue) {
+  if (rawValue === null || rawValue === undefined) return false;
+  if (rawValue === "true") return true;
+  if (rawValue === "false") return false;
+  throw invalidRequest("Avatar reduced_motion must be true or false.");
+}
+
+async function authorizedAvatar(
+  pool,
+  token,
+  rawPrincipalId,
+  rawTeamId,
+  rawSize,
+  rawReducedMotion,
+) {
   const principalId = uuid(rawPrincipalId, "principal_id");
   const teamId = uuid(rawTeamId, "team_id");
   const size = avatarVariantSize(rawSize);
+  const reducedMotion = avatarReducedMotion(rawReducedMotion);
+  if (reducedMotion && size === null) {
+    throw invalidRequest("Avatar reduced_motion requires a display size.");
+  }
   const auth = await authenticate(pool, token);
   await requireMembership(pool, teamId, auth.principalId);
   await requireMembership(pool, teamId, principalId);
@@ -382,9 +428,14 @@ async function authorizedAvatar(pool, token, rawPrincipalId, rawTeamId, rawSize)
               avatar.updated_at
          FROM principal_avatars avatar
          JOIN principal_avatar_variants variant
-           ON variant.principal_id = avatar.principal_id AND variant.size = $2
+           ON variant.principal_id = avatar.principal_id
+          AND variant.size = $2
+          AND variant.animation_mode = CASE
+            WHEN $3 AND avatar.content_type = 'image/gif' THEN 'static'
+            ELSE 'animated'
+          END
         WHERE avatar.principal_id = $1`,
-      [principalId, size],
+      [principalId, size, reducedMotion],
     );
   if (result.rowCount === 0) {
     throw new AppError(404, "resource_not_found", "The avatar was not found.");
@@ -392,8 +443,23 @@ async function authorizedAvatar(pool, token, rawPrincipalId, rawTeamId, rawSize)
   return result.rows[0];
 }
 
-export async function openAvatarContent(pool, token, principalId, teamId, size, config) {
-  const row = await authorizedAvatar(pool, token, principalId, teamId, size);
+export async function openAvatarContent(
+  pool,
+  token,
+  principalId,
+  teamId,
+  size,
+  reducedMotion,
+  config,
+) {
+  const row = await authorizedAvatar(
+    pool,
+    token,
+    principalId,
+    teamId,
+    size,
+    reducedMotion,
+  );
   let handle;
   try {
     handle = await open(
@@ -416,6 +482,7 @@ export async function openAvatarContent(pool, token, principalId, teamId, size, 
 
 export {
   avatarStoragePath,
+  avatarReducedMotion,
   avatarVariantSize,
   commitAvatarAssets,
   detectAvatarContent,

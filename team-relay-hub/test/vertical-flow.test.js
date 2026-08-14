@@ -20,7 +20,8 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const database = await pool.query("SELECT current_database() AS name");
   assert.match(database.rows[0].name, /_test$/, "integration test requires an isolated *_test database");
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
-  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", "0008_principal_avatars.sql", "0009_avatar_hardening.sql", "0009_confirmed_transfers.sql"];
+  const confirmedTransferMigration = "0009_confirmed_transfers.sql";
+  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", confirmedTransferMigration, "0010_principal_avatars.sql", "0011_avatar_hardening.sql", "0012_avatar_reduced_motion.sql"];
   async function applyMigration(migrationName) {
     const migration = await readFile(
       new URL(`../../docs/team-relay/migrations/${migrationName}`, import.meta.url),
@@ -28,7 +29,10 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     );
     await pool.query(migration);
   }
-  for (const migrationName of migrationNames.slice(0, -1)) await applyMigration(migrationName);
+  for (const migrationName of migrationNames) {
+    if (migrationName === confirmedTransferMigration) break;
+    await applyMigration(migrationName);
+  }
   const migrationPrincipalA = randomUUID();
   const migrationPrincipalB = randomUUID();
   const migrationTeam = randomUUID();
@@ -70,7 +74,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
       createHash("sha256").update("migration-request").digest("hex"),
     ],
   );
-  await applyMigration(migrationNames.at(-1));
+  await applyMigration(confirmedTransferMigration);
   const migratedCompatibility = await pool.query(
     `SELECT a.transfer_mode, d.relay_protocol_version, tp.material_access_at
        FROM relay_actions a
@@ -208,9 +212,24 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     return { status: response.status, value: await response.json() };
   }
 
-  async function readAvatar(member, principalId, teamId, size) {
+  async function uploadTruncatedAvatar(member) {
+    const boundary = "pinvou-truncated-avatar-boundary";
+    const response = await fetch(`${origin}/v1/me/avatar`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${member.device_token}`,
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+      },
+      body: Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="avatar.gif"\r\nContent-Type: image/gif\r\n\r\ntruncated`,
+      ),
+    });
+    return { status: response.status, value: await response.json() };
+  }
+
+  async function readAvatar(member, principalId, teamId, size, reducedMotion = false) {
     const response = await fetch(
-      `${origin}/v1/principals/${principalId}/avatar?team_id=${teamId}${size ? `&size=${size}` : ""}`,
+      `${origin}/v1/principals/${principalId}/avatar?team_id=${teamId}${size ? `&size=${size}` : ""}${reducedMotion ? "&reduced_motion=true" : ""}`,
       { headers: { Authorization: `Bearer ${member.device_token}` } },
     );
     return {
@@ -480,6 +499,9 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const animatedGif = await sharp(animatedPixels, {
     raw: { width: 2, height: 4, channels: 4, pageHeight: 2 },
   }).gif({ delay: [80, 120], loop: 0 }).toBuffer();
+  const truncatedAvatar = await uploadTruncatedAvatar(a);
+  assert.equal(truncatedAvatar.status, 400);
+  assert.equal(truncatedAvatar.value.error.code, "invalid_request");
   const uploadedAvatar = await uploadAvatar(a, animatedGif, "avatar.gif");
   assert.equal(uploadedAvatar.status, 200);
   assert.equal(uploadedAvatar.value.avatar.content_type, "image/gif");
@@ -497,6 +519,11 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(thumbnailAvatar.contentType, "image/gif");
   assert.equal(thumbnailAvatar.sourceSha256, uploadedAvatar.value.avatar.sha256);
   assert.equal((await sharp(thumbnailAvatar.bytes, { animated: true }).metadata()).pages, 2);
+  const reducedMotionAvatar = await readAvatar(b, a.principal.id, initial.team_id, 48, true);
+  assert.equal(reducedMotionAvatar.status, 200);
+  assert.equal(reducedMotionAvatar.contentType, "image/png");
+  assert.equal(reducedMotionAvatar.sourceSha256, uploadedAvatar.value.avatar.sha256);
+  assert.equal((await sharp(reducedMotionAvatar.bytes).metadata()).pages, 1);
   const invalidAvatarSize = await readAvatar(b, a.principal.id, initial.team_id, 64);
   assert.equal(invalidAvatarSize.status, 400);
   const outsideTeamAvatar = await readAvatar(accountEnrollment.value, a.principal.id, initial.team_id);

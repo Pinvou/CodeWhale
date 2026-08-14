@@ -144,8 +144,14 @@ assert.equal(avatarSource, 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yw=')
 assert.equal(cachedAvatarSource, avatarSource);
 assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url').length, 1, 'concurrent avatar reads must share one authenticated request');
 assert.equal(calls.find(call => call.command === 'team_relay_avatar_data_url').args.displaySize, 48);
+await feature.avatarSource('member-one', avatarMetadata, 48, true);
+const reducedMotionCall = calls.find(call => call.command === 'team_relay_avatar_data_url' && call.args.reducedMotion === true);
+assert.equal(reducedMotionCall.args.displaySize, 48);
+assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url').length, 2, 'static and animated variants must have independent bounded cache entries');
+await feature.avatarSource('member-one', avatarMetadata, 48);
+assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url').length, 2, 'returning to normal motion must reuse the animated cache entry');
 await feature.avatarSource('member-one', avatarMetadata, 96);
-assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url').length, 2, '48px and 96px variants must have independent bounded cache entries');
+assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url').length, 3, '48px and 96px variants must have independent bounded cache entries');
 await feature.avatarSource('member-original', avatarMetadata, null);
 const originalAvatarCall = calls.find(call => call.command === 'team_relay_avatar_data_url' && call.args.principalId === 'member-original');
 assert.equal(Object.hasOwn(originalAvatarCall.args, 'displaySize'), false, 'the profile preview must be able to request the processed original');

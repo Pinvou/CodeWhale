@@ -70,3 +70,11 @@ export function relayAvatarAssetSize(renderedPixels, pixelRatio = 1) {
   const logicalPixels = Math.max(1, Number(renderedPixels) || 1);
   return logicalPixels * Math.max(1, Number(pixelRatio) || 1) <= 48 ? 48 : 96;
 }
+
+export function relayAvatarSourceRequest(contentType, displaySize, reducedMotion) {
+  const staticFirstFrame = reducedMotion && contentType === 'image/gif';
+  return {
+    displaySize: staticFirstFrame && displaySize === null ? 96 : displaySize,
+    reducedMotion: staticFirstFrame,
+  };
+}

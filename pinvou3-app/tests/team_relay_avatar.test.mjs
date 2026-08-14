@@ -5,6 +5,7 @@ import {
   relayAvatarAssetSize,
   relayAvatarContrastRatio,
   relayAvatarFallback,
+  relayAvatarSourceRequest,
   relayAvatarTone,
 } from '../src/features/team-relay/relay-avatar.mjs';
 
@@ -77,7 +78,7 @@ test('Team Relay requests compact animated avatar variants for rendered density'
     new URL('../src/features/team-relay/TeamRelayView.jsx', import.meta.url),
     'utf8',
   );
-  assert.match(component, /requestedDisplaySize/);
+  assert.match(component, /sourceRequest/);
   assert.match(component, /getBoundingClientRect/);
   assert.match(component, /typeof window === 'undefined'/);
   assert.match(component, /const useOriginal = displaySize === null/);
@@ -94,4 +95,30 @@ test('Team Relay requests compact animated avatar variants for rendered density'
   assert.match(component, /if \(active\) setSource/);
   assert.match(component, /return \(\) => \{ active = false; \}/);
   assert.doesNotMatch(component, /animationPlayState|\.pause\(/);
+});
+
+test('Team Relay switches GIF sources at runtime when reduced-motion changes', () => {
+  const normal = relayAvatarSourceRequest('image/gif', null, false);
+  const reduced = relayAvatarSourceRequest('image/gif', null, true);
+  const restored = relayAvatarSourceRequest('image/gif', null, false);
+  assert.deepEqual(normal, { displaySize: null, reducedMotion: false });
+  assert.deepEqual(reduced, { displaySize: 96, reducedMotion: true });
+  assert.deepEqual(restored, normal);
+  assert.deepEqual(
+    relayAvatarSourceRequest('image/png', 48, true),
+    { displaySize: 48, reducedMotion: false },
+  );
+
+  const component = fs.readFileSync(
+    new URL('../src/features/team-relay/RelayAvatar.jsx', import.meta.url),
+    'utf8',
+  );
+  const hook = fs.readFileSync(
+    new URL('../src/hooks/useReducedMotion.js', import.meta.url),
+    'utf8',
+  );
+  assert.match(component, /useReducedMotion\(\)/);
+  assert.match(component, /sourceRequest\.reducedMotion/);
+  assert.match(component, /\[digest, loadSource, name, ready, seed, sourceRequest\]/);
+  assert.match(hook, /addEventListener\?\.\('change', onChange\)/);
 });

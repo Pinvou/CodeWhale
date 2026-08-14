@@ -352,6 +352,7 @@ impl TeamRelayManager {
         principal_id: &str,
         expected_sha256: &str,
         display_size: Option<u16>,
+        reduced_motion: bool,
     ) -> Result<Option<String>, String> {
         validate_local_identifier("principal_id", principal_id)?;
         let display_size = validate_avatar_display_size(display_size)?;
@@ -368,6 +369,14 @@ impl TeamRelayManager {
         let mut query = vec![("team_id", settings.team_id.clone())];
         if let Some(size) = display_size {
             query.push(("size", size.to_string()));
+        }
+        if reduced_motion {
+            let Some(_) = display_size else {
+                return Err(
+                    "avatar_size_invalid: reduced motion requires a display variant".to_string(),
+                );
+            };
+            query.push(("reduced_motion", "true".to_string()));
         }
         let response = self
             .client
