@@ -4214,6 +4214,7 @@ mod tests {
             "save_model",
             "set_active_model",
             "test_model_connection",
+            "test_image_input_capability",
             "set_disabled_connectors",
             "install_marketplace_skill",
             "install_marketplace_tool",
