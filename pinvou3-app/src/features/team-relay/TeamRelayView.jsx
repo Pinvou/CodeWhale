@@ -540,7 +540,7 @@ function RelayDialog({ copy, theme, type, task, teams, teamId, onTeamChange, mem
 function WorkCard({ copy, task, selected, onClick }) {
   const lastEvent = task.events[task.events.length - 1];
   return <button type="button" className={`team-relay-card${selected ? ' is-selected' : ''}${task.pinned ? ' is-pinned' : ''}`} onClick={onClick} aria-pressed={selected} data-testid={`team-relay-task-${task.id}`}>
-    <span className="team-relay-card-heading"><strong>{task.pinned && <PinIcon size={13} aria-label={copy.pinned} />}{task.title}</strong><time>{displayListTime(lastEvent?.time || task.updated)}</time></span>
+    <span className="team-relay-card-heading"><strong>{task.pinned && <PinIcon size={13} aria-label={copy.pinned} />}{task.title}</strong><span className="team-relay-card-heading-meta">{!!task.unreadCount && <b className="team-relay-unread-badge" aria-label={copy.unread.updates(task.unreadCount)}>{task.unreadCount > 99 ? '99+' : task.unreadCount}</b>}<time>{displayListTime(lastEvent?.time || task.updated)}</time></span></span>
     <span className="team-relay-card-status"><PersonAvatar name={task.current === copy.dash ? task.owner : task.current} seed={task.currentActorId || task.raw.owner_id} tone={selected ? 'green' : 'orange'} /><span className="team-relay-card-status-text">{task.status}</span><em className={`tone-${task.category}`}>{copy.statuses[task.category]}</em></span>
     <span className="team-relay-card-meta"><span className="team-relay-card-team"><Users size={12} />{task.teamName}</span>{!!task.files.length && <small><Paperclip size={11} />{copy.attachments(task.files.length)}</small>}</span>
   </button>;
@@ -618,6 +618,12 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const [teamJoinCodeLoading, setTeamJoinCodeLoading] = useState(false);
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [legacyReadCursors, setLegacyReadCursors] = useState(() => {
+    try {
+      const value = JSON.parse(window.localStorage.getItem('pinvou.team-relay.read-cursors.v1') || '{}');
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    } catch { return {}; }
+  });
   const joinCodeRequestRef = useRef(null);
   const joinCodeRequestGenerationRef = useRef(0);
   const joinCodeFetchedAtRef = useRef(0);
@@ -635,12 +641,13 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const activeTeamId = selectedTeamId || snapshot?.bootstrap?.team?.id;
   const activeBootstrap = (snapshot?.team_bootstraps || []).find(item => item.team.id === activeTeamId) || snapshot?.bootstrap;
   const activeSnapshot = snapshot && activeBootstrap ? { ...snapshot, bootstrap: activeBootstrap } : snapshot;
-  const tasks = useMemo(() => projectSnapshot(snapshot, copy), [snapshot, copy]);
+  const tasks = useMemo(() => projectSnapshot(snapshot, copy, legacyReadCursors), [snapshot, copy, legacyReadCursors]);
   const teamTasks = useMemo(() => tasks.filter(task => task.teamId === activeBootstrap?.team?.id), [activeBootstrap?.team?.id, tasks]);
   const board = useMemo(() => projectTeamBoard(activeSnapshot, teamTasks), [activeSnapshot, teamTasks]);
   const meId = snapshot?.bootstrap?.me?.id;
   const countedTasks = useMemo(() => teamFilter === 'all' ? tasks : tasks.filter(task => task.teamId === teamFilter), [tasks, teamFilter]);
   const counts = useMemo(() => relayViewCounts(countedTasks, meId), [countedTasks, meId]);
+  const unreadTaskCount = useMemo(() => tasks.filter(task => task.category !== 'hidden' && task.unreadCount > 0).length, [tasks]);
   const visibleTasks = useMemo(() => tasks
     .filter(task => matchesRelayView(task, activeView, meId)
       && (teamFilter === 'all' || task.teamId === teamFilter)
@@ -863,13 +870,30 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
     setActiveView(task.category === 'hidden' ? 'hidden' : task.category === 'ended' ? 'ended' : 'all');
     setSelectedId(task.id);
     setMobileDetailOpen(true);
+    acknowledgeTask(task);
   };
+
+  const openPersonalTask = task => {
+    setSelectedId(task.id);
+    setMobileDetailOpen(true);
+    acknowledgeTask(task);
+  };
+
+  function acknowledgeTask(task) {
+    if (!task || task.unreadCount <= 0) return;
+    setLegacyReadCursors(current => {
+      const next = { ...current, [task.id]: Math.max(Number(current[task.id] || 0), Number(task.revision || 0)) };
+      try { window.localStorage.setItem('pinvou.team-relay.read-cursors.v1', JSON.stringify(next)); } catch { /* optional cache */ }
+      return next;
+    });
+    if (bridge?.teamRelay?.markThreadRead) bridge.teamRelay.markThreadRead(task.id, task.revision).catch(() => {});
+  }
 
   return <div className={`team-relay-root theme-${theme === 'dark' ? 'dark' : 'light'}${viewMode === 'personal' && mobileDetailOpen ? ' mobile-detail-open' : ''}`} data-testid="team-relay-page">
     <header className="team-relay-page-header">
       <div className="team-relay-brand"><PinvouLogo className="team-relay-brand-logo" /><strong>{copy.brand}</strong></div>
       <div className="team-relay-header-actions">
-        <nav className="team-relay-view-switch" aria-label={copy.views.label}><button type="button" className={viewMode === 'personal' ? 'is-active' : ''} onClick={() => setViewMode('personal')}>{copy.views.personal}</button><button type="button" className={viewMode !== 'personal' ? 'is-active' : ''} onClick={() => { setViewMode('teams'); setMobileDetailOpen(false); }}>{copy.views.teams}</button></nav>
+        <nav className="team-relay-view-switch" aria-label={copy.views.label}><button type="button" className={viewMode === 'personal' ? 'is-active' : ''} onClick={() => setViewMode('personal')}><span>{copy.views.personal}</span>{!!unreadTaskCount && <b className="team-relay-unread-badge" aria-label={copy.unread.tasks(unreadTaskCount)}>{unreadTaskCount > 99 ? '99+' : unreadTaskCount}</b>}</button><button type="button" className={viewMode !== 'personal' ? 'is-active' : ''} onClick={() => { setViewMode('teams'); setMobileDetailOpen(false); }}>{copy.views.teams}</button></nav>
         <button type="button" className="team-relay-secondary team-relay-sync-button" disabled={relay.loading} onClick={() => bridge.teamRelay.refresh().catch(() => {})} aria-label={copy.syncNow} title={copy.syncNow}><RotateCcw size={15} /><span>{relay.loading ? copy.syncingNow : copy.syncNow}</span></button>
         {onThemeChange && <button type="button" className="team-relay-theme-button" onClick={() => onThemeChange(theme === 'dark' ? 'light' : 'dark')} aria-label={copy.toggleTheme}>{theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</button>}
         <button type="button" className="team-relay-profile-button" onClick={() => setProfileOpen(true)} aria-label={copy.profile.open}><RelayAvatar name={snapshot.bootstrap.me.display_name} seed={snapshot.bootstrap.me.id} /></button>
@@ -878,7 +902,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
     </header>
     {relay.error && <div className="team-relay-error-banner" role="alert"><span>{relayError(copy, relay.error)}</span><button type="button" onClick={() => bridge.teamRelay.refresh().catch(() => {})}>{copy.retry}</button></div>}
     {viewMode === 'teams' ? <TeamDirectory copy={copy} teams={teams} busy={relay.mutating} onJoin={() => setTeamDialog('join')} onCreate={() => setTeamDialog('create')} onOpen={openTeam} /> : viewMode === 'board' ? <TeamBoard copy={copy} teamName={activeBootstrap.team.name} board={board} tasks={teamTasks} canManage={owner} busy={relay.mutating || teamJoinCodeLoading || relay.status?.team_id !== activeBootstrap.team.id} joinCodeOpen={teamJoinCodeOpen} joinCodeBanner={teamJoinCodeOpen && teamJoinCode ? <TeamJoinCodeBanner copy={copy} state={teamJoinCode} owner={owner} busy={relay.mutating} onCopy={() => { navigator.clipboard.writeText(teamJoinCode.join_password); setToast(copy.copiedJoinPassword); }} onRotate={rotateTeamJoinCode} onVisibility={changeTeamJoinCodeVisibility} onDisable={disableTeamJoinCode} onClose={() => setTeamJoinCodeOpen(false)} /> : null} onBack={() => setViewMode('teams')} onInvite={toggleTeamJoinCode} onAssign={() => { setAssignmentTeamId(activeBootstrap.team.id); setDialog('assign'); }} onOpenTask={openBoardTask} onRemove={removeMember} /> : <div className="team-relay-layout"><nav className="team-relay-categories" aria-label={copy.inbox} data-testid="team-relay-categories"><strong>{copy.inbox}</strong><div className="team-relay-team-filter"><small>{copy.teams.filterLabel}</small><RelaySelect value={teamFilter} onChange={value => { setTeamFilter(value); setSelectedId(null); }} ariaLabel={copy.teams.filterLabel} options={[{ value: 'all', label: copy.teams.allTeams }, ...teams.map(team => ({ value: team.id, label: team.name }))]} /></div>{TEAM_RELAY_VIEWS.map(view => <button type="button" key={view} className={activeView === view ? 'is-active' : ''} onClick={() => { setActiveView(view); setSelectedId(null); setMobileDetailOpen(false); }} aria-current={activeView === view ? 'page' : undefined}><RelayCategoryIcon category={view} /><span>{copy.categories[view]}</span>{!!counts[view] && <b>{counts[view]}</b>}</button>)}</nav>
-      <section className="team-relay-list" data-testid="team-relay-list"><header className={activeView === 'all' ? 'has-source-filters' : ''}><label><Search size={18} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={`${copy.search}${copy.title}…`} aria-label={copy.search} /></label>{activeView === 'all' && <div className="team-relay-source-filters" role="group" aria-label={copy.sourceFilterLabel}>{TEAM_RELAY_SOURCE_FILTERS.map(filter => <button type="button" key={filter} className={sourceFilter === filter ? 'is-active' : ''} aria-pressed={sourceFilter === filter} onClick={() => { setSourceFilter(filter); setSelectedId(null); setMobileDetailOpen(false); }}>{copy.sourceFilters[filter]}</button>)}</div>}</header><div className="team-relay-list-scroll">{visibleTasks.map(task => <WorkCard copy={copy} task={task} selected={task.id === selectedTask?.id} key={task.id} onClick={() => { setSelectedId(task.id); setMobileDetailOpen(true); }} />)}{!visibleTasks.length && <div className="team-relay-empty"><Search size={26} /><p>{copy.empty}</p></div>}</div></section>
+      <section className="team-relay-list" data-testid="team-relay-list"><header className={activeView === 'all' ? 'has-source-filters' : ''}><label><Search size={18} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={`${copy.search}${copy.title}…`} aria-label={copy.search} /></label>{activeView === 'all' && <div className="team-relay-source-filters" role="group" aria-label={copy.sourceFilterLabel}>{TEAM_RELAY_SOURCE_FILTERS.map(filter => <button type="button" key={filter} className={sourceFilter === filter ? 'is-active' : ''} aria-pressed={sourceFilter === filter} onClick={() => { setSourceFilter(filter); setSelectedId(null); setMobileDetailOpen(false); }}>{copy.sourceFilters[filter]}</button>)}</div>}</header><div className="team-relay-list-scroll">{visibleTasks.map(task => <WorkCard copy={copy} task={task} selected={task.id === selectedTask?.id} key={task.id} onClick={() => openPersonalTask(task)} />)}{!visibleTasks.length && <div className="team-relay-empty"><Search size={26} /><p>{copy.empty}</p></div>}</div></section>
       <div className="team-relay-workspace">
         {selectedTask ? <WorkThread copy={copy} task={selectedTask} meId={meId} taskWorkspace={taskWorkspace} onBack={() => setMobileDetailOpen(false)} onDialog={setDialog} onAction={runAction} onPreference={setPreference} /> : <section className="team-relay-detail team-relay-empty"><p>{copy.selectWork}</p></section>}
         {selectedTask && <MaterialInspector copy={copy} task={selectedTask} taskWorkspace={taskWorkspace} workspaceLoading={workspaceLoading || relay.preparingWorkspace === selectedTask.id} onPrepare={() => bridge.teamRelay.prepareTaskWorkspace(selectedTask.id).catch(() => {})} onDownload={file => bridge.teamRelay.downloadAttachment(file).catch(() => {})} onOpenPreparedMaterial={path => bridge.teamRelay.openPreparedMaterial(path).catch(() => {})} onRevealPreparedMaterial={attachmentId => bridge.teamRelay.revealPreparedMaterial(selectedTask.id, attachmentId, selectedTask.teamId).catch(() => {})} onLocatePackage={locateMaterialPackage} />}

@@ -709,6 +709,7 @@ pub fn run() {
             commands::team_relay::team_relay_create_thread,
             commands::team_relay::team_relay_create_action,
             commands::team_relay::team_relay_set_thread_preference,
+            commands::team_relay::team_relay_mark_thread_read,
             commands::team_relay::team_relay_upload_attachment,
             commands::team_relay::team_relay_download_attachment,
             commands::team_relay::team_relay_task_workspace_status,

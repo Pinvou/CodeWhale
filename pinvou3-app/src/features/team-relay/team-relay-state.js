@@ -63,14 +63,21 @@ export function matchesSourceFilter(task, filter, meId) {
   return true;
 }
 
-export function projectSnapshot(snapshot, copy) {
+export function projectSnapshot(snapshot, copy, legacyReadCursors = {}) {
   if (!snapshot?.bootstrap) return [];
   const { attachments = {} } = snapshot;
   const bootstraps = snapshot.team_bootstraps?.length ? snapshot.team_bootstraps : [snapshot.bootstrap];
-  return bootstraps.flatMap(bootstrap => projectTeamSnapshot(bootstrap, attachments, copy));
+  return bootstraps.flatMap(bootstrap => projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors));
 }
 
-function projectTeamSnapshot(bootstrap, attachments, copy) {
+export function teamRelayHasUnread(snapshot) {
+  if (!snapshot?.bootstrap) return false;
+  const bootstraps = snapshot.team_bootstraps?.length ? snapshot.team_bootstraps : [snapshot.bootstrap];
+  return bootstraps.some(bootstrap => (bootstrap.threads || []).some(detail =>
+    !detail?.preference?.hidden && Number(detail?.unread_count || 0) > 0));
+}
+
+function projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors) {
   const names = new Map(bootstrap.members.map(member => [member.id, member.display_name]));
   names.set(bootstrap.me.id, bootstrap.me.display_name);
   const nameOf = id => id ? (names.get(id) || id.slice(0, 8)) : copy.dash;
@@ -105,6 +112,23 @@ function projectTeamSnapshot(bootstrap, attachments, copy) {
     const acceptedPackage = thread.phase === 'closed'
       ? [...events].reverse().find(event => event.kind === 'final_deliver') || null
       : null;
+    const hubHasReadState = Object.prototype.hasOwnProperty.call(detail, 'unread_count');
+    const revision = Number(thread.revision || 0);
+    const legacyCursorValue = Number(legacyReadCursors[thread.id]);
+    const hasLocalCursor = Number.isFinite(legacyCursorValue) && legacyCursorValue >= 0 && legacyCursorValue <= revision;
+    const legacyCursor = hasLocalCursor
+      ? legacyCursorValue
+      : Math.max(0, revision - 1);
+    const hubReadState = detail.read_state || { thread_id: thread.id, last_read_sequence: 0, last_read_at: null };
+    const hubCursor = Number(hubReadState.last_read_sequence || 0);
+    const effectiveCursor = hasLocalCursor ? Math.max(hubCursor, legacyCursor) : hubCursor;
+    const localCursorIsAhead = hasLocalCursor && legacyCursor > hubCursor;
+    const readState = hubHasReadState
+      ? { ...hubReadState, last_read_sequence: effectiveCursor }
+      : { thread_id: thread.id, last_read_sequence: legacyCursor, last_read_at: null };
+    const unreadCount = hubHasReadState && !localCursorIsAhead
+      ? Number(detail.unread_count || 0)
+      : detail.actions.filter(action => Number(action.sequence || 0) > readState.last_read_sequence && action.actor_id !== bootstrap.me.id).length;
     return {
       id: thread.id,
       category,
@@ -131,6 +155,8 @@ function projectTeamSnapshot(bootstrap, attachments, copy) {
       pinned: Boolean(preference.pinned),
       hidden: Boolean(preference.hidden),
       preference,
+      readState,
+      unreadCount,
     };
   });
 }

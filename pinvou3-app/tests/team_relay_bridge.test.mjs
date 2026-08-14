@@ -6,6 +6,11 @@ const source = fs.readFileSync(new URL('../src/platform/tauri/bridge/team-relay.
 const windowObject = {
   __PINVOU_TAURI_BRIDGE_FEATURES__: {},
   crypto: { randomUUID: (() => { let id = 0; return () => `00000000-0000-4000-8000-${String(++id).padStart(12, '0')}`; })() },
+  localStorage: {
+    values: {},
+    getItem(key) { return this.values[key] || null; },
+    setItem(key, value) { this.values[key] = String(value); },
+  },
   setTimeout,
   clearTimeout,
 };
@@ -38,12 +43,26 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
     if (command === 'team_relay_update_profile') return teamSnapshot('team', args.input.display_name);
     if (command === 'team_relay_create_team') return teamSnapshot('created-team');
     if (command === 'team_relay_join_team') return teamSnapshot('joined-team');
-    if (command === 'team_relay_switch_team') return teamSnapshot(args.teamId);
+    if (command === 'team_relay_switch_team') {
+      if (args.teamId === 'legacy-team') {
+        const snapshot = teamSnapshot('legacy-team');
+        snapshot.bootstrap.threads = [{
+          thread: { id: 'legacy-thread', revision: 1 },
+          actions: [{ sequence: 1, actor_id: 'other' }],
+        }];
+        return snapshot;
+      }
+      return teamSnapshot(args.teamId);
+    }
     if (command === 'team_relay_remove_member') return null;
     if (command === 'team_relay_get_join_password') return { configured: true, visible: true, recoverable: true, visibility: 'members', join_password: 'K7M4-P9Q2', updated_at: '2026-08-10T00:00:00Z' };
     if (command === 'team_relay_rotate_join_password') return { configured: true, visible: true, recoverable: true, visibility: 'members', join_password: 'R8N5-X4C7', updated_at: '2026-08-11T00:00:00Z' };
     if (command === 'team_relay_set_join_password_visibility') return { configured: true, visible: true, recoverable: true, visibility: args.visibility, join_password: 'R8N5-X4C7', updated_at: '2026-08-11T00:00:00Z' };
     if (command === 'team_relay_disable_join_password') return { configured: false, visible: false, recoverable: false, visibility: 'members', join_password: null, updated_at: null };
+    if (command === 'team_relay_mark_thread_read') {
+      if (args.threadId === 'legacy-thread') throw new Error('resource_not_found: The endpoint was not found.');
+      return { thread_id: args.threadId, last_read_sequence: args.input.read_through_sequence, last_read_at: '2026-08-13T00:00:00Z' };
+    }
     if (command === 'team_relay_create_thread') {
       createAttempts += 1;
       if (createAttempts === 1) throw new Error('connection lost');
@@ -76,7 +95,7 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
   },
 });
 
-assert.deepEqual(Object.keys(feature).sort(), ['claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'listDraftSourceSessions', 'load', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'updateProfile', 'verifyAccess']);
+assert.deepEqual(Object.keys(feature).sort(), ['claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'listDraftSourceSessions', 'load', 'markThreadRead', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'updateProfile', 'verifyAccess']);
 assert.equal(await feature.verifyAccess('test-only-access-code'), true);
 assert.equal(await feature.verifyAccess('incorrect'), false);
 await feature.load();
@@ -101,6 +120,12 @@ assert.equal(state.teamRelay.snapshot.bootstrap.team.id, 'joined-team');
 await feature.switchTeam('team-two');
 assert.equal(state.teamRelay.snapshot.bootstrap.team.id, 'team-two');
 assert.equal(state.teamRelay.status.team_id, 'team-two');
+await feature.switchTeam('legacy-team');
+assert.equal(state.teamRelay.snapshot.bootstrap.threads[0].unread_count, 1, 'an old Hub snapshot must show its latest incoming action as unread');
+await feature.markThreadRead('legacy-thread', 1);
+assert.equal(state.teamRelay.snapshot.bootstrap.threads[0].unread_count, 0, 'old Hub fallback read state must clear the badge locally');
+assert.equal(state.teamRelay.error, null, 'an unsupported old Hub read endpoint must not surface as an application error');
+await feature.switchTeam('team-two');
 await feature.updateProfile({ display_name: 'New name' });
 assert.equal(state.teamRelay.snapshot.bootstrap.me.display_name, 'New name');
 await feature.removeMember('member-two');
@@ -124,6 +149,30 @@ assert.equal(writes.length, 2);
 assert.equal(writes[0].args.input.idempotency_key, writes[1].args.input.idempotency_key, 'manual retry must reuse the idempotency key');
 await feature.setThreadPreference('thread', { pinned: true, hidden: false });
 assert.ok(calls.some(call => call.command === 'team_relay_set_thread_preference' && call.args.threadId === 'thread'));
+state.teamRelay.snapshot = {
+  bootstrap: {
+    team: { id: 'team-two', name: 'Team two' },
+    me: { id: 'me', display_name: 'Me' },
+    members: [],
+    threads: [{
+      thread: { id: 'thread', revision: 3 },
+      actions: [
+        { sequence: 1, actor_id: 'other' },
+        { sequence: 2, actor_id: 'other' },
+        { sequence: 3, actor_id: 'me' },
+      ],
+      read_state: { thread_id: 'thread', last_read_sequence: 1, last_read_at: null },
+      unread_count: 1,
+    }],
+  },
+  team_bootstraps: [],
+  attachments: {},
+  teams: [],
+};
+await feature.markThreadRead('thread', 3);
+assert.equal(state.teamRelay.snapshot.bootstrap.threads[0].unread_count, 0);
+assert.equal(state.teamRelay.snapshot.bootstrap.threads[0].read_state.last_read_sequence, 3);
+assert.ok(calls.some(call => call.command === 'team_relay_mark_thread_read' && call.args.input.read_through_sequence === 3));
 const emptyWorkspace = await feature.taskWorkspaceStatus('thread', 'team-two');
 assert.equal(emptyWorkspace.thread_id, 'thread');
 assert.ok(calls.some(call => call.command === 'team_relay_task_workspace_status' && call.args.teamId === 'team-two'));

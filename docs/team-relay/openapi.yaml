@@ -555,6 +555,33 @@ paths:
         "403":
           $ref: "#/components/responses/ActionNotAllowed"
 
+  /v1/threads/{thread_id}/read:
+    parameters:
+      - $ref: "#/components/parameters/ThreadId"
+    put:
+      tags: [Threads]
+      operationId: markThreadRead
+      description: Advances the current principal monotonic, cross-device read cursor without changing the shared relay history.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MarkThreadReadRequest"
+      responses:
+        "200":
+          description: Read cursor advanced or left unchanged when the request was stale.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreadReadState"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/ThreadAccessDenied"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+
   /v1/attachments:
     post:
       tags: [Attachments]
@@ -1335,7 +1362,7 @@ components:
     ThreadDetail:
       type: object
       additionalProperties: false
-      required: [thread, preference, participants, actions]
+      required: [thread, preference, participants, actions, read_state, unread_count]
       properties:
         thread:
           $ref: "#/components/schemas/WorkThreadSummary"
@@ -1349,6 +1376,11 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/RelayAction"
+        read_state:
+          $ref: "#/components/schemas/ThreadReadState"
+        unread_count:
+          type: integer
+          minimum: 0
 
     RelayAction:
       type: object
@@ -1471,6 +1503,30 @@ components:
           type: boolean
         hidden:
           type: boolean
+
+    MarkThreadReadRequest:
+      type: object
+      additionalProperties: false
+      required: [read_through_sequence]
+      properties:
+        read_through_sequence:
+          type: integer
+          minimum: 0
+
+    ThreadReadState:
+      type: object
+      additionalProperties: false
+      required: [thread_id, last_read_sequence, last_read_at]
+      properties:
+        thread_id:
+          $ref: "#/components/schemas/Uuid"
+        last_read_sequence:
+          type: integer
+          minimum: 0
+        last_read_at:
+          oneOf:
+            - $ref: "#/components/schemas/Timestamp"
+            - type: "null"
 
     ThreadPreference:
       type: object

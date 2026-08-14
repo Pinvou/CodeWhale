@@ -15,6 +15,8 @@
     var joinPasswordReadPromise = null;
     var refreshTimer = null;
     var pendingRequests = {};
+    var legacyReadCursorKey = "pinvou.team-relay.read-cursors.v1";
+    var legacyReadCursors = loadLegacyReadCursors();
     var connectionGeneration = 0;
 
     function uuid() {
@@ -23,18 +25,86 @@
     }
 
     function patch(value) {
+      if (value && value.snapshot) {
+        value = Object.assign({}, value, { snapshot: applyLegacyUnreadFallback(value.snapshot) });
+      }
       state.teamRelay = Object.assign({}, state.teamRelay, value);
       notify();
     }
 
-    async function load() {
+    function loadLegacyReadCursors() {
+      try {
+        var parsed = JSON.parse(root.localStorage && root.localStorage.getItem(legacyReadCursorKey) || "{}");
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function saveLegacyReadCursors() {
+      try {
+        if (!root.localStorage) return;
+        var entries = Object.entries(legacyReadCursors);
+        if (entries.length > 2000) legacyReadCursors = Object.fromEntries(entries.slice(-2000));
+        root.localStorage.setItem(legacyReadCursorKey, JSON.stringify(legacyReadCursors));
+      } catch (_) {
+        /* A denied local cache must not block Team Relay. */
+      }
+    }
+
+    function setLegacyReadCursor(threadId, sequence) {
+      var previous = Number(legacyReadCursors[threadId] || 0);
+      legacyReadCursors[threadId] = Math.max(previous, Number(sequence || 0));
+      saveLegacyReadCursors();
+      return legacyReadCursors[threadId];
+    }
+
+    function applyLegacyUnreadFallback(snapshot) {
+      if (!snapshot) return snapshot;
+      var initialized = false;
+      function patchBootstrap(bootstrap) {
+        if (!bootstrap || !Array.isArray(bootstrap.threads)) return bootstrap;
+        var meId = bootstrap.me && bootstrap.me.id;
+        var changed = false;
+        var threads = bootstrap.threads.map(function (detail) {
+          if (!detail || !detail.thread || Object.prototype.hasOwnProperty.call(detail, "unread_count")) return detail;
+          changed = true;
+          var actions = detail.actions || [];
+          var revision = Number(detail.thread.revision || 0);
+          var cursor = Number(legacyReadCursors[detail.thread.id]);
+          if (!Number.isFinite(cursor)) {
+            var latest = actions[actions.length - 1];
+            cursor = latest && latest.actor_id !== meId ? Math.max(0, revision - 1) : revision;
+            legacyReadCursors[detail.thread.id] = cursor;
+            initialized = true;
+          }
+          var unreadCount = actions.filter(function (action) {
+            return Number(action.sequence || 0) > cursor && action.actor_id !== meId;
+          }).length;
+          return Object.assign({}, detail, {
+            read_state: { thread_id: detail.thread.id, last_read_sequence: cursor, last_read_at: null },
+            unread_count: unreadCount,
+          });
+        });
+        return changed ? Object.assign({}, bootstrap, { threads: threads }) : bootstrap;
+      }
+      var next = Object.assign({}, snapshot, {
+        bootstrap: patchBootstrap(snapshot.bootstrap),
+        team_bootstraps: (snapshot.team_bootstraps || []).map(patchBootstrap),
+      });
+      if (initialized) saveLegacyReadCursors();
+      return next;
+    }
+
+    async function load(options) {
       if (refreshPromise) return refreshPromise;
+      var silent = options && options.silent === true;
       var generation = connectionGeneration;
       function patchCurrent(value) {
         if (generation === connectionGeneration) patch(value);
       }
       var request = (async function () {
-        patchCurrent({ loading: true, error: null });
+        if (!silent) patchCurrent({ loading: true, error: null });
         try {
           var status = await invoke("team_relay_status");
           if (!status.configured) {
@@ -56,7 +126,7 @@
           patchCurrent({ loading: false, status: status, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
           return snapshot;
         } catch (error) {
-          patchCurrent({ loading: false, error: String(error) });
+          if (!silent) patchCurrent({ loading: false, error: String(error) });
           throw error;
         } finally {
           if (refreshPromise === request) refreshPromise = null;
@@ -225,6 +295,57 @@
 
     function setThreadPreference(threadId, input) {
       return mutate("team_relay_set_thread_preference", { threadId: threadId, input: input });
+    }
+
+    function patchThreadReadState(snapshot, threadId, readState) {
+      if (!snapshot || !readState) return snapshot;
+      function patchBootstrap(bootstrap) {
+        if (!bootstrap || !Array.isArray(bootstrap.threads)) return bootstrap;
+        var meId = bootstrap.me && bootstrap.me.id;
+        var changed = false;
+        var threads = bootstrap.threads.map(function (detail) {
+          if (!detail || !detail.thread || detail.thread.id !== threadId) return detail;
+          changed = true;
+          var cursor = Math.max(
+            Number(detail.read_state && detail.read_state.last_read_sequence || 0),
+            Number(readState.last_read_sequence || 0)
+          );
+          var unreadCount = (detail.actions || []).filter(function (action) {
+            return Number(action.sequence || 0) > cursor && action.actor_id !== meId;
+          }).length;
+          return Object.assign({}, detail, {
+            read_state: Object.assign({}, readState, { last_read_sequence: cursor }),
+            unread_count: unreadCount,
+          });
+        });
+        return changed ? Object.assign({}, bootstrap, { threads: threads }) : bootstrap;
+      }
+      return Object.assign({}, snapshot, {
+        bootstrap: patchBootstrap(snapshot.bootstrap),
+        team_bootstraps: (snapshot.team_bootstraps || []).map(patchBootstrap),
+      });
+    }
+
+    async function markThreadRead(threadId, readThroughSequence) {
+      patch({ error: null });
+      var localReadState = {
+        thread_id: threadId,
+        last_read_sequence: setLegacyReadCursor(threadId, readThroughSequence),
+        last_read_at: new Date().toISOString(),
+      };
+      patch({ snapshot: patchThreadReadState(state.teamRelay.snapshot, threadId, localReadState) });
+      try {
+        var readState = await invoke("team_relay_mark_thread_read", {
+          threadId: threadId,
+          input: { read_through_sequence: readThroughSequence },
+        });
+        patch({ snapshot: patchThreadReadState(state.teamRelay.snapshot, threadId, readState) });
+        return readState;
+      } catch (error) {
+        if (String(error).indexOf("resource_not_found:") !== -1) return localReadState;
+        patch({ error: String(error) });
+        throw error;
+      }
     }
 
     async function pickDraftAttachments() {
@@ -575,6 +696,7 @@
       createThread: createThread,
       createAction: createAction,
       setThreadPreference: setThreadPreference,
+      markThreadRead: markThreadRead,
       listDraftSourceSessions: listDraftSourceSessions,
       readDraftSourceSession: readDraftSourceSession,
       mountDraftMaterials: mountDraftMaterials,

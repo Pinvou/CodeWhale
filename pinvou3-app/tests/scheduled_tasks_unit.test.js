@@ -233,7 +233,7 @@ assert.ok(
   'blue dots should represent unread run conversations at task and run level'
 );
 assert.ok(
-  indexHtml.includes('data-testid="scheduled-nav-unread"') &&
+  indexHtml.includes("unreadTestId = 'scheduled-nav-unread'") &&
     /unread=\{!!\(bs && \(bs\.scheduledTasks \|\| \[\]\)\.some\(task => task\.hasUnreadRuns\)\)\}/.test(indexHtml),
   'the Scheduled sidebar item should aggregate unread completed runs across tasks'
 );

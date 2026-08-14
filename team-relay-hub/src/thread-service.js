@@ -4,7 +4,14 @@ import { newId, requestHash } from "./crypto.js";
 import { inTransaction } from "./db.js";
 import { normalizeDelivery } from "./delivery-package.js";
 import { AppError } from "./errors.js";
-import { actionFromRow, emailHint, teamFromRow, threadFromRow, threadPreferenceFromRow } from "./serializers.js";
+import {
+  actionFromRow,
+  emailHint,
+  teamFromRow,
+  threadFromRow,
+  threadPreferenceFromRow,
+  threadReadStateFromRow,
+} from "./serializers.js";
 import { transition } from "./state-machine.js";
 import { boolean, exactKeys, integer, text, uuid, uuidArray } from "./validation.js";
 
@@ -81,6 +88,23 @@ async function threadDetail(db, threadRow, principalId) {
       WHERE thread_id = $1 AND principal_id = $2`,
     [threadRow.id, principalId],
   );
+  const readState = await db.query(
+    `SELECT tp.thread_id, rs.last_read_sequence, rs.last_read_at,
+            count(a.id) FILTER (
+              WHERE a.sequence > coalesce(rs.last_read_sequence, 0)
+                AND a.sequence >= tp.first_action_sequence
+                AND a.actor_id <> $2
+            )::integer AS unread_count
+       FROM thread_participants tp
+       LEFT JOIN thread_read_states rs
+         ON rs.thread_id = tp.thread_id AND rs.principal_id = tp.principal_id
+       LEFT JOIN relay_actions a ON a.thread_id = tp.thread_id
+      WHERE tp.thread_id = $1 AND tp.principal_id = $2
+      GROUP BY tp.thread_id, tp.first_action_sequence,
+               rs.last_read_sequence, rs.last_read_at`,
+    [threadRow.id, principalId],
+  );
+  const readRow = readState.rows[0] || { id: threadRow.id, unread_count: 0 };
   return {
     thread: threadFromRow(threadRow),
     preference: preference.rowCount
@@ -88,6 +112,8 @@ async function threadDetail(db, threadRow, principalId) {
       : threadPreferenceFromRow({ id: threadRow.id }),
     participants: participants.rows.map((row) => row.principal_id),
     actions: actions.rows.map((row) => actionFromRow(row, row.attachment_ids)),
+    read_state: threadReadStateFromRow(readRow),
+    unread_count: Number(readRow.unread_count || 0),
   };
 }
 
@@ -202,6 +228,11 @@ export async function createThread(pool, token, body, notify = () => {}) {
        VALUES ($1, $2, 1), ($1, $3, 1)
        ON CONFLICT (thread_id, principal_id) DO NOTHING`,
       [threadId, auth.principalId, input.assigneeId],
+    );
+    await client.query(
+      `INSERT INTO thread_read_states (principal_id, thread_id, last_read_sequence)
+       VALUES ($1, $2, 1)`,
+      [auth.principalId, threadId],
     );
     await client.query(
       `INSERT INTO relay_actions (
@@ -411,6 +442,43 @@ export async function setThreadPreference(pool, token, rawThreadId, body, notify
   });
   notify(result.teamId, "thread.preference.changed", { id: threadId, principal_id: auth.principalId });
   return result.preference;
+}
+
+export async function markThreadRead(pool, token, rawThreadId, body, notify = () => {}) {
+  const threadId = uuid(rawThreadId, "thread_id");
+  exactKeys(body, ["read_through_sequence"]);
+  const readThroughSequence = integer(
+    body.read_through_sequence,
+    "read_through_sequence",
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const auth = await authenticate(pool, token);
+  const result = await inTransaction(pool, async (client) => {
+    const initial = await selectThread(client, threadId);
+    await lockTeamMembershipChanges(client, initial.team_id);
+    const thread = await selectThread(client, threadId, true);
+    await requireMembership(client, thread.team_id, auth.principalId);
+    await requireParticipant(client, threadId, auth.principalId);
+    if (readThroughSequence > Number(thread.revision)) {
+      throw new AppError(400, "invalid_request", "The read cursor exceeds the current thread revision.");
+    }
+    const readState = await client.query(
+      `INSERT INTO thread_read_states (principal_id, thread_id, last_read_sequence, last_read_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (principal_id, thread_id) DO UPDATE
+         SET last_read_sequence = greatest(thread_read_states.last_read_sequence, $3),
+             last_read_at = CASE
+               WHEN $3 > thread_read_states.last_read_sequence THEN now()
+               ELSE thread_read_states.last_read_at
+             END
+       RETURNING thread_id, last_read_sequence, last_read_at`,
+      [auth.principalId, threadId, readThroughSequence],
+    );
+    return { teamId: thread.team_id, readState: threadReadStateFromRow(readState.rows[0]) };
+  });
+  notify(result.teamId, "thread.read.changed", { id: threadId, principal_id: auth.principalId });
+  return result.readState;
 }
 
 export async function getBootstrap(pool, token, rawTeamId) {

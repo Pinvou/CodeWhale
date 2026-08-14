@@ -814,6 +814,11 @@
 .team-relay-card-heading { color: var(--relay-text) !important; }
 .team-relay-card-heading strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .team-relay-card-heading time { color: var(--relay-muted); flex: 0 0 auto; font-size: 9px; }
+.team-relay-card-heading-meta { align-items: center; display: inline-flex; flex: 0 0 auto; gap: 7px; }
+.team-relay-unread-badge { align-items: center; background: #df3f4f; border-radius: 999px; color: #fff; display: inline-flex; flex: 0 0 auto; font-size: 9px; font-style: normal; font-weight: 750; height: 18px; justify-content: center; line-height: 1; min-width: 18px; padding: 0 5px; }
+.team-relay-view-switch button { align-items: center; display: inline-flex; gap: 7px; }
+.team-relay-view-switch .team-relay-unread-badge { box-shadow: 0 0 0 2px var(--relay-panel-soft); }
+.team-relay-board-queue .team-relay-unread-badge { margin-left: auto; }
 .team-relay-card-status { color: color-mix(in srgb, var(--relay-text) 78%, var(--relay-muted)); font-size: 10px; }
 .team-relay-card-meta { color: var(--relay-muted); font-size: 9px; }
 .team-relay-card-meta > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

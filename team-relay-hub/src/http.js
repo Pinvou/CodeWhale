@@ -33,6 +33,7 @@ import {
   getBootstrap,
   getThread,
   listThreads,
+  markThreadRead,
   setThreadPreference,
 } from "./thread-service.js";
 import { exactKeys, text, uuid } from "./validation.js";
@@ -394,6 +395,12 @@ export function createHubServer({ pool, config }) {
       if (params && method === "PUT") {
         const body = await readJson(request, config.maxJsonBytes);
         sendJson(response, 200, await setThreadPreference(pool, token, params[0], body, notify), requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/threads\/([^/]+)\/read$/);
+      if (params && method === "PUT") {
+        const body = await readJson(request, config.maxJsonBytes);
+        sendJson(response, 200, await markThreadRead(pool, token, params[0], body, notify), requestId);
         return;
       }
       if (method === "POST" && pathname === "/v1/attachments") {

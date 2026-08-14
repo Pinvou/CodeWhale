@@ -2145,6 +2145,7 @@
   var createTeamRelayThread = teamRelayFeature.createThread;
   var createTeamRelayAction = teamRelayFeature.createAction;
   var setTeamRelayThreadPreference = teamRelayFeature.setThreadPreference;
+  var markTeamRelayThreadRead = teamRelayFeature.markThreadRead;
   var listTeamRelayDraftSourceSessions = teamRelayFeature.listDraftSourceSessions;
   var readTeamRelayDraftSourceSession = teamRelayFeature.readDraftSourceSession;
   var mountTeamRelayDraftMaterials = teamRelayFeature.mountDraftMaterials;
@@ -2488,6 +2489,7 @@
       createThread: createTeamRelayThread,
       createAction: createTeamRelayAction,
       setThreadPreference: setTeamRelayThreadPreference,
+      markThreadRead: markTeamRelayThreadRead,
       listDraftSourceSessions: listTeamRelayDraftSourceSessions,
       readDraftSourceSession: readTeamRelayDraftSourceSession,
       mountDraftMaterials: mountTeamRelayDraftMaterials,

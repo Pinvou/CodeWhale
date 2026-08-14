@@ -4,7 +4,7 @@ import { dict } from '../src/shared/i18n.js';
 import {
   canUpdateRelayProgress, deriveBoardColumn, deriveCategory, matchesRelayView,
   matchesSourceFilter, projectMaterialPackages, projectSnapshot, projectTeamBoard,
-  relayViewCounts,
+  relayViewCounts, teamRelayHasUnread,
 } from '../src/features/team-relay/team-relay-state.js';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../src/features/team-relay/team-relay-access.js';
 
@@ -55,6 +55,8 @@ const snapshot = {
       thread: { id: 'thread', team_id: 'team', title: '方案', initiator_id: 'me', owner_id: 'b', current_actor_id: 'b', return_to_id: 'me', final_recipient_id: 'me', phase: 'active', revision: 1, created_at: '2026-08-04T00:00:00Z', updated_at: '2026-08-04T00:00:00Z' },
       participants: ['me', 'b'],
       actions: [{ id: 'action', thread_id: 'thread', sequence: 1, kind: 'assign', actor_id: 'me', recipient_id: 'b', return_to_id: 'me', message: '请处理', base_revision: 0, idempotency_key: 'key', attachment_ids: ['file'], created_at: '2026-08-04T00:00:00Z' }],
+      read_state: { thread_id: 'thread', last_read_sequence: 0, last_read_at: null },
+      unread_count: 2,
     }],
   },
   attachments: { file: { id: 'file', original_name: '方案.md' } },
@@ -69,6 +71,25 @@ assert.equal(tasks[0].events[0].delivery.subtype, '');
 assert.equal(tasks[0].events[0].sequence, 1);
 assert.equal(tasks[0].teamId, 'team');
 assert.equal(tasks[0].teamName, 'Demo');
+assert.equal(tasks[0].unreadCount, 2);
+assert.equal(tasks[0].readState.last_read_sequence, 0);
+assert.equal(teamRelayHasUnread(snapshot), true);
+const noUnreadSnapshot = JSON.parse(JSON.stringify(snapshot));
+noUnreadSnapshot.bootstrap.threads[0].unread_count = 0;
+assert.equal(teamRelayHasUnread(noUnreadSnapshot), false);
+const hiddenUnreadSnapshot = JSON.parse(JSON.stringify(snapshot));
+hiddenUnreadSnapshot.bootstrap.threads[0].preference = { hidden: true };
+assert.equal(teamRelayHasUnread(hiddenUnreadSnapshot), false);
+const optimisticallyReadTasks = projectSnapshot(snapshot, dict.zh.uiTeamRelay, { thread: 1 });
+assert.equal(optimisticallyReadTasks[0].unreadCount, 0, 'a click cursor must clear an authoritative badge before the Hub round trip finishes');
+assert.equal(optimisticallyReadTasks[0].readState.last_read_sequence, 1);
+const legacySnapshot = JSON.parse(JSON.stringify(snapshot));
+delete legacySnapshot.bootstrap.threads[0].read_state;
+delete legacySnapshot.bootstrap.threads[0].unread_count;
+assert.equal(projectSnapshot(legacySnapshot, dict.zh.uiTeamRelay)[0].unreadCount, 0, 'the latest action from myself is not unread on an old Hub');
+legacySnapshot.bootstrap.threads[0].actions[0].actor_id = 'b';
+assert.equal(projectSnapshot(legacySnapshot, dict.zh.uiTeamRelay)[0].unreadCount, 1, 'the latest incoming action is unread on an old Hub');
+assert.equal(projectSnapshot(legacySnapshot, dict.zh.uiTeamRelay, { thread: 1 })[0].unreadCount, 0, 'the local fallback cursor clears an old Hub badge');
 
 const secondBootstrap = JSON.parse(JSON.stringify(snapshot.bootstrap));
 secondBootstrap.team = { id: 'team-two', name: 'Second team' };
@@ -194,6 +215,8 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(copy.taskInfo);
   assert.ok(copy.views.board);
   assert.ok(copy.views.teams);
+  assert.equal(typeof copy.unread.tasks, 'function');
+  assert.equal(typeof copy.unread.updates, 'function');
   assert.ok(copy.teams.create);
   assert.equal(typeof copy.teams.openWork, 'function');
   assert.ok(copy.teams.createDialog.confirm);
@@ -330,6 +353,14 @@ assert.match(viewSource, /final_recipient_id !== task\.raw\.initiator_id/);
 assert.match(viewSource, /team-relay-task-info/);
 assert.match(viewSource, /TeamBoard/);
 assert.match(viewSource, /team-relay-view-switch/);
+assert.match(viewSource, /team-relay-unread-badge/);
+assert.match(viewSource, /markThreadRead\(task\.id, task\.revision\)/);
+assert.match(viewSource, /pinvou\.team-relay\.read-cursors\.v1/);
+assert.match(mainSource, /setInterval\(refresh, 15_000\)/);
+assert.match(mainSource, /addEventListener\('focus', refresh\)/);
+assert.match(mainSource, /visibilitychange/);
+assert.match(mainSource, /unreadTestId="team-relay-nav-unread"/);
+assert.match(mainSource, /unreadTone="danger"/);
 assert.match(viewSource, /const openTeam = teamId => \{[\s\S]*setSelectedTeamId\(teamId\);[\s\S]*setViewMode\('board'\);[\s\S]*bridge\.teamRelay\.switchTeam\(teamId\)/);
 assert.match(viewSource, /rotateJoinPassword\(\)/);
 assert.match(viewSource, /getJoinPassword\(\)/);

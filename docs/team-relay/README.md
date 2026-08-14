@@ -15,6 +15,7 @@
 - [`migrations/0005_short_join_code.sql`](migrations/0005_short_join_code.sql)：保留既有摘要字段并登记短加入码语义；
 - [`migrations/0006_persistent_join_code.sql`](migrations/0006_persistent_join_code.sql)：加入可恢复的加密加入码与成员可见性策略；
 - [`migrations/0007_principal_email.sql`](migrations/0007_principal_email.sql)：加入服务内唯一邮箱账户，并允许旧成员后续绑定；
+- [`migrations/0008_thread_read_states.sql`](migrations/0008_thread_read_states.sql)：持久化跨设备已读游标，并提供任务未读更新计数；
 - [`../team-relay-demo-implementation-plan.md`](../team-relay-demo-implementation-plan.md)：范围、部署、批次与验收计划。
 
 发生冲突时，以 `protocol.md` 的业务不变量为准；实现修改契约时必须在同一变更中同步 OpenAPI、数据库迁移草案和契约测试。

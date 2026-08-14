@@ -159,6 +159,10 @@ pub struct ThreadDetail {
     pub preference: ThreadPreference,
     pub participants: Vec<String>,
     pub actions: Vec<RelayAction>,
+    #[serde(default)]
+    pub read_state: ThreadReadState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -169,6 +173,13 @@ pub struct ThreadPreference {
     pub pinned_at: Option<String>,
     pub hidden_at: Option<String>,
     pub updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ThreadReadState {
+    pub thread_id: String,
+    pub last_read_sequence: u64,
+    pub last_read_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -397,4 +408,45 @@ pub struct CreateActionInput {
 pub struct SetThreadPreferenceInput {
     pub pinned: bool,
     pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkThreadReadInput {
+    pub read_through_sequence: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ThreadDetail;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_thread_detail_keeps_missing_unread_count_absent() {
+        let detail: ThreadDetail = serde_json::from_value(json!({
+            "thread": {
+                "id": "thread-1",
+                "team_id": "team-1",
+                "title": "test",
+                "initiator_id": "principal-1",
+                "owner_id": "principal-2",
+                "current_actor_id": "principal-2",
+                "return_to_id": "principal-1",
+                "final_recipient_id": "principal-1",
+                "phase": "active",
+                "revision": 1,
+                "created_at": "2026-08-13T00:00:00Z",
+                "updated_at": "2026-08-13T00:00:00Z"
+            },
+            "participants": ["principal-1", "principal-2"],
+            "actions": []
+        }))
+        .expect("legacy thread detail should deserialize");
+
+        assert_eq!(detail.unread_count, None);
+        let serialized = serde_json::to_value(detail).expect("thread detail should serialize");
+        assert!(!serialized
+            .as_object()
+            .expect("thread detail should serialize as an object")
+            .contains_key("unread_count"));
+    }
 }

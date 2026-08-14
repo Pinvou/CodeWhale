@@ -61,6 +61,14 @@ export function threadPreferenceFromRow(row) {
   };
 }
 
+export function threadReadStateFromRow(row) {
+  return {
+    thread_id: row.thread_id || row.id,
+    last_read_sequence: Number(row.last_read_sequence || 0),
+    last_read_at: row.last_read_at || null,
+  };
+}
+
 export function actionFromRow(row, attachmentIds = []) {
   return {
     id: row.id,

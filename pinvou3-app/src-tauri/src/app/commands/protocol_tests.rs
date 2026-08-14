@@ -472,6 +472,7 @@ command_protocol!(
         "team_relay_create_thread",
         "team_relay_create_action",
         "team_relay_set_thread_preference",
+        "team_relay_mark_thread_read",
         "team_relay_upload_attachment",
         "team_relay_download_attachment",
         "team_relay_task_workspace_status",
