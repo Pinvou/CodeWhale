@@ -13,3 +13,6 @@ pub(crate) mod skill_materialization;
 pub(crate) mod timing;
 pub(crate) mod tool_policy;
 pub(crate) mod turn_shell_tasks;
+
+#[cfg(test)]
+mod strict_mode_validation_tests;
