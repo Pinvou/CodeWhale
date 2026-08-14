@@ -626,6 +626,62 @@ fn resolver_strict_direct_rejects_clearly_foreign_selector() {
 }
 
 #[test]
+fn forkguard_strict_direct_row_match_survives_casing_mismatch() {
+    // The bundled zai rows advertise marketing casing (`GLM-5.2`) while app
+    // pickers and saved configs carry the lowercase spelling. Lowercase
+    // `glm-5.2` must resolve to the owning zai row — with the catalog's
+    // documented casing on the wire — instead of being misread as another
+    // provider's bare wire id (a modelstudio row serves bare `glm-5.2`).
+    let r = RouteResolver::new();
+    let out = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("glm-5.2")))
+        .expect("lowercase selector on the owning strict-direct row must resolve");
+    assert_eq!(out.provider_kind(), ProviderKind::Zai);
+    assert_eq!(
+        out.wire_model_id().as_str(),
+        "GLM-5.2",
+        "the owning catalog row's casing is what goes on the wire"
+    );
+    assert!(
+        out.limits().has_known_limit(),
+        "matching the owning row must carry its catalog limits"
+    );
+
+    // The same case-insensitive rescue applies to the saved-model fallback.
+    let saved = RouteRequest {
+        saved_provider_model: Some(WireModelId::from("glm-5.2")),
+        ..req(Some(ProviderKind::Zai), None)
+    };
+    let out = r
+        .resolve(&saved)
+        .expect("saved lowercase model must resolve");
+    assert_eq!(out.wire_model_id().as_str(), "GLM-5.2");
+}
+
+#[test]
+fn resolver_strict_direct_case_insensitive_match_stays_provider_scoped() {
+    // Case-insensitive matching is a rescue for the OWNING provider's rows
+    // only: it applies to Deepseek's own catalog the same way, and a bare
+    // foreign id on zai (exactly another provider's wire id) is still
+    // rejected.
+    let r = RouteResolver::new();
+    let out = r
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("Deepseek-V4-Pro")))
+        .expect("own-row casing variant must resolve on Deepseek too");
+    assert_eq!(out.provider_kind(), ProviderKind::Deepseek);
+    assert_eq!(out.wire_model_id().as_str(), "deepseek-v4-pro");
+
+    let out = r.resolve(&req(Some(ProviderKind::Zai), Some("deepseek-v4-pro")));
+    match out {
+        Err(RouteError::ForeignModelForDirectProvider { provider, model }) => {
+            assert_eq!(provider.as_str(), "zai");
+            assert_eq!(model, "deepseek-v4-pro");
+        }
+        other => panic!("expected ForeignModelForDirectProvider, got {other:?}"),
+    }
+}
+
+#[test]
 fn resolver_strict_direct_rejects_other_provider_known_bare_offering() {
     let r = RouteResolver::new();
     let out = r.resolve(&req(Some(ProviderKind::Zai), Some("deepseek-v4-pro")));

@@ -335,6 +335,14 @@ impl RouteResolver {
         // Try to match a catalog offering owned by THIS provider, either by
         // canonical model id or by exact wire id. This keeps interpretation
         // inside provider scope; offerings from other providers are ignored.
+        // Strict direct providers additionally match their own rows
+        // case-insensitively: their catalogs advertise marketing casing
+        // (`GLM-5.2`) while pickers and saved configs frequently carry the
+        // lowercase spelling, which must resolve to the owning row BEFORE the
+        // foreign-selector check below can misread it as another provider's
+        // bare wire id (e.g. lowercase `glm-5.2` colliding with a modelstudio
+        // row). The offering's documented casing is what goes on the wire.
+        let own_row_case_insensitive = class == ProviderClass::StrictDirect;
         for offering in &self.offerings {
             if offering.provider != *provider_id {
                 continue;
@@ -343,7 +351,9 @@ impl RouteResolver {
                 .canonical_model
                 .as_ref()
                 .is_some_and(|m| m.as_str() == raw);
-            let matches_wire = offering.wire_model_id.as_str() == raw;
+            let matches_wire = offering.wire_model_id.as_str() == raw
+                || (own_row_case_insensitive
+                    && offering.wire_model_id.as_str().eq_ignore_ascii_case(raw));
             if matches_canonical || matches_wire {
                 return Ok(ResolvedOffering::from_offering(offering));
             }
