@@ -1,14 +1,13 @@
-//! `strict_mode` 严格错误校验回归（轻量测试目标）。
+//! `strict_mode` 严格错误校验回归。
 //!
 //! 这三个测试原属 `l1_dialog_harness.rs`，是确定性纯函数校验：只依赖
 //! `deepseek_tui` 的 `Event` / `ErrorEnvelope` / `TurnOutcomeStatus` / `Usage`，
-//! 不触碰 `AppEngine` / `Pinvou3Bridge`。拆到独立测试目标，避免
-//! `--test l1_dialog_harness` 因同文件 import `AppEngine`/`Pinvou3Bridge` 而被迫
-//! 链接 fastembed / tauri / aws-lc-sys 全树，在 ubuntu 16GB runner 上 link 阶段
-//! 内存峰值越线被 SIGTERM（exit 143）。
+//! 不触碰 `AppEngine` / `Pinvou3Bridge`。作为 `pinvou3_lib` 的单测模块随现有
+//! `cargo test --lib` 一起链接和执行，避免再启动一个 integration test 目标，
+//! 重复编译并链接 fastembed / tauri / aws-lc-sys 全树。
 //!
 //! 真 vLLM 端到端 scenario 仍留在 `l1_dialog_harness.rs`（`#[ignore]`，需 vLLM
-//! 在线、按需手跑）；本目标只跑不依赖运行时与外部模型的确定性校验，CI 可常跑。
+//! 在线、按需手跑）；本模块只跑不依赖运行时与外部模型的确定性校验，CI 可常跑。
 //!
 //! 下面的纯辅助函数与 `l1_dialog_harness.rs` 中同名函数行为一致（那份同时被真模型
 //! scenario 使用，无法整体迁出）；此处保留副本，改动需两边同步。
