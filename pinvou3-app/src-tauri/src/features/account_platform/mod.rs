@@ -14,22 +14,14 @@ use rand::RngCore as _;
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    sync::Mutex,
-};
+use tokio::sync::Mutex;
 
 const ENABLED_ENV: &str = "PINVOU_ACCOUNT_PLATFORM_ENABLED";
 const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
-const AUTHORIZATION_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_AUTHORIZATION_URL";
 const TOKEN_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_TOKEN_URL";
 const CLIENT_ID_ENV: &str = "PINVOU_ACCOUNT_OIDC_CLIENT_ID";
 const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
-const CALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
-const MAX_CALLBACK_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const OIDC_CREDENTIAL_SERVICE: &str = "pinvou3-account-platform-oidc";
@@ -37,7 +29,6 @@ const REFRESH_TOKEN_KEY: &str = "desktop-refresh-token";
 
 #[derive(Debug, Clone)]
 struct AccountPlatformConfig {
-    authorization_url: Url,
     token_url: Url,
     client_id: String,
     account_url: Url,
@@ -56,9 +47,6 @@ impl AccountPlatformConfig {
         }
 
         let issuer = optional_env(ISSUER_ENV);
-        let authorization_url = optional_env(AUTHORIZATION_URL_ENV)
-            .or_else(|| issuer.as_ref().map(|value| oidc_endpoint(value, "auth")))
-            .ok_or_else(|| missing_config(AUTHORIZATION_URL_ENV, ISSUER_ENV))?;
         let token_url = optional_env(TOKEN_URL_ENV)
             .or_else(|| issuer.as_ref().map(|value| oidc_endpoint(value, "token")))
             .ok_or_else(|| missing_config(TOKEN_URL_ENV, ISSUER_ENV))?;
@@ -70,7 +58,6 @@ impl AccountPlatformConfig {
         }
 
         Ok(Self {
-            authorization_url: parse_endpoint(AUTHORIZATION_URL_ENV, &authorization_url)?,
             token_url: parse_endpoint(TOKEN_URL_ENV, &token_url)?,
             client_id,
             account_url: parse_service_base(ACCOUNT_URL_ENV, &required_env(ACCOUNT_URL_ENV)?)?,
@@ -176,6 +163,12 @@ struct TokenResponse {
     expires_in: u64,
 }
 
+#[derive(Deserialize)]
+pub struct PasswordLogin {
+    username: String,
+    password: String,
+}
+
 const fn default_expires_in() -> u64 {
     300
 }
@@ -275,31 +268,27 @@ impl AccountPlatformState {
         }
     }
 
-    pub async fn login(&self) -> Result<SessionStatus, String> {
+    pub async fn login(&self, credentials: PasswordLogin) -> Result<SessionStatus, String> {
         let _login = self.login_guard.lock().await;
         let config = AccountPlatformConfig::from_env()?;
         self.credentials
             .probe()
             .map_err(|error| format!("credential_store_unavailable: {error}"))?;
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .map_err(|error| format!("oidc_loopback_unavailable: {error}"))?;
-        let port = listener
-            .local_addr()
-            .map_err(|error| format!("oidc_loopback_unavailable: {error}"))?
-            .port();
-        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-        let (verifier, challenge) = create_pkce();
-        let oauth_state = random_urlsafe(32);
-        let authorization_url =
-            authorization_url(&config, &redirect_uri, &oauth_state, &challenge)?;
-
-        crate::platform::os::open_target(authorization_url.as_str(), "Pinvou account login")
-            .map_err(|error| format!("oidc_browser_open_failed: {error}"))?;
-        let code = wait_for_callback(listener, &oauth_state).await?;
-        let tokens = self
-            .exchange_code(&config, &code, &redirect_uri, &verifier)
-            .await?;
+        let username = credentials.username.trim();
+        if username.is_empty() || username.len() > 320 || username.chars().any(char::is_control) {
+            return Err("oidc_credentials_invalid: account or password is invalid".to_string());
+        }
+        if credentials.password.is_empty() || credentials.password.len() > 4096 {
+            return Err("oidc_credentials_invalid: account or password is invalid".to_string());
+        }
+        let form = [
+            ("grant_type", "password"),
+            ("client_id", config.client_id.as_str()),
+            ("username", username),
+            ("password", credentials.password.as_str()),
+            ("scope", "openid profile email offline_access"),
+        ];
+        let tokens = self.password_token_request(&config, &form).await?;
         let _refresh = self.refresh_guard.lock().await;
         self.install_tokens(tokens, None).await?;
         Ok(self.status().await)
@@ -326,26 +315,6 @@ impl AccountPlatformState {
         response_to_api(response).await
     }
 
-    async fn exchange_code(
-        &self,
-        config: &AccountPlatformConfig,
-        code: &str,
-        redirect_uri: &str,
-        verifier: &str,
-    ) -> Result<TokenResponse, String> {
-        self.token_request(
-            config,
-            &[
-                ("grant_type", "authorization_code"),
-                ("client_id", config.client_id.as_str()),
-                ("code", code),
-                ("redirect_uri", redirect_uri),
-                ("code_verifier", verifier),
-            ],
-        )
-        .await
-    }
-
     async fn token_request(
         &self,
         config: &AccountPlatformConfig,
@@ -369,6 +338,33 @@ impl AccountPlatformState {
             .await
             .map_err(|_| "oidc_token_response_invalid: token response is invalid".to_string())
             .and_then(validate_token_response)
+    }
+
+    async fn password_token_request(
+        &self,
+        config: &AccountPlatformConfig,
+        form: &[(&str, &str)],
+    ) -> Result<TokenResponse, String> {
+        let response = self
+            .client
+            .post(config.token_url.clone())
+            .form(form)
+            .send()
+            .await
+            .map_err(|error| format!("oidc_token_endpoint_unavailable: {error}"))?;
+        if response.status().is_success() {
+            return response
+                .json::<TokenResponse>()
+                .await
+                .map_err(|_| "oidc_token_response_invalid: token response is invalid".to_string())
+                .and_then(validate_token_response);
+        }
+        let oauth_error = response.json::<Value>().await.ok().and_then(|body| {
+            body.get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        Err(password_login_error(oauth_error.as_deref()).to_string())
     }
 
     async fn install_tokens(
@@ -474,147 +470,20 @@ fn validate_token_response(tokens: TokenResponse) -> Result<TokenResponse, Strin
     Ok(tokens)
 }
 
-fn authorization_url(
-    config: &AccountPlatformConfig,
-    redirect_uri: &str,
-    state: &str,
-    challenge: &str,
-) -> Result<Url, String> {
-    let mut url = config.authorization_url.clone();
-    {
-        let mut query = url.query_pairs_mut();
-        query
-            .clear()
-            .append_pair("response_type", "code")
-            .append_pair("client_id", &config.client_id)
-            .append_pair("redirect_uri", redirect_uri)
-            .append_pair("scope", "openid profile email offline_access")
-            .append_pair("state", state)
-            .append_pair("code_challenge", challenge)
-            .append_pair("code_challenge_method", "S256");
-    }
-    Ok(url)
-}
-
 fn random_urlsafe(bytes: usize) -> String {
     let mut value = vec![0_u8; bytes];
     rand::rng().fill_bytes(&mut value);
     URL_SAFE_NO_PAD.encode(value)
 }
 
-fn create_pkce() -> (String, String) {
-    let verifier = random_urlsafe(48);
-    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    (verifier, challenge)
-}
-
-async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<String, String> {
-    let deadline = Instant::now() + CALLBACK_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err("oidc_callback_timeout: browser login did not complete".to_string());
+fn password_login_error(oauth_error: Option<&str>) -> &'static str {
+    match oauth_error {
+        Some("invalid_grant") => "oidc_credentials_invalid: account or password is invalid",
+        Some("unauthorized_client") => {
+            "oidc_direct_grant_disabled: password login is disabled for this client"
         }
-        let accepted = tokio::time::timeout(remaining, listener.accept())
-            .await
-            .map_err(|_| "oidc_callback_timeout: browser login did not complete".to_string())?
-            .map_err(|error| format!("oidc_callback_failed: {error}"))?;
-        let (mut stream, _) = accepted;
-        let request =
-            tokio::time::timeout(Duration::from_secs(5), read_callback_request(&mut stream))
-                .await
-                .map_err(|_| "oidc_callback_invalid: callback request timed out".to_string())?
-                .map_err(|error| format!("oidc_callback_invalid: {error}"))?;
-        match parse_callback_request(&request, expected_state) {
-            Ok(code) => {
-                write_callback_response(&mut stream, true).await;
-                return Ok(code);
-            }
-            Err(error) => {
-                write_callback_response(&mut stream, false).await;
-                if error.starts_with("oidc_authorization_") {
-                    return Err(error);
-                }
-            }
-        }
+        _ => "oidc_login_failed: identity service rejected sign-in",
     }
-}
-
-async fn read_callback_request(stream: &mut tokio::net::TcpStream) -> std::io::Result<String> {
-    let mut request = Vec::with_capacity(1024);
-    let mut chunk = [0_u8; 1024];
-    loop {
-        let read = stream.read(&mut chunk).await?;
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&chunk[..read]);
-        if request.len() > MAX_CALLBACK_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "callback request exceeds 8 KiB",
-            ));
-        }
-        if request.windows(4).any(|window| window == b"\r\n\r\n")
-            || request.windows(2).any(|window| window == b"\n\n")
-        {
-            break;
-        }
-    }
-    String::from_utf8(request)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-}
-
-fn parse_callback_request(request: &str, expected_state: &str) -> Result<String, String> {
-    let first = request
-        .lines()
-        .next()
-        .ok_or_else(|| "oidc_callback_invalid: missing request line".to_string())?;
-    let mut parts = first.split_whitespace();
-    if parts.next() != Some("GET") {
-        return Err("oidc_callback_invalid: callback must use GET".to_string());
-    }
-    let target = parts
-        .next()
-        .ok_or_else(|| "oidc_callback_invalid: missing callback target".to_string())?;
-    let url = Url::parse(&format!("http://127.0.0.1{target}"))
-        .map_err(|_| "oidc_callback_invalid: malformed callback target".to_string())?;
-    if url.path() != "/callback" {
-        return Err("oidc_callback_invalid: unexpected callback path".to_string());
-    }
-    let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
-    if let Some(error) = query.get("error") {
-        return Err(format!("oidc_authorization_failed: {error}"));
-    }
-    if query.get("state").map(String::as_str) != Some(expected_state) {
-        return Err("oidc_callback_invalid: state mismatch".to_string());
-    }
-    query
-        .get("code")
-        .filter(|code| !code.is_empty() && code.len() <= 4096)
-        .cloned()
-        .ok_or_else(|| "oidc_callback_invalid: authorization code is missing".to_string())
-}
-
-async fn write_callback_response(stream: &mut tokio::net::TcpStream, success: bool) {
-    let (status, title, message) = if success {
-        ("200 OK", "Login complete", "You can return to Pinvou.")
-    } else {
-        (
-            "400 Bad Request",
-            "Login not accepted",
-            "Return to Pinvou and try again.",
-        )
-    };
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><meta name=referrer content=no-referrer><title>{title}</title><h1>{title}</h1><p>{message}</p>"
-    );
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
 }
 
 #[derive(Debug)]
@@ -754,32 +623,11 @@ mod tests {
 
     fn config() -> AccountPlatformConfig {
         AccountPlatformConfig {
-            authorization_url: Url::parse("https://id.example.test/authorize").unwrap(),
             token_url: Url::parse("https://id.example.test/token").unwrap(),
             client_id: "desktop-client".to_string(),
             account_url: Url::parse("https://account.example.test/").unwrap(),
             token_gateway_url: Url::parse("https://token.example.test/").unwrap(),
         }
-    }
-
-    #[test]
-    fn pkce_uses_s256_and_does_not_reveal_verifier() {
-        let (verifier, challenge) = create_pkce();
-        assert!(verifier.len() >= 43);
-        assert_ne!(verifier, challenge);
-        assert_eq!(
-            challenge,
-            URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
-        );
-        let url = authorization_url(
-            &config(),
-            "http://127.0.0.1:49152/callback",
-            "state-value",
-            &challenge,
-        )
-        .unwrap();
-        assert!(!url.as_str().contains(&verifier));
-        assert!(url.as_str().contains("code_challenge_method=S256"));
     }
 
     #[test]
@@ -792,17 +640,16 @@ mod tests {
     }
 
     #[test]
-    fn callback_requires_exact_path_and_state() {
-        let request = "GET /callback?code=abc&state=expected HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
-        assert_eq!(parse_callback_request(request, "expected").unwrap(), "abc");
-        assert!(parse_callback_request(request, "other")
-            .unwrap_err()
-            .contains("state mismatch"));
-        assert!(parse_callback_request(
-            "GET /other?code=abc&state=expected HTTP/1.1\r\n\r\n",
-            "expected"
-        )
-        .is_err());
+    fn password_login_errors_are_stable_and_do_not_expose_provider_details() {
+        assert!(
+            password_login_error(Some("invalid_grant")).starts_with("oidc_credentials_invalid:")
+        );
+        assert!(password_login_error(Some("unauthorized_client"))
+            .starts_with("oidc_direct_grant_disabled:"));
+        assert!(
+            password_login_error(Some("temporarily_unavailable")).starts_with("oidc_login_failed:")
+        );
+        assert!(password_login_error(None).starts_with("oidc_login_failed:"));
     }
 
     #[test]

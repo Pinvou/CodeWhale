@@ -55,16 +55,13 @@ func NewService(config Config, store Store) (*Service, error) {
 }
 
 func (s *Service) Handler(static http.Handler) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /auth/login", s.login)
-	mux.HandleFunc("GET /auth/callback", s.callback)
-	mux.HandleFunc("GET /api/session", s.sessionStatus)
-	mux.HandleFunc("POST /api/logout", s.logout)
-	mux.HandleFunc("/api/account/{resource...}", s.proxyAccount)
-	mux.HandleFunc("/api/token/{resource...}", s.proxyToken)
-	if static != nil {
-		mux.Handle("/", static)
-	}
+	router := httpserver.NewRouter()
+	router.GET("/auth/login", httpserver.AdaptFunc(s.login))
+	router.GET("/auth/callback", httpserver.AdaptFunc(s.callback))
+	router.GET("/api/session", httpserver.AdaptFunc(s.sessionStatus))
+	router.POST("/api/logout", httpserver.AdaptFunc(s.logout))
+	router.Any("/api/account/*resource", httpserver.AdaptFunc(s.proxyAccount))
+	router.Any("/api/token/*resource", httpserver.AdaptFunc(s.proxyToken))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -79,7 +76,11 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 		if !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/auth/") {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
-		mux.ServeHTTP(w, r)
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || static == nil {
+			router.ServeHTTP(w, r)
+			return
+		}
+		static.ServeHTTP(w, r)
 	})
 }
 

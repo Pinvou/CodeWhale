@@ -7,7 +7,11 @@
     var invoke = context.invoke;
     return {
       session: function () { return invoke("account_platform_session"); },
-      login: function () { return invoke("account_platform_login"); },
+      login: function (username, password) {
+        return invoke("account_platform_login", {
+          credentials: { username: username, password: password },
+        });
+      },
       logout: function () { return invoke("account_platform_logout"); },
       request: function (request) {
         return invoke("account_platform_request", { request: request });

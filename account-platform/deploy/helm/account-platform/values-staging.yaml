@@ -24,7 +24,7 @@ observability:
 tokenGateway:
   secretProvider: remote
   secretKeyId: staging-account-token-v1
-  providerAllowedHosts: [newapi.staging.example.com]
+  providerAllowedHosts: [newapi]
 
 external:
   postgresCidrs: [10.120.0.0/24]

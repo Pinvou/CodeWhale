@@ -19,7 +19,7 @@
       "enabled": true,
       "publicClient": true,
       "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": false,
+      "directAccessGrantsEnabled": true,
       "implicitFlowEnabled": false,
       "redirectUris": [
         "http://127.0.0.1/*"

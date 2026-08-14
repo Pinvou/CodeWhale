@@ -31,6 +31,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [order, setOrder] = useState(null);
   const [qrData, setQrData] = useState('');
   const guardRef = useRef(createContextRequestGuard());
@@ -129,11 +131,15 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   };
 
   const login = () => run(async () => {
-    await client.login();
-    const account = await client.bootstrap();
-    setMe(account);
-    setAuth('ready');
-    await loadContext(account);
+    try {
+      await client.login(loginUsername, loginPassword);
+      const account = await client.bootstrap();
+      setMe(account);
+      setAuth('ready');
+      await loadContext(account);
+    } finally {
+      setLoginPassword('');
+    }
   });
 
   const logout = () => run(async () => {
@@ -155,7 +161,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   });
 
   if (auth === 'loading') return <div className={`ap-shell ap-centered ${portal ? 'ap-portal' : 'ap-desktop'}`}><div className="ap-spinner" />{copy.loading}</div>;
-  if (auth === 'guest' || auth === 'error') return <div className={`ap-shell ap-login ${portal ? 'ap-portal' : 'ap-desktop'}`}><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{copy.loginIntro}</p>{error && <div role="alert" className="ap-alert error">{error}</div>}{portal ? <a className="ap-primary" href="/auth/login">{copy.login}</a> : <button className="ap-primary" disabled={busy} onClick={login}>{copy.login}</button>}{onClose && <button className="ap-close" onClick={onClose}>{copy.close}</button>}</div></div>;
+  if (auth === 'guest' || auth === 'error') return <div className={`ap-shell ap-login ${portal ? 'ap-portal' : 'ap-desktop'}`}><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{portal ? copy.loginIntro : copy.desktopLoginIntro}</p>{error && <div role="alert" className="ap-alert error">{error}</div>}{portal ? <a className="ap-primary" href="/auth/login">{copy.login}</a> : <form className="ap-login-form" onSubmit={event => { event.preventDefault(); if (!busy && loginUsername.trim() && loginPassword) login(); }}><Field label={copy.account}><input autoComplete="username" value={loginUsername} onChange={event => setLoginUsername(event.target.value)} maxLength={320} /></Field><Field label={copy.password}><input type="password" autoComplete="current-password" value={loginPassword} onChange={event => setLoginPassword(event.target.value)} maxLength={4096} /></Field><button className="ap-primary" disabled={busy || !loginUsername.trim() || !loginPassword}>{busy ? copy.signingIn : copy.login}</button></form>}{onClose && <button className="ap-close" onClick={onClose}>{copy.close}</button>}</div></div>;
 
   return <div className={`ap-shell ap-app ${portal ? 'ap-portal' : 'ap-desktop'}`}>
     <aside className="ap-sidebar">

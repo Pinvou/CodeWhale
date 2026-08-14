@@ -62,6 +62,7 @@ function generatedComposeEnvironment() {
     BILLING_DB_PASSWORD: secret(),
     TOKEN_DB_PASSWORD: secret(),
     PAYMENT_SIM_DB_PASSWORD: secret(),
+    NEWAPI_DB_PASSWORD: secret(),
     KEYCLOAK_DB_PASSWORD: secret(),
     KEYCLOAK_ADMIN_USERNAME: `pinvou-test-${randomBytes(8).toString('hex')}`,
     KEYCLOAK_ADMIN_PASSWORD: secret(),
@@ -72,6 +73,8 @@ function generatedComposeEnvironment() {
     PAYMENT_SIM_PAY_TOKEN_SECRET: secret(48),
     TOKEN_LOCAL_KEK_BASE64: randomBytes(32).toString('base64'),
     MOCK_NEWAPI_KEY: secret(48),
+    NEWAPI_SESSION_SECRET: secret(48),
+    NEWAPI_CRYPTO_SECRET: secret(48),
   };
 }
 
@@ -83,8 +86,8 @@ function ensureNodeModules() {
 
 function verify() {
   ensureNodeModules();
-  run(executable('go'), ['test', './...'], { cwd: platformRoot });
-  run(executable('go'), ['vet', './...'], { cwd: platformRoot });
+  run(executable('go'), ['test', '-tags=nomsgpack', './...'], { cwd: platformRoot });
+  run(executable('go'), ['vet', '-tags=nomsgpack', './...'], { cwd: platformRoot });
   runNpm(['test'], { cwd: platformRoot });
   run('python', ['scripts/architecture-guard.py']);
   run('git', ['diff', '--check']);
@@ -94,7 +97,7 @@ function compose(action) {
   if (!existsSync(composeEnv)) {
     throw new Error(`Compose environment is missing: copy ${composeEnv}.example to ${composeEnv} and replace every placeholder`);
   }
-  run('docker', ['compose', '--env-file', composeEnv, '-f', composeFile, action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
+  run('docker', ['compose', '--env-file', composeEnv, '-f', composeFile, ...(action === 'up' ? ['--profile', 'real-newapi'] : []), action, ...(action === 'up' ? ['--build', '-d', '--wait'] : [])]);
 }
 
 function composeTest(testFiles) {
@@ -149,7 +152,7 @@ try {
   if (scope === 'verify' && action === undefined) verify();
   else if (scope === 'dev' && action === 'up') compose('up');
   else if (scope === 'dev' && action === 'down') compose('down');
-  else if (scope === 'test' && action === 'unit') run(executable('go'), ['test', './...'], { cwd: platformRoot });
+  else if (scope === 'test' && action === 'unit') run(executable('go'), ['test', '-tags=nomsgpack', './...'], { cwd: platformRoot });
   else if (scope === 'test' && action === 'contract') {
     ensureNodeModules();
     runNpm(['test'], { cwd: platformRoot });

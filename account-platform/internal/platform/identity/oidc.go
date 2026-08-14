@@ -11,6 +11,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/gin-gonic/gin"
 )
 
 type Principal struct {
@@ -112,4 +113,24 @@ func Middleware(verify VerifyFunc, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalContextKey{}, principal)))
 	})
+}
+
+func GinMiddleware(verify VerifyFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		header := c.Request.Header.Get("Authorization")
+		parts := strings.Fields(header)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
+			api.WriteError(c.Writer, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		principal, err := verify(c.Request.Context(), parts[1])
+		if err != nil {
+			api.WriteError(c.Writer, http.StatusUnauthorized, "AUTH_REQUIRED", "the bearer token is invalid", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), principalContextKey{}, principal))
+		c.Next()
+	}
 }

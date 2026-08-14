@@ -62,7 +62,7 @@ func HandlerWithApplication(cfg config.Config, application http.Handler, ready f
 }
 
 func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(context.Context) error) (http.Handler, *httpMetrics) {
-	mux := http.NewServeMux()
+	health := NewRouter()
 	metrics := newHTTPMetrics(cfg.ServiceName)
 	status := func(state string, check func(context.Context) error) http.HandlerFunc {
 		return func(w http.ResponseWriter, _ *http.Request) {
@@ -87,12 +87,16 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 			})
 		}
 	}
-	mux.HandleFunc("GET /health/live", status("ok", nil))
-	mux.HandleFunc("GET /health/ready", status("ready", ready))
-	if application != nil {
-		mux.Handle("/", application)
-	}
-	observed := metrics.middleware(withRateLimit(cfg, mux), newLogger(cfg))
+	health.GET("/health/live", AdaptFunc(status("ok", nil)))
+	health.GET("/health/ready", AdaptFunc(status("ready", ready)))
+	dispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" || application == nil {
+			health.ServeHTTP(w, r)
+			return
+		}
+		application.ServeHTTP(w, r)
+	})
+	observed := metrics.middleware(withRateLimit(cfg, dispatch), newLogger(cfg))
 	return otelhttp.NewHandler(withRequestID(withSecurityHeaders(cfg, observed)), cfg.ServiceName), metrics
 }
 

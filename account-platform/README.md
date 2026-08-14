@@ -20,12 +20,12 @@
 
 新账号入口由 `PINVOU_ACCOUNT_PLATFORM_ENABLED` 显式开启，默认关闭，关闭时原有 `llmapi_hub` 入口和模型路径不变。开启时还需配置：
 
-- `PINVOU_ACCOUNT_OIDC_ISSUER`，或分别配置 `PINVOU_ACCOUNT_OIDC_AUTHORIZATION_URL` 与 `PINVOU_ACCOUNT_OIDC_TOKEN_URL`；
-- `PINVOU_ACCOUNT_OIDC_CLIENT_ID`（公开客户端，必须启用 Authorization Code、PKCE S256 和 loopback redirect）；
+- `PINVOU_ACCOUNT_OIDC_ISSUER`，或配置 `PINVOU_ACCOUNT_OIDC_TOKEN_URL`；
+- `PINVOU_ACCOUNT_OIDC_CLIENT_ID`（公开客户端，桌面内登录必须启用 Direct Access Grants；Web Portal 仍使用 Authorization Code + PKCE）；
 - `PINVOU_ACCOUNT_SERVICE_URL`；
 - `PINVOU_TOKEN_GATEWAY_URL`。
 
-远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端使用系统浏览器和临时 loopback 回调，Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。
+远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端在应用内收集账号密码并通过 Rust 一次性提交给 Keycloak Token Endpoint；密码不持久化、不写日志，完成请求后即释放。Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。注册、找回密码、第三方身份和复杂 MFA 不经过该密码接口，需使用相应的独立流程。
 
 ## Token Gateway 安全默认值
 
@@ -36,6 +36,8 @@
 - 支付回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置，客户端不能提交回调 URL。
 
 `mock-newapi` 只属于开发 Compose 后端网络，不发布宿主机端口；可用于验证正常、限流、断流和缺失 usage 场景。
+
+真实模型数据面使用独立部署的官方 New API。开发命令启用 `real-newapi` Compose profile，生产 Helm 以固定版本和镜像摘要部署仅供 Token Gateway 私网访问的 New API；初始化与升级流程见 [`deploy/runbooks/newapi-deployment.md`](deploy/runbooks/newapi-deployment.md)。
 
 ## 本地命令
 

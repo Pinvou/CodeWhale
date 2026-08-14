@@ -26,6 +26,7 @@ services:
       BILLING_DB_PASSWORD: ${BILLING_DB_PASSWORD:?set BILLING_DB_PASSWORD}
       TOKEN_DB_PASSWORD: ${TOKEN_DB_PASSWORD:?set TOKEN_DB_PASSWORD}
       PAYMENT_SIM_DB_PASSWORD: ${PAYMENT_SIM_DB_PASSWORD:?set PAYMENT_SIM_DB_PASSWORD}
+      NEWAPI_DB_PASSWORD: ${NEWAPI_DB_PASSWORD:?set NEWAPI_DB_PASSWORD}
       KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?set KEYCLOAK_DB_PASSWORD}
     volumes:
       - postgres-data:/var/lib/postgresql/data
@@ -167,7 +168,7 @@ services:
       TOKEN_SECRET_KEY_ID: pinvou-development-local-v1
       TOKEN_LOCAL_KEK_BASE64: ${TOKEN_LOCAL_KEK_BASE64:?set TOKEN_LOCAL_KEK_BASE64}
       TOKEN_GATEWAY_MAX_INPUT_TOKENS: "128000"
-      TOKEN_PROVIDER_ALLOWED_HOSTS: mock-newapi
+      TOKEN_PROVIDER_ALLOWED_HOSTS: mock-newapi,newapi
       NATS_URL: nats://nats:4222
     depends_on:
       postgres:
@@ -265,6 +266,44 @@ services:
       APP_ENV: development
       PORT: 8080
       MOCK_NEWAPI_KEY: ${MOCK_NEWAPI_KEY:?set MOCK_NEWAPI_KEY}
+
+  newapi:
+    <<: *service-defaults
+    profiles: [real-newapi]
+    image: calciumion/new-api:v1.0.0-rc.11@sha256:bd30213d808857bb569ef47d3c9209d061a66ea089c2472ef46ce51e75517f19
+    user: "65532:65532"
+    cap_drop: [ALL]
+    tmpfs:
+      - /tmp:size=16m,mode=1777,uid=65532,gid=65532
+      - /data:size=64m,mode=0700,uid=65532,gid=65532
+    environment:
+      PORT: 3000
+      TZ: Asia/Shanghai
+      GIN_MODE: release
+      SQL_DSN: postgresql://new_api:${NEWAPI_DB_PASSWORD:?set NEWAPI_DB_PASSWORD}@postgres:5432/account_platform_newapi?sslmode=disable
+      REDIS_CONN_STRING: redis://redis:6379/1
+      SESSION_SECRET: ${NEWAPI_SESSION_SECRET:?set NEWAPI_SESSION_SECRET}
+      CRYPTO_SECRET: ${NEWAPI_CRYPTO_SECRET:?set NEWAPI_CRYPTO_SECRET}
+      TRUSTED_PROXIES: none
+      NODE_TYPE: master
+      BATCH_UPDATE_ENABLED: "true"
+      ERROR_LOG_ENABLED: "true"
+      STREAMING_TIMEOUT: "300"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/api/status | grep -q '\"success\":true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "127.0.0.1:18106:3000"
+    networks:
+      - backend
+
   payment-simulator:
     <<: *service-defaults
     build:

@@ -57,6 +57,7 @@ metadata: { name: {{ include "pinvou.fullname" . }}-internal-and-approved-egress
 spec:
   podSelector:
     matchLabels: {{ include "pinvou.selector" . | nindent 6 }}
+    matchExpressions: [{ key: pinvou.io/newapi-data-plane, operator: DoesNotExist }]
   policyTypes: [Ingress, Egress]
   ingress:
     - from:
@@ -83,9 +84,21 @@ kind: NetworkPolicy
 metadata: { name: {{ include "pinvou.fullname" . }}-newapi-data-plane }
 spec:
   podSelector: { matchLabels: { pinvou.io/newapi-data-plane: "true" } }
-  policyTypes: [Ingress]
+  policyTypes: [Ingress, Egress]
   ingress:
     - from:
         - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: token-gateway } }
       ports: [{ protocol: TCP, port: 8080 }]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: redis } }
+      ports: [{ protocol: TCP, port: 6379 }]
+    {{- range $cidr := .Values.external.postgresCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 5432 }]
+    {{- end }}
+    {{- range $cidr := .Values.external.modelProviderCidrs }}
+    - to: [{ ipBlock: { cidr: {{ $cidr | quote }} } }]
+      ports: [{ protocol: TCP, port: 443 }]
+    {{- end }}
 {{- end }}

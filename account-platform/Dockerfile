@@ -13,10 +13,11 @@ COPY internal ./internal
 COPY migrations ./migrations
 RUN test -n "$SERVICE" && \
     CGO_ENABLED=0 go build \
+      -tags=nomsgpack \
       -trimpath \
       -ldflags="-s -w -X github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver.version=${VERSION} -X github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver.commit=${COMMIT}" \
       -o /out/service "./cmd/${SERVICE}" && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck
+    CGO_ENABLED=0 go build -tags=nomsgpack -trimpath -ldflags="-s -w" -o /out/healthcheck ./cmd/healthcheck
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

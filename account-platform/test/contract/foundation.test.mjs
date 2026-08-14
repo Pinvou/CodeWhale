@@ -75,6 +75,11 @@ test('Compose keeps data stores private and simulator development-only', async (
     assert.deepEqual(compose.services[service].networks, ['backend', 'edge'], `${service} must publish only through loopback edge bindings`);
   }
   assert.equal(compose.services['payment-simulator'].environment.APP_ENV, 'development');
+  assert.deepEqual(compose.services.newapi.profiles, ['real-newapi']);
+  assert.deepEqual(compose.services.newapi.networks, ['backend']);
+  assert.match(compose.services.newapi.image, /^calciumion\/new-api:v1\.0\.0-rc\.11@sha256:[a-f0-9]{64}$/);
+  assert.deepEqual(compose.services.newapi.ports, ['127.0.0.1:18106:3000']);
+  assert.match(compose.services['token-gateway'].environment.TOKEN_PROVIDER_ALLOWED_HOSTS, /(?:^|,)newapi(?:,|$)/);
   assert.match(compose.services['billing-service'].environment.DATABASE_URL, /account_platform_billing/);
   assert.match(compose.services['account-service'].environment.DATABASE_URL, /account_platform_account/);
   assert.match(compose.services['token-gateway'].environment.DATABASE_URL, /account_platform_token/);
@@ -95,13 +100,13 @@ test('Compose keeps data stores private and simulator development-only', async (
   }
 });
 
-test('Keycloak development client disables unsafe grants', async () => {
+test('Keycloak development client enables password login without enabling implicit flow', async () => {
   const realm = JSON.parse(await readFile(path.join(root, 'deploy/keycloak/pinvou-dev-realm.json'), 'utf8'));
   const desktop = realm.clients.find((client) => client.clientId === 'pinvou-desktop-dev');
   assert.ok(desktop);
   assert.equal(desktop.publicClient, true);
   assert.equal(desktop.standardFlowEnabled, true);
-  assert.equal(desktop.directAccessGrantsEnabled, false);
+  assert.equal(desktop.directAccessGrantsEnabled, true);
   assert.equal(desktop.implicitFlowEnabled, false);
   assert.deepEqual(desktop.redirectUris, ['http://127.0.0.1/*']);
 });

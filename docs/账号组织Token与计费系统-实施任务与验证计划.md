@@ -241,14 +241,14 @@ flowchart TD
 交付：
 
 - Realm、桌面公开客户端、Web BFF 机密客户端和服务客户端配置。
-- Authorization Code + PKCE、Refresh Token Rotation、MFA、精确 Redirect URI。
+- Web Authorization Code + PKCE、桌面 Direct Access Grant、Refresh Token Rotation、MFA 和精确 Redirect URI。
 - 开发 Realm 可重复导入；生产配置只含引用，不含密钥。
 
 测试：
 
 - 注册、登录、刷新、退出、刷新令牌重放和会话撤销。
 - 错误 issuer、audience、签名、过期时间和 redirect URI 均拒绝。
-- 桌面端不使用密码模式和 Implicit Flow。
+- 桌面公开客户端允许 Direct Access Grant，但禁用 Implicit Flow；密码不持久化、不记录日志。
 
 #### T21 用户开户与个人上下文
 
@@ -522,11 +522,11 @@ flowchart TD
 
 ### 任务组 6：品悟桌面端和 Token Web Portal
 
-#### T60 桌面端 OIDC 与兼容开关
+#### T60 桌面端身份登录与兼容开关
 
 交付：
 
-- `account-platform` feature、Tauri/Web Bridge、OIDC 系统浏览器 + PKCE、系统凭据存储。
+- `account-platform` feature、Tauri/Web Bridge、应用内账号密码登录、系统凭据存储。
 - `PINVOU_ACCOUNT_PLATFORM_ENABLED` 或等价服务端能力开关，默认不影响旧 `llmapi_hub`。
 - 新账号模式启用时不再以 BIOS SN 或 New API 用户名密码作为业务身份。
 
@@ -534,7 +534,7 @@ flowchart TD
 
 - 开关关闭时现有账号和模型路径行为不变。
 - 开关开启时登录、刷新、退出、令牌过期恢复正常。
-- Refresh Token 不进入前端 JS、日志或普通设置文件。
+- 密码不持久化、不进入日志；Refresh Token 不进入前端 JS、日志或普通设置文件。
 - Windows、macOS、Linux 对不支持状态给出明确错误。
 
 #### T61 账号和组织 UI
@@ -907,7 +907,7 @@ cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-thre
 
 自动化通过后至少执行：
 
-1. 用桌面端真实系统浏览器完成 Keycloak 登录。
+1. 用桌面端应用内账号密码表单完成 Keycloak 登录，并确认密码不被保存。
 2. 在两个设备/两个会话激活不同组织，确认互不覆盖。
 3. 手机扫描三个模拟渠道二维码并付款。
 4. 付款前关闭品悟，确认后台仍入账，重开后余额正确。

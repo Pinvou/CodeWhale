@@ -100,7 +100,7 @@ const expectedProtocolHashes = {
   voice: '2e6789eca3969f27e8e0fd9f034bd82e0b0e1f302152efc65c5714839fbf5b72',
   workflow: 'c92e92ed3dc3850bae17f451810184fad2cadbfda6bf9f565a8b2862ad0595a1',
   teamRelay: '557de5c0a8a9e3284c396cb7754b03b1f2252367dcc7a03fceecf923f2f7728e',
-  accountPlatform: 'feca5c0d6c3eae01124af18eeecc95555886d4d60227bfa2613ae7ff1dabb90c',
+  accountPlatform: '465220e68baeaf4da1b5ff037ebcd027c44a3f015cdf195b96488de31fee0864',
 };
 
 for (const [domain, files] of Object.entries(protocolSources)) {

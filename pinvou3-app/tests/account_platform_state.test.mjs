@@ -90,7 +90,10 @@ test('desktop client keeps OAuth tokens behind the account-platform Bridge', asy
   const calls = [];
   const transport = {
     session: async () => ({ enabled: true, configured: true, authenticated: true }),
-    login: async () => ({ authenticated: true }),
+    login: async (username, password) => {
+      calls.push({ username, password });
+      return { authenticated: true };
+    },
     logout: async () => ({ authenticated: false }),
     request: async request => {
       calls.push(request);
@@ -99,8 +102,10 @@ test('desktop client keeps OAuth tokens behind the account-platform Bridge', asy
   };
   const client = new AccountPlatformDesktopClient(transport);
   assert.equal((await client.session()).authenticated, true);
+  await client.login('user@example.test', 'one-time-password');
   await client.createRecharge('product-10', 'ALIPAY', 'recharge-id');
-  assert.deepEqual(calls[0], {
+  assert.deepEqual(calls[0], { username: 'user@example.test', password: 'one-time-password' });
+  assert.deepEqual(calls[1], {
     area: 'token',
     resource: '/v1/recharge/orders',
     method: 'POST',
