@@ -752,12 +752,12 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
       const toastKey = { accept_transfer: 'transferAccepted', decline_transfer: 'transferDeclined', withdraw_transfer: 'transferWithdrawn', reroute_transfer: 'transferRerouted', accept: 'accepted', note: 'progressUpdated', return: 'returned', handoff: 'handedOff', final_deliver: 'delivered', request_changes: 'supplementRequested', cancel: 'cancelled' }[kind];
       const directTransfer = new Set(['handoff', 'reroute_transfer']).has(kind)
         && (!confirmedTransfers || result?.transfer_mode === 'direct_legacy');
-      const message = directTransfer
+      const toastMessage = directTransfer
         ? kind === 'handoff'
           ? copy.legacyTransfers.handedOffToast
           : copy.legacyTransfers.reroutedToast
         : copy.toasts[toastKey];
-      setDialog(null); setToast(message || '');
+      setDialog(null); setToast(toastMessage || '');
       return result;
     } catch {
       /* Bridge state renders the authoritative error. */
