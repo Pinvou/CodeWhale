@@ -61,6 +61,13 @@ test("relay changes select the web UI smoke", () => {
   );
 });
 
+test("team relay changes select its action smoke", () => {
+  assert.deepEqual(
+    labels(selectFrontendSmokes(["pinvou3-app/src/features/team-relay/TeamRelayView.jsx"])),
+    ["npm:test:ui-smoke", "npm:test:team-relay-ui"],
+  );
+});
+
 test("unknown frontend features fail closed to the full browser suite", () => {
   assert.deepEqual(
     labels(selectFrontendSmokes(["pinvou3-app/src/features/search/SearchView.jsx"])),
