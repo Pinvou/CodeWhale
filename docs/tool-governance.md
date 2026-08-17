@@ -28,9 +28,9 @@ Pinvou disallowed_tools（模式、连接器、技能空态等动态拒绝）
 | 职责 | 文件 |
 |---|---|
 | Pinvou 正向白名单 | `pinvou3-app/src-tauri/src/features/assistant/tool_policy.rs` |
-| 能力档案 | `pinvou3-app/src-tauri/resources/common/capability-profiles.json` |
-| 档案解析 | `pinvou3-app/src-tauri/src/features/assistant/capability_profile.rs` |
+| 模式能力静态表 | `pinvou3-app/src-tauri/src/features/assistant/session_policy.rs` 的 `MODE_TABLE` |
 | 模式与动态拒绝整形 | `pinvou3-app/src-tauri/src/features/assistant/session_policy.rs`、`platform/bridge.rs::shape_disallowed_tools` |
+| 能力包与 scope 治理 | `docs/capability-governance.md` |
 | 底座注册、过滤与执行 | `CodeWhale/crates/tui/src/core/engine.rs` 及其工具注册模块 |
 
 ## 2. Pinvou 正向白名单
@@ -64,17 +64,18 @@ v0.9.5 的模型侧名称以 canonical family 为准：
 
 ## 4. work / code 模式差量
 
-能力档案只声明需要继续拒绝的差量，不再维护 `include`：
+模式差量由编译期静态表 `MODE_TABLE` 声明，不再维护运行时能力档案：
 
 | 维度 | work（plain） | code |
 |---|---|---|
-| 档案 `tools.exclude` | `Git` | 空 |
-| 模式固有隐藏 | 空 | `mcp_pinvou3_present_artifact` |
-| 连接器禁用集 | Plain scope | Code scope |
+| 原生家族 | 公共白名单（含 `Git`） | 公共白名单（含 `Git`） |
+| `MODE_TABLE.unavailable_tools` | 空 | `mcp_pinvou3_present_artifact` |
+| 能力包默认策略 | AllowAll | DenyAll |
+| 连接器/技能禁用集 | `plain` scope | `code` scope |
 | `load_skill` | 按正常技能状态 | 会话组合技能目录为空时隐藏 |
 | 项目规则与代码层指令 | 不绑定 | 绑定项目并使用 code instructions |
 
-因此，#238 在 v0.9.0 上“逐个 include 8 个旧工具名”的产品目标，在 v0.9.5 上由 **code 模式允许 `Git` canonical family + 公共正向白名单**承接；不再存在 8 个 `hidden_tools` 注入项。work 模式通过拒绝整个 `Git` family 保持非代码工具面。
+因此，#238 在 v0.9.0 上“逐个 include 8 个旧工具名”的产品目标，在 v0.9.5 上由 canonical family 与公共正向白名单承接；不再存在 8 个 `hidden_tools` 注入项。底座能力是产品承诺，plain 与 code 均允许 `Git` family；两种模式的外部能力风险姿态则由各自 scope 的默认策略和用户选择控制。
 
 code 会话默认 Plan 时，最终可用 action 仍受 Plan 注册面与只读 sandbox 限制；切换 Yolo 后才具备相应写入/执行面。产品层不得用白名单绕过底座模式安全边界。
 
@@ -82,11 +83,10 @@ code 会话默认 Plan 时，最终可用 action 仍受 Plan 注册面与只读 
 
 `shape_disallowed_tools` 在持久禁用集上叠加：
 
-1. 当前模式档案的 `exclude`；
-2. 当前模式的 `extra_hidden`；
-3. 对应连接器 scope 的禁用工具；
-4. code 会话技能组合目录为空时的 `load_skill`；
-5. 知识库、会话或产品状态产生的其他动态拒绝项。
+1. 当前模式 `MODE_TABLE` 的 `unavailable_tools`；
+2. 对应模式 scope 的连接器禁用工具；
+3. 当前模式要求且技能组合目录为空时的 `load_skill`；
+4. 知识库、会话或产品状态产生的其他动态拒绝项。
 
 同一名称重复加入时会去重。允许与拒绝冲突时拒绝优先；`restrict_tools=true` 的单轮请求还可进一步收敛到零工具。
 
@@ -96,15 +96,15 @@ code 会话默认 Plan 时，最终可用 action 仍受 Plan 注册面与只读 
 
 1. 确认 CodeWhale 当前模式确实注册该 canonical 名称/action，并核对 sandbox 与审批语义。
 2. 在 `PINVOU3_ALLOWED_TOOLS` 添加精确名称或最窄前缀；不要添加 replay 别名。
-3. 若只对某模式开放，在能力档案的另一模式 `exclude` 中声明拒绝，不要复制注册逻辑。
-4. 同步工具策略、能力档案、前端渲染与提示词契约测试。
+3. 若某模式架构上不提供该工具，在 `MODE_TABLE` 对应行的 `unavailable_tools` 中声明；用户可选的外部能力应走能力包 scope，不得混入模式身份。
+4. 同步工具策略、模式静态表、前端渲染与提示词契约测试。
 5. 更新本文和 `scripts/fork-guard.sh`，运行完整 fork guard 与 app 测试。
 
 ### 隐藏工具
 
 1. 全产品禁止：从正向白名单移除。
-2. 按模式禁止：写入能力档案 `tools.exclude`。
-3. 按连接器或运行状态禁止：通过 `disallowed_tools` 动态计算，不修改静态档案。
+2. 按模式禁止：仅架构缺席项写入 `MODE_TABLE.unavailable_tools`。
+3. 按连接器、技能或运行状态禁止：通过 scope 状态和 `disallowed_tools` 动态计算，不修改模式静态表。
 4. 不得仅隐藏 UI；执行层必须同步不可达。
 
 ## 7. 安全不变量
@@ -122,5 +122,6 @@ code 会话默认 Plan 时，最终可用 action 仍受 Plan 注册面与只读 
 |---|---|
 | 2026-08-10 | v0.9.0 能力档案曾为 code 模式从底座隐藏集放出 5 个 Git 工具及 `apply_patch`、`run_verifiers`、`exec_shell_cancel`。 |
 | 2026-08-11 | 升级 CodeWhale v0.9.5：切换到 canonical family、`allowed_tools` 正向白名单和单一 `disallowed_tools` 差量通道；旧 8 项 include 被等价迁移，不再作为模型侧工具名维护。 |
+| 2026-08-14 | 退役无运行时写入者的能力档案，模式架构差量收敛为 `MODE_TABLE`；plain 放开 `Git` family，外部能力默认姿态改由按模式 scope 管理。 |
 
 每次 CodeWhale 升级都必须重新核对 canonical 名称、各模式注册面、首轮/延迟加载策略、前端历史回放兼容和本文档；不能只凭旧工具名相同就判定行为等价。
