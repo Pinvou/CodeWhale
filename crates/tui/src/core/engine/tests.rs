@@ -16186,6 +16186,7 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         tx_steer: mpsc::channel(1).0,
         shared_paused: Arc::new(StdMutex::new(false)),
         client_preflight_required: true,
+        steer_keep_inbox: Arc::new(AtomicBool::new(true)),
         live_runtime_authority: Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
             LiveRuntimeAuthority::from_fields(
                 AppMode::Agent,
