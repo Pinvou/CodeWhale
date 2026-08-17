@@ -26,6 +26,18 @@ use crate::tools::tool_call_budget::ToolCallBudget;
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 const TOOL_ERROR_DEGRADATION_THRESHOLD: u32 = 2;
 
+fn tool_log_message_for_policy(
+    restricted: bool,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+) -> String {
+    if restricted {
+        "Planning restricted tool with redacted input".to_string()
+    } else {
+        format!("Planning tool '{tool_name}' with input: {tool_input:?}")
+    }
+}
+
 pub(super) fn append_stuck_runtime_notice(content: String) -> String {
     format!("{content}\n\n{STUCK_RUNTIME_NOTICE}")
 }
@@ -1283,9 +1295,15 @@ impl Engine {
                             input,
                             caller,
                         } => {
-                            crate::logging::info(format!(
-                                "Tool '{name}' block start. Initial input: {input:?}"
-                            ));
+                            if self.active_turn_tool_security.is_some() {
+                                crate::logging::info(
+                                    "Restricted tool block start (details redacted)",
+                                );
+                            } else {
+                                crate::logging::info(format!(
+                                    "Tool '{name}' block start. Initial input: {input:?}"
+                                ));
+                            }
                             current_block_kind = Some(ContentBlockKind::ToolUse);
                             current_tool_indices.insert(index, tool_uses.len());
                             // ToolCallStarted is deferred to ContentBlockStop —
@@ -1302,9 +1320,15 @@ impl Engine {
                             });
                         }
                         ContentBlockStart::ServerToolUse { id, name, input } => {
-                            crate::logging::info(format!(
-                                "Server tool '{name}' block start. Initial input: {input:?}"
-                            ));
+                            if self.active_turn_tool_security.is_some() {
+                                crate::logging::info(
+                                    "Restricted server tool block start (details redacted)",
+                                );
+                            } else {
+                                crate::logging::info(format!(
+                                    "Server tool '{name}' block start. Initial input: {input:?}"
+                                ));
+                            }
                             current_block_kind = Some(ContentBlockKind::ToolUse);
                             current_tool_indices.insert(index, tool_uses.len());
                             tool_uses.push(ToolUseState {
@@ -1369,16 +1393,28 @@ impl Engine {
                                 && let Some(tool_state) = tool_uses.get_mut(tool_idx)
                             {
                                 tool_state.input_buffer.push_str(&partial_json);
-                                crate::logging::info(format!(
-                                    "Tool '{}' input delta: {} (buffer now: {})",
-                                    tool_state.name, partial_json, tool_state.input_buffer
-                                ));
+                                if self.active_turn_tool_security.is_some() {
+                                    crate::logging::info(
+                                        "Restricted tool input delta (details redacted)",
+                                    );
+                                } else {
+                                    crate::logging::info(format!(
+                                        "Tool '{}' input delta: {} (buffer now: {})",
+                                        tool_state.name, partial_json, tool_state.input_buffer
+                                    ));
+                                }
                                 if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
                                     tool_state.input = value.clone();
-                                    crate::logging::info(format!(
-                                        "Tool '{}' input parsed: {:?}",
-                                        tool_state.name, value
-                                    ));
+                                    if self.active_turn_tool_security.is_some() {
+                                        crate::logging::info(
+                                            "Restricted tool input parsed (details redacted)",
+                                        );
+                                    } else {
+                                        crate::logging::info(format!(
+                                            "Tool '{}' input parsed: {:?}",
+                                            tool_state.name, value
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1421,22 +1457,40 @@ impl Engine {
                         if let Some(tool_idx) = current_tool_indices.remove(&index)
                             && let Some(tool_state) = tool_uses.get_mut(tool_idx)
                         {
-                            crate::logging::info(format!(
-                                "Tool '{}' block stop. Buffer: '{}', Current input: {:?}",
-                                tool_state.name, tool_state.input_buffer, tool_state.input
-                            ));
+                            if self.active_turn_tool_security.is_some() {
+                                crate::logging::info(
+                                    "Restricted tool block stop (details redacted)",
+                                );
+                            } else {
+                                crate::logging::info(format!(
+                                    "Tool '{}' block stop. Buffer: '{}', Current input: {:?}",
+                                    tool_state.name, tool_state.input_buffer, tool_state.input
+                                ));
+                            }
                             if !tool_state.input_buffer.trim().is_empty() {
                                 if let Some(value) = parse_tool_input(&tool_state.input_buffer) {
                                     tool_state.input = value;
-                                    crate::logging::info(format!(
-                                        "Tool '{}' final input: {:?}",
-                                        tool_state.name, tool_state.input
-                                    ));
+                                    if self.active_turn_tool_security.is_some() {
+                                        crate::logging::info(
+                                            "Restricted tool final input (details redacted)",
+                                        );
+                                    } else {
+                                        crate::logging::info(format!(
+                                            "Tool '{}' final input: {:?}",
+                                            tool_state.name, tool_state.input
+                                        ));
+                                    }
                                 } else {
-                                    crate::logging::warn(format!(
-                                        "Tool '{}' failed to parse final input buffer: '{}'",
-                                        tool_state.name, tool_state.input_buffer
-                                    ));
+                                    if self.active_turn_tool_security.is_some() {
+                                        crate::logging::warn(
+                                            "Restricted tool input parse failed (details redacted)",
+                                        );
+                                    } else {
+                                        crate::logging::warn(format!(
+                                            "Tool '{}' failed to parse final input buffer: '{}'",
+                                            tool_state.name, tool_state.input_buffer
+                                        ));
+                                    }
                                     let error =
                                         malformed_tool_arguments_error(&tool_state.input_buffer);
                                     tool_state.input_parse_error = Some(error);
@@ -1451,10 +1505,16 @@ impl Engine {
                                         .await;
                                 }
                             } else {
-                                crate::logging::warn(format!(
-                                    "Tool '{}' input buffer is empty, using initial input: {:?}",
-                                    tool_state.name, tool_state.input
-                                ));
+                                if self.active_turn_tool_security.is_some() {
+                                    crate::logging::warn(
+                                        "Restricted tool input buffer is empty (details redacted)",
+                                    );
+                                } else {
+                                    crate::logging::warn(format!(
+                                        "Tool '{}' input buffer is empty, using initial input: {:?}",
+                                        tool_state.name, tool_state.input
+                                    ));
+                                }
                             }
 
                             // Now that the input is finalized, announce the
@@ -1486,7 +1546,13 @@ impl Engine {
                         // surfaces fatal errors as stream Err items; this
                         // defensive arm keeps any passed-through error
                         // visible instead of silently dropped.
-                        crate::logging::warn(format!("Provider stream error event: {error}"));
+                        if self.active_turn_tool_security.is_some() {
+                            crate::logging::warn(
+                                "Restricted provider stream error (details redacted)",
+                            );
+                        } else {
+                            crate::logging::warn(format!("Provider stream error event: {error}"));
+                        }
                         stream_errors += 1;
                     }
                 }
@@ -2271,8 +2337,10 @@ impl Engine {
                 let mut tool_name = tool.name.clone();
                 let mut tool_input = tool.input.clone();
                 let tool_caller = tool.caller.clone();
-                crate::logging::info(format!(
-                    "Planning tool '{tool_name}' with input: {tool_input:?}"
+                crate::logging::info(tool_log_message_for_policy(
+                    self.active_turn_tool_security.is_some(),
+                    &tool_name,
+                    &tool_input,
                 ));
 
                 let requested_tool_name = tool_name.clone();
@@ -2403,6 +2471,10 @@ impl Engine {
 
                 if blocked_error.is_none()
                     && let Some(hook_executor) = self.config.hook_executor.as_ref()
+                    && self
+                        .active_turn_tool_security
+                        .as_ref()
+                        .is_none_or(|policy| policy.allows_hooks())
                     && hook_executor.has_hooks_for_event(crate::hooks::HookEvent::ToolCallBefore)
                 {
                     // Warn if any ToolCallBefore hook is configured as background
@@ -2575,11 +2647,14 @@ impl Engine {
                         )
                     {
                         approval_required = false;
-                        emit_tool_audit(json!({
-                            "event": "tool.workspace_write_carve_out",
-                            "tool_id": tool_id.clone(),
-                            "tool_name": tool_name.clone(),
-                        }));
+                        emit_tool_audit_for_policy(
+                            self.active_turn_tool_security.is_some(),
+                            json!({
+                                "event": "tool.workspace_write_carve_out",
+                                "tool_id": tool_id.clone(),
+                                "tool_name": tool_name.clone(),
+                            }),
+                        );
                     }
 
                     let approval = match prepared.call.approval {
@@ -2587,17 +2662,20 @@ impl Engine {
                         ApprovalRequirement::Suggest => "suggest",
                         ApprovalRequirement::Required => "required",
                     };
-                    emit_tool_audit(json!({
-                        "event": "tool.prepared",
-                        "tool_id": tool_id.clone(),
-                        "tool_name": tool_name.clone(),
-                        "read_only": read_only,
-                        "supports_parallel": supports_parallel,
-                        "starts_detached": detached_start,
-                        "approval": approval,
-                        "resources": &resources,
-                        "reprepared_after_hook": reprepared_after_hook,
-                    }));
+                    emit_tool_audit_for_policy(
+                        self.active_turn_tool_security.is_some(),
+                        json!({
+                            "event": "tool.prepared",
+                            "tool_id": tool_id.clone(),
+                            "tool_name": tool_name.clone(),
+                            "read_only": read_only,
+                            "supports_parallel": supports_parallel,
+                            "starts_detached": detached_start,
+                            "approval": approval,
+                            "resources": &resources,
+                            "reprepared_after_hook": reprepared_after_hook,
+                        }),
+                    );
                 }
 
                 if blocked_error.is_none()
@@ -2676,11 +2754,14 @@ impl Engine {
                         crate::config::is_workspace_trusted(&self.session.workspace),
                         false,
                     );
-                    emit_tool_audit(json!({
-                        "event": "tool.auto_review_decision",
-                        "tool_id": tool_id.clone(),
-                        "auto_review": audit_event,
-                    }));
+                    emit_tool_audit_for_policy(
+                        self.active_turn_tool_security.is_some(),
+                        json!({
+                            "event": "tool.auto_review_decision",
+                            "tool_id": tool_id.clone(),
+                            "auto_review": audit_event,
+                        }),
+                    );
                     match decision {
                         AutoReviewPlanDecision::NoChange => {}
                         AutoReviewPlanDecision::Allow => {
@@ -2716,18 +2797,21 @@ impl Engine {
                         &tool_input,
                     )
                 {
-                    emit_tool_audit(json!({
-                        "event": "tool.repo_law_decision",
-                        "tool_id": tool_id.clone(),
-                        "decision": match &decision {
-                            crate::repo_law::RepoLawPlanDecision::ForcePrompt(_) => "force_prompt",
-                            crate::repo_law::RepoLawPlanDecision::Block(_) => "block",
-                        },
-                        "reason": match &decision {
-                            crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason)
-                            | crate::repo_law::RepoLawPlanDecision::Block(reason) => reason.clone(),
-                        },
-                    }));
+                    emit_tool_audit_for_policy(
+                        self.active_turn_tool_security.is_some(),
+                        json!({
+                            "event": "tool.repo_law_decision",
+                            "tool_id": tool_id.clone(),
+                            "decision": match &decision {
+                                crate::repo_law::RepoLawPlanDecision::ForcePrompt(_) => "force_prompt",
+                                crate::repo_law::RepoLawPlanDecision::Block(_) => "block",
+                            },
+                            "reason": match &decision {
+                                crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason)
+                                | crate::repo_law::RepoLawPlanDecision::Block(reason) => reason.clone(),
+                            },
+                        }),
+                    );
                     match decision {
                         crate::repo_law::RepoLawPlanDecision::ForcePrompt(reason) => {
                             if self.session.auto_approve {
@@ -2761,13 +2845,16 @@ impl Engine {
                         &mut deferred_tools_hydrated_this_batch,
                     )
                 {
-                    emit_tool_audit(json!({
-                        "event": "tool.schema_hydrated",
-                        "tool_id": tool_id.clone(),
-                        "tool_name": tool_name.clone(),
-                        "auto_retry_same_turn": true,
-                        "metadata": result.metadata,
-                    }));
+                    emit_tool_audit_for_policy(
+                        self.active_turn_tool_security.is_some(),
+                        json!({
+                            "event": "tool.schema_hydrated",
+                            "tool_id": tool_id.clone(),
+                            "tool_name": tool_name.clone(),
+                            "auto_retry_same_turn": true,
+                            "metadata": result.metadata,
+                        }),
+                    );
                     if should_emit_hydration_status {
                         let status = if requested_tool_name == tool_name {
                             format!(
@@ -3042,6 +3129,7 @@ impl Engine {
                         let context_override = batch_tool_context.clone();
                         let cancel_token = self.cancel_token.clone();
                         let turn_tool_security = self.active_turn_tool_security.clone();
+                        let restricted_audit = turn_tool_security.is_some();
 
                         tool_tasks.push(async move {
                             let _shell_permit = if plan.name == "exec_shell" {
@@ -3078,12 +3166,15 @@ impl Engine {
                                         &session_id,
                                     )
                             {
-                                emit_tool_audit(json!({
-                                    "event": "tool.spillover",
-                                    "tool_id": plan.id.clone(),
-                                    "tool_name": plan.name.clone(),
-                                    "path": path.display().to_string(),
-                                }));
+                                emit_tool_audit_for_policy(
+                                    restricted_audit,
+                                    json!({
+                                        "event": "tool.spillover",
+                                        "tool_id": plan.id.clone(),
+                                        "tool_name": plan.name.clone(),
+                                        "path": path.display().to_string(),
+                                    }),
+                                );
                             }
 
                             let _ = tx_event
@@ -3315,11 +3406,14 @@ impl Engine {
                             Option<crate::tools::ToolContext>,
                             Option<ToolApprovalStamp>,
                         ) = if plan.approval_required {
-                            emit_tool_audit(json!({
-                                "event": "tool.approval_required",
-                                "tool_id": tool_id.clone(),
-                                "tool_name": tool_name.clone(),
-                            }));
+                            emit_tool_audit_for_policy(
+                                self.active_turn_tool_security.is_some(),
+                                json!({
+                                    "event": "tool.approval_required",
+                                    "tool_id": tool_id.clone(),
+                                    "tool_name": tool_name.clone(),
+                                }),
+                            );
                             let approval_key = crate::tools::approval_cache::build_approval_key(
                                 &tool_name,
                                 &tool_input,
@@ -3351,23 +3445,29 @@ impl Engine {
 
                             match self.await_tool_approval(&tool_id).await {
                                 Ok(ApprovalResult::Approved) => {
-                                    emit_tool_audit(json!({
-                                        "event": "tool.approval_decision",
-                                        "tool_id": tool_id.clone(),
-                                        "tool_name": tool_name.clone(),
-                                        "decision": "approved",
-                                        "caller": caller_type_for_tool_use(tool_caller.as_ref()),
-                                    }));
+                                    emit_tool_audit_for_policy(
+                                        self.active_turn_tool_security.is_some(),
+                                        json!({
+                                            "event": "tool.approval_decision",
+                                            "tool_id": tool_id.clone(),
+                                            "tool_name": tool_name.clone(),
+                                            "decision": "approved",
+                                            "caller": caller_type_for_tool_use(tool_caller.as_ref()),
+                                        }),
+                                    );
                                     (None, None, Some(ToolApprovalStamp::ApprovedByUser))
                                 }
                                 Ok(ApprovalResult::Denied) => {
-                                    emit_tool_audit(json!({
-                                        "event": "tool.approval_decision",
-                                        "tool_id": tool_id.clone(),
-                                        "tool_name": tool_name.clone(),
-                                        "decision": "denied",
-                                        "caller": caller_type_for_tool_use(tool_caller.as_ref()),
-                                    }));
+                                    emit_tool_audit_for_policy(
+                                        self.active_turn_tool_security.is_some(),
+                                        json!({
+                                            "event": "tool.approval_decision",
+                                            "tool_id": tool_id.clone(),
+                                            "tool_name": tool_name.clone(),
+                                            "decision": "denied",
+                                            "caller": caller_type_for_tool_use(tool_caller.as_ref()),
+                                        }),
+                                    );
                                     (
                                         Some(Err(ToolError::permission_denied(format!(
                                             // #5146: name the correct next
@@ -3386,14 +3486,17 @@ impl Engine {
                                     )
                                 }
                                 Ok(ApprovalResult::RetryWithPolicy(policy)) => {
-                                    emit_tool_audit(json!({
-                                        "event": "tool.approval_decision",
-                                        "tool_id": tool_id.clone(),
-                                        "tool_name": tool_name.clone(),
-                                        "decision": "retry_with_policy",
-                                        "policy": format!("{policy:?}"),
-                                        "caller": caller_type_for_tool_use(tool_caller.as_ref()),
-                                    }));
+                                    emit_tool_audit_for_policy(
+                                        self.active_turn_tool_security.is_some(),
+                                        json!({
+                                            "event": "tool.approval_decision",
+                                            "tool_id": tool_id.clone(),
+                                            "tool_name": tool_name.clone(),
+                                            "decision": "retry_with_policy",
+                                            "policy": format!("{policy:?}"),
+                                            "caller": caller_type_for_tool_use(tool_caller.as_ref()),
+                                        }),
+                                    );
                                     let elevated_context =
                                         batch_tool_context.clone().map(|context| {
                                             context.with_elevated_sandbox_policy(policy)
@@ -3512,12 +3615,15 @@ impl Engine {
                                     &self.session.id,
                                 )
                         {
-                            emit_tool_audit(json!({
-                                "event": "tool.spillover",
-                                "tool_id": tool_id.clone(),
-                                "tool_name": tool_name.clone(),
-                                "path": path.display().to_string(),
-                            }));
+                            emit_tool_audit_for_policy(
+                                self.active_turn_tool_security.is_some(),
+                                json!({
+                                    "event": "tool.spillover",
+                                    "tool_id": tool_id.clone(),
+                                    "tool_name": tool_name.clone(),
+                                    "path": path.display().to_string(),
+                                }),
+                            );
                         }
 
                         let _ = self
@@ -3574,14 +3680,17 @@ impl Engine {
                 };
                 let result =
                     read_repeat_guard.coalesced_result(occurrence, &leader_id, &leader_result);
-                emit_tool_audit(json!({
-                    "event": "tool.read_repeat_coalesced",
-                    "tool_id": follower.id.clone(),
-                    "tool_name": follower.name.clone(),
-                    "leader_tool_id": leader_id,
-                    "count": occurrence.count,
-                    "receipt": occurrence.count >= RECEIPT_THRESHOLD,
-                }));
+                emit_tool_audit_for_policy(
+                    self.active_turn_tool_security.is_some(),
+                    json!({
+                        "event": "tool.read_repeat_coalesced",
+                        "tool_id": follower.id.clone(),
+                        "tool_name": follower.name.clone(),
+                        "leader_tool_id": leader_id,
+                        "count": occurrence.count,
+                        "receipt": occurrence.count >= RECEIPT_THRESHOLD,
+                    }),
+                );
                 let _ = self
                     .tx_event
                     .send(Event::ToolCallComplete {
@@ -3735,13 +3844,16 @@ impl Engine {
                                 refreshed,
                             );
                         }
-                        emit_tool_audit(json!({
-                            "event": "tool.result",
-                            "tool_id": outcome.id.clone(),
-                            "tool_name": outcome.name.clone(),
-                            "status": terminal_status.as_str(),
-                            "success": output.success,
-                        }));
+                        emit_tool_audit_for_policy(
+                            self.active_turn_tool_security.is_some(),
+                            json!({
+                                "event": "tool.result",
+                                "tool_id": outcome.id.clone(),
+                                "tool_name": outcome.name.clone(),
+                                "status": terminal_status.as_str(),
+                                "success": output.success,
+                            }),
+                        );
                         let output_for_context = compact_tool_result_for_route(
                             self.api_provider,
                             &self.session.model,
@@ -3802,16 +3914,19 @@ impl Engine {
                     }
                     Err(e) => {
                         let envelope: ErrorEnvelope = e.clone().into();
-                        emit_tool_audit(json!({
-                            "event": "tool.result",
-                            "tool_id": outcome.id.clone(),
-                            "tool_name": outcome.name.clone(),
-                            "status": terminal_status.as_str(),
-                            "success": false,
-                            "error": e.to_string(),
-                            "category": envelope.category.to_string(),
-                            "severity": envelope.severity.to_string(),
-                        }));
+                        emit_tool_audit_for_policy(
+                            self.active_turn_tool_security.is_some(),
+                            json!({
+                                "event": "tool.result",
+                                "tool_id": outcome.id.clone(),
+                                "tool_name": outcome.name.clone(),
+                                "status": terminal_status.as_str(),
+                                "success": false,
+                                "error": e.to_string(),
+                                "category": envelope.category.to_string(),
+                                "severity": envelope.severity.to_string(),
+                            }),
+                        );
                         let input_schema = tool_catalog
                             .iter()
                             .find(|tool| tool.name == outcome.name)
@@ -3871,11 +3986,14 @@ impl Engine {
                 let reason = format!(
                     "read-only repetition limit reached for '{tool_name}' at occurrence {count}; stopping turn deterministically"
                 );
-                emit_tool_audit(json!({
-                    "event": "tool.read_repeat_stopped",
-                    "tool_name": tool_name,
-                    "count": count,
-                }));
+                emit_tool_audit_for_policy(
+                    self.active_turn_tool_security.is_some(),
+                    json!({
+                        "event": "tool.read_repeat_stopped",
+                        "tool_name": tool_name,
+                        "count": count,
+                    }),
+                );
                 let _ = self.tx_event.send(Event::status(reason.clone())).await;
                 return (TurnOutcomeStatus::Failed, Some(reason));
             }
@@ -5712,5 +5830,19 @@ mod tests {
         let fold = fold_tool_call_before_results(&results);
         assert!(fold.deny_reason.is_none());
         assert!(fold.requires_approval);
+    }
+
+    #[test]
+    fn restricted_planning_log_redacts_tool_name_input_and_path() {
+        let sentinel = "PRIVATE_SENTINEL_C_MUST_NOT_REACH_VERBOSE_LOG";
+        let message = tool_log_message_for_policy(
+            true,
+            "read_file",
+            &serde_json::json!({"path": format!("C:/private/{sentinel}")}),
+        );
+        assert!(!message.contains(sentinel));
+        assert!(!message.contains("read_file"));
+        assert!(!message.contains("C:/private"));
+        assert_eq!(message, "Planning restricted tool with redacted input");
     }
 }

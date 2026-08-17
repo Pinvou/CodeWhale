@@ -616,6 +616,10 @@ pub struct EngineHandle {
 pub struct Engine {
     config: EngineConfig,
     active_turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
+    /// Remains latched until the next message is dequeued, so queued control
+    /// operations cannot gain authority merely because a restricted turn
+    /// reached its terminal event.
+    control_plane_restricted: bool,
     api_config: Config,
     /// Runtime-host authority consulted only when constructing a later turn
     /// descriptor (goal continuation, idle child completion, `/edit`). Active
@@ -1356,9 +1360,11 @@ impl Engine {
 
         let active_route_limits = config.active_route_limits;
         let active_turn_tool_security = config.turn_tool_security.clone();
+        let control_plane_restricted = active_turn_tool_security.is_some();
         let engine = Engine {
             config,
             active_turn_tool_security,
+            control_plane_restricted,
             api_config: api_config.clone(),
             authoritative_route_config: None,
             deepseek_client,
@@ -2093,6 +2099,7 @@ impl Engine {
                         let configured_security = self.config.turn_tool_security.clone();
                         self.active_turn_tool_security =
                             turn_tool_security.or(configured_security.clone());
+                        self.control_plane_restricted = self.active_turn_tool_security.is_some();
                         if self.active_turn_tool_security.is_some() && !dynamic_tools.is_empty() {
                             let _ = self
                                 .tx_event
@@ -2131,7 +2138,7 @@ impl Engine {
                             provenance,
                         )
                         .await;
-                        if self.active_turn_tool_security.is_some() {
+                        if self.control_plane_restricted {
                             self.config.allowed_tools = previous_allowed_tools;
                         }
                         self.active_turn_tool_security = configured_security;
@@ -2213,7 +2220,7 @@ impl Engine {
                         auto_approve,
                         approval_mode,
                     } => {
-                        if self.active_turn_tool_security.is_some() {
+                        if self.control_plane_restricted {
                             let _ = self
                                 .tx_event
                                 .send(Event::error(ErrorEnvelope::fatal(
@@ -2254,7 +2261,7 @@ impl Engine {
                             .await;
                     }
                     Op::SpawnSubAgent { prompt } => {
-                        if self.active_turn_tool_security.is_some() {
+                        if self.control_plane_restricted {
                             let _ = self
                                 .tx_event
                                 .send(Event::error(ErrorEnvelope::fatal(
@@ -6314,7 +6321,7 @@ use self::tool_catalog::{
     preflight_requested_deferred_tool, should_default_defer_tool, tool_allowed,
     tool_catalog_consistency_issues, tool_denied,
 };
-use self::tool_execution::emit_tool_audit;
+use self::tool_execution::{emit_tool_audit, emit_tool_audit_for_policy};
 use self::tool_preparation::{prepare_tool_call, reprepare_tool_call_after_hook};
 use crate::tools::js_execution::execute_js_execution_tool;
 

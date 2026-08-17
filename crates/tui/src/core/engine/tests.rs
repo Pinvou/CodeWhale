@@ -4296,6 +4296,99 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
     }
 }
 
+fn restricted_user_message_op(content: &str, config: &Config) -> Op {
+    let mut op = external_user_message_op(content, AppMode::Agent, config);
+    let Op::SendMessage {
+        turn_tool_security,
+        allow_shell,
+        auto_approve,
+        approval_mode,
+        ..
+    } = &mut op
+    else {
+        unreachable!("external user helper always builds SendMessage")
+    };
+    *turn_tool_security = Some(Arc::new(TurnToolSecurityPolicy::new(
+        Some(Vec::new()),
+        Some(ExactToolDispatchPolicy::try_new(Vec::new()).expect("zero-tool policy")),
+    )));
+    *allow_shell = false;
+    *auto_approve = false;
+    *approval_mode = crate::tui::approval::ApprovalMode::Never;
+    op
+}
+
+#[tokio::test]
+async fn forkguard_queued_control_op_keeps_restricted_turn_authority() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("workspace");
+    let config = Config::default();
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "restricted turn complete",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+
+    handle
+        .send(restricted_user_message_op("evaluate", &config))
+        .await
+        .expect("queue restricted turn");
+    handle
+        .send(Op::RunShellCommand {
+            command: "echo must-not-run".to_string(),
+            mode: AppMode::Yolo,
+            allow_shell: true,
+            trust_mode: true,
+            auto_approve: true,
+            approval_mode: crate::tui::approval::ApprovalMode::Auto,
+        })
+        .await
+        .expect("queue control op behind restricted turn");
+    handle
+        .send(Op::SpawnSubAgent {
+            prompt: "must-not-spawn".to_string(),
+        })
+        .await
+        .expect("queue sub-agent op behind restricted turn");
+
+    let run = tokio::spawn(engine.run());
+    let mut saw_shell_denial = false;
+    let mut saw_subagent_denial = false;
+    let mut rx = handle.rx_event.write().await;
+    while let Ok(Some(event)) = tokio::time::timeout(model_turn_event_timeout(), rx.recv()).await {
+        match event {
+            Event::Error { envelope, .. } => {
+                saw_shell_denial |= envelope
+                    .message
+                    .contains("Restricted turns cannot execute control-plane shell operations");
+                saw_subagent_denial |= envelope
+                    .message
+                    .contains("Restricted turns cannot spawn sub-agents");
+                if saw_shell_denial && saw_subagent_denial {
+                    break;
+                }
+            }
+            Event::ToolCallStarted { name, .. } if name == "exec_shell" => {
+                panic!("queued shell reached execution after a restricted turn")
+            }
+            Event::AgentSpawned { .. } => {
+                panic!("queued sub-agent spawned after a restricted turn")
+            }
+            _ => {}
+        }
+    }
+    drop(rx);
+    assert!(saw_shell_denial, "queued shell op was not denied");
+    assert!(saw_subagent_denial, "queued sub-agent op was not denied");
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
 struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for DropSignal {

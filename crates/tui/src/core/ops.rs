@@ -67,6 +67,7 @@ impl ExactToolDispatchPolicy {
 pub struct TurnToolSecurityPolicy {
     trusted_external_paths_override: Option<Arc<[PathBuf]>>,
     exact_dispatch: Option<ExactToolDispatchPolicy>,
+    allow_hooks: bool,
 }
 
 impl TurnToolSecurityPolicy {
@@ -80,6 +81,7 @@ impl TurnToolSecurityPolicy {
         Self {
             trusted_external_paths_override: trusted_external_paths_override.map(Into::into),
             exact_dispatch,
+            allow_hooks: false,
         }
     }
 
@@ -89,6 +91,32 @@ impl TurnToolSecurityPolicy {
 
     pub fn exact_dispatch(&self) -> Option<&ExactToolDispatchPolicy> {
         self.exact_dispatch.as_ref()
+    }
+
+    /// Explicitly permit the embedding host's hooks for this restricted turn.
+    /// Restricted policies default to no hooks because hook executors may
+    /// launch external processes and receive the full tool input.
+    pub fn with_trusted_hooks(mut self) -> Self {
+        self.allow_hooks = true;
+        self
+    }
+
+    pub fn allows_hooks(&self) -> bool {
+        self.allow_hooks
+    }
+}
+
+#[cfg(test)]
+mod turn_security_tests {
+    use super::*;
+
+    #[test]
+    fn restricted_turn_hooks_require_explicit_host_opt_in() {
+        let default_policy = TurnToolSecurityPolicy::new(Some(Vec::new()), None);
+        assert!(!default_policy.allows_hooks());
+
+        let trusted = default_policy.with_trusted_hooks();
+        assert!(trusted.allows_hooks());
     }
 }
 

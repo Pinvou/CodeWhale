@@ -183,6 +183,24 @@ pub(super) fn emit_tool_audit(event: serde_json::Value) {
     emit_tool_audit_to_path(&PathBuf::from(path), event);
 }
 
+pub(super) fn tool_audit_event_for_policy(
+    restricted: bool,
+    event: serde_json::Value,
+) -> serde_json::Value {
+    if restricted {
+        serde_json::json!({
+            "event": "restricted_tool_event",
+            "details": "redacted",
+        })
+    } else {
+        event
+    }
+}
+
+pub(super) fn emit_tool_audit_for_policy(restricted: bool, event: serde_json::Value) {
+    emit_tool_audit(tool_audit_event_for_policy(restricted, event));
+}
+
 fn emit_tool_audit_to_path(path: &Path, event: serde_json::Value) {
     let line = match serde_json::to_string(&event) {
         Ok(line) => line,
@@ -405,15 +423,20 @@ impl Engine {
         let input_bytes = serde_json::to_string(&tool_input)
             .map(|s| s.len())
             .unwrap_or(0);
-        tracing::debug!(
-            target: "engine.tool_execution",
-            tool = %tool_name,
-            dispatch,
-            interactive,
-            supports_parallel,
-            input_bytes,
-            "tool.exec.start",
-        );
+        let restricted_log = turn_tool_security.is_some();
+        if restricted_log {
+            tracing::debug!(target: "engine.tool_execution", "restricted_tool.exec.start");
+        } else {
+            tracing::debug!(
+                target: "engine.tool_execution",
+                tool = %tool_name,
+                dispatch,
+                interactive,
+                supports_parallel,
+                input_bytes,
+                "tool.exec.start",
+            );
+        }
 
         let _guard = if supports_parallel {
             ToolExecGuard::Read(lock.read().await)
@@ -494,15 +517,19 @@ impl Engine {
         }
         match &outcome {
             Ok(result) => {
-                tracing::debug!(
-                    target: "engine.tool_execution",
-                    tool = %tool_name,
-                    dispatch,
-                    duration_ms,
-                    success = result.success,
-                    output_bytes = result.content.len(),
-                    "tool.exec.end",
-                );
+                if restricted_log {
+                    tracing::debug!(target: "engine.tool_execution", "restricted_tool.exec.end");
+                } else {
+                    tracing::debug!(
+                        target: "engine.tool_execution",
+                        tool = %tool_name,
+                        dispatch,
+                        duration_ms,
+                        success = result.success,
+                        output_bytes = result.content.len(),
+                        "tool.exec.end",
+                    );
+                }
             }
             Err(err) => {
                 let kind = match err {
@@ -527,15 +554,23 @@ impl Engine {
                     }
                     _ => {}
                 }
-                tracing::warn!(
-                    target: "engine.tool_execution",
-                    tool = %tool_name,
-                    dispatch,
-                    duration_ms,
-                    error_kind = kind,
-                    error = %err,
-                    "tool.exec.end",
-                );
+                if restricted_log {
+                    tracing::warn!(
+                        target: "engine.tool_execution",
+                        error_kind = kind,
+                        "restricted_tool.exec.end",
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "engine.tool_execution",
+                        tool = %tool_name,
+                        dispatch,
+                        duration_ms,
+                        error_kind = kind,
+                        error = %err,
+                        "tool.exec.end",
+                    );
+                }
             }
         }
         outcome
@@ -762,5 +797,22 @@ mod tests {
         let nested = tmp.path().join("nested").join("dir").join("audit.log");
         emit_tool_audit_to_path(&nested, json!({"event": "test"}));
         assert!(nested.exists(), "writer should mkdir -p the parent chain");
+    }
+
+    #[test]
+    fn restricted_tool_audit_redacts_private_sentinel() {
+        let private = "PRIVATE_SENTINEL_C_MUST_NOT_REACH_AUDIT";
+        let event = tool_audit_event_for_policy(
+            true,
+            json!({
+                "event": "tool.error",
+                "tool_input": private,
+                "error": format!("failed at C:/private/{private}"),
+            }),
+        );
+        let encoded = serde_json::to_string(&event).expect("audit json");
+        assert!(!encoded.contains(private));
+        assert_eq!(event["event"], "restricted_tool_event");
+        assert_eq!(event["details"], "redacted");
     }
 }
