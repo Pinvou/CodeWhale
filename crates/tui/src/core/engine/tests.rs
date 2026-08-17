@@ -26,6 +26,34 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
+#[test]
+fn forkguard_session_trusted_roots_override_persisted_workspace_trust() {
+    let _env_lock = lock_test_env();
+    let isolated_home = tempdir().expect("isolated home");
+    let _home = EnvVarGuard::set("CODEWHALE_HOME", isolated_home.path());
+    let workspace = tempdir().expect("workspace");
+    let persisted = tempdir().expect("persisted trust root");
+    let persisted = crate::workspace_trust::add(workspace.path(), persisted.path())
+        .expect("persist workspace trust root");
+    let legacy_config = deterministic_engine_config(workspace.path());
+    let (legacy_engine, _legacy_handle) = Engine::new(legacy_config, &Config::default());
+    let legacy_context = legacy_engine.build_tool_context(AppMode::Agent, false);
+    assert!(legacy_context.trusted_external_paths.contains(&persisted));
+
+    let mut config = deterministic_engine_config(workspace.path());
+    config.turn_tool_security = Some(Arc::new(crate::core::ops::TurnToolSecurityPolicy::new(
+        Some(Vec::new()),
+        None,
+    )));
+    let (engine, _handle) = Engine::new(config, &Config::default());
+    assert!(
+        engine
+            .build_tool_context(AppMode::Agent, false)
+            .trusted_external_paths
+            .is_empty()
+    );
+}
+
 const WORKING_SET_SUMMARY_MARKER: &str = "## Repo Working Set";
 const REPRESENTATIVE_FIXTURE_ID: &str = "representative-v1";
 const REPRESENTATIVE_PROJECT_AUTHORITY: &str = "REPRESENTATIVE_PROJECT_AUTHORITY";
@@ -513,6 +541,7 @@ async fn exact_turn_snapshot_restores_custom_endpoint_and_turn_receipt_after_bui
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send exact custom turn");
@@ -880,6 +909,7 @@ async fn goal_continuation_preserves_goal_and_resolves_updated_authoritative_rou
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send first goal turn");
@@ -1158,6 +1188,7 @@ async fn saturated_mailbox_does_not_deadlock_goal_continuation_self_dispatch() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send saturated goal turn");
@@ -1285,6 +1316,7 @@ async fn queued_ordinary_turn_does_not_multiply_engine_goal_continuations() {
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
     };
 
     handle
@@ -1881,6 +1913,7 @@ async fn cross_turn_token_budget_exhaustion_does_not_pause_goal() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send budgeted goal turn");
@@ -2908,6 +2941,7 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send host-owned goal turn");
@@ -3015,6 +3049,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send explicit host turn");
@@ -4220,6 +4255,7 @@ fn active_goal_message_op(
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
     }
 }
 
@@ -4256,6 +4292,7 @@ fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op
         hook_executor: None,
         verbosity: None,
         provenance: UserInputProvenance::ExternalUser,
+        turn_tool_security: None,
     }
 }
 
@@ -8725,6 +8762,7 @@ async fn operate_model_shell_uses_normal_approval_and_workspace_sandbox() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send Operate model turn");
@@ -8868,6 +8906,7 @@ async fn full_access_subagent_handoff_keeps_model_shell_free_of_approval_prompts
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::SubAgentHandoff,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -9002,6 +9041,7 @@ async fn assert_full_access_model_tool_batch_is_blocked(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send Full Access model turn");
@@ -9264,6 +9304,7 @@ async fn auto_review_auto_resolves_hallucinated_question_without_prompting() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send Auto-Review model turn");
@@ -9450,6 +9491,7 @@ async fn full_access_permission_allow_cannot_bypass_background_catastrophic_floo
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -9590,6 +9632,7 @@ async fn yolo_mode_does_not_prompt_for_background_shell() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -9726,6 +9769,7 @@ async fn yolo_mode_executes_publish_like_shell_without_prompt() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -9866,6 +9910,7 @@ async fn yolo_mode_does_not_prompt_for_mcp_action() {
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send model turn");
@@ -14267,6 +14312,7 @@ async fn code_execution_runs_through_common_executor_after_approval_gate() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("code_execution should run through common executor");
@@ -15214,6 +15260,7 @@ async fn run_headless_turn_with_flaky_network(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send flaky-network turn");
@@ -15341,6 +15388,7 @@ async fn run_interactive_turn_with_flaky_network(
             hook_executor: None,
             verbosity: None,
             provenance: UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await
         .expect("send interactive flaky-network turn");

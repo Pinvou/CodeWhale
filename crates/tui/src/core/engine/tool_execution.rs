@@ -294,6 +294,7 @@ impl Engine {
             let workspace = self.session.workspace.clone();
             let context_override = context_override.clone();
             let cancel_token = self.cancel_token.clone();
+            let turn_tool_security = self.active_turn_tool_security.clone();
             tasks.push(async move {
                 let _shell_permit = if tool_name == "exec_shell" {
                     shell_permits.acquire_owned().await.ok()
@@ -312,6 +313,7 @@ impl Engine {
                     Some(registry_ref),
                     mcp_pool,
                     context_override,
+                    turn_tool_security,
                 )
                 .await;
                 (index, tool_name, result)
@@ -365,7 +367,17 @@ impl Engine {
         registry: Option<&crate::tools::ToolRegistry>,
         mcp_pool: Option<Arc<AsyncMutex<McpPool>>>,
         context_override: Option<crate::tools::ToolContext>,
+        turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
     ) -> Result<ToolResult, ToolError> {
+        if let Some(exact) = turn_tool_security
+            .as_ref()
+            .and_then(|policy| policy.exact_dispatch())
+            && !exact.allows(&tool_name)
+        {
+            return Err(ToolError::permission_denied(
+                "Tool blocked by host turn policy".to_string(),
+            ));
+        }
         if cancel_token
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
@@ -535,6 +547,45 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn forkguard_dispatch_allowlist_rejects_forged_calls_before_all_dispatch_backends() {
+        let exact =
+            crate::core::ops::ExactToolDispatchPolicy::try_new(vec!["read_file".to_string()])
+                .expect("exact policy");
+        let policy = Arc::new(crate::core::ops::TurnToolSecurityPolicy::new(
+            None,
+            Some(exact),
+        ));
+        let workspace = tempfile::tempdir().expect("workspace");
+        for forged in [
+            "mcp__forged__call",
+            CODE_EXECUTION_TOOL_NAME,
+            JS_EXECUTION_TOOL_NAME,
+            "exec_shell",
+            "agent",
+            "dynamic_forged",
+        ] {
+            let (tx, _rx) = mpsc::channel(1);
+            let error = Engine::execute_tool_with_lock(
+                Arc::new(RwLock::new(())),
+                false,
+                false,
+                tx,
+                None,
+                forged.to_string(),
+                serde_json::json!({}),
+                workspace.path().to_path_buf(),
+                None,
+                None,
+                None,
+                Some(policy.clone()),
+            )
+            .await
+            .expect_err("forged dispatch must fail closed");
+            assert!(matches!(error, ToolError::PermissionDenied { .. }));
+        }
+    }
 
     const TEST_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
 

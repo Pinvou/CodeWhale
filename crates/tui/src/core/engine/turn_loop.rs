@@ -2226,9 +2226,10 @@ impl Engine {
             }
 
             let tool_exec_lock = self.tool_exec_lock.clone();
-            let mcp_pool = if tool_uses
-                .iter()
-                .any(|tool| McpPool::is_mcp_tool(&tool.name))
+            let mcp_pool = if self.active_turn_tool_security.is_none()
+                && tool_uses
+                    .iter()
+                    .any(|tool| McpPool::is_mcp_tool(&tool.name))
             {
                 match self.ensure_mcp_pool().await {
                     Ok(pool) => Some(pool),
@@ -2341,6 +2342,12 @@ impl Engine {
                     blocked_error = Some(ToolError::permission_denied(format!(
                         "Tool '{tool_name}' is not in the allowed-tools list for the current command"
                     )));
+                }
+
+                if blocked_error.is_none()
+                    && let Some(error) = self.exact_dispatch_error(&tool_name)
+                {
+                    blocked_error = Some(error);
                 }
 
                 if blocked_error.is_none()
@@ -3034,6 +3041,7 @@ impl Engine {
                         let workspace = self.session.workspace.clone();
                         let context_override = batch_tool_context.clone();
                         let cancel_token = self.cancel_token.clone();
+                        let turn_tool_security = self.active_turn_tool_security.clone();
 
                         tool_tasks.push(async move {
                             let _shell_permit = if plan.name == "exec_shell" {
@@ -3053,6 +3061,7 @@ impl Engine {
                                 registry,
                                 mcp_pool,
                                 context_override,
+                                turn_tool_security,
                             )
                             .await;
 
@@ -3476,6 +3485,7 @@ impl Engine {
                                         tool_registry,
                                         mcp_pool.clone(),
                                         context_override.or_else(|| batch_tool_context.clone()),
+                                        self.active_turn_tool_security.clone(),
                                     ) => (result, false),
                                 }
                             };
@@ -3958,6 +3968,9 @@ impl Engine {
         continuations_this_turn: &mut u32,
         current_turn_usage: &Usage,
     ) -> Option<String> {
+        if self.exact_dispatch_error("update_goal").is_some() {
+            return None;
+        }
         let registry = tool_registry?;
         if !registry.contains("update_goal") {
             return None;
@@ -4433,7 +4446,7 @@ mod stream_timeout_tests {
 }
 
 #[cfg(test)]
-fn command_allows_tool(allowed_tools: Option<&[String]>, tool_name: &str) -> bool {
+pub(super) fn command_allows_tool(allowed_tools: Option<&[String]>, tool_name: &str) -> bool {
     tool_allowed(allowed_tools, tool_name)
 }
 
