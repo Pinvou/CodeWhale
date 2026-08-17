@@ -774,105 +774,6 @@ pub fn clear_profile() -> io::Result<MemoryProfile> {
     Ok(profile)
 }
 
-pub fn capture_deterministic_memory(message: &str) -> io::Result<Vec<MemoryWriteEvent>> {
-    let _ = message;
-    Ok(Vec::new())
-}
-
-#[cfg(test)]
-fn extract_deterministic_profile(message: &str) -> Option<(Option<String>, Option<String>)> {
-    let mut call_name = None;
-    let mut assistant_alias = None;
-
-    for clause in split_memory_clauses(message) {
-        if call_name.is_none() {
-            call_name = extract_call_name(&clause);
-        }
-        if assistant_alias.is_none() {
-            assistant_alias = extract_assistant_alias(&clause);
-        }
-    }
-
-    if call_name.is_some() || assistant_alias.is_some() {
-        Some((call_name, assistant_alias))
-    } else {
-        None
-    }
-}
-
-#[cfg(test)]
-fn split_memory_clauses(message: &str) -> Vec<String> {
-    message
-        .split(|c| {
-            matches!(
-                c,
-                '。' | '，' | ',' | '；' | ';' | '\n' | '！' | '!' | '？' | '?'
-            )
-        })
-        .map(clean_scalar)
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-#[cfg(test)]
-fn extract_call_name(clause: &str) -> Option<String> {
-    if clause.starts_with("我叫你") {
-        return None;
-    }
-    if let Some(after) = clause
-        .strip_prefix("别叫我")
-        .or_else(|| clause.strip_prefix("不要叫我"))
-    {
-        if let Some((_, new_name)) = after
-            .split_once("叫我")
-            .or_else(|| after.split_once("称呼我"))
-        {
-            return clean_memory_label(new_name);
-        }
-    }
-
-    for prefix in [
-        "以后你都叫我",
-        "以后都叫我",
-        "以后叫我",
-        "之后叫我",
-        "以后称呼我",
-        "你可以叫我",
-        "请叫我",
-        "叫我",
-        "我叫",
-    ] {
-        if let Some(value) = clause.strip_prefix(prefix) {
-            return clean_memory_label(value);
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-fn extract_assistant_alias(clause: &str) -> Option<String> {
-    for prefix in [
-        "以后我都叫你",
-        "我都叫你",
-        "以后我叫你",
-        "我叫你",
-        "你的名字叫",
-    ] {
-        if let Some(value) = clause.strip_prefix(prefix) {
-            return clean_memory_label(value);
-        }
-    }
-    for prefix in ["以后你都叫", "以后你叫", "你叫"] {
-        if let Some(value) = clause.strip_prefix(prefix) {
-            if value.starts_with('我') {
-                return None;
-            }
-            return clean_memory_label(value);
-        }
-    }
-    None
-}
-
 fn clean_memory_label(value: &str) -> Option<String> {
     let cleaned = value
         .trim()
@@ -5610,23 +5511,6 @@ mod tests {
         assert!(doc.contains("回答先给结论"));
         assert!(doc.contains("pinvou-memory-snapshot/v1"));
         assert!(doc.contains("当前没有绑定 session"));
-    }
-
-    #[test]
-    fn deterministic_capture_extracts_names_only_from_explicit_phrases() {
-        let extracted = extract_deterministic_profile("以后你都叫我欣哥，我都叫你小猪").unwrap();
-        assert_eq!(extracted.0.as_deref(), Some("欣哥"));
-        assert_eq!(extracted.1.as_deref(), Some("小猪"));
-
-        assert!(extract_deterministic_profile("帮我写一个周报").is_none());
-        assert!(extract_deterministic_profile("叫我写一个周报").is_none());
-        assert!(extract_deterministic_profile("我是谁").is_none());
-        assert!(extract_deterministic_profile("我叫什么").is_none());
-
-        let alias_only = extract_deterministic_profile("我叫你小猪").unwrap();
-        assert_eq!(alias_only.0, None);
-        assert_eq!(alias_only.1.as_deref(), Some("小猪"));
-        assert!(extract_deterministic_profile("我是贺欣").is_none());
     }
 
     #[test]
