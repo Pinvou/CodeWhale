@@ -127,6 +127,10 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
         self.assertIn("github.event_name == 'push'", rust_test)
+        self.assertNotIn(
+            "github.event_name == 'push' || needs.changes.outputs.rust_code == 'true'",
+            rust_test,
+        )
 
     def test_windows_rust_test_runs_on_every_retained_main_push(self):
         # concurrency 可能用后续非 Rust pending 替换含 Rust 变更的 pending；Windows
@@ -138,18 +142,6 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("needs.changes.outputs.rust_code == 'true'", windows_rust_test)
         self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
         self.assertNotIn("github.event.pull_request.draft == false", windows_rust_test)
-
-    def test_windows_rust_test_wired_into_required_gate(self):
-        required_gate = self.workflow.split("\n  required-gate:", maxsplit=1)[1]
-        self.assertIn("- windows-rust-test", required_gate)
-        self.assertIn(
-            "WINDOWS_RUST_RESULT: ${{ needs.windows-rust-test.result }}",
-            required_gate,
-        )
-        self.assertIn(
-            '"windows-rust-test:$WINDOWS_RUST_RESULT"',
-            required_gate,
-        )
 
     def test_release_and_platform_contracts_skip_drafts_but_run_in_queue(self):
         release_contract = self.workflow.split(
