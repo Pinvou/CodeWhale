@@ -253,6 +253,8 @@ impl SavedModel {
             provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.to_string()),
             vendor: None,
             endpoint_mode: None,
+            image_capability_override: ImageCapabilityOverride::default(),
+            vision_model_id: None,
             api_key: String::new(),
             credential_ref: None,
             credential_state: CredentialState::Missing,

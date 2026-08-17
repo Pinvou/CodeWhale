@@ -573,6 +573,8 @@ pub async fn bootstrap_local_vllm(app: tauri::AppHandle) -> Result<BootstrapResu
         provider_kind: Some(crate::platform::prefs::MODEL_PROVIDER_KIND_CUSTOM.to_string()),
         vendor: None,
         endpoint_mode: None,
+        image_capability_override: Default::default(),
+        vision_model_id: None,
         api_key: String::new(),
         // 本地 vLLM 无 key,凭证字段同 prefs.rs 内置模型的无 key 缺省
         credential_ref: None,
