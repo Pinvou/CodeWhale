@@ -1578,8 +1578,7 @@ impl Engine {
                 // { keepInbox: true })`）。停止（keepInbox=false）→ 清空并
                 // 逐条发 SteerDropped，宿主据此移除排队 chip 并提示用户，
                 // 消息不会「UI 消失但引擎里还活着」地悬挂。
-                if !self.steer_keep_inbox.load(Ordering::Acquire)
-                    && !self.pending_steers.is_empty()
+                if !self.steer_keep_inbox.load(Ordering::Acquire) && !self.pending_steers.is_empty()
                 {
                     let dropped = std::mem::take(&mut self.pending_steers);
                     for steer in dropped {
