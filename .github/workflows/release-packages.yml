@@ -167,6 +167,11 @@ jobs:
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
+      # 托管 x86_64 runner 的冷 thin-LTO 构建也连续在约 30 分钟收到 shutdown
+      # (exit 143)。与 ARM64 一致，仅对 CI artifact 关闭跨 crate LTO 并提高
+      # 代码生成并行度；Cargo.toml 的正式本地 release profile 保持 thin LTO。
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       # v0.9.5 升级后 release(thin-LTO O3)编译 codewhale-tui 时 rustc/LLVM 栈溢出
       # (SIGBUS,Linux 与 macOS 同源风险)。.cargo/config.toml 不设置 rustc-wrapper
       # (全局键无法按平台条件化),由本 Linux 发布 job 显式注入 RUSTC_WRAPPER
@@ -273,10 +278,13 @@ jobs:
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
-      # release profile 已在 Cargo.toml 设为 thin LTO(原 fat 在 ubuntu 16GB 上
-      # link 而越线被 SIGTERM),ARM 不再需要 env 覆盖。
-      # lld 是必需的:thin LTO 让 rustc 给依赖 crate 传 -C linker-plugin-lto
-      # (生成 LLVM bitcode,link 阶段做跨 crate 合并),BFD ld 无法处理 LLVM bitcode。
+      # thin-LTO + codegen-units=1 的冷构建在托管 ARM runner 上连续于约 25 分钟
+      # 收到 shutdown(exit 143),且 runner 终止会跳过 Rust cache 保存。仅在该 CI
+      # job 关闭跨 crate LTO 并提高代码生成并行度；保留 release 的 O3/strip/panic，
+      # 其他平台及正式本地 release profile 仍使用 Cargo.toml 的 thin LTO。
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      # 即使关闭 LTO 也保留 lld，降低大型 Rust binary 的链接内存开销。
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
       # release 编译 codewhale-tui 的 SIGBUS 同源风险防护(同 build-linux-x64,
       # 正式入口按平台注入 RUSTC_WRAPPER,见 config.toml 注释)。

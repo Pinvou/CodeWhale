@@ -55,17 +55,30 @@ class ReleaseCachePolicyTests(unittest.TestCase):
         self.assertLess(lint_cache, test_cache)
         self.assertIn("save-if: false", warm_cache_step)
 
-    def test_arm64_release_validation_finishes_within_runner_window(self):
+    def test_linux_release_jobs_use_hosted_runner_profile(self):
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-        arm64_job = workflow.split("\n  build-linux-arm64:", maxsplit=1)[1].split(
-            "\n  build-windows-x64:", maxsplit=1
-        )[0]
+        linux_jobs = {
+            "x64": workflow.split("\n  build-linux-x64:", maxsplit=1)[1].split(
+                "\n  build-linux-arm64:", maxsplit=1
+            )[0],
+            "arm64": workflow.split(
+                "\n  build-linux-arm64:", maxsplit=1
+            )[1].split("\n  build-windows-x64:", maxsplit=1)[0],
+        }
 
-        # release profile 已设 thin LTO(thin 替代 fat),ARM 不再需要 env 覆盖;
-        # 保留 lld(thin LTO 的 link 阶段需要支持 LLVM bitcode 的链接器)。
-        self.assertIn('RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', arm64_job)
-        self.assertNotIn('CARGO_PROFILE_RELEASE_LTO', arm64_job)
-        self.assertNotIn('CARGO_PROFILE_RELEASE_CODEGEN_UNITS', arm64_job)
+        for architecture, job in linux_jobs.items():
+            with self.subTest(architecture=architecture):
+                job_env = job.split("\n    steps:", maxsplit=1)[0]
+                self.assertIn(
+                    'CARGO_PROFILE_RELEASE_LTO: "false"', job_env
+                )
+                self.assertIn(
+                    'CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"', job_env
+                )
+                self.assertIn(
+                    'RUSTFLAGS: "-C link-arg=-fuse-ld=lld"', job_env
+                )
+                self.assertIn("build-essential pkg-config cmake lld", job)
 
 
 if __name__ == "__main__":
