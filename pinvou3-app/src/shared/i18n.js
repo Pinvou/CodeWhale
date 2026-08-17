@@ -2689,7 +2689,7 @@ Object.assign(dict.zh.uiToolStore, { storeData: {
     visualizer: { title:'数据分析可视化', subtitle:'Chart.js 仪表盘 / 图表分析 / HTML 可视化', desc:'将结构化数据、表格汇总和业务指标转成符合 Pinvou 宿主体验的 HTML 可视化仪表盘。默认使用 Chart.js、无障碍 canvas、自定义图例、扁平配色，并通过 .html 产物卡交付。', latency:'本地' },
     s5: { title:'视觉设计', subtitle:'设计系统直出网页 / banner / 海报 / 简历', desc:'内置自动技能:模型按需自动加载,以设计系统级审美直出网页 / banner / 海报 / 简历等。无需安装、随时可用。', version:'内置', latency:'本地' },
   },
-  categories: { all:'全部', collab:'沟通协作', docs:'文档知识', dev:'研发', finance:'金融数据', life:'生活实用', skill:'技能' },
+  categories: { all:'全部', h3c:'H3C 内部', collab:'沟通协作', docs:'文档知识', dev:'研发', finance:'金融数据', life:'生活实用', skill:'技能' },
 } });
 Object.assign(dict.en.uiToolStore, { storeData: {
   skills: {
@@ -2698,7 +2698,7 @@ Object.assign(dict.en.uiToolStore, { storeData: {
     visualizer: { title:'Data Visualization', subtitle:'Chart.js dashboards / chart analysis / HTML visualization', desc:'Turn structured data, table summaries, and business metrics into HTML visualization dashboards that match the Pinvou host experience. Chart.js, accessible canvas, custom legends, and flat colors by default, delivered as .html artifact cards.', latency:'Local' },
     s5: { title:'Visual Design', subtitle:'Design-system-grade webpages / banners / posters / resumes', desc:'Built-in automatic skill: the model loads it on demand to produce webpages, banners, posters, resumes, and more with design-system-grade aesthetics. No installation needed—always available.', version:'Built-in', latency:'Local' },
   },
-  categories: { all:'All', collab:'Collaboration', docs:'Docs & Knowledge', dev:'Development', finance:'Financial Data', life:'Daily Life', skill:'Skills' },
+  categories: { all:'All', h3c:'H3C Internal', collab:'Collaboration', docs:'Docs & Knowledge', dev:'Development', finance:'Financial Data', life:'Daily Life', skill:'Skills' },
 } });
 Object.assign(dict.ja.uiToolStore, { storeData: {
   skills: {
@@ -2707,7 +2707,7 @@ Object.assign(dict.ja.uiToolStore, { storeData: {
     visualizer: { title:'データ分析の可視化', subtitle:'Chart.js ダッシュボード / グラフ分析 / HTML 可視化', desc:'構造化データ・表の集計・ビジネス指標を、Pinvou のホスト体験に合った HTML 可視化ダッシュボードに変換します。デフォルトで Chart.js、アクセシブルな canvas、カスタム凡例、フラット配色を使用し、.html アーティファクトカードとして提供します。', latency:'ローカル' },
     s5: { title:'ビジュアルデザイン', subtitle:'デザインシステム級の Web ページ / バナー / ポスター / レジュメを直接生成', desc:'内蔵の自動スキル：モデルが必要に応じて自動で読み込み、デザインシステム級の美観で Web ページ / バナー / ポスター / レジュメなどを直接生成します。インストール不要でいつでも利用できます。', version:'内蔵', latency:'ローカル' },
   },
-  categories: { all:'すべて', collab:'連携・コラボ', docs:'ドキュメント・ナレッジ', dev:'開発', finance:'金融データ', life:'生活・実用', skill:'スキル' },
+  categories: { all:'すべて', h3c:'H3C 社内', collab:'連携・コラボ', docs:'ドキュメント・ナレッジ', dev:'開発', finance:'金融データ', life:'生活・実用', skill:'スキル' },
 } });
 
 Object.assign(dict.zh.uiAccount, { settingsLoadFailedDetail:'设置页面暂时无法显示，请重新打开后重试。' });

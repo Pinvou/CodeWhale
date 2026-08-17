@@ -2063,6 +2063,13 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
                     </div>
                   )}
 
+                  {selectedTool.internal && (
+                    <div className="mb-8 rounded-2xl border border-indigo-200/70 bg-indigo-50/70 p-4 dark:border-indigo-400/20 dark:bg-indigo-500/10">
+                      <p className="text-[14px] leading-relaxed text-slate-700 dark:text-slate-200">{storeCopy.internalDetailDesc}</p>
+                      <p className="mt-2 text-[12px] leading-relaxed text-indigo-700 dark:text-indigo-300">{storeCopy.internalUsageHint}</p>
+                    </div>
+                  )}
+
                   <div>
                     <h3 className="text-[19px] font-bold text-slate-900 dark:text-white mb-4">{storeCopy.aboutTitle}</h3>
                     <div className="text-slate-600 dark:text-slate-300 leading-relaxed text-[15px] space-y-4 font-medium">

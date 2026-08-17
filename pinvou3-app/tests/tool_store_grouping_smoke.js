@@ -115,7 +115,7 @@ async function clickExact(page, text) {
     rec('点击「按业务」segment', await clickExact(page, '按业务'));
     await sleep(300);
     const bizChips = await page.evaluate(() => [...document.querySelectorAll('button')].map(b => (b.textContent || '').trim()));
-    for (const label of ['全部', '沟通协作', '文档知识', '研发', '金融数据', '生活实用']) {
+    for (const label of ['全部', 'H3C 内部', '沟通协作', '文档知识', '研发', '金融数据', '生活实用']) {
       rec(`业务维度 chip「${label}」渲染`, bizChips.includes(label));
     }
     rec('业务维度 chip 不含「技能」', !bizChips.includes('技能'));
@@ -123,6 +123,16 @@ async function clickExact(page, text) {
     for (const label of ['MCP', 'Skill', 'CLI 集成', 'API & Webhook', '即将上线']) {
       rec(`按业务时类型分区「${label}」渲染`, sectionsByBiz.includes(label));
     }
+
+    // Official 私有工具保留为独立业务组，且筛选后只展示两项 H3C CLI。
+    rec('点击「H3C 内部」chip', await clickExact(page, 'H3C 内部'));
+    await sleep(300);
+    const h3cOnly = await page.evaluate(() => {
+      const text = document.body.innerText;
+      return text.includes('H3C 员工门户（EIP）') && text.includes('H3C 知道 · 内部知识库')
+        && !text.includes('飞书（Lark）') && !text.includes('企查查');
+    });
+    rec('H3C 筛选只显示内部工具', h3cOnly);
 
     // 业务筛选:金融 → 只剩金融条目,仍按类型分区
     rec('点击「金融数据」chip', await clickExact(page, '金融数据'));
