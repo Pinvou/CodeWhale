@@ -4,6 +4,7 @@
 //! 安装状态持久化在 `~/.pinvou3/marketplace/installed.json`。
 //! 安装/卸载时同步修改 `~/.pinvou3/bundle/mcp.json`。
 
+pub mod bundle;
 pub mod skill_marketplace;
 pub mod skill_scope;
 
@@ -604,12 +605,15 @@ fn manifest_secret_targets(manifest: &ToolManifest) -> Vec<(String, String)> {
         push("env", &s.key);
     }
     for s in &manifest.secret_headers {
-        push("header", &s.source_key);
+        push(
+            bundle::keyring_target(bundle::CredentialTarget::Bearer),
+            &s.source_key,
+        );
     }
     for f in &manifest.config_fields {
         if f.secret {
             let target = if f.target == "bearer" {
-                "header"
+                bundle::keyring_target(bundle::CredentialTarget::Bearer)
             } else {
                 f.target.as_str()
             };
@@ -1349,7 +1353,7 @@ impl<S: CredentialStore> MarketplaceManager<S> {
                             if field.secret {
                                 self.resolve_secret_placeholder(
                                     &manifest.id,
-                                    "header",
+                                    bundle::keyring_target(bundle::CredentialTarget::Bearer),
                                     &field.key,
                                     user_config,
                                     &manifest.env,
@@ -1375,7 +1379,7 @@ impl<S: CredentialStore> MarketplaceManager<S> {
                 for secret in &manifest.secret_headers {
                     self.resolve_secret_placeholder(
                         &manifest.id,
-                        "header",
+                        bundle::keyring_target(bundle::CredentialTarget::Bearer),
                         &secret.source_key,
                         user_config,
                         &manifest.env,
@@ -1395,7 +1399,7 @@ impl<S: CredentialStore> MarketplaceManager<S> {
                         if is_sensitive_key_name(k) {
                             let placeholder = self.resolve_secret_placeholder(
                                 &manifest.id,
-                                "header",
+                                bundle::keyring_target(bundle::CredentialTarget::Bearer),
                                 k,
                                 user_config,
                                 &manifest.env,
