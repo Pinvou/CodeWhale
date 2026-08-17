@@ -13167,11 +13167,30 @@ impl SubAgentToolRegistry {
     fn unavailable_allowed_tools(&self) -> Vec<String> {
         match &self.allowed_tools {
             None => Vec::new(),
-            Some(list) => list
-                .iter()
-                .filter(|name| !self.registry.contains(name))
-                .cloned()
-                .collect(),
+            Some(list) => {
+                let api_tools = self.registry.to_api_tools();
+                list.iter()
+                    .filter(|name| {
+                        !self.registry.contains(name)
+                            && !CANONICAL_ACTION_ALIASES
+                                .iter()
+                                .any(|(family, action, alias)| {
+                                    alias == name
+                                        && api_tools.iter().any(|tool| {
+                                            tool.name == *family
+                                                && tool.input_schema["properties"]["action"]["enum"]
+                                                    .as_array()
+                                                    .is_some_and(|actions| {
+                                                        actions.iter().any(|value| {
+                                                            value.as_str() == Some(*action)
+                                                        })
+                                                    })
+                                        })
+                                })
+                    })
+                    .cloned()
+                    .collect()
+            }
         }
     }
 

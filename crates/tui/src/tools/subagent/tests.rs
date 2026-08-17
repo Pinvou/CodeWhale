@@ -6471,6 +6471,11 @@ fn custom_child_allowlist_omitting_load_skill_fails_closed() {
         todo_list.clone(),
         plan_state.clone(),
     );
+    assert_eq!(
+        without.unavailable_allowed_tools(),
+        Vec::<String>::new(),
+        "legacy action names must resolve through their registered canonical family"
+    );
     let names = tool_names(without.tools_for_model(&FleetRole::Custom));
     assert!(
         names.contains("File"),

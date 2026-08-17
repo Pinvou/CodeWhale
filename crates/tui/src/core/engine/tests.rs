@@ -243,7 +243,11 @@ fn registry_first_policy_is_in_the_initial_prompt_only_when_mcp_is_enabled() {
             .expect("system prompt"),
     );
     assert!(prompt.contains(MCP_REGISTRY_FIRST_INSTRUCTION_SOURCE));
-    assert!(prompt.contains("must call `registry_sync {}` before `exec_shell`"));
+    assert!(prompt.contains(
+        "must call `registry_sync {}` before `Bash(action=\"run\")`, `Web(action=\"fetch\")`"
+    ));
+    assert!(!prompt.contains("before `exec_shell`"));
+    assert!(!prompt.contains("`fetch_url`"));
 
     let mut disabled = EngineConfig::default();
     disabled.features.disable(Feature::Mcp);
