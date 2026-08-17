@@ -3139,22 +3139,6 @@ async fn execute_foreground_via_background(
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
-        if context
-            .cancel_token
-            .as_ref()
-            .is_some_and(|token| token.is_cancelled())
-        {
-            let mut manager = context
-                .shell_manager
-                .lock()
-                .map_err(|_| anyhow!("shell manager lock poisoned"))?;
-            let result = manager.kill(&task_id);
-            if result.is_ok() {
-                manager.acknowledge_foreground_completion(&task_id);
-            }
-            return result;
-        }
-
         let snapshot = {
             let mut manager = context
                 .shell_manager
@@ -3185,7 +3169,32 @@ async fn execute_foreground_via_background(
             return Ok(result);
         }
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // P1-D：轮询改 select。原 100ms 轮询检查 cancel 与 turn loop 的
+        // biased select 竞速——turn loop 先 drop 工具 future 时，轮询不再
+        // 运行，shell 进程幸存。select 直接监听 token（与 turn loop 的
+        // select 同时唤醒，CancellationToken 是广播语义），kill 不再输给
+        // future drop；无 token（Option None）时退化为原有 100ms 轮询节奏。
+        tokio::select! {
+            biased;
+            _ = async {
+                if let Some(token) = context.cancel_token.as_ref() {
+                    token.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                let mut manager = context
+                    .shell_manager
+                    .lock()
+                    .map_err(|_| anyhow!("shell manager lock poisoned"))?;
+                let result = manager.kill(&task_id);
+                if result.is_ok() {
+                    manager.acknowledge_foreground_completion(&task_id);
+                }
+                return result;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
     }
 }
 

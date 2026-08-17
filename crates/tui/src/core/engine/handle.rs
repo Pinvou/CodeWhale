@@ -8,6 +8,8 @@
 //! `submit_user_input` / `cancel_user_input`, and `steer` — moves here
 //! so the agent loop's mailbox API is reviewable on its own.
 
+use std::sync::atomic::Ordering;
+
 use anyhow::Result;
 use tokio::sync::mpsc;
 
@@ -156,6 +158,20 @@ impl EngineHandle {
             Ok(token) => token.is_cancelled(),
             Err(poisoned) => poisoned.into_inner().is_cancelled(),
         }
+    }
+
+    /// Set the keepInbox disposition for steers when the current turn is
+    /// cancelled (P0-A). Must be called **before** `cancel`/`cancel_with_reason`:
+    /// the turn loop reads it at the cancellation check point.
+    ///
+    /// - `true` (interrupt): unconsumed steers are parked on the engine and
+    ///   re-injected by the next turn's step boundary — the user's queued
+    ///   message survives the interrupt.
+    /// - `false` (stop): unconsumed steers are dropped and each emits
+    ///   `Event::SteerDropped`, so hosts can remove the queued chip and tell
+    ///   the user the message was cancelled — nothing hangs invisible.
+    pub fn set_steer_keep_inbox(&self, keep: bool) {
+        self.steer_keep_inbox.store(keep, Ordering::Release);
     }
 
     /// Pause or resume the current pausable command.

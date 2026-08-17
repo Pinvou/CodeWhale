@@ -402,6 +402,27 @@ pub enum Event {
     /// Status message for UI display
     Status { message: String },
 
+    // === Steer (mid-turn injection) Events ===
+    /// A steer message was committed into the session transcript (injected at
+    /// a step boundary or after the stream ended). Hosts correlate the event
+    /// back to the original steer input via `content_hash` — never by order —
+    /// so a queued "chip" can be promoted to a visible bubble exactly when the
+    /// engine actually appended the message.
+    SteerCommitted {
+        /// FNV-1a hash (hex) of the trimmed steer content.
+        content_hash: String,
+    },
+
+    /// A steer message was dropped without ever being injected: the turn it
+    /// was destined for was cancelled or ended before a step boundary
+    /// consumed it. Hosts must surface this so a queued chip cannot silently
+    /// stall forever — the steer contract is "committed (with an event) or
+    /// dropped (with an event), never silent".
+    SteerDropped {
+        /// FNV-1a hash (hex) of the trimmed steer content.
+        content_hash: String,
+    },
+
     /// Rendered `/preview-request` manifest (#1004).
     ///
     /// The engine is the only authority that can rebuild the exact next-turn

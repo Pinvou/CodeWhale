@@ -5,6 +5,8 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
+use std::sync::atomic::Ordering;
+
 use super::dispatch::{
     ReadRepeatExecutionPlan, normalize_schema_json_containers, plan_read_repeat_execution,
 };
@@ -474,6 +476,9 @@ impl Engine {
         // Scoped to this external user turn: counts survive all model/tool
         // steps below, then reset before the next user prompt.
         let mut read_repeat_guard = ReadRepeatGuard::default();
+        // 注意：steer 队列（流内收集 + 跨轮保留）统一存 `self.pending_steers`
+        // 字段——局部变量随 step/return 消亡会丢消息；字段让任何 return 路径
+        // 的残留天然保留给下一个 turn（keepInbox 语义，见字段文档）。
         let mut turn_error: Option<String> = None;
         let mut context_recovery_attempts = 0u8;
         let mut tool_policy = tool_policy;
@@ -523,6 +528,15 @@ impl Engine {
                     .working_set
                     .observe_user_message(&steer, &self.session.workspace);
                 self.add_session_message(self.user_text_message_with_turn_metadata(steer.clone()))
+                    .await;
+                // 投递确认（P0-A）：注入完成即发 committed 事件（带内容指纹），
+                // 宿主把排队 chip 转气泡的时机从此有了权威信号，不再靠
+                // transcript 提交事件猜。
+                let _ = self
+                    .tx_event
+                    .send(Event::SteerCommitted {
+                        content_hash: steer_content_hash(&steer),
+                    })
                     .await;
                 let _ = self
                     .tx_event
@@ -980,7 +994,6 @@ impl Engine {
             // content-block delta delivered to the consumer).
             let mut any_content_received = false;
             let mut transparent_stream_retries = 0u32;
-            let mut pending_steers: Vec<String> = Vec::new();
             // `stream_start` is reset on a transparent retry so the wall-clock
             // budget restarts with the fresh stream.
             let mut stream_start = Instant::now();
@@ -1041,7 +1054,7 @@ impl Engine {
                     if steer.is_empty() {
                         continue;
                     }
-                    pending_steers.push(steer.clone());
+                    self.pending_steers.push(steer.clone());
                     let _ = self
                         .tx_event
                         .send(Event::status(format!(
@@ -1559,6 +1572,25 @@ impl Engine {
             }
 
             if self.cancel_token.is_cancelled() {
+                // keepInbox 语义（P0-A）：打断（keepInbox=true）→ 未注入的
+                // steer 保留在字段里，下一个 turn 的 step 边界重新注入——用户
+                // 消息跨打断存活（对齐 deepseek-harness `cancel(cause,
+                // { keepInbox: true })`）。停止（keepInbox=false）→ 清空并
+                // 逐条发 SteerDropped，宿主据此移除排队 chip 并提示用户，
+                // 消息不会「UI 消失但引擎里还活着」地悬挂。
+                if !self.steer_keep_inbox.load(Ordering::Acquire)
+                    && !self.pending_steers.is_empty()
+                {
+                    let dropped = std::mem::take(&mut self.pending_steers);
+                    for steer in dropped {
+                        let _ = self
+                            .tx_event
+                            .send(Event::SteerDropped {
+                                content_hash: steer_content_hash(&steer),
+                            })
+                            .await;
+                    }
+                }
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                 self.add_interrupted_assistant_text(&current_text_visible)
                     .await;
@@ -1859,6 +1891,8 @@ impl Engine {
                             .elapsed();
                         let status = no_progress_status_message(&reason, elapsed);
                         crate::logging::warn(compact_no_progress_diagnostic(&reason, elapsed));
+                        // keepInbox：无进展失败同样保留未注入的 steer（字段残留
+                        // 天然保留给下一个 turn，无需显式 park）。
                         let _ = self.tx_event.send(Event::status(status.clone())).await;
                         return (TurnOutcomeStatus::Failed, Some(status));
                     }
@@ -1874,12 +1908,20 @@ impl Engine {
             // "background children" status if running>0). No status claims
             // "ending" before step 5.
             if tool_uses.is_empty() {
-                if !pending_steers.is_empty() {
-                    for steer in pending_steers.drain(..) {
+                if !self.pending_steers.is_empty() {
+                    let pending = std::mem::take(&mut self.pending_steers);
+                    for steer in pending {
+                        let hash = steer_content_hash(&steer);
                         self.session
                             .working_set
                             .observe_user_message(&steer, &self.session.workspace);
                         self.add_session_message(self.user_text_message_with_turn_metadata(steer))
+                            .await;
+                        // 投递确认（P0-A）：流期间收集（或上一轮打断 park）的
+                        // steer 在此注入，逐条发 committed 事件供前端转气泡。
+                        let _ = self
+                            .tx_event
+                            .send(Event::SteerCommitted { content_hash: hash })
                             .await;
                     }
                     let _ = self
@@ -2236,7 +2278,7 @@ impl Engine {
                         tool_uses.is_empty(),
                         turn_error.is_none(),
                         self.cancel_token.is_cancelled(),
-                        !pending_steers.is_empty(),
+                        !self.pending_steers.is_empty(),
                         false,
                     )
                 {
@@ -3214,6 +3256,14 @@ impl Engine {
                             biased;
                             () = self.cancel_token.cancelled() => {
                                 parallel_cancelled = true;
+                                // P1-D：显式终止本 engine 的 shell 进程组。工具
+                                // future 的 drop 不杀 OS 进程；工具内部轮询 kill
+                                // 与 drop 竞速不可靠。kill_running 幂等，已完成的
+                                // 任务无副作用。
+                                let _ = self
+                                    .shell_manager
+                                    .lock()
+                                    .map(|mut manager| manager.kill_running());
                                 break;
                             }
                             outcome = tool_tasks.next() => {
@@ -3586,6 +3636,12 @@ impl Engine {
                                 tokio::select! {
                                     biased;
                                     () = self.cancel_token.cancelled() => {
+                                        // P1-D：工具 future 被 drop 不杀 OS 进程，
+                                        // 显式终止本 engine 的 shell 进程组（幂等）。
+                                        let _ = self
+                                            .shell_manager
+                                            .lock()
+                                            .map(|mut manager| manager.kill_running());
                                         (Ok(interrupted_tool_result()), true)
                                     },
                                     result = Self::execute_tool_with_lock(
@@ -4032,12 +4088,19 @@ impl Engine {
                 no_progress_warning_started_at = None;
             }
 
-            if !pending_steers.is_empty() {
-                for steer in pending_steers.drain(..) {
+            if !self.pending_steers.is_empty() {
+                let pending = std::mem::take(&mut self.pending_steers);
+                for steer in pending {
+                    let hash = steer_content_hash(&steer);
                     self.session
                         .working_set
                         .observe_user_message(&steer, &self.session.workspace);
                     self.add_session_message(self.user_text_message_with_turn_metadata(steer))
+                        .await;
+                    // 投递确认（P0-A）：工具执行后的注入点同样逐条发 committed。
+                    let _ = self
+                        .tx_event
+                        .send(Event::SteerCommitted { content_hash: hash })
                         .await;
                 }
             }
@@ -4344,6 +4407,18 @@ fn truncate_runtime_status_field(text: &str, max_chars: usize) -> String {
         out.push_str("...");
     }
     out
+}
+
+/// FNV-1a 64-bit hash（hex）of trimmed steer content。宿主用它与
+/// `Event::SteerCommitted` / `Event::SteerDropped` 的 payload 比对，
+/// 把排队 chip 关联回原始 steer 输入——不依赖消息顺序或全文回传。
+fn steer_content_hash(content: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in content.trim().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]

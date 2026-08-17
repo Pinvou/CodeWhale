@@ -11,6 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -605,6 +606,10 @@ pub struct EngineHandle {
     /// change publishes here before its mailbox op is queued, so gates never
     /// consult a stale per-turn copy.
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
+    /// keepInbox 语义开关（P0-A）：cancel 时未注入的 steer 是否保留给下一轮。
+    /// 打断（interrupt）= true → park 保留（下个 turn 注入）；停止（stop）=
+    /// false → 清空并逐条发 `SteerDropped`。宿主在 cancel 前设置。
+    pub steer_keep_inbox: Arc<AtomicBool>,
 }
 
 // `impl EngineHandle { ... }` moved to `engine/handle.rs` so the
@@ -671,6 +676,19 @@ pub struct Engine {
     rx_approval: mpsc::Receiver<ApprovalDecision>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
     rx_steer: mpsc::Receiver<String>,
+    /// Steers collected during streams but not yet injected, plus steers
+    /// carried across turns. Function-scoped locals died with every step and
+    /// every cancelled turn; this field lives for the engine, so an
+    /// interrupted turn leaves its unconsumed steers here and the next turn's
+    /// step boundary injects them (keepInbox semantics — see `interrupt` in
+    /// deepseek-harness `continuation.ts`: `cancel(cause, { keepInbox: true })`).
+    /// The steer contract is "injected (SteerCommitted) or carried forward,
+    /// never silently dropped at a turn boundary".
+    pending_steers: Vec<String>,
+    /// keepInbox 语义开关（与 EngineHandle 共享）：cancel 时未注入 steer 的
+    /// 处置——true（打断）park 保留给下一轮；false（停止）清空并逐条发
+    /// SteerDropped。宿主在 cancel 前通过 handle 设置。
+    steer_keep_inbox: Arc<AtomicBool>,
     tx_event: mpsc::Sender<Event>,
     /// Wakeup channel for the parent turn loop when a direct child sub-agent
     /// terminates (issue #756). Cloned into `SubAgentRuntime` so the runtime
@@ -1205,6 +1223,9 @@ impl Engine {
         let (tx_subagent_completion, rx_subagent_completion) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
+        // keepInbox 默认 true（对齐 deepseek-harness interrupt 语义）：
+        // 未注入 steer 默认保留；宿主取消（停止）时显式置 false。
+        let steer_keep_inbox = Arc::new(AtomicBool::new(true));
         let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
         let shared_paused = Arc::new(StdMutex::new(false));
         let live_runtime_authority = Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
@@ -1392,6 +1413,8 @@ impl Engine {
             rx_approval,
             rx_user_input,
             rx_steer,
+            pending_steers: Vec::new(),
+            steer_keep_inbox: steer_keep_inbox.clone(),
             tx_event,
             tx_subagent_completion,
             rx_subagent_completion,
@@ -1423,6 +1446,7 @@ impl Engine {
             shared_paused,
             client_preflight_required: true,
             live_runtime_authority,
+            steer_keep_inbox: steer_keep_inbox.clone(),
         };
 
         (engine, handle)
@@ -4153,8 +4177,11 @@ impl Engine {
         // after the UI changed modes (#3568).
         self.apply_runtime_mode_policy(&input_policy);
 
-        // Drain stale steer messages from previous turns.
-        while self.rx_steer.try_recv().is_ok() {}
+        // P0-A（keepInbox）：**不** drain 上一轮残留的 steer。残留消息留在
+        // channel 中，由本 turn 第一个 step 边界（turn_loop step 循环开头的
+        // try_recv 注入点）消费并注入——steer 从「当前 turn 限定、轮末静默
+        // 丢弃」提升为「会话级排队、要么注入（SteerCommitted）要么跨轮保留」。
+        // 打断路径收集进 pending_steers 的已由 turn loop park 回 parked_steers。
 
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
@@ -6071,6 +6098,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         shared_paused,
         client_preflight_required: false,
         live_runtime_authority,
+        steer_keep_inbox: Arc::new(AtomicBool::new(true)),
     };
 
     MockEngineHandle {
