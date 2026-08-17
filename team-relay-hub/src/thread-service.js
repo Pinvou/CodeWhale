@@ -11,7 +11,6 @@ import { normalizeDelivery } from "./delivery-package.js";
 import { AppError } from "./errors.js";
 import {
   actionFromRow,
-  emailHint,
   teamFromRow,
   teamMemberFromRow,
   threadFromRow,

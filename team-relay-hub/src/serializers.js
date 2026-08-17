@@ -53,6 +53,7 @@ export function teamMemberFromRow(row) {
     created_at: row.created_at,
     role: row.role,
     last_seen_at: row.last_seen_at,
+    confirmed_transfers_supported: Boolean(row.confirmed_transfers_supported),
     avatar: avatarFromRow(row),
   };
 }

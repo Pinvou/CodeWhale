@@ -85,12 +85,16 @@ noUnreadSnapshot.bootstrap.threads[0].unread_count = 0;
 assert.equal(teamRelayHasUnread(noUnreadSnapshot), false);
 const pendingActionSnapshot = JSON.parse(JSON.stringify(noUnreadSnapshot));
 pendingActionSnapshot.bootstrap.me = { id: 'b', display_name: 'B' };
+pendingActionSnapshot.bootstrap.members.find(member => member.id === 'b').avatar = {
+  sha256: 'c'.repeat(64), media_type: 'image/gif', byte_size: 768, updated_at: '2026-08-04T00:00:00Z',
+};
 Object.assign(pendingActionSnapshot.bootstrap.threads[0].thread, {
   owner_id: 'me', current_actor_id: 'me', phase: 'pending_transfer', pending_transfer_kind: 'assignment', pending_sender_id: 'me', pending_recipient_id: 'b',
 });
 assert.equal(teamRelayHasUnread(pendingActionSnapshot), true, 'an unresolved transfer keeps the navigation dot after it is read');
 const pendingActionTask = projectSnapshot(pendingActionSnapshot, dict.zh.uiTeamRelay)[0];
 assert.equal(pendingActionTask.category, 'offer');
+assert.equal(pendingActionTask.pendingRecipientAvatar.sha256, 'c'.repeat(64));
 assert.equal(matchesRelayView(pendingActionTask, 'attention', 'b'), true);
 assert.equal(matchesSourceFilter(pendingActionTask, 'received', 'b'), true);
 const hiddenUnreadSnapshot = JSON.parse(JSON.stringify(snapshot));

@@ -17,6 +17,7 @@ import { PassThrough, Readable } from "node:stream";
 import test from "node:test";
 import sharp from "sharp";
 import { removeAvatarOrphans } from "../src/attachment-cleanup.js";
+import { teamMemberFromRow } from "../src/serializers.js";
 import {
   MAX_AVATAR_BYTES,
   MAX_GIF_FRAMES,
@@ -62,6 +63,31 @@ async function writeUpload(directory, filename, bytes) {
   await writeFile(path, bytes);
   return { filename, temporaryPath: path, byteSize: bytes.length };
 }
+
+test("team member serialization preserves transfer capability beside avatar metadata", () => {
+  const updatedAt = new Date("2026-08-17T00:00:00Z");
+  const member = teamMemberFromRow({
+    id: "member-b",
+    email: "member@example.com",
+    display_name: "Member B",
+    created_at: updatedAt,
+    role: "member",
+    last_seen_at: updatedAt,
+    confirmed_transfers_supported: true,
+    avatar_content_type: "image/gif",
+    avatar_byte_size: "768",
+    avatar_sha256: "c".repeat(64),
+    avatar_updated_at: updatedAt,
+  });
+
+  assert.equal(member.confirmed_transfers_supported, true);
+  assert.deepEqual(member.avatar, {
+    content_type: "image/gif",
+    byte_size: 768,
+    sha256: "c".repeat(64),
+    updated_at: updatedAt,
+  });
+});
 
 test("avatar storage keys cannot escape the private avatar root", () => {
   const config = { attachmentDir: join(tmpdir(), "team-relay-avatar-root") };
