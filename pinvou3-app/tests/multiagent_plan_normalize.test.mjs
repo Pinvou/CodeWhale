@@ -1407,7 +1407,7 @@ function loadInteractionRuntime() {
     isBusyFor() { return false; },
     markRemoteTurn() {},
     turnUsageDirty: {},
-    invoke(name) {
+    invoke(name, args) {
       calls.push(name);
       runtime.invokeArgs = runtime.invokeArgs || {};
       runtime.invokeArgs[name] = args;
