@@ -6,6 +6,12 @@ ROOT = Path(__file__).resolve().parents[2]
 PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 
 
+def _without_yaml_comments(block):
+    return "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 class CiGatePolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -46,6 +52,8 @@ class CiGatePolicyTests(unittest.TestCase):
         for output in (
             "rust_code",
             "rust_dependencies",
+            "knowledge_rust",
+            "knowledge_dependencies",
             "release_contract",
             "frontend",
             "relay",
@@ -108,6 +116,46 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("cargo ", portability)
         self.assertNotIn("submodule update", portability)
 
+    def test_standalone_knowledge_crate_has_its_own_required_gate(self):
+        changes = _without_yaml_comments(
+            self.workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        self.assertIn("knowledge_rust:", changes)
+        self.assertIn("knowledge_dependencies:", changes)
+        knowledge_paths = changes.split(
+            "            knowledge_rust:", maxsplit=1
+        )[1].split("            knowledge_dependencies:", maxsplit=1)[0]
+        self.assertIn("- 'pinvou-knowledge/**/*.rs'", knowledge_paths)
+        self.assertIn("- 'pinvou-knowledge/deploy/**'", knowledge_paths)
+
+        knowledge = _without_yaml_comments(
+            self.workflow.split("\n  knowledge-rust:", maxsplit=1)[1].split(
+                "\n  rust-lint:", maxsplit=1
+            )[0]
+        )
+        self.assertIn("needs.changes.outputs.knowledge_rust == 'true'", knowledge)
+        self.assertIn(
+            "cargo fmt --manifest-path pinvou-knowledge/Cargo.toml -- --check",
+            knowledge,
+        )
+        self.assertIn(
+            "cargo clippy --manifest-path pinvou-knowledge/Cargo.toml --all-targets --all-features --no-deps",
+            knowledge,
+        )
+        self.assertIn(
+            "cargo test --manifest-path pinvou-knowledge/Cargo.toml --all-features",
+            knowledge,
+        )
+        self.assertIn("bash -n pinvou-knowledge/deploy/install.sh", knowledge)
+        self.assertIn("needs.changes.outputs.knowledge_dependencies == 'true'", knowledge)
+        self.assertIn("--manifest-path pinvou-knowledge/Cargo.toml", knowledge)
+
+        required_gate = self.workflow.split("\n  required-gate:", maxsplit=1)[1]
+        self.assertIn("- knowledge-rust", required_gate)
+        self.assertIn('"knowledge-rust:$KNOWLEDGE_RUST_RESULT"', required_gate)
+
     def test_rust_modes_preserve_fast_drafts_and_queue_validation(self):
         rust_lint = self.workflow.split("\n  rust-lint:", maxsplit=1)[1].split(
             "\n  rust-test:", maxsplit=1
@@ -131,25 +179,65 @@ class CiGatePolicyTests(unittest.TestCase):
             "github.event_name == 'push' || needs.changes.outputs.rust_code == 'true'",
             rust_test,
         )
+        self.assertIn("timeout-minutes: 120", rust_test)
+        self.assertIn(
+            'RUSTFLAGS: "-C link-arg=-fuse-ld=lld '
+            '-C link-arg=-Wl,--thinlto-jobs=1"',
+            rust_test,
+        )
 
     def test_windows_rust_test_runs_on_every_retained_main_push(self):
         # concurrency 可能用后续非 Rust pending 替换含 Rust 变更的 pending；Windows
         # 累计验证不得依赖单次 push 的相邻路径 diff。
-        windows_rust_test = self.workflow.split("\n  windows-rust-test:", maxsplit=1)[
-            1
-        ].split("\n  windows-rustup-repair-test:", maxsplit=1)[0]
+        windows_rust_test = _without_yaml_comments(
+            self.workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
+                "\n  windows-rustup-repair-test:", maxsplit=1
+            )[0]
+        )
         self.assertIn("github.event_name == 'push'", windows_rust_test)
         self.assertNotIn("needs.changes.outputs.rust_code == 'true'", windows_rust_test)
         self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
         self.assertNotIn("github.event.pull_request.draft == false", windows_rust_test)
 
+        self.assertIn(
+            "defaults:\n      run:\n        shell: bash",
+            windows_rust_test,
+        )
+        self.assertIn("Windows 测试 exe 嵌入 Common-Controls v6 清单", windows_rust_test)
+        self.assertIn('"-outputresource:$($testExe.FullName);#1"', windows_rust_test)
+        self.assertIn('"PINVOU3_TEST_EXE=$testExe" | Out-File', windows_rust_test)
+        self.assertIn('test_exe="$(cygpath -u "$PINVOU3_TEST_EXE")"', windows_rust_test)
+        regression = windows_rust_test.split(
+            "- name: Windows 原子替换状态机回归", maxsplit=1
+        )[1]
+        self.assertIn('"$test_exe" "$filter" --test-threads=1', regression)
+        self.assertNotIn("cargo test", regression)
+
     def test_release_and_platform_contracts_skip_drafts_but_run_in_queue(self):
+        changes = _without_yaml_comments(
+            self.workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        release_contract_paths = changes.split(
+            "            release_contract:", maxsplit=1
+        )[1].split("            l1:", maxsplit=1)[0]
+        self.assertIn("- 'pinvou3-app/src-tauri/resources/**'", release_contract_paths)
+        self.assertIn(
+            "- 'pinvou3-app/tests/knowledge_host_packaging.test.mjs'",
+            release_contract_paths,
+        )
+
         release_contract = self.workflow.split(
             "\n  release-contract-test:", maxsplit=1
-        )[1].split("\n  rust-lint:", maxsplit=1)[0]
+        )[1].split("\n  knowledge-rust:", maxsplit=1)[0]
         self.assertIn("needs.changes.outputs.release_contract == 'true'", release_contract)
         self.assertIn("github.event.pull_request.draft == false", release_contract)
         self.assertNotIn("github.event_name != 'merge_group'", release_contract)
+        self.assertIn(
+            "npm --prefix pinvou3-app run test:knowledge-host-packaging",
+            release_contract,
+        )
 
         for start, end in (
             ("windows-codex-runtime-test", "windows-runtime-test"),

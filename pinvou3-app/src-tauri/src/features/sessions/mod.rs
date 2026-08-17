@@ -32,6 +32,7 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub use crate::core::mode_state::MountedRemoteCollection;
 use crate::core::mode_state::{
     ActiveSkillBinding, ModeLane, MountedCollection, MountedCollectionsSnapshot, SerializableMode,
     SessionModeState,
@@ -2153,6 +2154,136 @@ impl SessionStore {
 
     pub fn mounted_collection(&self, id: &str) -> Option<i64> {
         self.mounted_collection_ids(id).into_iter().next()
+    }
+
+    pub fn mounted_remote_collections(&self, id: &str) -> Vec<MountedRemoteCollection> {
+        self.mode_states
+            .read()
+            .get(id)
+            .map(|state| state.mounted_remote_collections.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn add_mounted_remote_collection(
+        &self,
+        id: &str,
+        server_id: String,
+        collection_id: i64,
+    ) -> Vec<MountedRemoteCollection> {
+        self.update_mounted_remote_collections(id, |mut collections| {
+            if let Some(collection) = collections.iter_mut().find(|collection| {
+                collection.server_id == server_id && collection.collection_id == collection_id
+            }) {
+                collection.enabled = true;
+            } else {
+                collections.push(MountedRemoteCollection {
+                    server_id,
+                    collection_id,
+                    enabled: true,
+                });
+            }
+            collections
+        })
+    }
+
+    pub fn set_mounted_remote_collection_enabled(
+        &self,
+        id: &str,
+        server_id: &str,
+        collection_id: i64,
+        enabled: bool,
+    ) -> Vec<MountedRemoteCollection> {
+        self.update_mounted_remote_collections(id, |mut collections| {
+            if let Some(collection) = collections.iter_mut().find(|collection| {
+                collection.server_id == server_id && collection.collection_id == collection_id
+            }) {
+                collection.enabled = enabled;
+            }
+            collections
+        })
+    }
+
+    pub fn remove_mounted_remote_collection(
+        &self,
+        id: &str,
+        server_id: &str,
+        collection_id: i64,
+    ) -> Vec<MountedRemoteCollection> {
+        self.update_mounted_remote_collections(id, |mut collections| {
+            collections.retain(|collection| {
+                collection.server_id != server_id || collection.collection_id != collection_id
+            });
+            collections
+        })
+    }
+
+    /// Remove one remote collection from every in-memory session.
+    pub fn remove_mounted_remote_collection_from_all(
+        &self,
+        server_id: &str,
+        collection_id: i64,
+    ) -> Vec<(String, Vec<MountedRemoteCollection>)> {
+        let mut states = self.mode_states.write();
+        let mut changed = Vec::new();
+        for (session_id, state) in states.iter_mut() {
+            let previous_len = state.mounted_remote_collections.len();
+            state.mounted_remote_collections.retain(|collection| {
+                collection.server_id != server_id || collection.collection_id != collection_id
+            });
+            if state.mounted_remote_collections.len() != previous_len {
+                changed.push((session_id.clone(), state.mounted_remote_collections.clone()));
+            }
+        }
+        changed.sort_by(|left, right| left.0.cmp(&right.0));
+        changed
+    }
+
+    /// Remove every mount belonging to a disconnected remote server from all sessions.
+    pub fn remove_remote_server_mounts(
+        &self,
+        server_id: &str,
+    ) -> Vec<(String, Vec<MountedRemoteCollection>)> {
+        let mut states = self.mode_states.write();
+        let mut changed = Vec::new();
+        for (session_id, state) in states.iter_mut() {
+            let previous_len = state.mounted_remote_collections.len();
+            state
+                .mounted_remote_collections
+                .retain(|collection| collection.server_id != server_id);
+            if state.mounted_remote_collections.len() != previous_len {
+                changed.push((session_id.clone(), state.mounted_remote_collections.clone()));
+            }
+        }
+        changed.sort_by(|left, right| left.0.cmp(&right.0));
+        changed
+    }
+
+    fn update_mounted_remote_collections<F>(
+        &self,
+        id: &str,
+        update: F,
+    ) -> Vec<MountedRemoteCollection>
+    where
+        F: FnOnce(Vec<MountedRemoteCollection>) -> Vec<MountedRemoteCollection>,
+    {
+        let default_mode = self.resolved_default_mode(id);
+        let mut states = self.mode_states.write();
+        let state = Self::mode_state_entry(&mut states, id, default_mode);
+        let mut normalized = Vec::new();
+        for collection in update(state.mounted_remote_collections.clone()) {
+            if collection.server_id.trim().is_empty()
+                || collection.collection_id <= 0
+                || normalized.iter().any(|mounted: &MountedRemoteCollection| {
+                    mounted.server_id == collection.server_id
+                        && mounted.collection_id == collection.collection_id
+                })
+            {
+                continue;
+            }
+            normalized.push(collection);
+        }
+        state.mounted_remote_collections = normalized.clone();
+        normalized
     }
 
     pub fn unbind_skill(&self, id: &str) {
@@ -4960,6 +5091,112 @@ mod tests {
                 enabled: true,
             }]
         );
+    }
+
+    #[test]
+    fn remote_and_local_collections_can_be_mounted_together() {
+        let (store, _g) = isolated_store();
+        let sid = "s-mixed-kb";
+        store.set_mounted_collection(sid, Some(7));
+        store.add_mounted_remote_collection(sid, "cube".to_string(), 7);
+        store.add_mounted_remote_collection(sid, "cube".to_string(), 7);
+        store.add_mounted_remote_collection(sid, "other".to_string(), 7);
+        assert_eq!(store.mounted_collection_ids(sid), vec![7]);
+        assert_eq!(
+            store.mounted_remote_collections(sid),
+            vec![
+                MountedRemoteCollection {
+                    server_id: "cube".to_string(),
+                    collection_id: 7,
+                    enabled: true,
+                },
+                MountedRemoteCollection {
+                    server_id: "other".to_string(),
+                    collection_id: 7,
+                    enabled: true,
+                },
+            ]
+        );
+        store.set_mounted_remote_collection_enabled(sid, "cube", 7, false);
+        assert!(!store.mounted_remote_collections(sid)[0].enabled);
+        let changed = store.remove_remote_server_mounts("cube");
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].0, sid);
+        assert_eq!(store.mounted_remote_collections(sid).len(), 1);
+    }
+
+    #[test]
+    fn disconnecting_remote_server_removes_its_mounts_from_every_affected_session() {
+        let (store, _g) = isolated_store();
+        store.set_mounted_collection("session-a", Some(7));
+        store.add_mounted_remote_collection("session-a", "cube".to_string(), 7);
+        store.add_mounted_remote_collection("session-a", "cube".to_string(), 8);
+        store.add_mounted_remote_collection("session-a", "other".to_string(), 7);
+        store.add_mounted_remote_collection("session-b", "cube".to_string(), 9);
+        store.add_mounted_remote_collection("session-unaffected", "other".to_string(), 10);
+
+        let changed = store.remove_remote_server_mounts("cube");
+
+        assert_eq!(
+            changed
+                .iter()
+                .map(|(session_id, _)| session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session-a", "session-b"]
+        );
+        assert_eq!(
+            changed[0].1,
+            vec![MountedRemoteCollection {
+                server_id: "other".to_string(),
+                collection_id: 7,
+                enabled: true,
+            }]
+        );
+        assert!(store.mounted_remote_collections("session-b").is_empty());
+        assert_eq!(
+            store.mounted_collection("session-a"),
+            Some(7),
+            "disconnecting a remote server must not disturb local mounts"
+        );
+    }
+
+    #[test]
+    fn deleting_remote_collection_removes_only_the_exact_mount_from_every_session() {
+        let (store, _g) = isolated_store();
+        store.set_mounted_collection("session-a", Some(7));
+        store.add_mounted_remote_collection("session-a", "cube".to_string(), 7);
+        store.add_mounted_remote_collection("session-a", "cube".to_string(), 8);
+        store.add_mounted_remote_collection("session-a", "other".to_string(), 7);
+        store.add_mounted_remote_collection("session-b", "cube".to_string(), 7);
+        store.set_mounted_remote_collection_enabled("session-b", "cube", 7, false);
+        store.add_mounted_remote_collection("session-unaffected", "cube".to_string(), 9);
+
+        let changed = store.remove_mounted_remote_collection_from_all("cube", 7);
+
+        assert_eq!(
+            changed
+                .iter()
+                .map(|(session_id, _)| session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session-a", "session-b"]
+        );
+        assert_eq!(
+            store.mounted_remote_collections("session-a"),
+            vec![
+                MountedRemoteCollection {
+                    server_id: "cube".to_string(),
+                    collection_id: 8,
+                    enabled: true,
+                },
+                MountedRemoteCollection {
+                    server_id: "other".to_string(),
+                    collection_id: 7,
+                    enabled: true,
+                },
+            ]
+        );
+        assert!(store.mounted_remote_collections("session-b").is_empty());
+        assert_eq!(store.mounted_collection("session-a"), Some(7));
     }
 
     #[test]

@@ -13,6 +13,7 @@ const {
   platformConfigPath,
 } = require("./platform-config.js");
 const { linuxStartupWindowConfigSpec } = require("./startup-window-config.js");
+const { prepareKnowledgeHost } = require("./knowledge-host.js");
 const { WRAPPER_ENV } = require("./require-wrapper.js");
 const { prepareWebTemplate } = require("./web-template.js");
 const { stageWindowsInstaller } = require("./windows-installer.js");
@@ -232,10 +233,12 @@ function prepareTauriArgs(
       : platform === "linux"
         ? linuxStartupWindowConfigSpec()
         : null;
-    if (devIndex >= 0 && devConfig) {
+    const automaticConfigs = [devConfig, ...additionalConfigs].filter(Boolean);
+    if (devIndex >= 0 && automaticConfigs.length > 0) {
       // 与 build/bundle 保持相同优先级:自动平台配置在前,调用方显式
       // --config 在后,从而仍可有意覆盖平台默认值。
-      prepared.splice(devIndex + 1, 0, "--config", devConfig);
+      const injected = automaticConfigs.flatMap((configPath) => ["--config", configPath]);
+      prepared.splice(devIndex + 1, 0, ...injected);
     }
     return prepared;
   }
@@ -385,11 +388,14 @@ async function main() {
   if (isDev) {
     prepareCodexBridge();
     prepareWindowsCodexBridge();
+    const developmentHost = prepareKnowledgeHost({ development: true });
+    if (developmentHost?.configSpec) additionalConfigs.push(developmentHost.configSpec);
   }
   if (hasTauriBuildCommand) {
     prepareWebTemplate();
     prepareCodexBridge();
     prepareWindowsCodexBridge(windowsBridgeOptions);
+    prepareKnowledgeHost();
     if (process.platform === "win32") {
       additionalConfigs.push(WINDOWS_BRIDGE_CONFIG_PATH);
     }
@@ -428,6 +434,7 @@ module.exports = {
   formatElapsed,
   main,
   prepareCodexBridge,
+  prepareKnowledgeHost,
   prepareWindowsCodexBridge,
   stageWindowsInstaller,
   stageWindowsOnnxRuntime,
