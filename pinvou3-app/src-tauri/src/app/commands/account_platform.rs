@@ -1,7 +1,7 @@
 use tauri::State;
 
 use crate::features::account_platform::{
-    AccountPlatformState, ApiRequest, ApiResponse, PasswordLogin, SessionStatus,
+    AccountPlatformState, ApiRequest, ApiResponse, LoginCredentials, SessionStatus,
 };
 
 #[tauri::command]
@@ -13,7 +13,7 @@ pub async fn account_platform_session(
 
 #[tauri::command]
 pub async fn account_platform_login(
-    credentials: PasswordLogin,
+    credentials: LoginCredentials,
     state: State<'_, AccountPlatformState>,
 ) -> Result<SessionStatus, String> {
     state.login(credentials).await

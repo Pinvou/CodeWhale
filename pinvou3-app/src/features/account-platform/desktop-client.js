@@ -23,7 +23,9 @@ export class AccountPlatformDesktopClient {
   }
 
   session(signal) { return this.call(() => this.transport.session(), signal); }
-  login(username, password, signal) { return this.call(() => this.transport.login(username, password), signal); }
+  login(account, password, signal) {
+    return this.call(() => this.transport.login({ account, password }), signal);
+  }
   logout(signal) { return this.call(() => this.transport.logout(), signal); }
 
   async call(action, signal) {

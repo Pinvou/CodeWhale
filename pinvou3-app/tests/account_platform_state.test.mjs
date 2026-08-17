@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
@@ -90,8 +91,8 @@ test('desktop client keeps OAuth tokens behind the account-platform Bridge', asy
   const calls = [];
   const transport = {
     session: async () => ({ enabled: true, configured: true, authenticated: true }),
-    login: async (username, password) => {
-      calls.push({ username, password });
+    login: async credentials => {
+      calls.push({ credentials });
       return { authenticated: true };
     },
     logout: async () => ({ authenticated: false }),
@@ -102,9 +103,9 @@ test('desktop client keeps OAuth tokens behind the account-platform Bridge', asy
   };
   const client = new AccountPlatformDesktopClient(transport);
   assert.equal((await client.session()).authenticated, true);
-  await client.login('user@example.test', 'one-time-password');
+  await client.login('person@example.com', 'secret-password');
   await client.createRecharge('product-10', 'ALIPAY', 'recharge-id');
-  assert.deepEqual(calls[0], { username: 'user@example.test', password: 'one-time-password' });
+  assert.deepEqual(calls[0], { credentials: { account: 'person@example.com', password: 'secret-password' } });
   assert.deepEqual(calls[1], {
     area: 'token',
     resource: '/v1/recharge/orders',
@@ -125,4 +126,68 @@ test('desktop client surfaces backend error codes without exposing auth state', 
     assert.equal(error.status, 403);
     return true;
   });
+});
+
+test('desktop account entry is a popover and no longer mounts a full workspace', async () => {
+  const source = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
+  assert.match(source, /data-testid="account-platform-button"/);
+  assert.match(source, /<AccountPlatformPopover/);
+  assert.doesNotMatch(source, /accountPlatformEnabled && accountPlatformClient/);
+  assert.doesNotMatch(source, /data-testid="llmapi-account-button"/);
+  assert.doesNotMatch(source, /<AccountPopover/);
+  assert.doesNotMatch(source, /navigateFromScheduledRun\('accountPlatform'\)/);
+  assert.doesNotMatch(source, /currentView === 'accountPlatform' && \(/);
+  assert.doesNotMatch(source, /<AccountPlatformView/);
+});
+
+test('desktop account entry uses the same monochrome round icon treatment as sidebar controls', async () => {
+  const source = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
+  const entry = source.match(/data-testid="account-platform-button"[\s\S]*?<AccountPlatformPopover/)?.[0] || '';
+  assert.match(entry, /rounded-full/);
+  assert.match(entry, /<User size=\{18\}/);
+  assert.doesNotMatch(entry, /bg-gradient-to-br/);
+});
+
+test('desktop sign-in renders inside the popover and never opens a browser', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const bridge = await readFile(new URL('../src/platform/tauri/bridge/account-platform.js', import.meta.url), 'utf8');
+  const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  assert.match(popover, /type="password"/);
+  assert.match(popover, /autoComplete="current-password"/);
+  assert.match(popover, /await client\.login\(account\.trim\(\), password\)/);
+  assert.match(bridge, /invoke\("account_platform_login", \{ credentials: credentials \}\)/);
+  assert.doesNotMatch(backend, /open_target|authorization_request|TcpListener/);
+});
+
+test('desktop account popover does not expose the internal user id', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(popover, /me\?\.user_id/);
+});
+
+test('desktop account popover only loads the user and balance summary', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(popover, /client\.organizations/);
+  assert.doesNotMatch(popover, /client\.managedTokens/);
+  assert.doesNotMatch(popover, /client\.switchContext/);
+  assert.doesNotMatch(popover, /copy\.activeContext/);
+  assert.doesNotMatch(popover, /copy\.accountStatus/);
+});
+
+test('desktop account persists only refresh credentials and clears them on logout or auth failure', async () => {
+  const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  const credentialStore = await readFile(new URL('../src-tauri/src/platform/credential_store.rs', import.meta.url), 'utf8');
+  assert.match(backend, /SystemCredentialStore/);
+  assert.match(backend, /for_account_platform_refresh_token/);
+  assert.match(backend, /self\.credentials\s*\.set/);
+  assert.match(backend, /self\.credentials\s*\.delete/);
+  assert.match(backend, /ensure_restored/);
+  assert.match(backend, /self\.clear_authentication\(\)\.await\?/);
+  assert.doesNotMatch(backend, /\.set\([^\n]*password/);
+  assert.match(backend, /refresh_token: String/);
+  assert.match(credentialStore, /pinvou3-account-platform-refresh-token/);
+});
+
+test('desktop account restoration starts with the app without blocking startup', async () => {
+  const source = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
+  assert.match(source, /accountPlatformClient\.session\(controller\.signal\)\.catch/);
 });

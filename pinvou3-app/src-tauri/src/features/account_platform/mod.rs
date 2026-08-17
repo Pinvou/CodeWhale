@@ -1,20 +1,24 @@
 //! Desktop account-platform adapter.
 //!
-//! OAuth tokens never cross the Tauri command boundary. The WebView receives
-//! only a session summary and allowlisted business API responses; refresh
-//! tokens are persisted through the shared OS credential-store abstraction.
+//! OAuth tokens never cross the Tauri command boundary. The WebView submits a
+//! password only for the duration of an explicit sign-in request; the password
+//! is never persisted. A successful session stores only its renewable refresh
+//! token in the system credential store so the next launch can sign in again.
 
 mod platform;
 
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use codewhale_secrets::{DefaultKeyringStore, KeyringStore};
 use rand::RngCore as _;
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex;
+
+use crate::platform::credential_store::{
+    CredentialReference, CredentialStore, SystemCredentialStore,
+};
 
 const ENABLED_ENV: &str = "PINVOU_ACCOUNT_PLATFORM_ENABLED";
 const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
@@ -24,8 +28,6 @@ const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
-const OIDC_CREDENTIAL_SERVICE: &str = "pinvou3-account-platform-oidc";
-const REFRESH_TOKEN_KEY: &str = "desktop-refresh-token";
 
 #[derive(Debug, Clone)]
 struct AccountPlatformConfig {
@@ -143,6 +145,7 @@ const fn platform_supported() -> bool {
 #[derive(Debug)]
 struct RuntimeSession {
     access_token: String,
+    refresh_token: String,
     expires_at: Instant,
 }
 
@@ -156,6 +159,12 @@ pub struct SessionStatus {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LoginCredentials {
+    pub account: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
@@ -163,10 +172,15 @@ struct TokenResponse {
     expires_in: u64,
 }
 
-#[derive(Deserialize)]
-pub struct PasswordLogin {
-    username: String,
-    password: String,
+#[derive(Debug, Deserialize)]
+struct OAuthErrorResponse {
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TokenFlow {
+    Password,
+    Refresh,
 }
 
 const fn default_expires_in() -> u64 {
@@ -194,8 +208,8 @@ pub struct AccountPlatformState {
     session: Mutex<Option<RuntimeSession>>,
     login_guard: Mutex<()>,
     refresh_guard: Mutex<()>,
-    credentials: DefaultKeyringStore,
     client: reqwest::Client,
+    credentials: SystemCredentialStore,
 }
 
 impl AccountPlatformState {
@@ -210,8 +224,8 @@ impl AccountPlatformState {
             session: Mutex::new(None),
             login_guard: Mutex::new(()),
             refresh_guard: Mutex::new(()),
-            credentials: DefaultKeyringStore::new(OIDC_CREDENTIAL_SERVICE),
             client,
+            credentials: SystemCredentialStore::new(),
         })
     }
 
@@ -232,74 +246,74 @@ impl AccountPlatformState {
                 error_code: Some("unsupported_platform"),
             };
         }
-        if let Err(error) = AccountPlatformConfig::from_env() {
-            let error_code = if error.starts_with("account_platform_configuration_invalid:") {
-                "account_platform_configuration_invalid"
-            } else {
-                "account_platform_configuration_missing"
-            };
-            return SessionStatus {
-                enabled: true,
-                configured: false,
-                authenticated: false,
-                error_code: Some(error_code),
-            };
-        }
-        if self.credentials.probe().is_err() {
-            return SessionStatus {
-                enabled: true,
-                configured: false,
-                authenticated: false,
-                error_code: Some("credential_store_unavailable"),
-            };
-        }
-        let in_memory = self.session.lock().await.is_some();
-        let persisted = self
-            .credentials
-            .get(REFRESH_TOKEN_KEY)
-            .ok()
-            .flatten()
-            .is_some_and(|token| !token.is_empty());
+        let config = match AccountPlatformConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                let error_code = if error.starts_with("account_platform_configuration_invalid:") {
+                    "account_platform_configuration_invalid"
+                } else {
+                    "account_platform_configuration_missing"
+                };
+                return SessionStatus {
+                    enabled: true,
+                    configured: false,
+                    authenticated: false,
+                    error_code: Some(error_code),
+                };
+            }
+        };
+        let restored = match self.ensure_restored(&config).await {
+            Ok(authenticated) => authenticated,
+            Err(error) => {
+                return SessionStatus {
+                    enabled: true,
+                    configured: true,
+                    authenticated: false,
+                    error_code: Some(session_error_code(&error)),
+                };
+            }
+        };
         SessionStatus {
             enabled: true,
             configured: true,
-            authenticated: in_memory || persisted,
+            authenticated: restored,
             error_code: None,
         }
     }
 
-    pub async fn login(&self, credentials: PasswordLogin) -> Result<SessionStatus, String> {
+    pub async fn login(&self, credentials: LoginCredentials) -> Result<SessionStatus, String> {
         let _login = self.login_guard.lock().await;
         let config = AccountPlatformConfig::from_env()?;
-        self.credentials
-            .probe()
-            .map_err(|error| format!("credential_store_unavailable: {error}"))?;
-        let username = credentials.username.trim();
-        if username.is_empty() || username.len() > 320 || username.chars().any(char::is_control) {
+        let _refresh = self.refresh_guard.lock().await;
+        let account = credentials.account.trim();
+        if account.is_empty()
+            || account.len() > 320
+            || credentials.password.is_empty()
+            || credentials.password.len() > 4096
+        {
+            self.clear_authentication().await?;
             return Err("oidc_credentials_invalid: account or password is invalid".to_string());
         }
-        if credentials.password.is_empty() || credentials.password.len() > 4096 {
-            return Err("oidc_credentials_invalid: account or password is invalid".to_string());
-        }
+        self.clear_authentication().await?;
         let form = [
             ("grant_type", "password"),
             ("client_id", config.client_id.as_str()),
-            ("username", username),
+            ("username", account),
             ("password", credentials.password.as_str()),
             ("scope", "openid profile email offline_access"),
         ];
-        let tokens = self.password_token_request(&config, &form).await?;
-        let _refresh = self.refresh_guard.lock().await;
+        let tokens = self
+            .token_request(&config, &form, TokenFlow::Password)
+            .await?;
         self.install_tokens(tokens, None).await?;
+        drop(_refresh);
         Ok(self.status().await)
     }
 
     pub async fn logout(&self) -> Result<SessionStatus, String> {
         let _refresh = self.refresh_guard.lock().await;
-        *self.session.lock().await = None;
-        self.credentials
-            .delete(REFRESH_TOKEN_KEY)
-            .map_err(|error| format!("credential_store_failed: {error}"))?;
+        self.clear_authentication().await?;
+        drop(_refresh);
         Ok(self.status().await)
     }
 
@@ -319,6 +333,7 @@ impl AccountPlatformState {
         &self,
         config: &AccountPlatformConfig,
         form: &[(&str, &str)],
+        flow: TokenFlow,
     ) -> Result<TokenResponse, String> {
         let response = self
             .client
@@ -327,44 +342,20 @@ impl AccountPlatformState {
             .send()
             .await
             .map_err(|error| format!("oidc_token_endpoint_unavailable: {error}"))?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "oidc_token_exchange_failed: token endpoint returned {}",
-                response.status().as_u16()
-            ));
+        let status = response.status();
+        if !status.is_success() {
+            let oauth_error = response
+                .json::<OAuthErrorResponse>()
+                .await
+                .ok()
+                .and_then(|body| body.error);
+            return Err(classify_token_error(flow, status, oauth_error.as_deref()));
         }
         response
             .json::<TokenResponse>()
             .await
             .map_err(|_| "oidc_token_response_invalid: token response is invalid".to_string())
             .and_then(validate_token_response)
-    }
-
-    async fn password_token_request(
-        &self,
-        config: &AccountPlatformConfig,
-        form: &[(&str, &str)],
-    ) -> Result<TokenResponse, String> {
-        let response = self
-            .client
-            .post(config.token_url.clone())
-            .form(form)
-            .send()
-            .await
-            .map_err(|error| format!("oidc_token_endpoint_unavailable: {error}"))?;
-        if response.status().is_success() {
-            return response
-                .json::<TokenResponse>()
-                .await
-                .map_err(|_| "oidc_token_response_invalid: token response is invalid".to_string())
-                .and_then(validate_token_response);
-        }
-        let oauth_error = response.json::<Value>().await.ok().and_then(|body| {
-            body.get("error")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
-        Err(password_login_error(oauth_error.as_deref()).to_string())
     }
 
     async fn install_tokens(
@@ -374,19 +365,23 @@ impl AccountPlatformState {
     ) -> Result<String, String> {
         let refresh_token = tokens
             .refresh_token
-            .as_deref()
-            .or(previous_refresh_token)
+            .filter(|token| !token.is_empty())
+            .or_else(|| previous_refresh_token.map(str::to_string))
             .ok_or_else(|| {
                 "oidc_refresh_token_missing: identity provider did not issue a refresh token"
                     .to_string()
             })?;
-        self.credentials
-            .set(REFRESH_TOKEN_KEY, refresh_token)
-            .map_err(|error| format!("credential_store_failed: {error}"))?;
         let access_token = tokens.access_token;
         let lifetime = Duration::from_secs(tokens.expires_in);
+        self.credentials
+            .set(
+                &CredentialReference::for_account_platform_refresh_token(),
+                &refresh_token,
+            )
+            .map_err(credential_store_error)?;
         *self.session.lock().await = Some(RuntimeSession {
             access_token: access_token.clone(),
+            refresh_token,
             expires_at: Instant::now() + lifetime,
         });
         Ok(access_token)
@@ -408,30 +403,75 @@ impl AccountPlatformState {
                 return Ok(session.access_token.clone());
             }
         }
-        let refresh_token = self
-            .credentials
-            .get(REFRESH_TOKEN_KEY)
-            .map_err(|error| format!("credential_store_failed: {error}"))?
-            .filter(|token| !token.is_empty())
-            .ok_or_else(|| "authentication_required: sign in to Pinvou first".to_string())?;
+        let refresh_token = match self.runtime_refresh_token().await {
+            Some(token) => token,
+            None => self
+                .persisted_refresh_token()?
+                .ok_or_else(|| "authentication_required: sign in to Pinvou first".to_string())?,
+        };
         let form = [
             ("grant_type", "refresh_token"),
             ("client_id", config.client_id.as_str()),
             ("refresh_token", refresh_token.as_str()),
         ];
-        let tokens = match self.token_request(config, &form).await {
+        let tokens = match self.token_request(config, &form, TokenFlow::Refresh).await {
             Ok(tokens) => tokens,
             Err(error) => {
-                *self.session.lock().await = None;
-                if error.contains("token endpoint returned 400")
-                    || error.contains("token endpoint returned 401")
-                {
-                    let _ = self.credentials.delete(REFRESH_TOKEN_KEY);
-                }
+                self.clear_authentication().await?;
                 return Err(error);
             }
         };
         self.install_tokens(tokens, Some(&refresh_token)).await
+    }
+
+    async fn ensure_restored(&self, config: &AccountPlatformConfig) -> Result<bool, String> {
+        if self.session.lock().await.is_some() {
+            return Ok(true);
+        }
+        let _refresh = self.refresh_guard.lock().await;
+        if self.session.lock().await.is_some() {
+            return Ok(true);
+        }
+        let Some(refresh_token) = self.persisted_refresh_token()? else {
+            return Ok(false);
+        };
+        let form = [
+            ("grant_type", "refresh_token"),
+            ("client_id", config.client_id.as_str()),
+            ("refresh_token", refresh_token.as_str()),
+        ];
+        let tokens = match self.token_request(config, &form, TokenFlow::Refresh).await {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                self.clear_authentication().await?;
+                return Err(error);
+            }
+        };
+        self.install_tokens(tokens, Some(&refresh_token)).await?;
+        Ok(true)
+    }
+
+    async fn runtime_refresh_token(&self) -> Option<String> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|session| session.refresh_token.clone())
+            .filter(|token| !token.is_empty())
+    }
+
+    fn persisted_refresh_token(&self) -> Result<Option<String>, String> {
+        self.credentials
+            .get(&CredentialReference::for_account_platform_refresh_token())
+            .map(|value| value.filter(|token| !token.trim().is_empty()))
+            .map_err(credential_store_error)
+    }
+
+    async fn clear_authentication(&self) -> Result<(), String> {
+        *self.session.lock().await = None;
+        self.credentials
+            .delete(&CredentialReference::for_account_platform_refresh_token())
+            .map_err(credential_store_error)
     }
 
     async fn send(
@@ -470,20 +510,43 @@ fn validate_token_response(tokens: TokenResponse) -> Result<TokenResponse, Strin
     Ok(tokens)
 }
 
+fn classify_token_error(flow: TokenFlow, status: StatusCode, oauth_error: Option<&str>) -> String {
+    match (flow, oauth_error) {
+        (TokenFlow::Password, Some("invalid_grant")) => {
+            "oidc_credentials_invalid: account or password is incorrect".to_string()
+        }
+        (TokenFlow::Password, Some("unauthorized_client")) => {
+            "oidc_direct_grant_disabled: in-app password sign-in is disabled".to_string()
+        }
+        (TokenFlow::Refresh, Some("invalid_grant")) => {
+            "authentication_required: saved sign-in has expired".to_string()
+        }
+        _ => format!(
+            "oidc_token_exchange_failed: token endpoint returned {}",
+            status.as_u16()
+        ),
+    }
+}
+
+fn session_error_code(error: &str) -> &'static str {
+    match error.split(':').next().unwrap_or_default() {
+        "credential_store_unavailable" => "credential_store_unavailable",
+        "oidc_token_endpoint_unavailable" => "oidc_token_endpoint_unavailable",
+        "oidc_token_response_invalid" => "oidc_token_response_invalid",
+        "oidc_token_exchange_failed" => "oidc_token_exchange_failed",
+        "oidc_direct_grant_disabled" => "oidc_direct_grant_disabled",
+        _ => "authentication_required",
+    }
+}
+
+fn credential_store_error(error: impl std::fmt::Display) -> String {
+    format!("credential_store_unavailable: {error}")
+}
+
 fn random_urlsafe(bytes: usize) -> String {
     let mut value = vec![0_u8; bytes];
     rand::rng().fill_bytes(&mut value);
     URL_SAFE_NO_PAD.encode(value)
-}
-
-fn password_login_error(oauth_error: Option<&str>) -> &'static str {
-    match oauth_error {
-        Some("invalid_grant") => "oidc_credentials_invalid: account or password is invalid",
-        Some("unauthorized_client") => {
-            "oidc_direct_grant_disabled: password login is disabled for this client"
-        }
-        _ => "oidc_login_failed: identity service rejected sign-in",
-    }
 }
 
 #[derive(Debug)]
@@ -640,16 +703,25 @@ mod tests {
     }
 
     #[test]
-    fn password_login_errors_are_stable_and_do_not_expose_provider_details() {
-        assert!(
-            password_login_error(Some("invalid_grant")).starts_with("oidc_credentials_invalid:")
-        );
-        assert!(password_login_error(Some("unauthorized_client"))
-            .starts_with("oidc_direct_grant_disabled:"));
-        assert!(
-            password_login_error(Some("temporarily_unavailable")).starts_with("oidc_login_failed:")
-        );
-        assert!(password_login_error(None).starts_with("oidc_login_failed:"));
+    fn token_errors_distinguish_password_and_saved_session_failures() {
+        assert!(classify_token_error(
+            TokenFlow::Password,
+            StatusCode::BAD_REQUEST,
+            Some("invalid_grant")
+        )
+        .starts_with("oidc_credentials_invalid:"));
+        assert!(classify_token_error(
+            TokenFlow::Password,
+            StatusCode::UNAUTHORIZED,
+            Some("unauthorized_client")
+        )
+        .starts_with("oidc_direct_grant_disabled:"));
+        assert!(classify_token_error(
+            TokenFlow::Refresh,
+            StatusCode::BAD_REQUEST,
+            Some("invalid_grant")
+        )
+        .starts_with("authentication_required:"));
     }
 
     #[test]

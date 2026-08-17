@@ -43,6 +43,7 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiChatExtra',
     'uiChatScenes',
     'uiAccount',
+    'uiAccountPlatform',
     'uiWorkflow',
     'uiToolStore',
     'uiPet',
@@ -144,21 +145,15 @@ const main = source('app/main.jsx');
 assert.match(main, /emit\(['"]ui:language_changed['"], \{ language: lang \}\)/);
 assert.match(main, /<ToolStoreView[^>]*t=\{t\}/);
 assert.match(main, /<WebConnectionStatus[^>]*t=\{t\}/);
-assert.match(main, /<AccountPopover[\s\S]{0,300}t=\{t\}/);
-assert.match(main, /const accountCopy = t\.uiAccount/);
-assert.match(main, /accountCopy\.availableQuota/);
-assert.match(main, /accountCopy\.loginAndSync/);
-assert.match(main, /setLoginErrorCode\(errorCode\(err\) \|\| 'unknown'\)/);
-assert.match(main, /localizedErrorMessage\(\{ code: loginErrorCode \}, accountCopy\.errors, accountCopy\.builtinLoginFailed\)/);
-assert.match(main, /localizedErrorMessage\(\{ code: accountErrorCode \}, accountCopy\.errors, accountCopy\.syncFailed\)/);
-assert.doesNotMatch(main, /setLoginError\(err && err\.message/);
-assert.doesNotMatch(main, /setLlmApiError\(e && e\.message/);
-assert.doesNotMatch(main, /console\.error\('llm api (?:quota refresh|login) failed:', e\)/);
-assert.match(main, /const refreshLlmApiStatus = useCallback\(async \(\) => \{[\s\S]{0,1000}\}, \[\]\);/);
-assert.doesNotMatch(main, /\}, \[t\.uiAccount\.syncFailed\]\);/);
-assert.match(main, /formatQuotaTokens\(limit, t\.langTag\)/);
-assert.match(main, /t\.uiAccount\.viewQuota/);
-assert.doesNotMatch(main, />查看可用额度</);
+assert.match(main, /<AccountPlatformPopover[\s\S]{0,400}copy=\{t\.uiAccountPlatform\}/);
+assert.match(main, /title=\{t\.uiAccountPlatform\.title\}/);
+assert.doesNotMatch(main, /<AccountPopover/);
+const accountPlatformPopover = source('features/account-platform/AccountPlatformPopover.jsx');
+assert.match(accountPlatformPopover, /copy\.balance/);
+assert.match(accountPlatformPopover, /copy\.reservedCredits/);
+assert.doesNotMatch(accountPlatformPopover, />可用余额</);
+assert.equal(dict.zh.uiAccountPlatform.balance, '可用余额');
+assert.equal(dict.zh.uiAccountPlatform.reservedCredits, '使用中');
 assert.match(main, /<SettingsErrorBoundary[^>]*t=\{t\}/);
 assert.match(main, /<CodexAcpView[^>]*t=\{t\}/);
 const settingsErrorBoundary = source('features/settings/SettingsErrorBoundary.jsx');

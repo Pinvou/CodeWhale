@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const {
@@ -13,6 +14,8 @@ const {
   configureIsolatedWindowsRustToolchain,
   configSpecs,
   ensureWindowsRustToolchain,
+  loadDevelopmentEnvironment,
+  parseEnvironmentFile,
   prepareCodexBridge,
   prepareWindowsCodexBridge,
   prepareTauriArgs,
@@ -34,6 +37,33 @@ const { requireWrapper, WRAPPER_ENV } = require("../scripts/tauri/require-wrappe
 const { WINDOWS_BRIDGE_CONFIG_PATH } = require("../scripts/tauri/codex-bridge.js");
 
 const noRuntime = () => null;
+
+assert.deepEqual(
+  parseEnvironmentFile(`
+    # comment
+    PINVOU_ACCOUNT_PLATFORM_ENABLED=1
+    export PINVOU_ACCOUNT_OIDC_CLIENT_ID="pinvou-desktop-dev"
+    PINVOU_ACCOUNT_SERVICE_URL=https://example.test/account # public endpoint
+  `),
+  {
+    PINVOU_ACCOUNT_PLATFORM_ENABLED: "1",
+    PINVOU_ACCOUNT_OIDC_CLIENT_ID: "pinvou-desktop-dev",
+    PINVOU_ACCOUNT_SERVICE_URL: "https://example.test/account",
+  },
+);
+const developmentEnvRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-dev-env-"));
+try {
+  fs.writeFileSync(path.join(developmentEnvRoot, ".env"), "PINVOU_FILE_VALUE=base\nPINVOU_FILE_ONLY=yes\n");
+  fs.writeFileSync(path.join(developmentEnvRoot, ".env.development.local"), "PINVOU_FILE_VALUE=local\n");
+  const loadedEnvironment = loadDevelopmentEnvironment(
+    { PINVOU_FILE_VALUE: "process" },
+    { appRoot: developmentEnvRoot, log: () => {} },
+  );
+  assert.equal(loadedEnvironment.PINVOU_FILE_VALUE, "process");
+  assert.equal(loadedEnvironment.PINVOU_FILE_ONLY, "yes");
+} finally {
+  fs.rmSync(developmentEnvRoot, { recursive: true, force: true });
+}
 
 const isolatedRustEnv = {};
 const isolatedRust = configureIsolatedWindowsRustToolchain({
