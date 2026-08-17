@@ -3958,7 +3958,6 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                 .send(EngineEvent::AgentComplete {
                     id: "stale_agent".to_string(),
                     result: "stale completion".to_string(),
-                    role: None,
                     failed: false,
                 })
                 .await;

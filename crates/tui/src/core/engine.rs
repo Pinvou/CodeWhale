@@ -56,15 +56,12 @@ use crate::tools::spec::{
 };
 use crate::tools::spec::{
     RuntimeToolServices, SharedFileReadTracker, new_shared_file_read_tracker,
-    resolve_strict_authority_path,
 };
-use crate::tools::subagent::coord::WriteScopeClaim;
 use crate::tools::subagent::{
-    FleetRole, Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentAssignment,
-    SubAgentCompletion, SubAgentForkContext, SubAgentManager, SubAgentResult, SubAgentRuntime,
-    SubAgentSpawnOptions, SubAgentStatus, SubAgentThinking, agent_worker_owner_snapshot,
-    ensure_subagent_model_for_provider, new_shared_subagent_manager_with_state_root_and_timeout,
-    resolve_subagent_assignment_route,
+    FleetRole, Mailbox, MailboxMessage, SharedSubAgentManager, SubAgentCompletion,
+    SubAgentForkContext, SubAgentManager, SubAgentResult, SubAgentRuntime, SubAgentStatus,
+    SubAgentThinking, agent_worker_owner_snapshot, ensure_subagent_model_for_provider,
+    new_shared_subagent_manager_with_state_root_and_timeout, resolve_subagent_assignment_route,
 };
 use crate::tools::todo::{SharedTodoList, new_shared_todo_list};
 use crate::tools::user_input::{UserInputRequest, UserInputResponse};
@@ -2196,25 +2193,7 @@ impl Engine {
                             .send(Event::status(format!("Denied tool call: {id}")))
                             .await;
                     }
-                    Op::SpawnSubAgent {
-                        prompt,
-                        role_id,
-                        allowed_tools,
-                        write_files,
-                        max_steps,
-                        output_schema,
-                        structured_output_root,
-                        expects_file_output,
-                    } => {
-                        if allowed_tools.is_empty() {
-                            let _ = self
-                                .tx_event
-                                .send(Event::error(ErrorEnvelope::fatal(format!(
-                                    "Cannot spawn role '{role_id}': empty allowed_tools whitelist"
-                                ))))
-                                .await;
-                            continue;
-                        }
+                    Op::SpawnSubAgent { prompt } => {
                         let Some(client) = self.deepseek_client.clone() else {
                             let message = self
                                 .deepseek_client_error
@@ -2277,7 +2256,7 @@ impl Engine {
                             &runtime,
                             None,
                             &prompt,
-                            &FleetRole::Custom,
+                            &FleetRole::Worker,
                             ModelRoute::Inherit,
                             SubAgentThinking::Inherit,
                         )
@@ -2302,68 +2281,14 @@ impl Engine {
                         runtime.reasoning_effort = route.reasoning_effort;
                         runtime.reasoning_effort_auto = false;
 
-                        let write_claim = match host_write_claim(&runtime.context, &write_files) {
-                            Ok(claim) => claim,
-                            Err(err) => {
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::error(ErrorEnvelope::fatal(format!(
-                                        "Failed to spawn role '{role_id}': {err}"
-                                    ))))
-                                    .await;
-                                continue;
-                            }
-                        };
-                        let structured_output_root = match output_schema.as_ref() {
-                            Some(schema) => match structured_output_root.as_deref() {
-                                Some(root) => match host_structured_output_root(
-                                    &runtime.context,
-                                    root,
-                                    schema,
-                                    write_claim.as_ref(),
-                                ) {
-                                    Ok(root) => Some(root),
-                                    Err(err) => {
-                                        let _ = self
-                                            .tx_event
-                                            .send(Event::error(ErrorEnvelope::fatal(format!(
-                                                "Failed to spawn role '{role_id}': {err}"
-                                            ))))
-                                            .await;
-                                        continue;
-                                    }
-                                },
-                                None => {
-                                    let _ = self
-                                        .tx_event
-                                        .send(Event::error(ErrorEnvelope::fatal(format!(
-                                            "Failed to spawn role '{role_id}': structured output requires an explicit project root"
-                                        ))))
-                                        .await;
-                                    continue;
-                                }
-                            },
-                            None => None,
-                        };
-
                         let result = {
                             let mut manager = self.subagent_manager.write().await;
-                            manager.spawn_background_with_assignment_options(
+                            manager.spawn_background(
                                 Arc::clone(&self.subagent_manager),
                                 runtime,
-                                FleetRole::Custom,
+                                FleetRole::Worker,
                                 prompt.clone(),
-                                SubAgentAssignment::new(prompt.clone(), Some(role_id.clone()))
-                                    .with_output_schema(output_schema)
-                                    .with_structured_output_root(structured_output_root)
-                                    .with_expects_file_output(expects_file_output),
-                                Some(allowed_tools),
-                                SubAgentSpawnOptions {
-                                    max_steps,
-                                    write_claim,
-                                    host_managed_explicit_tools: true,
-                                    ..SubAgentSpawnOptions::default()
-                                },
+                                None,
                             )
                         };
 
@@ -5422,126 +5347,6 @@ impl Engine {
         self.session.last_system_prompt_hash = Some(system_prompt_hash(merged.as_ref()));
         self.session.system_prompt = merged;
     }
-}
-
-fn host_write_claim(
-    context: &ToolContext,
-    write_files: &[PathBuf],
-) -> std::result::Result<Option<WriteScopeClaim>, String> {
-    if write_files.is_empty() {
-        return Ok(None);
-    }
-
-    let mut exact_files = Vec::with_capacity(write_files.len());
-    for file in write_files {
-        let relative = strict_workspace_relative_path(context, file)
-            .map_err(|error| format!("declared write file '{}': {error}", file.display()))?;
-        if relative.as_os_str().is_empty() {
-            return Err("declared write file cannot be the workspace root".to_string());
-        }
-        let normalized = relative.to_string_lossy().replace('\\', "/");
-        if !exact_files.contains(&normalized) {
-            exact_files.push(normalized);
-        }
-    }
-
-    Ok(Some(WriteScopeClaim {
-        owner: String::new(),
-        roots: Vec::new(),
-        exact_files,
-        contracts: Vec::new(),
-    }))
-}
-
-fn strict_workspace_relative_path(
-    context: &ToolContext,
-    requested: &Path,
-) -> std::result::Result<PathBuf, String> {
-    let workspace = context.workspace.canonicalize().map_err(|error| {
-        format!(
-            "cannot canonicalize workspace '{}': {error}",
-            context.workspace.display()
-        )
-    })?;
-    let relative = if requested.is_absolute() {
-        requested
-            .strip_prefix(&context.workspace)
-            .or_else(|_| requested.strip_prefix(&workspace))
-            .map_err(|_| format!("path escapes workspace '{}'", context.workspace.display()))?
-            .to_path_buf()
-    } else {
-        requested.to_path_buf()
-    };
-    let raw = relative
-        .to_str()
-        .ok_or_else(|| format!("path is not valid UTF-8: {}", requested.display()))?;
-    let resolved =
-        resolve_strict_authority_path(context, raw).map_err(|error| error.to_string())?;
-    resolved
-        .strip_prefix(&workspace)
-        .map(Path::to_path_buf)
-        .map_err(|_| format!("path escapes workspace '{}'", context.workspace.display()))
-}
-
-fn structured_output_files(schema: &Value) -> std::result::Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
-    if let Some(path) = schema.get("x-output-file").and_then(Value::as_str) {
-        files.push(PathBuf::from(path));
-    }
-    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
-        for property in properties.values() {
-            if let Some(path) = property.get("x-output-file").and_then(Value::as_str) {
-                files.push(PathBuf::from(path));
-            }
-        }
-    }
-    if files.is_empty() {
-        return Err("structured output schema does not declare x-output-file".to_string());
-    }
-    for file in &files {
-        if file.as_os_str().is_empty()
-            || file.is_absolute()
-            || file.components().any(|component| {
-                !matches!(
-                    component,
-                    std::path::Component::Normal(_) | std::path::Component::CurDir
-                )
-            })
-        {
-            return Err(format!(
-                "structured output path is not a safe relative path: {}",
-                file.display()
-            ));
-        }
-    }
-    Ok(files)
-}
-
-fn host_structured_output_root(
-    context: &ToolContext,
-    requested_root: &Path,
-    schema: &Value,
-    write_claim: Option<&WriteScopeClaim>,
-) -> std::result::Result<PathBuf, String> {
-    let root = strict_workspace_relative_path(context, requested_root).map_err(|error| {
-        format!(
-            "structured output root '{}': {error}",
-            requested_root.display()
-        )
-    })?;
-    let claim = write_claim
-        .ok_or_else(|| "structured output requires host-declared exact write files".to_string())?;
-    for relative in structured_output_files(schema)? {
-        let target = root.join(relative);
-        let target = strict_workspace_relative_path(context, &target)?;
-        let normalized = target.to_string_lossy().replace('\\', "/");
-        if !claim.exact_files.contains(&normalized) {
-            return Err(format!(
-                "structured output file '{normalized}' is outside the host-declared exact write claim"
-            ));
-        }
-    }
-    Ok(root)
 }
 
 fn strip_active_operation_reanchor(prompt: Option<&SystemPrompt>) -> Option<SystemPrompt> {
