@@ -259,6 +259,18 @@ test('built-in desktop chat uses the in-memory OIDC session and Token Gateway ro
   assert.match(runtimeProvider, /RuntimeModelCredential::api_key\([\s\S]*authorization\.access_token/);
 });
 
+test('personal center and desktop chat share one account identity lifecycle', async () => {
+  const accountBackend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  const commands = await readFile(new URL('../src-tauri/src/app/commands/account_platform.rs', import.meta.url), 'utf8');
+  assert.match(accountBackend, /bootstrap_account_identity/);
+  assert.match(accountBackend, /account_user_id: Option<String>/);
+  assert.match(accountBackend, /oidc-user-\{account_user_id\}-session-\{generation\}/);
+  assert.equal(
+    (commands.match(/pool\.mark_model_updated\(BUILTIN_LLMAPI_MODEL_ID\)/g) || []).length,
+    2,
+  );
+});
+
 test('desktop account restoration starts with the app without blocking startup', async () => {
   const source = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
   assert.match(source, /accountPlatformClient\.session\(controller\.signal\)\.catch/);

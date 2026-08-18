@@ -150,6 +150,7 @@ struct RuntimeSession {
     refresh_token: String,
     expires_at: Instant,
     generation: u64,
+    account_user_id: Option<String>,
 }
 
 /// OIDC-backed credentials used only inside the Rust model runtime.
@@ -335,33 +336,125 @@ impl AccountPlatformState {
     pub async fn request(&self, input: ApiRequest) -> Result<ApiResponse, String> {
         let config = AccountPlatformConfig::from_env()?;
         let prepared = prepare_request(&config, input)?;
-        let token = self.access_token(&config, None).await?;
+        let mut token = self.access_token(&config, None).await?;
         let mut response = self.send(&prepared, &token).await?;
         if response.status() == StatusCode::UNAUTHORIZED {
-            let refreshed = self.access_token(&config, Some(&token)).await?;
-            response = self.send(&prepared, &refreshed).await?;
+            token = self.access_token(&config, Some(&token)).await?;
+            response = self.send(&prepared, &token).await?;
         }
-        response_to_api(response).await
+        let api_response = response_to_api(response).await?;
+        if prepared.is_account_bootstrap() && (200..300).contains(&api_response.status) {
+            let user_id = bootstrap_user_id(&api_response.body)?;
+            self.remember_account_identity(&token, user_id).await?;
+        }
+        Ok(api_response)
     }
 
     pub(crate) async fn chat_runtime_authorization(
         &self,
     ) -> Result<ChatRuntimeAuthorization, String> {
         let config = AccountPlatformConfig::from_env()?;
-        let access_token = self.access_token(&config, None).await?;
+        let mut access_token = self.access_token(&config, None).await?;
+        let mut account_user_id = self
+            .cached_account_identity(&access_token)
+            .await
+            .unwrap_or_default();
+        if account_user_id.is_empty() {
+            match self
+                .bootstrap_account_identity(&config, &access_token)
+                .await
+            {
+                Ok(user_id) => account_user_id = user_id,
+                Err(error) if error.starts_with("authentication_required:") => {
+                    access_token = self.access_token(&config, Some(&access_token)).await?;
+                    account_user_id = self
+                        .bootstrap_account_identity(&config, &access_token)
+                        .await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
         let generation = self
             .session
             .lock()
             .await
             .as_ref()
-            .filter(|session| session.access_token == access_token)
+            .filter(|session| {
+                session.access_token == access_token
+                    && session.account_user_id.as_deref() == Some(account_user_id.as_str())
+            })
             .map(|session| session.generation)
             .ok_or_else(|| "authentication_required: sign in to Pinvou first".to_string())?;
         Ok(ChatRuntimeAuthorization {
             base_url: token_gateway_openai_base(&config.token_gateway_url),
             access_token,
-            revision: format!("oidc-session-{generation}"),
+            revision: format!("oidc-user-{account_user_id}-session-{generation}"),
         })
+    }
+
+    async fn cached_account_identity(&self, access_token: &str) -> Option<String> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .filter(|session| session.access_token == access_token)
+            .and_then(|session| session.account_user_id.clone())
+    }
+
+    async fn bootstrap_account_identity(
+        &self,
+        config: &AccountPlatformConfig,
+        access_token: &str,
+    ) -> Result<String, String> {
+        let url = config
+            .account_url
+            .join("v1/account/bootstrap")
+            .map_err(|_| {
+                "account_platform_configuration_invalid: cannot resolve account bootstrap"
+                    .to_string()
+            })?;
+        let response = self
+            .client
+            .post(url)
+            .bearer_auth(access_token)
+            .header("Accept", "application/json")
+            .header("X-Request-ID", random_urlsafe(18))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .map_err(|error| format!("account_platform_service_unavailable: {error}"))?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err("authentication_required: account session was rejected".to_string());
+        }
+        let api_response = response_to_api(response).await?;
+        if !(200..300).contains(&api_response.status) {
+            let code = api_response
+                .body
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("ACCOUNT_BOOTSTRAP_FAILED");
+            return Err(format!(
+                "account_platform_account_unavailable: account bootstrap failed with {code}"
+            ));
+        }
+        let user_id = bootstrap_user_id(&api_response.body)?;
+        self.remember_account_identity(access_token, user_id.clone())
+            .await?;
+        Ok(user_id)
+    }
+
+    async fn remember_account_identity(
+        &self,
+        access_token: &str,
+        user_id: String,
+    ) -> Result<(), String> {
+        let mut session = self.session.lock().await;
+        let current = session
+            .as_mut()
+            .filter(|session| session.access_token == access_token)
+            .ok_or_else(|| "authentication_required: account session changed".to_string())?;
+        current.account_user_id = Some(user_id);
+        Ok(())
     }
 
     async fn token_request(
@@ -418,11 +511,18 @@ impl AccountPlatformState {
                 &refresh_token,
             )
             .map_err(credential_store_error)?;
+        let account_user_id = self
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|session| session.account_user_id.clone());
         *self.session.lock().await = Some(RuntimeSession {
             access_token: access_token.clone(),
             refresh_token,
             expires_at: Instant::now() + lifetime,
             generation,
+            account_user_id,
         });
         Ok(access_token)
     }
@@ -604,6 +704,23 @@ struct PreparedRequest {
     url: Url,
     body: Option<Value>,
     idempotency_key: Option<String>,
+}
+
+impl PreparedRequest {
+    fn is_account_bootstrap(&self) -> bool {
+        self.method == Method::POST && self.url.path().ends_with("/v1/account/bootstrap")
+    }
+}
+
+fn bootstrap_user_id(body: &Value) -> Result<String, String> {
+    body.get("user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            "account_platform_response_invalid: account bootstrap omitted user_id".to_string()
+        })
 }
 
 fn prepare_request(
