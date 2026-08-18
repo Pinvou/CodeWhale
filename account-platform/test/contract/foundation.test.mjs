@@ -14,7 +14,7 @@ async function readYaml(relative) {
 }
 
 test('OpenAPI contracts expose stable versions and no inline credentials', async () => {
-  const files = ['account.yaml', 'billing.yaml', 'token-gateway.yaml'];
+  const files = ['account.yaml', 'billing.yaml', 'token-gateway.yaml', 'admin.yaml'];
   for (const file of files) {
     const raw = await readFile(path.join(root, 'contracts/openapi', file), 'utf8');
     const document = YAML.parse(raw);
@@ -81,6 +81,8 @@ test('Compose keeps data stores private and simulator development-only', async (
   assert.deepEqual(compose.services.newapi.ports, ['127.0.0.1:18106:3000']);
   assert.match(compose.services['token-gateway'].environment.TOKEN_PROVIDER_ALLOWED_HOSTS, /(?:^|,)newapi(?:,|$)/);
   assert.match(compose.services['billing-service'].environment.DATABASE_URL, /account_platform_billing/);
+  assert.equal(compose.services['billing-service'].environment.OIDC_AUDIENCE, compose.services['account-service'].environment.OIDC_AUDIENCE);
+  assert.equal(compose.services['token-portal'].environment.BILLING_HTTP_URL, 'http://billing-service:8080');
   assert.match(compose.services['account-service'].environment.DATABASE_URL, /account_platform_account/);
   assert.match(compose.services['token-gateway'].environment.DATABASE_URL, /account_platform_token/);
   assert.notEqual(
@@ -109,6 +111,31 @@ test('Keycloak development client enables password login without enabling implic
   assert.equal(desktop.directAccessGrantsEnabled, true);
   assert.equal(desktop.implicitFlowEnabled, false);
   assert.deepEqual(desktop.redirectUris, ['http://127.0.0.1/*']);
+  assert.equal(realm.registrationEmailAsUsername, false);
+  assert.equal(realm.loginWithEmailAllowed, true);
+  assert.ok(realm.roles.realm.some((role) => role.name === 'platform-admin'));
+  const provisioning = await readFile(path.join(root, 'deploy/keycloak/provision-platform-admin.sh'), 'utf8');
+  assert.match(provisioning, /PINVOU_ADMIN_PASSWORD:\?set PINVOU_ADMIN_PASSWORD/);
+  assert.match(provisioning, /--rolename "\$ROLE"/);
+  assert.doesNotMatch(provisioning, /PINVOU_ADMIN_PASSWORD=['"][^$]/);
+});
+
+test('operations API is role protected and limits mutations to account lifecycle management', async () => {
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+  assert.deepEqual(admin.security, [{ oidc: [] }]);
+  for (const [pathName, pathItem] of Object.entries(admin.paths)) {
+    assert.match(pathName, /^\/(account|billing|token)\/admin\/v1\//);
+    for (const operation of Object.values(pathItem)) {
+      assert.ok(operation.responses['403'], `${pathName} must document role denial`);
+    }
+  }
+  for (const [pathName, pathItem] of Object.entries(admin.paths).filter(([name]) => name.startsWith('/billing/') || name.startsWith('/token/'))) {
+    assert.deepEqual(Object.keys(pathItem), ['get'], `${pathName} must remain read-only`);
+  }
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/users/{user_id}/status']), ['patch']);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/users/{user_id}']), ['delete']);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/status']), ['patch']);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}']), ['delete']);
 });
 
 test('every migration up script has a matching down script', async () => {

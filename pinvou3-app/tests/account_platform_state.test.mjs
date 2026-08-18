@@ -2,8 +2,19 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
+import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
+
+test('account balances convert internal microcredits to display points', () => {
+  assert.equal(MICROCREDITS_PER_POINT, 10_000);
+  assert.equal(microcreditsToPoints(1_000_000), 100);
+  assert.equal(formatPoints(1_000_000, 'en'), '100');
+  assert.equal(formatPoints(7_969_994, 'en'), '796.9994');
+  assert.equal(formatPoints(1, 'en'), '0.0001');
+  assert.equal(formatPoints(0, 'en'), '0');
+  assert.equal(formatPoints(null, 'en'), '—');
+});
 
 test('context guard invalidates and aborts stale organization loads', () => {
   const guard = createContextRequestGuard();

@@ -80,6 +80,7 @@ services:
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
     volumes:
       - ../keycloak/pinvou-dev-realm.json:/opt/keycloak/data/import/pinvou-realm.json:ro
+      - ../keycloak/provision-platform-admin.sh:/opt/keycloak/data/import/provision-platform-admin.sh:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -128,6 +129,9 @@ services:
       APP_ENV: development
       PORT: 8080
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+      OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
+      OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
+      OIDC_AUDIENCE: pinvou-desktop-dev
       NATS_URL: nats://nats:4222
       PAYMENT_SIMULATOR_URL: http://payment-simulator:8080
       BILLING_PAYMENT_CALLBACK_URL: http://billing-service:8080/internal/payment/notifications
@@ -240,6 +244,7 @@ services:
       PORTAL_OIDC_TOKEN_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/token
       PORTAL_OIDC_CLIENT_ID: pinvou-desktop-dev
       ACCOUNT_HTTP_URL: http://account-service:8080
+      BILLING_HTTP_URL: http://billing-service:8080
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
     depends_on:
       redis:

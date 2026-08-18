@@ -3,7 +3,7 @@
   "enabled": true,
   "displayName": "Pinvou Development",
   "registrationAllowed": true,
-  "registrationEmailAsUsername": true,
+  "registrationEmailAsUsername": false,
   "rememberMe": false,
   "verifyEmail": false,
   "resetPasswordAllowed": true,
@@ -12,6 +12,14 @@
   "accessTokenLifespan": 600,
   "revokeRefreshToken": true,
   "refreshTokenMaxReuse": 0,
+  "roles": {
+    "realm": [
+      {
+        "name": "platform-admin",
+        "description": "Protected access to the Pinvou account platform operations console"
+      }
+    ]
+  },
   "clients": [
     {
       "clientId": "pinvou-desktop-dev",

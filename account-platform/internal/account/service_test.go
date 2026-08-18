@@ -3,6 +3,9 @@ package account
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +16,7 @@ import (
 type fakeRepository struct {
 	me            Me
 	activateCalls int
+	adminCalls    []string
 }
 
 func (f *fakeRepository) Bootstrap(context.Context, identity.Principal) (Me, bool, error) {
@@ -68,8 +72,32 @@ func (*fakeRepository) RevokeMembership(context.Context, identity.Principal, uui
 func (*fakeRepository) TransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error {
 	panic("not used")
 }
-func (*fakeRepository) Ping(context.Context) error { return nil }
-func (*fakeRepository) Close()                     {}
+func (*fakeRepository) AdminOverview(context.Context) (AdminOverview, error) {
+	return AdminOverview{}, nil
+}
+func (*fakeRepository) AdminUsers(context.Context, string, int) ([]AdminUser, error) { return nil, nil }
+func (f *fakeRepository) AdminSetUserStatus(_ context.Context, _ identity.Principal, id uuid.UUID, status string) error {
+	f.adminCalls = append(f.adminCalls, "user:"+id.String()+":"+status)
+	return nil
+}
+func (f *fakeRepository) AdminDeleteUser(_ context.Context, _ identity.Principal, id uuid.UUID) error {
+	f.adminCalls = append(f.adminCalls, "user:"+id.String()+":DELETE")
+	return nil
+}
+func (*fakeRepository) AdminOrganizations(context.Context, string, int) ([]AdminOrganization, error) {
+	return nil, nil
+}
+func (f *fakeRepository) AdminSetOrganizationStatus(_ context.Context, _ identity.Principal, id uuid.UUID, status string) error {
+	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":"+status)
+	return nil
+}
+func (f *fakeRepository) AdminDeleteOrganization(_ context.Context, _ identity.Principal, id uuid.UUID) error {
+	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":DELETE")
+	return nil
+}
+func (*fakeRepository) AdminAuditLogs(context.Context, int) ([]AdminAuditLog, error) { return nil, nil }
+func (*fakeRepository) Ping(context.Context) error                                   { return nil }
+func (*fakeRepository) Close()                                                       {}
 
 type fakeWalletProvisioner struct {
 	err   error
@@ -103,6 +131,52 @@ func TestBootstrapRemainsProvisioningWhenBillingIsUnavailable(t *testing.T) {
 	}
 	if me.Status != "PROVISIONING" || repository.activateCalls != 0 {
 		t.Fatalf("me=%+v activate calls=%d", me, repository.activateCalls)
+	}
+}
+
+func TestBootstrapDoesNotReactivateDisabledUser(t *testing.T) {
+	repository := &fakeRepository{me: Me{UserID: uuid.Must(uuid.NewV7()), Status: "DISABLED", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
+	wallets := &fakeWalletProvisioner{}
+	me, err := NewService(repository, wallets).Bootstrap(context.Background(), identity.Principal{})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("error = %v, want ErrForbidden", err)
+	}
+	if me.Status != "DISABLED" || wallets.calls != 0 || repository.activateCalls != 0 {
+		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
+	}
+}
+
+func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
+	repository := &fakeRepository{}
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session", RealmRoles: []string{"platform-admin"}}, nil
+	}
+	handler := NewService(repository, &fakeWalletProvisioner{}).Handler(verify)
+	userID := uuid.Must(uuid.NewV7())
+	organizationID := uuid.Must(uuid.NewV7())
+	tests := []struct {
+		method string
+		path   string
+		body   string
+		want   string
+	}{
+		{http.MethodPatch, "/admin/v1/users/" + userID.String() + "/status", `{"status":"DISABLED"}`, "user:" + userID.String() + ":DISABLED"},
+		{http.MethodDelete, "/admin/v1/users/" + userID.String(), "", "user:" + userID.String() + ":DELETE"},
+		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/status", `{"status":"ACTIVE"}`, "organization:" + organizationID.String() + ":ACTIVE"},
+		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String(), "", "organization:" + organizationID.String() + ":DELETE"},
+	}
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
+		request.Header.Set("Authorization", "Bearer test-token")
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("%s %s status=%d body=%s", test.method, test.path, response.Code, response.Body.String())
+		}
+		if got := repository.adminCalls[len(repository.adminCalls)-1]; got != test.want {
+			t.Fatalf("admin call=%q want=%q", got, test.want)
+		}
 	}
 }
 

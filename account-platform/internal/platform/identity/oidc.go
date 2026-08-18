@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
@@ -20,6 +21,8 @@ type Principal struct {
 	SessionID   string
 	Email       string
 	DisplayName string
+	Username    string
+	RealmRoles  []string
 }
 
 type VerifyFunc func(context.Context, string) (Principal, error)
@@ -73,6 +76,9 @@ func NewOIDCVerifyFuncWithJWKS(ctx context.Context, issuer, jwksURL, audience, e
 			Email         string `json:"email"`
 			Name          string `json:"name"`
 			PreferredName string `json:"preferred_username"`
+			RealmAccess   struct {
+				Roles []string `json:"roles"`
+			} `json:"realm_access"`
 		}
 		if err := token.Claims(&claims); err != nil {
 			return Principal{}, fmt.Errorf("decode access token claims: %w", err)
@@ -94,8 +100,26 @@ func NewOIDCVerifyFuncWithJWKS(ctx context.Context, issuer, jwksURL, audience, e
 			SessionID:   sessionID,
 			Email:       claims.Email,
 			DisplayName: displayName,
+			Username:    claims.PreferredName,
+			RealmRoles:  slices.Clone(claims.RealmAccess.Roles),
 		}, nil
 	}, nil
+}
+
+func HasRealmRole(principal Principal, role string) bool {
+	return slices.Contains(principal.RealmRoles, strings.TrimSpace(role))
+}
+
+func RequireRealmRoleGin(role string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := FromContext(c.Request.Context())
+		if !ok || !HasRealmRole(principal, role) {
+			api.WriteError(c.Writer, http.StatusForbidden, "ADMIN_REQUIRED", "platform administrator access is required", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
 }
 
 func Middleware(verify VerifyFunc, next http.Handler) http.Handler {

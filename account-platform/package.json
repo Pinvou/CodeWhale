@@ -7,7 +7,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "lint:openapi": "redocly lint contracts/openapi/account.yaml contracts/openapi/billing.yaml contracts/openapi/token-gateway.yaml",
+    "lint:openapi": "redocly lint contracts/openapi/account.yaml contracts/openapi/billing.yaml contracts/openapi/token-gateway.yaml contracts/openapi/admin.yaml",
     "test:contracts": "node --test test/contract/*.test.mjs",
     "test": "npm run lint:openapi && npm run test:contracts"
   },

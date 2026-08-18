@@ -36,6 +36,9 @@ func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (
 	if me.Status == "ACTIVE" {
 		return me, nil
 	}
+	if me.Status != "PROVISIONING" {
+		return me, ErrForbidden
+	}
 	if err := s.wallets.EnsurePersonalWallet(ctx, me.UserID); err != nil {
 		return me, fmt.Errorf("%w: %v", ErrWalletProvisioning, err)
 	}
@@ -63,6 +66,16 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.POST("/v1/invitations/accept", httpserver.AdaptFunc(s.acceptInvitation))
 	router.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
 	router.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
+	admin := router.Group("/admin/v1")
+	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
+	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
+	admin.GET("/users", httpserver.AdaptFunc(s.adminUsers))
+	admin.PATCH("/users/:user_id/status", httpserver.AdaptFunc(s.adminSetUserStatus))
+	admin.DELETE("/users/:user_id", httpserver.AdaptFunc(s.adminDeleteUser))
+	admin.GET("/organizations", httpserver.AdaptFunc(s.adminOrganizations))
+	admin.PATCH("/organizations/:organization_id/status", httpserver.AdaptFunc(s.adminSetOrganizationStatus))
+	admin.DELETE("/organizations/:organization_id", httpserver.AdaptFunc(s.adminDeleteOrganization))
+	admin.GET("/audit-logs", httpserver.AdaptFunc(s.adminAuditLogs))
 	return router
 }
 

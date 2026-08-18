@@ -1,0 +1,227 @@
+openapi: 3.1.0
+info:
+  title: Pinvou Operations Console API
+  version: 0.2.0
+  description: Platform operations API. Every operation requires the platform-admin Keycloak Realm role; mutations are audited.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: /api/admin
+security:
+  - oidc: []
+paths:
+  /account/admin/v1/overview:
+    get:
+      operationId: getAdminAccountOverview
+      summary: Get platform-wide account and organization counts
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/users:
+    get:
+      operationId: listAdminUsers
+      summary: List and search platform users
+      parameters: [{ $ref: "#/components/parameters/Search" }, { $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/users/{user_id}/status:
+    patch:
+      operationId: setAdminUserStatus
+      summary: Enable or disable a platform user
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StatusChange" }
+      responses:
+        "204": { description: User status updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/users/{user_id}:
+    delete:
+      operationId: deleteAdminUser
+      summary: Soft-delete a user and revoke sessions and memberships
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      responses:
+        "204": { description: User deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations:
+    get:
+      operationId: listAdminOrganizations
+      summary: List and search organizations
+      parameters: [{ $ref: "#/components/parameters/Search" }, { $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/status:
+    patch:
+      operationId: setAdminOrganizationStatus
+      summary: Enable or disable an organization and its memberships
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StatusChange" }
+      responses:
+        "204": { description: Organization status updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}:
+    delete:
+      operationId: deleteAdminOrganization
+      summary: Soft-delete an organization and revoke its memberships
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      responses:
+        "204": { description: Organization deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/audit-logs:
+    get:
+      operationId: listAdminAuditLogs
+      summary: List recent account audit events
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/overview:
+    get:
+      operationId: getAdminBillingOverview
+      summary: Get platform-wide wallet, order, adjustment, and hold counts
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/wallets:
+    get:
+      operationId: listAdminWallets
+      summary: List recently updated wallets
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders:
+    get:
+      operationId: listAdminPaymentOrders
+      summary: List recently updated payment orders
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/adjustments:
+    get:
+      operationId: listAdminAdjustments
+      summary: List recent manual billing adjustments
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/usage-holds:
+    get:
+      operationId: listAdminUsageHolds
+      summary: List recent usage reservations
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/overview:
+    get:
+      operationId: getAdminTokenOverview
+      summary: Get platform-wide Token account, route, and usage counts
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts:
+    get:
+      operationId: listAdminTokenAccounts
+      summary: List recently updated Token accounts without credential secrets
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/usage-requests:
+    get:
+      operationId: listAdminUsageRequests
+      summary: List recent model usage and settlement requests
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: /realms/pinvou/.well-known/openid-configuration
+  parameters:
+    Search:
+      name: q
+      in: query
+      description: Case-insensitive display name, email, or exact UUID search.
+      schema: { type: string, maxLength: 320 }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    UserID:
+      name: user_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OrganizationID:
+      name: organization_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  schemas:
+    StatusChange:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+  responses:
+    Overview:
+      description: Service overview counters
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties:
+              type: integer
+              format: int64
+              minimum: 0
+    Collection:
+      description: A bounded collection ordered by recent activity
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                maxItems: 200
+                items:
+                  type: object
+                  additionalProperties: true
+    Error:
+      description: JSON API error
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [code, message]
+            properties:
+              code: { type: string }
+              message: { type: string }
+              request_id: { type: string }

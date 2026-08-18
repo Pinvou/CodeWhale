@@ -19,6 +19,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/google/uuid"
 )
 
 type Config struct {
@@ -27,6 +28,7 @@ type Config struct {
 	TokenURL         *url.URL
 	ClientID         string
 	AccountURL       *url.URL
+	BillingURL       *url.URL
 	TokenGatewayURL  *url.URL
 	SecureCookies    bool
 	SessionMaxAge    time.Duration
@@ -42,7 +44,7 @@ type Service struct {
 }
 
 func NewService(config Config, store Store) (*Service, error) {
-	if config.PublicURL == nil || config.AuthorizationURL == nil || config.TokenURL == nil || config.AccountURL == nil || config.TokenGatewayURL == nil || strings.TrimSpace(config.ClientID) == "" || store == nil {
+	if config.PublicURL == nil || config.AuthorizationURL == nil || config.TokenURL == nil || config.AccountURL == nil || config.BillingURL == nil || config.TokenGatewayURL == nil || strings.TrimSpace(config.ClientID) == "" || store == nil {
 		return nil, errors.New("invalid portal configuration")
 	}
 	if config.PublicURL.Scheme != "https" && config.SecureCookies {
@@ -62,6 +64,9 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.POST("/api/logout", httpserver.AdaptFunc(s.logout))
 	router.Any("/api/account/*resource", httpserver.AdaptFunc(s.proxyAccount))
 	router.Any("/api/token/*resource", httpserver.AdaptFunc(s.proxyToken))
+	router.Any("/api/admin/account/*resource", httpserver.AdaptFunc(s.proxyAdminAccount))
+	router.Any("/api/admin/billing/*resource", httpserver.AdaptFunc(s.proxyAdminBilling))
+	router.Any("/api/admin/token/*resource", httpserver.AdaptFunc(s.proxyAdminToken))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -181,6 +186,18 @@ func (s *Service) proxyAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) proxyToken(w http.ResponseWriter, r *http.Request) {
 	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenPathAllowed)
+}
+
+func (s *Service) proxyAdminAccount(w http.ResponseWriter, r *http.Request) {
+	s.proxy(w, r, s.config.AccountURL, "/"+r.PathValue("resource"), accountAdminPathAllowed)
+}
+
+func (s *Service) proxyAdminBilling(w http.ResponseWriter, r *http.Request) {
+	s.proxy(w, r, s.config.BillingURL, "/"+r.PathValue("resource"), billingAdminPathAllowed)
+}
+
+func (s *Service) proxyAdminToken(w http.ResponseWriter, r *http.Request) {
+	s.proxy(w, r, s.config.TokenGatewayURL, "/"+r.PathValue("resource"), tokenAdminPathAllowed)
 }
 
 func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.URL, resource string, allowed func(string, string) bool) {
@@ -381,4 +398,41 @@ func tokenPathAllowed(method, resource string) bool {
 		return false
 	}
 	return method == http.MethodGet || method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch
+}
+
+func accountAdminPathAllowed(method, resource string) bool {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
+		return true
+	}
+	if strings.Contains(resource, "..") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" || (parts[2] != "users" && parts[2] != "organizations") {
+		return false
+	}
+	if _, err := uuid.Parse(parts[3]); err != nil {
+		return false
+	}
+	return (method == http.MethodDelete && len(parts) == 4) || (method == http.MethodPatch && len(parts) == 5 && parts[4] == "status")
+}
+
+func billingAdminPathAllowed(method, resource string) bool {
+	return adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds")
+}
+
+func tokenAdminPathAllowed(method, resource string) bool {
+	return adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests")
+}
+
+func adminReadPathAllowed(method, resource string, allowed ...string) bool {
+	if method != http.MethodGet || strings.Contains(resource, "..") {
+		return false
+	}
+	for _, prefix := range allowed {
+		if resource == prefix {
+			return true
+		}
+	}
+	return false
 }

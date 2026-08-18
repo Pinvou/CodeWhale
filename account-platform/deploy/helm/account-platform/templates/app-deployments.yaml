@@ -59,7 +59,7 @@ spec:
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $app.name }}-database-url } }
             {{- end }}
-            {{- if or (eq $app.name "account-service") (eq $app.name "token-gateway") }}
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - { name: OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }
             - { name: OIDC_JWKS_URL, value: {{ $jwksURL | quote }} }
             - { name: OIDC_AUDIENCE, value: {{ $root.Values.oidc.audience | quote }} }
@@ -97,6 +97,7 @@ spec:
             - { name: PORTAL_OIDC_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
             - { name: PORTAL_OIDC_CLIENT_ID, value: {{ $root.Values.oidc.portalClientId | quote }} }
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
             {{- end }}
           readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }

@@ -81,7 +81,7 @@ export default defineConfig(({ mode }) => {
     emptyOutDir: true,
     rolldownOptions: {
       input: accountPortalBuild
-        ? { account: resolve(sourceRoot, 'account.html') }
+        ? { account: resolve(sourceRoot, 'account.html'), admin: resolve(sourceRoot, 'admin.html') }
         : webBuild
         ? { main: resolve(sourceRoot, 'index.html') }
         : {

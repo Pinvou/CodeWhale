@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw, User, X } from '../../components/icons.jsx';
+import { formatPoints } from './credit-units.js';
 
 function localizedError(copy, reason) {
   const raw = String(reason?.code || reason?.message || reason || '');
@@ -97,7 +98,6 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const controlTheme = isDark
     ? 'bg-[#202124] border-white/10 text-[#E3E3E3] placeholder:text-[#6F7378]'
     : 'bg-white border-black/10 text-[#1F1F1F] placeholder:text-[#9AA0A6]';
-  const number = value => value == null ? '—' : Number(value).toLocaleString(language || 'en');
 
   const submitLogin = async event => {
     event.preventDefault();
@@ -179,7 +179,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         <div className="space-y-2.5">
           {error && <div role="alert" className="break-words rounded-xl bg-[#EA4335]/10 px-3 py-2 text-[12px] leading-snug text-[#EA4335]">{error}</div>}
           <div className={`rounded-2xl border p-3 ${cardTheme}`}>
-            <div className="flex items-end justify-between gap-3"><div><div className={`text-[12px] ${mutedText}`}>{copy.balance}</div><div className="mt-1 text-[22px] font-semibold tabular-nums">{number(balance?.available_microcredits)}</div></div><div className={`text-right text-[11px] ${mutedText}`}>{copy.reservedCredits}<div className="mt-1 text-[13px] font-medium tabular-nums">{number(balance?.reserved_microcredits)}</div></div></div>
+            <div className="flex items-end justify-between gap-3"><div><div className={`text-[12px] ${mutedText}`}>{copy.balance}</div><div className="mt-1 text-[22px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div></div><div className={`text-right text-[11px] ${mutedText}`}>{copy.reservedCredits}<div className="mt-1 text-[13px] font-medium tabular-nums">{formatPoints(balance?.reserved_microcredits, language)}</div></div></div>
           </div>
 
           <button type="button" onClick={() => void logout()} disabled={busy} className={`h-9 w-full rounded-xl text-[12px] font-medium transition-colors disabled:opacity-40 ${isDark ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}>{copy.logout}</button>

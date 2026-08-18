@@ -9,6 +9,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
@@ -28,7 +29,7 @@ func (s *Service) WithPayments(payments *PaymentCoordinator) *Service {
 	return s
 }
 
-func (s *Service) Handler(serviceToken string) http.Handler {
+func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
@@ -52,6 +53,15 @@ func (s *Service) Handler(serviceToken string) http.Handler {
 		protected.POST("/internal/v1/recharge/orders/:order_id/sync", httpserver.AdaptFunc(s.syncRechargeOrder))
 		protected.POST("/internal/v1/reconciliation/runs", httpserver.AdaptFunc(s.runReconciliation))
 		router.POST("/internal/payment/notifications", httpserver.AdaptFunc(s.paymentNotification))
+	}
+	if len(adminVerify) > 0 && adminVerify[0] != nil {
+		admin := router.Group("/admin/v1")
+		admin.Use(identity.GinMiddleware(adminVerify[0]), identity.RequireRealmRoleGin("platform-admin"))
+		admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/wallets", httpserver.AdaptFunc(s.adminWallets))
+		admin.GET("/payment-orders", httpserver.AdaptFunc(s.adminPaymentOrders))
+		admin.GET("/adjustments", httpserver.AdaptFunc(s.adminAdjustments))
+		admin.GET("/usage-holds", httpserver.AdaptFunc(s.adminUsageHolds))
 	}
 	return router
 }

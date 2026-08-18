@@ -4,7 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/gin-gonic/gin"
 )
 
 func TestMiddlewareRejectsMissingBearerToken(t *testing.T) {
@@ -30,7 +34,7 @@ func TestMiddlewareAddsVerifiedPrincipal(t *testing.T) {
 		return want, nil
 	}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, ok := FromContext(r.Context())
-		if !ok || got != want {
+		if !ok || !reflect.DeepEqual(got, want) {
 			t.Fatalf("principal = %+v, ok = %v", got, ok)
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -39,6 +43,38 @@ func TestMiddlewareAddsVerifiedPrincipal(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", response.Code)
+	}
+}
+
+func TestRequireRealmRoleGinRejectsNonAdmin(t *testing.T) {
+	verify := func(context.Context, string) (Principal, error) {
+		return Principal{Issuer: "https://issuer.example", Subject: "subject", SessionID: "session", RealmRoles: []string{"member"}}, nil
+	}
+	router := httpserver.NewRouter()
+	router.Use(GinMiddleware(verify), RequireRealmRoleGin("platform-admin"))
+	router.GET("/admin", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	request := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	request.Header.Set("Authorization", "Bearer token")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", response.Code)
+	}
+}
+
+func TestRequireRealmRoleGinAllowsAdmin(t *testing.T) {
+	verify := func(context.Context, string) (Principal, error) {
+		return Principal{Issuer: "https://issuer.example", Subject: "subject", SessionID: "session", RealmRoles: []string{"platform-admin"}}, nil
+	}
+	router := httpserver.NewRouter()
+	router.Use(GinMiddleware(verify), RequireRealmRoleGin("platform-admin"))
+	router.GET("/admin", func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	request := httptest.NewRequest(http.MethodGet, "/admin", nil)
+	request.Header.Set("Authorization", "Bearer token")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", response.Code)
 	}

@@ -28,6 +28,7 @@ func main() {
 		TokenURL:         mustURL("PORTAL_OIDC_TOKEN_URL"),
 		ClientID:         os.Getenv("PORTAL_OIDC_CLIENT_ID"),
 		AccountURL:       mustURL("ACCOUNT_HTTP_URL"),
+		BillingURL:       mustURL("BILLING_HTTP_URL"),
 		TokenGatewayURL:  mustURL("TOKEN_GATEWAY_HTTP_URL"),
 		SecureCookies:    publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
 	}, store)

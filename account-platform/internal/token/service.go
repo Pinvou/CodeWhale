@@ -72,6 +72,11 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 	router.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
 	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
+	admin := router.Group("/admin/v1")
+	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
+	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
+	admin.GET("/token-accounts", httpserver.AdaptFunc(s.adminTokenAccounts))
+	admin.GET("/usage-requests", httpserver.AdaptFunc(s.adminUsageRequests))
 	return router
 }
 

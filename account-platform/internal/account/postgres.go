@@ -159,11 +159,12 @@ SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,s.member
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
 JOIN user_sessions s ON s.user_id=u.id AND s.issuer=i.issuer AND s.session_id=$3
+LEFT JOIN organizations o ON o.id=s.active_organization_id
 LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=s.active_organization_id AND m.status='ACTIVE'
 LEFT JOIN membership_units mu ON mu.membership_id=m.id
 LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
 LEFT JOIN role_bindings rb ON rb.membership_id=m.id
-WHERE i.issuer=$1 AND i.subject=$2
+WHERE i.issuer=$1 AND i.subject=$2 AND (s.active_organization_id IS NULL OR o.status='ACTIVE')
 GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
 		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles,
 	)
@@ -479,7 +480,10 @@ func (r *PostgresRepository) AcceptInvitation(ctx context.Context, principal ide
 	var rolesJSON []byte
 	var expiresAt time.Time
 	var acceptedBy *uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT id, organization_id, email_normalized, status, roles, expires_at, accepted_by FROM invitations WHERE token_hash = $1 FOR UPDATE`, hash[:]).Scan(&invitationID, &organizationID, &email, &status, &rolesJSON, &expiresAt, &acceptedBy)
+	err = tx.QueryRow(ctx, `
+SELECT i.id,i.organization_id,i.email_normalized,i.status,i.roles,i.expires_at,i.accepted_by
+FROM invitations i JOIN organizations o ON o.id=i.organization_id AND o.status='ACTIVE'
+WHERE i.token_hash=$1 FOR UPDATE OF i`, hash[:]).Scan(&invitationID, &organizationID, &email, &status, &rolesJSON, &expiresAt, &acceptedBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Organization{}, ErrNotFound
 	}
