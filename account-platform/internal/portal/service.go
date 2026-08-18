@@ -404,6 +404,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
 		return true
 	}
+	if method == http.MethodPost && resource == "/admin/v1/organizations" {
+		return true
+	}
 	if strings.Contains(resource, "..") {
 		return false
 	}
@@ -414,7 +417,13 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if _, err := uuid.Parse(parts[3]); err != nil {
 		return false
 	}
-	return (method == http.MethodDelete && len(parts) == 4) || (method == http.MethodPatch && len(parts) == 5 && parts[4] == "status")
+	if method == http.MethodDelete && len(parts) == 4 {
+		return true
+	}
+	if method == http.MethodPatch && len(parts) == 5 && parts[4] == "status" {
+		return true
+	}
+	return parts[2] == "organizations" && len(parts) == 5 && parts[4] == "units" && (method == http.MethodGet || method == http.MethodPost)
 }
 
 func billingAdminPathAllowed(method, resource string) bool {

@@ -5,6 +5,8 @@ import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from
 import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
+import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
+import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
 
 test('account balances convert internal microcredits to display points', () => {
   assert.equal(MICROCREDITS_PER_POINT, 10_000);
@@ -14,6 +16,39 @@ test('account balances convert internal microcredits to display points', () => {
   assert.equal(formatPoints(1, 'en'), '0.0001');
   assert.equal(formatPoints(0, 'en'), '0');
   assert.equal(formatPoints(null, 'en'), '—');
+});
+
+test('admin organization client uses protected organization and unit endpoints', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    return new Response(JSON.stringify(options.method === 'POST' ? { organization_id:'org-id' } : { items:[] }), { status:options.method === 'POST' ? 201 : 200, headers:{ 'Content-Type':'application/json' } });
+  };
+  try {
+    const client = new AdminPlatformClient('/portal');
+    client.csrfToken = 'c'.repeat(32);
+    await client.createOrganization('Example', 'owner-id');
+    await client.organizationUnits('org-id');
+    await client.createOrganizationUnit('org-id', 'Engineering', 'parent-id');
+    assert.deepEqual(calls.map(call => [call.url, call.options.method || 'GET']), [
+      ['/portal/api/admin/account/admin/v1/organizations', 'POST'],
+      ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'GET'],
+      ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'POST'],
+    ]);
+    assert.deepEqual(JSON.parse(calls[0].options.body), { name:'Example', owner_user_id:'owner-id' });
+    assert.deepEqual(JSON.parse(calls[2].options.body), { name:'Engineering', parent_id:'parent-id' });
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('admin organization units form a nested management tree', () => {
+  const roots = buildUnitTree([
+    { unit_id:'child', parent_id:'root', name:'Child' },
+    { unit_id:'root', parent_id:null, name:'Root' },
+  ]);
+  assert.equal(roots.length, 1);
+  assert.equal(roots[0].unit_id, 'root');
+  assert.equal(roots[0].children[0].unit_id, 'child');
 });
 
 test('context guard invalidates and aborts stale organization loads', () => {

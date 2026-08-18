@@ -60,6 +60,52 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminOrganization
+      summary: Create an organization with an initial owner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrganizationCreate" }
+      responses:
+        "201":
+          description: Organization created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Organization" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/units:
+    get:
+      operationId: listAdminOrganizationUnits
+      summary: List the complete organization unit hierarchy
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminOrganizationUnit
+      summary: Create a root or child organization unit
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrganizationUnitCreate" }
+      responses:
+        "201":
+          description: Organization unit created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationUnit" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/status:
     patch:
       operationId: setAdminOrganizationStatus
@@ -182,6 +228,49 @@ components:
       required: true
       schema: { type: string, format: uuid }
   schemas:
+    OrganizationCreate:
+      type: object
+      additionalProperties: false
+      required: [name, owner_user_id]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        owner_user_id: { type: string, format: uuid }
+    OrganizationUnitCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        parent_id:
+          oneOf:
+            - { type: string, format: uuid }
+            - { type: "null" }
+    Organization:
+      type: object
+      additionalProperties: false
+      required: [organization_id, name, status, version]
+      properties:
+        organization_id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        version: { type: integer, format: int64, minimum: 1 }
+        roles:
+          type: array
+          items: { type: string }
+    OrganizationUnit:
+      type: object
+      additionalProperties: false
+      required: [unit_id, organization_id, name, status, version]
+      properties:
+        unit_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        parent_id:
+          oneOf:
+            - { type: string, format: uuid }
+            - { type: "null" }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        version: { type: integer, format: int64, minimum: 1 }
     StatusChange:
       type: object
       additionalProperties: false
