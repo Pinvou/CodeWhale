@@ -1907,7 +1907,7 @@ dependencies = [
  "crossterm_winapi",
  "derive_more",
  "document-features",
- "mio",
+ "mio 1.2.0",
  "parking_lot",
  "rustix",
  "signal-hook",
@@ -4914,7 +4914,7 @@ dependencies = [
  "flume",
  "if-addrs 0.15.0",
  "log",
- "mio 1.2.0",
+ "mio",
  "socket-pktinfo",
  "socket2",
 ]

@@ -15,7 +15,6 @@ const {
 const { linuxStartupWindowConfigSpec } = require("./startup-window-config.js");
 const { prepareKnowledgeHost } = require("./knowledge-host.js");
 const { WRAPPER_ENV } = require("./require-wrapper.js");
-const { prepareWebTemplate } = require("./web-template.js");
 const { stageWindowsInstaller } = require("./windows-installer.js");
 const {
   describeWindowsRuntime,
@@ -392,7 +391,6 @@ async function main() {
     if (developmentHost?.configSpec) additionalConfigs.push(developmentHost.configSpec);
   }
   if (hasTauriBuildCommand) {
-    prepareWebTemplate();
     prepareCodexBridge();
     prepareWindowsCodexBridge(windowsBridgeOptions);
     prepareKnowledgeHost();

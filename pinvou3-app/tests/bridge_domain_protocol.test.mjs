@@ -75,16 +75,15 @@ const protocolSources = {
   settings: ['bridge/settings.js'],
   updater: ['bridge/updater.js'],
   voice: ['bridge/voice.js'],
-  workflow: ['bridge/workflow-runtime.js', 'bridge/workflow.js'],
   multiAgent: ['bridge/multiagent.js'],
   teamRelay: ['bridge/team-relay.js'],
 };
 
 const expectedProtocolHashes = {
-  multiAgent: 'b123eece32980d80787ab9cd7315f3566b0943ab366a2358a1ff0cb247b65491',
+  multiAgent: '6896409bb406f1ba54ca496dd78c04549cc78ff5490ae771d9cf60586368a8a8',
   orchestration: 'e5e333aca4d1fb7e8ed32f879d3b310c01cd0845d0e5cdc2b5ed1e95aee3ea31',
-  artifacts: '9de646442d1192440abd14046e75ec402afc2c8bea1a8a88ff9667aab5e6ac4c',
-  chat: '3db60915d5941a1a4130e1c0a067671a5fd173ef24d703ca2cd807c021157fc1',
+  artifacts: '8ea6cbffcc1a768f79cd218dc02d2f211456fe09c7f2aa233587603ba34c4f4e',
+  chat: '090ca99a3aaf1977bf8274ddbaa22f863ae77e50ae72cea6ad0724ea5167c28a',
   dependencies: '257468e4f9e2e9270de6ef75f685d5eafcd000226d44cfb81a1b04c0e7615707',
   interaction: '8a042288323a37d82862a55537f57daaa7f368bb569d528d480a8c2ed8a1961a',
   knowledge: '96d4f6a1534f0aedf10714e7b945e0a29579b224ec98cbf27659237b5aac59b6',
@@ -97,7 +96,6 @@ const expectedProtocolHashes = {
   settings: 'c8f2c392ecfea7f8dca803a2cbeeb783cdc3de24e3643ddbacd56dc6a165343b',
   updater: '53562c8fe6547a6c422d112d34769d3ac79abeec27633c32b5658605072c9fe2',
   voice: '2e6789eca3969f27e8e0fd9f034bd82e0b0e1f302152efc65c5714839fbf5b72',
-  workflow: 'c92e92ed3dc3850bae17f451810184fad2cadbfda6bf9f565a8b2862ad0595a1',
   teamRelay: '0cc913fbf65665a2ad93a87c94ac6dce8d3830b8a2d7736e4b80a043cccef379',
 };
 

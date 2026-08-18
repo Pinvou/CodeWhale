@@ -4,6 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
+RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
 
 
 def _without_yaml_comments(block):
@@ -16,6 +17,20 @@ class CiGatePolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        cls.release_workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    def test_release_workflow_does_not_reference_retired_web_template(self):
+        for retired_reference in (
+            "test:web-template-packaging",
+            "prepare:web-template",
+            "resources/common/web-template",
+            "网页模板发布前冒烟",
+        ):
+            self.assertNotIn(
+                retired_reference,
+                self.release_workflow,
+                f"发布流程仍引用已退役网页模板: {retired_reference}",
+            )
 
     def test_pr_modes_and_stacked_pr_triggers_are_explicit(self):
         trigger = self.workflow.split("\non:", maxsplit=1)[1].split(
