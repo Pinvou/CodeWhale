@@ -94,6 +94,7 @@ type UsageStore interface {
 	BeginUsage(context.Context, UsageRequest, map[string]any) (UsageRequest, bool, error)
 	MarkReserved(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
 	MarkUpstream(context.Context, uuid.UUID) error
+	RecordUpstreamRequest(context.Context, uuid.UUID, string) error
 	MarkCommitted(context.Context, uuid.UUID, int64, map[string]any) error
 	MarkReleased(context.Context, uuid.UUID, string) error
 	MarkReview(context.Context, uuid.UUID, string, map[string]any) error

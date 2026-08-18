@@ -39,6 +39,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
 	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
 	protected.GET("/internal/v1/pricing/current", httpserver.AdaptFunc(s.currentPrice))
+	protected.GET("/internal/v1/pricing/:price_version_id", httpserver.AdaptFunc(s.priceByID))
 	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.approveAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
@@ -333,6 +334,20 @@ func (s *Service) currentPrice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	price, err := s.repository.CurrentPrice(r.Context(), model)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, price)
+}
+
+func (s *Service) priceByID(w http.ResponseWriter, r *http.Request) {
+	priceID, err := uuid.Parse(r.PathValue("price_version_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid price version identifier", httpserver.RequestID(r.Context()))
+		return
+	}
+	price, err := s.repository.PriceByID(r.Context(), priceID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

@@ -118,6 +118,15 @@ func (r *PostgresRepository) CurrentPrice(ctx context.Context, model string) (Pr
 	return price, err
 }
 
+func (r *PostgresRepository) PriceByID(ctx context.Context, priceID uuid.UUID) (PriceVersion, error) {
+	var price PriceVersion
+	err := r.pool.QueryRow(ctx, `SELECT id,model,input_per_million,output_per_million,cached_input_per_million,effective_from FROM pricing_versions WHERE id=$1`, priceID).Scan(&price.ID, &price.Model, &price.InputPerMillion, &price.OutputPerMillion, &price.CachedInputPerMillion, &price.EffectiveFrom)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PriceVersion{}, ErrNotFound
+	}
+	return price, err
+}
+
 func (r *PostgresRepository) Credit(ctx context.Context, walletID uuid.UUID, businessReference string, amount int64, refundable bool) (Wallet, error) {
 	if amount <= 0 || strings.TrimSpace(businessReference) == "" {
 		return Wallet{}, ErrConflict

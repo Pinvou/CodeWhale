@@ -96,6 +96,12 @@ spec:
             - { name: TOKEN_DEFAULT_ROUTE_PRIORITY, value: {{ $root.Values.tokenGateway.defaultRoutePriority | quote }} }
             - name: TOKEN_DEFAULT_PROVIDER_API_KEY
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-default-provider-api-key } }
+            - { name: TOKEN_RECONCILIATION_NEWAPI_BASE_URL, value: {{ $root.Values.tokenGateway.reconciliationNewApiBaseUrl | quote }} }
+            - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-reconciliation-newapi-admin-token } }
+            - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-reconciliation-newapi-admin-user-id } }
+            - { name: TOKEN_RECONCILIATION_INTERVAL_SECONDS, value: {{ $root.Values.tokenGateway.reconciliationIntervalSeconds | quote }} }
             {{- else if eq $app.name "token-portal" }}
             - { name: REDIS_URL, value: {{ printf "redis://%s-redis:6379/0" $fullname | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }

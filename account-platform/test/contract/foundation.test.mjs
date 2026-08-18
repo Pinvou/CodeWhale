@@ -202,6 +202,28 @@ test('default model routes are platform managed and deployment-secret backed', a
   assert.doesNotMatch(chart, /TOKEN_DEFAULT_PROVIDER_API_KEY, value:/);
 });
 
+test('usage review reconciliation is leased, evidence based, and secret backed', async () => {
+  const migration = await readFile(
+    path.join(root, 'migrations/token/000006_usage_reconciliation.up.sql'),
+    'utf8',
+  );
+  const reconciler = await readFile(path.join(root, 'internal/token/reconciliation.go'), 'utf8');
+  const gateway = await readFile(path.join(root, 'internal/token/proxy.go'), 'utf8');
+  const chart = await readFile(
+    path.join(root, 'deploy/helm/account-platform/templates/app-deployments.yaml'),
+    'utf8',
+  );
+  assert.match(migration, /reconciliation_lease_until/);
+  assert.match(reconciler, /FOR UPDATE(?: OF request)? SKIP LOCKED/);
+  assert.match(reconciler, /request_id/);
+  assert.match(reconciler, /PriceByID/);
+  assert.match(reconciler, /automatic reconciliation exhausted/);
+  assert.match(gateway, /X-Oneapi-Request-Id/);
+  assert.match(gateway, /RecordUpstreamRequest/);
+  assert.match(chart, /key: token-reconciliation-newapi-admin-token/);
+  assert.doesNotMatch(chart, /TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN, value:/);
+});
+
 test('payment simulator preserves the exact signed callback payload', async () => {
   const migration = await readFile(
     path.join(root, 'migrations/payment-simulator/000004_exact_notification_payload.up.sql'),

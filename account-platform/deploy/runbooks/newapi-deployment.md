@@ -10,7 +10,8 @@ New API 使用 AGPLv3，并带上游声明的附加归属要求。发布或修�
 2. 执行 `node scripts/account-platform.mjs dev up`。该命令显式启用 `real-newapi` profile；普通 Integration/Fault 测试仍只使用 Mock New API。
 3. 首次使用新的 PostgreSQL 卷时，初始化脚本自动创建 `new_api` 角色和 `account_platform_newapi` 数据库。已有卷可在更新 Postgres 容器环境后执行 `docker compose --env-file account-platform/deploy/compose/.env -f account-platform/deploy/compose/compose.yaml exec postgres sh /docker-entrypoint-initdb.d/10-init-databases.sh`，脚本可重复执行。
 4. 仅从本机打开 `http://127.0.0.1:18106` 完成管理员初始化、配置真实上游 Channel，并创建供 Token Gateway 使用的最小权限 API Token。
-5. 创建一个仅允许平台代理模型的最小权限 New API Token，将其通过部署 Secret 注入 `TOKEN_DEFAULT_PROVIDER_API_KEY`；Provider Base URL 使用 `http://newapi:3000`。Token Gateway 会在用户第一次对话时创建平台托管的默认 Token Account 和路由，并将凭据二次加密后写入 Token 数据库。不得把实际 Token 写入 Compose、源码或日志。
+5. 创建一个仅允许平台代理模型的最小权限 New API Token，将其通过部署 Secret 注入 `TOKEN_DEFAULT_PROVIDER_API_KEY`；Provider Base URL 使用 `http://newapi:3000`。Token Gateway 会在用户第一次对话时创建平台托管的默认 Token Account 和路由，并将凭据二次加密后写入 Token 数据库。
+6. 为自动用量核对创建独立的 New API 管理访问 Token，分别把 Token 和对应管理员用户数字 ID 注入 `TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN`、`TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID`。Token Gateway 会保存 New API 响应的 `X-Oneapi-Request-Id`，该凭据只用于按此 ID 精确读取 New API 日志，不用于模型调用。不得把任何实际 Token 写入 Compose、源码、日志、命令行参数或工单。
 
 Mock New API 继续用于限流、断流和缺失 usage 故障注入；真实 New API 不用于制造这些异常。
 
@@ -22,6 +23,8 @@ Mock New API 继续用于限流、断流和缺失 usage 故障注入；真实 Ne
 - `newapi-session-secret`：所有 New API 副本一致；
 - `newapi-crypto-secret`：所有 New API 副本一致，且不得与 Session Secret 相同。
 - `token-default-provider-api-key`：供 Token Gateway 自动创建默认路由的最小权限 New API Token。
+- `token-reconciliation-newapi-admin-token`：供 Token Gateway 按请求 ID 查询 New API 用量日志的独立管理访问 Token；
+- `token-reconciliation-newapi-admin-user-id`：上述管理 Token 所属的 New API 数字用户 ID。
 
 Helm 不创建内联 Secret。生产 New API 没有公网 Ingress，Service 名为 `newapi`，只有带 Token Gateway 组件标签的 Pod 可以访问其 8080 数据面。New API 只能访问 DNS、内部 Redis、批准的 PostgreSQL CIDR 和模型供应商 CIDR。
 
@@ -40,7 +43,7 @@ Token Gateway 中的 Provider Base URL 使用 `http://newapi:8080`。完成 `/v1
 - `/api/status` 返回成功；
 - Token Gateway 可以用加密凭据读取 `/v1/models`；
 - JSON 与 SSE 请求只调用一次真实 New API；
-- usage 明确时正确 Commit，断流或 usage 不确定时保留 Hold 并进入 Review；
+- usage 明确时正确 Commit；断流或 usage 不确定时先进入 Review，后台任务随后按 New API 请求日志自动补结算；只有明确的鉴权、模型不存在或额度拒绝证据才自动释放 Hold，24 小时仍无确定证据的请求停止自动处理并保留人工复核；
 - New API 管理面没有公网入口，其他账号平台 Pod 不能直接访问数据面；
 - PostgreSQL、Redis 和 New API 镜像均有备份/回滚记录。
 

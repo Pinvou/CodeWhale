@@ -7,8 +7,11 @@ their backup, certificate, and merchant controls remain environment-owned.
 Create the referenced runtime Secret before install. It must contain separate
 database URLs (`account-service-database-url`, `billing-service-database-url`,
 `token-gateway-database-url`, and Keycloak database keys), the internal service
-token, payment adapter URL/HMAC keys, and the environment-specific external
-secret-provider material. Never place those values in a values file.
+token, payment adapter URL/HMAC keys, the environment-specific external
+secret-provider material, `token-default-provider-api-key`, and the New API
+reconciliation credentials (`token-reconciliation-newapi-admin-token` and
+`token-reconciliation-newapi-admin-user-id`). Never place those values in a
+values file.
 
 Production-new deliberately excludes Payment Simulator and Mock New API. Use the
 dedicated production values only after the real payment adapter, real New API,

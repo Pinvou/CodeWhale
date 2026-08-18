@@ -58,6 +58,8 @@ tokenGateway:
   defaultProviderBaseUrl: http://newapi:8080
   defaultProviderModels: [deepseek-v4-flash]
   defaultRoutePriority: 10
+  reconciliationNewApiBaseUrl: http://newapi:8080
+  reconciliationIntervalSeconds: 15
 
 external:
   postgresCidrs: []

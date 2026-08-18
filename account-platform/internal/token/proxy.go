@@ -197,6 +197,9 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer response.Body.Close()
+	if newAPIRequestID := response.Header.Get("X-Oneapi-Request-Id"); newAPIRequestID != "" {
+		_ = s.repository.RecordUpstreamRequest(context.WithoutCancel(r.Context()), usageRequest.ID, newAPIRequestID)
+	}
 	w.Header().Set("X-Pinvou-Usage-Request-ID", usageRequest.ID.String())
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		s.handleUpstreamFailure(w, r, usageRequest.ID, hold.ID, response)
