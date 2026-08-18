@@ -30,8 +30,6 @@ assertContainsTranslationKeys(dict.zh, dict.en, 'en');
 assertContainsTranslationKeys(dict.zh, dict.ja, 'ja');
 
 for (const language of ['zh', 'en', 'ja']) {
-  assert.ok(dict[language].expertPoolIndividualTab, `${language}.expertPoolIndividualTab must exist`);
-  assert.ok(dict[language].expertPoolTeamTab, `${language}.expertPoolTeamTab must exist`);
   for (const section of [
     'uiRemote',
     'uiMonitor',
@@ -43,7 +41,7 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiChatExtra',
     'uiChatScenes',
     'uiAccount',
-    'uiWorkflow',
+    'artifactPreview',
     'uiToolStore',
     'uiPet',
     'uiWebConnection',
@@ -181,12 +179,6 @@ assert.match(scheduledTasks, /const scheduledCopy = t\.uiScheduled/);
 assert.match(scheduledTasks, /scheduledCopy\.taskName/);
 assert.match(scheduledTasks, /scheduledCopy\.runHistory/);
 assert.doesNotMatch(scheduledTasks, />立即运行</);
-const workflow = source('features/workflow/WorkflowView.jsx');
-assert.match(workflow, /t\.uiWorkflow/);
-assert.match(workflow, /kind:\s*'other',\s*label:\s*t\.uiToolRender\.other/);
-assert.match(workflow, /answers\[qi\]\?\.kind\s*===\s*'other'/);
-assert.doesNotMatch(workflow, /OTHER_ANSWER_LABEL/);
-assert.doesNotMatch(workflow, /label:\s*'其他'/);
 const toolStore = source('features/tools/ToolStoreView.jsx');
 const connectorSsoDialog = source('features/tools/ConnectorSsoDialog.jsx');
 assert.match(toolStore, /const storeCopy = t\.uiToolStore/);
@@ -361,7 +353,7 @@ const codexViewProviders = source('features/codex/CodexAcpView.jsx');
 assert.match(codexViewProviders, /set_codex_acp_session_provider/);
 assert.match(codexViewProviders, /t\.uiAcpProviders/);
 const personas = source('features/personas/Personas.jsx');
-assert.match(personas, /label: t\.expertPoolIndividualTab/);
-assert.doesNotMatch(personas, /expertPoolIndividualTab \|\|/);
+assert.match(personas, /\{t\.cpMyCards\}/);
+assert.doesNotMatch(personas, /ExpertTeamsPanel|expertPoolTeamTab|expertPoolIndividualTab/);
 
 console.log('UI language coverage tests passed');

@@ -45,7 +45,6 @@ pub(crate) mod team_relay;
 pub(crate) mod timeline;
 pub(crate) mod updater;
 pub(crate) mod voice;
-pub(crate) mod workflows;
 
 #[cfg(test)]
 mod protocol_tests;

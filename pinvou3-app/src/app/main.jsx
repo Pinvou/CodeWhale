@@ -55,7 +55,6 @@ const PREVIEW_SCHEDULED_RUN_SHORTCUTS = [
 import { ToolStoreView } from '../features/tools/ToolStoreView.jsx';
 import { PinvouSummonCard } from '../features/tools/tool-renderers.jsx';
 import { CardPoolView, Lanyard, PersonaEditorModal } from '../features/personas/Personas.jsx';
-import { WorkflowView } from '../features/workflow/WorkflowView.jsx';
 import { SearchView } from '../features/search/SearchView.jsx';
 import { TeamRelayView } from '../features/team-relay/TeamRelayView.jsx';
 import { disableTeamRelayAccess, loadTeamRelayAccess, unlockTeamRelayAccess } from '../features/team-relay/team-relay-access.js';
@@ -72,7 +71,7 @@ let appFirstRenderMarked = false;
 
 const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
-  'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas', 'workflow',
+  'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas',
   'memory', 'remoteControl', 'updater', 'dependencies', 'teamRelay',
 ];
 
@@ -884,8 +883,6 @@ function workspaceDisplayName(path) {
           setCurrentView('chat');
         } else if (!teamRelayAvailable && currentView === 'teamRelay') {
           setCurrentView('chat');
-        } else if (currentView === 'workflow') {
-          setCurrentView('cardpool');
         }
       }, [currentView, teamRelayAvailable]);
 
@@ -952,7 +949,6 @@ function workspaceDisplayName(path) {
       const languageNeedsRestart = !!bootedLanguageRef.current && language !== bootedLanguageRef.current;
 
       // Build chat history from sessions
-      const skillBindings = (bs && bs.workflow && bs.workflow.bindings) || {};
       const sessionBusy = (bs && bs.sessionBusy) || {};
       const chatHistory = bs && bs.sessions ? bs.sessions.map(s => {
         const isPlaceholder = !s.title || DEFAULT_CHAT_TITLES.has(s.title);
@@ -970,7 +966,6 @@ function workspaceDisplayName(path) {
           updatedAt: s.updated_at || s.created_at || '',
           pinned: !!s.pinned,
           pinnedAt: s.pinned_at || '',
-          skill: skillBindings[s.id] || null,
           working: !!sessionBusy[s.id], // 多 session 并发:该 session 是否正在后台生成
           leadingIcon: <PinvouLogo className="h-[18px] w-[18px]" />,
           testId: 'regular-sidebar-item',
@@ -1947,7 +1942,7 @@ function workspaceDisplayName(path) {
         ? ((((chatHistory || []).find(c => c.id === activeChat)) || {}).title || 'PINVOU')
         : currentView === 'codex'
           ? ((((codexHistory || []).find(c => c.id === activeCodexId)) || {}).title || t.sidebarTaskFilterCode)
-        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, workflow: t.workflow, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings }[currentView] || 'PINVOU');
+        : ({ search: t.searchChats, scheduled: t.scheduledPlans, monitor: t.monitor, cardpool: t.cardPool, toolStore: t.toolStore, teamRelay: t.teamRelay, outputs: t.outputs, knowledge: t.knowledge, settings: t.settings }[currentView] || 'PINVOU');
       const mobileNavigate = (view, beforeNavigate) => {
         setMobileMoreOpen(false);
         navigateFromScheduledRun(view, beforeNavigate);
@@ -2509,7 +2504,6 @@ function workspaceDisplayName(path) {
                 />
               </SettingsErrorBoundary>
             )}
-            {currentView === 'workflow' && <WorkflowView theme={activeTheme} t={t} bs={bs} />}
             {teamRelayAvailable && currentView === 'teamRelay' && <TeamRelayView theme={activeTheme} t={t} onThemeChange={handleSetTheme} onUseAgent={handleTeamRelayUseAgent} onLoadCodeAgents={loadTeamRelayCodeAgents} />}
             {currentView === 'toolStore' && <ToolStoreView theme={activeTheme} t={t} onNewChat={handleNewChat} />}
             {currentView === 'cardpool' && <CardPoolView theme={activeTheme} t={t} bs={bs} onEquipped={() => setCurrentView('chat')} onAICreate={startAICard} initialMyOnly={poolMyOnly} />}

@@ -217,7 +217,6 @@ jobs:
               - 'pinvou3-app/src-tauri/src/features/assistant/strict_mode_validation_tests.rs'
               - 'pinvou3-app/src-tauri/src/features/assistant/platform/**'
               - 'pinvou3-app/src-tauri/src/features/assistant/engine.rs'
-              - 'pinvou3-app/src-tauri/src/features/assistant/harness.rs'
               - 'pinvou3-app/src-tauri/src/lib.rs'
               - 'pinvou3-app/src-tauri/Cargo.toml'
               - 'pinvou3-app/src-tauri/Cargo.lock'
@@ -594,9 +593,6 @@ jobs:
         run: |
           npm --prefix pinvou3-app run test:tauri-layout
           npm --prefix pinvou3-app run test:tauri-effective-config
-          npm --prefix pinvou3-app run test:web-template-packaging
-          npm --prefix pinvou3-app run prepare:web-template
-          npm --prefix pinvou3-app/src-tauri/resources/common/web-template run build
           npm --prefix pinvou3-app run test:macos-phase2
           npm --prefix pinvou3-app run test:knowledge-host-packaging
 

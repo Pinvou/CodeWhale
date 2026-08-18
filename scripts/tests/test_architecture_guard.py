@@ -266,6 +266,12 @@ class ArchitectureGuardUnitTests(unittest.TestCase):
             common.mkdir(parents=True)
             (common / "tool.exe").write_bytes(b"MZ\x00\x00")
             (common / "tool").write_bytes(b"\x7fELF")
+            generated = (
+                root
+                / "pinvou3-app/src-tauri/resources/common/generated/node_modules/tool"
+            )
+            generated.parent.mkdir(parents=True)
+            generated.write_bytes(b"\x7fELF")
             platform = root / "pinvou3-app/src-tauri/resources/platforms/linux/x86_64"
             platform.mkdir(parents=True)
             (platform / "allowed").write_bytes(b"\x7fELF")
