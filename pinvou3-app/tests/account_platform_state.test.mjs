@@ -237,3 +237,13 @@ test('desktop account restoration starts with the app without blocking startup',
   const source = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
   assert.match(source, /accountPlatformClient\.session\(controller\.signal\)\.catch/);
 });
+
+test('admin console exposes organizations and users as independent primary tabs', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');
+  assert.match(view, /section === 'organizations'/);
+  assert.match(view, /section === 'users'/);
+  assert.doesNotMatch(view, /section === 'accounts'/);
+  assert.doesNotMatch(i18n, /账号与组织/);
+  assert.match(i18n, /organizations:'组织', users:'用户'/);
+});

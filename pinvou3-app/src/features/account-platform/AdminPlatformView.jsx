@@ -3,7 +3,7 @@ import { buildUnitTree } from './admin-organization-tree.js';
 import { formatPoints } from './credit-units.js';
 import './admin-platform.css';
 
-const NAV_ICONS = { overview:'⌂', accounts:'◎', billing:'◇', tokens:'↗', audit:'≡' };
+const NAV_ICONS = { overview:'⌂', organizations:'▦', users:'◎', billing:'◇', tokens:'↗', audit:'≡' };
 const okStatuses = new Set(['ACTIVE', 'PAID', 'SETTLED', 'HEALTHY', 'APPROVED', 'SUCCESS']);
 const warnStatuses = new Set(['PENDING', 'CREATED', 'SETTLEMENT_PENDING', 'REVIEW', 'MANUAL_REVIEW', 'PENDING_APPROVAL']);
 
@@ -52,9 +52,12 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       if (target === 'overview') {
         const [account, billing, token] = await Promise.all([client.accountOverview(signal), client.billingOverview(signal), client.tokenOverview(signal)]);
         next = { accountOverview:account, billingOverview:billing, tokenOverview:token };
-      } else if (target === 'accounts') {
+      } else if (target === 'organizations') {
         const [users, organizations] = await Promise.all([client.users('', signal), client.organizations('', signal)]);
         next = { users:users.items || [], organizations:organizations.items || [] };
+      } else if (target === 'users') {
+        const users = await client.users('', signal);
+        next = { users:users.items || [] };
       } else if (target === 'billing') {
         const [wallets, orders, adjustments, holds] = await Promise.all([client.wallets(signal), client.paymentOrders(signal), client.adjustments(signal), client.holds(signal)]);
         next = { wallets:wallets.items || [], orders:orders.items || [], adjustments:adjustments.items || [], holds:holds.items || [] };
@@ -101,7 +104,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       {error && <div role="alert" className="adm-alert">{error}</div>}
       {busy && <div className="adm-progress" />}
       {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
-      {section === 'accounts' && <Accounts copy={copy} data={data} client={client} setData={setData} />}
+      {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} />}
+      {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} />}
       {section === 'billing' && <Billing copy={copy} language={language} data={data} />}
       {section === 'tokens' && <Tokens copy={copy} language={language} data={data} />}
       {section === 'audit' && <Audit copy={copy} data={data} />}
@@ -110,7 +114,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
 }
 
 function sectionHasData(section, data) {
-  return section === 'overview' ? data.accountOverview : section === 'accounts' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : data.audits;
+  return section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : data.audits;
 }
 
 function StatePage({ copy, kind, onRetry }) {
@@ -126,8 +130,7 @@ function Overview({ copy, language, data }) {
   return <section><div className="adm-hero"><div><h2>{copy.overview.title}</h2><p>{copy.overview.lead}</p></div><Status value="ACTIVE" /></div><div className="adm-metrics"><Metric label={copy.overview.users} value={a.users} /><Metric label={copy.overview.organizations} value={a.organizations} /><Metric label={copy.overview.available} value={Number(b.posted_microcredits || 0) - Number(b.reserved_microcredits || 0)} tone="accent" formatter={value => formatPoints(value, language)} /><Metric label={copy.overview.reserved} value={b.reserved_microcredits} formatter={value => formatPoints(value, language)} /><Metric label={copy.overview.tokenAccounts} value={t.token_accounts} /><Metric label={copy.overview.usageRequests} value={t.usage_requests} /></div><div className="adm-overview-grid"><article className="adm-panel"><SectionHeader title={copy.overview.attention} copy={copy} /><div className="adm-attention">{alerts.map(([label,value]) => <div key={label}><span>{label}</span><strong className={Number(value) ? 'has-value' : ''}>{formatNumber(value)}</strong></div>)}</div></article><article className="adm-panel adm-health"><span>{copy.overview.healthyRoutes}</span><strong>{formatNumber(t.healthy_routes)}</strong><small>/ {formatNumber(t.token_accounts)} {copy.overview.tokenAccounts}</small><div><i style={{ width:`${Math.min(100, Number(t.token_accounts) ? Number(t.healthy_routes) / Number(t.token_accounts) * 100 : 0)}%` }} /></div></article></div></section>;
 }
 
-function Accounts({ copy, data, client, setData }) {
-  const [tab, setTab] = useState('users');
+function AccountDirectory({ section, copy, data, client, setData }) {
   const [search, setSearch] = useState('');
   const [actionKey, setActionKey] = useState('');
   const [notice, setNotice] = useState('');
@@ -135,21 +138,22 @@ function Accounts({ copy, data, client, setData }) {
   const [selectedOrganization, setSelectedOrganization] = useState(null);
   const [organizationName, setOrganizationName] = useState('');
   const [ownerUserID, setOwnerUserID] = useState('');
-  const items = tab === 'users' ? data.users || [] : data.organizations || [];
-  const activeUsers = (data.users || []).filter(user => user.status === 'ACTIVE');
+  const isUserSection = section === 'users';
+  const items = isUserSection ? data.users || [] : data.organizations || [];
+  const activeUsers = useMemo(() => (data.users || []).filter(user => user.status === 'ACTIVE'), [data.users]);
   useEffect(() => {
     if (!ownerUserID && activeUsers[0]) setOwnerUserID(activeUsers[0].user_id);
   }, [activeUsers, ownerUserID]);
-  const reload = async (targetTab = tab) => {
-    const result = targetTab === 'users' ? await client.users(search) : await client.organizations(search);
-    setData(current => ({ ...current, [targetTab]:result.items || [], accountOverview:undefined }));
+  const reload = async () => {
+    const result = isUserSection ? await client.users(search) : await client.organizations(search);
+    setData(current => ({ ...current, [section]:result.items || [], accountOverview:undefined }));
   };
   const perform = async (item, action) => {
-    const isUser = tab === 'users';
+    const isUser = isUserSection;
     const id = isUser ? item.user_id : item.organization_id;
     const label = isUser ? item.display_name || item.email || shortID(id) : item.name;
     if (action === 'delete' && !window.confirm(isUser ? copy.accounts.confirmUser(label) : copy.accounts.confirmOrganization(label))) return;
-    setActionKey(`${tab}:${id}:${action}`); setNotice(''); setActionError('');
+    setActionKey(`${section}:${id}:${action}`); setNotice(''); setActionError('');
     try {
       if (isUser) {
         if (action === 'delete') await client.deleteUser(id);
@@ -170,7 +174,7 @@ function Accounts({ copy, data, client, setData }) {
     buttons.push(<button key="delete" className="danger" disabled={Boolean(actionKey)} onClick={() => perform(item, 'delete')}>{actionKey === `${prefix}delete` ? '…' : copy.accounts.delete}</button>);
     return <div className="adm-row-actions">{buttons}</div>;
   };
-  const columns = tab === 'users' ? [
+  const columns = isUserSection ? [
     { key:'display_name', label:copy.accounts.displayName, render:item => <strong>{item.display_name || '—'}</strong> }, { key:'email', label:copy.accounts.email }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'organization_count', label:copy.accounts.memberships }, { key:'last_seen_at', label:copy.accounts.lastSeen, render:item => formatDate(item.last_seen_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, true) },
   ] : [
     { key:'name', label:copy.accounts.organization, render:item => <button className="adm-name-link" onClick={() => setSelectedOrganization(item)}>{item.name}</button> }, { key:'organization_id', label:'ID', render:item => <code title={item.organization_id}>{shortID(item.organization_id)}</code> }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'member_count', label:copy.accounts.members }, { key:'created_at', label:copy.accounts.created, render:item => formatDate(item.created_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, false) },
@@ -183,14 +187,14 @@ function Accounts({ copy, data, client, setData }) {
     try {
       await client.createOrganization(organizationName.trim(), ownerUserID);
       setOrganizationName('');
-      await reload('organizations');
+      await reload();
       setNotice(copy.accounts.organizationCreated);
     } catch {
       setActionError(copy.accounts.actionFailed);
     } finally { setActionKey(''); }
   };
   if (selectedOrganization) return <OrganizationDetail copy={copy} organization={selectedOrganization} client={client} onBack={() => setSelectedOrganization(null)} />;
-  return <section className="adm-panel"><SectionHeader title={copy.accounts.title} count={items.length} copy={copy}><form className="adm-search" onSubmit={submit}><input value={search} onChange={event => setSearch(event.target.value)} placeholder={copy.search} /><button>{copy.searchAction}</button></form></SectionHeader><Tabs active={tab} onChange={value => { setTab(value); setSelectedOrganization(null); setNotice(''); setActionError(''); }} items={[{key:'users',label:copy.accounts.users},{key:'organizations',label:copy.accounts.organizations}]} />{tab === 'organizations' && <form className="adm-create-row" onSubmit={createOrganization}><input value={organizationName} onChange={event => setOrganizationName(event.target.value)} placeholder={copy.accounts.organizationNamePlaceholder} maxLength={120} /><select value={ownerUserID} onChange={event => setOwnerUserID(event.target.value)} aria-label={copy.accounts.initialOwner}><option value="">{copy.accounts.chooseOwner}</option>{activeUsers.map(user => <option key={user.user_id} value={user.user_id}>{user.display_name || user.email || shortID(user.user_id)}</option>)}</select><button disabled={!organizationName.trim() || !ownerUserID || Boolean(actionKey)}>{copy.accounts.createOrganization}</button>{activeUsers.length === 0 && <small>{copy.accounts.noActiveOwner}</small>}</form>}{notice && <div className="adm-inline-message ok" role="status">{notice}</div>}{actionError && <div className="adm-inline-message error" role="alert">{actionError}</div>}<Table columns={columns} items={items} copy={copy} /></section>;
+  return <section className="adm-panel"><SectionHeader title={copy.accounts[section]} count={items.length} copy={copy}><form className="adm-search" onSubmit={submit}><input value={search} onChange={event => setSearch(event.target.value)} placeholder={copy.search} /><button>{copy.searchAction}</button></form></SectionHeader>{!isUserSection && <form className="adm-create-row" onSubmit={createOrganization}><input value={organizationName} onChange={event => setOrganizationName(event.target.value)} placeholder={copy.accounts.organizationNamePlaceholder} maxLength={120} /><select value={ownerUserID} onChange={event => setOwnerUserID(event.target.value)} aria-label={copy.accounts.initialOwner}><option value="">{copy.accounts.chooseOwner}</option>{activeUsers.map(user => <option key={user.user_id} value={user.user_id}>{user.display_name || user.email || shortID(user.user_id)}</option>)}</select><button disabled={!organizationName.trim() || !ownerUserID || Boolean(actionKey)}>{copy.accounts.createOrganization}</button>{activeUsers.length === 0 && <small>{copy.accounts.noActiveOwner}</small>}</form>}{notice && <div className="adm-inline-message ok" role="status">{notice}</div>}{actionError && <div className="adm-inline-message error" role="alert">{actionError}</div>}<Table columns={columns} items={items} copy={copy} /></section>;
 }
 
 function OrganizationDetail({ copy, organization, client, onBack }) {
