@@ -248,6 +248,17 @@ test('desktop account persists only refresh credentials and clears them on logou
   assert.match(credentialStore, /pinvou3-account-platform-refresh-token/);
 });
 
+test('built-in desktop chat uses the in-memory OIDC session and Token Gateway route', async () => {
+  const accountBackend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  const runtimeProvider = await readFile(new URL('../src-tauri/src/features/llmapi_hub/runtime_model.rs', import.meta.url), 'utf8');
+  assert.match(accountBackend, /chat_runtime_authorization/);
+  assert.match(accountBackend, /token_gateway_openai_base/);
+  assert.match(accountBackend, /\("token", &Method::POST, \["v1", "chat", "completions"\], None\)/);
+  assert.match(runtimeProvider, /chat_runtime_authorization\(\)/);
+  assert.match(runtimeProvider, /model\.base_url = authorization\.base_url/);
+  assert.match(runtimeProvider, /RuntimeModelCredential::api_key\([\s\S]*authorization\.access_token/);
+});
+
 test('desktop account restoration starts with the app without blocking startup', async () => {
   const source = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
   assert.match(source, /accountPlatformClient\.session\(controller\.signal\)\.catch/);

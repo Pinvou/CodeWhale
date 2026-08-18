@@ -7,6 +7,7 @@
 
 mod platform;
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -28,6 +29,7 @@ const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
+const MAX_CHAT_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct AccountPlatformConfig {
@@ -147,6 +149,17 @@ struct RuntimeSession {
     access_token: String,
     refresh_token: String,
     expires_at: Instant,
+    generation: u64,
+}
+
+/// OIDC-backed credentials used only inside the Rust model runtime.
+///
+/// The access token never crosses the Tauri command boundary and this type is
+/// intentionally not serializable or debuggable.
+pub(crate) struct ChatRuntimeAuthorization {
+    pub(crate) base_url: String,
+    pub(crate) access_token: String,
+    pub(crate) revision: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -210,6 +223,7 @@ pub struct AccountPlatformState {
     refresh_guard: Mutex<()>,
     client: reqwest::Client,
     credentials: SystemCredentialStore,
+    session_generation: AtomicU64,
 }
 
 impl AccountPlatformState {
@@ -226,6 +240,7 @@ impl AccountPlatformState {
             refresh_guard: Mutex::new(()),
             client,
             credentials: SystemCredentialStore::new(),
+            session_generation: AtomicU64::new(0),
         })
     }
 
@@ -329,6 +344,26 @@ impl AccountPlatformState {
         response_to_api(response).await
     }
 
+    pub(crate) async fn chat_runtime_authorization(
+        &self,
+    ) -> Result<ChatRuntimeAuthorization, String> {
+        let config = AccountPlatformConfig::from_env()?;
+        let access_token = self.access_token(&config, None).await?;
+        let generation = self
+            .session
+            .lock()
+            .await
+            .as_ref()
+            .filter(|session| session.access_token == access_token)
+            .map(|session| session.generation)
+            .ok_or_else(|| "authentication_required: sign in to Pinvou first".to_string())?;
+        Ok(ChatRuntimeAuthorization {
+            base_url: token_gateway_openai_base(&config.token_gateway_url),
+            access_token,
+            revision: format!("oidc-session-{generation}"),
+        })
+    }
+
     async fn token_request(
         &self,
         config: &AccountPlatformConfig,
@@ -373,6 +408,10 @@ impl AccountPlatformState {
             })?;
         let access_token = tokens.access_token;
         let lifetime = Duration::from_secs(tokens.expires_in);
+        let generation = self
+            .session_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
         self.credentials
             .set(
                 &CredentialReference::for_account_platform_refresh_token(),
@@ -383,6 +422,7 @@ impl AccountPlatformState {
             access_token: access_token.clone(),
             refresh_token,
             expires_at: Instant::now() + lifetime,
+            generation,
         });
         Ok(access_token)
     }
@@ -549,6 +589,15 @@ fn random_urlsafe(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(value)
 }
 
+fn token_gateway_openai_base(base: &Url) -> String {
+    let trimmed = base.as_str().trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1")
+    }
+}
+
 #[derive(Debug)]
 struct PreparedRequest {
     method: Method,
@@ -591,11 +640,21 @@ fn prepare_request(
         let size = serde_json::to_vec(body)
             .map_err(|_| "account_platform_request_invalid: invalid JSON body".to_string())?
             .len();
-        if size > MAX_REQUEST_BODY_BYTES {
+        let maximum = if parsed.path() == "/v1/chat/completions" {
+            MAX_CHAT_REQUEST_BODY_BYTES
+        } else {
+            MAX_REQUEST_BODY_BYTES
+        };
+        if size > maximum {
             return Err("account_platform_request_invalid: request body is too large".to_string());
         }
     }
-    if input.idempotency_key.is_some() && parsed.path() != "/v1/recharge/orders" {
+    if input.idempotency_key.is_some()
+        && !matches!(
+            parsed.path(),
+            "/v1/recharge/orders" | "/v1/chat/completions"
+        )
+    {
         return Err(
             "account_platform_request_denied: idempotency key is not allowed for this route"
                 .to_string(),
@@ -609,6 +668,17 @@ fn prepare_request(
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
             return Err("account_platform_request_invalid: invalid idempotency key".to_string());
+        }
+    }
+    if parsed.path() == "/v1/chat/completions" {
+        let body = input.body.as_ref().ok_or_else(|| {
+            "account_platform_request_invalid: chat request body is required".to_string()
+        })?;
+        if body.get("stream").and_then(Value::as_bool) == Some(true) {
+            return Err(
+                "account_platform_request_denied: streaming chat uses the native model runtime"
+                    .to_string(),
+            );
         }
     }
     Ok(PreparedRequest {
@@ -634,7 +704,8 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
         | ("token", &Method::POST, ["v1", "recharge", "orders"], None)
-        | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None) => true,
+        | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None)
+        | ("token", &Method::POST, ["v1", "chat", "completions"], None) => true,
         ("account", &Method::GET, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::POST, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::GET, ["v1", "organizations", id, "members"], None)
@@ -761,6 +832,38 @@ mod tests {
             "https://token.example.test/v1/me/usage-requests?limit=50"
         );
 
+        let chat = prepare_request(
+            &config(),
+            ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+                body: Some(serde_json::json!({
+                    "model": "example-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": false
+                })),
+                idempotency_key: Some("desktop-request-0001".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            chat.url.as_str(),
+            "https://token.example.test/v1/chat/completions"
+        );
+
+        assert!(prepare_request(
+            &config(),
+            ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/chat/completions".to_string(),
+                method: "POST".to_string(),
+                body: Some(serde_json::json!({"model": "example-model", "stream": true})),
+                idempotency_key: Some("desktop-request-0002".to_string()),
+            },
+        )
+        .is_err());
+
         for resource in [
             "https://evil.example/v1/me/balance",
             "/v1/me/balance?consistency=eventual",
@@ -788,5 +891,17 @@ mod tests {
         assert!(parse_endpoint("OIDC", "https://user:secret@example.test/token").is_err());
         assert!(parse_endpoint("OIDC", "http://example.test/token").is_err());
         assert!(parse_endpoint("OIDC", "http://127.0.0.1:8080/token").is_ok());
+    }
+
+    #[test]
+    fn chat_runtime_uses_the_gateway_openai_base() {
+        assert_eq!(
+            token_gateway_openai_base(&Url::parse("https://account.example/token/").unwrap()),
+            "https://account.example/token/v1"
+        );
+        assert_eq!(
+            token_gateway_openai_base(&Url::parse("https://account.example/token/v1/").unwrap()),
+            "https://account.example/token/v1"
+        );
     }
 }

@@ -25,7 +25,7 @@
 - `PINVOU_ACCOUNT_SERVICE_URL`；
 - `PINVOU_TOKEN_GATEWAY_URL`。
 
-远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端在应用内收集账号密码并通过 Rust 一次性提交给 Keycloak Token Endpoint；密码不持久化、不写日志，完成请求后即释放。Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。注册、找回密码、第三方身份和复杂 MFA 不经过该密码接口，需使用相应的独立流程。
+远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端在应用内收集账号密码并通过 Rust 一次性提交给 Keycloak Token Endpoint；密码不持久化、不写日志，完成请求后即释放。Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。启用账号平台后，内置模型运行时直接使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`，不会再把 New API 用户 Token 当作聊天身份。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。注册、找回密码、第三方身份和复杂 MFA 不经过该密码接口，需使用相应的独立流程。
 
 ## Token Gateway 安全默认值
 
@@ -33,6 +33,7 @@
 - `production`/`production-new` 会拒绝本地密钥 Provider，必须接入 KMS/Vault 实现。
 - `TOKEN_PROVIDER_ALLOWED_HOSTS` 是逗号分隔的精确主机白名单；生产环境同时强制 HTTPS。
 - Gateway 不重试模型调用。上游结果不确定、流式断开或缺失 usage 时保留 Hold 并进入 `REVIEW`。
+- 桌面聊天未显式发送 `Idempotency-Key` 时，Gateway 使用用户、OIDC 会话和请求体生成稳定键；相同请求的网络重试不会重复调用上游。
 - 支付回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置，客户端不能提交回调 URL。
 
 `mock-newapi` 只属于开发 Compose 后端网络，不发布宿主机端口；可用于验证正常、限流、断流和缺失 usage 场景。

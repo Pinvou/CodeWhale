@@ -346,7 +346,8 @@ paths:
       parameters:
         - name: Idempotency-Key
           in: header
-          required: true
+          required: false
+          description: Optional client key. When omitted, the gateway derives a stable key from the authenticated user, OIDC session, and request body.
           schema:
             type: string
             minLength: 16

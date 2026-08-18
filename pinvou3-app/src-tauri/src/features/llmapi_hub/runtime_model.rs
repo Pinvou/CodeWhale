@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
+use tauri::{AppHandle, Manager};
 
 use crate::features::assistant::runtime_model::{
     ModelCredentialMode, PreparedRuntimeModel, RuntimeModelCredential, RuntimeModelProvider,
@@ -16,8 +17,16 @@ const PREPARE_TIMEOUT: Duration = Duration::from_secs(25);
 ///
 /// 公共 EnginePool 只认识 RuntimeModelProvider；账户开通、凭据读取和内置模型路由
 /// 都封装在这里，避免聊天、定时任务和 bridge 各自维护一套专用分支。
-#[derive(Debug, Default)]
-pub(crate) struct LlmApiRuntimeModelProvider;
+#[derive(Clone, Default)]
+pub(crate) struct LlmApiRuntimeModelProvider {
+    app: Option<AppHandle>,
+}
+
+impl LlmApiRuntimeModelProvider {
+    pub(crate) fn new(app: AppHandle) -> Self {
+        Self { app: Some(app) }
+    }
+}
 
 fn prepare_builtin_model() -> Result<PreparedRuntimeModel> {
     crate::features::llmapi_hub::provisioning::ensure_binding_for_current_user()
@@ -60,6 +69,26 @@ impl RuntimeModelProvider for LlmApiRuntimeModelProvider {
     async fn prepare(&self, request: RuntimeModelRequest) -> Result<PreparedRuntimeModel> {
         if !request.model.is_builtin_llmapi() {
             return Ok(PreparedRuntimeModel::unchanged(request.model));
+        }
+
+        if crate::features::account_platform::account_platform_enabled() {
+            let account = self
+                .app
+                .as_ref()
+                .context("账号平台运行时尚未初始化")?
+                .try_state::<crate::features::account_platform::AccountPlatformState>()
+                .context("账号平台尚未初始化")?;
+            let authorization = account
+                .chat_runtime_authorization()
+                .await
+                .map_err(|error| anyhow!(error))?;
+            let mut model = request.model;
+            model.base_url = authorization.base_url;
+            return Ok(PreparedRuntimeModel {
+                model,
+                credential: Some(RuntimeModelCredential::api_key(authorization.access_token)?),
+                revision: Some(authorization.revision),
+            });
         }
 
         let started_at = Instant::now();
@@ -116,7 +145,7 @@ mod tests {
 
     #[test]
     fn builtin_model_uses_backend_managed_credentials() {
-        let provider = LlmApiRuntimeModelProvider;
+        let provider = LlmApiRuntimeModelProvider::default();
         assert_eq!(
             provider.credential_mode(&SavedModel::builtin_llmapi(), true),
             ModelCredentialMode::BackendManaged
@@ -129,7 +158,7 @@ mod tests {
 
     #[tokio::test]
     async fn ordinary_model_does_not_touch_private_provisioning() {
-        let provider = LlmApiRuntimeModelProvider;
+        let provider = LlmApiRuntimeModelProvider::default();
         let prepared = provider
             .prepare(RuntimeModelRequest {
                 session_id: "session-1".to_string(),

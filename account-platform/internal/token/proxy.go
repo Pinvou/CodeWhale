@@ -127,9 +127,9 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusUnprocessableEntity, "PRICE_INVALID", "the model request cannot be priced", httpserver.RequestID(r.Context()))
 		return
 	}
-	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if len(idempotencyKey) < 16 {
-		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain at least 16 characters", httpserver.RequestID(r.Context()))
+	idempotencyKey := requestIdempotencyKey(r.Header.Get("Idempotency-Key"), resolved, body)
+	if len(idempotencyKey) < 16 || len(idempotencyKey) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key must contain between 16 and 128 characters", httpserver.RequestID(r.Context()))
 		return
 	}
 	usageID := uuid.Must(uuid.NewV7())
@@ -206,6 +206,20 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.settle(context.WithoutCancel(r.Context()), usageRequest.ID, hold.ID, price, usage)
+}
+
+func requestIdempotencyKey(provided string, resolved AuthorizationContext, body []byte) string {
+	if provided = strings.TrimSpace(provided); provided != "" {
+		return provided
+	}
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("pinvou-chat-v1\x00"))
+	_, _ = digest.Write([]byte(resolved.UserID.String()))
+	_, _ = digest.Write([]byte{'\x00'})
+	_, _ = digest.Write([]byte(resolved.SessionID))
+	_, _ = digest.Write([]byte{'\x00'})
+	_, _ = digest.Write(body)
+	return "desktop-" + hex.EncodeToString(digest.Sum(nil))
 }
 
 func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, response *http.Response) {
