@@ -106,6 +106,32 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/units/{unit_id}:
+    patch:
+      operationId: renameAdminOrganizationUnit
+      summary: Rename an organization unit
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NameChange" }
+      responses:
+        "204": { description: Organization unit renamed }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteAdminOrganizationUnit
+      summary: Delete a leaf organization unit and clear its assignments
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }]
+      responses:
+        "204": { description: Organization unit deleted }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/status:
     patch:
       operationId: setAdminOrganizationStatus
@@ -123,6 +149,21 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}:
+    patch:
+      operationId: renameAdminOrganization
+      summary: Rename an organization
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NameChange" }
+      responses:
+        "204": { description: Organization renamed }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
     delete:
       operationId: deleteAdminOrganization
       summary: Soft-delete an organization and revoke its memberships
@@ -227,7 +268,18 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    UnitID:
+      name: unit_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   schemas:
+    NameChange:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
     OrganizationCreate:
       type: object
       additionalProperties: false

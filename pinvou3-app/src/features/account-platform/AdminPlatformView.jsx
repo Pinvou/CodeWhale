@@ -193,13 +193,15 @@ function AccountDirectory({ section, copy, data, client, setData }) {
       setActionError(copy.accounts.actionFailed);
     } finally { setActionKey(''); }
   };
-  if (selectedOrganization) return <OrganizationDetail copy={copy} organization={selectedOrganization} client={client} onBack={() => setSelectedOrganization(null)} />;
-  return <section className="adm-panel"><SectionHeader title={copy.accounts[section]} count={items.length} copy={copy}><form className="adm-search" onSubmit={submit}><input value={search} onChange={event => setSearch(event.target.value)} placeholder={copy.search} /><button>{copy.searchAction}</button></form></SectionHeader>{!isUserSection && <form className="adm-create-row" onSubmit={createOrganization}><input value={organizationName} onChange={event => setOrganizationName(event.target.value)} placeholder={copy.accounts.organizationNamePlaceholder} maxLength={120} /><select value={ownerUserID} onChange={event => setOwnerUserID(event.target.value)} aria-label={copy.accounts.initialOwner}><option value="">{copy.accounts.chooseOwner}</option>{activeUsers.map(user => <option key={user.user_id} value={user.user_id}>{user.display_name || user.email || shortID(user.user_id)}</option>)}</select><button disabled={!organizationName.trim() || !ownerUserID || Boolean(actionKey)}>{copy.accounts.createOrganization}</button>{activeUsers.length === 0 && <small>{copy.accounts.noActiveOwner}</small>}</form>}{notice && <div className="adm-inline-message ok" role="status">{notice}</div>}{actionError && <div className="adm-inline-message error" role="alert">{actionError}</div>}<Table columns={columns} items={items} copy={copy} /></section>;
+  if (selectedOrganization) return <OrganizationDetail copy={copy} organization={selectedOrganization} client={client} onBack={() => setSelectedOrganization(null)} onRenamed={name => { setSelectedOrganization(current => ({ ...current, name })); setData(current => ({ ...current, organizations:(current.organizations || []).map(item => item.organization_id === selectedOrganization.organization_id ? { ...item, name } : item) })); }} />;
+  return <section className="adm-panel"><SectionHeader title={copy.accounts[section]} count={items.length} copy={copy}><form className="adm-search" onSubmit={submit}><input value={search} onChange={event => setSearch(event.target.value)} placeholder={isUserSection ? copy.search : copy.accounts.organizationSearch} /><button>{copy.searchAction}</button></form></SectionHeader>{!isUserSection && <form className="adm-create-row" onSubmit={createOrganization}><input value={organizationName} onChange={event => setOrganizationName(event.target.value)} placeholder={copy.accounts.organizationNamePlaceholder} maxLength={120} /><select value={ownerUserID} onChange={event => setOwnerUserID(event.target.value)} aria-label={copy.accounts.initialOwner}><option value="">{copy.accounts.chooseOwner}</option>{activeUsers.map(user => <option key={user.user_id} value={user.user_id}>{user.display_name || user.email || shortID(user.user_id)}</option>)}</select><button disabled={!organizationName.trim() || !ownerUserID || Boolean(actionKey)}>{copy.accounts.createOrganization}</button>{activeUsers.length === 0 && <small>{copy.accounts.noActiveOwner}</small>}</form>}{notice && <div className="adm-inline-message ok" role="status">{notice}</div>}{actionError && <div className="adm-inline-message error" role="alert">{actionError}</div>}<Table columns={columns} items={items} copy={copy} /></section>;
 }
 
-function OrganizationDetail({ copy, organization, client, onBack }) {
+function OrganizationDetail({ copy, organization, client, onBack, onRenamed }) {
   const [units, setUnits] = useState([]);
   const [name, setName] = useState('');
+  const [organizationName, setOrganizationName] = useState(organization.name);
+  const [editingOrganizationName, setEditingOrganizationName] = useState(false);
   const [parentID, setParentID] = useState('');
   const [busy, setBusy] = useState(true);
   const [notice, setNotice] = useState('');
@@ -218,7 +220,23 @@ function OrganizationDetail({ copy, organization, client, onBack }) {
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
+  useEffect(() => setOrganizationName(organization.name), [organization.name]);
   const roots = useMemo(() => buildUnitTree(units), [units]);
+  const refreshUnits = async () => {
+    const result = await client.organizationUnits(organization.organization_id);
+    setUnits(result.items || []);
+  };
+  const renameOrganization = async event => {
+    event.preventDefault();
+    const nextName = organizationName.trim();
+    if (!nextName || nextName === organization.name || busy) return;
+    setBusy(true); setNotice(''); setError('');
+    try {
+      await client.renameOrganization(organization.organization_id, nextName);
+      onRenamed(nextName); setEditingOrganizationName(false); setNotice(copy.accounts.organizationRenamed);
+    } catch { setError(copy.accounts.actionFailed); }
+    finally { setBusy(false); }
+  };
   const createUnit = async event => {
     event.preventDefault();
     if (!name.trim() || busy || organization.status !== 'ACTIVE') return;
@@ -226,16 +244,42 @@ function OrganizationDetail({ copy, organization, client, onBack }) {
     try {
       await client.createOrganizationUnit(organization.organization_id, name.trim(), parentID || null);
       setName(''); setParentID('');
-      const result = await client.organizationUnits(organization.organization_id);
-      setUnits(result.items || []); setNotice(copy.accounts.unitCreated);
+      await refreshUnits(); setNotice(copy.accounts.unitCreated);
     } catch { setError(copy.accounts.actionFailed); }
     finally { setBusy(false); }
   };
-  return <section className="adm-panel adm-org-detail"><button className="adm-back" onClick={onBack}>← {copy.accounts.backToOrganizations}</button><div className="adm-org-title"><div><span className="adm-eyebrow">{copy.accounts.organizationManagement}</span><h2>{organization.name}</h2></div><Status value={organization.status} /></div>{organization.status !== 'ACTIVE' && <div className="adm-inline-message error">{copy.accounts.organizationDisabled}</div>}<form className="adm-unit-form" onSubmit={createUnit}><input value={name} onChange={event => setName(event.target.value)} placeholder={copy.accounts.unitName} maxLength={120} /><select value={parentID} onChange={event => setParentID(event.target.value)} aria-label={copy.accounts.parentUnit}><option value="">{copy.accounts.organizationRoot}</option>{units.filter(unit => unit.status === 'ACTIVE').map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select><button disabled={busy || organization.status !== 'ACTIVE' || !name.trim()}>{copy.accounts.createUnit}</button></form>{notice && <div className="adm-inline-message ok" role="status">{notice}</div>}{error && <div className="adm-inline-message error" role="alert">{error}</div>}<div className="adm-unit-head"><h3>{copy.accounts.unitHierarchy}</h3><span>{copy.items(units.length)}</span></div>{busy && units.length === 0 ? <div className="adm-empty">{copy.accounts.loadingUnits}</div> : roots.length === 0 ? <Empty copy={copy} /> : <div className="adm-unit-tree">{roots.map(unit => <UnitBranch key={unit.unit_id} unit={unit} copy={copy} disabled={busy || organization.status !== 'ACTIVE'} onAddChild={id => { setParentID(id); setName(''); }} />)}</div>}</section>;
+  const renameUnit = async (unit, nextName) => {
+    const trimmed = nextName.trim();
+    if (!trimmed || trimmed === unit.name || busy) return trimmed === unit.name;
+    setBusy(true); setNotice(''); setError('');
+    try {
+      await client.renameOrganizationUnit(organization.organization_id, unit.unit_id, trimmed);
+      await refreshUnits(); setNotice(copy.accounts.unitRenamed); return true;
+    } catch { setError(copy.accounts.actionFailed); return false; }
+    finally { setBusy(false); }
+  };
+  const deleteUnit = async unit => {
+    if (busy || !window.confirm(copy.accounts.confirmUnit(unit.name))) return;
+    setBusy(true); setNotice(''); setError('');
+    try {
+      await client.deleteOrganizationUnit(organization.organization_id, unit.unit_id);
+      await refreshUnits(); setNotice(copy.accounts.unitDeleted);
+    } catch (reason) {
+      setError(reason?.code === 'ORG_UNIT_HIERARCHY_INVALID' ? copy.accounts.deleteUnitBlocked : copy.accounts.actionFailed);
+    } finally { setBusy(false); }
+  };
+  return <section className="adm-panel adm-org-detail"><button className="adm-back" onClick={onBack}>← {copy.accounts.backToOrganizations}</button><div className="adm-org-title"><div><span className="adm-eyebrow">{copy.accounts.organizationManagement}</span>{editingOrganizationName ? <form className="adm-org-rename" onSubmit={renameOrganization}><input value={organizationName} onChange={event => setOrganizationName(event.target.value)} maxLength={120} aria-label={copy.accounts.organizationName} autoFocus /><button disabled={busy || !organizationName.trim() || organizationName.trim() === organization.name}>{copy.accounts.save}</button><button type="button" className="secondary" disabled={busy} onClick={() => { setOrganizationName(organization.name); setEditingOrganizationName(false); }}>{copy.accounts.cancel}</button></form> : <div className="adm-org-name-display"><h2>{organization.name}</h2><button type="button" disabled={busy} onClick={() => setEditingOrganizationName(true)}>{copy.accounts.rename}</button></div>}</div><Status value={organization.status} /></div>{organization.status !== 'ACTIVE' && <div className="adm-inline-message error">{copy.accounts.organizationDisabled}</div>}<form className="adm-unit-form" onSubmit={createUnit}><input value={name} onChange={event => setName(event.target.value)} placeholder={copy.accounts.unitName} maxLength={120} /><select value={parentID} onChange={event => setParentID(event.target.value)} aria-label={copy.accounts.parentUnit}><option value="">{copy.accounts.organizationRoot}</option>{units.filter(unit => unit.status === 'ACTIVE').map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select><button disabled={busy || organization.status !== 'ACTIVE' || !name.trim()}>{copy.accounts.createUnit}</button></form>{notice && <div className="adm-inline-message ok" role="status">{notice}</div>}{error && <div className="adm-inline-message error" role="alert">{error}</div>}<div className="adm-unit-head"><h3>{copy.accounts.unitHierarchy}</h3><span>{copy.items(units.length)}</span></div>{busy && units.length === 0 ? <div className="adm-empty">{copy.accounts.loadingUnits}</div> : roots.length === 0 ? <Empty copy={copy} /> : <div className="adm-unit-tree">{roots.map(unit => <UnitBranch key={unit.unit_id} unit={unit} copy={copy} disabled={busy} addDisabled={organization.status !== 'ACTIVE'} onAddChild={id => { setParentID(id); setName(''); }} onRename={renameUnit} onDelete={deleteUnit} />)}</div>}</section>;
 }
 
-function UnitBranch({ unit, copy, disabled, onAddChild }) {
-  return <div className="adm-unit-branch"><div className="adm-unit-node"><div><strong>{unit.name}</strong><Status value={unit.status} /></div><button disabled={disabled || unit.status !== 'ACTIVE'} onClick={() => onAddChild(unit.unit_id)}>{copy.accounts.addChild}</button></div>{unit.children.length > 0 && <div className="adm-unit-children">{unit.children.map(child => <UnitBranch key={child.unit_id} unit={child} copy={copy} disabled={disabled} onAddChild={onAddChild} />)}</div>}</div>;
+function UnitBranch({ unit, copy, disabled, addDisabled, onAddChild, onRename, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(unit.name);
+  useEffect(() => setName(unit.name), [unit.name]);
+  const submit = async event => {
+    event.preventDefault();
+    if (await onRename(unit, name)) setEditing(false);
+  };
+  return <div className="adm-unit-branch"><div className="adm-unit-node">{editing ? <form className="adm-unit-rename" onSubmit={submit}><input value={name} onChange={event => setName(event.target.value)} maxLength={120} aria-label={copy.accounts.unitName} autoFocus /><button disabled={disabled || !name.trim()}>{copy.accounts.save}</button><button type="button" onClick={() => { setName(unit.name); setEditing(false); }}>{copy.accounts.cancel}</button></form> : <div><strong>{unit.name}</strong><Status value={unit.status} /></div>}<div className="adm-unit-actions"><button type="button" disabled={disabled || addDisabled || unit.status !== 'ACTIVE'} onClick={() => onAddChild(unit.unit_id)}>{copy.accounts.addChild}</button><button type="button" disabled={disabled || unit.status !== 'ACTIVE'} onClick={() => setEditing(true)}>{copy.accounts.rename}</button><button type="button" className="danger" title={unit.children.length ? copy.accounts.deleteUnitBlocked : undefined} disabled={disabled || unit.status !== 'ACTIVE' || unit.children.length > 0} onClick={() => onDelete(unit)}>{copy.accounts.delete}</button></div></div>{unit.children.length > 0 && <div className="adm-unit-children">{unit.children.map(child => <UnitBranch key={child.unit_id} unit={child} copy={copy} disabled={disabled} addDisabled={addDisabled} onAddChild={onAddChild} onRename={onRename} onDelete={onDelete} />)}</div>}</div>;
 }
 
 function Billing({ copy, language, data }) {

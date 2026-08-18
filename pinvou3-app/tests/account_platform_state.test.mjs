@@ -29,15 +29,25 @@ test('admin organization client uses protected organization and unit endpoints',
     const client = new AdminPlatformClient('/portal');
     client.csrfToken = 'c'.repeat(32);
     await client.createOrganization('Example', 'owner-id');
+    await client.organizations('研发 & AI');
     await client.organizationUnits('org-id');
     await client.createOrganizationUnit('org-id', 'Engineering', 'parent-id');
+    await client.renameOrganization('org-id', 'Renamed');
+    await client.renameOrganizationUnit('org-id', 'unit-id', 'Platform');
+    await client.deleteOrganizationUnit('org-id', 'unit-id');
     assert.deepEqual(calls.map(call => [call.url, call.options.method || 'GET']), [
       ['/portal/api/admin/account/admin/v1/organizations', 'POST'],
+      ['/portal/api/admin/account/admin/v1/organizations?limit=100&q=%E7%A0%94%E5%8F%91%20%26%20AI', 'GET'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'GET'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'POST'],
+      ['/portal/api/admin/account/admin/v1/organizations/org-id', 'PATCH'],
+      ['/portal/api/admin/account/admin/v1/organizations/org-id/units/unit-id', 'PATCH'],
+      ['/portal/api/admin/account/admin/v1/organizations/org-id/units/unit-id', 'DELETE'],
     ]);
     assert.deepEqual(JSON.parse(calls[0].options.body), { name:'Example', owner_user_id:'owner-id' });
-    assert.deepEqual(JSON.parse(calls[2].options.body), { name:'Engineering', parent_id:'parent-id' });
+    assert.deepEqual(JSON.parse(calls[3].options.body), { name:'Engineering', parent_id:'parent-id' });
+    assert.deepEqual(JSON.parse(calls[4].options.body), { name:'Renamed' });
+    assert.deepEqual(JSON.parse(calls[5].options.body), { name:'Platform' });
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -246,4 +256,15 @@ test('admin console exposes organizations and users as independent primary tabs'
   assert.doesNotMatch(view, /section === 'accounts'/);
   assert.doesNotMatch(i18n, /账号与组织/);
   assert.match(i18n, /organizations:'组织', users:'用户'/);
+});
+
+test('admin organization detail supports rename, leaf deletion, and list search', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /client\.renameOrganization\(organization\.organization_id, nextName\)/);
+  assert.match(view, /client\.renameOrganizationUnit\(organization\.organization_id, unit\.unit_id, trimmed\)/);
+  assert.match(view, /client\.deleteOrganizationUnit\(organization\.organization_id, unit\.unit_id\)/);
+  assert.match(view, /unit\.children\.length > 0/);
+  assert.match(view, /copy\.accounts\.organizationSearch/);
+  assert.match(view, /editingOrganizationName \? <form/);
+  assert.match(view, /setEditingOrganizationName\(true\)/);
 });

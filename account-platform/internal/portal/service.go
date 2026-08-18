@@ -420,10 +420,25 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodDelete && len(parts) == 4 {
 		return true
 	}
+	if method == http.MethodPatch && len(parts) == 4 && parts[2] == "organizations" {
+		return true
+	}
 	if method == http.MethodPatch && len(parts) == 5 && parts[4] == "status" {
 		return true
 	}
-	return parts[2] == "organizations" && len(parts) == 5 && parts[4] == "units" && (method == http.MethodGet || method == http.MethodPost)
+	if parts[2] != "organizations" || len(parts) < 5 || parts[4] != "units" {
+		return false
+	}
+	if len(parts) == 5 {
+		return method == http.MethodGet || method == http.MethodPost
+	}
+	if len(parts) == 6 {
+		if _, err := uuid.Parse(parts[5]); err != nil {
+			return false
+		}
+		return method == http.MethodPatch || method == http.MethodDelete
+	}
+	return false
 }
 
 func billingAdminPathAllowed(method, resource string) bool {

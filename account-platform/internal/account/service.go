@@ -74,10 +74,13 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.DELETE("/users/:user_id", httpserver.AdaptFunc(s.adminDeleteUser))
 	admin.GET("/organizations", httpserver.AdaptFunc(s.adminOrganizations))
 	admin.POST("/organizations", httpserver.AdaptFunc(s.adminCreateOrganization))
+	admin.PATCH("/organizations/:organization_id", httpserver.AdaptFunc(s.adminRenameOrganization))
 	admin.PATCH("/organizations/:organization_id/status", httpserver.AdaptFunc(s.adminSetOrganizationStatus))
 	admin.DELETE("/organizations/:organization_id", httpserver.AdaptFunc(s.adminDeleteOrganization))
 	admin.GET("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminUnits))
 	admin.POST("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminCreateUnit))
+	admin.PATCH("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminRenameUnit))
+	admin.DELETE("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminDeleteUnit))
 	admin.GET("/audit-logs", httpserver.AdaptFunc(s.adminAuditLogs))
 	return router
 }

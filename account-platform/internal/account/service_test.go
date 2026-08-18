@@ -91,6 +91,10 @@ func (f *fakeRepository) AdminCreateOrganization(_ context.Context, _ identity.P
 	f.adminCalls = append(f.adminCalls, "organization:create:"+ownerID.String()+":"+name)
 	return Organization{ID: uuid.Must(uuid.NewV7()), Name: name, Status: "ACTIVE", Version: 1}, nil
 }
+func (f *fakeRepository) AdminRenameOrganization(_ context.Context, _ identity.Principal, id uuid.UUID, name string) error {
+	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":rename:"+name)
+	return nil
+}
 func (f *fakeRepository) AdminSetOrganizationStatus(_ context.Context, _ identity.Principal, id uuid.UUID, status string) error {
 	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":"+status)
 	return nil
@@ -110,6 +114,14 @@ func (f *fakeRepository) AdminCreateUnit(_ context.Context, _ identity.Principal
 	}
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:create:"+parent+":"+name)
 	return Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}, nil
+}
+func (f *fakeRepository) AdminRenameUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID, name string) error {
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":rename:"+name)
+	return nil
+}
+func (f *fakeRepository) AdminDeleteUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID) error {
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":DELETE")
+	return nil
 }
 func (*fakeRepository) AdminAuditLogs(context.Context, int) ([]AdminAuditLog, error) { return nil, nil }
 func (*fakeRepository) Ping(context.Context) error                                   { return nil }
@@ -178,6 +190,7 @@ func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 	}{
 		{http.MethodPatch, "/admin/v1/users/" + userID.String() + "/status", `{"status":"DISABLED"}`, "user:" + userID.String() + ":DISABLED"},
 		{http.MethodDelete, "/admin/v1/users/" + userID.String(), "", "user:" + userID.String() + ":DELETE"},
+		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String(), `{"name":"Renamed"}`, "organization:" + organizationID.String() + ":rename:Renamed"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/status", `{"status":"ACTIVE"}`, "organization:" + organizationID.String() + ":ACTIVE"},
 		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String(), "", "organization:" + organizationID.String() + ":DELETE"},
 	}
@@ -205,6 +218,7 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 	ownerID := uuid.Must(uuid.NewV7())
 	organizationID := uuid.Must(uuid.NewV7())
 	parentID := uuid.Must(uuid.NewV7())
+	unitID := uuid.Must(uuid.NewV7())
 	tests := []struct {
 		method string
 		path   string
@@ -215,6 +229,8 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 		{http.MethodPost, "/admin/v1/organizations", `{"name":"Example","owner_user_id":"` + ownerID.String() + `"}`, http.StatusCreated, "organization:create:" + ownerID.String() + ":Example"},
 		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/units", "", http.StatusOK, "organization:" + organizationID.String() + ":units"},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/units", `{"name":"Engineering","parent_id":"` + parentID.String() + `"}`, http.StatusCreated, "organization:" + organizationID.String() + ":unit:create:" + parentID.String() + ":Engineering"},
+		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusNoContent, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
+		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), "", http.StatusNoContent, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":DELETE"},
 	}
 	for _, test := range tests {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
