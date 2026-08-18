@@ -67,6 +67,7 @@ impl ExactToolDispatchPolicy {
 pub struct TurnToolSecurityPolicy {
     trusted_external_paths_override: Option<Arc<[PathBuf]>>,
     exact_dispatch: Option<ExactToolDispatchPolicy>,
+    require_read_only_dispatch: bool,
     allow_hooks: bool,
 }
 
@@ -81,6 +82,7 @@ impl TurnToolSecurityPolicy {
         Self {
             trusted_external_paths_override: trusted_external_paths_override.map(Into::into),
             exact_dispatch,
+            require_read_only_dispatch: false,
             allow_hooks: false,
         }
     }
@@ -91,6 +93,20 @@ impl TurnToolSecurityPolicy {
 
     pub fn exact_dispatch(&self) -> Option<&ExactToolDispatchPolicy> {
         self.exact_dispatch.as_ref()
+    }
+
+    /// Require every model-visible and dispatched tool action to be read-only.
+    ///
+    /// Hosts use this for untrusted benchmark or inspection turns. The engine
+    /// projects a read-only catalog and repeats the check at final dispatch so
+    /// a forged call cannot rely on schema filtering alone.
+    pub fn with_read_only_dispatch(mut self) -> Self {
+        self.require_read_only_dispatch = true;
+        self
+    }
+
+    pub fn requires_read_only_dispatch(&self) -> bool {
+        self.require_read_only_dispatch
     }
 
     /// Explicitly permit the embedding host's hooks for this restricted turn.
@@ -111,12 +127,21 @@ mod turn_security_tests {
     use super::*;
 
     #[test]
-    fn restricted_turn_hooks_require_explicit_host_opt_in() {
+    fn forkguard_restricted_turn_hooks_require_explicit_host_opt_in() {
         let default_policy = TurnToolSecurityPolicy::new(Some(Vec::new()), None);
         assert!(!default_policy.allows_hooks());
 
         let trusted = default_policy.with_trusted_hooks();
         assert!(trusted.allows_hooks());
+    }
+
+    #[test]
+    fn restricted_turn_read_only_dispatch_requires_explicit_opt_in() {
+        let default_policy = TurnToolSecurityPolicy::new(Some(Vec::new()), None);
+        assert!(!default_policy.requires_read_only_dispatch());
+
+        let read_only = default_policy.with_read_only_dispatch();
+        assert!(read_only.requires_read_only_dispatch());
     }
 }
 

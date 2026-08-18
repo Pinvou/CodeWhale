@@ -10172,6 +10172,38 @@ fn turn_tool_registry_builder_keeps_plan_mode_read_only_for_files() {
     );
 }
 
+#[test]
+fn forkguard_restricted_agent_uses_read_only_file_schema() {
+    let mut engine_config = EngineConfig::default();
+    engine_config.turn_tool_security = Some(Arc::new(
+        TurnToolSecurityPolicy::new(
+            Some(Vec::new()),
+            Some(ExactToolDispatchPolicy::try_new(vec!["File".to_string()]).unwrap()),
+        )
+        .with_read_only_dispatch(),
+    ));
+    let (engine, _handle) = Engine::new(engine_config, &Config::default());
+    let registry = engine
+        .build_turn_tool_registry_builder(
+            AppMode::Agent,
+            engine.config.todos.clone(),
+            engine.config.plan_state.clone(),
+        )
+        .build(engine.build_tool_context(AppMode::Agent, false));
+
+    let file = registry.get("File").expect("restricted File tool");
+    let actions = file.input_schema()["properties"]["action"]["enum"]
+        .as_array()
+        .expect("File action enum")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actions,
+        vec!["read", "list", "search_name", "search_content"]
+    );
+}
+
 /// Plan mode toggle must not change the byte representation of the tool
 /// catalog head. DeepSeek's KV prefix cache includes the tools array in
 /// the immutable prefix; if toggling between Plan and Agent mode changes

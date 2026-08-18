@@ -2686,6 +2686,18 @@ impl Engine {
                     )));
                 }
 
+                if blocked_error.is_none()
+                    && self
+                        .active_turn_tool_security
+                        .as_ref()
+                        .is_some_and(|policy| policy.requires_read_only_dispatch())
+                    && !read_only
+                {
+                    blocked_error = Some(ToolError::permission_denied(
+                        "Tool action blocked by host read-only turn policy".to_string(),
+                    ));
+                }
+
                 // #3026: a hook `ask` decision forces the approval prompt even
                 // for tools the registry would auto-run. Must stay after the
                 // registry-based computation above, which assigns rather than

@@ -72,7 +72,11 @@ impl Engine {
         plan_state: SharedPlanState,
     ) -> ToolRegistryBuilder {
         let shell_policy = shell_policy_for_mode(mode, allow_shell);
-        if mode != AppMode::Plan {
+        let restricted_read_only = self
+            .active_turn_tool_security
+            .as_ref()
+            .is_some_and(|policy| policy.requires_read_only_dispatch());
+        if mode != AppMode::Plan && !restricted_read_only {
             let mut builder = ToolRegistryBuilder::new().with_agent_runtime_surface(
                 client.clone(),
                 model.to_string(),

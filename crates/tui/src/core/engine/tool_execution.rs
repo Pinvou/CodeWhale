@@ -396,6 +396,21 @@ impl Engine {
                 "Tool blocked by host turn policy".to_string(),
             ));
         }
+        if turn_tool_security
+            .as_ref()
+            .is_some_and(|policy| policy.requires_read_only_dispatch())
+        {
+            let Some(spec) = registry.and_then(|registry| registry.get(&tool_name)) else {
+                return Err(ToolError::permission_denied(
+                    "Tool blocked by host read-only turn policy".to_string(),
+                ));
+            };
+            if !spec.is_read_only_for(&tool_input) {
+                return Err(ToolError::permission_denied(
+                    "Tool action blocked by host read-only turn policy".to_string(),
+                ));
+            }
+        }
         if cancel_token
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
@@ -622,6 +637,41 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn forkguard_read_only_turn_rejects_write_action_at_final_dispatch() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let registry = crate::tools::ToolRegistryBuilder::new()
+            .with_file_tools()
+            .build(crate::tools::ToolContext::new(workspace.path()));
+        let exact = crate::core::ops::ExactToolDispatchPolicy::try_new(vec!["File".to_string()])
+            .expect("exact policy");
+        let policy = Arc::new(
+            crate::core::ops::TurnToolSecurityPolicy::new(None, Some(exact))
+                .with_read_only_dispatch(),
+        );
+        let (tx, _rx) = mpsc::channel(1);
+
+        let error = Engine::execute_tool_with_lock(
+            Arc::new(RwLock::new(())),
+            false,
+            false,
+            tx,
+            None,
+            "File".to_string(),
+            json!({"action": "write", "path": "blocked.txt", "content": "blocked"}),
+            workspace.path().to_path_buf(),
+            Some(&registry),
+            None,
+            None,
+            Some(policy),
+        )
+        .await
+        .expect_err("write action must fail closed");
+
+        assert!(matches!(error, ToolError::PermissionDenied { .. }));
+        assert!(!workspace.path().join("blocked.txt").exists());
+    }
+
     const TEST_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
 
     #[tokio::test]
@@ -800,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    fn restricted_tool_audit_redacts_private_sentinel() {
+    fn forkguard_restricted_tool_audit_redacts_private_sentinel() {
         let private = "PRIVATE_SENTINEL_C_MUST_NOT_REACH_AUDIT";
         let event = tool_audit_event_for_policy(
             true,
