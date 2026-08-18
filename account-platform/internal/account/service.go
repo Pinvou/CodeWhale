@@ -78,6 +78,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.PATCH("/organizations/:organization_id/status", httpserver.AdaptFunc(s.adminSetOrganizationStatus))
 	admin.DELETE("/organizations/:organization_id", httpserver.AdaptFunc(s.adminDeleteOrganization))
 	admin.GET("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminUnits))
+	admin.GET("/organizations/:organization_id/members", httpserver.AdaptFunc(s.adminMembers))
+	admin.POST("/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.adminTransferOwnership))
 	admin.POST("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminCreateUnit))
 	admin.PATCH("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminRenameUnit))
 	admin.DELETE("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminDeleteUnit))

@@ -18,7 +18,7 @@ test('account balances convert internal microcredits to display points', () => {
   assert.equal(formatPoints(null, 'en'), '—');
 });
 
-test('admin organization client uses protected organization and unit endpoints', async () => {
+test('admin organization client uses protected organization, member, and unit endpoints', async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
@@ -30,6 +30,8 @@ test('admin organization client uses protected organization and unit endpoints',
     client.csrfToken = 'c'.repeat(32);
     await client.createOrganization('Example', 'owner-id');
     await client.organizations('研发 & AI');
+    await client.organizationMembers('org-id');
+    await client.transferOrganizationOwnership('org-id', 'new-owner-id');
     await client.organizationUnits('org-id');
     await client.createOrganizationUnit('org-id', 'Engineering', 'parent-id');
     await client.renameOrganization('org-id', 'Renamed');
@@ -38,6 +40,8 @@ test('admin organization client uses protected organization and unit endpoints',
     assert.deepEqual(calls.map(call => [call.url, call.options.method || 'GET']), [
       ['/portal/api/admin/account/admin/v1/organizations', 'POST'],
       ['/portal/api/admin/account/admin/v1/organizations?limit=100&q=%E7%A0%94%E5%8F%91%20%26%20AI', 'GET'],
+      ['/portal/api/admin/account/admin/v1/organizations/org-id/members', 'GET'],
+      ['/portal/api/admin/account/admin/v1/organizations/org-id/ownership', 'POST'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'GET'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'POST'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id', 'PATCH'],
@@ -45,9 +49,10 @@ test('admin organization client uses protected organization and unit endpoints',
       ['/portal/api/admin/account/admin/v1/organizations/org-id/units/unit-id', 'DELETE'],
     ]);
     assert.deepEqual(JSON.parse(calls[0].options.body), { name:'Example', owner_user_id:'owner-id' });
-    assert.deepEqual(JSON.parse(calls[3].options.body), { name:'Engineering', parent_id:'parent-id' });
-    assert.deepEqual(JSON.parse(calls[4].options.body), { name:'Renamed' });
-    assert.deepEqual(JSON.parse(calls[5].options.body), { name:'Platform' });
+    assert.deepEqual(JSON.parse(calls[3].options.body), { new_owner_user_id:'new-owner-id' });
+    assert.deepEqual(JSON.parse(calls[5].options.body), { name:'Engineering', parent_id:'parent-id' });
+    assert.deepEqual(JSON.parse(calls[6].options.body), { name:'Renamed' });
+    assert.deepEqual(JSON.parse(calls[7].options.body), { name:'Platform' });
   } finally { globalThis.fetch = originalFetch; }
 });
 
@@ -258,8 +263,14 @@ test('admin console exposes organizations and users as independent primary tabs'
   assert.match(i18n, /organizations:'组织', users:'用户'/);
 });
 
-test('admin organization detail supports rename, leaf deletion, and list search', async () => {
+test('admin organization detail supports ownership transfer, rename, leaf deletion, and list search', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');
+  assert.match(view, /client\.organizationMembers\(organization\.organization_id/);
+  assert.match(view, /client\.transferOrganizationOwnership\(organization\.organization_id, target\.user_id\)/);
+  assert.match(view, /copy\.accounts\.confirmOwnership/);
+  assert.match(view, /copy\.accounts\.transferOwner/);
+  assert.match(i18n, /transferOwner:'转让所有权'/);
   assert.match(view, /client\.renameOrganization\(organization\.organization_id, nextName\)/);
   assert.match(view, /client\.renameOrganizationUnit\(organization\.organization_id, unit\.unit_id, trimmed\)/);
   assert.match(view, /client\.deleteOrganizationUnit\(organization\.organization_id, unit\.unit_id\)/);

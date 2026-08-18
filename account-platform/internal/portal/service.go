@@ -426,6 +426,12 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodPatch && len(parts) == 5 && parts[4] == "status" {
 		return true
 	}
+	if parts[2] == "organizations" && len(parts) == 5 && parts[4] == "members" {
+		return method == http.MethodGet
+	}
+	if parts[2] == "organizations" && len(parts) == 5 && parts[4] == "ownership" {
+		return method == http.MethodPost
+	}
 	if parts[2] != "organizations" || len(parts) < 5 || parts[4] != "units" {
 		return false
 	}

@@ -107,6 +107,14 @@ func (f *fakeRepository) AdminUnits(_ context.Context, organizationID uuid.UUID)
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":units")
 	return []Unit{}, nil
 }
+func (f *fakeRepository) AdminMembers(_ context.Context, organizationID uuid.UUID) ([]Member, error) {
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":members")
+	return []Member{}, nil
+}
+func (f *fakeRepository) AdminTransferOwnership(_ context.Context, _ identity.Principal, organizationID, ownerID uuid.UUID) error {
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":owner:"+ownerID.String())
+	return nil
+}
 func (f *fakeRepository) AdminCreateUnit(_ context.Context, _ identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name string) (Unit, error) {
 	parent := "root"
 	if parentID != nil {
@@ -228,6 +236,8 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 	}{
 		{http.MethodPost, "/admin/v1/organizations", `{"name":"Example","owner_user_id":"` + ownerID.String() + `"}`, http.StatusCreated, "organization:create:" + ownerID.String() + ":Example"},
 		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/units", "", http.StatusOK, "organization:" + organizationID.String() + ":units"},
+		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/members", "", http.StatusOK, "organization:" + organizationID.String() + ":members"},
+		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/ownership", `{"new_owner_user_id":"` + ownerID.String() + `"}`, http.StatusNoContent, "organization:" + organizationID.String() + ":owner:" + ownerID.String()},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/units", `{"name":"Engineering","parent_id":"` + parentID.String() + `"}`, http.StatusCreated, "organization:" + organizationID.String() + ":unit:create:" + parentID.String() + ":Engineering"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusNoContent, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
 		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), "", http.StatusNoContent, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":DELETE"},

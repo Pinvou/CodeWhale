@@ -106,6 +106,31 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/members:
+    get:
+      operationId: listAdminOrganizationMembers
+      summary: List active organization members and their roles
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/ownership:
+    post:
+      operationId: transferAdminOrganizationOwnership
+      summary: Replace the organization owner with an active member
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OwnershipTransfer" }
+      responses:
+        "204": { description: Organization ownership transferred }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/units/{unit_id}:
     patch:
       operationId: renameAdminOrganizationUnit
@@ -287,6 +312,12 @@ components:
       properties:
         name: { type: string, minLength: 1, maxLength: 120 }
         owner_user_id: { type: string, format: uuid }
+    OwnershipTransfer:
+      type: object
+      additionalProperties: false
+      required: [new_owner_user_id]
+      properties:
+        new_owner_user_id: { type: string, format: uuid }
     OrganizationUnitCreate:
       type: object
       additionalProperties: false
