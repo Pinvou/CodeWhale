@@ -24,14 +24,10 @@ if [ "$OS_NAME" = "Linux" ]; then
   export DEEPSEEK_FORCE_HTTP1="${DEEPSEEK_FORCE_HTTP1:-1}"
 fi
 
-# ── L1 知识库语义检索：本地 embedding 模型目录 ──────────────────────
-# 配了就启用 fastembed 进程内向量化(bge-m3 int8 单文件
-# onnx/model_int8.onnx 或 model.onnx),知识库检索
-# 升级为 fts+向量 RRF 混合;不配/加载失败则降级为纯全文 fts。模型目录需含
-# 单文件 ONNX + tokenizer.json/config.json/special_tokens_map.json/tokenizer_config.json。
-# (生产 deb 的模型下载/配置入口=设置页"知识库模型"卡,Phase 3 收尾待做。)
-# 三平台共用(bge-m3 是工具模型非 LLM,Mac/Win/Linux 完全等效)。
-export PINVOU3_KB_EMBED_MODEL_DIR="${PINVOU3_KB_EMBED_MODEL_DIR:-$HOME/models/bge-m3}"
+# ── L1 知识库语义检索：默认与正式版共用应用托管目录 ──────────────────
+# 本地知识库和共享知识库宿主复用 ~/.pinvou3/knowledge/models/bge-m3。
+# 仅需要外部只读模型夹具时，才在启动前显式设置
+# PINVOU3_KB_EMBED_MODEL_DIR；开发入口不再覆盖应用的托管目录选择。
 
 # ── 三省六部「网页类」预置模板 seed 源(dev)──────────────────────────
 # 工部角色 `cp -r ~/.pinvou3/web-template ...` 的母版,首次启动从此处复制(prod 走随 deb 的

@@ -39,6 +39,15 @@ pub struct MountedCollection {
     pub enabled: bool,
 }
 
+/// 会话挂载的远程知识集。服务器 ID 与服务端集合 ID 共同构成稳定身份。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MountedRemoteCollection {
+    pub server_id: String,
+    pub collection_id: i64,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MountedCollectionsSnapshot {
@@ -98,6 +107,9 @@ pub struct SessionModeState {
     /// 多知识库挂载事实源。旧单库字段保留给旧前端/远程端兼容读取。
     #[serde(default)]
     pub mounted_collections: Vec<MountedCollection>,
+    /// 远程知识集挂载，与本地挂载可以同时启用并由检索工具统一合并。
+    #[serde(default)]
+    pub mounted_remote_collections: Vec<MountedRemoteCollection>,
     /// 仅驻内存的并发版本号；通过专用 snapshot 命令对外提供，不混入 mode_state 协议。
     #[serde(skip)]
     pub mounted_collections_revision: u64,
@@ -121,6 +133,7 @@ impl Default for SessionModeState {
             pending_persona_body: None,
             mounted_collection: None,
             mounted_collections: Vec::new(),
+            mounted_remote_collections: Vec::new(),
             mounted_collections_revision: 0,
             multi_agent: false,
         }
@@ -213,6 +226,7 @@ mod tests {
             pending_persona_body: None,
             mounted_collection: None,
             mounted_collections: Vec::new(),
+            mounted_remote_collections: Vec::new(),
             mounted_collections_revision: 0,
             multi_agent: false,
         };

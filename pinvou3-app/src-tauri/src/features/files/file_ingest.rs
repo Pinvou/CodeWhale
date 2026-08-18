@@ -397,7 +397,7 @@ fn ingest_text(path: &Path, basename: String, path_str: String, byte_size: u64) 
     };
     // 内容侧安全兜底:已知文本扩展名也可能被塞了私钥(如把 id_rsa 改名 id_rsa.txt),
     // 这种情况按 secret 拒绝读取,不进 markdown。
-    if looks_like_secret_material(&bytes) {
+    if pinvou_knowledge::looks_like_secret_material(&bytes) {
         return secret_placeholder(basename, path_str, byte_size);
     }
     let (content, warning) = decode_text_bytes(&bytes);
@@ -1979,23 +1979,6 @@ fn secret_placeholder(basename: String, path_str: String, byte_size: u64) -> Ing
 /// 内容侧私钥检测:捕获改了名 / 无扩展名 / 套了 .txt 外壳的私钥(如 `id_rsa`、
 /// `server-key`、`backup.txt` 里贴了 PEM)。PEM 私钥头和 OpenSSH magic 都在文件开头,
 /// 故只看前 8 KiB 即可。**不**匹配 `-----BEGIN CERTIFICATE-----`(证书可公开)。
-fn looks_like_secret_material(bytes: &[u8]) -> bool {
-    const MARKERS: &[&[u8]] = &[
-        b"-----BEGIN PRIVATE KEY-----",
-        b"-----BEGIN RSA PRIVATE KEY-----",
-        b"-----BEGIN DSA PRIVATE KEY-----",
-        b"-----BEGIN EC PRIVATE KEY-----",
-        b"-----BEGIN OPENSSH PRIVATE KEY-----",
-        b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
-        b"-----BEGIN PGP PRIVATE KEY BLOCK-----",
-        b"openssh-key-v1",
-    ];
-    let head = &bytes[..bytes.len().min(8192)];
-    MARKERS
-        .iter()
-        .any(|m| head.windows(m.len()).any(|w| w == *m))
-}
-
 /// 对字节内容做嗅探,判定是文本还是二进制。只看前 `SNIFF_BYTES` 字节即可下结论
 /// (NUL / 控制字符都在头部就能判定),**但调用方仍会 `std::fs::read` 整个文件** ——
 /// 因为判定为文本时还需要全部字节做解码。`ingest` 入口已用 MAX_FILE_BYTES(20MiB)
@@ -2054,7 +2037,7 @@ fn sniff_text_or_binary(
         }
     };
     // 内容侧安全兜底:无扩展名 / 改名的私钥(id_rsa、server-key 等)在此拦截。
-    if looks_like_secret_material(&bytes) {
+    if pinvou_knowledge::looks_like_secret_material(&bytes) {
         return secret_placeholder(basename, path_str, byte_size);
     }
     // UTF-16 无 BOM 的 ASCII/混合文本含大量 NUL，本来会被二进制嗅探拒绝；先识别
