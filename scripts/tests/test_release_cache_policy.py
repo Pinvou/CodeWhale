@@ -37,7 +37,7 @@ class ReleaseCachePolicyTests(unittest.TestCase):
             "\n  windows-rust-test:", maxsplit=1
         )[0]
 
-        self.assertIn("timeout-minutes: 90", rust_test_job)
+        self.assertIn("timeout-minutes: 120", rust_test_job)
         self.assertIn("shared-key: rust-test-v2", rust_test_job)
         self.assertIn(MAIN_ONLY_SAVE, rust_test_job)
 
