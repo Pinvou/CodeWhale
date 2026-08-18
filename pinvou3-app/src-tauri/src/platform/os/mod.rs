@@ -15,6 +15,12 @@ pub(crate) mod posix;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(crate) mod unsupported;
 
+// GNU 消息 locale 语义的环境变量探测，仅 linux 与 unsupported 平台消费
+// (windows/macos 各有原生实现)，按 posix.rs 先例门控到消费平台并集，
+// 避免在非消费平台累积 dead_code(见 [lints] 中 dead_code 升 deny 计划)。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+mod locale;
+
 mod interface;
 
 #[cfg(target_os = "linux")]
@@ -28,9 +34,9 @@ pub(crate) use windows as platform;
 
 pub use interface::{
     apply_user_npm_prefix, archive_dependency_packages, archive_tool_exists, archive_tool_path,
-    command_exists, configure_onnxruntime_dylib, connector_cli_command, device_serial_number,
-    disable_super_permission, email_dependency_packages, email_manual_hint, email_tool_exists,
-    enable_super_permission, external_application_path, file_url_from_path,
+    command_exists, configure_onnxruntime_dylib, connector_cli_command, current_system_locale,
+    device_serial_number, disable_super_permission, email_dependency_packages, email_manual_hint,
+    email_tool_exists, enable_super_permission, external_application_path, file_url_from_path,
     filesystem_path_identity_key, kill_pid_tree, libreoffice_missing_message,
     libreoffice_open_fallback_needed, libreoffice_tool_path, msg_converter_required,
     msg_native_supported, nvidia_smi_candidates, obsidian_config_path, ocr_dependency_packages,
