@@ -35,10 +35,6 @@ pub(crate) const fn is_windows() -> bool {
     cfg!(target_os = "windows")
 }
 
-pub(crate) const fn is_linux() -> bool {
-    cfg!(target_os = "linux")
-}
-
 pub(crate) const fn is_unix() -> bool {
     cfg!(unix)
 }
@@ -60,10 +56,13 @@ mod tests {
             capabilities.uses_homebrew_dependency_installer,
             cfg!(target_os = "macos")
         );
-        assert_eq!(capabilities.show_super_permission_settings, is_linux());
+        assert_eq!(
+            capabilities.show_super_permission_settings,
+            cfg!(target_os = "linux")
+        );
         assert_eq!(
             capabilities.task_completion_notifications_default,
-            !is_linux()
+            !cfg!(target_os = "linux")
         );
         assert_eq!(
             capabilities.codex_acp_supported,
