@@ -64,7 +64,25 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens)
+	defaultPriority := 10
+	if raw := strings.TrimSpace(os.Getenv("TOKEN_DEFAULT_ROUTE_PRIORITY")); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 0 || parsed > 10000 {
+			log.Fatal("TOKEN_DEFAULT_ROUTE_PRIORITY must be between 0 and 10000")
+		}
+		defaultPriority = parsed
+	}
+	defaultRoutes, err := token.NewDefaultRouteProvisioner(repository, providerURLPolicy, token.DefaultRouteConfig{
+		Provider: os.Getenv("TOKEN_DEFAULT_PROVIDER"),
+		BaseURL:  os.Getenv("TOKEN_DEFAULT_PROVIDER_BASE_URL"),
+		Secret:   []byte(os.Getenv("TOKEN_DEFAULT_PROVIDER_API_KEY")),
+		Models:   strings.Split(os.Getenv("TOKEN_DEFAULT_PROVIDER_MODELS"), ","),
+		Priority: defaultPriority,
+	})
+	if err != nil {
+		log.Fatal("default Token Account provisioning is not configured: ", err)
+	}
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes)
 	if err := httpserver.RunWithApplication("token-gateway", service.Handler(verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

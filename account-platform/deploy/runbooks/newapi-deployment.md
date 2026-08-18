@@ -10,7 +10,7 @@ New API 使用 AGPLv3，并带上游声明的附加归属要求。发布或修�
 2. 执行 `node scripts/account-platform.mjs dev up`。该命令显式启用 `real-newapi` profile；普通 Integration/Fault 测试仍只使用 Mock New API。
 3. 首次使用新的 PostgreSQL 卷时，初始化脚本自动创建 `new_api` 角色和 `account_platform_newapi` 数据库。已有卷可在更新 Postgres 容器环境后执行 `docker compose --env-file account-platform/deploy/compose/.env -f account-platform/deploy/compose/compose.yaml exec postgres sh /docker-entrypoint-initdb.d/10-init-databases.sh`，脚本可重复执行。
 4. 仅从本机打开 `http://127.0.0.1:18106` 完成管理员初始化、配置真实上游 Channel，并创建供 Token Gateway 使用的最小权限 API Token。
-5. 在账号 Portal 创建 Token Account 时，Provider Base URL 使用 `http://newapi:3000`。API Token 必须经 Token Gateway 的凭据接口加密保存，不得写入 `.env`、Compose 或日志。
+5. 创建一个仅允许平台代理模型的最小权限 New API Token，将其通过部署 Secret 注入 `TOKEN_DEFAULT_PROVIDER_API_KEY`；Provider Base URL 使用 `http://newapi:3000`。Token Gateway 会在用户第一次对话时创建平台托管的默认 Token Account 和路由，并将凭据二次加密后写入 Token 数据库。不得把实际 Token 写入 Compose、源码或日志。
 
 Mock New API 继续用于限流、断流和缺失 usage 故障注入；真实 New API 不用于制造这些异常。
 
@@ -21,6 +21,7 @@ Mock New API 继续用于限流、断流和缺失 usage 故障注入；真实 Ne
 - `newapi-database-url`：指向独立 PostgreSQL 数据库；
 - `newapi-session-secret`：所有 New API 副本一致；
 - `newapi-crypto-secret`：所有 New API 副本一致，且不得与 Session Secret 相同。
+- `token-default-provider-api-key`：供 Token Gateway 自动创建默认路由的最小权限 New API Token。
 
 Helm 不创建内联 Secret。生产 New API 没有公网 Ingress，Service 名为 `newapi`，只有带 Token Gateway 组件标签的 Pod 可以访问其 8080 数据面。New API 只能访问 DNS、内部 Redis、批准的 PostgreSQL CIDR 和模型供应商 CIDR。
 

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -113,6 +114,20 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		explicit = &parsed
 	}
 	route, err := SelectRoute(resolved, RouteRequest{Model: request.Model, ExplicitTokenAccountID: explicit}, candidates)
+	if errors.Is(err, ErrNoEligibleRoute) && explicit == nil && s.defaultRoutes != nil {
+		walletID, provisionErr := s.activeWallet(r.Context(), resolved)
+		if provisionErr == nil {
+			provisionErr = s.defaultRoutes.Ensure(r.Context(), resolved, walletID, request.Model)
+		}
+		if provisionErr == nil {
+			candidates, provisionErr = s.repository.ListCandidates(r.Context(), request.Model)
+		}
+		if provisionErr == nil {
+			route, err = SelectRoute(resolved, RouteRequest{Model: request.Model}, candidates)
+		} else if !errors.Is(provisionErr, ErrNoEligibleRoute) {
+			err = provisionErr
+		}
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return

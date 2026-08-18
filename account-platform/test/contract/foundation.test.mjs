@@ -178,6 +178,25 @@ test('every migration up script has a matching down script', async () => {
   }
 });
 
+test('default model routes are platform managed and deployment-secret backed', async () => {
+  const migration = await readFile(
+    path.join(root, 'migrations/token/000005_platform_managed_routes.up.sql'),
+    'utf8',
+  );
+  const provisioner = await readFile(path.join(root, 'internal/token/default_route.go'), 'utf8');
+  const gateway = await readFile(path.join(root, 'internal/token/proxy.go'), 'utf8');
+  const chart = await readFile(
+    path.join(root, 'deploy/helm/account-platform/templates/app-deployments.yaml'),
+    'utf8',
+  );
+  assert.match(migration, /management_mode IN \('USER', 'PLATFORM'\)/);
+  assert.match(provisioner, /pg_advisory_xact_lock/);
+  assert.match(provisioner, /p\.repository\.secrets\.Encrypt/);
+  assert.match(gateway, /explicit == nil && s\.defaultRoutes != nil/);
+  assert.match(chart, /key: token-default-provider-api-key/);
+  assert.doesNotMatch(chart, /TOKEN_DEFAULT_PROVIDER_API_KEY, value:/);
+});
+
 test('payment simulator preserves the exact signed callback payload', async () => {
   const migration = await readFile(
     path.join(root, 'migrations/payment-simulator/000004_exact_notification_payload.up.sql'),

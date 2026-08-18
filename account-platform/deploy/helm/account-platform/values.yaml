@@ -54,6 +54,10 @@ tokenGateway:
   secretKeyId: ""
   providerAllowedHosts: []
   maxInputTokens: 128000
+  defaultProvider: new-api
+  defaultProviderBaseUrl: http://newapi:8080
+  defaultProviderModels: [deepseek-v4-flash]
+  defaultRoutePriority: 10
 
 external:
   postgresCidrs: []

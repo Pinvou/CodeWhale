@@ -160,12 +160,12 @@ func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUI
 func getTokenAccount(ctx context.Context, database interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, accountID uuid.UUID, lock bool) (TokenAccount, error) {
-	query := `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.id=$1`
+	query := `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority,ta.management_mode FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.id=$1`
 	if lock {
 		query += ` FOR UPDATE OF ta,sp`
 	}
 	var account TokenAccount
-	err := database.QueryRow(ctx, query, accountID).Scan(&account.ID, &account.OwnerType, &account.OwnerID, &account.OwnerOrganization, &account.OwnerUnit, &account.WalletID, &account.Name, &account.Status, &account.ShareScope, &account.DefaultPriority)
+	err := database.QueryRow(ctx, query, accountID).Scan(&account.ID, &account.OwnerType, &account.OwnerID, &account.OwnerOrganization, &account.OwnerUnit, &account.WalletID, &account.Name, &account.Status, &account.ShareScope, &account.DefaultPriority, &account.ManagementMode)
 	return account, err
 }
 

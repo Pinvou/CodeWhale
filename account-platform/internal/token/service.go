@@ -44,6 +44,12 @@ type Service struct {
 	maximumInputTokens     int64
 	defaultMaxOutputTokens int64
 	maximumOutputTokens    int64
+	defaultRoutes          DefaultRouteProvisioner
+}
+
+func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
+	s.defaultRoutes = provisioner
+	return s
 }
 
 func NewService(repository Repository, contexts ContextResolver, wallets WalletResolver, validator CredentialValidator, providerURLs ProviderURLPolicy, billing BillingClient, upstream UpstreamClient, maximumInputTokens int64) *Service {
@@ -206,7 +212,7 @@ func (s *Service) resolveOwnedAccount(w http.ResponseWriter, r *http.Request) (A
 		return AuthorizationContext{}, TokenAccount{}, false
 	}
 	account, err := s.repository.GetAccount(r.Context(), accountID)
-	if err != nil || !authorizeOwner(resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
+	if err != nil || account.ManagementMode == "PLATFORM" || !authorizeOwner(resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
 		s.writeError(w, r, ErrForbidden)
 		return AuthorizationContext{}, TokenAccount{}, false
 	}
@@ -393,7 +399,7 @@ func (s *Service) rotateCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account, err := s.repository.GetAccount(r.Context(), accountID)
-	if err != nil || !authorizeOwner(resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
+	if err != nil || account.ManagementMode == "PLATFORM" || !authorizeOwner(resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
 		s.writeError(w, r, ErrForbidden)
 		return
 	}

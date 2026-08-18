@@ -26,6 +26,7 @@ type TokenAccount struct {
 	Status            string     `json:"status"`
 	ShareScope        string     `json:"share_scope"`
 	DefaultPriority   int        `json:"default_priority"`
+	ManagementMode    string     `json:"-"`
 }
 
 type Credential struct {
@@ -317,7 +318,7 @@ func (r *PostgresRepository) CreateAccount(ctx context.Context, request CreateAc
 
 func (r *PostgresRepository) GetAccount(ctx context.Context, accountID uuid.UUID) (TokenAccount, error) {
 	var account TokenAccount
-	err := r.pool.QueryRow(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.id=$1`, accountID).Scan(&account.ID, &account.OwnerType, &account.OwnerID, &account.OwnerOrganization, &account.OwnerUnit, &account.WalletID, &account.Name, &account.Status, &account.ShareScope, &account.DefaultPriority)
+	err := r.pool.QueryRow(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority,ta.management_mode FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.id=$1`, accountID).Scan(&account.ID, &account.OwnerType, &account.OwnerID, &account.OwnerOrganization, &account.OwnerUnit, &account.WalletID, &account.Name, &account.Status, &account.ShareScope, &account.DefaultPriority, &account.ManagementMode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return TokenAccount{}, ErrNotFound
 	}
@@ -328,9 +329,9 @@ func (r *PostgresRepository) ListManagedAccounts(ctx context.Context, resolved A
 	var rows pgx.Rows
 	var err error
 	if resolved.ContextType == "PERSONAL" {
-		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_type='USER' AND ta.owner_id=$1 ORDER BY ta.name,ta.id`, resolved.UserID)
+		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority,ta.management_mode FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_type='USER' AND ta.owner_id=$1 AND ta.management_mode='USER' ORDER BY ta.name,ta.id`, resolved.UserID)
 	} else if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && (slices.Contains(resolved.Roles, "OWNER") || slices.Contains(resolved.Roles, "ORG_ADMIN")) {
-		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_organization_id=$1 ORDER BY ta.name,ta.id`, *resolved.OrganizationID)
+		rows, err = r.pool.Query(ctx, `SELECT ta.id,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.name,ta.status,sp.scope,ta.default_priority,ta.management_mode FROM token_accounts ta JOIN token_share_policies sp ON sp.token_account_id=ta.id WHERE ta.owner_organization_id=$1 AND ta.management_mode='USER' ORDER BY ta.name,ta.id`, *resolved.OrganizationID)
 	} else {
 		return []TokenAccount{}, nil
 	}
@@ -341,7 +342,7 @@ func (r *PostgresRepository) ListManagedAccounts(ctx context.Context, resolved A
 	items := make([]TokenAccount, 0)
 	for rows.Next() {
 		var item TokenAccount
-		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.DefaultPriority); err != nil {
+		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.DefaultPriority, &item.ManagementMode); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
