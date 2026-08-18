@@ -993,7 +993,7 @@ impl EnginePool {
         // abort 不 join，子智能体已启动的独立 shell 子进程仍可能残留。
         for op in Self::shutdown_cancel_cascade_ops() {
             if let Err(e) = engine.handle.send(op).await {
-                eprintln!("[engine_pool] shutdown {session_id} failed: {e:?}");
+                eprintln!("[engine_pool] shutdown {session_id} failed: {e:#}");
                 break;
             }
         }
@@ -1355,7 +1355,7 @@ impl EnginePool {
                 let sid = session_id.to_string();
                 async move {
                     if let Err(e) = handle.send(Op::CancelSubAgents).await {
-                        eprintln!("[engine_pool] cancel subagents {sid} failed: {e:?}");
+                        eprintln!("[engine_pool] cancel subagents {sid} failed: {e:#}");
                     }
                 }
             },
@@ -1391,7 +1391,7 @@ impl EnginePool {
                 })
                 .await
             {
-                eprintln!("[engine_pool] set_disallowed_all {sid} failed: {e:?}");
+                eprintln!("[engine_pool] set_disallowed_all {sid} failed: {e:#}");
             }
         }
     }

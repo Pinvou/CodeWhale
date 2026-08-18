@@ -18,9 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use anyhow::{bail, Context, Result};
 
-use crate::core::mode_state::{
-    ModeDefaultsView, ModeLane, MountedRemoteCollection, SerializableMode,
-};
+use crate::core::mode_state::{ModeDefaultsView, ModeLane, SerializableMode};
 
 use super::injections::{PendingPlanClaim, PendingTurnInjections};
 use super::SessionStore;
@@ -57,7 +55,17 @@ pub struct ActiveSkillBinding {
 /// UI can toggle a mount on/off without losing its position in the ordered
 /// list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct MountedCollection {
+    pub collection_id: i64,
+    pub enabled: bool,
+}
+
+/// 会话挂载的远程知识集。服务器 ID 与服务端集合 ID 共同构成稳定身份。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MountedRemoteCollection {
+    pub server_id: String,
     pub collection_id: i64,
     pub enabled: bool,
 }
@@ -67,6 +75,7 @@ pub struct MountedCollection {
 /// revisioned event that lets concurrent clients reconcile out-of-order
 /// updates.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct MountedCollectionsSnapshot {
     pub revision: u64,
     pub collections: Vec<MountedCollection>,

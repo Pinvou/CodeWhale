@@ -32,7 +32,7 @@
 //! 可见。pub 面在本文件集中 re-export，保持外部调用路径不变。
 
 mod injections;
-mod mode_state;
+pub(crate) mod mode_state;
 mod retention;
 mod scheduled;
 mod sidecars;
@@ -49,12 +49,19 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 
-pub use crate::core::mode_state::{ModeLane, MountedRemoteCollection, SerializableMode};
+pub use crate::core::mode_state::{ModeLane, SerializableMode};
 use crate::platform::paths;
 use crate::platform::prefs::{CodePermissionPrefs, ModeDefaultPrefs};
 
+/// Re-export the session-domain mode-state types so they are owned by the
+/// sessions feature. These were historically re-exported through a `core`
+/// shim (`core::mode_state`), but they are feature-domain aggregates
+/// (persona/review/workflow/knowledge) and must not form a `core → features`
+/// reverse dependency. Consumers should import from
+/// `crate::features::sessions::{...}`.
 pub use self::mode_state::{
-    ActiveSkillBinding, MountedCollection, MountedCollectionsSnapshot, SessionModeState,
+    ActiveSkillBinding, MountedCollection, MountedCollectionsSnapshot, MountedRemoteCollection,
+    SessionModeState,
 };
 /// Re-export scheduled-run types so the historical
 /// `crate::features::sessions::X` paths stay stable.

@@ -379,7 +379,7 @@ pub fn run() {
                     Some(store)
                 }
                 Err(e) => {
-                    eprintln!("[pinvou3-app] session store boot failed: {e:?}");
+                    eprintln!("[pinvou3-app] session store boot failed: {e:#}");
                     None
                 }
             };
@@ -520,7 +520,7 @@ pub fn run() {
                             eprintln!("[pinvou3-app] scheduled tasks runtime ready");
                         }
                         Err(e) => {
-                            eprintln!("[pinvou3-app] scheduled tasks runtime init failed: {e:?}");
+                            eprintln!("[pinvou3-app] scheduled tasks runtime init failed: {e:#}");
                         }
                     }
                     handle.manage(pool);
@@ -534,7 +534,7 @@ pub fn run() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("[pinvou3-app] failed to init engine pool: {e:?}");
+                    eprintln!("[pinvou3-app] failed to init engine pool: {e:#}");
                 }
             }
             startup::mark("engine_pool:done");
@@ -606,7 +606,7 @@ pub fn run() {
                     app.handle().manage(svc);
                     eprintln!("[pinvou3-app] knowledge service ready");
                 }
-                Err(e) => eprintln!("[pinvou3-app] knowledge service init failed: {e:?}"),
+                Err(e) => eprintln!("[pinvou3-app] knowledge service init failed: {e:#}"),
             }
             startup::mark("knowledge_service:done");
 
