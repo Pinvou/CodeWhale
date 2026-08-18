@@ -4389,6 +4389,96 @@ async fn forkguard_queued_control_op_keeps_restricted_turn_authority() {
     run.await.expect("engine task");
 }
 
+/// Restricted turns must also gate goal self-continuation and MCP reload:
+/// ContinueGoal does not install the per-op turn security policy, so a queued
+/// continuation would otherwise run the next turn with full authority, and a
+/// queued ReloadMcp would spawn external processes while restricted.
+#[tokio::test]
+async fn forkguard_queued_goal_continuation_and_mcp_reload_keeps_restricted_turn_authority() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("workspace");
+    let config = Config::default();
+    let mock = Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "restricted turn complete",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+
+    handle
+        .send(restricted_user_message_op("evaluate", &config))
+        .await
+        .expect("queue restricted turn");
+    handle
+        .send(Op::ContinueGoal {
+            dynamic_tools: Vec::new(),
+            engine_schedule_id: None,
+        })
+        .await
+        .expect("queue goal continuation behind restricted turn");
+    let (reload_tx, mut reload_rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::ReloadMcp {
+            config_path: workspace.path().to_path_buf(),
+            tx: Arc::new(std::sync::Mutex::new(Some(reload_tx))),
+        })
+        .await
+        .expect("queue MCP reload behind restricted turn");
+
+    let run = tokio::spawn(engine.run());
+    let mut saw_goal_denial = false;
+    let mut saw_reload_denial = false;
+    let mut reload_result = None;
+    let mut turn_started_count = 0usize;
+    let mut rx = handle.rx_event.write().await;
+    while let Ok(Some(event)) = tokio::time::timeout(model_turn_event_timeout(), rx.recv()).await {
+        match event {
+            Event::Error { envelope, .. } => {
+                saw_goal_denial |= envelope
+                    .message
+                    .contains("Restricted turns cannot continue scheduled goals");
+                if saw_goal_denial && saw_reload_denial {
+                    break;
+                }
+            }
+            Event::TurnStarted { .. } => {
+                turn_started_count += 1;
+                // 1 = the restricted turn itself; a second turn means the
+                // queued goal continuation escaped the restricted latch.
+                assert_eq!(
+                    turn_started_count, 1,
+                    "goal continuation started an extra turn after a restricted turn"
+                );
+            }
+            _ => {}
+        }
+        if reload_result.is_none() {
+            if let Ok(result) = reload_rx.try_recv() {
+                saw_reload_denial = result.as_ref().err().is_some_and(|message| {
+                    message.contains("Restricted turns cannot reload MCP pools")
+                });
+                reload_result = Some(result);
+                if saw_goal_denial && saw_reload_denial {
+                    break;
+                }
+            }
+        }
+    }
+    drop(rx);
+    assert!(saw_goal_denial, "queued goal continuation was not denied");
+    assert!(
+        saw_reload_denial,
+        "queued MCP reload was not denied: {:?}",
+        reload_result
+    );
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
 struct DropSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for DropSignal {
@@ -10192,7 +10282,8 @@ fn forkguard_restricted_agent_uses_read_only_file_schema() {
         .build(engine.build_tool_context(AppMode::Agent, false));
 
     let file = registry.get("File").expect("restricted File tool");
-    let actions = file.input_schema()["properties"]["action"]["enum"]
+    let schema = file.input_schema().clone();
+    let actions = schema["properties"]["action"]["enum"]
         .as_array()
         .expect("File action enum")
         .iter()

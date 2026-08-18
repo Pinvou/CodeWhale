@@ -2147,6 +2147,21 @@ impl Engine {
                         dynamic_tools,
                         engine_schedule_id,
                     } => {
+                        // A restricted (host-policy) turn must not be followed by
+                        // an unrestricted goal self-continuation: the per-turn
+                        // security policy is not installed on this path, so the
+                        // next turn would run with full authority. Reject the
+                        // continuation while the latch is set instead of relying
+                        // on the exact allowlist not containing goal tools.
+                        if self.control_plane_restricted {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot continue scheduled goals".to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         let Some(dynamic_tools) = self
                             .take_scheduled_goal_continuation(engine_schedule_id, dynamic_tools)
                         else {
@@ -2699,6 +2714,17 @@ impl Engine {
                         }
                     }
                     Op::ReloadMcp { config_path, tx } => {
+                        // MCP reload spawns real external processes; a queued
+                        // reload must inherit the restricted-turn latch instead
+                        // of escaping it.
+                        if self.control_plane_restricted {
+                            let status: crate::core::ops::McpReloadResult =
+                                Err("Restricted turns cannot reload MCP pools".to_string());
+                            if let Some(tx) = tx.lock().ok().and_then(|mut guard| guard.take()) {
+                                let _ = tx.send(status);
+                            }
+                            continue;
+                        }
                         let result = self.reload_mcp_pool(config_path).await.map_err(|error| {
                             codewhale_config::persistence::redact_secrets(&format!("{error:#}"))
                         });

@@ -183,18 +183,27 @@ pub(super) fn emit_tool_audit(event: serde_json::Value) {
     emit_tool_audit_to_path(&PathBuf::from(path), event);
 }
 
+/// Restricted-turn audit projection: keep the non-private identity fields
+/// (event kind, tool name) so operators can still audit *which* tool ran how
+/// often, and redact everything else — inputs, outputs, paths and any extra
+/// payload keys never reach the audit log.
 pub(super) fn tool_audit_event_for_policy(
     restricted: bool,
     event: serde_json::Value,
 ) -> serde_json::Value {
-    if restricted {
-        serde_json::json!({
-            "event": "restricted_tool_event",
-            "details": "redacted",
-        })
-    } else {
-        event
+    if !restricted {
+        return event;
     }
+    let mut projected = serde_json::json!({
+        "restricted": true,
+    });
+    if let Some(event_kind) = event.get("event").and_then(serde_json::Value::as_str) {
+        projected["event"] = serde_json::json!(event_kind);
+    }
+    if let Some(tool_name) = event.get("tool_name").and_then(serde_json::Value::as_str) {
+        projected["tool_name"] = serde_json::json!(tool_name);
+    }
+    projected
 }
 
 pub(super) fn emit_tool_audit_for_policy(restricted: bool, event: serde_json::Value) {
@@ -856,13 +865,20 @@ mod tests {
             true,
             json!({
                 "event": "tool.error",
+                "tool_name": "File",
                 "tool_input": private,
                 "error": format!("failed at C:/private/{private}"),
             }),
         );
         let encoded = serde_json::to_string(&event).expect("audit json");
         assert!(!encoded.contains(private));
-        assert_eq!(event["event"], "restricted_tool_event");
-        assert_eq!(event["details"], "redacted");
+        // 非私有身份字段保留:受限轮仍可审计"哪个工具在运行"。
+        assert_eq!(event["event"], "tool.error");
+        assert_eq!(event["tool_name"], "File");
+        assert_eq!(event["restricted"], true);
+        // 输入/输出/路径类载荷不落审计。
+        assert!(event.get("tool_input").is_none());
+        assert!(event.get("error").is_none());
+        assert!(event.get("details").is_none());
     }
 }
