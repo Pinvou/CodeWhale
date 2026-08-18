@@ -632,27 +632,30 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         ("account", &Method::POST, ["v1", "account", "bootstrap"], None)
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
-        | ("account", &Method::POST, ["v1", "organizations"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
         | ("token", &Method::POST, ["v1", "recharge", "orders"], None)
-        | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None)
-        | ("token", &Method::GET, ["v1", "token-accounts"], None)
-        | ("token", &Method::POST, ["v1", "token-accounts"], None) => true,
+        | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None) => true,
         ("account", &Method::GET, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::POST, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::GET, ["v1", "organizations", id, "members"], None)
         | ("account", &Method::POST, ["v1", "organizations", id, "invitations"], None)
-        | ("token", &Method::GET, ["v1", "recharge", "orders", id], None)
-        | ("token", &Method::GET, ["v1", "usage-requests", id], None) => safe_id(id),
-        ("token", &Method::GET, ["v1", "token-accounts", id, "credentials"], None)
-        | ("token", &Method::POST, ["v1", "token-accounts", id, "credentials"], None) => {
-            safe_id(id)
-        }
+        | ("token", &Method::GET, ["v1", "recharge", "orders", id], None) => safe_id(id),
         ("token", &Method::GET, ["v1", "me", "balance"], Some("consistency=strong")) => true,
-        ("token", &Method::GET, ["v1", "token-accounts", "eligible"], Some(query)) => {
-            query.starts_with("model=") && !query[6..].is_empty() && !query[6..].contains('&')
+        ("token", &Method::GET, ["v1", "me", "usage-requests"], query) => {
+            usage_history_query_allowed(query)
         }
         _ => false,
+    }
+}
+
+fn usage_history_query_allowed(query: Option<&str>) -> bool {
+    match query {
+        None => true,
+        Some(query) => query
+            .strip_prefix("limit=")
+            .filter(|value| !value.is_empty() && !value.contains('&'))
+            .and_then(|value| value.parse::<u8>().ok())
+            .is_some_and(|limit| (1..=100).contains(&limit)),
     }
 }
 
@@ -742,11 +745,29 @@ mod tests {
             "https://token.example.test/v1/me/balance?consistency=strong"
         );
 
+        let usage = prepare_request(
+            &config(),
+            ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/me/usage-requests?limit=50".to_string(),
+                method: "GET".to_string(),
+                body: None,
+                idempotency_key: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            usage.url.as_str(),
+            "https://token.example.test/v1/me/usage-requests?limit=50"
+        );
+
         for resource in [
             "https://evil.example/v1/me/balance",
             "/v1/me/balance?consistency=eventual",
             "/metrics",
             "/v1/token-accounts/eligible?model=x&admin=true",
+            "/v1/token-accounts",
+            "/v1/me/usage-requests?limit=101",
         ] {
             assert!(prepare_request(
                 &config(),

@@ -190,8 +190,13 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 	if tokenPathAllowed(http.MethodPost, "/v1/chat/completions") {
 		t.Fatal("Portal BFF must not expose the model data plane")
 	}
-	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !accountPathAllowed(http.MethodGet, "/v1/me") {
+	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-requests") || !accountPathAllowed(http.MethodGet, "/v1/me") {
 		t.Fatal("Portal BFF must expose the documented management APIs")
+	}
+	for _, resource := range []string{"/v1/token-accounts", "/v1/token-accounts/id/credentials", "/v1/token-accounts/eligible", "/v1/usage-requests/id"} {
+		if tokenPathAllowed(http.MethodGet, resource) {
+			t.Fatalf("Portal BFF must not expose internal Token management route %s", resource)
+		}
 	}
 	if safeReturnTo("//evil.example") != "/" || safeReturnTo("https://evil.example") != "/" {
 		t.Fatal("external post-login redirects must be rejected")

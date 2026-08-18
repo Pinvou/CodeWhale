@@ -48,6 +48,23 @@ test('recent recharge lookup is wallet-scoped internally and context-scoped publ
   );
 });
 
+test('personal usage history exposes only user-facing fields', async () => {
+  const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
+  const operation = gateway.paths['/me/usage-requests'].get;
+  const record = gateway.components.schemas.UserUsageRecord;
+  assert.equal(operation.responses['200'].headers['Cache-Control'].schema.const, 'no-store');
+  assert.deepEqual(Object.keys(record.properties).sort(), [
+    'actual_microcredits',
+    'display_status',
+    'model',
+    'started_at',
+    'updated_at',
+  ]);
+  for (const internalField of ['token_account_id', 'credential_id', 'wallet_id', 'usage_request_id', 'provider']) {
+    assert.equal(record.properties[internalField], undefined);
+  }
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,6 +66,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
 	router.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
 	router.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
+	router.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
 	router.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	router.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
 	router.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
@@ -464,6 +466,39 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 		"maximum_microcredits": usage.MaximumMicrocredits, "actual_microcredits": usage.ActualMicrocredits,
 		"started_at": usage.StartedAt, "updated_at": usage.UpdatedAt,
 	})
+}
+
+func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	limit := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "limit must be between 1 and 100", httpserver.RequestID(r.Context()))
+			return
+		}
+		limit = parsed
+	}
+	usageRequests, err := s.repository.ListUsageForContext(r.Context(), resolved, limit)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	items := make([]map[string]any, 0, len(usageRequests))
+	for _, usage := range usageRequests {
+		items = append(items, map[string]any{
+			"model":               usage.Model,
+			"display_status":      usageDisplayStatus(usage),
+			"actual_microcredits": usage.ActualMicrocredits,
+			"started_at":          usage.StartedAt,
+			"updated_at":          usage.UpdatedAt,
+		})
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func usageContextMatches(context AuthorizationContext, usage UsageRequest) bool {

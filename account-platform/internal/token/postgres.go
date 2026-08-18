@@ -79,6 +79,7 @@ type Repository interface {
 	UpsertRoute(context.Context, uuid.UUID, string, int, string, string, uuid.UUID) (RoutingPolicy, error)
 	ListCandidates(context.Context, string) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
+	ListUsageForContext(context.Context, AuthorizationContext, int) ([]UsageRequest, error)
 	UsageStore
 	Ping(context.Context) error
 	Close()
@@ -124,6 +125,40 @@ func (r *PostgresRepository) GetUsage(ctx context.Context, usageID uuid.UUID) (U
 		return UsageRequest{}, ErrNotFound
 	}
 	return usage, err
+}
+
+func (r *PostgresRepository) ListUsageForContext(ctx context.Context, resolved AuthorizationContext, limit int) ([]UsageRequest, error) {
+	if resolved.UserID == uuid.Nil || limit < 1 || limit > 100 {
+		return nil, ErrForbidden
+	}
+	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at
+FROM usage_requests
+WHERE user_id=$1 AND organization_id IS NULL
+ORDER BY started_at DESC,id DESC LIMIT $2`
+	arguments := []any{resolved.UserID, limit}
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
+		query = `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at
+FROM usage_requests
+WHERE user_id=$1 AND organization_id=$2
+ORDER BY started_at DESC,id DESC LIMIT $3`
+		arguments = []any{resolved.UserID, *resolved.OrganizationID, limit}
+	} else if resolved.ContextType != "PERSONAL" {
+		return nil, ErrForbidden
+	}
+	rows, err := r.pool.Query(ctx, query, arguments...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]UsageRequest, 0)
+	for rows.Next() {
+		var usage UsageRequest
+		if err := rows.Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, usage)
+	}
+	return items, rows.Err()
 }
 
 func (r *PostgresRepository) MarkReserved(ctx context.Context, usageID, holdID, priceVersionID uuid.UUID) error {

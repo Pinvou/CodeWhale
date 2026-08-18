@@ -394,10 +394,22 @@ func accountPathAllowed(method, resource string) bool {
 }
 
 func tokenPathAllowed(method, resource string) bool {
-	if !strings.HasPrefix(resource, "/v1/") || resource == "/v1/chat/completions" || strings.Contains(resource, "..") {
-		return false
+	if method == http.MethodGet {
+		switch resource {
+		case "/v1/recharge/products", "/v1/recharge/orders/recent", "/v1/me/balance", "/v1/me/usage-requests":
+			return true
+		}
+		if orderID, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {
+			return safeProxyPathID(orderID)
+		}
 	}
-	return method == http.MethodGet || method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch
+	return method == http.MethodPost && resource == "/v1/recharge/orders"
+}
+
+func safeProxyPathID(value string) bool {
+	return value != "" && len(value) <= 128 && !strings.Contains(value, "/") && strings.IndexFunc(value, func(char rune) bool {
+		return !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '-' || char == '_')
+	}) == -1
 }
 
 func accountAdminPathAllowed(method, resource string) bool {

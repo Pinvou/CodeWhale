@@ -304,6 +304,41 @@ paths:
                 $ref: "#/components/schemas/UsageRequestStatus"
         "404":
           $ref: "#/components/responses/Error"
+  /me/usage-requests:
+    get:
+      operationId: listMyUsageRequests
+      summary: List the current user's model usage in the active personal or organization context
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: User-facing usage history without routing or credential identifiers
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UserUsageRecord"
+        "403":
+          $ref: "#/components/responses/Error"
   /chat/completions:
     post:
       operationId: createChatCompletion
@@ -638,6 +673,26 @@ components:
           type: integer
           format: int64
           minimum: 1
+        actual_microcredits:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        started_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    UserUsageRecord:
+      type: object
+      additionalProperties: false
+      required: [model, display_status, started_at, updated_at]
+      properties:
+        model:
+          type: string
+        display_status:
+          type: string
+          enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW]
         actual_microcredits:
           type: [integer, "null"]
           format: int64

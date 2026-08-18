@@ -128,19 +128,19 @@ test('BFF client restores the recent order without browser persistence', async (
   }
 });
 
-test('settlement status is queried once and never resends a model request', async () => {
+test('personal usage history is read-only and never resends a model request', async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, options });
-    return new Response(JSON.stringify({ display_status: 'SETTLEMENT_PENDING' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ items: [{ model: 'example-model', display_status: 'SETTLED', actual_microcredits: 10_000 }] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   };
   try {
     const client = new AccountPlatformBffClient('/portal');
-    const status = await client.usageRequest('usage-id');
-    assert.equal(status.display_status, 'SETTLEMENT_PENDING');
+    const history = await client.usageHistory();
+    assert.equal(history.items[0].display_status, 'SETTLED');
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, '/portal/api/token/v1/usage-requests/usage-id');
+    assert.equal(calls[0].url, '/portal/api/token/v1/me/usage-requests?limit=50');
     assert.equal(calls[0].options.method, 'GET');
     assert.equal(calls[0].url.includes('/chat/completions'), false);
   } finally {
@@ -279,6 +279,21 @@ test('personal center keeps context on overview and cannot create organizations'
   assert.doesNotMatch(bffClient, /createOrganization\(/);
   assert.doesNotMatch(desktopClient, /createOrganization\(/);
   assert.match(styles, /\.ap-sidebar-foot select \{[^}]*color: var\(--ap-primary\);[^}]*background: var\(--ap-component\);/);
+});
+
+test('personal center exposes only user-facing usage history instead of Token administration', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
+  const desktopClient = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
+  assert.match(view, /section === 'usage'/);
+  assert.match(view, /client\.usageHistory\(request\.signal\)/);
+  assert.match(i18n, /usage:'用量记录'/);
+  assert.doesNotMatch(view, /section === 'tokens'|client\.(managedTokens|eligibleTokens|credentials|rotateCredential|createTokenAccount)/);
+  assert.doesNotMatch(i18n, /Token 管理|供应商凭据|模型消费准备状态|消费结算状态|可管理 Token/);
+  assert.match(bffClient, /usageHistory\(signal\)/);
+  assert.match(desktopClient, /usageHistory\(signal\)/);
+  assert.doesNotMatch(`${bffClient}\n${desktopClient}`, /managedTokens|eligibleTokens|rotateCredential|createTokenAccount/);
 });
 
 test('account portal uses stable asset names with revalidated caching', async () => {
