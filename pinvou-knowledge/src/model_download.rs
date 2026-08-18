@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
-pub const KNOWLEDGE_MODEL_HF_BASE_URL: &str = "https://huggingface.co";
+pub const KNOWLEDGE_MODEL_HF_BASE_URL: &str = "https://hf-mirror.com";
 pub const KNOWLEDGE_MODEL_HF_REPOSITORY: &str = "onnx-community/bge-m3-ONNX";
 pub const KNOWLEDGE_MODEL_HF_REVISION: &str = "25b9af8e87a38eb120cfe87125383677b9cd309e";
 pub const KNOWLEDGE_MODEL_HF_BASE_URL_ENV: &str = "PINVOU_KNOWLEDGE_HF_BASE_URL";
@@ -563,6 +563,7 @@ mod tests {
 
     #[test]
     fn pinned_manifest_has_expected_total_and_unique_destinations() {
+        assert_eq!(KNOWLEDGE_MODEL_HF_BASE_URL, "https://hf-mirror.com");
         assert_eq!(
             KNOWLEDGE_MODEL_FILES
                 .iter()
