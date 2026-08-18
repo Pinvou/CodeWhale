@@ -360,6 +360,24 @@ impl Pinvou3Bundle {
                 .all(|dir| self.skills_dir.join(dir).join("SKILL.md").is_file())
     }
 
+    /// EIP 技能门控：连接时恢复 `SKILL.md`，未连接时隐藏技能但保留 CLI 二进制。
+    pub fn apply_eip_skill_visibility(&self, show: bool) -> std::io::Result<()> {
+        let skill_md = self.skills_dir.join("eip").join("SKILL.md");
+        if show {
+            if !skill_md.is_file() {
+                if let Some(file) = EIP_SKILL_DIR.get_file("SKILL.md") {
+                    if let Some(parent) = skill_md.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&skill_md, file.contents())?;
+                }
+            }
+        } else {
+            let _ = std::fs::remove_file(&skill_md);
+        }
+        Ok(())
+    }
+
     /// 腾讯会议 mono skill 门控:`show` → 解包 `tmeet-skill` 到 `skills_dir`;否则删除。
     /// 出处声明用 `NOTICE-tmeet.md`,避免覆盖其他 CLI 连接器 NOTICE。
     pub fn apply_tmeet_skills(&self, show: bool) -> std::io::Result<()> {
@@ -370,6 +388,25 @@ impl Pinvou3Bundle {
                 let _ = std::fs::remove_dir_all(self.skills_dir.join(d));
             }
             let _ = std::fs::remove_file(self.skills_dir.join("NOTICE-tmeet.md"));
+        }
+        Ok(())
+    }
+
+    /// 知道技能门控：显示时刷新 `SKILL.md` 与 references，隐藏时保留 CLI 二进制。
+    pub fn apply_zhidao_skill_visibility(&self, show: bool) -> std::io::Result<()> {
+        let skill_md = self.skills_dir.join("zhidao").join("SKILL.md");
+        if show {
+            if let Some(file) = ZHIDAO_SKILL_DIR.get_file("SKILL.md") {
+                if let Some(parent) = skill_md.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&skill_md, file.contents())?;
+            }
+            if let Some(references) = ZHIDAO_SKILL_DIR.get_dir("references") {
+                Self::extract_dir(references, &self.skills_dir.join("zhidao"))?;
+            }
+        } else {
+            let _ = std::fs::remove_file(&skill_md);
         }
         Ok(())
     }
