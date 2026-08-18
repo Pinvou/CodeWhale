@@ -55,12 +55,17 @@ test('personal usage history exposes only user-facing fields', async () => {
   assert.equal(operation.responses['200'].headers['Cache-Control'].schema.const, 'no-store');
   assert.deepEqual(Object.keys(record.properties).sort(), [
     'actual_microcredits',
+    'cached_input_tokens',
+    'completed_at',
     'display_status',
+    'input_tokens',
     'model',
+    'output_tokens',
     'started_at',
     'updated_at',
+    'usage_request_id',
   ]);
-  for (const internalField of ['token_account_id', 'credential_id', 'wallet_id', 'usage_request_id', 'provider']) {
+  for (const internalField of ['token_account_id', 'credential_id', 'wallet_id', 'provider']) {
     assert.equal(record.properties[internalField], undefined);
   }
 });

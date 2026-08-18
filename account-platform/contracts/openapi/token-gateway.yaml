@@ -316,7 +316,15 @@ paths:
             type: integer
             minimum: 1
             maximum: 100
-            default: 50
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque cursor returned by the previous page.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
       responses:
         "200":
           description: User-facing usage history without routing or credential identifiers
@@ -331,12 +339,14 @@ paths:
               schema:
                 type: object
                 additionalProperties: false
-                required: [items]
+                required: [items, next_cursor]
                 properties:
                   items:
                     type: array
                     items:
                       $ref: "#/components/schemas/UserUsageRecord"
+                  next_cursor:
+                    type: [string, "null"]
         "403":
           $ref: "#/components/responses/Error"
   /chat/completions:
@@ -687,8 +697,11 @@ components:
     UserUsageRecord:
       type: object
       additionalProperties: false
-      required: [model, display_status, started_at, updated_at]
+      required: [usage_request_id, model, display_status, actual_microcredits, input_tokens, output_tokens, cached_input_tokens, started_at, completed_at, updated_at]
       properties:
+        usage_request_id:
+          type: string
+          format: uuid
         model:
           type: string
         display_status:
@@ -698,8 +711,23 @@ components:
           type: [integer, "null"]
           format: int64
           minimum: 0
+        input_tokens:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        output_tokens:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+        cached_input_tokens:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
         started_at:
           type: string
+          format: date-time
+        completed_at:
+          type: [string, "null"]
           format: date-time
         updated_at:
           type: string

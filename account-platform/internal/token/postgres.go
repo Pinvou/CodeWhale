@@ -80,7 +80,7 @@ type Repository interface {
 	UpsertRoute(context.Context, uuid.UUID, string, int, string, string, uuid.UUID) (RoutingPolicy, error)
 	ListCandidates(context.Context, string) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
-	ListUsageForContext(context.Context, AuthorizationContext, int) ([]UsageRequest, error)
+	ListUsageForContext(context.Context, AuthorizationContext, int, *UsageHistoryCursor) ([]UserUsageRecord, error)
 	UsageStore
 	Ping(context.Context) error
 	Close()
@@ -128,21 +128,35 @@ func (r *PostgresRepository) GetUsage(ctx context.Context, usageID uuid.UUID) (U
 	return usage, err
 }
 
-func (r *PostgresRepository) ListUsageForContext(ctx context.Context, resolved AuthorizationContext, limit int) ([]UsageRequest, error) {
-	if resolved.UserID == uuid.Nil || limit < 1 || limit > 100 {
+func (r *PostgresRepository) ListUsageForContext(ctx context.Context, resolved AuthorizationContext, limit int, cursor *UsageHistoryCursor) ([]UserUsageRecord, error) {
+	if resolved.UserID == uuid.Nil || limit < 1 || limit > 101 {
 		return nil, ErrForbidden
 	}
-	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at
+	query := `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL
 ORDER BY started_at DESC,id DESC LIMIT $2`
 	arguments := []any{resolved.UserID, limit}
+	if cursor != nil {
+		query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+FROM usage_requests
+WHERE user_id=$1 AND organization_id IS NULL AND (started_at,id)<($2,$3)
+ORDER BY started_at DESC,id DESC LIMIT $4`
+		arguments = []any{resolved.UserID, cursor.StartedAt, cursor.ID, limit}
+	}
 	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
-		query = `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at
+		query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2
 ORDER BY started_at DESC,id DESC LIMIT $3`
 		arguments = []any{resolved.UserID, *resolved.OrganizationID, limit}
+		if cursor != nil {
+			query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+FROM usage_requests
+WHERE user_id=$1 AND organization_id=$2 AND (started_at,id)<($3,$4)
+ORDER BY started_at DESC,id DESC LIMIT $5`
+			arguments = []any{resolved.UserID, *resolved.OrganizationID, cursor.StartedAt, cursor.ID, limit}
+		}
 	} else if resolved.ContextType != "PERSONAL" {
 		return nil, ErrForbidden
 	}
@@ -151,13 +165,23 @@ ORDER BY started_at DESC,id DESC LIMIT $3`
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]UsageRequest, 0)
+	items := make([]UserUsageRecord, 0)
 	for rows.Next() {
-		var usage UsageRequest
-		if err := rows.Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt); err != nil {
+		var item UserUsageRecord
+		var snapshot []byte
+		if err := rows.Scan(&item.UsageRequestID, &item.Model, &item.status, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
-		items = append(items, usage)
+		if len(snapshot) > 0 {
+			var payload struct {
+				Usage *Usage `json:"usage"`
+			}
+			if json.Unmarshal(snapshot, &payload) == nil && payload.Usage != nil {
+				input, output, cached := payload.Usage.InputTokens, payload.Usage.OutputTokens, payload.Usage.CachedInputTokens
+				item.InputTokens, item.OutputTokens, item.CachedInputTokens = &input, &output, &cached
+			}
+		}
+		items = append(items, item)
 	}
 	return items, rows.Err()
 }

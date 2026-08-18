@@ -59,5 +59,8 @@ export class AccountPlatformDesktopClient {
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', idempotencyKey: key, body: { product_id: productId, channel } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
-  usageHistory(signal) { return this.request('token', '/v1/me/usage-requests?limit=50', { signal }); }
+  usageHistory(cursor = '', signal) {
+    const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+    return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
+  }
 }

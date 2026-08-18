@@ -134,7 +134,9 @@
 .ap-usage-row > div:last-child { justify-items: end; }
 .ap-usage-row strong { font-size: 15px; font-weight: 550; overflow-wrap: anywhere; }
 .ap-usage-row small { color: var(--ap-tertiary); font-size: 12px; }
+.ap-usage-tokens { color: var(--ap-secondary) !important; font-variant-numeric: tabular-nums; }
 .ap-usage-amount { color: rgba(8, 8, 11, .86); font-size: 16px !important; }
+.ap-usage-more { justify-self: center; min-width: 140px; margin-top: 8px; }
 .ap-usage-status-released { color: var(--ap-secondary); background: var(--ap-component); }
 .ap-usage-status-settlement-pending, .ap-usage-status-manual-review { color: #9a6500; background: #fff4d6; }
 .ap-login, .ap-centered { display: grid; place-items: center; min-height: 100%; text-align: center; background: var(--ap-page); }

@@ -837,14 +837,39 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
 }
 
 fn usage_history_query_allowed(query: Option<&str>) -> bool {
-    match query {
-        None => true,
-        Some(query) => query
-            .strip_prefix("limit=")
-            .filter(|value| !value.is_empty() && !value.contains('&'))
-            .and_then(|value| value.parse::<u8>().ok())
-            .is_some_and(|limit| (1..=100).contains(&limit)),
+    let Some(query) = query else {
+        return true;
+    };
+    let mut limit_seen = false;
+    let mut cursor_seen = false;
+    for part in query.split('&') {
+        let Some((name, value)) = part.split_once('=') else {
+            return false;
+        };
+        match name {
+            "limit" if !limit_seen => {
+                limit_seen = value
+                    .parse::<u8>()
+                    .ok()
+                    .is_some_and(|limit| (1..=100).contains(&limit));
+                if !limit_seen {
+                    return false;
+                }
+            }
+            "cursor" if !cursor_seen => {
+                cursor_seen = !value.is_empty()
+                    && value.len() <= 256
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+                if !cursor_seen {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
     }
+    limit_seen || cursor_seen
 }
 
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
@@ -948,6 +973,18 @@ mod tests {
             usage.url.as_str(),
             "https://token.example.test/v1/me/usage-requests?limit=50"
         );
+
+        assert!(prepare_request(
+            &config(),
+            ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/me/usage-requests?limit=20&cursor=YWJjLTEyMw".to_string(),
+                method: "GET".to_string(),
+                body: None,
+                idempotency_key: None,
+            },
+        )
+        .is_ok());
 
         let chat = prepare_request(
             &config(),

@@ -140,7 +140,7 @@ test('personal usage history is read-only and never resends a model request', as
     const history = await client.usageHistory();
     assert.equal(history.items[0].display_status, 'SETTLED');
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, '/portal/api/token/v1/me/usage-requests?limit=50');
+    assert.equal(calls[0].url, '/portal/api/token/v1/me/usage-requests?limit=20');
     assert.equal(calls[0].options.method, 'GET');
     assert.equal(calls[0].url.includes('/chat/completions'), false);
   } finally {
@@ -187,6 +187,16 @@ test('desktop client surfaces backend error codes without exposing auth state', 
     assert.equal(error.status, 403);
     return true;
   });
+});
+
+test('personal usage history supports opaque pagination without exposing routing secrets', async () => {
+  const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(bffClient, /cursor=\$\{encodeURIComponent\(cursor\)\}/);
+  assert.match(view, /record\.input_tokens/);
+  assert.match(view, /record\.output_tokens/);
+  assert.match(view, /page\.next_cursor/);
+  assert.doesNotMatch(view, /record\.(?:token_account_id|credential_id|wallet_id|provider)/);
 });
 
 test('desktop account entry is a popover and no longer mounts a full workspace', async () => {
@@ -310,12 +320,12 @@ test('personal center exposes only user-facing usage history instead of Token ad
   const desktopClient = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
   assert.match(view, /section === 'usage'/);
-  assert.match(view, /client\.usageHistory\(request\.signal\)/);
+  assert.match(view, /client\.usageHistory\('', request\.signal\)/);
   assert.match(i18n, /usage:'用量记录'/);
   assert.doesNotMatch(view, /section === 'tokens'|client\.(managedTokens|eligibleTokens|credentials|rotateCredential|createTokenAccount)/);
   assert.doesNotMatch(i18n, /Token 管理|供应商凭据|模型消费准备状态|消费结算状态|可管理 Token/);
-  assert.match(bffClient, /usageHistory\(signal\)/);
-  assert.match(desktopClient, /usageHistory\(signal\)/);
+  assert.match(bffClient, /usageHistory\(cursor = '', signal\)/);
+  assert.match(desktopClient, /usageHistory\(cursor = '', signal\)/);
   assert.doesNotMatch(`${bffClient}\n${desktopClient}`, /managedTokens|eligibleTokens|rotateCredential|createTokenAccount/);
 });
 

@@ -70,6 +70,25 @@ type UsageRequest struct {
 	UpdatedAt           time.Time
 }
 
+type UsageHistoryCursor struct {
+	StartedAt time.Time
+	ID        uuid.UUID
+}
+
+type UserUsageRecord struct {
+	UsageRequestID     uuid.UUID  `json:"usage_request_id"`
+	Model              string     `json:"model"`
+	DisplayStatus      string     `json:"display_status"`
+	ActualMicrocredits *int64     `json:"actual_microcredits"`
+	InputTokens        *int64     `json:"input_tokens"`
+	OutputTokens       *int64     `json:"output_tokens"`
+	CachedInputTokens  *int64     `json:"cached_input_tokens"`
+	StartedAt          time.Time  `json:"started_at"`
+	CompletedAt        *time.Time `json:"completed_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	status             string
+}
+
 type UsageStore interface {
 	GetUsage(context.Context, uuid.UUID) (UsageRequest, error)
 	BeginUsage(context.Context, UsageRequest, map[string]any) (UsageRequest, bool, error)

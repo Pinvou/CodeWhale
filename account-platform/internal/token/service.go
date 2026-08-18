@@ -3,6 +3,7 @@ package token
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -479,7 +480,7 @@ func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	limit := 50
+	limit := 20
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 || parsed > 100 {
@@ -488,23 +489,60 @@ func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = parsed
 	}
-	usageRequests, err := s.repository.ListUsageForContext(r.Context(), resolved, limit)
+	var cursor *UsageHistoryCursor
+	if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
+		parsed, err := decodeUsageCursor(raw)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "cursor is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		cursor = &parsed
+	}
+	usageRequests, err := s.repository.ListUsageForContext(r.Context(), resolved, limit+1, cursor)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	items := make([]map[string]any, 0, len(usageRequests))
-	for _, usage := range usageRequests {
-		items = append(items, map[string]any{
-			"model":               usage.Model,
-			"display_status":      usageDisplayStatus(usage),
-			"actual_microcredits": usage.ActualMicrocredits,
-			"started_at":          usage.StartedAt,
-			"updated_at":          usage.UpdatedAt,
-		})
+	var nextCursor *string
+	if len(usageRequests) > limit {
+		last := usageRequests[limit-1]
+		encoded := encodeUsageCursor(UsageHistoryCursor{StartedAt: last.StartedAt, ID: last.UsageRequestID})
+		nextCursor = &encoded
+		usageRequests = usageRequests[:limit]
+	}
+	for index := range usageRequests {
+		usageRequests[index].DisplayStatus = usageDisplayStatus(UsageRequest{Status: usageRequests[index].status})
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": usageRequests, "next_cursor": nextCursor})
+}
+
+func encodeUsageCursor(cursor UsageHistoryCursor) string {
+	payload := cursor.StartedAt.UTC().Format(time.RFC3339Nano) + "|" + cursor.ID.String()
+	return base64.RawURLEncoding.EncodeToString([]byte(payload))
+}
+
+func decodeUsageCursor(raw string) (UsageHistoryCursor, error) {
+	if len(raw) > 256 {
+		return UsageHistoryCursor{}, ErrForbidden
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return UsageHistoryCursor{}, err
+	}
+	parts := strings.SplitN(string(payload), "|", 2)
+	if len(parts) != 2 {
+		return UsageHistoryCursor{}, ErrForbidden
+	}
+	startedAt, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return UsageHistoryCursor{}, err
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return UsageHistoryCursor{}, err
+	}
+	return UsageHistoryCursor{StartedAt: startedAt, ID: id}, nil
 }
 
 func usageContextMatches(context AuthorizationContext, usage UsageRequest) bool {

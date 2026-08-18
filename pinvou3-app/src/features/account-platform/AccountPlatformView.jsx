@@ -38,6 +38,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [balance, setBalance] = useState(null);
   const [billingUnavailable, setBillingUnavailable] = useState(false);
   const [usageRecords, setUsageRecords] = useState([]);
+  const [usageCursor, setUsageCursor] = useState(null);
   const [usageUnavailable, setUsageUnavailable] = useState(false);
   const [section, setSection] = useState('overview');
   const [busy, setBusy] = useState(false);
@@ -59,7 +60,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         client.recentRechargeOrder(request.signal),
         organizationId ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }),
         organizationId ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }),
-        client.usageHistory(request.signal),
+        client.usageHistory('', request.signal),
       ]);
       if (!guardRef.current.isCurrent(request.generation)) return;
       const value = index => results[index].status === 'fulfilled' ? results[index].value : null;
@@ -70,6 +71,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setUnits(value(4)?.items || []);
       setMembers(value(5)?.items || []);
       setUsageRecords(value(6)?.items || []);
+      setUsageCursor(value(6)?.next_cursor || null);
       setUsageUnavailable(results[6].status === 'rejected');
       const billingFailed = [1, 2, 3].some(index => results[index].status === 'rejected');
       setBillingUnavailable(billingFailed);
@@ -138,7 +140,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
 
   const run = async action => {
     setBusy(true); setError(''); setNotice('');
-    try { await action(); } catch (reason) { setError(localizedError(copy, reason)); }
+    try { await action(); } catch (reason) { if (reason?.name !== 'AbortError') setError(localizedError(copy, reason)); }
     finally { setBusy(false); }
   };
 
@@ -154,18 +156,30 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     await client.logout();
     guardRef.current.cancel();
     setMe(null); setOrganizations([]); setUnits([]); setMembers([]); setProducts([]);
-    setBalance(null); setUsageRecords([]); setUsageUnavailable(false); setOrder(null); setQrData(''); setAuth('guest');
+    setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setOrder(null); setQrData(''); setAuth('guest');
     if (portal) window.location.reload();
   });
 
   const switchContext = value => run(async () => {
     guardRef.current.cancel();
-    setBalance(null); setUsageRecords([]); setUsageUnavailable(false); setUnits([]); setMembers([]); setOrder(null); setBillingUnavailable(false);
+    setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setUnits([]); setMembers([]); setOrder(null); setBillingUnavailable(false);
     const organizationId = value || null;
     const context = await client.switchContext(organizationId ? 'ORGANIZATION' : 'PERSONAL', organizationId);
     const updated = { ...me, active_context: context };
     setMe(updated);
     await loadContext(updated);
+  });
+
+  const loadMoreUsage = () => run(async () => {
+    if (!usageCursor) return;
+    const request = guardRef.current.begin();
+    const page = await client.usageHistory(usageCursor, request.signal);
+    if (!guardRef.current.isCurrent(request.generation)) return;
+    setUsageRecords(current => {
+      const known = new Set(current.map(item => item.usage_request_id));
+      return [...current, ...(page.items || []).filter(item => !known.has(item.usage_request_id))];
+    });
+    setUsageCursor(page.next_cursor || null);
   });
 
   if (auth === 'loading') return <div className={`ap-shell ap-centered ${portal ? 'ap-portal' : 'ap-desktop'}`}><div className="ap-spinner" />{copy.loading}</div>;
@@ -190,7 +204,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} />}
       {section === 'organization' && <Organization copy={copy} organization={activeOrganization} units={units} members={members} busy={busy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} />}
       {section === 'wallet' && <Wallet copy={copy} language={language} products={products} balance={balance} billingUnavailable={billingUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} />}
-      {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} />}
+      {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={loadMoreUsage} />}
     </main>
   </div>;
 }
@@ -228,11 +242,12 @@ function formatUsageTime(value, language) {
   return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
-function Usage({ copy, language, records, unavailable }) {
+function Usage({ copy, language, records, unavailable, hasMore, busy, onLoadMore }) {
   if (unavailable) return <section><p className="ap-eyebrow">{copy.sections.usage}</p><h2>{copy.usageTitle}</h2><p className="ap-lead">{copy.usageLead}</p><div role="alert" className="ap-alert error">{copy.usageUnavailable}</div></section>;
   return <section><p className="ap-eyebrow">{copy.sections.usage}</p><h2>{copy.usageTitle}</h2><p className="ap-lead">{copy.usageLead}</p>{records.length ? <div className="ap-usage-list">{records.map((record, index) => {
     const consumed = record.actual_microcredits == null && record.display_status !== 'RELEASED' ? '—' : formatPoints(record.actual_microcredits || 0, language);
     const statusClass = String(record.display_status || '').toLowerCase().replaceAll('_', '-');
-    return <article className="ap-usage-row" key={`${record.started_at}-${record.model}-${index}`}><div><strong>{record.model || copy.unknownModel}</strong><small>{formatUsageTime(record.started_at, language)}</small></div><div><strong className="ap-usage-amount">{consumed} {copy.points}</strong><span className={`ap-status ap-usage-status-${statusClass}`}>{copy.usageStatuses[record.display_status] || record.display_status}</span></div></article>;
-  })}</div> : <Empty>{copy.noUsage}</Empty>}</section>;
+    const tokenKnown = record.input_tokens != null && record.output_tokens != null;
+    return <article className="ap-usage-row" key={record.usage_request_id || `${record.started_at}-${record.model}-${index}`}><div><strong>{record.model || copy.unknownModel}</strong><small>{formatUsageTime(record.started_at, language)}</small>{tokenKnown && <small className="ap-usage-tokens">{copy.inputTokens}: {record.input_tokens.toLocaleString()} · {copy.outputTokens}: {record.output_tokens.toLocaleString()} · {copy.cachedTokens}: {(record.cached_input_tokens || 0).toLocaleString()}</small>}<small title={record.usage_request_id}>{copy.usageRecord}: {String(record.usage_request_id || '—').slice(0, 8)}</small></div><div><strong className="ap-usage-amount">{consumed} {copy.points}</strong><span className={`ap-status ap-usage-status-${statusClass}`}>{copy.usageStatuses[record.display_status] || record.display_status}</span>{record.completed_at && <small>{copy.completedAt}: {formatUsageTime(record.completed_at, language)}</small>}</div></article>;
+  })}{hasMore && <button className="ap-usage-more" disabled={busy} onClick={onLoadMore}>{busy ? copy.loadingMore : copy.loadMore}</button>}</div> : <Empty>{copy.noUsage}</Empty>}</section>;
 }

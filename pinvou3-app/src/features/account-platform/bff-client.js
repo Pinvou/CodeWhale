@@ -52,6 +52,9 @@ export class AccountPlatformBffClient {
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', headers: { 'Idempotency-Key': key }, body: { product_id: productId, channel } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
-  usageHistory(signal) { return this.request('token', '/v1/me/usage-requests?limit=50', { signal }); }
+  usageHistory(cursor = '', signal) {
+    const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
+    return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
+  }
   logout() { return fetch(`${this.baseURL}/api/logout`, { method: 'POST', headers: { 'X-CSRF-Token': this.csrfToken }, credentials: 'same-origin' }); }
 }
