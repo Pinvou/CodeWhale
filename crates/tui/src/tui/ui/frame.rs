@@ -232,6 +232,7 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         allowed_tools: app.active_allowed_tools.clone(),
         disallowed_tools: None,
         max_tool_calls: None,
+        direct_tool_round_policy: None,
         hook_executor: app.runtime_services.hook_executor.clone(),
         network_policy: config.network.clone().map(|toml_cfg| {
             crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())

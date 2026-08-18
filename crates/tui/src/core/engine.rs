@@ -233,6 +233,20 @@ impl std::fmt::Debug for ExtraTools {
     }
 }
 
+/// Optional host policy that bounds how many direct tool batches a foreground
+/// agent may execute before its tool surface narrows to explicit handoff tools.
+///
+/// A "round" is one assistant response containing one or more tool calls. Calls
+/// emitted in parallel by the same response share a round. Once the direct
+/// budget is exhausted the model may still answer from collected evidence, but
+/// any further tool call must use one of `overflow_tools`. After such a handoff
+/// call, tools stay hidden for the remainder of the user turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectToolRoundPolicy {
+    pub max_direct_rounds: u32,
+    pub overflow_tools: Vec<String>,
+}
+
 /// Configuration for the engine
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -371,6 +385,10 @@ pub struct EngineConfig {
     /// set this from the task's structured `max_tool_calls` constraint; the
     /// per-turn counter itself lives in the turn loop, not here.
     pub max_tool_calls: Option<u32>,
+    /// Host-defined direct-work budget. `None` preserves the ordinary CodeWhale
+    /// tool loop. Embedders can use this to require a bounded foreground agent
+    /// to hand longer work to a dedicated orchestration tool.
+    pub direct_tool_round_policy: Option<DirectToolRoundPolicy>,
     /// Hook executor for control-plane hooks.
     /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
     pub hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
@@ -491,6 +509,7 @@ impl Default for EngineConfig {
             allowed_tools: None,
             disallowed_tools: None,
             max_tool_calls: None,
+            direct_tool_round_policy: None,
             hook_executor: None,
             locale_tag: "en".to_string(),
             workshop: None,

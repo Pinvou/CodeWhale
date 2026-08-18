@@ -5834,6 +5834,7 @@ impl RuntimeThreadManager {
                 allowed_tools: None,
                 disallowed_tools: None,
                 max_tool_calls: None,
+                direct_tool_round_policy: None,
                 hook_executor: None,
                 locale_tag: crate::localization::resolve_locale(&settings.locale)
                     .tag()

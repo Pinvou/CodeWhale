@@ -26,6 +26,56 @@ use crate::tools::tool_call_budget::ToolCallBudget;
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
 const TOOL_ERROR_DEGRADATION_THRESHOLD: u32 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectToolRoundDecision {
+    Allowed,
+    DirectBudgetExhausted,
+    HandoffAlreadyUsed,
+}
+
+fn direct_tool_round_decision(
+    policy: Option<&DirectToolRoundPolicy>,
+    direct_rounds: u32,
+    handoff_used: bool,
+    tool_name: &str,
+) -> DirectToolRoundDecision {
+    let Some(policy) = policy else {
+        return DirectToolRoundDecision::Allowed;
+    };
+    if handoff_used {
+        return DirectToolRoundDecision::HandoffAlreadyUsed;
+    }
+    if direct_rounds < policy.max_direct_rounds
+        || policy
+            .overflow_tools
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(tool_name))
+    {
+        return DirectToolRoundDecision::Allowed;
+    }
+    DirectToolRoundDecision::DirectBudgetExhausted
+}
+
+pub(super) fn apply_direct_tool_round_policy(
+    tools: Option<Vec<crate::models::Tool>>,
+    policy: Option<&DirectToolRoundPolicy>,
+    direct_rounds: u32,
+    handoff_used: bool,
+) -> Option<Vec<crate::models::Tool>> {
+    if policy.is_none() {
+        return tools;
+    }
+    let narrowed = tools
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|tool| {
+            direct_tool_round_decision(policy, direct_rounds, handoff_used, &tool.name)
+                == DirectToolRoundDecision::Allowed
+        })
+        .collect::<Vec<_>>();
+    (!narrowed.is_empty()).then_some(narrowed)
+}
+
 pub(super) fn append_stuck_runtime_notice(content: String) -> String {
     format!("{content}\n\n{STUCK_RUNTIME_NOTICE}")
 }
@@ -476,6 +526,12 @@ impl Engine {
         // catalog; the policy only carries the declared limit, and `None`
         // (no declared budget) leaves the gate below inert.
         let mut tool_call_budget = ToolCallBudget::new(tool_policy.max_tool_calls);
+        // Foreground-agent round budget: unlike `max_steps`, this counts only
+        // assistant responses that actually contain tool calls. Parallel tool
+        // calls in one response therefore consume exactly one round.
+        let direct_tool_round_policy = self.config.direct_tool_round_policy.clone();
+        let mut direct_tool_rounds = 0_u32;
+        let mut overflow_handoff_used = false;
         let mut goal_continuations_this_turn = 0u32;
         // Turn-scoped empty REPL guard (NOTE-turn-loop-wrongness §2): persists
         // across model steps so 3 consecutive empty blocks end the turn, not
@@ -702,8 +758,12 @@ impl Engine {
             // helper that seeded this turn and that `/preview-request`
             // reports, so a deferred tool activated mid-turn is reflected
             // identically in both places.
-            let active_tools =
-                active_tools_for_request(&tool_catalog, &active_tool_names, strict_tool_mode);
+            let active_tools = apply_direct_tool_round_policy(
+                active_tools_for_request(&tool_catalog, &active_tool_names, strict_tool_mode),
+                direct_tool_round_policy.as_ref(),
+                direct_tool_rounds,
+                overflow_handoff_used,
+            );
 
             // Resolve `auto` reasoning_effort to a concrete tier (#663).
             let effective_reasoning_effort = resolve_auto_effort(
@@ -2317,6 +2377,30 @@ impl Engine {
                     blocked_error = Some(exceeded.into_tool_error(&tool_name));
                 }
 
+                if blocked_error.is_none() {
+                    blocked_error = match direct_tool_round_decision(
+                        direct_tool_round_policy.as_ref(),
+                        direct_tool_rounds,
+                        overflow_handoff_used,
+                        &requested_tool_name,
+                    ) {
+                        DirectToolRoundDecision::Allowed => None,
+                        DirectToolRoundDecision::DirectBudgetExhausted => {
+                            let max_direct_rounds = direct_tool_round_policy
+                                .as_ref()
+                                .map_or(0, |policy| policy.max_direct_rounds);
+                            Some(ToolError::permission_denied(format!(
+                                "Tool '{requested_tool_name}' is not available after the direct-tool round budget of {max_direct_rounds} was exhausted; only the configured handoff tools may run"
+                            )))
+                        }
+                        DirectToolRoundDecision::HandoffAlreadyUsed => {
+                            Some(ToolError::permission_denied(format!(
+                                "Tool '{requested_tool_name}' is not available after the handoff tool was used; no further tools may run in this turn"
+                            )))
+                        }
+                    };
+                }
+
                 if mode_blocks_command_execution(mode, &tool_name) {
                     blocked_error = Some(ToolError::permission_denied(format!(
                         "'{tool_name}' is not available in Plan mode — switch to Act mode (`/mode act`) to run commands and code."
@@ -3906,6 +3990,22 @@ impl Engine {
                 consecutive_tool_error_steps = next_consecutive_tool_error_steps;
             } else {
                 consecutive_tool_error_steps = 0;
+            }
+
+            if !tool_uses.is_empty() {
+                let used_overflow_tool = direct_tool_round_policy.as_ref().is_some_and(|policy| {
+                    tool_uses.iter().any(|tool| {
+                        policy
+                            .overflow_tools
+                            .iter()
+                            .any(|name| name.eq_ignore_ascii_case(&tool.name))
+                    })
+                });
+                if used_overflow_tool {
+                    overflow_handoff_used = true;
+                } else {
+                    direct_tool_rounds = direct_tool_rounds.saturating_add(1);
+                }
             }
 
             // A successful tool step is productive progress, not a runaway

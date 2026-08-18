@@ -5,7 +5,7 @@ use super::dispatch::normalize_schema_json_containers;
 use super::streaming::{TOOL_CALL_END_MARKERS, TOOL_CALL_MARKER_PAIRS};
 use super::turn_loop::{
     append_stuck_runtime_notice, append_tool_error_degradation_runtime_notice,
-    merge_new_runtime_mcp_tools, registered_tool_approval_required,
+    apply_direct_tool_round_policy, merge_new_runtime_mcp_tools, registered_tool_approval_required,
     registered_tool_blocked_in_full_access, registered_tool_forces_prompt,
     tool_error_degradation_runtime_hint, workspace_write_carve_out_applies,
 };
@@ -46,6 +46,34 @@ const REPRESENTATIVE_SKILL_DESCRIPTION: &str = "REPRESENTATIVE_SKILL_DESCRIPTION
 const REPRESENTATIVE_MEMORY_CHECKPOINT: &str = "REPRESENTATIVE_MEMORY_CHECKPOINT";
 const REPRESENTATIVE_GOAL_OBJECTIVE: &str = "REPRESENTATIVE_GOAL_OBJECTIVE";
 const REPRESENTATIVE_HANDOFF_RELAY: &str = "REPRESENTATIVE_HANDOFF_RELAY";
+
+#[test]
+fn forkguard_direct_tool_round_budget_narrows_to_one_handoff_then_closes() {
+    let tools = || Some(vec![api_tool("File"), api_tool("Web"), api_tool("agent")]);
+    let policy = DirectToolRoundPolicy {
+        max_direct_rounds: 3,
+        overflow_tools: vec!["AGENT".to_string()],
+    };
+
+    let before_limit = apply_direct_tool_round_policy(tools(), Some(&policy), 2, false)
+        .expect("ordinary direct tools should remain available before round three");
+    assert_eq!(before_limit.len(), 3);
+
+    let at_limit = apply_direct_tool_round_policy(tools(), Some(&policy), 3, false)
+        .expect("the configured handoff tool should remain available");
+    assert_eq!(
+        at_limit
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["agent"]
+    );
+
+    assert!(
+        apply_direct_tool_round_policy(tools(), Some(&policy), 3, true).is_none(),
+        "after the handoff batch the foreground agent must not regain direct tools"
+    );
+}
 
 struct ForkguardHostExtraTool;
 
@@ -3701,6 +3729,152 @@ async fn run_budgeted_read_turn(
         })
         .collect::<Vec<_>>();
     (status, error, completions)
+}
+
+async fn run_direct_round_policy_turn(
+    workspace: &Path,
+    policy: DirectToolRoundPolicy,
+    mock: std::sync::Arc<crate::llm_client::mock::MockLlmClient>,
+) -> (
+    TurnOutcomeStatus,
+    Option<String>,
+    Vec<(String, String, Result<ToolResult, ToolError>)>,
+) {
+    let mut engine_config = deterministic_engine_config(workspace);
+    engine_config.direct_tool_round_policy = Some(policy);
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(crate::tools::file::ReadFileTool));
+    registry.register(std::sync::Arc::new(ForkguardHostExtraTool));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(6);
+
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let mut events = handle.rx_event.write().await;
+    let completions = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::ToolCallComplete {
+                id, name, result, ..
+            } => Some((id, name, result)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (status, error, completions)
+}
+
+#[tokio::test]
+async fn forkguard_direct_round_budget_blocks_a_hallucinated_old_tool_at_execution() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("fixture.txt"), "fixture\n").expect("write fixture");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-direct-admitted",
+            "read_file",
+            r#"{"path":"fixture.txt"}"#,
+        ),
+        canned::tool_call_turn(
+            "call-direct-bypass",
+            "read_file",
+            r#"{"path":"fixture.txt"}"#,
+        ),
+        canned::simple_text_turn("done"),
+    ]));
+    let policy = DirectToolRoundPolicy {
+        max_direct_rounds: 1,
+        overflow_tools: vec!["host_extra_probe".to_string()],
+    };
+
+    let (status, error, completions) =
+        run_direct_round_policy_turn(workspace.path(), policy, mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 3, "two tool proposals then final text");
+    let requests = mock.captured_requests();
+    let overflow_surface = requests[1]
+        .tools
+        .as_ref()
+        .expect("the configured handoff tool remains advertised at the limit");
+    assert_eq!(
+        overflow_surface
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["host_extra_probe"]
+    );
+
+    let admitted = completions
+        .iter()
+        .find(|(id, _, _)| id == "call-direct-admitted")
+        .expect("first direct call completion");
+    assert!(admitted.2.is_ok(), "first direct round must execute");
+
+    let blocked = completions
+        .iter()
+        .find(|(id, _, _)| id == "call-direct-bypass")
+        .expect("bypass attempt completion")
+        .2
+        .as_ref()
+        .expect_err("a tool omitted from the exhausted surface must not execute");
+    assert!(
+        blocked.to_string().contains("direct-tool round budget"),
+        "{blocked}"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_direct_round_policy_blocks_every_tool_after_handoff_execution() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("fixture.txt"), "fixture\n").expect("write fixture");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn("call-handoff", "host_extra_probe", r#"{}"#),
+        canned::tool_call_turn(
+            "call-after-handoff",
+            "read_file",
+            r#"{"path":"fixture.txt"}"#,
+        ),
+        canned::simple_text_turn("done"),
+    ]));
+    let policy = DirectToolRoundPolicy {
+        max_direct_rounds: 3,
+        overflow_tools: vec!["host_extra_probe".to_string()],
+    };
+
+    let (status, error, completions) =
+        run_direct_round_policy_turn(workspace.path(), policy, mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 3, "handoff, bypass attempt, final text");
+    let requests = mock.captured_requests();
+    assert!(
+        requests[1].tools.is_none(),
+        "the request after handoff must expose no tools"
+    );
+
+    let handoff = completions
+        .iter()
+        .find(|(id, _, _)| id == "call-handoff")
+        .expect("handoff completion");
+    assert!(handoff.2.is_ok(), "configured handoff tool must execute");
+
+    let blocked = completions
+        .iter()
+        .find(|(id, _, _)| id == "call-after-handoff")
+        .expect("post-handoff attempt completion")
+        .2
+        .as_ref()
+        .expect_err("no tool may execute after handoff");
+    assert!(
+        blocked
+            .to_string()
+            .contains("no further tools may run in this turn"),
+        "{blocked}"
+    );
 }
 
 /// #4415 AC(a): an 8-call cap admits exactly 8 calls; the 9th is rejected

@@ -11085,6 +11085,7 @@ async fn run_exec_agent(
         allowed_tools: allowed_tools.clone(),
         disallowed_tools: disallowed_tools.clone(),
         max_tool_calls: None,
+        direct_tool_round_policy: None,
         hook_executor: None,
         locale_tag: crate::localization::resolve_locale(&settings.locale)
             .tag()
