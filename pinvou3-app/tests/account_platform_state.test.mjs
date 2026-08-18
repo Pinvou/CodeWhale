@@ -278,7 +278,7 @@ test('personal center keeps context on overview and cannot create organizations'
   assert.doesNotMatch(view, /client\.createOrganization/);
   assert.doesNotMatch(bffClient, /createOrganization\(/);
   assert.doesNotMatch(desktopClient, /createOrganization\(/);
-  assert.match(styles, /\.ap-sidebar-foot select \{[^}]*color: #172033;[^}]*background: #fff;/);
+  assert.match(styles, /\.ap-sidebar-foot select \{[^}]*color: var\(--ap-primary\);[^}]*background: var\(--ap-component\);/);
 });
 
 test('account portal uses stable asset names with revalidated caching', async () => {
@@ -288,6 +288,22 @@ test('account portal uses stable asset names with revalidated caching', async ()
   assert.match(viteConfig, /chunkFileNames: 'assets\/\[name\]\.js'/);
   assert.match(viteConfig, /assetFileNames: 'assets\/\[name\]\[extname\]'/);
   assert.match(portalService, /Header\(\)\.Set\("Cache-Control", "no-cache"\)/);
+});
+
+test('personal center follows the restrained WorkBuddy-inspired visual system', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
+  assert.match(view, /className="ap-sidebar-brand"/);
+  assert.match(view, /className="ap-user-summary"/);
+  assert.match(view, /<NavIcon name=\{key\}/);
+  assert.match(styles, /--ap-page: #f5f7fa/);
+  assert.match(styles, /--ap-primary: #1b1a24/);
+  assert.match(styles, /--ap-accent: #4ecba0/);
+  assert.match(styles, /grid-template-columns: 250px minmax\(0, 1fr\)/);
+  assert.match(styles, /max-width: 1000px/);
+  assert.match(styles, /border-radius: 24px/);
+  assert.match(styles, /\.ap-sidebar nav button \{ color: rgba\(27, 26, 36, \.42\); \}/);
+  assert.match(styles, /\.ap-sidebar nav button\.active \{ color: var\(--ap-primary\);/);
 });
 
 test('admin organization detail supports ownership transfer, rename, leaf deletion, and list search', async () => {
