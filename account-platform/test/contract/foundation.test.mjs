@@ -120,6 +120,13 @@ test('Keycloak development client enables password login without enabling implic
   assert.doesNotMatch(provisioning, /PINVOU_ADMIN_PASSWORD=['"][^$]/);
 });
 
+test('organization creation is reserved for platform administrators', async () => {
+  const account = await readYaml('contracts/openapi/account.yaml');
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+  assert.equal(account.paths['/organizations'], undefined);
+  assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations']), ['get', 'post']);
+});
+
 test('operations API is role protected and limits mutations to account lifecycle management', async () => {
   const admin = await readYaml('contracts/openapi/admin.yaml');
   assert.deepEqual(admin.security, [{ oidc: [] }]);

@@ -87,7 +87,6 @@ type Repository interface {
 	ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error)
 	ListOrganizations(context.Context, identity.Principal) ([]Organization, error)
 	SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error)
-	CreateOrganization(context.Context, identity.Principal, string) (Organization, error)
 	ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error)
 	ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error)
 	ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error)

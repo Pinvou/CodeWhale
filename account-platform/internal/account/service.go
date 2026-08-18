@@ -56,7 +56,6 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.GET("/v1/me/authorization-context", httpserver.AdaptFunc(s.getAuthorizationContext))
 	router.GET("/v1/me/organizations", httpserver.AdaptFunc(s.listOrganizations))
 	router.POST("/v1/sessions/current/active-context", httpserver.AdaptFunc(s.setActiveContext))
-	router.POST("/v1/organizations", httpserver.AdaptFunc(s.createOrganization))
 	router.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
 	router.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
 	router.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
@@ -194,22 +193,6 @@ func (s *Service) setActiveContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, context)
-}
-
-func (s *Service) createOrganization(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name string `json:"name"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid organization request", httpserver.RequestID(r.Context()))
-		return
-	}
-	organization, err := s.repository.CreateOrganization(r.Context(), mustPrincipal(r.Context()), body.Name)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusCreated, organization)
 }
 
 func (s *Service) createUnit(w http.ResponseWriter, r *http.Request) {

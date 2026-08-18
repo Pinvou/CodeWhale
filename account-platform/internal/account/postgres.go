@@ -268,45 +268,6 @@ WHERE issuer = $1 AND session_id = $2 AND user_id = $3`,
 	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: version}, nil
 }
 
-func (r *PostgresRepository) CreateOrganization(ctx context.Context, principal identity.Principal, name string) (Organization, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 120 {
-		return Organization{}, ErrConflict
-	}
-	tx, err := r.pool.Begin(ctx)
-	if err != nil {
-		return Organization{}, err
-	}
-	defer tx.Rollback(ctx)
-	userID, err := activeUserID(ctx, tx, principal)
-	if err != nil {
-		return Organization{}, err
-	}
-	now := r.now()
-	organization := Organization{ID: uuid.Must(uuid.NewV7()), Name: name, Status: "ACTIVE", Version: 1, Roles: []string{"OWNER"}}
-	membershipID := uuid.Must(uuid.NewV7())
-	_, err = tx.Exec(ctx, `INSERT INTO organizations(id, name, status, created_by, created_at, updated_at) VALUES ($1, $2, 'ACTIVE', $3, $4, $4)`, organization.ID, name, userID, now)
-	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO memberships(id, organization_id, user_id, status, joined_at, updated_at) VALUES ($1, $2, $3, 'ACTIVE', $4, $4)`, membershipID, organization.ID, userID, now)
-	}
-	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at) VALUES ($1, $2, 'OWNER', $3, $4)`, uuid.Must(uuid.NewV7()), membershipID, userID, now)
-	}
-	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE users SET membership_version = membership_version + 1, updated_at = $2 WHERE id = $1`, userID, now)
-	}
-	if err != nil {
-		return Organization{}, mapConstraintError(err)
-	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organization.ID, "organization.create", "organization", organization.ID.String(), "SUCCEEDED", map[string]any{"name": name}); err != nil {
-		return Organization{}, err
-	}
-	if err := appendOutbox(ctx, tx, "account.organization.created.v1", organization.ID, 1, map[string]any{"organization_id": organization.ID, "status": "ACTIVE"}); err != nil {
-		return Organization{}, err
-	}
-	return organization, tx.Commit(ctx)
-}
-
 func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name string) (Unit, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || len([]rune(name)) > 120 {

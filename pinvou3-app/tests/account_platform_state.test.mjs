@@ -100,7 +100,7 @@ test('BFF client keeps CSRF on mutations and never persists OIDC tokens', async 
   try {
     const client = new AccountPlatformBffClient('https://portal.example');
     await client.session();
-    await client.createOrganization('Example');
+    await client.switchContext('PERSONAL', null);
     assert.equal(calls[1].options.headers['X-CSRF-Token'], 'c'.repeat(32));
     assert.equal(calls[1].options.credentials, 'same-origin');
     assert.equal('accessToken' in client, false);
@@ -261,6 +261,21 @@ test('admin console exposes organizations and users as independent primary tabs'
   assert.doesNotMatch(view, /section === 'accounts'/);
   assert.doesNotMatch(i18n, /账号与组织/);
   assert.match(i18n, /organizations:'组织', users:'用户'/);
+});
+
+test('personal center keeps context on overview and cannot create organizations', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
+  const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
+  const desktopClient = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
+  assert.match(i18n, /title:'个人中心'/);
+  assert.match(view, /function Overview[\s\S]*copy\.activeContext/);
+  assert.equal((view.match(/copy\.activeContext/g) || []).length, 1);
+  assert.doesNotMatch(view, /client\.createOrganization/);
+  assert.doesNotMatch(bffClient, /createOrganization\(/);
+  assert.doesNotMatch(desktopClient, /createOrganization\(/);
+  assert.match(styles, /\.ap-sidebar-foot select \{[^}]*color: #172033;[^}]*background: #fff;/);
 });
 
 test('admin organization detail supports ownership transfer, rename, leaf deletion, and list search', async () => {

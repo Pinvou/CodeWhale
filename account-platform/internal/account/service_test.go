@@ -42,9 +42,6 @@ func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([
 func (*fakeRepository) SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error) {
 	panic("not used")
 }
-func (*fakeRepository) CreateOrganization(context.Context, identity.Principal, string) (Organization, error) {
-	panic("not used")
-}
 func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error) {
 	panic("not used")
 }
@@ -179,6 +176,21 @@ func TestBootstrapDoesNotReactivateDisabledUser(t *testing.T) {
 	}
 	if me.Status != "DISABLED" || wallets.calls != 0 || repository.activateCalls != 0 {
 		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
+	}
+}
+
+func TestPersonalUsersCannotCreateOrganizations(t *testing.T) {
+	repository := &fakeRepository{}
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "user", SessionID: "session"}, nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/organizations", strings.NewReader(`{"name":"Example"}`))
+	request.Header.Set("Authorization", "Bearer valid")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

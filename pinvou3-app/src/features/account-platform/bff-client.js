@@ -43,7 +43,6 @@ export class AccountPlatformBffClient {
   switchContext(contextType, organizationId, signal) {
     return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null }, signal });
   }
-  createOrganization(name) { return this.request('account', '/v1/organizations', { method: 'POST', body: { name } }); }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }
   members(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/members`, { signal }); }
   createUnit(organizationId, name, parentId = null) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', body: { name, parent_id: parentId } }); }
