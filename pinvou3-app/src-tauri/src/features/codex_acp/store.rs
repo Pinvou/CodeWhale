@@ -22,6 +22,8 @@ pub enum AgentBackend {
     KimiAcp,
 }
 
+// parse/agent_id 是 backend 字符串表示(序列化契约)的公开解析入口,生产链路
+// 在用;as_str 仅测试断言别名契约,已单独 #[cfg(test)] 门控。
 impl AgentBackend {
     pub fn parse(value: Option<&str>) -> Result<Self> {
         match value.unwrap_or("deepseek") {

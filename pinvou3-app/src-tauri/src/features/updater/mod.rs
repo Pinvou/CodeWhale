@@ -64,7 +64,7 @@ pub struct UpdateInfo {
 }
 
 /// 多平台更新清单的单平台资产。`latest.json` 的 `platforms` map 每个值用这个类型。
-/// 客户端按 `build_platform_key()` 选自己平台的资产;缺失则回退到顶层 url/sha256/size。
+/// 客户端按平台 key（如 `macos-universal`、`linux-arm64`）选自己平台的资产;缺失则回退到顶层 url/sha256/size。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PlatformAsset {
     pub url: String,
