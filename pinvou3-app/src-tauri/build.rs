@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 fn main() {
     // Bundle system prompt and security hook changes must invalidate the
     // extracted immutable bundle on existing installations.
@@ -28,8 +30,48 @@ fn main() {
     tauri_build::build();
 }
 
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+fn hash_dir(dir: &Path) -> u64 {
+    let mut files = Vec::new();
+    collect_files(dir, &mut files);
+    files.sort();
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for path in &files {
+        println!("cargo:rerun-if-changed={}", path.display());
+        hash = fnv1a_step(hash, path.to_string_lossy().as_bytes());
+        if let Ok(bytes) = std::fs::read(path) {
+            hash = fnv1a_step(hash, &bytes);
+        }
+    }
+    hash
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        #[allow(clippy::case_sensitive_file_extension_comparisons)]
+        if name.to_ascii_lowercase().ends_with(".pyc") || name == "__pycache__" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    fnv1a_step(0xcbf2_9ce4_8422_2325_u64, bytes)
+}
+
+fn fnv1a_step(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x100_0000_01b3);
