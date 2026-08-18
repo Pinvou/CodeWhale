@@ -89,6 +89,13 @@ export default defineConfig(({ mode }) => {
             pet: resolve(sourceRoot, 'pet.html'),
             reader: resolve(sourceRoot, 'reader.html'),
           },
+      output: accountPortalBuild
+        ? {
+            entryFileNames: 'assets/[name].js',
+            chunkFileNames: 'assets/[name].js',
+            assetFileNames: 'assets/[name][extname]',
+          }
+        : undefined,
     },
   },
   };

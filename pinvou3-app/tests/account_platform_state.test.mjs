@@ -270,12 +270,24 @@ test('personal center keeps context on overview and cannot create organizations'
   const desktopClient = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
   assert.match(i18n, /title:'个人中心'/);
+  assert.match(i18n, /activeContext:'当前身份', switchContext:'切换身份', personal:'个人账号'/);
+  assert.doesNotMatch(i18n, /当前上下文|身份上下文/);
   assert.match(view, /function Overview[\s\S]*copy\.activeContext/);
   assert.equal((view.match(/copy\.activeContext/g) || []).length, 1);
+  assert.match(view, /copy\.organizationIdentity\(activeOrganization\.name\)/);
   assert.doesNotMatch(view, /client\.createOrganization/);
   assert.doesNotMatch(bffClient, /createOrganization\(/);
   assert.doesNotMatch(desktopClient, /createOrganization\(/);
   assert.match(styles, /\.ap-sidebar-foot select \{[^}]*color: #172033;[^}]*background: #fff;/);
+});
+
+test('account portal uses stable asset names with revalidated caching', async () => {
+  const viteConfig = await readFile(new URL('../vite.config.js', import.meta.url), 'utf8');
+  const portalService = await readFile(new URL('../../account-platform/internal/portal/service.go', import.meta.url), 'utf8');
+  assert.match(viteConfig, /entryFileNames: 'assets\/\[name\]\.js'/);
+  assert.match(viteConfig, /chunkFileNames: 'assets\/\[name\]\.js'/);
+  assert.match(viteConfig, /assetFileNames: 'assets\/\[name\]\[extname\]'/);
+  assert.match(portalService, /Header\(\)\.Set\("Cache-Control", "no-cache"\)/);
 });
 
 test('admin organization detail supports ownership transfer, rename, leaf deletion, and list search', async () => {
