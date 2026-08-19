@@ -4,6 +4,11 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
@@ -33,6 +38,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	reconciliationInterval := 15 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS")); raw != "" {
+		seconds, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || seconds < 1 || seconds > 300 {
+			log.Fatal("BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS must be between 1 and 300")
+		}
+		reconciliationInterval = time.Duration(seconds) * time.Second
+	}
+	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopWorker()
+	go billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run(workerContext)
 	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

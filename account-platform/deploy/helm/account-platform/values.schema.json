@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "images", "newApi", "oidc", "public", "observability", "security", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
+  "required": ["global", "images", "newApi", "oidc", "public", "observability", "security", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
   "properties": {
     "global": {
       "type": "object",
@@ -70,6 +70,14 @@
       "properties": {
         "rateLimitRPS": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000 },
         "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "billing": {
+      "type": "object",
+      "required": ["paymentExpiryIntervalSeconds"],
+      "additionalProperties": false,
+      "properties": {
+        "paymentExpiryIntervalSeconds": { "type": "integer", "minimum": 1, "maximum": 300 }
       }
     },
     "tokenGateway": {

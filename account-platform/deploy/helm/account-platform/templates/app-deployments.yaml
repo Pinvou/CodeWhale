@@ -75,6 +75,7 @@ spec:
             - name: PAYMENT_SIMULATOR_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-provider-url } }
             - { name: BILLING_PAYMENT_CALLBACK_URL, value: {{ $root.Values.public.paymentCallbackUrl | quote }} }
+            - { name: BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS, value: {{ $root.Values.billing.paymentExpiryIntervalSeconds | quote }} }
             {{- range $channel := list "UNIONPAY" "ALIPAY" "WECHAT" }}
             - name: PAYMENT_SIM_HMAC_{{ $channel }}
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "payment-hmac-%s" ($channel | lower) }} } }

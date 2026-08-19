@@ -49,6 +49,9 @@ security:
   rateLimitRPS: 100
   rateLimitBurst: 200
 
+billing:
+  paymentExpiryIntervalSeconds: 15
+
 tokenGateway:
   secretProvider: remote
   secretKeyId: ""
