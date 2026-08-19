@@ -413,7 +413,7 @@ func safeProxyPathID(value string) bool {
 }
 
 func accountAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
 		return true
 	}
 	if method == http.MethodPost && resource == "/admin/v1/organizations" {
@@ -432,6 +432,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodDelete && len(parts) == 4 {
 		return true
 	}
+	if parts[2] == "users" && len(parts) == 5 && parts[4] == "memberships" {
+		return method == http.MethodGet
+	}
 	if method == http.MethodPatch && len(parts) == 4 && parts[2] == "organizations" {
 		return true
 	}
@@ -439,7 +442,19 @@ func accountAdminPathAllowed(method, resource string) bool {
 		return true
 	}
 	if parts[2] == "organizations" && len(parts) == 5 && parts[4] == "members" {
-		return method == http.MethodGet
+		return method == http.MethodGet || method == http.MethodPost
+	}
+	if parts[2] == "organizations" && len(parts) == 7 && parts[4] == "members" {
+		if _, err := uuid.Parse(parts[5]); err != nil || parts[6] != "roles" {
+			return false
+		}
+		return method == http.MethodPut
+	}
+	if parts[2] == "organizations" && len(parts) == 6 && parts[4] == "members" {
+		if _, err := uuid.Parse(parts[5]); err != nil {
+			return false
+		}
+		return method == http.MethodDelete
 	}
 	if parts[2] == "organizations" && len(parts) == 5 && parts[4] == "ownership" {
 		return method == http.MethodPost

@@ -49,7 +49,9 @@ export class AdminPlatformClient {
   }
 
   accountOverview(signal) { return this.request('account', '/admin/v1/overview', signal); }
+  roles(signal) { return this.request('account', '/admin/v1/roles', signal); }
   users(search, signal) { return this.request('account', `/admin/v1/users?limit=100&q=${encodeURIComponent(search || '')}`, signal); }
+  userMemberships(userID, signal) { return this.request('account', `/admin/v1/users/${encodeURIComponent(userID)}/memberships`, signal); }
   setUserStatus(userID, status) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}/status`, 'PATCH', { status }); }
   deleteUser(userID) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}`, 'DELETE'); }
   organizations(search, signal) { return this.request('account', `/admin/v1/organizations?limit=100&q=${encodeURIComponent(search || '')}`, signal); }
@@ -58,6 +60,9 @@ export class AdminPlatformClient {
   setOrganizationStatus(organizationID, status) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/status`, 'PATCH', { status }); }
   deleteOrganization(organizationID) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'DELETE'); }
   organizationMembers(organizationID, signal) { return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, signal); }
+  addOrganizationMember(organizationID, userID, roles, unitAdminUnitIDs) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, 'POST', { user_id:userID, roles, unit_admin_unit_ids:unitAdminUnitIDs }); }
+  replaceOrganizationMemberRoles(organizationID, userID, roles, unitAdminUnitIDs) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/roles`, 'PUT', { roles, unit_admin_unit_ids:unitAdminUnitIDs }); }
+  removeOrganizationMember(organizationID, userID) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}`, 'DELETE'); }
   transferOrganizationOwnership(organizationID, userID) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/ownership`, 'POST', { new_owner_user_id:userID }); }
   organizationUnits(organizationID, signal) { return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units`, signal); }
   createOrganizationUnit(organizationID, name, parentID = null) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units`, 'POST', { name, parent_id: parentID }); }

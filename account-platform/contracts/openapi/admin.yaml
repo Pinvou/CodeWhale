@@ -26,6 +26,22 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/roles:
+    get:
+      operationId: listAdminRoleDefinitions
+      summary: List organization role definitions and assignment scopes
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/users/{user_id}/memberships:
+    get:
+      operationId: listAdminUserMemberships
+      summary: List a user's organization memberships and roles
+      parameters: [{ $ref: "#/components/parameters/UserID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /account/admin/v1/users/{user_id}/status:
     patch:
       operationId: setAdminUserStatus
@@ -115,6 +131,47 @@ paths:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: addAdminOrganizationMember
+      summary: Add or reactivate a platform user as an organization member
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MemberRoleChange" }
+      responses:
+        "201": { description: Member added }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/members/{user_id}:
+    delete:
+      operationId: removeAdminOrganizationMember
+      summary: Revoke a non-owner organization membership
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }]
+      responses:
+        "204": { description: Member removed }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/members/{user_id}/roles:
+    put:
+      operationId: replaceAdminOrganizationMemberRoles
+      summary: Replace assignable organization roles and unit administrator scopes
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MemberRoleChange" }
+      responses:
+        "200": { description: Member roles updated }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/ownership:
     post:
       operationId: transferAdminOrganizationOwnership
@@ -318,6 +375,20 @@ components:
       required: [new_owner_user_id]
       properties:
         new_owner_user_id: { type: string, format: uuid }
+    MemberRoleChange:
+      type: object
+      additionalProperties: false
+      required: [roles, unit_admin_unit_ids]
+      properties:
+        user_id: { type: string, format: uuid }
+        roles:
+          type: array
+          uniqueItems: true
+          items: { type: string, enum: [ORG_ADMIN, BILLING_ADMIN, MEMBER, AUDITOR] }
+        unit_admin_unit_ids:
+          type: array
+          uniqueItems: true
+          items: { type: string, format: uuid }
     OrganizationUnitCreate:
       type: object
       additionalProperties: false

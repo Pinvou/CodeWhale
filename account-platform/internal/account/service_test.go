@@ -73,6 +73,9 @@ func (*fakeRepository) AdminOverview(context.Context) (AdminOverview, error) {
 	return AdminOverview{}, nil
 }
 func (*fakeRepository) AdminUsers(context.Context, string, int) ([]AdminUser, error) { return nil, nil }
+func (*fakeRepository) AdminUserMemberships(context.Context, uuid.UUID) ([]AdminUserMembership, error) {
+	return nil, nil
+}
 func (f *fakeRepository) AdminSetUserStatus(_ context.Context, _ identity.Principal, id uuid.UUID, status string) error {
 	f.adminCalls = append(f.adminCalls, "user:"+id.String()+":"+status)
 	return nil
@@ -107,6 +110,18 @@ func (f *fakeRepository) AdminUnits(_ context.Context, organizationID uuid.UUID)
 func (f *fakeRepository) AdminMembers(_ context.Context, organizationID uuid.UUID) ([]Member, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":members")
 	return []Member{}, nil
+}
+func (f *fakeRepository) AdminAddMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID) (Member, error) {
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:add:"+userID.String())
+	return Member{UserID: userID, Roles: roles, UnitAdminIDs: unitIDs}, nil
+}
+func (f *fakeRepository) AdminReplaceMemberRoles(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID) (Member, error) {
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:roles:"+userID.String())
+	return Member{UserID: userID, Roles: roles, UnitAdminIDs: unitIDs}, nil
+}
+func (f *fakeRepository) AdminRemoveMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID) error {
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:remove:"+userID.String())
+	return nil
 }
 func (f *fakeRepository) AdminTransferOwnership(_ context.Context, _ identity.Principal, organizationID, ownerID uuid.UUID) error {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":owner:"+ownerID.String())
@@ -289,5 +304,22 @@ func TestManagedRolesCannotGrantOwnership(t *testing.T) {
 	}
 	if _, err := validateManagedRoles([]string{"UNIT_ADMIN"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("unit admin requires a scoped assignment workflow: %v", err)
+	}
+}
+
+func TestNormalizeAdminMemberRolesSeparatesUnitScope(t *testing.T) {
+	unitID := uuid.Must(uuid.NewV7())
+	roles, units, err := normalizeAdminMemberRoles([]string{"auditor", "ORG_ADMIN", "auditor"}, []uuid.UUID{unitID, unitID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(roles, ",") != "AUDITOR,MEMBER,ORG_ADMIN" || len(units) != 1 || units[0] != unitID {
+		t.Fatalf("roles=%v units=%v", roles, units)
+	}
+	if _, _, err := normalizeAdminMemberRoles([]string{"OWNER"}, nil); !errors.Is(err, ErrConflict) {
+		t.Fatalf("OWNER must be changed through ownership transfer, got %v", err)
+	}
+	if _, _, err := normalizeAdminMemberRoles(nil, []uuid.UUID{uuid.Nil}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("nil unit must be rejected, got %v", err)
 	}
 }

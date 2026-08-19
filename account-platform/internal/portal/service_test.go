@@ -204,16 +204,20 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 }
 
 func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
-	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/roles") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
 		t.Fatal("admin portal must expose the documented management APIs")
 	}
 	userID := "0198fbf7-c3ba-7bc4-8849-c157740963de"
 	organizationID := "0198fbf7-c3ba-7bc4-8849-c157740963df"
 	unitID := "0198fbf7-c3ba-7bc4-8849-c157740963e0"
+	memberID := "0198fbf7-c3ba-7bc4-8849-c157740963e1"
 	if !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/users/"+userID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/members") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/ownership") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) {
 		t.Fatal("admin portal must expose account lifecycle mutations")
 	}
-	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members") || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users/"+userID+"/memberships") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members") || !accountAdminPathAllowed(http.MethodPut, "/admin/v1/organizations/"+organizationID+"/members/"+memberID+"/roles") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) {
+		t.Fatal("admin portal must expose documented membership and role operations")
+	}
+	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
 		t.Fatal("admin portal must not expose undocumented mutations, internal APIs, or the model data plane")
 	}
 }
