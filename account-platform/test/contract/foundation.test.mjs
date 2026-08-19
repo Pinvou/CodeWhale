@@ -149,7 +149,7 @@ test('organization creation is reserved for platform administrators', async () =
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations']), ['get', 'post']);
 });
 
-test('operations API is role protected and limits mutations to account lifecycle management', async () => {
+test('operations API is role protected and limits mutations to documented management workflows', async () => {
   const admin = await readYaml('contracts/openapi/admin.yaml');
   assert.deepEqual(admin.security, [{ oidc: [] }]);
   for (const [pathName, pathItem] of Object.entries(admin.paths)) {
@@ -158,7 +158,7 @@ test('operations API is role protected and limits mutations to account lifecycle
       assert.ok(operation.responses['403'], `${pathName} must document role denial`);
     }
   }
-  for (const [pathName, pathItem] of Object.entries(admin.paths).filter(([name]) => name.startsWith('/billing/') || name.startsWith('/token/'))) {
+  for (const [pathName, pathItem] of Object.entries(admin.paths).filter(([name]) => name.startsWith('/token/'))) {
     assert.deepEqual(Object.keys(pathItem), ['get'], `${pathName} must remain read-only`);
   }
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/users/{user_id}/status']), ['patch']);
@@ -173,6 +173,10 @@ test('operations API is role protected and limits mutations to account lifecycle
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/ownership']), ['post']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}/status']), ['patch']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations/{organization_id}']), ['patch', 'delete']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/pricing-versions']), ['get', 'post']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/payment-orders/{order_id}/refunds']), ['post']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/usage-holds/{hold_id}/release']), ['post']);
+  assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/reconciliation-runs']), ['get', 'post']);
 });
 
 test('every migration up script has a matching down script', async () => {

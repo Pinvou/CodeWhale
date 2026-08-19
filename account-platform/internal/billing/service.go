@@ -60,9 +60,20 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.Use(identity.GinMiddleware(adminVerify[0]), identity.RequireRealmRoleGin("platform-admin"))
 		admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/wallets", httpserver.AdaptFunc(s.adminWallets))
+		admin.GET("/wallets/:wallet_id/ledger", httpserver.AdaptFunc(s.adminWalletLedger))
+		admin.GET("/pricing-versions", httpserver.AdaptFunc(s.adminPriceVersions))
+		admin.POST("/pricing-versions", httpserver.AdaptFunc(s.adminCreatePriceVersion))
 		admin.GET("/payment-orders", httpserver.AdaptFunc(s.adminPaymentOrders))
+		admin.POST("/payment-orders/:order_id/sync", httpserver.AdaptFunc(s.adminSyncPaymentOrder))
+		admin.POST("/payment-orders/:order_id/refunds", httpserver.AdaptFunc(s.adminRefundPaymentOrder))
 		admin.GET("/adjustments", httpserver.AdaptFunc(s.adminAdjustments))
+		admin.POST("/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.adminApproveAdjustment))
+		admin.POST("/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.adminRejectAdjustment))
 		admin.GET("/usage-holds", httpserver.AdaptFunc(s.adminUsageHolds))
+		admin.POST("/usage-holds/:hold_id/release", httpserver.AdaptFunc(s.adminReleaseUsageHold))
+		admin.GET("/reconciliation-runs", httpserver.AdaptFunc(s.adminReconciliationRuns))
+		admin.POST("/reconciliation-runs", httpserver.AdaptFunc(s.adminRunReconciliation))
+		admin.GET("/reconciliation-runs/:run_id/cases", httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
 }

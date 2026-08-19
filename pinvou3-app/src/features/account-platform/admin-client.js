@@ -71,9 +71,19 @@ export class AdminPlatformClient {
   audits(signal) { return this.request('account', '/admin/v1/audit-logs?limit=100', signal); }
   billingOverview(signal) { return this.request('billing', '/admin/v1/overview', signal); }
   wallets(signal) { return this.request('billing', '/admin/v1/wallets?limit=100', signal); }
+  walletLedger(walletID, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal); }
+  priceVersions(signal) { return this.request('billing', '/admin/v1/pricing-versions?limit=100', signal); }
+  createPriceVersion(input) { return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input); }
   paymentOrders(signal) { return this.request('billing', '/admin/v1/payment-orders?limit=100', signal); }
+  syncPaymentOrder(orderID) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {}); }
+  refundPaymentOrder(orderID, amountFen, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { amount_fen:amountFen, reason }); }
   adjustments(signal) { return this.request('billing', '/admin/v1/adjustments?limit=100', signal); }
+  decideAdjustment(adjustmentID, decision, reason) { return this.mutate('billing', `/admin/v1/adjustments/${encodeURIComponent(adjustmentID)}/${decision}`, 'POST', { reason }); }
   holds(signal) { return this.request('billing', '/admin/v1/usage-holds?limit=100', signal); }
+  releaseHold(holdID, reason) { return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }); }
+  reconciliationRuns(signal) { return this.request('billing', '/admin/v1/reconciliation-runs?limit=100', signal); }
+  runReconciliation(channel, businessDate) { return this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', { channel, business_date:businessDate }); }
+  reconciliationCases(runID, signal) { return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal); }
   tokenOverview(signal) { return this.request('token', '/admin/v1/overview', signal); }
   tokenAccounts(signal) { return this.request('token', '/admin/v1/token-accounts?limit=100', signal); }
   usageRequests(signal) { return this.request('token', '/admin/v1/usage-requests?limit=100', signal); }

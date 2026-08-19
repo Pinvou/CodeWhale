@@ -278,6 +278,35 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/wallets/{wallet_id}/ledger:
+    get:
+      operationId: listAdminWalletLedger
+      summary: List immutable wallet ledger entries
+      parameters: [{ $ref: "#/components/parameters/WalletID" }, { $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing-versions:
+    get:
+      operationId: listAdminPricingVersions
+      summary: List current and historical model prices
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminPricingVersion
+      summary: Activate a new model price while retaining price history
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PricingVersionCreate" }
+      responses:
+        "201": { description: Pricing version activated }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders:
     get:
       operationId: listAdminPaymentOrders
@@ -286,6 +315,32 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders/{order_id}/sync:
+    post:
+      operationId: syncAdminPaymentOrder
+      summary: Query the payment provider and converge an order
+      parameters: [{ $ref: "#/components/parameters/OrderID" }]
+      responses:
+        "200": { description: Synchronized payment order }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders/{order_id}/refunds:
+    post:
+      operationId: createAdminPaymentRefund
+      summary: Refund a settled payment order subject to refundable balance
+      parameters: [{ $ref: "#/components/parameters/OrderID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefundCreate" }
+      responses:
+        "201": { description: Refund created }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/adjustments:
     get:
       operationId: listAdminAdjustments
@@ -294,6 +349,28 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/adjustments/{adjustment_id}/approve:
+    post:
+      operationId: approveAdminAdjustment
+      summary: Approve and post a pending manual adjustment
+      parameters: [{ $ref: "#/components/parameters/AdjustmentID" }]
+      requestBody: { $ref: "#/components/requestBodies/Decision" }
+      responses:
+        "200": { description: Adjustment approved }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/adjustments/{adjustment_id}/reject:
+    post:
+      operationId: rejectAdminAdjustment
+      summary: Reject a pending manual adjustment
+      parameters: [{ $ref: "#/components/parameters/AdjustmentID" }]
+      requestBody: { $ref: "#/components/requestBodies/Decision" }
+      responses:
+        "200": { description: Adjustment rejected }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/usage-holds:
     get:
       operationId: listAdminUsageHolds
@@ -302,6 +379,46 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/usage-holds/{hold_id}/release:
+    post:
+      operationId: releaseAdminUsageHold
+      summary: Release an active or review usage hold with an audit reason
+      parameters: [{ $ref: "#/components/parameters/HoldID" }]
+      requestBody: { $ref: "#/components/requestBodies/Decision" }
+      responses:
+        "200": { description: Hold released }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/reconciliation-runs:
+    get:
+      operationId: listAdminReconciliationRuns
+      summary: List recent payment reconciliation runs
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: runAdminReconciliation
+      summary: Reconcile one payment channel and business date
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReconciliationCreate" }
+      responses:
+        "200": { description: Reconciliation completed }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/reconciliation-runs/{run_id}/cases:
+    get:
+      operationId: listAdminReconciliationCases
+      summary: List differences found by a reconciliation run
+      parameters: [{ $ref: "#/components/parameters/RunID" }, { $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /token/admin/v1/overview:
     get:
       operationId: getAdminTokenOverview
@@ -355,6 +472,42 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    WalletID:
+      name: wallet_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OrderID:
+      name: order_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AdjustmentID:
+      name: adjustment_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    HoldID:
+      name: hold_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RunID:
+      name: run_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  requestBodies:
+    Decision:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [reason]
+            properties:
+              reason: { type: string, minLength: 1, maxLength: 500 }
   schemas:
     NameChange:
       type: object
@@ -431,6 +584,29 @@ components:
       required: [status]
       properties:
         status: { type: string, enum: [ACTIVE, DISABLED] }
+    PricingVersionCreate:
+      type: object
+      additionalProperties: false
+      required: [model, input_per_million, output_per_million, cached_input_per_million]
+      properties:
+        model: { type: string, minLength: 1, maxLength: 160 }
+        input_per_million: { type: integer, format: int64, minimum: 0 }
+        output_per_million: { type: integer, format: int64, minimum: 0 }
+        cached_input_per_million: { type: integer, format: int64, minimum: 0 }
+    RefundCreate:
+      type: object
+      additionalProperties: false
+      required: [amount_fen, reason]
+      properties:
+        amount_fen: { type: integer, format: int64, minimum: 1 }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    ReconciliationCreate:
+      type: object
+      additionalProperties: false
+      required: [channel, business_date]
+      properties:
+        channel: { type: string, enum: [UNIONPAY, ALIPAY, WECHAT] }
+        business_date: { type: string, format: date }
   responses:
     Overview:
       description: Service overview counters

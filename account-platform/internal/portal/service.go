@@ -475,7 +475,36 @@ func accountAdminPathAllowed(method, resource string) bool {
 }
 
 func billingAdminPathAllowed(method, resource string) bool {
-	return adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds")
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs") {
+		return true
+	}
+	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs") && method == http.MethodPost {
+		return true
+	}
+	if strings.Contains(resource, "..") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) != 5 || parts[0] != "admin" || parts[1] != "v1" {
+		return false
+	}
+	if _, err := uuid.Parse(parts[3]); err != nil {
+		return false
+	}
+	switch parts[2] {
+	case "wallets":
+		return method == http.MethodGet && parts[4] == "ledger"
+	case "payment-orders":
+		return method == http.MethodPost && (parts[4] == "sync" || parts[4] == "refunds")
+	case "adjustments":
+		return method == http.MethodPost && (parts[4] == "approve" || parts[4] == "reject")
+	case "usage-holds":
+		return method == http.MethodPost && parts[4] == "release"
+	case "reconciliation-runs":
+		return method == http.MethodGet && parts[4] == "cases"
+	default:
+		return false
+	}
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
