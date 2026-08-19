@@ -2654,20 +2654,36 @@ impl Engine {
                         };
                         // #383: /edit — remove the last user+assistant exchange
                         // from the session, then re-send with the new content.
-                        // Pop messages from the tail until we've removed the
-                        // most recent user message and everything after it.
-                        // First, find the last user message index.
-                        let mut cut = None;
-                        for (idx, msg) in self.session.messages.iter().enumerate().rev() {
-                            if msg.role == "user" {
-                                cut = Some(idx);
-                                break;
-                            }
-                        }
-                        if let Some(idx) = cut {
-                            self.session.messages.truncate_to(idx);
-                            self.session.bump_messages_revision();
-                        }
+                        // Tool results and runtime-owned internal envelopes are
+                        // also persisted with role "user", so locate the cut
+                        // point by genuine user prompt — a bare role scan would
+                        // land mid-turn on a tool_result and keep the old
+                        // prompt plus its tool round-trips in history.
+                        let cut = self
+                            .session
+                            .messages
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .find(|(_, msg)| crate::runtime_handoff::is_user_turn_prompt(msg))
+                            .map(|(idx, _)| idx);
+                        let Some(idx) = cut else {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::transient(
+                                    "Cannot edit the last turn because the session history has no user message to replace.",
+                                )))
+                                .await;
+                            let outcome = SendMessageOutcome::NotStarted {
+                                error: Some(
+                                    "session history has no user message to replace".to_string(),
+                                ),
+                            };
+                            self.reconcile_non_completed_goal_turn(&outcome).await;
+                            continue;
+                        };
+                        self.session.messages.truncate_to(idx);
+                        self.session.bump_messages_revision();
                         // Now dispatch the new message as a normal send,
                         // reusing the engine's stored mode/model config.
                         let mode = self.current_mode;

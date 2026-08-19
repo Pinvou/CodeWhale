@@ -11979,6 +11979,261 @@ async fn edit_last_turn_preserves_current_mode() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_edit_last_turn_cuts_at_user_prompt_before_tool_results() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Tool results persist with role "user"; the edit cut must land on the
+    // last genuine user prompt, not on the trailing tool_result of the
+    // previous turn.
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    let done_sse = concat!(
+        "data: {\"id\":\"chatcmpl-edit-cut\",\"choices\":[{\"index\":0,",
+        "\"delta\":{\"content\":\"Revised answer.\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-edit-cut\",\"choices\":[{\"index\":0,",
+        "\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(done_sse),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &api_config);
+
+    let run = tokio::spawn(engine.run());
+    let seeded_messages = vec![
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "original prompt".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "Bash".to_string(),
+                input: serde_json::json!({"command": "printf hi"}),
+                caller: None,
+            }],
+        },
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "unique-tool-output-marker".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "final answer".to_string(),
+                cache_control: None,
+            }],
+        },
+    ];
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("edit-cut-test".to_string()),
+            messages: seeded_messages,
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "edited prompt".to_string(),
+        })
+        .await
+        .expect("send edit");
+
+    // Ops are processed in order: once the snapshot arrives, the replacement
+    // turn has completed.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request snapshot");
+    let snapshot = tokio::time::timeout(model_turn_event_timeout(), rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+
+    assert_eq!(
+        snapshot.messages.len(),
+        2,
+        "the whole previous turn (prompt, tool_use, tool_result, answer) must be cut: {:?}",
+        snapshot.messages
+    );
+    assert!(
+        snapshot.messages.iter().all(|message| !message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))),
+        "no tool_result may survive the cut: {:?}",
+        snapshot.messages
+    );
+    let replacement_text = message_text_of(&snapshot.messages[0]);
+    assert!(
+        replacement_text.contains("edited prompt"),
+        "first surviving message is the edited prompt: {replacement_text}"
+    );
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("recorded replacement request");
+    assert_eq!(requests.len(), 1);
+    let body = String::from_utf8(requests[0].body.clone()).expect("request body utf8");
+    assert!(body.contains("edited prompt"));
+    assert!(
+        !body.contains("original prompt"),
+        "old prompt must not leak into the replacement turn: {body}"
+    );
+    assert!(
+        !body.contains("unique-tool-output-marker"),
+        "tool round-trip must not leak into the replacement turn: {body}"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn forkguard_edit_last_turn_without_user_prompt_errors_and_sends_nothing() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _lock = lock_test_env();
+    let tmp = tempdir().expect("tempdir");
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let api_config = Config {
+        api_key: Some("test-key".to_string()),
+        base_url: Some(server.uri()),
+        ..Config::default()
+    };
+    let config = EngineConfig {
+        workspace: tmp.path().to_path_buf(),
+        model: "deepseek-v4-pro".to_string(),
+        snapshots_enabled: false,
+        subagents_enabled: false,
+        ..Default::default()
+    };
+    let (engine, handle) = Engine::new(config, &api_config);
+
+    let run = tokio::spawn(engine.run());
+    // History without any genuine user prompt: nothing to edit. The engine
+    // must surface an error instead of silently appending the message.
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("edit-no-user-test".to_string()),
+            messages: vec![Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "assistant only".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "edited prompt".to_string(),
+        })
+        .await
+        .expect("send edit");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_edit_error = false;
+    {
+        let mut events = handle.rx_event.write().await;
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+            if let Event::Error { envelope, .. } = &event {
+                assert!(
+                    envelope.message.contains("no user message"),
+                    "unexpected error: {}",
+                    envelope.message
+                );
+                saw_edit_error = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_edit_error, "edit without a user prompt must error out");
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request snapshot");
+    let snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("snapshot response")
+        .expect("snapshot");
+    assert_eq!(
+        snapshot.messages.len(),
+        1,
+        "failed edit must not append the new message: {:?}",
+        snapshot.messages
+    );
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert!(
+        requests.is_empty(),
+        "failed edit must not dispatch a provider turn"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
+#[tokio::test]
 async fn provider_runtime_status_reports_configured_zai_cap_without_client() {
     let (engine, handle) = {
         let _lock = lock_test_env();

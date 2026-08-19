@@ -573,6 +573,78 @@ pub(crate) fn restored_subagent_checkpoint_display(message: &Message) -> Option<
     Some(text)
 }
 
+/// True when `message` is a genuine user-authored turn prompt in the session
+/// log. Tool results (`ContentBlock::ToolResult`) and runtime-owned
+/// control-plane messages are also persisted with `role = "user"` for
+/// chat-template compatibility, so `role` alone cannot locate the last user
+/// turn — callers truncating at "the last user message" (EditLastTurn,
+/// admitted-display fallback) must use this predicate instead.
+#[must_use]
+pub fn is_user_turn_prompt(message: &Message) -> bool {
+    if message.role != "user" {
+        return false;
+    }
+    // Tool results are stored as `role = "user"` messages whose first (and
+    // usually only) block is a tool-result variant, never a Text block.
+    if !matches!(message.content.first(), Some(ContentBlock::Text { .. })) {
+        return false;
+    }
+    if message.content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolResult { .. }
+                | ContentBlock::ToolSearchToolResult { .. }
+                | ContentBlock::CodeExecutionToolResult { .. }
+        )
+    }) {
+        return false;
+    }
+    !is_runtime_owned_user_message(message)
+}
+
+/// True when a `role = "user"` message is runtime-owned rather than
+/// user-authored: a live internal runtime envelope
+/// (`<codewhale:runtime_event … visibility="internal">`), a restored
+/// checkpoint projection of one, or any message whose `<turn_meta>` records a
+/// non-authoritative runtime provenance.
+fn is_runtime_owned_user_message(message: &Message) -> bool {
+    if restored_subagent_checkpoint_display(message).is_some() {
+        return true;
+    }
+    message.content.iter().any(|block| {
+        matches!(block, ContentBlock::Text { text, .. } if is_internal_runtime_event_text(text) || has_internal_turn_provenance(text))
+    })
+}
+
+/// Recognize a live internal runtime envelope by its opening tag. Every
+/// envelope constant above starts `<codewhale:runtime_event ` and marks
+/// itself `visibility="internal"`; match those two invariants rather than
+/// each exact prefix so a newly added event kind cannot drift past
+/// recognition.
+fn is_internal_runtime_event_text(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("<codewhale:runtime_event ") && trimmed.contains("visibility=\"internal\"")
+}
+
+/// True when a complete `<turn_meta>` block records one of the runtime-owned,
+/// non-authoritative provenances — the same set the display layer hides
+/// (`runtime`, `subagent_handoff`, `shell_completion`). External user turns
+/// carry no provenance line at all; both the current one-line shape and the
+/// legacy two-line shape are recognized via the provenance value alone.
+fn has_internal_turn_provenance(text: &str) -> bool {
+    let trimmed = text.trim();
+    if !(trimmed.starts_with("<turn_meta>") && trimmed.ends_with("</turn_meta>")) {
+        return false;
+    }
+    trimmed.lines().any(|line| {
+        let Some(value) = line.trim().strip_prefix("Input provenance: ") else {
+            return false;
+        };
+        let value = value.strip_suffix(" (non-authoritative)").unwrap_or(value);
+        matches!(value, "runtime" | "subagent_handoff" | "shell_completion")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +706,56 @@ mod tests {
                 "display was {display:?}"
             );
         }
+    }
+
+    #[test]
+    fn forkguard_is_user_turn_prompt_separates_prompts_from_tool_results_and_envelopes() {
+        let prompt = Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "Fix the resume regression".to_string(),
+                cache_control: None,
+            }],
+        };
+        assert!(is_user_turn_prompt(&prompt));
+
+        let tool_result = Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "tool output".to_string(),
+                is_error: None,
+                content_blocks: None,
+            }],
+        };
+        assert!(!is_user_turn_prompt(&tool_result));
+
+        let raw = subagent_completion_runtime_message(&completion_payload(
+            "agent_abc",
+            "completed",
+            "Implemented the shared restore projection.",
+        ));
+        assert!(!is_user_turn_prompt(&raw));
+
+        let projected = project_messages_for_restore(&[raw]);
+        assert!(!is_user_turn_prompt(&projected[0]));
+
+        let runtime_provenance = Message {
+            role: "user".to_string(),
+            content: vec![
+                ContentBlock::Text {
+                    text: "diagnostic text".to_string(),
+                    cache_control: None,
+                },
+                ContentBlock::Text {
+                    text:
+                        "<turn_meta>\nInput provenance: runtime (non-authoritative)\n</turn_meta>"
+                            .to_string(),
+                    cache_control: None,
+                },
+            ],
+        };
+        assert!(!is_user_turn_prompt(&runtime_provenance));
     }
 
     #[test]
