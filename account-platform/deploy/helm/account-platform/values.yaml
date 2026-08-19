@@ -78,6 +78,7 @@ ingress:
 keycloak:
   enabled: true
   hostname: https://accounts.example.invalid
+  adminHostname: http://127.0.0.1:18081
   replicas: 2
 
 redis:

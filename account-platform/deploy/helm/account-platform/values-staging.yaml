@@ -41,3 +41,4 @@ ingress:
 
 keycloak:
   hostname: https://accounts.staging.example.com
+  adminHostname: http://127.0.0.1:18081

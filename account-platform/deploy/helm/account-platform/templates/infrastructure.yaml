@@ -71,6 +71,7 @@ spec:
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
           env:
             - { name: KC_HOSTNAME, value: {{ .Values.keycloak.hostname | quote }} }
+            - { name: KC_HOSTNAME_ADMIN, value: {{ .Values.keycloak.adminHostname | quote }} }
             - { name: KC_PROXY_HEADERS, value: xforwarded }
             - { name: KC_DB, value: postgres }
             - name: KC_DB_URL

@@ -3,7 +3,7 @@ import { buildUnitTree } from './admin-organization-tree.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import './admin-platform.css';
 
-const NAV_ICONS = { overview:'⌂', organizations:'▦', users:'◎', billing:'◇', tokens:'↗', system:'◉', audit:'≡' };
+const NAV_ICONS = { overview:'⌂', organizations:'▦', users:'◎', billing:'◇', tokens:'↗', system:'◉', audit:'≡', identity:'⚿' };
 const okStatuses = new Set(['ACTIVE', 'PAID', 'SETTLED', 'HEALTHY', 'APPROVED', 'SUCCESS']);
 const warnStatuses = new Set(['PENDING', 'CREATED', 'SETTLEMENT_PENDING', 'REVIEW', 'MANUAL_REVIEW', 'PENDING_APPROVAL']);
 
@@ -66,8 +66,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         next = { tokenAccounts:accounts.items || [], usage:usage.items || [] };
       } else if (target === 'system') {
         next = { systemStatus:await client.systemStatus(signal) };
-      } else {
+      } else if (target === 'audit') {
         const audits = await client.audits({}, signal); next = { audits:audits.items || [] };
+      } else {
+        return;
       }
       setData(current => ({ ...current, ...next })); setUpdatedAt(new Date()); setAuth('ready');
     } catch (reason) {
@@ -102,7 +104,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       <div className="adm-sidebar-foot"><span>{copy.readOnly}</span><select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}><option value="zh">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select></div>
     </aside>
     <main className="adm-main">
-      <header className="adm-topbar"><div><span className="adm-eyebrow">{copy.product}</span><h1>{copy.nav[section]}</h1></div><div className="adm-actions">{updatedAt && <small>{copy.updated} {updatedAt.toLocaleTimeString()}</small>}<button onClick={() => load(section)} disabled={busy}>{copy.refresh}</button><div className="adm-admin"><span>PA</span><div><strong>{copy.administrator}</strong><button onClick={logout}>{copy.logout}</button></div></div></div></header>
+      <header className="adm-topbar"><div><span className="adm-eyebrow">{copy.product}</span><h1>{copy.nav[section]}</h1></div><div className="adm-actions">{updatedAt && section !== 'identity' && <small>{copy.updated} {updatedAt.toLocaleTimeString()}</small>}{section !== 'identity' && <button onClick={() => load(section)} disabled={busy}>{copy.refresh}</button>}<div className="adm-admin"><span>PA</span><div><strong>{copy.administrator}</strong><button onClick={logout}>{copy.logout}</button></div></div></div></header>
       {error && <div role="alert" className="adm-alert">{error}</div>}
       {busy && <div className="adm-progress" />}
       {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
@@ -112,12 +114,13 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} />}
       {section === 'system' && <SystemStatus copy={copy} data={data} />}
       {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} />}
+      {section === 'identity' && <IdentitySecurity copy={copy} />}
     </main>
   </div>;
 }
 
 function sectionHasData(section, data) {
-  return section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : section === 'system' ? data.systemStatus : data.audits;
+  return section === 'identity' || (section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : section === 'system' ? data.systemStatus : data.audits);
 }
 
 function StatePage({ copy, kind, onRetry }) {
@@ -458,6 +461,36 @@ function SystemStatus({ copy, data }) {
   const relayColumns = [{key:'key',label:copy.system.service,render:item => <strong>{copy.system.names[item.key] || item.key}</strong>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'pending_events',label:copy.system.pending},{key:'dead_lettered_events',label:copy.system.deadLetters},{key:'oldest_pending_seconds',label:copy.system.oldest,render:item => `${formatNumber(item.oldest_pending_seconds)} s`},{key:'message',label:copy.system.message}];
   const errorColumns = [{key:'source',label:copy.system.source,render:item => <strong>{copy.system.names[item.source] || item.source}</strong>},{key:'resource',label:copy.system.resource,render:item => <code title={item.resource}>{shortID(item.resource)}</code>},{key:'message',label:copy.system.message},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)}];
   return <section><div className="adm-metrics"><Metric label={copy.system.healthyServices} value={status.services.filter(item => item.status === 'HEALTHY').length} /><Metric label={copy.system.pendingReconciliation} value={status.reconciliation.pending} /><Metric label={copy.system.stoppedReconciliation} value={status.reconciliation.stopped} tone={Number(status.reconciliation.stopped) ? 'accent' : ''} /></div><article className="adm-panel"><SectionHeader title={copy.system.services} count={status.services.length} copy={copy} /><Table columns={serviceColumns} items={status.services} copy={copy} /><h3>{copy.system.relays}</h3><Table columns={relayColumns} items={status.relays} copy={copy} /><h3>{copy.system.recentErrors}</h3><Table columns={errorColumns} items={status.recent_errors} copy={copy} /></article></section>;
+}
+
+function IdentitySecurity({ copy }) {
+  const [copied, setCopied] = useState('');
+  const commands = {
+    ssh:'ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 18081:127.0.0.1:18080 <ssh-user>@<server>',
+    kubernetes:'kubectl -n <namespace> port-forward service/<release>-account-platform-keycloak 18081:8080 --address 127.0.0.1',
+  };
+  const copyCommand = async key => {
+    try { await navigator.clipboard.writeText(commands[key]); setCopied(key); }
+    catch { setCopied(''); }
+  };
+  return <section className="adm-security-grid">
+    <article className="adm-panel adm-security-intro">
+      <span className="adm-eyebrow">KEYCLOAK</span><h2>{copy.identity.title}</h2><p>{copy.identity.lead}</p>
+      <div className="adm-security-warning"><strong>{copy.identity.publicBlocked}</strong><span>{copy.identity.publicBlockedHelp}</span></div>
+      <a className="adm-security-open" href="http://127.0.0.1:18081/admin/" target="_blank" rel="noreferrer">{copy.identity.openLocal}</a>
+      <small>{copy.identity.openHelp}</small>
+    </article>
+    <article className="adm-panel">
+      <SectionHeader title={copy.identity.accessMethods} copy={copy} />
+      <SecureCommand title={copy.identity.ssh} help={copy.identity.sshHelp} command={commands.ssh} copied={copied === 'ssh'} copy={copy} onCopy={() => copyCommand('ssh')} />
+      <SecureCommand title={copy.identity.kubernetes} help={copy.identity.kubernetesHelp} command={commands.kubernetes} copied={copied === 'kubernetes'} copy={copy} onCopy={() => copyCommand('kubernetes')} />
+      <ol className="adm-security-steps"><li>{copy.identity.stepTunnel}</li><li>{copy.identity.stepOpen}</li><li>{copy.identity.stepClose}</li></ol>
+    </article>
+  </section>;
+}
+
+function SecureCommand({ title, help, command, copied, copy, onCopy }) {
+  return <div className="adm-secure-command"><div><strong>{title}</strong><span>{help}</span></div><code>{command}</code><button type="button" onClick={onCopy}>{copied ? copy.identity.copied : copy.identity.copy}</button></div>;
 }
 
 function Audit({ copy, data, client, setData }) {

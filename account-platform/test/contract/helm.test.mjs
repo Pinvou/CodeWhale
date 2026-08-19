@@ -15,6 +15,7 @@ test('Helm production-new values contain references, not secret material or simu
   assert.equal(values.global.environment, 'production-new');
   assert.match(values.global.runtimeSecret, /production-new/);
   assert.equal(values.tokenGateway.secretProvider, 'remote');
+  assert.equal(values.keycloak.adminHostname, 'http://127.0.0.1:18081');
   assert.equal(values.tokenGateway.providerAllowedHosts.includes('newapi'), true);
   assert.match(values.images.newApi.digest, /^sha256:[a-f0-9]{64}$/);
   assert.ok(values.tokenGateway.providerAllowedHosts.every(host => !/mock|localhost|127\.0\.0\.1/i.test(host)));
@@ -41,6 +42,7 @@ test('Helm values schema rejects unsafe production-new overrides', async () => {
   assert.equal(validate({ ...values, newApi: { ...values.newApi, enabled: false } }), false);
   assert.equal(validate({ ...values, images: { ...values.images, newApi: { ...values.images.newApi, digest: '' } } }), false);
   assert.equal(validate({ ...values, external: { ...values.external, postgresCidrs: ['0.0.0.0/0'] } }), false);
+  assert.equal(validate({ ...values, keycloak: { hostname: values.keycloak.hostname } }), false);
 });
 
 test('Helm chart includes required workloads, migration hooks, and deny-by-default policy', async () => {
@@ -60,5 +62,15 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   assert.match(combined, /range \$source := list "account" "billing" "token"/);
   assert.match(combined, /kind: Service[\s\S]*name: \{\{ \$fullname \}\}-\{\{ \$source \}\}-event-relay/);
   assert.match(combined, /name: monitor, port: 8222/);
+  assert.match(combined, /name: KC_HOSTNAME_ADMIN/);
   assert.doesNotMatch(combined, /kind:\s*Secret/);
+});
+
+test('Helm exposes only Keycloak authentication paths and keeps administration tunneled', async () => {
+  const ingress = await readFile(path.join(chart, 'templates/ingress.yaml'), 'utf8');
+  const keycloakRule = ingress.slice(ingress.indexOf('- host: {{ .Values.ingress.keycloakHost'));
+  assert.match(ingress, /^\s*- path: \/realms\s*$/m);
+  assert.match(ingress, /^\s*- path: \/resources\s*$/m);
+  assert.doesNotMatch(keycloakRule, /path:\s*\/(?=\s*[,}\n])/);
+  assert.doesNotMatch(keycloakRule, /\/admin/);
 });
