@@ -25,13 +25,38 @@ assert.match(
 );
 assert.match(
   FEEDBACK,
-  /const FIXED_FEEDBACK_GW_SN: Option<&str> = Some\("[A-Za-z0-9]+"\);/,
-  "feedback must keep the registered receiver serial used to obtain an upload token",
+  /const REGISTERED_FEEDBACK_RECEIVER_SN: &str = "219801A4BL522CM00002";/,
+  "feedback must keep the exact historical receiver serial registered by the upload service",
+);
+
+const h3cUploader = FEEDBACK.match(
+  /impl FeedbackUploader for H3cFeedbackUploader \{([\s\S]*?)\n\}/,
+);
+assert.ok(h3cUploader, "feedback must retain the H3C uploader implementation");
+assert.match(
+  h3cUploader[1],
+  /let receiver_sn = REGISTERED_FEEDBACK_RECEIVER_SN;/,
+  "feedback upload must select the registered receiver serial",
 );
 assert.match(
+  h3cUploader[1],
+  /request_upload_token\(receiver_sn\)\.await\?/,
+  "feedback token requests must use the registered receiver serial",
+);
+assert.match(
+  h3cUploader[1],
+  /compute_check_code\(&token, receiver_sn\)/,
+  "feedback check codes must use the registered receiver serial",
+);
+assert.match(
+  h3cUploader[1],
+  /upload_dbg_file\(&package\.dbg_path, receiver_sn, &check_code\)\.await/,
+  "feedback file uploads must use the registered receiver serial",
+);
+assert.doesNotMatch(
   FEEDBACK,
-  /pub fn resolve_device_serial\(\) -> Option<String> \{\s*if let Some\(serial\) = FIXED_FEEDBACK_GW_SN \{\s*return Some\(serial\.to_string\(\)\);\s*\}/,
-  "feedback must resolve the registered receiver serial before any client-device fallback",
+  /PINVOU3_FEEDBACK_GW_SN|device_serial_number|resolve_device_serial/,
+  "feedback must not read or fall back to a client-device serial",
 );
 assert.match(
   CARGO_TOML,

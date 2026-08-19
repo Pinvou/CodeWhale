@@ -25,7 +25,7 @@ const TOKEN_URL: &str = "https://magic.h3c.com/rest/ihomers/uploadRequest";
 const UPLOAD_URL: &str = "https://magic.h3c.com/rest/ihomers/uploadSysinfoFile";
 // 接收端只为登记过的采集器 SN 签发 token；这里标识反馈接收通道，不是用户设备。
 // 不得替换为 BIOS/主板序列号，否则普通设备会稳定收到 retCode=24。
-const FIXED_FEEDBACK_GW_SN: Option<&str> = Some("219801A4BL522CM00002");
+const REGISTERED_FEEDBACK_RECEIVER_SN: &str = "219801A4BL522CM00002";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -142,17 +142,12 @@ impl FeedbackUploader for H3cFeedbackUploader {
         package: &'a PreparedFeedbackPackage,
     ) -> Pin<Box<dyn Future<Output = Result<(), FeedbackError>> + Send + 'a>> {
         Box::pin(async move {
-            let serial = resolve_device_serial().ok_or_else(|| {
-                FeedbackError::Validation(
-                    "当前设备缺少反馈上传通道所需标识，请配置 PINVOU3_FEEDBACK_GW_SN 后重试。"
-                        .to_string(),
-                )
-            })?;
+            let receiver_sn = REGISTERED_FEEDBACK_RECEIVER_SN;
             create_tar_gz_archive(&package.package_dir, &package.tar_gz_path)?;
             xor_to_dbg(&package.tar_gz_path, &package.dbg_path)?;
-            let token = request_upload_token(&serial).await?;
-            let check_code = compute_check_code(&token, &serial);
-            upload_dbg_file(&package.dbg_path, &serial, &check_code).await
+            let token = request_upload_token(receiver_sn).await?;
+            let check_code = compute_check_code(&token, receiver_sn);
+            upload_dbg_file(&package.dbg_path, receiver_sn, &check_code).await
         })
     }
 }
@@ -500,7 +495,7 @@ pub fn parse_token_response(body: &str) -> Result<String, FeedbackError> {
             .ok_or_else(|| FeedbackError::Upload("反馈上传 token 为空。".to_string()))
     } else {
         Err(FeedbackError::Upload(format!(
-            "反馈上传 token 获取失败：{}。请确认设备 SN 已在反馈接收通道登记，或通过 PINVOU3_FEEDBACK_GW_SN 配置正确 SN。",
+            "反馈上传 token 获取失败：{}。请稍后重试或联系支持。",
             format_h3c_error(ret_code, parsed.ret_string.as_ref())
         )))
     }
@@ -560,19 +555,6 @@ fn h3c_value_to_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::Null => None,
         _ => Some(value.to_string()),
     }
-}
-
-pub fn resolve_device_serial() -> Option<String> {
-    if let Some(serial) = FIXED_FEEDBACK_GW_SN {
-        return Some(serial.to_string());
-    }
-    if let Ok(serial) = std::env::var("PINVOU3_FEEDBACK_GW_SN") {
-        let serial = serial.trim().to_string();
-        if !serial.is_empty() {
-            return Some(serial);
-        }
-    }
-    crate::platform::os::device_serial_number()
 }
 
 fn cleanup_successful_package(package: &PreparedFeedbackPackage) -> Result<(), FeedbackError> {
@@ -784,8 +766,8 @@ mod tests {
     }
 
     #[test]
-    fn feedback_uses_registered_fixed_gateway_serial() {
-        assert_eq!(resolve_device_serial().as_deref(), FIXED_FEEDBACK_GW_SN);
+    fn feedback_receiver_uses_historical_registered_serial() {
+        assert_eq!(REGISTERED_FEEDBACK_RECEIVER_SN, "219801A4BL522CM00002");
     }
 
     #[test]
