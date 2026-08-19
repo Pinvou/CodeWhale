@@ -23,15 +23,19 @@ import (
 )
 
 type Config struct {
-	PublicURL        *url.URL
-	AuthorizationURL *url.URL
-	TokenURL         *url.URL
-	ClientID         string
-	AccountURL       *url.URL
-	BillingURL       *url.URL
-	TokenGatewayURL  *url.URL
-	SecureCookies    bool
-	SessionMaxAge    time.Duration
+	PublicURL         *url.URL
+	AuthorizationURL  *url.URL
+	TokenURL          *url.URL
+	ClientID          string
+	AccountURL        *url.URL
+	BillingURL        *url.URL
+	TokenGatewayURL   *url.URL
+	KeycloakStatusURL *url.URL
+	NewAPIStatusURL   *url.URL
+	NATSStatusURL     *url.URL
+	RelayURLs         map[string]*url.URL
+	SecureCookies     bool
+	SessionMaxAge     time.Duration
 }
 
 const defaultSessionMaxAge = 30 * 24 * time.Hour
@@ -67,6 +71,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 	router.Any("/api/admin/account/*resource", httpserver.AdaptFunc(s.proxyAdminAccount))
 	router.Any("/api/admin/billing/*resource", httpserver.AdaptFunc(s.proxyAdminBilling))
 	router.Any("/api/admin/token/*resource", httpserver.AdaptFunc(s.proxyAdminToken))
+	router.GET("/api/admin/system/status", httpserver.AdaptFunc(s.adminSystemStatus))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")

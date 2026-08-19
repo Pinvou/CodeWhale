@@ -105,6 +105,8 @@ test('Compose keeps data stores private and simulator development-only', async (
   assert.match(compose.services['billing-service'].environment.DATABASE_URL, /account_platform_billing/);
   assert.equal(compose.services['billing-service'].environment.OIDC_AUDIENCE, compose.services['account-service'].environment.OIDC_AUDIENCE);
   assert.equal(compose.services['token-portal'].environment.BILLING_HTTP_URL, 'http://billing-service:8080');
+  assert.equal(compose.services['token-portal'].environment.SYSTEM_NATS_STATUS_URL, 'http://nats:8222/healthz');
+  assert.equal(compose.services['token-portal'].environment.SYSTEM_ACCOUNT_RELAY_URL, 'http://account-event-relay:9090');
   assert.match(compose.services['account-service'].environment.DATABASE_URL, /account_platform_account/);
   assert.match(compose.services['token-gateway'].environment.DATABASE_URL, /account_platform_token/);
   assert.notEqual(
@@ -116,6 +118,7 @@ test('Compose keeps data stores private and simulator development-only', async (
     assert.equal(relay.environment.EVENT_SOURCE, source);
     assert.equal(relay.environment.NATS_URL, 'nats://nats:4222');
     assert.equal(relay.environment.DATABASE_URL, compose.services[`${source === 'token' ? 'token-gateway' : `${source}-service`}`].environment.DATABASE_URL);
+    assert.equal(relay.ports, undefined, `${source} relay metrics must remain internal`);
   }
   const example = await readFile(path.join(root, 'deploy/compose/.env.example'), 'utf8');
   const names = new Set(example.split(/\r?\n/).filter(Boolean).map((line) => line.split('=', 1)[0]));
@@ -153,7 +156,7 @@ test('operations API is role protected and limits mutations to documented manage
   const admin = await readYaml('contracts/openapi/admin.yaml');
   assert.deepEqual(admin.security, [{ oidc: [] }]);
   for (const [pathName, pathItem] of Object.entries(admin.paths)) {
-    assert.match(pathName, /^\/(account|billing|token)\/admin\/v1\//);
+    assert.match(pathName, /^(\/system\/status|\/(account|billing|token)\/admin\/v1\/)/);
     for (const operation of Object.values(pathItem)) {
       assert.ok(operation.responses['403'], `${pathName} must document role denial`);
     }

@@ -11,6 +11,14 @@ servers:
 security:
   - oidc: []
 paths:
+  /system/status:
+    get:
+      operationId: getAdminSystemStatus
+      summary: Get internal service health, event backlog, reconciliation state, and recent errors
+      responses:
+        "200": { $ref: "#/components/responses/SystemStatus" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/overview:
     get:
       operationId: getAdminAccountOverview
@@ -734,6 +742,20 @@ components:
         channel: { type: string, enum: [UNIONPAY, ALIPAY, WECHAT] }
         business_date: { type: string, format: date }
   responses:
+    SystemStatus:
+      description: Aggregated internal operational status without internal endpoint addresses
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
+            required: [checked_at, services, relays, reconciliation, recent_errors]
+            properties:
+              checked_at: { type: string, format: date-time }
+              services: { type: array, items: { type: object, additionalProperties: true } }
+              relays: { type: array, items: { type: object, additionalProperties: true } }
+              reconciliation: { type: object, additionalProperties: true }
+              recent_errors: { type: array, items: { type: object, additionalProperties: true } }
     Overview:
       description: Service overview counters
       content:

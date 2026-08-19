@@ -111,6 +111,12 @@ spec:
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
+            - { name: SYSTEM_KEYCLOAK_STATUS_URL, value: {{ printf "http://%s-keycloak:8080/realms/pinvou/.well-known/openid-configuration" $fullname | quote }} }
+            - { name: SYSTEM_NEWAPI_STATUS_URL, value: {{ printf "http://%s-newapi:8080/api/status" $fullname | quote }} }
+            - { name: SYSTEM_NATS_STATUS_URL, value: {{ printf "http://%s-nats:8222/healthz" $fullname | quote }} }
+            - { name: SYSTEM_ACCOUNT_RELAY_URL, value: {{ printf "http://%s-account-event-relay:9090" $fullname | quote }} }
+            - { name: SYSTEM_BILLING_RELAY_URL, value: {{ printf "http://%s-billing-event-relay:9090" $fullname | quote }} }
+            - { name: SYSTEM_TOKEN_RELAY_URL, value: {{ printf "http://%s-token-event-relay:9090" $fullname | quote }} }
             {{- end }}
           readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }

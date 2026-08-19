@@ -56,5 +56,9 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   assert.match(combined, /app\.kubernetes\.io\/component: token-gateway/);
   assert.match(combined, /newapi-database-url/);
   assert.match(combined, /newapi-session-secret/);
+  assert.match(combined, /SYSTEM_NATS_STATUS_URL/);
+  assert.match(combined, /range \$source := list "account" "billing" "token"/);
+  assert.match(combined, /kind: Service[\s\S]*name: \{\{ \$fullname \}\}-\{\{ \$source \}\}-event-relay/);
+  assert.match(combined, /name: monitor, port: 8222/);
   assert.doesNotMatch(combined, /kind:\s*Secret/);
 });

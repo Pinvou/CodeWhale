@@ -130,6 +130,73 @@ func TestSessionEndpointDoesNotExposeOIDCTokens(t *testing.T) {
 	}
 }
 
+func TestSystemStatusAggregatesInternalHealthWithoutExposingEndpoints(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/admin/v1/overview":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"reconciliation_pending":2,"reconciliation_stopped":1}`)
+		case "/admin/v1/usage-requests":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"items":[{"usage_request_id":"usage-a","reconciliation_last_error":"evidence lookup failed","updated_at":"2026-08-19T01:02:03Z"}]}`)
+		case "/metrics":
+			_, _ = io.WriteString(w, "pinvou_outbox_pending_events{source=\"account\"} 3\npinvou_outbox_dead_lettered_events{source=\"account\"} 0\npinvou_outbox_oldest_pending_age_seconds{source=\"account\"} 12.5\n")
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newMemoryStore()
+	service, err := NewService(Config{
+		PublicURL:         parsed,
+		AuthorizationURL:  parsed,
+		TokenURL:          parsed,
+		ClientID:          "portal",
+		AccountURL:        parsed,
+		BillingURL:        parsed,
+		TokenGatewayURL:   parsed,
+		KeycloakStatusURL: endpoint(parsed, "/keycloak"),
+		NewAPIStatusURL:   endpoint(parsed, "/newapi"),
+		NATSStatusURL:     endpoint(parsed, "/nats"),
+		RelayURLs:         map[string]*url.URL{"account-event-relay": parsed, "billing-event-relay": parsed, "token-event-relay": parsed},
+	}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := Session{ID: "system-session", AccessToken: "admin-access", RefreshToken: "refresh", AccessExpiresAt: time.Now().Add(time.Hour), RefreshExpiresAt: time.Now().Add(2 * time.Hour), CSRFToken: strings.Repeat("s", 32)}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/admin/system/status", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("system status = %d %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"pending":2`) || !strings.Contains(body, `"pending_events":3`) || !strings.Contains(body, "evidence lookup failed") {
+		t.Fatalf("missing system status data: %s", body)
+	}
+	if strings.Contains(body, upstream.URL) || strings.Contains(body, "admin-access") {
+		t.Fatalf("system status exposed an internal endpoint or access token: %s", body)
+	}
+}
+
+func TestParseRelayMetricsRequiresAllBacklogSignals(t *testing.T) {
+	metrics, err := parseRelayMetrics(strings.NewReader("pinvou_outbox_pending_events 4\npinvou_outbox_dead_lettered_events 1\npinvou_outbox_oldest_pending_age_seconds 8.5\n"))
+	if err != nil || metrics["pinvou_outbox_pending_events"] != 4 || metrics["pinvou_outbox_oldest_pending_age_seconds"] != 8.5 {
+		t.Fatalf("unexpected relay metrics: %#v, %v", metrics, err)
+	}
+	if _, err := parseRelayMetrics(strings.NewReader("pinvou_outbox_pending_events 1\n")); err == nil {
+		t.Fatal("incomplete relay metrics must be rejected")
+	}
+}
+
 func TestCallbackAcceptsNonExpiringOfflineRefreshTokenWithBoundedSession(t *testing.T) {
 	store := newMemoryStore()
 	tokenServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -3,7 +3,7 @@ import { buildUnitTree } from './admin-organization-tree.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import './admin-platform.css';
 
-const NAV_ICONS = { overview:'⌂', organizations:'▦', users:'◎', billing:'◇', tokens:'↗', audit:'≡' };
+const NAV_ICONS = { overview:'⌂', organizations:'▦', users:'◎', billing:'◇', tokens:'↗', system:'◉', audit:'≡' };
 const okStatuses = new Set(['ACTIVE', 'PAID', 'SETTLED', 'HEALTHY', 'APPROVED', 'SUCCESS']);
 const warnStatuses = new Set(['PENDING', 'CREATED', 'SETTLEMENT_PENDING', 'REVIEW', 'MANUAL_REVIEW', 'PENDING_APPROVAL']);
 
@@ -64,6 +64,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       } else if (target === 'tokens') {
         const [accounts, usage] = await Promise.all([client.tokenAccounts(signal), client.usageRequests(signal)]);
         next = { tokenAccounts:accounts.items || [], usage:usage.items || [] };
+      } else if (target === 'system') {
+        next = { systemStatus:await client.systemStatus(signal) };
       } else {
         const audits = await client.audits(signal); next = { audits:audits.items || [] };
       }
@@ -108,13 +110,14 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} />}
       {section === 'billing' && <Billing copy={copy} language={language} data={data} client={client} setData={setData} />}
       {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} />}
+      {section === 'system' && <SystemStatus copy={copy} data={data} />}
       {section === 'audit' && <Audit copy={copy} data={data} />}
     </main>
   </div>;
 }
 
 function sectionHasData(section, data) {
-  return section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : data.audits;
+  return section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : section === 'system' ? data.systemStatus : data.audits;
 }
 
 function StatePage({ copy, kind, onRetry }) {
@@ -447,6 +450,14 @@ function UsageRequestDetail({ copy, language, item, busy, notice, error, onBack,
   ];
   const canRetry = ['SETTLEMENT_PENDING','REVIEW'].includes(item.status);
   return <section className="adm-panel"><button className="adm-back" onClick={onBack}>← {copy.tokens.back}</button><SectionHeader title={`${copy.tokens.usageDetail} · ${shortID(item.usage_request_id)}`} copy={copy}>{canRetry && <button disabled={busy} onClick={onRetry}>{copy.tokens.retry}</button>}</SectionHeader>{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}<dl className="adm-detail-list">{rows.map(([label,value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></section>;
+}
+
+function SystemStatus({ copy, data }) {
+  const status = data.systemStatus || { services:[], relays:[], reconciliation:{}, recent_errors:[] };
+  const serviceColumns = [{key:'key',label:copy.system.service,render:item => <strong>{copy.system.names[item.key] || item.key}</strong>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'latency_ms',label:copy.system.latency,render:item => `${formatNumber(item.latency_ms)} ms`},{key:'message',label:copy.system.message}];
+  const relayColumns = [{key:'key',label:copy.system.service,render:item => <strong>{copy.system.names[item.key] || item.key}</strong>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'pending_events',label:copy.system.pending},{key:'dead_lettered_events',label:copy.system.deadLetters},{key:'oldest_pending_seconds',label:copy.system.oldest,render:item => `${formatNumber(item.oldest_pending_seconds)} s`},{key:'message',label:copy.system.message}];
+  const errorColumns = [{key:'source',label:copy.system.source,render:item => <strong>{copy.system.names[item.source] || item.source}</strong>},{key:'resource',label:copy.system.resource,render:item => <code title={item.resource}>{shortID(item.resource)}</code>},{key:'message',label:copy.system.message},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)}];
+  return <section><div className="adm-metrics"><Metric label={copy.system.healthyServices} value={status.services.filter(item => item.status === 'HEALTHY').length} /><Metric label={copy.system.pendingReconciliation} value={status.reconciliation.pending} /><Metric label={copy.system.stoppedReconciliation} value={status.reconciliation.stopped} tone={Number(status.reconciliation.stopped) ? 'accent' : ''} /></div><article className="adm-panel"><SectionHeader title={copy.system.services} count={status.services.length} copy={copy} /><Table columns={serviceColumns} items={status.services} copy={copy} /><h3>{copy.system.relays}</h3><Table columns={relayColumns} items={status.relays} copy={copy} /><h3>{copy.system.recentErrors}</h3><Table columns={errorColumns} items={status.recent_errors} copy={copy} /></article></section>;
 }
 
 function Audit({ copy, data }) {

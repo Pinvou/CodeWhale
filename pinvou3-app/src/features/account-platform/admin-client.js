@@ -94,6 +94,7 @@ export class AdminPlatformClient {
   usageRequests(signal) { return this.request('token', '/admin/v1/usage-requests?limit=100', signal); }
   usageRequest(usageRequestID, signal) { return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal); }
   retryUsageReconciliation(usageRequestID, reason) { return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }); }
+  systemStatus(signal) { return this.request('system', '/status', signal); }
 
   logout() {
     return fetch(`${this.baseURL}/api/logout`, {

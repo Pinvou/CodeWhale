@@ -16,12 +16,14 @@ import (
 )
 
 type AdminOverview struct {
-	TokenAccounts       int64 `json:"token_accounts"`
-	ActiveAccounts      int64 `json:"active_accounts"`
-	ActiveCredentials   int64 `json:"active_credentials"`
-	HealthyRoutes       int64 `json:"healthy_routes"`
-	UsageRequests       int64 `json:"usage_requests"`
-	ReviewUsageRequests int64 `json:"review_usage_requests"`
+	TokenAccounts         int64 `json:"token_accounts"`
+	ActiveAccounts        int64 `json:"active_accounts"`
+	ActiveCredentials     int64 `json:"active_credentials"`
+	HealthyRoutes         int64 `json:"healthy_routes"`
+	UsageRequests         int64 `json:"usage_requests"`
+	ReviewUsageRequests   int64 `json:"review_usage_requests"`
+	ReconciliationPending int64 `json:"reconciliation_pending"`
+	ReconciliationStopped int64 `json:"reconciliation_stopped"`
 }
 
 type AdminTokenAccount struct {
@@ -329,9 +331,12 @@ SELECT
   (SELECT count(*) FROM provider_credentials WHERE status='ACTIVE' AND validation_status='VALID'),
   (SELECT count(*) FROM routing_policies WHERE health_status='HEALTHY'),
   (SELECT count(*) FROM usage_requests),
-  (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW'))`).Scan(
+  (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW')),
+  (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL),
+  (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NOT NULL)`).Scan(
 		&result.TokenAccounts, &result.ActiveAccounts, &result.ActiveCredentials,
 		&result.HealthyRoutes, &result.UsageRequests, &result.ReviewUsageRequests,
+		&result.ReconciliationPending, &result.ReconciliationStopped,
 	)
 	return result, err
 }
