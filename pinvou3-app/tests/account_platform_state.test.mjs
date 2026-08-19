@@ -244,6 +244,24 @@ test('desktop account popover only loads the user and balance summary', async ()
   assert.doesNotMatch(popover, /copy\.accountStatus/);
 });
 
+test('desktop recharge completes inside the account popover without opening a web page', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  assert.match(popover, /copy\.balance[\s\S]*copy\.recharge/);
+  assert.match(popover, /client\.products\(controller\.signal\)/);
+  assert.doesNotMatch(popover, /client\.recentRechargeOrder/);
+  assert.match(popover, /const openRecharge = \(\) => \{\s*setOrder\(null\)/);
+  assert.match(popover, /client\.createRecharge\(productId, channel, newIdempotencyKey\(\)\)/);
+  assert.match(popover, /import\('qrcode'\)/);
+  assert.match(popover, /client\.rechargeOrder\(order\.order_id\)/);
+  assert.match(popover, /refreshedBalance = await client\.balance\(\)/);
+  assert.match(popover, /copy\.paymentReceived/);
+  assert.doesNotMatch(popover, /target=["']_blank["']|window\.open|open_target|href=\{order\.(?:payment_url|qr_content)\}/);
+  assert.match(backend, /\("token", &Method::GET, \["v1", "recharge", "products"\], None\)/);
+  assert.match(backend, /\("token", &Method::POST, \["v1", "recharge", "orders"\], None\)/);
+  assert.match(backend, /\("token", &Method::GET, \["v1", "recharge", "orders", id\], None\) => safe_id\(id\)/);
+});
+
 test('desktop account persists only refresh credentials and clears them on logout or auth failure', async () => {
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   const credentialStore = await readFile(new URL('../src-tauri/src/platform/credential_store.rs', import.meta.url), 'utf8');
