@@ -445,7 +445,7 @@ func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, ac
 	}
 	now := r.now()
 	credential := Credential{ID: credentialID, TokenAccountID: accountID, Provider: provider, BaseURL: baseURL, Fingerprint: Fingerprint(secret), Version: nextVersion, Status: "ACTIVE", AllowedModels: models, ValidatedAt: &now}
-	_, err = tx.Exec(ctx, `INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10,$11,$10)`, credential.ID, accountID, provider, baseURL, ciphertext, r.secrets.KeyID(), credential.Fingerprint, nextVersion, models, now, actorID)
+	_, err = tx.Exec(ctx, `INSERT INTO provider_credentials(id,token_account_id,provider,base_url,ciphertext,key_id,fingerprint,version,status,allowed_models,validated_at,created_by,created_at,validation_status,validation_checked_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'PENDING',$9,$10,$11,$10,'VALID',$11)`, credential.ID, accountID, provider, baseURL, ciphertext, r.secrets.KeyID(), credential.Fingerprint, nextVersion, models, now, actorID)
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE provider_credentials SET status='RETIRED',retired_at=$2 WHERE token_account_id=$1 AND status='ACTIVE'`, accountID, now)
 	}
@@ -472,7 +472,7 @@ SELECT ta.id,ta.name,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner
        rp.default_scope,rp.priority,rp.health_status,pc.id
 FROM token_accounts ta
 JOIN token_share_policies sp ON sp.token_account_id=ta.id
-JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE'
+JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID'
 JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=$1
 WHERE ta.status='ACTIVE'
 ORDER BY rp.priority DESC,ta.id`, model)

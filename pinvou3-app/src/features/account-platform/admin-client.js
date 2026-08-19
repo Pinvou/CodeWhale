@@ -86,7 +86,14 @@ export class AdminPlatformClient {
   reconciliationCases(runID, signal) { return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal); }
   tokenOverview(signal) { return this.request('token', '/admin/v1/overview', signal); }
   tokenAccounts(signal) { return this.request('token', '/admin/v1/token-accounts?limit=100', signal); }
+  tokenAccount(tokenAccountID, signal) { return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal); }
+  setTokenAccountStatus(tokenAccountID, status, reason) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/status`, 'PATCH', { status, reason }); }
+  upsertTokenRoute(tokenAccountID, route) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route); }
+  deleteTokenRoute(tokenAccountID, model) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'DELETE', { model }); }
+  validateTokenCredential(tokenAccountID, credentialID) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credentials/${encodeURIComponent(credentialID)}/validate`, 'POST', {}); }
   usageRequests(signal) { return this.request('token', '/admin/v1/usage-requests?limit=100', signal); }
+  usageRequest(usageRequestID, signal) { return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal); }
+  retryUsageReconciliation(usageRequestID, reason) { return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }); }
 
   logout() {
     return fetch(`${this.baseURL}/api/logout`, {

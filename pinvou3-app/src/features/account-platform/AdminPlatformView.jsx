@@ -107,7 +107,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} />}
       {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} />}
       {section === 'billing' && <Billing copy={copy} language={language} data={data} client={client} setData={setData} />}
-      {section === 'tokens' && <Tokens copy={copy} language={language} data={data} />}
+      {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} />}
       {section === 'audit' && <Audit copy={copy} data={data} />}
     </main>
   </div>;
@@ -382,14 +382,71 @@ function BillingDetail({ copy, title, items, columns, onBack }) {
   return <section className="adm-panel"><button className="adm-back" onClick={onBack}>← {copy.billing.back}</button><SectionHeader title={title} count={items.length} copy={copy} /><Table columns={columns} items={items} copy={copy} /></section>;
 }
 
-function Tokens({ copy, language, data }) {
-  const [tab, setTab] = useState('tokenAccounts'); const items = data[tab] || [];
+function Tokens({ copy, language, data, client, setData }) {
+  const [tab, setTab] = useState('tokenAccounts');
+  const [account, setAccount] = useState(null);
+  const [usageDetail, setUsageDetail] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [route, setRoute] = useState({ model:'', priority:100, default_scope:'NONE', health_status:'HEALTHY' });
+  const items = data[tab] || [];
+  const perform = async action => {
+    setBusy(true); setNotice(''); setError('');
+    try { const message = await action(); setNotice(message || copy.tokens.completed); }
+    catch { setError(copy.tokens.actionFailed); }
+    finally { setBusy(false); }
+  };
+  const openAccount = item => perform(async () => { setAccount(await client.tokenAccount(item.token_account_id)); setUsageDetail(null); });
+  const openUsage = item => perform(async () => { setUsageDetail(await client.usageRequest(item.usage_request_id)); setAccount(null); });
+  const refreshAccount = async () => setAccount(await client.tokenAccount(account.token_account_id));
+  const updateStatus = () => {
+    const status = account.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE';
+    const reason = window.prompt(copy.tokens.statusReason);
+    if (!reason?.trim()) return;
+    void perform(async () => {
+      await client.setTokenAccountStatus(account.token_account_id, status, reason.trim());
+      await refreshAccount();
+      setData(current => ({ ...current, tokenAccounts:(current.tokenAccounts || []).map(item => item.token_account_id === account.token_account_id ? { ...item, status } : item) }));
+    });
+  };
+  const saveRoute = event => {
+    event.preventDefault();
+    if (!route.model.trim()) return;
+    void perform(async () => { await client.upsertTokenRoute(account.token_account_id, { ...route, model:route.model.trim(), priority:Number(route.priority) }); await refreshAccount(); setRoute(current => ({ ...current, model:'' })); });
+  };
+  const deleteRoute = model => {
+    if (!window.confirm(copy.tokens.confirmDeleteRoute(model))) return;
+    void perform(async () => { await client.deleteTokenRoute(account.token_account_id, model); await refreshAccount(); });
+  };
+  const validateCredential = credentialID => perform(async () => { const result = await client.validateTokenCredential(account.token_account_id, credentialID); await refreshAccount(); return result.valid ? copy.tokens.credentialValid : copy.tokens.credentialInvalid; });
+  const retryReconciliation = () => {
+    const reason = window.prompt(copy.tokens.retryReason);
+    if (!reason?.trim()) return;
+    void perform(async () => { setUsageDetail(await client.retryUsageReconciliation(usageDetail.usage_request_id, reason.trim())); });
+  };
+  if (account) return <TokenAccountDetail copy={copy} account={account} route={route} setRoute={setRoute} busy={busy} notice={notice} error={error} onBack={() => setAccount(null)} onStatus={updateStatus} onSaveRoute={saveRoute} onDeleteRoute={deleteRoute} onValidate={validateCredential} />;
+  if (usageDetail) return <UsageRequestDetail copy={copy} language={language} item={usageDetail} busy={busy} notice={notice} error={error} onBack={() => setUsageDetail(null)} onRetry={retryReconciliation} />;
   const columns = tab === 'tokenAccounts' ? [
-    {key:'name',label:copy.tokens.name,render:item => <strong>{item.name}</strong>},{key:'owner_id',label:copy.tokens.owner,render:item => <code title={item.owner_id}>{item.owner_type} · {shortID(item.owner_id)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'share_scope',label:copy.tokens.sharing},{key:'active_credential_count',label:copy.tokens.credentials},{key:'route_count',label:copy.tokens.routes},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)},
+    {key:'name',label:copy.tokens.name,render:item => <button className="adm-name-link" onClick={() => openAccount(item)}>{item.name}</button>},{key:'owner_id',label:copy.tokens.owner,render:item => <code title={item.owner_id}>{item.owner_type} · {shortID(item.owner_id)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'share_scope',label:copy.tokens.sharing},{key:'active_credential_count',label:copy.tokens.credentials},{key:'route_count',label:copy.tokens.routes},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)},
   ] : [
-    {key:'id',label:'Usage ID',render:item => <code title={item.usage_request_id || item.id}>{shortID(item.usage_request_id || item.id)}</code>},{key:'model',label:copy.tokens.model},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'maximum_microcredits',label:copy.tokens.maximum,render:item => formatPoints(item.maximum_microcredits, language)},{key:'actual_microcredits',label:copy.tokens.actual,render:item => formatPoints(item.actual_microcredits, language)},{key:'error_class',label:copy.tokens.error},{key:'started_at',label:copy.tokens.started,render:item => formatDate(item.started_at)},
+    {key:'id',label:'Usage ID',render:item => <button className="adm-name-link" title={item.usage_request_id} onClick={() => openUsage(item)}>{shortID(item.usage_request_id)}</button>},{key:'model',label:copy.tokens.model},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'maximum_microcredits',label:copy.tokens.maximum,render:item => formatPoints(item.maximum_microcredits, language)},{key:'actual_microcredits',label:copy.tokens.actual,render:item => formatPoints(item.actual_microcredits, language)},{key:'newapi_request_id',label:copy.tokens.newAPIRequest,render:item => <code title={item.newapi_request_id}>{shortID(item.newapi_request_id)}</code>},{key:'error_class',label:copy.tokens.error},{key:'started_at',label:copy.tokens.started,render:item => formatDate(item.started_at)},
   ];
-  return <section className="adm-panel"><SectionHeader title={copy.tokens.title} count={items.length} copy={copy} /><Tabs active={tab} onChange={setTab} items={[{key:'tokenAccounts',label:copy.tokens.accounts},{key:'usage',label:copy.tokens.usage}]} /><Table columns={columns} items={items} copy={copy} /></section>;
+  return <section className="adm-panel"><SectionHeader title={copy.tokens.title} count={items.length} copy={copy} /><Tabs active={tab} onChange={setTab} items={[{key:'tokenAccounts',label:copy.tokens.accounts},{key:'usage',label:copy.tokens.usage}]} />{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}<Table columns={columns} items={items} copy={copy} /></section>;
+}
+
+function TokenAccountDetail({ copy, account, route, setRoute, busy, notice, error, onBack, onStatus, onSaveRoute, onDeleteRoute, onValidate }) {
+  const credentialColumns = [{key:'provider',label:copy.tokens.provider},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'validation_status',label:copy.tokens.validation,render:item => <Status value={item.validation_status} />},{key:'fingerprint',label:copy.tokens.fingerprint,render:item => <code>{item.fingerprint}</code>},{key:'allowed_models',label:copy.tokens.models,render:item => item.allowed_models.join(' · ')},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)},{key:'actions',label:copy.accounts.actions,render:item => <button disabled={busy || item.status !== 'ACTIVE'} onClick={() => onValidate(item.credential_id)}>{copy.tokens.validate}</button>}];
+  const routeColumns = [{key:'model',label:copy.tokens.model,render:item => <strong>{item.model}</strong>},{key:'priority',label:copy.tokens.priority},{key:'default_scope',label:copy.tokens.defaultScope},{key:'health_status',label:copy.tokens.health,render:item => <Status value={item.health_status} />},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)},{key:'actions',label:copy.accounts.actions,render:item => <button className="danger" disabled={busy} onClick={() => onDeleteRoute(item.model)}>{copy.accounts.delete}</button>}];
+  return <section className="adm-panel"><button className="adm-back" onClick={onBack}>← {copy.tokens.back}</button><SectionHeader title={`${copy.tokens.accountDetail} · ${account.name}`} copy={copy}><button disabled={busy || account.status === 'FROZEN'} onClick={onStatus}>{account.status === 'ACTIVE' ? copy.accounts.disable : copy.accounts.enable}</button></SectionHeader>{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}<h3>{copy.tokens.credentialMetadata}</h3><p className="adm-help">{copy.tokens.credentialSafety}</p><Table columns={credentialColumns} items={account.credentials} copy={copy} /><h3>{copy.tokens.routes}</h3><form className="adm-ops-form" onSubmit={onSaveRoute}><input placeholder={copy.tokens.model} value={route.model} onChange={event => setRoute(current => ({ ...current, model:event.target.value }))} /><input type="number" min="0" max="10000" value={route.priority} onChange={event => setRoute(current => ({ ...current, priority:event.target.value }))} /><select value={route.default_scope} onChange={event => setRoute(current => ({ ...current, default_scope:event.target.value }))}><option>NONE</option><option>UNIT</option><option>ORG</option></select><select value={route.health_status} onChange={event => setRoute(current => ({ ...current, health_status:event.target.value }))}><option>HEALTHY</option><option>DEGRADED</option><option>UNHEALTHY</option></select><button disabled={busy || !route.model.trim()}>{copy.tokens.saveRoute}</button></form><Table columns={routeColumns} items={account.routes} copy={copy} /></section>;
+}
+
+function UsageRequestDetail({ copy, language, item, busy, notice, error, onBack, onRetry }) {
+  const rows = [
+    [copy.tokens.model,item.model],[copy.accounts.status,<Status value={item.status} />],[copy.tokens.maximum,formatPoints(item.maximum_microcredits, language)],[copy.tokens.actual,formatPoints(item.actual_microcredits, language)],[copy.tokens.newAPIRequest,<code>{item.newapi_request_id || '—'}</code>],[copy.tokens.providerRequest,<code>{item.provider_request_id || '—'}</code>],[copy.tokens.attemptStatus,item.attempt_status || '—'],[copy.tokens.tokens,`${formatNumber(item.input_tokens)} / ${formatNumber(item.output_tokens)} / ${formatNumber(item.cached_input_tokens)}`],[copy.tokens.reconciliationAttempts,formatNumber(item.reconciliation_attempts)],[copy.tokens.lastError,item.reconciliation_last_error || item.error_class || '—'],[copy.tokens.started,formatDate(item.started_at)],[copy.billing.updated,formatDate(item.updated_at)],
+  ];
+  const canRetry = ['SETTLEMENT_PENDING','REVIEW'].includes(item.status);
+  return <section className="adm-panel"><button className="adm-back" onClick={onBack}>← {copy.tokens.back}</button><SectionHeader title={`${copy.tokens.usageDetail} · ${shortID(item.usage_request_id)}`} copy={copy}>{canRetry && <button disabled={busy} onClick={onRetry}>{copy.tokens.retry}</button>}</SectionHeader>{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}<dl className="adm-detail-list">{rows.map(([label,value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></section>;
 }
 
 function Audit({ copy, data }) {

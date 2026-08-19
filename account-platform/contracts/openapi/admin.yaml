@@ -434,6 +434,71 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}:
+    get:
+      operationId: getAdminTokenAccount
+      summary: Get a Token account with routes and credential metadata only
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}/status:
+    patch:
+      operationId: setAdminTokenAccountStatus
+      summary: Enable or disable a Token account
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenAccountStatusChange" }
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}/routes:
+    put:
+      operationId: upsertAdminTokenRoute
+      summary: Create or replace a model routing policy
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRouteChange" }
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      operationId: deleteAdminTokenRoute
+      summary: Delete a model routing policy
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [model]
+              properties: { model: { type: string } }
+      responses:
+        "204": { description: Route deleted }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/token-accounts/{token_account_id}/credentials/{credential_id}/validate:
+    post:
+      operationId: validateAdminProviderCredential
+      summary: Validate a provider credential without returning its secret, ciphertext, or endpoint
+      parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/CredentialID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /token/admin/v1/usage-requests:
     get:
       operationId: listAdminUsageRequests
@@ -442,6 +507,30 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/usage-requests/{usage_request_id}:
+    get:
+      operationId: getAdminUsageRequest
+      summary: Get settlement, attempt, and NewAPI correlation metadata without conversation content
+      parameters: [{ $ref: "#/components/parameters/UsageRequestID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation:
+    post:
+      operationId: retryAdminUsageReconciliation
+      summary: Reschedule a failed automatic usage reconciliation
+      parameters: [{ $ref: "#/components/parameters/UsageRequestID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Reason" }
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     oidc:
@@ -494,6 +583,21 @@ components:
       schema: { type: string, format: uuid }
     RunID:
       name: run_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    TokenAccountID:
+      name: token_account_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CredentialID:
+      name: credential_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    UsageRequestID:
+      name: usage_request_id
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -584,6 +688,28 @@ components:
       required: [status]
       properties:
         status: { type: string, enum: [ACTIVE, DISABLED] }
+    TokenAccountStatusChange:
+      type: object
+      additionalProperties: false
+      required: [status, reason]
+      properties:
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    TokenRouteChange:
+      type: object
+      additionalProperties: false
+      required: [model, priority, default_scope, health_status]
+      properties:
+        model: { type: string, minLength: 1, maxLength: 160 }
+        priority: { type: integer, minimum: 0, maximum: 10000 }
+        default_scope: { type: string, enum: [NONE, UNIT, ORG] }
+        health_status: { type: string, enum: [HEALTHY, DEGRADED, UNHEALTHY] }
+    Reason:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
     PricingVersionCreate:
       type: object
       additionalProperties: false

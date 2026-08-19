@@ -158,9 +158,6 @@ test('operations API is role protected and limits mutations to documented manage
       assert.ok(operation.responses['403'], `${pathName} must document role denial`);
     }
   }
-  for (const [pathName, pathItem] of Object.entries(admin.paths).filter(([name]) => name.startsWith('/token/'))) {
-    assert.deepEqual(Object.keys(pathItem), ['get'], `${pathName} must remain read-only`);
-  }
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/users/{user_id}/status']), ['patch']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/users/{user_id}']), ['delete']);
   assert.deepEqual(Object.keys(admin.paths['/account/admin/v1/organizations']), ['get', 'post']);
@@ -177,6 +174,21 @@ test('operations API is role protected and limits mutations to documented manage
   assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/payment-orders/{order_id}/refunds']), ['post']);
   assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/usage-holds/{hold_id}/release']), ['post']);
   assert.deepEqual(Object.keys(admin.paths['/billing/admin/v1/reconciliation-runs']), ['get', 'post']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}']), ['get']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/status']), ['patch']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/routes']), ['put', 'delete']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/token-accounts/{token_account_id}/credentials/{credential_id}/validate']), ['post']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/usage-requests/{usage_request_id}']), ['get']);
+  assert.deepEqual(Object.keys(admin.paths['/token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation']), ['post']);
+});
+
+test('Token operations expose credential metadata without provider secrets', async () => {
+  const source = await readFile(path.join(root, 'internal/token/admin.go'), 'utf8');
+  const metadata = source.match(/type AdminCredentialMetadata struct \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(metadata, /Fingerprint/);
+  assert.match(metadata, /ValidationStatus/);
+  assert.match(metadata, /UpdatedAt/);
+  assert.doesNotMatch(metadata, /BaseURL|Secret|Ciphertext|KeyID/);
 });
 
 test('every migration up script has a matching down script', async () => {

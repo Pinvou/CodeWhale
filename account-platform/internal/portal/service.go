@@ -508,7 +508,42 @@ func billingAdminPathAllowed(method, resource string) bool {
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
-	return adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests")
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests") {
+		return true
+	}
+	if strings.Contains(resource, "..") {
+		return false
+	}
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" {
+		return false
+	}
+	if _, err := uuid.Parse(parts[3]); err != nil {
+		return false
+	}
+	if parts[2] == "usage-requests" {
+		return (len(parts) == 4 && method == http.MethodGet) ||
+			(len(parts) == 5 && parts[4] == "retry-reconciliation" && method == http.MethodPost)
+	}
+	if parts[2] != "token-accounts" {
+		return false
+	}
+	if len(parts) == 4 {
+		return method == http.MethodGet
+	}
+	if len(parts) == 5 {
+		switch parts[4] {
+		case "status":
+			return method == http.MethodPatch
+		case "routes":
+			return method == http.MethodPut || method == http.MethodDelete
+		}
+	}
+	if len(parts) == 7 && parts[4] == "credentials" && parts[6] == "validate" && method == http.MethodPost {
+		_, err := uuid.Parse(parts[5])
+		return err == nil
+	}
+	return false
 }
 
 func adminReadPathAllowed(method, resource string, allowed ...string) bool {

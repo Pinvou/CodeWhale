@@ -85,7 +85,14 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
 	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
 	admin.GET("/token-accounts", httpserver.AdaptFunc(s.adminTokenAccounts))
+	admin.GET("/token-accounts/:token_account_id", httpserver.AdaptFunc(s.adminTokenAccount))
+	admin.PATCH("/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
+	admin.PUT("/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.adminUpsertTokenRoute))
+	admin.DELETE("/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.adminDeleteTokenRoute))
+	admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", httpserver.AdaptFunc(s.adminValidateCredential))
 	admin.GET("/usage-requests", httpserver.AdaptFunc(s.adminUsageRequests))
+	admin.GET("/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.adminUsageRequest))
+	admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", httpserver.AdaptFunc(s.adminRetryReconciliation))
 	return router
 }
 
