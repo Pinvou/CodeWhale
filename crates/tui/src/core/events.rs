@@ -405,22 +405,23 @@ pub enum Event {
     // === Steer (mid-turn injection) Events ===
     /// A steer message was committed into the session transcript (injected at
     /// a step boundary or after the stream ended). Hosts correlate the event
-    /// back to the original steer input via `content_hash` — never by order —
-    /// so a queued "chip" can be promoted to a visible bubble exactly when the
-    /// engine actually appended the message.
+    /// back to the original steer input via the opaque `steer_id` handed out
+    /// by `EngineHandle::steer` — never by order or content — so a queued
+    /// message placeholder in the host UI can be promoted to a visible bubble
+    /// exactly when the engine actually appended the message.
     SteerCommitted {
-        /// FNV-1a hash (hex) of the trimmed steer content.
-        content_hash: String,
+        /// Opaque id of the committed steer (`SteerMessage::id`).
+        steer_id: String,
     },
 
     /// A steer message was dropped without ever being injected: the turn it
     /// was destined for was cancelled or ended before a step boundary
-    /// consumed it. Hosts must surface this so a queued chip cannot silently
-    /// stall forever — the steer contract is "committed (with an event) or
-    /// dropped (with an event), never silent".
+    /// consumed it. Hosts must surface this so a queued message cannot
+    /// silently stall forever — the steer contract is "committed (with an
+    /// event) or dropped (with an event), never silent".
     SteerDropped {
-        /// FNV-1a hash (hex) of the trimmed steer content.
-        content_hash: String,
+        /// Opaque id of the dropped steer (`SteerMessage::id`).
+        steer_id: String,
     },
 
     /// Rendered `/preview-request` manifest (#1004).

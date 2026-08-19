@@ -6392,11 +6392,11 @@ fn engine_initial_prompt_includes_configured_goal() {
         ..Default::default()
     };
     let (engine, _handle) = Engine::new(config, &Config::default());
-    let prompt = match engine.session.system_prompt {
-        Some(SystemPrompt::Text(text)) => text,
+    let prompt = match &engine.session.system_prompt {
+        Some(SystemPrompt::Text(text)) => text.clone(),
         Some(SystemPrompt::Blocks(blocks)) => blocks
-            .into_iter()
-            .map(|block| block.text)
+            .iter()
+            .map(|block| block.text.clone())
             .collect::<Vec<_>>()
             .join("\n"),
         None => panic!("expected system prompt"),
@@ -6422,11 +6422,11 @@ fn engine_initial_prompt_omits_paused_goal() {
         ..Default::default()
     };
     let (engine, _handle) = Engine::new(config, &Config::default());
-    let prompt = match engine.session.system_prompt {
-        Some(SystemPrompt::Text(text)) => text,
+    let prompt = match &engine.session.system_prompt {
+        Some(SystemPrompt::Text(text)) => text.clone(),
         Some(SystemPrompt::Blocks(blocks)) => blocks
-            .into_iter()
-            .map(|block| block.text)
+            .iter()
+            .map(|block| block.text.clone())
             .collect::<Vec<_>>()
             .join("\n"),
         None => panic!("expected system prompt"),
@@ -6453,11 +6453,11 @@ fn refresh_system_prompt_uses_runtime_goal_state() {
     }
 
     engine.refresh_system_prompt();
-    let prompt = match engine.session.system_prompt {
-        Some(SystemPrompt::Text(text)) => text,
+    let prompt = match &engine.session.system_prompt {
+        Some(SystemPrompt::Text(text)) => text.clone(),
         Some(SystemPrompt::Blocks(blocks)) => blocks
-            .into_iter()
-            .map(|block| block.text)
+            .iter()
+            .map(|block| block.text.clone())
             .collect::<Vec<_>>()
             .join("\n"),
         None => panic!("expected system prompt"),
@@ -16184,9 +16184,11 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         tx_approval: mpsc::channel(1).0,
         tx_user_input: mpsc::channel(1).0,
         tx_steer: mpsc::channel(1).0,
+        next_steer_id: Arc::new(AtomicU64::new(0)),
         shared_paused: Arc::new(StdMutex::new(false)),
         client_preflight_required: true,
         steer_keep_inbox: Arc::new(AtomicBool::new(true)),
+        withdrawn_steers: Arc::new(StdMutex::new(HashSet::new())),
         live_runtime_authority: Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
             LiveRuntimeAuthority::from_fields(
                 AppMode::Agent,
@@ -17035,6 +17037,741 @@ async fn user_prompt_reaches_the_model_exactly_once_per_request() {
             "request {index} must contain the turn-1 prompt text exactly once"
         );
     }
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+// === Steer (mid-turn injection) contract tests ===
+
+/// Receive engine events until the next `TurnComplete`, collecting the steer
+/// delivery events seen on the way. Returns (committed ids, dropped ids,
+/// terminal status).
+async fn steer_events_until_turn_complete(
+    handle: &EngineHandle,
+) -> (Vec<String>, Vec<String>, TurnOutcomeStatus) {
+    let mut committed = Vec::new();
+    let mut dropped = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("engine event timeout")
+            .expect("engine event stream closed");
+        match event {
+            Event::SteerCommitted { steer_id } => committed.push(steer_id),
+            Event::SteerDropped { steer_id } => dropped.push(steer_id),
+            Event::TurnComplete { status, .. } => return (committed, dropped, status),
+            _ => {}
+        }
+    }
+}
+
+/// Model client whose first stream call blocks until the turn is cancelled
+/// and whose later calls answer with a plain text turn — the deterministic
+/// scaffold for interrupt/park steer tests.
+struct PendFirstStreamModelClient {
+    calls: std::sync::atomic::AtomicUsize,
+    first_entered: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for PendFirstStreamModelClient {
+    fn provider_name(&self) -> &str {
+        "deterministic-steer"
+    }
+
+    fn model(&self) -> &str {
+        "deterministic-steer-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("steer tests use the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        if call == 1 {
+            self.first_entered.notify_one();
+            std::future::pending().await
+        }
+        let events = crate::llm_client::mock::canned::simple_text_turn("after the interrupt")
+            .into_iter()
+            .map(Ok);
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn engine_handle_steer_returns_unique_incrementing_ids() {
+    let harness = mock_engine_handle();
+    let handle = harness.handle;
+    let mut rx_steer = harness.rx_steer;
+
+    let first = handle.steer("first message").await.expect("first steer");
+    let second = handle.steer("second message").await.expect("second steer");
+
+    assert_eq!(first, "steer-1");
+    assert_eq!(second, "steer-2");
+    let first_message = rx_steer.recv().await.expect("first steer message");
+    assert_eq!(first_message.id, first);
+    assert_eq!(first_message.content, "first message");
+    let second_message = rx_steer.recv().await.expect("second steer message");
+    assert_eq!(second_message.id, second);
+    assert_eq!(second_message.content, "second message");
+}
+
+#[tokio::test]
+async fn keep_inbox_true_cancel_parks_steer_and_next_turn_commits_it() {
+    let workspace = tempdir().expect("tempdir");
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(PendFirstStreamModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            first_entered: std::sync::Arc::clone(&entered),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "turn that will be interrupted",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send first turn");
+    tokio::time::timeout(model_turn_event_timeout(), entered.notified())
+        .await
+        .expect("first model request entered");
+
+    // keepInbox defaults to true (interrupt): the steer must survive.
+    let steer_id = handle
+        .steer("hold this across the interrupt")
+        .await
+        .expect("steer enqueued");
+    handle.cancel();
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Interrupted);
+    assert!(
+        committed.is_empty(),
+        "interrupted turn must not commit steers: {committed:?}"
+    );
+    assert!(
+        dropped.is_empty(),
+        "keepInbox=true must park steers, not drop them: {dropped:?}"
+    );
+
+    // The next turn's step boundary collects the parked steer and injects it.
+    handle
+        .send(external_user_message_op(
+            "follow-up turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send second turn");
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert_eq!(committed, vec![steer_id]);
+    assert!(dropped.is_empty(), "no drops on the follow-up turn");
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn keep_inbox_false_cancel_drops_parked_and_channel_steers() {
+    let workspace = tempdir().expect("tempdir");
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(BlockingModelClient {
+            entered: std::sync::Arc::clone(&entered),
+            request_dropped: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // A steer parked by an earlier interrupted turn lives in the field…
+    engine.pending_steers.push(SteerMessage {
+        id: "steer-parked".to_string(),
+        content: "parked from an earlier interrupt".to_string(),
+    });
+    let task = tokio::spawn(engine.run());
+    handle.set_steer_keep_inbox(false);
+    handle
+        .send(external_user_message_op(
+            "turn that will be stopped",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+    tokio::time::timeout(model_turn_event_timeout(), entered.notified())
+        .await
+        .expect("model request entered");
+
+    // …and a steer still sitting in the channel, never collected by the
+    // blocked stream. Both must be dropped with events on stop.
+    let channel_steer_id = handle
+        .steer("still queued in the channel")
+        .await
+        .expect("steer enqueued");
+    handle.cancel();
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Interrupted);
+    assert!(committed.is_empty(), "stopped turn commits nothing");
+    assert_eq!(
+        dropped,
+        vec!["steer-parked".to_string(), channel_steer_id],
+        "both the parked steer and the channel leftover must be dropped with events"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn steer_enqueued_before_turn_is_committed_at_step_boundary() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "boundary answer",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // Enqueue before the turn starts: the first step boundary of the turn
+    // loop must inject it and confirm with a committed event.
+    let steer_id = handle
+        .steer("queued before the turn")
+        .await
+        .expect("steer enqueued");
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "ordinary turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert_eq!(committed, vec![steer_id]);
+    assert!(dropped.is_empty());
+    assert_eq!(mock.call_count(), 1);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn pending_steer_is_committed_at_no_tool_turn_end() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("first answer"),
+        canned::simple_text_turn("answer after the steer"),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // A steer collected while the stream was running (or parked by an
+    // interrupted turn) sits in `pending_steers`; a no-tool turn end injects
+    // it and resumes the turn.
+    engine.pending_steers.push(SteerMessage {
+        id: "steer-parked".to_string(),
+        content: "collected during the stream".to_string(),
+    });
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "ordinary turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert_eq!(committed, vec!["steer-parked".to_string()]);
+    assert!(dropped.is_empty());
+    assert_eq!(
+        mock.call_count(),
+        2,
+        "the injected steer must resume the turn with a second model request"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn pending_steer_is_committed_after_tool_execution() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(
+        workspace.path().join("README.md"),
+        "steer-post-tool-proof\n",
+    )
+    .expect("write fixture");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::tool_call_turn(
+            "call-read",
+            "File",
+            r#"{"action":"read","path":"README.md"}"#,
+        ),
+        canned::simple_text_turn("done"),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    engine.pending_steers.push(SteerMessage {
+        id: "steer-parked".to_string(),
+        content: "collected during the stream".to_string(),
+    });
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "Read README.md.",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert_eq!(committed, vec!["steer-parked".to_string()]);
+    assert!(dropped.is_empty());
+    assert_eq!(mock.call_count(), 2);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn sync_session_drops_all_queued_steers_with_events() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn(
+        "new session answer",
+    )]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    // One steer parked from the old session's interrupted turn…
+    engine.pending_steers.push(SteerMessage {
+        id: "steer-parked".to_string(),
+        content: "parked in the old session".to_string(),
+    });
+    let task = tokio::spawn(engine.run());
+    // …and one still queued in the channel. Neither may leak into the new
+    // session's transcript; both must be dropped with events.
+    let channel_steer_id = handle
+        .steer("queued for the old session")
+        .await
+        .expect("steer enqueued");
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("session-b".to_string()),
+            messages: Vec::new(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "mock-model".to_string(),
+            workspace: workspace.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync session");
+
+    let mut dropped = Vec::new();
+    {
+        let mut rx = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+                .await
+                .expect("engine event timeout")
+                .expect("engine event stream closed");
+            match event {
+                Event::SteerDropped { steer_id } => dropped.push(steer_id),
+                Event::SessionUpdated { .. } => break,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        dropped,
+        vec!["steer-parked".to_string(), channel_steer_id],
+        "session switch must drop every queued steer with an event"
+    );
+
+    // A turn in the new session must not see the old session's steers.
+    handle
+        .send(external_user_message_op(
+            "first turn of the new session",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send new-session turn");
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert!(
+        committed.is_empty(),
+        "old-session steers must never be injected into the new session"
+    );
+    assert!(dropped.is_empty());
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn engine_drop_reports_unconsumed_steers_best_effort() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("unused")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    engine.pending_steers.push(SteerMessage {
+        id: "steer-parked".to_string(),
+        content: "parked".to_string(),
+    });
+    let channel_steer_id = handle
+        .steer("left in the channel")
+        .await
+        .expect("steer enqueued");
+
+    // Host evicts the engine without Op::Shutdown: Drop must still report
+    // every unconsumed steer (best-effort try_send).
+    drop(engine);
+
+    let dropped: Vec<String> = {
+        let mut rx = handle.rx_event.write().await;
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::SteerDropped { steer_id } => Some(steer_id),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        dropped,
+        vec!["steer-parked".to_string(), channel_steer_id],
+        "engine drop must emit SteerDropped for parked and channel steers"
+    );
+}
+
+// === Steer withdrawal tests ===
+
+#[tokio::test]
+async fn withdrawn_channel_steer_is_dropped_not_injected_on_next_turn() {
+    let workspace = tempdir().expect("tempdir");
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(PendFirstStreamModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            first_entered: std::sync::Arc::clone(&entered),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "turn that will be interrupted",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send first turn");
+    tokio::time::timeout(model_turn_event_timeout(), entered.notified())
+        .await
+        .expect("first model request entered");
+
+    // The steer sits in the channel (the blocked stream never collects it)
+    // and is withdrawn before the interrupt parks it.
+    let steer_id = handle
+        .steer("never deliver this")
+        .await
+        .expect("steer enqueued");
+    handle.withdraw_steer(&steer_id);
+    handle.cancel();
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Interrupted);
+    assert!(committed.is_empty());
+    assert!(
+        dropped.is_empty(),
+        "keepInbox=true parks the withdrawn steer for the next turn"
+    );
+
+    // The next turn's step boundary collects the parked steer, sees the
+    // withdraw mark, and reports exactly one drop without injecting.
+    handle
+        .send(external_user_message_op(
+            "follow-up turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send second turn");
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert!(
+        committed.is_empty(),
+        "withdrawn steer must never be committed"
+    );
+    assert_eq!(dropped, vec![steer_id]);
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn withdrawn_pending_steer_is_dropped_not_injected() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![canned::simple_text_turn("answer")]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    engine.pending_steers.push(SteerMessage {
+        id: "steer-parked".to_string(),
+        content: "withdraw me before injection".to_string(),
+    });
+    let task = tokio::spawn(engine.run());
+    handle.withdraw_steer("steer-parked");
+    handle
+        .send(external_user_message_op(
+            "ordinary turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert!(committed.is_empty());
+    assert_eq!(dropped, vec!["steer-parked".to_string()]);
+    assert_eq!(
+        mock.call_count(),
+        1,
+        "a fully withdrawn pending batch must not resume the turn"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn withdrawing_committed_steer_is_a_noop() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("first answer"),
+        canned::simple_text_turn("second answer"),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let steer_id = handle
+        .steer("committed before withdraw lands")
+        .await
+        .expect("steer enqueued");
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "first turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send first turn");
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert_eq!(committed, vec![steer_id.clone()]);
+    assert!(dropped.is_empty());
+
+    // Withdrawing an already-committed id must produce no event and no
+    // effect on later turns.
+    handle.withdraw_steer(&steer_id);
+    handle
+        .send(external_user_message_op(
+            "second turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send second turn");
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert!(committed.is_empty());
+    assert!(
+        dropped.is_empty(),
+        "a committed steer must not be reported dropped: {dropped:?}"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn withdraw_after_interrupt_park_prevents_reinjection() {
+    let workspace = tempdir().expect("tempdir");
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(PendFirstStreamModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            first_entered: std::sync::Arc::clone(&entered),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "turn that will be interrupted",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send first turn");
+    tokio::time::timeout(model_turn_event_timeout(), entered.notified())
+        .await
+        .expect("first model request entered");
+
+    // Interrupt parks the steer (keepInbox=true); the user withdraws it
+    // afterwards, before any later turn can inject it.
+    let steer_id = handle
+        .steer("parked, then withdrawn")
+        .await
+        .expect("steer enqueued");
+    handle.cancel();
+    let (_committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Interrupted);
+    assert!(dropped.is_empty(), "park keeps the steer without events");
+    handle.withdraw_steer(&steer_id);
+
+    handle
+        .send(external_user_message_op(
+            "follow-up turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send second turn");
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert!(committed.is_empty());
+    assert_eq!(
+        dropped,
+        vec![steer_id],
+        "the withdrawn parked steer must be dropped exactly once"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn withdraw_leaves_other_steers_unaffected() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    let mock = std::sync::Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("first answer"),
+        canned::simple_text_turn("answer after the surviving steer"),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (mut engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    engine.pending_steers.push(SteerMessage {
+        id: "steer-withdrawn".to_string(),
+        content: "withdrawn".to_string(),
+    });
+    engine.pending_steers.push(SteerMessage {
+        id: "steer-kept".to_string(),
+        content: "still wanted".to_string(),
+    });
+    let task = tokio::spawn(engine.run());
+    handle.withdraw_steer("steer-withdrawn");
+    handle
+        .send(external_user_message_op(
+            "ordinary turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send turn");
+
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert_eq!(dropped, vec!["steer-withdrawn".to_string()]);
+    assert_eq!(committed, vec!["steer-kept".to_string()]);
+    assert_eq!(
+        mock.call_count(),
+        2,
+        "the surviving steer must still resume the turn"
+    );
 
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     task.await.expect("engine task");

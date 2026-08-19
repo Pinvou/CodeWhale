@@ -723,6 +723,12 @@ pub struct BackgroundShell {
     stdout_cursor: usize,
     stderr_cursor: usize,
     completion_reported: bool,
+    /// True while this shell is the OS process behind a still-waiting
+    /// foreground tool call. Set by the foreground execution path right after
+    /// spawn and cleared when the user deliberately moves the wait to the
+    /// background — from then on the job is a background task with cross-turn
+    /// semantics and turn cancellation must not kill it.
+    spawned_as_foreground: bool,
     stdin: Option<StdinWriter>,
     child: Option<ShellChild>,
     #[cfg(windows)]
@@ -2071,6 +2077,7 @@ impl ShellManager {
             stdout_cursor: 0,
             stderr_cursor: 0,
             completion_reported: false,
+            spawned_as_foreground: false,
             stdin,
             child: Some(child),
             #[cfg(windows)]
@@ -2261,6 +2268,50 @@ impl ShellManager {
             .processes
             .iter()
             .filter(|(_, shell)| shell.status == ShellStatus::Running)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            results.push(self.kill(&id)?);
+        }
+        Ok(results)
+    }
+
+    /// Mark a tracked shell as the process behind a waiting foreground tool
+    /// call. Only shells carrying this mark are eligible for
+    /// [`Self::kill_running_turn_foreground`].
+    fn mark_spawned_as_foreground(&mut self, task_id: &str) {
+        if let Some(shell) = self.processes.get_mut(task_id) {
+            shell.spawned_as_foreground = true;
+        }
+    }
+
+    /// Clear the foreground mark: the user deliberately moved the foreground
+    /// wait to the background, so the job now has cross-turn background-task
+    /// semantics and turn cancellation must leave it alone.
+    fn clear_spawned_as_foreground(&mut self, task_id: &str) {
+        if let Some(shell) = self.processes.get_mut(task_id) {
+            shell.spawned_as_foreground = false;
+        }
+    }
+
+    /// Kill only the running shells spawned by still-waiting foreground tool
+    /// calls of the current turn. Unlike [`Self::kill_running`], this leaves
+    /// two categories untouched: background tasks the user or model
+    /// deliberately detached (cross-turn `task_shell_start` semantics,
+    /// including foreground waits moved to the background mid-run), and
+    /// shells owned by a sub-agent (`owner_agent` set), whose lifecycle is
+    /// decoupled from the parent turn's cancellation.
+    pub fn kill_running_turn_foreground(&mut self) -> Result<Vec<ShellResult>> {
+        let ids = self
+            .processes
+            .iter()
+            .filter(|(_, shell)| {
+                shell.status == ShellStatus::Running
+                    && shell.spawned_as_foreground
+                    && shell.owner_agent.is_none()
+            })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
 
@@ -3121,12 +3172,17 @@ async fn execute_foreground_via_background(
     let task_id = spawned
         .task_id
         .ok_or_else(|| anyhow!("foreground shell did not return a process id"))?;
-    if let Some(permit) = heavy_permit {
+    {
         let mut manager = context
             .shell_manager
             .lock()
             .map_err(|_| anyhow!("shell manager lock poisoned"))?;
-        manager.attach_heavy_permit(&task_id, permit)?;
+        // Mark before the wait starts so turn cancellation can kill exactly
+        // this turn's foreground shells without touching background tasks.
+        manager.mark_spawned_as_foreground(&task_id);
+        if let Some(permit) = heavy_permit {
+            manager.attach_heavy_permit(&task_id, permit)?;
+        }
     }
 
     if stdin_data.is_some() {
@@ -3145,6 +3201,9 @@ async fn execute_foreground_via_background(
                 .lock()
                 .map_err(|_| anyhow!("shell manager lock poisoned"))?;
             if manager.take_foreground_background_request() {
+                // The user deliberately detached this wait: the job is now a
+                // background task and must survive turn cancellation.
+                manager.clear_spawned_as_foreground(&task_id);
                 return manager.get_output(&task_id, false, 0);
             }
             let snapshot = manager.get_output(&task_id, false, 0)?;
@@ -3169,11 +3228,14 @@ async fn execute_foreground_via_background(
             return Ok(result);
         }
 
-        // P1-D：轮询改 select。原 100ms 轮询检查 cancel 与 turn loop 的
-        // biased select 竞速——turn loop 先 drop 工具 future 时，轮询不再
-        // 运行，shell 进程幸存。select 直接监听 token（与 turn loop 的
-        // select 同时唤醒，CancellationToken 是广播语义），kill 不再输给
-        // future drop；无 token（Option None）时退化为原有 100ms 轮询节奏。
+        // Poll via select instead of a plain 100ms sleep. With polling, the
+        // cancel check raced the turn loop's biased select: when the turn
+        // loop dropped the tool future first, the poll stopped running and
+        // the shell process survived. The select listens on the token
+        // directly (woken together with the turn loop's select —
+        // CancellationToken is broadcast), so the per-task kill no longer
+        // loses to the future drop. Without a token (None) it degrades to the
+        // original 100ms poll cadence.
         tokio::select! {
             biased;
             _ = async {

@@ -161,6 +161,24 @@ pub struct SessionSnapshot {
     pub mode: String,
 }
 
+/// A mid-turn steer message travelling on the engine's steer channel.
+///
+/// The id is an opaque, engine-assigned correlation token (unique within the
+/// engine session). Hosts use it to match `Event::SteerCommitted` /
+/// `Event::SteerDropped` back to the queued input they originated — never a
+/// content hash, so correlation cannot break on non-ASCII content or depend
+/// on both sides re-implementing the same hash over the same encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteerMessage {
+    /// Opaque correlation id assigned by `EngineHandle::steer` at enqueue
+    /// time (e.g. `steer-7`).
+    pub id: String,
+    /// Steer text as submitted by the host. The engine trims it at the
+    /// injection points; an all-whitespace payload is dropped (with a
+    /// `SteerDropped` event) instead of injected.
+    pub content: String,
+}
+
 /// Provider request runtime state surfaced by `/provider`.
 /// Returned by `Op::GetProviderRuntimeStatus` via a oneshot channel.
 #[derive(Debug, Clone, PartialEq, Eq)]

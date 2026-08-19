@@ -18,6 +18,7 @@ use super::{
     CancelReason, EngineHandle, LiveRuntimeAuthority, Op, RuntimePermissionAuthority,
     UserInputResponse,
 };
+use crate::core::ops::SteerMessage;
 
 impl EngineHandle {
     /// True when the caller must preflight a concrete provider client before
@@ -124,9 +125,20 @@ impl EngineHandle {
 
     /// Reserve capacity for a runtime steer before it mutates durable state.
     /// The owned permit lets the caller persist and dispatch synchronously,
-    /// without a cancellation point between those two operations.
-    pub(crate) async fn reserve_steer(&self) -> Result<mpsc::OwnedPermit<String>> {
-        Ok(self.tx_steer.clone().reserve_owned().await?)
+    /// without a cancellation point between those two operations. Returns the
+    /// permit together with the steer id the caller must put into the
+    /// `SteerMessage` it sends, so the reserved path and `steer` share one id
+    /// authority.
+    pub(crate) async fn reserve_steer(&self) -> Result<(mpsc::OwnedPermit<SteerMessage>, String)> {
+        let permit = self.tx_steer.clone().reserve_owned().await?;
+        Ok((permit, self.next_steer_id()))
+    }
+
+    /// Allocate the next opaque steer id. Unique within this engine session;
+    /// shared across handle clones via the counter in `EngineHandle`.
+    fn next_steer_id(&self) -> String {
+        let seq = self.next_steer_id.fetch_add(1, Ordering::Relaxed) + 1;
+        format!("steer-{seq}")
     }
 
     /// Cancel the current request (user-initiated path — keeps the
@@ -168,8 +180,9 @@ impl EngineHandle {
     ///   re-injected by the next turn's step boundary — the user's queued
     ///   message survives the interrupt.
     /// - `false` (stop): unconsumed steers are dropped and each emits
-    ///   `Event::SteerDropped`, so hosts can remove the queued chip and tell
-    ///   the user the message was cancelled — nothing hangs invisible.
+    ///   `Event::SteerDropped`, so hosts can remove the queued placeholder
+    ///   and tell the user the message was cancelled — nothing hangs
+    ///   invisible.
     pub fn set_steer_keep_inbox(&self, keep: bool) {
         self.steer_keep_inbox.store(keep, Ordering::Release);
     }
@@ -246,10 +259,39 @@ impl EngineHandle {
         Ok(())
     }
 
+    /// Withdraw a queued steer before the engine injects it.
+    ///
+    /// Fire-and-forget: the id is recorded in a set shared with the engine,
+    /// which checks it at every steer collection and injection point. A
+    /// withdrawn steer is never appended to the transcript; when the engine
+    /// next encounters it, the steer is skipped and reported once via
+    /// `Event::SteerDropped`. Withdrawing an id that was already committed —
+    /// or never existed — is a no-op with no event. The mark survives across
+    /// turns (a parked steer may only surface in a later turn) and is cleared
+    /// on session switch and shutdown.
+    pub fn withdraw_steer(&self, steer_id: &str) {
+        let mut set = self
+            .withdrawn_steers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set.insert(steer_id.to_string());
+    }
+
     /// Steer an in-flight turn with additional user input.
-    pub async fn steer(&self, content: impl Into<String>) -> Result<()> {
-        self.tx_steer.send(content.into()).await?;
-        Ok(())
+    ///
+    /// Returns the opaque steer id assigned at enqueue time. The engine
+    /// echoes it back in `Event::SteerCommitted` / `Event::SteerDropped`, so
+    /// hosts can correlate those events with the queued input without
+    /// re-hashing content.
+    pub async fn steer(&self, content: impl Into<String>) -> Result<String> {
+        let id = self.next_steer_id();
+        self.tx_steer
+            .send(SteerMessage {
+                id: id.clone(),
+                content: content.into(),
+            })
+            .await?;
+        Ok(id)
     }
 
     /// Request a snapshot of the current session state.

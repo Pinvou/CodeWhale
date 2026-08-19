@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -79,8 +79,8 @@ use super::authority::{
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    ExactToolDispatchPolicy, Op, ProviderRuntimeStatus, SessionSnapshot, TurnToolSecurityPolicy,
-    USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
+    ExactToolDispatchPolicy, Op, ProviderRuntimeStatus, SessionSnapshot, SteerMessage,
+    TurnToolSecurityPolicy, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
 };
 use super::session::Session;
 use super::tool_parser;
@@ -595,7 +595,11 @@ pub struct EngineHandle {
     /// Send user input responses to the engine
     tx_user_input: mpsc::Sender<UserInputDecision>,
     /// Send steer input for an in-flight turn.
-    tx_steer: mpsc::Sender<String>,
+    tx_steer: mpsc::Sender<SteerMessage>,
+    /// Monotonic counter backing the opaque steer ids handed out by
+    /// `EngineHandle::steer`. Shared across handle clones so ids stay unique
+    /// for the lifetime of the engine session.
+    next_steer_id: Arc<AtomicU64>,
     /// Shared pause flag set by the TUI and read by the turn loop.
     shared_paused: Arc<StdMutex<bool>>,
     /// Whether the host must construct the route's concrete provider client
@@ -606,10 +610,15 @@ pub struct EngineHandle {
     /// change publishes here before its mailbox op is queued, so gates never
     /// consult a stale per-turn copy.
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
-    /// keepInbox 语义开关（P0-A）：cancel 时未注入的 steer 是否保留给下一轮。
-    /// 打断（interrupt）= true → park 保留（下个 turn 注入）；停止（stop）=
-    /// false → 清空并逐条发 `SteerDropped`。宿主在 cancel 前设置。
+    /// keepInbox disposition for unconsumed steers when a turn is cancelled.
+    /// Interrupt (true) parks them for the next turn; stop (false) drops them
+    /// with a `SteerDropped` event each. Set by the host before cancelling.
     pub steer_keep_inbox: Arc<AtomicBool>,
+    /// Ids of steers withdrawn by the host before the engine injected them.
+    /// Shared with the engine, which checks the set at every collection and
+    /// injection point: a withdrawn steer is never appended to the
+    /// transcript; it is skipped with a `SteerDropped` event instead.
+    withdrawn_steers: Arc<StdMutex<HashSet<String>>>,
 }
 
 // `impl EngineHandle { ... }` moved to `engine/handle.rs` so the
@@ -675,20 +684,26 @@ pub struct Engine {
     goal_continuation_schedule_seq: u64,
     rx_approval: mpsc::Receiver<ApprovalDecision>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
-    rx_steer: mpsc::Receiver<String>,
+    rx_steer: mpsc::Receiver<SteerMessage>,
     /// Steers collected during streams but not yet injected, plus steers
     /// carried across turns. Function-scoped locals died with every step and
     /// every cancelled turn; this field lives for the engine, so an
     /// interrupted turn leaves its unconsumed steers here and the next turn's
-    /// step boundary injects them (keepInbox semantics — see `interrupt` in
-    /// deepseek-harness `continuation.ts`: `cancel(cause, { keepInbox: true })`).
+    /// step boundary injects them (keepInbox semantics).
     /// The steer contract is "injected (SteerCommitted) or carried forward,
     /// never silently dropped at a turn boundary".
-    pending_steers: Vec<String>,
-    /// keepInbox 语义开关（与 EngineHandle 共享）：cancel 时未注入 steer 的
-    /// 处置——true（打断）park 保留给下一轮；false（停止）清空并逐条发
-    /// SteerDropped。宿主在 cancel 前通过 handle 设置。
+    pending_steers: Vec<SteerMessage>,
+    /// keepInbox disposition shared with `EngineHandle`: on cancel, true
+    /// (interrupt) parks unconsumed steers for the next turn; false (stop)
+    /// drops them, emitting one `SteerDropped` per steer. The host sets it
+    /// through the handle before cancelling.
     steer_keep_inbox: Arc<AtomicBool>,
+    /// Ids of steers withdrawn by the host (`EngineHandle::withdraw_steer`)
+    /// before the engine injected them. Checked at every steer collection
+    /// and injection point; the mark survives across turns (a parked steer
+    /// may only be processed by a later turn) and is cleared on session
+    /// switch and shutdown.
+    withdrawn_steers: Arc<StdMutex<HashSet<String>>>,
     tx_event: mpsc::Sender<Event>,
     /// Wakeup channel for the parent turn loop when a direct child sub-agent
     /// terminates (issue #756). Cloned into `SubAgentRuntime` so the runtime
@@ -1223,9 +1238,11 @@ impl Engine {
         let (tx_subagent_completion, rx_subagent_completion) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
-        // keepInbox 默认 true（对齐 deepseek-harness interrupt 语义）：
-        // 未注入 steer 默认保留；宿主取消（停止）时显式置 false。
+        // keepInbox defaults to true (interrupt semantics): unconsumed steers
+        // are kept by default; a host cancelling with stop semantics sets it
+        // to false explicitly.
         let steer_keep_inbox = Arc::new(AtomicBool::new(true));
+        let withdrawn_steers = Arc::new(StdMutex::new(HashSet::new()));
         let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
         let shared_paused = Arc::new(StdMutex::new(false));
         let live_runtime_authority = Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
@@ -1415,6 +1432,7 @@ impl Engine {
             rx_steer,
             pending_steers: Vec::new(),
             steer_keep_inbox: steer_keep_inbox.clone(),
+            withdrawn_steers: withdrawn_steers.clone(),
             tx_event,
             tx_subagent_completion,
             rx_subagent_completion,
@@ -1443,10 +1461,12 @@ impl Engine {
             tx_approval,
             tx_user_input,
             tx_steer,
+            next_steer_id: Arc::new(AtomicU64::new(0)),
             shared_paused,
             client_preflight_required: true,
             live_runtime_authority,
             steer_keep_inbox: steer_keep_inbox.clone(),
+            withdrawn_steers,
         };
 
         (engine, handle)
@@ -2654,6 +2674,11 @@ impl Engine {
                         workspace,
                         mode,
                     } => {
+                        // The steers queued so far belong to the previous
+                        // session. Drop them (with events) before swapping
+                        // state, or they would be injected into the new
+                        // session's transcript — cross-session pollution.
+                        self.drop_all_steers().await;
                         let plugin_workspace_changed =
                             self.plugin_registry.workspace() != workspace.as_path();
                         if let Some(session_id) = session_id {
@@ -2865,6 +2890,9 @@ impl Engine {
                         tracing::info!(target: "advisor", "advisor watcher {state}");
                     }
                     Op::Shutdown => {
+                        // Teardown destroys every unconsumed steer for good;
+                        // report each one instead of dropping silently.
+                        self.drop_all_steers().await;
                         break;
                     }
                 },
@@ -2891,6 +2919,66 @@ impl Engine {
 
     fn host_managed_turns(&self) -> bool {
         self.config.runtime_services.active_thread_id.is_some()
+    }
+
+    /// Consume the withdraw mark for a steer id. Returns true at most once
+    /// per id — the mark is removed — so the matching `SteerDropped` event
+    /// is emitted exactly once.
+    fn take_steer_withdraw_mark(&self, steer_id: &str) -> bool {
+        self.withdrawn_steers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(steer_id)
+    }
+
+    /// Check a steer against the withdraw set before it is collected or
+    /// injected. A withdrawn steer is reported `SteerDropped` (exactly once)
+    /// and filtered out — it must never reach the transcript. Anything else
+    /// passes through unchanged. This is the single withdraw checkpoint every
+    /// steer touch point routes through.
+    async fn filter_withdrawn_steer(&self, steer: SteerMessage) -> Option<SteerMessage> {
+        if !self.take_steer_withdraw_mark(&steer.id) {
+            return Some(steer);
+        }
+        let _ = self
+            .tx_event
+            .send(Event::SteerDropped { steer_id: steer.id })
+            .await;
+        None
+    }
+
+    /// Drop every unconsumed steer — parked in `pending_steers` and still
+    /// queued in the steer channel — emitting one `SteerDropped` per steer.
+    ///
+    /// Used when the steer's target context is gone for good (session switch,
+    /// engine shutdown): carrying them over would inject the previous
+    /// session's queued messages into the new session's transcript, and
+    /// dropping them silently would strand the host's queued placeholders.
+    /// Unlike `settle_steers_on_interrupt`, this ignores the keepInbox
+    /// disposition — there is no "next turn of this session" to park for.
+    /// Pending withdraw marks are consumed and the set cleared: they belong
+    /// to the same retired context.
+    async fn drop_all_steers(&mut self) {
+        let dropped = std::mem::take(&mut self.pending_steers);
+        for steer in dropped {
+            self.take_steer_withdraw_mark(&steer.id);
+            let _ = self
+                .tx_event
+                .send(Event::SteerDropped { steer_id: steer.id })
+                .await;
+        }
+        while let Ok(steer) = self.rx_steer.try_recv() {
+            self.take_steer_withdraw_mark(&steer.id);
+            let _ = self
+                .tx_event
+                .send(Event::SteerDropped { steer_id: steer.id })
+                .await;
+        }
+        // Withdraw marks belong to the retired context as well.
+        self.withdrawn_steers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
     }
 
     async fn emit_session_updated(&self) {
@@ -4177,11 +4265,14 @@ impl Engine {
         // after the UI changed modes (#3568).
         self.apply_runtime_mode_policy(&input_policy);
 
-        // P0-A（keepInbox）：**不** drain 上一轮残留的 steer。残留消息留在
-        // channel 中，由本 turn 第一个 step 边界（turn_loop step 循环开头的
-        // try_recv 注入点）消费并注入——steer 从「当前 turn 限定、轮末静默
-        // 丢弃」提升为「会话级排队、要么注入（SteerCommitted）要么跨轮保留」。
-        // 打断路径收集进 pending_steers 的已由 turn loop park 回 parked_steers。
+        // keepInbox: do NOT drain steer messages left over from a previous
+        // turn. Leftover messages stay in the channel and are consumed and
+        // injected at this turn's first step boundary (the try_recv injection
+        // point at the top of the turn-loop step cycle) — steers are promoted
+        // from "turn-scoped, silently discarded at turn end" to
+        // "session-queued: either injected (SteerCommitted) or carried across
+        // turns". Steers collected into `pending_steers` by an interrupted
+        // turn were already parked back by the turn loop.
 
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
@@ -6004,13 +6095,41 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
     handle
 }
 
+/// Best-effort steer settlement when a host drops the engine outright
+/// (evict/reclaim without sending `Op::Shutdown`). Drop is synchronous, so
+/// this cannot await: each unconsumed steer gets a `SteerDropped` via
+/// `try_send`, and a full or closed event channel simply swallows the
+/// notification — the engine is gone either way, but a live host still gets
+/// the events it needs to retire its queued placeholders.
+impl Drop for Engine {
+    fn drop(&mut self) {
+        let dropped = std::mem::take(&mut self.pending_steers);
+        for steer in dropped {
+            self.take_steer_withdraw_mark(&steer.id);
+            let _ = self
+                .tx_event
+                .try_send(Event::SteerDropped { steer_id: steer.id });
+        }
+        while let Ok(steer) = self.rx_steer.try_recv() {
+            self.take_steer_withdraw_mark(&steer.id);
+            let _ = self
+                .tx_event
+                .try_send(Event::SteerDropped { steer_id: steer.id });
+        }
+        self.withdrawn_steers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+}
+
 #[cfg(test)]
 pub(crate) struct MockEngineHandle {
     pub handle: EngineHandle,
     pub rx_op: mpsc::Receiver<Op>,
     rx_approval: mpsc::Receiver<ApprovalDecision>,
     rx_user_input: mpsc::Receiver<UserInputDecision>,
-    pub rx_steer: mpsc::Receiver<String>,
+    pub rx_steer: mpsc::Receiver<SteerMessage>,
     pub tx_event: mpsc::Sender<Event>,
     pub cancel_token: CancellationToken,
 }
@@ -6095,10 +6214,12 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         tx_approval,
         tx_user_input,
         tx_steer,
+        next_steer_id: Arc::new(AtomicU64::new(0)),
         shared_paused,
         client_preflight_required: false,
         live_runtime_authority,
         steer_keep_inbox: Arc::new(AtomicBool::new(true)),
+        withdrawn_steers: Arc::new(StdMutex::new(HashSet::new())),
     };
 
     MockEngineHandle {

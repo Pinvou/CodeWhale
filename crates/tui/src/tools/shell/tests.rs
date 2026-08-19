@@ -2452,6 +2452,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         stdout_cursor: 0,
         stderr_cursor: 0,
         completion_reported: false,
+        spawned_as_foreground: false,
         stdin: None,
         child: None,
         windows_job: None,
@@ -3048,4 +3049,80 @@ fn timeout_ms_description_covers_every_action_default() {
             "missing {expected}: {description}"
         );
     }
+}
+
+#[test]
+fn kill_running_turn_foreground_scopes_to_this_turns_unowned_foreground_shells() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+
+    // This turn's foreground tool-call shell: eligible for the scoped kill.
+    let foreground = manager
+        .execute(&sleep_command(60), None, 5000, true)
+        .expect("spawn foreground shell")
+        .task_id
+        .expect("foreground task id");
+    manager.mark_spawned_as_foreground(&foreground);
+
+    // A background task deliberately left running (cross-turn semantics):
+    // never touched by turn cancellation.
+    let background = manager
+        .execute(&sleep_command(60), None, 5000, true)
+        .expect("spawn background shell")
+        .task_id
+        .expect("background task id");
+
+    // A sub-agent-owned shell — even foreground-marked, its lifecycle is
+    // decoupled from the parent turn's cancellation.
+    let owned = manager
+        .execute_with_options_env_for_owner(
+            &sleep_command(60),
+            None,
+            5000,
+            true,
+            None,
+            false,
+            None,
+            HashMap::new(),
+            Some(ShellJobOwner {
+                agent_id: "agent_child".to_string(),
+                agent_name: "child".to_string(),
+            }),
+        )
+        .expect("spawn owned shell")
+        .task_id
+        .expect("owned task id");
+    manager.mark_spawned_as_foreground(&owned);
+
+    let killed = manager
+        .kill_running_turn_foreground()
+        .expect("scoped foreground kill");
+    let killed_ids: Vec<String> = killed.iter().filter_map(|r| r.task_id.clone()).collect();
+    assert_eq!(
+        killed_ids,
+        vec![foreground.clone()],
+        "only this turn's unowned foreground shell may be killed"
+    );
+
+    let jobs = manager.list_jobs();
+    let status_of = |id: &str| {
+        jobs.iter()
+            .find(|job| job.id == id)
+            .map(|job| job.status.clone())
+    };
+    assert_eq!(status_of(&foreground), Some(ShellStatus::Killed));
+    assert_eq!(
+        status_of(&background),
+        Some(ShellStatus::Running),
+        "background tasks survive turn cancellation"
+    );
+    assert_eq!(
+        status_of(&owned),
+        Some(ShellStatus::Running),
+        "sub-agent-owned shells survive parent turn cancellation"
+    );
+
+    // Idempotent on already-finished tasks, and cleanup for the survivors.
+    let _ = manager.kill_running_turn_foreground();
+    let _ = manager.kill_running();
 }

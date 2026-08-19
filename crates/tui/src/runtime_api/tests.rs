@@ -3134,11 +3134,11 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
         let _ = tx_event
             .send(EngineEvent::MessageStarted { index: 0 })
             .await;
-        if let Some(steer_text) = rx_steer.recv().await {
+        if let Some(steer) = rx_steer.recv().await {
             let _ = tx_event
                 .send(EngineEvent::MessageDelta {
                     index: 0,
-                    content: format!("steer:{steer_text}"),
+                    content: format!("steer:{}", steer.content),
                 })
                 .await;
         }

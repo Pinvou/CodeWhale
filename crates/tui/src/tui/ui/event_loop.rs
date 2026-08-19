@@ -1842,8 +1842,9 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::Status { message } => {
                         app.status_message = Some(message);
                     }
-                    // steer 投递确认（P0-A）：TUI 沿用现有 status 反馈即可，
-                    // 结构化事件主要供 pinvou3 等宿主消费。
+                    // Steer delivery confirmations: the TUI keeps its
+                    // existing status feedback; the structured events are
+                    // primarily for embedding hosts.
                     EngineEvent::SteerCommitted { .. } | EngineEvent::SteerDropped { .. } => {}
                     EngineEvent::RequestManifestReady { rendered } => {
                         // Typed manifest text, or the explicitly requested
