@@ -67,7 +67,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       } else if (target === 'system') {
         next = { systemStatus:await client.systemStatus(signal) };
       } else {
-        const audits = await client.audits(signal); next = { audits:audits.items || [] };
+        const audits = await client.audits({}, signal); next = { audits:audits.items || [] };
       }
       setData(current => ({ ...current, ...next })); setUpdatedAt(new Date()); setAuth('ready');
     } catch (reason) {
@@ -111,7 +111,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       {section === 'billing' && <Billing copy={copy} language={language} data={data} client={client} setData={setData} />}
       {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} />}
       {section === 'system' && <SystemStatus copy={copy} data={data} />}
-      {section === 'audit' && <Audit copy={copy} data={data} />}
+      {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} />}
     </main>
   </div>;
 }
@@ -460,9 +460,46 @@ function SystemStatus({ copy, data }) {
   return <section><div className="adm-metrics"><Metric label={copy.system.healthyServices} value={status.services.filter(item => item.status === 'HEALTHY').length} /><Metric label={copy.system.pendingReconciliation} value={status.reconciliation.pending} /><Metric label={copy.system.stoppedReconciliation} value={status.reconciliation.stopped} tone={Number(status.reconciliation.stopped) ? 'accent' : ''} /></div><article className="adm-panel"><SectionHeader title={copy.system.services} count={status.services.length} copy={copy} /><Table columns={serviceColumns} items={status.services} copy={copy} /><h3>{copy.system.relays}</h3><Table columns={relayColumns} items={status.relays} copy={copy} /><h3>{copy.system.recentErrors}</h3><Table columns={errorColumns} items={status.recent_errors} copy={copy} /></article></section>;
 }
 
-function Audit({ copy, data }) {
-  const items = data.audits || []; const columns = [
-    {key:'action',label:copy.audit.action,render:item => <strong>{item.action}</strong>},{key:'resource_type',label:copy.audit.resource,render:item => <span>{item.resource_type}<br /><code title={item.resource_id}>{shortID(item.resource_id)}</code></span>},{key:'actor_user_id',label:copy.audit.actor,render:item => <code title={item.actor_user_id}>{shortID(item.actor_user_id)}</code>},{key:'result',label:copy.audit.result,render:item => <Status value={item.result} />},{key:'request_id',label:copy.audit.request,render:item => <code title={item.request_id}>{shortID(item.request_id)}</code>},{key:'occurred_at',label:copy.audit.occurred,render:item => formatDate(item.occurred_at)},
+function Audit({ copy, data, client, setData }) {
+  const [filters, setFilters] = useState({ actor:'', action:'', resource:'', result:'', from:'', to:'' });
+  const [detail, setDetail] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const items = data.audits || [];
+  const queryFilters = () => ({ ...filters, from:filters.from ? new Date(filters.from).toISOString() : '', to:filters.to ? new Date(filters.to).toISOString() : '' });
+  const search = async event => {
+    event?.preventDefault(); setBusy(true); setError('');
+    try { const result = await client.audits(queryFilters()); setData(current => ({ ...current, audits:result.items || [] })); }
+    catch { setError(copy.audit.actionFailed); }
+    finally { setBusy(false); }
+  };
+  const showDetail = async item => {
+    setBusy(true); setError('');
+    try { setDetail(await client.audit(item.audit_id)); }
+    catch { setError(copy.audit.actionFailed); }
+    finally { setBusy(false); }
+  };
+  const exportItems = () => exportAuditCSV(items, copy.audit.exportFile);
+  if (detail) return <AuditDetail copy={copy} item={detail} onBack={() => setDetail(null)} />;
+  const columns = [
+    {key:'action',label:copy.audit.action,render:item => <button className="adm-name-link" onClick={() => showDetail(item)}>{item.action}</button>},{key:'resource_type',label:copy.audit.resource,render:item => <span>{item.resource_type}<br /><code title={item.resource_id}>{shortID(item.resource_id)}</code></span>},{key:'actor_user_id',label:copy.audit.actor,render:item => <span>{item.actor_display_name || item.actor_email || '—'}<br /><code title={item.actor_user_id}>{shortID(item.actor_user_id)}</code></span>},{key:'result',label:copy.audit.result,render:item => <Status value={item.result} />},{key:'request_id',label:copy.audit.request,render:item => <code title={item.request_id}>{shortID(item.request_id)}</code>},{key:'occurred_at',label:copy.audit.occurred,render:item => formatDate(item.occurred_at)},
   ];
-  return <section className="adm-panel"><SectionHeader title={copy.audit.title} count={items.length} copy={copy} /><Table columns={columns} items={items} copy={copy} /></section>;
+  return <section className="adm-panel"><SectionHeader title={copy.audit.title} count={items.length} copy={copy}><button disabled={!items.length} onClick={exportItems}>{copy.audit.export}</button></SectionHeader><form className="adm-ops-form" onSubmit={search}><input placeholder={copy.audit.actorFilter} value={filters.actor} onChange={event => setFilters(current => ({ ...current, actor:event.target.value }))} /><input placeholder={copy.audit.actionFilter} value={filters.action} onChange={event => setFilters(current => ({ ...current, action:event.target.value }))} /><input placeholder={copy.audit.resourceFilter} value={filters.resource} onChange={event => setFilters(current => ({ ...current, resource:event.target.value }))} /><select value={filters.result} onChange={event => setFilters(current => ({ ...current, result:event.target.value }))}><option value="">{copy.audit.allResults}</option><option>SUCCEEDED</option><option>DENIED</option><option>FAILED</option></select><label className="adm-filter-date"><span>{copy.audit.from}</span><input type="datetime-local" value={filters.from} onChange={event => setFilters(current => ({ ...current, from:event.target.value }))} /></label><label className="adm-filter-date"><span>{copy.audit.to}</span><input type="datetime-local" value={filters.to} onChange={event => setFilters(current => ({ ...current, to:event.target.value }))} /></label><button disabled={busy}>{copy.searchAction}</button></form>{error && <div className="adm-inline-message error">{error}</div>}<Table columns={columns} items={items} copy={copy} /></section>;
+}
+
+function AuditDetail({ copy, item, onBack }) {
+  const rows = [[copy.audit.source,'Account Service'],[copy.audit.actor,item.actor_display_name || item.actor_email || item.actor_user_id || '—'],[copy.audit.action,item.action],[copy.audit.resource,`${item.resource_type} · ${item.resource_id}`],[copy.audit.result,<Status value={item.result} />],[copy.audit.request,item.request_id],[copy.audit.organization,item.active_organization_id || '—'],[copy.audit.occurred,formatDate(item.occurred_at)]];
+  return <section className="adm-panel"><button className="adm-back" onClick={onBack}>← {copy.audit.back}</button><SectionHeader title={copy.audit.detail} copy={copy} /><dl className="adm-detail-list">{rows.map(([label,value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl><h3>{copy.audit.changeSummary}</h3><pre className="adm-json-detail">{JSON.stringify(item.change_summary || {}, null, 2)}</pre></section>;
+}
+
+function exportAuditCSV(items, filename) {
+  const fields = ['occurred_at','actor_display_name','actor_email','actor_user_id','action','resource_type','resource_id','result','request_id','change_summary'];
+  const safe = value => {
+    let text = typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value ?? '');
+    if (/^[=+\-@]/.test(text)) text = `'${text}`;
+    return `"${text.replaceAll('"', '""')}"`;
+  };
+  const body = [fields.map(safe).join(','), ...items.map(item => fields.map(field => safe(item[field])).join(','))].join('\r\n');
+  const blob = new Blob([`\uFEFF${body}`], { type:'text/csv;charset=utf-8' });
+  const href = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = href; link.download = filename; link.click(); URL.revokeObjectURL(href);
 }

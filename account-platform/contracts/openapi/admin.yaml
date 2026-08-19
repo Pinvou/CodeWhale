@@ -266,11 +266,28 @@ paths:
   /account/admin/v1/audit-logs:
     get:
       operationId: listAdminAuditLogs
-      summary: List recent account audit events
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      summary: Filter recent account audit events by actor, resource, action, time, and result
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: actor, in: query, schema: { type: string, maxLength: 320 } }
+        - { name: action, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: resource, in: query, schema: { type: string, maxLength: 320 } }
+        - { name: result, in: query, schema: { type: string, enum: [SUCCEEDED, DENIED, FAILED] } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
       responses:
         "200": { $ref: "#/components/responses/Collection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/audit-logs/{audit_id}:
+    get:
+      operationId: getAdminAuditLog
+      summary: Get one audit event with its change summary
+      parameters: [{ $ref: "#/components/parameters/AuditID" }]
+      responses:
+        "200": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/overview:
     get:
       operationId: getAdminBillingOverview
@@ -606,6 +623,11 @@ components:
       schema: { type: string, format: uuid }
     UsageRequestID:
       name: usage_request_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    AuditID:
+      name: audit_id
       in: path
       required: true
       schema: { type: string, format: uuid }

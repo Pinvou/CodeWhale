@@ -88,6 +88,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.PATCH("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminRenameUnit))
 	admin.DELETE("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminDeleteUnit))
 	admin.GET("/audit-logs", httpserver.AdaptFunc(s.adminAuditLogs))
+	admin.GET("/audit-logs/:audit_id", httpserver.AdaptFunc(s.adminAuditLog))
 	return router
 }
 

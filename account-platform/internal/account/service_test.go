@@ -143,9 +143,14 @@ func (f *fakeRepository) AdminDeleteUnit(_ context.Context, _ identity.Principal
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":DELETE")
 	return nil
 }
-func (*fakeRepository) AdminAuditLogs(context.Context, int) ([]AdminAuditLog, error) { return nil, nil }
-func (*fakeRepository) Ping(context.Context) error                                   { return nil }
-func (*fakeRepository) Close()                                                       {}
+func (*fakeRepository) AdminAuditLogs(context.Context, AdminAuditFilter) ([]AdminAuditLog, error) {
+	return nil, nil
+}
+func (*fakeRepository) AdminAuditLog(context.Context, uuid.UUID) (AdminAuditLog, error) {
+	return AdminAuditLog{}, nil
+}
+func (*fakeRepository) Ping(context.Context) error { return nil }
+func (*fakeRepository) Close()                     {}
 
 type fakeWalletProvisioner struct {
 	err   error
@@ -321,5 +326,17 @@ func TestNormalizeAdminMemberRolesSeparatesUnitScope(t *testing.T) {
 	}
 	if _, _, err := normalizeAdminMemberRoles(nil, []uuid.UUID{uuid.Nil}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("nil unit must be rejected, got %v", err)
+	}
+}
+
+func TestParseAdminAuditFilter(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/audit-logs?actor=admin%40example.com&action=organization&resource=unit&result=SUCCEEDED&from=2026-08-01T00:00:00Z&to=2026-08-19T23:59:59Z&limit=80", nil)
+	filter, err := parseAdminAuditFilter(request)
+	if err != nil || filter.Actor != "admin@example.com" || filter.Action != "organization" || filter.Resource != "unit" || filter.Result != "SUCCEEDED" || filter.Limit != 80 || filter.From == nil || filter.To == nil {
+		t.Fatalf("unexpected audit filter: %#v, %v", filter, err)
+	}
+	invalid := httptest.NewRequest(http.MethodGet, "/admin/v1/audit-logs?result=UNKNOWN", nil)
+	if _, err := parseAdminAuditFilter(invalid); err == nil {
+		t.Fatal("invalid audit result must be rejected")
 	}
 }
