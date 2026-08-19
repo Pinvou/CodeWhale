@@ -36,9 +36,12 @@ type PaymentOrder struct {
 	Status               string     `json:"status"`
 	FulfillmentStatus    string     `json:"fulfillment_status"`
 	PaymentURL           string     `json:"payment_url,omitempty"`
+	QRData               string     `json:"qr_data,omitempty"`
 	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
 	ExpiresAt            time.Time  `json:"expires_at"`
 	PaidAt               *time.Time `json:"paid_at,omitempty"`
+	Mobile               string     `json:"-"`
+	ProviderSKU          string     `json:"-"`
 }
 
 type PaymentCoordinator struct {
@@ -48,17 +51,26 @@ type PaymentCoordinator struct {
 	merchantID  string
 	callbackURL string
 	now         func() time.Time
+	productSKUs map[string]ExternalProduct
 }
 
 type ProviderOrder struct {
 	MerchantOrderNo      string     `json:"merchant_order_no"`
 	PaymentURL           string     `json:"payment_url"`
+	QRData               string     `json:"qr_data,omitempty"`
 	Status               string     `json:"status"`
 	Channel              string     `json:"channel"`
 	AmountFen            int64      `json:"amount_fen"`
 	Currency             string     `json:"currency"`
 	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
 	PaidAt               *time.Time `json:"paid_at,omitempty"`
+	ProviderStatus       string     `json:"provider_status,omitempty"`
+	ProviderTraceID      string     `json:"provider_trace_id,omitempty"`
+}
+
+type ExternalProduct struct {
+	SKU       string `json:"sku"`
+	AmountFen int64  `json:"amount_fen"`
 }
 
 type ProviderRefund struct {
@@ -105,7 +117,44 @@ func NewPaymentCoordinator(repository *PostgresRepository, providerURL, serviceT
 	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, callbackURL: parsedCallback.String(), now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
+func NewPaymentCoordinatorWithProvider(repository *PostgresRepository, provider PaymentProvider, products map[string]ExternalProduct) (*PaymentCoordinator, error) {
+	if repository == nil || provider == nil || len(products) == 0 {
+		return nil, errors.New("external payment provider and product mapping are required")
+	}
+	validated := make(map[string]ExternalProduct, len(products))
+	for productID, product := range products {
+		productID, product.SKU = strings.TrimSpace(productID), strings.TrimSpace(product.SKU)
+		if productID == "" || product.SKU == "" || product.AmountFen <= 0 {
+			return nil, errors.New("external payment product mapping is invalid")
+		}
+		validated[productID] = product
+	}
+	return &PaymentCoordinator{repository: repository, provider: provider, productSKUs: validated, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+func (p *PaymentCoordinator) FilterProducts(products []Product) []Product {
+	if len(p.productSKUs) == 0 {
+		return products
+	}
+	filtered := make([]Product, 0, len(products))
+	for _, product := range products {
+		if external, ok := p.productSKUs[product.ProductID]; ok && external.AmountFen == product.AmountFen {
+			product.Channels = []string{"ALIPAY"}
+			filtered = append(filtered, product)
+		}
+	}
+	return filtered
+}
+
 func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey string) (PaymentOrder, bool, error) {
+	return p.createOrder(ctx, requesterID, walletID, productID, channel, "", idempotencyKey)
+}
+
+func (p *PaymentCoordinator) CreateMobileOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
+	return p.createOrder(ctx, requesterID, walletID, productID, channel, mobile, idempotencyKey)
+}
+
+func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
 	channel = strings.ToUpper(channel)
 	if len(idempotencyKey) < 16 || !validPaymentChannel(channel) {
 		return PaymentOrder{}, false, ErrConflict
@@ -118,7 +167,7 @@ func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walle
 	if err := lockTransactionKey(ctx, tx, "payment.create", idempotencyKey); err != nil {
 		return PaymentOrder{}, false, err
 	}
-	requestDigest := sha256.Sum256([]byte(requesterID.String() + "|" + walletID.String() + "|" + productID + "|" + channel))
+	requestDigest := sha256.Sum256([]byte(requesterID.String() + "|" + walletID.String() + "|" + productID + "|" + channel + "|" + mobile))
 	requestHash := hex.EncodeToString(requestDigest[:])
 	var existingHash string
 	var existingBody []byte
@@ -144,13 +193,17 @@ func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walle
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
+	external := p.productSKUs[productID]
+	if len(p.productSKUs) > 0 && (channel != "ALIPAY" || mobile == "" || external.SKU == "" || external.AmountFen != product.AmountFen) {
+		return PaymentOrder{}, false, ErrConflict
+	}
 	if _, err := getWallet(ctx, tx, walletID, false); err != nil {
 		return PaymentOrder{}, false, ErrNotFound
 	}
 	now := p.now()
-	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + uuid.Must(uuid.NewV7()).String(), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute)}
+	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + uuid.Must(uuid.NewV7()).String(), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute), Mobile: mobile, ProviderSKU: external.SKU}
 	snapshot, _ := json.Marshal(product)
-	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED','PENDING',$11,$12,$12)`, order.ID, order.MerchantOrderNo, requesterID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at, mobile_e164, provider_sku) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED','PENDING',$11,$12,$12,NULLIF($13,''),NULLIF($14,''))`, order.ID, order.MerchantOrderNo, requesterID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now, mobile, external.SKU)
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
@@ -160,7 +213,8 @@ func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walle
 	}
 	order.Status = "PENDING"
 	order.PaymentURL = providerOrder.PaymentURL
-	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status = 'PENDING', payment_url = $2, updated_at = $3 WHERE id = $1`, order.ID, order.PaymentURL, p.now())
+	order.QRData = providerOrder.QRData
+	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='PENDING',payment_url=NULLIF($2,''),qr_data=NULLIF($3,''),updated_at=$4 WHERE id=$1`, order.ID, order.PaymentURL, order.QRData, p.now())
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
@@ -288,7 +342,7 @@ func creditWithinTransaction(ctx context.Context, tx pgx.Tx, walletID uuid.UUID,
 
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
 	var o PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,payment_url,channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,payment_url,qr_data,channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.QRData, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
 	return o, err
 }
 

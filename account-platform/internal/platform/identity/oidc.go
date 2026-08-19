@@ -16,13 +16,15 @@ import (
 )
 
 type Principal struct {
-	Issuer      string
-	Subject     string
-	SessionID   string
-	Email       string
-	DisplayName string
-	Username    string
-	RealmRoles  []string
+	Issuer        string
+	Subject       string
+	SessionID     string
+	Email         string
+	DisplayName   string
+	Username      string
+	PhoneNumber   string
+	PhoneVerified bool
+	RealmRoles    []string
 }
 
 type VerifyFunc func(context.Context, string) (Principal, error)
@@ -76,6 +78,8 @@ func NewOIDCVerifyFuncWithJWKS(ctx context.Context, issuer, jwksURL, audience, e
 			Email         string `json:"email"`
 			Name          string `json:"name"`
 			PreferredName string `json:"preferred_username"`
+			PhoneNumber   string `json:"phone_number"`
+			PhoneVerified bool   `json:"phone_number_verified"`
 			RealmAccess   struct {
 				Roles []string `json:"roles"`
 			} `json:"realm_access"`
@@ -95,13 +99,15 @@ func NewOIDCVerifyFuncWithJWKS(ctx context.Context, issuer, jwksURL, audience, e
 			displayName = claims.PreferredName
 		}
 		return Principal{
-			Issuer:      issuer,
-			Subject:     token.Subject,
-			SessionID:   sessionID,
-			Email:       claims.Email,
-			DisplayName: displayName,
-			Username:    claims.PreferredName,
-			RealmRoles:  slices.Clone(claims.RealmAccess.Roles),
+			Issuer:        issuer,
+			Subject:       token.Subject,
+			SessionID:     sessionID,
+			Email:         claims.Email,
+			DisplayName:   displayName,
+			Username:      claims.PreferredName,
+			PhoneNumber:   claims.PhoneNumber,
+			PhoneVerified: claims.PhoneVerified,
+			RealmRoles:    slices.Clone(claims.RealmAccess.Roles),
 		}, nil
 	}, nil
 }

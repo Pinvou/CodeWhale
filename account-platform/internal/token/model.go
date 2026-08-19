@@ -25,6 +25,9 @@ type AuthorizationContext struct {
 	UnitIDs           []uuid.UUID
 	AncestorUnitIDs   []uuid.UUID
 	Roles             []string
+	Mobile            *string
+	MobileVerified    bool
+	MallSyncStatus    string
 }
 
 type Candidate struct {

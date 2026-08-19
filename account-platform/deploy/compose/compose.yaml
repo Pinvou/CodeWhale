@@ -66,7 +66,9 @@ services:
       - backend
 
   keycloak:
-    image: quay.io/keycloak/keycloak:26.7.0
+    build:
+      context: ../keycloak
+      dockerfile: Dockerfile
     restart: unless-stopped
     command: ["start-dev", "--import-realm", "--health-enabled=true"]
     environment:
@@ -78,9 +80,14 @@ services:
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
       KC_HOSTNAME: http://127.0.0.1:18080
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      PINVOU_SMS_VERIFY_URL: http://account-service:8080/internal/v1/auth/sms/verify
+      PINVOU_INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
+      KEYCLOAK_PROVISIONER_CLIENT_ID: ${KEYCLOAK_PROVISIONER_CLIENT_ID:-pinvou-account-provisioner}
+      KEYCLOAK_PROVISIONER_CLIENT_SECRET: ${KEYCLOAK_PROVISIONER_CLIENT_SECRET:-}
     volumes:
       - ../keycloak/pinvou-dev-realm.json:/opt/keycloak/data/import/pinvou-realm.json:ro
       - ../keycloak/provision-platform-admin.sh:/opt/keycloak/data/import/provision-platform-admin.sh:ro
+      - ../keycloak/provision-mobile-auth.sh:/opt/keycloak/data/import/provision-mobile-auth.sh:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,6 +113,21 @@ services:
       BILLING_HTTP_URL: http://billing-service:8080
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       NATS_URL: nats://nats:4222
+      MOBILE_AUTH_ENABLED: ${MOBILE_AUTH_ENABLED:-false}
+      MOBILE_AUTH_HASH_SECRET: ${MOBILE_AUTH_HASH_SECRET:-}
+      ALIYUN_SMS_ACCESS_KEY_ID: ${ALIYUN_SMS_ACCESS_KEY_ID:-}
+      ALIYUN_SMS_ACCESS_KEY_SECRET: ${ALIYUN_SMS_ACCESS_KEY_SECRET:-}
+      ALIYUN_SMS_SIGN_NAME: ${ALIYUN_SMS_SIGN_NAME:-}
+      ALIYUN_SMS_REGISTER_TEMPLATE: ${ALIYUN_SMS_REGISTER_TEMPLATE:-}
+      ALIYUN_SMS_LOGIN_TEMPLATE: ${ALIYUN_SMS_LOGIN_TEMPLATE:-}
+      KEYCLOAK_ADMIN_API_URL: http://keycloak:8080
+      KEYCLOAK_PROVISIONER_TOKEN_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/token
+      KEYCLOAK_REALM: pinvou
+      KEYCLOAK_PROVISIONER_CLIENT_ID: ${KEYCLOAK_PROVISIONER_CLIENT_ID:-pinvou-account-provisioner}
+      KEYCLOAK_PROVISIONER_CLIENT_SECRET: ${KEYCLOAK_PROVISIONER_CLIENT_SECRET:-}
+      H3C_MALL_BASE_URL: ${H3C_MALL_BASE_URL:-}
+      H3C_MALL_APP_KEY: ${H3C_MALL_APP_KEY:-}
+      H3C_MALL_APP_SECRET: ${H3C_MALL_APP_SECRET:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -134,11 +156,16 @@ services:
       OIDC_AUDIENCE: pinvou-desktop-dev
       NATS_URL: nats://nats:4222
       PAYMENT_SIMULATOR_URL: http://payment-simulator:8080
+      BILLING_PAYMENT_PROVIDER: ${BILLING_PAYMENT_PROVIDER:-simulator}
       BILLING_PAYMENT_CALLBACK_URL: http://billing-service:8080/internal/payment/notifications
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       PAYMENT_SIM_HMAC_UNIONPAY: ${PAYMENT_SIM_HMAC_UNIONPAY:?set PAYMENT_SIM_HMAC_UNIONPAY}
       PAYMENT_SIM_HMAC_ALIPAY: ${PAYMENT_SIM_HMAC_ALIPAY:?set PAYMENT_SIM_HMAC_ALIPAY}
       PAYMENT_SIM_HMAC_WECHAT: ${PAYMENT_SIM_HMAC_WECHAT:?set PAYMENT_SIM_HMAC_WECHAT}
+      H3C_MALL_BASE_URL: ${H3C_MALL_BASE_URL:-}
+      H3C_MALL_APP_KEY: ${H3C_MALL_APP_KEY:-}
+      H3C_MALL_APP_SECRET: ${H3C_MALL_APP_SECRET:-}
+      H3C_MALL_PRODUCTS_JSON: "${H3C_MALL_PRODUCTS_JSON:-{}}"
       BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS: "15"
     depends_on:
       postgres:

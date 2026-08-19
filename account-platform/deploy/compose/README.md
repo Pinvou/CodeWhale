@@ -22,6 +22,22 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 部署时应将 `provision-platform-admin.sh` 以只读方式挂载到容器，或复制脚本内容到受控的运维环境执行。脚本可重复运行，并会确保用户拥有 `platform-admin` 角色。
 
+## 手机注册、登录与商城支付
+
+开启 `MOBILE_AUTH_ENABLED=true` 前，需要配置阿里云短信 AccessKey、已审核的签名和注册/登录模板，并配置新华三商城的应用凭据。`H3C_MALL_PRODUCTS_JSON` 必须逐项映射本地充值商品到商城 SKU 和实际分金额；金额不一致时服务会拒绝下单。所有密钥仅放在部署环境的 Secret 中。
+
+已有 Keycloak 数据卷升级后，还需要执行一次可重复运行的初始化脚本，以安装手机直登 Flow、服务账号权限和手机号 Token Claim：
+
+```sh
+docker compose --env-file account-platform/deploy/compose/.env \
+  -f account-platform/deploy/compose/compose.yaml exec keycloak \
+  sh /opt/keycloak/data/import/provision-mobile-auth.sh
+```
+
+注册短信由阿里云发送；注册成功后 Account Service 会在后台为同一手机号创建或确认商城用户。商城用户同步完成前，充值接口保持关闭。支付订单和二维码完全以商城返回值为准，客户端不会自行生成二维码；商城返回 `PAID` 后 Billing 才会把积分记入钱包。
+
+当前商城合同没有关闭订单、退款、支付回调和对账单接口，因此这些能力不会伪造：订单关闭跟随商城的 `PAY_CLOSED`，退款和渠道账单会明确返回“供应商能力不可用”。上线退款前需补充商城退款合同。
+
 确定性集成烟测使用独立 project：`node scripts/account-platform.mjs test integration`。命令会启动完整栈、验证五个 Readiness、请求/Trace 关联头和 Portal 安全头，然后仅删除该测试 project 的卷。
 
 数据库、Redis、NATS 和服务间网络不对公网开放。Compose 是开发/测试拓扑，不是生产部署模板。Payment Simulator 不得进入生产环境。

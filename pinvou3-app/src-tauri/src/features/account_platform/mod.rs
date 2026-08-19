@@ -179,6 +179,27 @@ pub struct LoginCredentials {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SMSRequest {
+    pub mobile: String,
+    pub purpose: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SMSLoginCredentials {
+    pub mobile: String,
+    pub challenge_id: String,
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobileRegistration {
+    pub mobile: String,
+    pub challenge_id: String,
+    pub code: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
@@ -194,6 +215,7 @@ struct OAuthErrorResponse {
 #[derive(Debug, Clone, Copy)]
 enum TokenFlow {
     Password,
+    Sms,
     Refresh,
 }
 
@@ -321,6 +343,57 @@ impl AccountPlatformState {
         let tokens = self
             .token_request(&config, &form, TokenFlow::Password)
             .await?;
+        self.install_tokens(tokens, None).await?;
+        drop(_refresh);
+        Ok(self.status().await)
+    }
+
+    pub async fn send_sms(&self, input: SMSRequest) -> Result<Value, String> {
+        let config = AccountPlatformConfig::from_env()?;
+        let purpose = input.purpose.trim().to_ascii_uppercase();
+        if purpose != "REGISTER" && purpose != "LOGIN" {
+            return Err("mobile_auth_request_invalid: invalid SMS purpose".to_string());
+        }
+        self.public_account_request(
+            &config,
+            "v1/auth/sms/challenges",
+            serde_json::json!({
+                "mobile": input.mobile.trim(), "purpose": purpose,
+            }),
+        )
+        .await
+    }
+
+    pub async fn register_mobile(&self, input: MobileRegistration) -> Result<Value, String> {
+        let config = AccountPlatformConfig::from_env()?;
+        self.public_account_request(
+            &config,
+            "v1/auth/register",
+            serde_json::json!({
+                "mobile": input.mobile.trim(), "challenge_id": input.challenge_id.trim(),
+                "code": input.code.trim(), "password": input.password,
+            }),
+        )
+        .await
+    }
+
+    pub async fn login_sms(
+        &self,
+        credentials: SMSLoginCredentials,
+    ) -> Result<SessionStatus, String> {
+        let _login = self.login_guard.lock().await;
+        let config = AccountPlatformConfig::from_env()?;
+        let _refresh = self.refresh_guard.lock().await;
+        self.clear_authentication().await?;
+        let form = [
+            ("grant_type", "password"),
+            ("client_id", config.client_id.as_str()),
+            ("username", mainland_username(credentials.mobile.trim())),
+            ("sms_challenge_id", credentials.challenge_id.trim()),
+            ("sms_code", credentials.code.trim()),
+            ("scope", "openid profile email offline_access"),
+        ];
+        let tokens = self.token_request(&config, &form, TokenFlow::Sms).await?;
         self.install_tokens(tokens, None).await?;
         drop(_refresh);
         Ok(self.status().await)
@@ -636,6 +709,36 @@ impl AccountPlatformState {
             .await
             .map_err(|error| format!("account_platform_service_unavailable: {error}"))
     }
+
+    async fn public_account_request(
+        &self,
+        config: &AccountPlatformConfig,
+        path: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        let url = config.account_url.join(path).map_err(|_| {
+            "account_platform_configuration_invalid: cannot resolve account endpoint".to_string()
+        })?;
+        let response = self
+            .client
+            .post(url)
+            .header("Accept", "application/json")
+            .header("X-Request-ID", random_urlsafe(18))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| format!("account_platform_service_unavailable: {error}"))?;
+        let response = response_to_api(response).await?;
+        if !(200..300).contains(&response.status) {
+            let code = response
+                .body
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("MOBILE_AUTH_FAILED");
+            return Err(format!("mobile_auth_failed: {code}"));
+        }
+        Ok(response.body)
+    }
 }
 
 fn access_token_is_usable(session: &RuntimeSession, rejected: Option<&str>) -> bool {
@@ -657,6 +760,12 @@ fn classify_token_error(flow: TokenFlow, status: StatusCode, oauth_error: Option
         }
         (TokenFlow::Password, Some("unauthorized_client")) => {
             "oidc_direct_grant_disabled: in-app password sign-in is disabled".to_string()
+        }
+        (TokenFlow::Sms, Some("invalid_grant")) => {
+            "mobile_auth_code_invalid: SMS code is invalid or expired".to_string()
+        }
+        (TokenFlow::Sms, Some("unauthorized_client")) => {
+            "oidc_direct_grant_disabled: in-app SMS sign-in is disabled".to_string()
         }
         (TokenFlow::Refresh, Some("invalid_grant")) => {
             "authentication_required: saved sign-in has expired".to_string()
@@ -687,6 +796,13 @@ fn random_urlsafe(bytes: usize) -> String {
     let mut value = vec![0_u8; bytes];
     rand::rng().fill_bytes(&mut value);
     URL_SAFE_NO_PAD.encode(value)
+}
+
+fn mainland_username(value: &str) -> &str {
+    value
+        .strip_prefix("+86")
+        .or_else(|| value.strip_prefix("86"))
+        .unwrap_or(value)
 }
 
 fn token_gateway_openai_base(base: &Url) -> String {

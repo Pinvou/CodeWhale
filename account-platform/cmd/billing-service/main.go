@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 )
@@ -27,9 +30,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer repository.Close()
-	payments, err := billing.NewPaymentCoordinator(repository, os.Getenv("PAYMENT_SIMULATOR_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "pinvou-development", os.Getenv("BILLING_PAYMENT_CALLBACK_URL"), map[string]string{
-		"UNIONPAY": os.Getenv("PAYMENT_SIM_HMAC_UNIONPAY"), "ALIPAY": os.Getenv("PAYMENT_SIM_HMAC_ALIPAY"), "WECHAT": os.Getenv("PAYMENT_SIM_HMAC_WECHAT"),
-	})
+	payments, err := paymentCoordinator(repository)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -52,4 +53,25 @@ func main() {
 	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func paymentCoordinator(repository *billing.PostgresRepository) (*billing.PaymentCoordinator, error) {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("BILLING_PAYMENT_PROVIDER")), "h3c_mall") {
+		products := make(map[string]billing.ExternalProduct)
+		if err := json.Unmarshal([]byte(os.Getenv("H3C_MALL_PRODUCTS_JSON")), &products); err != nil || len(products) == 0 {
+			return nil, errors.New("H3C_MALL_PRODUCTS_JSON must map local product IDs to Mall SKU and amount_fen")
+		}
+		client, err := h3cmall.New(h3cmall.Config{BaseURL: os.Getenv("H3C_MALL_BASE_URL"), AppKey: os.Getenv("H3C_MALL_APP_KEY"), AppSecret: os.Getenv("H3C_MALL_APP_SECRET")})
+		if err != nil {
+			return nil, err
+		}
+		provider, err := billing.NewH3CMallProvider(client, products)
+		if err != nil {
+			return nil, err
+		}
+		return billing.NewPaymentCoordinatorWithProvider(repository, provider, products)
+	}
+	return billing.NewPaymentCoordinator(repository, os.Getenv("PAYMENT_SIMULATOR_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "pinvou-development", os.Getenv("BILLING_PAYMENT_CALLBACK_URL"), map[string]string{
+		"UNIONPAY": os.Getenv("PAYMENT_SIM_HMAC_UNIONPAY"), "ALIPAY": os.Getenv("PAYMENT_SIM_HMAC_ALIPAY"), "WECHAT": os.Getenv("PAYMENT_SIM_HMAC_WECHAT"),
+	})
 }

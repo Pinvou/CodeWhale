@@ -26,6 +26,9 @@ export class AccountPlatformDesktopClient {
   login(account, password, signal) {
     return this.call(() => this.transport.login({ account, password }), signal);
   }
+  sendSms(mobile, purpose, signal) { return this.call(() => this.transport.sendSms({ mobile, purpose }), signal); }
+  registerMobile(mobile, challengeId, code, password, signal) { return this.call(() => this.transport.registerMobile({ mobile, challenge_id: challengeId, code, password }), signal); }
+  loginSms(mobile, challengeId, code, signal) { return this.call(() => this.transport.loginSms({ mobile, challenge_id: challengeId, code }), signal); }
   logout(signal) { return this.call(() => this.transport.logout(), signal); }
 
   async call(action, signal) {

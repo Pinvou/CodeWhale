@@ -248,6 +248,10 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrForbidden)
 		return
 	}
+	if !resolved.MobileVerified || resolved.Mobile == nil || resolved.MallSyncStatus != "SYNCED" {
+		api.WriteError(w, http.StatusConflict, "MOBILE_ACCOUNT_NOT_READY", "a verified mobile synchronized with the Mall is required before recharge", httpserver.RequestID(r.Context()))
+		return
+	}
 	var body struct {
 		ProductID string `json:"product_id"`
 		Channel   string `json:"channel"`
@@ -260,7 +264,7 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), r.Header.Get("Idempotency-Key"))
+	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		api.WriteError(w, http.StatusBadGateway, "RECHARGE_CREATE_FAILED", "the recharge order could not be created", httpserver.RequestID(r.Context()))
 		return
@@ -651,11 +655,14 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		UnitIDs           []uuid.UUID `json:"unit_ids"`
 		AncestorUnitIDs   []uuid.UUID `json:"ancestor_unit_ids"`
 		Roles             []string    `json:"roles"`
+		Mobile            *string     `json:"mobile"`
+		MobileVerified    bool        `json:"mobile_verified"`
+		MallSyncStatus    string      `json:"mall_sync_status"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
 		return AuthorizationContext{}, err
 	}
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles}, nil
+	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified, MallSyncStatus: body.MallSyncStatus}, nil
 }
 
 type HTTPWalletResolver struct {

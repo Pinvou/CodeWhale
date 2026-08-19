@@ -1,0 +1,62 @@
+#!/bin/sh
+set -eu
+
+KEYCLOAK_ADMIN_USERNAME=${KEYCLOAK_ADMIN_USERNAME:-${KC_BOOTSTRAP_ADMIN_USERNAME:-}}
+KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-${KC_BOOTSTRAP_ADMIN_PASSWORD:-}}
+: "${KEYCLOAK_ADMIN_USERNAME:?set KEYCLOAK_ADMIN_USERNAME or KC_BOOTSTRAP_ADMIN_USERNAME}"
+: "${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD or KC_BOOTSTRAP_ADMIN_PASSWORD}"
+: "${KEYCLOAK_PROVISIONER_CLIENT_SECRET:?set KEYCLOAK_PROVISIONER_CLIENT_SECRET}"
+
+KCADM=/opt/keycloak/bin/kcadm.sh
+REALM=${KEYCLOAK_REALM:-pinvou}
+DESKTOP_CLIENT=${PINVOU_OIDC_CLIENT_ID:-pinvou-desktop-dev}
+PROVISIONER_CLIENT=${KEYCLOAK_PROVISIONER_CLIENT_ID:-pinvou-account-provisioner}
+FLOW=pinvou-mobile-direct-grant
+PROVIDER=pinvou-mobile-direct-grant
+
+"$KCADM" config credentials --server http://127.0.0.1:8080 --realm master \
+  --user "$KEYCLOAK_ADMIN_USERNAME" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
+
+client_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$PROVISIONER_CLIENT" --fields id,clientId --format csv --noquotes | awk -F, -v wanted="$PROVISIONER_CLIENT" '$2==wanted {print $1; exit}')
+if [ -z "$client_id" ]; then
+  client_id=$("$KCADM" create clients -r "$REALM" -i \
+    -s "clientId=$PROVISIONER_CLIENT" -s enabled=true -s publicClient=false \
+    -s serviceAccountsEnabled=true -s standardFlowEnabled=false -s directAccessGrantsEnabled=false \
+    -s "secret=$KEYCLOAK_PROVISIONER_CLIENT_SECRET")
+else
+  "$KCADM" update "clients/$client_id" -r "$REALM" -s enabled=true -s publicClient=false \
+    -s serviceAccountsEnabled=true -s "secret=$KEYCLOAK_PROVISIONER_CLIENT_SECRET" >/dev/null
+fi
+service_user=$("$KCADM" get "clients/$client_id/service-account-user" -r "$REALM" --fields id --format csv --noquotes | tail -n 1)
+realm_management=$("$KCADM" get clients -r "$REALM" -q clientId=realm-management --fields id,clientId --format csv --noquotes | awk -F, '$2=="realm-management" {print $1; exit}')
+for role in manage-users view-users query-users; do
+  "$KCADM" add-roles -r "$REALM" --uid "$service_user" --cid "$realm_management" --rolename "$role" >/dev/null 2>&1 || true
+done
+
+flow_id=$("$KCADM" get authentication/flows -r "$REALM" --fields id,alias --format csv --noquotes | awk -F, -v wanted="$FLOW" '$2==wanted {print $1; exit}')
+if [ -z "$flow_id" ]; then
+  flow_id=$("$KCADM" create authentication/flows -r "$REALM" -i \
+    -s "alias=$FLOW" -s 'description=Pinvou mobile password or SMS direct grant' \
+    -s providerId=basic-flow -s topLevel=true -s builtIn=false)
+fi
+if ! "$KCADM" get "authentication/flows/$flow_id/executions" -r "$REALM" --format csv --noquotes | grep -q "$PROVIDER"; then
+  "$KCADM" create "authentication/flows/$FLOW/executions/execution" -r "$REALM" -s "provider=$PROVIDER" >/dev/null
+fi
+"$KCADM" update "authentication/flows/$FLOW/executions" -r "$REALM" \
+  -s "id=$("$KCADM" get "authentication/flows/$flow_id/executions" -r "$REALM" --fields id,providerId --format csv --noquotes | awk -F, -v wanted="$PROVIDER" '$2==wanted {print $1; exit}')" \
+  -s requirement=REQUIRED >/dev/null
+"$KCADM" update "realms/$REALM" -s "directGrantFlow=$FLOW" -s registrationAllowed=false >/dev/null
+
+desktop_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$DESKTOP_CLIENT" --fields id,clientId --format csv --noquotes | awk -F, -v wanted="$DESKTOP_CLIENT" '$2==wanted {print $1; exit}')
+for spec in 'pinvou-phone-number|phone_number|String' 'pinvou-phone-number-verified|phone_number_verified|boolean'; do
+  name=${spec%%|*}; rest=${spec#*|}; attribute=${rest%%|*}; json_type=${rest##*|}
+  if ! "$KCADM" get "clients/$desktop_id/protocol-mappers/models" -r "$REALM" --fields name --format csv --noquotes | grep -qx "$name"; then
+    "$KCADM" create "clients/$desktop_id/protocol-mappers/models" -r "$REALM" \
+      -s "name=$name" -s protocol=openid-connect -s protocolMapper=oidc-usermodel-attribute-mapper \
+      -s "config.\"user.attribute\"=$attribute" -s "config.\"claim.name\"=$attribute" \
+      -s "config.\"jsonType.label\"=$json_type" -s 'config."id.token.claim"=true' \
+      -s 'config."access.token.claim"=true' -s 'config."userinfo.token.claim"=true' >/dev/null
+  fi
+done
+
+printf 'Mobile authentication provisioned for realm %s\n' "$REALM"

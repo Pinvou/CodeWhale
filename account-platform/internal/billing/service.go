@@ -139,12 +139,13 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		WalletID    uuid.UUID `json:"wallet_id"`
 		ProductID   string    `json:"product_id"`
 		Channel     string    `json:"channel"`
+		Mobile      string    `json:"mobile"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
 		return
 	}
-	order, created, err := s.payments.CreateOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, r.Header.Get("Idempotency-Key"))
+	order, created, err := s.payments.CreateMobileOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -164,7 +165,13 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order lookup", httpserver.RequestID(r.Context()))
 		return
 	}
+	// Authorize against the local order before making a provider request. This
+	// keeps an authenticated caller from using guessed order IDs to trigger
+	// Mall lookups for another account.
 	order, err := s.payments.GetOrder(r.Context(), orderID, requesterID)
+	if err == nil {
+		order, err = s.payments.SyncOrder(r.Context(), order.ID)
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -328,6 +335,9 @@ func (s *Service) listProducts(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	if s.payments != nil {
+		products = s.payments.FilterProducts(products)
 	}
 	var version int64
 	for _, product := range products {

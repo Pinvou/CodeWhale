@@ -2473,6 +2473,9 @@
     accountPlatform: {
       session: accountPlatformFeature.session,
       login: accountPlatformFeature.login,
+      sendSms: accountPlatformFeature.sendSms,
+      registerMobile: accountPlatformFeature.registerMobile,
+      loginSms: accountPlatformFeature.loginSms,
       logout: accountPlatformFeature.logout,
       request: accountPlatformFeature.request,
     },

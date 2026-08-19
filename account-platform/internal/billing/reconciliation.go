@@ -207,6 +207,10 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 	if providerOrder.MerchantOrderNo != order.MerchantOrderNo || providerOrder.Channel != order.Channel || providerOrder.AmountFen != order.AmountFen || providerOrder.Currency != order.Currency {
 		return PaymentOrder{}, ErrConflict
 	}
+	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET payment_url=NULLIF($2,''),qr_data=NULLIF($3,''),provider_status=NULLIF($4,''),provider_trace_id=NULLIF($5,''),updated_at=$6 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, providerOrder.ProviderStatus, providerOrder.ProviderTraceID, p.now()); err != nil {
+		return PaymentOrder{}, err
+	}
+	order.PaymentURL, order.QRData = providerOrder.PaymentURL, providerOrder.QRData
 	if providerOrder.Status == "SUCCESS" {
 		return p.applyQueriedPayment(ctx, order.ID, providerOrder)
 	}

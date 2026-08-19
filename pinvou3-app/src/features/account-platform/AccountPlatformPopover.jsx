@@ -5,11 +5,12 @@ import { rechargePollDelay } from './context-guard.js';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'MANUAL_REVIEW']);
 const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
-const fallbackChannels = ['UNIONPAY', 'ALIPAY', 'WECHAT'];
+const fallbackChannels = ['ALIPAY'];
 
 function localizedError(copy, reason) {
   const raw = String(reason?.code || reason?.message || reason || '');
   const code = raw.split(':', 1)[0].trim();
+  if (code === 'mobile_auth_failed' || code === 'mobile_auth_code_invalid') return copy.mobileAuthFailed;
   return copy.errors?.[code] || (reason?.message && typeof reason.message === 'string' ? reason.message : copy.requestFailed);
 }
 
@@ -39,11 +40,9 @@ function RechargePanel({
   const remainingSeconds = orderRemainingSeconds(order, now);
   const paid = paidOrderStates.has(order?.status);
   const terminal = terminalOrderStates.has(order?.status);
-  const displayStatus = order && !terminal && remainingSeconds === 0 ? 'EXPIRED' : order?.status;
-  const canScan = Boolean(order && !terminal && remainingSeconds > 0);
-  const inactiveHint = displayStatus === 'EXPIRED'
-    ? copy.orderExpires(new Date(order?.expires_at).toLocaleTimeString())
-    : copy.orderNoLongerPayable;
+  const displayStatus = order?.status;
+  const canScan = Boolean(order && !terminal);
+  const inactiveHint = copy.orderNoLongerPayable;
 
   useEffect(() => {
     if (!selected && products[0]) setProductId(products[0].product_id);
@@ -101,7 +100,7 @@ function RechargePanel({
                 {qrError && <div className="px-4 text-center text-[12px] text-[#D93025]"><p>{copy.qrFailed}</p><button type="button" onClick={onRetryQR} className="mt-2 rounded-lg bg-[#D93025]/10 px-3 py-1.5 font-medium">{copy.retry}</button></div>}
               </div>
               <div className="mt-3 text-center text-[13px] font-medium">{copy.scanToPay}</div>
-              <div className={`mt-1 text-center text-[11px] tabular-nums ${mutedText}`}>{copy.countdown(formatCountdown(remainingSeconds))}</div>
+              <div className={`mt-1 text-center text-[11px] tabular-nums ${mutedText}`}>{remainingSeconds > 0 ? copy.countdown(formatCountdown(remainingSeconds)) : copy.orderStatuses.PENDING}</div>
             </>
           ) : (
             <div className={`py-8 text-center text-[12px] ${mutedText}`}>{inactiveHint}</div>
@@ -167,6 +166,10 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [balance, setBalance] = useState(null);
   const [account, setAccount] = useState('');
   const [password, setPassword] = useState('');
+  const [loginMode, setLoginMode] = useState('password');
+  const [mobile, setMobile] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [smsChallenge, setSmsChallenge] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [view, setView] = useState('account');
@@ -262,24 +265,19 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   }, [open, loadAccount]);
 
   useEffect(() => {
-    const paymentContent = order?.payment_url || order?.qr_content || '';
+    const paymentContent = order?.qr_data || '';
     if (!paymentContent) {
       setQrData('');
       setQrError(false);
       return undefined;
     }
-    let active = true;
-    setQrData('');
-    setQrError(false);
-    import('qrcode')
-      .then(({ default: QRCode }) => QRCode.toDataURL(paymentContent, { width: 220, margin: 2, errorCorrectionLevel: 'M' }))
-      .then(value => { if (active) setQrData(value); })
-      .catch(() => { if (active) setQrError(true); });
-    return () => { active = false; };
-  }, [order?.payment_url, order?.qr_content, qrRetry]);
+    setQrData(paymentContent);
+    setQrError(!paymentContent.startsWith('data:image/png;base64,'));
+    return undefined;
+  }, [order?.qr_data, qrRetry]);
 
   useEffect(() => {
-    if (!open || auth !== 'ready' || !order?.order_id || terminalOrderStates.has(order.status) || orderRemainingSeconds(order, Date.now()) === 0) return undefined;
+    if (!open || auth !== 'ready' || !order?.order_id || terminalOrderStates.has(order.status)) return undefined;
     let stopped = false;
     let timer;
     let attempt = 0;
@@ -304,7 +302,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         }
         setOrder(latest);
         setRechargeError('');
-        if (!terminalOrderStates.has(latest.status) && orderRemainingSeconds(latest, Date.now()) > 0) timer = window.setTimeout(poll, rechargePollDelay(attempt++));
+        if (!terminalOrderStates.has(latest.status)) timer = window.setTimeout(poll, rechargePollDelay(attempt++));
       } catch {
         if (!stopped) {
           setRechargeError(copy.paymentStatusUnavailable);
@@ -347,13 +345,31 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     setBusy(true);
     setError('');
     try {
-      await client.login(account.trim(), password);
+      if (loginMode === 'sms') await client.loginSms(mobile.trim(), smsChallenge, smsCode.trim());
+      else if (loginMode === 'register') {
+        await client.registerMobile(mobile.trim(), smsChallenge, smsCode.trim(), password);
+        await client.login(mobile.trim().replace(/^\+?86/, ''), password);
+      } else await client.login(account.trim().replace(/^\+?86(?=1\d{10}$)/, ''), password);
       setPassword('');
       await loadAccount();
     } catch (reason) {
       setPassword('');
       setAuth('guest');
       setError(localizedError(copy, reason));
+      setBusy(false);
+    }
+  };
+
+  const sendSms = async () => {
+    if (busy || !mobile.trim()) return;
+    setBusy(true);
+    setError('');
+    try {
+      const result = await client.sendSms(mobile.trim(), loginMode === 'register' ? 'REGISTER' : 'LOGIN');
+      setSmsChallenge(result.challenge_id || result.challengeId || '');
+    } catch (reason) {
+      setError(localizedError(copy, reason));
+    } finally {
       setBusy(false);
     }
   };
@@ -436,10 +452,12 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
       {(auth === 'guest' || auth === 'error') && (
         <form className={`space-y-3 rounded-2xl border p-3 ${cardTheme}`} onSubmit={event => void submitLogin(event)}>
-          <input value={account} onChange={event => setAccount(event.target.value)} disabled={busy} placeholder={copy.account} aria-label={copy.account} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />
-          <input value={password} onChange={event => setPassword(event.target.value)} disabled={busy} placeholder={copy.password} aria-label={copy.password} type="password" autoComplete="current-password" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />
+          <div className="grid grid-cols-3 gap-1 rounded-xl bg-black/5 p-1">{['password', 'sms', 'register'].map(mode => <button key={mode} type="button" onClick={() => { setLoginMode(mode); setSmsChallenge(''); setSmsCode(''); setError(''); }} className={`h-7 rounded-lg text-[11px] ${loginMode === mode ? 'bg-white shadow-sm' : mutedText}`}>{copy.authModes[mode]}</button>)}</div>
+          {loginMode === 'password' ? <input value={account} onChange={event => setAccount(event.target.value)} disabled={busy} placeholder={copy.mobileOrAccount} aria-label={copy.mobileOrAccount} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} /> : <input value={mobile} onChange={event => setMobile(event.target.value)} disabled={busy} placeholder={copy.mobile} aria-label={copy.mobile} inputMode="tel" autoComplete="tel-national" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {loginMode !== 'password' && <div className="flex gap-2"><input value={smsCode} onChange={event => setSmsCode(event.target.value)} disabled={busy} placeholder={copy.smsCode} aria-label={copy.smsCode} inputMode="numeric" autoComplete="one-time-code" className={`h-9 min-w-0 flex-1 rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} /><button type="button" disabled={busy || !mobile.trim()} onClick={() => void sendSms()} className="h-9 shrink-0 rounded-xl bg-[#10B981]/10 px-3 text-[11px] font-semibold text-[#07966F] disabled:opacity-40">{smsChallenge ? copy.resendCode : copy.sendCode}</button></div>}
+          {loginMode !== 'sms' && <input value={password} onChange={event => setPassword(event.target.value)} disabled={busy} placeholder={copy.password} aria-label={copy.password} type="password" autoComplete={loginMode === 'register' ? 'new-password' : 'current-password'} className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
           {error && <div role="alert" className="break-words text-[12px] leading-snug text-[#EA4335]">{error}</div>}
-          <button type="submit" disabled={busy || !account.trim() || !password} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{busy ? copy.signingIn : copy.login}</button>
+          <button type="submit" disabled={busy || (loginMode === 'password' ? !account.trim() || !password : !mobile.trim() || !smsChallenge || !smsCode.trim() || (loginMode === 'register' && !password))} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{busy ? copy.signingIn : loginMode === 'register' ? copy.register : copy.login}</button>
         </form>
       )}
 

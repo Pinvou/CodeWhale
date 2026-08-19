@@ -224,8 +224,10 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   const bridge = await readFile(new URL('../src/platform/tauri/bridge/account-platform.js', import.meta.url), 'utf8');
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   assert.match(popover, /type="password"/);
-  assert.match(popover, /autoComplete="current-password"/);
-  assert.match(popover, /await client\.login\(account\.trim\(\), password\)/);
+  assert.match(popover, /'password', 'sms', 'register'/);
+  assert.match(popover, /autoComplete=\{loginMode === 'register' \? 'new-password' : 'current-password'\}/);
+  assert.match(popover, /await client\.loginSms\(mobile\.trim\(\), smsChallenge, smsCode\.trim\(\)\)/);
+  assert.match(popover, /await client\.registerMobile/);
   assert.match(bridge, /invoke\("account_platform_login", \{ credentials: credentials \}\)/);
   assert.doesNotMatch(backend, /open_target|authorization_request|TcpListener/);
 });
@@ -252,7 +254,8 @@ test('desktop recharge completes inside the account popover without opening a we
   assert.doesNotMatch(popover, /client\.recentRechargeOrder/);
   assert.match(popover, /const openRecharge = \(\) => \{\s*setOrder\(null\)/);
   assert.match(popover, /client\.createRecharge\(productId, channel, newIdempotencyKey\(\)\)/);
-  assert.match(popover, /import\('qrcode'\)/);
+  assert.match(popover, /order\?\.qr_data/);
+  assert.doesNotMatch(popover, /import\('qrcode'\)/);
   assert.match(popover, /client\.rechargeOrder\(order\.order_id\)/);
   assert.match(popover, /refreshedBalance = await client\.balance\(\)/);
   assert.match(popover, /copy\.paymentReceived/);
@@ -295,7 +298,7 @@ test('personal center and desktop chat share one account identity lifecycle', as
   assert.match(accountBackend, /oidc-user-\{account_user_id\}-session-\{generation\}/);
   assert.equal(
     (commands.match(/pool\.mark_model_updated\(BUILTIN_LLMAPI_MODEL_ID\)/g) || []).length,
-    2,
+    3,
   );
 });
 

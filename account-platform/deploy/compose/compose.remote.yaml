@@ -9,10 +9,12 @@ services:
   account-service:
     environment:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+      MOBILE_AUTH_ENABLED: "true"
 
   billing-service:
     environment:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
+      BILLING_PAYMENT_PROVIDER: h3c_mall
 
   token-gateway:
     environment:
@@ -25,5 +27,6 @@ services:
       SYSTEM_NEWAPI_STATUS_URL: http://newapi:3000/api/status
 
   payment-simulator:
+    profiles: [development-simulator]
     environment:
       PAYMENT_SIM_PUBLIC_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
