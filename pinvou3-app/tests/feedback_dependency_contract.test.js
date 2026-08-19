@@ -24,6 +24,16 @@ assert.match(
   "feedback check-code protocol must continue to use MD5",
 );
 assert.match(
+  FEEDBACK,
+  /const FIXED_FEEDBACK_GW_SN: Option<&str> = Some\("[A-Za-z0-9]+"\);/,
+  "feedback must keep the registered receiver serial used to obtain an upload token",
+);
+assert.match(
+  FEEDBACK,
+  /pub fn resolve_device_serial\(\) -> Option<String> \{\s*if let Some\(serial\) = FIXED_FEEDBACK_GW_SN \{\s*return Some\(serial\.to_string\(\)\);\s*\}/,
+  "feedback must resolve the registered receiver serial before any client-device fallback",
+);
+assert.match(
   CARGO_TOML,
   /^md5\s*=\s*"0\.7"\s*$/m,
   "Cargo.toml must keep the direct md5 dependency used by feedback",

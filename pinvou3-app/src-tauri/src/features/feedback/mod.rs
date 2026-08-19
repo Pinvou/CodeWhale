@@ -23,6 +23,9 @@ const MAX_VIDEO_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 80 * 1024 * 1024;
 const TOKEN_URL: &str = "https://magic.h3c.com/rest/ihomers/uploadRequest";
 const UPLOAD_URL: &str = "https://magic.h3c.com/rest/ihomers/uploadSysinfoFile";
+// 接收端只为登记过的采集器 SN 签发 token；这里标识反馈接收通道，不是用户设备。
+// 不得替换为 BIOS/主板序列号，否则普通设备会稳定收到 retCode=24。
+const FIXED_FEEDBACK_GW_SN: Option<&str> = Some("219801A4BL522CM00002");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -560,6 +563,9 @@ fn h3c_value_to_string(value: &serde_json::Value) -> Option<String> {
 }
 
 pub fn resolve_device_serial() -> Option<String> {
+    if let Some(serial) = FIXED_FEEDBACK_GW_SN {
+        return Some(serial.to_string());
+    }
     if let Ok(serial) = std::env::var("PINVOU3_FEEDBACK_GW_SN") {
         let serial = serial.trim().to_string();
         if !serial.is_empty() {
@@ -775,6 +781,11 @@ mod tests {
 
         std::env::remove_var("PINVOU3_HOME");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn feedback_uses_registered_fixed_gateway_serial() {
+        assert_eq!(resolve_device_serial().as_deref(), FIXED_FEEDBACK_GW_SN);
     }
 
     #[test]
