@@ -2,7 +2,9 @@ package account
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
 
@@ -11,7 +13,24 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
+func (s *Service) precheckMobileRegistration(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Mobile   string `json:"mobile"`
+		Password string `json:"password"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	username, err := s.mobileAuth.PrecheckRegistration(r.Context(), body.Username, body.Mobile, body.Password)
+	if err != nil {
+		s.writeMobileAuthError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"username": username, "available": true})
+}
+
+func (s *Service) createSliderCaptcha(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Mobile  string     `json:"mobile"`
 		Purpose SMSPurpose `json:"purpose"`
@@ -19,7 +38,27 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	challenge, err := s.mobileAuth.Send(r.Context(), body.Mobile, SMSPurpose(strings.ToUpper(string(body.Purpose))))
+	challenge, err := s.mobileAuth.CreateSliderCaptcha(r.Context(), body.Mobile, SMSPurpose(strings.ToUpper(string(body.Purpose))))
+	if err != nil {
+		s.writeMobileAuthError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusCreated, challenge)
+}
+
+func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username      string     `json:"username"`
+		Mobile        string     `json:"mobile"`
+		Password      string     `json:"password"`
+		Purpose       SMSPurpose `json:"purpose"`
+		CaptchaID     uuid.UUID  `json:"captcha_id"`
+		CaptchaOffset int        `json:"captcha_offset"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	challenge, err := s.mobileAuth.Send(r.Context(), body.Username, body.Mobile, body.Password, SMSPurpose(strings.ToUpper(string(body.Purpose))), body.CaptchaID, body.CaptchaOffset)
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
@@ -79,12 +118,23 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 	case errors.Is(err, ErrMobileAlreadyRegistered):
 		status, code, message = http.StatusConflict, "MOBILE_ALREADY_REGISTERED", "the mobile number is already registered"
 	case errors.Is(err, ErrUsernameInvalid):
-		status, code, message = http.StatusBadRequest, "USERNAME_INVALID", "username must start with a letter and contain 3 to 32 lowercase letters, digits, dots, underscores, or hyphens"
+		status, code, message = http.StatusBadRequest, "USERNAME_INVALID", "username must start with a letter and contain 3 to 32 letters, digits, dots, underscores, or hyphens"
 	case errors.Is(err, ErrUsernameAlreadyRegistered):
 		status, code, message = http.StatusConflict, "USERNAME_ALREADY_REGISTERED", "the username is already registered"
+	case errors.Is(err, ErrPasswordInvalid):
+		status, code, message = http.StatusBadRequest, "PASSWORD_INVALID", "password must be 8 to 128 printable characters and contain a letter and a digit"
+	case errors.Is(err, ErrCaptchaInvalid):
+		status, code, message = http.StatusBadRequest, "CAPTCHA_INVALID", "the slider verification is invalid or expired"
 	case errors.Is(err, ErrSMSRateLimited):
 		status, code, message = http.StatusTooManyRequests, "SMS_RATE_LIMITED", "too many verification code requests"
-		w.Header().Set("Retry-After", "60")
+		retryAfter := 60
+		var limited *SMSRateLimitError
+		if errors.As(err, &limited) {
+			retryAfter = max(1, int(math.Ceil(limited.RetryAfter.Seconds())))
+		}
+		w.Header().Set("Retry-After", fmt.Sprint(retryAfter))
+		api.WriteJSON(w, status, api.Error{Code: code, Message: message, RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"retry_after_seconds": retryAfter}})
+		return
 	case errors.Is(err, ErrSMSInvalid):
 		status, code, message = http.StatusUnauthorized, "SMS_CODE_INVALID", "the verification code is invalid or expired"
 	case errors.Is(err, ErrSMSUnavailable):

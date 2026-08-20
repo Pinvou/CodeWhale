@@ -24,8 +24,23 @@ func TestNormalizeMainlandMobile(t *testing.T) {
 }
 
 func TestRegistrationPasswordPolicy(t *testing.T) {
-	if !validPassword("pinvou2026") || validPassword("password") || validPassword("12345678") || validPassword("a1") {
+	if !validPassword("pinvou2026") || !validPassword("Pinvou2026@*+-&") || validPassword("password") || validPassword("12345678") || validPassword("a1") || validPassword("pinvou 2026") {
 		t.Fatal("registration password policy mismatch")
+	}
+}
+
+func TestSMSRateLimitReturnsRemainingCooldown(t *testing.T) {
+	now := time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC)
+	last := now.Add(-17 * time.Second)
+	err := smsRateLimit(now, &last, &last, 1)
+	var limited *SMSRateLimitError
+	if !errors.As(err, &limited) || limited.RetryAfter != 43*time.Second {
+		t.Fatalf("unexpected retry delay: err=%v limited=%#v", err, limited)
+	}
+	oldest := now.Add(-52 * time.Minute)
+	err = smsRateLimit(now, nil, &oldest, 5)
+	if !errors.As(err, &limited) || limited.RetryAfter != 8*time.Minute {
+		t.Fatalf("unexpected hourly retry delay: err=%v limited=%#v", err, limited)
 	}
 }
 
@@ -53,6 +68,9 @@ type mobileAuthRepositoryFake struct {
 	consumeVerified    bool
 	registeredUsername string
 	registeredMobile   string
+	captchaConsumed    bool
+	sliderChallenge    SliderCaptcha
+	captchaErr         error
 }
 
 func (f *mobileAuthRepositoryFake) MobileExists(context.Context, string) (bool, error) {
@@ -61,6 +79,16 @@ func (f *mobileAuthRepositoryFake) MobileExists(context.Context, string) (bool, 
 
 func (f *mobileAuthRepositoryFake) UsernameExists(context.Context, string) (bool, error) {
 	return f.usernameExists, nil
+}
+
+func (f *mobileAuthRepositoryFake) CreateSliderCaptcha(_ context.Context, challenge SliderCaptcha) error {
+	f.sliderChallenge = challenge
+	return nil
+}
+
+func (f *mobileAuthRepositoryFake) ConsumeSliderCaptcha(context.Context, uuid.UUID, string, SMSPurpose, int) error {
+	f.captchaConsumed = true
+	return f.captchaErr
 }
 
 func (f *mobileAuthRepositoryFake) CreateSMSChallenge(_ context.Context, challenge SMSChallenge) error {
@@ -143,12 +171,43 @@ func TestMobileAuthSendUsesProviderGeneratedChallenge(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{}
 	sms := &smsProviderFake{}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	challenge, err := service.Send(context.Background(), "13800138000", SMSPurposeRegister)
+	challenge, err := service.Send(context.Background(), "pinvou.user", "13800138000", "Pinvou2026@", SMSPurposeRegister, uuid.New(), 128)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if challenge.ID == uuid.Nil || challenge.ID != repository.challenge.ID || challenge.ID != sms.sentChallenge || !repository.challengeSent {
 		t.Fatalf("challenge was not consistently persisted and sent: %#v", challenge)
+	}
+	if !repository.captchaConsumed {
+		t.Fatal("SMS must not be sent before slider verification is consumed")
+	}
+}
+
+func TestSliderCaptchaIsBoundToMobileAndDoesNotExposeTarget(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{}
+	service := newMobileAuthForTest(t, repository, &smsProviderFake{}, &identityProvisionerFake{})
+	challenge, err := service.CreateSliderCaptcha(context.Background(), "13800138000", SMSPurposeRegister)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if challenge.ID == uuid.Nil || challenge.ID != repository.sliderChallenge.ID || repository.sliderChallenge.Mobile != "+8613800138000" {
+		t.Fatalf("captcha binding mismatch: response=%#v stored=%#v", challenge, repository.sliderChallenge)
+	}
+	if len(challenge.BackgroundImage) < 100 || len(challenge.PieceImage) < 100 {
+		t.Fatal("captcha images were not generated")
+	}
+}
+
+func TestMobileAuthSendRejectsInvalidCaptchaBeforeProvider(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{captchaErr: ErrCaptchaInvalid}
+	sms := &smsProviderFake{}
+	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
+	_, err := service.Send(context.Background(), "pinvou.user", "13800138000", "Pinvou2026@", SMSPurposeRegister, uuid.New(), 0)
+	if !errors.Is(err, ErrCaptchaInvalid) {
+		t.Fatalf("expected invalid captcha, got %v", err)
+	}
+	if sms.sentChallenge != uuid.Nil {
+		t.Fatal("provider must not be called after failed slider verification")
 	}
 }
 
@@ -156,7 +215,7 @@ func TestMobileAuthSendMarksProviderFailureAndKeepsUnavailableClassification(t *
 	repository := &mobileAuthRepositoryFake{}
 	sms := &smsProviderFake{sendErr: errors.New("provider rejected request")}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	_, err := service.Send(context.Background(), "13800138000", SMSPurposeRegister)
+	_, err := service.Send(context.Background(), "pinvou.user", "13800138000", "Pinvou2026@", SMSPurposeRegister, uuid.New(), 128)
 	if !errors.Is(err, ErrSMSUnavailable) {
 		t.Fatalf("expected SMS_UNAVAILABLE classification, got %v", err)
 	}
@@ -169,7 +228,7 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{readyErr: ErrSMSInvalid}
 	sms := &smsProviderFake{verified: true}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	challenge, err := service.Send(context.Background(), "13800138000", SMSPurposeLogin)
+	challenge, err := service.Send(context.Background(), "", "13800138000", "", SMSPurposeLogin, uuid.New(), 128)
 	if err != nil || challenge.ID == uuid.Nil {
 		t.Fatalf("unknown account response must be indistinguishable: challenge=%#v err=%v", challenge, err)
 	}
@@ -181,6 +240,17 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 	}
 	if sms.verifyCalls != 0 {
 		t.Fatal("local challenge state must be checked before calling Aliyun")
+	}
+}
+
+func TestRegistrationPrecheckRejectsDuplicatesBeforeSMS(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{usernameExists: true}
+	service := newMobileAuthForTest(t, repository, &smsProviderFake{}, &identityProvisionerFake{})
+	if _, err := service.PrecheckRegistration(context.Background(), "pinvou.user", "13800138000", "Pinvou2026@"); !errors.Is(err, ErrUsernameAlreadyRegistered) {
+		t.Fatalf("expected duplicate username, got %v", err)
+	}
+	if repository.captchaConsumed {
+		t.Fatal("registration precheck must finish before captcha or SMS consumption")
 	}
 }
 

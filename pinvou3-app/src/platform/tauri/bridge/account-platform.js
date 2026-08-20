@@ -8,6 +8,8 @@
     return {
       session: function () { return invoke("account_platform_session"); },
       login: function (credentials) { return invoke("account_platform_login", { credentials: credentials }); },
+      createSliderCaptcha: function (input) { return invoke("account_platform_create_slider_captcha", { input: input }); },
+      precheckMobileRegistration: function (input) { return invoke("account_platform_precheck_mobile_registration", { input: input }); },
       sendSms: function (input) { return invoke("account_platform_send_sms", { input: input }); },
       registerMobile: function (input) { return invoke("account_platform_register_mobile", { input: input }); },
       loginSms: function (input) { return invoke("account_platform_login_sms", { input: input }); },

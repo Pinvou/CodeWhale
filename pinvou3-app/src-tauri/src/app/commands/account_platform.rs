@@ -2,7 +2,8 @@ use tauri::State;
 
 use crate::features::account_platform::{
     AccountPlatformState, ApiRequest, ApiResponse, LoginCredentials, MobileRegistration,
-    SMSLoginCredentials, SMSRequest, SessionStatus,
+    MobileRegistrationPrecheck, SMSLoginCredentials, SMSRequest, SessionStatus,
+    SliderCaptchaRequest,
 };
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID;
@@ -31,6 +32,22 @@ pub async fn account_platform_send_sms(
     state: State<'_, AccountPlatformState>,
 ) -> Result<serde_json::Value, String> {
     state.send_sms(input).await
+}
+
+#[tauri::command]
+pub async fn account_platform_create_slider_captcha(
+    input: SliderCaptchaRequest,
+    state: State<'_, AccountPlatformState>,
+) -> Result<serde_json::Value, String> {
+    state.create_slider_captcha(input).await
+}
+
+#[tauri::command]
+pub async fn account_platform_precheck_mobile_registration(
+    input: MobileRegistrationPrecheck,
+    state: State<'_, AccountPlatformState>,
+) -> Result<serde_json::Value, String> {
+    state.precheck_mobile_registration(input).await
 }
 
 #[tauri::command]

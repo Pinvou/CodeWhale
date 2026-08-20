@@ -180,8 +180,25 @@ pub struct LoginCredentials {
 
 #[derive(Debug, Deserialize)]
 pub struct SMSRequest {
+    pub username: String,
+    pub mobile: String,
+    pub password: String,
+    pub purpose: String,
+    pub captcha_id: String,
+    pub captcha_offset: u16,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SliderCaptchaRequest {
     pub mobile: String,
     pub purpose: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MobileRegistrationPrecheck {
+    pub username: String,
+    pub mobile: String,
+    pub password: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -359,7 +376,40 @@ impl AccountPlatformState {
             &config,
             "v1/auth/sms/challenges",
             serde_json::json!({
-                "mobile": input.mobile.trim(), "purpose": purpose,
+                "username": input.username.trim(), "mobile": input.mobile.trim(), "password": input.password,
+                "purpose": purpose, "captcha_id": input.captcha_id.trim(), "captcha_offset": input.captcha_offset,
+            }),
+        )
+        .await
+    }
+
+    pub async fn create_slider_captcha(
+        &self,
+        input: SliderCaptchaRequest,
+    ) -> Result<Value, String> {
+        let config = AccountPlatformConfig::from_env()?;
+        let purpose = input.purpose.trim().to_ascii_uppercase();
+        if purpose != "REGISTER" && purpose != "LOGIN" {
+            return Err("mobile_auth_request_invalid: invalid captcha purpose".to_string());
+        }
+        self.public_account_request(
+            &config,
+            "v1/auth/captcha/challenges",
+            serde_json::json!({"mobile": input.mobile.trim(), "purpose": purpose}),
+        )
+        .await
+    }
+
+    pub async fn precheck_mobile_registration(
+        &self,
+        input: MobileRegistrationPrecheck,
+    ) -> Result<Value, String> {
+        let config = AccountPlatformConfig::from_env()?;
+        self.public_account_request(
+            &config,
+            "v1/auth/registration/precheck",
+            serde_json::json!({
+                "username": input.username.trim(), "mobile": input.mobile.trim(), "password": input.password,
             }),
         )
         .await
@@ -736,7 +786,13 @@ impl AccountPlatformState {
                 .get("code")
                 .and_then(Value::as_str)
                 .unwrap_or("MOBILE_AUTH_FAILED");
-            return Err(format!("mobile_auth_failed: {code}"));
+            let retry_after = response
+                .body
+                .pointer("/details/retry_after_seconds")
+                .and_then(Value::as_u64)
+                .map(|seconds| format!(":{seconds}"))
+                .unwrap_or_default();
+            return Err(format!("mobile_auth_failed: {code}{retry_after}"));
         }
         Ok(response.body)
     }

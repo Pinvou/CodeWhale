@@ -17,6 +17,8 @@ var (
 	ErrMobileAlreadyRegistered   = errors.New("mobile number is already registered")
 	ErrUsernameInvalid           = errors.New("username is invalid")
 	ErrUsernameAlreadyRegistered = errors.New("username is already registered")
+	ErrPasswordInvalid           = errors.New("password is invalid")
+	ErrCaptchaInvalid            = errors.New("slider captcha is invalid")
 	ErrSMSRateLimited            = errors.New("SMS requests are rate limited")
 	ErrSMSInvalid                = errors.New("SMS challenge is invalid")
 	ErrSMSUnavailable            = errors.New("SMS service is unavailable")
@@ -35,6 +37,8 @@ type SMSChallenge struct {
 type MobileAuthRepository interface {
 	MobileExists(context.Context, string) (bool, error)
 	UsernameExists(context.Context, string) (bool, error)
+	CreateSliderCaptcha(context.Context, SliderCaptcha) error
+	ConsumeSliderCaptcha(context.Context, uuid.UUID, string, SMSPurpose, int) error
 	CreateSMSChallenge(context.Context, SMSChallenge) error
 	MarkSMSChallengeSent(context.Context, uuid.UUID, string) error
 	MarkSMSChallengeFailed(context.Context, uuid.UUID) error
@@ -42,6 +46,13 @@ type MobileAuthRepository interface {
 	ConsumeSMSChallenge(context.Context, uuid.UUID, string, SMSPurpose, bool) error
 	RegisterMobileIdentity(context.Context, string, string, string, string) (uuid.UUID, error)
 }
+
+type SMSRateLimitError struct {
+	RetryAfter time.Duration
+}
+
+func (e *SMSRateLimitError) Error() string { return ErrSMSRateLimited.Error() }
+func (e *SMSRateLimitError) Unwrap() error { return ErrSMSRateLimited }
 
 type MobileAuthService struct {
 	repository MobileAuthRepository
@@ -77,10 +88,50 @@ func NormalizeRegistrationUsername(value string) (string, error) {
 	return value, nil
 }
 
-func (s *MobileAuthService) Send(ctx context.Context, rawMobile string, purpose SMSPurpose) (SMSChallenge, error) {
+func (s *MobileAuthService) PrecheckRegistration(ctx context.Context, rawUsername, rawMobile, password string) (string, error) {
+	username, err := NormalizeRegistrationUsername(rawUsername)
+	if err != nil {
+		return "", err
+	}
+	mobile, err := NormalizeMainlandMobile(rawMobile)
+	if err != nil {
+		return "", err
+	}
+	if !validPassword(password) {
+		return "", ErrPasswordInvalid
+	}
+	usernameExists, err := s.repository.UsernameExists(ctx, username)
+	if err != nil {
+		return "", err
+	}
+	if usernameExists {
+		return "", ErrUsernameAlreadyRegistered
+	}
+	mobileExists, err := s.repository.MobileExists(ctx, mobile)
+	if err != nil {
+		return "", err
+	}
+	if mobileExists {
+		return "", ErrMobileAlreadyRegistered
+	}
+	return username, nil
+}
+
+func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, password string, purpose SMSPurpose, captchaID uuid.UUID, captchaOffset int) (SMSChallenge, error) {
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil || purpose != SMSPurposeRegister && purpose != SMSPurposeLogin {
 		return SMSChallenge{}, ErrMobileInvalid
+	}
+	if purpose == SMSPurposeRegister {
+		if _, err := s.PrecheckRegistration(ctx, rawUsername, mobile, password); err != nil {
+			return SMSChallenge{}, err
+		}
+	}
+	if captchaID == uuid.Nil || captchaOffset < 0 {
+		return SMSChallenge{}, ErrCaptchaInvalid
+	}
+	if err := s.repository.ConsumeSliderCaptcha(ctx, captchaID, mobile, purpose, captchaOffset); err != nil {
+		return SMSChallenge{}, err
 	}
 	exists, err := s.repository.MobileExists(ctx, mobile)
 	if err != nil {
@@ -115,8 +166,11 @@ func (s *MobileAuthService) Register(ctx context.Context, rawUsername, rawMobile
 		return uuid.Nil, err
 	}
 	mobile, err := NormalizeMainlandMobile(rawMobile)
-	if err != nil || !validPassword(password) {
-		return uuid.Nil, ErrSMSInvalid
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if !validPassword(password) {
+		return uuid.Nil, ErrPasswordInvalid
 	}
 	exists, err := s.repository.UsernameExists(ctx, username)
 	if err != nil {
@@ -169,6 +223,9 @@ func validPassword(password string) bool {
 	}
 	var letter, digit bool
 	for _, r := range password {
+		if r < '!' || r > '~' {
+			return false
+		}
 		letter = letter || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
 		digit = digit || r >= '0' && r <= '9'
 	}
@@ -193,24 +250,38 @@ func (r *PostgresRepository) CreateSMSChallenge(ctx context.Context, challenge S
 		return err
 	}
 	defer tx.Rollback(ctx)
-	lock := challenge.Mobile + ":" + string(challenge.Purpose)
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lock); err != nil {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, challenge.Mobile); err != nil {
 		return err
 	}
 	now := r.now()
 	var last *time.Time
+	var oldest *time.Time
 	var hourly int
-	if err := tx.QueryRow(ctx, `SELECT max(created_at),count(*) FILTER (WHERE created_at>$3) FROM sms_challenges WHERE mobile_e164=$1 AND purpose=$2`, challenge.Mobile, challenge.Purpose, now.Add(-time.Hour)).Scan(&last, &hourly); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT max(created_at) FILTER (WHERE status<>'FAILED'),min(created_at) FILTER (WHERE created_at>$2 AND status<>'FAILED'),count(*) FILTER (WHERE created_at>$2 AND status<>'FAILED') FROM sms_challenges WHERE mobile_e164=$1`, challenge.Mobile, now.Add(-time.Hour)).Scan(&last, &oldest, &hourly); err != nil {
 		return err
 	}
-	if last != nil && now.Sub(*last) < time.Minute || hourly >= 5 {
-		return ErrSMSRateLimited
+	if err := smsRateLimit(now, last, oldest, hourly); err != nil {
+		return err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO sms_challenges(id,mobile_e164,purpose,code_hash,status,expires_at,created_at,updated_at) VALUES($1,$2,$3,NULL,'CREATED',$4,$5,$5)`, challenge.ID, challenge.Mobile, challenge.Purpose, challenge.ExpiresAt, now)
 	if err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func smsRateLimit(now time.Time, last, oldest *time.Time, hourly int) error {
+	if last != nil && now.Sub(*last) < time.Minute {
+		return &SMSRateLimitError{RetryAfter: time.Minute - now.Sub(*last)}
+	}
+	if hourly >= 5 {
+		retryAfter := time.Hour
+		if oldest != nil {
+			retryAfter = max(time.Second, time.Hour-now.Sub(*oldest))
+		}
+		return &SMSRateLimitError{RetryAfter: retryAfter}
+	}
+	return nil
 }
 
 func (r *PostgresRepository) MarkSMSChallengeSent(ctx context.Context, id uuid.UUID, messageID string) error {

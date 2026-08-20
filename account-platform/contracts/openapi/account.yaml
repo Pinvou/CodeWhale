@@ -10,6 +10,64 @@ servers:
 security:
   - oidc: []
 paths:
+  /auth/registration/precheck:
+    post:
+      security: []
+      operationId: precheckMobileRegistration
+      summary: Validate username, mobile availability, and password policy before sending SMS
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, mobile, password]
+              properties:
+                username: { type: string, minLength: 3, maxLength: 32 }
+                mobile: { type: string }
+                password: { type: string, minLength: 8, maxLength: 128 }
+      responses:
+        "200":
+          description: Registration fields are valid and available
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /auth/captcha/challenges:
+    post:
+      security: []
+      operationId: createSliderCaptcha
+      summary: Create a mobile- and purpose-bound slider challenge
+      responses:
+        "201":
+          description: Slider challenge with PNG background and puzzle piece
+        "400":
+          $ref: "#/components/responses/Error"
+  /auth/sms/challenges:
+    post:
+      security: []
+      operationId: sendSMSChallenge
+      summary: Send an SMS after registration precheck and slider verification
+      responses:
+        "202":
+          description: SMS challenge accepted; retry_after_seconds is at least 60
+        "400":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+  /auth/register:
+    post:
+      security: []
+      operationId: registerMobile
+      summary: Register a mobile identity after provider-side SMS verification
+      responses:
+        "201":
+          description: Account provisioning started
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
   /account/bootstrap:
     post:
       operationId: bootstrapAccount

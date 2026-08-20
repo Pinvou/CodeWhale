@@ -227,6 +227,11 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   assert.match(popover, /'password', 'sms', 'register'/);
   assert.match(popover, /copy\.registrationUsername/);
   assert.match(popover, /client\.registerMobile\(account\.trim\(\), mobile\.trim\(\)/);
+  assert.match(popover, /client\.precheckMobileRegistration\(account\.trim\(\), mobile\.trim\(\), password\)/);
+  assert.match(popover, /client\.createSliderCaptcha\(mobile\.trim\(\)/);
+  assert.match(popover, /<SliderCaptcha/);
+  assert.match(popover, /setSmsCooldown\(Math\.max\(1, Number\(result\.retry_after_seconds \|\| 60\)\)\)/);
+  assert.match(popover, /smsCooldown > 0 \? copy\.resendCountdown\(smsCooldown\)/);
   assert.match(popover, /autoComplete=\{loginMode === 'register' \? 'new-password' : 'current-password'\}/);
   assert.match(popover, /await client\.loginSms\(mobile\.trim\(\), smsChallenge, smsCode\.trim\(\)\)/);
   assert.match(popover, /await client\.registerMobile/);
