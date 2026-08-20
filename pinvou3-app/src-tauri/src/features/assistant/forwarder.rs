@@ -7,6 +7,14 @@
 
 use super::*;
 
+fn behavior_task_status(status: TurnOutcomeStatus, error: Option<&str>) -> &'static str {
+    match status {
+        TurnOutcomeStatus::Completed if error.is_none() => "success",
+        TurnOutcomeStatus::Interrupted => "interrupted",
+        _ => "failed",
+    }
+}
+
 /// 后台 task：持续读 rx_event 转 Tauri emit。
 ///
 /// 关键点：监听 `Event::ApprovalRequired` 并主动 `approve_tool_call`。
@@ -89,6 +97,18 @@ pub(crate) fn spawn_event_forwarder(
                     active_transcript_seen = false;
                     chat_persistence_error = None;
                     current_turn_id = Some(turn_id.clone());
+                    crate::features::behavior_telemetry::track(
+                        &app,
+                        crate::features::behavior_telemetry::BehaviorEvent::new("task_started")
+                            .session(&session_id)
+                            .turn(&turn_id),
+                    );
+                    crate::features::behavior_telemetry::track_model_used(
+                        &app,
+                        &session_id,
+                        &turn_id,
+                        &bridge,
+                    );
                     if let Err(error) = turn_shell_tasks.bind_or_prepare_turn(&turn_id).await {
                         log::error!(
                             "[pinvou3][chat] failed to bind shell task scope sid={} turn={}: {error:#}",
@@ -885,6 +905,20 @@ pub(crate) fn spawn_event_forwarder(
                             });
                         }
                     }
+                    if let Some(turn_id) = current_turn_id.as_deref() {
+                        crate::features::behavior_telemetry::track(
+                            &app,
+                            crate::features::behavior_telemetry::BehaviorEvent::new(
+                                "task_finished",
+                            )
+                            .session(&session_id)
+                            .turn(turn_id)
+                            .status(behavior_task_status(
+                                terminal_status,
+                                terminal_error.as_deref(),
+                            )),
+                        );
+                    }
                     maybe_notify_task_completed(
                         &app,
                         &store,
@@ -1012,6 +1046,13 @@ pub(crate) fn spawn_event_forwarder(
             Some(EmittedTerminal {
                 turn_id: Some(turn_id),
             }) => {
+                crate::features::behavior_telemetry::track(
+                    &app,
+                    crate::features::behavior_telemetry::BehaviorEvent::new("task_finished")
+                        .session(&session_id)
+                        .turn(&turn_id)
+                        .status("failed"),
+                );
                 let _ = turn_events.send(EngineTurnSignal::Terminal {
                     turn_id,
                     status: TurnOutcomeStatus::Failed,
