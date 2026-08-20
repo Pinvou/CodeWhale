@@ -317,6 +317,8 @@ test('admin console exposes organizations and users as independent primary tabs'
   assert.doesNotMatch(view, /section === 'accounts'/);
   assert.doesNotMatch(i18n, /账号与组织/);
   assert.match(i18n, /organizations:'组织', users:'用户'/);
+  assert.match(view, /key:'username', label:copy\.username/);
+  assert.match(i18n, /username:'用户名'/);
 });
 
 test('personal center keeps context on overview and cannot create organizations', async () => {

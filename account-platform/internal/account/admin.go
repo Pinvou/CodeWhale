@@ -29,6 +29,7 @@ type AdminOverview struct {
 
 type AdminUser struct {
 	ID                uuid.UUID  `json:"user_id"`
+	Username          *string    `json:"username,omitempty"`
 	DisplayName       *string    `json:"display_name,omitempty"`
 	Email             *string    `json:"email,omitempty"`
 	Status            string     `json:"status"`
@@ -600,12 +601,12 @@ SELECT
 func (r *PostgresRepository) AdminUsers(ctx context.Context, search string, limit int) ([]AdminUser, error) {
 	pattern := "%" + strings.ToLower(search) + "%"
 	rows, err := r.pool.Query(ctx, `
-SELECT u.id,u.display_name,u.email,u.status,
+SELECT u.id,u.username,u.display_name,u.email,u.status,
        (SELECT count(*) FROM memberships m WHERE m.user_id=u.id AND m.status='ACTIVE'),
        (SELECT max(s.last_seen_at) FROM user_sessions s WHERE s.user_id=u.id),
        u.created_at,u.updated_at
 FROM users u
-WHERE u.status<>'DELETED' AND ($1='' OR lower(COALESCE(u.display_name,'')) LIKE $2 OR lower(COALESCE(u.email,'')) LIKE $2 OR u.id::text=$1)
+WHERE u.status<>'DELETED' AND ($1='' OR lower(COALESCE(u.username,'')) LIKE $2 OR lower(COALESCE(u.display_name,'')) LIKE $2 OR lower(COALESCE(u.email,'')) LIKE $2 OR u.id::text=$1)
 ORDER BY u.updated_at DESC,u.id LIMIT $3`, strings.ToLower(search), pattern, limit)
 	if err != nil {
 		return nil, err
@@ -614,7 +615,7 @@ ORDER BY u.updated_at DESC,u.id LIMIT $3`, strings.ToLower(search), pattern, lim
 	items := make([]AdminUser, 0)
 	for rows.Next() {
 		var item AdminUser
-		if err := rows.Scan(&item.ID, &item.DisplayName, &item.Email, &item.Status, &item.OrganizationCount, &item.LastSeenAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Username, &item.DisplayName, &item.Email, &item.Status, &item.OrganizationCount, &item.LastSeenAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
