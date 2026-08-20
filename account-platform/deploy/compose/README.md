@@ -36,6 +36,8 @@ docker compose --env-file account-platform/deploy/compose/.env \
   sh /opt/keycloak/data/import/provision-mobile-auth.sh
 ```
 
+该脚本还会将 Keycloak 用户资料规则调整为适配手机注册：邮箱、姓、名保持可选，手机号及其验证状态仅允许账号服务写入。脚本可重复执行，并会同步更新既有 Realm，避免新账号已创建却因资料不完整而无法在应用内登录。
+
 注册短信由阿里云发送；注册成功后 Account Service 会在后台为同一手机号创建或确认商城用户。商城用户同步完成前，充值接口保持关闭。支付订单和二维码完全以商城返回值为准，客户端不会自行生成二维码；商城返回 `PAID` 后 Billing 才会把积分记入钱包。
 
 当前商城合同没有关闭订单、退款、支付回调和对账单接口，因此这些能力不会伪造：订单关闭跟随商城的 `PAY_CLOSED`，退款和渠道账单会明确返回“供应商能力不可用”。上线退款前需补充商城退款合同。

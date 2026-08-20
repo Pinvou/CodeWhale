@@ -58,6 +58,100 @@ execution_id=$("$KCADM" get "authentication/flows/$FLOW/executions" -r "$REALM" 
   -s requirement=REQUIRED -n >/dev/null
 "$KCADM" update "realms/$REALM" -s "directGrantFlow=$FLOW" -s registrationAllowed=false >/dev/null
 
+# Mobile-only accounts do not have email or legal-name fields at registration
+# time. Keep those standard attributes available for later profile editing, but
+# do not let Keycloak's VERIFY_PROFILE trigger block password or SMS grants.
+# Phone attributes are managed by the account service and remain read-only to
+# the end user.
+"$KCADM" update users/profile -r "$REALM" -f - >/dev/null <<'PINVOU_MOBILE_USER_PROFILE'
+{
+  "unmanagedAttributePolicy": "DISABLED",
+  "attributes": [
+    {
+      "name": "username",
+      "displayName": "${username}",
+      "validations": {
+        "length": { "min": 3, "max": 255 },
+        "username-prohibited-characters": {},
+        "up-username-not-idn-homograph": {}
+      },
+      "permissions": {
+        "view": [ "admin", "user" ],
+        "edit": [ "admin", "user" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "email",
+      "displayName": "${email}",
+      "validations": {
+        "email": {},
+        "length": { "max": 255 }
+      },
+      "permissions": {
+        "view": [ "admin", "user" ],
+        "edit": [ "admin", "user" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "firstName",
+      "displayName": "${firstName}",
+      "validations": {
+        "length": { "max": 255 },
+        "person-name-prohibited-characters": {}
+      },
+      "permissions": {
+        "view": [ "admin", "user" ],
+        "edit": [ "admin", "user" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "lastName",
+      "displayName": "${lastName}",
+      "validations": {
+        "length": { "max": 255 },
+        "person-name-prohibited-characters": {}
+      },
+      "permissions": {
+        "view": [ "admin", "user" ],
+        "edit": [ "admin", "user" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "phone_number",
+      "displayName": "Phone number",
+      "validations": {
+        "length": { "max": 16 }
+      },
+      "permissions": {
+        "view": [ "admin", "user" ],
+        "edit": [ "admin" ]
+      },
+      "multivalued": false
+    },
+    {
+      "name": "phone_number_verified",
+      "displayName": "Phone number verified",
+      "permissions": {
+        "view": [ "admin", "user" ],
+        "edit": [ "admin" ]
+      },
+      "multivalued": false
+    }
+  ],
+  "groups": [
+    {
+      "name": "user-metadata",
+      "displayHeader": "User metadata",
+      "displayDescription": "Attributes which refer to user metadata"
+    }
+  ]
+}
+PINVOU_MOBILE_USER_PROFILE
+
 desktop_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$DESKTOP_CLIENT" --fields id,clientId --format csv --noquotes | find_id_by_name "$DESKTOP_CLIENT")
 for spec in 'pinvou-phone-number|phone_number|String' 'pinvou-phone-number-verified|phone_number_verified|boolean'; do
   name=${spec%%|*}; rest=${spec#*|}; attribute=${rest%%|*}; json_type=${rest##*|}

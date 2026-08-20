@@ -235,6 +235,9 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   assert.match(popover, /autoComplete=\{loginMode === 'register' \? 'new-password' : 'current-password'\}/);
   assert.match(popover, /await client\.loginSms\(mobile\.trim\(\), smsChallenge, smsCode\.trim\(\)\)/);
   assert.match(popover, /await client\.registerMobile/);
+  assert.match(popover, /try \{\s*await client\.login\(registeredUsername, password\);\s*\} catch \{/);
+  assert.match(popover, /setError\(copy\.registrationCompletedLoginFailed\)/);
+  assert.match(popover, /setLoginMode\('password'\)/);
   assert.match(bridge, /invoke\("account_platform_login", \{ credentials: credentials \}\)/);
   assert.doesNotMatch(backend, /open_target|authorization_request|TcpListener/);
 });

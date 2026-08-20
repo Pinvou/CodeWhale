@@ -449,7 +449,20 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       if (loginMode === 'sms') await client.loginSms(mobile.trim(), smsChallenge, smsCode.trim());
       else if (loginMode === 'register') {
         const registration = await client.registerMobile(account.trim(), mobile.trim(), smsChallenge, smsCode.trim(), password);
-        await client.login(registration?.username || account.trim(), password);
+        const registeredUsername = registration?.username || account.trim();
+        try {
+          await client.login(registeredUsername, password);
+        } catch {
+          setAccount(registeredUsername);
+          setLoginMode('password');
+          setPassword('');
+          setAuth('guest');
+          resetSMSVerification();
+          setRegistrationCheck('idle');
+          setError(copy.registrationCompletedLoginFailed);
+          setBusy(false);
+          return;
+        }
       } else await client.login(account.trim().replace(/^\+?86(?=1\d{10}$)/, ''), password);
       setPassword('');
       await loadAccount();

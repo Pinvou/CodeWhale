@@ -228,6 +228,7 @@ struct TokenResponse {
 #[derive(Debug, Deserialize)]
 struct OAuthErrorResponse {
     error: Option<String>,
+    error_description: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -596,12 +597,15 @@ impl AccountPlatformState {
             .map_err(|error| format!("oidc_token_endpoint_unavailable: {error}"))?;
         let status = response.status();
         if !status.is_success() {
-            let oauth_error = response
-                .json::<OAuthErrorResponse>()
-                .await
-                .ok()
-                .and_then(|body| body.error);
-            return Err(classify_token_error(flow, status, oauth_error.as_deref()));
+            let oauth_error = response.json::<OAuthErrorResponse>().await.ok();
+            return Err(classify_token_error(
+                flow,
+                status,
+                oauth_error.as_ref().and_then(|body| body.error.as_deref()),
+                oauth_error
+                    .as_ref()
+                    .and_then(|body| body.error_description.as_deref()),
+            ));
         }
         response
             .json::<TokenResponse>()
@@ -810,7 +814,23 @@ fn validate_token_response(tokens: TokenResponse) -> Result<TokenResponse, Strin
     Ok(tokens)
 }
 
-fn classify_token_error(flow: TokenFlow, status: StatusCode, oauth_error: Option<&str>) -> String {
+fn classify_token_error(
+    flow: TokenFlow,
+    status: StatusCode,
+    oauth_error: Option<&str>,
+    oauth_description: Option<&str>,
+) -> String {
+    let account_setup_incomplete = oauth_error == Some("invalid_grant")
+        && matches!(flow, TokenFlow::Password | TokenFlow::Sms)
+        && oauth_description.is_some_and(|description| {
+            let description = description.to_ascii_lowercase();
+            description.contains("account is not fully set up")
+                || description.contains("resolve_required_actions")
+        });
+    if account_setup_incomplete {
+        return "oidc_account_setup_incomplete: account profile requires administrator attention"
+            .to_string();
+    }
     match (flow, oauth_error) {
         (TokenFlow::Password, Some("invalid_grant")) => {
             "oidc_credentials_invalid: account or password is incorrect".to_string()
@@ -841,6 +861,7 @@ fn session_error_code(error: &str) -> &'static str {
         "oidc_token_response_invalid" => "oidc_token_response_invalid",
         "oidc_token_exchange_failed" => "oidc_token_exchange_failed",
         "oidc_direct_grant_disabled" => "oidc_direct_grant_disabled",
+        "oidc_account_setup_incomplete" => "oidc_account_setup_incomplete",
         _ => "authentication_required",
     }
 }
@@ -1096,21 +1117,31 @@ mod tests {
         assert!(classify_token_error(
             TokenFlow::Password,
             StatusCode::BAD_REQUEST,
-            Some("invalid_grant")
+            Some("invalid_grant"),
+            None,
         )
         .starts_with("oidc_credentials_invalid:"));
         assert!(classify_token_error(
             TokenFlow::Password,
             StatusCode::UNAUTHORIZED,
-            Some("unauthorized_client")
+            Some("unauthorized_client"),
+            None,
         )
         .starts_with("oidc_direct_grant_disabled:"));
         assert!(classify_token_error(
             TokenFlow::Refresh,
             StatusCode::BAD_REQUEST,
-            Some("invalid_grant")
+            Some("invalid_grant"),
+            None,
         )
         .starts_with("authentication_required:"));
+        assert!(classify_token_error(
+            TokenFlow::Password,
+            StatusCode::BAD_REQUEST,
+            Some("invalid_grant"),
+            Some("Account is not fully set up"),
+        )
+        .starts_with("oidc_account_setup_incomplete:"));
     }
 
     #[test]

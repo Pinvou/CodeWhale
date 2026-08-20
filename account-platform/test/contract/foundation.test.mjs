@@ -150,6 +150,20 @@ test('mobile authentication provisioning works in the minimal Keycloak image', a
   assert.doesNotMatch(provisioning, /\bawk\b/);
   assert.match(provisioning, /authentication\/flows\/\$FLOW\/executions/);
   assert.match(provisioning, /-s requirement=REQUIRED -n/);
+  assert.match(provisioning, /update users\/profile -r "\$REALM" -f -/);
+  const profileSource = provisioning.match(/<<'PINVOU_MOBILE_USER_PROFILE'\r?\n([\s\S]*?)\r?\nPINVOU_MOBILE_USER_PROFILE/)?.[1];
+  assert.ok(profileSource, 'mobile user profile JSON must be embedded in the idempotent provisioning script');
+  const profile = JSON.parse(profileSource);
+  assert.equal(profile.unmanagedAttributePolicy, 'DISABLED');
+  for (const name of ['email', 'firstName', 'lastName']) {
+    const attribute = profile.attributes.find((candidate) => candidate.name === name);
+    assert.ok(attribute, `${name} must remain available as an optional profile field`);
+    assert.equal(attribute.required, undefined, `${name} must not block mobile-only login`);
+  }
+  for (const name of ['phone_number', 'phone_number_verified']) {
+    const attribute = profile.attributes.find((candidate) => candidate.name === name);
+    assert.deepEqual(attribute.permissions.edit, ['admin'], `${name} must be managed by the account service`);
+  }
 });
 
 test('remote Keycloak administration is available only through a controlled local channel', async () => {
