@@ -68,7 +68,7 @@ use crate::tools::user_input::{UserInputRequest, UserInputResponse};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
 use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
-use crate::worker_profile::{ModelRoute, WorkerRuntimeProfile};
+use crate::worker_profile::{ModelRoute, ShellPolicy, WorkerRuntimeProfile};
 use crate::working_set::WorkingSet;
 
 #[cfg(test)]
@@ -617,8 +617,8 @@ pub struct Engine {
     config: EngineConfig,
     active_turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
     /// Remains latched until the next message is dequeued, so queued control
-    /// operations cannot gain authority merely because a restricted turn
-    /// reached its terminal event.
+    /// operations and automatic runtime wakes cannot gain authority merely
+    /// because a restricted turn reached its terminal event.
     control_plane_restricted: bool,
     api_config: Config,
     /// Runtime-host authority consulted only when constructing a later turn
@@ -1921,12 +1921,20 @@ impl Engine {
                 .map(|op| EngineRunInput::Operation(Box::new(op)))
         } else {
             loop {
-                let shell_wake_armed = !host_managed_turns && self.idle_shell_wake_armed();
+                // A per-message restriction is removed from
+                // `active_turn_tool_security` after the turn returns, while
+                // this latch deliberately remains set. Keep runtime-produced
+                // follow-ups queued until a new explicit SendMessage installs
+                // its own authority; otherwise an old child/shell completion
+                // can start a normal unrestricted turn behind the host's back.
+                let automatic_followups_allowed =
+                    !host_managed_turns && !self.control_plane_restricted;
+                let shell_wake_armed = automatic_followups_allowed && self.idle_shell_wake_armed();
                 tokio::select! {
                     op = self.rx_op.recv() => {
                         return op.map(|op| EngineRunInput::Operation(Box::new(op)));
                     }
-                    completion = self.rx_subagent_completion.recv(), if !host_managed_turns => {
+                    completion = self.rx_subagent_completion.recv(), if automatic_followups_allowed => {
                         return completion.map(EngineRunInput::SubAgentCompletion);
                     }
                     // Background shells have no completion channel, so an
@@ -2154,6 +2162,14 @@ impl Engine {
                         // continuation while the latch is set instead of relying
                         // on the exact allowlist not containing goal tools.
                         if self.control_plane_restricted {
+                            // Consume a matching engine-owned token as well as
+                            // rejecting it. Leaving its schedule marker latched
+                            // would make `next_run_input` wait forever for a
+                            // token that was already dequeued.
+                            let _ = self.take_scheduled_goal_continuation(
+                                engine_schedule_id,
+                                dynamic_tools,
+                            );
                             let _ = self
                                 .tx_event
                                 .send(Event::error(ErrorEnvelope::fatal(
@@ -2736,6 +2752,22 @@ impl Engine {
                         self.handle_purge().await;
                     }
                     Op::EditLastTurn { new_message } => {
+                        // `/edit` removes transcript state and immediately
+                        // starts another model turn without carrying a new
+                        // TurnToolSecurityPolicy. Treat it like every other
+                        // implicit continuation while the restricted latch is
+                        // set; a fresh SendMessage is the only operation that
+                        // may install replacement authority.
+                        if self.control_plane_restricted {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot edit and replay the last turn"
+                                        .to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         let route = match self.current_runtime_route() {
                             Ok(route) => route,
                             Err(err) => {
@@ -5032,6 +5064,21 @@ impl Engine {
             .map(|_| ToolError::permission_denied("Tool blocked by host turn policy".to_string()))
     }
 
+    /// Apply host read-only hardening to the shell policy resolved from the
+    /// ordinary mode/permission posture. `None` remains `None`; any full shell
+    /// surface is narrowed to the existing direct-argv read-only boundary.
+    fn effective_turn_shell_policy(&self, policy: ShellPolicy) -> ShellPolicy {
+        if self
+            .active_turn_tool_security
+            .as_ref()
+            .is_some_and(|security| security.requires_read_only_dispatch())
+        {
+            policy.min_with(ShellPolicy::ReadOnly)
+        } else {
+            policy
+        }
+    }
+
     fn build_tool_context(&self, mode: AppMode, auto_approve: bool) -> ToolContext {
         let authority = TurnAuthority::from_effective_fields(
             mode,
@@ -5075,7 +5122,7 @@ impl Engine {
         );
         context.trust_mode = authority.trust_mode;
         context.auto_approve = authority.auto_approve;
-        context.set_shell_policy(authority.shell_policy());
+        context.set_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()));
         context.elevated_sandbox_policy = Some(authority.sandbox_policy(
             &self.session.workspace,
             self.api_config.sandbox_mode.as_deref(),
@@ -5145,7 +5192,7 @@ impl Engine {
             self.session.messages.clone().into(),
         ))
         .with_cancel_token(self.cancel_token.clone())
-        .with_shell_policy(authority.shell_policy())
+        .with_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()))
         .with_trusted_external_paths(trusted_external_paths)
         .with_follow_symlinks(self.config.workspace_follow_symlinks);
 

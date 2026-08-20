@@ -4389,10 +4389,10 @@ async fn forkguard_queued_control_op_keeps_restricted_turn_authority() {
     run.await.expect("engine task");
 }
 
-/// Restricted turns must also gate goal self-continuation and MCP reload:
+/// Restricted turns must also gate goal self-continuation, edit replay, and MCP reload:
 /// ContinueGoal does not install the per-op turn security policy, so a queued
-/// continuation would otherwise run the next turn with full authority, and a
-/// queued ReloadMcp would spawn external processes while restricted.
+/// continuation or edit would otherwise run the next turn with full authority,
+/// and a queued ReloadMcp would spawn external processes while restricted.
 #[tokio::test]
 async fn forkguard_queued_goal_continuation_and_mcp_reload_keeps_restricted_turn_authority() {
     use crate::llm_client::mock::{MockLlmClient, canned};
@@ -4403,7 +4403,7 @@ async fn forkguard_queued_goal_continuation_and_mcp_reload_keeps_restricted_turn
         "restricted turn complete",
     )]));
     let client: crate::core::model_client::SharedModelClient = mock;
-    let (engine, handle) = Engine::new_with_model_client(
+    let (mut engine, handle) = Engine::new_with_model_client(
         deterministic_engine_config(workspace.path()),
         &config,
         client,
@@ -4413,13 +4413,7 @@ async fn forkguard_queued_goal_continuation_and_mcp_reload_keeps_restricted_turn
         .send(restricted_user_message_op("evaluate", &config))
         .await
         .expect("queue restricted turn");
-    handle
-        .send(Op::ContinueGoal {
-            dynamic_tools: Vec::new(),
-            engine_schedule_id: None,
-        })
-        .await
-        .expect("queue goal continuation behind restricted turn");
+    engine.schedule_goal_continuation(Vec::new());
     let (reload_tx, mut reload_rx) = tokio::sync::oneshot::channel();
     handle
         .send(Op::ReloadMcp {
@@ -4428,10 +4422,17 @@ async fn forkguard_queued_goal_continuation_and_mcp_reload_keeps_restricted_turn
         })
         .await
         .expect("queue MCP reload behind restricted turn");
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "must-not-replay".to_string(),
+        })
+        .await
+        .expect("queue edit behind restricted turn");
 
     let run = tokio::spawn(engine.run());
     let mut saw_goal_denial = false;
     let mut saw_reload_denial = false;
+    let mut saw_edit_denial = false;
     let mut reload_result = None;
     let mut turn_started_count = 0usize;
     let mut rx = handle.rx_event.write().await;
@@ -4441,7 +4442,10 @@ async fn forkguard_queued_goal_continuation_and_mcp_reload_keeps_restricted_turn
                 saw_goal_denial |= envelope
                     .message
                     .contains("Restricted turns cannot continue scheduled goals");
-                if saw_goal_denial && saw_reload_denial {
+                saw_edit_denial |= envelope
+                    .message
+                    .contains("Restricted turns cannot edit and replay the last turn");
+                if saw_goal_denial && saw_reload_denial && saw_edit_denial {
                     break;
                 }
             }
@@ -4462,7 +4466,7 @@ async fn forkguard_queued_goal_continuation_and_mcp_reload_keeps_restricted_turn
                     message.contains("Restricted turns cannot reload MCP pools")
                 });
                 reload_result = Some(result);
-                if saw_goal_denial && saw_reload_denial {
+                if saw_goal_denial && saw_reload_denial && saw_edit_denial {
                     break;
                 }
             }
@@ -4475,6 +4479,102 @@ async fn forkguard_queued_goal_continuation_and_mcp_reload_keeps_restricted_turn
         "queued MCP reload was not denied: {:?}",
         reload_result
     );
+    assert!(saw_edit_denial, "queued edit replay was not denied");
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_restricted_turn_defers_idle_subagent_completion_until_new_message() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let workspace = tempdir().expect("workspace");
+    let config = Config::default();
+    let mock = Arc::new(MockLlmClient::new(vec![
+        canned::simple_text_turn("restricted turn complete"),
+        canned::simple_text_turn("explicit turn complete"),
+    ]));
+    let client: crate::core::model_client::SharedModelClient = mock.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &config,
+        client,
+    );
+    let completion_tx = engine.tx_subagent_completion.clone();
+
+    handle
+        .send(restricted_user_message_op("evaluate", &config))
+        .await
+        .expect("queue restricted turn");
+    let run = tokio::spawn(engine.run());
+
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("restricted turn event timeout")
+            .expect("engine event channel");
+        if matches!(event, Event::TurnComplete { .. }) {
+            break;
+        }
+    }
+    drop(rx);
+
+    completion_tx
+        .send(SubAgentCompletion {
+            agent_id: "preexisting-child".to_string(),
+            payload: "completion after restricted turn".to_string(),
+        })
+        .expect("queue idle completion");
+
+    let mut rx = handle.rx_event.write().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        assert!(
+            !matches!(event, Event::TurnStarted { .. }),
+            "idle completion started a new turn without replacement authority"
+        );
+    }
+    drop(rx);
+    assert_eq!(
+        mock.captured_requests().len(),
+        1,
+        "idle completion must remain queued behind the restricted latch"
+    );
+
+    handle
+        .send(external_user_message_op(
+            "resume explicitly",
+            AppMode::Agent,
+            &config,
+        ))
+        .await
+        .expect("queue replacement-authority turn");
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("replacement turn event timeout")
+            .expect("engine event channel");
+        if matches!(event, Event::TurnComplete { .. }) {
+            break;
+        }
+    }
+    drop(rx);
+
+    let requests = mock.captured_requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "explicit message must start the next turn"
+    );
+    let second_request = serde_json::to_string(&requests[1]).expect("serialize second request");
+    assert!(
+        second_request.contains("completion after restricted turn"),
+        "the deferred completion must be delivered once replacement authority arrives"
+    );
+
     handle.send(Op::Shutdown).await.expect("shutdown engine");
     run.await.expect("engine task");
 }
@@ -10293,6 +10393,53 @@ fn forkguard_restricted_agent_uses_read_only_file_schema() {
         actions,
         vec!["read", "list", "search_name", "search_content"]
     );
+}
+
+#[test]
+fn forkguard_restricted_agent_uses_hardened_read_only_shell_context() {
+    let engine_config = EngineConfig {
+        turn_tool_security: Some(Arc::new(
+            TurnToolSecurityPolicy::new(
+                Some(Vec::new()),
+                Some(ExactToolDispatchPolicy::try_new(vec!["Bash".to_string()]).unwrap()),
+            )
+            .with_read_only_dispatch(),
+        )),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(engine_config, &Config::default());
+    engine.session.allow_shell = true;
+    let registry = engine
+        .build_turn_tool_registry_builder(
+            AppMode::Agent,
+            engine.config.todos.clone(),
+            engine.config.plan_state.clone(),
+        )
+        .build(engine.build_tool_context(AppMode::Agent, false));
+
+    assert_eq!(
+        registry.context().shell_policy,
+        crate::worker_profile::ShellPolicy::ReadOnly,
+        "the start-of-turn context must activate direct-argv shell hardening"
+    );
+    assert_eq!(
+        engine
+            .live_tool_context(Some(&registry))
+            .expect("live tool context")
+            .shell_policy,
+        crate::worker_profile::ShellPolicy::ReadOnly,
+        "live posture projection must not restore full shell authority"
+    );
+
+    let bash = registry.get("Bash").expect("restricted Bash tool");
+    let schema = bash.input_schema();
+    assert_eq!(
+        schema["properties"]["action"]["enum"],
+        json!(["run"]),
+        "restricted Bash must expose only the foreground run action"
+    );
+    assert!(schema["properties"].get("background").is_none());
+    assert!(bash.is_read_only_for(&json!({"command": "git status"})));
 }
 
 /// Plan mode toggle must not change the byte representation of the tool
@@ -16703,6 +16850,74 @@ async fn idle_engine_wakes_for_finished_background_shell_only_while_goal_active(
     assert!(
         engine.has_scheduled_goal_continuation(),
         "the wake must queue a goal continuation that will claim the evidence"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_restricted_turn_defers_idle_shell_wake_until_new_message() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let config = EngineConfig {
+        snapshots_enabled: false,
+        terminal_chrome_enabled: false,
+        workspace: tmp.path().to_path_buf(),
+        ..Default::default()
+    };
+    let (mut engine, _handle) = Engine::new(config, &Config::default());
+
+    {
+        let mut shell = engine.shell_manager.lock().expect("shell manager");
+        shell
+            .execute_with_options_env_for_owner(
+                "echo restricted-shell-wake-done",
+                None,
+                30_000,
+                true,
+                None,
+                false,
+                None,
+                std::collections::HashMap::new(),
+                None,
+            )
+            .expect("start background job");
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let done = {
+            let mut shell = engine.shell_manager.lock().expect("shell manager");
+            shell.has_finished_unreported_jobs()
+        };
+        if done {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background job never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    engine.control_plane_restricted = true;
+    engine
+        .tx_op
+        .try_send(Op::Shutdown)
+        .expect("queue explicit control operation");
+    let input = tokio::time::timeout(Duration::from_secs(1), engine.next_run_input(false))
+        .await
+        .expect("queued operation should wake the engine")
+        .expect("engine input");
+    assert!(
+        matches!(input, EngineRunInput::Operation(op) if matches!(*op, Op::Shutdown)),
+        "restricted latch must keep the shell wake queued behind explicit operations"
+    );
+
+    engine.control_plane_restricted = false;
+    let input = tokio::time::timeout(Duration::from_secs(10), engine.next_run_input(false))
+        .await
+        .expect("released latch should deliver the deferred shell wake")
+        .expect("engine input");
+    assert!(
+        matches!(input, EngineRunInput::ShellCompletionWake),
+        "deferred shell wake must remain available after replacement authority"
     );
 }
 
