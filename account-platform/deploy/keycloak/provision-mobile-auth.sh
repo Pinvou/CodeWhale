@@ -65,7 +65,6 @@ execution_id=$("$KCADM" get "authentication/flows/$FLOW/executions" -r "$REALM" 
 # the end user.
 "$KCADM" update users/profile -r "$REALM" -f - >/dev/null <<'PINVOU_MOBILE_USER_PROFILE'
 {
-  "unmanagedAttributePolicy": "DISABLED",
   "attributes": [
     {
       "name": "username",

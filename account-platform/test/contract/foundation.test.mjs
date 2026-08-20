@@ -154,7 +154,6 @@ test('mobile authentication provisioning works in the minimal Keycloak image', a
   const profileSource = provisioning.match(/<<'PINVOU_MOBILE_USER_PROFILE'\r?\n([\s\S]*?)\r?\nPINVOU_MOBILE_USER_PROFILE/)?.[1];
   assert.ok(profileSource, 'mobile user profile JSON must be embedded in the idempotent provisioning script');
   const profile = JSON.parse(profileSource);
-  assert.equal(profile.unmanagedAttributePolicy, 'DISABLED');
   for (const name of ['email', 'firstName', 'lastName']) {
     const attribute = profile.attributes.find((candidate) => candidate.name === name);
     assert.ok(attribute, `${name} must remain available as an optional profile field`);
