@@ -145,6 +145,13 @@ test('Keycloak development client enables password login without enabling implic
   assert.doesNotMatch(provisioning, /PINVOU_ADMIN_PASSWORD=['"][^$]/);
 });
 
+test('mobile authentication provisioning works in the minimal Keycloak image', async () => {
+  const provisioning = await readFile(path.join(root, 'deploy/keycloak/provision-mobile-auth.sh'), 'utf8');
+  assert.doesNotMatch(provisioning, /\bawk\b/);
+  assert.match(provisioning, /authentication\/flows\/\$FLOW\/executions/);
+  assert.match(provisioning, /-s requirement=REQUIRED -n/);
+});
+
 test('remote Keycloak administration is available only through a controlled local channel', async () => {
   const proxy = await readFile(path.join(root, 'deploy/nginx/account-platform.conf.template'), 'utf8');
   const remoteCompose = await readFile(path.join(root, 'deploy/compose/compose.remote.yaml'), 'utf8');

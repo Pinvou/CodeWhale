@@ -14,10 +14,20 @@ PROVISIONER_CLIENT=${KEYCLOAK_PROVISIONER_CLIENT_ID:-pinvou-account-provisioner}
 FLOW=pinvou-mobile-direct-grant
 PROVIDER=pinvou-mobile-direct-grant
 
+find_id_by_name() {
+  wanted=$1
+  while IFS=, read -r id name _rest; do
+    if [ "$name" = "$wanted" ]; then
+      printf '%s\n' "$id"
+      return 0
+    fi
+  done
+}
+
 "$KCADM" config credentials --server http://127.0.0.1:8080 --realm master \
   --user "$KEYCLOAK_ADMIN_USERNAME" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null
 
-client_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$PROVISIONER_CLIENT" --fields id,clientId --format csv --noquotes | awk -F, -v wanted="$PROVISIONER_CLIENT" '$2==wanted {print $1; exit}')
+client_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$PROVISIONER_CLIENT" --fields id,clientId --format csv --noquotes | find_id_by_name "$PROVISIONER_CLIENT")
 if [ -z "$client_id" ]; then
   client_id=$("$KCADM" create clients -r "$REALM" -i \
     -s "clientId=$PROVISIONER_CLIENT" -s enabled=true -s publicClient=false \
@@ -28,26 +38,27 @@ else
     -s serviceAccountsEnabled=true -s "secret=$KEYCLOAK_PROVISIONER_CLIENT_SECRET" >/dev/null
 fi
 service_user=$("$KCADM" get "clients/$client_id/service-account-user" -r "$REALM" --fields id --format csv --noquotes | tail -n 1)
-realm_management=$("$KCADM" get clients -r "$REALM" -q clientId=realm-management --fields id,clientId --format csv --noquotes | awk -F, '$2=="realm-management" {print $1; exit}')
+realm_management=$("$KCADM" get clients -r "$REALM" -q clientId=realm-management --fields id,clientId --format csv --noquotes | find_id_by_name realm-management)
 for role in manage-users view-users query-users; do
   "$KCADM" add-roles -r "$REALM" --uid "$service_user" --cid "$realm_management" --rolename "$role" >/dev/null 2>&1 || true
 done
 
-flow_id=$("$KCADM" get authentication/flows -r "$REALM" --fields id,alias --format csv --noquotes | awk -F, -v wanted="$FLOW" '$2==wanted {print $1; exit}')
+flow_id=$("$KCADM" get authentication/flows -r "$REALM" --fields id,alias --format csv --noquotes | find_id_by_name "$FLOW")
 if [ -z "$flow_id" ]; then
   flow_id=$("$KCADM" create authentication/flows -r "$REALM" -i \
     -s "alias=$FLOW" -s 'description=Pinvou mobile password or SMS direct grant' \
     -s providerId=basic-flow -s topLevel=true -s builtIn=false)
 fi
-if ! "$KCADM" get "authentication/flows/$flow_id/executions" -r "$REALM" --format csv --noquotes | grep -q "$PROVIDER"; then
+if ! "$KCADM" get "authentication/flows/$FLOW/executions" -r "$REALM" --format csv --noquotes | grep -q "$PROVIDER"; then
   "$KCADM" create "authentication/flows/$FLOW/executions/execution" -r "$REALM" -s "provider=$PROVIDER" >/dev/null
 fi
+execution_id=$("$KCADM" get "authentication/flows/$FLOW/executions" -r "$REALM" --fields id,providerId --format csv --noquotes | find_id_by_name "$PROVIDER")
 "$KCADM" update "authentication/flows/$FLOW/executions" -r "$REALM" \
-  -s "id=$("$KCADM" get "authentication/flows/$flow_id/executions" -r "$REALM" --fields id,providerId --format csv --noquotes | awk -F, -v wanted="$PROVIDER" '$2==wanted {print $1; exit}')" \
-  -s requirement=REQUIRED >/dev/null
+  -s "id=$execution_id" \
+  -s requirement=REQUIRED -n >/dev/null
 "$KCADM" update "realms/$REALM" -s "directGrantFlow=$FLOW" -s registrationAllowed=false >/dev/null
 
-desktop_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$DESKTOP_CLIENT" --fields id,clientId --format csv --noquotes | awk -F, -v wanted="$DESKTOP_CLIENT" '$2==wanted {print $1; exit}')
+desktop_id=$("$KCADM" get clients -r "$REALM" -q "clientId=$DESKTOP_CLIENT" --fields id,clientId --format csv --noquotes | find_id_by_name "$DESKTOP_CLIENT")
 for spec in 'pinvou-phone-number|phone_number|String' 'pinvou-phone-number-verified|phone_number_verified|boolean'; do
   name=${spec%%|*}; rest=${spec#*|}; attribute=${rest%%|*}; json_type=${rest##*|}
   if ! "$KCADM" get "clients/$desktop_id/protocol-mappers/models" -r "$REALM" --fields name --format csv --noquotes | grep -qx "$name"; then
