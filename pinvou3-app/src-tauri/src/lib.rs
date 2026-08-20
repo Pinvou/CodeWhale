@@ -322,6 +322,8 @@ pub fn run() {
                 move |event, payload| remote_event_transport.forward_local_event(event, payload),
             ));
             app.handle().manage(remote_control_manager.clone());
+            app.handle()
+                .manage(features::behavior_telemetry::BehaviorTelemetry::new());
             // 匿名设备遥测：独立于 UI/Engine，失败只写日志；先 manage 再建 EnginePool，
             // 让每个 session forwarder 都能在 TurnStarted/TurnComplete 取到状态。
             match telemetry::TelemetryState::boot(env!("CARGO_PKG_VERSION")) {
@@ -559,6 +561,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::chat::chat,
+            commands::behavior_telemetry::track_behavior_event,
             commands::assistant_response::export_assistant_response,
             commands::assistant_response::open_assistant_share_target,
             commands::startup::report_frontend_startup,
