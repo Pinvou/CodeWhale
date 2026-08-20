@@ -507,6 +507,64 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
+/// [pinvou3-fork 2026-08-19] Kimi Code 会员路由（api.kimi.com/coding/v1）的
+/// kimi-for-coding 系列（K2.7 Coding）采样固定：temperature 只允许 1，否则
+/// 400 "invalid temperature: only 1 is allowed for this model"。compaction 硬编码
+/// temperature 0.3 在该路由必炸（正常聊天不显式携带所以不炸）。剥离显式非 1 值，
+/// 恰好 1.0 原样保留；与 deepseek v4 侧的 apply_deepseek_v4_official_fixed_sampling
+/// 同理，只匹配第一方精确路由，中转网关自有契约不动。
+fn apply_kimi_code_coding_plan_fixed_sampling(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) {
+    if provider != ApiProvider::Moonshot
+        || !crate::config::moonshot_base_url_is_exact_kimi_code(base_url)
+        || !model
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("kimi-for-coding")
+    {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        let non_one = object
+            .get("temperature")
+            .and_then(|value| value.as_f64())
+            .is_some_and(|value| value != 1.0);
+        if non_one {
+            object.remove("temperature");
+        }
+    }
+}
+
+/// [pinvou3-fork 2026-08-19] DeepSeek 官方 API 的 v4 系列模型采样参数被固定：
+/// temperature 只允许 1，否则 400 "invalid temperature: only 1 is allowed for
+/// this model"。compaction 等辅助调用在 `compaction.rs` 硬编码 temperature 0.3，
+/// 正常聊天不显式携带 temperature（落 provider 默认 1.0）所以不炸，压缩必炸。
+/// 统一在出站 seam 剥离该字段（缺省即 1.0），只匹配官方端点的 v4 模型——
+/// 中转网关自有契约，不能误伤。top_p 无证据受限，不动。
+fn apply_deepseek_v4_official_fixed_sampling(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) {
+    let trimmed = base_url.trim_end_matches('/').to_ascii_lowercase();
+    let official = trimmed.starts_with("https://api.deepseek.com")
+        || trimmed.starts_with("https://api.deepseeki.com");
+    if provider != ApiProvider::Deepseek
+        || !official
+        || !model.trim().to_ascii_lowercase().starts_with("deepseek-v4")
+    {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("temperature");
+    }
+}
+
 fn openai_compatible_reasoning_effort(
     effort: &str,
     supports_max: bool,
@@ -713,6 +771,8 @@ pub(crate) fn build_chat_wire_body(
         request.reasoning_effort.as_deref(),
     );
     apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
+    apply_deepseek_v4_official_fixed_sampling(&mut body, provider, base_url, &model);
+    apply_kimi_code_coding_plan_fixed_sampling(&mut body, provider, base_url, &model);
 
     // Bulletproof final sanitizer: walk the wire payload and force
     // `reasoning_content` onto any assistant message that has tool_calls
@@ -5134,8 +5194,9 @@ mod alias_thinking_detection_tests {
     //! turn. See upstream API docs:
     //! https://api-docs.deepseek.com/guides/thinking_mode
     use super::{
-        ReasoningStreamStyle, apply_direct_moonshot_k3_fixed_sampling,
-        apply_inkling_reasoning_effort, apply_kimi_code_k3_reasoning_effort,
+        ReasoningStreamStyle, apply_deepseek_v4_official_fixed_sampling,
+        apply_direct_moonshot_k3_fixed_sampling, apply_inkling_reasoning_effort,
+        apply_kimi_code_coding_plan_fixed_sampling, apply_kimi_code_k3_reasoning_effort,
         apply_openai_reasoning_effort, apply_provider_token_limit, apply_route_reasoning_controls,
         is_reasoning_model_for_stream, is_reasoning_model_for_stream_on_route,
         provider_accepts_reasoning_content, reasoning_stream_style_for_route,
@@ -5852,6 +5913,120 @@ mod alias_thinking_detection_tests {
         );
         assert!(provider_default.get("thinking").is_none());
         assert!(provider_default.get("reasoning_effort").is_none());
+    }
+
+    /// [pinvou3-fork] Kimi Code 会员路由 kimi-for-coding（K2.7）temperature 固定为 1：
+    /// 剥离显式非 1 值（compaction 的 0.3）；1.0、网关与其他模型不动。
+    #[test]
+    fn forkguard_kimi_code_coding_plan_strips_non_one_temperature() {
+        let kimi_code_url = "https://api.kimi.com/coding/v1";
+
+        let mut compaction_like = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut compaction_like,
+            ApiProvider::Moonshot,
+            kimi_code_url,
+            "kimi-for-coding",
+        );
+        assert!(
+            compaction_like.get("temperature").is_none(),
+            "{compaction_like}"
+        );
+
+        let mut highspeed = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut highspeed,
+            ApiProvider::Moonshot,
+            kimi_code_url,
+            "kimi-for-coding-highspeed",
+        );
+        assert!(highspeed.get("temperature").is_none(), "{highspeed}");
+
+        let mut explicit_one = json!({ "temperature": 1.0 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut explicit_one,
+            ApiProvider::Moonshot,
+            kimi_code_url,
+            "kimi-for-coding",
+        );
+        assert_eq!(explicit_one["temperature"], json!(1.0), "{explicit_one}");
+
+        // 官方直连平台（api.moonshot.ai）的同名模型不在会员路由约束证据内
+        let mut direct = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut direct,
+            ApiProvider::Moonshot,
+            "https://api.moonshot.ai/v1",
+            "kimi-for-coding",
+        );
+        assert_eq!(direct["temperature"], json!(0.3), "{direct}");
+
+        // 非 Moonshot provider 托管不动
+        let mut hosted = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut hosted,
+            ApiProvider::Openrouter,
+            kimi_code_url,
+            "kimi-for-coding",
+        );
+        assert_eq!(hosted["temperature"], json!(0.3), "{hosted}");
+    }
+
+    /// [pinvou3-fork] deepseek-v4 官方路由 temperature 固定为 1：剥离显式值；
+    /// 网关/旧模型/其他 provider 的 wire 契约不受影响。
+    #[test]
+    fn forkguard_deepseek_v4_official_route_strips_fixed_temperature() {
+        let mut official = json!({
+            "max_tokens": 64,
+            "temperature": 0.3,
+        });
+        apply_deepseek_v4_official_fixed_sampling(
+            &mut official,
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+        );
+        assert!(official.get("temperature").is_none(), "{official}");
+
+        // /v1 与 /beta 后缀同属官方端点
+        let mut official_v1 = json!({ "temperature": 0.3 });
+        apply_deepseek_v4_official_fixed_sampling(
+            &mut official_v1,
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com/v1",
+            "deepseek-v4-pro",
+        );
+        assert!(official_v1.get("temperature").is_none(), "{official_v1}");
+
+        // 中转网关：自有契约，不动
+        let mut gateway = json!({ "temperature": 0.3 });
+        apply_deepseek_v4_official_fixed_sampling(
+            &mut gateway,
+            ApiProvider::Deepseek,
+            "https://proxy.example/v1",
+            "deepseek-v4-flash",
+        );
+        assert_eq!(gateway["temperature"], json!(0.3), "{gateway}");
+
+        // 旧代模型不在固定采样约束内
+        let mut legacy = json!({ "temperature": 0.3 });
+        apply_deepseek_v4_official_fixed_sampling(
+            &mut legacy,
+            ApiProvider::Deepseek,
+            "https://api.deepseek.com",
+            "deepseek-v3.2",
+        );
+        assert_eq!(legacy["temperature"], json!(0.3), "{legacy}");
+
+        // 其他 provider 托管的同名模型不动
+        let mut hosted = json!({ "temperature": 0.3 });
+        apply_deepseek_v4_official_fixed_sampling(
+            &mut hosted,
+            ApiProvider::Openrouter,
+            "https://openrouter.ai/api/v1",
+            "deepseek-v4-flash",
+        );
+        assert_eq!(hosted["temperature"], json!(0.3), "{hosted}");
     }
 
     #[test]

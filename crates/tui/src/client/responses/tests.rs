@@ -557,6 +557,33 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
     );
 }
 
+/// [pinvou3-fork] DeepSeek v4 Responses 路由 temperature 固定为 1：显式非 1 值
+/// （如 compaction 的 0.3）剥离；恰好 1.0 与非 v4 模型不受影响。
+#[test]
+fn forkguard_deepseek_v4_responses_drops_non_one_temperature() {
+    let mut compaction_like = minimal_responses_request();
+    compaction_like.model = "deepseek-v4-flash".to_string();
+    compaction_like.temperature = Some(0.3);
+    let body = build_responses_body_for_provider(&compaction_like, ApiProvider::Deepseek);
+    assert!(body.get("temperature").is_none(), "{body}");
+
+    let mut explicit_one = minimal_responses_request();
+    explicit_one.model = "deepseek-v4-flash".to_string();
+    explicit_one.temperature = Some(1.0);
+    let body = build_responses_body_for_provider(&explicit_one, ApiProvider::Deepseek);
+    assert_eq!(body["temperature"], json!(1.0), "{body}");
+
+    let mut legacy = minimal_responses_request();
+    legacy.model = "deepseek-v3.2".to_string();
+    legacy.temperature = Some(0.3);
+    let body = build_responses_body_for_provider(&legacy, ApiProvider::Deepseek);
+    // temperature 是 f32，JSON 里是 0.30000001192092896：比误差，不比字面值。
+    assert!(
+        (body["temperature"].as_f64().expect("temperature number") - 0.3).abs() < 1e-6,
+        "{body}"
+    );
+}
+
 #[test]
 fn deepseek_responses_reasoning_effort_uses_documented_labels() {
     assert_eq!(responses_reasoning_effort("low", true), Some("low"));

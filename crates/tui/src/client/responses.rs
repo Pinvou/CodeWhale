@@ -56,7 +56,16 @@ pub(super) fn build_responses_body_for_provider(
         if request.max_tokens > 0 {
             body["max_output_tokens"] = json!(request.max_tokens);
         }
-        if let Some(temperature) = request.temperature {
+        // [pinvou3-fork 2026-08-19] DeepSeek v4 系列采样固定：temperature 只允许 1，
+        // 其他取值 400 "invalid temperature: only 1 is allowed for this model"
+        // （compaction 硬编码 0.3，在该路由必炸）。非 1 显式值剥离，缺省即 1.0；
+        // top_p 不受限（deepseek_flash_responses_body_uses_stateless_0731_contract
+        // 钉住 0.95 透传）。Chat 方言侧的同款剥离见 chat.rs
+        // apply_deepseek_v4_official_fixed_sampling。
+        let v4_fixed_sampling = model.trim().to_ascii_lowercase().starts_with("deepseek-v4");
+        if let Some(temperature) = request.temperature
+            && !(v4_fixed_sampling && temperature != 1.0)
+        {
             body["temperature"] = json!(temperature);
         }
         if let Some(top_p) = request.top_p {
