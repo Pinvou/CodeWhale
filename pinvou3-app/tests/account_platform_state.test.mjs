@@ -225,6 +225,8 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   assert.match(popover, /type="password"/);
   assert.match(popover, /'password', 'sms', 'register'/);
+  assert.match(popover, /copy\.registrationUsername/);
+  assert.match(popover, /client\.registerMobile\(account\.trim\(\), mobile\.trim\(\)/);
   assert.match(popover, /autoComplete=\{loginMode === 'register' \? 'new-password' : 'current-password'\}/);
   assert.match(popover, /await client\.loginSms\(mobile\.trim\(\), smsChallenge, smsCode\.trim\(\)\)/);
   assert.match(popover, /await client\.registerMobile/);

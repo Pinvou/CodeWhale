@@ -2,6 +2,7 @@ package account
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -33,6 +34,7 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) registerMobile(w http.ResponseWriter, r *http.Request) {
 	var body struct {
+		Username    string    `json:"username"`
 		Mobile      string    `json:"mobile"`
 		ChallengeID uuid.UUID `json:"challenge_id"`
 		Code        string    `json:"code"`
@@ -42,13 +44,14 @@ func (s *Service) registerMobile(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid mobile registration request", httpserver.RequestID(r.Context()))
 		return
 	}
-	userID, err := s.mobileAuth.Register(r.Context(), body.Mobile, body.ChallengeID, body.Code, body.Password)
+	userID, err := s.mobileAuth.Register(r.Context(), body.Username, body.Mobile, body.ChallengeID, body.Code, body.Password)
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusCreated, map[string]any{"user_id": userID, "status": "PROVISIONING"})
+	username, _ := NormalizeRegistrationUsername(body.Username)
+	api.WriteJSON(w, http.StatusCreated, map[string]any{"user_id": userID, "username": username, "status": "PROVISIONING"})
 }
 
 func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +78,10 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 		status, code, message = http.StatusBadRequest, "MOBILE_INVALID", "a valid mainland China mobile number is required"
 	case errors.Is(err, ErrMobileAlreadyRegistered):
 		status, code, message = http.StatusConflict, "MOBILE_ALREADY_REGISTERED", "the mobile number is already registered"
+	case errors.Is(err, ErrUsernameInvalid):
+		status, code, message = http.StatusBadRequest, "USERNAME_INVALID", "username must start with a letter and contain 3 to 32 lowercase letters, digits, dots, underscores, or hyphens"
+	case errors.Is(err, ErrUsernameAlreadyRegistered):
+		status, code, message = http.StatusConflict, "USERNAME_ALREADY_REGISTERED", "the username is already registered"
 	case errors.Is(err, ErrSMSRateLimited):
 		status, code, message = http.StatusTooManyRequests, "SMS_RATE_LIMITED", "too many verification code requests"
 		w.Header().Set("Retry-After", "60")
@@ -82,6 +89,9 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 		status, code, message = http.StatusUnauthorized, "SMS_CODE_INVALID", "the verification code is invalid or expired"
 	case errors.Is(err, ErrSMSUnavailable):
 		status, code, message = http.StatusServiceUnavailable, "SMS_UNAVAILABLE", "the SMS service is temporarily unavailable"
+	}
+	if status >= http.StatusInternalServerError {
+		slog.ErrorContext(r.Context(), "mobile authentication request failed", "error", err, "request_id", httpserver.RequestID(r.Context()))
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

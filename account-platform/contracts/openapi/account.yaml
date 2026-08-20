@@ -428,6 +428,8 @@ components:
         status:
           type: string
           enum: [PROVISIONING, ACTIVE, DISABLED]
+        username:
+          type: [string, "null"]
         display_name:
           type: [string, "null"]
         active_context:

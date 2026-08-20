@@ -10,6 +10,8 @@ const fallbackChannels = ['ALIPAY'];
 function localizedError(copy, reason) {
   const raw = String(reason?.code || reason?.message || reason || '');
   const code = raw.split(':', 1)[0].trim();
+  if (raw.includes('USERNAME_ALREADY_REGISTERED')) return copy.usernameAlreadyRegistered;
+  if (raw.includes('USERNAME_INVALID')) return copy.usernameInvalid;
   if (code === 'mobile_auth_failed' || code === 'mobile_auth_code_invalid') return copy.mobileAuthFailed;
   return copy.errors?.[code] || (reason?.message && typeof reason.message === 'string' ? reason.message : copy.requestFailed);
 }
@@ -347,8 +349,8 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     try {
       if (loginMode === 'sms') await client.loginSms(mobile.trim(), smsChallenge, smsCode.trim());
       else if (loginMode === 'register') {
-        await client.registerMobile(mobile.trim(), smsChallenge, smsCode.trim(), password);
-        await client.login(mobile.trim().replace(/^\+?86/, ''), password);
+        const registration = await client.registerMobile(account.trim(), mobile.trim(), smsChallenge, smsCode.trim(), password);
+        await client.login(registration?.username || account.trim(), password);
       } else await client.login(account.trim().replace(/^\+?86(?=1\d{10}$)/, ''), password);
       setPassword('');
       await loadAccount();
@@ -453,11 +455,12 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       {(auth === 'guest' || auth === 'error') && (
         <form className={`space-y-3 rounded-2xl border p-3 ${cardTheme}`} onSubmit={event => void submitLogin(event)}>
           <div className="grid grid-cols-3 gap-1 rounded-xl bg-black/5 p-1">{['password', 'sms', 'register'].map(mode => <button key={mode} type="button" onClick={() => { setLoginMode(mode); setSmsChallenge(''); setSmsCode(''); setError(''); }} className={`h-7 rounded-lg text-[11px] ${loginMode === mode ? 'bg-white shadow-sm' : mutedText}`}>{copy.authModes[mode]}</button>)}</div>
-          {loginMode === 'password' ? <input value={account} onChange={event => setAccount(event.target.value)} disabled={busy} placeholder={copy.mobileOrAccount} aria-label={copy.mobileOrAccount} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} /> : <input value={mobile} onChange={event => setMobile(event.target.value)} disabled={busy} placeholder={copy.mobile} aria-label={copy.mobile} inputMode="tel" autoComplete="tel-national" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {loginMode !== 'sms' && <input value={account} onChange={event => setAccount(event.target.value)} disabled={busy} placeholder={loginMode === 'register' ? copy.registrationUsername : copy.mobileOrAccount} aria-label={loginMode === 'register' ? copy.username : copy.mobileOrAccount} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {loginMode !== 'password' && <input value={mobile} onChange={event => setMobile(event.target.value)} disabled={busy} placeholder={copy.mobile} aria-label={copy.mobile} inputMode="tel" autoComplete="tel-national" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
           {loginMode !== 'password' && <div className="flex gap-2"><input value={smsCode} onChange={event => setSmsCode(event.target.value)} disabled={busy} placeholder={copy.smsCode} aria-label={copy.smsCode} inputMode="numeric" autoComplete="one-time-code" className={`h-9 min-w-0 flex-1 rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} /><button type="button" disabled={busy || !mobile.trim()} onClick={() => void sendSms()} className="h-9 shrink-0 rounded-xl bg-[#10B981]/10 px-3 text-[11px] font-semibold text-[#07966F] disabled:opacity-40">{smsChallenge ? copy.resendCode : copy.sendCode}</button></div>}
           {loginMode !== 'sms' && <input value={password} onChange={event => setPassword(event.target.value)} disabled={busy} placeholder={copy.password} aria-label={copy.password} type="password" autoComplete={loginMode === 'register' ? 'new-password' : 'current-password'} className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
           {error && <div role="alert" className="break-words text-[12px] leading-snug text-[#EA4335]">{error}</div>}
-          <button type="submit" disabled={busy || (loginMode === 'password' ? !account.trim() || !password : !mobile.trim() || !smsChallenge || !smsCode.trim() || (loginMode === 'register' && !password))} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{busy ? copy.signingIn : loginMode === 'register' ? copy.register : copy.login}</button>
+          <button type="submit" disabled={busy || (loginMode === 'password' ? !account.trim() || !password : !mobile.trim() || !smsChallenge || !smsCode.trim() || (loginMode === 'register' && (!account.trim() || !password)))} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{busy ? copy.signingIn : loginMode === 'register' ? copy.register : copy.login}</button>
         </form>
       )}
 

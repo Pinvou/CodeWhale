@@ -193,6 +193,7 @@ pub struct SMSLoginCredentials {
 
 #[derive(Debug, Deserialize)]
 pub struct MobileRegistration {
+    pub username: String,
     pub mobile: String,
     pub challenge_id: String,
     pub code: String,
@@ -370,7 +371,7 @@ impl AccountPlatformState {
             &config,
             "v1/auth/register",
             serde_json::json!({
-                "mobile": input.mobile.trim(), "challenge_id": input.challenge_id.trim(),
+                "username": input.username.trim(), "mobile": input.mobile.trim(), "challenge_id": input.challenge_id.trim(),
                 "code": input.code.trim(), "password": input.password,
             }),
         )

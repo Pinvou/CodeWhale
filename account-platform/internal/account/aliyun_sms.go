@@ -27,7 +27,8 @@ const (
 )
 
 type SMSProvider interface {
-	SendCode(context.Context, string, SMSPurpose, string) (string, error)
+	SendCode(context.Context, string, SMSPurpose, uuid.UUID) (string, error)
+	VerifyCode(context.Context, string, uuid.UUID, string) (bool, error)
 }
 
 type AliyunSMSConfig struct {
@@ -53,7 +54,7 @@ func NewAliyunSMSProvider(config AliyunSMSConfig) (*AliyunSMSProvider, error) {
 	config.LoginTemplate = strings.TrimSpace(config.LoginTemplate)
 	config.Endpoint = strings.TrimSpace(config.Endpoint)
 	if config.Endpoint == "" {
-		config.Endpoint = "https://dysmsapi.aliyuncs.com"
+		config.Endpoint = "https://dypnsapi.aliyuncs.com"
 	}
 	parsed, err := url.Parse(config.Endpoint)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -65,18 +66,27 @@ func NewAliyunSMSProvider(config AliyunSMSConfig) (*AliyunSMSProvider, error) {
 	return &AliyunSMSProvider{config: config, client: observability.NewHTTPClient(10 * time.Second), now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
-func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, code string) (string, error) {
+func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose SMSPurpose, challengeID uuid.UUID) (string, error) {
 	template := p.config.LoginTemplate
 	if purpose == SMSPurposeRegister {
 		template = p.config.RegisterTemplate
 	}
 	parameters := url.Values{
-		"PhoneNumbers":  {strings.TrimPrefix(mobile, "+86")},
-		"SignName":      {p.config.SignName},
-		"TemplateCode":  {template},
-		"TemplateParam": {fmt.Sprintf(`{"code":%q}`, code)},
+		"PhoneNumber":      {strings.TrimPrefix(mobile, "+86")},
+		"CountryCode":      {"86"},
+		"SignName":         {p.config.SignName},
+		"TemplateCode":     {template},
+		"TemplateParam":    {`{"code":"##code##","min":"5"}`},
+		"OutId":            {challengeID.String()},
+		"CodeLength":       {"6"},
+		"ValidTime":        {"300"},
+		"DuplicatePolicy":  {"1"},
+		"Interval":         {"60"},
+		"CodeType":         {"1"},
+		"ReturnVerifyCode": {"false"},
+		"AutoRetry":        {"1"},
 	}
-	request, err := p.signedRequest(ctx, parameters)
+	request, err := p.signedRequest(ctx, "SendSmsVerifyCode", parameters)
 	if err != nil {
 		return "", err
 	}
@@ -88,22 +98,69 @@ func (p *AliyunSMSProvider) SendCode(ctx context.Context, mobile string, purpose
 	var body struct {
 		Code      string `json:"Code"`
 		Message   string `json:"Message"`
-		BizID     string `json:"BizId"`
+		Success   bool   `json:"Success"`
 		RequestID string `json:"RequestId"`
+		Model     struct {
+			BizID     string `json:"BizId"`
+			RequestID string `json:"RequestId"`
+		} `json:"Model"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&body); err != nil {
 		return "", errors.New("Aliyun SMS returned an invalid response")
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 || body.Code != "OK" {
+	if response.StatusCode < 200 || response.StatusCode >= 300 || body.Code != "OK" || !body.Success {
 		return "", fmt.Errorf("Aliyun SMS rejected the request: %s", sanitizeProviderCode(body.Code))
 	}
-	if body.BizID != "" {
-		return body.BizID, nil
+	if body.Model.BizID != "" {
+		return body.Model.BizID, nil
+	}
+	if body.Model.RequestID != "" {
+		return body.Model.RequestID, nil
 	}
 	return body.RequestID, nil
 }
 
-func (p *AliyunSMSProvider) signedRequest(ctx context.Context, parameters url.Values) (*http.Request, error) {
+func (p *AliyunSMSProvider) VerifyCode(ctx context.Context, mobile string, challengeID uuid.UUID, code string) (bool, error) {
+	parameters := url.Values{
+		"PhoneNumber": {strings.TrimPrefix(mobile, "+86")},
+		"CountryCode": {"86"},
+		"OutId":       {challengeID.String()},
+		"VerifyCode":  {strings.TrimSpace(code)},
+	}
+	request, err := p.signedRequest(ctx, "CheckSmsVerifyCode", parameters)
+	if err != nil {
+		return false, err
+	}
+	response, err := p.client.Do(request)
+	if err != nil {
+		return false, fmt.Errorf("verify Aliyun SMS: %w", err)
+	}
+	defer response.Body.Close()
+	var body struct {
+		Code      string `json:"Code"`
+		Success   bool   `json:"Success"`
+		RequestID string `json:"RequestId"`
+		Model     struct {
+			VerifyResult string `json:"VerifyResult"`
+		} `json:"Model"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&body); err != nil {
+		return false, errors.New("Aliyun SMS returned an invalid verification response")
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 || body.Code != "OK" || !body.Success {
+		return false, fmt.Errorf("Aliyun SMS rejected verification: %s", sanitizeProviderCode(body.Code))
+	}
+	switch body.Model.VerifyResult {
+	case "PASS":
+		return true, nil
+	case "UNKNOWN":
+		return false, nil
+	default:
+		return false, errors.New("Aliyun SMS returned an invalid verification result")
+	}
+}
+
+func (p *AliyunSMSProvider) signedRequest(ctx context.Context, action string, parameters url.Values) (*http.Request, error) {
 	endpoint, _ := url.Parse(p.config.Endpoint)
 	endpoint.Path = "/"
 	endpoint.RawQuery = canonicalQuery(parameters)
@@ -113,7 +170,7 @@ func (p *AliyunSMSProvider) signedRequest(ctx context.Context, parameters url.Va
 	nonce := uuid.NewString()
 	signedHeaders := "host;x-acs-action;x-acs-content-sha256;x-acs-date;x-acs-signature-nonce;x-acs-version"
 	canonicalHeaders := "host:" + endpoint.Host + "\n" +
-		"x-acs-action:SendSms\n" +
+		"x-acs-action:" + action + "\n" +
 		"x-acs-content-sha256:" + payloadHash + "\n" +
 		"x-acs-date:" + date + "\n" +
 		"x-acs-signature-nonce:" + nonce + "\n" +
@@ -131,7 +188,7 @@ func (p *AliyunSMSProvider) signedRequest(ctx context.Context, parameters url.Va
 	}
 	request.Host = endpoint.Host
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("x-acs-action", "SendSms")
+	request.Header.Set("x-acs-action", action)
 	request.Header.Set("x-acs-content-sha256", payloadHash)
 	request.Header.Set("x-acs-date", date)
 	request.Header.Set("x-acs-signature-nonce", nonce)

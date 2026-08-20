@@ -2,11 +2,6 @@ package account
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"regexp"
@@ -18,14 +13,17 @@ import (
 )
 
 var (
-	ErrMobileInvalid           = errors.New("mobile number is invalid")
-	ErrMobileAlreadyRegistered = errors.New("mobile number is already registered")
-	ErrSMSRateLimited          = errors.New("SMS requests are rate limited")
-	ErrSMSInvalid              = errors.New("SMS challenge is invalid")
-	ErrSMSUnavailable          = errors.New("SMS service is unavailable")
+	ErrMobileInvalid             = errors.New("mobile number is invalid")
+	ErrMobileAlreadyRegistered   = errors.New("mobile number is already registered")
+	ErrUsernameInvalid           = errors.New("username is invalid")
+	ErrUsernameAlreadyRegistered = errors.New("username is already registered")
+	ErrSMSRateLimited            = errors.New("SMS requests are rate limited")
+	ErrSMSInvalid                = errors.New("SMS challenge is invalid")
+	ErrSMSUnavailable            = errors.New("SMS service is unavailable")
 )
 
 var mainlandMobile = regexp.MustCompile(`^1[3-9][0-9]{9}$`)
+var registrationUsername = regexp.MustCompile(`^[a-z][a-z0-9._-]{2,31}$`)
 
 type SMSChallenge struct {
 	ID        uuid.UUID  `json:"challenge_id"`
@@ -36,11 +34,13 @@ type SMSChallenge struct {
 
 type MobileAuthRepository interface {
 	MobileExists(context.Context, string) (bool, error)
-	CreateSMSChallenge(context.Context, SMSChallenge, []byte) error
+	UsernameExists(context.Context, string) (bool, error)
+	CreateSMSChallenge(context.Context, SMSChallenge) error
 	MarkSMSChallengeSent(context.Context, uuid.UUID, string) error
 	MarkSMSChallengeFailed(context.Context, uuid.UUID) error
-	ConsumeSMSChallenge(context.Context, uuid.UUID, string, SMSPurpose, []byte) error
-	RegisterMobileIdentity(context.Context, string, string, string) (uuid.UUID, error)
+	SMSChallengeReady(context.Context, uuid.UUID, string, SMSPurpose) error
+	ConsumeSMSChallenge(context.Context, uuid.UUID, string, SMSPurpose, bool) error
+	RegisterMobileIdentity(context.Context, string, string, string, string) (uuid.UUID, error)
 }
 
 type MobileAuthService struct {
@@ -48,17 +48,15 @@ type MobileAuthService struct {
 	sms        SMSProvider
 	identities IdentityProvisioner
 	issuer     string
-	hashSecret []byte
 	now        func() time.Time
-	code       func() (string, error)
 }
 
-func NewMobileAuthService(repository MobileAuthRepository, sms SMSProvider, identities IdentityProvisioner, issuer, hashSecret string) (*MobileAuthService, error) {
+func NewMobileAuthService(repository MobileAuthRepository, sms SMSProvider, identities IdentityProvisioner, issuer string) (*MobileAuthService, error) {
 	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
-	if repository == nil || sms == nil || identities == nil || issuer == "" || len(hashSecret) < 32 {
+	if repository == nil || sms == nil || identities == nil || issuer == "" {
 		return nil, errors.New("mobile authentication is not fully configured")
 	}
-	return &MobileAuthService{repository: repository, sms: sms, identities: identities, issuer: issuer, hashSecret: []byte(hashSecret), now: func() time.Time { return time.Now().UTC() }, code: generateSMSCode}, nil
+	return &MobileAuthService{repository: repository, sms: sms, identities: identities, issuer: issuer, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func NormalizeMainlandMobile(value string) (string, error) {
@@ -69,6 +67,14 @@ func NormalizeMainlandMobile(value string) (string, error) {
 		return "", ErrMobileInvalid
 	}
 	return "+86" + value, nil
+}
+
+func NormalizeRegistrationUsername(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if !registrationUsername.MatchString(value) {
+		return "", ErrUsernameInvalid
+	}
+	return value, nil
 }
 
 func (s *MobileAuthService) Send(ctx context.Context, rawMobile string, purpose SMSPurpose) (SMSChallenge, error) {
@@ -84,12 +90,7 @@ func (s *MobileAuthService) Send(ctx context.Context, rawMobile string, purpose 
 		return SMSChallenge{}, ErrMobileAlreadyRegistered
 	}
 	challenge := SMSChallenge{ID: uuid.Must(uuid.NewV7()), Mobile: mobile, Purpose: purpose, ExpiresAt: s.now().Add(5 * time.Minute)}
-	code, err := s.code()
-	if err != nil {
-		return SMSChallenge{}, ErrSMSUnavailable
-	}
-	hash := s.codeHash(challenge, code)
-	if err := s.repository.CreateSMSChallenge(ctx, challenge, hash); err != nil {
+	if err := s.repository.CreateSMSChallenge(ctx, challenge); err != nil {
 		return SMSChallenge{}, err
 	}
 	// Unknown login accounts receive the same API response without sending an
@@ -97,10 +98,10 @@ func (s *MobileAuthService) Send(ctx context.Context, rawMobile string, purpose 
 	if purpose == SMSPurposeLogin && !exists {
 		return challenge, nil
 	}
-	messageID, err := s.sms.SendCode(ctx, mobile, purpose, code)
+	messageID, err := s.sms.SendCode(ctx, mobile, purpose, challenge.ID)
 	if err != nil {
 		_ = s.repository.MarkSMSChallengeFailed(context.WithoutCancel(ctx), challenge.ID)
-		return SMSChallenge{}, ErrSMSUnavailable
+		return SMSChallenge{}, fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
 	}
 	if err := s.repository.MarkSMSChallengeSent(ctx, challenge.ID, messageID); err != nil {
 		return SMSChallenge{}, err
@@ -108,20 +109,30 @@ func (s *MobileAuthService) Send(ctx context.Context, rawMobile string, purpose 
 	return challenge, nil
 }
 
-func (s *MobileAuthService) Register(ctx context.Context, rawMobile string, challengeID uuid.UUID, code, password string) (uuid.UUID, error) {
+func (s *MobileAuthService) Register(ctx context.Context, rawUsername, rawMobile string, challengeID uuid.UUID, code, password string) (uuid.UUID, error) {
+	username, err := NormalizeRegistrationUsername(rawUsername)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil || !validPassword(password) {
 		return uuid.Nil, ErrSMSInvalid
 	}
-	challenge := SMSChallenge{ID: challengeID, Mobile: mobile, Purpose: SMSPurposeRegister}
-	if err := s.repository.ConsumeSMSChallenge(ctx, challengeID, mobile, SMSPurposeRegister, s.codeHash(challenge, strings.TrimSpace(code))); err != nil {
-		return uuid.Nil, err
-	}
-	subject, err := s.identities.CreateMobileUser(ctx, mobile, password)
+	exists, err := s.repository.UsernameExists(ctx, username)
 	if err != nil {
 		return uuid.Nil, err
 	}
-	userID, err := s.repository.RegisterMobileIdentity(ctx, s.issuer, subject, mobile)
+	if exists {
+		return uuid.Nil, ErrUsernameAlreadyRegistered
+	}
+	if err := s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeRegister, code); err != nil {
+		return uuid.Nil, err
+	}
+	subject, err := s.identities.CreateMobileUser(ctx, username, mobile, password)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	userID, err := s.repository.RegisterMobileIdentity(ctx, s.issuer, subject, username, mobile)
 	if err != nil {
 		_ = s.identities.DeleteUser(context.WithoutCancel(ctx), subject)
 		return uuid.Nil, err
@@ -134,28 +145,22 @@ func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, c
 	if err != nil {
 		return ErrSMSInvalid
 	}
-	challenge := SMSChallenge{ID: challengeID, Mobile: mobile, Purpose: SMSPurposeLogin}
-	return s.repository.ConsumeSMSChallenge(ctx, challengeID, mobile, SMSPurposeLogin, s.codeHash(challenge, strings.TrimSpace(code)))
+	return s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeLogin, code)
 }
 
-func (s *MobileAuthService) codeHash(challenge SMSChallenge, code string) []byte {
-	mac := hmac.New(sha256.New, s.hashSecret)
-	_, _ = mac.Write([]byte(challenge.ID.String()))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(challenge.Mobile))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(challenge.Purpose))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(code))
-	return mac.Sum(nil)
-}
-
-func generateSMSCode() (string, error) {
-	var value [4]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "", err
+func (s *MobileAuthService) verifyChallenge(ctx context.Context, challengeID uuid.UUID, mobile string, purpose SMSPurpose, code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return ErrSMSInvalid
 	}
-	return fmt.Sprintf("%06d", binary.BigEndian.Uint32(value[:])%1_000_000), nil
+	if err := s.repository.SMSChallengeReady(ctx, challengeID, mobile, purpose); err != nil {
+		return err
+	}
+	verified, err := s.sms.VerifyCode(ctx, mobile, challengeID, code)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrSMSUnavailable, err)
+	}
+	return s.repository.ConsumeSMSChallenge(ctx, challengeID, mobile, purpose, verified)
 }
 
 func validPassword(password string) bool {
@@ -176,7 +181,13 @@ func (r *PostgresRepository) MobileExists(ctx context.Context, mobile string) (b
 	return exists, err
 }
 
-func (r *PostgresRepository) CreateSMSChallenge(ctx context.Context, challenge SMSChallenge, hash []byte) error {
+func (r *PostgresRepository) UsernameExists(ctx context.Context, username string) (bool, error) {
+	var exists bool
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE lower(username)=lower($1) AND status<>'DELETED')`, username).Scan(&exists)
+	return exists, err
+}
+
+func (r *PostgresRepository) CreateSMSChallenge(ctx context.Context, challenge SMSChallenge) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -186,16 +197,16 @@ func (r *PostgresRepository) CreateSMSChallenge(ctx context.Context, challenge S
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lock); err != nil {
 		return err
 	}
+	now := r.now()
 	var last *time.Time
 	var hourly int
-	if err := tx.QueryRow(ctx, `SELECT max(created_at),count(*) FILTER (WHERE created_at>$3-interval '1 hour') FROM sms_challenges WHERE mobile_e164=$1 AND purpose=$2`, challenge.Mobile, challenge.Purpose, r.now()).Scan(&last, &hourly); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT max(created_at),count(*) FILTER (WHERE created_at>$3) FROM sms_challenges WHERE mobile_e164=$1 AND purpose=$2`, challenge.Mobile, challenge.Purpose, now.Add(-time.Hour)).Scan(&last, &hourly); err != nil {
 		return err
 	}
-	if last != nil && r.now().Sub(*last) < time.Minute || hourly >= 5 {
+	if last != nil && now.Sub(*last) < time.Minute || hourly >= 5 {
 		return ErrSMSRateLimited
 	}
-	now := r.now()
-	_, err = tx.Exec(ctx, `INSERT INTO sms_challenges(id,mobile_e164,purpose,code_hash,status,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,'CREATED',$5,$6,$6)`, challenge.ID, challenge.Mobile, challenge.Purpose, hash, challenge.ExpiresAt, now)
+	_, err = tx.Exec(ctx, `INSERT INTO sms_challenges(id,mobile_e164,purpose,code_hash,status,expires_at,created_at,updated_at) VALUES($1,$2,$3,NULL,'CREATED',$4,$5,$5)`, challenge.ID, challenge.Mobile, challenge.Purpose, challenge.ExpiresAt, now)
 	if err != nil {
 		return err
 	}
@@ -212,17 +223,36 @@ func (r *PostgresRepository) MarkSMSChallengeFailed(ctx context.Context, id uuid
 	return err
 }
 
-func (r *PostgresRepository) ConsumeSMSChallenge(ctx context.Context, id uuid.UUID, mobile string, purpose SMSPurpose, expected []byte) error {
+func (r *PostgresRepository) SMSChallengeReady(ctx context.Context, id uuid.UUID, mobile string, purpose SMSPurpose) error {
+	var status string
+	var attempts int
+	var expires time.Time
+	err := r.pool.QueryRow(ctx, `SELECT status,attempts,expires_at FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3`, id, mobile, purpose).Scan(&status, &attempts, &expires)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrSMSInvalid
+	}
+	if err != nil {
+		return err
+	}
+	if status != "SENT" || attempts >= 5 || !expires.After(r.now()) {
+		if status == "SENT" && !expires.After(r.now()) {
+			_, _ = r.pool.Exec(ctx, `UPDATE sms_challenges SET status='EXPIRED',updated_at=$2 WHERE id=$1 AND status='SENT'`, id, r.now())
+		}
+		return ErrSMSInvalid
+	}
+	return nil
+}
+
+func (r *PostgresRepository) ConsumeSMSChallenge(ctx context.Context, id uuid.UUID, mobile string, purpose SMSPurpose, verified bool) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var actual []byte
 	var status string
 	var attempts int
 	var expires time.Time
-	err = tx.QueryRow(ctx, `SELECT code_hash,status,attempts,expires_at FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3 FOR UPDATE`, id, mobile, purpose).Scan(&actual, &status, &attempts, &expires)
+	err = tx.QueryRow(ctx, `SELECT status,attempts,expires_at FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3 FOR UPDATE`, id, mobile, purpose).Scan(&status, &attempts, &expires)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrSMSInvalid
 	}
@@ -236,7 +266,7 @@ func (r *PostgresRepository) ConsumeSMSChallenge(ctx context.Context, id uuid.UU
 		}
 		return ErrSMSInvalid
 	}
-	if len(actual) != len(expected) || subtle.ConstantTimeCompare(actual, expected) != 1 {
+	if !verified {
 		attempts++
 		_, _ = tx.Exec(ctx, `UPDATE sms_challenges SET attempts=$2,status=CASE WHEN $2>=5 THEN 'FAILED' ELSE status END,updated_at=$3 WHERE id=$1`, id, attempts, r.now())
 		_ = tx.Commit(ctx)
@@ -249,19 +279,20 @@ func (r *PostgresRepository) ConsumeSMSChallenge(ctx context.Context, id uuid.UU
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) RegisterMobileIdentity(ctx context.Context, issuer, subject, mobile string) (uuid.UUID, error) {
+func (r *PostgresRepository) RegisterMobileIdentity(ctx context.Context, issuer, subject, username, mobile string) (uuid.UUID, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return uuid.Nil, err
 	}
 	defer tx.Rollback(ctx)
 	now, userID := r.now(), uuid.Must(uuid.NewV7())
-	masked := strings.TrimPrefix(mobile, "+86")
-	display := masked[:3] + "****" + masked[7:]
-	_, err = tx.Exec(ctx, `INSERT INTO users(id,status,display_name,mobile_e164,mobile_verified_at,created_at,updated_at) VALUES($1,'PROVISIONING',$2,$3,$4,$4,$4)`, userID, display, mobile, now)
+	_, err = tx.Exec(ctx, `INSERT INTO users(id,status,username,display_name,mobile_e164,mobile_verified_at,created_at,updated_at) VALUES($1,'PROVISIONING',$2,$2,$3,$4,$4,$4)`, userID, username, mobile, now)
 	if err != nil {
 		if strings.Contains(err.Error(), "users_mobile_e164_unique_idx") {
 			return uuid.Nil, ErrMobileAlreadyRegistered
+		}
+		if strings.Contains(err.Error(), "users_username_unique_idx") {
+			return uuid.Nil, ErrUsernameAlreadyRegistered
 		}
 		return uuid.Nil, err
 	}

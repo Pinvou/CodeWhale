@@ -17,7 +17,7 @@ import (
 )
 
 type IdentityProvisioner interface {
-	CreateMobileUser(context.Context, string, string) (string, error)
+	CreateMobileUser(context.Context, string, string, string) (string, error)
 	DeleteUser(context.Context, string) error
 }
 
@@ -56,14 +56,13 @@ func NewKeycloakProvisioner(adminURL, tokenURL, realm, clientID, clientSecret st
 	return &KeycloakProvisioner{adminURL: admin, tokenURL: token, realm: strings.TrimSpace(realm), clientID: strings.TrimSpace(clientID), clientSecret: strings.TrimSpace(clientSecret), client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
-func (p *KeycloakProvisioner) CreateMobileUser(ctx context.Context, mobile, password string) (string, error) {
+func (p *KeycloakProvisioner) CreateMobileUser(ctx context.Context, username, mobile, password string) (string, error) {
 	access, err := p.accessToken(ctx)
 	if err != nil {
 		return "", err
 	}
-	national := strings.TrimPrefix(mobile, "+86")
 	body, _ := json.Marshal(map[string]any{
-		"username": national, "enabled": true,
+		"username": username, "enabled": true,
 		"attributes":  map[string][]string{"phone_number": {mobile}, "phone_number_verified": {"true"}},
 		"credentials": []map[string]any{{"type": "password", "value": password, "temporary": false}},
 	})
@@ -79,7 +78,7 @@ func (p *KeycloakProvisioner) CreateMobileUser(ctx context.Context, mobile, pass
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 	if response.StatusCode == http.StatusConflict {
-		return "", ErrMobileAlreadyRegistered
+		return "", ErrUsernameAlreadyRegistered
 	}
 	if response.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("create Keycloak user returned HTTP %d", response.StatusCode)

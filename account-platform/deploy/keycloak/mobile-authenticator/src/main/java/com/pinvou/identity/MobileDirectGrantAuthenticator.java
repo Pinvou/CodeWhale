@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.Authenticator;
@@ -31,9 +32,9 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
     @Override
     public void authenticate(AuthenticationFlowContext context) {
         MultivaluedMap<String, String> form = context.getHttpRequest().getDecodedFormParameters();
-        String username = trim(form.getFirst("username"));
-        UserModel user = username.isEmpty() ? null
-            : KeycloakModelUtils.findUserByNameOrEmail(context.getSession(), context.getRealm(), username);
+        String login = trim(form.getFirst("username"));
+        String mobile = normalizeMobile(login);
+        UserModel user = findUser(context, login, mobile);
         if (user == null) {
             AuthenticatorUtils.dummyHash(context);
             fail(context, AuthenticationFlowError.INVALID_USER);
@@ -48,8 +49,8 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         String code = trim(form.getFirst("sms_code"));
         boolean valid;
         if (!challenge.isEmpty() || !code.isEmpty()) {
-            valid = MOBILE.matcher(username).matches() && CHALLENGE.matcher(challenge).matches()
-                && CODE.matcher(code).matches() && verifySMS(username, challenge, code);
+            valid = !mobile.isEmpty() && CHALLENGE.matcher(challenge).matches()
+                && CODE.matcher(code).matches() && verifySMS(mobile, challenge, code);
         } else {
             String password = form.getFirst("password");
             valid = password != null && !password.isEmpty() && user.credentialManager().isValid(UserCredentialModel.password(password));
@@ -63,11 +64,22 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         context.success();
     }
 
-    private boolean verifySMS(String username, String challenge, String code) {
+    private UserModel findUser(AuthenticationFlowContext context, String login, String mobile) {
+        if (login.isEmpty()) return null;
+        if (mobile.isEmpty()) {
+            return KeycloakModelUtils.findUserByNameOrEmail(context.getSession(), context.getRealm(), login);
+        }
+        try (Stream<UserModel> users = context.getSession().users()
+                .searchForUserByUserAttributeStream(context.getRealm(), "phone_number", mobile)) {
+            return users.findFirst().orElse(null);
+        }
+    }
+
+    private boolean verifySMS(String mobile, String challenge, String code) {
         String endpoint = System.getenv("PINVOU_SMS_VERIFY_URL");
         String serviceToken = System.getenv("PINVOU_INTERNAL_SERVICE_TOKEN");
         if (endpoint == null || serviceToken == null || endpoint.isBlank() || serviceToken.length() < 32) return false;
-        String body = "{\"mobile\":\"+86" + username + "\",\"challenge_id\":\"" + challenge + "\",\"code\":\"" + code + "\"}";
+        String body = "{\"mobile\":\"" + mobile + "\",\"challenge_id\":\"" + challenge + "\",\"code\":\"" + code + "\"}";
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))
                 .timeout(Duration.ofSeconds(5)).header("Content-Type", "application/json")
@@ -78,6 +90,13 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    private static String normalizeMobile(String value) {
+        String national = trim(value);
+        if (national.startsWith("+86")) national = national.substring(3);
+        else if (national.startsWith("86")) national = national.substring(2);
+        return MOBILE.matcher(national).matches() ? "+86" + national : "";
     }
 
     private void fail(AuthenticationFlowContext context, AuthenticationFlowError error) {

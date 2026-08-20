@@ -24,7 +24,9 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 ## 手机注册、登录与商城支付
 
-开启 `MOBILE_AUTH_ENABLED=true` 前，需要配置阿里云短信 AccessKey、已审核的签名和注册/登录模板，并配置新华三商城的应用凭据。`H3C_MALL_PRODUCTS_JSON` 必须逐项映射本地充值商品到商城 SKU 和实际分金额；金额不一致时服务会拒绝下单。所有密钥仅放在部署环境的 Secret 中。
+开启 `MOBILE_AUTH_ENABLED=true` 前，需要配置阿里云号码认证服务 AccessKey、系统赠送签名和系统赠送模板（登录/注册模板 CODE 为 `100001`）。验证码由阿里云动态生成，并由 Account Service 调用 `CheckSmsVerifyCode` 核验；服务端不生成、保存或记录明文验证码。所有密钥仅放在部署环境的 Secret 中。
+
+新华三商城账号同步与手机认证相互独立。配置 `H3C_MALL_BASE_URL`、`H3C_MALL_APP_KEY` 和 `H3C_MALL_APP_SECRET` 后，Account Service 会启动商城用户同步；未配置时注册仍可用，同步任务保持待处理。启用商城支付前，`H3C_MALL_PRODUCTS_JSON` 必须逐项映射本地充值商品到商城 SKU 和实际分金额；金额不一致时服务会拒绝下单。
 
 已有 Keycloak 数据卷升级后，还需要执行一次可重复运行的初始化脚本，以安装手机直登 Flow、服务账号权限和手机号 Token Claim：
 

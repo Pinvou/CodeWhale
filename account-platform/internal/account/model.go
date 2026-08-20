@@ -27,6 +27,7 @@ type Context struct {
 type Me struct {
 	UserID         uuid.UUID `json:"user_id"`
 	Status         string    `json:"status"`
+	Username       *string   `json:"username"`
 	DisplayName    *string   `json:"display_name"`
 	Mobile         *string   `json:"mobile,omitempty"`
 	MobileVerified bool      `json:"mobile_verified"`

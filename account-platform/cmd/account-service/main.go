@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
@@ -50,17 +51,22 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		auth, err := account.NewMobileAuthService(repository, sms, identities, os.Getenv("OIDC_ISSUER"), os.Getenv("MOBILE_AUTH_HASH_SECRET"))
+		auth, err := account.NewMobileAuthService(repository, sms, identities, os.Getenv("OIDC_ISSUER"))
 		if err != nil {
 			log.Fatal(err)
 		}
 		service.WithMobileAuth(auth, os.Getenv("INTERNAL_SERVICE_TOKEN"))
 
-		mall, err := h3cmall.New(h3cmall.Config{BaseURL: os.Getenv("H3C_MALL_BASE_URL"), AppKey: os.Getenv("H3C_MALL_APP_KEY"), AppSecret: os.Getenv("H3C_MALL_APP_SECRET"), AllowInsecure: cfg.Environment == "development" || cfg.Environment == "test"})
-		if err != nil {
-			log.Fatal(err)
+		// Mobile authentication and Mall account synchronization use separate
+		// providers. Keep authentication available while Mall integration is not
+		// configured; queued users are synchronized once its credentials exist.
+		if strings.TrimSpace(os.Getenv("H3C_MALL_BASE_URL")) != "" {
+			mall, err := h3cmall.New(h3cmall.Config{BaseURL: os.Getenv("H3C_MALL_BASE_URL"), AppKey: os.Getenv("H3C_MALL_APP_KEY"), AppSecret: os.Getenv("H3C_MALL_APP_SECRET"), AllowInsecure: cfg.Environment == "development" || cfg.Environment == "test"})
+			if err != nil {
+				log.Fatal(err)
+			}
+			go account.NewMallSyncWorker(repository, mall, 5*time.Second).Run(ctx)
 		}
-		go account.NewMallSyncWorker(repository, mall, 5*time.Second).Run(ctx)
 	}
 	if err := httpserver.RunWithApplication("account-service", service.Handler(verify), repository.Ping); err != nil {
 		log.Fatal(err)
