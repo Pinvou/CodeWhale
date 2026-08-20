@@ -68,7 +68,7 @@ use crate::tools::user_input::{UserInputRequest, UserInputResponse};
 use crate::tools::{ToolContext, ToolRegistryBuilder};
 use crate::tui::app::AppMode;
 use crate::utils::spawn_supervised;
-use crate::worker_profile::{ModelRoute, WorkerRuntimeProfile};
+use crate::worker_profile::{ModelRoute, ShellPolicy, WorkerRuntimeProfile};
 use crate::working_set::WorkingSet;
 
 #[cfg(test)]
@@ -78,7 +78,8 @@ use super::authority::{
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    Op, ProviderRuntimeStatus, SessionSnapshot, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
+    ExactToolDispatchPolicy, Op, ProviderRuntimeStatus, SessionSnapshot, TurnToolSecurityPolicy,
+    USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
 };
 use super::session::Session;
 use super::tool_parser;
@@ -87,6 +88,25 @@ use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
 const GOAL_CONTINUATION_FAILURE_DETAIL_MAX_BYTES: usize = 512;
 const PLAN_SHELL_NETWORK_DENIED_HINT: &str = "Shell command blocked: Plan mode runs shell commands in a read-only sandbox — no writes, no network. Use Act mode (`/mode act`) for any command that creates or modifies files, or that needs network access.";
+
+fn project_exact_allowed_tools(
+    exact: Option<&ExactToolDispatchPolicy>,
+    requested: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    let Some(exact) = exact else { return requested };
+    Some(
+        exact
+            .allowed_tools()
+            .iter()
+            .filter(|name| {
+                requested
+                    .as_deref()
+                    .is_none_or(|allowed| tool_catalog::tool_allowed(Some(allowed), name))
+            })
+            .cloned()
+            .collect(),
+    )
+}
 
 fn context_pressure_message(usage_percent: f64) -> Option<&'static str> {
     if usage_percent >= crate::tui::context_inspector::CONTEXT_CRITICAL_THRESHOLD_PERCENT {
@@ -363,6 +383,8 @@ pub struct EngineConfig {
     /// Tool restriction from custom slash command frontmatter.
     /// `None` means the current turn may use the normal tool set.
     pub allowed_tools: Option<Vec<String>>,
+    /// Process-local host authority for restricted embedded turns.
+    pub turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
     /// Tool deny-list.  Deny always wins over allow (#3027).
     /// `None` means no tools are explicitly denied.
     pub disallowed_tools: Option<Vec<String>>,
@@ -489,6 +511,7 @@ impl Default for EngineConfig {
             goal_status: GoalStatus::Active,
             goal_max_continuations: crate::goal_loop::DEFAULT_MAX_GOAL_CONTINUATIONS,
             allowed_tools: None,
+            turn_tool_security: None,
             disallowed_tools: None,
             max_tool_calls: None,
             hook_executor: None,
@@ -592,6 +615,11 @@ pub struct EngineHandle {
 /// The core engine that processes operations and emits events
 pub struct Engine {
     config: EngineConfig,
+    active_turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
+    /// Remains latched until the next message is dequeued, so queued control
+    /// operations and automatic runtime wakes cannot gain authority merely
+    /// because a restricted turn reached its terminal event.
+    control_plane_restricted: bool,
     api_config: Config,
     /// Runtime-host authority consulted only when constructing a later turn
     /// descriptor (goal continuation, idle child completion, `/edit`). Active
@@ -1331,8 +1359,12 @@ impl Engine {
             .map(std::sync::Arc::from);
 
         let active_route_limits = config.active_route_limits;
+        let active_turn_tool_security = config.turn_tool_security.clone();
+        let control_plane_restricted = active_turn_tool_security.is_some();
         let engine = Engine {
             config,
+            active_turn_tool_security,
+            control_plane_restricted,
             api_config: api_config.clone(),
             authoritative_route_config: None,
             deepseek_client,
@@ -1533,6 +1565,7 @@ impl Engine {
                     Some(&registry),
                     None,
                     None,
+                    self.active_turn_tool_security.clone(),
                 )
                 .await
             }
@@ -1888,12 +1921,20 @@ impl Engine {
                 .map(|op| EngineRunInput::Operation(Box::new(op)))
         } else {
             loop {
-                let shell_wake_armed = !host_managed_turns && self.idle_shell_wake_armed();
+                // A per-message restriction is removed from
+                // `active_turn_tool_security` after the turn returns, while
+                // this latch deliberately remains set. Keep runtime-produced
+                // follow-ups queued until a new explicit SendMessage installs
+                // its own authority; otherwise an old child/shell completion
+                // can start a normal unrestricted turn behind the host's back.
+                let automatic_followups_allowed =
+                    !host_managed_turns && !self.control_plane_restricted;
+                let shell_wake_armed = automatic_followups_allowed && self.idle_shell_wake_armed();
                 tokio::select! {
                     op = self.rx_op.recv() => {
                         return op.map(|op| EngineRunInput::Operation(Box::new(op)));
                     }
-                    completion = self.rx_subagent_completion.recv(), if !host_managed_turns => {
+                    completion = self.rx_subagent_completion.recv(), if automatic_followups_allowed => {
                         return completion.map(EngineRunInput::SubAgentCompletion);
                     }
                     // Background shells have no completion channel, so an
@@ -2061,7 +2102,27 @@ impl Engine {
                         hook_executor,
                         verbosity,
                         provenance,
+                        turn_tool_security,
                     } => {
+                        let configured_security = self.config.turn_tool_security.clone();
+                        self.active_turn_tool_security =
+                            turn_tool_security.or(configured_security.clone());
+                        self.control_plane_restricted = self.active_turn_tool_security.is_some();
+                        if self.active_turn_tool_security.is_some() && !dynamic_tools.is_empty() {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns do not accept dynamic tools".to_string(),
+                                )))
+                                .await;
+                            self.active_turn_tool_security = configured_security;
+                            continue;
+                        }
+                        let previous_allowed_tools = self.config.allowed_tools.clone();
+                        let allowed_tools = project_exact_allowed_tools(
+                            self.exact_dispatch_policy(),
+                            allowed_tools,
+                        );
                         self.handle_send_message(
                             content,
                             mode,
@@ -2085,11 +2146,38 @@ impl Engine {
                             provenance,
                         )
                         .await;
+                        if self.control_plane_restricted {
+                            self.config.allowed_tools = previous_allowed_tools;
+                        }
+                        self.active_turn_tool_security = configured_security;
                     }
                     Op::ContinueGoal {
                         dynamic_tools,
                         engine_schedule_id,
                     } => {
+                        // A restricted (host-policy) turn must not be followed by
+                        // an unrestricted goal self-continuation: the per-turn
+                        // security policy is not installed on this path, so the
+                        // next turn would run with full authority. Reject the
+                        // continuation while the latch is set instead of relying
+                        // on the exact allowlist not containing goal tools.
+                        if self.control_plane_restricted {
+                            // Consume a matching engine-owned token as well as
+                            // rejecting it. Leaving its schedule marker latched
+                            // would make `next_run_input` wait forever for a
+                            // token that was already dequeued.
+                            let _ = self.take_scheduled_goal_continuation(
+                                engine_schedule_id,
+                                dynamic_tools,
+                            );
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot continue scheduled goals".to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         let Some(dynamic_tools) = self
                             .take_scheduled_goal_continuation(engine_schedule_id, dynamic_tools)
                         else {
@@ -2163,6 +2251,16 @@ impl Engine {
                         auto_approve,
                         approval_mode,
                     } => {
+                        if self.control_plane_restricted {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot execute control-plane shell operations"
+                                        .to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         self.handle_run_shell_command(
                             command,
                             mode,
@@ -2194,6 +2292,15 @@ impl Engine {
                             .await;
                     }
                     Op::SpawnSubAgent { prompt } => {
+                        if self.control_plane_restricted {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot spawn sub-agents".to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         let Some(client) = self.deepseek_client.clone() else {
                             let message = self
                                 .deepseek_client_error
@@ -2623,6 +2730,17 @@ impl Engine {
                         }
                     }
                     Op::ReloadMcp { config_path, tx } => {
+                        // MCP reload spawns real external processes; a queued
+                        // reload must inherit the restricted-turn latch instead
+                        // of escaping it.
+                        if self.control_plane_restricted {
+                            let status: crate::core::ops::McpReloadResult =
+                                Err("Restricted turns cannot reload MCP pools".to_string());
+                            if let Some(tx) = tx.lock().ok().and_then(|mut guard| guard.take()) {
+                                let _ = tx.send(status);
+                            }
+                            continue;
+                        }
                         let result = self.reload_mcp_pool(config_path).await.map_err(|error| {
                             codewhale_config::persistence::redact_secrets(&format!("{error:#}"))
                         });
@@ -2634,6 +2752,22 @@ impl Engine {
                         self.handle_purge().await;
                     }
                     Op::EditLastTurn { new_message } => {
+                        // `/edit` removes transcript state and immediately
+                        // starts another model turn without carrying a new
+                        // TurnToolSecurityPolicy. Treat it like every other
+                        // implicit continuation while the restricted latch is
+                        // set; a fresh SendMessage is the only operation that
+                        // may install replacement authority.
+                        if self.control_plane_restricted {
+                            let _ = self
+                                .tx_event
+                                .send(Event::error(ErrorEnvelope::fatal(
+                                    "Restricted turns cannot edit and replay the last turn"
+                                        .to_string(),
+                                )))
+                                .await;
+                            continue;
+                        }
                         let route = match self.current_runtime_route() {
                             Ok(route) => route,
                             Err(err) => {
@@ -3287,6 +3421,9 @@ impl Engine {
     /// backstop (`[goal] max_continuations`, `0` = unlimited) still halts a
     /// pathological loop that never emits a terminal signal.
     fn goal_continuation_if_active(&self) -> GoalContinuationAction {
+        if self.exact_dispatch_error("update_goal").is_some() {
+            return GoalContinuationAction::Inactive;
+        }
         let mut state = match self.config.goal_state.lock() {
             Ok(state) => state,
             Err(err) => {
@@ -3604,7 +3741,10 @@ impl Engine {
         // so start_mcp_server can be registered when Feature::Mcp is enabled.
         // A passive snapshot must not create the pool: allocating it is engine
         // state a preview has no business writing.
-        if self.config.features.enabled(Feature::Mcp) && mcp_access.may_connect() {
+        if self.active_turn_tool_security.is_none()
+            && self.config.features.enabled(Feature::Mcp)
+            && mcp_access.may_connect()
+        {
             let _ = self.ensure_mcp_pool().await;
         }
         let builder = self
@@ -3616,10 +3756,15 @@ impl Engine {
                 todo_list,
                 plan_state,
             )
-            .with_dynamic_tools(dynamic_tools);
+            .with_dynamic_tools(if self.active_turn_tool_security.is_some() {
+                &[]
+            } else {
+                dynamic_tools
+            });
 
-        let subagents_available =
-            self.config.subagents_enabled && self.config.features.enabled(Feature::Subagents);
+        let subagents_available = self.active_turn_tool_security.is_none()
+            && self.config.subagents_enabled
+            && self.config.features.enabled(Feature::Subagents);
 
         let fork_context_for_runtime = if subagents_available && wiring.is_live() {
             let state = StructuredState::capture(
@@ -3700,7 +3845,9 @@ impl Engine {
             None
         };
 
-        let mcp_pool = if self.config.features.enabled(Feature::Mcp) {
+        let mcp_pool = if self.active_turn_tool_security.is_none()
+            && self.config.features.enabled(Feature::Mcp)
+        {
             if mcp_access.may_connect() {
                 self.ensure_mcp_pool().await.ok()
             } else {
@@ -3783,7 +3930,9 @@ impl Engine {
         let plugin_tool_names =
             configure_plugin_tools(&mut tool_registry, self.config.tools.as_ref());
 
-        let mcp_state = if self.config.features.enabled(Feature::Mcp) {
+        let mcp_state = if self.active_turn_tool_security.is_none()
+            && self.config.features.enabled(Feature::Mcp)
+        {
             if mcp_access.may_connect() {
                 let tools = self.mcp_tools().await;
                 let server_count = match self.mcp_pool.as_ref() {
@@ -4425,7 +4574,8 @@ impl Engine {
         // their host must create the next durable claim before dispatching any
         // further turn. A Failed or Interrupted turn never continues.
         let outcome = SendMessageOutcome::Finished { status, error };
-        if !self.host_managed_turns()
+        if self.exact_dispatch_error("update_goal").is_none()
+            && !self.host_managed_turns()
             && matches!(
                 &outcome,
                 SendMessageOutcome::Finished {
@@ -4902,6 +5052,33 @@ impl Engine {
         models
     }
 
+    fn exact_dispatch_policy(&self) -> Option<&ExactToolDispatchPolicy> {
+        self.active_turn_tool_security
+            .as_ref()
+            .and_then(|policy| policy.exact_dispatch())
+    }
+
+    fn exact_dispatch_error(&self, canonical_name: &str) -> Option<ToolError> {
+        self.exact_dispatch_policy()
+            .filter(|policy| !policy.allows(canonical_name))
+            .map(|_| ToolError::permission_denied("Tool blocked by host turn policy".to_string()))
+    }
+
+    /// Apply host read-only hardening to the shell policy resolved from the
+    /// ordinary mode/permission posture. `None` remains `None`; any full shell
+    /// surface is narrowed to the existing direct-argv read-only boundary.
+    fn effective_turn_shell_policy(&self, policy: ShellPolicy) -> ShellPolicy {
+        if self
+            .active_turn_tool_security
+            .as_ref()
+            .is_some_and(|security| security.requires_read_only_dispatch())
+        {
+            policy.min_with(ShellPolicy::ReadOnly)
+        } else {
+            policy
+        }
+    }
+
     fn build_tool_context(&self, mode: AppMode, auto_approve: bool) -> ToolContext {
         let authority = TurnAuthority::from_effective_fields(
             mode,
@@ -4945,7 +5122,7 @@ impl Engine {
         );
         context.trust_mode = authority.trust_mode;
         context.auto_approve = authority.auto_approve;
-        context.set_shell_policy(authority.shell_policy());
+        context.set_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()));
         context.elevated_sandbox_policy = Some(authority.sandbox_policy(
             &self.session.workspace,
             self.api_config.sandbox_mode.as_deref(),
@@ -4969,16 +5146,22 @@ impl Engine {
         // build. Cheap (a small JSON file) and always reflects the latest
         // `/trust add` / `/trust remove` mutations without an explicit cache
         // refresh hook.
-        let trusted = crate::workspace_trust::WorkspaceTrust::load_for(&self.session.workspace);
-        let mut trusted_external_paths = trusted.paths().to_vec();
-        let clipboard_images_dir =
-            crate::tui::clipboard::clipboard_images_dir(&self.session.workspace);
-        if !trusted_external_paths
-            .iter()
-            .any(|path| path == &clipboard_images_dir)
+        let trusted_external_paths = if let Some(paths) = self
+            .active_turn_tool_security
+            .as_ref()
+            .and_then(|policy| policy.trusted_external_paths_override())
         {
-            trusted_external_paths.push(clipboard_images_dir);
-        }
+            paths.to_vec()
+        } else {
+            let trusted = crate::workspace_trust::WorkspaceTrust::load_for(&self.session.workspace);
+            let mut paths = trusted.paths().to_vec();
+            let clipboard_images_dir =
+                crate::tui::clipboard::clipboard_images_dir(&self.session.workspace);
+            if !paths.iter().any(|path| path == &clipboard_images_dir) {
+                paths.push(clipboard_images_dir);
+            }
+            paths
+        };
         let mut ctx = ToolContext::with_auto_approve(
             self.session.workspace.clone(),
             authority.trust_mode,
@@ -5009,7 +5192,7 @@ impl Engine {
             self.session.messages.clone().into(),
         ))
         .with_cancel_token(self.cancel_token.clone())
-        .with_shell_policy(authority.shell_policy())
+        .with_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()))
         .with_trusted_external_paths(trusted_external_paths)
         .with_follow_symlinks(self.config.workspace_follow_symlinks);
 
@@ -6211,7 +6394,7 @@ use self::tool_catalog::{
     preflight_requested_deferred_tool, should_default_defer_tool, tool_allowed,
     tool_catalog_consistency_issues, tool_denied,
 };
-use self::tool_execution::emit_tool_audit;
+use self::tool_execution::{emit_tool_audit, emit_tool_audit_for_policy};
 use self::tool_preparation::{prepare_tool_call, reprepare_tool_call_after_hook};
 use crate::tools::js_execution::execute_js_execution_tool;
 

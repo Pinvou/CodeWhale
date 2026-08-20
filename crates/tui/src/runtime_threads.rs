@@ -5250,6 +5250,7 @@ impl RuntimeThreadManager {
             approval_mode: policy.permission,
             verbosity,
             provenance: crate::core::ops::UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         };
 
         // Reserve mailbox capacity before claiming or persisting anything.
@@ -5832,6 +5833,7 @@ impl RuntimeThreadManager {
                 goal_status: crate::tools::goal::GoalStatus::Active,
                 goal_max_continuations: cfg.goal_max_continuations(),
                 allowed_tools: None,
+                turn_tool_security: None,
                 disallowed_tools: None,
                 max_tool_calls: None,
                 hook_executor: None,
