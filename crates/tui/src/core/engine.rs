@@ -86,6 +86,11 @@ use super::turn::{TurnContext, post_turn_snapshot, pre_turn_snapshot};
 
 const ENGINE_OP_CHANNEL_CAPACITY: usize = 32;
 const GOAL_CONTINUATION_FAILURE_DETAIL_MAX_BYTES: usize = 512;
+#[cfg(not(test))]
+const SUBAGENT_COMPLETION_HOLD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const SUBAGENT_COMPLETION_HOLD_IDLE_TIMEOUT: Duration = Duration::from_millis(25);
+const SUBAGENT_COMPLETION_HOLDER_MAX_BYTES: usize = 128;
 const PLAN_SHELL_NETWORK_DENIED_HINT: &str = "Shell command blocked: Plan mode runs shell commands in a read-only sandbox — no writes, no network. Use Act mode (`/mode act`) for any command that creates or modifies files, or that needs network access.";
 
 fn context_pressure_message(usage_percent: f64) -> Option<&'static str> {
@@ -247,6 +252,29 @@ pub struct DirectToolRoundPolicy {
     pub overflow_tools: Vec<String>,
 }
 
+/// Controls when completed background sub-agents become model-visible.
+///
+/// The default [`Self::Eager`] behavior preserves CodeWhale's interactive
+/// runtime contract: a completion that arrives during a turn may be added
+/// before the next provider request, while an idle completion starts its own
+/// runtime-authored follow-up turn. Embedders that keep a foreground agent
+/// available for unrelated user work can select [`Self::BoundaryOnly`] so a
+/// completion never changes an already-active turn and is instead delivered
+/// through a dedicated [`UserInputProvenance::SubAgentHandoff`] turn.
+///
+/// Hosted engines retain their existing explicit-claim semantics regardless
+/// of this setting: an idle completion waits for the host's next durable turn
+/// and is made visible inside that claimed turn.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SubAgentCompletionDeliveryPolicy {
+    /// Surface completions at the next available provider boundary.
+    #[default]
+    Eager,
+    /// Keep active interactive turns immutable; deliver completions in a
+    /// separate runtime-authored turn after the current turn boundary.
+    BoundaryOnly,
+}
+
 /// Configuration for the engine
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -389,6 +417,10 @@ pub struct EngineConfig {
     /// tool loop. Embedders can use this to require a bounded foreground agent
     /// to hand longer work to a dedicated orchestration tool.
     pub direct_tool_round_policy: Option<DirectToolRoundPolicy>,
+    /// Delivery policy for completed background sub-agents. Defaults to the
+    /// historical eager behavior; interactive embedders may opt into isolated
+    /// boundary delivery without changing hosted-engine claim semantics.
+    pub subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy,
     /// Hook executor for control-plane hooks.
     /// `ToolCallBefore` hooks may deny a tool call with exit code 2.
     pub hook_executor: Option<std::sync::Arc<crate::hooks::HookExecutor>>,
@@ -510,6 +542,7 @@ impl Default for EngineConfig {
             disallowed_tools: None,
             max_tool_calls: None,
             direct_tool_round_policy: None,
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::default(),
             hook_executor: None,
             locale_tag: "en".to_string(),
             workshop: None,
@@ -676,6 +709,11 @@ pub struct Engine {
     /// dropped event can be synthesized once without duplicating a later
     /// delivery.
     delivered_subagent_completion_ids: HashSet<String>,
+    /// Host-owned, short-lived arbitration token used only by interactive
+    /// BoundaryOnly engines. It lets an input accepted into the host FIFO
+    /// outrank an already-ready detached completion at the next whole-turn
+    /// boundary without steering or mutating the active turn.
+    subagent_completion_holders: HashMap<String, SubAgentCompletionHold>,
     cancel_token: CancellationToken,
     shared_cancel_token: Arc<StdMutex<CancellationToken>>,
     /// Latched reason for the current cancellation, mirrored to
@@ -834,6 +872,16 @@ struct ScheduledGoalContinuation {
     id: u64,
     dynamic_tools: Vec<DynamicToolSpec>,
     enqueued: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubAgentCompletionHold {
+    /// `Some` for the two-phase host barrier; `None` for the legacy
+    /// fire-and-forget Hold operation. Legacy renewals preserve an existing
+    /// generation instead of invalidating an in-flight Confirm.
+    barrier_id: Option<String>,
+    /// Armed only while the engine is idle. Active turns pause this deadline.
+    deadline: Option<Instant>,
 }
 
 enum SendMessageOutcome {
@@ -1383,6 +1431,7 @@ impl Engine {
             tx_subagent_completion,
             rx_subagent_completion,
             delivered_subagent_completion_ids: HashSet::new(),
+            subagent_completion_holders: HashMap::new(),
             cancel_token: cancel_token.clone(),
             shared_cancel_token: shared_cancel_token.clone(),
             cancel_reason: cancel_reason.clone(),
@@ -1472,6 +1521,7 @@ impl Engine {
             .send(Event::TurnStarted {
                 turn_id: turn_id.clone(),
                 created_at: chrono::Utc::now(),
+                provenance: UserInputProvenance::ExternalUser,
                 route: None,
             })
             .await;
@@ -1750,7 +1800,9 @@ impl Engine {
             // prior synthetic token is already queued. Refresh that one token
             // instead of multiplying autonomous turns and provider spend.
             scheduled.dynamic_tools = dynamic_tools;
-            self.try_flush_pending_goal_continuation();
+            if !self.isolates_subagent_completions_at_turn_boundary() {
+                self.try_flush_pending_goal_continuation();
+            }
             return;
         }
 
@@ -1761,7 +1813,9 @@ impl Engine {
             dynamic_tools,
             enqueued: false,
         });
-        self.try_flush_pending_goal_continuation();
+        if !self.isolates_subagent_completions_at_turn_boundary() {
+            self.try_flush_pending_goal_continuation();
+        }
     }
 
     fn cancel_scheduled_goal_continuation(&mut self) {
@@ -1890,7 +1944,133 @@ impl Engine {
         }
     }
 
+    async fn manager_subagent_completions(&self) -> Vec<SubAgentCompletion> {
+        let results = {
+            let manager = self.subagent_manager.read().await;
+            manager.terminal_results_excluding(&self.delivered_subagent_completion_ids)
+        };
+        results
+            .into_iter()
+            .map(|result| {
+                let report_ref =
+                    crate::tools::subagent::spill_subagent_final_report(&self.session.id, &result);
+                crate::tools::subagent::subagent_completion_from_result_with_ref(
+                    &result,
+                    report_ref.as_deref(),
+                )
+            })
+            .collect()
+    }
+
+    async fn manager_subagent_reconciliation_armed(&self) -> bool {
+        let manager = self.subagent_manager.read().await;
+        manager.may_transform_next_parent_request(&self.delivered_subagent_completion_ids)
+    }
+
+    async fn next_boundary_only_run_input(&mut self) -> Option<EngineRunInput> {
+        loop {
+            // A live host holder outranks every runtime-authored turn,
+            // including goal continuations. This matters after create_goal:
+            // the synthetic token is scheduled before the host can observe
+            // TurnComplete and submit its already-visible queued input.
+            if !self.subagent_completion_holders.is_empty() {
+                let idle_started_at = Instant::now();
+                for hold in self.subagent_completion_holders.values_mut() {
+                    if hold.deadline.is_none() {
+                        hold.deadline =
+                            Some(idle_started_at + SUBAGENT_COMPLETION_HOLD_IDLE_TIMEOUT);
+                    }
+                }
+                let next_expiry = self
+                    .subagent_completion_holders
+                    .values()
+                    .filter_map(|hold| hold.deadline)
+                    .min()
+                    .expect("non-empty completion holders must have idle deadlines");
+                tokio::select! {
+                    biased;
+                    op = self.rx_op.recv() => {
+                        return op.map(|op| EngineRunInput::Operation(Box::new(op)));
+                    }
+                    () = tokio::time::sleep_until(next_expiry.into()) => {
+                        let expired_at = Instant::now();
+                        let expired = self.expire_subagent_completion_holders(expired_at);
+                        tracing::warn!(
+                            expired,
+                            holder_count = self.subagent_completion_holders.len(),
+                            "released abandoned sub-agent completion holds after idle timeout"
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            // Mailbox acceptance is authoritative. Anything already queued
+            // there wins before a channel frame or a manager-reconciled
+            // terminal result.
+            if let Ok(op) = self.rx_op.try_recv() {
+                return Some(EngineRunInput::Operation(Box::new(op)));
+            }
+            if let Ok(completion) = self.rx_subagent_completion.try_recv() {
+                return Some(EngineRunInput::SubAgentCompletion(completion));
+            }
+            if let Some(completion) = self.manager_subagent_completions().await.into_iter().next() {
+                return Some(EngineRunInput::SubAgentCompletion(completion));
+            }
+
+            // Only after host/user work and ready child results have been
+            // arbitrated may BoundaryOnly enqueue an autonomous goal token.
+            // Eager/hosted engines retain their historical scheduling path.
+            if self.has_scheduled_goal_continuation() {
+                self.try_flush_pending_goal_continuation();
+                if self
+                    .scheduled_goal_continuation
+                    .as_ref()
+                    .is_some_and(|scheduled| scheduled.enqueued)
+                {
+                    return self
+                        .rx_op
+                        .recv()
+                        .await
+                        .map(|op| EngineRunInput::Operation(Box::new(op)));
+                }
+                // A concurrent sender may have filled the mailbox between
+                // try_recv and try_send. Loop so that accepted op runs first.
+                if self.has_scheduled_goal_continuation() {
+                    continue;
+                }
+            }
+
+            let shell_wake_armed = self.idle_shell_wake_armed();
+            let manager_reconciliation_armed = self.manager_subagent_reconciliation_armed().await;
+            tokio::select! {
+                biased;
+                op = self.rx_op.recv() => {
+                    return op.map(|op| EngineRunInput::Operation(Box::new(op)));
+                }
+                completion = self.rx_subagent_completion.recv() => {
+                    return completion.map(EngineRunInput::SubAgentCompletion);
+                }
+                () = tokio::time::sleep(Duration::from_millis(SHELL_WAKE_POLL_MS)), if shell_wake_armed || manager_reconciliation_armed => {
+                    if shell_wake_armed && self.finished_background_shell_pending() {
+                        return Some(EngineRunInput::ShellCompletionWake);
+                    }
+                    // A manager terminal result is pull-only if its channel
+                    // frame was lost. Re-check at the top without claiming it
+                    // until the normal completion handler runs.
+                }
+            }
+        }
+    }
+
     async fn next_run_input(&mut self, host_managed_turns: bool) -> Option<EngineRunInput> {
+        let boundary_only = !host_managed_turns
+            && self.config.subagent_completion_delivery_policy
+                == SubAgentCompletionDeliveryPolicy::BoundaryOnly;
+        if boundary_only {
+            return self.next_boundary_only_run_input().await;
+        }
+
         // A full mailbox means queued controls must run first. Retrying at the
         // top of each receive appends the continuation behind the remaining
         // controls as soon as one slot becomes available.
@@ -1927,6 +2107,154 @@ impl Engine {
                 }
             }
         }
+    }
+
+    fn valid_subagent_completion_hold_identity(value: &str) -> bool {
+        !value.is_empty() && value.len() <= SUBAGENT_COMPLETION_HOLDER_MAX_BYTES
+    }
+
+    fn hold_subagent_completions(&mut self, holder_id: String) -> bool {
+        if self.config.subagent_completion_delivery_policy
+            != SubAgentCompletionDeliveryPolicy::BoundaryOnly
+            || !Self::valid_subagent_completion_hold_identity(&holder_id)
+        {
+            return false;
+        }
+        // Do not silently drop a valid holder after the Host has observed its
+        // mailbox send succeed. That send is the protocol's linearization
+        // point: at the next idle boundary the biased mailbox receive must see
+        // every accepted holder before a ready completion. Holder ids are
+        // bounded above, duplicate acquisition is idempotent, and the
+        // idle-only abandonment watchdog clears renderer-crash leftovers.
+        // A Hold operation is processed only at an idle mailbox boundary.
+        // A cleared deadline makes the next idle wait arm (or renew) only this
+        // holder. Preserve an existing two-phase generation: a legacy
+        // heartbeat must not invalidate a Confirm already crossing the host
+        // event barrier.
+        self.subagent_completion_holders
+            .entry(holder_id)
+            .and_modify(|hold| hold.deadline = None)
+            .or_insert(SubAgentCompletionHold {
+                barrier_id: None,
+                deadline: None,
+            });
+        true
+    }
+
+    async fn acquire_subagent_completion_hold(
+        &mut self,
+        holder_id: String,
+        barrier_id: String,
+        receipt: crate::core::ops::SubAgentCompletionHoldReceipt,
+    ) {
+        if self.config.subagent_completion_delivery_policy
+            != SubAgentCompletionDeliveryPolicy::BoundaryOnly
+            || !Self::valid_subagent_completion_hold_identity(&holder_id)
+            || !Self::valid_subagent_completion_hold_identity(&barrier_id)
+        {
+            // Fail closed without leaving the caller parked until its own
+            // timeout. No Applied event is truthful when no generation was
+            // installed; the terminal barrier result is simply inactive.
+            let _ = self
+                .tx_event
+                .send(Event::SubAgentCompletionHoldConfirmed {
+                    holder_id,
+                    barrier_id,
+                    active: false,
+                    receipt,
+                })
+                .await;
+            return;
+        }
+
+        // Installing the generation is phase one. The event is deliberately
+        // emitted afterwards and the Engine never resolves the receipt here:
+        // the serial host forwarder must cross all earlier lifecycle events,
+        // then send Confirm back through this same mailbox.
+        self.subagent_completion_holders.insert(
+            holder_id.clone(),
+            SubAgentCompletionHold {
+                barrier_id: Some(barrier_id.clone()),
+                deadline: None,
+            },
+        );
+        let _ = self
+            .tx_event
+            .send(Event::SubAgentCompletionHoldApplied {
+                holder_id,
+                barrier_id,
+                receipt,
+            })
+            .await;
+    }
+
+    async fn confirm_subagent_completion_hold(
+        &mut self,
+        holder_id: String,
+        barrier_id: String,
+        receipt: crate::core::ops::SubAgentCompletionHoldReceipt,
+    ) {
+        let now = Instant::now();
+        let identity_valid = Self::valid_subagent_completion_hold_identity(&holder_id)
+            && Self::valid_subagent_completion_hold_identity(&barrier_id);
+        let current = identity_valid
+            && self
+                .subagent_completion_holders
+                .get(&holder_id)
+                .is_some_and(|hold| {
+                    hold.barrier_id.as_deref() == Some(barrier_id.as_str())
+                        && hold.deadline.is_none_or(|deadline| deadline > now)
+                });
+
+        if current {
+            if let Some(hold) = self.subagent_completion_holders.get_mut(&holder_id) {
+                // Renew only the matching live generation. The next idle wait
+                // arms a fresh bounded deadline.
+                hold.deadline = None;
+            }
+        } else {
+            let matching_expired = identity_valid
+                && self
+                    .subagent_completion_holders
+                    .get(&holder_id)
+                    .is_some_and(|hold| {
+                        hold.barrier_id.as_deref() == Some(barrier_id.as_str())
+                            && hold.deadline.is_some_and(|deadline| deadline <= now)
+                    });
+            if matching_expired {
+                self.subagent_completion_holders.remove(&holder_id);
+            }
+        }
+
+        // Even a stale Confirm gets a deterministic negative result. It never
+        // inserts or renews a different generation, so late event-forwarder
+        // work cannot resurrect an expired/released holder.
+        let _ = self
+            .tx_event
+            .send(Event::SubAgentCompletionHoldConfirmed {
+                holder_id,
+                barrier_id,
+                active: current,
+                receipt,
+            })
+            .await;
+    }
+
+    fn release_subagent_completions(&mut self, holder_id: &str) {
+        self.subagent_completion_holders.remove(holder_id);
+    }
+
+    fn pause_subagent_completion_hold_deadlines(&mut self) {
+        for hold in self.subagent_completion_holders.values_mut() {
+            hold.deadline = None;
+        }
+    }
+
+    fn expire_subagent_completion_holders(&mut self, expired_at: Instant) -> usize {
+        let before = self.subagent_completion_holders.len();
+        self.subagent_completion_holders
+            .retain(|_, hold| hold.deadline.is_some_and(|deadline| deadline > expired_at));
+        before.saturating_sub(self.subagent_completion_holders.len())
     }
 
     /// Whether the idle loop should poll for background shell completion: a
@@ -2714,6 +3042,28 @@ impl Engine {
                         )
                         .await;
                     }
+                    Op::HoldSubAgentCompletions { holder_id } => {
+                        self.hold_subagent_completions(holder_id);
+                    }
+                    Op::AcquireSubAgentCompletionHold {
+                        holder_id,
+                        barrier_id,
+                        receipt,
+                    } => {
+                        self.acquire_subagent_completion_hold(holder_id, barrier_id, receipt)
+                            .await;
+                    }
+                    Op::ConfirmSubAgentCompletionHold {
+                        holder_id,
+                        barrier_id,
+                        receipt,
+                    } => {
+                        self.confirm_subagent_completion_hold(holder_id, barrier_id, receipt)
+                            .await;
+                    }
+                    Op::ReleaseSubAgentCompletions { holder_id } => {
+                        self.release_subagent_completions(&holder_id);
+                    }
                     Op::SetAdvisorEnabled { enabled } => {
                         self.config.advisor_config.enabled = enabled;
                         let state = if enabled { "enabled" } else { "disabled" };
@@ -2752,6 +3102,16 @@ impl Engine {
 
     fn host_managed_turns(&self) -> bool {
         self.config.runtime_services.active_thread_id.is_some()
+    }
+
+    /// Whether this engine owns an interactive lifecycle whose active turns
+    /// must not absorb background sub-agent completions. Hosted engines cannot
+    /// use the idle completion branch and therefore retain their established
+    /// next-explicit-claim delivery behavior.
+    fn isolates_subagent_completions_at_turn_boundary(&self) -> bool {
+        !self.host_managed_turns()
+            && self.config.subagent_completion_delivery_policy
+                == SubAgentCompletionDeliveryPolicy::BoundaryOnly
     }
 
     async fn emit_session_updated(&self) {
@@ -3198,6 +3558,13 @@ impl Engine {
             completions.push(completion);
         }
         while let Ok(completion) = self.rx_subagent_completion.try_recv() {
+            if let Some(completion) =
+                claim_subagent_completion(&mut self.delivered_subagent_completion_ids, completion)
+            {
+                completions.push(completion);
+            }
+        }
+        for completion in self.manager_subagent_completions().await {
             if let Some(completion) =
                 claim_subagent_completion(&mut self.delivered_subagent_completion_ids, completion)
             {
@@ -3938,6 +4305,10 @@ impl Engine {
         verbosity: Option<String>,
         provenance: UserInputProvenance,
     ) -> SendMessageOutcome {
+        // Completion-holder expiry is an idle crash-recovery lease, not a
+        // foreground-turn deadline. Any model turn pauses every holder; the
+        // next idle boundary arms fresh per-holder deadlines.
+        self.pause_subagent_completion_hold_deadlines();
         let effective_provider = route.identity.provider;
         let provider_identity = route.identity.key.clone();
         let model = route.model.clone();
@@ -4108,6 +4479,7 @@ impl Engine {
             .send(Event::TurnStarted {
                 turn_id: turn.id.clone(),
                 created_at: turn_started_at,
+                provenance,
                 route: Some(turn_route),
             })
             .await;

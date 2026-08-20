@@ -640,6 +640,88 @@ struct FirstRequestGatedGoalModelClient {
     release_request: std::sync::Arc<tokio::sync::Notify>,
 }
 
+/// Two-request fixture for sub-agent completion delivery. The first provider
+/// request pauses after capturing its immutable payload, giving the test a
+/// deterministic active-turn window in which to publish a child completion.
+struct GatedSubAgentCompletionModelClient {
+    calls: std::sync::atomic::AtomicUsize,
+    requests: std::sync::Mutex<Vec<crate::models::MessageRequest>>,
+    first_request_entered: std::sync::Arc<tokio::sync::Notify>,
+    release_first_request: std::sync::Arc<tokio::sync::Notify>,
+    max_requests: usize,
+}
+
+impl GatedSubAgentCompletionModelClient {
+    fn captured_requests(&self) -> Vec<crate::models::MessageRequest> {
+        self.requests
+            .lock()
+            .expect("sub-agent completion request lock")
+            .clone()
+    }
+}
+
+fn model_request_text(request: &crate::models::MessageRequest) -> String {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            crate::models::ContentBlock::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for GatedSubAgentCompletionModelClient {
+    fn provider_name(&self) -> &str {
+        "deterministic-subagent-completion"
+    }
+
+    fn model(&self) -> &str {
+        "local-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("sub-agent completion regression uses the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        self.requests
+            .lock()
+            .expect("sub-agent completion request lock")
+            .push(request);
+        if call == 1 {
+            self.first_request_entered.notify_one();
+            self.release_first_request.notified().await;
+        } else if call > self.max_requests {
+            anyhow::bail!("unexpected sub-agent completion model request #{call}");
+        }
+
+        let events = crate::llm_client::mock::canned::simple_text_turn(&format!(
+            "completion fixture response {call}"
+        ))
+        .into_iter()
+        .map(Ok);
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
 struct IndexedGatedGoalModelClient {
     calls: std::sync::atomic::AtomicUsize,
     gates: HashMap<
@@ -2969,7 +3051,793 @@ async fn host_managed_engine_does_not_self_dispatch_goal_continuation() {
 }
 
 #[tokio::test]
-async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() {
+async fn forkguard_boundary_only_keeps_active_turn_clean_then_delivers_one_dedicated_handoff() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let first_request_entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release_first_request = std::sync::Arc::new(tokio::sync::Notify::new());
+    let model = std::sync::Arc::new(GatedSubAgentCompletionModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        requests: std::sync::Mutex::new(Vec::new()),
+        first_request_entered: std::sync::Arc::clone(&first_request_entered),
+        release_first_request: std::sync::Arc::clone(&release_first_request),
+        max_requests: 2,
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let tx_subagent_completion = engine.tx_subagent_completion.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(external_user_message_op_for_model(
+            "keep this user turn isolated",
+            AppMode::Agent,
+            &config,
+            "local-model",
+        ))
+        .await
+        .expect("send isolated external turn");
+    tokio::time::timeout(model_turn_event_timeout(), first_request_entered.notified())
+        .await
+        .expect("first isolated request was never entered");
+
+    let completion_payload = "BOUNDARY_ONLY_CHILD_RESULT";
+    for payload in [completion_payload, "duplicate must not be delivered"] {
+        tx_subagent_completion
+            .send(SubAgentCompletion {
+                agent_id: "agent_boundary_once".to_string(),
+                payload: payload.to_string(),
+            })
+            .expect("queue completion during active external turn");
+    }
+    release_first_request.notify_one();
+
+    let deadline = tokio::time::Instant::now() + model_turn_event_timeout();
+    let mut provenances = Vec::new();
+    let mut completed_turns = 0usize;
+    {
+        let mut events = handle.rx_event.write().await;
+        while completed_turns < 2 {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("boundary-only lifecycle timed out")
+                .expect("boundary-only engine event channel closed");
+            match event {
+                Event::TurnStarted { provenance, .. } => provenances.push(provenance),
+                Event::TurnComplete { .. } => completed_turns += 1,
+                _ => {}
+            }
+        }
+    }
+
+    assert_eq!(
+        provenances,
+        vec![
+            UserInputProvenance::ExternalUser,
+            UserInputProvenance::SubAgentHandoff,
+        ],
+        "the child result must start one typed follow-up turn after the external turn ends"
+    );
+    let requests = model.captured_requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "each lifecycle must make one provider request"
+    );
+    let external_request = model_request_text(&requests[0]);
+    assert!(
+        !external_request.contains(completion_payload),
+        "an active external request absorbed a background completion: {external_request}"
+    );
+    let handoff_request = model_request_text(&requests[1]);
+    assert_eq!(
+        handoff_request.matches(completion_payload).count(),
+        1,
+        "a duplicate completion id must be claimed exactly once: {handoff_request}"
+    );
+    assert!(
+        handoff_request.contains("Input provenance: subagent_handoff (non-authoritative)"),
+        "the dedicated request must retain its typed reduced authority: {handoff_request}"
+    );
+    assert_eq!(
+        model.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "one child completion id must not create another model turn"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_boundary_only_prefers_an_already_queued_external_op_over_idle_completion() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let config = goal_custom_route_config();
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    handle
+        .tx_op
+        .try_send(external_user_message_op_for_model(
+            "queued user work",
+            AppMode::Agent,
+            &config,
+            "local-model",
+        ))
+        .expect("queue external operation");
+    engine
+        .tx_subagent_completion
+        .send(SubAgentCompletion {
+            agent_id: "agent_ready_at_idle_boundary".to_string(),
+            payload: "ready idle completion".to_string(),
+        })
+        .expect("queue idle completion");
+
+    let first = engine
+        .next_run_input(false)
+        .await
+        .expect("boundary-only first input");
+    let EngineRunInput::Operation(first) = first else {
+        panic!("ready idle completion beat an already-queued external operation");
+    };
+    assert!(matches!(
+        *first,
+        Op::SendMessage {
+            provenance: UserInputProvenance::ExternalUser,
+            ..
+        }
+    ));
+
+    let second = engine
+        .next_run_input(false)
+        .await
+        .expect("boundary-only second input");
+    let EngineRunInput::SubAgentCompletion(second) = second else {
+        panic!("idle completion was lost after the queued external operation");
+    };
+    assert_eq!(second.agent_id, "agent_ready_at_idle_boundary");
+}
+
+#[tokio::test]
+async fn forkguard_boundary_only_recovers_manager_terminal_without_channel_frame_once() {
+    let config = goal_custom_route_config();
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    {
+        let mut manager = engine.subagent_manager.write().await;
+        manager.insert_terminal_root_result_without_delivery_for_test(
+            "agent_manager_only",
+            "MANAGER_ONLY_TERMINAL_RESULT",
+        );
+    }
+    handle
+        .tx_op
+        .try_send(external_user_message_op_for_model(
+            "queued user work wins",
+            AppMode::Agent,
+            &config,
+            "local-model",
+        ))
+        .expect("queue external operation");
+
+    let first = engine.next_run_input(false).await.expect("first input");
+    assert!(matches!(
+        first,
+        EngineRunInput::Operation(op)
+            if matches!(*op, Op::SendMessage { provenance: UserInputProvenance::ExternalUser, .. })
+    ));
+
+    let second = engine
+        .next_run_input(false)
+        .await
+        .expect("manager terminal reconciliation");
+    let EngineRunInput::SubAgentCompletion(completion) = second else {
+        panic!("manager-only terminal result was not synthesized");
+    };
+    assert_eq!(completion.agent_id, "agent_manager_only");
+    assert!(completion.payload.contains("MANAGER_ONLY_TERMINAL_RESULT"));
+    assert!(
+        claim_subagent_completion(&mut engine.delivered_subagent_completion_ids, completion,)
+            .is_some()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), engine.next_run_input(false))
+            .await
+            .is_err(),
+        "a manager terminal result already claimed for delivery must not reappear"
+    );
+}
+
+#[tokio::test]
+async fn forkguard_live_holder_and_queued_user_op_precede_goal_continuation() {
+    let config = goal_custom_route_config();
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    assert!(engine.hold_subagent_completions("front-fifo".to_string()));
+    engine.schedule_goal_continuation(Vec::new());
+    assert!(engine.has_scheduled_goal_continuation());
+    assert!(
+        !engine
+            .scheduled_goal_continuation
+            .as_ref()
+            .expect("scheduled continuation")
+            .enqueued,
+        "BoundaryOnly must not enqueue a synthetic goal token past a live holder"
+    );
+    handle
+        .tx_op
+        .try_send(external_user_message_op_for_model(
+            "queued front input",
+            AppMode::Agent,
+            &config,
+            "local-model",
+        ))
+        .expect("queue front input");
+
+    let first = engine.next_run_input(false).await.expect("front input");
+    assert!(matches!(
+        first,
+        EngineRunInput::Operation(op)
+            if matches!(*op, Op::SendMessage { provenance: UserInputProvenance::ExternalUser, .. })
+    ));
+
+    engine.release_subagent_completions("front-fifo");
+    let second = engine
+        .next_run_input(false)
+        .await
+        .expect("goal continuation after user input");
+    assert!(matches!(
+        second,
+        EngineRunInput::Operation(op) if matches!(*op, Op::ContinueGoal { .. })
+    ));
+}
+
+#[tokio::test]
+async fn forkguard_two_phase_hold_requires_matching_confirmed_event() {
+    let config = goal_custom_route_config();
+    let (engine, handle) = Engine::new(
+        EngineConfig {
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    let run_task = tokio::spawn(engine.run());
+    let (receipt_tx, mut receipt_rx) = tokio::sync::oneshot::channel();
+    let receipt = std::sync::Arc::new(std::sync::Mutex::new(Some(receipt_tx)));
+    handle
+        .send(Op::AcquireSubAgentCompletionHold {
+            holder_id: "front-idle".to_string(),
+            barrier_id: "barrier-1".to_string(),
+            receipt: std::sync::Arc::clone(&receipt),
+        })
+        .await
+        .expect("queue acquire");
+
+    let applied = tokio::time::timeout(Duration::from_secs(1), async {
+        handle.rx_event.write().await.recv().await
+    })
+    .await
+    .expect("Applied event timeout")
+    .expect("Applied event");
+    assert!(matches!(
+        applied,
+        Event::SubAgentCompletionHoldApplied {
+            ref holder_id,
+            ref barrier_id,
+            ..
+        } if holder_id == "front-idle" && barrier_id == "barrier-1"
+    ));
+    assert!(
+        matches!(
+            receipt_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "Applied must not acknowledge the original caller"
+    );
+
+    handle
+        .send(Op::ConfirmSubAgentCompletionHold {
+            holder_id: "front-idle".to_string(),
+            barrier_id: "barrier-1".to_string(),
+            receipt: std::sync::Arc::clone(&receipt),
+        })
+        .await
+        .expect("queue confirm");
+    let confirmed = tokio::time::timeout(Duration::from_secs(1), async {
+        handle.rx_event.write().await.recv().await
+    })
+    .await
+    .expect("Confirmed event timeout")
+    .expect("Confirmed event");
+    assert!(matches!(
+        confirmed,
+        Event::SubAgentCompletionHoldConfirmed {
+            ref holder_id,
+            ref barrier_id,
+            active: true,
+            ..
+        } if holder_id == "front-idle" && barrier_id == "barrier-1"
+    ));
+    assert!(
+        matches!(
+            receipt_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ),
+        "Engine must leave final receipt resolution to the host forwarder"
+    );
+
+    receipt
+        .lock()
+        .expect("receipt lock")
+        .take()
+        .expect("receipt sender")
+        .send(())
+        .expect("resolve caller after active Confirmed");
+    receipt_rx.await.expect("caller receipt");
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_acquire_fails_closed_outside_boundary_only() {
+    let config = goal_custom_route_config();
+    let (engine, handle) = Engine::new(EngineConfig::default(), &config);
+    let run_task = tokio::spawn(engine.run());
+    let (receipt_tx, _receipt_rx) = tokio::sync::oneshot::channel();
+    let receipt = std::sync::Arc::new(std::sync::Mutex::new(Some(receipt_tx)));
+    handle
+        .send(Op::AcquireSubAgentCompletionHold {
+            holder_id: "unsupported".to_string(),
+            barrier_id: "barrier-eager".to_string(),
+            receipt,
+        })
+        .await
+        .expect("queue unsupported acquire");
+    let event = tokio::time::timeout(Duration::from_secs(1), async {
+        handle.rx_event.write().await.recv().await
+    })
+    .await
+    .expect("negative Confirmed timeout")
+    .expect("negative Confirmed event");
+    assert!(matches!(
+        event,
+        Event::SubAgentCompletionHoldConfirmed { active: false, .. }
+    ));
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_host_completion_hold_linearizes_fifo_before_ready_handoff() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let first_request_entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release_first_request = std::sync::Arc::new(tokio::sync::Notify::new());
+    let model = std::sync::Arc::new(GatedSubAgentCompletionModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        requests: std::sync::Mutex::new(Vec::new()),
+        first_request_entered: std::sync::Arc::clone(&first_request_entered),
+        release_first_request: std::sync::Arc::clone(&release_first_request),
+        max_requests: 3,
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let tx_subagent_completion = engine.tx_subagent_completion.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    // Ordinary Pinvou Front admission is atomic at the Engine mailbox:
+    // Hold(holder) is queued immediately before the first ExternalUser turn.
+    // The holder then spans every queued turn until the Host observes the last
+    // terminal boundary and releases it.
+    handle
+        .send(Op::HoldSubAgentCompletions {
+            holder_id: "host-fifo-1".to_string(),
+        })
+        .await
+        .expect("acquire turn-scoped host lease");
+    handle
+        .send(external_user_message_op_for_model(
+            "first foreground turn",
+            AppMode::Agent,
+            &config,
+            "local-model",
+        ))
+        .await
+        .expect("send first foreground turn");
+    tokio::time::timeout(model_turn_event_timeout(), first_request_entered.notified())
+        .await
+        .expect("first foreground request was never entered");
+
+    tx_subagent_completion
+        .send(SubAgentCompletion {
+            agent_id: "agent_ready_before_boundary".to_string(),
+            payload: "READY_BACKGROUND_RESULT".to_string(),
+        })
+        .expect("queue ready background result");
+    release_first_request.notify_one();
+
+    let deadline = tokio::time::Instant::now() + model_turn_event_timeout();
+    let mut provenances = Vec::new();
+    {
+        let mut events = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("first foreground lifecycle timed out")
+                .expect("engine event channel closed");
+            match event {
+                Event::TurnStarted { provenance, .. } => provenances.push(provenance),
+                Event::TurnComplete { .. } => break,
+                _ => {}
+            }
+        }
+    }
+
+    // The first chat:done sends exactly one queued turn while retaining the
+    // same lease. Releasing here would reopen the tail race during that turn.
+    handle
+        .send(external_user_message_op_for_model(
+            "queued interjection",
+            AppMode::Agent,
+            &config,
+            "local-model",
+        ))
+        .await
+        .expect("enqueue queued interjection");
+
+    let mut completed_turns = 1usize;
+    {
+        let mut events = handle.rx_event.write().await;
+        while completed_turns < 2 {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("queued-input lifecycle timed out")
+                .expect("engine event channel closed");
+            match event {
+                Event::TurnStarted { provenance, .. } => provenances.push(provenance),
+                Event::TurnComplete { .. } => completed_turns += 1,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        provenances,
+        vec![
+            UserInputProvenance::ExternalUser,
+            UserInputProvenance::ExternalUser,
+        ],
+        "a ready completion must remain held through the queued turn terminal"
+    );
+
+    // Only the queued turn's own terminal plus an empty Host FIFO may release
+    // the lease. The deferred completion then receives one dedicated turn.
+    handle
+        .send(Op::ReleaseSubAgentCompletions {
+            holder_id: "host-fifo-1".to_string(),
+        })
+        .await
+        .expect("release host lease after the final queued terminal");
+    {
+        let mut events = handle.rx_event.write().await;
+        while completed_turns < 3 {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("deferred handoff lifecycle timed out")
+                .expect("engine event channel closed");
+            match event {
+                Event::TurnStarted { provenance, .. } => provenances.push(provenance),
+                Event::TurnComplete { .. } => completed_turns += 1,
+                _ => {}
+            }
+        }
+    }
+
+    assert_eq!(
+        provenances,
+        vec![
+            UserInputProvenance::ExternalUser,
+            UserInputProvenance::ExternalUser,
+            UserInputProvenance::SubAgentHandoff,
+        ],
+        "the accepted host FIFO must run before the ready background handoff"
+    );
+    let requests = model.captured_requests();
+    assert_eq!(requests.len(), 3);
+    assert!(model_request_text(&requests[1]).contains("queued interjection"));
+    assert!(
+        !model_request_text(&requests[1]).contains("READY_BACKGROUND_RESULT"),
+        "the queued user turn absorbed a background completion"
+    );
+    assert_eq!(
+        model_request_text(&requests[2])
+            .matches("READY_BACKGROUND_RESULT")
+            .count(),
+        1,
+        "the deferred background result must be delivered exactly once"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_completion_hold_requires_matching_release_and_never_starves_controls() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let config = goal_custom_route_config();
+    let (mut engine, handle) = Engine::new(
+        EngineConfig {
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    engine.hold_subagent_completions("desktop".to_string());
+    engine.hold_subagent_completions("web".to_string());
+    engine
+        .tx_subagent_completion
+        .send(SubAgentCompletion {
+            agent_id: "agent_held".to_string(),
+            payload: "held result".to_string(),
+        })
+        .expect("queue held completion");
+
+    engine.release_subagent_completions("web");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(5), engine.next_run_input(false))
+            .await
+            .is_err(),
+        "releasing one holder must not release another host's FIFO"
+    );
+
+    handle
+        .tx_op
+        .try_send(Op::Shutdown)
+        .expect("queue control while held");
+    let control = engine
+        .next_run_input(false)
+        .await
+        .expect("held engine must still consume controls");
+    assert!(matches!(control, EngineRunInput::Operation(op) if matches!(*op, Op::Shutdown)));
+
+    engine.release_subagent_completions("desktop");
+    let completion = engine
+        .next_run_input(false)
+        .await
+        .expect("matching release must expose completion");
+    assert!(matches!(
+        completion,
+        EngineRunInput::SubAgentCompletion(completion) if completion.agent_id == "agent_held"
+    ));
+}
+
+#[tokio::test]
+async fn forkguard_abandoned_completion_hold_expires_only_at_idle_boundary() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    let config = goal_custom_route_config();
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    engine.hold_subagent_completions("crashed-renderer".to_string());
+    engine
+        .tx_subagent_completion
+        .send(SubAgentCompletion {
+            agent_id: "agent_after_watchdog".to_string(),
+            payload: "eventually visible".to_string(),
+        })
+        .expect("queue completion behind abandoned holder");
+
+    let result = tokio::time::timeout(Duration::from_secs(1), engine.next_run_input(false))
+        .await
+        .expect("idle abandonment watchdog did not release the completion")
+        .expect("engine input after watchdog");
+    assert!(engine.subagent_completion_holders.is_empty());
+    assert!(matches!(
+        result,
+        EngineRunInput::SubAgentCompletion(completion)
+            if completion.agent_id == "agent_after_watchdog"
+    ));
+}
+
+#[tokio::test]
+async fn forkguard_live_holder_heartbeat_does_not_extend_crashed_holder_deadline() {
+    let config = goal_custom_route_config();
+    let (mut engine, _handle) = Engine::new(
+        EngineConfig {
+            subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
+            ..EngineConfig::default()
+        },
+        &config,
+    );
+    engine.hold_subagent_completions("crashed-renderer".to_string());
+    engine.hold_subagent_completions("live-renderer".to_string());
+
+    let base = Instant::now();
+    engine.subagent_completion_holders.insert(
+        "crashed-renderer".to_string(),
+        SubAgentCompletionHold {
+            barrier_id: None,
+            deadline: Some(base + Duration::from_secs(1)),
+        },
+    );
+    engine.subagent_completion_holders.insert(
+        "live-renderer".to_string(),
+        SubAgentCompletionHold {
+            barrier_id: None,
+            deadline: Some(base + Duration::from_secs(2)),
+        },
+    );
+
+    // A heartbeat renews only its own holder. Model that renewal with the same
+    // method used by the mailbox handler, then arm its next idle deadline.
+    engine.hold_subagent_completions("live-renderer".to_string());
+    assert_eq!(
+        engine.subagent_completion_holders["live-renderer"].deadline,
+        None
+    );
+    engine
+        .subagent_completion_holders
+        .get_mut("live-renderer")
+        .expect("live holder")
+        .deadline = Some(base + Duration::from_secs(3));
+
+    assert_eq!(
+        engine.expire_subagent_completion_holders(base + Duration::from_millis(1500)),
+        1
+    );
+    assert!(
+        !engine
+            .subagent_completion_holders
+            .contains_key("crashed-renderer")
+    );
+    assert!(
+        engine
+            .subagent_completion_holders
+            .contains_key("live-renderer")
+    );
+}
+
+#[tokio::test]
+async fn forkguard_default_eager_delivery_still_resumes_inside_the_active_turn() {
+    use crate::tools::subagent::SubAgentCompletion;
+
+    assert_eq!(
+        EngineConfig::default().subagent_completion_delivery_policy,
+        SubAgentCompletionDeliveryPolicy::Eager,
+        "the compatibility behavior must remain the default"
+    );
+
+    let first_request_entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release_first_request = std::sync::Arc::new(tokio::sync::Notify::new());
+    let model = std::sync::Arc::new(GatedSubAgentCompletionModelClient {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        requests: std::sync::Mutex::new(Vec::new()),
+        first_request_entered: std::sync::Arc::clone(&first_request_entered),
+        release_first_request: std::sync::Arc::clone(&release_first_request),
+        max_requests: 2,
+    });
+    let config = goal_custom_route_config();
+    let client: crate::core::model_client::SharedModelClient = model.clone();
+    let (engine, handle) = Engine::new_with_model_client(
+        EngineConfig {
+            model: "local-model".to_string(),
+            snapshots_enabled: false,
+            terminal_chrome_enabled: false,
+            ..EngineConfig::default()
+        },
+        &config,
+        client,
+    );
+    let tx_subagent_completion = engine.tx_subagent_completion.clone();
+    let run_task = tokio::spawn(engine.run());
+
+    handle
+        .send(external_user_message_op_for_model(
+            "preserve eager behavior",
+            AppMode::Agent,
+            &config,
+            "local-model",
+        ))
+        .await
+        .expect("send eager external turn");
+    tokio::time::timeout(model_turn_event_timeout(), first_request_entered.notified())
+        .await
+        .expect("first eager request was never entered");
+    let completion_payload = "EAGER_CHILD_RESULT";
+    tx_subagent_completion
+        .send(SubAgentCompletion {
+            agent_id: "agent_eager".to_string(),
+            payload: completion_payload.to_string(),
+        })
+        .expect("queue eager active-turn completion");
+    release_first_request.notify_one();
+
+    let deadline = tokio::time::Instant::now() + model_turn_event_timeout();
+    let mut provenances = Vec::new();
+    {
+        let mut events = handle.rx_event.write().await;
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv())
+                .await
+                .expect("eager lifecycle timed out")
+                .expect("eager engine event channel closed");
+            match event {
+                Event::TurnStarted { provenance, .. } => provenances.push(provenance),
+                Event::TurnComplete { .. } => break,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(
+        provenances,
+        vec![UserInputProvenance::ExternalUser],
+        "eager completion must remain inside the original lifecycle"
+    );
+    let requests = model.captured_requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "eager completion must resume one provider step"
+    );
+    assert!(
+        !model_request_text(&requests[0]).contains(completion_payload),
+        "the completion arrived only after the first request was captured"
+    );
+    assert!(
+        model_request_text(&requests[1]).contains(completion_payload),
+        "historical eager behavior must surface the completion in the next in-turn request"
+    );
+
+    handle.send(Op::Shutdown).await.expect("shutdown engine");
+    run_task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn forkguard_host_managed_engine_preserves_explicit_claim_delivery_under_boundary_policy() {
     use crate::tools::subagent::SubAgentCompletion;
 
     let mut custom = HashMap::new();
@@ -3000,6 +3868,7 @@ async fn host_managed_engine_defers_idle_subagent_completion_to_explicit_turn() 
         snapshots_enabled: false,
         terminal_chrome_enabled: false,
         runtime_services,
+        subagent_completion_delivery_policy: SubAgentCompletionDeliveryPolicy::BoundaryOnly,
         ..EngineConfig::default()
     };
     let (engine, handle) = Engine::new(engine_config, &config);
@@ -4409,10 +5278,19 @@ fn system_prompt_text(prompt: SystemPrompt) -> String {
 }
 
 fn external_user_message_op(content: &str, mode: AppMode, config: &Config) -> Op {
+    external_user_message_op_for_model(content, mode, config, crate::config::DEFAULT_TEXT_MODEL)
+}
+
+fn external_user_message_op_for_model(
+    content: &str,
+    mode: AppMode,
+    config: &Config,
+    model: &str,
+) -> Op {
     Op::SendMessage {
         content: content.to_string(),
         mode,
-        route: resolved_route_for_test(config, crate::config::DEFAULT_TEXT_MODEL),
+        route: resolved_route_for_test(config, model),
         compaction: Box::new(CompactionConfig::default()),
         goal_objective: None,
         goal_token_budget: None,

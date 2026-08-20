@@ -3588,6 +3588,7 @@ async fn thread_lifecycle_persists_across_restart() -> Result<()> {
                 .send(EngineEvent::TurnStarted {
                     turn_id: "engine_turn_1".to_string(),
                     created_at: chrono::Utc::now(),
+                    provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                     route: None,
                 })
                 .await;
@@ -3682,6 +3683,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
         .send(EngineEvent::TurnStarted {
             turn_id: "engine_route_receipt".to_string(),
             created_at: started_at,
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -3809,6 +3811,7 @@ async fn monitor_separates_lifecycle_start_from_billing_dispatch_and_child_usage
         .send(EngineEvent::TurnStarted {
             turn_id: second_engine_turn.to_string(),
             created_at: Utc::now(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -3882,6 +3885,7 @@ async fn completed_turn_without_engine_output_fails() -> Result<()> {
                 .send(EngineEvent::TurnStarted {
                     turn_id: "engine_empty_turn".to_string(),
                     created_at: chrono::Utc::now(),
+                    provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                     route: None,
                 })
                 .await;
@@ -3968,6 +3972,7 @@ async fn preturn_control_status_does_not_make_empty_turn_succeed() -> Result<()>
                 .send(EngineEvent::TurnStarted {
                     turn_id: "engine_empty_after_control_status".to_string(),
                     created_at: chrono::Utc::now(),
+                    provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                     route: None,
                 })
                 .await;
@@ -4023,6 +4028,7 @@ async fn engine_error_remains_failed_after_nominal_turn_complete() -> Result<()>
                 .send(EngineEvent::TurnStarted {
                     turn_id: "engine_error_then_complete".to_string(),
                     created_at: chrono::Utc::now(),
+                    provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                     route: None,
                 })
                 .await;
@@ -4718,6 +4724,7 @@ async fn multi_turn_continuity_same_thread() -> Result<()> {
                 .send(EngineEvent::TurnStarted {
                     turn_id: format!("engine_turn_{turn_index}"),
                     created_at: chrono::Utc::now(),
+                    provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                     route: None,
                 })
                 .await;
@@ -4920,6 +4927,7 @@ async fn interrupt_turn_marks_interrupted_after_cleanup() -> Result<()> {
                 .send(EngineEvent::TurnStarted {
                     turn_id: "engine_turn_interrupt".to_string(),
                     created_at: chrono::Utc::now(),
+                    provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                     route: None,
                 })
                 .await;
@@ -5623,6 +5631,7 @@ async fn thread_detail_cursor_precedes_projection_reads_at_terminal_boundary() -
         .send(EngineEvent::TurnStarted {
             turn_id: "snapshot_terminal".to_string(),
             created_at: Utc::now(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -5802,6 +5811,7 @@ async fn thread_detail_materializes_stream_prefixes_before_their_delta_cursor() 
         .send(EngineEvent::TurnStarted {
             turn_id: "delta_snapshot".to_string(),
             created_at: Utc::now(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -5923,6 +5933,7 @@ async fn thread_detail_delta_boundary_is_replay_idempotent() -> Result<()> {
         .send(EngineEvent::TurnStarted {
             turn_id: "delta_boundary".to_string(),
             created_at: Utc::now(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -6160,6 +6171,7 @@ async fn dynamic_tool_result_settles_snapshot_and_emits_one_safe_resolution() ->
         .send(EngineEvent::TurnStarted {
             turn_id: "dynamic_result".to_string(),
             created_at: Utc::now(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -6319,6 +6331,7 @@ async fn dynamic_tool_result_receipt_outlives_canceled_delivery_future() -> Resu
         .send(EngineEvent::TurnStarted {
             turn_id: "dynamic_detached_settlement".to_string(),
             created_at: Utc::now(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -7259,6 +7272,7 @@ async fn dynamic_tool_timeout_clears_snapshot_and_emits_once() -> Result<()> {
         .send(EngineEvent::TurnStarted {
             turn_id: "dynamic_timeout".to_string(),
             created_at: Utc::now(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -7331,6 +7345,7 @@ async fn terminal_turn_cancels_pending_dynamic_tool_exactly_once() -> Result<()>
         .send(EngineEvent::TurnStarted {
             turn_id: "dynamic_cancel".to_string(),
             created_at: Utc::now(),
+            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
             route: None,
         })
         .await?;
@@ -8001,6 +8016,7 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                 .send(EngineEvent::TurnStarted {
                     turn_id: "engine_turn_steer".to_string(),
                     created_at: chrono::Utc::now(),
+                    provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                     route: None,
                 })
                 .await;
@@ -8512,6 +8528,7 @@ async fn compaction_lifecycle_emits_item_events_with_compaction_counts() -> Resu
                         .send(EngineEvent::TurnStarted {
                             turn_id: "engine_turn_auto".to_string(),
                             created_at: chrono::Utc::now(),
+                            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                             route: None,
                         })
                         .await;

@@ -410,17 +410,7 @@ impl Engine {
             }
         }
 
-        let synthesized = {
-            let manager = self.subagent_manager.read().await;
-            manager.terminal_results_excluding(&self.delivered_subagent_completion_ids)
-        };
-        for result in synthesized {
-            let report_ref =
-                crate::tools::subagent::spill_subagent_final_report(&self.session.id, &result);
-            let completion = crate::tools::subagent::subagent_completion_from_result_with_ref(
-                &result,
-                report_ref.as_deref(),
-            );
+        for completion in self.manager_subagent_completions().await {
             if let Some(completion) = super::claim_subagent_completion(
                 &mut self.delivered_subagent_completion_ids,
                 completion,
@@ -582,7 +572,9 @@ impl Engine {
             // request so the parent can use them immediately instead of
             // discovering them only when it eventually emits no more tools or
             // the idle handler starts a separate follow-up turn.
-            self.drain_subagent_completion_events("queued").await;
+            if !self.isolates_subagent_completions_at_turn_boundary() {
+                self.drain_subagent_completion_events("queued").await;
+            }
 
             // Ensure system prompt is up to date with latest session states
             self.refresh_system_prompt();
@@ -1897,7 +1889,12 @@ impl Engine {
                 // queued completions exist is correct; #3216 says do NOT
                 // barrier on running children. Running children are background
                 // work; results return via sentinel on a later turn.
-                let subagent_completions = self.drain_subagent_completion_events("").await;
+                let subagent_completions = if self.isolates_subagent_completions_at_turn_boundary()
+                {
+                    0
+                } else {
+                    self.drain_subagent_completion_events("").await
+                };
                 if subagent_completions > 0 {
                     let _ = self
                         .tx_event
@@ -2190,7 +2187,9 @@ impl Engine {
                     }
                 }
 
-                if self.drain_subagent_completion_events("late").await > 0 {
+                if !self.isolates_subagent_completions_at_turn_boundary()
+                    && self.drain_subagent_completion_events("late").await > 0
+                {
                     let _ = self
                         .tx_event
                         .send(Event::status(

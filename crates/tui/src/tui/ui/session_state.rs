@@ -347,6 +347,7 @@ pub(crate) fn capture_turn_started_metadata(app: &mut App, event: &EngineEvent) 
             turn_id,
             created_at,
             route,
+            ..
         } => {
             app.ocean_completion_started_at = None;
             let auto_route_receipt = if route.as_ref().is_some_and(|route| route.auto_model) {

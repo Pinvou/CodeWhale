@@ -233,6 +233,8 @@ pub(crate) fn build_engine_config(app: &App, config: &Config) -> EngineConfig {
         disallowed_tools: None,
         max_tool_calls: None,
         direct_tool_round_policy: None,
+        subagent_completion_delivery_policy:
+            crate::core::engine::SubAgentCompletionDeliveryPolicy::Eager,
         hook_executor: app.runtime_services.hook_executor.clone(),
         network_policy: config.network.clone().map(|toml_cfg| {
             crate::network_policy::NetworkPolicyDecider::with_default_audit(toml_cfg.into_runtime())

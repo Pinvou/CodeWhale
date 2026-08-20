@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 
 use crate::config::ApiProvider;
+use crate::core::ops::{SubAgentCompletionHoldReceipt, UserInputProvenance};
 use crate::error_taxonomy::ErrorEnvelope;
 use crate::models::{Message, SystemPrompt, Tool, Usage};
 use crate::tools::goal::GoalSnapshot;
@@ -229,6 +230,10 @@ pub enum Event {
     TurnStarted {
         turn_id: String,
         created_at: DateTime<Utc>,
+        /// Typed origin of the user-role input that opened this turn. Runtime
+        /// handoffs intentionally use a user wire role for provider
+        /// compatibility, so role alone is not sufficient provenance.
+        provenance: UserInputProvenance,
         /// Legacy/non-model hosts may still attach a route at start. Model
         /// turns emit it separately at the real provider dispatch boundary.
         route: Option<TurnRoute>,
@@ -271,6 +276,27 @@ pub enum Event {
     /// Runtime goal state changed inside the engine, usually from model-visible
     /// `create_goal` or `update_goal` tool calls.
     GoalUpdated { snapshot: GoalSnapshot },
+
+    /// Internal first phase of the host/engine completion-hold barrier.
+    ///
+    /// The holder generation has been installed, but the original caller
+    /// must not be acknowledged yet. A serial host forwarder responds with
+    /// `Op::ConfirmSubAgentCompletionHold` carrying the same generation and
+    /// receipt.
+    SubAgentCompletionHoldApplied {
+        holder_id: String,
+        barrier_id: String,
+        receipt: SubAgentCompletionHoldReceipt,
+    },
+
+    /// Internal second phase of the host/engine completion-hold barrier.
+    /// Only `active = true` authorizes the forwarder to resolve `receipt`.
+    SubAgentCompletionHoldConfirmed {
+        holder_id: String,
+        barrier_id: String,
+        active: bool,
+        receipt: SubAgentCompletionHoldReceipt,
+    },
 
     /// Context compaction started.
     CompactionStarted {

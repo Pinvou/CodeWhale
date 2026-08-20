@@ -649,7 +649,14 @@ impl Engine {
             manager.may_transform_next_parent_request(&self.delivered_subagent_completion_ids)
         };
         if queued_completions {
-            reasons.push("a running or undelivered sub-agent completion may be injected");
+            reasons.push(match self.config.subagent_completion_delivery_policy {
+                crate::core::engine::SubAgentCompletionDeliveryPolicy::Eager => {
+                    "a running or undelivered sub-agent completion may be injected"
+                }
+                crate::core::engine::SubAgentCompletionDeliveryPolicy::BoundaryOnly => {
+                    "a detached sub-agent completion is pending for a dedicated boundary turn"
+                }
+            });
         }
 
         if compaction.enabled {

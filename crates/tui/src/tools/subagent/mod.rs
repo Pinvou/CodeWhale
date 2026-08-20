@@ -3055,6 +3055,39 @@ impl SubAgentManager {
         &self.current_session_boot_id
     }
 
+    /// Seed a current-boot root terminal record without installing any live
+    /// delivery channel. Engine regression tests use this to model the exact
+    /// crash/replay seam where manager state (and its persisted projection)
+    /// committed but the parent completion frame was never observed.
+    #[cfg(test)]
+    pub(crate) fn insert_terminal_root_result_without_delivery_for_test(
+        &mut self,
+        agent_id: impl Into<String>,
+        result: impl Into<String>,
+    ) {
+        let agent_id = agent_id.into();
+        let (input_tx, _input_rx) = mpsc::unbounded_channel();
+        let mut agent = SubAgent::new(
+            agent_id.clone(),
+            FleetRole::Worker,
+            "manager-only terminal fixture".to_string(),
+            SubAgentAssignment::new(
+                "verify manager-only terminal reconciliation".to_string(),
+                Some("worker".to_string()),
+            ),
+            "test-model".to_string(),
+            None,
+            None,
+            input_tx,
+            self.workspace.clone(),
+            self.current_session_boot_id.clone(),
+        );
+        agent.status = SubAgentStatus::Completed;
+        agent.result = Some(result.into());
+        agent.input_tx = None;
+        self.agents.insert(agent_id, agent);
+    }
+
     pub fn record_coordination_decision(
         &mut self,
         decision: DecisionRecord,

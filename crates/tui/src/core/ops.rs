@@ -13,6 +13,15 @@ use crate::tui::approval::ApprovalMode;
 use codewhale_protocol::runtime::DynamicToolSpec;
 use std::path::PathBuf;
 
+/// Final host-visible receipt for a two-phase sub-agent completion hold.
+///
+/// The same single-use sender crosses the engine event barrier twice. The
+/// host must resolve it only after `SubAgentCompletionHoldConfirmed` reports
+/// `active = true`; an `Applied` event alone proves mailbox ordering, not that
+/// the holder survived long enough for the host to reserve its external turn.
+pub type SubAgentCompletionHoldReceipt =
+    std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>;
+
 /// Prefix used for tool-call ids created by local composer shell shortcuts.
 pub const USER_SHELL_TOOL_ID_PREFIX: &str = "user_shell_";
 
@@ -139,6 +148,42 @@ pub enum Op {
         /// across capacity-waiting, enqueued, and running-adjacent states.
         engine_schedule_id: Option<u64>,
     },
+
+    /// Temporarily keep detached sub-agent completions behind host-queued
+    /// external input at the next whole-turn boundary.
+    ///
+    /// The host acquires this before it accepts an interjection into its own
+    /// FIFO. The engine starts a bounded abandonment timer only once it is
+    /// idle and waiting for that host's next operation, so a long active turn
+    /// does not consume the safety window. Engines that do not opt into
+    /// boundary-only completion delivery ignore this operation.
+    HoldSubAgentCompletions { holder_id: String },
+
+    /// Begin a two-phase completion hold acquisition.
+    ///
+    /// `barrier_id` is a host-minted generation. Processing this operation
+    /// installs that exact generation before the engine emits
+    /// `SubAgentCompletionHoldApplied`. The host event forwarder must then
+    /// submit `ConfirmSubAgentCompletionHold`; only its matching Confirmed
+    /// event is safe to acknowledge to the original caller.
+    AcquireSubAgentCompletionHold {
+        holder_id: String,
+        barrier_id: String,
+        receipt: SubAgentCompletionHoldReceipt,
+    },
+
+    /// Confirm that the host event forwarder has crossed the Applied event.
+    /// A stale, released, superseded, or expired generation is reported as
+    /// inactive and must never recreate the holder.
+    ConfirmSubAgentCompletionHold {
+        holder_id: String,
+        barrier_id: String,
+        receipt: SubAgentCompletionHoldReceipt,
+    },
+
+    /// Release one previously acquired sub-agent completion hold. The opaque
+    /// id prevents a stale UI instance from releasing another holder's gate.
+    ReleaseSubAgentCompletions { holder_id: String },
 
     /// Execute a user-submitted composer shell command (`! <command>`) without
     /// sending a model turn. This still routes through `exec_shell`, approval,

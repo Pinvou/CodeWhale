@@ -1853,6 +1853,12 @@ pub(crate) async fn run_event_loop(
                             transcript_batch_updated = true;
                         }
                     }
+                    EngineEvent::SubAgentCompletionHoldApplied { .. }
+                    | EngineEvent::SubAgentCompletionHoldConfirmed { .. } => {
+                        // Private embedding barrier. The standalone TUI never
+                        // submits its Acquire operation, so it has no receipt
+                        // to forward or resolve.
+                    }
                     EngineEvent::SessionUpdated {
                         session_id,
                         messages,

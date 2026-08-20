@@ -2128,6 +2128,7 @@ async fn compatibility_stream_closes_losslessly_across_replay_live_handoff() -> 
             .send(EngineEvent::TurnStarted {
                 turn_id: "mock_compat_handoff".to_string(),
                 created_at: chrono::Utc::now(),
+                provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                 route: None,
             })
             .await;
@@ -2325,6 +2326,7 @@ async fn compatibility_stream_exposes_and_resolves_user_input_without_answer_ech
             .send(EngineEvent::TurnStarted {
                 turn_id: "mock_compat_input".to_string(),
                 created_at: chrono::Utc::now(),
+                provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                 route: None,
             })
             .await?;
@@ -2740,6 +2742,7 @@ async fn thread_endpoints_expose_lifecycle_contract() -> Result<()> {
                         .send(EngineEvent::TurnStarted {
                             turn_id: "mock_lifecycle".to_string(),
                             created_at: chrono::Utc::now(),
+                            provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                             route: None,
                         })
                         .await;
@@ -2916,6 +2919,7 @@ async fn events_endpoint_respects_since_seq_cursor() -> Result<()> {
             .send(EngineEvent::TurnStarted {
                 turn_id: "mock_cursor".to_string(),
                 created_at: chrono::Utc::now(),
+                provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                 route: None,
             })
             .await;
@@ -3128,6 +3132,7 @@ async fn steer_and_interrupt_endpoints_work_on_active_turn() -> Result<()> {
             .send(EngineEvent::TurnStarted {
                 turn_id: "engine_turn_api".to_string(),
                 created_at: chrono::Utc::now(),
+                provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                 route: None,
             })
             .await;
@@ -3486,6 +3491,7 @@ async fn stream_endpoint_remains_backward_compatible() -> Result<()> {
             .send(EngineEvent::TurnStarted {
                 turn_id: "mock_stream".to_string(),
                 created_at: chrono::Utc::now(),
+                provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                 route: None,
             })
             .await;
@@ -4173,6 +4179,7 @@ async fn session_create_from_thread_rejects_active_turn() -> Result<()> {
             .send(EngineEvent::TurnStarted {
                 turn_id: "mock_active_session_save".to_string(),
                 created_at: chrono::Utc::now(),
+                provenance: crate::core::ops::UserInputProvenance::ExternalUser,
                 route: None,
             })
             .await;
@@ -8647,17 +8654,33 @@ async fn skill_lifecycle_uninstall_removes_installed_skill() -> Result<()> {
     let root = tmp.path().join("runtime");
     let workspace = tmp.path().to_path_buf();
     let sessions_dir = root.join("sessions");
+    let config_path = tmp.path().join("config.toml");
     fs::create_dir_all(&root)?;
 
-    create_managed_skill(&workspace, "hello")?;
+    let (skill_dir, _) = create_managed_skill(&workspace, "hello")?;
+    let skills_dir = skill_dir.parent().context("managed skill root")?;
+    // Embedded discovery is sealed to the host-injected `skills_dir`; make
+    // this lifecycle fixture authoritative instead of relying on ambient
+    // workspace discovery.
+    fs::write(
+        &config_path,
+        format!(
+            "skills_dir = {}\n",
+            serde_json::to_string(&skills_dir.to_string_lossy())?
+        ),
+    )?;
 
     let Some((addr, _runtime_threads, handle)) =
-        spawn_test_server_with_root_token_mobile_workspace(
+        spawn_test_server_with_root_token_mobile_workspace_and_overrides(
             root,
             sessions_dir,
             None,
             false,
             workspace,
+            TestServerOverrides {
+                config_path: Some(config_path),
+                ..TestServerOverrides::default()
+            },
         )
         .await?
     else {

@@ -5835,6 +5835,8 @@ impl RuntimeThreadManager {
                 disallowed_tools: None,
                 max_tool_calls: None,
                 direct_tool_round_policy: None,
+                subagent_completion_delivery_policy:
+                    crate::core::engine::SubAgentCompletionDeliveryPolicy::Eager,
                 hook_executor: None,
                 locale_tag: crate::localization::resolve_locale(&settings.locale)
                     .tag()
@@ -6241,6 +6243,7 @@ impl RuntimeThreadManager {
                     turn_id: started_turn_id,
                     created_at,
                     route,
+                    ..
                 } => {
                     saw_turn_started = true;
                     engine_turn_id = Some(started_turn_id);

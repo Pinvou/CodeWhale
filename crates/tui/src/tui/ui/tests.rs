@@ -10880,6 +10880,7 @@ fn turn_started_route_is_captured_before_cancel_suppression() {
     let event = EngineEvent::TurnStarted {
         turn_id: "turn_cancel_race".to_string(),
         created_at,
+        provenance: crate::core::ops::UserInputProvenance::ExternalUser,
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Openai,
             provider_identity: "openai".to_string(),
@@ -10944,6 +10945,7 @@ fn turn_started_suggestion_authority_comes_from_the_route_receipt_not_config() {
     let event = EngineEvent::TurnStarted {
         turn_id: "turn_route_receipt".to_string(),
         created_at: chrono::Utc::now(),
+        provenance: crate::core::ops::UserInputProvenance::ExternalUser,
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Deepseek,
             provider_identity: "deepseek".to_string(),
@@ -10986,6 +10988,7 @@ fn turn_started_without_a_route_receipt_captures_no_suggestion_authority() {
     let event = EngineEvent::TurnStarted {
         turn_id: "turn_no_receipt".to_string(),
         created_at: chrono::Utc::now(),
+        provenance: crate::core::ops::UserInputProvenance::ExternalUser,
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Deepseek,
             provider_identity: "deepseek".to_string(),
@@ -11022,6 +11025,7 @@ fn engine_error_health_accounting_uses_active_turn_route() {
     let event = EngineEvent::TurnStarted {
         turn_id: "routed-turn".to_string(),
         created_at: chrono::Utc::now(),
+        provenance: crate::core::ops::UserInputProvenance::ExternalUser,
         route: Some(crate::core::events::TurnRoute {
             provider: ApiProvider::Openai,
             provider_identity: "openai".to_string(),
