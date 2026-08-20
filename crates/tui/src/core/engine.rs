@@ -1212,6 +1212,12 @@ impl Engine {
         messages_after: Option<usize>,
     ) {
         let summary_prompt = self.rendered_compaction_summary();
+        // 调用点均在 replace_messages 之后：此处 self.session.messages 已是压缩后的
+        // 新列表，直接估算供宿主刷新用量展示。
+        let post_input_tokens = Some(crate::compaction::estimate_input_tokens_conservative(
+            &self.session.messages,
+            None,
+        ) as u64);
         let _ = self
             .tx_event
             .send(Event::CompactionCompleted {
@@ -1221,6 +1227,7 @@ impl Engine {
                 messages_before,
                 messages_after,
                 summary_prompt,
+                post_input_tokens,
             })
             .await;
     }
