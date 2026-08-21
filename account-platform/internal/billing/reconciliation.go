@@ -94,7 +94,14 @@ func (r *ExpiredPaymentReconciler) runOnce(ctx context.Context) {
 	for _, item := range items {
 		order, syncErr := r.synchronizer.SyncOrder(ctx, item.OrderID)
 		if syncErr == nil && (order.Status == "CREATED" || order.Status == "PENDING") {
-			syncErr = errors.New("payment provider did not return a terminal state")
+			// H3C Mall has no payment callback in the supplied contract. Keep
+			// polling server-side so payment can be credited even after the client
+			// closes the QR page. A non-terminal state is expected, not an error.
+			nextAt := r.now().Add(r.interval)
+			if err := r.store.RescheduleExpiredPaymentOrder(ctx, item.OrderID, "", nextAt); err != nil {
+				r.logger.Error("reschedule pending payment order failed", "order_id", item.OrderID, "error", err)
+			}
+			continue
 		}
 		if syncErr == nil {
 			continue
@@ -147,7 +154,7 @@ WITH candidates AS (
     SELECT id
     FROM payment_orders
     WHERE status IN ('CREATED','PENDING')
-      AND expires_at <= $1
+      AND (expires_at <= $1 OR provider_sku IS NOT NULL)
       AND (reconciliation_next_at IS NULL OR reconciliation_next_at <= $1)
       AND (reconciliation_lease_until IS NULL OR reconciliation_lease_until <= $1)
     ORDER BY COALESCE(reconciliation_next_at, expires_at), expires_at, id
@@ -179,7 +186,7 @@ RETURNING payment.id, payment.reconciliation_attempts`, now, limit, now.Add(leas
 
 func (r *PostgresRepository) RescheduleExpiredPaymentOrder(ctx context.Context, orderID uuid.UUID, lastError string, nextAt time.Time) error {
 	_, err := r.pool.Exec(ctx, `UPDATE payment_orders
-SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=$3,updated_at=$4
+SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=NULLIF($3,''),updated_at=$4
 WHERE id=$1 AND status IN ('CREATED','PENDING')`, orderID, nextAt.UTC(), truncatePaymentReconciliationError(lastError), r.now())
 	return err
 }

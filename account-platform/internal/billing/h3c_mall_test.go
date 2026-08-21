@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -9,13 +10,32 @@ import (
 )
 
 type h3cMallStub struct {
-	created []string
-	order   h3cmall.Order
+	created   []string
+	order     h3cmall.Order
+	createErr error
 }
 
 func (s *h3cMallStub) CreateOrder(_ context.Context, orderKey, mobile, sku string) error {
 	s.created = []string{orderKey, mobile, sku}
-	return nil
+	return s.createErr
+}
+
+func TestH3CMallProviderRecoversAcceptedOrderAfterCreateError(t *testing.T) {
+	client := &h3cMallStub{
+		createErr: errors.New("acceptance response lost"),
+		order:     h3cmall.Order{OrderKey: "pv-1", Mobile: "+8613800138000", SKU: "sku-100", Status: "WAIT_PAY"},
+	}
+	provider, err := NewH3CMallProvider(client, map[string]ExternalProduct{"points-100": {SKU: "sku-100", AmountFen: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, err := provider.Create(context.Background(), PaymentOrder{MerchantOrderNo: "pv-1", Mobile: "+8613800138000", ProviderSKU: "sku-100", Channel: "ALIPAY", AmountFen: 100, Currency: "CNY"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Status != "PENDING" || order.MerchantOrderNo != "pv-1" {
+		t.Fatalf("unexpected recovered order: %#v", order)
+	}
 }
 
 func (s *h3cMallStub) QueryOrder(context.Context, string) (h3cmall.Order, error) {

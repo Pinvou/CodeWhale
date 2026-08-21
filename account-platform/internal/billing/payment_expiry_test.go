@@ -66,13 +66,13 @@ func TestExpiredPaymentReconcilerReschedulesFailuresAndNonTerminalProviderStates
 	if _, exists := store.rescheduled[closedID]; exists {
 		t.Fatal("closed order must not be rescheduled")
 	}
-	if got := store.rescheduled[pendingID]; !got.Equal(now.Add(30 * time.Second)) {
-		t.Fatalf("pending order retry = %v, want %v", got, now.Add(30*time.Second))
+	if got := store.rescheduled[pendingID]; !got.Equal(now.Add(15 * time.Second)) {
+		t.Fatalf("pending order retry = %v, want %v", got, now.Add(15*time.Second))
 	}
 	if got := store.rescheduled[failedID]; !got.Equal(now.Add(time.Minute)) {
 		t.Fatalf("failed order retry = %v, want %v", got, now.Add(time.Minute))
 	}
-	if store.errors[pendingID] != "payment order synchronization failed" || store.errors[failedID] != "payment order synchronization failed" {
+	if store.errors[pendingID] != "" || store.errors[failedID] != "payment order synchronization failed" {
 		t.Fatalf("unexpected retry errors: %#v", store.errors)
 	}
 }

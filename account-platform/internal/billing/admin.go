@@ -17,14 +17,15 @@ import (
 )
 
 type AdminOverview struct {
-	Wallets                  int64 `json:"wallets"`
-	PostedMicrocredits       int64 `json:"posted_microcredits"`
-	ReservedMicrocredits     int64 `json:"reserved_microcredits"`
-	PendingPaymentOrders     int64 `json:"pending_payment_orders"`
-	ExpiredPaymentOrders     int64 `json:"expired_payment_orders"`
-	ReviewPaymentOrders      int64 `json:"review_payment_orders"`
-	PendingAdjustments       int64 `json:"pending_adjustments"`
-	ActiveOrReviewUsageHolds int64 `json:"active_or_review_usage_holds"`
+	Wallets                  int64               `json:"wallets"`
+	PostedMicrocredits       int64               `json:"posted_microcredits"`
+	ReservedMicrocredits     int64               `json:"reserved_microcredits"`
+	PendingPaymentOrders     int64               `json:"pending_payment_orders"`
+	ExpiredPaymentOrders     int64               `json:"expired_payment_orders"`
+	ReviewPaymentOrders      int64               `json:"review_payment_orders"`
+	PendingAdjustments       int64               `json:"pending_adjustments"`
+	ActiveOrReviewUsageHolds int64               `json:"active_or_review_usage_holds"`
+	PaymentCapabilities      PaymentCapabilities `json:"payment_capabilities"`
 }
 
 type AdminPaymentOrder struct {
@@ -143,6 +144,9 @@ func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, r, err)
 		return
+	}
+	if s.payments != nil {
+		result.PaymentCapabilities = s.payments.Capabilities()
 	}
 	api.WriteJSON(w, http.StatusOK, result)
 }

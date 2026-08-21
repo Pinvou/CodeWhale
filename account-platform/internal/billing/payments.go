@@ -90,6 +90,19 @@ type ProviderBillEntry struct {
 	PaidAt               time.Time `json:"paid_at"`
 }
 
+type PaymentCapabilities struct {
+	Provider                string `json:"provider"`
+	OrderSyncSupported      bool   `json:"order_sync_supported"`
+	RefundSupported         bool   `json:"refund_supported"`
+	CloseSupported          bool   `json:"close_supported"`
+	NotificationSupported   bool   `json:"notification_supported"`
+	ReconciliationSupported bool   `json:"reconciliation_supported"`
+}
+
+type paymentCapabilityProvider interface {
+	Capabilities() PaymentCapabilities
+}
+
 type PaymentProvider interface {
 	Create(context.Context, PaymentOrder, string) (ProviderOrder, error)
 	Get(context.Context, string) (ProviderOrder, error)
@@ -144,6 +157,13 @@ func (p *PaymentCoordinator) FilterProducts(products []Product) []Product {
 		}
 	}
 	return filtered
+}
+
+func (p *PaymentCoordinator) Capabilities() PaymentCapabilities {
+	if provider, ok := p.provider.(paymentCapabilityProvider); ok {
+		return provider.Capabilities()
+	}
+	return PaymentCapabilities{Provider: "unknown", OrderSyncSupported: true}
 }
 
 func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey string) (PaymentOrder, bool, error) {
@@ -201,7 +221,8 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, ErrNotFound
 	}
 	now := p.now()
-	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + uuid.Must(uuid.NewV7()).String(), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute), Mobile: mobile, ProviderSKU: external.SKU}
+	merchantDigest := sha256.Sum256([]byte(requesterID.String() + "|" + idempotencyKey))
+	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute), Mobile: mobile, ProviderSKU: external.SKU}
 	snapshot, _ := json.Marshal(product)
 	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at, mobile_e164, provider_sku) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED','PENDING',$11,$12,$12,NULLIF($13,''),NULLIF($14,''))`, order.ID, order.MerchantOrderNo, requesterID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now, mobile, external.SKU)
 	if err != nil {
@@ -350,6 +371,13 @@ type SimulatorProvider struct {
 	base   *url.URL
 	token  string
 	client *http.Client
+}
+
+func (p *SimulatorProvider) Capabilities() PaymentCapabilities {
+	return PaymentCapabilities{
+		Provider: "simulator", OrderSyncSupported: true, RefundSupported: true,
+		CloseSupported: true, NotificationSupported: true, ReconciliationSupported: true,
+	}
 }
 
 func NewSimulatorProvider(raw, token string) (*SimulatorProvider, error) {

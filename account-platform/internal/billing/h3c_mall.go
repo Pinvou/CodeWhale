@@ -27,12 +27,23 @@ func NewH3CMallProvider(client h3cMallClient, products map[string]ExternalProduc
 	return &H3CMallProvider{client: client, products: products}, nil
 }
 
+func (p *H3CMallProvider) Capabilities() PaymentCapabilities {
+	return PaymentCapabilities{Provider: "h3c_mall", OrderSyncSupported: true}
+}
+
 func (p *H3CMallProvider) Create(ctx context.Context, order PaymentOrder, _ string) (ProviderOrder, error) {
 	if order.Channel != "ALIPAY" || strings.TrimSpace(order.Mobile) == "" || strings.TrimSpace(order.ProviderSKU) == "" {
 		return ProviderOrder{}, ErrConflict
 	}
 	if err := p.client.CreateOrder(ctx, order.MerchantOrderNo, order.Mobile, order.ProviderSKU); err != nil {
-		return ProviderOrder{}, err
+		// The Mall accepts orders asynchronously. If the acceptance response is
+		// lost, retrying the same idempotency key uses the same order key. Query
+		// that key before failing so a remotely accepted order is not orphaned.
+		existing, queryErr := p.client.QueryOrder(ctx, order.MerchantOrderNo)
+		if queryErr != nil || existing.Mobile != order.Mobile || existing.SKU != order.ProviderSKU {
+			return ProviderOrder{}, err
+		}
+		return p.mapOrder(existing)
 	}
 	// Mall accepts the order asynchronously. Querying immediately can race its
 	// processing pipeline, so the normal polling path obtains the actual QR.

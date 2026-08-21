@@ -14,7 +14,7 @@
 - `token-portal`：OIDC Authorization Code + PKCE、Redis 服务端会话和同源 CSRF 保护的 Web BFF；OIDC Token 不进入浏览器 JavaScript。
 - `payment-simulator`：仅开发/测试使用的三渠道支付模拟器。
 
-当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单与支付查询、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、生产 Helm 和恢复 Runbook。商城合同暂未提供的退款、关闭、支付回调与账单对账接口保持关闭，不以本地模拟冒充真实能力。
+当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单与支付查询、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、生产 Helm 和恢复 Runbook。新华三待支付订单由 Billing 在服务端持续查询，客户端关闭二维码页面后仍可按商城事实完成入账。商城合同暂未提供的退款、关闭、支付回调与账单对账接口保持关闭，运营台同步禁用这些操作，不以本地模拟冒充真实能力。
 
 ## 桌面端 OIDC
 
