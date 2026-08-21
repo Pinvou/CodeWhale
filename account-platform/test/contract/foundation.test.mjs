@@ -108,6 +108,13 @@ test('entitlement packages expire locally and remain queryable by the personal u
   assert.match(packages, /"EXPIRE", "expire:"\+packageID\.String\(\)/);
 });
 
+test('repeated purchase clicks reuse one pending order for the same personal plan', async () => {
+  const payments = await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8');
+  assert.match(payments, /lockTransactionKey\(ctx, tx, "payment\.pending"/);
+  assert.match(payments, /getPendingPlanOrderForUpdate/);
+  assert.match(payments, /status IN \('CREATED','PENDING'\)/);
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));

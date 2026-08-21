@@ -199,6 +199,9 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if err := lockTransactionKey(ctx, tx, "payment.create", idempotencyKey); err != nil {
 		return PaymentOrder{}, false, err
 	}
+	if err := lockTransactionKey(ctx, tx, "payment.pending", requesterID.String()+"|"+walletID.String()+"|"+productID); err != nil {
+		return PaymentOrder{}, false, err
+	}
 	requestDigest := sha256.Sum256([]byte(requesterID.String() + "|" + walletID.String() + "|" + productID + "|" + channel + "|" + mobile))
 	requestHash := hex.EncodeToString(requestDigest[:])
 	var existingHash string
@@ -213,6 +216,18 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 			return PaymentOrder{}, false, err
 		}
 		return order, false, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, false, err
+	}
+	existing, err := getPendingPlanOrderForUpdate(ctx, tx, requesterID, walletID, productID, channel)
+	if err == nil {
+		responseBody, _ := json.Marshal(existing)
+		now := p.now()
+		if _, err := tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour)); err != nil {
+			return PaymentOrder{}, false, err
+		}
+		return existing, false, tx.Commit(ctx)
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, err
@@ -257,6 +272,12 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 	return order, true, tx.Commit(ctx)
+}
+
+func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, walletID uuid.UUID, productID, channel string) (PaymentOrder, error) {
+	var order PaymentOrder
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 AND product_id=$3 AND channel=$4 AND status IN ('CREATED','PENDING') ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, requesterID, walletID, productID, channel).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
+	return order, err
 }
 
 func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, signature string, body []byte) error {
