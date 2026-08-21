@@ -90,7 +90,9 @@ func (r *PostgresRepository) ListProducts(ctx context.Context, currency, channel
 	currency = strings.ToUpper(strings.TrimSpace(currency))
 	channel = strings.ToUpper(strings.TrimSpace(channel))
 	rows, err := r.pool.Query(ctx, `
-SELECT product_id, amount_fen, credit_microcredits, display_points, currency, channels, catalog_version
+SELECT product_id, plan_name, sku_code, amount_fen, credit_microcredits, display_points,
+       base_points, bonus_points, validity_days, price_status, invoice_product_name,
+       currency, channels, catalog_version
 FROM recharge_products
 WHERE enabled AND currency = $1 AND ($2 = '' OR $2 = ANY(channels))
 ORDER BY amount_fen`, currency, channel)
@@ -101,12 +103,36 @@ ORDER BY amount_fen`, currency, channel)
 	products := make([]Product, 0)
 	for rows.Next() {
 		var product Product
-		if err := rows.Scan(&product.ProductID, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.Currency, &product.Channels, &product.CatalogVersion); err != nil {
+		if err := rows.Scan(&product.ProductID, &product.PlanName, &product.SKUCode, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.PriceStatus, &product.InvoiceProductName, &product.Currency, &product.Channels, &product.CatalogVersion); err != nil {
 			return nil, err
 		}
 		products = append(products, product)
 	}
 	return products, rows.Err()
+}
+
+func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context) (map[string]ExternalProduct, error) {
+	rows, err := r.pool.Query(ctx, `SELECT product_id,sku_code,amount_fen FROM recharge_products WHERE enabled AND sku_code<>'' ORDER BY product_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	products := make(map[string]ExternalProduct)
+	for rows.Next() {
+		var productID string
+		var product ExternalProduct
+		if err := rows.Scan(&productID, &product.SKU, &product.AmountFen); err != nil {
+			return nil, err
+		}
+		products[productID] = product
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(products) == 0 {
+		return nil, errors.New("no enabled Mall products are configured")
+	}
+	return products, nil
 }
 
 func (r *PostgresRepository) CurrentPrice(ctx context.Context, model string) (PriceVersion, error) {

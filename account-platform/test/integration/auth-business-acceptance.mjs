@@ -74,7 +74,7 @@ const { body: credential } = await requestJSON(tokenOrigin, `/v1/token-accounts/
 assert.equal(credential.status, 'ACTIVE');
 
 const { body: order } = await requestJSON(tokenOrigin, '/v1/recharge/orders', {
-  method: 'POST', body: { product_id: 'CNY_1', channel: 'ALIPAY' },
+  method: 'POST', body: { product_id: 'PLAN_TRIAL', channel: 'ALIPAY' },
   headers: { 'idempotency-key': `auth-acceptance-recharge-${randomUUID()}` }, statuses: [201],
 });
 const publicPaymentURL = new URL(order.payment_url);

@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"log"
 	"os"
 	"os/signal"
@@ -30,7 +28,7 @@ func main() {
 		log.Fatal(err)
 	}
 	defer repository.Close()
-	payments, err := paymentCoordinator(repository)
+	payments, err := paymentCoordinator(ctx, repository)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -55,11 +53,11 @@ func main() {
 	}
 }
 
-func paymentCoordinator(repository *billing.PostgresRepository) (*billing.PaymentCoordinator, error) {
+func paymentCoordinator(ctx context.Context, repository *billing.PostgresRepository) (*billing.PaymentCoordinator, error) {
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("BILLING_PAYMENT_PROVIDER")), "h3c_mall") {
-		products := make(map[string]billing.ExternalProduct)
-		if err := json.Unmarshal([]byte(os.Getenv("H3C_MALL_PRODUCTS_JSON")), &products); err != nil || len(products) == 0 {
-			return nil, errors.New("H3C_MALL_PRODUCTS_JSON must map local product IDs to Mall SKU and amount_fen")
+		products, err := repository.ActiveExternalProducts(ctx)
+		if err != nil {
+			return nil, err
 		}
 		client, err := h3cmall.New(h3cmall.Config{BaseURL: os.Getenv("H3C_MALL_BASE_URL"), AppKey: os.Getenv("H3C_MALL_APP_KEY"), AppSecret: os.Getenv("H3C_MALL_APP_SECRET")})
 		if err != nil {

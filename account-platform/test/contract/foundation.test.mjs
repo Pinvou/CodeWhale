@@ -28,7 +28,12 @@ test('OpenAPI contracts expose stable versions and no inline credentials', async
 test('billing products are server-authoritative and fixed to the approved catalog', async () => {
   const billing = await readYaml('contracts/openapi/billing.yaml');
   const productIDs = billing.components.schemas.RechargeProduct.properties.product_id.enum;
-  assert.deepEqual(productIDs, ['CNY_1', 'CNY_10', 'CNY_100', 'CNY_200']);
+  assert.deepEqual(productIDs, ['PLAN_TRIAL', 'PLAN_STANDARD', 'PLAN_ADVANCED', 'PLAN_FLAGSHIP']);
+
+  const product = billing.components.schemas.RechargeProduct;
+  for (const field of ['plan_name', 'sku_code', 'base_points', 'bonus_points', 'validity_days', 'price_status', 'invoice_product_name']) {
+    assert.ok(product.required.includes(field), field);
+  }
 
   const createProperties = billing.components.schemas.CreateRechargeOrderRequest.properties;
   assert.equal(createProperties.amount_fen, undefined);

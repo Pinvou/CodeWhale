@@ -168,11 +168,15 @@ components:
     RechargeProduct:
       type: object
       additionalProperties: false
-      required: [product_id, amount_fen, credit_microcredits, display_points, channels]
+      required: [product_id, plan_name, sku_code, amount_fen, credit_microcredits, display_points, base_points, bonus_points, validity_days, price_status, invoice_product_name, channels]
       properties:
         product_id:
           type: string
-          enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+          enum: [PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
+        plan_name:
+          type: string
+        sku_code:
+          type: string
         amount_fen:
           type: integer
           format: int64
@@ -185,6 +189,22 @@ components:
           type: integer
           format: int64
           minimum: 1
+        base_points:
+          type: integer
+          format: int64
+          minimum: 0
+        bonus_points:
+          type: integer
+          format: int64
+          minimum: 0
+        validity_days:
+          type: integer
+          minimum: 1
+        price_status:
+          type: string
+          enum: [UAT_TENTATIVE, FROZEN]
+        invoice_product_name:
+          type: string
         channels:
           type: array
           uniqueItems: true
@@ -203,7 +223,7 @@ components:
           format: uuid
         product_id:
           type: string
-          enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+          enum: [PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
         channel:
           $ref: "#/components/schemas/PaymentChannel"
     RechargeOrder:

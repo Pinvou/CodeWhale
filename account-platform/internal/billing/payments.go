@@ -206,7 +206,7 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 	var product Product
-	err = tx.QueryRow(ctx, `SELECT product_id, amount_fen, credit_microcredits, display_points, currency, channels, catalog_version FROM recharge_products WHERE product_id = $1 AND enabled AND $2 = ANY(channels)`, productID, channel).Scan(&product.ProductID, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.Currency, &product.Channels, &product.CatalogVersion)
+	err = tx.QueryRow(ctx, `SELECT product_id,plan_name,sku_code,amount_fen,credit_microcredits,display_points,base_points,bonus_points,validity_days,price_status,invoice_product_name,currency,channels,catalog_version FROM recharge_products WHERE product_id=$1 AND enabled AND $2=ANY(channels)`, productID, channel).Scan(&product.ProductID, &product.PlanName, &product.SKUCode, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.PriceStatus, &product.InvoiceProductName, &product.Currency, &product.Channels, &product.CatalogVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, ErrConflict
 	}

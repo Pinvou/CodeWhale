@@ -432,7 +432,7 @@ paths:
               properties:
                 product_id:
                   type: string
-                  enum: [CNY_1, CNY_10, CNY_100, CNY_200]
+                  enum: [PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
                 channel:
                   type: string
                   enum: [UNIONPAY, ALIPAY, WECHAT]
