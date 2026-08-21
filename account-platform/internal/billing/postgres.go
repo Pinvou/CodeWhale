@@ -237,9 +237,40 @@ func (r *PostgresRepository) Reserve(ctx context.Context, usageRequestID, wallet
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return Hold{}, err
 	}
+	now := r.now()
+	type packageAllocation struct {
+		packageID uuid.UUID
+		amount    int64
+	}
+	rows, err := tx.Query(ctx, `SELECT id,points_remaining FROM entitlement_packages WHERE wallet_id=$1 AND status='ACTIVE' AND valid_from<=$2 AND valid_until>$2 AND points_remaining>0 ORDER BY valid_until,credited_at,id FOR UPDATE`, walletID, now)
+	if err != nil {
+		return Hold{}, err
+	}
+	remaining := maxAmount
+	allocations := make([]packageAllocation, 0)
+	for rows.Next() {
+		var packageID uuid.UUID
+		var available int64
+		if err := rows.Scan(&packageID, &available); err != nil {
+			rows.Close()
+			return Hold{}, err
+		}
+		amount := min(remaining, available)
+		if amount > 0 {
+			allocations = append(allocations, packageAllocation{packageID: packageID, amount: amount})
+			remaining -= amount
+		}
+		if remaining == 0 {
+			break
+		}
+	}
+	rows.Close()
+	if remaining != 0 {
+		return Hold{}, ErrInsufficientBalance
+	}
 	command, err := tx.Exec(ctx, `
 UPDATE wallets SET reserved_microcredits = reserved_microcredits + $2, version = version + 1, updated_at = $3
-WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcredits >= $2`, walletID, maxAmount, r.now())
+WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcredits >= $2`, walletID, maxAmount, now)
 	if err != nil {
 		return Hold{}, err
 	}
@@ -253,11 +284,18 @@ WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcred
 		}
 		return Hold{}, ErrInsufficientBalance
 	}
-	now := r.now()
 	hold := Hold{ID: uuid.Must(uuid.NewV7()), UsageRequestID: usageRequestID, WalletID: walletID, PriceVersionID: priceVersionID, Status: "ACTIVE", MaxMicrocredits: maxAmount, ExpiresAt: expiresAt.UTC()}
 	_, err = tx.Exec(ctx, `INSERT INTO usage_holds(id, usage_request_id, wallet_id, price_version_id, status, max_microcredits, expires_at, created_at, updated_at) VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $6, $7, $7)`, hold.ID, usageRequestID, walletID, priceVersionID, maxAmount, hold.ExpiresAt, now)
 	if err != nil {
 		return Hold{}, err
+	}
+	for _, allocation := range allocations {
+		if _, err := tx.Exec(ctx, `UPDATE entitlement_packages SET points_remaining=points_remaining-$2,points_reserved=points_reserved+$2,updated_at=$3 WHERE id=$1 AND points_remaining>=$2`, allocation.packageID, allocation.amount, now); err != nil {
+			return Hold{}, err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_allocations(hold_id,package_id,reserved_microcredits,created_at,updated_at) VALUES($1,$2,$3,$4,$4)`, hold.ID, allocation.packageID, allocation.amount, now); err != nil {
+			return Hold{}, err
+		}
 	}
 	return hold, tx.Commit(ctx)
 }
@@ -292,50 +330,61 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 		return Hold{}, ErrConflict
 	}
 	now := r.now()
+	entryID := uuid.Nil
+	var walletAccount uuid.UUID
 	if actual > 0 {
-		entryID := uuid.Must(uuid.NewV7())
+		entryID = uuid.Must(uuid.NewV7())
 		if err := insertJournal(ctx, tx, entryID, "USAGE", "usage:"+usageRequestID.String(), "settle model usage", now); err != nil {
 			return Hold{}, err
 		}
-		walletAccount, err := walletLedgerAccount(ctx, tx, hold.WalletID)
+		walletAccount, err = walletLedgerAccount(ctx, tx, hold.WalletID)
 		if err != nil {
 			return Hold{}, err
 		}
-		remaining := actual
-		rows, err := tx.Query(ctx, `SELECT id, remaining_microcredits FROM credit_lots WHERE wallet_id = $1 AND remaining_microcredits > 0 AND (expires_at IS NULL OR expires_at > $2) ORDER BY refundable DESC, created_at, id FOR UPDATE`, hold.WalletID, now)
-		if err != nil {
+	}
+	type allocation struct {
+		packageID uuid.UUID
+		lotID     uuid.UUID
+		reserved  int64
+	}
+	rows, err := tx.Query(ctx, `SELECT allocation.package_id,package.credit_lot_id,allocation.reserved_microcredits FROM usage_hold_allocations allocation JOIN entitlement_packages package ON package.id=allocation.package_id WHERE allocation.hold_id=$1 ORDER BY package.valid_until,package.credited_at,package.id FOR UPDATE OF allocation,package`, hold.ID)
+	if err != nil {
+		return Hold{}, err
+	}
+	allocations := make([]allocation, 0)
+	for rows.Next() {
+		var item allocation
+		if err := rows.Scan(&item.packageID, &item.lotID, &item.reserved); err != nil {
+			rows.Close()
 			return Hold{}, err
 		}
-		type lot struct {
-			id        uuid.UUID
-			remaining int64
-		}
-		lots := make([]lot, 0)
-		for rows.Next() {
-			var item lot
-			if err := rows.Scan(&item.id, &item.remaining); err != nil {
-				rows.Close()
+		allocations = append(allocations, item)
+	}
+	rows.Close()
+	remaining := actual
+	for _, item := range allocations {
+		settled := min(remaining, item.reserved)
+		released := item.reserved - settled
+		if settled > 0 {
+			if _, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits>=$2`, item.lotID, settled); err != nil {
 				return Hold{}, err
 			}
-			lots = append(lots, item)
-		}
-		rows.Close()
-		for _, item := range lots {
-			if remaining == 0 {
-				break
-			}
-			consume := min(remaining, item.remaining)
-			if _, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits = remaining_microcredits - $2 WHERE id = $1`, item.id, consume); err != nil {
+			if err := insertPosting(ctx, tx, entryID, walletAccount, -settled, &item.lotID, now); err != nil {
 				return Hold{}, err
 			}
-			if err := insertPosting(ctx, tx, entryID, walletAccount, -consume, &item.id, now); err != nil {
-				return Hold{}, err
-			}
-			remaining -= consume
 		}
-		if remaining != 0 {
-			return Hold{}, errors.New("wallet balance is not backed by credit lots")
+		if _, err := tx.Exec(ctx, `UPDATE entitlement_packages SET points_reserved=points_reserved-$2,points_used=points_used+$3,points_remaining=points_remaining+$4,status=CASE WHEN points_reserved-$2=0 AND points_remaining+$4=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$5 WHERE id=$1 AND points_reserved>=$2`, item.packageID, item.reserved, settled, released, now); err != nil {
+			return Hold{}, err
 		}
+		if _, err := tx.Exec(ctx, `UPDATE usage_hold_allocations SET settled_microcredits=$2,released_microcredits=$3,updated_at=$4 WHERE hold_id=$1 AND package_id=$5`, hold.ID, settled, released, now, item.packageID); err != nil {
+			return Hold{}, err
+		}
+		remaining -= settled
+	}
+	if remaining != 0 {
+		return Hold{}, errors.New("usage hold is not backed by entitlement packages")
+	}
+	if actual > 0 {
 		if err := insertPosting(ctx, tx, entryID, usageRevenueAccount, actual, nil, now); err != nil {
 			return Hold{}, err
 		}
@@ -373,6 +422,9 @@ func (r *PostgresRepository) Release(ctx context.Context, usageRequestID, holdID
 	}
 	now := r.now()
 	snapshot, _ := json.Marshal(map[string]string{"release_reason": strings.TrimSpace(reason)})
+	if err := releasePackageAllocations(ctx, tx, hold.ID, now); err != nil {
+		return Hold{}, err
+	}
 	_, err = tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits = reserved_microcredits - $2, version = version + 1, updated_at = $3 WHERE id = $1 AND reserved_microcredits >= $2`, hold.WalletID, hold.MaxMicrocredits, now)
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE usage_holds SET status = 'RELEASED', usage_snapshot = $2, terminal_at = $3, updated_at = $3 WHERE id = $1`, hold.ID, snapshot, now)
@@ -382,6 +434,14 @@ func (r *PostgresRepository) Release(ctx context.Context, usageRequestID, holdID
 	}
 	hold.Status = "RELEASED"
 	return hold, tx.Commit(ctx)
+}
+
+func releasePackageAllocations(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, now time.Time) error {
+	if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET points_reserved=package.points_reserved-allocation.reserved_microcredits,points_remaining=package.points_remaining+allocation.reserved_microcredits,updated_at=$2 FROM usage_hold_allocations allocation WHERE allocation.hold_id=$1 AND allocation.package_id=package.id AND allocation.settled_microcredits=0 AND allocation.released_microcredits=0 AND package.points_reserved>=allocation.reserved_microcredits`, holdID, now); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE usage_hold_allocations SET released_microcredits=reserved_microcredits,updated_at=$2 WHERE hold_id=$1 AND settled_microcredits=0 AND released_microcredits=0`, holdID, now)
+	return err
 }
 
 func (r *PostgresRepository) ExpireHolds(ctx context.Context, limit int) (int, error) {

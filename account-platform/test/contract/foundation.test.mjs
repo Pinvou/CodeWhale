@@ -91,6 +91,15 @@ test('paid plan orders create independent thirty-day entitlement packages', asyn
   assert.match(payments, /refundable,expires_at/);
 });
 
+test('usage holds reserve and settle entitlement packages in earliest-expiry order', async () => {
+  const migration = await readFile(path.join(root, 'migrations/billing/000012_package_hold_allocations.up.sql'), 'utf8');
+  const postgres = await readFile(path.join(root, 'internal/billing/postgres.go'), 'utf8');
+  assert.match(migration, /CREATE TABLE usage_hold_allocations/);
+  assert.match(postgres, /ORDER BY valid_until,credited_at,id FOR UPDATE/);
+  assert.match(postgres, /points_remaining=points_remaining-\$2,points_reserved=points_reserved\+\$2/);
+  assert.match(postgres, /released_microcredits=reserved_microcredits/);
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));

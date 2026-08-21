@@ -568,6 +568,9 @@ func (r *PostgresRepository) AdminReleaseUsageHold(ctx context.Context, holdID u
 		return AdminHold{}, ErrUsageAlreadyTerminal
 	}
 	now := r.now()
+	if err := releasePackageAllocations(ctx, tx, hold.ID, now); err != nil {
+		return AdminHold{}, err
+	}
 	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits-$2,version=version+1,updated_at=$3 WHERE id=$1 AND reserved_microcredits >= $2`, hold.WalletID, hold.MaxMicrocredits, now)
 	if err != nil || command.RowsAffected() != 1 {
 		if err != nil {
