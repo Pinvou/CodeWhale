@@ -1,4 +1,9 @@
-//! 连接器按需安装与 H3C 内部 CLI 的平台适配。
+//! 连接器按需安装的平台适配：目标 lock、可执行文件命名和权限。
+//!
+//! lock 表与可执行文件命名已下沉为跨功能原语 `crate::platform::connector_lock`
+//! （marketplace 首启导入也要对照 lock 表验存量二进制）；此处保留委托，
+//! 既有调用方（native_installer）零改动。Official 的 H3C 内部 CLI 路径适配
+//! 继续保留在功能内的平台模块中。
 
 use std::path::Path;
 
@@ -15,46 +20,12 @@ pub(super) use linux::{eip_bin_path, zhidao_bin_path};
 pub(super) use unsupported::{eip_bin_path, zhidao_bin_path};
 #[cfg(target_os = "windows")]
 pub(super) use windows::{eip_bin_path, zhidao_bin_path};
-
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const LOCK_JSON: &str = include_str!(
-    "../../../../resources/platforms/linux/aarch64/bundle/connectors/connectors.lock.json"
-);
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const LOCK_JSON: &str = include_str!(
-    "../../../../resources/platforms/linux/x86_64/bundle/connectors/connectors.lock.json"
-);
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const LOCK_JSON: &str = include_str!(
-    "../../../../resources/platforms/macos/aarch64/bundle/connectors/connectors.lock.json"
-);
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const LOCK_JSON: &str = include_str!(
-    "../../../../resources/platforms/macos/x86_64/bundle/connectors/connectors.lock.json"
-);
-#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-const LOCK_JSON: &str = include_str!(
-    "../../../../resources/platforms/windows/x86_64/bundle/connectors/connectors.lock.json"
-);
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "aarch64"),
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "macos", target_arch = "x86_64"),
-    all(target_os = "windows", target_arch = "x86_64"),
-)))]
-const LOCK_JSON: &str = "";
-
 pub fn lock_json() -> &'static str {
-    LOCK_JSON
+    crate::platform::connector_lock::lock_json()
 }
 
 pub fn executable_name(name: &str) -> String {
-    if cfg!(windows) {
-        format!("{name}.exe")
-    } else {
-        name.to_string()
-    }
+    crate::platform::connector_lock::executable_name(name)
 }
 
 pub fn archive_member(name: &str) -> &'static str {
