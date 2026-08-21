@@ -266,8 +266,15 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, ErrConflict
 	}
 	now := p.now()
-	existing, err := getPendingPlanOrderForUpdate(ctx, tx, requesterID, walletID, productID, channel, now, p.Policy().ReusePendingOrderAfterExpiry)
+	policy := p.Policy()
+	existing, err := getPendingPlanOrderForUpdate(ctx, tx, requesterID, walletID, productID, channel, now, policy.ReusePendingOrderAfterExpiry)
 	if err == nil {
+		if policy.ReusePendingOrderAfterExpiry && !existing.ExpiresAt.After(now) {
+			existing.ExpiresAt = now.Add(15 * time.Minute)
+			if _, err := tx.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,reconciliation_next_at=$3,reconciliation_attempts=0,reconciliation_last_error=NULL,updated_at=$3 WHERE id=$1`, existing.ID, existing.ExpiresAt, now); err != nil {
+				return PaymentOrder{}, false, err
+			}
+		}
 		responseBody, _ := json.Marshal(existing)
 		if _, err := tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour)); err != nil {
 			return PaymentOrder{}, false, err

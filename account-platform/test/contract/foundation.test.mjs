@@ -113,6 +113,8 @@ test('repeated purchase clicks reuse one pending order for the same personal pla
   assert.match(payments, /lockTransactionKey\(ctx, tx, "payment\.pending"/);
   assert.match(payments, /getPendingPlanOrderForUpdate/);
   assert.match(payments, /status IN \('CREATED','PENDING'\)/);
+	assert.match(payments, /policy\.ReusePendingOrderAfterExpiry && !existing\.ExpiresAt\.After\(now\)/);
+	assert.match(payments, /UPDATE payment_orders SET expires_at=\$2/);
 });
 
 test('personal recharge orders expose a normal history list', async () => {
