@@ -75,6 +75,12 @@ test('personal usage history exposes only user-facing fields', async () => {
   }
 });
 
+test('personal plans cannot be purchased into organization wallets', async () => {
+  const source = await readFile(path.join(root, 'internal/token/service.go'), 'utf8');
+  assert.match(source, /resolved\.ContextType != "PERSONAL"/);
+  assert.match(source, /PERSONAL_RECHARGE_ONLY/);
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));

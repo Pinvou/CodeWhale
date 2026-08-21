@@ -244,8 +244,8 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if resolved.ContextType == "ORGANIZATION" && !slices.Contains(resolved.Roles, "OWNER") && !slices.Contains(resolved.Roles, "BILLING_ADMIN") {
-		s.writeError(w, r, ErrForbidden)
+	if resolved.ContextType != "PERSONAL" {
+		api.WriteError(w, http.StatusForbidden, "PERSONAL_RECHARGE_ONLY", "personal plans can only be purchased in the personal context", httpserver.RequestID(r.Context()))
 		return
 	}
 	if !resolved.MobileVerified || resolved.Mobile == nil || resolved.MallSyncStatus != "SYNCED" {
