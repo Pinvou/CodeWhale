@@ -60,6 +60,7 @@ type EntitlementPackage struct {
 	UserID          uuid.UUID `json:"user_id"`
 	WalletID        uuid.UUID `json:"wallet_id"`
 	PaymentOrderID  uuid.UUID `json:"pinvou_order_id"`
+	MallOrderID     string    `json:"mall_order_id"`
 	ProductID       string    `json:"plan_id"`
 	PlanName        string    `json:"plan_name"`
 	SKUCode         string    `json:"sku_code"`

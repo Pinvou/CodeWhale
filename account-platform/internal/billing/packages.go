@@ -23,7 +23,7 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 	if limit < 1 || limit > 200 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,user_id,wallet_id,payment_order_id,product_id,plan_name,sku_code,amount_fen,points_total,points_reserved,points_used,points_remaining,credited_at,valid_from,valid_until,status FROM entitlement_packages WHERE user_id=$1 AND wallet_id=$2 ORDER BY credited_at DESC,id DESC LIMIT $3`, userID, walletID, limit)
+	rows, err := r.pool.Query(ctx, `SELECT ep.id,ep.user_id,ep.wallet_id,ep.payment_order_id,po.merchant_order_no,ep.product_id,ep.plan_name,ep.sku_code,ep.amount_fen,ep.points_total,ep.points_reserved,ep.points_used,ep.points_remaining,ep.credited_at,ep.valid_from,ep.valid_until,ep.status FROM entitlement_packages ep JOIN payment_orders po ON po.id=ep.payment_order_id WHERE ep.user_id=$1 AND ep.wallet_id=$2 ORDER BY ep.credited_at DESC,ep.id DESC LIMIT $3`, userID, walletID, limit)
 	if err != nil {
 		return nil, PackageSummary{}, err
 	}
@@ -31,7 +31,7 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 	items := make([]EntitlementPackage, 0)
 	for rows.Next() {
 		var item EntitlementPackage
-		if err := rows.Scan(&item.ID, &item.UserID, &item.WalletID, &item.PaymentOrderID, &item.ProductID, &item.PlanName, &item.SKUCode, &item.AmountFen, &item.PointsTotal, &item.PointsReserved, &item.PointsUsed, &item.PointsRemaining, &item.CreditedAt, &item.ValidFrom, &item.ValidUntil, &item.Status); err != nil {
+		if err := rows.Scan(&item.ID, &item.UserID, &item.WalletID, &item.PaymentOrderID, &item.MallOrderID, &item.ProductID, &item.PlanName, &item.SKUCode, &item.AmountFen, &item.PointsTotal, &item.PointsReserved, &item.PointsUsed, &item.PointsRemaining, &item.CreditedAt, &item.ValidFrom, &item.ValidUntil, &item.Status); err != nil {
 			return nil, PackageSummary{}, err
 		}
 		items = append(items, item)

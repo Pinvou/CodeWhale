@@ -606,12 +606,13 @@ components:
     EntitlementPackage:
       type: object
       additionalProperties: false
-      required: [package_id, pinvou_order_id, plan_id, plan_name, sku_code, amount_fen, points_total_microcredits, points_reserved_microcredits, points_used_microcredits, points_remaining_microcredits, credited_at, valid_from, valid_until, status]
+      required: [package_id, pinvou_order_id, mall_order_id, plan_id, plan_name, sku_code, amount_fen, points_total_microcredits, points_reserved_microcredits, points_used_microcredits, points_remaining_microcredits, credited_at, valid_from, valid_until, status]
       properties:
         package_id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
         wallet_id: { type: string, format: uuid }
         pinvou_order_id: { type: string, format: uuid }
+        mall_order_id: { type: string }
         plan_id: { type: string }
         plan_name: { type: string }
         sku_code: { type: string }

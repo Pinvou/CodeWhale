@@ -452,6 +452,16 @@ test('payment capabilities isolate provider limitations and enable reviewed-orde
   assert.match(i18n, /不支持的退款、主动关单、支付回调或日终账单对账操作已自动禁用/);
 });
 
+test('personal plan history shows traceable package and payment identifiers', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  for (const field of ['package_id', 'pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until', 'invoice_status']) {
+    assert.match(view, new RegExp(`item\\.${field}`));
+  }
+  assert.match(view, /points_total_microcredits/);
+  assert.match(view, /points_used_microcredits/);
+  assert.match(view, /points_remaining_microcredits/);
+});
+
 test('billing order readers tolerate provider fields that are null before the first successful sync', async () => {
   const payments = await readFile(new URL('../../account-platform/internal/billing/payments.go', import.meta.url), 'utf8');
   const refunds = await readFile(new URL('../../account-platform/internal/billing/refunds.go', import.meta.url), 'utf8');

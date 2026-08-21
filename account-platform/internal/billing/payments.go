@@ -46,8 +46,12 @@ type PaymentOrder struct {
 
 type PaymentOrderHistoryItem struct {
 	ID                uuid.UUID  `json:"order_id"`
+	PinvouOrderID     uuid.UUID  `json:"pinvou_order_id"`
+	MallOrderID       string     `json:"mall_order_id"`
 	ProductID         string     `json:"product_id"`
 	PlanName          string     `json:"plan_name"`
+	SKUCode           string     `json:"sku_code"`
+	OrderType         string     `json:"order_type"`
 	AmountFen         int64      `json:"amount_fen"`
 	DisplayPoints     int64      `json:"display_points"`
 	Channel           string     `json:"channel"`
@@ -55,6 +59,9 @@ type PaymentOrderHistoryItem struct {
 	FulfillmentStatus string     `json:"fulfillment_status"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	PaidAt            *time.Time `json:"paid_at,omitempty"`
+	CreditedAt        *time.Time `json:"credited_at,omitempty"`
+	ValidUntil        *time.Time `json:"valid_until,omitempty"`
+	InvoiceStatus     string     `json:"invoice_status"`
 	CreatedAt         time.Time  `json:"created_at"`
 }
 

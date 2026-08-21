@@ -24,3 +24,16 @@ export const accountPlatformCopy = {
     usageTitle:'モデル利用履歴', usageLead:'現在の ID におけるモデル呼び出し、Token 使用量、ポイント消費を確認できます。', noUsage:'現在の ID にはモデル利用履歴がありません。', usageUnavailable:'利用履歴は一時的に利用できません。後でもう一度お試しください。', unknownModel:'不明なモデル', inputTokens:'入力', outputTokens:'出力', cachedTokens:'キャッシュ', usageRecord:'記録番号', completedAt:'完了日時', loadMore:'さらに読み込む', loadingMore:'読み込み中…', usageStatuses:{ IN_PROGRESS:'処理中', SETTLED:'完了', SETTLEMENT_PENDING:'決済処理中', RELEASED:'消費なし', MANUAL_REVIEW:'確認中' },
   },
 };
+
+Object.assign(accountPlatformCopy.zh, {
+  packageId:'权益包编号', pinvouOrder:'品悟订单号', mallOrder:'商城订单号', amount:'支付金额', creditedAt:'到账时间', validPeriod:'权益有效期', totalPoints:'总积分', usedPoints:'已用积分', createdAt:'创建时间', paidAt:'支付时间', fulfillmentStatus:'发放状态', invoiceStatus:'发票状态',
+  fulfillmentStatuses:{ PENDING:'待发放', CREDITED:'已到账', MANUAL_REVIEW:'人工复核中', REVOKED:'已撤销' }, invoiceStatuses:{ NOT_SUPPORTED:'当前接口不支持' },
+});
+Object.assign(accountPlatformCopy.en, {
+  packageId:'Package ID', pinvouOrder:'Pinvou order', mallOrder:'Mall order', amount:'Amount paid', creditedAt:'Credited at', validPeriod:'Benefit validity', totalPoints:'Total points', usedPoints:'Used points', createdAt:'Created at', paidAt:'Paid at', fulfillmentStatus:'Fulfillment', invoiceStatus:'Invoice status',
+  fulfillmentStatuses:{ PENDING:'Pending', CREDITED:'Credited', MANUAL_REVIEW:'Manual review', REVOKED:'Revoked' }, invoiceStatuses:{ NOT_SUPPORTED:'Not supported by the current API' },
+});
+Object.assign(accountPlatformCopy.ja, {
+  packageId:'特典パッケージ ID', pinvouOrder:'品悟注文番号', mallOrder:'モール注文番号', amount:'支払金額', creditedAt:'付与日時', validPeriod:'特典有効期間', totalPoints:'合計ポイント', usedPoints:'使用済みポイント', createdAt:'作成日時', paidAt:'支払日時', fulfillmentStatus:'付与状態', invoiceStatus:'請求書状態',
+  fulfillmentStatuses:{ PENDING:'付与待ち', CREDITED:'付与済み', MANUAL_REVIEW:'手動確認中', REVOKED:'取消済み' }, invoiceStatuses:{ NOT_SUPPORTED:'現在の API では未対応' },
+});

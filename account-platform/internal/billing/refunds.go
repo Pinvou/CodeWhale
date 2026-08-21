@@ -63,8 +63,8 @@ func (p *PaymentCoordinator) ListOrders(ctx context.Context, requesterID, wallet
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := p.repository.pool.Query(ctx, `SELECT id,product_id,COALESCE(product_snapshot->>'plan_name',product_id),amount_fen,COALESCE((product_snapshot->>'display_points')::bigint,credit_microcredits/10000),channel,status,fulfillment_status,expires_at,paid_at,created_at
-		FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 ORDER BY created_at DESC,id DESC LIMIT $3`, requesterID, walletID, limit)
+	rows, err := p.repository.pool.Query(ctx, `SELECT po.id,po.merchant_order_no,po.product_id,COALESCE(po.product_snapshot->>'plan_name',po.product_id),COALESCE(po.provider_sku,po.product_snapshot->>'sku_code',''),po.amount_fen,COALESCE((po.product_snapshot->>'display_points')::bigint,po.credit_microcredits/10000),po.channel,po.status,po.fulfillment_status,po.expires_at,po.paid_at,ep.credited_at,ep.valid_until,po.created_at
+		FROM payment_orders po LEFT JOIN entitlement_packages ep ON ep.payment_order_id=po.id WHERE po.requester_id=$1 AND po.wallet_id=$2 ORDER BY po.created_at DESC,po.id DESC LIMIT $3`, requesterID, walletID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -72,9 +72,10 @@ func (p *PaymentCoordinator) ListOrders(ctx context.Context, requesterID, wallet
 	items := make([]PaymentOrderHistoryItem, 0)
 	for rows.Next() {
 		var item PaymentOrderHistoryItem
-		if err := rows.Scan(&item.ID, &item.ProductID, &item.PlanName, &item.AmountFen, &item.DisplayPoints, &item.Channel, &item.Status, &item.FulfillmentStatus, &item.ExpiresAt, &item.PaidAt, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.MallOrderID, &item.ProductID, &item.PlanName, &item.SKUCode, &item.AmountFen, &item.DisplayPoints, &item.Channel, &item.Status, &item.FulfillmentStatus, &item.ExpiresAt, &item.PaidAt, &item.CreditedAt, &item.ValidUntil, &item.CreatedAt); err != nil {
 			return nil, err
 		}
+		item.PinvouOrderID, item.OrderType, item.InvoiceStatus = item.ID, "PLAN", "NOT_SUPPORTED"
 		items = append(items, item)
 	}
 	return items, rows.Err()

@@ -121,8 +121,12 @@ test('personal recharge orders expose a normal history list', async () => {
   const billing = await readYaml('contracts/openapi/billing.yaml');
   const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
   const service = await readFile(path.join(root, 'internal/token/service.go'), 'utf8');
+  const history = billing.components.schemas.RechargeOrderHistoryItem;
+  const entitlement = gateway.components.schemas.EntitlementPackage;
   assert.ok(billing.paths['/recharge/orders'].get);
   assert.ok(gateway.paths['/recharge/orders'].get);
+  assert.ok(['pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until', 'invoice_status'].every(field => history.properties[field]));
+  assert.ok(['package_id', 'pinvou_order_id', 'mall_order_id', 'sku_code', 'credited_at', 'valid_until'].every(field => entitlement.properties[field]));
   assert.match(service, /resolved\.ContextType != "PERSONAL"/);
   assert.match(service, /RechargeOrders\(r\.Context\(\), resolved\.UserID, walletID\)/);
 });

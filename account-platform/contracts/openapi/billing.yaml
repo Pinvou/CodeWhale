@@ -299,15 +299,25 @@ components:
     RechargeOrderHistoryItem:
       type: object
       additionalProperties: false
-      required: [order_id, product_id, plan_name, amount_fen, display_points, channel, status, fulfillment_status, expires_at, created_at]
+      required: [order_id, pinvou_order_id, mall_order_id, product_id, plan_name, sku_code, order_type, amount_fen, display_points, channel, status, fulfillment_status, invoice_status, expires_at, created_at]
       properties:
         order_id:
           type: string
           format: uuid
+        pinvou_order_id:
+          type: string
+          format: uuid
+        mall_order_id:
+          type: string
         product_id:
           type: string
         plan_name:
           type: string
+        sku_code:
+          type: string
+        order_type:
+          type: string
+          const: PLAN
         amount_fen:
           type: integer
           format: int64
@@ -328,6 +338,15 @@ components:
         paid_at:
           type: string
           format: date-time
+        credited_at:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        invoice_status:
+          type: string
+          enum: [NOT_SUPPORTED]
         created_at:
           type: string
           format: date-time
