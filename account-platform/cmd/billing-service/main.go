@@ -67,7 +67,11 @@ func paymentCoordinator(ctx context.Context, repository *billing.PostgresReposit
 		if err != nil {
 			return nil, err
 		}
-		return billing.NewPaymentCoordinatorWithProvider(repository, provider, products)
+		coordinator, err := billing.NewPaymentCoordinatorWithProvider(repository, provider, products)
+		if err != nil {
+			return nil, err
+		}
+		return coordinator.AllowTentativePrices(strings.EqualFold(strings.TrimSpace(os.Getenv("BILLING_ALLOW_TENTATIVE_PRICES")), "true")), nil
 	}
 	return billing.NewPaymentCoordinator(repository, os.Getenv("PAYMENT_SIMULATOR_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "pinvou-development", os.Getenv("BILLING_PAYMENT_CALLBACK_URL"), map[string]string{
 		"UNIONPAY": os.Getenv("PAYMENT_SIM_HMAC_UNIONPAY"), "ALIPAY": os.Getenv("PAYMENT_SIM_HMAC_ALIPAY"), "WECHAT": os.Getenv("PAYMENT_SIM_HMAC_WECHAT"),

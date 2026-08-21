@@ -52,6 +52,7 @@ type PaymentCoordinator struct {
 	callbackURL string
 	now         func() time.Time
 	productSKUs map[string]ExternalProduct
+	allowTentativePrices bool
 }
 
 type ProviderOrder struct {
@@ -127,7 +128,7 @@ func NewPaymentCoordinator(repository *PostgresRepository, providerURL, serviceT
 	if err != nil || parsedCallback.Scheme == "" || parsedCallback.Host == "" {
 		return nil, errors.New("invalid Billing payment callback URL")
 	}
-	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, callbackURL: parsedCallback.String(), now: func() time.Time { return time.Now().UTC() }}, nil
+	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, callbackURL: parsedCallback.String(), now: func() time.Time { return time.Now().UTC() }, allowTentativePrices: true}, nil
 }
 
 func NewPaymentCoordinatorWithProvider(repository *PostgresRepository, provider PaymentProvider, products map[string]ExternalProduct) (*PaymentCoordinator, error) {
@@ -145,12 +146,20 @@ func NewPaymentCoordinatorWithProvider(repository *PostgresRepository, provider 
 	return &PaymentCoordinator{repository: repository, provider: provider, productSKUs: validated, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
+func (p *PaymentCoordinator) AllowTentativePrices(allowed bool) *PaymentCoordinator {
+	p.allowTentativePrices = allowed
+	return p
+}
+
 func (p *PaymentCoordinator) FilterProducts(products []Product) []Product {
 	if len(p.productSKUs) == 0 {
 		return products
 	}
 	filtered := make([]Product, 0, len(products))
 	for _, product := range products {
+		if product.PriceStatus != "FROZEN" && !p.allowTentativePrices {
+			continue
+		}
 		if external, ok := p.productSKUs[product.ProductID]; ok && external.AmountFen == product.AmountFen {
 			product.Channels = []string{"ALIPAY"}
 			filtered = append(filtered, product)
@@ -182,6 +191,9 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
 		return PaymentOrder{}, false, err
+	}
+	if product.PriceStatus != "FROZEN" && !p.allowTentativePrices {
+		return PaymentOrder{}, false, ErrConflict
 	}
 	defer tx.Rollback(ctx)
 	if err := lockTransactionKey(ctx, tx, "payment.create", idempotencyKey); err != nil {
