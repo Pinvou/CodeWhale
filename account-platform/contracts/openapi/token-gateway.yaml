@@ -523,6 +523,36 @@ paths:
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /me/entitlement-packages:
+    get:
+      operationId: listMyEntitlementPackages
+      summary: List personal plan packages and their expiry summary
+      responses:
+        "200":
+          description: Personal entitlement packages
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [summary, items]
+                properties:
+                  summary:
+                    $ref: "#/components/schemas/EntitlementPackageSummary"
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EntitlementPackage"
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
 components:
   securitySchemes:
     oidc:
@@ -544,6 +574,36 @@ components:
         type: string
         format: uuid
   schemas:
+    EntitlementPackageSummary:
+      type: object
+      additionalProperties: false
+      required: [available_microcredits, active_package_count, next_expiry_microcredits]
+      properties:
+        available_microcredits: { type: integer, format: int64, minimum: 0 }
+        active_package_count: { type: integer, minimum: 0 }
+        next_expiry_at: { type: string, format: date-time }
+        next_expiry_microcredits: { type: integer, format: int64, minimum: 0 }
+    EntitlementPackage:
+      type: object
+      additionalProperties: false
+      required: [package_id, pinvou_order_id, plan_id, plan_name, sku_code, amount_fen, points_total_microcredits, points_reserved_microcredits, points_used_microcredits, points_remaining_microcredits, credited_at, valid_from, valid_until, status]
+      properties:
+        package_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        pinvou_order_id: { type: string, format: uuid }
+        plan_id: { type: string }
+        plan_name: { type: string }
+        sku_code: { type: string }
+        amount_fen: { type: integer, format: int64, minimum: 1 }
+        points_total_microcredits: { type: integer, format: int64, minimum: 1 }
+        points_reserved_microcredits: { type: integer, format: int64, minimum: 0 }
+        points_used_microcredits: { type: integer, format: int64, minimum: 0 }
+        points_remaining_microcredits: { type: integer, format: int64, minimum: 0 }
+        credited_at: { type: string, format: date-time }
+        valid_from: { type: string, format: date-time }
+        valid_until: { type: string, format: date-time }
+        status: { type: string, enum: [ACTIVE, CONSUMED, EXPIRED, CREDIT_FAILED, REPAIRED, FROZEN] }
     ShareScope:
       type: string
       enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS]

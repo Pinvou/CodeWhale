@@ -81,6 +81,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 	router.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
 	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
+	router.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
 	admin := router.Group("/admin/v1")
 	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
 	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
@@ -339,6 +340,29 @@ func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {
 	payload, err := s.billing.Balance(r.Context(), walletID)
 	if err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the balance is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) getEntitlementPackages(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	if resolved.ContextType != "PERSONAL" {
+		s.writeError(w, r, ErrForbidden)
+		return
+	}
+	walletID, err := s.wallets.Ensure(r.Context(), "PERSONAL", resolved.UserID)
+	client, supported := s.billing.(EntitlementPackageBillingClient)
+	if err != nil || !supported {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "entitlement packages are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := client.Packages(r.Context(), resolved.UserID, walletID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "entitlement packages are unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)

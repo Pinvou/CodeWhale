@@ -100,6 +100,14 @@ test('usage holds reserve and settle entitlement packages in earliest-expiry ord
   assert.match(postgres, /released_microcredits=reserved_microcredits/);
 });
 
+test('entitlement packages expire locally and remain queryable by the personal user', async () => {
+  const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
+  const packages = await readFile(path.join(root, 'internal/billing/packages.go'), 'utf8');
+  assert.ok(gateway.paths['/me/entitlement-packages']);
+  assert.match(packages, /status='ACTIVE' AND valid_until<=\$1 AND points_reserved=0/);
+  assert.match(packages, /"EXPIRE", "expire:"\+packageID\.String\(\)/);
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));

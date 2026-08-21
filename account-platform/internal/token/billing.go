@@ -51,6 +51,10 @@ type BillingClient interface {
 	Balance(context.Context, uuid.UUID) (json.RawMessage, error)
 }
 
+type EntitlementPackageBillingClient interface {
+	Packages(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+}
+
 func (c *HTTPBillingClient) Products(ctx context.Context) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodGet, "/v1/recharge/products", nil, "")
 }
@@ -74,6 +78,11 @@ func (c *HTTPBillingClient) CloseRechargeOrder(ctx context.Context, orderID, req
 
 func (c *HTTPBillingClient) Balance(ctx context.Context, walletID uuid.UUID) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodGet, "/internal/v1/wallets/"+walletID.String()+"/balance", nil, "")
+}
+
+func (c *HTTPBillingClient) Packages(ctx context.Context, userID, walletID uuid.UUID) (json.RawMessage, error) {
+	query := "?user_id=" + url.QueryEscape(userID.String()) + "&wallet_id=" + url.QueryEscape(walletID.String())
+	return c.raw(ctx, http.MethodGet, "/internal/v1/entitlement-packages"+query, nil, "")
 }
 
 func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input any, idempotencyKey string) (json.RawMessage, error) {

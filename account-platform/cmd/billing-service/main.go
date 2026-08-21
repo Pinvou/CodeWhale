@@ -48,6 +48,7 @@ func main() {
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run(workerContext)
+	go billing.NewPackageExpiryWorker(repository, time.Minute).Run(workerContext)
 	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

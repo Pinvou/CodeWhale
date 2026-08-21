@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -35,6 +36,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
 	protected.POST("/internal/v1/wallets/ensure", httpserver.AdaptFunc(s.ensureWallet))
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
+	protected.GET("/internal/v1/entitlement-packages", httpserver.AdaptFunc(s.listEntitlementPackages))
 	protected.POST("/internal/v1/holds/reserve", httpserver.AdaptFunc(s.reserve))
 	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
 	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
@@ -76,6 +78,27 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/reconciliation-runs/:run_id/cases", httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
+}
+
+type entitlementPackageRepository interface {
+	ListPackages(context.Context, uuid.UUID, uuid.UUID, int) ([]EntitlementPackage, PackageSummary, error)
+}
+
+func (s *Service) listEntitlementPackages(w http.ResponseWriter, r *http.Request) {
+	userID, userErr := uuid.Parse(r.URL.Query().Get("user_id"))
+	walletID, walletErr := uuid.Parse(r.URL.Query().Get("wallet_id"))
+	repository, ok := s.repository.(entitlementPackageRepository)
+	if userErr != nil || walletErr != nil || !ok {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid entitlement package lookup", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, summary, err := repository.ListPackages(r.Context(), userID, walletID, 100)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"summary": summary, "items": items})
 }
 
 func (s *Service) requestAdjustment(w http.ResponseWriter, r *http.Request) {
