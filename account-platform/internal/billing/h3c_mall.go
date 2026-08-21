@@ -31,6 +31,16 @@ func (p *H3CMallProvider) Capabilities() PaymentCapabilities {
 	return PaymentCapabilities{Provider: "h3c_mall", OrderSyncSupported: true}
 }
 
+func (p *H3CMallProvider) Policy() PaymentPolicy {
+	// The current H3C Mall contract has neither close nor notification APIs.
+	// Keep the accepted order key reusable after the local QR session expires,
+	// and route payments reported after that boundary to manual verification.
+	return PaymentPolicy{
+		ReusePendingOrderAfterExpiry: true,
+		ReviewLatePayment:            true,
+	}
+}
+
 func (p *H3CMallProvider) Create(ctx context.Context, order PaymentOrder, _ string) (ProviderOrder, error) {
 	if order.Channel != "ALIPAY" || strings.TrimSpace(order.Mobile) == "" || strings.TrimSpace(order.ProviderSKU) == "" {
 		return ProviderOrder{}, ErrConflict

@@ -100,8 +100,20 @@ type PaymentCapabilities struct {
 	ReconciliationSupported bool   `json:"reconciliation_supported"`
 }
 
+// PaymentPolicy describes provider-specific behavior that the generic billing
+// workflow must honor. Providers opt in explicitly; future providers keep the
+// conservative defaults without introducing provider-name branches here.
+type PaymentPolicy struct {
+	ReusePendingOrderAfterExpiry bool
+	ReviewLatePayment            bool
+}
+
 type paymentCapabilityProvider interface {
 	Capabilities() PaymentCapabilities
+}
+
+type paymentPolicyProvider interface {
+	Policy() PaymentPolicy
 }
 
 type PaymentProvider interface {
@@ -175,6 +187,13 @@ func (p *PaymentCoordinator) Capabilities() PaymentCapabilities {
 	return PaymentCapabilities{Provider: "unknown", OrderSyncSupported: true}
 }
 
+func (p *PaymentCoordinator) Policy() PaymentPolicy {
+	if provider, ok := p.provider.(paymentPolicyProvider); ok {
+		return provider.Policy()
+	}
+	return PaymentPolicy{}
+}
+
 func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey string) (PaymentOrder, bool, error) {
 	return p.createOrder(ctx, requesterID, walletID, productID, channel, "", idempotencyKey)
 }
@@ -191,9 +210,6 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
 		return PaymentOrder{}, false, err
-	}
-	if product.PriceStatus != "FROZEN" && !p.allowTentativePrices {
-		return PaymentOrder{}, false, ErrConflict
 	}
 	defer tx.Rollback(ctx)
 	if err := lockTransactionKey(ctx, tx, "payment.create", idempotencyKey); err != nil {
@@ -220,24 +236,27 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, err
 	}
-	existing, err := getPendingPlanOrderForUpdate(ctx, tx, requesterID, walletID, productID, channel)
-	if err == nil {
-		responseBody, _ := json.Marshal(existing)
-		now := p.now()
-		if _, err := tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour)); err != nil {
-			return PaymentOrder{}, false, err
-		}
-		return existing, false, tx.Commit(ctx)
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return PaymentOrder{}, false, err
-	}
 	var product Product
 	err = tx.QueryRow(ctx, `SELECT product_id,plan_name,sku_code,amount_fen,credit_microcredits,display_points,base_points,bonus_points,validity_days,price_status,invoice_product_name,currency,channels,catalog_version FROM recharge_products WHERE product_id=$1 AND enabled AND $2=ANY(channels)`, productID, channel).Scan(&product.ProductID, &product.PlanName, &product.SKUCode, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.PriceStatus, &product.InvoiceProductName, &product.Currency, &product.Channels, &product.CatalogVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, ErrConflict
 	}
 	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	if product.PriceStatus != "FROZEN" && !p.allowTentativePrices {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	now := p.now()
+	existing, err := getPendingPlanOrderForUpdate(ctx, tx, requesterID, walletID, productID, channel, now, p.Policy().ReusePendingOrderAfterExpiry)
+	if err == nil {
+		responseBody, _ := json.Marshal(existing)
+		if _, err := tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour)); err != nil {
+			return PaymentOrder{}, false, err
+		}
+		return existing, false, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, err
 	}
 	external := p.productSKUs[productID]
@@ -247,7 +266,6 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if _, err := getWallet(ctx, tx, walletID, false); err != nil {
 		return PaymentOrder{}, false, ErrNotFound
 	}
-	now := p.now()
 	merchantDigest := sha256.Sum256([]byte(requesterID.String() + "|" + idempotencyKey))
 	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute), Mobile: mobile, ProviderSKU: external.SKU}
 	snapshot, _ := json.Marshal(product)
@@ -274,9 +292,9 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	return order, true, tx.Commit(ctx)
 }
 
-func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, walletID uuid.UUID, productID, channel string) (PaymentOrder, error) {
+func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, walletID uuid.UUID, productID, channel string, now time.Time, includeExpired bool) (PaymentOrder, error) {
 	var order PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 AND product_id=$3 AND channel=$4 AND status IN ('CREATED','PENDING') ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, requesterID, walletID, productID, channel).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 AND product_id=$3 AND channel=$4 AND status IN ('CREATED','PENDING') AND ($6 OR expires_at>$5) ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, requesterID, walletID, productID, channel, now, includeExpired).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
 	return order, err
 }
 

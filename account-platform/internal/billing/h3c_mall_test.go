@@ -57,6 +57,17 @@ func TestH3CMallProviderCreatesWithoutInventingQR(t *testing.T) {
 	}
 }
 
+func TestH3CMallProviderKeepsDegradedRulesInProviderPolicy(t *testing.T) {
+	provider, err := NewH3CMallProvider(&h3cMallStub{}, map[string]ExternalProduct{"points-100": {SKU: "sku-100", AmountFen: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := provider.Policy()
+	if !policy.ReusePendingOrderAfterExpiry || !policy.ReviewLatePayment {
+		t.Fatalf("unexpected H3C Mall payment policy: %#v", policy)
+	}
+}
+
 func TestH3CMallProviderMapsPaidOrder(t *testing.T) {
 	client := &h3cMallStub{order: h3cmall.Order{OrderKey: "pv-1", SKU: "sku-100", Status: "PAID", PayUniqueKey: "trade-1", PayTime: "2026-08-19 12:00:00"}}
 	provider, _ := NewH3CMallProvider(client, map[string]ExternalProduct{"points-100": {SKU: "sku-100", AmountFen: 100}})
