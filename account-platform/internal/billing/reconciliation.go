@@ -398,7 +398,7 @@ func (p *PaymentCoordinator) RunReconciliation(ctx context.Context, channel stri
 }
 
 func (p *PaymentCoordinator) listPaidOrders(ctx context.Context, channel string, start, end time.Time) ([]PaymentOrder, error) {
-	rows, err := p.repository.pool.Query(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,payment_url,channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE channel=$1 AND paid_at >= $2 AND paid_at < $3 AND fulfillment_status IN ('CREDITED','REFUNDED') ORDER BY paid_at,merchant_order_no`, channel, start, end)
+	rows, err := p.repository.pool.Query(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE channel=$1 AND paid_at >= $2 AND paid_at < $3 AND fulfillment_status IN ('CREDITED','REFUNDED') ORDER BY paid_at,merchant_order_no`, channel, start, end)
 	if err != nil {
 		return nil, err
 	}

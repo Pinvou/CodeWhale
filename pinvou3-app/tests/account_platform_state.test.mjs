@@ -439,3 +439,12 @@ test('H3C Mall disables unsupported financial operations in the admin console', 
   assert.match(view, /disabled=\{busy \|\| !reconciliationSupported\}/);
   assert.match(i18n, /退款、主动关单、支付回调和日终账单对账已禁用/);
 });
+
+test('billing order readers tolerate provider fields that are null before the first successful sync', async () => {
+  const payments = await readFile(new URL('../../account-platform/internal/billing/payments.go', import.meta.url), 'utf8');
+  const refunds = await readFile(new URL('../../account-platform/internal/billing/refunds.go', import.meta.url), 'utf8');
+  const reconciliation = await readFile(new URL('../../account-platform/internal/billing/reconciliation.go', import.meta.url), 'utf8');
+  assert.match(payments, /COALESCE\(payment_url,''\),COALESCE\(qr_data,''\)/);
+  assert.equal((refunds.match(/COALESCE\(payment_url,''\),COALESCE\(qr_data,''\)/g) || []).length, 2);
+  assert.match(reconciliation, /COALESCE\(payment_url,''\),channel_transaction_id/);
+});

@@ -46,7 +46,7 @@ func (p *PaymentCoordinator) GetOrder(ctx context.Context, orderID, requesterID 
 }
 
 func (p *PaymentCoordinator) RecentOrder(ctx context.Context, requesterID, walletID uuid.UUID) (*PaymentOrder, error) {
-	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,payment_url,qr_data,channel_transaction_id,expires_at,paid_at
+	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at
 		FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 ORDER BY created_at DESC LIMIT 1`
 	var order PaymentOrder
 	err := p.repository.pool.QueryRow(ctx, query, requesterID, walletID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
@@ -282,7 +282,7 @@ func refundMerchantOrder(ctx context.Context, database queryable, orderID uuid.U
 }
 
 func getPaymentOrderByID(ctx context.Context, database queryable, orderID uuid.UUID, lock bool) (PaymentOrder, error) {
-	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,payment_url,qr_data,channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE id=$1`
+	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}

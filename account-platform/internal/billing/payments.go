@@ -363,7 +363,7 @@ func creditWithinTransaction(ctx context.Context, tx pgx.Tx, walletID uuid.UUID,
 
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
 	var o PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,payment_url,qr_data,channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.QRData, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.QRData, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
 	return o, err
 }
 
