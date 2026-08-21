@@ -149,7 +149,10 @@ jobs:
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-    runs-on: ubuntu-latest
+    # Linux 发布基线是 Ubuntu 22.04 (glibc 2.35)。发布二进制链接构建机的 glibc，
+    # 在更新的 Ubuntu runner 上构建会引入 22.04 不存在的符号引用，导致启动崩溃。
+    # runner 必须钉在 ubuntu-22.04，升级前先调整并验证配套 glibc 下限守卫。
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
@@ -178,7 +181,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri
-          shared-key: release-linux-x64
+          # jammy 后缀隔离此前由 Ubuntu 24.04 构建的缓存产物，避免高版本
+          # glibc 符号通过 target 缓存混入 Ubuntu 22.04 发布包。
+          shared-key: release-linux-x64-jammy
           # 非 main 手动构建只恢复 main 缓存；禁止写入分支缓存，避免多平台
           # release 缓存重复占满仓库配额并淘汰 pr-check 的 rust-test 暖缓存。
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -242,6 +247,11 @@ jobs:
           echo "$SHA  $DST" > "$DST.sha256"
           ls -lh "$DST"
 
+      # 对 deb 内每个 ELF 校验 Ubuntu 22.04 的 glibc/libstdc++ 符号下限，
+      # 防止 runner 或依赖升级静默抬高发布包的运行系统要求。
+      - name: glibc 下限守卫 (Ubuntu 22.04 = glibc 2.35)
+        run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_x64.deb"
+
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7
         with:
@@ -260,7 +270,8 @@ jobs:
       needs.check-version-bump.outputs.build_required == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'push' && github.ref == 'refs/heads/main'))
-    runs-on: ubuntu-24.04-arm
+    # 与 x86_64 一致，ARM64 发布包也以 Ubuntu 22.04 (glibc 2.35) 为基线。
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 90
     env:
       VERSION: ${{ needs.check-version-bump.outputs.version }}
@@ -288,7 +299,8 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: pinvou3-app/src-tauri
-          shared-key: release-linux-arm64
+          # jammy 后缀隔离此前由 Ubuntu 24.04 构建的缓存产物。
+          shared-key: release-linux-arm64-jammy
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: 装 Tauri + pinvou3 Linux 系统依赖
@@ -342,6 +354,9 @@ jobs:
           echo "deb sha256: $SHA"
           echo "$SHA  $DEB" > "$DEB.sha256"
           ls -lh "$DEB"
+
+      - name: glibc 下限守卫 (Ubuntu 22.04 = glibc 2.35)
+        run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_arm64.deb"
 
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7
