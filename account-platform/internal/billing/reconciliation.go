@@ -321,7 +321,7 @@ func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uu
 	}
 	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2,fulfillment_status='CREDITED',channel_transaction_id=$3,paid_at=$4,updated_at=$5 WHERE id=$1`, order.ID, status, *provider.ChannelTransactionID, *provider.PaidAt, now)
 	if err == nil {
-		err = issuePackageWithValidityStart(ctx, tx, order, now, *provider.PaidAt)
+		_, err = issuePackageWithinTransaction(ctx, tx, order, now, false)
 	}
 	if err != nil {
 		return PaymentOrder{}, err
@@ -379,10 +379,15 @@ func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, a
 		"status": provider.Status, "provider_status": provider.ProviderStatus, "provider_trace_id": provider.ProviderTraceID,
 		"channel_transaction_id": *provider.ChannelTransactionID, "paid_at": *provider.PaidAt,
 	})
-	if _, err := tx.Exec(ctx, `INSERT INTO payment_order_repairs(id,payment_order_id,actor_id,reason,provider_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6)`, uuid.Must(uuid.NewV7()), order.ID, actorID, reason, snapshot, now); err != nil {
+	var balanceBefore int64
+	if err := tx.QueryRow(ctx, `SELECT posted_microcredits FROM wallets WHERE id=$1 FOR UPDATE`, order.WalletID).Scan(&balanceBefore); err != nil {
 		return PaymentOrder{}, err
 	}
-	if err := issuePackageWithValidityStart(ctx, tx, order, now, *provider.PaidAt); err != nil {
+	packageID, err := issuePackageWithinTransaction(ctx, tx, order, now, true)
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO payment_order_repairs(id,payment_order_id,actor_id,reason,provider_snapshot,entitlement_package_id,points_awarded,wallet_balance_before,wallet_balance_after,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.Must(uuid.NewV7()), order.ID, actorID, reason, snapshot, packageID, order.CreditMicrocredits, balanceBefore, balanceBefore+order.CreditMicrocredits, now); err != nil {
 		return PaymentOrder{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE payment_orders SET status='PAID_LATE',fulfillment_status='CREDITED',channel_transaction_id=$2,paid_at=$3,updated_at=$4 WHERE id=$1`, order.ID, *provider.ChannelTransactionID, *provider.PaidAt, now); err != nil {

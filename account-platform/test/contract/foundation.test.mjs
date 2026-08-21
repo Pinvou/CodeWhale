@@ -86,7 +86,7 @@ test('paid plan orders create independent thirty-day entitlement packages', asyn
   const payments = await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8');
   assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
   assert.match(migration, /points_reserved \+ points_used \+ points_remaining = points_total/);
-  assert.match(payments, /validUntil := validFrom\.AddDate\(0, 0, product\.ValidityDays\)/);
+  assert.match(payments, /validFrom, validUntil := now, now\.AddDate\(0, 0, product\.ValidityDays\)/);
   assert.match(payments, /INSERT INTO entitlement_packages/);
   assert.match(payments, /refundable,expires_at/);
 });
@@ -137,7 +137,9 @@ test('late Mall payments require audited operator repair before fulfillment', as
   assert.match(reconciliation, /p\.Policy\(\)\.ReviewLatePayment/);
   assert.match(reconciliation, /provider\.Status != "SUCCESS"/);
   assert.match(reconciliation, /INSERT INTO payment_order_repairs/);
-  assert.match(reconciliation, /issuePackageWithValidityStart/);
+  assert.match(reconciliation, /issuePackageWithinTransaction/);
+  assert.match(reconciliation, /wallet_balance_before,wallet_balance_after/);
+  assert.match(await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8'), /"REPAIR_CREDIT", "repair:"/);
 });
 
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
