@@ -18,10 +18,6 @@ pub fn reveal_target(target: &Path) -> Result<(), String> {
     ))
 }
 
-pub fn device_serial_number() -> Option<String> {
-    None
-}
-
 pub fn command_exists(_command: &str) -> bool {
     false
 }

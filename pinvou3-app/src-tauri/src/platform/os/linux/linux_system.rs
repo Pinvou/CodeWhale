@@ -41,10 +41,6 @@ pub fn reveal_target(target: &Path) -> Result<(), String> {
     open_target(parent, "文件所在目录")
 }
 
-pub fn device_serial_number() -> Option<String> {
-    None
-}
-
 pub fn command_exists(command: &str) -> bool {
     Command::new("which")
         .arg(command)

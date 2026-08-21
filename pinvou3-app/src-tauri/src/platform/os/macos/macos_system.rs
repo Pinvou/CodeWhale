@@ -40,10 +40,6 @@ pub fn reveal_target(target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn device_serial_number() -> Option<String> {
-    None
-}
-
 pub fn command_exists(command: &str) -> bool {
     // 先走 `which`(含 PATH 内命令),未命中再补查 extra_lookup_dirs() 中的
     // Homebrew bin 与 cask 应用目录(见该函数注释)。

@@ -63,10 +63,6 @@ pub fn reveal_target(target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn device_serial_number() -> Option<String> {
-    bios_serial_number().ok()
-}
-
 pub fn command_exists(command: &str) -> bool {
     let command_path = Path::new(command);
     if command_path.components().count() > 1 || command_path.extension().is_some() {
