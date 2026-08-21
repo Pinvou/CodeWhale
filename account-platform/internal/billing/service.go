@@ -49,6 +49,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.GET("/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
 	if s.payments != nil {
 		protected.POST("/internal/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+		protected.GET("/internal/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
 		protected.GET("/internal/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
 		protected.GET("/internal/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 		protected.POST("/internal/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
@@ -78,6 +79,22 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/reconciliation-runs/:run_id/cases", httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
+}
+
+func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
+	requesterID, requesterErr := uuid.Parse(r.URL.Query().Get("requester_id"))
+	walletID, walletErr := uuid.Parse(r.URL.Query().Get("wallet_id"))
+	if requesterErr != nil || walletErr != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order list", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := s.payments.ListOrders(r.Context(), requesterID, walletID, 50)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 type entitlementPackageRepository interface {

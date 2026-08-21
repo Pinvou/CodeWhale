@@ -44,6 +44,20 @@ type PaymentOrder struct {
 	ProviderSKU          string     `json:"-"`
 }
 
+type PaymentOrderHistoryItem struct {
+	ID                uuid.UUID  `json:"order_id"`
+	ProductID         string     `json:"product_id"`
+	PlanName          string     `json:"plan_name"`
+	AmountFen         int64      `json:"amount_fen"`
+	DisplayPoints     int64      `json:"display_points"`
+	Channel           string     `json:"channel"`
+	Status            string     `json:"status"`
+	FulfillmentStatus string     `json:"fulfillment_status"`
+	ExpiresAt         time.Time  `json:"expires_at"`
+	PaidAt            *time.Time `json:"paid_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+}
+
 type PaymentCoordinator struct {
 	repository  *PostgresRepository
 	provider    PaymentProvider

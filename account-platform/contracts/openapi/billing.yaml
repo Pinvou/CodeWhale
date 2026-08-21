@@ -39,6 +39,37 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
   /recharge/orders:
+    get:
+      operationId: listRechargeOrders
+      summary: List recharge orders for one requester and wallet
+      parameters:
+        - name: requester_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: wallet_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Recharge order history
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RechargeOrderList"
+        "400":
+          $ref: "#/components/responses/Error"
     post:
       operationId: createRechargeOrder
       summary: Create or replay a recharge order
@@ -265,6 +296,50 @@ components:
           oneOf:
             - $ref: "#/components/schemas/RechargeOrder"
             - type: "null"
+    RechargeOrderHistoryItem:
+      type: object
+      additionalProperties: false
+      required: [order_id, product_id, plan_name, amount_fen, display_points, channel, status, fulfillment_status, expires_at, created_at]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        product_id:
+          type: string
+        plan_name:
+          type: string
+        amount_fen:
+          type: integer
+          format: int64
+        display_points:
+          type: integer
+          format: int64
+        channel:
+          $ref: "#/components/schemas/PaymentChannel"
+        status:
+          type: string
+          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW]
+        fulfillment_status:
+          type: string
+          enum: [PENDING, CREDITED, REFUNDED, MANUAL_REVIEW]
+        expires_at:
+          type: string
+          format: date-time
+        paid_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    RechargeOrderList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RechargeOrderHistoryItem"
     WalletBalance:
       type: object
       additionalProperties: false

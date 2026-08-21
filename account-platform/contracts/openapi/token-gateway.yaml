@@ -410,6 +410,26 @@ paths:
         "401":
           $ref: "#/components/responses/Error"
   /recharge/orders:
+    get:
+      operationId: listMyRechargeOrders
+      summary: List recharge orders for the current personal wallet
+      responses:
+        "200":
+          description: Personal recharge order history
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "billing.yaml#/components/schemas/RechargeOrderList"
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
     post:
       operationId: createRechargeOrder
       summary: Create a recharge order for the current permitted wallet

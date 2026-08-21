@@ -115,6 +115,16 @@ test('repeated purchase clicks reuse one pending order for the same personal pla
   assert.match(payments, /status IN \('CREATED','PENDING'\)/);
 });
 
+test('personal recharge orders expose a normal history list', async () => {
+  const billing = await readYaml('contracts/openapi/billing.yaml');
+  const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
+  const service = await readFile(path.join(root, 'internal/token/service.go'), 'utf8');
+  assert.ok(billing.paths['/recharge/orders'].get);
+  assert.ok(gateway.paths['/recharge/orders'].get);
+  assert.match(service, /resolved\.ContextType != "PERSONAL"/);
+  assert.match(service, /RechargeOrders\(r\.Context\(\), resolved\.UserID, walletID\)/);
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));

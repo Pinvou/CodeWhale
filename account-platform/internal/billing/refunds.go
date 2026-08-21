@@ -59,6 +59,27 @@ func (p *PaymentCoordinator) RecentOrder(ctx context.Context, requesterID, walle
 	return &order, nil
 }
 
+func (p *PaymentCoordinator) ListOrders(ctx context.Context, requesterID, walletID uuid.UUID, limit int) ([]PaymentOrderHistoryItem, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	rows, err := p.repository.pool.Query(ctx, `SELECT id,product_id,COALESCE(product_snapshot->>'plan_name',product_id),amount_fen,COALESCE((product_snapshot->>'display_points')::bigint,credit_microcredits/10000),channel,status,fulfillment_status,expires_at,paid_at,created_at
+		FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 ORDER BY created_at DESC,id DESC LIMIT $3`, requesterID, walletID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]PaymentOrderHistoryItem, 0)
+	for rows.Next() {
+		var item PaymentOrderHistoryItem
+		if err := rows.Scan(&item.ID, &item.ProductID, &item.PlanName, &item.AmountFen, &item.DisplayPoints, &item.Channel, &item.Status, &item.FulfillmentStatus, &item.ExpiresAt, &item.PaidAt, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterID uuid.UUID) (PaymentOrder, error) {
 	order, err := p.GetOrder(ctx, orderID, requesterID)
 	if err != nil {

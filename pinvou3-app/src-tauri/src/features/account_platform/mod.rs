@@ -1014,8 +1014,10 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
+        | ("token", &Method::GET, ["v1", "recharge", "orders"], None)
         | ("token", &Method::POST, ["v1", "recharge", "orders"], None)
         | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None)
+        | ("token", &Method::GET, ["v1", "me", "entitlement-packages"], None)
         | ("token", &Method::POST, ["v1", "chat", "completions"], None) => true,
         ("account", &Method::GET, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::POST, ["v1", "organizations", id, "units"], None)

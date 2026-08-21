@@ -77,6 +77,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	router.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
 	router.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+	router.GET("/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
 	router.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
 	router.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 	router.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
@@ -95,6 +96,28 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.GET("/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.adminUsageRequest))
 	admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", httpserver.AdaptFunc(s.adminRetryReconciliation))
 	return router
+}
+
+func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	if resolved.ContextType != "PERSONAL" {
+		s.writeError(w, r, ErrForbidden)
+		return
+	}
+	walletID, err := s.wallets.Ensure(r.Context(), "PERSONAL", resolved.UserID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "recharge orders are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := s.billing.RechargeOrders(r.Context(), resolved.UserID, walletID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "recharge orders are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
 }
 
 func (s *Service) listManagedTokenAccounts(w http.ResponseWriter, r *http.Request) {
