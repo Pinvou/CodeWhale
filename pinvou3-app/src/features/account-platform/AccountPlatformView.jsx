@@ -49,6 +49,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const guardRef = useRef(createContextRequestGuard());
   const activeOrganizationId = me?.active_context?.organization_id || '';
   const activeOrganization = organizations.find(item => item.organization_id === activeOrganizationId);
+  const navigationSections = organizations.length > 0
+    ? ['overview', 'organization', 'wallet', 'usage']
+    : ['overview', 'wallet', 'usage'];
 
   const loadContext = async (nextMe = me) => {
     const request = guardRef.current.begin();
@@ -107,6 +110,10 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   useEffect(() => {
     setQrData(order?.qr_data || '');
   }, [order?.qr_data]);
+
+  useEffect(() => {
+    if (section === 'organization' && organizations.length === 0) setSection('overview');
+  }, [organizations.length, section]);
 
   useEffect(() => {
     if (!order?.order_id || terminalOrderStates.has(order.status)) return undefined;
@@ -188,7 +195,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     <aside className="ap-sidebar">
       <div className="ap-sidebar-brand"><span className="ap-brand-mark">P</span><div><p className="ap-eyebrow">PINVOU</p><h1>{copy.title}</h1></div></div>
       <div className="ap-user-summary"><span className="ap-user-avatar">{userLabel.trim().slice(0, 1).toUpperCase()}</span><div><strong>{userLabel}</strong><span>{identityLabel}</span></div></div>
-      <nav>{['overview', 'organization', 'wallet', 'usage'].map(key => <button key={key} className={section === key ? 'active' : ''} onClick={() => setSection(key)}><NavIcon name={key} /><span>{copy.sections[key]}</span></button>)}</nav>
+      <nav>{navigationSections.map(key => <button key={key} className={section === key ? 'active' : ''} onClick={() => setSection(key)}><NavIcon name={key} /><span>{copy.sections[key]}</span></button>)}</nav>
       <div className="ap-sidebar-foot">
         <select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}><option value="zh">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select>
         <button onClick={logout}>{copy.logout}</button>

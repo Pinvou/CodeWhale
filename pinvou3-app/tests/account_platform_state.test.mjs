@@ -371,6 +371,13 @@ test('personal center keeps context on overview and cannot create organizations'
   assert.match(styles, /\.ap-sidebar-foot select \{[^}]*color: var\(--ap-primary\);[^}]*background: var\(--ap-component\);/);
 });
 
+test('personal center hides the organization tab when the user has no organizations', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /organizations\.length > 0[\s\S]*\['overview', 'organization', 'wallet', 'usage'\][\s\S]*\['overview', 'wallet', 'usage'\]/);
+  assert.match(view, /section === 'organization' && organizations\.length === 0[\s\S]*setSection\('overview'\)/);
+  assert.match(view, /<nav>\{navigationSections\.map/);
+});
+
 test('personal center exposes only user-facing usage history instead of Token administration', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
