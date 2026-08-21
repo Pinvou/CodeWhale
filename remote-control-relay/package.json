@@ -5,14 +5,10 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js",
-    "test:legacy-v1-ui": "node --test --test-concurrency=1 test/preview-security.legacy.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   },
   "dependencies": {
     "ip2region.js": "3.1.8",
     "ws": "^8.18.0"
-  },
-  "devDependencies": {
-    "jsdom": "^29.1.1"
   }
 }
