@@ -281,6 +281,27 @@ func (s *Service) adminSyncPaymentOrder(w http.ResponseWriter, r *http.Request) 
 	api.WriteJSON(w, http.StatusOK, order)
 }
 
+func (s *Service) adminRepairPaymentOrder(w http.ResponseWriter, r *http.Request) {
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a repair reason is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	if s.payments == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	order, err := s.payments.RepairReviewedOrder(r.Context(), orderID, adminActor(adminPrincipal(r)), body.Reason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, order)
+}
+
 func (s *Service) adminRefundPaymentOrder(w http.ResponseWriter, r *http.Request) {
 	repository, ok := s.requireAdminRepository(w, r)
 	if !ok {

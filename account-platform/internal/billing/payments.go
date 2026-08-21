@@ -405,7 +405,7 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 	if err != nil {
 		return err
 	}
-	if err := issuePackageWithinTransaction(ctx, tx, order, p.now()); err != nil {
+	if err := issuePackageWithValidityStart(ctx, tx, order, p.now(), notification.PaidAt); err != nil {
 		return err
 	}
 	if err := events.AppendOutbox(ctx, tx, "billing.recharge.succeeded.v1", order.ID, 1, map[string]any{
@@ -422,7 +422,7 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 
 var ErrForbiddenPayment = errors.New("payment notification rejected")
 
-func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order PaymentOrder, now time.Time) error {
+func issuePackageWithValidityStart(ctx context.Context, tx pgx.Tx, order PaymentOrder, now, validFrom time.Time) error {
 	wallet, err := getWallet(ctx, tx, order.WalletID, true)
 	if err != nil || wallet.Status != "ACTIVE" {
 		return ErrWalletUnavailable
@@ -453,12 +453,15 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 	if err != nil {
 		return err
 	}
-	validUntil := now.AddDate(0, 0, product.ValidityDays)
+	validUntil := validFrom.AddDate(0, 0, product.ValidityDays)
+	if !validUntil.After(now) {
+		return ErrConflict
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,false,$5,$6)`, lotID, order.WalletID, reference, amount, validUntil, now); err != nil {
 		return err
 	}
 	packageID := uuid.Must(uuid.NewV7())
-	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$11,$12,'ACTIVE',$11,$11)`, packageID, order.RequesterID, order.WalletID, order.ID, lotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validUntil); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,'ACTIVE',$11,$11)`, packageID, order.RequesterID, order.WalletID, order.ID, lotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validFrom, validUntil); err != nil {
 		return err
 	}
 	if err = insertPosting(ctx, tx, entryID, accountID, amount, &lotID, now); err != nil {

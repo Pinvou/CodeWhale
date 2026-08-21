@@ -350,6 +350,22 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders/{order_id}/repair:
+    post:
+      operationId: repairAdminPaymentOrder
+      summary: Re-verify and fulfill a late payment held for manual review
+      parameters: [{ $ref: "#/components/parameters/OrderID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Reason" }
+      responses:
+        "200": { description: Repaired and fulfilled payment order }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders/{order_id}/refunds:
     post:
       operationId: createAdminPaymentRefund

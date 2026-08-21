@@ -68,6 +68,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/pricing-versions", httpserver.AdaptFunc(s.adminCreatePriceVersion))
 		admin.GET("/payment-orders", httpserver.AdaptFunc(s.adminPaymentOrders))
 		admin.POST("/payment-orders/:order_id/sync", httpserver.AdaptFunc(s.adminSyncPaymentOrder))
+		admin.POST("/payment-orders/:order_id/repair", httpserver.AdaptFunc(s.adminRepairPaymentOrder))
 		admin.POST("/payment-orders/:order_id/refunds", httpserver.AdaptFunc(s.adminRefundPaymentOrder))
 		admin.GET("/adjustments", httpserver.AdaptFunc(s.adminAdjustments))
 		admin.POST("/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.adminApproveAdjustment))

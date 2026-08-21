@@ -504,7 +504,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	case "wallets":
 		return method == http.MethodGet && parts[4] == "ledger"
 	case "payment-orders":
-		return method == http.MethodPost && (parts[4] == "sync" || parts[4] == "refunds")
+		return method == http.MethodPost && (parts[4] == "sync" || parts[4] == "repair" || parts[4] == "refunds")
 	case "adjustments":
 		return method == http.MethodPost && (parts[4] == "approve" || parts[4] == "reject")
 	case "usage-holds":

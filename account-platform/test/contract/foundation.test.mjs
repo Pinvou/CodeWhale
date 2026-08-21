@@ -86,7 +86,7 @@ test('paid plan orders create independent thirty-day entitlement packages', asyn
   const payments = await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8');
   assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
   assert.match(migration, /points_reserved \+ points_used \+ points_remaining = points_total/);
-  assert.match(payments, /validUntil := now\.AddDate\(0, 0, product\.ValidityDays\)/);
+  assert.match(payments, /validUntil := validFrom\.AddDate\(0, 0, product\.ValidityDays\)/);
   assert.match(payments, /INSERT INTO entitlement_packages/);
   assert.match(payments, /refundable,expires_at/);
 });
@@ -125,6 +125,19 @@ test('personal recharge orders expose a normal history list', async () => {
   assert.ok(gateway.paths['/recharge/orders'].get);
   assert.match(service, /resolved\.ContextType != "PERSONAL"/);
   assert.match(service, /RechargeOrders\(r\.Context\(\), resolved\.UserID, walletID\)/);
+});
+
+test('late Mall payments require audited operator repair before fulfillment', async () => {
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+  const migration = await readFile(path.join(root, 'migrations/billing/000014_payment_repairs.up.sql'), 'utf8');
+  const reconciliation = await readFile(path.join(root, 'internal/billing/reconciliation.go'), 'utf8');
+  assert.ok(admin.paths['/billing/admin/v1/payment-orders/{order_id}/repair']);
+  assert.match(migration, /CREATE TABLE payment_order_repairs/);
+  assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
+  assert.match(reconciliation, /p\.Policy\(\)\.ReviewLatePayment/);
+  assert.match(reconciliation, /provider\.Status != "SUCCESS"/);
+  assert.match(reconciliation, /INSERT INTO payment_order_repairs/);
+  assert.match(reconciliation, /issuePackageWithValidityStart/);
 });
 
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {

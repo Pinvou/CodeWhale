@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -320,12 +321,79 @@ func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uu
 	}
 	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2,fulfillment_status='CREDITED',channel_transaction_id=$3,paid_at=$4,updated_at=$5 WHERE id=$1`, order.ID, status, *provider.ChannelTransactionID, *provider.PaidAt, now)
 	if err == nil {
-		err = issuePackageWithinTransaction(ctx, tx, order, now)
+		err = issuePackageWithValidityStart(ctx, tx, order, now, *provider.PaidAt)
 	}
 	if err != nil {
 		return PaymentOrder{}, err
 	}
 	order.Status, order.FulfillmentStatus, order.ChannelTransactionID, order.PaidAt = status, "CREDITED", provider.ChannelTransactionID, provider.PaidAt
+	return order, tx.Commit(ctx)
+}
+
+func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, actorID uuid.UUID, reason string) (PaymentOrder, error) {
+	reason = strings.TrimSpace(reason)
+	if actorID == uuid.Nil || reason == "" || len(reason) > 500 || !p.Policy().ReviewLatePayment {
+		return PaymentOrder{}, ErrConflict
+	}
+	order, err := getPaymentOrderByID(ctx, p.repository.pool, orderID, false)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, ErrNotFound
+	}
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	if order.Status != "MANUAL_REVIEW" || order.FulfillmentStatus != "MANUAL_REVIEW" {
+		return PaymentOrder{}, ErrConflict
+	}
+	provider, err := p.provider.Get(ctx, order.MerchantOrderNo)
+	if err != nil {
+		return PaymentOrder{}, errors.Join(ErrPaymentProvider, err)
+	}
+	if provider.Status != "SUCCESS" || provider.ChannelTransactionID == nil || provider.PaidAt == nil || provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency || !p.Policy().RequiresReview(order.ExpiresAt, *provider.PaidAt) {
+		return PaymentOrder{}, ErrConflict
+	}
+	tx, err := p.repository.pool.Begin(ctx)
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	defer tx.Rollback(ctx)
+	order, err = getPaymentOrderByID(ctx, tx, orderID, true)
+	if err != nil || order.Status != "MANUAL_REVIEW" || order.FulfillmentStatus != "MANUAL_REVIEW" {
+		if err != nil {
+			return PaymentOrder{}, err
+		}
+		return PaymentOrder{}, ErrConflict
+	}
+	now := p.now()
+	command, err := tx.Exec(ctx, `INSERT INTO payment_transactions(id,payment_order_id,channel,channel_transaction_id,status,amount_fen,currency,source,verified_at,created_at,updated_at) VALUES($1,$2,$3,$4,'SUCCEEDED',$5,$6,'QUERY',$7,$7,$7) ON CONFLICT (channel_transaction_id) DO NOTHING`, uuid.Must(uuid.NewV7()), order.ID, order.Channel, *provider.ChannelTransactionID, order.AmountFen, order.Currency, now)
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	if command.RowsAffected() == 0 {
+		var existingOrderID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT payment_order_id FROM payment_transactions WHERE channel_transaction_id=$1`, *provider.ChannelTransactionID).Scan(&existingOrderID); err != nil || existingOrderID != order.ID {
+			return PaymentOrder{}, ErrConflict
+		}
+	}
+	snapshot, _ := json.Marshal(map[string]any{
+		"status": provider.Status, "provider_status": provider.ProviderStatus, "provider_trace_id": provider.ProviderTraceID,
+		"channel_transaction_id": *provider.ChannelTransactionID, "paid_at": *provider.PaidAt,
+	})
+	if _, err := tx.Exec(ctx, `INSERT INTO payment_order_repairs(id,payment_order_id,actor_id,reason,provider_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6)`, uuid.Must(uuid.NewV7()), order.ID, actorID, reason, snapshot, now); err != nil {
+		return PaymentOrder{}, err
+	}
+	if err := issuePackageWithValidityStart(ctx, tx, order, now, *provider.PaidAt); err != nil {
+		return PaymentOrder{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_orders SET status='PAID_LATE',fulfillment_status='CREDITED',channel_transaction_id=$2,paid_at=$3,updated_at=$4 WHERE id=$1`, order.ID, *provider.ChannelTransactionID, *provider.PaidAt, now); err != nil {
+		return PaymentOrder{}, err
+	}
+	if err := events.AppendOutbox(ctx, tx, "billing.recharge.succeeded.v1", order.ID, 1, map[string]any{
+		"order_id": order.ID, "wallet_id": order.WalletID, "channel": order.Channel, "amount_fen": order.AmountFen, "credit_microcredits": order.CreditMicrocredits,
+	}); err != nil {
+		return PaymentOrder{}, err
+	}
+	order.Status, order.FulfillmentStatus, order.ChannelTransactionID, order.PaidAt = "PAID_LATE", "CREDITED", provider.ChannelTransactionID, provider.PaidAt
 	return order, tx.Commit(ctx)
 }
 
