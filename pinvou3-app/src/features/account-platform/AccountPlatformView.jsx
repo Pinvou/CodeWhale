@@ -17,6 +17,8 @@ function NavIcon({ name }) {
     overview: <><rect x="3" y="3" width="7" height="7" rx="2" /><rect x="14" y="3" width="7" height="7" rx="2" /><rect x="3" y="14" width="7" height="7" rx="2" /><rect x="14" y="14" width="7" height="7" rx="2" /></>,
     organization: <><circle cx="12" cy="7" r="3" /><circle cx="6" cy="17" r="2.5" /><circle cx="18" cy="17" r="2.5" /><path d="M12 10v3M8 15l4-2 4 2" /></>,
     wallet: <><rect x="3" y="5" width="18" height="14" rx="3" /><path d="M3 9h18M16 14h2" /></>,
+    orders: <><path d="M6 3h12v18H6z" /><path d="M9 8h6M9 12h6M9 16h4" /></>,
+    invoice: <><path d="M5 3h14v18l-3-2-4 2-4-2-3 2z" /><path d="M8 8h8M8 12h8" /></>,
     usage: <><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></>,
   };
   return <svg className="ap-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
@@ -37,6 +39,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [products, setProducts] = useState([]);
   const [balance, setBalance] = useState(null);
   const [billingUnavailable, setBillingUnavailable] = useState(false);
+  const [billingDetailsUnavailable, setBillingDetailsUnavailable] = useState(false);
   const [usageRecords, setUsageRecords] = useState([]);
   const [usageCursor, setUsageCursor] = useState(null);
   const [usageUnavailable, setUsageUnavailable] = useState(false);
@@ -45,25 +48,34 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [order, setOrder] = useState(null);
+  const [orders, setOrders] = useState([]);
+  const [packages, setPackages] = useState({ summary: null, items: [] });
   const [qrData, setQrData] = useState('');
   const guardRef = useRef(createContextRequestGuard());
   const activeOrganizationId = me?.active_context?.organization_id || '';
   const activeOrganization = organizations.find(item => item.organization_id === activeOrganizationId);
-  const navigationSections = organizations.length > 0
-    ? ['overview', 'organization', 'wallet', 'usage']
-    : ['overview', 'wallet', 'usage'];
+  const personalContext = !activeOrganizationId;
+  const navigationSections = [
+    'overview',
+    ...(organizations.length > 0 ? ['organization'] : []),
+    ...(personalContext ? ['wallet', 'orders', 'invoice'] : []),
+    'usage',
+  ];
 
   const loadContext = async (nextMe = me) => {
     const request = guardRef.current.begin();
     setError('');
     const organizationId = nextMe?.active_context?.organization_id;
     try {
+      const isPersonal = !organizationId;
       const results = await Promise.allSettled([
         client.organizations(request.signal), client.products(request.signal), client.balance(request.signal),
         client.recentRechargeOrder(request.signal),
         organizationId ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }),
         organizationId ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }),
         client.usageHistory('', request.signal),
+        isPersonal ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] }),
+        isPersonal ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }),
       ]);
       if (!guardRef.current.isCurrent(request.generation)) return;
       const value = index => results[index].status === 'fulfilled' ? results[index].value : null;
@@ -76,8 +88,11 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setUsageRecords(value(6)?.items || []);
       setUsageCursor(value(6)?.next_cursor || null);
       setUsageUnavailable(results[6].status === 'rejected');
+      setPackages(value(7) || { summary: null, items: [] });
+      setOrders(value(8)?.items || []);
       const billingFailed = [1, 2, 3].some(index => results[index].status === 'rejected');
       setBillingUnavailable(billingFailed);
+      setBillingDetailsUnavailable([7, 8].some(index => results[index].status === 'rejected'));
       if ([0, 4, 5].some(index => results[index].status === 'rejected')) setError(copy.requestFailed);
     } catch (reason) {
       if (reason?.name !== 'AbortError' && guardRef.current.isCurrent(request.generation)) setError(copy.requestFailed);
@@ -112,8 +127,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [order?.qr_data]);
 
   useEffect(() => {
-    if (section === 'organization' && organizations.length === 0) setSection('overview');
-  }, [organizations.length, section]);
+    if (!navigationSections.includes(section)) setSection('overview');
+  }, [activeOrganizationId, organizations.length, section]);
 
   useEffect(() => {
     if (!order?.order_id || terminalOrderStates.has(order.status)) return undefined;
@@ -158,14 +173,14 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const logout = () => run(async () => {
     await client.logout();
     guardRef.current.cancel();
-    setMe(null); setOrganizations([]); setUnits([]); setMembers([]); setProducts([]);
-    setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setOrder(null); setQrData(''); setAuth('guest');
+    setMe(null); setOrganizations([]); setUnits([]); setMembers([]); setProducts([]); setOrders([]); setPackages({ summary: null, items: [] });
+    setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setBillingDetailsUnavailable(false); setOrder(null); setQrData(''); setAuth('guest');
     if (portal) window.location.reload();
   });
 
   const switchContext = value => run(async () => {
     guardRef.current.cancel();
-    setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setUnits([]); setMembers([]); setOrder(null); setBillingUnavailable(false);
+    setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setUnits([]); setMembers([]); setOrder(null); setOrders([]); setPackages({ summary: null, items: [] }); setBillingUnavailable(false); setBillingDetailsUnavailable(false);
     const organizationId = value || null;
     const context = await client.switchContext(organizationId ? 'ORGANIZATION' : 'PERSONAL', organizationId);
     const updated = { ...me, active_context: context };
@@ -206,7 +221,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {error && <div role="alert" className="ap-alert error">{error}</div>}{notice && <div className="ap-alert success">{notice}</div>}
       {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} />}
       {section === 'organization' && <Organization copy={copy} organization={activeOrganization} units={units} members={members} busy={busy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} />}
-      {section === 'wallet' && <Wallet copy={copy} language={language} products={products} balance={balance} billingUnavailable={billingUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} />}
+      {section === 'wallet' && <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} />}
+      {section === 'orders' && <Orders copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
+      {section === 'invoice' && <Invoice copy={copy} />}
       {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={loadMoreUsage} />}
     </main>
   </div>;
@@ -222,7 +239,7 @@ function Organization({ copy, organization, units, members, busy, onCreateUnit, 
   return <section><p className="ap-eyebrow">{copy.sections.organization}</p><h2>{organization.name}</h2><div className="ap-grid"><article className="ap-card"><h3>{copy.organizationTree}</h3>{units.length ? <ul className="ap-list">{units.map(unit => <li key={unit.unit_id}><span>{unit.name}</span><small>{unit.parent_id ? copy.childUnit : copy.rootUnit}</small></li>)}</ul> : <Empty>{copy.noUnits}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (unitName.trim()) onCreateUnit(unitName.trim(), parentId || null).then?.(() => setUnitName('')); }}><Field label={copy.unitName}><input value={unitName} onChange={event => setUnitName(event.target.value)} /></Field><Field label={copy.parentUnit}><select value={parentId} onChange={event => setParentId(event.target.value)}><option value="">{copy.rootUnit}</option>{units.map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select></Field><button disabled={busy || !unitName.trim()}>{copy.createUnit}</button></form></article><article className="ap-card"><h3>{copy.members}</h3>{members.length ? <ul className="ap-list">{members.map(member => <li key={member.user_id}><span>{member.display_name || member.email || member.user_id}</span><small>{member.roles.join(' · ')}</small></li>)}</ul> : <Empty>{copy.noMembers}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (email.trim()) onInvite(email.trim(), ['MEMBER']).then?.(() => setEmail('')); }}><Field label={copy.memberEmail}><input type="email" value={email} onChange={event => setEmail(event.target.value)} /></Field><button disabled={busy || !email.trim()}>{copy.createInvitation}</button></form></article></div></section>;
 }
 
-function Wallet({ copy, language, products, balance, billingUnavailable, order, qrData, busy, onRecharge }) {
+function Wallet({ copy, language, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, onRecharge }) {
   const [productId, setProductId] = useState(''); const [channel, setChannel] = useState('ALIPAY');
   const [now, setNow] = useState(Date.now());
   useEffect(() => { if (!productId && products[0]) setProductId(products[0].product_id); }, [products, productId]);
@@ -236,7 +253,15 @@ function Wallet({ copy, language, products, balance, billingUnavailable, order, 
   const remainingSeconds = order ? Math.max(0, Math.ceil((new Date(order.expires_at).getTime() - now) / 1000)) : 0;
   const displayStatus = order?.status;
   const countdown = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
-  return <section><p className="ap-eyebrow">{copy.sections.wallet}</p><h2>{copy.walletTitle}</h2>{billingUnavailable && <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div>}<div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}</small></div><div className="ap-card"><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} onClick={() => setProductId(product.product_id)}><strong>¥{(product.amount_fen / 100).toFixed(2)}</strong><span>{product.display_points.toLocaleString()} {copy.points}</span></button>)}</div><div className="ap-inline"><select value={channel} onChange={event => setChannel(event.target.value)}><option value="ALIPAY">{copy.channels.ALIPAY}</option></select><button className="ap-primary" disabled={busy || billingUnavailable || !selected} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span><h3>¥{(order.amount_fen / 100).toFixed(2)} · {copy.scanToPay}</h3><p>{remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderStatuses.PENDING}</p></div></div>}</div></section>;
+  return <section><p className="ap-eyebrow">{copy.sections.wallet}</p><h2>{copy.walletTitle}</h2><p className="ap-lead">{copy.walletLead}</p>{billingUnavailable && <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div>}<div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}</small></div><div className="ap-card"><h3>{copy.availablePlans}</h3><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} onClick={() => setProductId(product.product_id)}><strong>{product.plan_name}</strong><span>¥{(product.amount_fen / 100).toFixed(2)} · {product.display_points.toLocaleString()} {copy.points}</span><small>{copy.validityDays(product.validity_days)}{product.price_status !== 'FROZEN' ? ` · ${copy.tentativePrice}` : ''}</small></button>)}</div><div className="ap-inline"><select value={channel} onChange={event => setChannel(event.target.value)}><option value="ALIPAY">{copy.channels.ALIPAY}</option></select><button className="ap-primary" disabled={busy || billingUnavailable || !selected} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span><h3>¥{(order.amount_fen / 100).toFixed(2)} · {copy.scanToPay}</h3><p>{remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderStatuses.PENDING}</p></div></div>}</div><div className="ap-card ap-entitlements"><h3>{copy.myEntitlements}</h3>{detailsUnavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : packages.items?.length ? <div className="ap-order-list">{packages.items.map(item => <article key={item.package_id}><div><strong>{item.plan_name}</strong><small>{copy.validUntil}: {formatUsageTime(item.valid_until, language)}</small></div><div><strong>{formatPoints(item.points_remaining_microcredits, language)} {copy.points}</strong><span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span></div></article>)}</div> : <Empty>{copy.noEntitlements}</Empty>}</div></section>;
+}
+
+function Orders({ copy, language, orders, unavailable }) {
+  return <section><p className="ap-eyebrow">{copy.sections.orders}</p><h2>{copy.ordersTitle}</h2><p className="ap-lead">{copy.ordersLead}</p>{unavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : orders.length ? <div className="ap-order-list">{orders.map(item => <article key={item.order_id}><div><strong>{item.plan_name}</strong><small>{formatUsageTime(item.created_at, language)} · {copy.channels[item.channel] || item.channel}</small></div><div><strong>¥{(item.amount_fen / 100).toFixed(2)}</strong><span className="ap-status">{copy.orderStatuses[item.status] || item.status}</span></div></article>)}</div> : <Empty>{copy.noOrders}</Empty>}</section>;
+}
+
+function Invoice({ copy }) {
+  return <section><p className="ap-eyebrow">{copy.sections.invoice}</p><h2>{copy.invoiceTitle}</h2><p className="ap-lead">{copy.invoiceLead}</p><div className="ap-card"><h3>{copy.invoiceUnavailableTitle}</h3><p className="ap-muted">{copy.invoiceUnavailable}</p></div></section>;
 }
 
 function formatUsageTime(value, language) {

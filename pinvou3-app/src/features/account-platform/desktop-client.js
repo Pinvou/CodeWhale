@@ -63,7 +63,9 @@ export class AccountPlatformDesktopClient {
   balance(signal) { return this.request('token', '/v1/me/balance?consistency=strong', { signal }); }
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', idempotencyKey: key, body: { product_id: productId, channel } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
+  rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }
+  entitlementPackages(signal) { return this.request('token', '/v1/me/entitlement-packages', { signal }); }
   usageHistory(cursor = '', signal) {
     const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
     return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });

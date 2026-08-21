@@ -118,13 +118,20 @@
 .ap-balance-hero span, .ap-balance-hero small { color: rgba(0, 0, 0, .44); }
 .ap-balance-hero strong { display: block; margin: 8px 0; color: rgba(8, 8, 11, .9); font-size: 40px; font-weight: 500; line-height: 48px; }
 .ap-product-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
-.ap-product-grid button { display: grid; gap: 5px; background: var(--ap-component); border-color: transparent; }
+.ap-product-grid button { display: grid; gap: 5px; text-align: left; background: var(--ap-component); border-color: transparent; }
+.ap-product-grid button small { color: var(--ap-tertiary); font-size: 11px; }
 .ap-product-grid button:hover { border-color: var(--ap-border); }
 .ap-product-grid button.selected { color: #16765f; border-color: rgba(78, 203, 160, .45); background: var(--ap-accent-soft); }
 .ap-product-grid span { color: var(--ap-secondary); font-size: 12px; }
 .ap-payment { display: flex; gap: 28px; align-items: center; margin-top: 28px; padding-top: 28px; border-top: 1px solid var(--ap-border-soft); }
 .ap-payment img { width: 180px; border: 1px solid var(--ap-border-soft); border-radius: 16px; }
 .ap-status { display: inline-flex; padding: 3px 9px; border-radius: 999px; color: #16765f; background: var(--ap-accent-soft); font-size: 11px; font-weight: 600; }
+.ap-entitlements { margin-top: 24px; }
+.ap-order-list { display: grid; gap: 12px; }
+.ap-order-list article { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 22px; border: 1px solid rgba(0, 0, 0, .08); border-radius: 16px; background: var(--ap-card); }
+.ap-order-list article > div { display: grid; gap: 5px; }
+.ap-order-list article > div:last-child { justify-items: end; }
+.ap-order-list small, .ap-muted { color: var(--ap-tertiary); font-size: 12px; }
 .ap-usage-list { display: grid; gap: 12px; }
 .ap-usage-row {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 24px;
@@ -154,7 +161,7 @@
   .ap-sidebar { position: static; width: 100%; height: auto; padding: 16px; gap: 14px; border-right: 0; border-bottom: 1px solid var(--ap-border-soft); }
   .ap-sidebar-brand { padding-bottom: 14px; }
   .ap-user-summary { display: none; }
-  .ap-sidebar nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ap-sidebar nav { grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); }
   .ap-sidebar nav button { justify-content: center; gap: 7px; padding: 8px; }
   .ap-sidebar-foot { grid-template-columns: 1fr 1fr; margin: 0; padding-top: 12px; }
   .ap-main { padding: 32px 18px 56px; }

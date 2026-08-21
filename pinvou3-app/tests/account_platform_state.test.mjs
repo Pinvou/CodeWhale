@@ -373,8 +373,9 @@ test('personal center keeps context on overview and cannot create organizations'
 
 test('personal center hides the organization tab when the user has no organizations', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
-  assert.match(view, /organizations\.length > 0[\s\S]*\['overview', 'organization', 'wallet', 'usage'\][\s\S]*\['overview', 'wallet', 'usage'\]/);
-  assert.match(view, /section === 'organization' && organizations\.length === 0[\s\S]*setSection\('overview'\)/);
+  assert.match(view, /organizations\.length > 0 \? \['organization'\] : \[\]/);
+  assert.match(view, /personalContext \? \['wallet', 'orders', 'invoice'\] : \[\]/);
+  assert.match(view, /!navigationSections\.includes\(section\)[\s\S]*setSection\('overview'\)/);
   assert.match(view, /<nav>\{navigationSections\.map/);
 });
 
