@@ -109,17 +109,22 @@ func New(config Config) (*Client, error) {
 }
 
 func (c *Client) CreateUser(ctx context.Context, mobile string) error {
+	requestMobile, err := mallRequestMobile(mobile)
+	if err != nil {
+		return err
+	}
 	var result userSyncResult
-	if err := c.authorizedJSON(ctx, "/api/middle/external/pinwu/user/batch-create", map[string]any{"mobiles": []string{mobile}}, &result); err != nil {
+	if err := c.authorizedJSON(ctx, "/api/middle/external/pinwu/user/batch-create", map[string]any{"mobiles": []string{requestMobile}}, &result); err != nil {
 		return err
 	}
 	for _, item := range result.SuccessList {
-		if item.Mobile == mobile {
+		if normalized, normalizeErr := mallRequestMobile(item.Mobile); normalizeErr == nil && normalized == requestMobile {
 			return nil
 		}
 	}
 	for _, item := range result.FailedList {
-		if item.Mobile == mobile && strings.Contains(item.Message, "已存在") {
+		normalized, normalizeErr := mallRequestMobile(item.Mobile)
+		if normalizeErr == nil && normalized == requestMobile && strings.Contains(item.Message, "已存在") {
 			// The current Mall contract has no stable ALREADY_EXISTS code. Keep this
 			// compatibility branch isolated here so it can be removed once supplied.
 			return nil
@@ -129,9 +134,13 @@ func (c *Client) CreateUser(ctx context.Context, mobile string) error {
 }
 
 func (c *Client) CreateOrder(ctx context.Context, orderKey, mobile, sku string) error {
+	requestMobile, err := mallRequestMobile(mobile)
+	if err != nil {
+		return err
+	}
 	var accepted string
 	return c.authorizedJSON(ctx, "/api/trade/external/pinwu/order/createOrder", map[string]string{
-		"orderKey": orderKey, "mobile": mobile, "skuBom": sku,
+		"orderKey": orderKey, "mobile": requestMobile, "skuBom": sku,
 	}, &accepted)
 }
 
@@ -144,10 +153,41 @@ func (c *Client) QueryOrder(ctx context.Context, orderKey string) (Order, error)
 	if order.OrderKey != orderKey || strings.TrimSpace(order.Status) == "" {
 		return Order{}, ErrResponseInvalid
 	}
+	if strings.TrimSpace(order.Mobile) != "" {
+		mobile, normalizeErr := canonicalMainlandMobile(order.Mobile)
+		if normalizeErr != nil {
+			return Order{}, ErrResponseInvalid
+		}
+		order.Mobile = mobile
+	}
 	if order.AliQRData != "" && !ValidQRData(order.AliQRData) {
 		return Order{}, ErrResponseInvalid
 	}
 	return order, nil
+}
+
+func mallRequestMobile(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if strings.HasPrefix(value, "+86") {
+		value = strings.TrimPrefix(value, "+86")
+	}
+	if len(value) != 11 || value[0] != '1' {
+		return "", fmt.Errorf("%w: invalid mainland mobile", ErrRejected)
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return "", fmt.Errorf("%w: invalid mainland mobile", ErrRejected)
+		}
+	}
+	return value, nil
+}
+
+func canonicalMainlandMobile(value string) (string, error) {
+	mobile, err := mallRequestMobile(value)
+	if err != nil {
+		return "", err
+	}
+	return "+86" + mobile, nil
 }
 
 func ValidQRData(value string) bool {
