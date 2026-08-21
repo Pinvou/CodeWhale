@@ -36,3 +36,16 @@ export const adminPlatformCopy = {
     identity:{ title:'Keycloak の安全な管理アクセス', lead:'ID 管理コンソールはインターネットに公開されません。管理する前に、制御されたネットワークからローカルトンネルを確立してください。', publicBlocked:'公開 /admin/ は無効です', publicBlockedHelp:'認証に必要な /realms/ と /resources/ のみ公開します。', openLocal:'ローカル管理コンソールを開く', openHelp:'SSH、VPN、または Kubernetes ポート転送が確立されている場合のみ利用できます。', accessMethods:'制御された経路を確立', ssh:'SSH トンネル', sshHelp:'リモート Compose 配備向けです。', kubernetes:'Kubernetes ポート転送', kubernetesHelp:'クラスターアクセス権を持つ制御端末向けです。', copy:'コマンドをコピー', copied:'コピー済み', stepTunnel:'制御された経路を確立し、維持します。', stepOpen:'ローカルアドレスからログインし、パスワードは Keycloak ログイン画面にのみ入力します。', stepClose:'作業後はトンネルまたはポート転送を閉じ、変更を記録します。' },
   },
 };
+
+Object.assign(adminPlatformCopy.zh.billing, {
+  repair:'确认补偿', repairReason:'请输入人工补偿原因（系统将再次核验商城订单）',
+  h3cLimitations:'当前支付渠道能力有限；不支持的退款、主动关单、支付回调或日终账单对账操作已自动禁用。',
+});
+Object.assign(adminPlatformCopy.en.billing, {
+  repair:'Confirm repair', repairReason:'Reason for manual repair (the provider order will be verified again)',
+  h3cLimitations:'The current payment provider has limited capabilities. Unsupported refund, proactive close, notification, or daily reconciliation actions are disabled.',
+});
+Object.assign(adminPlatformCopy.ja.billing, {
+  repair:'補償を確定', repairReason:'手動補償の理由（プロバイダー注文を再確認します）',
+  h3cLimitations:'現在の決済プロバイダーには機能制限があります。未対応の返金、能動的なクローズ、通知、日次照合操作は無効です。',
+});

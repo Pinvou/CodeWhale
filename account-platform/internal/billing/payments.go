@@ -112,6 +112,7 @@ type PaymentCapabilities struct {
 	CloseSupported          bool   `json:"close_supported"`
 	NotificationSupported   bool   `json:"notification_supported"`
 	ReconciliationSupported bool   `json:"reconciliation_supported"`
+	ManualRepairSupported   bool   `json:"manual_repair_supported"`
 }
 
 // PaymentPolicy describes provider-specific behavior that the generic billing

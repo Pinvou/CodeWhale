@@ -81,6 +81,7 @@ export class AdminPlatformClient {
   createPriceVersion(input) { return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input); }
   paymentOrders(signal) { return this.request('billing', '/admin/v1/payment-orders?limit=100', signal); }
   syncPaymentOrder(orderID) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {}); }
+  repairPaymentOrder(orderID, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason }); }
   refundPaymentOrder(orderID, amountFen, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { amount_fen:amountFen, reason }); }
   adjustments(signal) { return this.request('billing', '/admin/v1/adjustments?limit=100', signal); }
   decideAdjustment(adjustmentID, decision, reason) { return this.mutate('billing', `/admin/v1/adjustments/${encodeURIComponent(adjustmentID)}/${decision}`, 'POST', { reason }); }
