@@ -427,3 +427,15 @@ test('admin organization detail supports ownership transfer, rename, leaf deleti
   assert.match(view, /editingOrganizationName \? <form/);
   assert.match(view, /setEditingOrganizationName\(true\)/);
 });
+
+test('H3C Mall disables unsupported financial operations in the admin console', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');
+  const provider = await readFile(new URL('../../account-platform/internal/billing/h3c_mall.go', import.meta.url), 'utf8');
+  assert.match(provider, /Provider: "h3c_mall", OrderSyncSupported: true/);
+  assert.match(view, /refundSupported = paymentCapabilities\.refund_supported === true/);
+  assert.match(view, /reconciliationSupported = paymentCapabilities\.reconciliation_supported === true/);
+  assert.match(view, /disabled=\{busy \|\| !refundSupported/);
+  assert.match(view, /disabled=\{busy \|\| !reconciliationSupported\}/);
+  assert.match(i18n, /退款、主动关单、支付回调和日终账单对账已禁用/);
+});
