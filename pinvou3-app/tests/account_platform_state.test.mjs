@@ -7,6 +7,7 @@ import { AccountPlatformBffClient } from '../src/features/account-platform/bff-c
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
+import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 
 test('account balances convert internal microcredits to display points', () => {
   assert.equal(MICROCREDITS_PER_POINT, 10_000);
@@ -240,6 +241,29 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   assert.match(popover, /setLoginMode\('password'\)/);
   assert.match(bridge, /invoke\("account_platform_login", \{ credentials: credentials \}\)/);
   assert.doesNotMatch(backend, /open_target|authorization_request|TcpListener/);
+});
+
+test('desktop mobile registration confirms matching passwords before network requests', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  assert.match(popover, /const \[passwordConfirmation, setPasswordConfirmation\] = useState\(''\)/);
+  assert.match(popover, /if \(password !== passwordConfirmation\) return copy\.passwordMismatch/);
+  assert.match(popover, /registrationInputError\(copy, account, mobile, password, passwordConfirmation\)/);
+  assert.match(popover, /placeholder=\{copy\.confirmPassword\}[\s\S]*?value=\{passwordConfirmation\}|value=\{passwordConfirmation\}[\s\S]*?placeholder=\{copy\.confirmPassword\}/);
+  assert.match(popover, /!passwordConfirmation \|\| password !== passwordConfirmation/);
+  assert.equal(accountPlatformCopy.zh.mobileOrAccount, '手机号码或用户名');
+  assert.equal(accountPlatformCopy.zh.password, '密码（至少 8 位，含字母和数字）');
+  assert.equal(accountPlatformCopy.zh.confirmPassword, '再次输入密码');
+  assert.equal(accountPlatformCopy.zh.passwordMismatch, '两次输入的密码不一致。');
+});
+
+test('slider verification overlays the login form without changing its layout height', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const loginForm = popover.match(/<form className=\{`space-y-3[\s\S]*?<\/form>/)?.[0] || '';
+  assert.doesNotMatch(loginForm, /<SliderCaptcha/);
+  assert.match(popover, /role="dialog" aria-modal="true"[\s\S]*?absolute inset-0 z-20/);
+  assert.match(popover, /onClose=\{\(\) => \{ if \(busy\) return; setCaptcha\(null\); setCaptchaOffset\(0\); \}\}/);
+  assert.match(popover, /if \(captcha && !busy\)[\s\S]*?setCaptcha\(null\)/);
+  assert.equal(accountPlatformCopy.zh.captchaClose, '关闭验证');
 });
 
 test('desktop account popover does not expose the internal user id', async () => {

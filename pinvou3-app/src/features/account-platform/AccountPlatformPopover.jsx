@@ -30,22 +30,23 @@ function retryAfterFromError(reason) {
   return match ? Math.max(1, Number(match[1])) : 0;
 }
 
-function registrationInputError(copy, username, mobile, password) {
+function registrationInputError(copy, username, mobile, password, passwordConfirmation) {
   if (!/^[A-Za-z][A-Za-z0-9._-]{2,31}$/.test(username.trim())) return copy.usernameInvalid;
   if (!/^1[3-9]\d{9}$/.test(mobile.trim().replace(/^\+?86/, ''))) return copy.mobileInvalid;
   if (password.length < 8 || password.length > 128 || !/[A-Za-z]/.test(password) || !/\d/.test(password) || !/^[!-~]+$/.test(password)) return copy.passwordInvalid;
+  if (password !== passwordConfirmation) return copy.passwordMismatch;
   return '';
 }
 
-function SliderCaptcha({ challenge, offset, busy, copy, cardTheme, mutedText, onOffset, onConfirm, onRefresh }) {
+function SliderCaptcha({ challenge, offset, busy, copy, cardTheme, mutedText, onOffset, onConfirm, onRefresh, onClose }) {
   const width = Number(challenge?.width || 280);
   const height = Number(challenge?.height || 120);
   const pieceWidth = Number(challenge?.piece_width || 44);
   const pieceHeight = Number(challenge?.piece_height || 44);
   const maximum = Math.max(1, width - pieceWidth);
   return (
-    <div className={`space-y-2 rounded-xl border p-2 ${cardTheme}`}>
-      <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-medium">{copy.captchaTitle}</span><button type="button" disabled={busy} onClick={onRefresh} className={`text-[11px] ${mutedText}`}>{copy.captchaRefresh}</button></div>
+    <div className={`w-full space-y-2 rounded-xl border p-2 shadow-xl ${cardTheme}`}>
+      <div className="flex items-center justify-between gap-2"><span className="text-[11px] font-medium">{copy.captchaTitle}</span><div className="flex items-center gap-2"><button type="button" disabled={busy} onClick={onRefresh} className={`text-[11px] ${mutedText}`}>{copy.captchaRefresh}</button><button type="button" disabled={busy} onClick={onClose} aria-label={copy.captchaClose} title={copy.captchaClose} className={`flex h-6 w-6 items-center justify-center rounded-full ${mutedText}`}><X size={13} /></button></div></div>
       <div className="relative w-full overflow-hidden rounded-lg" style={{ aspectRatio:`${width}/${height}` }}>
         <img src={challenge.background_image} alt="" draggable="false" className="absolute inset-0 h-full w-full select-none" />
         <img src={challenge.piece_image} alt="" draggable="false" className="pointer-events-none absolute select-none drop-shadow-md" style={{ left:`${Number(offset || 0) / width * 100}%`, top:`${Number(challenge.piece_y || 0) / height * 100}%`, width:`${pieceWidth / width * 100}%`, height:`${pieceHeight / height * 100}%` }} />
@@ -208,6 +209,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [balance, setBalance] = useState(null);
   const [account, setAccount] = useState('');
   const [password, setPassword] = useState('');
+  const [passwordConfirmation, setPasswordConfirmation] = useState('');
   const [loginMode, setLoginMode] = useState('password');
   const [mobile, setMobile] = useState('');
   const [smsCode, setSmsCode] = useState('');
@@ -373,7 +375,13 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       if (panelRef.current && !panelRef.current.contains(event.target)) onClose?.();
     };
     const handleKeyDown = event => {
-      if (event.key === 'Escape') onClose?.();
+      if (event.key !== 'Escape') return;
+      if (captcha && !busy) {
+        setCaptcha(null);
+        setCaptchaOffset(0);
+        return;
+      }
+      onClose?.();
     };
     window.addEventListener('mousedown', handleMouseDown);
     window.addEventListener('keydown', handleKeyDown);
@@ -381,7 +389,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       window.removeEventListener('mousedown', handleMouseDown);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [open, onClose]);
+  }, [busy, captcha, open, onClose]);
 
   if (!open) return null;
 
@@ -400,7 +408,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   };
 
   const precheckRegistration = async () => {
-    const localError = registrationInputError(copy, account, mobile, password);
+    const localError = registrationInputError(copy, account, mobile, password, passwordConfirmation);
     if (localError) {
       setRegistrationCheck('error');
       setError(localError);
@@ -443,6 +451,14 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const submitLogin = async event => {
     event.preventDefault();
     if (busy) return;
+    if (loginMode === 'register') {
+      const localError = registrationInputError(copy, account, mobile, password, passwordConfirmation);
+      if (localError) {
+        setRegistrationCheck('error');
+        setError(localError);
+        return;
+      }
+    }
     setBusy(true);
     setError('');
     try {
@@ -456,6 +472,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
           setAccount(registeredUsername);
           setLoginMode('password');
           setPassword('');
+          setPasswordConfirmation('');
           setAuth('guest');
           resetSMSVerification();
           setRegistrationCheck('idle');
@@ -465,9 +482,11 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         }
       } else await client.login(account.trim().replace(/^\+?86(?=1\d{10}$)/, ''), password);
       setPassword('');
+      setPasswordConfirmation('');
       await loadAccount();
     } catch (reason) {
       setPassword('');
+      setPasswordConfirmation('');
       setAuth('guest');
       setError(localizedError(copy, reason));
       setBusy(false);
@@ -476,6 +495,14 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
   const sendSms = async () => {
     if (busy || !mobile.trim() || !captcha?.captcha_id || smsCooldown > 0) return;
+    if (loginMode === 'register') {
+      const localError = registrationInputError(copy, account, mobile, password, passwordConfirmation);
+      if (localError) {
+        setRegistrationCheck('error');
+        setError(localError);
+        return;
+      }
+    }
     setBusy(true);
     setError('');
     try {
@@ -573,17 +600,23 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
       {(auth === 'guest' || auth === 'error') && (
         <form className={`space-y-3 rounded-2xl border p-3 ${cardTheme}`} onSubmit={event => void submitLogin(event)}>
-          <div className="grid grid-cols-3 gap-1 rounded-xl bg-black/5 p-1">{['password', 'sms', 'register'].map(mode => <button key={mode} type="button" onClick={() => { setLoginMode(mode); resetSMSVerification(); setRegistrationCheck('idle'); setError(''); }} className={`h-7 rounded-lg text-[11px] ${loginMode === mode ? 'bg-white shadow-sm' : mutedText}`}>{copy.authModes[mode]}</button>)}</div>
-          {loginMode !== 'sms' && <input value={account} onChange={event => { setAccount(event.target.value); setRegistrationCheck('idle'); resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password) void precheckRegistration(); }} disabled={busy} placeholder={loginMode === 'register' ? copy.registrationUsername : copy.mobileOrAccount} aria-label={loginMode === 'register' ? copy.username : copy.mobileOrAccount} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
-          {loginMode !== 'password' && <input value={mobile} onChange={event => { setMobile(event.target.value); setRegistrationCheck('idle'); resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password) void precheckRegistration(); }} disabled={busy} placeholder={copy.mobile} aria-label={copy.mobile} inputMode="tel" autoComplete="tel-national" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
-          {loginMode !== 'sms' && <input value={password} onChange={event => { setPassword(event.target.value); setRegistrationCheck('idle'); if (loginMode === 'register') resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password) void precheckRegistration(); }} disabled={busy} placeholder={copy.password} aria-label={copy.password} type="password" autoComplete={loginMode === 'register' ? 'new-password' : 'current-password'} className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          <div className="grid grid-cols-3 gap-1 rounded-xl bg-black/5 p-1">{['password', 'sms', 'register'].map(mode => <button key={mode} type="button" onClick={() => { setLoginMode(mode); setPasswordConfirmation(''); resetSMSVerification(); setRegistrationCheck('idle'); setError(''); }} className={`h-7 rounded-lg text-[11px] ${loginMode === mode ? 'bg-white shadow-sm' : mutedText}`}>{copy.authModes[mode]}</button>)}</div>
+          {loginMode !== 'sms' && <input value={account} onChange={event => { setAccount(event.target.value); setRegistrationCheck('idle'); resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={loginMode === 'register' ? copy.registrationUsername : copy.mobileOrAccount} aria-label={loginMode === 'register' ? copy.username : copy.mobileOrAccount} autoComplete="username" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {loginMode !== 'password' && <input value={mobile} onChange={event => { setMobile(event.target.value); setRegistrationCheck('idle'); resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={copy.mobile} aria-label={copy.mobile} inputMode="tel" autoComplete="tel-national" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {loginMode !== 'sms' && <input value={password} onChange={event => { setPassword(event.target.value); setRegistrationCheck('idle'); setError(''); if (loginMode === 'register') resetSMSVerification(); }} onBlur={() => { if (loginMode === 'register' && account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={copy.password} aria-label={copy.password} type="password" autoComplete={loginMode === 'register' ? 'new-password' : 'current-password'} className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
+          {loginMode === 'register' && <input value={passwordConfirmation} onChange={event => { setPasswordConfirmation(event.target.value); setRegistrationCheck('idle'); setError(''); resetSMSVerification(); }} onBlur={() => { if (account.trim() && mobile.trim() && password && passwordConfirmation) void precheckRegistration(); }} disabled={busy} placeholder={copy.confirmPassword} aria-label={copy.confirmPassword} type="password" autoComplete="new-password" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
           {loginMode === 'register' && registrationCheck === 'checking' && <div className={`text-[11px] ${mutedText}`}>{copy.registrationPrechecking}</div>}
           {loginMode === 'register' && registrationCheck === 'ready' && <div className="text-[11px] text-[#07966F]">{copy.registrationReady}</div>}
-          {loginMode !== 'password' && <div className="flex gap-2"><input value={smsCode} onChange={event => setSmsCode(event.target.value)} disabled={busy} placeholder={copy.smsCode} aria-label={copy.smsCode} inputMode="numeric" autoComplete="one-time-code" className={`h-9 min-w-0 flex-1 rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} /><button type="button" disabled={busy || registrationCheck === 'checking' || smsCooldown > 0 || !mobile.trim() || (loginMode === 'register' && (!account.trim() || !password))} onClick={() => void openSliderCaptcha()} className="h-9 shrink-0 rounded-xl bg-[#10B981]/10 px-3 text-[11px] font-semibold text-[#07966F] disabled:opacity-40">{smsCooldown > 0 ? copy.resendCountdown(smsCooldown) : smsChallenge ? copy.resendCode : copy.sendCode}</button></div>}
-          {loginMode !== 'password' && captcha && <SliderCaptcha challenge={captcha} offset={captchaOffset} busy={busy} copy={copy} cardTheme={cardTheme} mutedText={mutedText} onOffset={setCaptchaOffset} onConfirm={() => void sendSms()} onRefresh={() => void openSliderCaptcha()} />}
+          {loginMode !== 'password' && <div className="flex gap-2"><input value={smsCode} onChange={event => setSmsCode(event.target.value)} disabled={busy} placeholder={copy.smsCode} aria-label={copy.smsCode} inputMode="numeric" autoComplete="one-time-code" className={`h-9 min-w-0 flex-1 rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} /><button type="button" disabled={busy || registrationCheck === 'checking' || smsCooldown > 0 || !mobile.trim() || (loginMode === 'register' && (!account.trim() || !password || !passwordConfirmation || password !== passwordConfirmation))} onClick={() => void openSliderCaptcha()} className="h-9 shrink-0 rounded-xl bg-[#10B981]/10 px-3 text-[11px] font-semibold text-[#07966F] disabled:opacity-40">{smsCooldown > 0 ? copy.resendCountdown(smsCooldown) : smsChallenge ? copy.resendCode : copy.sendCode}</button></div>}
           {error && <div role="alert" className="break-words text-[12px] leading-snug text-[#EA4335]">{error}</div>}
-          <button type="submit" disabled={busy || (loginMode === 'password' ? !account.trim() || !password : !mobile.trim() || !smsChallenge || !smsCode.trim() || (loginMode === 'register' && (!account.trim() || !password || registrationCheck !== 'ready')))} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{busy ? copy.signingIn : loginMode === 'register' ? copy.register : copy.login}</button>
+          <button type="submit" disabled={busy || (loginMode === 'password' ? !account.trim() || !password : !mobile.trim() || !smsChallenge || !smsCode.trim() || (loginMode === 'register' && (!account.trim() || !password || !passwordConfirmation || password !== passwordConfirmation || registrationCheck !== 'ready')))} className="h-9 w-full rounded-xl bg-[#10B981] text-[13px] font-semibold text-white transition-opacity disabled:opacity-40">{busy ? copy.signingIn : loginMode === 'register' ? copy.register : copy.login}</button>
         </form>
+      )}
+
+      {loginMode !== 'password' && captcha && (
+        <div role="dialog" aria-modal="true" aria-label={copy.captchaTitle} className={`absolute inset-0 z-20 flex items-center justify-center rounded-[22px] p-3 backdrop-blur-xl ${isDark ? 'bg-[#202124]/95' : 'bg-white/95'}`}>
+          <SliderCaptcha challenge={captcha} offset={captchaOffset} busy={busy} copy={copy} cardTheme={cardTheme} mutedText={mutedText} onOffset={setCaptchaOffset} onConfirm={() => void sendSms()} onRefresh={() => void openSliderCaptcha()} onClose={() => { if (busy) return; setCaptcha(null); setCaptchaOffset(0); }} />
+        </div>
       )}
 
       {auth === 'ready' && view === 'account' && (
