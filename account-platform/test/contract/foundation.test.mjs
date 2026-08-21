@@ -147,6 +147,7 @@ test('Keycloak development client enables password login without enabling implic
 
 test('mobile authentication provisioning works in the minimal Keycloak image', async () => {
   const provisioning = await readFile(path.join(root, 'deploy/keycloak/provision-mobile-auth.sh'), 'utf8');
+  const authenticator = await readFile(path.join(root, 'deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/MobileDirectGrantAuthenticator.java'), 'utf8');
   assert.doesNotMatch(provisioning, /\bawk\b/);
   assert.match(provisioning, /authentication\/flows\/\$FLOW\/executions/);
   assert.match(provisioning, /-s requirement=REQUIRED -n/);
@@ -163,6 +164,9 @@ test('mobile authentication provisioning works in the minimal Keycloak image', a
     const attribute = profile.attributes.find((candidate) => candidate.name === name);
     assert.deepEqual(attribute.permissions.edit, ['admin'], `${name} must be managed by the account service`);
   }
+  assert.match(authenticator, /firstValue\("X-Pinvou-Identity-Subject"\)/);
+  assert.match(authenticator, /getUserById\(context\.getRealm\(\), value\)/);
+  assert.match(authenticator, /if \(smsLogin\) \{[\s\S]*verifySMS\(mobile, challenge, code\)[\s\S]*getUserById/);
 });
 
 test('remote Keycloak administration is available only through a controlled local channel', async () => {

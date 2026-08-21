@@ -36,6 +36,7 @@ type SMSChallenge struct {
 
 type MobileAuthRepository interface {
 	MobileExists(context.Context, string) (bool, error)
+	MobileIdentitySubject(context.Context, string, string) (string, error)
 	UsernameExists(context.Context, string) (bool, error)
 	CreateSliderCaptcha(context.Context, SliderCaptcha) error
 	ConsumeSliderCaptcha(context.Context, uuid.UUID, string, SMSPurpose, int) error
@@ -194,12 +195,25 @@ func (s *MobileAuthService) Register(ctx context.Context, rawUsername, rawMobile
 	return userID, nil
 }
 
-func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) error {
+func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (string, error) {
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil {
-		return ErrSMSInvalid
+		return "", ErrSMSInvalid
 	}
-	return s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeLogin, code)
+	subject, err := s.repository.MobileIdentitySubject(ctx, s.issuer, mobile)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrSMSInvalid
+	}
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(subject) == "" {
+		return "", ErrSMSInvalid
+	}
+	if err := s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeLogin, code); err != nil {
+		return "", err
+	}
+	return subject, nil
 }
 
 func (s *MobileAuthService) verifyChallenge(ctx context.Context, challengeID uuid.UUID, mobile string, purpose SMSPurpose, code string) error {
@@ -236,6 +250,12 @@ func (r *PostgresRepository) MobileExists(ctx context.Context, mobile string) (b
 	var exists bool
 	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE mobile_e164=$1 AND status<>'DELETED')`, mobile).Scan(&exists)
 	return exists, err
+}
+
+func (r *PostgresRepository) MobileIdentitySubject(ctx context.Context, issuer, mobile string) (string, error) {
+	var subject string
+	err := r.pool.QueryRow(ctx, `SELECT i.subject FROM users u JOIN identities i ON i.user_id=u.id WHERE u.mobile_e164=$1 AND u.status<>'DELETED' AND i.issuer=$2 ORDER BY i.last_seen_at DESC LIMIT 1`, mobile, issuer).Scan(&subject)
+	return subject, err
 }
 
 func (r *PostgresRepository) UsernameExists(ctx context.Context, username string) (bool, error) {

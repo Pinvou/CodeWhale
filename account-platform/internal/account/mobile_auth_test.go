@@ -3,10 +3,14 @@ package account
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestNormalizeMainlandMobile(t *testing.T) {
@@ -60,6 +64,8 @@ func TestNormalizeRegistrationUsername(t *testing.T) {
 
 type mobileAuthRepositoryFake struct {
 	mobileExists       bool
+	identitySubject    string
+	identityErr        error
 	usernameExists     bool
 	challenge          SMSChallenge
 	challengeSent      bool
@@ -75,6 +81,13 @@ type mobileAuthRepositoryFake struct {
 
 func (f *mobileAuthRepositoryFake) MobileExists(context.Context, string) (bool, error) {
 	return f.mobileExists, nil
+}
+
+func (f *mobileAuthRepositoryFake) MobileIdentitySubject(context.Context, string, string) (string, error) {
+	if f.identitySubject == "" && f.identityErr == nil {
+		return "keycloak-subject", nil
+	}
+	return f.identitySubject, f.identityErr
 }
 
 func (f *mobileAuthRepositoryFake) UsernameExists(context.Context, string) (bool, error) {
@@ -235,11 +248,56 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 	if sms.sentChallenge != uuid.Nil || repository.challengeSent {
 		t.Fatal("SMS must not be sent to an unknown login account")
 	}
-	if err := service.VerifyLogin(context.Background(), "13800138000", challenge.ID, "123456"); !errors.Is(err, ErrSMSInvalid) {
+	if _, err := service.VerifyLogin(context.Background(), "13800138000", challenge.ID, "123456"); !errors.Is(err, ErrSMSInvalid) {
 		t.Fatalf("unexpected verification error: %v", err)
 	}
 	if sms.verifyCalls != 0 {
 		t.Fatal("local challenge state must be checked before calling Aliyun")
+	}
+}
+
+func TestMobileAuthLoginReturnsAuthoritativeIdentitySubject(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{identitySubject: "authoritative-keycloak-subject"}
+	sms := &smsProviderFake{verified: true}
+	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
+	subject, err := service.VerifyLogin(context.Background(), "13800138000", uuid.New(), "123456")
+	if err != nil || subject != "authoritative-keycloak-subject" {
+		t.Fatalf("subject=%q err=%v", subject, err)
+	}
+	if sms.verifyCalls != 1 || !repository.consumeVerified {
+		t.Fatalf("SMS verification was not completed: calls=%d consumed=%v", sms.verifyCalls, repository.consumeVerified)
+	}
+}
+
+func TestSMSLoginVerificationReturnsIdentitySubjectToKeycloak(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{identitySubject: "authoritative-keycloak-subject"}
+	auth := newMobileAuthForTest(t, repository, &smsProviderFake{verified: true}, &identityProvisionerFake{})
+	service := NewService(nil, nil).WithMobileAuth(auth, "internal-service-token-for-tests-123456")
+	request := httptest.NewRequest(http.MethodPost, "/internal/v1/auth/sms/verify", strings.NewReader(`{"mobile":"13800138000","challenge_id":"018f0f76-3f5d-7d43-b630-163e3f635e5a","code":"123456"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer internal-service-token-for-tests-123456")
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if subject := response.Header().Get("X-Pinvou-Identity-Subject"); subject != "authoritative-keycloak-subject" {
+		t.Fatalf("identity subject header=%q", subject)
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("SMS verification response must not be cached")
+	}
+}
+
+func TestMobileAuthLoginRejectsMissingIdentityBeforeConsumingCode(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{identityErr: pgx.ErrNoRows}
+	sms := &smsProviderFake{verified: true}
+	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
+	if _, err := service.VerifyLogin(context.Background(), "13800138000", uuid.New(), "123456"); !errors.Is(err, ErrSMSInvalid) {
+		t.Fatalf("expected missing identity to be rejected, got %v", err)
+	}
+	if sms.verifyCalls != 0 || repository.consumeVerified {
+		t.Fatal("a code must not be consumed when no login identity is linked")
 	}
 }
 

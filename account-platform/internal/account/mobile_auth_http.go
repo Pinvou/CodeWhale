@@ -103,10 +103,13 @@ func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid SMS login verification request", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := s.mobileAuth.VerifyLogin(r.Context(), body.Mobile, body.ChallengeID, body.Code); err != nil {
+	subject, err := s.mobileAuth.VerifyLogin(r.Context(), body.Mobile, body.ChallengeID, body.Code)
+	if err != nil {
 		api.WriteError(w, http.StatusUnauthorized, "SMS_CODE_INVALID", "the verification code is invalid or expired", httpserver.RequestID(r.Context()))
 		return
 	}
+	w.Header().Set("X-Pinvou-Identity-Subject", subject)
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNoContent)
 }
 

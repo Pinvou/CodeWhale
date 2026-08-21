@@ -10,8 +10,10 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+import org.jboss.logging.Logger;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
 import org.keycloak.authentication.Authenticator;
@@ -24,9 +26,11 @@ import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 
 public final class MobileDirectGrantAuthenticator implements Authenticator {
+    private static final Logger LOG = Logger.getLogger(MobileDirectGrantAuthenticator.class);
     private static final Pattern MOBILE = Pattern.compile("^1[3-9][0-9]{9}$");
     private static final Pattern CHALLENGE = Pattern.compile("^[0-9a-fA-F-]{36}$");
     private static final Pattern CODE = Pattern.compile("^[0-9]{6}$");
+    private static final Pattern SUBJECT = Pattern.compile("^[A-Za-z0-9._:-]{1,128}$");
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
 
     @Override
@@ -34,7 +38,22 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         MultivaluedMap<String, String> form = context.getHttpRequest().getDecodedFormParameters();
         String login = trim(form.getFirst("username"));
         String mobile = normalizeMobile(login);
-        UserModel user = findUser(context, login, mobile);
+        String challenge = trim(form.getFirst("sms_challenge_id"));
+        String code = trim(form.getFirst("sms_code"));
+        boolean smsLogin = !challenge.isEmpty() || !code.isEmpty();
+        UserModel user;
+        boolean valid;
+        if (smsLogin) {
+            Optional<String> subject = !mobile.isEmpty() && CHALLENGE.matcher(challenge).matches()
+                && CODE.matcher(code).matches() ? verifySMS(mobile, challenge, code) : Optional.empty();
+            user = subject.map(value -> context.getSession().users().getUserById(context.getRealm(), value)).orElse(null);
+            valid = user != null;
+        } else {
+            user = findUser(context, login, mobile);
+            String password = form.getFirst("password");
+            valid = user != null && password != null && !password.isEmpty()
+                && user.credentialManager().isValid(UserCredentialModel.password(password));
+        }
         if (user == null) {
             AuthenticatorUtils.dummyHash(context);
             fail(context, AuthenticationFlowError.INVALID_USER);
@@ -45,16 +64,6 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
             return;
         }
 
-        String challenge = trim(form.getFirst("sms_challenge_id"));
-        String code = trim(form.getFirst("sms_code"));
-        boolean valid;
-        if (!challenge.isEmpty() || !code.isEmpty()) {
-            valid = !mobile.isEmpty() && CHALLENGE.matcher(challenge).matches()
-                && CODE.matcher(code).matches() && verifySMS(mobile, challenge, code);
-        } else {
-            String password = form.getFirst("password");
-            valid = password != null && !password.isEmpty() && user.credentialManager().isValid(UserCredentialModel.password(password));
-        }
         if (!valid) {
             fail(context, AuthenticationFlowError.INVALID_CREDENTIALS);
             return;
@@ -75,10 +84,13 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         }
     }
 
-    private boolean verifySMS(String mobile, String challenge, String code) {
+    private Optional<String> verifySMS(String mobile, String challenge, String code) {
         String endpoint = System.getenv("PINVOU_SMS_VERIFY_URL");
         String serviceToken = System.getenv("PINVOU_INTERNAL_SERVICE_TOKEN");
-        if (endpoint == null || serviceToken == null || endpoint.isBlank() || serviceToken.length() < 32) return false;
+        if (endpoint == null || serviceToken == null || endpoint.isBlank() || serviceToken.length() < 32) {
+            LOG.error("SMS verification endpoint is not configured");
+            return Optional.empty();
+        }
         String body = "{\"mobile\":\"" + mobile + "\",\"challenge_id\":\"" + challenge + "\",\"code\":\"" + code + "\"}";
         try {
             HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))
@@ -86,9 +98,13 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
                 .header("Authorization", "Bearer " + serviceToken)
                 .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build();
             HttpResponse<Void> response = HTTP.send(request, HttpResponse.BodyHandlers.discarding());
-            return response.statusCode() == 204;
-        } catch (Exception ignored) {
-            return false;
+            String subject = response.headers().firstValue("X-Pinvou-Identity-Subject").orElse("");
+            if (response.statusCode() == 204 && SUBJECT.matcher(subject).matches()) return Optional.of(subject);
+            LOG.warnf("SMS verification was rejected by the account service with HTTP %d", response.statusCode());
+            return Optional.empty();
+        } catch (Exception error) {
+            LOG.warnf("SMS verification request failed: %s", error.getClass().getSimpleName());
+            return Optional.empty();
         }
     }
 
