@@ -309,7 +309,7 @@ func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uu
 	}
 	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2,fulfillment_status='CREDITED',channel_transaction_id=$3,paid_at=$4,updated_at=$5 WHERE id=$1`, order.ID, status, *provider.ChannelTransactionID, *provider.PaidAt, now)
 	if err == nil {
-		err = creditWithinTransaction(ctx, tx, order.WalletID, "recharge:"+order.ID.String(), order.CreditMicrocredits, now)
+		err = issuePackageWithinTransaction(ctx, tx, order, now)
 	}
 	if err != nil {
 		return PaymentOrder{}, err

@@ -55,6 +55,25 @@ type Hold struct {
 	ExpiresAt          time.Time  `json:"expires_at"`
 }
 
+type EntitlementPackage struct {
+	ID              uuid.UUID `json:"package_id"`
+	UserID          uuid.UUID `json:"user_id"`
+	WalletID        uuid.UUID `json:"wallet_id"`
+	PaymentOrderID  uuid.UUID `json:"pinvou_order_id"`
+	ProductID       string    `json:"plan_id"`
+	PlanName        string    `json:"plan_name"`
+	SKUCode         string    `json:"sku_code"`
+	AmountFen       int64     `json:"amount_fen"`
+	PointsTotal     int64     `json:"points_total_microcredits"`
+	PointsReserved  int64     `json:"points_reserved_microcredits"`
+	PointsUsed      int64     `json:"points_used_microcredits"`
+	PointsRemaining int64     `json:"points_remaining_microcredits"`
+	CreditedAt      time.Time `json:"credited_at"`
+	ValidFrom       time.Time `json:"valid_from"`
+	ValidUntil      time.Time `json:"valid_until"`
+	Status          string    `json:"status"`
+}
+
 type PriceVersion struct {
 	ID                    uuid.UUID `json:"price_version_id"`
 	Model                 string    `json:"model"`

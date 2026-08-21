@@ -330,7 +330,7 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 	if err != nil {
 		return err
 	}
-	if err := creditWithinTransaction(ctx, tx, order.WalletID, "recharge:"+order.ID.String(), order.CreditMicrocredits, p.now()); err != nil {
+	if err := issuePackageWithinTransaction(ctx, tx, order, p.now()); err != nil {
 		return err
 	}
 	if err := events.AppendOutbox(ctx, tx, "billing.recharge.succeeded.v1", order.ID, 1, map[string]any{
@@ -347,20 +347,43 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 
 var ErrForbiddenPayment = errors.New("payment notification rejected")
 
-func creditWithinTransaction(ctx context.Context, tx pgx.Tx, walletID uuid.UUID, reference string, amount int64, now time.Time) error {
-	wallet, err := getWallet(ctx, tx, walletID, true)
+func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order PaymentOrder, now time.Time) error {
+	wallet, err := getWallet(ctx, tx, order.WalletID, true)
 	if err != nil || wallet.Status != "ACTIVE" {
 		return ErrWalletUnavailable
 	}
+	var snapshot []byte
+	if err := tx.QueryRow(ctx, `SELECT product_snapshot FROM payment_orders WHERE id=$1`, order.ID).Scan(&snapshot); err != nil {
+		return err
+	}
+	var product Product
+	if err := json.Unmarshal(snapshot, &product); err != nil {
+		return ErrConflict
+	}
+	if product.ValidityDays <= 0 {
+		product.ValidityDays = 30
+	}
+	if product.PlanName == "" {
+		product.PlanName = order.ProductID
+	}
+	if product.SKUCode == "" {
+		product.SKUCode = order.ProviderSKU
+	}
+	reference, amount := "recharge:"+order.ID.String(), order.CreditMicrocredits
 	entryID, lotID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	if err := insertJournal(ctx, tx, entryID, "RECHARGE", reference, "payment recharge", now); err != nil {
 		return err
 	}
-	accountID, err := walletLedgerAccount(ctx, tx, walletID)
+	accountID, err := walletLedgerAccount(ctx, tx, order.WalletID)
 	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,true,$5)`, lotID, walletID, reference, amount, now); err != nil {
+	validUntil := now.AddDate(0, 0, product.ValidityDays)
+	if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,false,$5,$6)`, lotID, order.WalletID, reference, amount, validUntil, now); err != nil {
+		return err
+	}
+	packageID := uuid.Must(uuid.NewV7())
+	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$11,$12,'ACTIVE',$11,$11)`, packageID, order.RequesterID, order.WalletID, order.ID, lotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validUntil); err != nil {
 		return err
 	}
 	if err = insertPosting(ctx, tx, entryID, accountID, amount, &lotID, now); err != nil {
@@ -369,7 +392,7 @@ func creditWithinTransaction(ctx context.Context, tx pgx.Tx, walletID uuid.UUID,
 	if err = insertPosting(ctx, tx, entryID, paymentClearingAccount, -amount, nil, now); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1`, walletID, amount, now)
+	_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1`, order.WalletID, amount, now)
 	return err
 }
 

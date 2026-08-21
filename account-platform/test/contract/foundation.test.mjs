@@ -81,6 +81,16 @@ test('personal plans cannot be purchased into organization wallets', async () =>
   assert.match(source, /PERSONAL_RECHARGE_ONLY/);
 });
 
+test('paid plan orders create independent thirty-day entitlement packages', async () => {
+  const migration = await readFile(path.join(root, 'migrations/billing/000011_entitlement_packages.up.sql'), 'utf8');
+  const payments = await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8');
+  assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
+  assert.match(migration, /points_reserved \+ points_used \+ points_remaining = points_total/);
+  assert.match(payments, /validUntil := now\.AddDate\(0, 0, product\.ValidityDays\)/);
+  assert.match(payments, /INSERT INTO entitlement_packages/);
+  assert.match(payments, /refundable,expires_at/);
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));
