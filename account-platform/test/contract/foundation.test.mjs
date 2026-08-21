@@ -146,6 +146,14 @@ test('late Mall payments require audited operator repair before fulfillment', as
   assert.match(await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8'), /"REPAIR_CREDIT", "repair:"/);
 });
 
+test('provider-specific payment rules remain inside the provider adapter', async () => {
+  const adapter = await readFile(path.join(root, 'internal/billing/h3c_mall.go'), 'utf8');
+  const genericFiles = await Promise.all(['payments.go', 'reconciliation.go', 'refunds.go', 'admin.go'].map(file => readFile(path.join(root, 'internal/billing', file), 'utf8')));
+  assert.match(adapter, /ReusePendingOrderAfterExpiry:\s+true/);
+  assert.match(adapter, /ReviewLatePayment:\s+true/);
+  for (const source of genericFiles) assert.doesNotMatch(source, /h3c_mall|H3C Mall|新华三/i);
+});
+
 test('payment operations can locate repair candidates by user and order references', async () => {
   const admin = await readYaml('contracts/openapi/admin.yaml');
   const billingAdmin = await readFile(path.join(root, 'internal/billing/admin.go'), 'utf8');

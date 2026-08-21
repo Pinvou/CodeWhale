@@ -470,6 +470,7 @@ test('billing operators can search repair candidates without provider-specific U
   assert.match(view, /channel_transaction_id/);
   assert.match(client, /query\.set\('q', filters\.q\)/);
   assert.match(client, /query\.set\('status', filters\.status\)/);
+  assert.doesNotMatch(view, /h3c|新华三/i);
 });
 
 test('billing order readers tolerate provider fields that are null before the first successful sync', async () => {

@@ -95,9 +95,9 @@ func (r *ExpiredPaymentReconciler) runOnce(ctx context.Context) {
 	for _, item := range items {
 		order, syncErr := r.synchronizer.SyncOrder(ctx, item.OrderID)
 		if syncErr == nil && (order.Status == "CREATED" || order.Status == "PENDING") {
-			// H3C Mall has no payment callback in the supplied contract. Keep
-			// polling server-side so payment can be credited even after the client
-			// closes the QR page. A non-terminal state is expected, not an error.
+			// Providers without notifications converge through server-side polling,
+			// including after the client closes the QR page. A non-terminal state is
+			// expected here and is rescheduled rather than treated as an error.
 			nextAt := r.now().Add(r.interval)
 			if err := r.store.RescheduleExpiredPaymentOrder(ctx, item.OrderID, "", nextAt); err != nil {
 				r.logger.Error("reschedule pending payment order failed", "order_id", item.OrderID, "error", err)
