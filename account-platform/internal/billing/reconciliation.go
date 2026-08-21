@@ -231,6 +231,9 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 		return p.applyProviderTerminalStatus(ctx, order, providerOrder.Status)
 	}
 	if (order.Status == "CREATED" || order.Status == "PENDING") && !order.ExpiresAt.After(p.now()) && providerOrder.Status == "PENDING" {
+		if !p.Capabilities().CloseSupported {
+			return order, nil
+		}
 		closed, closeErr := p.provider.Close(ctx, order.MerchantOrderNo)
 		if closeErr != nil {
 			return PaymentOrder{}, errors.Join(ErrPaymentProvider, closeErr)
@@ -302,6 +305,14 @@ func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uu
 		if err := tx.QueryRow(ctx, `SELECT payment_order_id FROM payment_transactions WHERE channel_transaction_id=$1`, *provider.ChannelTransactionID).Scan(&existingOrderID); err != nil || existingOrderID != order.ID {
 			return PaymentOrder{}, ErrConflict
 		}
+	}
+	if p.Policy().RequiresReview(order.ExpiresAt, *provider.PaidAt) {
+		_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',channel_transaction_id=$2,paid_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$4 WHERE id=$1`, order.ID, *provider.ChannelTransactionID, *provider.PaidAt, now)
+		if err != nil {
+			return PaymentOrder{}, err
+		}
+		order.Status, order.FulfillmentStatus, order.ChannelTransactionID, order.PaidAt = "MANUAL_REVIEW", "MANUAL_REVIEW", provider.ChannelTransactionID, provider.PaidAt
+		return order, tx.Commit(ctx)
 	}
 	status := "PAID"
 	if !order.ExpiresAt.After(*provider.PaidAt) {

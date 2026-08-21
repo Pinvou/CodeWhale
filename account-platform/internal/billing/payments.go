@@ -108,6 +108,10 @@ type PaymentPolicy struct {
 	ReviewLatePayment            bool
 }
 
+func (p PaymentPolicy) RequiresReview(expiresAt, paidAt time.Time) bool {
+	return p.ReviewLatePayment && !expiresAt.After(paidAt)
+}
+
 type paymentCapabilityProvider interface {
 	Capabilities() PaymentCapabilities
 }
@@ -364,6 +368,17 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 		if err := tx.QueryRow(ctx, `SELECT payment_order_id FROM payment_transactions WHERE channel_transaction_id=$1`, notification.ChannelTransaction).Scan(&existingOrderID); err != nil || existingOrderID != order.ID {
 			return ErrConflict
 		}
+	}
+	if p.Policy().RequiresReview(order.ExpiresAt, notification.PaidAt) {
+		_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',channel_transaction_id=$2,paid_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$4 WHERE id=$1`, order.ID, notification.ChannelTransaction, notification.PaidAt, p.now())
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE payment_notifications SET result='MANUAL_REVIEW',processed_at=$2 WHERE notification_id=$1`, notification.NotificationID, p.now())
+		if err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2, fulfillment_status='CREDITED', channel_transaction_id=$3, paid_at=$4, updated_at=$5 WHERE id=$1`, order.ID, status, notification.ChannelTransaction, notification.PaidAt, p.now())
 	if err != nil {

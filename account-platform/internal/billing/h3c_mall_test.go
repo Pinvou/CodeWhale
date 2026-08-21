@@ -66,6 +66,10 @@ func TestH3CMallProviderKeepsDegradedRulesInProviderPolicy(t *testing.T) {
 	if !policy.ReusePendingOrderAfterExpiry || !policy.ReviewLatePayment {
 		t.Fatalf("unexpected H3C Mall payment policy: %#v", policy)
 	}
+	expiresAt := time.Date(2026, 8, 21, 10, 0, 0, 0, time.UTC)
+	if policy.RequiresReview(expiresAt, expiresAt.Add(-time.Second)) || !policy.RequiresReview(expiresAt, expiresAt) {
+		t.Fatal("H3C Mall late-payment boundary must start at the local expiry time")
+	}
 }
 
 func TestH3CMallProviderMapsPaidOrder(t *testing.T) {
