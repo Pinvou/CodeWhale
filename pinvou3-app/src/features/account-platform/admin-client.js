@@ -79,7 +79,12 @@ export class AdminPlatformClient {
   walletLedger(walletID, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal); }
   priceVersions(signal) { return this.request('billing', '/admin/v1/pricing-versions?limit=100', signal); }
   createPriceVersion(input) { return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input); }
-  paymentOrders(signal) { return this.request('billing', '/admin/v1/payment-orders?limit=100', signal); }
+  paymentOrders(filters = {}, signal) {
+    const query = new URLSearchParams({ limit:'100' });
+    if (filters.q) query.set('q', filters.q);
+    if (filters.status) query.set('status', filters.status);
+    return this.request('billing', `/admin/v1/payment-orders?${query}`, signal);
+  }
   syncPaymentOrder(orderID) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {}); }
   repairPaymentOrder(orderID, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason }); }
   refundPaymentOrder(orderID, amountFen, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { amount_fen:amountFen, reason }); }

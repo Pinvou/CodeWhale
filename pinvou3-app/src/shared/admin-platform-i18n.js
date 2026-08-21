@@ -39,13 +39,16 @@ export const adminPlatformCopy = {
 
 Object.assign(adminPlatformCopy.zh.billing, {
   repair:'确认补偿', repairReason:'请输入人工补偿原因（系统将再次核验商城订单）',
+  orderSearch:'搜索手机号、品悟/商城订单号、支付流水号或 SKU', allStatuses:'全部状态', pinvouOrder:'品悟订单', product:'套餐 / SKU', paymentReference:'支付流水 / 手机号',
   h3cLimitations:'当前支付渠道能力有限；不支持的退款、主动关单、支付回调或日终账单对账操作已自动禁用。',
 });
 Object.assign(adminPlatformCopy.en.billing, {
   repair:'Confirm repair', repairReason:'Reason for manual repair (the provider order will be verified again)',
+  orderSearch:'Mobile, Pinvou/Mall order, payment reference, or SKU', allStatuses:'All statuses', pinvouOrder:'Pinvou order', product:'Plan / SKU', paymentReference:'Payment ref / Mobile',
   h3cLimitations:'The current payment provider has limited capabilities. Unsupported refund, proactive close, notification, or daily reconciliation actions are disabled.',
 });
 Object.assign(adminPlatformCopy.ja.billing, {
   repair:'補償を確定', repairReason:'手動補償の理由（プロバイダー注文を再確認します）',
+  orderSearch:'携帯番号、品悟/モール注文、決済番号、SKU を検索', allStatuses:'すべての状態', pinvouOrder:'品悟注文', product:'プラン / SKU', paymentReference:'決済番号 / 携帯番号',
   h3cLimitations:'現在の決済プロバイダーには機能制限があります。未対応の返金、能動的なクローズ、通知、日次照合操作は無効です。',
 });

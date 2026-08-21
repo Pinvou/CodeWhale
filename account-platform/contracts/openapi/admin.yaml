@@ -335,10 +335,19 @@ paths:
   /billing/admin/v1/payment-orders:
     get:
       operationId: listAdminPaymentOrders
-      summary: List recently updated payment orders
-      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      summary: Search recently updated payment orders
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - name: q
+          in: query
+          description: Mobile, Pinvou order ID, Mall order ID, payment transaction ID, or SKU
+          schema: { type: string, maxLength: 160 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW] }
       responses:
         "200": { $ref: "#/components/responses/Collection" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders/{order_id}/sync:
     post:

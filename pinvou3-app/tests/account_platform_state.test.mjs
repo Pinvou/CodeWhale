@@ -462,6 +462,16 @@ test('personal plan history shows traceable package and payment identifiers', as
   assert.match(view, /points_remaining_microcredits/);
 });
 
+test('billing operators can search repair candidates without provider-specific UI branches', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');
+  assert.match(view, /orderFilter/);
+  assert.match(view, /mobile_masked/);
+  assert.match(view, /channel_transaction_id/);
+  assert.match(client, /query\.set\('q', filters\.q\)/);
+  assert.match(client, /query\.set\('status', filters\.status\)/);
+});
+
 test('billing order readers tolerate provider fields that are null before the first successful sync', async () => {
   const payments = await readFile(new URL('../../account-platform/internal/billing/payments.go', import.meta.url), 'utf8');
   const refunds = await readFile(new URL('../../account-platform/internal/billing/refunds.go', import.meta.url), 'utf8');

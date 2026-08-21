@@ -146,6 +146,18 @@ test('late Mall payments require audited operator repair before fulfillment', as
   assert.match(await readFile(path.join(root, 'internal/billing/payments.go'), 'utf8'), /"REPAIR_CREDIT", "repair:"/);
 });
 
+test('payment operations can locate repair candidates by user and order references', async () => {
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+  const billingAdmin = await readFile(path.join(root, 'internal/billing/admin.go'), 'utf8');
+  const parameters = admin.paths['/billing/admin/v1/payment-orders'].get.parameters;
+  assert.ok(parameters.some(parameter => parameter.name === 'q'));
+  assert.ok(parameters.some(parameter => parameter.name === 'status'));
+  for (const field of ['mobile_e164', 'merchant_order_no', 'channel_transaction_id', 'provider_sku']) {
+    assert.match(billingAdmin, new RegExp(field));
+  }
+  assert.match(billingAdmin, /maskAdminMobile/);
+});
+
 test('event schemas compile as JSON Schema 2020-12 and reject secrets', async () => {
   const directory = path.join(root, 'contracts/events');
   const files = (await readdir(directory)).filter((name) => name.endsWith('.schema.json'));
