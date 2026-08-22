@@ -216,7 +216,7 @@ UAT 暂定价格必须由显式配置允许；正式上线前必须与商城冻�
 
 `payment_order` 与 `payment_transaction` 为一对多。支付来源权益包与确认成功流水在普通履约路径保持一对一：每笔可正常履约的成功流水幂等创建自己的权益包，多笔成功流水不能共同引用或补充同一个权益包；重复扣款、晚到冲突或金额/商品事实不一致时先进入复核。
 
-普通退款以 `payment_transaction_id + entitlement_package_id` 为唯一业务目标，`payment_order_id` 只用于归属、筛选和审计。退款意图在 Billing 单事务中按固定顺序锁定支付流水和权益包、冻结新分配/Hold、复查消费/授予/Hold、预约全部剩余可退金额、写 `refund_request` 和 Outbox。事务提交后 Worker 才使用稳定幂等键调用 Provider；提交后崩溃由 Outbox 恢复。只有 Provider 明确保证退款幂等时才允许自动重发外部调用，否则不确定结果只能查询原请求或转人工复核，并持续保持权益冻结。
+普通退款以 `payment_transaction_id + entitlement_package_id` 为唯一业务目标，`payment_order_id` 只用于归属、筛选和审计。目标权益包任一 BASE 或该支付产生的关联 BONUS 曾消费时拒绝普通退款；现金退款只按全部未消费 BASE 计算，关联 BONUS 不折现。退款意图在 Billing 单事务中按固定顺序锁定支付流水和权益包、冻结新分配/Hold、复查 BASE/BONUS 累计消费、授予、Hold 和资金异常、冻结待撤销 BASE/关联 BONUS、预约全部剩余现金可退金额、写 `refund_request`、权益冲销快照和 Outbox。Provider 确认后原子冲销全部未消费 BASE 与该支付产生的全部未消费关联 BONUS。事务提交后 Worker 才使用稳定幂等键调用 Provider；提交后崩溃由 Outbox 恢复。只有 Provider 明确保证退款幂等时才允许自动重发外部调用，否则不确定结果只能查询原请求或转人工复核，并持续保持权益冻结。渠道强制部分退款作为已发生外部资金事实独立保存和复核，不适用普通退款资格拒绝。
 
 ## 8. 一致性与事件
 
