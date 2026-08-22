@@ -67,10 +67,6 @@ fn key_lock_for(service: &str, account: &str) -> Arc<Mutex<()>> {
 }
 const SEARCH_API_KEY_SERVICE: &str = "pinvou3-search-api-key";
 const MCP_SECRET_SERVICE: &str = "pinvou3-mcp-secret";
-const LLMAPI_TOKEN_SERVICE: &str = "pinvou3-llmapi-token";
-const LLMAPI_ADMIN_SERVICE: &str = "pinvou3-llmapi-admin";
-const LLMAPI_USER_SESSION_SERVICE: &str = "pinvou3-llmapi-user-session";
-const LLMAPI_USER_PASSWORD_SERVICE: &str = "pinvou3-llmapi-user-password";
 const ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE: &str = "pinvou3-account-platform-refresh-token";
 const IMA_SECRET_SERVICE: &str = "pinvou3-ima-secret";
 const ACP_PROVIDER_KEY_SERVICE: &str = "pinvou3-acp-provider-key";
@@ -107,38 +103,6 @@ impl CredentialReference {
             version: 1,
         }
     }
-    pub fn for_llmapi_token(pinvou_user_id: &str, device_binding_id: &str) -> Self {
-        Self {
-            service: LLMAPI_TOKEN_SERVICE.to_string(),
-            account: format!("llmapi:{pinvou_user_id}:{device_binding_id}"),
-            version: 1,
-        }
-    }
-
-    pub fn for_llmapi_admin() -> Self {
-        Self {
-            service: LLMAPI_ADMIN_SERVICE.to_string(),
-            account: "newapi-admin".to_string(),
-            version: 1,
-        }
-    }
-
-    pub fn for_llmapi_user_session(pinvou_user_id: &str, device_binding_id: &str) -> Self {
-        Self {
-            service: LLMAPI_USER_SESSION_SERVICE.to_string(),
-            account: format!("llmapi-session:{pinvou_user_id}:{device_binding_id}"),
-            version: 1,
-        }
-    }
-
-    pub fn for_llmapi_user_password(pinvou_user_id: &str, device_binding_id: &str) -> Self {
-        Self {
-            service: LLMAPI_USER_PASSWORD_SERVICE.to_string(),
-            account: format!("llmapi-password:{pinvou_user_id}:{device_binding_id}"),
-            version: 1,
-        }
-    }
-
     pub fn for_account_platform_refresh_token() -> Self {
         Self {
             service: ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE.to_string(),
@@ -945,24 +909,6 @@ mod tests {
         assert_eq!(reference.service, "pinvou3-search-api-key");
         assert_eq!(reference.account, "search:metaso");
         assert_eq!(reference.version, 1);
-    }
-
-    #[test]
-    fn llmapi_references_use_dedicated_services() {
-        let token = CredentialReference::for_llmapi_token("u_1", "dev_abc");
-        assert_eq!(token.service, "pinvou3-llmapi-token");
-        assert_eq!(token.account, "llmapi:u_1:dev_abc");
-        assert_eq!(token.version, 1);
-
-        let admin = CredentialReference::for_llmapi_admin();
-        assert_eq!(admin.service, "pinvou3-llmapi-admin");
-        assert_eq!(admin.account, "newapi-admin");
-        assert_eq!(admin.version, 1);
-
-        let password = CredentialReference::for_llmapi_user_password("u_1", "dev_abc");
-        assert_eq!(password.service, "pinvou3-llmapi-user-password");
-        assert_eq!(password.account, "llmapi-password:u_1:dev_abc");
-        assert_eq!(password.version, 1);
     }
 
     #[test]

@@ -72,7 +72,7 @@ let appFirstRenderMarked = false;
 
 const APP_BRIDGE_STATE_DOMAINS = [
   'platform', 'sessions', 'chat', 'voice', 'knowledge', 'scheduled', 'monitor',
-  'settings', 'models', 'llmapi', 'vllm', 'interaction', 'personas', 'workflow',
+  'settings', 'models', 'vllm', 'interaction', 'personas', 'workflow',
   'memory', 'remoteControl', 'updater', 'dependencies',
 ];
 
@@ -530,8 +530,6 @@ function workspaceDisplayName(path) {
         window.PinvouHostFilePickerStrings = misc.hostFilePicker;
         // platform/web/bootstrap.js 的 invoke 拒绝错误文案（web bootstrap 内置中文兜底）。
         window.PinvouWebClientStrings = misc.webClientErrors;
-        // platform/tauri/bridge 下的非模块脚本通过同一入口读取当前语言。
-        window.PinvouTauriBridgeStrings = misc.tauriBridge;
       }, [t]);
       // 有可用新版 → 侧边栏设置图标亮红点（不弹窗不打断）
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);

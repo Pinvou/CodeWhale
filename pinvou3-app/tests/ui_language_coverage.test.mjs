@@ -42,7 +42,6 @@ for (const language of ['zh', 'en', 'ja']) {
     'uiChat',
     'uiChatExtra',
     'uiChatScenes',
-    'uiAccount',
     'uiAccountPlatform',
     'uiWorkflow',
     'uiToolStore',
@@ -104,10 +103,9 @@ for (const language of ['zh', 'en', 'ja']) {
   );
   assert.ok(dict[language].uiChatExtra.draftingScheduled, `${language}.uiChatExtra.draftingScheduled must exist`);
   assert.ok(dict[language].uiChatScenes.attachmentPrompt, `${language}.uiChatScenes.attachmentPrompt must exist`);
-  assert.ok(dict[language].uiAccount.availableQuota, `${language}.uiAccount.availableQuota must exist`);
-  assert.ok(dict[language].uiAccount.settingsLoadFailed, `${language}.uiAccount.settingsLoadFailed must exist`);
-  assert.ok(dict[language].uiAccount.settingsLoadFailedDetail, `${language}.uiAccount.settingsLoadFailedDetail must exist`);
-  assert.ok(dict[language].uiAccount.errors.service_unreachable, `${language}.uiAccount.errors.service_unreachable must exist`);
+  assert.ok(dict[language].uiAccountPlatform.balance, `${language}.uiAccountPlatform.balance must exist`);
+  assert.ok(dict[language].uiAccountPlatform.requestFailed, `${language}.uiAccountPlatform.requestFailed must exist`);
+  assert.ok(dict[language].uiAccountPlatform.errors.oidc_token_endpoint_unavailable, `${language}.uiAccountPlatform.errors.oidc_token_endpoint_unavailable must exist`);
   assert.ok(dict[language].uiToolStore.toolNames.eip, `${language}.uiToolStore.toolNames.eip must exist`);
   assert.ok(dict[language].uiToolStore.toolNames.zhidao, `${language}.uiToolStore.toolNames.zhidao must exist`);
   assert.ok(dict[language].uiToolStore.sso, `${language}.uiToolStore.sso must exist`);
@@ -125,7 +123,6 @@ for (const language of ['zh', 'en', 'ja']) {
     }
     assert.equal(tool.welcomeQueries.length, 4, `${language}.uiToolDetails.tools.${toolId}.welcomeQueries must contain four prompts`);
   }
-  assert.ok(dict[language].uiPlatformMisc.tauriBridge.builtinModelUnavailable, `${language}.uiPlatformMisc.tauriBridge.builtinModelUnavailable must exist`);
   assert.ok(dict[language].uiSettingsDetail.settingsLoadFailed, `${language}.uiSettingsDetail.settingsLoadFailed must exist`);
   // uiMultiAgent 收缩为活键集（ADR-0006）：开关行 + 行内专家卡 + 只读面板。
   // 确认卡/审批链/台账时代的键已随旧入口退役，不再断言存在。
@@ -171,7 +168,6 @@ assert.doesNotMatch(settingsErrorBoundary, /this\.state\.error\.message/);
 assert.doesNotMatch(settingsErrorBoundary, />设置页加载失败</);
 assert.match(main, /t\.uiScheduled\.runStatus\[value\]/);
 assert.doesNotMatch(main, /queued:\s*'等待中'/);
-assert.match(main, /window\.PinvouTauriBridgeStrings = misc\.tauriBridge/);
 
 const petWindow = source('features/pet/PetWindow.jsx');
 assert.match(petWindow, /invokeTauri\(['"]get_settings['"]\)/);
@@ -245,27 +241,24 @@ assert.doesNotMatch(chat, /label:\s*'数据可视化'/);
 assert.doesNotMatch(chat, /`取消\$\{scene\.label\}`/);
 assert.doesNotMatch(chat, /:\s*'描述你想生成或调整的内容'/);
 assert.doesNotMatch(chat, />下载语音识别模型</);
-const tauriSettingsBridge = source('platform/tauri/bridge/settings.js');
-assert.match(tauriSettingsBridge, /root\.PinvouTauriBridgeStrings/);
-
 assert.equal(errorCode({ code: 'sso_timeout', message: '原始诊断' }), 'sso_timeout');
-assert.equal(errorCode(new Error('service_unreachable: raw backend detail')), 'service_unreachable');
+assert.equal(errorCode(new Error('oidc_token_endpoint_unavailable: raw backend detail')), 'oidc_token_endpoint_unavailable');
 assert.equal(errorCode(new Error('raw backend detail')), '');
 assert.equal(
   localizedErrorMessage(
-    new Error('service_unreachable: raw backend detail'),
-    dict.ja.uiAccount.errors,
-    dict.ja.uiAccount.syncFailed,
+    new Error('oidc_token_endpoint_unavailable: raw backend detail'),
+    dict.ja.uiAccountPlatform.errors,
+    dict.ja.uiAccountPlatform.requestFailed,
   ),
-  dict.ja.uiAccount.errors.service_unreachable,
+  dict.ja.uiAccountPlatform.errors.oidc_token_endpoint_unavailable,
 );
 assert.equal(
   localizedErrorMessage(
     new Error('未知的底层诊断'),
-    dict.en.uiAccount.errors,
-    dict.en.uiAccount.syncFailed,
+    dict.en.uiAccountPlatform.errors,
+    dict.en.uiAccountPlatform.requestFailed,
   ),
-  dict.en.uiAccount.syncFailed,
+  dict.en.uiAccountPlatform.requestFailed,
 );
 assert.equal(connectorErrorCodeForStep('runtime'), 'runtime_prepare_failed');
 assert.equal(connectorErrorCodeForStep('cli'), 'cli_install_failed');
@@ -295,19 +288,19 @@ assert.equal(failedAuthorizationFlow.steps.cli, 'done');
 assert.equal(failedAuthorizationFlow.steps.qr, 'error');
 assert.equal(Object.hasOwn(failedAuthorizationFlow.steps, 'authorize'), false);
 assert.equal(Object.hasOwn(failedAuthorizationFlow, 'errorDetail'), false);
-const storedAccountErrorCode = errorCode(new Error('service_unreachable: raw backend detail'));
+const storedAccountErrorCode = errorCode(new Error('oidc_token_endpoint_unavailable: raw backend detail'));
 const englishAccountError = localizedErrorMessage(
   { code: storedAccountErrorCode },
-  dict.en.uiAccount.errors,
-  dict.en.uiAccount.syncFailed,
+  dict.en.uiAccountPlatform.errors,
+  dict.en.uiAccountPlatform.requestFailed,
 );
 const japaneseAccountError = localizedErrorMessage(
   { code: storedAccountErrorCode },
-  dict.ja.uiAccount.errors,
-  dict.ja.uiAccount.syncFailed,
+  dict.ja.uiAccountPlatform.errors,
+  dict.ja.uiAccountPlatform.requestFailed,
 );
-assert.equal(englishAccountError, dict.en.uiAccount.errors.service_unreachable);
-assert.equal(japaneseAccountError, dict.ja.uiAccount.errors.service_unreachable);
+assert.equal(englishAccountError, dict.en.uiAccountPlatform.errors.oidc_token_endpoint_unavailable);
+assert.equal(japaneseAccountError, dict.ja.uiAccountPlatform.errors.oidc_token_endpoint_unavailable);
 assert.notEqual(englishAccountError, japaneseAccountError);
 const semanticAlert = { visible: true, connectorAlert: 'failed', errorCode: 'auth_failed', toolId: 'wecom' };
 const englishAlert = localizeConnectorAlert(semanticAlert, dict.en.uiToolStore, dict.en.uiToolDetails);

@@ -1381,7 +1381,7 @@ export function CodexAcpView({
     draftMode: nativeDraftControls.mode,
     prefs: codePermPrefs,
   });
-  const nativeModelChoices = selectableModels((bs && bs.savedModels) || [], bs && bs.llmApiStatus)
+  const nativeModelChoices = selectableModels((bs && bs.savedModels) || [])
     .map(model => ({ value: model.id, name: selectorMainLabel(model, t) || model.id }));
   const nativeSessionModelId = activeId
     ? (nativeControlsSessionRef.current === activeId ? nativeControls.modelId : null)

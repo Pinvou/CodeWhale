@@ -6,7 +6,6 @@ pub(crate) mod dependencies;
 pub mod feedback;
 pub mod files;
 pub(crate) mod knowledge;
-pub mod llmapi_hub;
 pub(crate) mod local_llm;
 pub mod marketplace;
 pub mod memory;

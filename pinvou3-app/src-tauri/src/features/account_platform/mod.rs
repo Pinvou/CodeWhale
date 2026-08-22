@@ -5,7 +5,9 @@
 //! is never persisted. A successful session stores only its renewable refresh
 //! token in the system credential store so the next launch can sign in again.
 
+pub(crate) mod client_migration;
 mod platform;
+pub(crate) mod runtime_model;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -21,7 +23,6 @@ use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
 
-const ENABLED_ENV: &str = "PINVOU_ACCOUNT_PLATFORM_ENABLED";
 const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
 const TOKEN_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_TOKEN_URL";
 const CLIENT_ID_ENV: &str = "PINVOU_ACCOUNT_OIDC_CLIENT_ID";
@@ -41,9 +42,6 @@ struct AccountPlatformConfig {
 
 impl AccountPlatformConfig {
     fn from_env() -> Result<Self, String> {
-        if !account_platform_enabled() {
-            return Err("account_platform_disabled: account platform is disabled".to_string());
-        }
         if !platform_supported() {
             return Err(
                 "unsupported_platform: desktop OIDC requires Windows, macOS, or Linux".to_string(),
@@ -128,16 +126,7 @@ fn parse_service_base(name: &str, value: &str) -> Result<Url, String> {
 }
 
 pub fn account_platform_enabled() -> bool {
-    enabled_value(optional_env(ENABLED_ENV).as_deref())
-}
-
-fn enabled_value(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+    platform_supported()
 }
 
 const fn platform_supported() -> bool {
@@ -287,14 +276,6 @@ impl AccountPlatformState {
     }
 
     pub async fn status(&self) -> SessionStatus {
-        if !account_platform_enabled() {
-            return SessionStatus {
-                enabled: false,
-                configured: false,
-                authenticated: false,
-                error_code: Some("account_platform_disabled"),
-            };
-        }
         if !platform_supported() {
             return SessionStatus {
                 enabled: true,
@@ -1106,12 +1087,8 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_flag_is_closed_by_default() {
-        assert!(!enabled_value(None));
-        assert!(!enabled_value(Some("false")));
-        assert!(!enabled_value(Some("0")));
-        assert!(enabled_value(Some("true")));
-        assert!(enabled_value(Some(" ON ")));
+    fn account_platform_is_the_only_supported_desktop_path() {
+        assert_eq!(account_platform_enabled(), platform_supported());
     }
 
     #[test]

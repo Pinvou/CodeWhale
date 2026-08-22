@@ -87,16 +87,6 @@ function injectSource() {
         case 'get_settings': return Promise.resolve({theme:'liquid-light',language:'zh-Hans'});
         case 'get_platform_capabilities': return Promise.resolve({codexAcpSupported:true});
         case 'get_effective_model_config': return Promise.resolve({model:'qwen36_35b_256k',base_url:'http://127.0.0.1:8000/v1',api_key_set:false});
-        case 'get_llmapi_status': return window.__LLMAPI_STATUS_ERROR__
-          ? Promise.reject(new Error('temporary llmapi status failure'))
-          : Promise.resolve(window.__LLMAPI_STATUS__ || {
-              backend_user_exists:false,
-              backend_user_state:'not_exists',
-              stale:false
-            });
-        case 'get_llmapi_models': return window.__LLMAPI_MODELS_ERROR__
-          ? Promise.reject(new Error(window.__LLMAPI_MODELS_ERROR_MESSAGE__ || 'temporary llmapi models failure'))
-          : Promise.resolve(window.__LLMAPI_MODELS__ || {available_models:[],default_model:''});
         case 'list_sessions': return Promise.resolve(SESSIONS);
         case 'list_codex_acp_sessions': return Promise.resolve(CODEX_SESSIONS);
         case 'get_codex_acp_status': return Promise.resolve({installed:false,node_supported:false,authenticated:false});
@@ -602,7 +592,7 @@ async function expand(page) {
 
   // ① 启动落草稿页(僵尸 run 不劫持)
   const st = await page.evaluate(() => {
-    const s = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']);
+    const s = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']);
     return { activeSessionId: s.activeSessionId, wfActive: !!(s.workflow && s.workflow.run && s.workflow.run.active), wfSid: s.workflow && s.workflow.run && s.workflow.run.sessionId };
   });
   rec('① 僵尸run不劫持启动(落草稿页+挂看板)', (st.activeSessionId == null) && st.wfActive === true && st.wfSid === 's-zombie', JSON.stringify(st));
@@ -909,133 +899,6 @@ async function expand(page) {
 
   // ①b 工作流入口已合入专家池：从「专家池 > 专家团队」进入三省六部运行态，
   // 仍可停止并预填原需求重开。
-  const coldStartStaleAccountHidden = await page.evaluate(() =>
-    !document.querySelector('[data-testid="llmapi-account-button"]'));
-  await page.evaluate(async () => {
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: true,
-      backend_user_state: 'exists',
-      stale: false,
-      enabled: true,
-      provisioning_status: 'ready',
-    };
-    window.__LLMAPI_MODELS__ = {
-      available_models: ['deepseek-v4-flash'],
-      default_model: 'deepseek-v4-flash',
-    };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    await window.TauriBridge.llmapi.getLlmApiModels();
-  });
-  await page.waitForSelector('[data-testid="llmapi-account-button"]');
-
-  const llmApiRecoveryEntry = await page.evaluate(async () => {
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: true,
-      backend_user_state: 'exists',
-      stale: true,
-      auto_login_failed: true,
-      enabled: true,
-      provisioning_status: 'ready',
-      quota: null,
-    };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    await new Promise(resolve => setTimeout(resolve, 100));
-    document.querySelector('[data-testid="llmapi-account-button"]')?.click();
-    await new Promise(resolve => setTimeout(resolve, 100));
-    const recoveryStatus = window.TauriBridge.state.getMany(['llmapi']).llmApiStatus;
-    const recoveryState = {
-      stale: recoveryStatus && recoveryStatus.stale,
-      autoLoginFailed: recoveryStatus && recoveryStatus.auto_login_failed,
-      backendUserState: recoveryStatus && recoveryStatus.backend_user_state,
-    };
-    const accountButtonVisible = !!document.querySelector('[data-testid="llmapi-account-button"]');
-    const hasRecoveryForm = !!document.querySelector('input[autocomplete="username"]')
-      && !!document.querySelector('input[autocomplete="current-password"]');
-    const hasLoginCopy = document.body.innerText.includes('登录并同步额度');
-    document.querySelector('[data-testid="llmapi-account-button"]')?.click();
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: true,
-      backend_user_state: 'exists',
-      stale: false,
-      auto_login_failed: false,
-      enabled: true,
-      provisioning_status: 'ready',
-    };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    return { hasRecoveryForm, accountButtonVisible, recoveryState, hasLoginCopy };
-  });
-  rec('LLM API 自动登录失败时保留手工登录恢复入口',
-    llmApiRecoveryEntry.hasRecoveryForm,
-    JSON.stringify(llmApiRecoveryEntry));
-
-  const llmApiCacheFallback = await page.evaluate(async () => {
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: false,
-      backend_user_state: 'unknown',
-      stale: true,
-      provisioning_status: 'not_started',
-    };
-    await window.TauriBridge.llmapi.getLlmApiStatus();
-    const retainedAfterUnknown = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']);
-    const keptOnUnknown = retainedAfterUnknown.llmApiStatus
-      && retainedAfterUnknown.llmApiStatus.backend_user_state === 'exists';
-
-    window.__LLMAPI_STATUS_ERROR__ = true;
-    window.__LLMAPI_MODELS_ERROR__ = true;
-    await window.TauriBridge.llmapi.getLlmApiStatus().catch(() => {});
-    await window.TauriBridge.llmapi.getLlmApiModels().catch(() => {});
-    const retained = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']);
-    const keptExisting = retained.llmApiStatus && retained.llmApiStatus.backend_user_exists === true;
-    const keptModels = retained.llmApiModels && retained.llmApiModels.default_model === 'deepseek-v4-flash';
-
-    window.__LLMAPI_STATUS_ERROR__ = false;
-    window.__LLMAPI_MODELS_ERROR__ = true;
-    window.__LLMAPI_MODELS_ERROR_MESSAGE__ = 'send_user_message failed: service_disabled: user has been banned';
-    const accountUiVisibleBeforeDisabled = !!document.querySelector('[data-testid="llmapi-account-button"]');
-    try { await window.TauriBridge.llmapi.getLlmApiModels(); } catch (_) {}
-    const clearedWhenAuthoritative = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).llmApiModels === null;
-    const runtimeStatus = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).llmApiStatus;
-    window.__LLMAPI_MODELS_ERROR__ = false;
-    window.__LLMAPI_MODELS_ERROR_MESSAGE__ = '';
-    window.__LLMAPI_STATUS__ = {
-      backend_user_exists: false,
-      backend_user_state: 'not_exists',
-      stale: false,
-      enabled: false,
-      provisioning_status: 'not_started',
-      last_error_code: 'service_disabled',
-    };
-    const modelRefreshCallsBeforeDisabled = window.__TAURI_INVOKES__
-      .filter(call => call.cmd === 'get_llmapi_models').length;
-    await window.TauriBridge.llmapi.refreshLlmApi();
-    const modelRefreshSkippedWhenDisabled = window.__TAURI_INVOKES__
-      .filter(call => call.cmd === 'get_llmapi_models').length === modelRefreshCallsBeforeDisabled;
-    return {
-      keptOnUnknown,
-      keptExisting,
-      keptModels,
-      clearedWhenAuthoritative,
-      runtimeDisabledApplied: runtimeStatus && runtimeStatus.backend_user_state === 'not_exists'
-        && runtimeStatus.last_error_code === 'service_disabled',
-      modelRefreshSkippedWhenDisabled,
-      accountUiVisibleBeforeDisabled,
-    };
-  });
-  llmApiCacheFallback.coldStartStaleAccountHidden = coldStartStaleAccountHidden;
-  await page.waitForFunction(() => !document.querySelector('[data-testid="llmapi-account-button"]'));
-  llmApiCacheFallback.accountUiHiddenWhenDisabled = await page.evaluate(
-    () => !document.querySelector('[data-testid="llmapi-account-button"]')
-  );
-  rec('LLM API 冷启动不显示陈旧账户，运行时确认不存在或禁用后立即隐藏账户和模型',
-    llmApiCacheFallback.keptOnUnknown && llmApiCacheFallback.keptExisting
-      && llmApiCacheFallback.coldStartStaleAccountHidden
-      && llmApiCacheFallback.keptModels && llmApiCacheFallback.clearedWhenAuthoritative
-      && llmApiCacheFallback.runtimeDisabledApplied
-      && llmApiCacheFallback.modelRefreshSkippedWhenDisabled
-      && llmApiCacheFallback.accountUiVisibleBeforeDisabled
-      && llmApiCacheFallback.accountUiHiddenWhenDisabled,
-    JSON.stringify(llmApiCacheFallback));
-
   // 模型表单可能包含尚未保存的名称、地址和密钥，点击遮罩层不能意外丢失草稿；
   // 只有显式点击“取消”才关闭。
   const modelModalOpened = await page.evaluate(() => {
@@ -1126,7 +989,7 @@ async function expand(page) {
   });
   await sleep(700);
   const stopped = await page.evaluate(() => ({
-    status: window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).workflow.run.status,
+    status: window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).workflow.run.status,
     sessionId: window.__STOP_WORKFLOW_ARGS__ && window.__STOP_WORKFLOW_ARGS__.sessionId,
     brief: (document.querySelector('textarea') || {}).value || '',
   }));
@@ -1170,7 +1033,7 @@ async function expand(page) {
         roles: { taizi: { name: '太子', status: 'running' }, zhongshu: { name: '中书', status: 'reviewing' } },
       } });
     }
-    const run = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).workflow.run;
+    const run = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).workflow.run;
     return { status: run.status, taizi: run.agents.taizi.status, zhongshu: run.agents.zhongshu.status };
   });
   rec(
@@ -1219,7 +1082,7 @@ async function expand(page) {
         roles: { taizi: { name: '太子', status: 'failed', error: '模型服务鉴权失败：HTTP 401 authorization failed' } },
       } });
     }
-    const run = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).workflow.run;
+    const run = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).workflow.run;
     return {
       status: run.status,
       agentError: run.agents.taizi && run.agents.taizi.error,
@@ -1291,10 +1154,10 @@ async function expand(page) {
     .filter(o => o.t.includes('查错') || o.t.includes('发散') || /品|悟/.test(o.x)).length);
   const restored = await page.evaluate(() => {
     const text = document.body.innerText;
-    const artifactPaths = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems
+    const artifactPaths = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems
       .filter(item => item.type === 'artifact_card')
       .map(item => item.path);
-    const restoredShellCards = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.filter(item =>
+    const restoredShellCards = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.filter(item =>
       item.type === 'tool' && item.name === 'exec_shell' && item.args && item.args.command === 'history-shell');
     return {
       history: text.includes('整理纪要'),
@@ -1538,7 +1401,7 @@ async function expand(page) {
   });
   await sleep(200);
   const liveShell = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
+    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'live-shell');
     return {
       running: item && item.state === 'running',
       output: item && item.output,
@@ -1556,7 +1419,7 @@ async function expand(page) {
   });
   await sleep(100);
   const liveShellWait = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
+    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'live-shell-wait');
     return {
       running: item && item.state === 'running',
       output: item && item.output,
@@ -1578,7 +1441,7 @@ async function expand(page) {
   });
   await sleep(100);
   const splitTerminal = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal');
+    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal');
     return item && item.output;
   });
   rec('terminal parser preserves CRLF and ANSI state across live chunks',
@@ -1595,7 +1458,7 @@ async function expand(page) {
     await emit('chat:tool_delta', { session_id:'s1', id:'split-terminal-stderr', stream:'stderr', content:'m' });
   });
   const splitTerminalStderr = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal-stderr');
+    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'split-terminal-stderr');
     return item && item.output;
   });
   rec('terminal parser preserves stderr ANSI state across live chunks',
@@ -1616,7 +1479,7 @@ async function expand(page) {
   });
   await sleep(150);
   const backgroundShell = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
+    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
     const button = document.querySelector('[data-testid="cancel-shell-task"][data-shell-task-id="shell-bg-1"]');
     if (button) button.click();
     return {
@@ -1643,7 +1506,7 @@ async function expand(page) {
     }});
   });
   const backgroundKilled = await page.evaluate(() => {
-    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
+    const item = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(item => item.toolId === 'background-shell');
     return {
       terminal: item && item.state === 'failed' && item.shellStatus === 'Killed' && item.background === false,
       output: item && item.output,
@@ -1663,7 +1526,7 @@ async function expand(page) {
     await emit('chat:tool_start', { session_id:'s1', id:'live-mcp', name:'mcp_gongwen_make_gongwen', args:{} });
     await emit('chat:tool_end', { session_id:'s1', id:'live-mcp', success:true, output:'{"path":"live-report.docx"}' });
   });
-  const liveArtifacts = await page.evaluate(() => window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).artifacts.map(item => item.path));
+  const liveArtifacts = await page.evaluate(() => window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).artifacts.map(item => item.path));
   rec('③b 实时 tool_end 不跟踪 shell path、保留 MCP 产物', liveArtifacts.includes('live-report.docx') && !liveArtifacts.includes('live-validator-fake.html'), JSON.stringify(liveArtifacts));
 
   // ④ 后端 pending 事件必须直达 React 候选卡；三个决策按钮必须调用各自命令。
@@ -1717,13 +1580,13 @@ async function expand(page) {
   });
   await sleep(700);
   const shellRunning = await page.evaluate(() => {
-    const item=window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
+    const item=window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
     return item && {state:item.state,taskId:item.taskId,output:item.output};
   });
   await page.evaluate(() => window.TauriBridge.chat.cancelShellTask('s1','task-live-1'));
   await sleep(700);
   const shellCancelled = await page.evaluate(() => {
-    const item=window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
+    const item=window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems.find(it=>it.taskId==='task-live-1');
     return {item:item&&{state:item.state,exitCode:item.exitCode,output:item.output},args:window.__CANCEL_SHELL_ARGS__};
   });
   rec('③c Shell 实时 tail、省略标记、task_id 取消与退出码',
@@ -1750,7 +1613,7 @@ async function expand(page) {
   });
   await sleep(700);
   const ambiguousBeforeEnd = await page.evaluate(() => {
-    const items=window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems;
+    const items=window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems;
     return ['dup-tool-a','dup-tool-b'].map(id => {
       const item=items.find(it=>it.toolId===id); return item && item.taskId;
     });
@@ -1764,7 +1627,7 @@ async function expand(page) {
   });
   await sleep(500);
   const shellIdentity = await page.evaluate(() => {
-    const items=window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).chatItems;
+    const items=window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).chatItems;
     const a=items.filter(it=>it.taskId==='task-dup-a');
     const b=items.filter(it=>it.taskId==='task-dup-b');
     const done=items.find(it=>it.taskId==='task-detached-done');
@@ -1893,7 +1756,7 @@ async function expand(page) {
   });
   await sleep(3300);
   const timedOutSetup = await page.evaluate(() => {
-    const setup = window.TauriBridge.state.getMany(['chat', 'workflow', 'llmapi', 'vllm']).vllmSetup || {};
+    const setup = window.TauriBridge.state.getMany(['chat', 'workflow', 'vllm']).vllmSetup || {};
     return {
       popup: document.body.innerText.includes('启用本地大模型'),
       state: setup.engine_state,

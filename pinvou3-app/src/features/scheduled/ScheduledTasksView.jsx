@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { Check, ChevronDown, ChevronRight, ClipboardCheck, Clock, FileChartLine, MessageCircle, Newspaper, Play, Plus, Trash2, X } from '../../components/icons.jsx';
 import { bridge, useBridgeState } from '../../hooks/useBridge.js';
-import { isBuiltInLlmApiAvailable, isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
+import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
 import { selectorMainLabel } from '../settings/model-catalog.js';
 import { can } from '../../shared/platform.js';
 import dailyBriefImage from '../../assets/scheduled/daily-brief.jpg';
@@ -534,12 +534,11 @@ import weeklyReviewImage from '../../assets/scheduled/weekly-review.jpg';
           </>
         );
       };
-      const builtinModelAvailable = isBuiltInLlmApiAvailable(appState.llmApiStatus);
-      const savedModels = selectableModels(appState.savedModels || [], appState.llmApiStatus);
+      const savedModels = selectableModels(appState.savedModels || []);
       const activeModel = savedModels.find(model => model.id === appState.activeModelId) || savedModels[0] || null;
       const modelIdForTask = (task) => {
         if (!task) return '';
-        if (task.modelId && (!isBuiltInLlmApiModel({ id: task.modelId }) || builtinModelAvailable)) return task.modelId;
+        if (task.modelId && (!isBuiltInAccountPlatformModel({ id: task.modelId }) || savedModels.some(model => model.id === task.modelId))) return task.modelId;
         if (!task.model) return activeModel && activeModel.id || '';
         const matches = savedModels.filter(model => model.model === task.model);
         return matches.length === 1 ? matches[0].id : '';
@@ -975,10 +974,7 @@ import weeklyReviewImage from '../../assets/scheduled/weekly-review.jpg';
         label: selectorMainLabel(model, t),
         model: model.model,
       }));
-      const detailModelIsUnavailableBuiltin = detailForm &&
-        isBuiltInLlmApiModel({ id: detailForm.modelId }) &&
-        !builtinModelAvailable;
-      if (detailForm && detailForm.modelId && !detailModelIsUnavailableBuiltin && !modelOptions.some(option => option.value === detailForm.modelId)) {
+      if (detailForm && detailForm.modelId && !modelOptions.some(option => option.value === detailForm.modelId)) {
         modelOptions.unshift({ value: detailForm.modelId, label: detailForm.model || detailForm.modelId, model: detailForm.model });
       } else if (detailForm && !detailForm.modelId) {
         modelOptions.unshift({ value: '', label: detailForm.model ? scheduledCopy.reselectModel(detailForm.model) : scheduledCopy.currentModel });

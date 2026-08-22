@@ -15,7 +15,7 @@ fn sanitize_command_error(context: &str, err: impl std::fmt::Display) -> String 
 
 fn prepare_prefs_for_save(mut prefs: UserPrefs) -> Result<UserPrefs, String> {
     let store = SystemCredentialStore::new();
-    prefs.ensure_builtin_llmapi_model();
+    prefs.ensure_builtin_account_platform_model();
     prefs.normalize_saved_model_metadata();
     let migration = prefs.migrate_plaintext_api_keys_with_store(&store);
     if !migration.failed_model_ids.is_empty() || !migration.failed_search_providers.is_empty() {
@@ -221,12 +221,12 @@ pub struct ModelListItem {
 
 impl From<SavedModel> for ModelListItem {
     fn from(model: SavedModel) -> Self {
-        let builtin_llmapi = model.is_builtin_llmapi();
+        let builtin_account_platform = model.is_builtin_account_platform();
         Self {
             model,
-            readonly: builtin_llmapi,
-            system: builtin_llmapi,
-            kind: builtin_llmapi.then(|| "builtin_llmapi".to_string()),
+            readonly: builtin_account_platform,
+            system: builtin_account_platform,
+            kind: builtin_account_platform.then(|| "builtin_account_platform".to_string()),
         }
     }
 }
@@ -274,7 +274,7 @@ pub async fn reveal_model_api_key(id: String) -> Result<Option<String>, String> 
 /// 增或改一条模型(按 id)。前端负责生成稳定 id。
 #[tauri::command]
 pub async fn save_model(model: SavedModel, pool: State<'_, EnginePool>) -> Result<(), String> {
-    if model.is_builtin_llmapi() {
+    if model.is_builtin_account_platform() {
         return Err("内置模型不可编辑".to_string());
     }
     let model_id = model.id.clone();
@@ -296,7 +296,7 @@ pub async fn delete_model(id: String) -> Result<(), String> {
     UserPrefs::update_transaction(|prefs| {
         if prefs
             .model_by_id(&id)
-            .is_some_and(|model| model.is_builtin_llmapi())
+            .is_some_and(|model| model.is_builtin_account_platform())
         {
             return Err("内置模型不可删除".to_string());
         }

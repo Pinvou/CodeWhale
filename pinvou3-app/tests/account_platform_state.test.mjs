@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
@@ -8,6 +8,16 @@ import { AccountPlatformDesktopClient } from '../src/features/account-platform/d
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
+
+async function sourceFiles(root) {
+  const files = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const child = new URL(`${entry.name}${entry.isDirectory() ? '/' : ''}`, root);
+    if (entry.isDirectory()) files.push(...await sourceFiles(child));
+    else if (/\.(?:js|jsx|mjs|rs)$/.test(entry.name)) files.push(child);
+  }
+  return files;
+}
 
 test('account balances convert internal microcredits to display points', () => {
   assert.equal(MICROCREDITS_PER_POINT, 10_000);
@@ -315,7 +325,7 @@ test('desktop account persists only refresh credentials and clears them on logou
 
 test('built-in desktop chat uses the in-memory OIDC session and Token Gateway route', async () => {
   const accountBackend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
-  const runtimeProvider = await readFile(new URL('../src-tauri/src/features/llmapi_hub/runtime_model.rs', import.meta.url), 'utf8');
+  const runtimeProvider = await readFile(new URL('../src-tauri/src/features/account_platform/runtime_model.rs', import.meta.url), 'utf8');
   assert.match(accountBackend, /chat_runtime_authorization/);
   assert.match(accountBackend, /token_gateway_openai_base/);
   assert.match(accountBackend, /\("token", &Method::POST, \["v1", "chat", "completions"\], None\)/);
@@ -331,9 +341,45 @@ test('personal center and desktop chat share one account identity lifecycle', as
   assert.match(accountBackend, /account_user_id: Option<String>/);
   assert.match(accountBackend, /oidc-user-\{account_user_id\}-session-\{generation\}/);
   assert.equal(
-    (commands.match(/pool\.mark_model_updated\(BUILTIN_LLMAPI_MODEL_ID\)/g) || []).length,
+    (commands.match(/pool\.mark_model_updated\(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID\)/g) || []).length,
     3,
   );
+});
+
+test('legacy built-in model data has an idempotent client-only migration', async () => {
+  const migration = await readFile(new URL('../src-tauri/src/features/account_platform/client_migration.rs', import.meta.url), 'utf8');
+  const prefs = await readFile(new URL('../src-tauri/src/platform/prefs/mod.rs', import.meta.url), 'utf8');
+  assert.match(migration, /sessions.*_session_models\.json/s);
+  assert.match(migration, /scheduled-runs.*session-profiles\.json/s);
+  assert.match(migration, /legacy-llmapi-bindings-v1\.json/);
+  assert.match(migration, /MigrationState::CleanupPending/);
+  assert.match(prefs, /migrate_account_platform_model_path/);
+  assert.match(prefs, /LEGACY_BUILTIN_LLMAPI_MODEL_ID/);
+  assert.match(prefs, /BUILTIN_ACCOUNT_PLATFORM_MODEL_ID/);
+});
+
+test('new desktop build has no legacy model runtime or compatibility switch', async () => {
+  const lib = await readFile(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
+  const features = await readFile(new URL('../src-tauri/src/features/mod.rs', import.meta.url), 'utf8');
+  const account = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  assert.doesNotMatch(lib, /commands::llmapi|features::llmapi_hub/);
+  assert.doesNotMatch(features, /llmapi_hub/);
+  assert.doesNotMatch(account, /PINVOU_ACCOUNT_PLATFORM_ENABLED|account_platform_disabled/);
+
+  const allowedMigrationFiles = new Set([
+    '/src-tauri/src/features/account_platform/client_migration.rs',
+    '/src-tauri/src/platform/prefs/mod.rs',
+    '/src-tauri/src/platform/prefs/model.rs',
+  ]);
+  for (const file of [
+    ...await sourceFiles(new URL('../src/', import.meta.url)),
+    ...await sourceFiles(new URL('../src-tauri/src/', import.meta.url)),
+  ]) {
+    const pathname = file.pathname.replace(/\\/g, '/');
+    if ([...allowedMigrationFiles].some(suffix => pathname.endsWith(suffix))) continue;
+    const source = await readFile(file, 'utf8');
+    assert.doesNotMatch(source, /builtin_llmapi|llmapi_hub|get_llmapi|commands::llmapi|PINVOU_ACCOUNT_PLATFORM_ENABLED/, file.pathname);
+  }
 });
 
 test('desktop account restoration starts with the app without blocking startup', async () => {

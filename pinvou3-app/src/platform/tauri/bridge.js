@@ -258,8 +258,6 @@
       runtime: null,
       snapshot_path: "",
     },
-    llmApiStatus: null,
-    llmApiModels: null,
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
     activeModelId: null,
@@ -1268,7 +1266,6 @@
     monitor: ["monitor", "monitorError"],
     settings: ["settings", "selectedPet"],
     models: ["activeModelId", "currentSessionModelId", "effectiveModelConfig", "savedModels"],
-    llmapi: ["llmApiModels", "llmApiStatus"],
     vllm: ["vllmBootstrapDone", "vllmBootstrapError", "vllmBootstrapping", "vllmSetup", "vllmSetupAttempt", "vllmSetupDismissed", "vllmSetupPhase"],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     personas: ["activePersona", "personaEvents", "personaPool"],
@@ -1917,17 +1914,6 @@
   var loadEffectiveModelConfig = settingsFeature.loadEffectiveModelConfig;
   var saveSettings = settingsFeature.saveSettings;
   var saveSettingsAndRestart = settingsFeature.saveSettingsAndRestart;
-  var refreshLlmApiOnStartup = settingsFeature.refreshLlmApiOnStartup;
-  var refreshLlmApi = settingsFeature.refreshLlmApi;
-  var getLlmApiStatus = settingsFeature.getLlmApiStatus;
-  var getLlmApiModels = settingsFeature.getLlmApiModels;
-  var setLlmApiDefaultModel = settingsFeature.setLlmApiDefaultModel;
-  var ensureLlmApiBinding = settingsFeature.ensureLlmApiBinding;
-  var loginLlmApiUser = settingsFeature.loginLlmApiUser;
-  var saveLlmApiUserSession = settingsFeature.saveLlmApiUserSession;
-  var retryLlmApiProvisioning = settingsFeature.retryLlmApiProvisioning;
-  var setLlmApiUserEnabled = settingsFeature.setLlmApiUserEnabled;
-  var getLlmApiAdminOverview = settingsFeature.getLlmApiAdminOverview;
   var saveSearchSettings = settingsFeature.saveSearchSettings;
   var saveSearchSettingsAndRestart = settingsFeature.saveSearchSettingsAndRestart;
   var submitFeedback = settingsFeature.submitFeedback;
@@ -2178,9 +2164,6 @@
     await startupAwait("bridge:load_effective_model", loadEffectiveModelConfig);
     await startupAwait("bridge:load_app_version", loadAppVersion);
     await startupAwait("bridge:load_models", loadModels);
-    refreshLlmApiOnStartup()
-      .catch(function (e) { console.warn("load llmapi account/models failed", e); });
-    startupMark("bridge:llmapi_refresh_started");
     await startupAwait("bridge:refresh_history", refreshHistoryList);
     // 分离会话必须在同一初始化链内绑定目标 id。此前 DetachedShell 的独立 effect
     // 会与这里的 enterDraft() 并发，慢初始化时已加载的原会话会被重置成空白草稿。
@@ -2313,18 +2296,6 @@
       testSearchProvider: testSearchProvider,
     },
     feedback: { submitFeedback: submitFeedback },
-    llmapi: {
-      refreshLlmApi: refreshLlmApi,
-      getLlmApiStatus: getLlmApiStatus,
-      getLlmApiModels: getLlmApiModels,
-      setLlmApiDefaultModel: setLlmApiDefaultModel,
-      ensureLlmApiBinding: ensureLlmApiBinding,
-      loginLlmApiUser: loginLlmApiUser,
-      saveLlmApiUserSession: saveLlmApiUserSession,
-      retryLlmApiProvisioning: retryLlmApiProvisioning,
-      setLlmApiUserEnabled: setLlmApiUserEnabled,
-      getLlmApiAdminOverview: getLlmApiAdminOverview,
-    },
     vllm: {
       discoverLocalVllm: discoverLocalVllm,
       detectLocalVllmSetup: detectLocalVllmSetup,

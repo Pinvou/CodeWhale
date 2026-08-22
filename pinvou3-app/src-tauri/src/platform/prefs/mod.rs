@@ -133,8 +133,9 @@ use model::{
     identify_coding_plan_endpoint, migrated_minimax_base_url, strip_chat_completions_suffix,
 };
 pub use model::{
-    select_builtin_llmapi_model, ModelPreset, BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL,
-    BUILTIN_LLMAPI_DEFAULT_MODEL, BUILTIN_LLMAPI_MODEL_ID, BUILTIN_LLMAPI_MODEL_NAME,
+    select_builtin_account_platform_model, ModelPreset, BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL,
+    BUILTIN_ACCOUNT_PLATFORM_MODEL_ID, BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME,
+    BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL, LEGACY_BUILTIN_LLMAPI_MODEL_ID,
     MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM, MODEL_PROVIDER_KIND_OFFICIAL_API,
 };
 
@@ -174,15 +175,15 @@ pub struct SavedModel {
 }
 
 impl SavedModel {
-    pub fn builtin_llmapi() -> Self {
+    pub fn builtin_account_platform() -> Self {
         Self {
-            id: BUILTIN_LLMAPI_MODEL_ID.to_string(),
-            name: BUILTIN_LLMAPI_MODEL_NAME.to_string(),
+            id: BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string(),
+            name: BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME.to_string(),
             preset: ModelPreset::OpenaiCompatible,
             context_window_tokens: None,
             max_output_tokens: None,
-            model: BUILTIN_LLMAPI_DEFAULT_MODEL.to_string(),
-            base_url: BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL.to_string(),
+            model: BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL.to_string(),
+            base_url: BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL.to_string(),
             provider_kind: Some(MODEL_PROVIDER_KIND_CUSTOM.to_string()),
             vendor: None,
             endpoint_mode: None,
@@ -194,8 +195,8 @@ impl SavedModel {
         }
     }
 
-    pub fn is_builtin_llmapi(&self) -> bool {
-        self.id == BUILTIN_LLMAPI_MODEL_ID
+    pub fn is_builtin_account_platform(&self) -> bool {
+        self.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
     }
 
     fn normalize_route_limits(&mut self) {
@@ -470,10 +471,12 @@ pub struct AdvancedPrefs {
     /// 全局默认/当前激活模型 id(新建会话继承它)。None = 回退列表首条。
     #[serde(default)]
     pub active_model_id: Option<String>,
-    #[serde(default)]
-    pub builtin_llmapi_available_models: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub builtin_llmapi_default_model: Option<String>,
+    #[serde(
+        default,
+        alias = "builtin_llmapi_default_model",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub account_platform_default_model: Option<String>,
     /// MegaCube(GB10) 本地大模型一键引导是否成功跑过一次。
     /// 置真后首屏引导框永不再弹(见 `local_vllm_setup::detect`)。引导失败/被跳过不置真。
     #[serde(default)]
@@ -548,6 +551,9 @@ pub struct CodePermissionPrefs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserPrefs {
+    /// Version of the built-in model path stored in this file. Version 1 is
+    /// the Account Platform + Token Gateway-only path.
+    pub model_path_schema_version: u32,
     pub theme: Theme,
     pub color_scheme: ColorScheme,
     pub language: Language,
@@ -588,18 +594,15 @@ impl UserPrefs {
                 .custom_base_url
                 .as_deref()
                 .is_some_and(|url| migrated_minimax_base_url(url).is_some());
-        let builtin_llmapi_endpoint_changed = prefs.advanced.saved_models.iter().any(|model| {
-            model.id == BUILTIN_LLMAPI_MODEL_ID
-                && model.base_url != BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL
-        });
+        let account_platform_migration_changed = prefs.migrate_account_platform_model_path();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
         prefs.normalize_saved_model_metadata();
         let migration = prefs.migrate_plaintext_api_keys_with_store(&SystemCredentialStore::new());
         let memory_policy_changed = prefs.enforce_memory_locale_policy();
         if persist_normalized
             && (minimax_endpoint_changed
-                || builtin_llmapi_endpoint_changed
+                || account_platform_migration_changed
                 || migration.settings_sanitized
                 || memory_policy_changed)
         {
@@ -718,26 +721,60 @@ impl UserPrefs {
         }
     }
 
-    pub(crate) fn ensure_builtin_llmapi_model(&mut self) {
-        let builtin_model = select_builtin_llmapi_model(
-            &self.advanced.builtin_llmapi_available_models,
-            self.advanced.builtin_llmapi_default_model.as_deref(),
+    pub(crate) fn migrate_account_platform_model_path(&mut self) -> bool {
+        let mut changed = self.model_path_schema_version < 1;
+        let old_model = self
+            .advanced
+            .saved_models
+            .iter()
+            .find(|model| model.id == LEGACY_BUILTIN_LLMAPI_MODEL_ID)
+            .cloned();
+        if let Some(old_model) = old_model {
+            if self
+                .advanced
+                .account_platform_default_model
+                .as_deref()
+                .is_none_or(|model| model.trim().is_empty())
+            {
+                self.advanced.account_platform_default_model = Some(old_model.model.clone());
+            }
+            self.advanced
+                .saved_models
+                .retain(|model| model.id != LEGACY_BUILTIN_LLMAPI_MODEL_ID);
+            if self.advanced.active_model_id.as_deref() == Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID) {
+                self.advanced.active_model_id = Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string());
+            }
+            changed = true;
+        }
+        if self.model_path_schema_version != 1 {
+            self.model_path_schema_version = 1;
+            changed = true;
+        }
+        changed
+    }
+
+    pub(crate) fn ensure_builtin_account_platform_model(&mut self) {
+        let builtin_model = select_builtin_account_platform_model(
+            self.advanced.account_platform_default_model.as_deref(),
         );
         if let Some(model) = self
             .advanced
             .saved_models
             .iter_mut()
-            .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+            .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
         {
-            model.name = BUILTIN_LLMAPI_MODEL_NAME.to_string();
+            model.name = BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME.to_string();
             model.preset = ModelPreset::OpenaiCompatible;
             model.model = builtin_model;
-            model.base_url = BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL.to_string();
+            model.base_url = BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL.to_string();
             model.api_key.clear();
+            model.credential_ref = None;
+            model.credential_state = CredentialState::Missing;
+            model.has_secret = false;
             model.credential_action = None;
             return;
         }
-        let mut model = SavedModel::builtin_llmapi();
+        let mut model = SavedModel::builtin_account_platform();
         model.model = builtin_model;
         self.advanced.saved_models.push(model);
     }
@@ -749,7 +786,7 @@ impl UserPrefs {
         let mut result = CredentialMigrationResult::default();
 
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
@@ -922,7 +959,7 @@ impl UserPrefs {
         }
         self.advanced.custom_api_key = None;
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
@@ -938,7 +975,7 @@ impl UserPrefs {
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false);
         for model in &mut self.advanced.saved_models {
-            if model.is_builtin_llmapi() {
+            if model.is_builtin_account_platform() {
                 model.credential_ref = None;
                 model.credential_state = CredentialState::Missing;
                 model.has_secret = false;
@@ -1094,48 +1131,51 @@ mod tests {
     }
 
     #[test]
-    fn ensure_builtin_llmapi_model_adds_fixed_option() {
+    fn ensure_builtin_account_platform_model_adds_fixed_option() {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
 
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
 
         let model = prefs
-            .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             .expect("built-in model");
-        assert_eq!(model.name, BUILTIN_LLMAPI_MODEL_NAME);
+        assert_eq!(model.name, BUILTIN_ACCOUNT_PLATFORM_MODEL_NAME);
         assert_eq!(model.preset, ModelPreset::OpenaiCompatible);
-        assert_eq!(model.model, BUILTIN_LLMAPI_DEFAULT_MODEL);
-        assert_eq!(model.base_url, BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL);
+        assert_eq!(model.model, BUILTIN_ACCOUNT_PLATFORM_DEFAULT_MODEL);
+        assert_eq!(
+            model.base_url,
+            BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL
+        );
         assert!(model.credential_ref.is_none());
     }
 
     #[test]
-    fn ensure_builtin_llmapi_model_replaces_previous_path_endpoint() {
+    fn ensure_builtin_account_platform_model_replaces_previous_path_endpoint() {
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
         prefs
             .advanced
             .saved_models
             .iter_mut()
-            .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+            .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             .expect("built-in model")
             .base_url = "https://pinvou.com/llmapi/v1".into();
 
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
 
         assert_eq!(
             prefs
-                .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                 .expect("built-in model")
                 .base_url,
-            BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL
+            BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL
         );
     }
 
     #[test]
-    fn load_persists_legacy_builtin_llmapi_endpoint_migration() {
+    fn load_persists_legacy_builtin_model_path_migration() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = TemporaryPrefsHome::new("pinvou3-prefs-builtin-llmapi-migration");
 
@@ -1146,12 +1186,21 @@ mod tests {
         ] {
             let mut prefs = UserPrefs::default();
             prefs.migrate_models();
-            prefs.ensure_builtin_llmapi_model();
+            prefs.ensure_builtin_account_platform_model();
+            let current = prefs
+                .advanced
+                .saved_models
+                .iter_mut()
+                .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                .expect("built-in model");
+            current.id = LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string();
+            prefs.advanced.active_model_id = Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string());
+            prefs.model_path_schema_version = 0;
             prefs
                 .advanced
                 .saved_models
                 .iter_mut()
-                .find(|model| model.id == BUILTIN_LLMAPI_MODEL_ID)
+                .find(|model| model.id == LEGACY_BUILTIN_LLMAPI_MODEL_ID)
                 .expect("built-in model")
                 .base_url = legacy_endpoint.into();
             std::fs::write(
@@ -1163,9 +1212,9 @@ mod tests {
             let loaded = UserPrefs::load();
             assert_eq!(
                 loaded
-                    .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                     .map(|model| model.base_url.as_str()),
-                Some(BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL)
+                Some(BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL)
             );
 
             let persisted: UserPrefs =
@@ -1173,21 +1222,26 @@ mod tests {
                     .expect("parse migrated prefs");
             assert_eq!(
                 persisted
-                    .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
                     .map(|model| model.base_url.as_str()),
-                Some(BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL)
+                Some(BUILTIN_ACCOUNT_PLATFORM_PLACEHOLDER_BASE_URL)
+            );
+            assert_eq!(loaded.model_path_schema_version, 1);
+            assert_eq!(
+                loaded.advanced.active_model_id.as_deref(),
+                Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             );
         }
     }
 
     #[test]
-    fn builtin_llmapi_model_is_not_treated_as_editable_secret_model() {
+    fn builtin_account_platform_model_is_not_treated_as_editable_secret_model() {
         let store = MemoryCredentialStore::default();
         let mut prefs = UserPrefs::default();
         prefs.migrate_models();
-        prefs.ensure_builtin_llmapi_model();
+        prefs.ensure_builtin_account_platform_model();
         let builtin = prefs
-            .model_by_id(BUILTIN_LLMAPI_MODEL_ID)
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
             .cloned()
             .expect("built-in model");
         prefs.upsert_model(SavedModel {
@@ -1201,7 +1255,9 @@ mod tests {
         let result = prefs.migrate_plaintext_api_keys_with_store(&store);
 
         assert_eq!(result.migrated_count, 0);
-        let model = prefs.model_by_id(BUILTIN_LLMAPI_MODEL_ID).unwrap();
+        let model = prefs
+            .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+            .unwrap();
         assert!(model.api_key.is_empty());
         assert!(model.credential_ref.is_none());
         assert_eq!(model.credential_state, CredentialState::Missing);
@@ -1457,6 +1513,7 @@ mod tests {
     #[test]
     fn prefs_roundtrip() {
         let prefs = UserPrefs {
+            model_path_schema_version: 1,
             theme: Theme::LiquidDark,
             color_scheme: ColorScheme::Dark,
             language: Language::En,

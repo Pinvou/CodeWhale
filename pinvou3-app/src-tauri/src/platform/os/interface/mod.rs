@@ -13,7 +13,6 @@ pub use permission::{
     super_permission_turn_reminder,
 };
 #[cfg(target_os = "windows")]
-pub use system::bios_serial_number;
 pub use system::{
     archive_dependency_packages, archive_tool_exists, archive_tool_path, command_exists,
     device_serial_number, email_dependency_packages, email_manual_hint, email_tool_exists,

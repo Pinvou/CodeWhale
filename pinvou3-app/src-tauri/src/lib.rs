@@ -364,6 +364,33 @@ pub fn run() {
             }
             startup::mark("workflow_migrate:done");
 
+            // The Account Platform model cutover owns only client-local data.
+            // It must complete before SessionStore loads per-session model IDs.
+            startup::mark("account_platform_model_migrate:start");
+            match crate::features::account_platform::client_migration::migrate_if_needed() {
+                Ok(report) => {
+                    eprintln!(
+                        "[pinvou3-app] account platform model migration state={:?} session_bindings={} scheduled_profiles={} credentials_removed={} cleanup_errors={}",
+                        report.state,
+                        report.session_bindings_migrated,
+                        report.scheduled_profiles_migrated,
+                        report.credentials_removed,
+                        report.cleanup_errors.len()
+                    );
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[pinvou3-app] account platform model migration failed (will retry next boot): {error:#}"
+                    );
+                    startup::mark_with_detail(
+                        "rust",
+                        "account_platform_model_migrate:error",
+                        &error.to_string(),
+                    );
+                }
+            }
+            startup::mark("account_platform_model_migrate:done");
+
             // 多对话历史 store：用 ~/.pinvou3/sessions/ 隔离 deepseek-tui 全局目录。
             // 必须先 boot 这个，engine forwarder 需要它跟踪 active session 的 mode_state
             // 以便 TurnComplete 时判定是否 emit chat:plan_ready。
@@ -464,7 +491,7 @@ pub fn run() {
                 tool_factory,
                 tool_policy,
                 std::sync::Arc::new(
-                    crate::features::llmapi_hub::runtime_model::LlmApiRuntimeModelProvider::new(
+                    crate::features::account_platform::runtime_model::AccountPlatformRuntimeModelProvider::new(
                         handle.clone(),
                     ),
                 ),
@@ -739,15 +766,6 @@ pub fn run() {
             commands::sessions::clear_session,
             commands::monitor::get_monitor_snapshot,
             commands::monitor::get_backend_status,
-            commands::llmapi::ensure_llmapi_binding,
-            commands::llmapi::login_llmapi_user,
-            commands::llmapi::save_llmapi_user_session,
-            commands::llmapi::get_llmapi_status,
-            commands::llmapi::get_llmapi_models,
-            commands::llmapi::set_llmapi_default_model,
-            commands::llmapi::retry_llmapi_provisioning,
-            commands::llmapi::set_llmapi_user_enabled,
-            commands::llmapi::get_llmapi_admin_overview,
             commands::monitor::discover_local_vllm,
             commands::local_llm::detect_local_vllm_setup,
             commands::local_llm::bootstrap_local_vllm,

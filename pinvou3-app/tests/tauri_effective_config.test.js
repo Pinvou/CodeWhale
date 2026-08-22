@@ -41,12 +41,10 @@ const noRuntime = () => null;
 assert.deepEqual(
   parseEnvironmentFile(`
     # comment
-    PINVOU_ACCOUNT_PLATFORM_ENABLED=1
     export PINVOU_ACCOUNT_OIDC_CLIENT_ID="pinvou-desktop-dev"
     PINVOU_ACCOUNT_SERVICE_URL=https://example.test/account # public endpoint
   `),
   {
-    PINVOU_ACCOUNT_PLATFORM_ENABLED: "1",
     PINVOU_ACCOUNT_OIDC_CLIENT_ID: "pinvou-desktop-dev",
     PINVOU_ACCOUNT_SERVICE_URL: "https://example.test/account",
   },

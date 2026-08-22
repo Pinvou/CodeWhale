@@ -9,7 +9,7 @@ import { DEFAULT_PET_ID } from '../pet/pet-registry.js';
 import { TeamRelayAccessSettings } from '../team-relay/TeamRelayAccessSettings.jsx';
 import { bridge, isLocalModel } from '../../hooks/useBridge.js';
 import { formatSessionDate } from '../../shared/date-utils.js';
-import { isBuiltInLlmApiModel, selectableModels } from '../../shared/model-options.js';
+import { isBuiltInAccountPlatformModel, selectableModels } from '../../shared/model-options.js';
 import { can, isWeb } from '../../shared/platform.js';
 import { buildComposerToolMenuState } from './composer-tool-menu-logic.js';
 import { notifyComposerToolsChanged } from '../tools/tool-events.js';
@@ -517,7 +517,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           setMultiAgentBusy(false);
         }
       }
-      const savedModels = selectableModels((bs && bs.savedModels) || [], bs && bs.llmApiStatus);
+      const savedModels = selectableModels((bs && bs.savedModels) || []);
       const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
       const activeModelId = bs && bs.activeModelId;
       const currentSessionModelId = sessionModelIdProp !== undefined ? sessionModelIdProp : (bs && bs.currentSessionModelId);
@@ -1989,10 +1989,6 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const [feedbackStatus, setFeedbackStatus] = useState({ state: 'idle', message: '', receipt: null });
       const [feedbackNotice, setFeedbackNotice] = useState('');
       const [archivedDeleteConfirm, setArchivedDeleteConfirm] = useState(null);
-      const [llmApiModelBusy, setLlmApiModelBusy] = useState(false);
-      const llmApiModels = (bs && bs.llmApiModels) || {};
-      const builtinAvailableModels = llmApiModels.available_models || [];
-      const builtinDefaultModel = llmApiModels.default_model || (((bs && bs.settings && bs.settings.advanced && bs.settings.advanced.builtin_llmapi_default_model) || '') || '');
       const versionUpdateRef = useRef(null);
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const archivedSessions = (bs && bs.archivedSessions) || [];
@@ -2100,16 +2096,6 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         setArchivedDeleteConfirm(null);
         if (id && onDeleteArchived) onDeleteArchived(id);
       };
-      const refreshBuiltinModels = async () => {
-        if (!bridge.available || !bridge.llmapi.refreshLlmApi) return;
-        setLlmApiModelBusy(true);
-        try { await bridge.llmapi.refreshLlmApi(); } finally { setLlmApiModelBusy(false); }
-      };
-      const setBuiltinDefaultModel = async model => {
-        if (!bridge.available || !bridge.llmapi.setLlmApiDefaultModel || !model) return;
-        setLlmApiModelBusy(true);
-        try { await bridge.llmapi.setLlmApiDefaultModel(model); } finally { setLlmApiModelBusy(false); }
-      };
       // 进设置页自动体检一次可选依赖装齐没; 之后用户可手动「重新检测」
       useEffect(() => {
         if (!canInstallDependencies || !bridge.available || (bs && (bs.deps || bs.depsChecking))) return;
@@ -2203,9 +2189,9 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             : 'bg-[#34C759]/15 text-[#248A3D]'
         }`}>{children}</span>
       );
-      const userModels = selectableModels(savedModels || [], bs && bs.llmApiStatus)
+      const userModels = selectableModels(savedModels || [])
         .slice()
-        .sort((a, b) => Number(isBuiltInLlmApiModel(b)) - Number(isBuiltInLlmApiModel(a)));
+        .sort((a, b) => Number(isBuiltInAccountPlatformModel(b)) - Number(isBuiltInAccountPlatformModel(a)));
       const searchOptions = [
         { key: 'bing', label: 'Bing', desc: settingsCopy.searchDescriptions.bing },
         { key: 'metaso', label: t.uiSettingsView.searchProviderMetaso, desc: settingsCopy.searchDescriptions.metaso },
@@ -2319,30 +2305,11 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`text-[15px] leading-5 font-normal truncate text-[#1C1C1E] dark:text-[#F2F2F7]`}>{title}</span>
                 {isLocal && <Tag tone="gray">{settingsCopy.localModel}</Tag>}
-                {isBuiltInLlmApiModel(m) && <Tag tone="gray">{settingsCopy.builtinModel}</Tag>}
+                {isBuiltInAccountPlatformModel(m) && <Tag tone="gray">{settingsCopy.builtinModel}</Tag>}
                 {codingPlan && <Tag tone="gray">Coding Plan</Tag>}
                 {isActive && <Tag>{settingsCopy.defaultTag}</Tag>}
               </div>
               <div className="mt-0.5 text-[12px] leading-[17px] truncate text-[#8A8A8E] dark:text-[#98989D]">{providerLabel} · {m.model}</div>
-              {isBuiltInLlmApiModel(m) && (
-                <div className="mt-2 flex items-center gap-2 flex-wrap">
-                  <span className="text-[12px] text-[#8A8A8E] dark:text-[#98989D]">{t.builtinModelSelect}</span>
-                  <select
-                    value={builtinDefaultModel || m.model || ''}
-                    disabled={llmApiModelBusy || builtinAvailableModels.length === 0}
-                    onChange={e => setBuiltinDefaultModel(e.target.value)}
-                    className="min-w-[220px] max-w-full rounded-lg border px-3 py-1.5 text-[12px] outline-none bg-white border-black/[0.12] text-[#1C1C1E] dark:bg-[#1E1F20] dark:border-white/[0.10] dark:text-[#F2F2F7]"
-                  >
-                    {builtinAvailableModels.length === 0 ? (
-                      <option value={m.model || ''}>{t.builtinModelEmpty}</option>
-                    ) : builtinAvailableModels.map(model => <option key={model} value={model}>{model}</option>)}
-                  </select>
-                  <button onClick={refreshBuiltinModels} disabled={llmApiModelBusy}
-                    className={`min-h-8 px-3 rounded-full text-[14px] font-medium disabled:opacity-50 ${actionButton('blue')}`}>
-                    {llmApiModelBusy ? t.builtinModelLoading : t.builtinModelRefresh}
-                  </button>
-                </div>
-              )}
             </div>
             <div className="shrink-0 flex items-center gap-2">
               {!isReadonly && <button onClick={() => setEditingModel({ ...m, __scope: isLocal ? 'local' : 'cloud' })} className={`min-h-8 px-3 rounded-full text-[14px] font-medium ${actionButton('blue')}`}>{settingsCopy.edit}</button>}

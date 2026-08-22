@@ -230,21 +230,6 @@ command_protocol!(
     ]
 );
 command_protocol!(
-    llmapi_protocol,
-    "llmapi.rs",
-    [
-        "ensure_llmapi_binding",
-        "login_llmapi_user",
-        "save_llmapi_user_session",
-        "get_llmapi_status",
-        "get_llmapi_models",
-        "set_llmapi_default_model",
-        "retry_llmapi_provisioning",
-        "set_llmapi_user_enabled",
-        "get_llmapi_admin_overview"
-    ]
-);
-command_protocol!(
     marketplace_protocol,
     "marketplace.rs",
     [
