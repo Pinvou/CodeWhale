@@ -1,0 +1,495 @@
+# 账号平台部署与运维
+
+> 状态：当前部署基线
+>
+> 校准日期：2026-08-22
+>
+> 安全要求：本文只列配置名称和占位符，不保存真实域名、IP、账号、密码、AccessKey、Token 或商城密钥。
+
+## 1. 部署形态
+
+### 1.1 当前实际形态
+
+当前环境运行在单台 Linux 主机上：
+
+- Docker Compose 管理账号平台应用服务和基础设施。
+- 仓库基础定义为 `deploy/compose/compose.yaml`，远程公共 URL 覆盖为 `compose.remote.yaml`，生产环境还可叠加不入库的站点专用 override。
+- 宿主机反向代理终止 HTTPS，并把允许公开的路径转发到回环端口。
+- 独立 New API 为模型数据面，由 Token Gateway 通过私网/容器网络调用。
+- 发布物放在带 Git Commit 和时间戳的版本目录，稳定符号链接指向当前版本。
+- 数据库、Redis、NATS、New API 和内部管理端口不直接向公网开放。
+
+该形态是可运维的单机部署，但不是高可用架构。主机、Docker Engine 或本地 PostgreSQL 故障会影响整个平台。
+
+### 1.2 仓库提供的目标形态
+
+`deploy/helm/account-platform/` 是 Kubernetes/Helm 生产目标模板，包含 Deployment、Service、健康检查、指标抓取和网络策略等材料。除非实际集群已经部署并验证，不得以 Chart 存在为由宣称当前环境具备多副本、高可用、自动故障转移或既定 RPO/RTO。
+
+## 2. 服务与端口
+
+Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维访问：
+
+| 组件 | 回环端口 | 生产公开策略 |
+|---|---:|---|
+| Keycloak | 18080 | 只公开 Realm 登录和静态资源路径；不公开 `/admin/` |
+| Account Service | 18101 | 仅反代桌面注册/账号所需路径 |
+| Billing Service | 18102 | 不直接公开；通过 Portal/Gateway BFF |
+| Token Gateway | 18103 | 反代 OIDC 保护的模型和用户业务入口 |
+| Payment Simulator | 18104 | 仅开发/测试；生产不得公开或选用 |
+| Token Portal | 18105 | 公开个人中心、管理后台及同源 `/api/*` |
+| Compose 内 New API profile | 18106 | 仅本机初始化/受限管理；模型调用走私网 |
+| PostgreSQL / Redis / NATS | 不绑定公网 | 仅 backend 网络 |
+| Event Relay ×3 | 不公开 | 指标与健康仅供内部监控 |
+
+远程部署必须把所有用户可见 URL 统一到 `<public-base-url>`，避免 OIDC issuer、回调 URL、Cookie 域和桌面配置不一致。
+
+## 3. 服务清单
+
+生产业务服务：
+
+- `account-service`
+- `billing-service`
+- `token-gateway`
+- `token-portal`
+- `account-event-relay`
+- `billing-event-relay`
+- `token-event-relay`
+- `keycloak`
+- `postgres`
+- `redis`
+- `nats`
+- 独立 `newapi`
+
+一次性迁移服务：
+
+- `account-migrate`
+- `billing-migrate`
+- `token-migrate`
+
+仅开发/测试服务：
+
+- `mock-newapi`
+- `payment-simulator`
+- `payment-simulator-migrate`
+
+站点可以保留测试容器以便隔离测试，但生产 Provider 选择、反向代理和网络策略必须确保用户流量永远不会进入它们。
+
+## 4. 目录约定
+
+建议的单机发布布局：
+
+```text
+/opt/
+  pinvou-account-platform-<commit>-<timestamp>/
+    account-platform/
+    pinvou3-app/
+    scripts/
+    VERSION
+    .env                         # 站点 Secret，不入仓库
+    compose.site.yaml            # 站点覆盖，不入仓库
+  pinvou-account-platform-current -> pinvou-account-platform-<commit>-<timestamp>/
+  pinvou-account-platform-backups/
+    <deployment-id>/
+```
+
+不要在原目录上直接覆盖源码。新版本在独立目录完成构建、迁移和验证后，再原子切换 `pinvou-account-platform-current`。
+
+## 5. 前置条件
+
+- Linux 主机、Docker Engine 和 Compose Plugin。
+- 可解析且已配置 TLS 的 `<public-base-url>`。
+- 反向代理能够访问本机回环端口。
+- 独立 New API 已初始化管理员、供应商 Channel 和最小权限 API Token，并能按请求 ID 查询用量日志。
+- 阿里云短信认证的 RAM AccessKey、签名和模板已审核可用。
+- 新华三商城环境、App 凭据和四个商品 SKU 已可联调。
+- Secret 通过主机 Secret 文件、Docker Secret、Vault/KMS 或平台 Secret 管理注入；不能进入 Git。
+- 发布前有足够空间保存新镜像、数据库备份和上一个可回滚版本。
+- 已明确发布负责人、数据库负责人、支付尾单负责人和回滚决策人。
+
+## 6. 配置清单
+
+### 6.1 通用与数据库
+
+| 类别 | 配置名 |
+|---|---|
+| Compose | `COMPOSE_PROJECT_NAME`、`PUBLIC_BASE_URL` |
+| PostgreSQL 管理 | `ACCOUNT_PLATFORM_POSTGRES_PASSWORD` |
+| 分库密码 | `ACCOUNT_DB_PASSWORD`、`BILLING_DB_PASSWORD`、`TOKEN_DB_PASSWORD`、`KEYCLOAK_DB_PASSWORD` |
+| 开发库密码 | `PAYMENT_SIM_DB_PASSWORD`、`NEWAPI_DB_PASSWORD` |
+| 内部鉴权 | `INTERNAL_SERVICE_TOKEN` |
+
+每个数据库用户必须使用不同随机密码。生产环境不得沿用 `.env.example` 中的占位值。
+
+### 6.2 OIDC 与 Keycloak
+
+- `KEYCLOAK_ADMIN_USERNAME`
+- `KEYCLOAK_ADMIN_PASSWORD`
+- `KEYCLOAK_PROVISIONER_CLIENT_ID`
+- `KEYCLOAK_PROVISIONER_CLIENT_SECRET`
+- 各服务的 `OIDC_ISSUER`、`OIDC_JWKS_URL`、`OIDC_AUDIENCE`
+- Portal 的 `PORTAL_PUBLIC_URL`、`PORTAL_OIDC_AUTHORIZATION_URL`、`PORTAL_OIDC_TOKEN_URL`、`PORTAL_OIDC_CLIENT_ID`
+
+`OIDC_ISSUER` 必须与外部 Token 中的 issuer 完全一致；容器访问 JWKS 可使用内部 URL，但不能改变验证的 issuer。
+
+### 6.3 手机认证
+
+- `MOBILE_AUTH_ENABLED`
+- `ALIYUN_SMS_ACCESS_KEY_ID`
+- `ALIYUN_SMS_ACCESS_KEY_SECRET`
+- `ALIYUN_SMS_SIGN_NAME`
+- `ALIYUN_SMS_REGISTER_TEMPLATE`
+- `ALIYUN_SMS_LOGIN_TEMPLATE`
+- `ALIYUN_SMS_ENDPOINT`
+
+RAM 用户只授予发送和核验验证码所需的最小权限。AccessKey 不写入命令行参数、Shell 历史或日志；泄露后立即轮换。
+
+### 6.4 新华三商城
+
+- `H3C_MALL_BASE_URL`
+- `H3C_MALL_APP_KEY`
+- `H3C_MALL_APP_SECRET`
+- `BILLING_PAYMENT_PROVIDER=h3c_mall`
+- `BILLING_ALLOW_TENTATIVE_PRICES`
+
+UAT 联调可显式允许暂定目录；正式环境必须冻结商品后关闭该开关。商城特殊状态映射由 H3C 适配层处理，不能通过通用环境变量绕过服务端商品目录。
+
+### 6.5 Token Gateway 与 New API
+
+- `TOKEN_SECRET_PROVIDER`
+- `TOKEN_SECRET_KEY_ID`
+- `TOKEN_LOCAL_KEK_BASE64`（仅开发/测试）
+- `TOKEN_PROVIDER_ALLOWED_HOSTS`
+- `TOKEN_DEFAULT_PROVIDER`
+- `TOKEN_DEFAULT_PROVIDER_BASE_URL`
+- `TOKEN_DEFAULT_PROVIDER_API_KEY`
+- `TOKEN_DEFAULT_PROVIDER_MODELS`
+- `TOKEN_DEFAULT_ROUTE_PRIORITY`
+- `TOKEN_GATEWAY_MAX_INPUT_TOKENS`
+- `TOKEN_RECONCILIATION_NEWAPI_BASE_URL`
+- `TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN`
+- `TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID`
+- `TOKEN_RECONCILIATION_INTERVAL_SECONDS`
+
+`production`/`production-new` 环境必须拒绝本地 KEK，使用 KMS/Vault 类 Provider。Provider URL 必须是 HTTPS 且主机精确命中白名单。
+
+### 6.6 桌面端
+
+- `PINVOU_ACCOUNT_PLATFORM_ENABLED`
+- `PINVOU_ACCOUNT_OIDC_ISSUER` 或显式 Token URL
+- `PINVOU_ACCOUNT_OIDC_CLIENT_ID`
+- `PINVOU_ACCOUNT_SERVICE_URL`
+- `PINVOU_TOKEN_GATEWAY_URL`
+
+开发态 `npm run dev` 不需要每次生成安装包。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
+
+## 7. 本地开发
+
+1. 将 `account-platform/deploy/compose/.env.example` 复制为被 Git 忽略的 `.env`。
+2. 为每个占位 Secret 生成不同随机值。
+3. 从仓库根运行：
+
+```text
+node scripts/account-platform.mjs dev up
+```
+
+4. 首次需要真实 New API 时，按 `deploy/runbooks/newapi-deployment.md` 初始化最小权限 Token 和 Channel。
+5. 启动桌面应用使用项目既有开发命令；不要为 UI/接口联调生成安装包。
+6. 停止环境：
+
+```text
+node scripts/account-platform.mjs dev down
+```
+
+`dev down` 不应被用于生产。集成测试使用独立 Compose project，并只清理自己的卷。
+
+## 8. 单机 Compose 发布流程
+
+下面流程以 `<release-dir>`、`<backup-dir>` 和 `<compose-files>` 为占位符。站点专用配置和 Secret 不进入仓库。
+
+### 8.1 发布前检查
+
+1. 确认目标 Git Commit、当前运行 Commit、数据库迁移版本和当前符号链接。
+2. 检查工作树/发布包来源，确保构建内容可追溯且不包含本地私人文件。
+3. 运行与变更范围相符的测试：
+
+```text
+node scripts/account-platform.mjs verify
+node scripts/account-platform.mjs test integration
+```
+
+支付、故障和安全变更按需要增加：
+
+```text
+node scripts/account-platform.mjs test e2e
+node scripts/account-platform.mjs test fault
+node scripts/account-platform.mjs test security
+```
+
+4. 检查磁盘空间、Docker 可用空间、数据库健康、待处理支付订单、有效 Hold、Outbox 积压和死信。
+5. 验证 Secret 文件权限，确认不会被复制到公开日志或提交。
+
+### 8.2 创建版本目录
+
+1. 创建 `/opt/pinvou-account-platform-<commit>-<timestamp>`。
+2. 将已审核源码或发布包复制到版本目录。
+3. 从当前部署安全复制 `.env` 和站点 override，仅保留受限权限。
+4. 在版本目录记录完整 Git Commit 和构建时间。
+5. 不修改当前稳定符号链接，不停止现有服务。
+
+### 8.3 数据库备份
+
+迁移前至少备份：
+
+- PostgreSQL globals/roles。
+- Account 数据库。
+- Billing 数据库。
+- Token 数据库。
+- Keycloak 数据库。
+- 独立 New API 数据库（若本次变更涉及）。
+
+备份写入 `<backup-dir>/<deployment-id>`，生成校验和并执行最小可读性检查。Billing 备份是资金恢复依据，未验证备份时不得迁移。
+
+即使此前部署后人工删除过迁移备份，也不能把“无需备份”固化为流程。可按保留策略在稳定观察期和恢复演练完成后清理旧备份，但发布前备份仍是必需门禁。
+
+### 8.4 构建镜像
+
+在新版本目录使用仓库 Compose 与站点 override 构建业务和迁移镜像：
+
+```text
+docker compose --env-file <secret-env> <compose-files> build \
+  account-service billing-service token-gateway token-portal \
+  account-event-relay billing-event-relay token-event-relay \
+  account-migrate billing-migrate token-migrate
+```
+
+如果站点需要 Go Module 代理，只通过受控构建参数临时配置，不在仓库硬编码区域性代理，也不把代理凭据写入镜像层。
+
+### 8.5 执行迁移
+
+迁移顺序：
+
+1. `account-migrate`
+2. `billing-migrate`
+3. `token-migrate`
+
+每个迁移任务必须退出码为 0，再继续下一个。迁移器记录版本和校验和；已应用迁移文件不得修改，只能新增更高版本。迁移器可兼容仅换行符不同的旧校验和，但不接受语义内容变化。
+
+不要默认执行 down migration。涉及破坏性 Schema 的发布必须先提供前向兼容阶段和单独数据迁移方案。
+
+### 8.6 替换应用服务
+
+迁移完成后只更新应用服务，不主动重建正在运行且无需变更的 PostgreSQL、Redis、NATS 和独立 New API：
+
+```text
+docker compose --env-file <secret-env> <compose-files> up -d --no-deps \
+  account-service billing-service token-gateway token-portal \
+  account-event-relay billing-event-relay token-event-relay
+```
+
+使用 `--no-deps` 的前提是基础设施已经健康、网络和服务名没有变化。若发布涉及基础设施，必须使用单独审批和维护窗口。
+
+### 8.7 切换稳定链接
+
+应用和公共烟测通过后，原子更新：
+
+```text
+/opt/pinvou-account-platform-current -> /opt/pinvou-account-platform-<commit>-<timestamp>
+```
+
+符号链接只表示当前发布源码/配置位置；正在运行容器的镜像 Commit 仍需通过健康响应或镜像标签独立验证。
+
+## 9. 首次或升级后初始化 Keycloak
+
+### 9.1 平台管理员
+
+在受控终端临时注入管理员用户名和密码，执行可重复运行的初始化脚本：
+
+```text
+docker compose --env-file <secret-env> <compose-files> exec \
+  -e PINVOU_ADMIN_USERNAME -e PINVOU_ADMIN_PASSWORD keycloak \
+  sh /opt/keycloak/data/import/provision-platform-admin.sh
+```
+
+脚本确保用户和 `platform-admin` Realm 角色存在。密码不能写入仓库、共享聊天、部署日志或永久 Shell 配置。
+
+### 9.2 手机认证 Flow
+
+已有 Keycloak 数据卷启用手机登录后执行：
+
+```text
+docker compose --env-file <secret-env> <compose-files> exec keycloak \
+  sh /opt/keycloak/data/import/provision-mobile-auth.sh
+```
+
+该脚本安装手机 Direct Grant Flow、服务账号权限和手机号 Claim，并调整注册用户资料要求。脚本可重复执行；执行后验证密码登录、短信登录和新用户 bootstrap。
+
+## 10. 反向代理与公网路径
+
+建议只公开：
+
+- Portal 页面与其同源 `/api/*`。
+- Keycloak Realm 认证和静态资源路径。
+- Account 的注册、短信、bootstrap 和桌面白名单业务路径。
+- Token Gateway 的聊天、余额、权益、充值和个人用量路径。
+
+不得公开：
+
+- Keycloak `/admin/`。
+- Billing Service 原始端口和 `/internal/*`。
+- Account/Gateway 的 `/internal/*`。
+- PostgreSQL、Redis、NATS 和 Relay 端口。
+- New API 管理面及 Provider Token。
+- Payment Simulator 和 Mock New API。
+- 服务独立 Metrics 端口。
+
+反向代理必须传递可信的 `X-Forwarded-Proto`/Host，限制请求体大小，并为 SSE 禁用代理缓冲和配置合理的长连接超时。不要让客户端覆盖内部身份头或服务凭据头。
+
+## 11. 发布后验证
+
+### 11.1 服务健康
+
+业务服务提供：
+
+- `/health/live`：进程存活。
+- `/health/ready`：关键依赖可用，失败返回 503。
+- 独立 Metrics 监听地址上的 `/metrics`。
+
+至少验证 Account、Billing、Gateway、Portal 和三个 Relay；再检查 Keycloak Realm discovery、NATS health 和 New API status。
+
+### 11.2 公共烟测
+
+使用测试账号在 `<public-base-url>` 验证：
+
+1. Keycloak issuer、JWKS、Token audience 和 HTTPS 正确。
+2. 密码登录及自动登录恢复。
+3. 滑块、注册短信或短信登录的最小路径（不得在日志输出验证码）。
+4. Account bootstrap、个人信息、无组织时隐藏组织页签。
+5. 余额、权益包和用量列表。
+6. 内置模型非流式和流式请求各一次，New API 请求 ID、Hold 和结算一致。
+7. 管理后台只有 `platform-admin` 可访问，凭据只显示元数据。
+8. 系统运行页的服务、NATS、Relay 和 New API 状态可信。
+
+### 11.3 支付烟测
+
+UAT 只使用明确的测试商品和测试商城账号：
+
+1. 创建订单前确认商品金额、SKU、积分和有效期。
+2. 返回二维码和应付金额必须与商城事实一致。
+3. 客户端退出后，Billing 继续轮询。
+4. 商城 PAID 后仅入账一次，权益包与平衡账本一致。
+5. 重复查询、服务重启和晚到支付不重复入账。
+6. 退款、主动关单、回调和账单对账入口保持禁用/不支持。
+
+## 12. 日志与可观测性
+
+### 12.1 日志位置
+
+当前 Compose 服务以结构化 JSON 写标准输出/错误，首选通过 Docker 查看：
+
+```text
+docker compose --env-file <secret-env> <compose-files> logs --since 30m <service>
+docker logs --since 30m <container>
+```
+
+Docker 的底层 JSON 日志通常由 Engine 保存在其数据目录，但运维不应直接编辑或删除正在使用的日志文件，应配置 Docker 日志轮转或集中日志采集。
+
+New API 自身日志位置由其独立部署定义决定；核对用量优先调用受控日志查询 API，不通过应用日志推算资金事实。
+
+### 12.2 关联字段
+
+- `X-Request-ID`
+- `X-Trace-ID`
+- `traceparent`
+- 业务资源 ID（只在受控系统中记录订单 ID、Usage Request ID 等）
+- 服务名、环境、版本和 Commit
+
+禁止记录密码、短信验证码、Access/Refresh Token、Cookie、商城 App Secret、阿里云 AccessKey Secret、内部服务 Token、New API Admin Token 和真实供应商密钥。
+
+### 12.3 关键告警
+
+- Readiness 连续失败或 5xx/延迟升高。
+- Billing 账本不平或余额投影不一致。
+- PENDING/本地过期支付订单持续增长。
+- `REVIEW`/`SETTLEMENT_PENDING` 用量请求超出自动核对窗口。
+- 有效 Hold 过期、无法解释或长期未收敛。
+- Outbox 积压、Relay 重试、NATS Consumer Lag 和死信增长。
+- 商城用户同步任务持续失败。
+- PostgreSQL/NATS 卷和 Docker 数据目录空间不足。
+
+## 13. 回滚
+
+### 13.1 应用回滚
+
+只有当数据库 Schema 与上一版本镜像向后兼容时，才能：
+
+1. 停止新增发布动作，保留支付轮询、用量核对和事件投递。
+2. 用上一版本镜像对应用服务执行 `up -d --no-deps`。
+3. 恢复稳定符号链接。
+4. 重新执行健康、身份、聊天、账本和支付尾单验证。
+
+不要因为应用回滚而停止 Billing 对已创建订单的查询，也不要释放结果仍不确定的模型 Hold。
+
+### 13.2 数据库恢复
+
+数据库恢复只用于确认的数据事故，必须先冻结相关写流量并保全故障现场。跨库恢复需要统一恢复点，否则 Account、Billing、Token 和 Keycloak 可能失去引用一致性。
+
+优先采用前向修复；只有经过演练并获得事故负责人批准才恢复备份。Billing 恢复后必须运行账本平衡、订单、权益包、Hold 和支付交易审计；Token 恢复后必须核对 Usage 与 New API 日志；Account 恢复后必须核对身份和组织所有者。
+
+具体 SQL 和检查见：
+
+- `deploy/runbooks/backup-restore.md`
+- `deploy/runbooks/sql/account-restore-audit.sql`
+- `deploy/runbooks/sql/billing-ledger-audit.sql`
+- `deploy/runbooks/sql/token-restore-audit.sql`
+
+## 14. 备份、保留和安全清理
+
+必须备份的持久状态：PostgreSQL 各数据库、NATS JetStream、独立 New API 数据和部署 Secret 的受控副本。Redis Portal 会话可丢失并要求用户重新登录，不应把 Redis 当长期事实源。
+
+可以在确认当前版本稳定、备份保留策略满足且不影响恢复目标后清理：
+
+- 已被新版本替代的旧源码发布目录。
+- 不再引用的旧应用镜像和构建缓存。
+- 超出保留期且已有更近可验证备份的迁移临时备份。
+- 已轮转且不被容器使用的归档日志。
+
+不得直接删除：
+
+- 当前符号链接目标和上一可回滚版本。
+- 正在运行容器引用的镜像、挂载目录或日志文件。
+- PostgreSQL、NATS 或 New API 的活跃数据卷。
+- 尚未收敛支付、Hold、人工修复和审计所需的数据。
+- 当前有效的 `.env`、站点 override 和 Secret，除非已有受控替代且服务验证完成。
+
+清理前先用只读命令核对 Docker 容器、镜像引用、卷挂载、目录绝对路径和磁盘占用；不要对未解析变量、通配符、`/opt` 根目录或 Docker 根目录执行递归删除。
+
+## 15. Kubernetes/Helm 部署摘要
+
+Chart 位于 `deploy/helm/account-platform/`。使用前：
+
+1. 为所有镜像固定不可变 tag/digest。
+2. 使用外部 Secret 管理，不把 Secret 值写进 values 文件或渲染产物。
+3. 将 PostgreSQL、Redis、NATS、Keycloak 和 New API 的持久性、高可用和备份责任明确分配给平台组件或托管服务。
+4. 配置 Ingress 只公开允许路径，NetworkPolicy 默认拒绝并只放行必要服务流向。
+5. 迁移使用一次性 Job，并在应用滚动前完成。
+6. 为应用配置 readiness/liveness、资源请求限制、PodDisruptionBudget 和指标采集。
+7. Keycloak Admin 使用 port-forward/VPN/受限入口，不建公网 Ingress。
+8. 先在非生产命名空间执行 Helm 渲染、合同测试、故障测试和恢复演练。
+
+示例只使用占位符：
+
+```text
+helm upgrade --install <release> account-platform/deploy/helm/account-platform \
+  --namespace <namespace> --create-namespace \
+  -f <non-secret-values.yaml>
+```
+
+## 16. 相关 Runbook
+
+- `deploy/runbooks/backup-restore.md`
+- `deploy/runbooks/cutover-rollback.md`
+- `deploy/runbooks/newapi-deployment.md`
+- `deploy/runbooks/keycloak-admin-access.md`
+- `deploy/runbooks/event-delivery.md`
+- `deploy/runbooks/observability.md`
+- `deploy/runbooks/rpo-rto-exercise-template.md`

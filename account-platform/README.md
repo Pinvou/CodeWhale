@@ -1,10 +1,18 @@
 # Pinvou Account Platform
 
-账号平台是独立于当前生产 New API 的新服务集合。架构与实施基线见：
+账号平台是独立于 New API 模型数据面的账号、组织、计费与模型访问控制服务集合。目标需求与当前实现分开维护，文档见：
 
-- [`../docs/账号组织Token与计费系统-架构设计.md`](../docs/账号组织Token与计费系统-架构设计.md)
-- [`../docs/账号组织Token与计费系统-实施任务与验证计划.md`](../docs/账号组织Token与计费系统-实施任务与验证计划.md)
+- [`docs/README.md`](docs/README.md)
+- [`docs/architecture.md`](docs/architecture.md)
+- [`docs/requirements.md`](docs/requirements.md)
+- [`docs/implementation-status.md`](docs/implementation-status.md)
+- [`docs/role-system-design.md`](docs/role-system-design.md)
+- [`docs/sms-verification-provider-design.md`](docs/sms-verification-provider-design.md)
+- [`docs/call-flows.md`](docs/call-flows.md)
+- [`docs/deployment.md`](docs/deployment.md)
 - [`docs/adr/`](docs/adr/)
+
+根目录下的旧架构设计与实施计划保留为历史方案基线，不作为当前完成度和实际部署形态的事实源。
 
 ## 服务
 
@@ -14,7 +22,7 @@
 - `token-portal`：OIDC Authorization Code + PKCE、Redis 服务端会话和同源 CSRF 保护的 Web BFF；OIDC Token 不进入浏览器 JavaScript。
 - `payment-simulator`：仅开发/测试使用的三渠道支付模拟器。
 
-当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单与支付查询、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、生产 Helm 和恢复 Runbook。新华三待支付订单由 Billing 在服务端持续查询，客户端关闭二维码页面后仍可按商城事实完成入账。商城合同暂未提供的退款、关闭、支付回调与账单对账接口保持关闭，运营台同步禁用这些操作，不以本地模拟冒充真实能力。
+当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单与支付查询、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、Helm 目标模板和恢复 Runbook。当前实际环境使用单机 Compose，尚不具备 Helm 目标形态所代表的高可用能力。新华三待支付订单由 Billing 在服务端持续查询，客户端关闭二维码页面后仍可按商城事实完成入账。商城合同暂未提供的退款、关闭、支付回调与账单对账接口保持关闭，运营台同步禁用这些操作，不以本地模拟冒充真实能力。
 
 ## 桌面端 OIDC
 

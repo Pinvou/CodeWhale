@@ -44,4 +44,4 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 确定性集成烟测使用独立 project：`node scripts/account-platform.mjs test integration`。命令会启动完整栈、验证五个 Readiness、请求/Trace 关联头和 Portal 安全头，然后仅删除该测试 project 的卷。
 
-数据库、Redis、NATS 和服务间网络不对公网开放。Compose 是开发/测试拓扑，不是生产部署模板。Payment Simulator 不得进入生产环境。
+数据库、Redis、NATS 和服务间网络不对公网开放。`compose.yaml` 是可重复的开发/测试基础拓扑；当前单机环境在它之上叠加 `compose.remote.yaml` 和不入库的站点专用覆盖运行，实际流程见 [`../../docs/deployment.md`](../../docs/deployment.md)。Kubernetes 生产目标仍以 Helm Chart 为准，不能把基础 Compose 文件单独当作高可用生产模板。Payment Simulator 不得承接生产流量。

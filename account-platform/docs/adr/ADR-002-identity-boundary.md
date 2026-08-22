@@ -13,6 +13,8 @@ Keycloak 负责注册、登录、密码、MFA、会话、OIDC 和令牌签发。
 
 桌面密码只在一次 Tauri IPC 和 HTTPS Token 请求中存在，不持久化、不写日志；仅 Refresh Token 进入系统凭据存储。Direct Access Grant 不承担注册、找回密码、第三方身份或复杂 MFA，这些能力必须走独立的受控流程。
 
+注册中 Identity 与 Account 均成功后，账号事实已经成立并持久进入 `PROVISIONING`。个人钱包由 Billing 异步初始化；Billing 故障只能延迟平台模型和充值能力，不能回滚或删除已经验证成功的手机号身份。超过 Provisioning SLA 后进入 `REPAIR_REQUIRED`，仍允许登录和管理资料。
+
 JWT 只携带稳定身份、会话和粗粒度上下文，不携带余额、组织树或完整资源授权。高风险操作实时回源 Account Service。
 
 ## 被拒绝方案

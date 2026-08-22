@@ -5,6 +5,8 @@
 > 架构依据：[账号、组织、Token 与计费系统架构设计](账号组织Token与计费系统-架构设计.md)  
 > 本轮范围：先定义任务、依赖、测试、校验和交付门禁，不开始业务代码实现。
 
+> **历史文档提示（2026-08-22）：** 本文是实施前计划，不代表当前完成度。目标需求以 [`../account-platform/docs/requirements.md`](../account-platform/docs/requirements.md) 为准；当前实现、差距和证据以 [`../account-platform/docs/implementation-status.md`](../account-platform/docs/implementation-status.md) 为准；实际调用与部署请参阅同目录下的当前文档。
+
 ## 1. 实施结论与当前边界
 
 ### 1.1 本计划的完成目标
