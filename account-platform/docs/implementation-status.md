@@ -14,43 +14,51 @@
 
 | 字段 | 要求 |
 |---|---|
-| `source_commit` | 实现所在提交；本次快照仓库 HEAD 为 `d3ec1b70e5ae74461b9bdf08157684fe22c7cb8a` |
+| `source_commit` | 本轮审计所依据的提交；当前为 `75a29f822f339787c3a3457f521209368e2f6f34`。它证明结论对应的代码快照，不表示所有实现均由该提交引入 |
 | `tests` | 覆盖正常、权限拒绝、幂等、异常与恢复路径的测试名称或报告 |
 | `deployment_version` | 已验证的部署版本、环境和验证时间；未部署写 `NOT_DEPLOYED` |
 | `known_gaps` | 与目标需求的剩余差异、Provider 降级和未验证风险 |
 
-当前各矩阵中的“当前实现/边界”可作为 `known_gaps` 初始内容；提交、测试和部署证据尚未逐项完成审计，统一标记为 `待补证`。完成代码审计后应按需求编号维护独立证据记录，不得只修改文字状态。
+当前各矩阵中的“当前实现/边界”可作为 `known_gaps` 初始内容。已完成代码审计的项目使用下列共享证据编号；未逐项审计的项目继续标记 `待补证`。本轮未取得任何实际部署环境、制品版本或验证时间证据，因此所有已审计项目的 `deployment_version` 仍为 `NOT_DEPLOYED`。
+
+| 证据编号 | 审计内容 | 结果 |
+|---|---|---|
+| `AUDIT_HEAD` | 当前分支代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；提交 `75a29f822f339787c3a3457f521209368e2f6f34` | 通过代码审阅；不等同生产部署 |
+| `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
+| `CONTRACT-36` | 在 `account-platform/` 执行 `npm test` | OpenAPI lint 与 36 个合同测试通过 |
+| `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/36 个合同测试、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
 - 功能矩阵第一列是规范的 `target_requirement_id`，必须与 `requirements.md` 同义；不得使用行号、标题或自由文本代替。
 - 历史 `CR-*` 是变更记录编号，不是目标需求编号，必须通过 1.1 节的 `target_requirement_id` 列映射到一个或多个目标能力。
 - 既有 `ID/ACC/TOK/BILL/PAY/UI/ADM/NFR` 状态项与同名目标编号一一对应；目标文档新增的编号先进入下表，完成代码审计后再改变状态。
-- `SNAPSHOT_HEAD` 表示 `d3ec1b70e5ae74461b9bdf08157684fe22c7cb8a`；它是本轮需求修订前的代码审计起点，不能单独作为实现完成证据。
+- `AUDIT_HEAD` 表示 `75a29f822f339787c3a3457f521209368e2f6f34`；`SNAPSHOT_HEAD` 仅表示旧状态表的历史占位。两者都不能单独作为生产完成或部署证据。
 
 | target_requirement_id | 当前状态 | source_commit | tests | deployment_version | known_gaps |
 |---|---|---|---|---|---|
 | REQ-ID-01 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需建立强制编号检查 |
 | REQ-ID-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需将证据字段纳入发布门禁 |
 | REQ-ID-03 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需建立文档规范性语句检查 |
-| CORE-01 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Identity 事实源边界待代码审计 |
-| CORE-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Account 事实源边界待代码审计 |
-| CORE-03 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Commerce Mapping 边界待代码审计 |
-| CORE-04 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Billing 账本事实源待代码审计 |
-| CORE-05 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 凭据解密边界待代码审计 |
-| CORE-06 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 不确定结果证据状态机待代码审计 |
-| CORE-07 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 跨服务收敛机制待代码审计 |
-| SCOPE-01 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 本地独立模型边界待验证 |
-| SCOPE-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 个人中心入口和 API 待清理核验 |
-| SCOPE-03 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需核验所有组织角色均无法读取或管理平台/组织作用域的真实 Token Account、路由、凭据和 Provisioning |
-| SCOPE-04 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 旧运行时路径尚未完成删除验收 |
-| SCOPE-05 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需建立只允许修改品悟客户端及相关文件的变更范围门禁 |
-| ID-15 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Billing 故障不得删除已验证身份待实现核验 |
+| CORE-01 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Keycloak/Identity 与 Account 映射边界已存在；生产部署与 Identity 边界密码策略仍待补 |
+| CORE-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Account 自有用户、组织和 Session 上下文；平台权限仍依赖 Keycloak Realm Role，全局上下文未实现 |
+| CORE-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有新华三专用 `mall_user_sync_jobs`，尚无供应商中立 Commerce Mapping 模型 |
+| CORE-04 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 平衡不可变账本已实现；组成级权益、应收和完整支付事实模型未实现 |
+| CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
+| CORE-06 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 模型不确定结果可进入 REVIEW 并核对 New API；支付和流式派发证据状态机不完整 |
+| CORE-07 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 三服务具备 Outbox/Inbox/Relay；注册、注销、退款和 Provisioning Saga 缺失 |
+| SCOPE-01 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 本地独立模型仍受保护，账号平台迁移不删除用户自建模型 |
+| SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人中心已移除自管 Token Account 页面；Gateway 仍保留受限普通用户 API，不影响当前 UI 范围结论 |
+| SCOPE-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 普通用户接口过滤 PLATFORM 账号并拒绝修改；组织业务策略与平台路由的完整隔离矩阵未建立 |
+| SCOPE-04 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 桌面运行时不再引用旧 `llmapi_hub`/旧功能开关；仍缺安装与发布制品证明 |
+| SCOPE-05 | 部分实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 当前改动范围可审计，但尚无自动化发布范围门禁 |
+| ID-15 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Account 创建失败会补偿删除 Keycloak Identity；钱包仍同步调用，未满足已验证身份不因 Billing 故障删除的持久恢复模型 |
 | ID-17 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少密码预检、最终策略和注册幂等指纹只位于 Identity 边界的强制隔离 |
 | ID-18 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少首尾空格明确拒绝及禁止 trim、规范化、转换和截断的端到端契约 |
-| ACC-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 注册持久 PROVISIONING 成功边界待实现核验 |
-| ACC-03 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | PROVISIONING 登录/资料允许及模型/充值门禁待实现核验 |
-| ACC-04 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Provisioning SLA 超时转 REPAIR_REQUIRED 待实现核验 |
+| ACC-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | `PROVISIONING` 已持久化，但注册响应仍同步依赖钱包初始化成功 |
+| ACC-03 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 未形成 PROVISIONING 可登录/资料可用而模型和充值关闭的完整门禁 |
+| ACC-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无 Provisioning SLA、自动重试和 `REPAIR_REQUIRED` 状态 |
 | ACC-15 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 顶层组织创建需独立核验权限、幂等和审计 |
 | ACC-16 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 组织搜索需独立核验授权过滤、分页和稳定排序 |
 | ACC-17 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 组织启用需独立核验恢复条件、幂等和版本递增 |
@@ -85,24 +93,24 @@
 | ACC-53 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少贯穿短信、Identity、Account 和钱包的稳定注册操作 ID、指纹与幂等键 |
 | ACC-54 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少 Identity 已创建但 Account 未提交的30分钟恢复、24小时补偿门禁和安全释放顺序 |
 | ACC-55 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少不可枚举注册操作查询、签名令牌和脱敏恢复状态契约 |
-| TOK-04 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 协议能力目录待实现核验 |
-| TOK-07 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | CATALOG_VISIBLE 待实现核验 |
+| TOK-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前只有 `/v1/chat/completions`，没有版本化协议能力目录 |
+| TOK-07 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 没有独立模型目录和 `CATALOG_VISIBLE` 状态 |
 | TOK-09 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 托管路由 PENDING/READY/FAILED/REPAIR_REQUIRED 状态机及自动/人工修复待实现 |
 | TOK-10 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 目录、托管路由 Provisioning、上下文资格、请求预占、Hold 与上游调用的强制顺序待实现 |
-| TOK-12 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | CONTEXT_ELIGIBLE 上下文资格待实现核验 |
-| TOK-16 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 客户端可调用提示非权威及 Gateway 每请求重判待实现核验 |
-| TOK-17 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 每协议版本化预占公式待实现核验 |
-| TOK-18 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 公式缺省参数按 0 及配置缺失拒绝待实现核验 |
-| TOK-20 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | RESERVABLE 请求级实时计算与 Hold 原子创建边界待实现核验 |
-| TOK-21 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Hold 创建时快照待实现核验 |
-| TOK-23 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 长调用 Hold 续租待实现核验 |
+| TOK-12 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Gateway 每请求检查 Account 上下文和路由共享策略；缺目录/Provisioning 联合资格状态 |
+| TOK-16 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Gateway 会在请求时重选路由并预占；客户端提示与目标资格版本未完整实现 |
+| TOK-17 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有固定输入/输出/缓存输入定价，无协议版本化预占公式 |
+| TOK-18 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无公式参数默认值及公式配置缺失运行时契约 |
+| TOK-20 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 请求级最大费用在上游前计算并创建 Hold；公式、组成和跨服务原子边界未实现 |
+| TOK-21 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 请求保存价格与路由引用；没有公式/协议/逐单位价格完整快照 |
+| TOK-23 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 没有长调用 Hold 续租和追加预占 |
 | TOK-25 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 幂等键仍需统一为稳定用户级模型推理命名空间并移除 Session/上下文/协议作用域差异 |
 | TOK-26 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少版本化规范化请求指纹及同键异请求 409 防护 |
 | TOK-27 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少非终态、结果载荷、流事件、防重墓碑的分层保留与 410 过期契约 |
 | TOK-28 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少加密流事件日志、单调序号、完整性校验及按确认序号重放 |
 | TOK-29 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少断线不取消及按执行状态恢复流、结果或核对状态的统一契约 |
 | TOK-30 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少 Hold 后派发状态机、EnsureHold 幂等、派发不确定时禁止盲重试及过期恢复规则 |
-| TOK-35 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少客户端旧数据盘点、幂等迁移、凭据清理、历史会话保留和本地独立模型保护 |
+| TOK-35 | 部分实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 已有盘点报告、配置备份、幂等迁移、会话/任务模型迁移和凭据清理重试；缺安装崩溃注入与制品级验收 |
 | TOK-36 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少发布、安装、运行三层门禁，更新器尚未证明迁移预检失败不替换旧版本及二进制/配置原子提交回滚 |
 | TOK-37 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少不创建用户 Hold、不产生用户费用的客户端切换 readiness、隔离合成验收身份及绑定制品/环境/服务版本的短时签名准入证明 |
 | TOK-38 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少按原请求所有者授权、持久化取消意图、派发前安全终止及竞态处理的幂等取消命令 |
@@ -115,22 +123,22 @@
 | TOK-45 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少以历史版本为来源向前创建新版本、按当前依赖重新校验并原子发布的目录回滚 |
 | TOK-46 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少逻辑模型、目录、协议、能力、价格和路由代次的独立版本生成规则及请求全版本快照 |
 | TOK-47 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少弃用宽限期、新会话/历史继续分离门禁、显式替代分支及下架在途请求处理 |
-| BILL-04 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Outbox 驱动个人钱包异步初始化待实现核验 |
-| BILL-05 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | BASE/BONUS 类型约束待实现核验 |
-| BILL-09 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 按权益组成分配待实现核验 |
-| BILL-10 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 批量部分成功待实现核验 |
-| BILL-11 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 授予撤回重建待实现核验 |
-| BILL-12 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 普通可撤回授予返回原组成并排除 `ACCOUNT_CLOSED` 专用回收待实现核验 |
-| BILL-13 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 非账号注销的成员移除暂停与原用户 ID 恢复待实现核验 |
-| BILL-16 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 现行同日到期消费顺序待实现核验 |
-| BILL-20 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 版本化计量单位计价待实现核验 |
+| BILL-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Account 注册同步调用 `EnsurePersonalWallet`，没有 Outbox 驱动的异步初始化 |
+| BILL-05 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 商品有 BASE/BONUS 字段，但入账和权益包只保存合计，未形成组成类型约束 |
+| BILL-09 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Hold 只按聚合权益包分配，没有按 BASE/BONUS 组成分配 |
+| BILL-10 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组成级批量授权及逐项部分成功契约 |
+| BILL-11 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组成级授予撤回与重建 |
+| BILL-12 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无 `ACCOUNT_CLOSED` 专用回收和原组成恢复 |
+| BILL-13 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无成员移除后的授予暂停/恢复状态 |
+| BILL-16 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 仅按权益包到期时间消费，无法执行同日 BONUS 优先于 BASE |
+| BILL-20 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有固定三元组价格，没有版本化计量单位 |
 | BILL-23 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 公式引用单位与固定价格/模型级显式继承配置项的严格绑定待实现 |
 | BILL-24 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | INPUT_TOKEN 与 CACHED_INPUT_TOKEN 互斥归一化和防重复计费待实现 |
 | BILL-25 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 固定零价格、模型级显式继承与缺失配置的数据、发布和运行时语义区分待实现 |
-| BILL-29 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 钱包负余额与独立应收同事务双记待实现核验 |
-| BILL-30 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 负余额只冻结对应个人或组织上下文待实现核验 |
-| BILL-31 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 应收清偿来源限制待实现核验 |
-| BILL-32 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | BONUS 债务隔离与延迟激活待实现核验 |
+| BILL-29 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无独立应收表和钱包负余额同事务双记模型 |
+| BILL-30 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无应收驱动的上下文级冻结 |
+| BILL-31 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无应收清偿分配和来源限制 |
+| BILL-32 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无 BASE/BONUS 债务隔离和延迟激活 |
 | BILL-33 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 订单级拒付冲销隔离、关联权益撤销和对应钱包上下文冻结待实现 |
 | BILL-34 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少可信实际生成量、客户端交付量和平台不可恢复交付故障之间的计费证据边界 |
 | BILL-35 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少取消期间 Hold 的派发前释放、派发后续租、期限收敛和晚到证据处理规则 |
@@ -145,51 +153,51 @@
 | BILL-44 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少 DRAFT/PUBLISHED/ACTIVE/ENDED/CANCELLED 生命周期、生效前撤销和 ACTIVE 显式提前结束模式 |
 | BILL-45 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少逐单位最终价格与来源的 Hold 不可变快照，以及撤销、结束、替代和回滚后的续租/结算约束 |
 | PAY-11 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 订单一对多支付流水、权益包单一成功流水来源及多成功流水独立履约/复核待实现 |
-| PAY-12 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 不可变支付证据待实现核验 |
+| PAY-12 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | `payment_notifications` 保留回调证据；查询/账单统一不可变证据模型未实现 |
 | PAY-13 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 订单关闭、支付流水、退款和拒付独立状态机及订单派生摘要待实现 |
-| PAY-14 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 各支付领域对象内部的资金状态单调归并待实现核验 |
+| PAY-14 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前订单/流水更新有状态校验，但独立支付、退款、拒付状态机未建立 |
 | PAY-19 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少72小时边界最后查询、停止高频查询及转人工审核的确定性任务 |
-| PAY-20 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 晚到和多笔实收待实现核验 |
-| PAY-23 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 组织付款人 Commerce Mapping 待实现核验 |
+| PAY-20 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 一单一流水唯一约束无法表达晚到多笔实收及逐笔履约/复核 |
+| PAY-23 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组织购买和组织付款人 Commerce Mapping |
 | PAY-24 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 退款目标同时绑定支付流水和权益包并校验来源关系待实现 |
-| PAY-25 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 缺少 BASE/关联 BONUS 任一累计消费即拒绝、消费冲正不恢复资格及未收敛资金异常阻断的普通退款预检核验 |
+| PAY-25 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 现有退款按订单聚合剩余量与比例计算，无法检查 BASE/关联 BONUS 累计消费和资金异常 |
 | PAY-26 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 只按目标全部未消费 BASE 计算现金退款、关联 BONUS 零折现及无普通部分退款状态待实现 |
 | PAY-27 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 退款意图锁定、BASE/关联 BONUS 消费复查与冻结、仅按 BASE 预约现金金额、冲销快照、请求与 Outbox 原子提交待实现 |
-| PAY-28 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 退款冻结权益包待实现核验 |
-| PAY-29 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 原渠道退款待实现核验 |
-| PAY-31 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 退款能力降级待实现核验 |
+| PAY-28 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 现有退款没有目标权益包组成冻结和 Outbox 恢复 |
+| PAY-29 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 通用接口调用原 Provider 退款；新华三明确不支持，且目标绑定/幂等恢复未实现 |
+| PAY-31 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider capabilities 可拒绝不支持动作；UI 仍显示禁用按钮，未按需求完全隐藏入口 |
 | PAY-32 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 渠道部分强制退款作为既成外部事实、不受普通退款资格预检拒绝的独立异常、权益冻结、复核和订单应收待实现 |
 | PAY-35 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 无账单降级尚未与无回调 Provider 的正式收款准入和72小时人工审核闭合 |
 | PAY-37 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少72小时未收敛订单的唯一人工审核案件、责任人、复核 SLA、next_review_at 和逾期升级 |
 | PAY-38 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少对无回调无账单 Provider 的历史查询、有限晚到窗口、权威终态和正式收款准入校验 |
 | PAY-39 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少最晚确认期限、最终成功查询、权威未支付终态及冲突/申诉检查组成的归档门禁 |
 | PAY-40 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少 PROVIDER_BLIND 状态、责任升级、禁止静默归档和必要时停用新订单的闭环 |
-| UI-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 注册初始化状态反馈待实现核验 |
+| UI-02 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 后端注册仍同步等待钱包，前端没有异步初始化/修复状态反馈 |
 | UI-13 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少停止接收、取消处理中、Provider 不支持取消、待核对和已结算的用户状态反馈 |
 | UI-14 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少注销阶段、脱敏阻断项和用户恢复动作展示 |
 | UI-15 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少未完成注册查询、处理中/修复中展示及防重复注册恢复流程 |
 | ADM-11 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 组织模型业务策略与平台 Token Account、真实路由及凭据运营权限隔离待实现 |
-| ADM-12 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 计量单位定义管理待独立核验 |
-| ADM-13 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 价格版本管理待独立核验 |
-| ADM-14 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 钱包状态查询待独立核验 |
-| ADM-15 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 钱包账本详情查询待独立核验 |
-| ADM-16 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 应收管理待独立核验 |
-| ADM-17 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 人工积分调整待独立核验 |
-| ADM-18 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Hold 运营待独立核验 |
-| ADM-19 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 支付订单运营待独立核验 |
-| ADM-20 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 退款运营待独立核验 |
-| ADM-21 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Billing 对账管理待独立核验 |
-| ADM-22 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Billing 修复执行待独立核验 |
-| ADM-23 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 模型协议定义管理待独立核验 |
-| ADM-24 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 协议预占公式版本管理待独立核验 |
-| ADM-25 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Token Account 生命周期管理待独立核验 |
-| ADM-26 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 凭据元数据查询待独立核验 |
-| ADM-27 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 凭据有效性检查待独立核验 |
-| ADM-28 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 模型路由管理待独立核验 |
-| ADM-29 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Provisioning 状态查询待独立核验 |
-| ADM-30 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | Provisioning 修复待独立核验 |
-| ADM-31 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 用量请求与证据查询待独立核验 |
-| ADM-32 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 用量核对人工重试待独立核验 |
+| ADM-12 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无计量单位定义表、生命周期或后台入口 |
+| ADM-13 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有固定三元组价格版本管理；缺单位/公式/完整生命周期和并发发布约束 |
+| ADM-14 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 管理后台可查询钱包状态；生产授权隔离仍需部署验证 |
+| ADM-15 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 管理后台可查询 Journal/Posting，数据库保护已入账分录不可变 |
+| ADM-16 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无独立应收模型和管理页面 |
+| ADM-17 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有人工调整申请/审批和平衡入账；尚无统一审批命令框架 |
+| ADM-18 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有 Hold 查询/释放；缺目标异常状态与组成级证据 |
+| ADM-19 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有订单查询、同步和修复；目标多流水与完整支付状态机缺失 |
+| ADM-20 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有旧订单级部分退款，不满足目标普通退款运营模型 |
+| ADM-21 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有模拟器账单对账基础；新华三无账单且四方证据模型未完成 |
+| ADM-22 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有支付修复动作；缺统一幂等命令、审批和完整状态快照 |
+| ADM-23 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无模型协议定义管理 |
+| ADM-24 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无协议预占公式版本管理 |
+| ADM-25 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可管理平台 Token Account 生命周期；目标平台业务 RBAC 未实现 |
+| ADM-26 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可查询脱敏凭据元数据；目标细分角色隔离未实现 |
+| ADM-27 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有凭据检查动作；目标细分角色隔离和统一错误契约待补 |
+| ADM-28 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有路由 CRUD 和确定性选择；模型目录/Provisioning 代次缺失 |
+| ADM-29 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无托管 Provisioning 状态和代次视图 |
+| ADM-30 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无托管 Provisioning 修复命令 |
+| ADM-31 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可查询用量请求和上游引用；缺流事件/请求指纹/完整证据 |
+| ADM-32 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有用量核对人工重试且不重发模型请求；完整幂等收敛仍待目标实现 |
 | ADM-33 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少晚到支付案件筛选、认领、受审计查询、复核安排、归档和事实盲区升级页面 |
 | ADM-34 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少注销 REPAIR_REQUIRED 队列、阶段重试及禁止绕过门禁的运营能力 |
 | ADM-35 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少注册 REPAIR_REQUIRED 队列、Identity/Account 阶段重试及受证明门禁约束的补偿能力 |
@@ -220,7 +228,7 @@
 | NFR-37 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少月度抽样、季度端到端和年度灾难恢复演练及整改复测 |
 | NFR-38 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少支付/账本/审计/用量三年、普通日志90天及到期清除证明的分类策略 |
 | NFR-39 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少登录按IP/设备/标识/用户/会话的统一限流和反枚举验证 |
-| NFR-40 | 部分实现、待扩展 | SNAPSHOT_HEAD | 待补证 | 待补证 | 已有手机号60秒与小时限制基础，缺少IP/设备/用途/日上限及统一Provider配额门禁 |
+| NFR-40 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有手机号60秒与小时限制基础，缺少IP/设备/用途/日上限及统一Provider配额门禁 |
 | NFR-41 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少支付按付款人/受益组织/IP/订单/动作/Provider的多维限流 |
 | NFR-42 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少模型按用户/上下文/组织/模型/路由的请求速率和并发准入 |
 | NFR-43 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少跨个人、组织、节点、角色、缓存、批量、导出和事件路径的自动隔离矩阵 |
@@ -229,12 +237,12 @@
 | NFR-46 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少三授时源、100ms目标、250ms告警、1s退出就绪及时间敏感操作门禁 |
 | NFR-47 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少当前及前两桌面版本合同测试、90天兼容、60天通知和稳定淘汰响应 |
 | NFR-48 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少审计导出脱敏、独立PII权限、水印、加密、短时下载和配额控制 |
-| UI-16 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需核验桌面、Web Portal 和管理后台简体中文、英文、日文词条完整性及无单语硬编码门禁 |
+| UI-16 | 部分实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 当前桌面和 Web 路由三语覆盖测试通过；缺目标页面、错误码和发布制品级门禁 |
 | NFR-49 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少模型流事件、完整/聚合结果、防重墓碑的最大保留期、注销清除、案件保全和备份密码学销毁闭环 |
 
-### 0.2 既有目标编号证据占位
+### 0.2 既有目标编号证据索引
 
-以下目标编号在既有功能矩阵中已有状态描述，但尚未完成逐项代码、测试和部署证据审计。为满足 REQ-ID-02，它们先以完整字段进入证据索引；完成审计后必须用实际提交、测试和部署版本替换占位值，不能仅更新后文摘要。
+以下目标编号在既有功能矩阵中已有状态描述。本轮已经核验的项目使用 `AUDIT_HEAD` 和共享测试证据；其余项目保留历史占位，后续完成审计时必须用实际提交、测试和部署版本替换，不能仅更新后文摘要。
 
 | target_requirement_id | 当前状态 | source_commit | tests | deployment_version | known_gaps |
 |---|---|---|---|---|---|
@@ -266,11 +274,11 @@
 | ACC-14 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ACC-19 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ACC-22 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| ACC-26 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
+| ACC-26 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前仅支持电子邮箱 + 一次性 Token 邀请；手机号/用户名邀请未实现 |
 | ACC-29 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ACC-30 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ACC-33 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| ACC-34 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
+| ACC-34 | 待重构 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前上下文按 OIDC Session 保存，不是用户级全局值，也无跨端版本同步 |
 | TOK-01 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | TOK-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | TOK-03 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
@@ -283,7 +291,7 @@
 | TOK-15 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | TOK-19 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | TOK-22 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| TOK-24 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
+| TOK-24 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 幂等键能阻止重复上游调用，但重复请求返回 `USAGE_REPLAY_BLOCKED`，不会返回原结果/状态 |
 | TOK-31 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | TOK-32 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | TOK-33 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
@@ -291,7 +299,7 @@
 | BILL-01 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | BILL-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | BILL-03 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| BILL-06 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
+| BILL-06 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有支付来源聚合权益包、有效期和余额；未持久化 BASE/BONUS 组成，且来源绑定订单而非支付流水 |
 | BILL-07 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | BILL-08 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | BILL-14 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
@@ -304,22 +312,22 @@
 | BILL-26 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | BILL-27 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | BILL-28 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 普通退款成功时撤销目标支付全部未消费 BASE 与关联 BONUS、BONUS 零现金退款及平衡账本待实现 |
-| PAY-01 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-03 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-04 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-05 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-06 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-07 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-08 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-09 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-10 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-15 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-16 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-17 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-18 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-21 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| PAY-22 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
+| PAY-01 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | H3C 与 Simulator 均实现 Provider 接口；部分通用流程仍按当前能力和旧状态模型耦合 |
+| PAY-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider capabilities 已存在并驱动部分 API/UI；UI 对退款仍显示禁用入口，目标能力快照不完整 |
+| PAY-03 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 真实流程只有新华三支付宝；模拟器渠道不算生产能力 |
+| PAY-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 商品直接保存单一外部 SKU，无多 Provider 映射版本表 |
+| PAY-05 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前目录仍明确为 UAT 暂定 |
+| PAY-06 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有新华三手机号同步任务；尚未抽象供应商中立 Commerce Mapping |
+| PAY-07 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 充值选择、二维码和结果留在品悟应用/Portal 内 |
+| PAY-08 | 已实现 | AUDIT_HEAD | CONTRACT-36 | NOT_DEPLOYED | 每次充值从服务端商品选择开始，不恢复旧二维码作为新订单 |
+| PAY-09 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 服务端按 `product_id` 派生 SKU、金额和权益，拒绝客户端覆盖 |
+| PAY-10 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | H3C 二维码和实付金额来自 Provider 响应，不由客户端生成 |
+| PAY-15 | 降级实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Simulator 有签名回调；H3C 无回调，仅靠服务端查询，尚无统一回调/查询证据归并 |
+| PAY-16 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Billing 后台查询不依赖客户端二维码页面持续打开 |
+| PAY-17 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有过期/修复基础；无72小时确定性人工审核案件 |
+| PAY-18 | 降级实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前 H3C 不支持外部关单，只能停止本地展示并继续查询 |
+| PAY-21 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 确认成功可幂等入账并更新额度；真实 Provider 仅查询收敛，且权益仍为聚合模型 |
+| PAY-22 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组织在线购买和受益组织履约 |
 | PAY-30 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | Provider 确认普通退款后的 BASE/关联 BONUS 原子冲销、退款预约消费及平衡账本待实现 |
 | PAY-33 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | PAY-34 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
@@ -334,7 +342,7 @@
 | UI-09 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | UI-10 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | UI-11 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| UI-12 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
+| UI-12 | 未实现 | AUDIT_HEAD | CONTRACT-36 | NOT_DEPLOYED | 当前能力不足时显示禁用按钮；目标要求完全隐藏不可执行退款入口 |
 | ADM-01 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ADM-02 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ADM-03 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
@@ -541,7 +549,7 @@
 | ACC-23 | 重命名组织节点 | 待核验 | 当前已有显式编辑；需独立核验权限、名称冲突和节点身份/层级不变。 |
 | ACC-24 | 调整组织节点父节点 | 待核验 | 当前闭包表具备防环基础；需独立核验跨组织、自身/后代父级拒绝和原子结构版本。 |
 | ACC-25 | 删除组织节点 | 待核验 | 当前已有节点删除；需独立核验关联成员、授予、路由和任务的阻断规则。 |
-| ACC-26 | 组织邀请 | 部分实现、待重构 | 支持手机号、用户名和一次性邀请链接；具备创建、接受、过期、撤销、一次性消费、反枚举和角色校验。 |
+| ACC-26 | 组织邀请 | 部分实现、待重构 | 当前支持电子邮箱和一次性邀请 Token，并有创建、接受、过期/撤销状态；手机号、用户名邀请及目标反枚举恢复契约未实现。 |
 | ACC-27 | 添加组织成员 | 待核验 | 当前已有成员添加；需独立核验用户状态、重复添加、幂等和授权版本。 |
 | ACC-28 | 移除组织成员 | 待核验 | 当前已有成员移除；需独立核验权限立即失效、上下文回退及 BILL-13 授予暂停。 |
 | ACC-29 | 所有者安全转让 | 已实现、需收紧 | 每个有效组织恰好一个 `ORG_OWNER`；专用接口在同一 Account 事务内转让，普通管理员可以多人。 |
@@ -585,7 +593,7 @@
 | TOK-15 | 个人中心用户自管 Token Account | 移除 | 不提供个人供应商 Key、Token Account、共享和路由管理；现有相关个人入口及公开能力从目标范围移除。平台/组织运营管理与本地独立模型配置不受此条影响。 |
 | TOK-19 | 调用前按具体请求和协议动态预占 | 待重构 | 使用协议绑定的版本化预占公式和计量单位；公式参数缺省为 0。需要 INPUT_TOKEN 时使用 Tokenizer/估算器且额外裕量为 0；长调用续租，实际费用超过 Hold 时追加预占。 |
 | TOK-22 | 支持并发对话且防超扣 | 已实现 | 每请求独立 Hold；可用余额能够覆盖即可并发。 |
-| TOK-24 | 模型请求幂等 | 已实现 | 显式或稳定派生幂等键防止网络重试重复调用上游。 |
+| TOK-24 | 模型请求幂等 | 部分实现 | 显式或稳定派生幂等键可阻止网络重试重复调用上游，但重复请求返回 `USAGE_REPLAY_BLOCKED`，不会按目标返回原执行结果或当前状态。 |
 | TOK-25 | 模型请求幂等键作用域 | 未实现 | 当前派生键包含 OIDC Session，无法提供跨会话稳定防重；需改为稳定业务用户、固定模型推理命名空间和键摘要的唯一约束，并保存初次执行快照。 |
 | TOK-26 | 同键异请求冲突检测 | 未实现 | 当前缺少带算法版本的规范化请求指纹；同键不同语义请求必须返回 409，且不得创建 Hold、调用上游或覆盖原执行。 |
 | TOK-27 | 模型请求幂等记录保留 | 未实现 | 当前未形成非终态至收敛、流事件 24 小时、结果 30 天、防重墓碑 90 天及载荷过期返回 410 的分层保留证据。 |
@@ -615,7 +623,7 @@
 | BILL-01 | 个人和组织钱包独立 | 已实现 | 钱包按 Owner 类型和 ID 唯一；组织请求不能隐式扣个人钱包。 |
 | BILL-02 | 余额以不可变平衡账本为准 | 已实现 | Journal Entry 与 Posting 平衡，不能直接覆盖余额。 |
 | BILL-03 | 积分使用整数最小单位 | 已实现 | `10,000 microcredits = 1 展示积分`；金额使用分。 |
-| BILL-06 | 充值形成有有效期的权益包 | 已实现 | 基础/赠送额度、起止时间和剩余额度持久化。 |
+| BILL-06 | 充值形成有有效期的权益包 | 部分实现、待重构 | 当前持久化支付来源、起止时间和聚合剩余额度；商品虽有基础/赠送字段，权益包未保存 BASE/BONUS 组成，来源绑定订单而非成功支付流水。 |
 | BILL-07 | 组织权益在线购买入账 | 未实现 | 企业管理员购买时明确受益组织；支付成功幂等创建组织权益包和组织钱包分录，付款人个人钱包不参与。 |
 | BILL-08 | 组织成员额度手动分配 | 未实现 | 企业管理员从组织有效权益中给成员分配，员工无领取接口；分配、撤回、占用和消费均审计。 |
 | BILL-14 | 基础积分与赠送积分分项核算展示 | 未实现 | 权益包增加基础/赠送组成及各自剩余、预占、已用；按到期顺序分包返回。 |
@@ -649,8 +657,8 @@
 
 | target_requirement_id | 需求 | 状态 | 当前实现/边界 |
 |---|---|---|---|
-| PAY-01 | 支付实现位于独立 Adapter | 待重构 | H3C Mall 与 Simulator 分别实现通用 `PaymentProvider`，Billing 不导入厂商客户端、不构造模拟场景、不按 Provider 名称判断业务。 |
-| PAY-02 | 渠道和动作由能力声明驱动 | 待重构 | 商品目录与 Provider capabilities 需统一决定状态查询、历史保留、晚到窗口、权威终态、关单、退款、回调、账单和渠道；桌面/Web/管理 UI 与后台任务不得硬编码支付宝或厂商能力。 |
+| PAY-01 | 支付实现位于独立 Adapter | 部分实现 | H3C Mall 与 Simulator 分别实现通用 `PaymentProvider`；仍需用合同和架构门禁证明业务状态机不依赖具体 Provider。 |
+| PAY-02 | 渠道和动作由能力声明驱动 | 部分实现、待重构 | 已有 Provider capabilities 并驱动部分 API/UI；尚未覆盖历史保留、晚到窗口、权威终态和完整能力快照，退款不支持时 UI 仍显示禁用入口。 |
 | PAY-03 | 多支付渠道 | 未实现 | 当前真实流程仅支付宝；模拟器的银联/微信能力不属于生产能力。 |
 | PAY-04 | 多 Provider 商品映射 | 未实现 | 通用充值商品与外部 SKU 分表映射，至少包含 Provider、外部 SKU、金额校验、状态和有效期；历史订单固定创建时的映射版本。 |
 | PAY-05 | 充值商品正式冻结 | 未实现 | 当前 SKU/金额/权益为 UAT 暂定，正式收款前必须冻结。 |
@@ -661,12 +669,12 @@
 | PAY-10 | 二维码和支付金额完全采用商城返回事实 | 已实现 | H3C Provider 不本地生成二维码。 |
 | PAY-11 | 支付流水与权益包履约隔离 | 未实现 | 需明确 payment_order 1:N payment_transaction，并为支付来源权益包建立唯一 source_payment_transaction_id；多笔成功流水不得共享权益包，逐笔独立履约或进入重复/晚到支付复核。 |
 | PAY-13 | 支付领域独立状态机与订单派生摘要 | 未实现 | 现有单一订单状态链仍需拆成订单关闭流程、支付流水、退款和拒付状态机；订单摘要需改为可重建投影，禁止作为资金事实源。 |
-| PAY-15 | 支付回调与主动查询 | 未实现 | 回调为主要收敛方式并进行签名、金额、订单和防重校验；主动查询作为漏回调和不确定结果的补偿。Provider 无回调时采用主动查询降级收敛。 |
+| PAY-15 | 支付回调与主动查询 | 降级实现 | Simulator 有签名回调；新华三不支持回调，当前以 Billing 主动查询收敛。尚未形成回调、查询、账单统一不可变证据归并。 |
 | PAY-16 | 客户端关闭后订单仍继续收敛 | 已实现 | 查询任务运行在 Billing 服务端。 |
-| PAY-17 | 超时订单不永久停留普通 PENDING | 已实现、需扩展 | 本地过期和部分异常修复已实现；尚未按 PAY-37 将72小时未收敛订单确定性转换为具有责任人、SLA 和下次复核时间的人工审核案件。 |
+| PAY-17 | 超时订单不永久停留普通 PENDING | 部分实现 | 本地过期和部分异常修复已实现；尚未按 PAY-37 将72小时未收敛订单确定性转换为具有责任人、SLA 和下次复核时间的人工审核案件。 |
 | PAY-18 | 主动关闭未支付订单 | 降级实现 | 用户或系统可以关闭未支付订单；Provider 支持时调用外部关单并核验，Provider 不支持时降级为停止本地支付展示并持续查询，只有外部事实明确后才收敛最终状态。 |
 | PAY-19 | 主动查询退避与72小时边界 | 未实现 | 当前查询和过期处理尚未证明在72小时执行最后查询、停止高频任务并幂等转入 REVIEW_REQUIRED_LATE_PAYMENT。 |
-| PAY-21 | 支付后自动更新额度 | 已实现、需扩展 | 支付回调是主要收敛路径，主动查询负责补偿；Provider 无回调能力时降级为服务端主动查询。确认支付后幂等创建权益包和账本入账。 |
+| PAY-21 | 支付后自动更新额度 | 部分实现 | 当前真实 Provider 通过服务端主动查询确认支付后，幂等创建聚合权益包和账本入账；回调并非新华三的主要路径，目标组成级权益和多流水履约仍缺失。 |
 | PAY-22 | 企业管理员在线购买组织权益 | 未实现 | 有 `org.entitlements.purchase` 权限的企业管理员在组织上下文选择组织商品并支付；订单保存付款用户与受益组织，到账后只增加组织权益。 |
 | PAY-24 | 退款目标绑定支付流水和权益包 | 未实现 | 退款请求和执行命令需同时保存并校验 payment_transaction_id、entitlement_package_id；payment_order_id 仅作归属和审计，不能独立执行退款。 |
 | PAY-26 | 退还目标全部剩余可退金额 | 未实现 | 不接受退款金额输入；现金退款只按目标支付流水实收、退款预约/确认、权益包全部未消费 BASE 和 Provider 事实核对全部剩余金额，关联 BONUS 零折现但在成功时全部撤销，主动退款状态机无 PARTIALLY_REFUNDED。 |
@@ -700,7 +708,7 @@
 | UI-13 | 模型停止与结算状态反馈 | 未实现 | 当前缺少停止接收、取消请求已受理、Provider 不支持取消、后台结束处理中、待核对和已结算的区分，也未提示取消生效前按实际用量计费。 |
 | UI-14 | 注销进度与阻断原因展示 | 未实现 | 当前没有持久注销状态页、脱敏阻断分类、用户恢复动作或“自动处理中”与“需要本人处理”的区分。 |
 | UI-15 | 未完成注册恢复状态展示 | 未实现 | 当前没有保存注册操作查询凭据、按 next_retry_at 恢复轮询或区分 Identity 已创建、Account 提交中、修复中和已补偿。 |
-| UI-16 | 桌面与 Web 三语完整性 | 待核验 | 需核验桌面复用 `shared/i18n.js`，Web Portal/管理后台集中词条覆盖简体中文、英文和日文，并建立缺词条、语言回退和单语硬编码发布门禁。 |
+| UI-16 | 桌面与 Web 三语完整性 | 部分实现 | 当前桌面、Portal 和管理后台路由的简中/英文/日文词条测试通过；仍需覆盖全部目标页面、错误码以及发布制品级缺词条、回退和单语硬编码门禁。 |
 | ADM-01 | 首个超级管理员安全初始化 | 未实现 | 当前目标已禁止8位初始密码；尚缺 BOOTSTRAP_PENDING 权限门禁、交互式无回显直接设密，以及默认256 bit/最少128 bit的一次性引导凭据、Base64URL字符集、15分钟有效期、5次失败锁定、一次读取销毁、原子兑换和重新签发代次隔离。 |
 | ADM-02 | Break-glass 恢复 | 未实现 | 仅在凭据丢失、意外停用或身份故障等异常导致全部超级管理员无法登录时，通过主机/集群受控离线命令创建短时紧急授权或恢复账号；禁止公网 API、禁止绕过最后一个有效超级管理员主动注销保护或替代计划内交接，执行必须告警并写不可删除审计。 |
 | ADM-03 | 服务身份权限 | 未实现 | 服务账号、后台任务和 Event Relay 使用独立工作负载身份、短期凭据和最小权限，不继承人类平台角色；审计记录 `actor_type=SERVICE`、服务名和任务运行 ID。 |
