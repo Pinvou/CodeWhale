@@ -74,8 +74,7 @@ func Load(directory string) ([]Migration, error) {
 		if strings.TrimSpace(migration.UpSQL) == "" {
 			return nil, fmt.Errorf("migration version %d is missing an up script", migration.Version)
 		}
-		digest := sha256.Sum256([]byte(migration.UpSQL))
-		migration.Checksum = hex.EncodeToString(digest[:])
+		migration.Checksum = normalizedChecksum(migration.UpSQL)
 		migrations = append(migrations, *migration)
 	}
 	sort.Slice(migrations, func(i, j int) bool { return migrations[i].Version < migrations[j].Version })
@@ -93,7 +92,7 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 		).Scan(&existingChecksum)
 		switch {
 		case err == nil:
-			if existingChecksum != migration.Checksum {
+			if !checksumMatches(existingChecksum, migration.UpSQL) {
 				return fmt.Errorf("migration %d checksum changed after application", migration.Version)
 			}
 			continue
@@ -120,6 +119,31 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 		}
 	}
 	return nil
+}
+
+func normalizedChecksum(sql string) string {
+	return checksum(normalizeLineEndings(sql))
+}
+
+func checksumMatches(existingChecksum, sql string) bool {
+	normalized := normalizeLineEndings(sql)
+	if existingChecksum == checksum(normalized) {
+		return true
+	}
+
+	// Older deployments recorded bytes after checkout or packaging. Accept the
+	// CRLF representation only when the normalized SQL is otherwise identical.
+	return existingChecksum == checksum(strings.ReplaceAll(normalized, "\n", "\r\n"))
+}
+
+func normalizeLineEndings(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	return strings.ReplaceAll(value, "\r", "\n")
+}
+
+func checksum(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
 }
 
 func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) error {
