@@ -1,7 +1,7 @@
 # CodeWhale 0.9.0 → 0.9.5 底座升级报告
 
 > 日期：2026-08-11
-> 状态：CodeWhale 重建、结构化产出安全加固、会话恢复修复和父仓编译适配已完成，公开维护分支 `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r5` 已发布；`r1`/`r2`/`r3`/`r4` 保留为不可变历史标签。
+> 状态：CodeWhale 重建、结构化产出安全加固、会话恢复与工具续轮兼容修复和父仓编译适配已完成；父仓采用已发布固定标签 `pinvou-v0.9.5-r6`，历史标签保持不可变。
 
 ## 1. 结论
 
@@ -152,7 +152,7 @@ v0.9.5 把 CLI/TUI 合并为一个编译 runtime，`codewhale` 与 `codew` 指�
 ## 9. 当前交付状态
 
 - CodeWhale 分支：`Pinvou/CodeWhale:pinvou3-clean`
-- CodeWhale HEAD：`2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd`
-- 父仓分支：`fix/session-tool-recovery`
-- 远端状态：`pinvou3-clean` 与 `pinvou-v0.9.5-r5` 已发布；`r1`/`r2`/`r3`/`r4` 保留为不可变历史标签，旧 v0.9.0 分支已双重备份
-- 下一步：通过父仓 PR `#247` 合入 gitlink、会话适配代码和维护登记。
+- CodeWhale HEAD：`3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02`
+- 父仓分支：`feat/account-platform-foundation`
+- 远端状态：固定标签 `pinvou-v0.9.5-r6` 已发布并与父仓 gitlink 一致；`r1` 至 `r5` 保留为不可变历史标签，维护分支后续前进不自动改变父仓基线
+- 下一步：父仓按当前任务完成 gitlink、适配代码和维护登记提交，再进入推送与 PR 流程。

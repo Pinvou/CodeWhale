@@ -6,8 +6,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TUI="$REPO/CodeWhale"
 APP="$REPO/pinvou3-app/src-tauri"
 EXPECTED_UPSTREAM="853cb707bbcf4f7dc4268fba6d811e0d04083f9c"
-EXPECTED_HEAD="2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd"
-EXPECTED_COMMITS=7
+EXPECTED_HEAD="3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02"
+EXPECTED_COMMITS=8
 FAST_ONLY=0
 [[ "${1:-}" == "--fast" ]] && FAST_ONLY=1
 
@@ -35,7 +35,7 @@ fi
 
 commit_count="$(git -C "$TUI" rev-list --count "$EXPECTED_UPSTREAM..HEAD" 2>/dev/null || true)"
 if [[ "$commit_count" == "$EXPECTED_COMMITS" ]]; then
-  green "  ✓ v0.9.5 之上 7 个公开提交"
+  green "  ✓ v0.9.5 之上 $EXPECTED_COMMITS 个公开提交"
 else
   red "  ✗ v0.9.5 之上有 ${commit_count:-<unreadable>} 个 commit，公开登记为 $EXPECTED_COMMITS"
   fail=1

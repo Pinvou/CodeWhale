@@ -3,28 +3,35 @@
 > 本文是 Pinvou 对 CodeWhale fork 的单一现状清单。
 > 基线、主题边界、守护指纹和同步结论以本文与 `docs/fork-policy.md` 为准。
 
-## 0. 当前状态（2026-08-11 · v0.9.5 r5 公开基线）
+## 0. 当前状态（2026-08-22 · v0.9.5 r6 父仓基线）
 
 | 项 | 当前值 |
 |---|---|
 | 上游基线 | tag `v0.9.5`，commit `853cb707bbcf4f7dc4268fba6d811e0d04083f9c` |
-| 公开维护分支 | `Pinvou/CodeWhale:pinvou3-clean`，head `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
-| 已合并修复 | `Pinvou/CodeWhale#9`、`Pinvou/CodeWhale#11` 已合并；当前维护分支 head 为 `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd` |
-| 公开状态 | `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r5` 均指向公开维护分支 head；`r1`/`r2`/`r3`/`r4` 保留为不可变历史标签 |
+| 父仓选定基线 | 固定标签 `pinvou-v0.9.5-r6`，commit `3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02` |
+| 已合并修复 | `Pinvou/CodeWhale#9`、`Pinvou/CodeWhale#11`、`Pinvou/CodeWhale#12` 已合并；父仓当前采用 `#12` 对应 commit |
+| 公开状态 | 固定标签 `pinvou-v0.9.5-r6` 与父仓 gitlink 指向同一 commit；`r1`/`r2`/`r3`/`r4`/`r5` 保留为不可变历史标签，维护分支后续前进不自动改变父仓基线 |
 | 旧基线备份 | tag `pinvou-v0.9.0-r4` + branch `backup/pinvou3-clean-v0.9.0-r4`，均指向 `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` |
-| 组织方式 | 从 `v0.9.5` clean re-fork 的 5 个长期主题、7 个线性提交 |
-| drift | `48 files changed, +2177/-269`；净增约 1908 行 |
-| 守护 | 23 条 CodeWhale `forkguard_*` 行为测试 + 父仓指纹/行为测试 |
+| 组织方式 | 从 `v0.9.5` clean re-fork 的 5 个长期主题、8 个线性提交 |
+| drift | `52 files changed, +2640/-299`；净增约 2341 行 |
+| 守护 | 29 条 CodeWhale `forkguard_*` 行为测试 + 父仓指纹/行为测试 |
 | 父仓适配 | gitlink、`Cargo.lock`、`EngineConfig` v0.9.5 字段适配 |
 
 ### 本次会话修复（已验证并发布）
+
+- 严格 Provider 遇到模型把 schema 中的对象或数组参数编码为 JSON 字符串时，旧实现无法按声明容器类型恢复；连续工具错误和 stuck guard 的内部提示也可能形成不合法的续轮角色序列。
+- 底座修复已通过 `Pinvou/CodeWhale#12` 合入，固定标签 `pinvou-v0.9.5-r6` 指向 commit `3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02`。
+- T2 只按工具 schema 修复有界 JSON 容器，不转换普通字符串；stuck guard 与连续工具错误降级指引折叠进对应 tool result，保持 Provider 续轮消息序列合法。
+- 新增 6 条 `forkguard_*` 行为测试，覆盖嵌套容器恢复、错误类型和超限输入拒绝、两类提示的结果内嵌及严格 Provider 角色序列。
+
+### 上一轮会话恢复修复
 
 - v0.9.5 的 `load_session` 会把无配对 `tool_use` 视为进程崩溃并立即补写失败结果；Pinvou 运行中持久化工具调用后再次读取同一会话时，这一假设并不成立。
 - 底座修复已通过 `Pinvou/CodeWhale#11` 合入，公开 commit 为 `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd`。
 - T1 新增无修复副作用的 `load_session_snapshot` 与显式 `recover_session_for_resume`。Pinvou 的运行时读改写统一使用前者，仅在应用进程启动、任何 Engine 接管会话前执行后者，并把恢复结果原子落盘。
 - 前端仅对真正的跨端回合保留 revision 对账门禁；本地 `chat:done` 直接释放下一轮发送，落盘读回异常不得阻塞普通本地对话，跨端未收敛提示按会话去重。
 - 本次新增 2 条 CodeWhale `forkguard_*`、2 条父仓 `forkguard_*` 和 Tauri/Web 前端行为回归，分别锁定运行时无副作用读取、显式恢复可观测与幂等、二次 Store 打开安全、启动恢复落盘以及本地完成后连续发送。
-- 本节改动已计入上方公开维护分支 head、drift 和固定标签 `pinvou-v0.9.5-r5`；CodeWhale required checks 与父仓自动测试均已通过。
+- 本节改动已计入历史固定标签 `pinvou-v0.9.5-r5`；CodeWhale required checks 与父仓自动测试均已通过。
 
 ### 软上限评估
 
@@ -55,18 +62,20 @@
 
 ### T2：工具兼容与命令执行安全
 
-- **commit**：`595adce47e2d1bcf895d7bfd6426c074eb969324`
-- **规模**：15 文件，`+181/-98`
-- **核心文件**：`core/engine.rs`、`core/engine/tool_setup.rs`、`core/ops.rs`、`tools/file.rs`、`command_safety.rs`、`tools/shell.rs`、`docs/TOOL_SURFACE.md`。
+- **commits**：`595adce47e2d1bcf895d7bfd6426c074eb969324`、`3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02`（`Pinvou/CodeWhale#12`）。
+- **规模**：原主题 15 文件、`+181/-98`；r6 追加修复 5 文件、`+463/-30`。
+- **核心文件**：`core/engine.rs`、`core/engine/{dispatch,turn_loop}.rs`、`core/ops.rs`、`client/chat.rs`、`tools/file.rs`、`command_safety.rs`、`tools/shell.rs`、`docs/TOOL_SURFACE.md`。
 - **内容**：
   - `EngineConfig.extra_tools` 让宿主工具在 Plan、Agent、Yolo 等 turn registry 中一致注册。
   - `SetDisallowedTools` 支持工具商店、知识库和会话策略在不重建 Engine 的情况下动态收窄工具面。
   - 复用 v0.9.5 原生 `allowed_tools` 作为硬白名单入口；Pinvou 名单由 app 构造，底座不维护产品 blocklist。
   - `File` 写入保持 64 KiB 单次内容上限，并在落盘前拒绝超限输入。
   - 多行 Shell 按 segment 检查；破坏性命令在自动批准模式下仍被阻断。
+  - 仅按工具 schema 对有界、严格合法且类型匹配的字符串化 JSON 对象或数组进行容器恢复，普通字符串和超限输入保持拒绝。
+  - stuck guard 与连续工具错误的降级指引进入对应 tool result 内容，不额外插入破坏严格 Provider 角色顺序的消息。
   - 当前工具面不恢复已退役的独立追加文件工具，也没有改动 `request_user_input`。
 - **边界**：不包含 Skill 来源、Automation 或三省六部角色协议。
-- **守护**：`forkguard_host_extra_tools_register_in_all_modes`、`forkguard_file_content_caps_reject_before_writing`、`forkguard_multiline_still_blocks_destructive_segments`。
+- **守护**：`forkguard_host_extra_tools_register_in_all_modes`、`forkguard_file_content_caps_reject_before_writing`、`forkguard_multiline_still_blocks_destructive_segments`，以及 schema 容器恢复、错误提示内嵌和 Provider 角色序列的 6 条 r6 回归。
 
 ### T3：嵌入上下文与技能来源
 

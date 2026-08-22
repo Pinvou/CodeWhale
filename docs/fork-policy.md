@@ -1,15 +1,15 @@
 # Pinvou 对 CodeWhale 底座的 fork 维护策略
 
-> 最后更新：2026-08-11（公开维护基线：上游 `v0.9.5` + 5 个 Pinvou 主题）
+> 最后更新：2026-08-22（父仓选定公开基线：上游 `v0.9.5` + 5 个 Pinvou 主题）
 > 配套：`docs/fork-modifications.md`、`scripts/fork-guard.sh`、`docs/底座升级验收清单.md`
 
 ## 0. 当前基线
 
 - 上游：`Hmbown/CodeWhale` tag `v0.9.5`，commit `853cb707bbcf4f7dc4268fba6d811e0d04083f9c`。
-- 公开维护分支：`Pinvou/CodeWhale:pinvou3-clean`，head `2eceab4e19cb0b15576c09d5b89e0d8bc42e11fd`。
+- 父仓选定的公开基线：固定标签 `pinvou-v0.9.5-r6`，commit `3bbf8421ebdb16bff71f83dac4d42c8fb65f0f02`；维护分支可以继续向前，但父仓只在完成门禁后更新 gitlink。
 - 升级前基线 `03e9e1027c03ce1e4b35ab9e3ccce751b65b9624` 同时保留在 tag `pinvou-v0.9.0-r4` 和 branch `backup/pinvou3-clean-v0.9.0-r4`。
-- `pinvou3-clean` 与固定标签 `pinvou-v0.9.5-r5` 均公开可达，并与父仓 gitlink 指向同一 commit；`r1`/`r2`/`r3`/`r4` 保留为不可变历史标签。
-- `.gitmodules` 不配置浮动 `branch`；发布后父仓 gitlink、维护分支和不可变标签必须指向同一 commit。
+- 固定标签 `pinvou-v0.9.5-r6` 公开可达并与父仓 gitlink 指向同一 commit；`r1`/`r2`/`r3`/`r4`/`r5` 保留为不可变历史标签。
+- `.gitmodules` 不配置浮动 `branch`；发布验收时父仓 gitlink、维护分支和新固定标签必须指向同一 commit。维护分支后续可以继续前进，但不会自动改变父仓已选基线；再次更新 gitlink 时必须重新验收并发布新的固定标签。
 - 当前只维护 5 个长期主题：
 
   1. 宿主嵌入与路由边界
