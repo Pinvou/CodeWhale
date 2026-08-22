@@ -21,6 +21,8 @@
 
 桌面端启用账号平台后，登录与内置模型聊天使用同一 OIDC 身份。Access Token 保留在 Rust 进程中，聊天请求直接进入 Token Gateway，不再以设备身份或旧 New API 用户身份执行。
 
+客户端从旧内置模型路径切换到上述架构采用三层门禁：发布门禁在服务端兼容能力或非计费 readiness 未就绪时不发布新构建；安装门禁在隔离暂存副本完成迁移预检，失败时不替换旧二进制与配置；运行门禁保证已经安装的新构建只包含新路径，平台不可用时显示原因和修复动作而不复活旧路径。切换 readiness 不创建真实用户 Hold 或费用；端到端协议验证使用与用户/组织钱包隔离的专用合成身份。
+
 ## 2. 当前逻辑拓扑
 
 ```mermaid
@@ -117,10 +119,15 @@ flowchart LR
 主要表包括：
 
 - `wallets`、`ledger_accounts`、`journal_entries`、`ledger_postings`：钱包和不可变平衡账本。
-- `credit_lots`、`entitlement_packages`、`usage_hold_allocations`：充值批次、权益包和 Hold 分配。
-- `recharge_products`、`pricing_versions`：充值商品和模型定价版本。
-- `usage_holds`、`idempotency_records`：预占及幂等。
-- `payment_orders`、`payment_transactions`、`payment_notifications`、`refunds`：支付状态和外部事实记录。
+- `credit_lots`、`entitlement_packages`、`usage_hold_allocations`：充值批次、权益包和 Hold 分配；支付来源权益包以唯一 `source_payment_transaction_id` 绑定一笔确认成功流水。
+- `recharge_products`：充值商品。
+- `metering_unit_definitions`、`protocol_reservation_formula_versions`、`pricing_versions`、`pricing_version_unit_rates`：版本化计量单位、协议公式和模型价格。目标约束是每个价格版本的单位行集合与绑定公式引用集合完全一致；`unit_price = 0` 是有效且可审计的显式零价，价格行不存在是配置缺失，二者不能使用同一默认值表达。
+- `usage_holds`：请求预占、续租、释放和结算引用。
+- `model_usage_requests`、`idempotency_records`：模型逻辑请求状态、初次执行快照、用户级幂等键摘要、版本化请求指纹、防重墓碑和结果引用。
+- `stream_response_events`、`upstream_dispatch_attempts`：加密的供应商中立流事件、单调序号、派发意图/租约、上游幂等键和不确定执行证据。
+- `payment_orders`：订单意图、关闭流程和可重建的资金摘要投影；一个订单可以包含多笔支付流水，摘要不是资金事实源。
+- `payment_transactions`、`refund_requests`、`refund_amount_reservations`、`chargeback_cases`、`forced_refund_cases`：支付流水、主动退款意图/金额预约、拒付和渠道强制退款异常分别维护状态机，不以订单单一状态相互覆盖。
+- `payment_notifications`、`payment_evidence`：保存回调、查询和账单的不可变外部证据，再按对象类型归并到各自状态机。
 - `manual_adjustments`、`payment_order_repairs`：审批调整和支付人工修复。
 - `reconciliation_runs`、`reconciliation_cases`：对账运行和异常案例。
 - Billing 自有 Outbox/Inbox 表。
@@ -135,6 +142,7 @@ flowchart LR
 - `provider_credentials`：加密后的供应商凭据及元数据。
 - `token_share_policies`、`token_explicit_members`：共享范围和显式成员。
 - `routing_policies`：模型、上下文、优先级和默认范围路由。
+- `managed_route_provisionings`：按作用域、模型、协议和期望代记录托管 Token Account/路由的 PENDING、READY、FAILED、REPAIR_REQUIRED 状态、重试计划和修复审计引用。
 - `usage_requests`、`usage_attempts`：请求、New API 关联、预占和结算状态。
 - `authorization_cache_versions`：授权缓存版本。
 - `token_audit_logs`：Token 运维审计。
@@ -169,11 +177,21 @@ Gateway 对路由结果采用确定性选择：
 3. 组织上下文按组织、节点和角色检查 `ORG_ALL`、`OWNER_UNIT_ONLY`、`OWNER_SUBTREE`、`EXPLICIT_MEMBERS`。
 4. 优先使用节点默认路由，其次组织默认路由，再按唯一最高优先级选择；歧义时拒绝，不随机选择。
 5. 请求显式指定 Token Account 时，失败不会回退到平台默认路由。
-6. 未显式指定且不存在可用路由时，Gateway 幂等创建平台托管的默认账号、加密凭据和模型路由，再重新路由。
+6. 未显式指定且不存在 READY 托管路由时，Gateway 幂等确保平台托管 Token Account、加密凭据引用和默认路由的 Provisioning；Provisioning 未 READY 前不进入上下文资格和请求预占。
+
+目标调用管线固定为：`CATALOG_VISIBLE → 托管路由 Provisioning READY → CONTEXT_ELIGIBLE → 请求级 RESERVABLE → 原子创建 Hold → 调用上游`。目录可见不承诺路由已经准备；PENDING、FAILED、REPAIR_REQUIRED 均不得参与路由。FAILED 按退避计划自动重试，超过 SLA、达到最大次数或遇到不可安全归并的配置/凭据问题后进入 REPAIR_REQUIRED；人工修复只能受审计地重新进入 PENDING，不能直接写 READY。
 
 模型调用采用“预占—调用—结算/释放”模型。最大预占按平台配置的最大输入 Token（默认 128,000）和本次最大输出 Token 结合当前定价计算；输出默认 4,096，允许上限 128,000。并发对话不受“一次只能一条”限制，只要钱包可用积分足以覆盖所有并发 Hold。
 
+目标计价模型不再固定为 Token 三元组或上述统一 Token 上限，而由各协议的版本化公式输出计量单位数量。价格只能覆盖公式引用单位，引用单位缺价时禁止发布或创建 Hold，显式零价则正常生成零费用快照。Model Gateway Adapter 必须把输入规范化为互斥的 `INPUT_TOKEN`（非缓存输入）和 `CACHED_INPUT_TOKEN`（缓存输入）；如果 Provider 的总输入已包含缓存，必须先减去缓存量，不能把总输入与缓存输入重复计费。Provider 证据矛盾或返回公式未引用的非零单位时进入核对，不临时扩展计价集合。
+
 Gateway 不自动重试模型请求，以避免上游已执行但客户端未收到结果时产生重复消费。网络不确定、5xx、流中断或缺失 usage 会进入 `REVIEW`/`SETTLEMENT_PENDING`，后台通过 New API 请求日志核对后结算或释放。
+
+模型请求幂等以 `(stable_account_user_id, "model-inference", idempotency_key_digest)` 唯一，不以 OIDC Session、活动上下文、设备、协议或模型缩小作用域。初次请求保存可信上下文、路由、价格、公式和协议版本快照；请求指纹只覆盖客户端请求语义并保存算法版本。同键同指纹读取原执行，同键异指纹返回 `409 IDEMPOTENCY_KEY_REUSED`。非终态记录保留至收敛；终态逐条流事件、结果载荷和防重墓碑分别至少保留 24 小时、30 天和 90 天，载荷过期但墓碑仍在时返回 `410`，绝不静默发起新上游调用。
+
+流式输出先以加密、供应商中立事件和单调 `sequence` 持久化，再确认给客户端。客户端携带原幂等键和最后确认序号重连时，Gateway 先补发缺失事件再订阅实时流；传输断开不取消服务端执行，也不释放 Hold。已完成请求返回剩余事件或聚合结果，处于 `SETTLEMENT_PENDING`/`REVIEW` 时返回状态查询引用，不重复调用上游。
+
+派发状态按 `RECEIVED → HOLD_RESERVING → HOLD_RESERVED → DISPATCH_INTENT_PERSISTED → UPSTREAM_DISPATCHING → STREAMING/SETTLEMENT_PENDING → SUCCEEDED/FAILED/REVIEW` 持久推进。Billing 以 `usage_request_id` 幂等确保唯一 Hold。只有能证明 Worker 尚未取得派发租约时才能从持久派发意图继续；进入 `UPSTREAM_DISPATCHING` 后结果不确定时，只有上游支持请求级幂等才能用原键查询或重试，否则进入 REVIEW 并保留/续租 Hold。确定未派发且 Hold 已过期时以 `HOLD_EXPIRED_BEFORE_DISPATCH` 结束，客户端必须使用新键；可能已经派发时不得因 Hold 到期释放资金或重建执行。
 
 ## 7. 支付与权益边界
 
@@ -193,6 +211,12 @@ UAT 暂定价格必须由显式配置允许；正式上线前必须与商城冻�
 当前商城接口能力：支付宝下单、订单查询、服务端轮询和人工修复。当前不支持主动关单、退款、支付回调和日终账单对账，因此这些操作在前端/后台禁用或返回 Provider 不支持，不能用本地状态伪装商城成功。二维码和支付金额必须完全使用商城返回事实，不允许本地生成。
 
 商城确认支付成功后，Billing 以幂等事务创建权益包和账本分录。消费优先从较早到期的有效权益包扣除；到期任务处理未消费额度。客户端关闭二维码页不会停止 Billing 的服务端订单查询。
+
+目标支付模型不使用一条订单状态链覆盖全部资金事实。支付流水保留 `PAID/LATE_PAID`，主动退款只有整笔剩余金额退款且没有 `PARTIALLY_REFUNDED`；退款和拒付分别保存独立状态。Provider 若主动产生部分强制退款，则建立独立异常并进入权益冻结、应收和人工复核流程。订单页面使用从这些对象重建的分项摘要，任何摘要优先级只用于展示，不能驱动入账或冲销。
+
+`payment_order` 与 `payment_transaction` 为一对多。支付来源权益包与确认成功流水在普通履约路径保持一对一：每笔可正常履约的成功流水幂等创建自己的权益包，多笔成功流水不能共同引用或补充同一个权益包；重复扣款、晚到冲突或金额/商品事实不一致时先进入复核。
+
+普通退款以 `payment_transaction_id + entitlement_package_id` 为唯一业务目标，`payment_order_id` 只用于归属、筛选和审计。退款意图在 Billing 单事务中按固定顺序锁定支付流水和权益包、冻结新分配/Hold、复查消费/授予/Hold、预约全部剩余可退金额、写 `refund_request` 和 Outbox。事务提交后 Worker 才使用稳定幂等键调用 Provider；提交后崩溃由 Outbox 恢复。只有 Provider 明确保证退款幂等时才允许自动重发外部调用，否则不确定结果只能查询原请求或转人工复核，并持续保持权益冻结。
 
 ## 8. 一致性与事件
 
