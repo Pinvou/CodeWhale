@@ -20,6 +20,20 @@ export class AccountPlatformDesktopClient {
   constructor(transport = globalThis.TauriBridge?.accountPlatform) {
     if (!transport) throw new Error('Account Platform desktop bridge is unavailable');
     this.transport = transport;
+    this.contextVersion = 0;
+    this.contextVersionListeners = new Set();
+  }
+
+  onContextVersion(listener) {
+    this.contextVersionListeners.add(listener);
+    return () => this.contextVersionListeners.delete(listener);
+  }
+
+  observeContextVersion(value) {
+    const version = Number(value || 0);
+    if (!Number.isSafeInteger(version) || version <= this.contextVersion) return;
+    this.contextVersion = version;
+    for (const listener of this.contextVersionListeners) listener(version);
   }
 
   session(signal) { return this.call(() => this.transport.session(), signal); }
@@ -50,6 +64,7 @@ export class AccountPlatformDesktopClient {
       body: options.body,
       idempotencyKey: options.idempotencyKey,
     }), options.signal);
+    this.observeContextVersion(response.contextVersion);
     if (response.status < 200 || response.status >= 300) throw responseError(response);
     return response.body;
   }
@@ -60,7 +75,7 @@ export class AccountPlatformDesktopClient {
   completeProfileChange(requestId, code = '', signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}/actions/complete`, { method: 'POST', body: { code }, signal }); }
   profileChangeStatus(requestId, signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}`, { signal }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }
-  switchContext(contextType, organizationId, signal) { return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null }, signal }); }
+  switchContext(contextType, organizationId, expectedContextVersion, signal) { return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null, expected_context_version: expectedContextVersion }, signal }); }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }
   members(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/members`, { signal }); }
   createUnit(organizationId, name, parentId = null) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', body: { name, parent_id: parentId } }); }

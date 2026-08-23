@@ -91,6 +91,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	}
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
+	protected.Use(s.contextVersionHeaders())
 	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
 	protected.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
 	protected.GET("/v1/me/commerce-customer-mapping", httpserver.AdaptFunc(s.getCommerceCustomerMapping))
@@ -288,6 +289,8 @@ func (s *Service) bootstrap(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	w.Header().Set("X-Context-Version", stringInt64(me.ActiveContext.ContextVersion))
+	w.Header().Set("X-Authorization-Version", stringInt64(me.ActiveContext.AuthorizationVersion))
 	api.WriteJSON(w, http.StatusOK, me)
 }
 
@@ -331,18 +334,21 @@ func (s *Service) listOrganizations(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) setActiveContext(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ContextType    string     `json:"context_type"`
-		OrganizationID *uuid.UUID `json:"organization_id"`
+		ContextType            string     `json:"context_type"`
+		OrganizationID         *uuid.UUID `json:"organization_id"`
+		ExpectedContextVersion int64      `json:"expected_context_version"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || (body.ContextType != "PERSONAL" && body.ContextType != "ORGANIZATION") || (body.ContextType == "PERSONAL" && body.OrganizationID != nil) || (body.ContextType == "ORGANIZATION" && body.OrganizationID == nil) {
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.ExpectedContextVersion < 1 || (body.ContextType != "PERSONAL" && body.ContextType != "ORGANIZATION") || (body.ContextType == "PERSONAL" && body.OrganizationID != nil) || (body.ContextType == "ORGANIZATION" && body.OrganizationID == nil) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid active context", httpserver.RequestID(r.Context()))
 		return
 	}
-	context, err := s.repository.SetActiveContext(r.Context(), mustPrincipal(r.Context()), body.OrganizationID)
+	context, err := s.repository.SetActiveContext(r.Context(), mustPrincipal(r.Context()), body.OrganizationID, body.ExpectedContextVersion)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
+	w.Header().Set("X-Context-Version", stringInt64(context.ContextVersion))
+	w.Header().Set("X-Authorization-Version", stringInt64(context.AuthorizationVersion))
 	api.WriteJSON(w, http.StatusOK, context)
 }
 

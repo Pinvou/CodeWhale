@@ -272,6 +272,8 @@ pub struct ApiRequest {
 pub struct ApiResponse {
     pub status: u16,
     pub body: Value,
+    pub context_version: Option<u64>,
+    pub authorization_version: Option<u64>,
 }
 
 pub struct AccountPlatformState {
@@ -1318,6 +1320,16 @@ fn usage_history_query_allowed(query: Option<&str>) -> bool {
 
 async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, String> {
     let status = response.status().as_u16();
+    let context_version = response
+        .headers()
+        .get("X-Context-Version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let authorization_version = response
+        .headers()
+        .get("X-Authorization-Version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -1337,7 +1349,12 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         serde_json::from_slice(&bytes)
             .map_err(|_| "account_platform_response_invalid: expected JSON response".to_string())?
     };
-    Ok(ApiResponse { status, body })
+    Ok(ApiResponse {
+        status,
+        body,
+        context_version,
+        authorization_version,
+    })
 }
 
 #[cfg(test)]

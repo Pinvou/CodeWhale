@@ -1544,6 +1544,9 @@ WHERE id IN (SELECT user_id FROM changed)`, organizationID, toMembershipStatus, 
 		return err
 	}
 	if status == "DISABLED" {
+		if _, err := tx.Exec(ctx, `UPDATE user_active_contexts SET context_type='PERSONAL',organization_id=NULL,context_version=context_version+1,updated_at=$2 WHERE organization_id=$1`, organizationID, now); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE user_sessions SET active_context_type='PERSONAL',active_organization_id=NULL,membership_version=membership_version+1,last_seen_at=$2 WHERE active_organization_id=$1`, organizationID, now); err != nil {
 			return err
 		}
@@ -1593,6 +1596,9 @@ WHERE id IN (SELECT user_id FROM changed)`, organizationID, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE user_sessions SET active_context_type='PERSONAL',active_organization_id=NULL,membership_version=membership_version+1,last_seen_at=$2 WHERE active_organization_id=$1`, organizationID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE user_active_contexts SET context_type='PERSONAL',organization_id=NULL,context_version=context_version+1,updated_at=$2 WHERE organization_id=$1`, organizationID, now); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE organization_units SET status='DISABLED',name='Deleted unit '||left(id::text,8),version=version+1,updated_at=$2 WHERE organization_id=$1 AND status<>'DELETED'`, organizationID, now); err != nil {

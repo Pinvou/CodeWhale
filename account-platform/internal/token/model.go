@@ -20,16 +20,18 @@ var (
 )
 
 type AuthorizationContext struct {
-	UserID            uuid.UUID
-	SessionID         string
-	ContextType       string
-	OrganizationID    *uuid.UUID
-	MembershipVersion int64
-	UnitIDs           []uuid.UUID
-	AncestorUnitIDs   []uuid.UUID
-	Roles             []string
-	Mobile            *string
-	MobileVerified    bool
+	UserID               uuid.UUID
+	SessionID            string
+	ContextType          string
+	OrganizationID       *uuid.UUID
+	MembershipVersion    int64
+	ContextVersion       int64
+	AuthorizationVersion int64
+	UnitIDs              []uuid.UUID
+	AncestorUnitIDs      []uuid.UUID
+	Roles                []string
+	Mobile               *string
+	MobileVerified       bool
 }
 
 type Candidate struct {

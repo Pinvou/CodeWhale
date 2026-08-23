@@ -135,9 +135,10 @@ test('BFF client keeps CSRF on mutations and never persists OIDC tokens', async 
   try {
     const client = new AccountPlatformBffClient('https://portal.example');
     await client.session();
-    await client.switchContext('PERSONAL', null);
+    await client.switchContext('PERSONAL', null, 7);
     assert.equal(calls[1].options.headers['X-CSRF-Token'], 'c'.repeat(32));
     assert.equal(calls[1].options.credentials, 'same-origin');
+    assert.equal(JSON.parse(calls[1].options.body).expected_context_version, 7);
     assert.equal('accessToken' in client, false);
     assert.equal('refreshToken' in client, false);
   } finally {
@@ -222,6 +223,30 @@ test('desktop client surfaces backend error codes without exposing auth state', 
     assert.equal(error.status, 403);
     return true;
   });
+});
+
+test('account clients publish only increasing global context versions', async () => {
+  const originalFetch = globalThis.fetch;
+  const observed = [];
+  let version = 4;
+  globalThis.fetch = async () => new Response(JSON.stringify({ items: [] }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json', 'X-Context-Version': String(version) },
+  });
+  try {
+    const client = new AccountPlatformBffClient('/portal');
+    const unsubscribe = client.onContextVersion(value => observed.push(value));
+    await client.organizations();
+    version = 3;
+    await client.organizations();
+    version = 6;
+    await client.organizations();
+    unsubscribe();
+    assert.deepEqual(observed, [4, 6]);
+    assert.equal(client.contextVersion, 6);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('personal usage history supports opaque pagination without exposing routing secrets', async () => {

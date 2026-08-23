@@ -145,7 +145,7 @@ type Repository interface {
 	ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error)
 	GetCommerceCustomerMapping(context.Context, identity.Principal) (CommerceCustomerMapping, error)
 	ListOrganizations(context.Context, identity.Principal) ([]Organization, error)
-	SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error)
+	SetActiveContext(context.Context, identity.Principal, *uuid.UUID, int64) (Context, error)
 	ListUnits(context.Context, identity.Principal, uuid.UUID) (UnitTree, error)
 	ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error)
 	ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error)

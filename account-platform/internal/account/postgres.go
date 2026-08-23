@@ -120,6 +120,12 @@ VALUES ($1, $2, $3, $4, $4)`, principal.Issuer, principal.Subject, user.UserID, 
 
 	now := r.now()
 	_, err = tx.Exec(ctx, `
+INSERT INTO user_active_contexts(user_id,context_type,organization_id,context_version,updated_at)
+VALUES($1,'PERSONAL',NULL,1,$2) ON CONFLICT(user_id) DO NOTHING`, user.UserID, now)
+	if err != nil {
+		return Me{}, false, err
+	}
+	_, err = tx.Exec(ctx, `
 INSERT INTO user_sessions(issuer, session_id, user_id, active_context_type, membership_version, last_seen_at, created_at)
 VALUES ($1, $2, $3, 'PERSONAL', $4, $5, $5)
 ON CONFLICT (issuer, session_id) DO UPDATE
@@ -127,6 +133,17 @@ SET last_seen_at = EXCLUDED.last_seen_at
 WHERE user_sessions.user_id = EXCLUDED.user_id`,
 		principal.Issuer, principal.SessionID, user.UserID, user.ActiveContext.MembershipVersion, now)
 	if err != nil {
+		return Me{}, false, err
+	}
+	if err = tx.QueryRow(ctx, `
+SELECT context.context_type,context.organization_id,context.context_version,u.membership_version,
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id
+         AND scope=CASE WHEN context.organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END
+         AND scope_id=COALESCE(context.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1)
+FROM users u JOIN user_active_contexts context ON context.user_id=u.id WHERE u.id=$1`, user.UserID).Scan(
+		&user.ActiveContext.Type, &user.ActiveContext.OrganizationID, &user.ActiveContext.ContextVersion,
+		&user.ActiveContext.MembershipVersion, &user.ActiveContext.AuthorizationVersion,
+	); err != nil {
 		return Me{}, false, err
 	}
 	_, err = tx.Exec(ctx, `UPDATE identities SET last_seen_at = $3 WHERE issuer = $1 AND subject = $2`, principal.Issuer, principal.Subject, now)
@@ -183,46 +200,48 @@ func (r *PostgresRepository) GetMe(ctx context.Context, principal identity.Princ
 	var organizationID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
 SELECT u.id, u.user_code, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,
-       COALESCE(cm.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version,
-       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1)
+       COALESCE(cm.status,'NOT_CONFIGURED'), context.context_type, context.organization_id,
+       u.membership_version,context.context_version,
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN context.organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(context.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1)
 FROM identities i
 JOIN users u ON u.id = i.user_id
 JOIN user_sessions s ON s.user_id = u.id AND s.issuer = i.issuer AND s.session_id = $3
+JOIN user_active_contexts context ON context.user_id=u.id
 LEFT JOIN commerce_customer_mappings cm ON cm.subject_type='USER' AND cm.subject_id=u.id AND cm.provider_id=$4
 WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID, r.commerceProviderID).Scan(
-		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion, &me.ActiveContext.AuthorizationVersion,
+		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion, &me.ActiveContext.ContextVersion, &me.ActiveContext.AuthorizationVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Me{}, ErrNotFound
 	}
 	me.ActiveContext.OrganizationID = organizationID
 	me.UserCode = FormatUserCode(me.UserCode)
-	me.ActiveContext.ContextVersion = me.ActiveContext.MembershipVersion
 	return me, err
 }
 
 func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, principal identity.Principal) (AuthorizationContext, error) {
 	var resolved AuthorizationContext
 	err := r.pool.QueryRow(ctx, `
-SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version,
+SELECT u.id,s.session_id,active.context_type,active.organization_id,u.membership_version,active.context_version,
        COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
        COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
-       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
-       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id=active.organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=active.organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
        COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
        COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
-       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN active.organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(active.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
        u.mobile_e164,u.mobile_verified_at IS NOT NULL
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
 JOIN user_sessions s ON s.user_id=u.id AND s.issuer=i.issuer AND s.session_id=$3
-LEFT JOIN organizations o ON o.id=s.active_organization_id
-LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=s.active_organization_id AND m.status='ACTIVE'
+JOIN user_active_contexts active ON active.user_id=u.id
+LEFT JOIN organizations o ON o.id=active.organization_id
+LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=active.organization_id AND m.status='ACTIVE'
 LEFT JOIN membership_units mu ON mu.membership_id=m.id
 LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
-WHERE i.issuer=$1 AND i.subject=$2 AND (s.active_organization_id IS NULL OR o.status='ACTIVE')
-GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified,
+WHERE i.issuer=$1 AND i.subject=$2 AND (active.organization_id IS NULL OR o.status='ACTIVE')
+GROUP BY u.id,s.session_id,active.context_type,active.organization_id,active.context_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
+		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.ContextVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var status string
@@ -250,7 +269,6 @@ GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.memb
 	if resolved.Roles == nil {
 		resolved.Roles = []string{}
 	}
-	resolved.ContextVersion = resolved.MembershipVersion
 	if resolved.AuthorizationVersion < 1 {
 		resolved.AuthorizationVersion = 1
 	}
@@ -291,23 +309,34 @@ ORDER BY o.name, o.id`, principal.Issuer, principal.Subject)
 	return organizations, rows.Err()
 }
 
-func (r *PostgresRepository) SetActiveContext(ctx context.Context, principal identity.Principal, organizationID *uuid.UUID) (Context, error) {
-	tx, err := r.pool.Begin(ctx)
+func (r *PostgresRepository) SetActiveContext(ctx context.Context, principal identity.Principal, organizationID *uuid.UUID, expectedVersion int64) (Context, error) {
+	if expectedVersion < 1 {
+		return Context{}, ErrConflict
+	}
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return Context{}, err
 	}
 	defer tx.Rollback(ctx)
 	var userID uuid.UUID
-	var version int64
+	var membershipVersion, contextVersion int64
+	var currentOrganizationID *uuid.UUID
+	var currentType string
 	err = tx.QueryRow(ctx, `
-SELECT u.id, u.membership_version
-FROM identities i JOIN users u ON u.id = i.user_id
-WHERE i.issuer = $1 AND i.subject = $2 AND u.status = 'ACTIVE'`, principal.Issuer, principal.Subject).Scan(&userID, &version)
+SELECT u.id,u.membership_version,active.context_type,active.organization_id,active.context_version
+FROM identities i JOIN users u ON u.id=i.user_id
+JOIN user_sessions session ON session.user_id=u.id AND session.issuer=i.issuer AND session.session_id=$3
+JOIN user_active_contexts active ON active.user_id=u.id
+WHERE i.issuer=$1 AND i.subject=$2 AND u.status='ACTIVE'
+FOR UPDATE OF active`, principal.Issuer, principal.Subject, principal.SessionID).Scan(&userID, &membershipVersion, &currentType, &currentOrganizationID, &contextVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Context{}, ErrForbidden
 	}
 	if err != nil {
 		return Context{}, err
+	}
+	if contextVersion != expectedVersion {
+		return Context{}, ErrConflict
 	}
 	contextType := "PERSONAL"
 	if organizationID != nil {
@@ -325,19 +354,19 @@ SELECT EXISTS(
 		}
 		contextType = "ORGANIZATION"
 	}
-	command, err := tx.Exec(ctx, `
-UPDATE user_sessions
-SET active_context_type = $4, active_organization_id = $5, membership_version = $6, last_seen_at = $7
-WHERE issuer = $1 AND session_id = $2 AND user_id = $3`,
-		principal.Issuer, principal.SessionID, userID, contextType, organizationID, version, r.now())
-	if err != nil {
-		return Context{}, err
-	}
-	if command.RowsAffected() != 1 {
-		return Context{}, ErrNotFound
-	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, organizationID, "session.active_context.set", "session", principal.SessionID, "SUCCEEDED", map[string]any{"context_type": contextType}); err != nil {
-		return Context{}, err
+	changed := currentType != contextType || !uuidPointerEqual(currentOrganizationID, organizationID)
+	now := r.now()
+	if changed {
+		contextVersion++
+		if _, err := tx.Exec(ctx, `UPDATE user_active_contexts SET context_type=$2,organization_id=$3,context_version=$4,updated_at=$5 WHERE user_id=$1`, userID, contextType, organizationID, contextVersion, now); err != nil {
+			return Context{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE user_sessions SET active_context_type=$2,active_organization_id=$3,membership_version=$4,last_seen_at=CASE WHEN issuer=$5 AND session_id=$6 THEN $7 ELSE last_seen_at END WHERE user_id=$1`, userID, contextType, organizationID, membershipVersion, principal.Issuer, principal.SessionID, now); err != nil {
+			return Context{}, err
+		}
+		if err := appendAudit(ctx, tx, userID, principal.SessionID, organizationID, "user.active_context.set", "user_active_context", userID.String(), "SUCCEEDED", map[string]any{"context_type": contextType, "previous_context_type": currentType, "context_version": contextVersion}); err != nil {
+			return Context{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Context{}, err
@@ -347,7 +376,11 @@ WHERE issuer = $1 AND session_id = $2 AND user_id = $3`,
 	if err != nil {
 		return Context{}, err
 	}
-	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: version, ContextVersion: version, AuthorizationVersion: authorizationVersion}, nil
+	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: membershipVersion, ContextVersion: contextVersion, AuthorizationVersion: authorizationVersion}, nil
+}
+
+func uuidPointerEqual(left, right *uuid.UUID) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }
 
 func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name, idempotencyKey string) (UnitMutationResult, error) {

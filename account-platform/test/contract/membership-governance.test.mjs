@@ -37,6 +37,7 @@ test('membership commands are idempotent, immediately restrictive, and preserve 
   assert.match(migration, /effective organization must have exactly one owner/);
   assert.match(migration, /role_bindings_no_physical_delete/);
   assert.match(membership, /storedHash != requestHash/);
+  assert.match(membership, /UPDATE user_active_contexts SET context_type='PERSONAL'/);
   assert.match(membership, /active_context_type=CASE WHEN active_organization_id=/);
   assert.doesNotMatch(membership, /DELETE FROM role_bindings/);
   assert.match(billingMigration, /organization_member_lifecycle_states/);

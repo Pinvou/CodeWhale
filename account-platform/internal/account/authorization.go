@@ -70,7 +70,7 @@ func (r *PostgresRepository) Authorize(ctx context.Context, principal identity.P
 	decision.Permission = permission
 	decision.OrganizationID = organizationID
 	err := r.pool.QueryRow(ctx, `
-SELECT u.id, u.membership_version,
+SELECT u.id, active.context_version,
        COALESCE(av.version, 1),
        EXISTS(
          SELECT 1
@@ -94,6 +94,7 @@ SELECT u.id, u.membership_version,
        )
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
+JOIN user_active_contexts active ON active.user_id=u.id
 LEFT JOIN authorization_versions av ON av.user_id=u.id
   AND av.scope=CASE WHEN $4::uuid IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END
   AND av.scope_id=COALESCE($4::uuid, '00000000-0000-0000-0000-000000000000'::uuid)
@@ -104,6 +105,32 @@ WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, permis
 		return AuthorizationDecision{}, ErrForbidden
 	}
 	return decision, err
+}
+
+func (s *Service) contextVersionHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		principal, ok := identity.FromContext(c.Request.Context())
+		if !ok {
+			c.Next()
+			return
+		}
+		me, err := s.repository.GetMe(c.Request.Context(), principal)
+		if err == nil {
+			c.Header("X-Context-Version", stringInt64(me.ActiveContext.ContextVersion))
+			c.Header("X-Authorization-Version", stringInt64(me.ActiveContext.AuthorizationVersion))
+		}
+		if rawOrganizationID := c.Param("organization_id"); rawOrganizationID != "" {
+			if organizationID, parseErr := uuid.Parse(rawOrganizationID); parseErr == nil {
+				if repository, available := s.repository.(authorizationRepository); available {
+					decision, decisionErr := repository.Authorize(c.Request.Context(), principal, PermissionOrganizationProfileRead, &organizationID, nil)
+					if decisionErr == nil {
+						writeAuthorizationVersions(c.Writer.Header(), decision)
+					}
+				}
+			}
+		}
+		c.Next()
+	}
 }
 
 func (r *PostgresRepository) RoleDefinitions(ctx context.Context) ([]AdminRoleDefinition, error) {

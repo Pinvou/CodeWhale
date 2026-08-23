@@ -214,6 +214,7 @@ function RechargePanel({
 export function AccountPlatformPopover({ open, client, copy, language, theme, collapsed, onClose }) {
   const panelRef = useRef(null);
   const requestRef = useRef({ generation: 0, controller: null });
+  const contextSyncRef = useRef({ version: 0, loading: false, pending: 0 });
   const rechargeRequestRef = useRef({ generation: 0, controller: null });
   const [auth, setAuth] = useState('loading');
   const [me, setMe] = useState(null);
@@ -259,6 +260,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     const generation = requestRef.current.generation + 1;
     requestRef.current = { generation, controller };
     const isCurrent = () => requestRef.current.generation === generation && !controller.signal.aborted;
+    contextSyncRef.current.loading = true;
     setBusy(true);
     setError('');
     try {
@@ -268,11 +270,14 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         setAuth('guest');
         setMe(null);
         setBalance(null);
+        contextSyncRef.current.version = 0;
+        contextSyncRef.current.pending = 0;
         if (session.errorCode && session.errorCode !== 'account_platform_disabled') setError(localizedError(copy, session.errorCode));
         return;
       }
       const nextAccount = await client.bootstrap(controller.signal);
       if (!isCurrent()) return;
+      contextSyncRef.current.version = Number(nextAccount?.active_context?.context_version || 0);
       if (nextAccount?.status === 'PROVISIONING' || nextAccount?.status === 'REPAIR_REQUIRED') {
         setMe(nextAccount);
         setBalance(null);
@@ -291,7 +296,16 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         setError(localizedError(copy, reason));
       }
     } finally {
-      if (isCurrent()) setBusy(false);
+      if (isCurrent()) {
+        setBusy(false);
+        contextSyncRef.current.loading = false;
+        if (contextSyncRef.current.pending > contextSyncRef.current.version) {
+          contextSyncRef.current.pending = 0;
+          void loadAccount();
+        } else {
+          contextSyncRef.current.pending = 0;
+        }
+      }
     }
   }, [client, copy]);
 
@@ -338,6 +352,25 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
       rechargeRequestRef.current.controller?.abort();
     };
   }, [open, loadAccount]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const unsubscribe = client.onContextVersion?.(version => {
+      const nextVersion = Number(version || 0);
+      if (!Number.isSafeInteger(nextVersion) || nextVersion <= contextSyncRef.current.version) return;
+      if (contextSyncRef.current.loading) {
+        contextSyncRef.current.pending = Math.max(contextSyncRef.current.pending, nextVersion);
+        return;
+      }
+      void loadAccount();
+    });
+    const refreshOnFocus = () => void loadAccount();
+    window.addEventListener('focus', refreshOnFocus);
+    return () => {
+      unsubscribe?.();
+      window.removeEventListener('focus', refreshOnFocus);
+    };
+  }, [client, loadAccount, open]);
 
   useEffect(() => {
     if (!open || (auth !== 'guest' && auth !== 'error')) return undefined;

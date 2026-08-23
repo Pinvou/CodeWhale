@@ -52,6 +52,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [packages, setPackages] = useState({ summary: null, items: [] });
   const [qrData, setQrData] = useState('');
   const guardRef = useRef(createContextRequestGuard());
+  const meRef = useRef(null);
+  const contextMutationRef = useRef(false);
+  const contextRefreshRef = useRef(false);
   const activeOrganizationId = me?.active_context?.organization_id || '';
   const activeOrganization = organizations.find(item => item.organization_id === activeOrganizationId);
   const personalContext = !activeOrganizationId;
@@ -61,6 +64,13 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     ...(personalContext ? ['wallet', 'orders', 'invoice'] : []),
     'usage',
   ];
+
+  const clearContextResources = () => {
+    guardRef.current.cancel();
+    setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false);
+    setUnits([]); setMembers([]); setOrder(null); setOrders([]); setPackages({ summary: null, items: [] });
+    setBillingUnavailable(false); setBillingDetailsUnavailable(false);
+  };
 
   const loadContext = async (nextMe = me) => {
     const request = guardRef.current.begin();
@@ -112,6 +122,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         }
         const account = await client.bootstrap();
         if (!active) return;
+        meRef.current = account;
         setMe(account);
         setAuth('ready');
         await loadContext(account);
@@ -120,6 +131,41 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       }
     })();
     return () => { active = false; guardRef.current.cancel(); };
+  }, [client]);
+
+  useEffect(() => {
+    let disposed = false;
+    const synchronize = async (minimumVersion = 0) => {
+      if (!meRef.current) return;
+      const currentVersion = Number(meRef.current?.active_context?.context_version || 0);
+      if (contextMutationRef.current || contextRefreshRef.current || (minimumVersion > 0 && minimumVersion <= currentVersion)) return;
+      contextRefreshRef.current = true;
+      try {
+        const account = await client.bootstrap();
+        if (disposed) return;
+        const nextVersion = Number(account?.active_context?.context_version || 0);
+        const currentOrganization = meRef.current?.active_context?.organization_id || '';
+        const nextOrganization = account?.active_context?.organization_id || '';
+        if (nextVersion > currentVersion || nextOrganization !== currentOrganization) {
+          clearContextResources();
+          meRef.current = account;
+          setMe(account);
+          await loadContext(account);
+        }
+      } catch (reason) {
+        if (!disposed && reason?.name !== 'AbortError') setError(localizedError(copy, reason));
+      } finally {
+        contextRefreshRef.current = false;
+      }
+    };
+    const unsubscribe = client.onContextVersion?.(version => { void synchronize(version); });
+    const onFocus = () => { if (meRef.current) void synchronize(); };
+    globalThis.addEventListener?.('focus', onFocus);
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+      globalThis.removeEventListener?.('focus', onFocus);
+    };
   }, [client]);
 
   useEffect(() => {
@@ -165,6 +211,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const login = () => run(async () => {
     await client.login();
     const account = await client.bootstrap();
+    meRef.current = account;
     setMe(account);
     setAuth('ready');
     await loadContext(account);
@@ -173,19 +220,34 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const logout = () => run(async () => {
     await client.logout();
     guardRef.current.cancel();
+    meRef.current = null;
     setMe(null); setOrganizations([]); setUnits([]); setMembers([]); setProducts([]); setOrders([]); setPackages({ summary: null, items: [] });
     setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setBillingDetailsUnavailable(false); setOrder(null); setQrData(''); setAuth('guest');
     if (portal) window.location.reload();
   });
 
   const switchContext = value => run(async () => {
-    guardRef.current.cancel();
-    setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setUnits([]); setMembers([]); setOrder(null); setOrders([]); setPackages({ summary: null, items: [] }); setBillingUnavailable(false); setBillingDetailsUnavailable(false);
+    clearContextResources();
     const organizationId = value || null;
-    const context = await client.switchContext(organizationId ? 'ORGANIZATION' : 'PERSONAL', organizationId);
-    const updated = { ...me, active_context: context };
-    setMe(updated);
-    await loadContext(updated);
+    contextMutationRef.current = true;
+    try {
+      const expectedVersion = Number(meRef.current?.active_context?.context_version || 0);
+      const context = await client.switchContext(organizationId ? 'ORGANIZATION' : 'PERSONAL', organizationId, expectedVersion);
+      const updated = { ...meRef.current, active_context: context };
+      meRef.current = updated;
+      setMe(updated);
+      await loadContext(updated);
+    } catch (reason) {
+      if (reason?.code === 'ACCOUNT_CONFLICT') {
+        const account = await client.bootstrap();
+        meRef.current = account;
+        setMe(account);
+        await loadContext(account);
+      }
+      throw reason;
+    } finally {
+      contextMutationRef.current = false;
+    }
   });
 
   const loadMoreUsage = () => run(async () => {

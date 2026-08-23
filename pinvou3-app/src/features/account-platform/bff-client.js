@@ -9,6 +9,20 @@ export class AccountPlatformBffClient {
   constructor(baseURL = '') {
     this.baseURL = String(baseURL || '').replace(/\/$/, '');
     this.csrfToken = '';
+    this.contextVersion = 0;
+    this.contextVersionListeners = new Set();
+  }
+
+  onContextVersion(listener) {
+    this.contextVersionListeners.add(listener);
+    return () => this.contextVersionListeners.delete(listener);
+  }
+
+  observeContextVersion(value) {
+    const version = Number(value || 0);
+    if (!Number.isSafeInteger(version) || version <= this.contextVersion) return;
+    this.contextVersion = version;
+    for (const listener of this.contextVersionListeners) listener(version);
   }
 
   async session(signal) {
@@ -32,6 +46,7 @@ export class AccountPlatformBffClient {
       cache: 'no-store',
       signal: options.signal,
     });
+    this.observeContextVersion(response.headers.get('X-Context-Version'));
     if (response.status === 204) return null;
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, payload);
@@ -40,8 +55,8 @@ export class AccountPlatformBffClient {
 
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }
-  switchContext(contextType, organizationId, signal) {
-    return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null }, signal });
+  switchContext(contextType, organizationId, expectedContextVersion, signal) {
+    return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null, expected_context_version: expectedContextVersion }, signal });
   }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }
   members(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/members`, { signal }); }

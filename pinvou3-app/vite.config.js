@@ -61,6 +61,46 @@ function copyRuntimeAssets() {
   };
 }
 
+function preserveAccountPortalExtensions() {
+  const extensions = {
+    'account.html': {
+      head: [
+        '<script type="module" crossorigin src="/assets/my-role-bindings.js"></script>',
+        '<link rel="stylesheet" crossorigin href="/assets/my-role-bindings.css">',
+      ],
+      body: ['<div id="my-role-bindings-root"></div>'],
+    },
+    'admin.html': {
+      head: [
+        '<script type="module" crossorigin src="/assets/registration-repair.js"></script>',
+        '<script type="module" crossorigin src="/assets/role-bindings.js"></script>',
+        '<script type="module" crossorigin src="/assets/approval-requests.js"></script>',
+        '<link rel="stylesheet" crossorigin href="/assets/registration-repair.css">',
+        '<link rel="stylesheet" crossorigin href="/assets/role-bindings.css">',
+        '<link rel="stylesheet" crossorigin href="/assets/approval-requests.css">',
+      ],
+      body: [
+        '<div id="registration-repair-root"></div>',
+        '<div id="role-bindings-root"></div>',
+        '<div id="approval-requests-root"></div>',
+      ],
+    },
+  };
+  return {
+    name: 'pinvou-preserve-account-portal-extensions',
+    apply: 'build',
+    enforce: 'post',
+    transformIndexHtml(html, context) {
+      const filename = String(context.filename || '').replaceAll('\\', '/').split('/').pop();
+      const extension = extensions[filename];
+      if (!extension) return html;
+      return html
+        .replace('</head>', `  ${extension.head.join('\n  ')}\n</head>`)
+        .replace('</body>', `  ${extension.body.join('\n  ')}\n</body>`);
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const webBuild = mode === 'web';
   const accountPortalBuild = mode === 'account-portal';
@@ -75,10 +115,13 @@ export default defineConfig(({ mode }) => {
     port: Number(process.env.PINVOU3_UI_DEV_PORT || 1420),
     strictPort: true,
   },
-  plugins: [react(), ...(accountPortalBuild ? [] : [copyRuntimeAssets()])],
+  plugins: [react(), ...(accountPortalBuild ? [preserveAccountPortalExtensions()] : [copyRuntimeAssets()])],
   build: {
     outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',
-    emptyOutDir: true,
+    // The Portal directory also contains independently maintained approval,
+    // recovery, and role-lifecycle assets. Stable Vite outputs overwrite their
+    // own names without deleting those sibling entry points.
+    emptyOutDir: !accountPortalBuild,
     rolldownOptions: {
       input: accountPortalBuild
         ? { account: resolve(sourceRoot, 'account.html'), admin: resolve(sourceRoot, 'admin.html') }

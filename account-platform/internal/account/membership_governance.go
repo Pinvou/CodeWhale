@@ -224,6 +224,9 @@ func (r *PostgresRepository) removeMembership(ctx context.Context, principal ide
 		if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=$1`, targetUserID, now); err != nil {
 			return MembershipMutationResult{}, err
 		}
+		if _, err := tx.Exec(ctx, `UPDATE user_active_contexts SET context_type='PERSONAL',organization_id=NULL,context_version=context_version+1,updated_at=$3 WHERE user_id=$1 AND organization_id=$2`, targetUserID, organizationID, now); err != nil {
+			return MembershipMutationResult{}, err
+		}
 		if _, err := tx.Exec(ctx, `UPDATE user_sessions SET active_context_type=CASE WHEN active_organization_id=$2 THEN 'PERSONAL' ELSE active_context_type END,active_organization_id=CASE WHEN active_organization_id=$2 THEN NULL ELSE active_organization_id END,membership_version=membership_version+1,last_seen_at=$3 WHERE user_id=$1`, targetUserID, organizationID, now); err != nil {
 			return MembershipMutationResult{}, err
 		}

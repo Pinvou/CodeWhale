@@ -246,6 +246,12 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	defer response.Body.Close()
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "no-store")
+	if contextVersion := response.Header.Get("X-Context-Version"); contextVersion != "" {
+		w.Header().Set("X-Context-Version", contextVersion)
+	}
+	if authorizationVersion := response.Header.Get("X-Authorization-Version"); authorizationVersion != "" {
+		w.Header().Set("X-Authorization-Version", authorizationVersion)
+	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
 }

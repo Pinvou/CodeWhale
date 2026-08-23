@@ -20,6 +20,8 @@ type fakeRepository struct {
 	deny          bool
 	lookupResult  AdminUser
 	lookupErr     error
+	setExpected   int64
+	setContext    Context
 }
 
 func (f *fakeRepository) Bootstrap(context.Context, identity.Principal) (Me, bool, error) {
@@ -56,8 +58,10 @@ func (f *fakeRepository) LookupUserByCode(_ context.Context, _ identity.Principa
 func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
 	panic("not used")
 }
-func (*fakeRepository) SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error) {
-	panic("not used")
+func (f *fakeRepository) SetActiveContext(_ context.Context, _ identity.Principal, organizationID *uuid.UUID, expected int64) (Context, error) {
+	f.setExpected = expected
+	f.setContext.OrganizationID = organizationID
+	return f.setContext, nil
 }
 func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) (UnitTree, error) {
 	panic("not used")
@@ -255,6 +259,25 @@ func TestBootstrapDoesNotReactivateDisabledUser(t *testing.T) {
 	}
 	if me.Status != "DISABLED" || wallets.calls != 0 || repository.activateCalls != 0 {
 		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
+	}
+}
+
+func TestActiveContextSwitchRequiresAndReturnsGlobalVersion(t *testing.T) {
+	organizationID := uuid.Must(uuid.NewV7())
+	repository := &fakeRepository{
+		me:         Me{UserID: uuid.Must(uuid.NewV7()), Status: "ACTIVE", ActiveContext: Context{Type: "PERSONAL", ContextVersion: 7, AuthorizationVersion: 2}},
+		setContext: Context{Type: "ORGANIZATION", MembershipVersion: 3, ContextVersion: 8, AuthorizationVersion: 4},
+	}
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "user", SessionID: "session"}, nil
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/current/active-context", strings.NewReader(`{"context_type":"ORGANIZATION","organization_id":"`+organizationID.String()+`","expected_context_version":7}`))
+	request.Header.Set("Authorization", "Bearer valid")
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || repository.setExpected != 7 || response.Header().Get("X-Context-Version") != "8" || !strings.Contains(response.Body.String(), `"context_version":8`) {
+		t.Fatalf("status=%d expected=%d headers=%v body=%s", response.Code, repository.setExpected, response.Header(), response.Body.String())
 	}
 }
 

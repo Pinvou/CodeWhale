@@ -387,7 +387,7 @@ paths:
   /sessions/current/active-context:
     post:
       operationId: setActiveContext
-      summary: Select personal context or one active organization for this session
+      summary: CAS-select the user's global personal or organization context across every session
       requestBody:
         required: true
         content:
@@ -572,6 +572,9 @@ paths:
         "400":
           $ref: "#/components/responses/Error"
         "403":
+          $ref: "#/components/responses/Error"
+        "409":
+          description: The expected context version is stale; reload the current global context before retrying
           $ref: "#/components/responses/Error"
   /organizations/{organization_id}/invitations/{invitation_id}:
     delete:
@@ -1075,16 +1078,24 @@ components:
       oneOf:
         - type: object
           additionalProperties: false
-          required: [context_type]
+          required: [context_type, expected_context_version]
           properties:
             context_type:
               const: PERSONAL
+            expected_context_version:
+              type: integer
+              format: int64
+              minimum: 1
         - type: object
           additionalProperties: false
-          required: [context_type, organization_id]
+          required: [context_type, organization_id, expected_context_version]
           properties:
             context_type:
               const: ORGANIZATION
             organization_id:
               type: string
               format: uuid
+            expected_context_version:
+              type: integer
+              format: int64
+              minimum: 1
