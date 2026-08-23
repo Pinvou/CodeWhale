@@ -29,6 +29,8 @@ type Service struct {
 	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
 	organizationMemberLifecycle []OrganizationMemberLifecycleClient
 	serviceToken                string
+	serviceVersion              string
+	clientContractVersion       string
 	now                         func() time.Time
 }
 
@@ -66,6 +68,12 @@ func (s *Service) WithServiceToken(serviceToken string) *Service {
 	return s
 }
 
+func (s *Service) WithClientCompatibility(serviceVersion, contractVersion string) *Service {
+	s.serviceVersion = strings.TrimSpace(serviceVersion)
+	s.clientContractVersion = strings.TrimSpace(contractVersion)
+	return s
+}
+
 func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (Me, error) {
 	me, _, err := s.repository.Bootstrap(ctx, principal)
 	return me, err
@@ -76,6 +84,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.POST("/authorization/check", httpserver.AdaptFunc(s.checkPermission))
+	internal.GET("/client-compatibility", httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/users/:user_id/account-closure-state", httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.POST("/approval-requests/:approval_request_id/executions", approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
 	internal.POST("/approval-requests/:approval_request_id/executions/complete", approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))

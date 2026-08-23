@@ -10,6 +10,20 @@ servers:
 security:
   - oidc: []
 paths:
+  /client-compatibility:
+    get:
+      security: []
+      operationId: getClientCompatibility
+      summary: Publish updater-safe compatibility and attestation verification metadata
+      responses:
+        "200":
+          description: Current environment and supported desktop client range without internal probe credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientCompatibility"
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /models:
     get:
       operationId: listCatalogModels
@@ -890,6 +904,20 @@ components:
         type: string
         format: uuid
   schemas:
+    ClientCompatibility:
+      type: object
+      additionalProperties: false
+      required: [environment, service_version, contract_version, minimum_client_version, maximum_client_version, attestation_available, generated_at]
+      properties:
+        environment: { type: string }
+        service_version: { type: string }
+        contract_version: { type: string }
+        minimum_client_version: { type: string }
+        maximum_client_version: { type: string }
+        attestation_key_id: { type: string }
+        attestation_verification_key_base64url: { type: string }
+        attestation_available: { type: boolean }
+        generated_at: { type: string, format: date-time }
     CatalogModel:
       type: object
       additionalProperties: false

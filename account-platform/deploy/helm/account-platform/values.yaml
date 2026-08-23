@@ -84,6 +84,11 @@ tokenGateway:
   defaultRoutePriority: 10
   reconciliationNewApiBaseUrl: http://newapi:8080
   reconciliationIntervalSeconds: 15
+  clientContractVersion: client-readiness-v1
+  minimumClientVersion: 0.8.0
+  maximumClientVersion: 0.8.0
+  readinessAttestationKeyId: pinvou-client-readiness-v1
+  readinessAttestationTtlSeconds: 600
 
 external:
   postgresCidrs: []

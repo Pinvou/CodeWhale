@@ -95,6 +95,30 @@ func main() {
 	if err != nil {
 		log.Fatal("default Token Account provisioning is not configured: ", err)
 	}
+	readinessSigningKey, err := token.DecodeClientReadinessSigningKey(os.Getenv("CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if (strings.EqualFold(cfg.Environment, "production") || strings.EqualFold(cfg.Environment, "production-new")) && len(readinessSigningKey) == 0 {
+		log.Fatal("CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64 is required in production")
+	}
+	readinessTTL := 10 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("CLIENT_READINESS_ATTESTATION_TTL_SECONDS")); raw != "" {
+		seconds, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || seconds < 60 || seconds > 900 {
+			log.Fatal("CLIENT_READINESS_ATTESTATION_TTL_SECONDS must be between 60 and 900")
+		}
+		readinessTTL = time.Duration(seconds) * time.Second
+	}
+	readiness, err := token.NewClientReadinessService(token.ClientReadinessConfig{
+		Environment: cfg.Environment, ServiceVersion: valueOrDefault("TOKEN_SERVICE_VERSION", "development"), ContractVersion: valueOrDefault("TOKEN_CLIENT_CONTRACT_VERSION", "client-readiness-v1"),
+		MinimumClient: valueOrDefault("TOKEN_MINIMUM_CLIENT_VERSION", "0.8.0"), MaximumClient: valueOrDefault("TOKEN_MAXIMUM_CLIENT_VERSION", "0.8.0"),
+		AccountURL: os.Getenv("ACCOUNT_HTTP_URL"), OIDCIssuer: os.Getenv("OIDC_ISSUER"), ServiceToken: os.Getenv("INTERNAL_SERVICE_TOKEN"),
+		SigningKeyID: strings.TrimSpace(os.Getenv("CLIENT_READINESS_ATTESTATION_KEY_ID")), SigningKey: readinessSigningKey, AttestationTTL: readinessTTL,
+	}, repository, defaultRoutes, billingClient, repository)
+	if err != nil {
+		log.Fatal("client readiness is not configured: ", err)
+	}
 	adapterName := strings.ToUpper(strings.TrimSpace(os.Getenv("TOKEN_GATEWAY_ADAPTER")))
 	if adapterName == "" {
 		adapterName = "NEW_API"
@@ -168,8 +192,15 @@ func main() {
 	cancelInitialSync()
 	go catalogSync.Run(workerContext)
 	go defaultRoutes.Run(workerContext)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer)
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness)
 	if err := httpserver.RunWithApplication("token-gateway", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func valueOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }

@@ -84,6 +84,7 @@ func main() {
 	}
 	service := account.NewService(repository, wallets).
 		WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN")).
+		WithClientCompatibility(valueOrDefault("ACCOUNT_SERVICE_VERSION", "development"), valueOrDefault("ACCOUNT_CLIENT_CONTRACT_VERSION", "account-client-v1")).
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationMemberLifecycle(billingOrganizationLifecycle)

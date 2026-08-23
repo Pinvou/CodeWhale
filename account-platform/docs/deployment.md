@@ -267,6 +267,10 @@ node scripts/account-platform.mjs dev down
 
 授予回收验收必须使用具有 `organization.grant.reclaim_closed` 的组织管理员，通过 Token Gateway 的组织接口发起；请求不接受金额，只能一次性回收单条授予的全部当前可回收剩余量。验证普通撤回、恢复、消费、创建 Hold 仍拒绝 `ACCOUNT_CLOSED`，并分别注入关联 Hold、待核对用量、退款/拒付、支付异常和资金性对账差异，确认回收失败且余额守恒；批量请求中的失败项不得回滚成功项。监控 `IDENTITY_CLEANUP/ANONYMIZED` 停留时长、外部证明、主体生命周期不匹配的 Commerce `STALE` 证据、授予隔离/回收审计、Outbox 延迟和三年保留/法律保全任务。任一库产生清理、匿名化、隔离或回收事实后禁止对这两项迁移执行 down；故障时暂停注销 Worker 或关闭回收入口，保留已提交证明并从原阶段重试。
 
+客户端切换 Readiness 上线执行 Token `000016_client_readiness`。为 Token Gateway 配置当前服务/契约版本、允许的最小和最大桌面版本，并从运行时 Secret 注入独立 Ed25519 私钥及稳定 `key_id`；私钥不得进入 values、镜像、日志或桌面安装包，生产环境缺失私钥时 Gateway 必须拒绝启动。先发布 Account 的服务身份 `/internal/v1/client-compatibility`，再迁移并发布 Token Gateway，最后由发布系统调用 `/internal/v1/client-readiness` 和 `/internal/v1/client-readiness/attestations`。反向代理只公开 `/v1/client-compatibility`，禁止公开两个内部入口。
+
+验收连续执行只读 Readiness，并在调用前后核对用户/组织 Hold、权益桶、用量请求、账本和上游推理日志均无新增；分别注入 OIDC 不可达、Account 契约不可达、空目录、无 READY 路由和价格/公式不完整，结果必须返回稳定失败检查且不得签发证明。对有效证明逐项篡改环境、制品摘要、客户端版本、服务/契约/目录版本、签名和有效期，更新器均须拒绝；轮换密钥时先公开新公钥并保持旧 key 的验证窗口不短于所有已签证明寿命，再停止旧 key 签发。监控各检查失败率、证明签发量、过期拒绝和 `client_readiness_attestations` 连续性；一旦签发记录存在，禁止 down migration。生产等价证据完成前 APT-052 保持 `BLOCKED_EXTERNAL`，不得据此放行 APT-032 正式发布。
+
 ## 8. 单机 Compose 发布流程
 
 下面流程以 `<release-dir>`、`<backup-dir>` 和 `<compose-files>` 为占位符。站点专用配置和 Secret 不进入仓库。

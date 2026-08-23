@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 270`、`部分实现 26`、`未实现 33`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 270`、`部分实现 27`、`未实现 32`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -60,6 +60,7 @@
 | `USAGE-CANCELLATION-CONVERGENCE` | 原稳定用户幂等取消、派发前 Hold 全释放、派发后交付隔离、Adapter 取消能力、可信实际用量、版本化核对期限、损失复核及幂等人工重试 | Go 全量单元测试、OpenAPI lint、取消结构合同、桌面/Portal 构建和静态验证通过；真实 PostgreSQL 竞态、Provider 用量延迟、断线和故障注入待部署 |
 | `TOKEN-OPERATIONS-ISOLATION` | 平台 Token Account 创建/启停、PLATFORM 资源过滤、组织角色默认拒绝、凭据元数据最小化及统一脱敏检查结果 | Go 单元测试、OpenAPI lint、平台 Token 运营隔离合同、三语 Portal 构建和静态验证通过；数据库运行级迁移及真实 Provider 凭据检查待部署 |
 | `ACCOUNT-CLOSURE-CLEANUP` | 主体生命周期隔离、资料/Commerce/邀请自动收敛、Identity 删除、原标识释放、永久 ID/编码墓碑、三年保留策略，以及组织授予隔离与合规整笔回收 | Account/Billing/Token/Portal Go 单元测试、OpenAPI lint、注销清理合同、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Identity/Commerce 故障注入和三年时钟推进待部署 |
+| `CLIENT-SWITCH-READINESS` | 服务身份保护的只读 OIDC/Account/目录/READY 路由/价格公式检查、公开兼容范围、制品/环境/版本绑定的 Ed25519 短时证明和不可变签发审计 | Go 单元测试、OpenAPI lint、合同测试、Compose/Helm 静态门禁通过；生产密钥注入、真实环境连续无副作用核对和发布系统联调待外部验收 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
@@ -149,7 +150,7 @@
 | TOK-30 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | Hold 前加密准备、Billing 按 usage_request_id 唯一 EnsureHold、Hold/正式意图原子提升、一次性派发租约及 CAS 审计已闭环；已取得租约且结果未知的非幂等 Adapter 只转 REVIEW |
 | TOK-35 | 部分实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 已有盘点报告、配置备份、幂等迁移、会话/任务模型迁移和凭据清理重试；缺安装崩溃注入与制品级验收 |
 | TOK-36 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少发布、安装、运行三层门禁，更新器尚未证明迁移预检失败不替换旧版本及二进制/配置原子提交回滚 |
-| TOK-37 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少不创建用户 Hold、不产生用户费用的客户端切换 readiness、隔离合成验收身份及绑定制品/环境/服务版本的短时签名准入证明 |
+| TOK-37 | 部分实现 | DOC_CURRENT | GO-UNIT; CLIENT-SWITCH-READINESS | NOT_DEPLOYED | 内部服务身份接口只读核验 OIDC、Account 契约、目录、READY 路由及价格/公式，不创建 Hold/用量/推理；发布系统可取得绑定环境、制品摘要、客户端/服务/契约/目录版本的 Ed25519 短时证明，更新器仅获取公开兼容范围和验签公钥。生产密钥注入、真实环境连续无副作用核对及发布系统联调待验收。 |
 | TOK-38 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 取消仅按原稳定 user_id 授权并持久化键摘要/指纹；派发前竞态在用量行锁内阻止意图提升、幂等释放唯一 Hold 并终结为 LOCAL_CONFIRMED/CANCELLED_BEFORE_DISPATCH，终态返回 ALREADY_TERMINAL |
 | TOK-39 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | Adapter 统一声明 EXPLICIT_CANCEL、STREAM_ABORT_CONFIRMED_CANCEL 或 UNSUPPORTED；当前 OpenAI-compatible/New API 明确为 UNSUPPORTED，不把普通 HTTP/SSE 断开伪装成取消成功 |
 | TOK-40 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-EXECUTION-REPLAY; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | execution/cancel/delivery/settlement 独立持久；断线只改 delivery，后台上下文继续读取、持久化和结算，显式停止写 USER_STOPPED 且不覆盖真实执行状态 |
@@ -646,7 +647,7 @@
 | TOK-32 | Gateway 自动重试模型请求 | 已实现 | 上游是否执行可能不确定，自动重试会造成重复消费；当前 Gateway 不自动重发模型请求。 |
 | TOK-33 | 不确定结果自动核对和人工重试 | 已实现 | `REVIEW`/`SETTLEMENT_PENDING` 后按历史 Adapter 和上游引用退避查询；管理员重试具备独立幂等指纹且不重发模型，期限后释放未结算 Hold 并进入复核。 |
 | TOK-34 | 普通用户查看用量历史 | 已实现 | 提供个人用量请求列表和详情，不暴露内部凭据。 |
-| TOK-37 | 非计费客户端切换 Readiness | 未实现 | 当前没有覆盖兼容版本、OIDC、Account/Gateway 契约、目录、READY 路由和计价完整性的无副作用 readiness，也没有与真实用户钱包/账单隔离的专用合成验收身份或供桌面安全验证的短时签名准入证明。 |
+| TOK-37 | 非计费客户端切换 Readiness | 部分实现 | 已提供服务身份保护的无推理 readiness、公开兼容元数据及短时 Ed25519 准入证明；证明绑定环境、制品、客户端/服务/契约/目录版本并不可变留痕。生产密钥、真实环境无副作用证据和发布系统联调仍待外部验收。 |
 | TOK-38 | 用户取消模型请求 | 已实现 | 仅原稳定用户可执行持久幂等取消；派发前通过行锁阻止意图提升、释放唯一 Hold 并写 LOCAL_CONFIRMED，完成事实优先且重复取消不重复调用。 |
 | TOK-39 | Provider 取消能力适配 | 已实现 | Adapter 统一声明三类取消能力；当前两个 Adapter 明确 UNSUPPORTED，因此停止交付但继续受控读取原调用并核对用量，不从断流推断取消。 |
 | TOK-40 | 传输连接与模型执行状态隔离 | 已实现 | execution/cancel/delivery/settlement 独立持久，断线和 USER_STOPPED 不取消、不判失败、不释放 Hold，上游在受限后台上下文继续且原请求可重放。 |

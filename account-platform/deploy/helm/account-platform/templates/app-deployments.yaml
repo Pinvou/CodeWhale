@@ -73,6 +73,8 @@ spec:
             - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
             {{- end }}
             {{- if eq $app.name "account-service" }}
+            - { name: ACCOUNT_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
+            - { name: ACCOUNT_CLIENT_CONTRACT_VERSION, value: "account-client-v1" }
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
             - { name: IDENTITY_HTTP_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
@@ -150,6 +152,14 @@ spec:
             - name: TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-reconciliation-newapi-admin-user-id } }
             - { name: TOKEN_RECONCILIATION_INTERVAL_SECONDS, value: {{ $root.Values.tokenGateway.reconciliationIntervalSeconds | quote }} }
+            - { name: TOKEN_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
+            - { name: TOKEN_CLIENT_CONTRACT_VERSION, value: {{ $root.Values.tokenGateway.clientContractVersion | quote }} }
+            - { name: TOKEN_MINIMUM_CLIENT_VERSION, value: {{ $root.Values.tokenGateway.minimumClientVersion | quote }} }
+            - { name: TOKEN_MAXIMUM_CLIENT_VERSION, value: {{ $root.Values.tokenGateway.maximumClientVersion | quote }} }
+            - { name: CLIENT_READINESS_ATTESTATION_KEY_ID, value: {{ $root.Values.tokenGateway.readinessAttestationKeyId | quote }} }
+            - { name: CLIENT_READINESS_ATTESTATION_TTL_SECONDS, value: {{ $root.Values.tokenGateway.readinessAttestationTtlSeconds | quote }} }
+            - name: CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: client-readiness-attestation-private-key-base64 } }
             {{- else if eq $app.name "token-portal" }}
             - { name: REDIS_URL, value: {{ printf "redis://%s-redis:6379/0" $fullname | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }

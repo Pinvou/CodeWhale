@@ -56,6 +56,7 @@ type Service struct {
 	defaultRoutes          DefaultRouteProvisioner
 	catalogSync            *CatalogSynchronizer
 	authorizer             *authorization.Client
+	clientReadiness        *ClientReadinessService
 }
 
 func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
@@ -70,6 +71,11 @@ func (s *Service) WithAuthorizer(authorizer *authorization.Client) *Service {
 
 func (s *Service) WithCatalogSynchronizer(synchronizer *CatalogSynchronizer) *Service {
 	s.catalogSync = synchronizer
+	return s
+}
+
+func (s *Service) WithClientReadiness(readiness *ClientReadinessService) *Service {
+	s.clientReadiness = readiness
 	return s
 }
 
@@ -92,6 +98,9 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	internal.PUT("/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	internal.DELETE("/users/:user_id/replay-payloads", httpserver.AdaptFunc(s.anonymizeUserReplayPayloads))
 	internal.GET("/users/:user_id/account-closure-assessment", httpserver.AdaptFunc(s.accountClosureAssessment))
+	internal.GET("/client-readiness", httpserver.AdaptFunc(s.clientReadinessStatus))
+	internal.POST("/client-readiness/attestations", httpserver.AdaptFunc(s.issueClientReadinessAttestation))
+	router.GET("/v1/client-compatibility", httpserver.AdaptFunc(s.clientCompatibility))
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
 	protected.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
