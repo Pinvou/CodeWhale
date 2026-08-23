@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/commerce"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 )
 
@@ -131,6 +132,20 @@ func (c *Client) CreateUser(ctx context.Context, mobile string) error {
 		}
 	}
 	return fmt.Errorf("%w: user synchronization did not confirm the requested mobile", ErrRejected)
+}
+
+func (c *Client) EnsureCustomer(ctx context.Context, request commerce.CustomerProvisionRequest) (commerce.CustomerProvisionResult, error) {
+	if request.SubjectType != "USER" {
+		return commerce.CustomerProvisionResult{}, fmt.Errorf("%w: unsupported customer subject", ErrRejected)
+	}
+	if err := c.CreateUser(ctx, request.ContactMobile); err != nil {
+		return commerce.CustomerProvisionResult{}, err
+	}
+	mobile, err := mallRequestMobile(request.ContactMobile)
+	if err != nil {
+		return commerce.CustomerProvisionResult{}, err
+	}
+	return commerce.CustomerProvisionResult{ExternalReferenceRedacted: "***" + mobile[len(mobile)-4:]}, nil
 }
 
 func (c *Client) CreateOrder(ctx context.Context, orderKey, mobile, sku string) error {

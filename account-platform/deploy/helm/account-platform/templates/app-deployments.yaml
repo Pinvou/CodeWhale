@@ -81,6 +81,13 @@ spec:
             - { name: SMS_HTTP_ENDPOINT, value: {{ $root.Values.sms.httpEndpoint | quote }} }
             - { name: WALLET_PROVISIONING_POLICY_VERSION, value: {{ $root.Values.account.walletProvisioningPolicyVersion | quote }} }
             - { name: WALLET_PROVISIONING_SLA_MINUTES, value: {{ $root.Values.account.walletProvisioningSlaMinutes | quote }} }
+            - { name: COMMERCE_PROVIDER_ID, value: {{ $root.Values.account.commerceProviderId | quote }} }
+            - { name: COMMERCE_ADAPTER_VERSION, value: {{ $root.Values.account.commerceAdapterVersion | quote }} }
+            - { name: H3C_MALL_BASE_URL, value: {{ $root.Values.account.commerceAdapterBaseUrl | quote }} }
+            {{- range $item := list (dict "env" "H3C_MALL_APP_KEY" "key" "h3c-mall-app-key") (dict "env" "H3C_MALL_APP_SECRET" "key" "h3c-mall-app-secret") }}
+            - name: {{ $item.env }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }
+            {{- end }}
             {{- range $item := list (dict "env" "ALIYUN_SMS_ACCESS_KEY_ID" "key" "aliyun-sms-access-key-id") (dict "env" "ALIYUN_SMS_ACCESS_KEY_SECRET" "key" "aliyun-sms-access-key-secret") (dict "env" "ALIYUN_SMS_SIGN_NAME" "key" "aliyun-sms-sign-name") (dict "env" "ALIYUN_SMS_REGISTER_TEMPLATE" "key" "aliyun-sms-register-template") (dict "env" "ALIYUN_SMS_LOGIN_TEMPLATE" "key" "aliyun-sms-login-template") (dict "env" "SMS_VERIFICATION_HMAC_KEY_BASE64" "key" "sms-verification-hmac-key-base64") (dict "env" "SMS_HTTP_BEARER_TOKEN" "key" "sms-http-bearer-token") }}
             - name: {{ $item.env }}
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }

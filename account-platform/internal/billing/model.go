@@ -9,11 +9,12 @@ import (
 )
 
 var (
-	ErrNotFound             = errors.New("billing resource not found")
-	ErrConflict             = errors.New("billing resource conflict")
-	ErrInsufficientBalance  = errors.New("wallet has insufficient available credits")
-	ErrWalletUnavailable    = errors.New("wallet is unavailable")
-	ErrUsageAlreadyTerminal = errors.New("usage hold is already terminal")
+	ErrNotFound                 = errors.New("billing resource not found")
+	ErrConflict                 = errors.New("billing resource conflict")
+	ErrInsufficientBalance      = errors.New("wallet has insufficient available credits")
+	ErrWalletUnavailable        = errors.New("wallet is unavailable")
+	ErrUsageAlreadyTerminal     = errors.New("usage hold is already terminal")
+	ErrCommerceCustomerNotReady = errors.New("commerce customer mapping is not ready")
 )
 
 type Wallet struct {
@@ -29,8 +30,8 @@ type Wallet struct {
 
 type Product struct {
 	ProductID          string   `json:"product_id"`
-	PlanName          string   `json:"plan_name"`
-	SKUCode           string   `json:"sku_code"`
+	PlanName           string   `json:"plan_name"`
+	SKUCode            string   `json:"sku_code"`
 	AmountFen          int64    `json:"amount_fen"`
 	CreditMicrocredits int64    `json:"credit_microcredits"`
 	DisplayPoints      int64    `json:"display_points"`

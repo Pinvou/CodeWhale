@@ -198,6 +198,21 @@ paths:
                 $ref: "#/components/schemas/Me"
         "401":
           $ref: "#/components/responses/Error"
+  /me/commerce-customer-mapping:
+    get:
+      operationId: getCommerceCustomerMapping
+      summary: Get the supplier-neutral external customer readiness used only by dependent payments
+      responses:
+        "200":
+          description: Current Commerce Customer mapping state without an external customer identifier
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CommerceCustomerMapping" }
+        "401": { $ref: "#/components/responses/Error" }
   /me/profile-change-requests:
     post:
       operationId: createProfileChange
@@ -675,7 +690,7 @@ components:
     Me:
       type: object
       additionalProperties: false
-      required: [user_id, user_code, status, active_context]
+      required: [user_id, user_code, status, mobile_verified, commerce_customer_status, active_context]
       properties:
         user_id:
           type: string
@@ -689,8 +704,31 @@ components:
           type: [string, "null"]
         display_name:
           type: [string, "null"]
+        mobile:
+          type: [string, "null"]
+        mobile_verified:
+          type: boolean
+        commerce_customer_status:
+          type: string
+          enum: [NOT_CONFIGURED, PENDING, IN_PROGRESS, READY, RETRY, REPAIR_REQUIRED, DETACHED]
         active_context:
           $ref: "common.yaml#/components/schemas/Context"
+    CommerceCustomerMapping:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [NOT_CONFIGURED, PENDING, IN_PROGRESS, READY, RETRY, REPAIR_REQUIRED, DETACHED]
+        provider_id:
+          type: string
+          description: Stable configured Provider identifier; it is data, not a provider-specific API contract.
+        adapter_version:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
     UserCode:
       type: string
       description: Permanent, display-safe user code. It is not an authentication or authorization credential.

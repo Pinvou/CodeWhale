@@ -39,6 +39,10 @@ func (f *fakeRepository) GetMe(context.Context, identity.Principal) (Me, error) 
 func (*fakeRepository) ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error) {
 	panic("not used")
 }
+
+func (*fakeRepository) GetCommerceCustomerMapping(context.Context, identity.Principal) (CommerceCustomerMapping, error) {
+	return CommerceCustomerMapping{Status: "READY"}, nil
+}
 func (f *fakeRepository) Authorize(_ context.Context, _ identity.Principal, permission string, organizationID, _ *uuid.UUID) (AuthorizationDecision, error) {
 	return AuthorizationDecision{Allowed: !f.deny, Permission: permission, OrganizationID: organizationID, ContextVersion: 1, AuthorizationVersion: 1}, nil
 }

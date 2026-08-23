@@ -86,11 +86,20 @@
     },
     "account": {
       "type": "object",
-      "required": ["walletProvisioningPolicyVersion", "walletProvisioningSlaMinutes"],
+        "required": ["walletProvisioningPolicyVersion", "walletProvisioningSlaMinutes", "commerceProviderId", "commerceAdapterVersion", "commerceAdapterBaseUrl"],
       "additionalProperties": false,
       "properties": {
         "walletProvisioningPolicyVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "walletProvisioningSlaMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 }
+          "walletProvisioningSlaMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
+          "commerceProviderId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$" },
+          "commerceAdapterVersion": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "commerceAdapterBaseUrl": {
+            "type": "string",
+            "anyOf": [
+              { "maxLength": 0 },
+              { "format": "uri", "pattern": "^https://" }
+            ]
+          }
       }
     },
     "billing": {

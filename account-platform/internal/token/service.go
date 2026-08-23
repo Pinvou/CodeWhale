@@ -27,6 +27,10 @@ type ContextResolver interface {
 	Resolve(context.Context, string) (AuthorizationContext, error)
 }
 
+type CommerceCustomerResolver interface {
+	ResolveCommerceCustomer(context.Context, string) (string, error)
+}
+
 type WalletResolver interface {
 	Ensure(context.Context, string, uuid.UUID) (uuid.UUID, error)
 }
@@ -38,6 +42,7 @@ type CredentialValidator interface {
 type Service struct {
 	repository             Repository
 	contexts               ContextResolver
+	commerceCustomers      CommerceCustomerResolver
 	wallets                WalletResolver
 	validator              CredentialValidator
 	providerURLs           ProviderURLPolicy
@@ -64,7 +69,11 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 	if maximumInputTokens <= 0 {
 		maximumInputTokens = 128_000
 	}
-	return &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000}
+	service := &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000}
+	if resolver, ok := contexts.(CommerceCustomerResolver); ok {
+		service.commerceCustomers = resolver
+	}
+	return service
 }
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
@@ -280,8 +289,15 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusForbidden, "PERSONAL_RECHARGE_ONLY", "personal plans can only be purchased in the personal context", httpserver.RequestID(r.Context()))
 		return
 	}
-	if !resolved.MobileVerified || resolved.Mobile == nil || resolved.MallSyncStatus != "SYNCED" {
-		api.WriteError(w, http.StatusConflict, "MOBILE_ACCOUNT_NOT_READY", "a verified mobile synchronized with the Mall is required before recharge", httpserver.RequestID(r.Context()))
+	commerceStatus := "NOT_CONFIGURED"
+	if s.commerceCustomers != nil {
+		status, err := s.commerceCustomers.ResolveCommerceCustomer(r.Context(), r.Header.Get("Authorization"))
+		if err == nil {
+			commerceStatus = status
+		}
+	}
+	if !resolved.MobileVerified || resolved.Mobile == nil {
+		api.WriteError(w, http.StatusConflict, "MOBILE_NOT_VERIFIED", "a verified mobile is required before recharge", httpserver.RequestID(r.Context()))
 		return
 	}
 	var body struct {
@@ -296,8 +312,12 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, r.Header.Get("Idempotency-Key"))
+	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, commerceStatus, r.Header.Get("Idempotency-Key"))
 	if err != nil {
+		if errors.Is(err, ErrCommerceCustomerNotReady) {
+			api.WriteError(w, http.StatusConflict, "COMMERCE_CUSTOMER_NOT_READY", "the payment provider requires a ready Commerce Customer mapping", httpserver.RequestID(r.Context()))
+			return
+		}
 		api.WriteError(w, http.StatusBadGateway, "RECHARGE_CREATE_FAILED", "the recharge order could not be created", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -726,12 +746,34 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		Roles             []string    `json:"roles"`
 		Mobile            *string     `json:"mobile"`
 		MobileVerified    bool        `json:"mobile_verified"`
-		MallSyncStatus    string      `json:"mall_sync_status"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
 		return AuthorizationContext{}, err
 	}
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified, MallSyncStatus: body.MallSyncStatus}, nil
+	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
+}
+
+func (r *HTTPContextResolver) ResolveCommerceCustomer(ctx context.Context, authorization string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, r.baseURL.String()+"/v1/me/commerce-customer-mapping", nil)
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Authorization", authorization)
+	response, err := r.client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", ErrForbidden
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&body); err != nil {
+		return "", err
+	}
+	return body.Status, nil
 }
 
 type HTTPWalletResolver struct {

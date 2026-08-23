@@ -60,6 +60,9 @@ sms:
 account:
   walletProvisioningPolicyVersion: wallet-provisioning-v1
   walletProvisioningSlaMinutes: 15
+  commerceProviderId: h3c_mall
+  commerceAdapterVersion: h3c-mall-v1
+  commerceAdapterBaseUrl: ""
 
 billing:
   paymentExpiryIntervalSeconds: 15

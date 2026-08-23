@@ -42,6 +42,14 @@ func main() {
 	if err := repository.ConfigureWalletProvisioning(walletPolicyVersion, walletSLA); err != nil {
 		log.Fatal(err)
 	}
+	commerceProviderID := valueOrDefault("COMMERCE_PROVIDER_ID", "h3c_mall")
+	commerceAdapterVersion := valueOrDefault("COMMERCE_ADAPTER_VERSION", "h3c-mall-v1")
+	if err := repository.ConfigureCommerceProvider(commerceProviderID, commerceAdapterVersion); err != nil {
+		log.Fatal(err)
+	}
+	if err := repository.EnsureCommerceProviderMappings(ctx); err != nil {
+		log.Fatal(err)
+	}
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal(err)
@@ -94,15 +102,15 @@ func main() {
 		go account.NewProfileChangeWorker(profiles, 5*time.Second).Run(ctx)
 		go account.NewRegistrationRecoveryWorker(repository, auth, 5*time.Second).Run(ctx)
 
-		// Mobile authentication and Mall account synchronization use separate
-		// providers. Keep authentication available while Mall integration is not
-		// configured; queued users are synchronized once its credentials exist.
+		// Authentication and Commerce Customer provisioning are independent.
+		// Keep authentication available while the configured Commerce Adapter is
+		// unavailable; supplier-neutral jobs remain queued until it is enabled.
 		if strings.TrimSpace(os.Getenv("H3C_MALL_BASE_URL")) != "" {
 			mall, err := h3cmall.New(h3cmall.Config{BaseURL: os.Getenv("H3C_MALL_BASE_URL"), AppKey: os.Getenv("H3C_MALL_APP_KEY"), AppSecret: os.Getenv("H3C_MALL_APP_SECRET"), AllowInsecure: cfg.Environment == "development" || cfg.Environment == "test"})
 			if err != nil {
 				log.Fatal(err)
 			}
-			go account.NewMallSyncWorker(repository, mall, 5*time.Second).Run(ctx)
+			go account.NewCommerceCustomerSyncWorker(repository, mall, commerceProviderID, commerceAdapterVersion, 5*time.Second).Run(ctx)
 		}
 	}
 	if err := httpserver.RunWithApplication("account-service", service.Handler(verify), repository.Ping); err != nil {
@@ -113,4 +121,11 @@ func main() {
 func enabled(name string) bool {
 	value, err := strconv.ParseBool(os.Getenv(name))
 	return err == nil && value
+}
+
+func valueOrDefault(name, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
+	}
+	return fallback
 }

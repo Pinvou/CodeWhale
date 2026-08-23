@@ -244,12 +244,12 @@ components:
     CreateRechargeOrderRequest:
       type: object
       additionalProperties: false
-      required: [wallet_id, requester_user_id, product_id, channel]
+      required: [wallet_id, requester_id, product_id, channel, mobile, commerce_customer_status]
       properties:
         wallet_id:
           type: string
           format: uuid
-        requester_user_id:
+        requester_id:
           type: string
           format: uuid
         product_id:
@@ -257,6 +257,12 @@ components:
           enum: [PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
         channel:
           $ref: "#/components/schemas/PaymentChannel"
+        mobile:
+          type: string
+        commerce_customer_status:
+          type: string
+          enum: [NOT_CONFIGURED, PENDING, IN_PROGRESS, READY, RETRY, REPAIR_REQUIRED, DETACHED]
+          description: Trusted Account Mapping projection; only enforced when the selected Payment Provider declares commerce_customer_required.
     RechargeOrder:
       type: object
       additionalProperties: false

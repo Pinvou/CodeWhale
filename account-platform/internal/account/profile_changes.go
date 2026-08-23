@@ -399,7 +399,7 @@ func (r *PostgresRepository) CommitProfileChange(ctx context.Context, id uuid.UU
 		return ErrProfileChangeConflict
 	}
 	if c.Field == "MOBILE" {
-		_, err = tx.Exec(ctx, `INSERT INTO mall_user_sync_jobs(user_id,mobile_e164,status,attempts,next_attempt_at,created_at,updated_at) VALUES($1,$2,'PENDING',0,$3,$3,$3) ON CONFLICT(user_id) DO UPDATE SET mobile_e164=EXCLUDED.mobile_e164,status='PENDING',attempts=0,next_attempt_at=EXCLUDED.next_attempt_at,lease_until=NULL,last_error=NULL,buyer_id=NULL,synced_at=NULL,updated_at=EXCLUDED.updated_at`, c.UserID, c.NewValue, r.now())
+		err = enqueueCommerceCustomerSync(ctx, tx, "USER", c.UserID, c.NewValue, r.commerceProviderID, r.commerceAdapterVersion, "PROFILE_SYNC", r.now())
 		if err != nil {
 			return err
 		}

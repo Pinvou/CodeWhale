@@ -262,7 +262,7 @@ func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID
 	if _, err = tx.Exec(ctx, `INSERT INTO identities(issuer,subject,user_id,created_at,last_seen_at) VALUES($1,$2,$3,$4,$4)`, issuer, operation.IdentitySubject, operation.CandidateUserID, now); err != nil {
 		return RegistrationOperation{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO mall_user_sync_jobs(user_id,mobile_e164,status,next_attempt_at,created_at,updated_at) VALUES($1,$2,'PENDING',$3,$3,$3)`, operation.CandidateUserID, operation.Mobile, now); err != nil {
+	if err = enqueueCommerceCustomerSync(ctx, tx, "USER", operation.CandidateUserID, operation.Mobile, r.commerceProviderID, r.commerceAdapterVersion, "CUSTOMER_PROVISIONING", now); err != nil {
 		return RegistrationOperation{}, err
 	}
 	if _, err = tx.Exec(ctx, `

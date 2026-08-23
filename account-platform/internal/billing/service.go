@@ -183,14 +183,19 @@ func (s *Service) rejectAdjustment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		RequesterID uuid.UUID `json:"requester_id"`
-		WalletID    uuid.UUID `json:"wallet_id"`
-		ProductID   string    `json:"product_id"`
-		Channel     string    `json:"channel"`
-		Mobile      string    `json:"mobile"`
+		RequesterID            uuid.UUID `json:"requester_id"`
+		WalletID               uuid.UUID `json:"wallet_id"`
+		ProductID              string    `json:"product_id"`
+		Channel                string    `json:"channel"`
+		Mobile                 string    `json:"mobile"`
+		CommerceCustomerStatus string    `json:"commerce_customer_status"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
+		return
+	}
+	if s.payments.Capabilities().CommerceCustomerRequired && body.CommerceCustomerStatus != "READY" {
+		s.writeError(w, r, ErrCommerceCustomerNotReady)
 		return
 	}
 	order, created, err := s.payments.CreateMobileOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
@@ -503,6 +508,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "USAGE_ALREADY_SETTLED", "the usage hold is already terminal"
 	case errors.Is(err, ErrPaymentProvider):
 		status, code, message = http.StatusBadGateway, "PAYMENT_PROVIDER_UNAVAILABLE", "the payment provider request could not be completed"
+	case errors.Is(err, ErrCommerceCustomerNotReady):
+		status, code, message = http.StatusConflict, "COMMERCE_CUSTOMER_NOT_READY", "the payment provider requires a ready Commerce Customer mapping"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

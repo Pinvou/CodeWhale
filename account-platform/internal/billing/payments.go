@@ -66,13 +66,13 @@ type PaymentOrderHistoryItem struct {
 }
 
 type PaymentCoordinator struct {
-	repository  *PostgresRepository
-	provider    PaymentProvider
-	secrets     map[string][]byte
-	merchantID  string
-	callbackURL string
-	now         func() time.Time
-	productSKUs map[string]ExternalProduct
+	repository           *PostgresRepository
+	provider             PaymentProvider
+	secrets              map[string][]byte
+	merchantID           string
+	callbackURL          string
+	now                  func() time.Time
+	productSKUs          map[string]ExternalProduct
 	allowTentativePrices bool
 }
 
@@ -113,13 +113,14 @@ type ProviderBillEntry struct {
 }
 
 type PaymentCapabilities struct {
-	Provider                string `json:"provider"`
-	OrderSyncSupported      bool   `json:"order_sync_supported"`
-	RefundSupported         bool   `json:"refund_supported"`
-	CloseSupported          bool   `json:"close_supported"`
-	NotificationSupported   bool   `json:"notification_supported"`
-	ReconciliationSupported bool   `json:"reconciliation_supported"`
-	ManualRepairSupported   bool   `json:"manual_repair_supported"`
+	Provider                 string `json:"provider"`
+	OrderSyncSupported       bool   `json:"order_sync_supported"`
+	RefundSupported          bool   `json:"refund_supported"`
+	CloseSupported           bool   `json:"close_supported"`
+	NotificationSupported    bool   `json:"notification_supported"`
+	ReconciliationSupported  bool   `json:"reconciliation_supported"`
+	ManualRepairSupported    bool   `json:"manual_repair_supported"`
+	CommerceCustomerRequired bool   `json:"commerce_customer_required"`
 }
 
 // PaymentPolicy describes provider-specific behavior that the generic billing

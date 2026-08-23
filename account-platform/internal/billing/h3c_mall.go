@@ -28,7 +28,7 @@ func NewH3CMallProvider(client h3cMallClient, products map[string]ExternalProduc
 }
 
 func (p *H3CMallProvider) Capabilities() PaymentCapabilities {
-	return PaymentCapabilities{Provider: "h3c_mall", OrderSyncSupported: true, ManualRepairSupported: true}
+	return PaymentCapabilities{Provider: "h3c_mall", OrderSyncSupported: true, ManualRepairSupported: true, CommerceCustomerRequired: true}
 }
 
 func (p *H3CMallProvider) Policy() PaymentPolicy {

@@ -37,6 +37,8 @@ type BillingHold struct {
 	Status         string    `json:"status"`
 }
 
+var ErrCommerceCustomerNotReady = errors.New("commerce customer mapping is not ready")
+
 type BillingClient interface {
 	Price(context.Context, string) (PriceVersion, error)
 	PriceByID(context.Context, uuid.UUID) (PriceVersion, error)
@@ -44,7 +46,7 @@ type BillingClient interface {
 	Commit(context.Context, uuid.UUID, uuid.UUID, int64, Usage) error
 	Release(context.Context, uuid.UUID, uuid.UUID, string) error
 	Products(context.Context) (json.RawMessage, error)
-	CreateRechargeOrder(context.Context, uuid.UUID, uuid.UUID, string, string, string, string) (json.RawMessage, error)
+	CreateRechargeOrder(context.Context, uuid.UUID, uuid.UUID, string, string, string, string, string) (json.RawMessage, error)
 	RechargeOrders(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	RecentRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	RechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
@@ -60,8 +62,8 @@ func (c *HTTPBillingClient) Products(ctx context.Context) (json.RawMessage, erro
 	return c.raw(ctx, http.MethodGet, "/v1/recharge/products", nil, "")
 }
 
-func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (json.RawMessage, error) {
-	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile}, idempotencyKey)
+func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, commerceCustomerStatus, idempotencyKey string) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile, "commerce_customer_status": commerceCustomerStatus}, idempotencyKey)
 }
 
 func (c *HTTPBillingClient) RechargeOrders(ctx context.Context, requesterID, walletID uuid.UUID) (json.RawMessage, error) {
@@ -121,6 +123,12 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 		return nil, readErr
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		var problem struct {
+			Code string `json:"code"`
+		}
+		if json.Unmarshal(payload, &problem) == nil && problem.Code == "COMMERCE_CUSTOMER_NOT_READY" {
+			return nil, ErrCommerceCustomerNotReady
+		}
 		return nil, fmt.Errorf("Billing HTTP %d: %s", response.StatusCode, payload)
 	}
 	return json.RawMessage(payload), nil

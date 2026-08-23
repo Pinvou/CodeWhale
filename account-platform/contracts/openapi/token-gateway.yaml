@@ -465,6 +465,9 @@ paths:
               schema:
                 type: string
                 const: no-store
+        "409":
+          description: The payment requires a Commerce Customer mapping that is not READY
+          $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
   /recharge/orders/recent:

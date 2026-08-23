@@ -637,7 +637,7 @@ func (r *PostgresRepository) RegisterMobileIdentity(ctx context.Context, issuer,
 	if _, err = tx.Exec(ctx, `INSERT INTO identities(issuer,subject,user_id,created_at,last_seen_at) VALUES($1,$2,$3,$4,$4)`, issuer, subject, userID, now); err != nil {
 		return uuid.Nil, "", err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO mall_user_sync_jobs(user_id,mobile_e164,status,next_attempt_at,created_at,updated_at) VALUES($1,$2,'PENDING',$3,$3,$3)`, userID, mobile, now); err != nil {
+	if err = enqueueCommerceCustomerSync(ctx, tx, "USER", userID, mobile, r.commerceProviderID, r.commerceAdapterVersion, "CUSTOMER_PROVISIONING", now); err != nil {
 		return uuid.Nil, "", err
 	}
 	if err := appendAudit(ctx, tx, userID, "registration", nil, "account.mobile.register", "user", userID.String(), "SUCCEEDED", map[string]any{"mobile_verified": true}); err != nil {

@@ -29,15 +29,15 @@ type Context struct {
 }
 
 type Me struct {
-	UserID         uuid.UUID `json:"user_id"`
-	UserCode       string    `json:"user_code"`
-	Status         string    `json:"status"`
-	Username       *string   `json:"username"`
-	DisplayName    *string   `json:"display_name"`
-	Mobile         *string   `json:"mobile,omitempty"`
-	MobileVerified bool      `json:"mobile_verified"`
-	MallSyncStatus string    `json:"mall_sync_status"`
-	ActiveContext  Context   `json:"active_context"`
+	UserID                 uuid.UUID `json:"user_id"`
+	UserCode               string    `json:"user_code"`
+	Status                 string    `json:"status"`
+	Username               *string   `json:"username"`
+	DisplayName            *string   `json:"display_name"`
+	Mobile                 *string   `json:"mobile,omitempty"`
+	MobileVerified         bool      `json:"mobile_verified"`
+	CommerceCustomerStatus string    `json:"commerce_customer_status"`
+	ActiveContext          Context   `json:"active_context"`
 }
 
 type AuthorizationContext struct {
@@ -56,7 +56,6 @@ type AuthorizationContext struct {
 	PlatformPermissions  []string    `json:"platform_permissions"`
 	Mobile               *string     `json:"mobile,omitempty"`
 	MobileVerified       bool        `json:"mobile_verified"`
-	MallSyncStatus       string      `json:"mall_sync_status"`
 }
 
 type Organization struct {
@@ -103,6 +102,7 @@ type Repository interface {
 	ActivateUser(context.Context, uuid.UUID) error
 	GetMe(context.Context, identity.Principal) (Me, error)
 	ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error)
+	GetCommerceCustomerMapping(context.Context, identity.Principal) (CommerceCustomerMapping, error)
 	ListOrganizations(context.Context, identity.Principal) ([]Organization, error)
 	SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error)
 	ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error)

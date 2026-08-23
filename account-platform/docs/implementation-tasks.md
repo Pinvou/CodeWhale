@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标保留可追溯任务；完成 APT-001、APT-002、APT-003 与 APT-006 后当前仍有 249 个状态为 `部分实现`、`未实现` 或 `降级实现` 的目标编号，每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标保留可追溯任务；完成 APT-001～APT-006 后当前仍有 241 个状态为 `部分实现`、`未实现` 或 `降级实现` 的目标编号，每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -28,7 +28,7 @@
 | APT-002 | Identity 密码边界、原始字符策略、短信 Adapter 与登录反枚举 | ID-03, ID-08, ID-11, ID-17, ID-18, ACC-01, NFR-14 | 无 | CODE | DONE |
 | APT-003 | 注册唯一值预约、持久恢复 Saga、异步钱包 Provisioning 与恢复 UI | ID-14, ACC-03, ACC-04, ACC-51–ACC-55, BILL-04, UI-02, UI-15, ADM-35 | APT-001, APT-002 | CODE | DONE |
 | APT-004 | 用户名/手机号变更 Saga、忘记密码及个人中心入口 | ACC-06–ACC-09, UI-05 | APT-002 | CODE | DONE |
-| APT-005 | 供应商中立 Commerce Customer Mapping 与同步生命周期 | CORE-03, ACC-05, PAY-06, NFR-16 | 无 | CODE | PENDING |
+| APT-005 | 供应商中立 Commerce Customer Mapping 与同步生命周期 | CORE-03, ACC-05, PAY-06 | 无 | CODE | DONE |
 | APT-006 | Account 平台/组织 RBAC、原子权限码和显式授权作用域 | ACC-13, ACC-35, NFR-15 | 无 | CODE | DONE |
 | APT-007 | 超级管理员安全引导、异常失联 Break-glass 与最后管理员保护 | ACC-48, ADM-01, ADM-02 | APT-006, APT-046 | CODE+ENV | PENDING |
 | APT-008 | 管理命令审批分类、生命周期、失效、授权复核和幂等执行 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | APT-006, APT-046 | CODE | PENDING |
@@ -46,7 +46,7 @@
 | APT-020 | 钱包、组成级账本和 Hold 运营证据查询 | BILL-27, ADM-18 | APT-016, APT-018 | CODE | PENDING |
 | APT-021 | 普通退款目标锁定、全 BASE 退款、关联 BONUS 撤销与强制退款隔离 | BILL-28, PAY-24–PAY-32, ADM-20, UI-12 | APT-016, APT-019, APT-023 | CODE | PENDING |
 | APT-022 | Payment Provider/渠道/商品映射中立化及生产测试隔离 | PAY-01–PAY-05, NFR-17 | APT-005 | CODE | PENDING |
-| APT-023 | 一单多流水、不可变支付证据、独立状态机和组织付款履约 | CORE-06, PAY-11–PAY-15, PAY-20–PAY-23, ADM-19 | APT-016, APT-022 | CODE | PENDING |
+| APT-023 | 一单多流水、不可变支付证据、独立状态机和组织付款履约 | CORE-06, PAY-11–PAY-15, PAY-20–PAY-23, ADM-19, NFR-16 | APT-016, APT-022 | CODE | PENDING |
 | APT-024 | 晚到支付、无回调/账单降级、人工案件和事实盲区处置 | PAY-17–PAY-19, PAY-35, PAY-37–PAY-40, ADM-33, NFR-45 | APT-022, APT-023 | CODE | PENDING |
 | APT-025 | 拒付/异常复核、四方对账和受审计修复 | PAY-33, PAY-34, PAY-36, ADM-21 | APT-019, APT-023, APT-024 | CODE | PENDING |
 | APT-026 | 供应商中立模型网关协议和用量证据 Adapter | TOK-04, TOK-05, NFR-18 | 无 | CODE | PENDING |

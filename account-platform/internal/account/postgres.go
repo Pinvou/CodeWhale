@@ -20,10 +20,12 @@ import (
 )
 
 type PostgresRepository struct {
-	pool                  *pgxpool.Pool
-	now                   func() time.Time
-	walletPolicyVersion   string
-	walletProvisioningSLA time.Duration
+	pool                   *pgxpool.Pool
+	now                    func() time.Time
+	walletPolicyVersion    string
+	walletProvisioningSLA  time.Duration
+	commerceProviderID     string
+	commerceAdapterVersion string
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -38,7 +40,11 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 	if err != nil {
 		return nil, fmt.Errorf("open account database: %w", err)
 	}
-	repository := &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }, walletPolicyVersion: walletProvisioningPolicyVersion, walletProvisioningSLA: walletProvisioningSLA}
+	repository := &PostgresRepository{
+		pool: pool, now: func() time.Time { return time.Now().UTC() },
+		walletPolicyVersion: walletProvisioningPolicyVersion, walletProvisioningSLA: walletProvisioningSLA,
+		commerceProviderID: defaultCommerceProviderID, commerceAdapterVersion: defaultCommerceAdapterVersion,
+	}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, err
@@ -69,7 +75,7 @@ func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.P
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, lockKey); err != nil {
 		return Me{}, false, err
 	}
-	user, err := loadUserByIdentity(ctx, tx, principal)
+	user, err := loadUserByIdentity(ctx, tx, principal, r.commerceProviderID)
 	created := false
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
@@ -177,14 +183,14 @@ func (r *PostgresRepository) GetMe(ctx context.Context, principal identity.Princ
 	var organizationID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
 SELECT u.id, u.user_code, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,
-       COALESCE(ms.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version,
+       COALESCE(cm.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version,
        COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1)
 FROM identities i
 JOIN users u ON u.id = i.user_id
 JOIN user_sessions s ON s.user_id = u.id AND s.issuer = i.issuer AND s.session_id = $3
-LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id
-WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion, &me.ActiveContext.AuthorizationVersion,
+LEFT JOIN commerce_customer_mappings cm ON cm.subject_type='USER' AND cm.subject_id=u.id AND cm.provider_id=$4
+WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID, r.commerceProviderID).Scan(
+		&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion, &me.ActiveContext.AuthorizationVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Me{}, ErrNotFound
@@ -206,18 +212,17 @@ SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,s.member
        COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id IS NULL),'{}'),
        COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL),'{}'),
        COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
-       u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(ms.status,'NOT_CONFIGURED')
+       u.mobile_e164,u.mobile_verified_at IS NOT NULL
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
 JOIN user_sessions s ON s.user_id=u.id AND s.issuer=i.issuer AND s.session_id=$3
-LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id
 LEFT JOIN organizations o ON o.id=s.active_organization_id
 LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=s.active_organization_id AND m.status='ACTIVE'
 LEFT JOIN membership_units mu ON mu.membership_id=m.id
 LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
 WHERE i.issuer=$1 AND i.subject=$2 AND (s.active_organization_id IS NULL OR o.status='ACTIVE')
-GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version,ms.status`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified, &resolved.MallSyncStatus,
+GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
+		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		var status string
@@ -694,9 +699,9 @@ FOR UPDATE OF m`, organizationID, actorID, PermissionOrganizationOwnerTransfer).
 	return tx.Commit(ctx)
 }
 
-func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Principal) (Me, error) {
+func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Principal, commerceProviderID string) (Me, error) {
 	var me Me
-	err := tx.QueryRow(ctx, `SELECT u.id,u.user_code,u.status,u.username,u.display_name,u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(ms.status,'NOT_CONFIGURED'),u.membership_version FROM identities i JOIN users u ON u.id=i.user_id LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.MembershipVersion)
+	err := tx.QueryRow(ctx, `SELECT u.id,u.user_code,u.status,u.username,u.display_name,u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(cm.status,'NOT_CONFIGURED'),u.membership_version FROM identities i JOIN users u ON u.id=i.user_id LEFT JOIN commerce_customer_mappings cm ON cm.subject_type='USER' AND cm.subject_id=u.id AND cm.provider_id=$3 WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject, commerceProviderID).Scan(&me.UserID, &me.UserCode, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.CommerceCustomerStatus, &me.ActiveContext.MembershipVersion)
 	me.ActiveContext.Type = "PERSONAL"
 	me.UserCode = FormatUserCode(me.UserCode)
 	me.ActiveContext.ContextVersion = me.ActiveContext.MembershipVersion

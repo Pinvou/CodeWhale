@@ -72,6 +72,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.Use(identity.GinMiddleware(verify))
 	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
 	protected.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
+	protected.GET("/v1/me/commerce-customer-mapping", httpserver.AdaptFunc(s.getCommerceCustomerMapping))
 	if s.profiles != nil {
 		protected.POST("/v1/me/profile-change-requests", httpserver.AdaptFunc(s.createProfileChange))
 		protected.POST("/v1/me/profile-change-requests/:request_id/mobile-challenges", httpserver.AdaptFunc(s.sendProfileMobileChallenge))
@@ -189,6 +190,16 @@ func (s *Service) getMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, me)
+}
+
+func (s *Service) getCommerceCustomerMapping(w http.ResponseWriter, r *http.Request) {
+	mapping, err := s.repository.GetCommerceCustomerMapping(r.Context(), mustPrincipal(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, mapping)
 }
 
 func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request) {

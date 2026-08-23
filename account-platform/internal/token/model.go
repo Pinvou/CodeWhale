@@ -29,7 +29,6 @@ type AuthorizationContext struct {
 	Roles             []string
 	Mobile            *string
 	MobileVerified    bool
-	MallSyncStatus    string
 }
 
 type Candidate struct {
