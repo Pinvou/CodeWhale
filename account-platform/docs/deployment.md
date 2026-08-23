@@ -25,6 +25,8 @@
 
 `deploy/helm/account-platform/` 是 Kubernetes/Helm 生产目标模板，包含 Deployment、Service、健康检查、指标抓取和网络策略等材料。除非实际集群已经部署并验证，不得以 Chart 存在为由宣称当前环境具备多副本、高可用、自动故障转移或既定 RPO/RTO。
 
+`production-new` 还会强制开启跨可用区/节点拓扑约束、PDB 与零不可用滚动策略，并禁止 Chart 内单副本 Redis/NATS，改用 `rediss://`、`tls://`/HTTPS 管理监控端点的外部高可用依赖。按 `deploy/runbooks/high-availability-failover.md` 完成 Pod、节点、区域、滚动升级和依赖主节点丢失场景后，运行 `npm --prefix account-platform run check:production-ha -- <evidence.json>`；没有同一候选版本的实际证据时仍标记 `NOT_DEPLOYED`。
+
 ## 2. 服务与端口
 
 Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维访问：

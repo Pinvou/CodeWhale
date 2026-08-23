@@ -57,11 +57,13 @@ kind: Deployment
 metadata: { name: {{ $fullname }}-keycloak }
 spec:
   replicas: {{ .Values.keycloak.replicas }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   selector: { matchLabels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: keycloak } }
   template:
     metadata: { labels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: keycloak } }
     spec:
       automountServiceAccountToken: false
+      {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" "keycloak") | nindent 6 }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: keycloak

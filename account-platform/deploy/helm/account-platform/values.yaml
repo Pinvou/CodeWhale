@@ -32,6 +32,18 @@ replicas:
   tokenPortal: 2
   eventRelay: 1
 
+availability:
+  enabled: false
+  topologyKey: topology.kubernetes.io/zone
+  hostnameTopologyKey: kubernetes.io/hostname
+  terminationGracePeriodSeconds: 60
+
+dependencies:
+  redisUrl: ""
+  newApiRedisUrl: ""
+  natsUrl: ""
+  natsMonitorUrl: ""
+
 newApi:
   enabled: true
   serviceName: newapi

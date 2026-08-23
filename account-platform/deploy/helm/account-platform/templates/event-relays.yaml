@@ -24,6 +24,7 @@ metadata:
     app.kubernetes.io/component: {{ $source }}-event-relay
 spec:
   replicas: {{ $root.Values.replicas.eventRelay }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   selector:
     matchLabels:
       {{- include "pinvou.selector" $root | nindent 6 }}
@@ -37,6 +38,7 @@ spec:
     spec:
       serviceAccountName: {{ $fullname }}
       automountServiceAccountToken: false
+      {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" (printf "%s-event-relay" $source)) | nindent 6 }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: event-relay
@@ -51,7 +53,7 @@ spec:
             - { name: EVENT_SOURCE, value: {{ $source | quote }} }
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "%s-service-database-url" $source }} } }
-            - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
+            - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
           readinessProbe: { httpGet: { path: /health/ready, port: metrics }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: metrics }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts: [{ name: tmp, mountPath: /tmp }]

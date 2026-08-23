@@ -24,6 +24,7 @@ metadata:
     app.kubernetes.io/component: {{ $app.name }}
 spec:
   replicas: {{ $app.replicas }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   selector:
     matchLabels:
       {{- include "pinvou.selector" $root | nindent 6 }}
@@ -38,6 +39,7 @@ spec:
     spec:
       serviceAccountName: {{ $fullname }}
       automountServiceAccountToken: false
+      {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" $app.name) | nindent 6 }}
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
@@ -70,7 +72,7 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: internal-service-token } }
             {{- end }}
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
-            - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
+            - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
             {{- end }}
             {{- if eq $app.name "account-service" }}
             - { name: ACCOUNT_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
@@ -163,7 +165,7 @@ spec:
             - name: CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: client-readiness-attestation-private-key-base64 } }
             {{- else if eq $app.name "token-portal" }}
-            - { name: REDIS_URL, value: {{ printf "redis://%s-redis:6379/0" $fullname | quote }} }
+            - { name: REDIS_URL, value: {{ include "pinvou.redisUrl" $root | quote }} }
             - { name: PORTAL_PUBLIC_URL, value: {{ $root.Values.public.portalUrl | quote }} }
             - { name: PORTAL_OIDC_AUTHORIZATION_URL, value: {{ printf "%s/realms/pinvou/protocol/openid-connect/auth" $root.Values.keycloak.hostname | quote }} }
             - { name: PORTAL_OIDC_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
@@ -172,7 +174,7 @@ spec:
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
             - name: SYSTEM_PROBES_JSON
-              value: {{ printf `[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://%s-account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://%s-billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://%s-token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://%s-keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"http://%s-newapi:8080/api/status","json_boolean_field":"success"},{"key":"event-bus","kind":"http","url":"http://%s-nats:8222/healthz"},{"key":"account-event-relay","kind":"relay","url":"http://%s-account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://%s-billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://%s-token-event-relay:9090"}]` $fullname $fullname $fullname $fullname $fullname $fullname $fullname $fullname $fullname | quote }}
+              value: {{ printf `[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://%s-account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://%s-billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://%s-token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://%s-keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"http://%s-newapi:8080/api/status","json_boolean_field":"success"},{"key":"event-bus","kind":"http","url":%s},{"key":"account-event-relay","kind":"relay","url":"http://%s-account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://%s-billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://%s-token-event-relay:9090"}]` $fullname $fullname $fullname $fullname $fullname (include "pinvou.natsMonitorUrl" $root | quote) $fullname $fullname $fullname | quote }}
             {{- end }}
           readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }

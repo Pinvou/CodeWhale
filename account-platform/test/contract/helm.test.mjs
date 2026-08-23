@@ -21,6 +21,12 @@ test('Helm production-new values contain references, not secret material or simu
   assert.ok(values.tokenGateway.secretRotationIntervalSeconds >= 60);
   assert.equal(values.keycloak.adminHostname, 'http://127.0.0.1:18081');
   assert.equal(values.tokenGateway.providerAllowedHosts.includes('newapi'), true);
+  assert.equal(values.availability.enabled, true);
+  assert.equal(values.redis.enabled, false);
+  assert.equal(values.nats.enabled, false);
+  assert.match(values.dependencies.redisUrl, /^rediss:\/\//);
+  assert.match(values.dependencies.natsUrl, /^tls:\/\//);
+  for (const key of ['accountService', 'billingService', 'tokenGateway', 'tokenPortal', 'eventRelay']) assert.ok(values.replicas[key] >= 2);
   assert.match(values.images.newApi.digest, /^sha256:[a-f0-9]{64}$/);
   assert.ok(values.tokenGateway.providerAllowedHosts.every(host => !/mock|localhost|127\.0\.0\.1/i.test(host)));
   for (const cidrs of Object.values(values.external)) {
@@ -50,6 +56,10 @@ test('Helm values schema rejects unsafe production-new overrides', async () => {
   assert.equal(validate({ ...values, images: { ...values.images, newApi: { ...values.images.newApi, digest: '' } } }), false);
   assert.equal(validate({ ...values, external: { ...values.external, postgresCidrs: ['0.0.0.0/0'] } }), false);
   assert.equal(validate({ ...values, keycloak: { hostname: values.keycloak.hostname } }), false);
+  assert.equal(validate({ ...values, availability: { ...values.availability, enabled: false } }), false);
+  assert.equal(validate({ ...values, redis: { ...values.redis, enabled: true } }), false);
+  assert.equal(validate({ ...values, dependencies: { ...values.dependencies, natsUrl: 'nats://nats.example.com:4222' } }), false);
+  assert.equal(validate({ ...values, replicas: { ...values.replicas, billingService: 1 } }), false);
 });
 
 test('Helm chart includes required workloads, migration hooks, and deny-by-default policy', async () => {
@@ -73,6 +83,10 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   assert.match(combined, /kind: Service[\s\S]*name: \{\{ \$fullname \}\}-\{\{ \$source \}\}-event-relay/);
   assert.match(combined, /name: monitor, port: 8222/);
   assert.match(combined, /name: KC_HOSTNAME_ADMIN/);
+  assert.match(combined, /kind: PodDisruptionBudget/);
+  assert.match(combined, /topologySpreadConstraints/);
+  assert.match(combined, /maxUnavailable: 0/);
+  assert.match(combined, /pinvou\.natsUrl/);
   assert.doesNotMatch(combined, /kind:\s*Secret/);
 });
 

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 282`、`部分实现 22`、`未实现 25`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 282`、`部分实现 23`、`未实现 24`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -67,8 +67,9 @@
 | `PRODUCTION-SECURITY-GATE` | 生产 Ingress TLS、ExternalSecret KMS/Vault 来源、远程包络加密、持久 `key_id` 双读、全密文分批重加密、轮换 readiness 与旧 Key 停用验收 | Go 轮换/历史 Key 单测、Helm schema/ExternalSecret 负向合同和 TLS/KMS 环境门禁合同通过；无真实域名证书、SecretStore、KMS Key 轮换或部署版本证据 |
 | `OBSERVABILITY-RELEASE-GATE` | 稳定 JSON 日志 schema 与字段白名单、秘密标记丢弃、Request ID 校验/传播、HTTP/NATS/后台 Trace、健康分层、独立低基数指标与 Exemplar | Go 注入/关联/健康/指标单测、负向源码门禁与合同测试通过；真实 OTLP/Prometheus/日志采集和三组件 Trace 查询待部署验收 |
 | `RECOVERY-RELEASE-GATE` | 历史迁移规范化 SHA-256 只追加清单、生产迁移前快照和迁移后数据库摘要、分级 RPO/RTO、加密不可变备份、演练时效及分类删除收据 | Go/Node 正负向测试和全量发布门禁通过；真实四库备份、隔离恢复、月季年演练和删除收据待外部环境验收 |
+| `HA-RELEASE-GATE` | 双故障域、故障后容量、核心多副本/PDB/滚动策略、外部HA依赖及Pod/节点/区域/主节点故障切换 | Helm schema/合同和证据门禁正负向测试通过；真实集群拓扑、容量与无损切换报告待外部环境验收 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/120 个合同测试、任务覆盖、迁移/恢复/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/121 个合同测试、任务覆盖、迁移/恢复/HA/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -407,7 +408,7 @@
 | NFR-08 | 已实现 | DOC_CURRENT | GO-UNIT; GLOBAL-CONTEXT | NOT_DEPLOYED | 用户级 context_version 数据库单调保护，切换要求 expected_context_version；响应头跨 Account、Token、Portal 与桌面桥接传播，客户端只接受更高版本并刷新缓存 |
 | NFR-09 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 仓库清单拒绝历史迁移改名/删除/改写且仅追加更高版本，目标库再次校验已执行SHA；生产迁移强制24小时内快照并输出迁移后摘要，缺真实环境证据 |
 | NFR-10 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 版本目录、恢复/回滚runbook、只读核验SQL及生产证据门禁已闭环；缺实际备份恢复和周期演练报告 |
-| NFR-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移 |
+| NFR-11 | 部分实现 | DOC_CURRENT | HA-RELEASE-GATE | NOT_DEPLOYED | Compose明确非HA；production-new强制核心双副本、跨故障域、PDB、零不可用滚动及外部HA Redis/NATS，故障证据门禁要求无已提交事实丢失/重复；缺真实集群容量与切换报告 |
 | NFR-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 内部服务主要共享长期 INTERNAL_SERVICE_TOKEN，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权 |
 | NFR-13 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 注销在 Identity 不可认证证明后立即随机去标识化直接资料并释放用户名/手机号，法律记录只按永久内部主体引用保留；三年分类记录支持法律保全并由 worker 到期标记清除完成。 |
 | NFR-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 启动工厂按配置注入 `aliyun-managed` 或 `http-generated`；核心挑战状态机没有厂商条件，历史挑战保存 Provider ID 与 Adapter 版本 |
@@ -817,7 +818,7 @@
 | NFR-08 | 全局上下文一致性 | 已实现用户级唯一上下文、数据库单调版本、期望版本 CAS、标准响应头和桌面/Web 缓存失效；生产多端并发仍待部署验证。 |
 | NFR-09 | 数据迁移 | 历史迁移清单只允许追加更高版本，运行时复核数据库校验和；生产迁移强制快照凭证与迁移后实际摘要，待真实环境验收。 |
 | NFR-10 | 可恢复性 | 版本目录、恢复/回滚步骤、只读核验和生产证据门禁已建立；实际备份恢复和周期演练仍为外部阻塞。 |
-| NFR-11 | 高可用 | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移。 |
+| NFR-11 | 高可用 | 部分实现：生产Chart已强制独立故障域、多副本、PDB、零不可用滚动和外部HA依赖，并有无损切换证据门禁；真实集群验收仍为外部阻塞。 |
 | NFR-12 | 工作负载身份 | 内部服务主要共享长期 `INTERNAL_SERVICE_TOKEN`，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权。 |
 | NFR-13 | 个人信息去标识化与保留 | 已实现 Identity 删除证明后的随机墓碑和标识释放；用户 ID/编码与法定内部引用保留，三年分类记录、法律保全开关及到期自动清除状态独立持久化。 |
 | NFR-14 | 短信供应商可替换性 | `SMSProvider` 由启动工厂按配置注入，核心状态机无厂商分支；支持 `aliyun-managed` 与 `http-generated`，并保存 Provider ID 和 Adapter 版本。 |

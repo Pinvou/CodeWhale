@@ -11,6 +11,7 @@ metadata:
     app.kubernetes.io/component: new-api
 spec:
   replicas: {{ .Values.newApi.replicas }}
+  strategy: { type: RollingUpdate, rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } }
   selector:
     matchLabels:
       {{- include "pinvou.selector" . | nindent 6 }}
@@ -25,6 +26,7 @@ spec:
     spec:
       serviceAccountName: {{ $fullname }}
       automountServiceAccountToken: false
+      {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" "new-api") | nindent 6 }}
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets: {{ toYaml . | nindent 8 }}
       {{- end }}
@@ -42,7 +44,7 @@ spec:
             - { name: GIN_MODE, value: "release" }
             - { name: NODE_TYPE, value: {{ .Values.newApi.nodeType | quote }} }
             - { name: TRUSTED_PROXIES, value: {{ .Values.newApi.trustedProxies | quote }} }
-            - { name: REDIS_CONN_STRING, value: {{ printf "redis://%s-redis:6379/1" $fullname | quote }} }
+            - { name: REDIS_CONN_STRING, value: {{ include "pinvou.newApiRedisUrl" $root | quote }} }
             - { name: BATCH_UPDATE_ENABLED, value: "true" }
             - { name: ERROR_LOG_ENABLED, value: "true" }
             - { name: STREAMING_TIMEOUT, value: "300" }

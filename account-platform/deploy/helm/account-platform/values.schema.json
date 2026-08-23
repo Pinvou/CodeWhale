@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "externalSecrets", "images", "newApi", "oidc", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
+  "required": ["global", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy"],
   "properties": {
     "global": {
       "type": "object",
@@ -71,6 +71,41 @@
       "properties": {
         "rateLimitRPS": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000 },
         "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "replicas": {
+      "type": "object",
+      "required": ["accountService", "identityService", "billingService", "tokenGateway", "tokenPortal", "eventRelay"],
+      "additionalProperties": false,
+      "properties": {
+        "accountService": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "identityService": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "billingService": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "tokenGateway": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "tokenPortal": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "eventRelay": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "availability": {
+      "type": "object",
+      "required": ["enabled", "topologyKey", "hostnameTopologyKey", "terminationGracePeriodSeconds"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "topologyKey": { "type": "string", "minLength": 1 },
+        "hostnameTopologyKey": { "type": "string", "minLength": 1 },
+        "terminationGracePeriodSeconds": { "type": "integer", "minimum": 30, "maximum": 600 }
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "required": ["redisUrl", "newApiRedisUrl", "natsUrl", "natsMonitorUrl"],
+      "additionalProperties": false,
+      "properties": {
+        "redisUrl": { "type": "string" },
+        "newApiRedisUrl": { "type": "string" },
+        "natsUrl": { "type": "string" },
+        "natsMonitorUrl": { "type": "string" }
       }
     },
     "externalSecrets": {
@@ -165,6 +200,8 @@
         "adminHostname": { "type": "string", "format": "uri" }
       }
     },
+    "redis": { "type": "object", "required": ["enabled", "storage"], "properties": { "enabled": { "type": "boolean" }, "storage": { "type": "string", "minLength": 1 } } },
+    "nats": { "type": "object", "required": ["enabled", "storage"], "properties": { "enabled": { "type": "boolean" }, "storage": { "type": "string", "minLength": 1 } } },
     "networkPolicy": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } }
   },
   "definitions": {
@@ -221,7 +258,29 @@
               "remoteKey": { "type": "string", "minLength": 1 }
             }
           },
-          "newApi": { "type": "object", "properties": { "enabled": { "const": true } } },
+          "availability": { "type": "object", "properties": { "enabled": { "const": true } } },
+          "dependencies": {
+            "type": "object",
+            "properties": {
+              "redisUrl": { "type": "string", "pattern": "^rediss://" },
+              "newApiRedisUrl": { "type": "string", "pattern": "^rediss://" },
+              "natsUrl": { "type": "string", "pattern": "^tls://" },
+              "natsMonitorUrl": { "type": "string", "pattern": "^https://" }
+            }
+          },
+          "replicas": {
+            "type": "object",
+            "properties": {
+              "accountService": { "type": "integer", "minimum": 2 },
+              "billingService": { "type": "integer", "minimum": 2 },
+              "tokenGateway": { "type": "integer", "minimum": 2 },
+              "tokenPortal": { "type": "integer", "minimum": 2 },
+              "eventRelay": { "type": "integer", "minimum": 2 }
+            }
+          },
+          "redis": { "type": "object", "properties": { "enabled": { "const": false } } },
+          "nats": { "type": "object", "properties": { "enabled": { "const": false } } },
+          "newApi": { "type": "object", "properties": { "enabled": { "const": true }, "replicas": { "type": "integer", "minimum": 2 } } },
           "billing": { "type": "object", "properties": { "paymentProvider": { "const": "h3c_mall" }, "allowTentativePrices": { "const": false } } },
           "images": {
             "type": "object",
@@ -243,7 +302,7 @@
           "observability": { "type": "object", "properties": { "otlpEndpoint": { "type": "string", "pattern": "^https://" }, "prometheusRulesEnabled": { "const": true } } },
           "oidc": { "type": "object", "properties": { "issuer": { "type": "string", "pattern": "^https://" } } },
           "public": { "type": "object", "properties": { "portalUrl": { "type": "string", "pattern": "^https://" }, "paymentCallbackUrl": { "type": "string", "pattern": "^https://" } } },
-          "keycloak": { "type": "object", "properties": { "hostname": { "type": "string", "pattern": "^https://" } } },
+          "keycloak": { "type": "object", "properties": { "hostname": { "type": "string", "pattern": "^https://" }, "replicas": { "type": "integer", "minimum": 2 } } },
           "ingress": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true }, "tlsSecretName": { "type": "string", "minLength": 1 } } },
           "networkPolicy": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } }
         }
