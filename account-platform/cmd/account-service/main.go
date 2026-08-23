@@ -11,6 +11,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -145,7 +146,11 @@ func main() {
 			go observability.RunBackground(ctx, "commerce-customer-sync", account.NewCommerceCustomerSyncWorker(repository, mall, commerceProviderID, commerceAdapterVersion, 5*time.Second).Run)
 		}
 	}
-	if err := httpserver.RunWithApplication("account-service", service.Handler(verify), repository.Ping); err != nil {
+	compatibility, err := clientcompat.FromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := httpserver.RunWithApplication("account-service", compatibility.Wrap(service.Handler(verify)), repository.Ping); err != nil {
 		log.Fatal(err)
 	}
 }

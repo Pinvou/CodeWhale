@@ -111,6 +111,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "426":
+          $ref: "#/components/responses/UpgradeRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
   /recharge/orders/recent:
@@ -320,6 +322,16 @@ components:
         Retry-After:
           required: true
           schema: { type: integer, minimum: 1 }
+      content:
+        application/json:
+          schema:
+            $ref: "common.yaml#/components/schemas/Error"
+    UpgradeRequired:
+      description: The desktop client sunset has passed for remote write operations
+      headers:
+        Link: { required: true, schema: { type: string } }
+        X-API-Contract-Version: { required: true, schema: { type: string } }
+        X-Minimum-Supported-Client-Version: { required: true, schema: { type: string } }
       content:
         application/json:
           schema:

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
@@ -49,15 +50,21 @@ type ClientReadinessResult struct {
 }
 
 type ClientCompatibility struct {
-	Environment      string `json:"environment"`
-	ServiceVersion   string `json:"service_version"`
-	ContractVersion  string `json:"contract_version"`
-	MinimumClient    string `json:"minimum_client_version"`
-	MaximumClient    string `json:"maximum_client_version"`
-	AttestationKeyID string `json:"attestation_key_id,omitempty"`
-	VerificationKey  string `json:"attestation_verification_key_base64url,omitempty"`
-	AttestationReady bool   `json:"attestation_available"`
-	GeneratedAt      string `json:"generated_at"`
+	Environment            string                 `json:"environment"`
+	ServiceVersion         string                 `json:"service_version"`
+	ContractVersion        string                 `json:"contract_version"`
+	APIContractVersion     string                 `json:"api_contract_version"`
+	CurrentClient          string                 `json:"current_client_version"`
+	MinimumClient          string                 `json:"minimum_client_version"`
+	MinimumSupportedClient string                 `json:"minimum_supported_client_version"`
+	MaximumClient          string                 `json:"maximum_client_version"`
+	SunsetAt               string                 `json:"sunset_at,omitempty"`
+	UpgradeURL             string                 `json:"upgrade_url"`
+	Releases               []clientcompat.Release `json:"releases"`
+	AttestationKeyID       string                 `json:"attestation_key_id,omitempty"`
+	VerificationKey        string                 `json:"attestation_verification_key_base64url,omitempty"`
+	AttestationReady       bool                   `json:"attestation_available"`
+	GeneratedAt            string                 `json:"generated_at"`
 }
 
 type ClientReadinessAttestationClaims struct {
@@ -101,6 +108,7 @@ type ClientReadinessConfig struct {
 	SigningKeyID    string
 	SigningKey      ed25519.PrivateKey
 	AttestationTTL  time.Duration
+	Compatibility   clientcompat.Manifest
 }
 
 type ClientReadinessService struct {
@@ -182,7 +190,11 @@ func NewClientReadinessService(config ClientReadinessConfig, catalog interface {
 }
 
 func (s *ClientReadinessService) Compatibility() ClientCompatibility {
-	result := ClientCompatibility{Environment: s.config.Environment, ServiceVersion: s.config.ServiceVersion, ContractVersion: s.config.ContractVersion, MinimumClient: s.config.MinimumClient, MaximumClient: s.config.MaximumClient, GeneratedAt: s.now().Format(time.RFC3339)}
+	manifest := s.config.Compatibility
+	result := ClientCompatibility{Environment: s.config.Environment, ServiceVersion: s.config.ServiceVersion, ContractVersion: s.config.ContractVersion, APIContractVersion: manifest.APIContractVersion, CurrentClient: manifest.CurrentClientVersion, MinimumClient: manifest.MinimumSupportedClientVersion, MinimumSupportedClient: manifest.MinimumSupportedClientVersion, MaximumClient: manifest.CurrentClientVersion, SunsetAt: manifest.SunsetAt, UpgradeURL: manifest.UpgradeURL, Releases: manifest.Releases, GeneratedAt: s.now().Format(time.RFC3339)}
+	if result.MinimumClient == "" {
+		result.MinimumClient, result.MinimumSupportedClient, result.MaximumClient = s.config.MinimumClient, s.config.MinimumClient, s.config.MaximumClient
+	}
 	if len(s.config.SigningKey) == ed25519.PrivateKeySize {
 		result.AttestationKeyID = s.config.SigningKeyID
 		result.VerificationKey = base64.RawURLEncoding.EncodeToString(s.config.SigningKey.Public().(ed25519.PublicKey))

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -29,6 +30,10 @@ func main() {
 	}
 	ctx := context.Background()
 	cfg, err := config.Load("token-gateway")
+	if err != nil {
+		log.Fatal(err)
+	}
+	compatibility, err := clientcompat.FromEnv()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -119,6 +124,7 @@ func main() {
 		MinimumClient: valueOrDefault("TOKEN_MINIMUM_CLIENT_VERSION", "0.8.0"), MaximumClient: valueOrDefault("TOKEN_MAXIMUM_CLIENT_VERSION", "0.8.0"),
 		AccountURL: os.Getenv("ACCOUNT_HTTP_URL"), OIDCIssuer: os.Getenv("OIDC_ISSUER"), ServiceToken: os.Getenv("INTERNAL_SERVICE_TOKEN"),
 		SigningKeyID: strings.TrimSpace(os.Getenv("CLIENT_READINESS_ATTESTATION_KEY_ID")), SigningKey: readinessSigningKey, AttestationTTL: readinessTTL,
+		Compatibility: compatibility.Manifest(),
 	}, repository, defaultRoutes, billingClient, repository)
 	if err != nil {
 		log.Fatal("client readiness is not configured: ", err)
@@ -234,7 +240,7 @@ func main() {
 			return nil
 		}
 	}
-	if err := httpserver.RunWithApplication("token-gateway", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), ready); err != nil {
+	if err := httpserver.RunWithApplication("token-gateway", compatibility.Wrap(service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify)), ready); err != nil {
 		log.Fatal(err)
 	}
 }

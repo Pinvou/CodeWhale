@@ -14,6 +14,11 @@ x-service-build: &service-build
   context: ../..
   dockerfile: Dockerfile
 
+x-client-compatibility: &client-compatibility
+  PINVOU_API_CONTRACT_VERSION: ${PINVOU_API_CONTRACT_VERSION:-account-platform-v1}
+  PINVOU_CLIENT_UPGRADE_URL: ${PINVOU_CLIENT_UPGRADE_URL:-https://github.com/Pinvou/pinvou3/releases/latest}
+  PINVOU_CLIENT_RELEASE_MANIFEST: '${PINVOU_CLIENT_RELEASE_MANIFEST:-[{"version":"0.8.0","released_at":"2026-08-01T00:00:00Z"},{"version":"0.7.0","released_at":"2026-06-01T00:00:00Z","deprecation_notice_at":"2026-08-31T00:00:00Z","sunset_at":"2026-10-30T00:00:00Z"},{"version":"0.6.0","released_at":"2026-03-01T00:00:00Z","deprecation_notice_at":"2026-07-03T00:00:00Z","sunset_at":"2026-09-01T00:00:00Z"}]}'
+
 services:
   postgres:
     image: postgres:17-bookworm
@@ -105,6 +110,7 @@ services:
       args:
         SERVICE: account-service
     environment:
+      <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
       DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
@@ -189,6 +195,7 @@ services:
       args:
         SERVICE: billing-service
     environment:
+      <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
@@ -230,6 +237,7 @@ services:
       args:
         SERVICE: token-gateway
     environment:
+      <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
       DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
@@ -330,6 +338,7 @@ services:
       args:
         SERVICE: token-portal
     environment:
+      <<: *client-compatibility
       APP_ENV: development
       PORT: 8080
       REDIS_URL: redis://redis:6379/0

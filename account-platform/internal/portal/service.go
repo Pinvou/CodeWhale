@@ -31,6 +31,7 @@ type Config struct {
 	AccountURL       *url.URL
 	BillingURL       *url.URL
 	TokenGatewayURL  *url.URL
+	ClientVersion    string
 	SystemProbes     []SystemProbe
 	SecureCookies    bool
 	SessionMaxAge    time.Duration
@@ -229,6 +230,9 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("X-Pinvou-Client-Source", portalClientSource(r))
+	if s.config.ClientVersion != "" {
+		request.Header.Set("X-Pinvou-Client-Version", s.config.ClientVersion)
+	}
 	if contentType := r.Header.Get("Content-Type"); contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}

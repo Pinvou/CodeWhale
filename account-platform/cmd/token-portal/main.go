@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/portal"
@@ -26,6 +27,10 @@ func main() {
 	}
 	defer store.Close()
 	publicURL := mustURL("PORTAL_PUBLIC_URL")
+	compatibility, err := clientcompat.FromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
 	service, err := portal.NewService(portal.Config{
 		PublicURL:        publicURL,
 		AuthorizationURL: mustURL("PORTAL_OIDC_AUTHORIZATION_URL"),
@@ -34,13 +39,14 @@ func main() {
 		AccountURL:       mustURL("ACCOUNT_HTTP_URL"),
 		BillingURL:       mustURL("BILLING_HTTP_URL"),
 		TokenGatewayURL:  mustURL("TOKEN_GATEWAY_HTTP_URL"),
+		ClientVersion:    compatibility.Manifest().CurrentClientVersion,
 		SystemProbes:     systemProbes(),
 		SecureCookies:    publicURL.Scheme == "https" || cfg.Environment == "production" || cfg.Environment == "production-new",
 	}, store)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := httpserver.RunWithApplication("token-portal", service.Handler(portal.StaticHandler()), store.Ping); err != nil {
+	if err := httpserver.RunWithApplication("token-portal", compatibility.Wrap(service.Handler(portal.StaticHandler())), store.Ping); err != nil {
 		log.Fatal(err)
 	}
 }

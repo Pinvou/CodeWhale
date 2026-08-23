@@ -481,6 +481,8 @@ UAT 只使用明确的测试商品和测试商城账号：
 
 ### 11.4 客户端三层发布门禁
 
+正式发布还必须更新 `compatibility.releases`（Compose 对应 `PINVOU_CLIENT_RELEASE_MANIFEST`），按当前版本、前一小版本、前两小版本从新到旧排列。Chart schema 和服务启动校验会拒绝少于三个版本、后继发布后支持不足90天、正常通知不足60天，以及缺少审批号的7天安全紧急淘汰。`PINVOU_CLIENT_UPGRADE_URL` 必须是发布方控制的 HTTPS 地址。发布前分别以三个版本执行 Account bootstrap、Billing 下单、Gateway 下单和平台模型合同；在通知时间点确认 `Deprecation`、`X-Client-Sunset-At` 与升级 `Link`，在淘汰时间后确认远程写返回稳定426且处理器、支付 Provider 和模型 Provider均未被调用，同时验证只读请求、本地数据和本地模型保持可用。
+
 1. **发布门禁**：发布流水线设置 `PINVOU_RELEASE_ARTIFACT`、`PINVOU_RELEASE_ATTESTATION`、`PINVOU_CLIENT_COMPATIBILITY_URL`、`PINVOU_RELEASE_CLIENT_VERSION`、目标环境、公钥和 key ID，执行 `npm run release:account-platform-gate`。命令先执行三语源码/制品门禁，缺键、多键、空词条、单语硬编码、原始后端错误回退或 Portal 制品缺少任一静态词条均直接失败；随后核验 HTTPS 公开兼容范围、OIDC discovery、制品 SHA-256、版本区间以及 TOK-37 Ed25519 证明，才能把新客户端提升到正式更新渠道；它不接收内部 readiness 工作负载凭据，失败时渠道继续指向上一版本。
 2. **安装门禁**：更新清单或 Windows OTA `UpdatePackInfo.json` 必须携带 `readinessAttestation`。更新器使用 `PINVOU_ACCOUNT_ENVIRONMENT`、`PINVOU_CLIENT_READINESS_KEY_ID`、`PINVOU_CLIENT_READINESS_PUBLIC_KEY` 验证证明绑定的环境、制品、目标版本、CHAT 目录、六项 PASS 检查和 15 分钟有效期，再用 `PINVOU_UPDATE_SIGNER_IDENTITY` 验证 Windows Authenticode、macOS codesign 或 Linux dpkg-sig 身份，并执行只读迁移预检。通过后才写入安装门禁事务证据并调用平台安装器；旧清单、缺字段、签名不符或预检失败一律不进入安装。平台安装器对二进制/配置的原子替换与失败回滚仍须用正式制品做环境验收，桌面端不得持有内部 readiness 工作负载凭据。
 3. **运行门禁**：已经安装的新版本只运行账号平台和 Token Gateway 路径；平台不可用时显示原因与修复动作，不调用旧模型后台。

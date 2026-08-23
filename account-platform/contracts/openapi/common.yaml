@@ -35,6 +35,7 @@ components:
             - SERVICE_AUTH_REQUIRED
             - BILLING_CONFLICT
             - WALLET_UNAVAILABLE
+            - CLIENT_UPGRADE_REQUIRED
             - INTERNAL_ERROR
         message:
           type: string

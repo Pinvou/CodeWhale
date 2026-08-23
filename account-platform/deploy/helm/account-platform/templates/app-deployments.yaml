@@ -58,6 +58,11 @@ spec:
             - { name: RATE_LIMIT_RPS, value: {{ $root.Values.security.rateLimitRPS | quote }} }
             - { name: RATE_LIMIT_BURST, value: {{ $root.Values.security.rateLimitBurst | quote }} }
             - { name: TRUSTED_TIME_SOURCES, value: {{ join "," $root.Values.global.trustedTimeSources | quote }} }
+            {{- if ne $app.name "identity-service" }}
+            - { name: PINVOU_API_CONTRACT_VERSION, value: {{ $root.Values.compatibility.contractVersion | quote }} }
+            - { name: PINVOU_CLIENT_UPGRADE_URL, value: {{ $root.Values.compatibility.upgradeUrl | quote }} }
+            - { name: PINVOU_CLIENT_RELEASE_MANIFEST, value: {{ toJson $root.Values.compatibility.releases | quote }} }
+            {{- end }}
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - name: DATABASE_URL

@@ -185,6 +185,8 @@ paths:
                 $ref: "#/components/schemas/Me"
         "401":
           $ref: "#/components/responses/Error"
+        "426":
+          $ref: "#/components/responses/UpgradeRequired"
   /me:
     get:
       operationId: getMe
@@ -879,6 +881,16 @@ components:
   responses:
     Error:
       description: Stable error response
+      content:
+        application/json:
+          schema:
+            $ref: "common.yaml#/components/schemas/Error"
+    UpgradeRequired:
+      description: The desktop client sunset has passed for remote write operations
+      headers:
+        Link: { required: true, schema: { type: string } }
+        X-API-Contract-Version: { required: true, schema: { type: string } }
+        X-Minimum-Supported-Client-Version: { required: true, schema: { type: string } }
       content:
         application/json:
           schema:

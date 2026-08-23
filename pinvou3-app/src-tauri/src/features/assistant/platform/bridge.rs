@@ -19,7 +19,7 @@ pub use crate::features::sessions;
 pub use crate::platform::paths;
 pub use crate::platform::prefs;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use deepseek_tui::config::{
@@ -1501,6 +1501,15 @@ impl Pinvou3Bridge {
         // 本地 vLLM 必须关 thinking；Kimi Code 必须显式开启，其他远程
         // provider 保留底座默认。
         cfg.reasoning_effort = self.request_reasoning_effort().map(str::to_string);
+        if self
+            .effective_model()
+            .is_some_and(SavedModel::is_builtin_account_platform)
+        {
+            cfg.http_headers = Some(HashMap::from([(
+                crate::platform::client_version::HEADER.to_string(),
+                crate::platform::client_version::CURRENT.to_string(),
+            )]));
+        }
         cfg
     }
 

@@ -5,6 +5,14 @@ global:
   podLabels: {}
   trustedTimeSources: [time.cloudflare.com:123, time.google.com:123, time.aws.com:123]
 
+compatibility:
+  contractVersion: account-platform-v1
+  upgradeUrl: https://github.com/Pinvou/pinvou3/releases/latest
+  releases:
+    - { version: 0.8.0, released_at: "2026-08-01T00:00:00Z" }
+    - { version: 0.7.0, released_at: "2026-06-01T00:00:00Z", deprecation_notice_at: "2026-08-31T00:00:00Z", sunset_at: "2026-10-30T00:00:00Z" }
+    - { version: 0.6.0, released_at: "2026-03-01T00:00:00Z", deprecation_notice_at: "2026-07-03T00:00:00Z", sunset_at: "2026-09-01T00:00:00Z" }
+
 externalSecrets:
   enabled: false
   secretStoreKind: ClusterSecretStore
@@ -108,7 +116,7 @@ tokenGateway:
   reconciliationNewApiBaseUrl: http://newapi:8080
   reconciliationIntervalSeconds: 15
   clientContractVersion: client-readiness-v1
-  minimumClientVersion: 0.8.0
+  minimumClientVersion: 0.6.0
   maximumClientVersion: 0.8.0
   readinessAttestationKeyId: pinvou-client-readiness-v1
   readinessAttestationTtlSeconds: 600

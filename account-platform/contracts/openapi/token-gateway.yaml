@@ -551,6 +551,8 @@ paths:
           $ref: "#/components/responses/Error"
         "410":
           $ref: "#/components/responses/Error"
+        "426":
+          $ref: "#/components/responses/UpgradeRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
   /recharge/products:
@@ -623,6 +625,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "426":
+          $ref: "#/components/responses/UpgradeRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
   /recharge/orders/recent:
@@ -912,6 +916,16 @@ components:
         application/json:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
+    UpgradeRequired:
+      description: The desktop client sunset has passed for remote write operations
+      headers:
+        Link: { required: true, schema: { type: string } }
+        X-API-Contract-Version: { required: true, schema: { type: string } }
+        X-Minimum-Supported-Client-Version: { required: true, schema: { type: string } }
+      content:
+        application/json:
+          schema:
+            $ref: "common.yaml#/components/schemas/Error"
   parameters:
     TokenAccountId:
       name: token_account_id
@@ -924,13 +938,32 @@ components:
     ClientCompatibility:
       type: object
       additionalProperties: false
-      required: [environment, service_version, contract_version, minimum_client_version, maximum_client_version, attestation_available, generated_at]
+      required: [environment, service_version, contract_version, api_contract_version, current_client_version, minimum_client_version, minimum_supported_client_version, maximum_client_version, upgrade_url, releases, attestation_available, generated_at]
       properties:
         environment: { type: string }
         service_version: { type: string }
         contract_version: { type: string }
+        api_contract_version: { type: string }
+        current_client_version: { type: string }
         minimum_client_version: { type: string }
+        minimum_supported_client_version: { type: string }
         maximum_client_version: { type: string }
+        sunset_at: { type: string, format: date-time }
+        upgrade_url: { type: string, format: uri }
+        releases:
+          type: array
+          minItems: 3
+          items:
+            type: object
+            additionalProperties: false
+            required: [version, released_at]
+            properties:
+              version: { type: string }
+              released_at: { type: string, format: date-time }
+              deprecation_notice_at: { type: string, format: date-time }
+              sunset_at: { type: string, format: date-time }
+              security_exception: { type: boolean }
+              exception_approval_id: { type: string }
         attestation_key_id: { type: string }
         attestation_verification_key_base64url: { type: string }
         attestation_available: { type: boolean }

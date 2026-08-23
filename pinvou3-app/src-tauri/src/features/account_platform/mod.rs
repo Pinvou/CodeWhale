@@ -732,6 +732,10 @@ impl AccountPlatformState {
             .post(url)
             .bearer_auth(access_token)
             .header("Accept", "application/json")
+            .header(
+                crate::platform::client_version::HEADER,
+                crate::platform::client_version::CURRENT,
+            )
             .header("X-Request-ID", random_urlsafe(18))
             .header("X-Device-ID", &self.device_id)
             .json(&serde_json::json!({}))
@@ -943,6 +947,10 @@ impl AccountPlatformState {
             .request(request.method.clone(), request.url.clone())
             .bearer_auth(access_token)
             .header("Accept", "application/json")
+            .header(
+                crate::platform::client_version::HEADER,
+                crate::platform::client_version::CURRENT,
+            )
             .header("X-Request-ID", random_urlsafe(18));
         if let Some(key) = request.idempotency_key.as_ref() {
             builder = builder.header("Idempotency-Key", key);
@@ -969,6 +977,10 @@ impl AccountPlatformState {
             .client
             .post(url)
             .header("Accept", "application/json")
+            .header(
+                crate::platform::client_version::HEADER,
+                crate::platform::client_version::CURRENT,
+            )
             .header("X-Request-ID", random_urlsafe(18))
             .header("X-Device-ID", &self.device_id)
             .json(&body)
@@ -1009,6 +1021,10 @@ impl AccountPlatformState {
             .client
             .post(url)
             .header("Accept", "application/json")
+            .header(
+                crate::platform::client_version::HEADER,
+                crate::platform::client_version::CURRENT,
+            )
             .header("X-Request-ID", random_urlsafe(18))
             .json(&body)
             .send()
@@ -1040,6 +1056,10 @@ impl AccountPlatformState {
             .client
             .get(url)
             .header("Accept", "application/json")
+            .header(
+                crate::platform::client_version::HEADER,
+                crate::platform::client_version::CURRENT,
+            )
             .header("X-Request-ID", random_urlsafe(18))
             .header("X-Device-ID", &self.device_id)
             .header("X-Registration-Query-Token", query_token)

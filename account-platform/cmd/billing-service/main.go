@@ -14,6 +14,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
@@ -104,7 +105,11 @@ func main() {
 	if payments.Capabilities().BillSupported {
 		go observability.RunBackground(workerContext, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
 	}
-	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
+	compatibility, err := clientcompat.FromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := httpserver.RunWithApplication("billing-service", compatibility.Wrap(service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify)), repository.Ping); err != nil {
 		log.Fatal(err)
 	}
 }
