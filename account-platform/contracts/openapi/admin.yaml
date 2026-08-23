@@ -853,6 +853,50 @@ paths:
         "200": { description: Provider-blind escalation recorded, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-anomalies:
+    get:
+      operationId: listAdminPaymentAnomalies
+      summary: List unified chargeback, forced-refund, duplicate-payment, late-conflict, refund-failure, and invalid-transition cases
+      description: Each case preserves immutable evidence, owner, review conclusion, and financial-action status while the source domain state remains independent.
+      parameters:
+        - { name: anomaly_type, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [OPEN, RESOLVED] } }
+        - { name: severity, in: query, schema: { type: string, enum: [P0, P1, P2] } }
+        - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-anomalies/{case_id}:
+    get:
+      operationId: getAdminPaymentAnomaly
+      summary: Get immutable evidence snapshot and audited case timeline
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Payment anomaly detail, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAnomalyDetail" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-anomalies/{case_id}/claim:
+    post:
+      operationId: claimAdminPaymentAnomaly
+      summary: Idempotently claim a payment anomaly without resetting its SLA clock
+      parameters: [{ $ref: "#/components/parameters/CaseID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      responses:
+        "200": { description: Claimed case, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAnomalyCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-anomalies/{case_id}/resolve:
+    post:
+      operationId: resolveAdminPaymentAnomaly
+      summary: Record a constrained audited conclusion; arbitrary financial repairs remain approval-gated
+      parameters: [{ $ref: "#/components/parameters/CaseID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAnomalyResolution" } } }
+      responses:
+        "200": { description: Resolved case, content: { application/json: { schema: { $ref: "#/components/schemas/PaymentAnomalyCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/reconciliation-runs:
     get:
       operationId: listAdminReconciliationRuns
@@ -894,6 +938,18 @@ paths:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/reconciliation-cases/{case_id}/commands:
+    post:
+      operationId: updateAdminReconciliationCase
+      summary: Idempotently claim, assign, plan, resolve, ignore, or reopen one immutable reconciliation difference
+      parameters: [{ $ref: "#/components/parameters/CaseID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationCaseCommand" } } }
+      responses:
+        "200": { description: Updated reconciliation case, content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /token/admin/v1/overview:
     get:
       operationId: getAdminTokenOverview
@@ -1862,6 +1918,94 @@ components:
       properties:
         channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
         business_date: { type: string, format: date }
+    PaymentAnomalyCase:
+      type: object
+      additionalProperties: false
+      required: [case_id, anomaly_type, severity, status, financial_action_status, resource_snapshot, claim_due_at, first_response_due_at, mitigation_due_at, resolution_due_at, version, created_at, updated_at]
+      properties:
+        case_id: { type: string, format: uuid }
+        anomaly_type: { type: string, enum: [CHARGEBACK, FORCED_REFUND, DUPLICATE_PAYMENT, LATE_PAYMENT_CONFLICT, REFUND_FAILURE, PAYMENT_FACT_CONFLICT, ILLEGAL_TRANSITION] }
+        severity: { type: string, enum: [P0, P1, P2] }
+        status: { type: string, enum: [OPEN, RESOLVED] }
+        owner_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        payment_evidence_id: { type: string, format: uuid }
+        refund_id: { type: string, format: uuid }
+        forced_refund_case_id: { type: string, format: uuid }
+        chargeback_case_id: { type: string, format: uuid }
+        resolution_code: { type: string }
+        resolution_reason: { type: string }
+        financial_action_status: { type: string, enum: [NONE, PENDING, APPLIED, FAILED] }
+        resource_snapshot: { type: object, additionalProperties: true }
+        claimed_at: { type: string, format: date-time }
+        claim_due_at: { type: string, format: date-time }
+        first_response_due_at: { type: string, format: date-time }
+        mitigation_due_at: { type: string, format: date-time }
+        resolution_due_at: { type: string, format: date-time }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+    PaymentAnomalyDetail:
+      type: object
+      additionalProperties: false
+      required: [case, events]
+      properties:
+        case: { $ref: "#/components/schemas/PaymentAnomalyCase" }
+        events:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [event_id, event_type, details, created_at]
+            properties:
+              event_id: { type: string, format: uuid }
+              event_type: { type: string }
+              actor_id: { type: string, format: uuid }
+              details: { type: object, additionalProperties: true }
+              created_at: { type: string, format: date-time }
+    PaymentAnomalyResolution:
+      type: object
+      additionalProperties: false
+      required: [resolution, reason]
+      properties:
+        resolution: { type: string, enum: [CONFIRM_CHARGEBACK, CONFIRM_FORCED_REFUND, CONFIRM_PAYMENT, DISMISS, ESCALATE_FINANCIAL_REPAIR] }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+    ReconciliationCase:
+      type: object
+      additionalProperties: false
+      required: [case_id, reconciliation_run_id, merchant_order_no, case_type, status, severity, provider_snapshot, internal_snapshot, created_at, updated_at, version]
+      properties:
+        case_id: { type: string, format: uuid }
+        reconciliation_run_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        merchant_order_no: { type: string }
+        case_type: { type: string }
+        status: { type: string, enum: [OPEN, IN_REVIEW, RESOLVED, IGNORED] }
+        severity: { type: string, enum: [P0, P1, P2] }
+        owner_id: { type: string, format: uuid }
+        repair_action: { type: string }
+        review_result: { type: string }
+        provider_snapshot: { type: object, additionalProperties: true }
+        internal_snapshot: { type: object, additionalProperties: true }
+        refund_snapshot: { type: object, additionalProperties: true }
+        ledger_snapshot: { type: object, additionalProperties: true }
+        resolution: { type: string }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version: { type: integer, format: int64, minimum: 1 }
+    ReconciliationCaseCommand:
+      type: object
+      additionalProperties: false
+      required: [action, reason]
+      properties:
+        action: { type: string, enum: [CLAIM, ASSIGN, SET_REPAIR_ACTION, RESOLVE, IGNORE, REOPEN] }
+        owner_id: { type: string, format: uuid }
+        repair_action: { type: string, maxLength: 500 }
+        review_result: { type: string, maxLength: 2000 }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
     LatePaymentReviewCase:
       type: object
       additionalProperties: false
@@ -1945,10 +2089,12 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [merchant_order_no, provider_transaction_id, amount_fen, currency, status, paid_at]
+            required: [merchant_order_no, channel_transaction_id, amount_fen, currency, status, paid_at]
             properties:
+              entry_type: { type: string, enum: [PAYMENT, REFUND, CHARGEBACK] }
+              provider_reference_id: { type: string }
               merchant_order_no: { type: string, minLength: 1 }
-              provider_transaction_id: { type: string, minLength: 1 }
+              channel_transaction_id: { type: string, minLength: 1 }
               amount_fen: { type: integer, format: int64, minimum: 1 }
               currency: { type: string, minLength: 3, maxLength: 3 }
               status: { type: string, minLength: 1 }

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pinvou.example/contracts/events/billing.payment-anomaly.review-required.v1.schema.json",
+  "title": "billing.payment-anomaly.review-required.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case_id", "anomaly_type", "severity"],
+  "properties": {
+    "case_id": { "type": "string", "format": "uuid" },
+    "anomaly_type": {
+      "type": "string",
+      "enum": ["CHARGEBACK", "FORCED_REFUND", "DUPLICATE_PAYMENT", "LATE_PAYMENT_CONFLICT", "REFUND_FAILURE", "PAYMENT_FACT_CONFLICT", "ILLEGAL_TRANSITION"]
+    },
+    "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
+    "payment_order_id": { "type": ["string", "null"], "format": "uuid" }
+  }
+}

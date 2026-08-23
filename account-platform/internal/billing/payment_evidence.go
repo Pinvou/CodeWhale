@@ -116,11 +116,16 @@ func (p *PaymentCoordinator) recordProviderObservation(ctx context.Context, orde
 	if !valid {
 		mergeResult = "REVIEW_REQUIRED"
 	}
-	if _, err := p.insertPaymentEvidence(ctx, tx, order, nil, evidenceType, providerEvidenceKey(evidenceType, provider), mergeResult, provider, nil, p.now()); err != nil {
+	now := p.now()
+	evidenceID, err := p.insertPaymentEvidence(ctx, tx, order, nil, evidenceType, providerEvidenceKey(evidenceType, provider), mergeResult, provider, nil, now)
+	if err != nil {
 		return err
 	}
 	if !valid {
-		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, p.now()); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
+			return err
+		}
+		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "PAYMENT_FACT_CONFLICT", "P1", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentEvidenceID: &evidenceID}, map[string]any{"evidence_type": evidenceType, "merchant_order_no": provider.MerchantOrderNo, "amount_fen": provider.AmountFen, "currency": provider.Currency}, now); err != nil {
 			return err
 		}
 	}
@@ -149,6 +154,9 @@ func (p *PaymentCoordinator) mergeSuccessfulPaymentWithinTransaction(ctx context
 		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
 			return order, uuid.Nil, err
 		}
+		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "PAYMENT_FACT_CONFLICT", "P1", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentEvidenceID: &evidenceID}, map[string]any{"evidence_type": evidenceType, "provider_transaction_id": provider.ChannelTransactionID, "reason": "order channel amount or currency mismatch"}, now); err != nil {
+			return order, uuid.Nil, err
+		}
 		return order, evidenceID, ErrConflict
 	}
 
@@ -173,6 +181,9 @@ FROM payment_transactions WHERE provider_transaction_id=$1 FOR UPDATE`, *provide
 			return order, uuid.Nil, evidenceErr
 		}
 		if mergeResult == "REVIEW_REQUIRED" {
+			if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "PAYMENT_FACT_CONFLICT", "P0", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentEvidenceID: &evidenceID}, map[string]any{"evidence_type": evidenceType, "provider_transaction_id": provider.ChannelTransactionID, "reason": "provider transaction conflicts with an existing owner or immutable snapshot"}, now); err != nil {
+				return order, uuid.Nil, err
+			}
 			return order, evidenceID, ErrConflict
 		}
 		if repair && transaction.FulfillmentStatus == "REVIEW_REQUIRED" {
@@ -226,6 +237,15 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,$14,$14,$14)`,
 	evidenceID, err := p.insertPaymentEvidence(ctx, tx, order, &transaction.ID, evidenceType, evidenceKey, mergeResult, provider, payload, now)
 	if err != nil {
 		return order, uuid.Nil, err
+	}
+	if requiresReview {
+		anomalyType := "LATE_PAYMENT_CONFLICT"
+		if priorTransactions > 0 {
+			anomalyType = "DUPLICATE_PAYMENT"
+		}
+		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, anomalyType, "P1", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentTransactionID: &transaction.ID, PaymentEvidenceID: &evidenceID}, map[string]any{"evidence_type": evidenceType, "provider_transaction_id": provider.ChannelTransactionID, "provider_paid_at": provider.PaidAt, "prior_transaction_count": priorTransactions}, now); err != nil {
+			return order, uuid.Nil, err
+		}
 	}
 	if !requiresReview {
 		packageID, err := issuePackageWithinTransaction(ctx, tx, order, transaction.ID, now, false)

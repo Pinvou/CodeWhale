@@ -40,6 +40,8 @@ type Refund struct {
 }
 
 type BillEntry struct {
+	EntryType             string    `json:"entry_type,omitempty"`
+	ProviderReferenceID   string    `json:"provider_reference_id,omitempty"`
 	MerchantOrderNo      string    `json:"merchant_order_no"`
 	ChannelTransactionID string    `json:"channel_transaction_id"`
 	Channel              string    `json:"channel"`

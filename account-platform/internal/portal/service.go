@@ -556,7 +556,7 @@ func accountAdminPathAllowed(method, resource string) bool {
 }
 
 func billingAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs", "/admin/v1/late-payment-reviews") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies") {
 		return true
 	}
 	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/reconciliation-imports" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
@@ -569,7 +569,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
-	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && (parts[2] == "usage-holds" || parts[2] == "late-payment-reviews") {
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && (parts[2] == "usage-holds" || parts[2] == "late-payment-reviews" || parts[2] == "payment-anomalies") {
 		_, err := uuid.Parse(parts[3])
 		return err == nil && method == http.MethodGet
 	}
@@ -598,6 +598,10 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return method == http.MethodGet && parts[4] == "cases"
 	case "late-payment-reviews":
 		return method == http.MethodGet || method == http.MethodPost && (parts[4] == "claim" || parts[4] == "query" || parts[4] == "schedule" || parts[4] == "archive" || parts[4] == "provider-blind")
+	case "payment-anomalies":
+		return method == http.MethodPost && (parts[4] == "claim" || parts[4] == "resolve")
+	case "reconciliation-cases":
+		return method == http.MethodPost && parts[4] == "commands"
 	default:
 		return false
 	}

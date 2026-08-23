@@ -193,6 +193,8 @@ Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移
 
 晚到支付复核上线继续执行 Billing `000028_late_payment_review_lifecycle`，再滚动 Billing、Token Gateway、Portal 和桌面运营制品。迁移为既有订单补齐支付期限、72小时边界和最终归档期限，并新增人工案件/不可变时间线、晚到证据、账单文件导入及 Provider 版本新单开关。发布前必须核对 Provider 能力的 `reconciliation_mode`、历史查询保留、支付/晚到窗口和权威未支付终态；H3C 当前为 `QUERY_DEGRADED` 且没有回调/账单，因此现有 `TEST_ONLY` 映射不能直接升级为正式映射。发布后抽样验证：72小时最终查询只创建一个 P2 案件；前7天每日、之后每周的复核计划不因认领或安排重置创建时钟；用户申诉只为本人订单追加不可变证据；严格归档要求期限后成功权威查询且无支付/冲突/未复核申诉；无法取得该事实时升级 `PROVIDER_BLIND` 并停用该 Provider 版本新单。恢复收款不得直接改 `payment_provider_controls`，应在修复和验证能力后发布新的 Provider/Adapter 版本与 `FROZEN` 映射。持续监控 `REVIEW_REQUIRED_LATE_PAYMENT`、`PROVIDER_BLIND`、人工 SLA 升级 Outbox、逾期未认领/未响应/未止损/未解决案件以及账单导入失败；文件导入仅对声明 `FILE_IMPORT` 的能力开放，单批最多 100,000 行。已有案件、证据或停单事实后禁止 down migration；故障时保留只读复核和证据，不得把订单直接改成未支付终态。
 
+支付异常与四方对账随后依次执行 Account `000023_payment_anomaly_commands` 和 Billing `000029_payment_anomaly_reconciliation`，再滚动 Billing、Portal 与桌面运营制品。Billing 迁移把既有未结强制退款和历史对账差异补入通用人工案件，新增不可变异常/差异证据、命令审计、Provider/Adapter 版本化独立对账运行，并解除旧的“渠道+日期只能有一次运行”约束；定时任务仍以 Provider、版本、渠道、业务日唯一，只允许手工重跑形成新运行。发布前确认数据库支持 `gen_random_uuid()`，并核对所有开启账单能力的 Provider 将 PAYMENT/REFUND/CHARGEBACK 映射为正金额、稳定外部引用和上海自然日时间；不支持账单的 Provider 不启动日终任务。发布后抽样验证：拒付和强制退款只冻结并冲销原支付流水权益包，异常录入端点不直接记账；明确退款失败、重复/晚到冲突和非法状态进入统一队列；同一结论命令重试不重复记账；定时任务在上海零点边界按前一自然日取数；Provider、订单/流水、退款/拒付和账本任一缺失或金额不一致均生成带严重度的差异；同日手工重跑保留前次证据，认领、修复计划和结论只追加命令/事件。持续监控开放 P0/P1 案件、`financial_action_status=PENDING/FAILED`、未分配对账差异、定时运行缺口和账本缺失差异。产生任何新版异常、命令、独立运行或差异后禁止 down migration；故障时停止新结论与对账调度、保留只读证据并前向修复，禁止直接更新钱包、权益、异常或对账表。
+
 ### 6.4 新华三商城
 
 - `COMMERCE_PROVIDER_ID=h3c_mall`

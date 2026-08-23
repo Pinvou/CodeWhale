@@ -90,6 +90,9 @@ func main() {
 	}
 	go billing.NewPackageExpiryWorker(repository, time.Minute).Run(workerContext)
 	go billing.NewManualReviewSLAWorker(repository, time.Minute).Run(workerContext)
+	if payments.Capabilities().BillSupported {
+		go billing.NewDailyPaymentReconciliationWorker(payments).Run(workerContext)
+	}
 	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

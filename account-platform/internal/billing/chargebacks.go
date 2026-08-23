@@ -9,11 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *PostgresRepository) RecordAndApplyConfirmedChargeback(ctx context.Context, transactionID uuid.UUID, providerChargebackID string, payload json.RawMessage) (ChargebackCase, error) {
+func (r *PostgresRepository) RecordConfirmedChargebackForReview(ctx context.Context, transactionID uuid.UUID, providerChargebackID string, payload json.RawMessage) (ChargebackCase, error) {
 	providerChargebackID = strings.TrimSpace(providerChargebackID)
 	if transactionID == uuid.Nil || providerChargebackID == "" || len(providerChargebackID) > 200 {
 		return ChargebackCase{}, ErrConflict
@@ -43,7 +44,7 @@ func (r *PostgresRepository) RecordAndApplyConfirmedChargeback(ctx context.Conte
 		return ChargebackCase{}, err
 	}
 	var existing ChargebackCase
-	err = tx.QueryRow(ctx, `SELECT id,payment_evidence_id,payment_order_id,payment_transaction_id,entitlement_package_id,wallet_id,provider_chargeback_id,status,revoked_base_microcredits,revoked_bonus_microcredits,receivable_id,created_at FROM chargeback_cases WHERE payment_transaction_id=$1 AND provider_chargeback_id=$2`, transactionID, providerChargebackID).Scan(&existing.ID, &existing.PaymentEvidenceID, &existing.PaymentOrderID, &existing.PaymentTransactionID, &existing.EntitlementPackageID, &existing.WalletID, &existing.ProviderChargebackID, &existing.Status, &existing.RevokedBaseMicrocredits, &existing.RevokedBonusMicrocredits, &existing.ReceivableID, &existing.CreatedAt)
+	err = tx.QueryRow(ctx, chargebackCaseSelect+` WHERE payment_transaction_id=$1 AND provider_chargeback_id=$2`, transactionID, providerChargebackID).Scan(chargebackCaseScanTargets(&existing)...)
 	if err == nil {
 		return existing, tx.Commit(ctx)
 	}
@@ -61,10 +62,43 @@ func (r *PostgresRepository) RecordAndApplyConfirmedChargeback(ctx context.Conte
 			return ChargebackCase{}, err
 		}
 	}
-	if err := tx.Commit(ctx); err != nil {
+	var packageID, walletID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT id,wallet_id FROM entitlement_packages WHERE source_payment_transaction_id=$1 AND payment_order_id=$2 FOR UPDATE`, transactionID, orderID).Scan(&packageID, &walletID); err != nil {
 		return ChargebackCase{}, err
 	}
-	return r.ApplyConfirmedChargeback(ctx, evidenceID, providerChargebackID)
+	now := r.now()
+	result := ChargebackCase{ID: uuid.Must(uuid.NewV7()), PaymentEvidenceID: evidenceID, PaymentOrderID: orderID, PaymentTransactionID: transactionID, EntitlementPackageID: packageID, WalletID: walletID, ProviderChargebackID: providerChargebackID, Status: "REVIEW_REQUIRED", CreatedAt: now, Version: 1}
+	_, err = tx.Exec(ctx, `INSERT INTO chargeback_cases(id,payment_evidence_id,payment_order_id,payment_transaction_id,entitlement_package_id,wallet_id,provider_chargeback_id,status,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,'REVIEW_REQUIRED',$8)`, result.ID, evidenceID, orderID, transactionID, packageID, walletID, providerChargebackID, now)
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE entitlement_packages SET status='FROZEN',updated_at=$2 WHERE id=$1 AND status NOT IN ('REVOKED','CREDIT_FAILED')`, packageID, now)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE entitlement_components SET status='FROZEN',updated_at=$2 WHERE package_id=$1 AND status<>'REVOKED'`, packageID, now)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE member_quota_grants SET status='SUSPENDED',suspension_reason='CHARGEBACK_REVIEW',allocation_version=allocation_version+1,updated_at=$2 WHERE package_id=$1 AND status='ACTIVE'`, packageID, now)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE entitlement_components SET suspended_grant_microcredits=suspended_grant_microcredits+active_grant_microcredits,active_grant_microcredits=0,updated_at=$2 WHERE package_id=$1 AND active_grant_microcredits>0`, packageID, now)
+	}
+	if err != nil {
+		return ChargebackCase{}, err
+	}
+	anomaly, err := createPaymentAnomalyWithinTransaction(ctx, tx, "CHARGEBACK", "P1", "chargeback:"+result.ID.String(), paymentAnomalyReference{PaymentOrderID: &orderID, PaymentTransactionID: &transactionID, PaymentEvidenceID: &evidenceID, ChargebackCaseID: &result.ID}, map[string]any{"provider_chargeback_id": providerChargebackID, "provider_transaction_id": providerTransactionID, "amount_fen": amountFen, "payload_digest": hex.EncodeToString(digest[:])}, now)
+	if err != nil {
+		return ChargebackCase{}, err
+	}
+	result.ManualReviewCaseID = &anomaly.ID
+	if _, err := tx.Exec(ctx, `UPDATE chargeback_cases SET manual_review_case_id=$2 WHERE id=$1`, result.ID, anomaly.ID); err != nil {
+		return ChargebackCase{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_orders SET chargeback_summary=chargeback_summary||jsonb_build_object('review_count',(SELECT count(*) FROM chargeback_cases WHERE payment_order_id=$1 AND status='REVIEW_REQUIRED')),attention_summary='REVIEW_REQUIRED',summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, orderID, now); err != nil {
+		return ChargebackCase{}, err
+	}
+	if err := events.AppendOutbox(ctx, tx, "billing.chargeback.review-required.v1", result.ID, 1, map[string]any{"chargeback_case_id": result.ID, "manual_review_case_id": anomaly.ID, "payment_order_id": orderID, "payment_transaction_id": transactionID}); err != nil {
+		return ChargebackCase{}, err
+	}
+	return result, tx.Commit(ctx)
 }
 
 type ChargebackCase struct {
@@ -80,6 +114,11 @@ type ChargebackCase struct {
 	RevokedBonusMicrocredits int64      `json:"revoked_bonus_microcredits"`
 	ReceivableID             *uuid.UUID `json:"receivable_id,omitempty"`
 	CreatedAt                time.Time  `json:"created_at"`
+	ResolvedAt               *time.Time `json:"resolved_at,omitempty"`
+	ManualReviewCaseID       *uuid.UUID `json:"manual_review_case_id,omitempty"`
+	ResolutionCode           *string    `json:"resolution_code,omitempty"`
+	ResolutionReason         *string    `json:"resolution_reason,omitempty"`
+	Version                  int64      `json:"version"`
 }
 
 func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evidenceID uuid.UUID, providerChargebackID string) (ChargebackCase, error) {
@@ -95,12 +134,14 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 	if err := lockTransactionKey(ctx, tx, "chargeback.apply", evidenceID.String()); err != nil {
 		return ChargebackCase{}, err
 	}
-	if existing, found, err := getChargebackCase(ctx, tx, evidenceID); err != nil {
+	existing, found, err := getChargebackCase(ctx, tx, evidenceID)
+	if err != nil {
 		return ChargebackCase{}, err
-	} else if found {
-		if existing.ProviderChargebackID != providerChargebackID {
-			return ChargebackCase{}, ErrConflict
-		}
+	}
+	if !found || existing.ProviderChargebackID != providerChargebackID || existing.Status == "DISMISSED" {
+		return ChargebackCase{}, ErrConflict
+	}
+	if existing.Status == "CONFIRMED" {
 		return existing, tx.Commit(ctx)
 	}
 
@@ -218,8 +259,16 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 		}
 		receivableID = &receivable.ID
 	}
-	result := ChargebackCase{ID: uuid.Must(uuid.NewV7()), PaymentEvidenceID: evidenceID, PaymentOrderID: orderID, PaymentTransactionID: transactionID, EntitlementPackageID: packageID, WalletID: walletID, ProviderChargebackID: providerChargebackID, Status: "CONFIRMED", RevokedBaseMicrocredits: revokedBase, RevokedBonusMicrocredits: revokedBonus, ReceivableID: receivableID, CreatedAt: now}
-	if _, err := tx.Exec(ctx, `INSERT INTO chargeback_cases(id,payment_evidence_id,payment_order_id,payment_transaction_id,entitlement_package_id,wallet_id,provider_chargeback_id,status,revoked_base_microcredits,revoked_bonus_microcredits,receivable_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,'CONFIRMED',$8,$9,$10,$11)`, result.ID, evidenceID, orderID, transactionID, packageID, walletID, providerChargebackID, revokedBase, revokedBonus, receivableID, now); err != nil {
+	result := existing
+	result.Status, result.RevokedBaseMicrocredits, result.RevokedBonusMicrocredits, result.ReceivableID, result.ResolvedAt = "CONFIRMED", revokedBase, revokedBonus, receivableID, &now
+	result.Version++
+	if _, err := tx.Exec(ctx, `UPDATE entitlement_components SET status=CASE WHEN revoked_microcredits=original_microcredits THEN 'REVOKED' ELSE 'FROZEN' END,updated_at=$2 WHERE package_id=$1`, packageID, now); err != nil {
+		return ChargebackCase{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET status=CASE WHEN NOT EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id AND component.status<>'REVOKED') THEN 'REVOKED' ELSE 'FROZEN' END,updated_at=$2 WHERE id=$1`, packageID, now); err != nil {
+		return ChargebackCase{}, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE chargeback_cases SET status='CONFIRMED',revoked_base_microcredits=$2,revoked_bonus_microcredits=$3,receivable_id=$4,resolved_at=$5,version=version+1 WHERE id=$1 AND status='REVIEW_REQUIRED'`, result.ID, revokedBase, revokedBonus, receivableID, now); err != nil {
 		return ChargebackCase{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE payment_orders payment_order SET chargeback_summary=(SELECT jsonb_build_object('open_count',count(*) FILTER(WHERE chargeback.status='CONFIRMED'),'lost_amount_fen',COALESCE(sum(transaction.amount_fen) FILTER(WHERE chargeback.status='CONFIRMED'),0)) FROM chargeback_cases chargeback JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id WHERE chargeback.payment_order_id=$1),attention_summary=CASE WHEN EXISTS(SELECT 1 FROM receivables receivable WHERE receivable.payment_order_id=$1 AND receivable.outstanding_microcredits>0) THEN 'RECEIVABLE_OPEN' WHEN payment_order.attention_summary='RECEIVABLE_OPEN' THEN 'NORMAL' ELSE payment_order.attention_summary END,summary_version=summary_version+1,updated_at=$2 WHERE payment_order.id=$1`, orderID, now); err != nil {
@@ -230,9 +279,15 @@ func (r *PostgresRepository) ApplyConfirmedChargeback(ctx context.Context, evide
 
 func getChargebackCase(ctx context.Context, tx pgx.Tx, evidenceID uuid.UUID) (ChargebackCase, bool, error) {
 	var item ChargebackCase
-	err := tx.QueryRow(ctx, `SELECT id,payment_evidence_id,payment_order_id,payment_transaction_id,entitlement_package_id,wallet_id,provider_chargeback_id,status,revoked_base_microcredits,revoked_bonus_microcredits,receivable_id,created_at FROM chargeback_cases WHERE payment_evidence_id=$1`, evidenceID).Scan(&item.ID, &item.PaymentEvidenceID, &item.PaymentOrderID, &item.PaymentTransactionID, &item.EntitlementPackageID, &item.WalletID, &item.ProviderChargebackID, &item.Status, &item.RevokedBaseMicrocredits, &item.RevokedBonusMicrocredits, &item.ReceivableID, &item.CreatedAt)
+	err := tx.QueryRow(ctx, chargebackCaseSelect+` WHERE payment_evidence_id=$1`, evidenceID).Scan(chargebackCaseScanTargets(&item)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return item, false, nil
 	}
 	return item, err == nil, err
+}
+
+const chargebackCaseSelect = `SELECT id,payment_evidence_id,payment_order_id,payment_transaction_id,entitlement_package_id,wallet_id,provider_chargeback_id,status,revoked_base_microcredits,revoked_bonus_microcredits,receivable_id,created_at,resolved_at,manual_review_case_id,resolution_code,resolution_reason,version FROM chargeback_cases`
+
+func chargebackCaseScanTargets(item *ChargebackCase) []any {
+	return []any{&item.ID, &item.PaymentEvidenceID, &item.PaymentOrderID, &item.PaymentTransactionID, &item.EntitlementPackageID, &item.WalletID, &item.ProviderChargebackID, &item.Status, &item.RevokedBaseMicrocredits, &item.RevokedBonusMicrocredits, &item.ReceivableID, &item.CreatedAt, &item.ResolvedAt, &item.ManualReviewCaseID, &item.ResolutionCode, &item.ResolutionReason, &item.Version}
 }

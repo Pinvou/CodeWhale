@@ -63,7 +63,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", httpserver.AdaptFunc(s.executeApprovedAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
-	protected.POST("/internal/v1/chargebacks/confirmed", approvalpolicy.Require("BILLING_CONFIRMED_CHARGEBACK_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyConfirmedChargeback))
+	protected.POST("/internal/v1/chargebacks/confirmed", approvalpolicy.Require("BILLING_CHARGEBACK_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordConfirmedChargeback))
 	protected.POST("/internal/v1/refunds/forced", approvalpolicy.Require("BILLING_FORCED_REFUND_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordForcedRefund))
 	protected.PUT("/internal/v1/organizations/:organization_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	protected.PUT("/internal/v1/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
@@ -120,6 +120,10 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/late-payment-reviews/:case_id/schedule", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_LATE_PAYMENT_SCHEDULE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminScheduleLatePaymentReview))
 		admin.POST("/late-payment-reviews/:case_id/archive", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_LATE_PAYMENT_ARCHIVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminArchiveLatePaymentReview))
 		admin.POST("/late-payment-reviews/:case_id/provider-blind", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PROVIDER_BLIND_ESCALATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminEscalateProviderBlind))
+		admin.GET("/payment-anomalies", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentAnomalies))
+		admin.GET("/payment-anomalies/:case_id", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentAnomalyDetail))
+		admin.POST("/payment-anomalies/:case_id/claim", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PAYMENT_ANOMALY_CLAIM", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminClaimPaymentAnomaly))
+		admin.POST("/payment-anomalies/:case_id/resolve", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ANOMALY_RESOLVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminResolvePaymentAnomaly))
 		admin.GET("/adjustments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminAdjustments))
 		admin.POST("/adjustments", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_ADJUSTMENT_REQUEST", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRequestAdjustment))
 		admin.POST("/adjustments/:adjustment_id/approve", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("WALLET_ADJUSTMENT", approvalpolicy.ApprovalRequired), httpserver.AdaptFunc(s.adminApproveAdjustment))
@@ -131,13 +135,13 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("BILLING_RECONCILIATION_RUN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRunReconciliation))
 		admin.POST("/reconciliation-imports", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("BILLING_PROVIDER_BILL_IMPORT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminImportReconciliation))
 		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
+		admin.POST("/reconciliation-cases/:case_id/commands", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("BILLING_RECONCILIATION_CASE_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateReconciliationCase))
 	}
 	return router
 }
 
 type chargebackRepository interface {
-	ApplyConfirmedChargeback(context.Context, uuid.UUID, string) (ChargebackCase, error)
-	RecordAndApplyConfirmedChargeback(context.Context, uuid.UUID, string, json.RawMessage) (ChargebackCase, error)
+	RecordConfirmedChargebackForReview(context.Context, uuid.UUID, string, json.RawMessage) (ChargebackCase, error)
 }
 
 type forcedRefundRepository interface {
@@ -167,25 +171,18 @@ func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusCreated, item)
 }
 
-func (s *Service) applyConfirmedChargeback(w http.ResponseWriter, r *http.Request) {
+func (s *Service) recordConfirmedChargeback(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		PaymentEvidenceID    uuid.UUID       `json:"payment_evidence_id"`
 		PaymentTransactionID uuid.UUID       `json:"payment_transaction_id"`
 		ProviderChargebackID string          `json:"provider_chargeback_id"`
 		PayloadSnapshot      json.RawMessage `json:"payload_snapshot"`
 	}
 	repository, ok := s.repository.(chargebackRepository)
-	if err := api.DecodeJSON(w, r, &body); err != nil || !ok || (body.PaymentEvidenceID == uuid.Nil) == (body.PaymentTransactionID == uuid.Nil) || strings.TrimSpace(body.ProviderChargebackID) == "" {
+	if err := api.DecodeJSON(w, r, &body); err != nil || !ok || body.PaymentTransactionID == uuid.Nil || strings.TrimSpace(body.ProviderChargebackID) == "" || len(body.PayloadSnapshot) == 0 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid confirmed chargeback", httpserver.RequestID(r.Context()))
 		return
 	}
-	var result ChargebackCase
-	var err error
-	if body.PaymentEvidenceID != uuid.Nil {
-		result, err = repository.ApplyConfirmedChargeback(r.Context(), body.PaymentEvidenceID, body.ProviderChargebackID)
-	} else {
-		result, err = repository.RecordAndApplyConfirmedChargeback(r.Context(), body.PaymentTransactionID, body.ProviderChargebackID, body.PayloadSnapshot)
-	}
+	result, err := repository.RecordConfirmedChargebackForReview(r.Context(), body.PaymentTransactionID, body.ProviderChargebackID, body.PayloadSnapshot)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

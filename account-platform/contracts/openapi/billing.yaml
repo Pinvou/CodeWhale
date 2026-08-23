@@ -244,8 +244,8 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
   /internal/v1/chargebacks/confirmed:
     post:
-      operationId: applyConfirmedChargeback
-      summary: Apply an immutable provider-confirmed chargeback to exactly one payment transaction package
+      operationId: recordConfirmedChargeback
+      summary: Record immutable provider-confirmed chargeback evidence, freeze its exact package, and open review before accounting
       requestBody:
         required: true
         content:
@@ -254,7 +254,7 @@ paths:
               $ref: "#/components/schemas/ConfirmedChargebackRequest"
       responses:
         "200":
-          description: Idempotent chargeback accounting result
+          description: Idempotent chargeback review case
           content:
             application/json:
               schema:
@@ -529,12 +529,8 @@ components:
     ConfirmedChargebackRequest:
       type: object
       additionalProperties: false
-      required: [provider_chargeback_id]
-      oneOf:
-        - required: [payment_evidence_id]
-        - required: [payment_transaction_id, payload_snapshot]
+      required: [payment_transaction_id, provider_chargeback_id, payload_snapshot]
       properties:
-        payment_evidence_id: { type: string, format: uuid }
         payment_transaction_id: { type: string, format: uuid }
         provider_chargeback_id: { type: string, minLength: 1, maxLength: 200 }
         payload_snapshot: { type: object, additionalProperties: true, description: Verified provider event snapshot; secrets must be redacted before ingestion. }
@@ -580,7 +576,7 @@ components:
     ForcedRefundCase:
       type: object
       additionalProperties: false
-      required: [forced_refund_case_id, payment_evidence_id, payment_order_id, payment_transaction_id, entitlement_package_id, wallet_id, provider_refund_id, amount_fen, status, entitlement_snapshot, created_at]
+      required: [forced_refund_case_id, payment_evidence_id, payment_order_id, payment_transaction_id, entitlement_package_id, wallet_id, provider_refund_id, amount_fen, status, entitlement_snapshot, revoked_base_microcredits, revoked_bonus_microcredits, version, created_at]
       properties:
         forced_refund_case_id: { type: string, format: uuid }
         payment_evidence_id: { type: string, format: uuid }
@@ -594,10 +590,17 @@ components:
         entitlement_snapshot: { type: object, additionalProperties: true }
         created_at: { type: string, format: date-time }
         resolved_at: { type: string, format: date-time }
+        manual_review_case_id: { type: string, format: uuid }
+        resolution_code: { type: string }
+        resolution_reason: { type: string }
+        receivable_id: { type: string, format: uuid }
+        revoked_base_microcredits: { type: integer, format: int64, minimum: 0 }
+        revoked_bonus_microcredits: { type: integer, format: int64, minimum: 0 }
+        version: { type: integer, format: int64, minimum: 1 }
     ChargebackCase:
       type: object
       additionalProperties: false
-      required: [chargeback_case_id, payment_evidence_id, payment_order_id, payment_transaction_id, entitlement_package_id, wallet_id, provider_chargeback_id, status, revoked_base_microcredits, revoked_bonus_microcredits, created_at]
+      required: [chargeback_case_id, payment_evidence_id, payment_order_id, payment_transaction_id, entitlement_package_id, wallet_id, provider_chargeback_id, status, revoked_base_microcredits, revoked_bonus_microcredits, version, created_at]
       properties:
         chargeback_case_id: { type: string, format: uuid }
         payment_evidence_id: { type: string, format: uuid }
@@ -606,8 +609,13 @@ components:
         entitlement_package_id: { type: string, format: uuid }
         wallet_id: { type: string, format: uuid }
         provider_chargeback_id: { type: string }
-        status: { type: string, enum: [CONFIRMED, RESOLVED] }
+        status: { type: string, enum: [REVIEW_REQUIRED, CONFIRMED, DISMISSED] }
         revoked_base_microcredits: { type: integer, format: int64, minimum: 0 }
         revoked_bonus_microcredits: { type: integer, format: int64, minimum: 0 }
         receivable_id: { type: string, format: uuid }
         created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+        manual_review_case_id: { type: string, format: uuid }
+        resolution_code: { type: string }
+        resolution_reason: { type: string }
+        version: { type: integer, format: int64, minimum: 1 }

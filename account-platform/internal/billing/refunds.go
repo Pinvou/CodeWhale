@@ -353,6 +353,9 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		if err = events.AppendOutbox(ctx, tx, "billing.refund.review-required.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID, "failure_reason": failure}); err != nil {
 			return Refund{}, created, err
 		}
+		if _, err = createPaymentAnomalyWithinTransaction(ctx, tx, "REFUND_FAILURE", "P1", "refund:"+refund.ID.String()+":provider-conflict", paymentAnomalyReference{PaymentOrderID: &refund.PaymentOrderID, PaymentTransactionID: &refund.PaymentTransactionID, RefundID: &refund.ID}, map[string]any{"failure_reason": failure, "provider_status": provider.Status, "provider_refund_id": provider.ChannelRefundID}, now); err != nil {
+			return Refund{}, created, err
+		}
 		refund.Status, refund.FailureReason, refund.UpdatedAt = "MANUAL_REVIEW", &failure, now
 		if strings.TrimSpace(provider.ChannelRefundID) != "" {
 			refund.ChannelRefundID = &provider.ChannelRefundID
@@ -367,6 +370,9 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		}
 		if err == nil {
 			err = events.AppendOutbox(ctx, tx, "billing.refund.failed.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID, "failure_reason": failure})
+		}
+		if err == nil {
+			_, err = createPaymentAnomalyWithinTransaction(ctx, tx, "REFUND_FAILURE", "P2", "refund:"+refund.ID.String()+":provider-rejected", paymentAnomalyReference{PaymentOrderID: &refund.PaymentOrderID, PaymentTransactionID: &refund.PaymentTransactionID, RefundID: &refund.ID}, map[string]any{"failure_reason": failure, "provider_status": provider.Status}, now)
 		}
 		if err != nil {
 			return Refund{}, created, err
@@ -404,6 +410,9 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 			return Refund{}, created, updateErr
 		}
 		if updateErr = events.AppendOutbox(ctx, tx, "billing.refund.review-required.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID}); updateErr != nil {
+			return Refund{}, created, updateErr
+		}
+		if _, updateErr = createPaymentAnomalyWithinTransaction(ctx, tx, "REFUND_FAILURE", "P0", "refund:"+refund.ID.String()+":local-conflict", paymentAnomalyReference{PaymentOrderID: &refund.PaymentOrderID, PaymentTransactionID: &refund.PaymentTransactionID, RefundID: &refund.ID}, map[string]any{"failure_reason": "local refundable balance changed after provider refund", "provider_refund_id": provider.ChannelRefundID}, now); updateErr != nil {
 			return Refund{}, created, updateErr
 		}
 		refund.Status = "MANUAL_REVIEW"

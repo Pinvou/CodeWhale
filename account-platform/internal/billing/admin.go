@@ -201,11 +201,29 @@ type AdminReconciliationCase struct {
 	MerchantOrderNo  string          `json:"merchant_order_no"`
 	CaseType         string          `json:"case_type"`
 	Status           string          `json:"status"`
+	Severity         string          `json:"severity"`
+	OwnerID          *uuid.UUID      `json:"owner_id,omitempty"`
+	RepairAction     *string         `json:"repair_action,omitempty"`
+	ReviewResult     *string         `json:"review_result,omitempty"`
 	ProviderSnapshot json.RawMessage `json:"provider_snapshot,omitempty"`
 	InternalSnapshot json.RawMessage `json:"internal_snapshot,omitempty"`
+	RefundSnapshot   json.RawMessage `json:"refund_snapshot,omitempty"`
+	LedgerSnapshot   json.RawMessage `json:"ledger_snapshot,omitempty"`
 	Resolution       *string         `json:"resolution,omitempty"`
 	CreatedAt        time.Time       `json:"created_at"`
 	ResolvedAt       *time.Time      `json:"resolved_at,omitempty"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	Version          int64           `json:"version"`
+}
+
+type ReconciliationCaseCommand struct {
+	Action       string
+	OwnerID      *uuid.UUID
+	RepairAction string
+	ReviewResult string
+	Reason       string
+	IdempotencyKey string
+	ActorID      uuid.UUID
 }
 
 type adminRepository interface {
@@ -223,6 +241,13 @@ type adminRepository interface {
 	AdminReleaseUsageHold(context.Context, uuid.UUID, string, string, string) (AdminHold, error)
 	AdminReconciliationRuns(context.Context, int) ([]ReconciliationRun, error)
 	AdminReconciliationCases(context.Context, uuid.UUID, int) ([]AdminReconciliationCase, error)
+	UpdateReconciliationCase(context.Context, uuid.UUID, ReconciliationCaseCommand) (AdminReconciliationCase, error)
+	AdminPaymentAnomalies(context.Context, PaymentAnomalyFilter, int) ([]PaymentAnomalyCase, error)
+	PaymentAnomalyDetail(context.Context, uuid.UUID) (PaymentAnomalyDetail, error)
+	ClaimPaymentAnomaly(context.Context, uuid.UUID, uuid.UUID, string) (PaymentAnomalyCase, error)
+	ResolvePaymentAnomaly(context.Context, uuid.UUID, uuid.UUID, string, string, string, string) (PaymentAnomalyCase, error)
+	ApplyConfirmedChargeback(context.Context, uuid.UUID, string) (ChargebackCase, error)
+	ApplyReviewedForcedRefund(context.Context, uuid.UUID) (ForcedRefundCase, error)
 	AdminLatePaymentReviews(context.Context, LatePaymentReviewFilter, int) ([]LatePaymentReviewCase, error)
 	LatePaymentReview(context.Context, uuid.UUID) (LatePaymentReviewCase, error)
 	LatePaymentReviewDetail(context.Context, uuid.UUID) (LatePaymentReviewDetail, error)
@@ -823,7 +848,7 @@ func (s *Service) adminRunReconciliation(w http.ResponseWriter, r *http.Request)
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid channel and business date are required", httpserver.RequestID(r.Context()))
 		return
 	}
-	run, err := s.payments.RunReconciliation(r.Context(), body.Channel, date)
+	run, err := s.payments.RunAdminReconciliation(r.Context(), adminActor(adminPrincipal(r)), body.Channel, date)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -847,6 +872,157 @@ func (s *Service) adminReconciliationCases(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) adminUpdateReconciliationCase(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, err := uuid.Parse(r.PathValue("case_id"))
+	var body struct {
+		Action       string     `json:"action"`
+		OwnerID      *uuid.UUID `json:"owner_id"`
+		RepairAction string     `json:"repair_action"`
+		ReviewResult string     `json:"review_result"`
+		Reason       string     `json:"reason"`
+	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if !ok || err != nil || api.DecodeJSON(w, r, &body) != nil || len(idempotencyKey) < 8 || len([]rune(strings.TrimSpace(body.Reason))) < 10 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid reconciliation command, reason, and idempotency key are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.UpdateReconciliationCase(r.Context(), caseID, ReconciliationCaseCommand{Action: body.Action, OwnerID: body.OwnerID, RepairAction: body.RepairAction, ReviewResult: body.ReviewResult, Reason: body.Reason, IdempotencyKey: idempotencyKey, ActorID: adminActor(adminPrincipal(r))})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminPaymentAnomalies(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	filter := PaymentAnomalyFilter{AnomalyType: r.URL.Query().Get("anomaly_type"), Status: r.URL.Query().Get("status"), Severity: r.URL.Query().Get("severity")}
+	if raw := strings.TrimSpace(r.URL.Query().Get("owner_id")); raw != "" {
+		owner, err := uuid.Parse(raw)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid owner_id", httpserver.RequestID(r.Context()))
+			return
+		}
+		filter.OwnerID = &owner
+	}
+	items, err := repository.AdminPaymentAnomalies(r.Context(), filter, billingAdminLimit(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) adminPaymentAnomalyDetail(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, err := uuid.Parse(r.PathValue("case_id"))
+	if !ok || err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid payment anomaly case", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.PaymentAnomalyDetail(r.Context(), caseID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminClaimPaymentAnomaly(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, err := uuid.Parse(r.PathValue("case_id"))
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if !ok || err != nil || len(idempotencyKey) < 8 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid case and idempotency key are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.ClaimPaymentAnomaly(r.Context(), caseID, adminActor(adminPrincipal(r)), idempotencyKey)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminResolvePaymentAnomaly(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, parseErr := uuid.Parse(r.PathValue("case_id"))
+	var body struct {
+		Resolution string `json:"resolution"`
+		Reason     string `json:"reason"`
+	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if !ok || parseErr != nil || api.DecodeJSON(w, r, &body) != nil || len(idempotencyKey) < 8 || len([]rune(strings.TrimSpace(body.Reason))) < 10 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "valid resolution, reason, and idempotency key are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	detail, err := repository.PaymentAnomalyDetail(r.Context(), caseID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	resolution := strings.ToUpper(strings.TrimSpace(body.Resolution))
+	financialStatus := "NONE"
+	switch resolution {
+	case "CONFIRM_CHARGEBACK":
+		if detail.Case.AnomalyType != "CHARGEBACK" || detail.Case.PaymentEvidenceID == nil || detail.Case.ChargebackCaseID == nil {
+			err = ErrConflict
+		} else {
+			var chargeback ChargebackCase
+			chargeback, err = repository.ApplyConfirmedChargeback(r.Context(), *detail.Case.PaymentEvidenceID, paymentAnomalyProviderReference(detail.Case.ResourceSnapshot, "provider_chargeback_id"))
+			_ = chargeback
+			financialStatus = "APPLIED"
+		}
+	case "CONFIRM_FORCED_REFUND":
+		if detail.Case.AnomalyType != "FORCED_REFUND" || detail.Case.ForcedRefundCaseID == nil {
+			err = ErrConflict
+		} else {
+			_, err = repository.ApplyReviewedForcedRefund(r.Context(), *detail.Case.ForcedRefundCaseID)
+			financialStatus = "APPLIED"
+		}
+	case "CONFIRM_PAYMENT":
+		if detail.Case.PaymentOrderID == nil || s.payments == nil || (detail.Case.AnomalyType != "DUPLICATE_PAYMENT" && detail.Case.AnomalyType != "LATE_PAYMENT_CONFLICT") {
+			err = ErrConflict
+		} else {
+			_, err = s.payments.RepairReviewedOrder(r.Context(), *detail.Case.PaymentOrderID, adminActor(adminPrincipal(r)), body.Reason)
+			financialStatus = "APPLIED"
+		}
+	case "DISMISS":
+		if detail.Case.AnomalyType == "DUPLICATE_PAYMENT" || detail.Case.AnomalyType == "LATE_PAYMENT_CONFLICT" || detail.Case.AnomalyType == "ILLEGAL_TRANSITION" {
+			err = ErrConflict
+		} else {
+			financialStatus = "NONE"
+		}
+	case "ESCALATE_FINANCIAL_REPAIR":
+		financialStatus = "PENDING"
+	default:
+		err = ErrConflict
+	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	item, err := repository.ResolvePaymentAnomaly(r.Context(), caseID, adminActor(adminPrincipal(r)), idempotencyKey, resolution, body.Reason, financialStatus)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func paymentAnomalyProviderReference(snapshot json.RawMessage, key string) string {
+	var values map[string]any
+	if json.Unmarshal(snapshot, &values) != nil {
+		return ""
+	}
+	value, _ := values[key].(string)
+	return value
 }
 
 func (r *PostgresRepository) AdminOverview(ctx context.Context) (AdminOverview, error) {
@@ -1353,7 +1529,7 @@ FROM usage_holds hold LEFT JOIN (
 }
 
 func (r *PostgresRepository) AdminReconciliationRuns(ctx context.Context, limit int) ([]ReconciliationRun, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,channel,business_date,status,provider_row_count,case_count,started_at,COALESCE(completed_at,started_at) FROM reconciliation_runs ORDER BY started_at DESC,id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT id,provider_id,provider_version,channel,business_date,source_mode,requested_by,input_digest,status,provider_row_count,case_count,started_at,COALESCE(completed_at,started_at) FROM reconciliation_runs ORDER BY started_at DESC,id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1362,7 +1538,7 @@ func (r *PostgresRepository) AdminReconciliationRuns(ctx context.Context, limit 
 	for rows.Next() {
 		var item ReconciliationRun
 		var businessDate time.Time
-		if err := rows.Scan(&item.ID, &item.Channel, &businessDate, &item.Status, &item.ProviderRowCount, &item.CaseCount, &item.StartedAt, &item.CompletedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProviderID, &item.ProviderVersion, &item.Channel, &businessDate, &item.SourceMode, &item.RequestedBy, &item.InputDigest, &item.Status, &item.ProviderRowCount, &item.CaseCount, &item.StartedAt, &item.CompletedAt); err != nil {
 			return nil, err
 		}
 		item.BusinessDate = businessDate.Format("2006-01-02")
@@ -1372,7 +1548,7 @@ func (r *PostgresRepository) AdminReconciliationRuns(ctx context.Context, limit 
 }
 
 func (r *PostgresRepository) AdminReconciliationCases(ctx context.Context, runID uuid.UUID, limit int) ([]AdminReconciliationCase, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,provider_snapshot,internal_snapshot,resolution,created_at,resolved_at FROM reconciliation_cases WHERE reconciliation_run_id=$1 ORDER BY created_at,id LIMIT $2`, runID, limit)
+	rows, err := r.pool.Query(ctx, reconciliationCaseSelect+` WHERE reconciliation_run_id=$1 ORDER BY created_at,id LIMIT $2`, runID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1380,10 +1556,121 @@ func (r *PostgresRepository) AdminReconciliationCases(ctx context.Context, runID
 	items := make([]AdminReconciliationCase, 0)
 	for rows.Next() {
 		var item AdminReconciliationCase
-		if err := rows.Scan(&item.ID, &item.RunID, &item.PaymentOrderID, &item.MerchantOrderNo, &item.CaseType, &item.Status, &item.ProviderSnapshot, &item.InternalSnapshot, &item.Resolution, &item.CreatedAt, &item.ResolvedAt); err != nil {
+		if err := scanReconciliationCase(rows, &item); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+const reconciliationCaseSelect = `SELECT id,reconciliation_run_id,payment_order_id,merchant_order_no,case_type,status,severity,owner_id,repair_action,review_result,provider_snapshot,internal_snapshot,refund_snapshot,ledger_snapshot,resolution,created_at,resolved_at,updated_at,version FROM reconciliation_cases`
+
+func scanReconciliationCase(row pgx.Row, item *AdminReconciliationCase) error {
+	return row.Scan(&item.ID, &item.RunID, &item.PaymentOrderID, &item.MerchantOrderNo, &item.CaseType, &item.Status, &item.Severity, &item.OwnerID, &item.RepairAction, &item.ReviewResult, &item.ProviderSnapshot, &item.InternalSnapshot, &item.RefundSnapshot, &item.LedgerSnapshot, &item.Resolution, &item.CreatedAt, &item.ResolvedAt, &item.UpdatedAt, &item.Version)
+}
+
+func (r *PostgresRepository) UpdateReconciliationCase(ctx context.Context, caseID uuid.UUID, command ReconciliationCaseCommand) (AdminReconciliationCase, error) {
+	command.Action = strings.ToUpper(strings.TrimSpace(command.Action))
+	command.Reason = strings.TrimSpace(command.Reason)
+	command.IdempotencyKey = strings.TrimSpace(command.IdempotencyKey)
+	command.RepairAction = strings.TrimSpace(command.RepairAction)
+	command.ReviewResult = strings.TrimSpace(command.ReviewResult)
+	if caseID == uuid.Nil || command.ActorID == uuid.Nil || len([]rune(command.Reason)) < 10 || len(command.IdempotencyKey) < 8 || len(command.IdempotencyKey) > 120 {
+		return AdminReconciliationCase{}, ErrConflict
+	}
+	requestPayload, _ := json.Marshal(map[string]any{"action": command.Action, "owner_id": command.OwnerID, "repair_action": command.RepairAction, "review_result": command.ReviewResult, "reason": command.Reason})
+	digest := sha256.Sum256(requestPayload)
+	requestHash := fmt.Sprintf("%x", digest[:])
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return AdminReconciliationCase{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockTransactionKey(ctx, tx, "reconciliation-case.command", caseID.String()+":"+command.IdempotencyKey); err != nil {
+		return AdminReconciliationCase{}, err
+	}
+	var existingHash string
+	err = tx.QueryRow(ctx, `SELECT request_hash FROM reconciliation_case_commands WHERE reconciliation_case_id=$1 AND idempotency_key=$2`, caseID, command.IdempotencyKey).Scan(&existingHash)
+	if err == nil {
+		if existingHash != requestHash {
+			return AdminReconciliationCase{}, ErrConflict
+		}
+		var item AdminReconciliationCase
+		if err := scanReconciliationCase(tx.QueryRow(ctx, reconciliationCaseSelect+` WHERE id=$1`, caseID), &item); err != nil {
+			return AdminReconciliationCase{}, err
+		}
+		return item, tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return AdminReconciliationCase{}, err
+	}
+	var item AdminReconciliationCase
+	if err := scanReconciliationCase(tx.QueryRow(ctx, reconciliationCaseSelect+` WHERE id=$1 FOR UPDATE`, caseID), &item); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			err = ErrNotFound
+		}
+		return AdminReconciliationCase{}, err
+	}
+	before, _ := json.Marshal(item)
+	now := r.now()
+	switch command.Action {
+	case "CLAIM":
+		if item.Status != "OPEN" && item.Status != "IN_REVIEW" {
+			return AdminReconciliationCase{}, ErrConflict
+		}
+		if item.OwnerID != nil && *item.OwnerID != command.ActorID {
+			return AdminReconciliationCase{}, ErrConflict
+		}
+		item.OwnerID = &command.ActorID
+		item.Status = "IN_REVIEW"
+	case "ASSIGN":
+		if command.OwnerID == nil || item.Status == "RESOLVED" || item.Status == "IGNORED" {
+			return AdminReconciliationCase{}, ErrConflict
+		}
+		item.OwnerID = command.OwnerID
+		item.Status = "IN_REVIEW"
+	case "SET_REPAIR_ACTION":
+		if command.RepairAction == "" || item.OwnerID == nil || *item.OwnerID != command.ActorID || item.Status == "RESOLVED" || item.Status == "IGNORED" {
+			return AdminReconciliationCase{}, ErrConflict
+		}
+		item.RepairAction = &command.RepairAction
+		item.Status = "IN_REVIEW"
+	case "RESOLVE", "IGNORE":
+		if command.ReviewResult == "" || item.OwnerID == nil || *item.OwnerID != command.ActorID || (item.Status != "OPEN" && item.Status != "IN_REVIEW") {
+			return AdminReconciliationCase{}, ErrConflict
+		}
+		item.ReviewResult, item.Resolution = &command.ReviewResult, &command.Reason
+		item.Status = map[bool]string{true: "RESOLVED", false: "IGNORED"}[command.Action == "RESOLVE"]
+		item.ResolvedAt = &now
+	case "REOPEN":
+		if item.Status != "RESOLVED" && item.Status != "IGNORED" {
+			return AdminReconciliationCase{}, ErrConflict
+		}
+		item.Status, item.ResolvedAt = "OPEN", nil
+		item.ReviewResult, item.Resolution = nil, nil
+	default:
+		return AdminReconciliationCase{}, ErrConflict
+	}
+	item.UpdatedAt = now
+	item.Version++
+	_, err = tx.Exec(ctx, `UPDATE reconciliation_cases SET status=$2,severity=$3,owner_id=$4,repair_action=$5,review_result=$6,resolution=$7,resolved_at=$8,updated_at=$9,version=version+1 WHERE id=$1`, item.ID, item.Status, item.Severity, item.OwnerID, item.RepairAction, item.ReviewResult, item.Resolution, item.ResolvedAt, now)
+	if err == nil {
+		manualStatus := "OPEN"
+		if item.Status == "RESOLVED" || item.Status == "IGNORED" {
+			manualStatus = "RESOLVED"
+		}
+		_, err = tx.Exec(ctx, `UPDATE manual_review_cases SET status=$2,owner_id=$3,claimed_at=CASE WHEN $3::uuid IS NULL THEN claimed_at ELSE COALESCE(claimed_at,$4) END,first_response_at=CASE WHEN $3::uuid IS NULL THEN first_response_at ELSE COALESCE(first_response_at,$4) END,mitigation_at=CASE WHEN $5<>'' THEN COALESCE(mitigation_at,$4) ELSE mitigation_at END,resolved_at=$6,updated_at=$4 WHERE id=$1`, item.ID, manualStatus, item.OwnerID, now, command.RepairAction, item.ResolvedAt)
+	}
+	after, _ := json.Marshal(item)
+	if err == nil {
+		_, err = tx.Exec(ctx, `INSERT INTO reconciliation_case_commands(id,reconciliation_case_id,actor_id,idempotency_key,request_hash,action,reason,before_snapshot,after_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.Must(uuid.NewV7()), item.ID, command.ActorID, command.IdempotencyKey, requestHash, command.Action, command.Reason, before, after, now)
+	}
+	if err == nil {
+		err = appendManualReviewEvent(ctx, tx, item.ID, command.Action, &command.ActorID, map[string]any{"reason": command.Reason, "repair_action": command.RepairAction, "review_result": command.ReviewResult}, now)
+	}
+	if err != nil {
+		return AdminReconciliationCase{}, err
+	}
+	return item, tx.Commit(ctx)
 }

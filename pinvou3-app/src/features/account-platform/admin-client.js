@@ -104,6 +104,7 @@ export class AdminPlatformClient {
   runReconciliation(channel, businessDate) { return this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', { channel, business_date:businessDate }); }
   importProviderBill(channel, businessDate, items) { return this.mutate('billing', '/admin/v1/reconciliation-imports', 'POST', { channel, business_date:businessDate, items }); }
   reconciliationCases(runID, signal) { return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal); }
+  updateReconciliationCase(caseID, command) { return this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, 'POST', command, `reconciliation-case-${crypto.randomUUID()}`); }
   latePaymentReviews(filters = {}, signal) {
     const query = new URLSearchParams({ limit:'100' });
     for (const key of ['status','provider_id','owner_id']) if (filters[key]) query.set(key, filters[key]);
@@ -117,6 +118,14 @@ export class AdminPlatformClient {
   scheduleLatePaymentReview(caseID, nextReviewAt, reason) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/schedule`, 'POST', { next_review_at:new Date(nextReviewAt).toISOString(), reason }); }
   archiveLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive`, 'POST', {}); }
   escalateProviderBlind(caseID, reason) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason }); }
+  paymentAnomalies(filters = {}, signal) {
+    const query = new URLSearchParams({ limit:'100' });
+    for (const key of ['anomaly_type','status','severity','owner_id']) if (filters[key]) query.set(key, filters[key]);
+    return this.request('billing', `/admin/v1/payment-anomalies?${query}`, signal);
+  }
+  paymentAnomaly(caseID, signal) { return this.request('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}`, signal); }
+  claimPaymentAnomaly(caseID) { return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/claim`, 'POST', {}, `payment-anomaly-claim-${crypto.randomUUID()}`); }
+  resolvePaymentAnomaly(caseID, resolution, reason) { return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, `payment-anomaly-resolve-${crypto.randomUUID()}`); }
   tokenOverview(signal) { return this.request('token', '/admin/v1/overview', signal); }
   tokenAccounts(signal) { return this.request('token', '/admin/v1/token-accounts?limit=100', signal); }
   tokenAccount(tokenAccountID, signal) { return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal); }
