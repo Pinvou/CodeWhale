@@ -439,14 +439,24 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 				return Hold{}, err
 			}
 		}
-		command, err := tx.Exec(ctx, `UPDATE entitlement_components SET reserved_microcredits=reserved_microcredits-$2,used_microcredits=used_microcredits+$3,available_microcredits=available_microcredits+$4,status=CASE WHEN reserved_microcredits-$2=0 AND available_microcredits+$4=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$5 WHERE id=$1 AND reserved_microcredits>=$2`, item.componentID, item.reserved, settled, released, now)
-		if err != nil {
-			return Hold{}, err
+		memberBacked, memberErr := hasMemberQuotaAllocations(ctx, tx, hold.ID, item.componentID)
+		if memberErr != nil {
+			return Hold{}, memberErr
 		}
-		if command.RowsAffected() != 1 {
-			return Hold{}, ErrConflict
+		if memberBacked {
+			if err := settleMemberQuotaComponent(ctx, tx, hold.ID, item.componentID, settled, now); err != nil {
+				return Hold{}, err
+			}
+		} else {
+			command, err := tx.Exec(ctx, `UPDATE entitlement_components SET reserved_microcredits=reserved_microcredits-$2,used_microcredits=used_microcredits+$3,available_microcredits=available_microcredits+$4,status=CASE WHEN reserved_microcredits-$2=0 AND available_microcredits+$4=0 THEN 'CONSUMED' ELSE 'ACTIVE' END,updated_at=$5 WHERE id=$1 AND reserved_microcredits>=$2`, item.componentID, item.reserved, settled, released, now)
+			if err != nil {
+				return Hold{}, err
+			}
+			if command.RowsAffected() != 1 {
+				return Hold{}, ErrConflict
+			}
 		}
-		command, err = tx.Exec(ctx, `UPDATE usage_hold_allocations SET settled_microcredits=$2,released_microcredits=$3,updated_at=$4 WHERE hold_id=$1 AND component_id=$5`, hold.ID, settled, released, now, item.componentID)
+		command, err := tx.Exec(ctx, `UPDATE usage_hold_allocations SET settled_microcredits=$2,released_microcredits=$3,updated_at=$4 WHERE hold_id=$1 AND component_id=$5`, hold.ID, settled, released, now, item.componentID)
 		if err != nil {
 			return Hold{}, err
 		}
@@ -527,6 +537,70 @@ func (r *PostgresRepository) Release(ctx context.Context, usageRequestID, holdID
 }
 
 func releasePackageAllocations(ctx context.Context, tx pgx.Tx, holdID uuid.UUID, now time.Time) error {
+	var memberCount int64
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM member_quota_hold_allocations WHERE hold_id=$1 AND settled_microcredits=0 AND released_microcredits=0`, holdID).Scan(&memberCount); err != nil {
+		return err
+	}
+	if memberCount > 0 {
+		rows, err := tx.Query(ctx, `SELECT grant.id,grant.organization_id,grant.member_user_id,grant.package_id,grant.component_id,grant.component_type,grant.original_microcredits,grant.available_microcredits,grant.reserved_microcredits,grant.used_microcredits,grant.expired_microcredits,grant.revoked_microcredits,grant.status,grant.suspension_reason,grant.membership_version,grant.allocation_version,grant.created_by,grant.expires_at,grant.created_at,grant.updated_at,allocation.reserved_microcredits
+FROM member_quota_hold_allocations allocation JOIN member_quota_grants grant ON grant.id=allocation.grant_id
+WHERE allocation.hold_id=$1 AND allocation.settled_microcredits=0 AND allocation.released_microcredits=0 ORDER BY grant.component_id,grant.id FOR UPDATE OF allocation,grant`, holdID)
+		if err != nil {
+			return err
+		}
+		items := make([]memberHoldAllocation, 0, memberCount)
+		for rows.Next() {
+			var item memberHoldAllocation
+			if err := scanMemberQuotaGrantWithAmount(rows, &item.grant, &item.amount); err != nil {
+				rows.Close()
+				return err
+			}
+			items = append(items, item)
+		}
+		rows.Close()
+		for _, item := range items {
+			bucket := "active_grant_microcredits"
+			if item.grant.Status == "SUSPENDED" {
+				bucket = "suspended_grant_microcredits"
+			}
+			query := `UPDATE entitlement_components SET reserved_microcredits=reserved_microcredits-$2,` + bucket + `=` + bucket + `+$2,updated_at=$3 WHERE id=$1 AND reserved_microcredits>=$2`
+			command, err := tx.Exec(ctx, query, item.grant.ComponentID, item.amount, now)
+			if err != nil || command.RowsAffected() != 1 {
+				if err == nil {
+					err = ErrConflict
+				}
+				return err
+			}
+			command, err = tx.Exec(ctx, `UPDATE member_quota_grants SET reserved_microcredits=reserved_microcredits-$2,available_microcredits=available_microcredits+$2,allocation_version=allocation_version+1,updated_at=$3 WHERE id=$1 AND reserved_microcredits>=$2`, item.grant.ID, item.amount, now)
+			if err != nil || command.RowsAffected() != 1 {
+				if err == nil {
+					err = ErrConflict
+				}
+				return err
+			}
+			if _, err := tx.Exec(ctx, `UPDATE member_quota_hold_allocations SET released_microcredits=reserved_microcredits,updated_at=$3 WHERE hold_id=$1 AND grant_id=$2`, holdID, item.grant.ID, now); err != nil {
+				return err
+			}
+			item.grant.ReservedMicrocredits -= item.amount
+			item.grant.AvailableMicrocredits += item.amount
+			item.grant.AllocationVersion++
+			if err := appendMemberQuotaAudit(ctx, tx, item.grant, "HOLD_RELEASED", nil, item.amount, now); err != nil {
+				return err
+			}
+		}
+		command, err := tx.Exec(ctx, `UPDATE usage_hold_allocations SET released_microcredits=reserved_microcredits,updated_at=$2 WHERE hold_id=$1 AND settled_microcredits=0 AND released_microcredits=0`, holdID, now)
+		if err != nil {
+			return err
+		}
+		var expected int64
+		if err := tx.QueryRow(ctx, `SELECT count(DISTINCT component_id) FROM member_quota_hold_allocations WHERE hold_id=$1`, holdID).Scan(&expected); err != nil {
+			return err
+		}
+		if command.RowsAffected() != expected {
+			return ErrConflict
+		}
+		return nil
+	}
 	var expected int64
 	if err := tx.QueryRow(ctx, `SELECT count(*) FROM usage_hold_allocations WHERE hold_id=$1 AND settled_microcredits=0 AND released_microcredits=0`, holdID).Scan(&expected); err != nil {
 		return err

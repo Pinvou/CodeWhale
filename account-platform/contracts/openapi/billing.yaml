@@ -252,6 +252,10 @@ components:
         requester_id:
           type: string
           format: uuid
+        beneficiary_organization_id:
+          type: string
+          format: uuid
+          description: When present, the wallet must belong to this organization and the fulfilled package has no personal user owner.
         product_id:
           type: string
           enum: [PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
@@ -308,6 +312,9 @@ components:
       required: [order_id, pinvou_order_id, mall_order_id, product_id, plan_name, sku_code, order_type, amount_fen, display_points, channel, status, fulfillment_status, invoice_status, expires_at, created_at]
       properties:
         order_id:
+          type: string
+          format: uuid
+        beneficiary_organization_id:
           type: string
           format: uuid
         pinvou_order_id:

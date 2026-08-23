@@ -30,6 +30,7 @@ type AuthorizationContext struct {
 	UnitIDs              []uuid.UUID
 	AncestorUnitIDs      []uuid.UUID
 	Roles                []string
+	Permissions          []string
 	Mobile               *string
 	MobileVerified       bool
 }

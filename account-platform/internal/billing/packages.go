@@ -205,6 +205,9 @@ func (r *PostgresRepository) expireOnePackage(ctx context.Context) (bool, error)
 			if command.RowsAffected() != 1 {
 				return false, ErrConflict
 			}
+			if err := expireMemberQuotaGrantsForComponent(ctx, tx, component.id, now); err != nil {
+				return false, err
+			}
 			command, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,suspended_grant_microcredits=0,expired_microcredits=expired_microcredits+$2,status='EXPIRED',updated_at=$6 WHERE id=$1 AND available_microcredits=$3 AND active_grant_microcredits=$4 AND suspended_grant_microcredits=$5 AND reserved_microcredits=0`, component.id, expiring, component.available, component.active, component.suspended, now)
 			if err != nil {
 				return false, err

@@ -416,7 +416,23 @@ func tokenPathAllowed(method, resource string) bool {
 			return safeProxyPathID(orderID)
 		}
 	}
-	return method == http.MethodPost && resource == "/v1/recharge/orders"
+	if method == http.MethodPost && resource == "/v1/recharge/orders" {
+		return true
+	}
+	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "organizations" || !safeProxyPathID(parts[2]) {
+		return false
+	}
+	if len(parts) == 4 && parts[3] == "quota-grants" {
+		return method == http.MethodGet
+	}
+	if len(parts) == 4 && parts[3] == "quota-grants:batch" {
+		return method == http.MethodPost
+	}
+	if len(parts) == 5 && parts[3] == "recharge" && parts[4] == "orders" {
+		return method == http.MethodPost
+	}
+	return len(parts) == 6 && parts[3] == "quota-grants" && safeProxyPathID(parts[4]) && parts[5] == "revoke" && method == http.MethodPost
 }
 
 func safeProxyPathID(value string) bool {

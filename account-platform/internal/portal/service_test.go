@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type memoryStore struct {
@@ -256,6 +258,11 @@ func TestCallbackAcceptsNonExpiringOfflineRefreshTokenWithBoundedSession(t *test
 func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 	if tokenPathAllowed(http.MethodPost, "/v1/chat/completions") {
 		t.Fatal("Portal BFF must not expose the model data plane")
+	}
+	organizationID := uuid.Must(uuid.NewV7()).String()
+	grantID := uuid.Must(uuid.NewV7()).String()
+	if !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/recharge/orders") || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/quota-grants") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants:batch") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants/"+grantID+"/revoke") {
+		t.Fatal("organization billing paths must be allowlisted")
 	}
 	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-requests") || !accountPathAllowed(http.MethodGet, "/v1/me") {
 		t.Fatal("Portal BFF must expose the documented management APIs")

@@ -69,6 +69,9 @@ func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID)
 func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error) {
 	panic("not used")
 }
+func (*fakeRepository) ListQuotaMembers(context.Context, identity.Principal, uuid.UUID) ([]QuotaMember, error) {
+	panic("not used")
+}
 func (*fakeRepository) ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error) {
 	return []RoleBinding{}, nil
 }

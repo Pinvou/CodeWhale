@@ -26,24 +26,25 @@ import (
 )
 
 type PaymentOrder struct {
-	ID                   uuid.UUID  `json:"order_id"`
-	MerchantOrderNo      string     `json:"merchant_order_no"`
-	RequesterID          uuid.UUID  `json:"requester_id"`
-	WalletID             uuid.UUID  `json:"wallet_id"`
-	ProductID            string     `json:"product_id"`
-	Channel              string     `json:"channel"`
-	AmountFen            int64      `json:"amount_fen"`
-	Currency             string     `json:"currency"`
-	CreditMicrocredits   int64      `json:"credit_microcredits"`
-	Status               string     `json:"status"`
-	FulfillmentStatus    string     `json:"fulfillment_status"`
-	PaymentURL           string     `json:"payment_url,omitempty"`
-	QRData               string     `json:"qr_data,omitempty"`
-	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
-	ExpiresAt            time.Time  `json:"expires_at"`
-	PaidAt               *time.Time `json:"paid_at,omitempty"`
-	Mobile               string     `json:"-"`
-	ProviderSKU          string     `json:"-"`
+	ID                        uuid.UUID  `json:"order_id"`
+	MerchantOrderNo           string     `json:"merchant_order_no"`
+	RequesterID               uuid.UUID  `json:"requester_id"`
+	BeneficiaryOrganizationID *uuid.UUID `json:"beneficiary_organization_id,omitempty"`
+	WalletID                  uuid.UUID  `json:"wallet_id"`
+	ProductID                 string     `json:"product_id"`
+	Channel                   string     `json:"channel"`
+	AmountFen                 int64      `json:"amount_fen"`
+	Currency                  string     `json:"currency"`
+	CreditMicrocredits        int64      `json:"credit_microcredits"`
+	Status                    string     `json:"status"`
+	FulfillmentStatus         string     `json:"fulfillment_status"`
+	PaymentURL                string     `json:"payment_url,omitempty"`
+	QRData                    string     `json:"qr_data,omitempty"`
+	ChannelTransactionID      *string    `json:"channel_transaction_id,omitempty"`
+	ExpiresAt                 time.Time  `json:"expires_at"`
+	PaidAt                    *time.Time `json:"paid_at,omitempty"`
+	Mobile                    string     `json:"-"`
+	ProviderSKU               string     `json:"-"`
 }
 
 type PaymentOrderHistoryItem struct {
@@ -224,14 +225,21 @@ func (p *PaymentCoordinator) Policy() PaymentPolicy {
 }
 
 func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey string) (PaymentOrder, bool, error) {
-	return p.createOrder(ctx, requesterID, walletID, productID, channel, "", idempotencyKey)
+	return p.createOrder(ctx, requesterID, walletID, nil, productID, channel, "", idempotencyKey)
 }
 
 func (p *PaymentCoordinator) CreateMobileOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
-	return p.createOrder(ctx, requesterID, walletID, productID, channel, mobile, idempotencyKey)
+	return p.createOrder(ctx, requesterID, walletID, nil, productID, channel, mobile, idempotencyKey)
 }
 
-func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
+func (p *PaymentCoordinator) CreateOrganizationMobileOrder(ctx context.Context, requesterID, walletID, organizationID uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
+	if organizationID == uuid.Nil {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	return p.createOrder(ctx, requesterID, walletID, &organizationID, productID, channel, mobile, idempotencyKey)
+}
+
+func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walletID uuid.UUID, beneficiaryOrganizationID *uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
 	channel = strings.ToUpper(channel)
 	if len(idempotencyKey) < 16 || !validPaymentChannel(channel) {
 		return PaymentOrder{}, false, ErrConflict
@@ -247,7 +255,11 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if err := lockTransactionKey(ctx, tx, "payment.pending", requesterID.String()+"|"+walletID.String()+"|"+productID); err != nil {
 		return PaymentOrder{}, false, err
 	}
-	requestDigest := sha256.Sum256([]byte(requesterID.String() + "|" + walletID.String() + "|" + productID + "|" + channel + "|" + mobile))
+	beneficiary := "PERSONAL"
+	if beneficiaryOrganizationID != nil {
+		beneficiary = beneficiaryOrganizationID.String()
+	}
+	requestDigest := sha256.Sum256([]byte(requesterID.String() + "|" + walletID.String() + "|" + beneficiary + "|" + productID + "|" + channel + "|" + mobile))
 	requestHash := hex.EncodeToString(requestDigest[:])
 	var existingHash string
 	var existingBody []byte
@@ -299,13 +311,20 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if len(p.productSKUs) > 0 && (channel != "ALIPAY" || mobile == "" || external.SKU == "" || external.AmountFen != product.AmountFen) {
 		return PaymentOrder{}, false, ErrConflict
 	}
-	if _, err := getWallet(ctx, tx, walletID, false); err != nil {
+	wallet, walletErr := getWallet(ctx, tx, walletID, false)
+	if walletErr != nil {
 		return PaymentOrder{}, false, ErrNotFound
 	}
+	if beneficiaryOrganizationID == nil && (wallet.OwnerType != "PERSONAL" || wallet.OwnerID != requesterID) {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	if beneficiaryOrganizationID != nil && (wallet.OwnerType != "ORGANIZATION" || wallet.OwnerID != *beneficiaryOrganizationID) {
+		return PaymentOrder{}, false, ErrConflict
+	}
 	merchantDigest := sha256.Sum256([]byte(requesterID.String() + "|" + idempotencyKey))
-	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute), Mobile: mobile, ProviderSKU: external.SKU}
+	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, BeneficiaryOrganizationID: beneficiaryOrganizationID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute), Mobile: mobile, ProviderSKU: external.SKU}
 	snapshot, _ := json.Marshal(product)
-	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at, mobile_e164, provider_sku) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'CREATED','PENDING',$11,$12,$12,NULLIF($13,''),NULLIF($14,''))`, order.ID, order.MerchantOrderNo, requesterID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now, mobile, external.SKU)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, beneficiary_organization_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at, mobile_e164, provider_sku) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'CREATED','PENDING',$12,$13,$13,NULLIF($14,''),NULLIF($15,''))`, order.ID, order.MerchantOrderNo, requesterID, beneficiaryOrganizationID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now, mobile, external.SKU)
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
@@ -330,7 +349,7 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 
 func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, walletID uuid.UUID, productID, channel string, now time.Time, includeExpired bool) (PaymentOrder, error) {
 	var order PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 AND product_id=$3 AND channel=$4 AND status IN ('CREATED','PENDING') AND ($6 OR expires_at>$5) ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, requesterID, walletID, productID, channel, now, includeExpired).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 AND product_id=$3 AND channel=$4 AND status IN ('CREATED','PENDING') AND ($6 OR expires_at>$5) ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`, requesterID, walletID, productID, channel, now, includeExpired).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
 	return order, err
 }
 
@@ -420,7 +439,7 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 		return err
 	}
 	if err := events.AppendOutbox(ctx, tx, "billing.recharge.succeeded.v1", order.ID, 1, map[string]any{
-		"order_id": order.ID, "wallet_id": order.WalletID, "channel": order.Channel, "amount_fen": order.AmountFen, "credit_microcredits": order.CreditMicrocredits,
+		"order_id": order.ID, "wallet_id": order.WalletID, "beneficiary_organization_id": order.BeneficiaryOrganizationID, "channel": order.Channel, "amount_fen": order.AmountFen, "credit_microcredits": order.CreditMicrocredits,
 	}); err != nil {
 		return err
 	}
@@ -439,8 +458,16 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 		return uuid.Nil, ErrWalletUnavailable
 	}
 	var snapshot []byte
-	if err := tx.QueryRow(ctx, `SELECT product_snapshot FROM payment_orders WHERE id=$1`, order.ID).Scan(&snapshot); err != nil {
+	var beneficiaryOrganizationID *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT product_snapshot,beneficiary_organization_id FROM payment_orders WHERE id=$1`, order.ID).Scan(&snapshot, &beneficiaryOrganizationID); err != nil {
 		return uuid.Nil, err
+	}
+	if beneficiaryOrganizationID == nil {
+		if wallet.OwnerType != "PERSONAL" || wallet.OwnerID != order.RequesterID {
+			return uuid.Nil, ErrConflict
+		}
+	} else if wallet.OwnerType != "ORGANIZATION" || wallet.OwnerID != *beneficiaryOrganizationID {
+		return uuid.Nil, ErrConflict
 	}
 	var product Product
 	if err := json.Unmarshal(snapshot, &product); err != nil {
@@ -485,7 +512,11 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 			return uuid.Nil, err
 		}
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,'ACTIVE',$11,$11,'PAYMENT',$14)`, packageID, order.RequesterID, order.WalletID, order.ID, primaryLotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validFrom, validUntil, reference); err != nil {
+	var packageUserID *uuid.UUID
+	if beneficiaryOrganizationID == nil {
+		packageUserID = &order.RequesterID
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,'ACTIVE',$11,$11,'PAYMENT',$14)`, packageID, packageUserID, order.WalletID, order.ID, primaryLotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validFrom, validUntil, reference); err != nil {
 		return uuid.Nil, err
 	}
 	for _, component := range components {
@@ -533,7 +564,7 @@ func splitProductComponents(total, basePoints, bonusPoints int64) ([]productComp
 
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
 	var o PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.QRData, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.BeneficiaryOrganizationID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.QRData, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
 	return o, err
 }
 

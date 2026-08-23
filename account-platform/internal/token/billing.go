@@ -58,12 +58,44 @@ type EntitlementPackageBillingClient interface {
 	Packages(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 }
 
+type OrganizationBillingClient interface {
+	CreateOrganizationRechargeOrder(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string, string, string, string) (json.RawMessage, error)
+	OrganizationQuotaGrants(context.Context, uuid.UUID, *uuid.UUID) (json.RawMessage, error)
+	AllocateOrganizationQuotaBatch(context.Context, uuid.UUID, uuid.UUID, json.RawMessage, string) (json.RawMessage, error)
+	RevokeOrganizationQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (json.RawMessage, error)
+	ReserveMemberQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, uuid.UUID) (BillingHold, error)
+}
+
 func (c *HTTPBillingClient) Products(ctx context.Context) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodGet, "/v1/recharge/products", nil, "")
 }
 
 func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, commerceCustomerStatus, idempotencyKey string) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile, "commerce_customer_status": commerceCustomerStatus}, idempotencyKey)
+}
+
+func (c *HTTPBillingClient) CreateOrganizationRechargeOrder(ctx context.Context, requesterID, walletID, organizationID uuid.UUID, productID, channel, mobile, commerceCustomerStatus, idempotencyKey string) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders", map[string]any{"requester_id": requesterID, "beneficiary_organization_id": organizationID, "wallet_id": walletID, "product_id": productID, "channel": channel, "mobile": mobile, "commerce_customer_status": commerceCustomerStatus}, idempotencyKey)
+}
+
+func (c *HTTPBillingClient) OrganizationQuotaGrants(ctx context.Context, organizationID uuid.UUID, memberUserID *uuid.UUID) (json.RawMessage, error) {
+	path := "/internal/v1/organizations/" + organizationID.String() + "/quota-grants"
+	if memberUserID != nil {
+		path += "?member_user_id=" + url.QueryEscape(memberUserID.String())
+	}
+	return c.raw(ctx, http.MethodGet, path, nil, "")
+}
+
+func (c *HTTPBillingClient) AllocateOrganizationQuotaBatch(ctx context.Context, organizationID, actorUserID uuid.UUID, items json.RawMessage, idempotencyKey string) (json.RawMessage, error) {
+	var decoded []map[string]any
+	if err := json.Unmarshal(items, &decoded); err != nil {
+		return nil, err
+	}
+	return c.raw(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/quota-grants:batch", map[string]any{"created_by": actorUserID, "items": decoded}, idempotencyKey)
+}
+
+func (c *HTTPBillingClient) RevokeOrganizationQuota(ctx context.Context, organizationID, grantID, actorUserID uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/quota-grants/"+grantID.String()+"/revoke", map[string]any{"actor_user_id": actorUserID, "reason": reason}, idempotencyKey)
 }
 
 func (c *HTTPBillingClient) RechargeOrders(ctx context.Context, requesterID, walletID uuid.UUID) (json.RawMessage, error) {
@@ -190,6 +222,12 @@ func (c *HTTPBillingClient) PriceByID(ctx context.Context, priceID uuid.UUID) (P
 func (c *HTTPBillingClient) Reserve(ctx context.Context, usageID, walletID uuid.UUID, maximum int64, priceID uuid.UUID) (BillingHold, error) {
 	var hold BillingHold
 	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900}, &hold)
+	return hold, err
+}
+
+func (c *HTTPBillingClient) ReserveMemberQuota(ctx context.Context, usageID, walletID, organizationID, memberUserID uuid.UUID, membershipVersion, maximum int64, priceID uuid.UUID) (BillingHold, error) {
+	var hold BillingHold
+	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "organization_id": organizationID, "member_user_id": memberUserID, "membership_version": membershipVersion, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900}, &hold)
 	return hold, err
 }
 

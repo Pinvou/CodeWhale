@@ -52,6 +52,22 @@ Object.assign(accountPlatformCopy.ja, {
   profileSettings:'プロフィールとセキュリティ', changeUsername:'ユーザー名を変更', changeMobile:'携帯番号を変更', currentPassword:'現在のパスワード（再認証）', continueChange:'確認して続行', confirmChange:'変更を確定', profileChangeComplete:'プロフィールを更新し、以前のセッションを無効化しました。再度ログインしてください。',
   recentAuthenticationRequired:'プロフィールを変更する前に、現在のパスワードをもう一度入力してください。', profileChangeConflict:'別のプロフィールまたはアカウント更新と競合しています。更新して再試行してください。', mobileVerificationRequired:'先に新しい携帯番号を確認してください。', profileChangeNotFound:'このプロフィール変更は存在しないか、期限切れです。', profileChangeRecovering:'プロフィール変更を安全に復旧しています。重複して送信しないでください。',
 });
+
+Object.assign(accountPlatformCopy.zh, {
+  organizationPurchase:'为组织购买权益', organizationPurchaseLead:'订单记录实际付款管理员和受益组织，支付成功后权益只进入当前组织。', purchaseForOrganization:'为当前组织购买', organizationOrderCreated:'组织订单已创建',
+  allocateMemberQuota:'分配成员额度', allocateMemberQuotaLead:'选择具体权益包及 BASE/BONUS 组成；每次提交创建新授予，不支持原地改额。', member:'成员', entitlementPackage:'权益包', entitlementComponent:'权益组成', quotaAmount:'分配积分', allocateQuota:'分配额度', memberQuotaGrants:'成员额度授予', noMemberQuotaGrants:'暂无成员额度授予。', revokeQuota:'撤回未消费额度',
+  grantStatuses:{ACTIVE:'有效',SUSPENDED:'已暂停',REVOKED:'已撤回',EXPIRED:'已过期',ACCOUNT_CLOSED:'账号已注销',RECLAIMED_ACCOUNT_CLOSED:'注销额度已回收'},
+});
+Object.assign(accountPlatformCopy.en, {
+  organizationPurchase:'Purchase organization benefits', organizationPurchaseLead:'The order records the paying administrator and beneficiary organization; credited benefits go only to this organization.', purchaseForOrganization:'Purchase for this organization', organizationOrderCreated:'Organization order created',
+  allocateMemberQuota:'Allocate member quota', allocateMemberQuotaLead:'Choose an exact package and BASE/BONUS component. Each submission creates a new grant; grants cannot be edited in place.', member:'Member', entitlementPackage:'Benefit package', entitlementComponent:'Benefit component', quotaAmount:'Points to allocate', allocateQuota:'Allocate quota', memberQuotaGrants:'Member quota grants', noMemberQuotaGrants:'No member quota grants.', revokeQuota:'Revoke unconsumed quota',
+  grantStatuses:{ACTIVE:'Active',SUSPENDED:'Suspended',REVOKED:'Revoked',EXPIRED:'Expired',ACCOUNT_CLOSED:'Account closed',RECLAIMED_ACCOUNT_CLOSED:'Closed-account quota reclaimed'},
+});
+Object.assign(accountPlatformCopy.ja, {
+  organizationPurchase:'組織特典を購入', organizationPurchaseLead:'注文には支払管理者と受益組織が記録され、付与された特典は現在の組織だけに入ります。', purchaseForOrganization:'この組織向けに購入', organizationOrderCreated:'組織注文を作成しました',
+  allocateMemberQuota:'メンバー枠を割り当て', allocateMemberQuotaLead:'対象パッケージと BASE/BONUS 内訳を明示します。割り当ては毎回新規作成され、金額の直接変更はできません。', member:'メンバー', entitlementPackage:'特典パッケージ', entitlementComponent:'特典内訳', quotaAmount:'割り当てポイント', allocateQuota:'枠を割り当て', memberQuotaGrants:'メンバー枠の付与', noMemberQuotaGrants:'メンバー枠の付与はありません。', revokeQuota:'未使用枠を撤回',
+  grantStatuses:{ACTIVE:'有効',SUSPENDED:'一時停止',REVOKED:'撤回済み',EXPIRED:'期限切れ',ACCOUNT_CLOSED:'アカウント解約済み',RECLAIMED_ACCOUNT_CLOSED:'解約枠を回収済み'},
+});
 Object.assign(accountPlatformCopy.en, {
   packageId:'Package ID', pinvouOrder:'Pinvou order', mallOrder:'Mall order', amount:'Amount paid', creditedAt:'Credited at', validPeriod:'Benefit validity', totalPoints:'Total points', usedPoints:'Used points', createdAt:'Created at', paidAt:'Paid at', fulfillmentStatus:'Fulfillment', invoiceStatus:'Invoice status',
   fulfillmentStatuses:{ PENDING:'Pending', CREDITED:'Credited', MANUAL_REVIEW:'Manual review', REVOKED:'Revoked' }, invoiceStatuses:{ NOT_SUPPORTED:'Not supported by the current API' },

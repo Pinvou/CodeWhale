@@ -687,6 +687,32 @@ paths:
                       $ref: "#/components/schemas/OrganizationMember"
         "403":
           $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/quota-members:
+    get:
+      operationId: listOrganizationQuotaMembers
+      summary: List the minimal active-member directory required by quota allocators
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+      responses:
+        "200":
+          description: Active members eligible for organization quota allocation
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/QuotaMember"
+        "403":
+          $ref: "#/components/responses/Error"
   /organizations/{organization_id}/members/{user_id}/roles:
     put:
       operationId: replaceOrganizationMemberRoles
@@ -1013,6 +1039,19 @@ components:
         joined_at:
           type: string
           format: date-time
+    QuotaMember:
+      type: object
+      additionalProperties: false
+      required: [user_id, version]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        display_name:
+          type: [string, "null"]
+        version:
+          type: integer
+          minimum: 1
     Invitation:
       type: object
       additionalProperties: false

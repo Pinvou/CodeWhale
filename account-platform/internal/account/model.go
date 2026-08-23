@@ -28,6 +28,7 @@ type Context struct {
 	MembershipVersion    int64      `json:"membership_version"`
 	ContextVersion       int64      `json:"context_version"`
 	AuthorizationVersion int64      `json:"authorization_version"`
+	Permissions          []string   `json:"permissions"`
 }
 
 type Me struct {
@@ -101,6 +102,12 @@ type Member struct {
 	MembershipID uuid.UUID   `json:"membership_id"`
 }
 
+type QuotaMember struct {
+	UserID      uuid.UUID `json:"user_id"`
+	DisplayName *string   `json:"display_name"`
+	Version     int64     `json:"version"`
+}
+
 type Invitation struct {
 	ID             uuid.UUID  `json:"invitation_id"`
 	OrganizationID uuid.UUID  `json:"organization_id"`
@@ -148,6 +155,7 @@ type Repository interface {
 	SetActiveContext(context.Context, identity.Principal, *uuid.UUID, int64) (Context, error)
 	ListUnits(context.Context, identity.Principal, uuid.UUID) (UnitTree, error)
 	ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error)
+	ListQuotaMembers(context.Context, identity.Principal, uuid.UUID) ([]QuotaMember, error)
 	ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error)
 	ListOrganizationRoleBindings(context.Context, identity.Principal, uuid.UUID) ([]RoleBinding, error)
 	GrantOrganizationRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)

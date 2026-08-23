@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
-import { formatPoints } from './credit-units.js';
+import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import './account-platform.css';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'MANUAL_REVIEW']);
@@ -61,6 +61,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [order, setOrder] = useState(null);
   const [orders, setOrders] = useState([]);
   const [packages, setPackages] = useState({ summary: null, items: [] });
+  const [quotaGrants, setQuotaGrants] = useState([]);
+  const [quotaMembers, setQuotaMembers] = useState([]);
   const [qrData, setQrData] = useState('');
   const guardRef = useRef(createContextRequestGuard());
   const meRef = useRef(null);
@@ -81,7 +83,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const clearContextResources = () => {
     guardRef.current.cancel();
     setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false);
-    setUnits([]); setMembers([]); setOrder(null); setOrders([]); setPackages({ summary: null, items: [] });
+    setUnits([]); setMembers([]); setOrder(null); setOrders([]); setPackages({ summary: null, items: [] }); setQuotaGrants([]); setQuotaMembers([]);
     setBillingUnavailable(false); setBillingDetailsUnavailable(false);
   };
 
@@ -91,14 +93,21 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     const organizationId = nextMe?.active_context?.organization_id;
     try {
       const isPersonal = !organizationId;
+      const permissions = new Set(nextMe?.active_context?.permissions || []);
+      const canReadOrganizationEntitlements = permissions.has('org.wallet.read') || permissions.has('org.quota.allocate') || permissions.has('org.entitlements.purchase');
+      const canReadQuota = permissions.has('org.quota.read.self') || permissions.has('org.quota.read.all');
+      const canReadMembers = permissions.has('org.members.read');
+      const canAllocateQuota = permissions.has('org.quota.allocate');
       const results = await Promise.allSettled([
         client.organizations(request.signal), client.products(request.signal), client.balance(request.signal),
         client.recentRechargeOrder(request.signal),
         organizationId ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }),
-        organizationId ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }),
+        organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }),
         client.usageHistory('', request.signal),
-        isPersonal ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] }),
+        isPersonal || canReadOrganizationEntitlements ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] }),
         isPersonal ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }),
+        organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }),
+        organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }),
       ]);
       if (!guardRef.current.isCurrent(request.generation)) return;
       const value = index => results[index].status === 'fulfilled' ? results[index].value : null;
@@ -113,9 +122,11 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setUsageUnavailable(results[6].status === 'rejected');
       setPackages(value(7) || { summary: null, items: [] });
       setOrders(value(8)?.items || []);
+      setQuotaGrants(value(9)?.items || []);
+      setQuotaMembers(value(10)?.items || []);
       const billingFailed = [1, 2, 3].some(index => results[index].status === 'rejected');
       setBillingUnavailable(billingFailed);
-      setBillingDetailsUnavailable([7, 8].some(index => results[index].status === 'rejected'));
+      setBillingDetailsUnavailable([7, 8, 9].some(index => results[index].status === 'rejected'));
       if ([0, 4, 5].some(index => results[index].status === 'rejected')) setError(copy.requestFailed);
     } catch (reason) {
       if (reason?.name !== 'AbortError' && guardRef.current.isCurrent(request.generation)) setError(copy.requestFailed);
@@ -234,7 +245,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     await client.logout();
     guardRef.current.cancel();
     meRef.current = null;
-    setMe(null); setOrganizations([]); setUnits([]); setMembers([]); setProducts([]); setOrders([]); setPackages({ summary: null, items: [] });
+    setMe(null); setOrganizations([]); setUnits([]); setMembers([]); setProducts([]); setOrders([]); setPackages({ summary: null, items: [] }); setQuotaGrants([]); setQuotaMembers([]);
     setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false); setBillingDetailsUnavailable(false); setOrder(null); setQrData(''); setAuth('guest');
     if (portal) window.location.reload();
   });
@@ -296,7 +307,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {error && <div role="alert" className="ap-alert error">{error}</div>}{notice && <div className="ap-alert success">{notice}</div>}
       {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} />}
       {section === 'credits' && <ResourceSection name="credits" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <ContextCredits copy={copy} language={language} balance={balance} />}</ResourceSection>}
-      {section === 'entitlements' && <ResourceSection name="entitlements" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <Empty>{copy.noEntitlements}</Empty>}</ResourceSection>}
+      {section === 'entitlements' && <ResourceSection name="entitlements" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <OrganizationEntitlements copy={copy} language={language} organizationId={activeOrganizationId} permissions={me?.active_context?.permissions || []} products={products} packages={packages} members={quotaMembers} grants={quotaGrants} order={order} busy={busy} onPurchase={(productId, channel) => run(async () => setOrder(await client.purchaseOrganizationEntitlements(activeOrganizationId, productId, channel, idempotencyKey('org-recharge'))))} onAllocate={items => run(async () => { await client.allocateOrganizationQuota(activeOrganizationId, items, idempotencyKey('quota-batch')); await loadContext(me); })} onRevoke={(grantId, reason) => run(async () => { await client.revokeOrganizationQuota(activeOrganizationId, grantId, reason, idempotencyKey('quota-revoke')); await loadContext(me); })} />}</ResourceSection>}
       {section === 'organization' && <Organization copy={copy} organization={activeOrganization} units={units} members={members} busy={busy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} />}
       {section === 'orders' && <Orders copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
       {section === 'invoice' && <Invoice copy={copy} />}
@@ -313,6 +324,32 @@ function Organization({ copy, organization, units, members, busy, onCreateUnit, 
   const [unitName, setUnitName] = useState(''); const [parentId, setParentId] = useState(''); const [email, setEmail] = useState('');
   if (!organization) return <Empty>{copy.chooseOrganization}</Empty>;
   return <section><p className="ap-eyebrow">{copy.sections.organization}</p><h2>{organization.name}</h2><div className="ap-grid"><article className="ap-card"><h3>{copy.organizationTree}</h3>{units.length ? <ul className="ap-list">{units.map(unit => <li key={unit.unit_id}><span>{unit.name}</span><small>{unit.parent_id ? copy.childUnit : copy.rootUnit}</small></li>)}</ul> : <Empty>{copy.noUnits}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (unitName.trim()) onCreateUnit(unitName.trim(), parentId || null).then?.(() => setUnitName('')); }}><Field label={copy.unitName}><input value={unitName} onChange={event => setUnitName(event.target.value)} /></Field><Field label={copy.parentUnit}><select value={parentId} onChange={event => setParentId(event.target.value)}><option value="">{copy.rootUnit}</option>{units.map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select></Field><button disabled={busy || !unitName.trim()}>{copy.createUnit}</button></form></article><article className="ap-card"><h3>{copy.members}</h3>{members.length ? <ul className="ap-list">{members.map(member => <li key={member.user_id}><span>{member.display_name || member.email || member.user_id}</span><small>{member.roles.join(' · ')}</small></li>)}</ul> : <Empty>{copy.noMembers}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (email.trim()) onInvite(email.trim(), ['MEMBER']).then?.(() => setEmail('')); }}><Field label={copy.memberEmail}><input type="email" value={email} onChange={event => setEmail(event.target.value)} /></Field><button disabled={busy || !email.trim()}>{copy.createInvitation}</button></form></article></div></section>;
+}
+
+function OrganizationEntitlements({ copy, language, permissions, products, packages, members, grants, order, busy, onPurchase, onAllocate, onRevoke }) {
+  const permissionSet = new Set(permissions || []);
+  const canPurchase = permissionSet.has('org.entitlements.purchase');
+  const canAllocate = permissionSet.has('org.quota.allocate');
+  const canRevoke = permissionSet.has('org.quota.revoke');
+  const [productId, setProductId] = useState('');
+  const [memberId, setMemberId] = useState('');
+  const [packageId, setPackageId] = useState('');
+  const [componentId, setComponentId] = useState('');
+  const [amount, setAmount] = useState('');
+  useEffect(() => { if (!productId && products[0]) setProductId(products[0].product_id); }, [productId, products]);
+  useEffect(() => { if (!memberId && members[0]) setMemberId(members[0].user_id); }, [memberId, members]);
+  useEffect(() => { if (!packageId && packages.items?.[0]) setPackageId(packages.items[0].package_id); }, [packageId, packages.items]);
+  const selectedPackage = packages.items?.find(item => item.package_id === packageId);
+  const allocatableComponents = (selectedPackage?.components || []).filter(item => item.status === 'ACTIVE' && Number(item.available_microcredits) > 0);
+  const effectiveComponentId = allocatableComponents.some(item => item.component_id === componentId) ? componentId : (allocatableComponents[0]?.component_id || '');
+  const selectedComponent = allocatableComponents.find(item => item.component_id === effectiveComponentId);
+  const selectedMember = members.find(item => item.user_id === memberId);
+  const amountMicrocredits = Math.round(Number(amount) * MICROCREDITS_PER_POINT);
+  return <section className="ap-stack">
+    {canPurchase && <article className="ap-card"><h3>{copy.organizationPurchase}</h3><p className="ap-muted">{copy.organizationPurchaseLead}</p><div className="ap-inline"><select value={productId} onChange={event => setProductId(event.target.value)}>{products.map(product => <option key={product.product_id} value={product.product_id}>{product.plan_name} · {formatMoney(product.amount_fen)}</option>)}</select><button className="ap-primary" disabled={busy || !productId} onClick={() => onPurchase(productId, 'ALIPAY')}>{copy.purchaseForOrganization}</button></div>{order?.beneficiary_organization_id && <p className="ap-muted">{copy.organizationOrderCreated}: {order.merchant_order_no}</p>}</article>}
+    {canAllocate && <article className="ap-card"><h3>{copy.allocateMemberQuota}</h3><p className="ap-muted">{copy.allocateMemberQuotaLead}</p><form className="ap-stack" onSubmit={event => { event.preventDefault(); if (selectedMember && selectedComponent && amountMicrocredits > 0) onAllocate([{ member_user_id:selectedMember.user_id, membership_version:selectedMember.version, package_id:packageId, component_id:effectiveComponentId, component_type:selectedComponent.component_type, amount_microcredits:amountMicrocredits }]).then?.(() => setAmount('')); }}><Field label={copy.member}><select value={memberId} onChange={event => setMemberId(event.target.value)}>{members.map(member => <option key={member.user_id} value={member.user_id}>{member.display_name || member.email || member.user_id}</option>)}</select></Field><Field label={copy.entitlementPackage}><select value={packageId} onChange={event => setPackageId(event.target.value)}>{(packages.items || []).map(item => <option key={item.package_id} value={item.package_id}>{item.plan_name} · {String(item.package_id).slice(0, 8)}</option>)}</select></Field><Field label={copy.entitlementComponent}><select value={effectiveComponentId} onChange={event => setComponentId(event.target.value)}>{allocatableComponents.map(component => <option key={component.component_id} value={component.component_id}>{copy.componentTypes[component.component_type] || component.component_type} · {formatPoints(component.available_microcredits, language)}</option>)}</select></Field><Field label={copy.quotaAmount}><input type="number" min="0.0001" step="0.0001" value={amount} onChange={event => setAmount(event.target.value)} /></Field><button disabled={busy || !selectedMember || !selectedComponent || amountMicrocredits <= 0 || amountMicrocredits > Number(selectedComponent?.available_microcredits || 0)}>{copy.allocateQuota}</button></form></article>}
+    <article className="ap-card"><h3>{copy.memberQuotaGrants}</h3>{grants.length ? <div className="ap-order-list">{grants.map(grant => <article className="ap-trace-card" key={grant.grant_id}><header><div><strong>{members.find(member => member.user_id === grant.member_user_id)?.display_name || grant.member_user_id}</strong><small>{copy.componentTypes[grant.component_type] || grant.component_type} · {String(grant.package_id).slice(0, 8)}</small></div><div><strong>{formatPoints(grant.available_microcredits, language)} {copy.points}</strong><span className="ap-status">{copy.grantStatuses?.[grant.status] || grant.status}</span></div></header>{canRevoke && (grant.status === 'ACTIVE' || grant.status === 'SUSPENDED') && Number(grant.reserved_microcredits) === 0 && Number(grant.available_microcredits) > 0 && <button disabled={busy} onClick={() => onRevoke(grant.grant_id, 'ADMIN_REVOKE')}>{copy.revokeQuota}</button>}</article>)}</div> : <Empty>{copy.noMemberQuotaGrants}</Empty>}</article>
+  </section>;
 }
 
 function Wallet({ copy, language, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, onRecharge }) {

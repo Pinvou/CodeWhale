@@ -37,6 +37,7 @@ const (
 	PermissionOrganizationMembersManage = "org.members.manage"
 	PermissionOrganizationRolesAssign   = "org.roles.assign"
 	PermissionOrganizationOwnerTransfer = "org.owner.transfer"
+	PermissionOrganizationQuotaAllocate = "org.quota.allocate"
 )
 
 type AuthorizationDecision struct {

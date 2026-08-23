@@ -62,6 +62,9 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.PUT("/internal/v1/organizations/:organization_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	protected.PUT("/internal/v1/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	protected.PUT("/internal/v1/organizations/:organization_id/members/:user_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationMemberLifecycle))
+	protected.GET("/internal/v1/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listMemberQuotaGrants))
+	protected.POST("/internal/v1/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateMemberQuotaBatch))
+	protected.POST("/internal/v1/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeMemberQuotaGrant))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.listProducts))
 	protected.GET("/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
 	if s.payments != nil {
@@ -176,12 +179,13 @@ func (s *Service) rejectAdjustment(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		RequesterID            uuid.UUID `json:"requester_id"`
-		WalletID               uuid.UUID `json:"wallet_id"`
-		ProductID              string    `json:"product_id"`
-		Channel                string    `json:"channel"`
-		Mobile                 string    `json:"mobile"`
-		CommerceCustomerStatus string    `json:"commerce_customer_status"`
+		RequesterID               uuid.UUID  `json:"requester_id"`
+		WalletID                  uuid.UUID  `json:"wallet_id"`
+		ProductID                 string     `json:"product_id"`
+		Channel                   string     `json:"channel"`
+		Mobile                    string     `json:"mobile"`
+		CommerceCustomerStatus    string     `json:"commerce_customer_status"`
+		BeneficiaryOrganizationID *uuid.UUID `json:"beneficiary_organization_id"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.RequesterID == uuid.Nil || body.WalletID == uuid.Nil || body.ProductID == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
@@ -191,7 +195,14 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrCommerceCustomerNotReady)
 		return
 	}
-	order, created, err := s.payments.CreateMobileOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
+	var order PaymentOrder
+	var created bool
+	var err error
+	if body.BeneficiaryOrganizationID != nil {
+		order, created, err = s.payments.CreateOrganizationMobileOrder(r.Context(), body.RequesterID, body.WalletID, *body.BeneficiaryOrganizationID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
+	} else {
+		order, created, err = s.payments.CreateMobileOrder(r.Context(), body.RequesterID, body.WalletID, body.ProductID, body.Channel, body.Mobile, r.Header.Get("Idempotency-Key"))
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -424,11 +435,14 @@ func (s *Service) priceByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		UsageRequestID uuid.UUID  `json:"usage_request_id"`
-		WalletID       uuid.UUID  `json:"wallet_id"`
-		Maximum        int64      `json:"maximum_microcredits"`
-		PriceVersionID *uuid.UUID `json:"price_version_id"`
-		LeaseSeconds   int        `json:"lease_seconds"`
+		UsageRequestID    uuid.UUID  `json:"usage_request_id"`
+		WalletID          uuid.UUID  `json:"wallet_id"`
+		Maximum           int64      `json:"maximum_microcredits"`
+		PriceVersionID    *uuid.UUID `json:"price_version_id"`
+		LeaseSeconds      int        `json:"lease_seconds"`
+		OrganizationID    *uuid.UUID `json:"organization_id"`
+		MemberUserID      *uuid.UUID `json:"member_user_id"`
+		MembershipVersion int64      `json:"membership_version"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.UsageRequestID == uuid.Nil || body.WalletID == uuid.Nil || body.Maximum <= 0 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid credit reservation", httpserver.RequestID(r.Context()))
@@ -441,7 +455,20 @@ func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "hold lease must be between 30 and 1800 seconds", httpserver.RequestID(r.Context()))
 		return
 	}
-	hold, err := s.repository.Reserve(r.Context(), body.UsageRequestID, body.WalletID, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
+	var hold Hold
+	var err error
+	if body.OrganizationID != nil || body.MemberUserID != nil {
+		repository, ok := s.repository.(interface {
+			ReserveMemberQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, *uuid.UUID, time.Time) (Hold, error)
+		})
+		if !ok || body.OrganizationID == nil || body.MemberUserID == nil || body.MembershipVersion < 1 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid member quota reservation", httpserver.RequestID(r.Context()))
+			return
+		}
+		hold, err = repository.ReserveMemberQuota(r.Context(), body.UsageRequestID, body.WalletID, *body.OrganizationID, *body.MemberUserID, body.MembershipVersion, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
+	} else {
+		hold, err = s.repository.Reserve(r.Context(), body.UsageRequestID, body.WalletID, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
+	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -505,6 +532,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusBadGateway, "PAYMENT_PROVIDER_UNAVAILABLE", "the payment provider request could not be completed"
 	case errors.Is(err, ErrCommerceCustomerNotReady):
 		status, code, message = http.StatusConflict, "COMMERCE_CUSTOMER_NOT_READY", "the payment provider requires a ready Commerce Customer mapping"
+	case errors.Is(err, ErrInsufficientComponentCapacity):
+		status, code, message = http.StatusConflict, "INSUFFICIENT_COMPONENT_CAPACITY", "the selected entitlement component has insufficient allocatable capacity"
+	case errors.Is(err, ErrIdempotencyConflict):
+		status, code, message = http.StatusConflict, "IDEMPOTENCY_CONFLICT", "the idempotency key was used with a different request"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

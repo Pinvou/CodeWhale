@@ -108,6 +108,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
 	protected.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
 	protected.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
+	protected.GET("/v1/organizations/:organization_id/quota-members", httpserver.AdaptFunc(s.listQuotaMembers))
 	protected.GET("/v1/organizations/:organization_id/role-bindings", httpserver.AdaptFunc(s.listOrganizationRoleBindings))
 	protected.POST("/v1/organizations/:organization_id/role-bindings", httpserver.AdaptFunc(s.grantOrganizationRoleBinding))
 	protected.DELETE("/v1/organizations/:organization_id/role-bindings/:binding_id", httpserver.AdaptFunc(s.revokeOrganizationRoleBinding))
@@ -187,6 +188,20 @@ func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
+}
+
+func (s *Service) listQuotaMembers(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	members, err := s.repository.ListQuotaMembers(r.Context(), mustPrincipal(r.Context()), organizationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
 }
 

@@ -88,6 +88,41 @@ ORDER BY COALESCE(u.display_name,u.email,u.id::text),u.id`, organizationID)
 	return items, tx.Commit(ctx)
 }
 
+func (r *PostgresRepository) ListQuotaMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]QuotaMember, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	actorID, err := activeUserID(ctx, tx, principal)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationQuotaAllocate); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT member.user_id,account_user.display_name,member.version
+FROM memberships member JOIN users account_user ON account_user.id=member.user_id
+WHERE member.organization_id=$1 AND member.status='ACTIVE' AND account_user.status='ACTIVE'
+ORDER BY COALESCE(account_user.display_name,account_user.id::text),account_user.id`, organizationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]QuotaMember, 0)
+	for rows.Next() {
+		var item QuotaMember
+		if err := rows.Scan(&item.UserID, &item.DisplayName, &item.Version); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, tx.Commit(ctx)
+}
+
 func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal identity.Principal, organizationID, targetUserID uuid.UUID, roles []string) (Member, error) {
 	roles, err := validateManagedRoles(roles)
 	if err != nil {

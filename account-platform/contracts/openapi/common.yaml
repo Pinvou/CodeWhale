@@ -46,7 +46,7 @@ components:
     Context:
       type: object
       additionalProperties: false
-      required: [context_type, membership_version, context_version, authorization_version]
+      required: [context_type, membership_version, context_version, authorization_version, permissions]
       properties:
         context_type:
           type: string
@@ -63,3 +63,8 @@ components:
         authorization_version:
           type: integer
           minimum: 1
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string

@@ -159,7 +159,17 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusConflict, "USAGE_REPLAY_BLOCKED", "this model request already exists and will not be sent twice", httpserver.RequestID(r.Context()))
 		return
 	}
-	hold, err := s.billing.Reserve(r.Context(), usageRequest.ID, route.WalletID, maximumCost, price.ID)
+	var hold BillingHold
+	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
+		organizationBilling, supported := s.billing.(OrganizationBillingClient)
+		if !supported {
+			s.writeError(w, r, ErrForbidden)
+			return
+		}
+		hold, err = organizationBilling.ReserveMemberQuota(r.Context(), usageRequest.ID, route.WalletID, *resolved.OrganizationID, resolved.UserID, resolved.MembershipVersion, maximumCost, price.ID)
+	} else {
+		hold, err = s.billing.Reserve(r.Context(), usageRequest.ID, route.WalletID, maximumCost, price.ID)
+	}
 	if err != nil {
 		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "reserve_failed")
 		api.WriteError(w, http.StatusPaymentRequired, "WALLET_RESERVE_FAILED", "the wallet could not reserve enough credits", httpserver.RequestID(r.Context()))

@@ -100,6 +100,10 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
 	protected.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+	protected.POST("/v1/organizations/:organization_id/recharge/orders", httpserver.AdaptFunc(s.createOrganizationRechargeOrder))
+	protected.GET("/v1/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listOrganizationQuotaGrants))
+	protected.POST("/v1/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
+	protected.POST("/v1/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeOrganizationQuotaGrant))
 	protected.GET("/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
 	protected.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
 	protected.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
@@ -127,11 +131,11 @@ func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if resolved.ContextType != "PERSONAL" {
+	if resolved.ContextType == "ORGANIZATION" && !hasPermission(resolved, "org.wallet.read") && !hasPermission(resolved, "org.quota.allocate") && !hasPermission(resolved, "org.entitlements.purchase") {
 		s.writeError(w, r, ErrForbidden)
 		return
 	}
-	walletID, err := s.wallets.Ensure(r.Context(), "PERSONAL", resolved.UserID)
+	walletID, err := s.activeWallet(r.Context(), resolved)
 	if err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "recharge orders are unavailable", httpserver.RequestID(r.Context()))
 		return
@@ -757,13 +761,14 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		UnitIDs              []uuid.UUID `json:"unit_ids"`
 		AncestorUnitIDs      []uuid.UUID `json:"ancestor_unit_ids"`
 		Roles                []string    `json:"roles"`
+		Permissions          []string    `json:"permissions"`
 		Mobile               *string     `json:"mobile"`
 		MobileVerified       bool        `json:"mobile_verified"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
 		return AuthorizationContext{}, err
 	}
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
+	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Permissions: body.Permissions, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
 }
 
 func (r *HTTPContextResolver) ResolveCommerceCustomer(ctx context.Context, authorization string) (string, error) {

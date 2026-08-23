@@ -139,10 +139,11 @@ WHERE user_sessions.user_id = EXCLUDED.user_id`,
 SELECT context.context_type,context.organization_id,context.context_version,u.membership_version,
        COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id
          AND scope=CASE WHEN context.organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END
-         AND scope_id=COALESCE(context.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1)
+         AND scope_id=COALESCE(context.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=context.organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}')
 FROM users u JOIN user_active_contexts context ON context.user_id=u.id WHERE u.id=$1`, user.UserID).Scan(
 		&user.ActiveContext.Type, &user.ActiveContext.OrganizationID, &user.ActiveContext.ContextVersion,
-		&user.ActiveContext.MembershipVersion, &user.ActiveContext.AuthorizationVersion,
+		&user.ActiveContext.MembershipVersion, &user.ActiveContext.AuthorizationVersion, &user.ActiveContext.Permissions,
 	); err != nil {
 		return Me{}, false, err
 	}
@@ -372,11 +373,12 @@ SELECT EXISTS(
 		return Context{}, err
 	}
 	var authorizationVersion int64
-	err = r.pool.QueryRow(ctx, `SELECT COALESCE((SELECT version FROM authorization_versions WHERE user_id=$1 AND scope=CASE WHEN $2::uuid IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND scope_id=COALESCE($2::uuid,'00000000-0000-0000-0000-000000000000'::uuid)),1)`, userID, organizationID).Scan(&authorizationVersion)
+	var permissions []string
+	err = r.pool.QueryRow(ctx, `SELECT COALESCE((SELECT version FROM authorization_versions WHERE user_id=$1 AND scope=CASE WHEN $2::uuid IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND scope_id=COALESCE($2::uuid,'00000000-0000-0000-0000-000000000000'::uuid)),1),COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=$1 AND ra.organization_id=$2 AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}')`, userID, organizationID).Scan(&authorizationVersion, &permissions)
 	if err != nil {
 		return Context{}, err
 	}
-	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: membershipVersion, ContextVersion: contextVersion, AuthorizationVersion: authorizationVersion}, nil
+	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: membershipVersion, ContextVersion: contextVersion, AuthorizationVersion: authorizationVersion, Permissions: permissions}, nil
 }
 
 func uuidPointerEqual(left, right *uuid.UUID) bool {
