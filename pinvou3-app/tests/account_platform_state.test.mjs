@@ -67,6 +67,30 @@ test('admin organization client uses protected organization, member, and unit en
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('user code is displayed to its owner and resolved through a dedicated exact admin endpoint', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    calls.push(url);
+    return new Response(JSON.stringify({ user_id:'user-id', user_code:'USR-0123-4567-89AB-CDEF-MV', status:'ACTIVE' }), { status:200, headers:{ 'Content-Type':'application/json' } });
+  };
+  try {
+    const client = new AdminPlatformClient('/portal');
+    await client.userByCode('usr-0123-4567-89ab-cdef-mv');
+    assert.deepEqual(calls, ['/portal/api/admin/account/admin/v1/user-code-lookups/usr-0123-4567-89ab-cdef-mv']);
+  } finally { globalThis.fetch = originalFetch; }
+
+  const personal = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const admin = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(personal, /me\?\.user_code/);
+  assert.match(popover, /me\?\.user_code/);
+  assert.match(admin, /client\.userByCode/);
+  assert.match(admin, /key:'user_code'/);
+  assert.doesNotMatch(personal, /me\?\.user_id/);
+  for (const locale of ['zh', 'en', 'ja']) assert.ok(accountPlatformCopy[locale].userCode);
+});
+
 test('admin organization units form a nested management tree', () => {
   const roots = buildUnitTree([
     { unit_id:'child', parent_id:'root', name:'Child' },

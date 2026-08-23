@@ -34,6 +34,25 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/user-code-lookups/{user_code}:
+    get:
+      operationId: getAdminUserByCode
+      summary: Resolve one authorized user by a complete, checksum-valid user code
+      description: Requires platform.users.read. Prefix, substring, fuzzy, range, autocomplete, and batch code lookup are not supported.
+      parameters: [{ $ref: "#/components/parameters/UserCode" }]
+      responses:
+        "200":
+          description: Authorized exact-match result
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUser" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
   /account/admin/v1/roles:
     get:
       operationId: listAdminRoleDefinitions
@@ -601,6 +620,15 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    UserCode:
+      name: user_code
+      in: path
+      required: true
+      description: Complete user code; ASCII hyphens and letter case are ignored before validation.
+      schema:
+        type: string
+        minLength: 21
+        maxLength: 26
     OrganizationID:
       name: organization_id
       in: path
@@ -668,6 +696,23 @@ components:
             properties:
               reason: { type: string, minLength: 1, maxLength: 500 }
   schemas:
+    AdminUser:
+      type: object
+      additionalProperties: false
+      required: [user_id, user_code, status, organization_count, created_at, updated_at]
+      properties:
+        user_id: { type: string, format: uuid }
+        user_code:
+          type: string
+          pattern: '^USR-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{2}$'
+        username: { type: [string, "null"] }
+        display_name: { type: [string, "null"] }
+        email: { type: [string, "null"] }
+        status: { type: string, enum: [PROVISIONING, ACTIVE, DISABLED, DELETED] }
+        organization_count: { type: integer, format: int64, minimum: 0 }
+        last_seen_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     NameChange:
       type: object
       additionalProperties: false

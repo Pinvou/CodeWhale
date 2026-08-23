@@ -28,6 +28,7 @@ type Context struct {
 
 type Me struct {
 	UserID         uuid.UUID `json:"user_id"`
+	UserCode       string    `json:"user_code"`
 	Status         string    `json:"status"`
 	Username       *string   `json:"username"`
 	DisplayName    *string   `json:"display_name"`

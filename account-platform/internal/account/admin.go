@@ -29,6 +29,7 @@ type AdminOverview struct {
 
 type AdminUser struct {
 	ID                uuid.UUID  `json:"user_id"`
+	UserCode          string     `json:"user_code"`
 	Username          *string    `json:"username,omitempty"`
 	DisplayName       *string    `json:"display_name,omitempty"`
 	Email             *string    `json:"email,omitempty"`
@@ -605,7 +606,7 @@ SELECT
 func (r *PostgresRepository) AdminUsers(ctx context.Context, search string, limit int) ([]AdminUser, error) {
 	pattern := "%" + strings.ToLower(search) + "%"
 	rows, err := r.pool.Query(ctx, `
-SELECT u.id,u.username,u.display_name,u.email,u.status,
+SELECT u.id,u.user_code,u.username,u.display_name,u.email,u.status,
        (SELECT count(*) FROM memberships m WHERE m.user_id=u.id AND m.status='ACTIVE'),
        (SELECT max(s.last_seen_at) FROM user_sessions s WHERE s.user_id=u.id),
        u.created_at,u.updated_at
@@ -619,9 +620,10 @@ ORDER BY u.updated_at DESC,u.id LIMIT $3`, strings.ToLower(search), pattern, lim
 	items := make([]AdminUser, 0)
 	for rows.Next() {
 		var item AdminUser
-		if err := rows.Scan(&item.ID, &item.Username, &item.DisplayName, &item.Email, &item.Status, &item.OrganizationCount, &item.LastSeenAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.UserCode, &item.Username, &item.DisplayName, &item.Email, &item.Status, &item.OrganizationCount, &item.LastSeenAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
+		item.UserCode = FormatUserCode(item.UserCode)
 		items = append(items, item)
 	}
 	return items, rows.Err()

@@ -110,6 +110,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - Secret 通过主机 Secret 文件、Docker Secret、Vault/KMS 或平台 Secret 管理注入；不能进入 Git。
 - 发布前有足够空间保存新镜像、数据库备份和上一个可回滚版本。
 - 已明确发布负责人、数据库负责人、支付尾单负责人和回滚决策人。
+- Account 数据库允许迁移用户安装 `pgcrypto` 扩展；若由 DBA 预装，发布前核验 `digest` 与 `gen_random_bytes` 可用。
 
 ## 6. 配置清单
 
@@ -279,6 +280,8 @@ docker compose --env-file <secret-env> <compose-files> build \
 
 每个迁移任务必须退出码为 0，再继续下一个。迁移器记录版本和校验和；已应用迁移文件不得修改，只能新增更高版本。迁移器可兼容仅换行符不同的旧校验和，但不接受语义内容变化。
 
+Account `000011_permanent_user_codes` 会为历史用户回填永久编码并建立不可变触发器。迁移后必须核验：所有用户均有格式与校验码有效的唯一编码、`user_code_registry` 与用户一一对应、更新 `users.id/user_code` 和物理删除用户均被拒绝。不得通过禁用触发器、清空登记表或回滚迁移来“释放”已发放编码。
+
 不要默认执行 down migration。涉及破坏性 Schema 的发布必须先提供前向兼容阶段和单独数据迁移方案。
 
 ### 8.6 替换应用服务
@@ -349,7 +352,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 - 任何非生产 Payment Simulator、测试支付页面和 Mock New API。
 - 服务独立 Metrics 端口。
 
-反向代理必须传递可信的 `X-Forwarded-Proto`/Host，限制请求体大小，并为 SSE 禁用代理缓冲和配置合理的长连接超时。不要让客户端覆盖内部身份头或服务凭据头。
+反向代理必须覆盖并传递可信的 `X-Forwarded-Proto`、Host、`X-Real-IP`/`X-Forwarded-For`，限制请求体大小，并为 SSE 禁用代理缓冲和配置合理的长连接超时。Portal 会把经过该边界确认的客户端来源传给内部 Account 查询限流；不得让客户端覆盖转发头、内部身份头或服务凭据头。
 
 ## 11. 发布后验证
 

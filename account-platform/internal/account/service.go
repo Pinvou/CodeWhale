@@ -93,6 +93,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.GET("/overview", s.requirePermission(PermissionPlatformSystemStatusRead), httpserver.AdaptFunc(s.adminOverview))
 	admin.GET("/roles", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoles))
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
+	admin.GET("/user-code-lookups/:user_code", httpserver.AdaptFunc(s.adminUserByCode))
 	admin.GET("/users/:user_id/memberships", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUserMemberships))
 	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), httpserver.AdaptFunc(s.adminSetUserStatus))
 	admin.DELETE("/users/:user_id", s.requirePermission(PermissionPlatformUsersStatusManage), httpserver.AdaptFunc(s.adminDeleteUser))

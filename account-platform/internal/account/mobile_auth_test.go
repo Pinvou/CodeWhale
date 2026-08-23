@@ -131,10 +131,10 @@ func (f *mobileAuthRepositoryFake) ConsumeSMSChallenge(_ context.Context, _ uuid
 	return nil
 }
 
-func (f *mobileAuthRepositoryFake) RegisterMobileIdentity(_ context.Context, _, _, username, mobile string) (uuid.UUID, error) {
+func (f *mobileAuthRepositoryFake) RegisterMobileIdentity(_ context.Context, _, _, username, mobile string) (uuid.UUID, string, error) {
 	f.registeredUsername = username
 	f.registeredMobile = mobile
-	return uuid.MustParse("018f0f76-3f5d-7d43-b630-163e3f635e5a"), nil
+	return uuid.MustParse("018f0f76-3f5d-7d43-b630-163e3f635e5a"), "USR-0123-4567-89AB-CDEF-MV", nil
 }
 
 type smsProviderFake struct {
@@ -317,7 +317,7 @@ func TestMobileAuthRegisterVerifiesWithProviderBeforeProvisioning(t *testing.T) 
 	sms := &smsProviderFake{verified: true}
 	identities := &identityProvisionerFake{}
 	service := newMobileAuthForTest(t, repository, sms, identities)
-	userID, err := service.Register(context.Background(), " Pinvou.User ", "13800138000", uuid.New(), "123456", "pinvou2026")
+	userID, userCode, err := service.Register(context.Background(), " Pinvou.User ", "13800138000", uuid.New(), "123456", "pinvou2026")
 	if err != nil || userID == uuid.Nil {
 		t.Fatalf("register userID=%s err=%v", userID, err)
 	}
@@ -327,6 +327,9 @@ func TestMobileAuthRegisterVerifiesWithProviderBeforeProvisioning(t *testing.T) 
 	if identities.username != "pinvou.user" || repository.registeredUsername != "pinvou.user" || repository.registeredMobile != "+8613800138000" {
 		t.Fatalf("normalized identity was not shared across systems: identity=%q repository=%q mobile=%q", identities.username, repository.registeredUsername, repository.registeredMobile)
 	}
+	if userCode != "USR-0123-4567-89AB-CDEF-MV" {
+		t.Fatalf("user code=%q", userCode)
+	}
 }
 
 func TestMobileAuthRegisterRejectsFailedProviderVerification(t *testing.T) {
@@ -334,7 +337,7 @@ func TestMobileAuthRegisterRejectsFailedProviderVerification(t *testing.T) {
 	sms := &smsProviderFake{verified: false}
 	identities := &identityProvisionerFake{}
 	service := newMobileAuthForTest(t, repository, sms, identities)
-	_, err := service.Register(context.Background(), "pinvou.user", "13800138000", uuid.New(), "000000", "pinvou2026")
+	_, _, err := service.Register(context.Background(), "pinvou.user", "13800138000", uuid.New(), "000000", "pinvou2026")
 	if !errors.Is(err, ErrSMSInvalid) {
 		t.Fatalf("expected invalid SMS code, got %v", err)
 	}

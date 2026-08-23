@@ -14,25 +14,26 @@
 
 | 字段 | 要求 |
 |---|---|
-| `source_commit` | 本轮审计所依据的提交；当前为 `75a29f822f339787c3a3457f521209368e2f6f34`。它证明结论对应的代码快照，不表示所有实现均由该提交引入 |
+| `source_commit` | 本轮连续实施的代码起点为 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`；APT-001 结论还包含本文件所在的同一提交。它证明结论对应的代码快照，不表示所有实现均由该提交引入 |
 | `tests` | 覆盖正常、权限拒绝、幂等、异常与恢复路径的测试名称或报告 |
 | `deployment_version` | 已验证的部署版本、环境和验证时间；未部署写 `NOT_DEPLOYED` |
 | `known_gaps` | 与目标需求的剩余差异、Provider 降级和未验证风险 |
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 57`、`部分实现 99`、`未实现 171`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 61`、`部分实现 98`、`未实现 168`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
-| `AUDIT_HEAD` | 当前分支代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；代码基线 `75a29f822f339787c3a3457f521209368e2f6f34`，其后至本次核验只有文档变化 | 通过代码审阅；不等同生产部署 |
+| `AUDIT_HEAD` | 当前分支代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；连续实施起点 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`，并包含本文件所在提交 | 通过代码审阅；不等同生产部署 |
 | `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 331/331 个唯一目标编号均有结论 |
 | `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 331 个唯一编号一一覆盖，无缺失、无额外编号 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
 | `CONTRACT-36` | 本轮 RBAC 前基线合同集 | OpenAPI lint 与原 36 个合同测试通过 |
 | `RBAC-AUTH` | Account RBAC 迁移、默认拒绝、旧 Realm Role 不可绕过、跨服务原子权限和版本响应定向测试 | Go 单元测试与新增合同测试通过；合同总数增至 37 |
+| `USER-CODE` | UUIDv7 永久守卫、百万编码生成/校验、永久登记、本人/运营展示、精确查询防枚举与 OpenAPI 合同 | Go 单元测试、38 个合同测试及桌面三语 40 项定向测试通过；数据库运行级迁移验证待部署 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/37 个合同测试、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/38 个合同测试、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -98,9 +99,9 @@
 | ACC-53 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少贯穿短信、Identity、Account 和钱包的稳定注册操作 ID、指纹与幂等键 |
 | ACC-54 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少 Identity 已创建但 Account 未提交的30分钟恢复、24小时补偿门禁和安全释放顺序 |
 | ACC-55 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少不可枚举注册操作查询、签名令牌和脱敏恢复状态契约 |
-| ACC-56 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT | NOT_DEPLOYED | `users.id` 是 UUID 主键并由 UUIDv7 创建，现有领域写路径不修改且逻辑删除保留原值；缺数据库级不可变守卫、跨迁移验证和显式永久不复用契约 |
-| ACC-57 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | `users` 表和领域模型没有独立 `user_code`，也没有安全随机生成、格式/校验码、唯一约束、冲突重试及永久登记 |
-| ACC-58 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 本人资料、桌面/Web 和运营后台均未展示 `user_code`，也没有按完整编码精确查询及注销主体受控识别能力 |
+| ACC-56 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | `users.id` 由 UUIDv7 创建，主键保证全库唯一；数据库触发器拒绝修改和物理删除，注销墓碑保留原值，领域写路径没有复用入口 |
+| ACC-57 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | Account 用密码学安全随机源均匀生成 16 位 Crockford 载荷和 SHA-256 前 10 bit 校验码；具备格式/非空/唯一约束、保存点冲突重试、永久登记及不可变触发器 |
+| ACC-58 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE; DESKTOP-39 | NOT_DEPLOYED | 本人资料、桌面/Web 个人入口及运营列表/详情展示格式化编码；授权运营人员可按完整编码精确识别活动或已注销墓碑主体 |
 | TOK-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前只有 `/v1/chat/completions`，没有版本化协议能力目录 |
 | TOK-07 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 没有独立模型目录和 `CATALOG_VISIBLE` 状态 |
 | TOK-09 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 托管路由 PENDING/READY/FAILED/REPAIR_REQUIRED 状态机及自动/人工修复待实现 |
@@ -247,7 +248,7 @@
 | NFR-48 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少审计导出脱敏、独立PII权限、水印、加密、短时下载和配额控制 |
 | UI-16 | 部分实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 当前桌面和 Web 路由三语覆盖测试通过；缺目标页面、错误码和发布制品级门禁 |
 | NFR-49 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少模型流事件、完整/聚合结果、防重墓碑的最大保留期、注销清除、案件保全和备份密码学销毁闭环 |
-| NFR-50 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少用户编码及受鉴权精确查询接口，尚无编码查询的无泄露响应、多维限流、审计和反枚举门禁 |
+| NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 
 ### 0.2 既有目标编号证据索引
 
@@ -457,7 +458,7 @@
 | CR-58 | ADM-01, ID-18, NFR-04 | 用交互式设密或高熵一次性引导替代8位超级管理员初始密码 | 未实现 | admin 激活前保持 BOOTSTRAP_PENDING；直接设密使用高权限密码策略；引导凭据默认256 bit、最少128 bit、Base64URL、15分钟有效、最多5次失败、一次读取销毁且成功兑换原子失效 |
 | CR-59 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | 补齐管理命令审批对象、生命周期、失效和执行契约 | 未实现 | 所有后台写命令显式归类为强制审批或仅审计；人工财务变更申请审批分离，普通状态机与治理命令只审计；审批支持过期、撤回、新申请重提、关键资源/策略变化失效、执行前实时授权复核及 Outbox 幂等执行 |
 | CR-60 | NFR-26–NFR-48, ADM-09 | 建立性能、容量、灾备、保留、限流、隔离、Provider韧性、时钟、客户端兼容和审计导出的量化验收基线 | 未实现 | 在生产等价环境按固定样本测量P95/P99/TTFT和容量；定义分级RPO/RTO、加密备份与演练、分类保留、多维限流、租户隔离矩阵、熔断/人工SLA、授时偏差、N/N-1/N-2桌面兼容及受控审计导出 |
-| CR-61 | ACC-02, ACC-11, ACC-56–ACC-58, NFR-50 | 建立永久内部用户 ID 和独立可展示用户编码 | 部分实现 | 现有 UUIDv7 主键和逻辑删除已保留内部 ID；需增加数据库级不可变/不复用守卫、独立随机 `user_code`、永久编码登记、本人展示、运营精确查询及防枚举控制 |
+| CR-61 | ACC-02, ACC-11, ACC-56–ACC-58, NFR-50 | 建立永久内部用户 ID 和独立可展示用户编码 | 部分实现 | ACC-56–ACC-58 与 NFR-50 已完成；ACC-11 的完整注销 Saga、资料清理和三年分类保留仍待实现 |
 
 这些需求之间的强制关系：
 
@@ -584,9 +585,9 @@
 | ACC-53 | 注册操作稳定幂等 | 未实现 | 当前没有服务端注册操作 ID 贯穿短信发送/核验、Identity、Account 和钱包，也未定义同键异用户名、手机号、挑战或密码冲突。 |
 | ACC-54 | Identity 孤儿恢复与补偿 | 未实现 | 当前缺少持久状态、按外部关联查询防重复创建、30分钟向前恢复 SLA、24小时补偿证明及先停用 Identity 后释放预约的顺序。 |
 | ACC-55 | 注册操作安全查询 | 未实现 | 当前没有按操作 ID 和签名令牌查询未完成注册的接口，超时后客户端只能收到笼统失败并可能重复注册。 |
-| ACC-56 | 内部用户 ID 永久稳定 | 部分实现 | `users.id` 是 UUID 主键并由 UUIDv7 创建，现有领域写路径不修改且逻辑删除保留原值；缺数据库级不可变守卫、跨迁移验证和显式永久不复用契约。 |
-| ACC-57 | 独立用户编码 | 未实现 | 当前没有独立于主键的 `user_code` 字段、安全随机生成、格式/校验码、唯一冲突重试或永久编码登记。 |
-| ACC-58 | 用户编码展示与精确查询 | 未实现 | 本人资料、桌面/Web 和运营后台均未展示编码，也没有权限受控的完整编码精确查询和注销主体识别。 |
+| ACC-56 | 内部用户 ID 永久稳定 | 已实现 | UUIDv7 主键、数据库不可变/禁止物理删除触发器和逻辑删除墓碑共同保证已创建 ID 永久稳定且不复用。 |
+| ACC-57 | 独立用户编码 | 已实现 | 已实现安全随机 Crockford 载荷、SHA-256 校验码、格式/唯一约束、冲突重试、永久登记和不可变保护。 |
+| ACC-58 | 用户编码展示与精确查询 | 已实现 | 本人资料、桌面/Web 与运营后台展示编码；独立接口按完整规范化编码精确查询并能受控识别已注销主体。 |
 
 ### 3.3 Token Account、路由和模型调用
 
@@ -820,7 +821,7 @@
 | NFR-47 | 桌面 API 兼容与淘汰 | 未实现：当前缺少N/N-1/N-2合同测试、每版90天支持、弃用通知字段及426升级闭环。 |
 | NFR-48 | 审计导出保护 | 未实现：现有导出需补近期重认证、默认脱敏、PII独立权限、水印、文件加密、一次性下载和任务配额。 |
 | NFR-49 | 模型结果重放载荷最小化 | 未实现：当前缺少流事件24小时、完整/聚合结果30天、防重墓碑90天的自动清除，以及注销、案件保全、备份生命周期和密码学销毁证明。 |
-| NFR-50 | 用户编码查询保护 | 未实现：当前没有用户编码和对应查询入口，也没有完整等值查询、无泄露错误、多维限流、审计及禁止公开/模糊/批量枚举的实现门禁。 |
+| NFR-50 | 用户编码查询保护 | 已实现：编码不是认证/授权凭据；查询要求 `platform.users.read`，只做完整等值匹配，使用统一无泄露响应、多维摘要限流和全结果审计，不提供公开、前缀、模糊、自动补全或批量入口。 |
 
 ## 5. 已确认领域规则
 

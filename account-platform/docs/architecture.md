@@ -15,7 +15,7 @@
 当前代码已经形成身份、业务账号、资金账务和模型访问四个服务边界，但部分目标能力仍停留在需求模型，不能按目标架构宣称已完成：
 
 - Keycloak 是登录身份、密码和 OIDC 会话的事实源；OIDC Claim 只证明主体，不决定业务权限。迁移期保留的 `platform-admin` Realm Role 不再参与业务授权。
-- Account Service 是业务用户、平台/组织角色、权限码、组织树、成员和活动上下文的事实源；当前活动上下文按 OIDC Session 保存，不是用户级全局上下文。
+- Account Service 是永久内部用户 ID、独立用户编码、平台/组织角色、权限码、组织树、成员和活动上下文的事实源；当前活动上下文按 OIDC Session 保存，不是用户级全局上下文。
 - Billing Service 是钱包、平衡账本、充值订单、聚合权益包、固定三元组定价和 Hold 的事实源。
 - Token Gateway 是 Token Account、加密凭据、共享/路由策略和模型用量请求的事实源；当前模型推理协议仅支持 `/v1/chat/completions`。
 - New API 是模型数据面和上游用量证据源，不承载品悟用户、组织或钱包真相。
@@ -86,7 +86,7 @@ flowchart LR
 | 组件 | 当前职责 | 当前自有状态 | 主要目标差距 |
 |---|---|---|---|
 | Keycloak | 用户认证、密码、OIDC Token/Session、身份创建删除；迁移期 Realm Role 不参与业务授权 | Keycloak 数据库 | 当前注册原始密码先经过 Account；密码策略、原始密码处理与注册幂等需收敛到 Identity 边界 |
-| Account Service | 用户/身份映射、平台/组织 RBAC、权限解析、手机注册及当前密码编排、商城账号同步、组织/节点、成员/角色、Session 上下文、邀请、审计 | Account 数据库 | 移除原始密码处理、注册 Saga、全局上下文、角色绑定生命周期、安全引导、注销 Saga、标识预约与恢复 |
+| Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、权限解析、手机注册及当前密码编排、商城账号同步、组织/节点、成员/角色、Session 上下文、邀请、审计 | Account 数据库 | 移除原始密码处理、注册 Saga、全局上下文、角色绑定生命周期、安全引导、注销 Saga、标识预约与恢复 |
 | Billing Service | 钱包、账本、聚合权益包、充值、固定定价、Hold、人工调整、支付修复和对账 | Billing 数据库 | 组成级权益、版本化单位/公式、目标支付退款状态机、应收与组织购买 |
 | Token Gateway | Token Account、加密凭据、共享策略、路由、聊天代理、用量和 New API 核对 | Token 数据库 | 模型目录、协议能力、托管 Provisioning、请求重放、持久派发和取消 |
 | Token Portal | OIDC PKCE、Redis Session、CSRF、个人中心、运营后台和路径白名单代理 | Redis Session | 目标后台权限模型、缺失业务页面和发布级三语门禁 |
@@ -108,7 +108,8 @@ flowchart LR
 
 当前迁移包含：
 
-- `users`、`identities`：业务用户及 OIDC 身份映射；用户状态包括 `PROVISIONING`、`ACTIVE`、`DISABLED`、`DELETED`。
+- `users`、`identities`：业务用户及 OIDC 身份映射；`users.id` 使用 UUIDv7，`user_code` 使用密码学安全随机载荷与 SHA-256 校验码，二者由数据库触发器禁止修改或物理删除；用户状态包括 `PROVISIONING`、`ACTIVE`、`DISABLED`、`DELETED`。
+- `user_code_registry`：永久占用已经提交的用户编码，注销后也不释放；`user_code_lookup_attempts`：只保存操作者及来源、设备、目标编码的摘要维度，用于精确查询的限流和审计，不形成公开目录。
 - `organizations`、`organization_units`、`organization_unit_closure`：组织及树形闭包。
 - `permissions`、`roles`、`role_permissions`、`role_assignments`、`authorization_versions`：平台/组织原子权限、内置角色、授权关系、作用域和单调授权版本。
 - `memberships`、`membership_units`、`role_bindings`：成员和节点范围；`role_bindings` 在迁移期通过数据库触发器投影到 `role_assignments`，不再被授权查询直接读取。
@@ -118,7 +119,7 @@ flowchart LR
 - `mall_user_sync_jobs`：新华三商城用户同步任务。
 - `audit_logs`、`outbox_events`、`inbox_messages`、`inbox_aggregate_versions`：审计和可靠事件。
 
-手机注册接口先在 Keycloak 创建 Identity，再在 Account 事务中持久化稳定用户 ID 和 `PROVISIONING` 状态；两者成功后直接返回 `201`，注册响应不调用 Billing。桌面端随后单独发起登录；登录后的 `/v1/account/bootstrap` 会先确保 Account Session，再同步调用 Billing `EnsurePersonalWallet`，成功后把用户激活为 `ACTIVE`。Billing 失败会阻断本次 bootstrap/激活，但不会把已经成功的注册响应改为失败，也不会删除已提交的 Identity 或 Account。
+手机注册接口先在 Keycloak 创建 Identity，再在 Account 事务中持久化稳定 UUIDv7 用户 ID、独立用户编码和 `PROVISIONING` 状态；唯一冲突只回滚当前保存点、重新随机生成编码，成功后返回格式化编码。两者成功后直接返回 `201`，注册响应不调用 Billing。桌面端随后单独发起登录；登录后的 `/v1/account/bootstrap` 会先确保 Account Session，再同步调用 Billing `EnsurePersonalWallet`，成功后把用户激活为 `ACTIVE`。Billing 失败会阻断本次 bootstrap/激活，但不会把已经成功的注册响应改为失败，也不会删除已提交的 Identity 或 Account。
 
 因此，当前实现已经满足“已验证身份与 Account 成功后不因 Billing 故障回滚”的基本边界，但仍没有注册钱包 Outbox、后台重试、SLA 和 `REPAIR_REQUIRED` 收敛；Identity 已创建而 Account 提交失败时也仍依赖即时补偿删除，而不是持久恢复 Saga。
 
@@ -158,6 +159,7 @@ flowchart LR
 ### 5.1 当前权限模型
 
 - 平台运营后台使用 Account 平台角色和原子权限码；Account、Billing、Token Gateway 都默认拒绝，并分别按接口所需权限调用 Account 授权解析。Keycloak `platform-admin` Realm Role 不能绕过拒绝。
+- 本人资料接口返回格式化 `user_code`，桌面与 Web 不展示内部 `user_id`。运营端用户列表/详情展示编码；编码查询是单独的完整等值接口，先校验格式和校验码，再检查 `platform.users.read`，并按操作者、来源 IP、设备和目标编码摘要限流。不存在、无权和输入无效对调用方使用不泄露存在性的结果；编码不是登录、找回、会话或授权凭据。
 - `OWNER`、`ORG_ADMIN`、`BILLING_ADMIN`、`UNIT_ADMIN`、`MEMBER`、`AUDITOR` 是 Account 域组织角色，通过 `role_assignments` 解析权限和组织/节点作用域；旧 `role_bindings` 仅作为迁移期写入兼容投影。
 - 平台/组织角色绑定的起止时间、单绑定撤销、最后超级管理员保护、安全引导和 Break-glass 恢复机制仍待专门任务实现；旧管理员必须按 `deploy/runbooks/account-rbac-migration.md` 明确映射，不能自动全部升级为超级管理员。
 - 组织所有者具备普通接口保护，但“禁止最后一个有效超级管理员主动注销”无法由当前业务模型完整执行，因为用户主动注销和平台超级管理员生命周期均未实现。目标上 Break-glass 只能用于管理员异常失联后的恢复，不能作为主动注销绕过手段。

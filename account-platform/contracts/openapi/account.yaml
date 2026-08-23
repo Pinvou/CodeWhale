@@ -64,6 +64,17 @@ paths:
       responses:
         "201":
           description: Account provisioning started
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [user_id, user_code, username, status]
+                properties:
+                  user_id: { type: string, format: uuid }
+                  user_code: { $ref: "#/components/schemas/UserCode" }
+                  username: { type: string }
+                  status: { type: string, const: PROVISIONING }
         "400":
           $ref: "#/components/responses/Error"
         "409":
@@ -501,11 +512,13 @@ components:
     Me:
       type: object
       additionalProperties: false
-      required: [user_id, status, active_context]
+      required: [user_id, user_code, status, active_context]
       properties:
         user_id:
           type: string
           format: uuid
+        user_code:
+          $ref: "#/components/schemas/UserCode"
         status:
           type: string
           enum: [PROVISIONING, ACTIVE, DISABLED]
@@ -515,6 +528,11 @@ components:
           type: [string, "null"]
         active_context:
           $ref: "common.yaml#/components/schemas/Context"
+    UserCode:
+      type: string
+      description: Permanent, display-safe user code. It is not an authentication or authorization credential.
+      pattern: '^USR-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{2}$'
+      example: USR-0123-4567-89AB-CDEF-MV
     OrganizationSummary:
       type: object
       additionalProperties: false

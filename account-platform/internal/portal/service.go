@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"path"
@@ -230,6 +231,7 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	}
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Pinvou-Client-Source", portalClientSource(r))
 	if contentType := r.Header.Get("Content-Type"); contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
@@ -417,6 +419,21 @@ func safeProxyPathID(value string) bool {
 	}) == -1
 }
 
+func portalClientSource(r *http.Request) string {
+	if source := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(source) != nil {
+		return source
+	}
+	if forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ","); len(forwarded) > 0 {
+		if source := strings.TrimSpace(forwarded[0]); net.ParseIP(source) != nil {
+			return source
+		}
+	}
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
+}
+
 func accountAdminPathAllowed(method, resource string) bool {
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs") {
 		return true
@@ -428,6 +445,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "user-code-lookups" {
+		return method == http.MethodGet && safeProxyPathID(parts[3])
+	}
 	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "audit-logs" && method == http.MethodGet {
 		_, err := uuid.Parse(parts[3])
 		return err == nil

@@ -278,6 +278,9 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	organizationID := "0198fbf7-c3ba-7bc4-8849-c157740963df"
 	unitID := "0198fbf7-c3ba-7bc4-8849-c157740963e0"
 	memberID := "0198fbf7-c3ba-7bc4-8849-c157740963e1"
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/user-code-lookups/USR-0123-4567-89AB-CDEF-MV") {
+		t.Fatal("admin portal must expose complete user-code lookup")
+	}
 	if !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/users/"+userID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/status") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID) || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/members") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/ownership") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/units") || !accountAdminPathAllowed(http.MethodPatch, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/"+unitID) {
 		t.Fatal("admin portal must expose account lifecycle mutations")
 	}
@@ -295,6 +298,22 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	}
 	if accountAdminPathAllowed(http.MethodPost, "/admin/v1/users") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/users/not-a-uuid") || accountAdminPathAllowed(http.MethodPost, "/admin/v1/organizations/"+organizationID+"/members/"+memberID) || accountAdminPathAllowed(http.MethodGet, "/admin/v1/organizations/"+organizationID+"/ownership") || accountAdminPathAllowed(http.MethodDelete, "/admin/v1/organizations/"+organizationID+"/units/not-a-uuid") || billingAdminPathAllowed(http.MethodGet, "/internal/wallets") || tokenAdminPathAllowed(http.MethodGet, "/v1/chat/completions") {
 		t.Fatal("admin portal must not expose undocumented mutations, internal APIs, or the model data plane")
+	}
+}
+
+func TestPortalClientSourceUsesValidatedProxyHeaders(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "10.0.0.8:4321"
+	if source := portalClientSource(request); source != "10.0.0.8" {
+		t.Fatalf("source=%q", source)
+	}
+	request.Header.Set("X-Forwarded-For", "192.0.2.20, 10.0.0.8")
+	if source := portalClientSource(request); source != "192.0.2.20" {
+		t.Fatalf("forwarded source=%q", source)
+	}
+	request.Header.Set("X-Real-IP", "198.51.100.9")
+	if source := portalClientSource(request); source != "198.51.100.9" {
+		t.Fatalf("real source=%q", source)
 	}
 }
 

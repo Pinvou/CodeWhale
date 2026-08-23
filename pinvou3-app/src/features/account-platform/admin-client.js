@@ -51,6 +51,7 @@ export class AdminPlatformClient {
   accountOverview(signal) { return this.request('account', '/admin/v1/overview', signal); }
   roles(signal) { return this.request('account', '/admin/v1/roles', signal); }
   users(search, signal) { return this.request('account', `/admin/v1/users?limit=100&q=${encodeURIComponent(search || '')}`, signal); }
+  userByCode(userCode, signal) { return this.request('account', `/admin/v1/user-code-lookups/${encodeURIComponent(userCode)}`, signal); }
   userMemberships(userID, signal) { return this.request('account', `/admin/v1/users/${encodeURIComponent(userID)}/memberships`, signal); }
   setUserStatus(userID, status) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}/status`, 'PATCH', { status }); }
   deleteUser(userID) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}`, 'DELETE'); }

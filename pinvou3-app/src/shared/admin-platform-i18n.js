@@ -52,3 +52,10 @@ Object.assign(adminPlatformCopy.ja.billing, {
   orderSearch:'携帯番号、品悟/モール注文、決済番号、SKU を検索', allStatuses:'すべての状態', pinvouOrder:'品悟注文', product:'プラン / SKU', paymentReference:'決済番号 / 携帯番号',
   capabilityLimitations:'現在の決済プロバイダーには機能制限があります。未対応の返金、能動的なクローズ、通知、日次照合操作は無効です。',
 });
+
+Object.assign(adminPlatformCopy.zh.accounts, { userCode:'用户编码', exactCodeHint:'输入完整用户编码进行精确查询', lookupUnavailable:'无法完成用户编码查询。请检查完整编码或权限后重试。' });
+Object.assign(adminPlatformCopy.en.accounts, { userCode:'User code', exactCodeHint:'Enter a complete user code for exact lookup', lookupUnavailable:'The user-code lookup could not be completed. Check the complete code and your access.' });
+Object.assign(adminPlatformCopy.ja.accounts, { userCode:'ユーザーコード', exactCodeHint:'完全なユーザーコードで正確に検索', lookupUnavailable:'ユーザーコード検索を完了できません。完全なコードと権限を確認してください。' });
+Object.assign(adminPlatformCopy.zh, { search:'搜索用户名、名称、邮箱、ID，或输入完整用户编码精确查询' });
+Object.assign(adminPlatformCopy.en, { search:'Search username, name, email, ID, or enter a complete user code' });
+Object.assign(adminPlatformCopy.ja, { search:'ユーザー名、名前、メール、ID を検索、または完全なユーザーコードを入力' });

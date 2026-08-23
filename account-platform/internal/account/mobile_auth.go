@@ -45,7 +45,7 @@ type MobileAuthRepository interface {
 	MarkSMSChallengeFailed(context.Context, uuid.UUID) error
 	SMSChallengeReady(context.Context, uuid.UUID, string, SMSPurpose) error
 	ConsumeSMSChallenge(context.Context, uuid.UUID, string, SMSPurpose, bool) error
-	RegisterMobileIdentity(context.Context, string, string, string, string) (uuid.UUID, error)
+	RegisterMobileIdentity(context.Context, string, string, string, string) (uuid.UUID, string, error)
 }
 
 type SMSRateLimitError struct {
@@ -161,38 +161,38 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	return challenge, nil
 }
 
-func (s *MobileAuthService) Register(ctx context.Context, rawUsername, rawMobile string, challengeID uuid.UUID, code, password string) (uuid.UUID, error) {
+func (s *MobileAuthService) Register(ctx context.Context, rawUsername, rawMobile string, challengeID uuid.UUID, code, password string) (uuid.UUID, string, error) {
 	username, err := NormalizeRegistrationUsername(rawUsername)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	if !validPassword(password) {
-		return uuid.Nil, ErrPasswordInvalid
+		return uuid.Nil, "", ErrPasswordInvalid
 	}
 	exists, err := s.repository.UsernameExists(ctx, username)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	if exists {
-		return uuid.Nil, ErrUsernameAlreadyRegistered
+		return uuid.Nil, "", ErrUsernameAlreadyRegistered
 	}
 	if err := s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeRegister, code); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	subject, err := s.identities.CreateMobileUser(ctx, username, mobile, password)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
-	userID, err := s.repository.RegisterMobileIdentity(ctx, s.issuer, subject, username, mobile)
+	userID, userCode, err := s.repository.RegisterMobileIdentity(ctx, s.issuer, subject, username, mobile)
 	if err != nil {
 		_ = s.identities.DeleteUser(context.WithoutCancel(ctx), subject)
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
-	return userID, nil
+	return userID, userCode, nil
 }
 
 func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (string, error) {
@@ -370,31 +370,37 @@ func (r *PostgresRepository) ConsumeSMSChallenge(ctx context.Context, id uuid.UU
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) RegisterMobileIdentity(ctx context.Context, issuer, subject, username, mobile string) (uuid.UUID, error) {
+func (r *PostgresRepository) RegisterMobileIdentity(ctx context.Context, issuer, subject, username, mobile string) (uuid.UUID, string, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	defer tx.Rollback(ctx)
 	now, userID := r.now(), uuid.Must(uuid.NewV7())
-	_, err = tx.Exec(ctx, `INSERT INTO users(id,status,username,display_name,mobile_e164,mobile_verified_at,created_at,updated_at) VALUES($1,'PROVISIONING',$2,$2,$3,$4,$4,$4)`, userID, username, mobile, now)
+	userCode, err := insertUserWithGeneratedCode(ctx, tx, func(database pgx.Tx, candidate string) error {
+		_, insertErr := database.Exec(ctx, `INSERT INTO users(id,user_code,status,username,display_name,mobile_e164,mobile_verified_at,created_at,updated_at) VALUES($1,$2,'PROVISIONING',$3,$3,$4,$5,$5,$5)`, userID, candidate, username, mobile, now)
+		return insertErr
+	})
 	if err != nil {
 		if strings.Contains(err.Error(), "users_mobile_e164_unique_idx") {
-			return uuid.Nil, ErrMobileAlreadyRegistered
+			return uuid.Nil, "", ErrMobileAlreadyRegistered
 		}
 		if strings.Contains(err.Error(), "users_username_unique_idx") {
-			return uuid.Nil, ErrUsernameAlreadyRegistered
+			return uuid.Nil, "", ErrUsernameAlreadyRegistered
 		}
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO identities(issuer,subject,user_id,created_at,last_seen_at) VALUES($1,$2,$3,$4,$4)`, issuer, subject, userID, now); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO mall_user_sync_jobs(user_id,mobile_e164,status,next_attempt_at,created_at,updated_at) VALUES($1,$2,'PENDING',$3,$3,$3)`, userID, mobile, now); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 	if err := appendAudit(ctx, tx, userID, "registration", nil, "account.mobile.register", "user", userID.String(), "SUCCEEDED", map[string]any{"mobile_verified": true}); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
-	return userID, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, "", err
+	}
+	return userID, FormatUserCode(userCode), nil
 }

@@ -591,6 +591,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         )}
         <div className="min-w-0 flex-1">
           <div className="truncate text-[15px] font-semibold">{view === 'recharge' && auth === 'ready' ? copy.rechargeTitle : auth === 'ready' ? displayName : copy.title}</div>
+          {auth === 'ready' && view !== 'recharge' && <div className={`truncate font-mono text-[11px] ${mutedText}`} title={me?.user_code || ''}>{me?.user_code || '—'}</div>}
           {auth !== 'ready' && <div className={`truncate text-[11px] ${mutedText}`}>PINVOU ACCOUNT PLATFORM</div>}
         </div>
         <button type="button" onClick={onClose} className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`} title={copy.close}><X size={16} /></button>

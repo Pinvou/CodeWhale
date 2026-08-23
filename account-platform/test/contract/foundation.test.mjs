@@ -263,6 +263,36 @@ test('business authorization is owned by Account permission codes rather than Re
   assert.match(tokenService, /platform\.tokens\.read/);
 });
 
+test('permanent user codes are random, immutable, displayable, and exact-query only', async () => {
+  const migration = await readFile(path.join(root, 'migrations/account/000011_permanent_user_codes.up.sql'), 'utf8');
+  const generator = await readFile(path.join(root, 'internal/account/user_code.go'), 'utf8');
+  const lookup = await readFile(path.join(root, 'internal/account/user_code_lookup.go'), 'utf8');
+  const account = await readYaml('contracts/openapi/account.yaml');
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+
+  assert.match(migration, /ALTER COLUMN user_code SET NOT NULL/);
+  assert.match(migration, /users_user_code_unique UNIQUE \(user_code\)/);
+  assert.match(migration, /CREATE TABLE user_code_registry/);
+  assert.match(migration, /BEFORE UPDATE OR DELETE ON users/);
+  assert.match(migration, /BEFORE TRUNCATE ON users/);
+  assert.match(migration, /BEFORE TRUNCATE ON user_code_registry/);
+  assert.match(migration, /user code registry entries are permanent and immutable/);
+  assert.match(generator, /crypto\/rand/);
+  assert.match(generator, /0123456789ABCDEFGHJKMNPQRSTVWXYZ/);
+  assert.doesNotMatch(generator, /username|mobile|UserID|NewV7/);
+  assert.match(lookup, /WHERE u\.user_code=\$1/);
+  assert.doesNotMatch(lookup, /ILIKE|LIKE|similarity|prefix/i);
+  for (const dimension of ['actor_user_id', 'source_hash', 'device_hash', 'target_code_hash']) assert.match(lookup, new RegExp(dimension));
+  assert.match(lookup, /recordUserCodeLookup/);
+
+  assert.ok(account.components.schemas.Me.required.includes('user_code'));
+  assert.equal(account.components.schemas.Me.properties.user_code.$ref, '#/components/schemas/UserCode');
+  const exact = admin.paths['/account/admin/v1/user-code-lookups/{user_code}'].get;
+  assert.equal(exact.parameters[0].$ref, '#/components/parameters/UserCode');
+  assert.equal(exact.responses['200'].headers['Cache-Control'].schema.const, 'no-store');
+  assert.equal(admin.paths['/account/admin/v1/users'].get.parameters.length, 2);
+});
+
 test('mobile authentication provisioning works in the minimal Keycloak image', async () => {
   const provisioning = await readFile(path.join(root, 'deploy/keycloak/provision-mobile-auth.sh'), 'utf8');
   const authenticator = await readFile(path.join(root, 'deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/MobileDirectGrantAuthenticator.java'), 'utf8');

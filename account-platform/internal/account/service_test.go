@@ -18,6 +18,8 @@ type fakeRepository struct {
 	activateCalls int
 	adminCalls    []string
 	deny          bool
+	lookupResult  AdminUser
+	lookupErr     error
 }
 
 func (f *fakeRepository) Bootstrap(context.Context, identity.Principal) (Me, bool, error) {
@@ -42,6 +44,10 @@ func (f *fakeRepository) Authorize(_ context.Context, _ identity.Principal, perm
 }
 func (*fakeRepository) RoleDefinitions(context.Context) ([]AdminRoleDefinition, error) {
 	return []AdminRoleDefinition{{Code: "PLATFORM_SUPER_ADMIN", Scope: "PLATFORM", Permissions: []string{PermissionPlatformRolesRead}}}, nil
+}
+func (f *fakeRepository) LookupUserByCode(_ context.Context, _ identity.Principal, code, source, device string) (AdminUser, error) {
+	f.adminCalls = append(f.adminCalls, "user-code:"+code+":"+source+":"+device)
+	return f.lookupResult, f.lookupErr
 }
 func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
 	panic("not used")
@@ -231,6 +237,33 @@ func TestLegacyRealmRoleCannotBypassAccountPermissionDenial(t *testing.T) {
 	response := httptest.NewRecorder()
 	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "PERMISSION_DENIED") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestAdminUserCodeLookupUsesDedicatedExactRouteAndNoLeakage(t *testing.T) {
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "operator", SessionID: "session"}, nil
+	}
+	code := "USR-0123-4567-89AB-CDEF-MV"
+	repository := &fakeRepository{lookupResult: AdminUser{ID: uuid.Must(uuid.NewV7()), UserCode: code, Status: "ACTIVE"}}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/user-code-lookups/"+code, nil)
+	request.RemoteAddr = "192.0.2.10:1234"
+	request.Header.Set("Authorization", "Bearer valid")
+	request.Header.Set("X-Device-ID", "device-1")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), code) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := repository.adminCalls[len(repository.adminCalls)-1]; got != "user-code:"+code+":192.0.2.10:device-1" {
+		t.Fatalf("lookup=%q", got)
+	}
+
+	repository.lookupErr = ErrNotFound
+	response = httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), code) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }

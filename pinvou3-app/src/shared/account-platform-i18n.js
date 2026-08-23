@@ -40,3 +40,7 @@ Object.assign(accountPlatformCopy.ja, {
   fulfillmentStatuses:{ PENDING:'付与待ち', CREDITED:'付与済み', MANUAL_REVIEW:'手動確認中', REVOKED:'取消済み' }, invoiceStatuses:{ NOT_SUPPORTED:'現在の API では未対応' },
   invoiceUnavailable:'現在の決済チャネルでは請求書の申請・照会が公開されていないため、利用できない操作ボタンは表示しません。',
 });
+
+Object.assign(accountPlatformCopy.zh, { userCode:'用户编码' });
+Object.assign(accountPlatformCopy.en, { userCode:'User code' });
+Object.assign(accountPlatformCopy.ja, { userCode:'ユーザーコード' });

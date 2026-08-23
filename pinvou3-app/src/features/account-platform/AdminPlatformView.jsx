@@ -153,7 +153,9 @@ function AccountDirectory({ section, copy, data, client, setData }) {
     if (!ownerUserID && activeUsers[0]) setOwnerUserID(activeUsers[0].user_id);
   }, [activeUsers, ownerUserID]);
   const reload = async () => {
-    const result = isUserSection ? await client.users(search) : await client.organizations(search);
+    const compactCode = search.trim().replaceAll('-', '');
+    const userCodeLookup = isUserSection && /^USR/i.test(compactCode);
+    const result = userCodeLookup ? { items:[await client.userByCode(search.trim())] } : isUserSection ? await client.users(search) : await client.organizations(search);
     setData(current => ({ ...current, [section]:result.items || [], accountOverview:undefined }));
   };
   const perform = async (item, action) => {
@@ -183,11 +185,15 @@ function AccountDirectory({ section, copy, data, client, setData }) {
     return <div className="adm-row-actions">{buttons}</div>;
   };
   const columns = isUserSection ? [
-    { key:'username', label:copy.username, render:item => <button className="adm-name-link" onClick={() => setSelectedUser(item)}>{userLabel(item)}</button> }, { key:'display_name', label:copy.accounts.displayName }, { key:'email', label:copy.accounts.email }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'organization_count', label:copy.accounts.memberships }, { key:'last_seen_at', label:copy.accounts.lastSeen, render:item => formatDate(item.last_seen_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, true) },
+    { key:'username', label:copy.username, render:item => <button className="adm-name-link" onClick={() => setSelectedUser(item)}>{userLabel(item)}</button> }, { key:'user_code', label:copy.accounts.userCode, render:item => <code>{item.user_code || '—'}</code> }, { key:'display_name', label:copy.accounts.displayName }, { key:'email', label:copy.accounts.email }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'organization_count', label:copy.accounts.memberships }, { key:'last_seen_at', label:copy.accounts.lastSeen, render:item => formatDate(item.last_seen_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, true) },
   ] : [
     { key:'name', label:copy.accounts.organization, render:item => <button className="adm-name-link" onClick={() => setSelectedOrganization(item)}>{item.name}</button> }, { key:'organization_id', label:'ID', render:item => <code title={item.organization_id}>{shortID(item.organization_id)}</code> }, { key:'status', label:copy.accounts.status, render:item => <Status value={item.status} /> }, { key:'member_count', label:copy.accounts.members }, { key:'created_at', label:copy.accounts.created, render:item => formatDate(item.created_at) }, { key:'actions', label:copy.accounts.actions, render:item => actionButtons(item, false) },
   ];
-  const submit = async event => { event.preventDefault(); await reload(); };
+  const submit = async event => {
+    event.preventDefault(); setActionError('');
+    try { await reload(); }
+    catch { setActionError(copy.accounts.lookupUnavailable || copy.accounts.actionFailed); }
+  };
   const createOrganization = async event => {
     event.preventDefault();
     if (!organizationName.trim() || !ownerUserID || actionKey) return;
@@ -214,7 +220,7 @@ function RoleDefinitions({ copy, roles }) {
 function UserMembershipDetail({ copy, user, roles, client, onBack }) {
   const [items, setItems] = useState([]); const [busy, setBusy] = useState(true); const [error, setError] = useState('');
   useEffect(() => { const controller = new globalThis.AbortController(); client.userMemberships(user.user_id, controller.signal).then(result => setItems(result.items || [])).catch(reason => { if (reason?.name !== 'AbortError') setError(copy.accounts.actionFailed); }).finally(() => setBusy(false)); return () => controller.abort(); }, [client, copy.accounts.actionFailed, user.user_id]);
-  return <section className="adm-panel adm-org-detail"><button className="adm-back" onClick={onBack}>← {copy.roles.backToUsers}</button><div className="adm-org-title"><div><span className="adm-eyebrow">{copy.roles.userMemberships}</span><h2>{userLabel(user)}</h2></div><Status value={user.status} /></div>{error && <div className="adm-inline-message error">{error}</div>}{busy ? <div className="adm-empty">{copy.loading}</div> : items.length ? <div className="adm-membership-list">{items.map(item => <article key={item.organization_id}><div><strong>{item.organization_name}</strong><Status value={item.membership_status} /></div><div className="adm-role-badges">{item.roles.map(role => <span key={role}>{role}</span>)}</div>{item.unit_admin_unit_ids?.length > 0 && <small>{copy.roles.unitAdminNodes}: {item.unit_admin_unit_ids.map(shortID).join(' · ')}</small>}</article>)}</div> : <Empty copy={{ noData:copy.roles.noMemberships }} />}<RoleDefinitions copy={copy} roles={roles} /></section>;
+  return <section className="adm-panel adm-org-detail"><button className="adm-back" onClick={onBack}>← {copy.roles.backToUsers}</button><div className="adm-org-title"><div><span className="adm-eyebrow">{copy.roles.userMemberships}</span><h2>{userLabel(user)}</h2><code>{copy.accounts.userCode}: {user.user_code || '—'}</code></div><Status value={user.status} /></div>{error && <div className="adm-inline-message error">{error}</div>}{busy ? <div className="adm-empty">{copy.loading}</div> : items.length ? <div className="adm-membership-list">{items.map(item => <article key={item.organization_id}><div><strong>{item.organization_name}</strong><Status value={item.membership_status} /></div><div className="adm-role-badges">{item.roles.map(role => <span key={role}>{role}</span>)}</div>{item.unit_admin_unit_ids?.length > 0 && <small>{copy.roles.unitAdminNodes}: {item.unit_admin_unit_ids.map(shortID).join(' · ')}</small>}</article>)}</div> : <Empty copy={{ noData:copy.roles.noMemberships }} />}<RoleDefinitions copy={copy} roles={roles} /></section>;
 }
 
 function OrganizationDetail({ copy, organization, users, roles, client, onBack, onRenamed }) {

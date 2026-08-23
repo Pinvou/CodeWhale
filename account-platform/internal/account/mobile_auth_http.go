@@ -83,14 +83,14 @@ func (s *Service) registerMobile(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid mobile registration request", httpserver.RequestID(r.Context()))
 		return
 	}
-	userID, err := s.mobileAuth.Register(r.Context(), body.Username, body.Mobile, body.ChallengeID, body.Code, body.Password)
+	userID, userCode, err := s.mobileAuth.Register(r.Context(), body.Username, body.Mobile, body.ChallengeID, body.Code, body.Password)
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	username, _ := NormalizeRegistrationUsername(body.Username)
-	api.WriteJSON(w, http.StatusCreated, map[string]any{"user_id": userID, "username": username, "status": "PROVISIONING"})
+	api.WriteJSON(w, http.StatusCreated, map[string]any{"user_id": userID, "user_code": userCode, "username": username, "status": "PROVISIONING"})
 }
 
 func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
