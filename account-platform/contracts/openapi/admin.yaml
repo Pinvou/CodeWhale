@@ -353,6 +353,27 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/profile-change-requests:
+    get:
+      operationId: listProfileChangeRepairQueue
+      summary: List redacted retry and repair-required profile changes
+      description: Requires platform.profile-changes.repair. Old/new identifiers, Identity subjects, SMS details, and provider errors are never returned.
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/profile-change-requests/{request_id}/actions/retry:
+    post:
+      operationId: retryProfileChangeRepair
+      summary: Return one repair-required profile change to the forward-only recovery worker
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "202": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/overview:
     get:
       operationId: getAdminBillingOverview

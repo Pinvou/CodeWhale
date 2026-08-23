@@ -275,10 +275,10 @@
 | ID-16 | 非当前范围 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Keycloak 具备扩展基础，但当前产品闭环未实现；短信找回密码已纳入 ACC-09。 |
 | ACC-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Account 仅依赖服务鉴权的 Identity HTTP 端口及不透明密码引用；Keycloak Token、管理 URL、客户端密钥、用户创建/删除协议均只存在于独立 Identity Adapter |
 | ACC-05 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有新华三专用 mall_user_sync_jobs 异步任务；缺供应商中立 Commerce Mapping、Adapter 版本和通用状态模型 |
-| ACC-06 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 用户名和手机号变更使用唯一变更请求、字段预约、版本检查、Identity Provider 更新、Account 提交、会话撤销及 Commerce 异步同步；失败可重试或进入人工修复。 |
-| ACC-07 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 个人中心发起，重新认证后检查规范化用户名唯一，并通过身份 Adapter 与 Account 保持一致。 |
-| ACC-08 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 必须验证新手机号并重新认证；同步身份 Provider、Account 和当前 Commerce Customer 映射，失败进入可恢复状态。 |
-| ACC-09 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 未登录入口使用手机号短信验证，通过身份 Adapter 重置密码并撤销既有 Refresh Token/会话。 |
+| ACC-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; CONTRACT-41; DESKTOP-UI | NOT_DEPLOYED | 持久变更请求预约规范化新值并保存独立资料版本，按 Identity 更新、Account CAS、会话撤销顺序向前收敛；30 分钟 SLA 后转 `REPAIR_REQUIRED`。 |
+| ACC-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; DESKTOP-UI | NOT_DEPLOYED | 桌面个人中心先以密码 Direct Grant 获得五分钟内的 `auth_time`，再预约用户名；Account 与 Keycloak 都执行唯一性门禁，成功后撤销会话。 |
+| ACC-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; DESKTOP-UI | NOT_DEPLOYED | 新手机号绑定滑块和专用短信用途，Identity/Account 提交后重置当前商城同步任务；同步失败只使支付依赖保持不可用，不回滚资料。供应商中立 Mapping 仍归 APT-005。 |
+| ACC-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; DESKTOP-UI | NOT_DEPLOYED | 未登录入口对已知/未知手机号保持同形响应；短信成功后只向 Identity 传递不透明密码引用，Keycloak 重置密码并撤销全部会话，Account 同步清除 Session 投影。 |
 | ACC-10 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 重新认证后可以持久化注销请求；完成前强一致检查个人余额、未清应收、本人订单/退款、Hold、待核对用量、拒付、资金性差异、外部关单和 Commerce 任务，并要求转让组织所有权。组织余额和未消费组织授予不阻断；授予按 BILL-39 进入账号注销隔离暂停。 |
 | ACC-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前管理员删除保留 UUID 并清除部分资料，但完整注销 Saga、用户名/手机号安全释放、三年分类保留和永久 `user_code` 墓碑均未实现。 |
 | ACC-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
@@ -347,7 +347,7 @@
 | UI-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 不跳外部浏览器；个人信息也在弹层中展示。 |
 | UI-03 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 组织页签按成员关系隐藏；当前身份模块只放在概览；移除普通用户 Token Account/供应商 Key 管理入口。 |
 | UI-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
-| UI-05 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 增加用户名、手机号修改和忘记密码入口及完整安全校验。 |
+| UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-UI; UI-I18N; CONTRACT-41 | NOT_DEPLOYED | 桌面个人中心提供用户名/手机号修改及未登录忘记密码入口，复用集中三语词条；资料提交要求重新认证，手机号和密码恢复要求专用短信挑战。 |
 | UI-06 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人上下文显示个人权益；组织上下文只显示当前成员被授予的组织额度，不同时展示其他上下文余额。 |
 | UI-07 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 桌面与 Web 展示同一个服务端活动上下文；收到更高上下文版本、窗口重新聚焦或切换成功时清空旧额度/权限缓存并刷新。 |
 | UI-08 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 需展示总可用积分、每个包的 BASE/BONUS 余额、来源、到期时间、消耗顺序、即将到期提醒，以及 BONUS 零现金退款但普通退款成功时关联未消费 BONUS 随 BASE 撤销。 |
@@ -406,7 +406,7 @@
 | CR-02 | BILL-21–BILL-25 | 系统管理后台设置模型价格，支持统一价格或按时间段分段计价 | 部分实现、计量与匹配口径已由 CR-42、CR-57 细化 | 当前仅支持“某模型立即生效的新价格版本”；需增加全局默认、分时、未来生效、生命周期、显式继承、冲突校验和预览，并遵守 CR-57 的确定匹配与 Hold 快照规则 |
 | CR-03 | TOK-19, TOK-21, TOK-23, BILL-30 | 预占按照具体模型上下文动态计算 | 未实现 | 移除全局 128K 输入上限作为统一计费依据，改用模型上下文、请求输入和模型输出上限计算 |
 | CR-04 | ACC-34, UI-06 | 只能使用当前活动个人/组织上下文授予的额度，个人中心只展示该上下文额度 | 部分实现 | Gateway 已按活动上下文找钱包；需让所有额度/权益 API 和 UI 严格按活动上下文返回，组织场景只显示该成员被授予额度 |
-| CR-05 | ACC-06–ACC-09, UI-05 | 个人中心支持修改手机号、用户名和忘记密码 | 未实现 | 增加重新认证、短信验证、唯一性校验、身份 Provider/Account 一致性、会话撤销和外部 Commerce Customer 映射同步；具体 Keycloak/新华三协议留在 Adapter |
+| CR-05 | ACC-06–ACC-09, UI-05 | 个人中心支持修改手机号、用户名和忘记密码 | 已实现 | Account 只编排不透明 Identity 端口；Keycloak 更新/重置/会话撤销和新华三重同步协议分别留在 Adapter/Worker。供应商中立 Mapping 由 APT-005 替换现有专用任务。 |
 | CR-06 | ACC-19 | 组织删除为逻辑删除；有余额、有效权益包或未结算 Hold 时禁止删除 | 部分实现 | 当前已逻辑删除，但缺少跨 Billing 的删除前置检查；需增加冻结、预检、幂等删除和审计 |
 | CR-07 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 符合可用条件的模型都可供用户选择 | 已由 CR-35 细化状态语义 | 原记录把目录展示、上下文资格和请求预占混为一个可用条件；模型目录同步要求继续有效，状态划分以 CR-35 为准 |
 | CR-08 | BILL-14, BILL-17, BILL-16, UI-08 | 分别展示基础积分、赠送积分、到期顺序、即将到期提醒和多个权益包，同时展示可用总积分 | 部分实现 | 当前有多个权益包、总可用数和最近到期摘要，但包内没有基础/赠送余额拆分，UI 展示不足 |
@@ -433,7 +433,7 @@
 | CR-29 | ADM-07 | 审批允许角色兼任和交叉审批 | 未实现、由 CR-59 细化 | 同一用户可同时拥有计费运营和审批角色，仍禁止审批自己的申请；不同用户可以互相审批；强制审批命令只需一名独立审批人，普通退款和组织删除不进入财务审批流，全部写审计 |
 | CR-30 | ACC-26 | 组织邀请支持手机号、用户名和一次性链接 | 部分实现、待重构 | 三种方式都使用统一邀请实体、过期与一次性消费规则；邀请链接只保存摘要，手机号/用户名查询防枚举，接受时绑定当前已认证用户 |
 | CR-31 | ACC-10, ACC-11 | 用户可主动注销并保留三年法定记录 | 未实现、由 CR-52 细化 | 有个人余额、未清应收、本人未完成订单、未结算 Hold 或尚未转让的组织所有权时禁止完成注销，其他资金/外部事实及自动清理门禁按 CR-52；未消费组织授予不阻止注销并按 CR-51 处理；注销后标识可复用，法定记录以不可反查业务身份保存 3 年 |
-| CR-32 | ACC-07, ACC-08, ACC-06 | 用户资料修改采用可恢复 Saga | 未实现 | Account 创建带版本的变更请求并保留旧值/新值；经重新认证和验证后依次更新 Identity Provider、Account 与 Commerce Mapping；通过幂等重试、状态机和人工修复收敛，不宣称跨系统原子事务 |
+| CR-32 | ACC-07, ACC-08, ACC-06 | 用户资料修改采用可恢复 Saga | 已实现 | `profile_change_requests` 保存旧值、新值、资料版本和各阶段时间；Identity 成功后只向前重试，Account CAS 后异步重置 Commerce 任务，失败退避或进入修复状态。 |
 | CR-34 | BILL-29–BILL-33, PAY-33 | 用量负余额与拒付应收分场景记账并按钱包上下文隔离冻结 | 未实现 | 用量超额结算按 BILL-29 双记钱包负余额与独立应收；拒付按原支付流水和权益包撤销可撤销 BASE/关联 BONUS，不从聚合钱包反推或冲销其他权益；不足现金本金形成订单级应收，后续现金充值 BASE 优先清偿；个人与组织债务只冻结各自上下文 |
 | CR-35 | TOK-07, TOK-12, TOK-16, TOK-20 | 模型状态拆分为目录展示、上下文资格和请求级实时预占 | 未实现 | CATALOG_VISIBLE 只表示目录展示；CONTEXT_ELIGIBLE 判断当前上下文权限、策略和路由；RESERVABLE 在具体请求创建 Hold 时实时计算；客户端“可调用”仅为提示，Gateway 每次请求必须重新判断 |
 | CR-36 | TOK-04, TOK-17–TOK-20, BILL-20–BILL-21, BILL-23–BILL-25 | 模型协议和计价抽象为版本化计量单位及协议预占公式 | 未实现、价格口径由 CR-42 细化 | 使用版本化单位并为每种协议发布独立预占公式；公式缺省参数按 0，历史 1,000,000 Token 缺省输出规则失效；公式与价格集合、输入互斥计量及零价语义以 BILL-23–BILL-25 为准 |
@@ -542,10 +542,10 @@
 |---|---|---|---|
 | ACC-01 | 身份 Provider 管理适配 | 已实现 | Account 仅调用 Identity HTTP 端口并传递不透明引用；Keycloak 管理协议、Token 和客户端密钥全部位于独立 Adapter。 |
 | ACC-05 | 外部 Commerce Customer 开通 | 部分实现 | 已有新华三专用 `mall_user_sync_jobs` 异步任务；缺供应商中立 Commerce Mapping、Adapter 版本和通用状态模型。 |
-| ACC-06 | 资料变更 Saga | 未实现 | 用户名和手机号变更使用唯一变更请求、字段预约、版本检查、Identity Provider 更新、Account 提交、会话撤销及 Commerce 异步同步；失败可重试或进入人工修复。 |
-| ACC-07 | 修改用户名 | 未实现 | 个人中心发起，重新认证后检查规范化用户名唯一，并通过身份 Adapter 与 Account 保持一致。 |
-| ACC-08 | 修改手机号 | 未实现 | 必须验证新手机号并重新认证；同步身份 Provider、Account 和当前 Commerce Customer 映射，失败进入可恢复状态。 |
-| ACC-09 | 忘记密码 | 未实现 | 未登录入口使用手机号短信验证，通过身份 Adapter 重置密码并撤销既有 Refresh Token/会话。 |
+| ACC-06 | 资料变更 Saga | 已实现 | 唯一请求、字段预约、资料 CAS、Identity 更新、会话撤销、退避恢复和人工修复状态均已落地。 |
+| ACC-07 | 修改用户名 | 已实现 | 个人中心重新认证后规范化并预约唯一用户名，经 Identity Adapter 和 Account CAS 提交。 |
+| ACC-08 | 修改手机号 | 已实现 | 新手机号短信验证、重新认证、Identity/Account 提交和现有 Commerce 同步任务重置均已落地。 |
+| ACC-09 | 忘记密码 | 已实现 | 未登录手机号短信验证后由 Identity Adapter 重置密码并撤销会话；Account 不接触密码原文。 |
 | ACC-10 | 用户主动注销 | 未实现 | 重新认证后可以持久化注销请求；完成前强一致检查个人余额、未清应收、本人订单/退款、Hold、待核对用量、拒付、资金性差异、外部关单和 Commerce 任务，并要求转让组织所有权。组织余额和未消费组织授予不阻断；授予按 BILL-39 进入账号注销隔离暂停。 |
 | ACC-11 | 注销记录保留 | 未实现 | 当前管理员删除保留 UUID 并清除部分资料，但完整注销 Saga、用户名/手机号安全释放、三年分类保留和永久 `user_code` 墓碑均未实现。 |
 | ACC-12 | 一个用户可属于多个组织 | 已实现 | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
@@ -713,7 +713,7 @@
 | UI-01 | 桌面用户入口常显，未登录在弹层内登录 | 已实现 | 不跳外部浏览器；个人信息也在弹层中展示。 |
 | UI-03 | 个人中心提供概览、额度、用量和组织 | 部分实现 | 组织页签按成员关系隐藏；当前身份模块只放在概览；移除普通用户 Token Account/供应商 Key 管理入口。 |
 | UI-04 | 普通用户界面不暴露内部结算/供应商运维信息 | 已实现 | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
-| UI-05 | 账号资料与密码恢复 | 未实现 | 增加用户名、手机号修改和忘记密码入口及完整安全校验。 |
+| UI-05 | 账号资料与密码恢复 | 已实现 | 桌面 Popover 提供三语资料修改和密码恢复入口，并完成重新认证、短信、密码确认和稳定错误映射。 |
 | UI-06 | 个人中心只展示活动上下文额度 | 部分实现 | 个人上下文显示个人权益；组织上下文只显示当前成员被授予的组织额度，不同时展示其他上下文余额。 |
 | UI-07 | 跨端活动上下文同步 | 未实现 | 桌面与 Web 展示同一个服务端活动上下文；收到更高上下文版本、窗口重新聚焦或切换成功时清空旧额度/权限缓存并刷新。 |
 | UI-08 | 权益包、到期与退款说明 | 部分实现 | 需展示总可用积分、每个包的 BASE/BONUS 余额、来源、到期时间、消耗顺序、即将到期提醒，以及 BONUS 零现金退款但普通退款成功时关联未消费 BONUS 随 BASE 撤销。 |

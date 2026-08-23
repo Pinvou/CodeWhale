@@ -23,8 +23,12 @@ func (f *directoryFake) CreateMobileUser(_ context.Context, operationID uuid.UUI
 func (f *directoryFake) FindMobileUserByRegistrationOperation(_ context.Context, operationID uuid.UUID) (string, bool, error) {
 	return "identity-subject", f.operationID == operationID, nil
 }
-func (*directoryFake) DeleteUser(context.Context, string) error            { return nil }
-func (*directoryFake) DisableUserAndConfirm(context.Context, string) error { return nil }
+func (*directoryFake) DeleteUser(context.Context, string) error                        { return nil }
+func (*directoryFake) DisableUserAndConfirm(context.Context, string) error             { return nil }
+func (*directoryFake) UpdateUsername(context.Context, string, uuid.UUID, string) error { return nil }
+func (*directoryFake) UpdateMobile(context.Context, string, uuid.UUID, string) error   { return nil }
+func (*directoryFake) SetPassword(context.Context, string, string) error               { return nil }
+func (*directoryFake) RevokeSessions(context.Context, string) error                    { return nil }
 
 func TestPasswordPolicyPreservesExactPrintableASCII(t *testing.T) {
 	for _, password := range []string{"pinvou2026", "Pinvou 2026", "Pinvou2026@*+-&"} {

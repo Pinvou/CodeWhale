@@ -24,6 +24,26 @@ type IdentityProvisioner interface {
 	FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error)
 	DisableUserAndConfirm(context.Context, string) error
 	DeleteUser(context.Context, string) error
+	UpdateUsername(context.Context, string, uuid.UUID, string) error
+	UpdateMobile(context.Context, string, uuid.UUID, string) error
+	ResetPassword(context.Context, string, uuid.UUID, string, string, string) error
+	RevokeSessions(context.Context, string) error
+}
+
+func (p *HTTPIdentityProvisioner) UpdateUsername(ctx context.Context, subject string, operationID uuid.UUID, username string) error {
+	return p.request(ctx, http.MethodPut, "/internal/v1/users/"+url.PathEscape(subject)+"/username", map[string]any{"operation_id": operationID, "username": username}, nil)
+}
+
+func (p *HTTPIdentityProvisioner) UpdateMobile(ctx context.Context, subject string, operationID uuid.UUID, mobile string) error {
+	return p.request(ctx, http.MethodPut, "/internal/v1/users/"+url.PathEscape(subject)+"/mobile", map[string]any{"operation_id": operationID, "mobile": mobile}, nil)
+}
+
+func (p *HTTPIdentityProvisioner) ResetPassword(ctx context.Context, subject string, operationID uuid.UUID, mobile, handle, policyVersion string) error {
+	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/password-resets", map[string]any{"operation_id": operationID, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion}, nil)
+}
+
+func (p *HTTPIdentityProvisioner) RevokeSessions(ctx context.Context, subject string) error {
+	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/revoke-sessions", nil, nil)
 }
 
 type HTTPIdentityProvisioner struct {

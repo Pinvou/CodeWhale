@@ -681,6 +681,7 @@ pub fn run() {
             commands::account_platform::account_platform_register_mobile,
             commands::account_platform::account_platform_registration_status,
             commands::account_platform::account_platform_login_sms,
+            commands::account_platform::account_platform_reset_password,
             commands::account_platform::account_platform_logout,
             commands::account_platform::account_platform_request,
             commands::startup::report_frontend_startup,

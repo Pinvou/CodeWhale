@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Pinvou Identity Adapter API
   version: 0.1.0
-  description: Password-bearing registration boundary. Account and SMS APIs accept only the returned opaque reference.
+  description: Password-bearing registration and recovery boundary. Account and SMS APIs accept only the returned opaque reference.
   license:
     name: MIT
     identifier: MIT
@@ -13,7 +13,7 @@ paths:
   /registration/password-prechecks:
     post:
       operationId: precheckRegistrationPassword
-      summary: Validate the exact password sequence and create a short-lived opaque reference
+      summary: Validate an exact registration or replacement password and create a short-lived opaque reference
       requestBody:
         required: true
         content:

@@ -27,7 +27,7 @@
 | APT-001 | 永久内部用户 ID、独立用户编码、本人展示与受控精确查询 | ACC-56–ACC-58, NFR-50 | APT-006 | CODE | DONE |
 | APT-002 | Identity 密码边界、原始字符策略、短信 Adapter 与登录反枚举 | ID-03, ID-08, ID-11, ID-17, ID-18, ACC-01, NFR-14 | 无 | CODE | DONE |
 | APT-003 | 注册唯一值预约、持久恢复 Saga、异步钱包 Provisioning 与恢复 UI | ID-14, ACC-03, ACC-04, ACC-51–ACC-55, BILL-04, UI-02, UI-15, ADM-35 | APT-001, APT-002 | CODE | DONE |
-| APT-004 | 用户名/手机号变更 Saga、忘记密码及个人中心入口 | ACC-06–ACC-09, UI-05 | APT-002 | CODE | PENDING |
+| APT-004 | 用户名/手机号变更 Saga、忘记密码及个人中心入口 | ACC-06–ACC-09, UI-05 | APT-002 | CODE | DONE |
 | APT-005 | 供应商中立 Commerce Customer Mapping 与同步生命周期 | CORE-03, ACC-05, PAY-06, NFR-16 | 无 | CODE | PENDING |
 | APT-006 | Account 平台/组织 RBAC、原子权限码和显式授权作用域 | ACC-13, ACC-35, NFR-15 | 无 | CODE | DONE |
 | APT-007 | 超级管理员安全引导、异常失联 Break-glass 与最后管理员保护 | ACC-48, ADM-01, ADM-02 | APT-006, APT-046 | CODE+ENV | PENDING |

@@ -22,8 +22,10 @@ import (
 type SMSPurpose string
 
 const (
-	SMSPurposeRegister SMSPurpose = "REGISTER"
-	SMSPurposeLogin    SMSPurpose = "LOGIN"
+	SMSPurposeRegister      SMSPurpose = "REGISTER"
+	SMSPurposeLogin         SMSPurpose = "LOGIN"
+	SMSPurposeProfileMobile SMSPurpose = "PROFILE_MOBILE"
+	SMSPurposePasswordReset SMSPurpose = "PASSWORD_RESET"
 )
 
 type SMSProvider interface {

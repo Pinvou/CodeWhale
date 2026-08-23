@@ -23,8 +23,14 @@ type Service struct {
 	repository   Repository
 	wallets      WalletProvisioner
 	mobileAuth   *MobileAuthService
+	profiles     *ProfileChangeService
 	serviceToken string
 	now          func() time.Time
+}
+
+func (s *Service) WithProfileChanges(profiles *ProfileChangeService) *Service {
+	s.profiles = profiles
+	return s
 }
 
 func NewService(repository Repository, wallets WalletProvisioner) *Service {
@@ -58,11 +64,20 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		router.POST("/v1/auth/register", httpserver.AdaptFunc(s.registerMobile))
 		router.GET("/v1/auth/registration-operations/:operation_id", httpserver.AdaptFunc(s.registrationOperationStatus))
 		internal.POST("/auth/sms/verify", httpserver.AdaptFunc(s.verifyLoginSMS))
+		if s.profiles != nil {
+			router.POST("/v1/auth/password-resets", httpserver.AdaptFunc(s.resetForgottenPassword))
+		}
 	}
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
 	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
 	protected.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
+	if s.profiles != nil {
+		protected.POST("/v1/me/profile-change-requests", httpserver.AdaptFunc(s.createProfileChange))
+		protected.POST("/v1/me/profile-change-requests/:request_id/mobile-challenges", httpserver.AdaptFunc(s.sendProfileMobileChallenge))
+		protected.POST("/v1/me/profile-change-requests/:request_id/actions/complete", httpserver.AdaptFunc(s.completeProfileChange))
+		protected.GET("/v1/me/profile-change-requests/:request_id", httpserver.AdaptFunc(s.getProfileChange))
+	}
 	protected.GET("/v1/me/authorization-context", httpserver.AdaptFunc(s.getAuthorizationContext))
 	protected.GET("/v1/me/organizations", httpserver.AdaptFunc(s.listOrganizations))
 	protected.POST("/v1/sessions/current/active-context", httpserver.AdaptFunc(s.setActiveContext))
@@ -102,6 +117,10 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
 	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRetryRegistration))
 	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminCompensateRegistration))
+	if s.profiles != nil {
+		admin.GET("/profile-change-requests", s.requirePermission(PermissionPlatformProfileChangesRepair), httpserver.AdaptFunc(s.adminProfileChanges))
+		admin.POST("/profile-change-requests/:request_id/actions/retry", s.requirePermission(PermissionPlatformProfileChangesRepair), httpserver.AdaptFunc(s.adminRetryProfileChange))
+	}
 	return router
 }
 

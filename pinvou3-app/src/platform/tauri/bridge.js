@@ -2449,6 +2449,7 @@
       sendSms: accountPlatformFeature.sendSms,
       registerMobile: accountPlatformFeature.registerMobile,
       registrationStatus: accountPlatformFeature.registrationStatus,
+      resetPassword: accountPlatformFeature.resetPassword,
       loginSms: accountPlatformFeature.loginSms,
       logout: accountPlatformFeature.logout,
       request: accountPlatformFeature.request,

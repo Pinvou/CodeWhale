@@ -32,6 +32,7 @@ export class AccountPlatformDesktopClient {
   registerMobile(username, mobile, challengeId, code, passwordReference, recovery, signal) { return this.call(() => this.transport.registerMobile({ username, mobile, challenge_id: challengeId, code, password_handle: passwordReference?.password_handle || '', password_policy_version: passwordReference?.password_policy_version || '', registration_operation_id: recovery?.registration_operation_id || '', registration_query_token: recovery?.registration_query_token || '' }), signal); }
   registrationStatus(signal) { return this.call(() => this.transport.registrationStatus(), signal); }
   loginSms(mobile, challengeId, code, signal) { return this.call(() => this.transport.loginSms({ mobile, challenge_id: challengeId, code }), signal); }
+  resetPassword(mobile, challengeId, code, password, signal) { return this.call(() => this.transport.resetPassword({ mobile, challenge_id: challengeId, code, password }), signal); }
   logout(signal) { return this.call(() => this.transport.logout(), signal); }
 
   async call(action, signal) {
@@ -54,6 +55,10 @@ export class AccountPlatformDesktopClient {
   }
 
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
+  createProfileChange(field, value, signal) { return this.request('account', '/v1/me/profile-change-requests', { method: 'POST', body: { field, value }, signal }); }
+  sendProfileMobileChallenge(requestId, captchaId, captchaOffset, signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}/mobile-challenges`, { method: 'POST', body: { captcha_id: captchaId, captcha_offset: captchaOffset }, signal }); }
+  completeProfileChange(requestId, code = '', signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}/actions/complete`, { method: 'POST', body: { code }, signal }); }
+  profileChangeStatus(requestId, signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}`, { signal }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }
   switchContext(contextType, organizationId, signal) { return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null }, signal }); }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }

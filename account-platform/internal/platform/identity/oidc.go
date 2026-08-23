@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -16,15 +17,16 @@ import (
 )
 
 type Principal struct {
-	Issuer        string
-	Subject       string
-	SessionID     string
-	Email         string
-	DisplayName   string
-	Username      string
-	PhoneNumber   string
-	PhoneVerified bool
-	RealmRoles    []string
+	Issuer          string
+	Subject         string
+	SessionID       string
+	Email           string
+	DisplayName     string
+	Username        string
+	PhoneNumber     string
+	PhoneVerified   bool
+	AuthenticatedAt time.Time
+	RealmRoles      []string
 }
 
 type VerifyFunc func(context.Context, string) (Principal, error)
@@ -73,6 +75,7 @@ func NewOIDCVerifyFuncWithJWKS(ctx context.Context, issuer, jwksURL, audience, e
 			return Principal{}, fmt.Errorf("verify access token: %w", err)
 		}
 		var claims struct {
+			AuthTime      int64  `json:"auth_time"`
 			SessionID     string `json:"sid"`
 			SessionState  string `json:"session_state"`
 			Email         string `json:"email"`
@@ -99,15 +102,16 @@ func NewOIDCVerifyFuncWithJWKS(ctx context.Context, issuer, jwksURL, audience, e
 			displayName = claims.PreferredName
 		}
 		return Principal{
-			Issuer:        issuer,
-			Subject:       token.Subject,
-			SessionID:     sessionID,
-			Email:         claims.Email,
-			DisplayName:   displayName,
-			Username:      claims.PreferredName,
-			PhoneNumber:   claims.PhoneNumber,
-			PhoneVerified: claims.PhoneVerified,
-			RealmRoles:    slices.Clone(claims.RealmAccess.Roles),
+			Issuer:          issuer,
+			Subject:         token.Subject,
+			SessionID:       sessionID,
+			Email:           claims.Email,
+			DisplayName:     displayName,
+			Username:        claims.PreferredName,
+			PhoneNumber:     claims.PhoneNumber,
+			PhoneVerified:   claims.PhoneVerified,
+			AuthenticatedAt: time.Unix(claims.AuthTime, 0).UTC(),
+			RealmRoles:      slices.Clone(claims.RealmAccess.Roles),
 		}, nil
 	}, nil
 }

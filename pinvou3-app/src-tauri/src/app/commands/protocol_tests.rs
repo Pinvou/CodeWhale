@@ -76,6 +76,7 @@ command_protocol!(
     [
         "account_platform_session",
         "account_platform_login",
+        "account_platform_reset_password",
         "account_platform_logout",
         "account_platform_request"
     ]

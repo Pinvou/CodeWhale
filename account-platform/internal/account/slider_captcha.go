@@ -46,7 +46,7 @@ type SliderCaptchaResponse struct {
 
 func (s *MobileAuthService) CreateSliderCaptcha(ctx context.Context, rawMobile string, purpose SMSPurpose) (SliderCaptchaResponse, error) {
 	mobile, err := NormalizeMainlandMobile(rawMobile)
-	if err != nil || purpose != SMSPurposeRegister && purpose != SMSPurposeLogin {
+	if err != nil || purpose != SMSPurposeRegister && purpose != SMSPurposeLogin && purpose != SMSPurposeProfileMobile && purpose != SMSPurposePasswordReset {
 		return SliderCaptchaResponse{}, ErrMobileInvalid
 	}
 	if purpose == SMSPurposeRegister {

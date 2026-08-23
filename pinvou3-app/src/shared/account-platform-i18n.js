@@ -33,6 +33,22 @@ Object.assign(accountPlatformCopy.zh, {
   fulfillmentStatuses:{ PENDING:'待发放', CREDITED:'已到账', MANUAL_REVIEW:'人工复核中', REVOKED:'已撤销' }, invoiceStatuses:{ NOT_SUPPORTED:'当前接口不支持' },
   invoiceUnavailable:'当前支付渠道尚未开放发票申请与查询，因此此处仅展示说明，不提供不可用的操作按钮。',
 });
+
+Object.assign(accountPlatformCopy.zh, {
+  authModes:{...accountPlatformCopy.zh.authModes,forgot:'忘记密码'}, resetPassword:'重置密码', passwordResetComplete:'密码已重置，全部旧会话已撤销，请重新登录。',
+  profileSettings:'资料与安全', changeUsername:'修改用户名', changeMobile:'修改手机号', currentPassword:'当前密码（用于重新认证）', continueChange:'验证并继续', confirmChange:'确认修改', profileChangeComplete:'资料已更新，旧会话已撤销，请重新登录。',
+  recentAuthenticationRequired:'请重新输入当前密码后再修改资料。', profileChangeConflict:'另一项资料修改或账号更新与本次请求冲突，请刷新后重试。', mobileVerificationRequired:'请先验证新手机号。', profileChangeNotFound:'该资料修改请求不存在或已失效。', profileChangeRecovering:'资料修改正在安全恢复中，请勿重复提交。',
+});
+Object.assign(accountPlatformCopy.en, {
+  authModes:{...accountPlatformCopy.en.authModes,forgot:'Forgot'}, resetPassword:'Reset password', passwordResetComplete:'Password reset. All previous sessions were revoked; sign in again.',
+  profileSettings:'Profile & security', changeUsername:'Change username', changeMobile:'Change mobile', currentPassword:'Current password (reauthentication)', continueChange:'Verify and continue', confirmChange:'Confirm change', profileChangeComplete:'Profile updated. Previous sessions were revoked; sign in again.',
+  recentAuthenticationRequired:'Enter your current password again before changing profile details.', profileChangeConflict:'Another profile or account update conflicts with this request. Refresh and try again.', mobileVerificationRequired:'Verify the new mobile number first.', profileChangeNotFound:'This profile change no longer exists.', profileChangeRecovering:'The profile change is recovering safely. Do not submit another request.',
+});
+Object.assign(accountPlatformCopy.ja, {
+  authModes:{...accountPlatformCopy.ja.authModes,forgot:'パスワード再設定'}, resetPassword:'パスワードを再設定', passwordResetComplete:'パスワードを再設定し、以前のセッションをすべて無効化しました。再度ログインしてください。',
+  profileSettings:'プロフィールとセキュリティ', changeUsername:'ユーザー名を変更', changeMobile:'携帯番号を変更', currentPassword:'現在のパスワード（再認証）', continueChange:'確認して続行', confirmChange:'変更を確定', profileChangeComplete:'プロフィールを更新し、以前のセッションを無効化しました。再度ログインしてください。',
+  recentAuthenticationRequired:'プロフィールを変更する前に、現在のパスワードをもう一度入力してください。', profileChangeConflict:'別のプロフィールまたはアカウント更新と競合しています。更新して再試行してください。', mobileVerificationRequired:'先に新しい携帯番号を確認してください。', profileChangeNotFound:'このプロフィール変更は存在しないか、期限切れです。', profileChangeRecovering:'プロフィール変更を安全に復旧しています。重複して送信しないでください。',
+});
 Object.assign(accountPlatformCopy.en, {
   packageId:'Package ID', pinvouOrder:'Pinvou order', mallOrder:'Mall order', amount:'Amount paid', creditedAt:'Credited at', validPeriod:'Benefit validity', totalPoints:'Total points', usedPoints:'Used points', createdAt:'Created at', paidAt:'Paid at', fulfillmentStatus:'Fulfillment', invoiceStatus:'Invoice status',
   fulfillmentStatuses:{ PENDING:'Pending', CREDITED:'Credited', MANUAL_REVIEW:'Manual review', REVOKED:'Revoked' }, invoiceStatuses:{ NOT_SUPPORTED:'Not supported by the current API' },

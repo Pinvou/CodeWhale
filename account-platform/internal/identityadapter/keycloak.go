@@ -209,6 +209,118 @@ func (p *KeycloakDirectory) DisableUserAndConfirm(ctx context.Context, subject s
 	return nil
 }
 
+func (p *KeycloakDirectory) UpdateUsername(ctx context.Context, subject string, operationID uuid.UUID, username string) error {
+	return p.updateUser(ctx, subject, func(user map[string]any) {
+		user["username"] = username
+		setStringAttribute(user, "pinvou_profile_change_operation_id", operationID.String())
+	})
+}
+
+func (p *KeycloakDirectory) UpdateMobile(ctx context.Context, subject string, operationID uuid.UUID, mobile string) error {
+	return p.updateUser(ctx, subject, func(user map[string]any) {
+		setStringAttribute(user, "phone_number", mobile)
+		setStringAttribute(user, "phone_number_verified", "true")
+		setStringAttribute(user, "pinvou_profile_change_operation_id", operationID.String())
+	})
+}
+
+func (p *KeycloakDirectory) SetPassword(ctx context.Context, subject, password string) error {
+	access, err := p.accessToken(ctx)
+	if err != nil {
+		return err
+	}
+	endpoint := p.userEndpoint(subject)
+	endpoint.Path += "/reset-password"
+	body, _ := json.Marshal(map[string]any{"type": "password", "value": password, "temporary": false})
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+access)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := p.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("reset Keycloak password: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("reset Keycloak password returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func (p *KeycloakDirectory) RevokeSessions(ctx context.Context, subject string) error {
+	access, err := p.accessToken(ctx)
+	if err != nil {
+		return err
+	}
+	endpoint := p.userEndpoint(subject)
+	endpoint.Path += "/logout"
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), nil)
+	request.Header.Set("Authorization", "Bearer "+access)
+	response, err := p.client.Do(request)
+	if err != nil {
+		return fmt.Errorf("revoke Keycloak sessions: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("revoke Keycloak sessions returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func (p *KeycloakDirectory) userEndpoint(subject string) url.URL {
+	endpoint := *p.adminURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/admin/realms/" + url.PathEscape(p.realm) + "/users/" + url.PathEscape(subject)
+	return endpoint
+}
+
+func (p *KeycloakDirectory) updateUser(ctx context.Context, subject string, mutate func(map[string]any)) error {
+	access, err := p.accessToken(ctx)
+	if err != nil {
+		return err
+	}
+	endpoint := p.userEndpoint(subject)
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	request.Header.Set("Authorization", "Bearer "+access)
+	response, err := p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	var user map[string]any
+	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&user) != nil {
+		response.Body.Close()
+		return fmt.Errorf("read Keycloak user returned HTTP %d", response.StatusCode)
+	}
+	response.Body.Close()
+	mutate(user)
+	body, _ := json.Marshal(user)
+	request, _ = http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+access)
+	request.Header.Set("Content-Type", "application/json")
+	response, err = p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode == http.StatusConflict {
+		return ErrUsernameAlreadyRegistered
+	}
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("update Keycloak user returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func setStringAttribute(user map[string]any, key, value string) {
+	attributes, _ := user["attributes"].(map[string]any)
+	if attributes == nil {
+		attributes = map[string]any{}
+		user["attributes"] = attributes
+	}
+	attributes[key] = []string{value}
+}
+
 func (p *KeycloakDirectory) accessToken(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

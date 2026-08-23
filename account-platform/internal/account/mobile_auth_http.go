@@ -60,6 +60,10 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
+	if SMSPurpose(strings.ToUpper(string(body.Purpose))) == SMSPurposeProfileMobile {
+		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(r.Context()))
+		return
+	}
 	challenge, err := s.mobileAuth.Send(r.Context(), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion, SMSPurpose(strings.ToUpper(string(body.Purpose))), body.CaptchaID, body.CaptchaOffset, requestSource(r), r.Header.Get("X-Device-ID"))
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)

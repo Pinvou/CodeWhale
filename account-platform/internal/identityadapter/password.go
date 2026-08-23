@@ -28,6 +28,51 @@ type UserDirectory interface {
 	FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error)
 	DisableUserAndConfirm(context.Context, string) error
 	DeleteUser(context.Context, string) error
+	UpdateUsername(context.Context, string, uuid.UUID, string) error
+	UpdateMobile(context.Context, string, uuid.UUID, string) error
+	SetPassword(context.Context, string, string) error
+	RevokeSessions(context.Context, string) error
+}
+
+func (v *PasswordVault) ResetPassword(ctx context.Context, operationID uuid.UUID, handle, policyVersion, subject, mobile string) error {
+	if operationID == uuid.Nil || strings.TrimSpace(subject) == "" {
+		return ErrReferenceInvalid
+	}
+	if err := v.ValidateReference(operationID, handle, policyVersion, subject, mobile); err != nil {
+		return err
+	}
+	record, err := v.record(handle, policyVersion)
+	if err != nil {
+		return err
+	}
+	record.mu.Lock()
+	defer record.mu.Unlock()
+	if err := bindRecord(record, subject, mobile); err != nil || record.password == "" || v.now().After(record.expiresAt) {
+		if err != nil {
+			return err
+		}
+		return ErrReferenceInvalid
+	}
+	if err := ValidatePassword(record.password); err != nil {
+		return err
+	}
+	if err := v.directory.SetPassword(ctx, subject, record.password); err != nil {
+		return err
+	}
+	record.password = ""
+	return v.directory.RevokeSessions(ctx, subject)
+}
+
+func (v *PasswordVault) UpdateUsername(ctx context.Context, subject string, operationID uuid.UUID, username string) error {
+	return v.directory.UpdateUsername(ctx, subject, operationID, username)
+}
+
+func (v *PasswordVault) UpdateMobile(ctx context.Context, subject string, operationID uuid.UUID, mobile string) error {
+	return v.directory.UpdateMobile(ctx, subject, operationID, mobile)
+}
+
+func (v *PasswordVault) RevokeSessions(ctx context.Context, subject string) error {
+	return v.directory.RevokeSessions(ctx, subject)
 }
 
 type PasswordReference struct {

@@ -290,6 +290,24 @@ test('desktop mobile registration confirms matching passwords before network req
   assert.equal(accountPlatformCopy.zh.passwordMismatch, '两次输入的密码不一致。');
 });
 
+test('desktop profile changes and forgotten password keep secrets behind the Identity boundary', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  const client = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
+  const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  assert.match(popover, /'password', 'sms', 'register', 'forgot'/);
+  assert.match(popover, /await client\.resetPassword\(mobile\.trim\(\), smsChallenge, smsCode\.trim\(\), password\)/);
+  assert.match(popover, /await client\.login\(me\?\.username \|\| me\?\.mobile \|\| '', profilePassword\)/);
+  assert.match(popover, /client\.createProfileChange\(profileField, profileValue\.trim\(\)\)/);
+  assert.match(popover, /client\.sendProfileMobileChallenge/);
+  assert.match(client, /resetPassword\(mobile, challengeId, code, password/);
+  assert.match(backend, /public_identity_request[\s\S]*password-prechecks[\s\S]*public_account_request[\s\S]*password-resets/);
+  assert.doesNotMatch(client, /password-resets/);
+  for (const language of ['zh', 'en', 'ja']) {
+    assert.ok(accountPlatformCopy[language].authModes.forgot);
+    assert.ok(accountPlatformCopy[language].profileSettings);
+  }
+});
+
 test('slider verification overlays the login form without changing its layout height', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
   const loginForm = popover.match(/<form className=\{`space-y-3[\s\S]*?<\/form>/)?.[0] || '';

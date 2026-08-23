@@ -2,7 +2,7 @@ use tauri::State;
 
 use crate::features::account_platform::{
     AccountPlatformState, ApiRequest, ApiResponse, LoginCredentials, MobileRegistration,
-    MobileRegistrationPrecheck, SMSLoginCredentials, SMSRequest, SessionStatus,
+    MobileRegistrationPrecheck, PasswordReset, SMSLoginCredentials, SMSRequest, SessionStatus,
     SliderCaptchaRequest,
 };
 use crate::features::assistant::engine_pool::EnginePool;
@@ -13,6 +13,14 @@ pub async fn account_platform_session(
     state: State<'_, AccountPlatformState>,
 ) -> Result<SessionStatus, String> {
     Ok(state.status().await)
+}
+
+#[tauri::command]
+pub async fn account_platform_reset_password(
+    input: PasswordReset,
+    state: State<'_, AccountPlatformState>,
+) -> Result<serde_json::Value, String> {
+    state.reset_password(input).await
 }
 
 #[tauri::command]

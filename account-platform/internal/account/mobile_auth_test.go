@@ -229,6 +229,16 @@ func (f *identityProvisionerFake) CreateMobileUser(_ context.Context, _ uuid.UUI
 
 func (*identityProvisionerFake) DeleteUser(context.Context, string) error            { return nil }
 func (*identityProvisionerFake) DisableUserAndConfirm(context.Context, string) error { return nil }
+func (*identityProvisionerFake) UpdateUsername(context.Context, string, uuid.UUID, string) error {
+	return nil
+}
+func (*identityProvisionerFake) UpdateMobile(context.Context, string, uuid.UUID, string) error {
+	return nil
+}
+func (*identityProvisionerFake) ResetPassword(context.Context, string, uuid.UUID, string, string, string) error {
+	return nil
+}
+func (*identityProvisionerFake) RevokeSessions(context.Context, string) error { return nil }
 
 func newMobileAuthForTest(t *testing.T, repository MobileAuthRepository, sms SMSProvider, identities IdentityProvisioner) *MobileAuthService {
 	t.Helper()

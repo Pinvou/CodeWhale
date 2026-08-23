@@ -63,7 +63,7 @@ paths:
                 mobile: { type: string }
                 password_handle: { type: string, maxLength: 43 }
                 password_policy_version: { type: string, maxLength: 64 }
-                purpose: { type: string, enum: [REGISTER, LOGIN] }
+                purpose: { type: string, enum: [REGISTER, LOGIN, PASSWORD_RESET] }
                 captcha_id: { type: string, format: uuid }
                 captcha_offset: { type: integer, minimum: 0 }
       responses:
@@ -149,6 +149,29 @@ paths:
               schema: { $ref: "#/components/schemas/RegistrationStatus" }
         "404":
           $ref: "#/components/responses/Error"
+  /auth/password-resets:
+    post:
+      security: []
+      operationId: resetForgottenPassword
+      summary: Reset a password after anti-enumeration mobile SMS verification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mobile, challenge_id, code, password_handle, password_policy_version]
+              properties:
+                mobile: { type: string }
+                challenge_id: { type: string, format: uuid }
+                code: { type: string, minLength: 1, maxLength: 16 }
+                password_handle: { type: string, minLength: 43, maxLength: 43 }
+                password_policy_version: { type: string, const: user-v1 }
+      responses:
+        "204": { description: Password reset and all existing sessions revoked }
+        "401": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
   /account/bootstrap:
     post:
       operationId: bootstrapAccount
@@ -175,6 +198,62 @@ paths:
                 $ref: "#/components/schemas/Me"
         "401":
           $ref: "#/components/responses/Error"
+  /me/profile-change-requests:
+    post:
+      operationId: createProfileChange
+      summary: Reserve a username or mobile after recent authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [field, value]
+              properties:
+                field: { type: string, enum: [USERNAME, MOBILE] }
+                value: { type: string }
+      responses:
+        "201": { description: Recoverable profile change created }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /me/profile-change-requests/{request_id}/mobile-challenges:
+    post:
+      operationId: sendProfileMobileChallenge
+      summary: Verify the reserved new mobile with a bound SMS challenge
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "202": { description: Challenge sent }
+        "401": { $ref: "#/components/responses/Error" }
+  /me/profile-change-requests/{request_id}/actions/complete:
+    post:
+      operationId: completeProfileChange
+      summary: Converge Identity update, Account CAS commit, session revocation, and Commerce sync
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Profile change completed }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /me/profile-change-requests/{request_id}:
+    get:
+      operationId: getProfileChange
+      summary: Get the redacted recovery state of one profile change
+      parameters:
+        - name: request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200": { description: Redacted profile change state }
+        "404": { $ref: "#/components/responses/Error" }
   /me/authorization-context:
     get:
       operationId: resolveAuthorizationContext

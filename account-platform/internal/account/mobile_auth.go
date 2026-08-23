@@ -174,7 +174,7 @@ func (s *MobileAuthService) PrecheckRegistration(ctx context.Context, rawUsernam
 func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, passwordHandle, passwordPolicyVersion string, purpose SMSPurpose, captchaID uuid.UUID, captchaOffset int, source, device string) (SMSChallenge, error) {
 	startedAt := time.Now()
 	mobile, err := NormalizeMainlandMobile(rawMobile)
-	if err != nil || purpose != SMSPurposeRegister && purpose != SMSPurposeLogin {
+	if err != nil || purpose != SMSPurposeRegister && purpose != SMSPurposeLogin && purpose != SMSPurposeProfileMobile && purpose != SMSPurposePasswordReset {
 		return SMSChallenge{}, ErrMobileInvalid
 	}
 	if captchaID == uuid.Nil || captchaOffset < 0 {
@@ -225,7 +225,7 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	// Login delivery is deliberately detached from the external response. Known
 	// and unknown mobiles therefore share the same status and minimum timing
 	// bucket even when the provider is slow or unavailable.
-	if purpose == SMSPurposeLogin {
+	if purpose == SMSPurposeLogin || purpose == SMSPurposePasswordReset {
 		if exists {
 			go s.deliverSMS(context.WithoutCancel(ctx), challenge)
 		}
@@ -238,6 +238,25 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 		return SMSChallenge{}, err
 	}
 	return challenge, nil
+}
+
+func (s *MobileAuthService) VerifyPasswordReset(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (string, error) {
+	mobile, err := NormalizeMainlandMobile(rawMobile)
+	if err != nil {
+		return "", err
+	}
+	if err := s.verifyChallenge(ctx, challengeID, mobile, SMSPurposePasswordReset, code); err != nil {
+		return "", err
+	}
+	return s.repository.MobileIdentitySubject(ctx, s.issuer, mobile)
+}
+
+func (s *MobileAuthService) VerifyProfileMobile(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) error {
+	mobile, err := NormalizeMainlandMobile(rawMobile)
+	if err != nil {
+		return err
+	}
+	return s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeProfileMobile, code)
 }
 
 func registrationFingerprint(username, mobile string, challengeID uuid.UUID, policyVersion string) [32]byte {
@@ -425,19 +444,19 @@ func (s *MobileAuthService) verifyChallenge(ctx context.Context, challengeID uui
 
 func (r *PostgresRepository) MobileExists(ctx context.Context, mobile string) (bool, error) {
 	var exists bool
-	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE mobile_e164=$1 AND status<>'DELETED')`, mobile).Scan(&exists)
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE mobile_e164=$1 AND status<>'DELETED') OR EXISTS(SELECT 1 FROM profile_change_requests WHERE field='MOBILE' AND new_value=$1 AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))`, mobile).Scan(&exists)
 	return exists, err
 }
 
 func (r *PostgresRepository) MobileIdentitySubject(ctx context.Context, issuer, mobile string) (string, error) {
 	var subject string
-	err := r.pool.QueryRow(ctx, `SELECT i.subject FROM users u JOIN identities i ON i.user_id=u.id WHERE u.mobile_e164=$1 AND u.status<>'DELETED' AND i.issuer=$2 ORDER BY i.last_seen_at DESC LIMIT 1`, mobile, issuer).Scan(&subject)
+	err := r.pool.QueryRow(ctx, `SELECT i.subject FROM users u JOIN identities i ON i.user_id=u.id WHERE u.status<>'DELETED' AND i.issuer=$2 AND (u.mobile_e164=$1 OR EXISTS(SELECT 1 FROM profile_change_requests p WHERE p.user_id=u.id AND p.identity_issuer=i.issuer AND p.identity_subject=i.subject AND p.field='MOBILE' AND p.new_value=$1 AND p.identity_updated_at IS NOT NULL AND p.status IN ('IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))) ORDER BY (u.mobile_e164=$1) DESC,i.last_seen_at DESC LIMIT 1`, mobile, issuer).Scan(&subject)
 	return subject, err
 }
 
 func (r *PostgresRepository) UsernameExists(ctx context.Context, username string) (bool, error) {
 	var exists bool
-	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE lower(username)=lower($1) AND status<>'DELETED')`, username).Scan(&exists)
+	err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM users WHERE lower(username)=lower($1) AND status<>'DELETED') OR EXISTS(SELECT 1 FROM profile_change_requests WHERE field='USERNAME' AND new_value=lower($1) AND status IN ('PENDING','VERIFIED','IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))`, username).Scan(&exists)
 	return exists, err
 }
 

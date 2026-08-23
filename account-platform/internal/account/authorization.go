@@ -27,6 +27,7 @@ const (
 	PermissionPlatformAuditRead                  = "platform.audit.read"
 	PermissionPlatformSystemStatusRead           = "platform.system.status.read"
 	PermissionPlatformRegistrationsRepair        = "platform.registrations.repair"
+	PermissionPlatformProfileChangesRepair       = "platform.profile-changes.repair"
 
 	PermissionOrganizationProfileRead   = "org.profile.read"
 	PermissionOrganizationUnitsRead     = "org.units.read"

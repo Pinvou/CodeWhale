@@ -86,6 +86,12 @@ func main() {
 			log.Fatal(err)
 		}
 		service.WithMobileAuth(auth, os.Getenv("INTERNAL_SERVICE_TOKEN"))
+		profiles, err := account.NewProfileChangeService(repository, auth, identities)
+		if err != nil {
+			log.Fatal(err)
+		}
+		service.WithProfileChanges(profiles)
+		go account.NewProfileChangeWorker(profiles, 5*time.Second).Run(ctx)
 		go account.NewRegistrationRecoveryWorker(repository, auth, 5*time.Second).Run(ctx)
 
 		// Mobile authentication and Mall account synchronization use separate

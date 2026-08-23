@@ -25,7 +25,7 @@ export const desktopBridgeApi = {
   memory: ['archiveRecentWorkMemory', 'confirmMemoryCandidate', 'deleteMemoryItem', 'deleteMemoryPreference', 'ignoreMemoryCandidate', 'loadMemoryOverview', 'neverMemoryCandidate', 'saveMemoryProfilePatch', 'updateMemoryItem'],
   updater: ['cancelUpdate', 'checkForUpdate', 'downloadAndInstallUpdate', 'restartApp'],
   dependencies: ['checkDependencies', 'installDependencies'],
-  accountPlatform: ['createSliderCaptcha', 'login', 'loginSms', 'logout', 'precheckMobileRegistration', 'registerMobile', 'request', 'sendSms', 'session'],
+  accountPlatform: ['createSliderCaptcha', 'login', 'loginSms', 'logout', 'precheckMobileRegistration', 'registerMobile', 'registrationStatus', 'request', 'resetPassword', 'sendSms', 'session'],
   teamRelay: ['claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'listDraftSourceSessions', 'load', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'updateProfile', 'verifyAccess'],
 };
 
@@ -37,6 +37,7 @@ export const desktopOnlyBridgeApi = {
   knowledge: ['loadKnowledgeEmbedderAfterFirstFrame'],
   // 多智能体开关是桌面专属操作（ADR-0006）：Web 端只读呈现。
   interaction: ['setMultiAgentMode'],
+  accountPlatform: ['resetPassword'],
 };
 
 // 整域桌面专属：Web 端连域都不存在（区别于 platform 这类"空域仍在"）。

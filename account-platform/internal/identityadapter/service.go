@@ -32,8 +32,67 @@ func (s *Service) Handler() http.Handler {
 	internal.POST("/users/mobile", httpserver.AdaptFunc(s.createMobileUser))
 	internal.GET("/registration-operations/:operation_id/user", httpserver.AdaptFunc(s.findRegistrationUser))
 	internal.POST("/users/:subject/disable-and-confirm", httpserver.AdaptFunc(s.disableUserAndConfirm))
+	internal.PUT("/users/:subject/username", httpserver.AdaptFunc(s.updateUsername))
+	internal.PUT("/users/:subject/mobile", httpserver.AdaptFunc(s.updateMobile))
+	internal.POST("/users/:subject/password-resets", httpserver.AdaptFunc(s.resetPassword))
+	internal.POST("/users/:subject/revoke-sessions", httpserver.AdaptFunc(s.revokeSessions))
 	internal.DELETE("/users/:subject", httpserver.AdaptFunc(s.deleteUser))
 	return router
+}
+
+func (s *Service) updateUsername(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		OperationID uuid.UUID `json:"operation_id"`
+		Username    string    `json:"username"`
+	}
+	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil {
+		return
+	}
+	if err := s.vault.UpdateUsername(r.Context(), r.PathValue("subject"), body.OperationID, body.Username); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) updateMobile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		OperationID uuid.UUID `json:"operation_id"`
+		Mobile      string    `json:"mobile"`
+	}
+	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil {
+		return
+	}
+	if err := s.vault.UpdateMobile(r.Context(), r.PathValue("subject"), body.OperationID, body.Mobile); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) resetPassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		OperationID           uuid.UUID `json:"operation_id"`
+		Mobile                string    `json:"mobile"`
+		PasswordHandle        string    `json:"password_handle"`
+		PasswordPolicyVersion string    `json:"password_policy_version"`
+	}
+	if api.DecodeJSON(w, r, &body) != nil || body.OperationID == uuid.Nil {
+		return
+	}
+	if err := s.vault.ResetPassword(r.Context(), body.OperationID, body.PasswordHandle, body.PasswordPolicyVersion, r.PathValue("subject"), body.Mobile); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) revokeSessions(w http.ResponseWriter, r *http.Request) {
+	if err := s.vault.RevokeSessions(r.Context(), r.PathValue("subject")); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) precheckPassword(w http.ResponseWriter, r *http.Request) {
