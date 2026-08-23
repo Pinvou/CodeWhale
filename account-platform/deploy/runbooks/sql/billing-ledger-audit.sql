@@ -26,6 +26,46 @@ LEFT JOIN (
 ) holds ON holds.wallet_id=wallet.id
 WHERE wallet.reserved_microcredits <> COALESCE(holds.actual,0);
 
+SELECT 'entitlement_component_conservation_mismatch' AS check_name, count(*) AS violations
+FROM entitlement_components
+WHERE original_microcredits <>
+  available_microcredits + reserved_microcredits + used_microcredits +
+  active_grant_microcredits + suspended_grant_microcredits +
+  expired_microcredits + revoked_microcredits;
+
+SELECT 'entitlement_component_lot_mismatch' AS check_name, count(*) AS violations
+FROM entitlement_components component
+JOIN credit_lots lot ON lot.id=component.credit_lot_id
+WHERE lot.remaining_microcredits <>
+  component.available_microcredits + component.reserved_microcredits +
+  component.active_grant_microcredits + component.suspended_grant_microcredits;
+
+SELECT 'entitlement_package_projection_mismatch' AS check_name, count(*) AS violations
+FROM entitlement_packages package
+JOIN (
+  SELECT package_id,sum(original_microcredits) total,
+    sum(available_microcredits+active_grant_microcredits+suspended_grant_microcredits) remaining,
+    sum(reserved_microcredits) reserved,sum(used_microcredits) used,
+    sum(expired_microcredits) expired,sum(revoked_microcredits) revoked
+  FROM entitlement_components GROUP BY package_id
+) component ON component.package_id=package.id
+WHERE (package.points_total,package.points_remaining,package.points_reserved,package.points_used,
+       package.points_expired,package.points_revoked) <>
+      (component.total,component.remaining,component.reserved,component.used,
+       component.expired,component.revoked);
+
+SELECT 'entitlement_hold_allocation_mismatch' AS check_name, count(*) AS violations
+FROM entitlement_components component
+LEFT JOIN (
+  SELECT allocation.component_id,
+    sum(allocation.reserved_microcredits-allocation.settled_microcredits-allocation.released_microcredits) reserved
+  FROM usage_hold_allocations allocation
+  JOIN usage_holds hold ON hold.id=allocation.hold_id
+  WHERE hold.status='ACTIVE'
+  GROUP BY allocation.component_id
+) allocation ON allocation.component_id=component.id
+WHERE component.reserved_microcredits <> COALESCE(allocation.reserved,0);
+
 SELECT 'expired_active_holds' AS check_name, count(*) AS violations
 FROM usage_holds WHERE status='ACTIVE' AND expires_at <= now();
 

@@ -63,3 +63,13 @@ Object.assign(accountPlatformCopy.ja, {
 Object.assign(accountPlatformCopy.zh, { userCode:'用户编码' });
 Object.assign(accountPlatformCopy.en, { userCode:'User code' });
 Object.assign(accountPlatformCopy.ja, { userCode:'ユーザーコード' });
+
+Object.assign(accountPlatformCopy.zh, {
+  basePoints:'基础积分（BASE）', bonusPoints:'赠送积分（BONUS）', componentTypes:{BASE:'基础积分（BASE）',BONUS:'赠送积分（BONUS）'}, entitlementSource:'权益来源', expiredPoints:'已过期积分', revokedPoints:'已撤销积分', expiryReminder:'到期提醒', expiryReminderAt:value=>`${value} 到期；到期后不可再用于新消费。`, consumptionOrder:'消费顺序：优先使用最早到期的权益；同一天到期时先用 BONUS，再用 BASE；同类型按到账时间和编号顺序使用。', refundCompositionNotice:'BONUS 不产生现金退款金额，但普通退款成功时该支付产生的未消费关联 BONUS 将随 BASE 一并撤销。',
+});
+Object.assign(accountPlatformCopy.en, {
+  basePoints:'Base points (BASE)', bonusPoints:'Bonus points (BONUS)', componentTypes:{BASE:'Base points (BASE)',BONUS:'Bonus points (BONUS)'}, entitlementSource:'Benefit source', expiredPoints:'Expired points', revokedPoints:'Revoked points', expiryReminder:'Expiry reminder', expiryReminderAt:value=>`Expires ${value}; it cannot fund new usage after expiry.`, consumptionOrder:'Consumption order: earliest expiry first; for the same expiry date, BONUS before BASE; then credit time and stable ID.', refundCompositionNotice:'BONUS has no cash refund value. When a normal refund succeeds, all unconsumed BONUS associated with that payment is revoked together with BASE.',
+});
+Object.assign(accountPlatformCopy.ja, {
+  basePoints:'基本ポイント（BASE）', bonusPoints:'ボーナスポイント（BONUS）', componentTypes:{BASE:'基本ポイント（BASE）',BONUS:'ボーナスポイント（BONUS）'}, entitlementSource:'特典の付与元', expiredPoints:'期限切れポイント', revokedPoints:'取消済みポイント', expiryReminder:'期限のお知らせ', expiryReminderAt:value=>`${value} に期限切れとなり、それ以降は新しい利用に使用できません。`, consumptionOrder:'消費順序：期限が早い特典を優先し、同じ期限では BONUS、BASE の順、同種では付与日時と固定 ID の順に使用します。', refundCompositionNotice:'BONUS は現金返金額を生みません。通常返金が成功すると、その支払いに紐づく未消費の BONUS は BASE とともに取り消されます。',
+});

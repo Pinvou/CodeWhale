@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func (r *PostgresRepository) RequestAdjustment(ctx context.Context, walletID uuid.UUID, amount int64, reason string, requestedBy uuid.UUID) (ManualAdjustment, error) {
@@ -85,7 +86,20 @@ func (r *PostgresRepository) ApproveAdjustment(ctx context.Context, adjustmentID
 			return ManualAdjustment{}, ErrConflict
 		}
 		lotID := uuid.Must(uuid.NewV7())
-		_, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,created_at) VALUES($1,$2,'ADJUSTMENT',$3,$4,$4,false,$5)`, lotID, adjustment.WalletID, "adjustment:"+adjustment.ID.String(), adjustment.AmountMicrocredits, now)
+		reference := "adjustment:" + adjustment.ID.String()
+		expiresAt := now.AddDate(0, 0, 30)
+		_, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES($1,$2,'ADJUSTMENT',$3,$4,$4,false,$5,$6)`, lotID, adjustment.WalletID, reference, adjustment.AmountMicrocredits, expiresAt, now)
+		packageID := uuid.Must(uuid.NewV7())
+		if err == nil {
+			var command pgconn.CommandTag
+			command, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) SELECT $1,CASE WHEN owner_type='PERSONAL' THEN owner_id ELSE NULL END,id,NULL,$2,'MANUAL_BONUS','Manual bonus','',0,$3,$3,$4,$4,$5,'ACTIVE',$4,$4,'MANUAL_ADJUSTMENT',$6 FROM wallets WHERE id=$7`, packageID, lotID, adjustment.AmountMicrocredits, now, expiresAt, reference, adjustment.WalletID)
+			if err == nil && command.RowsAffected() != 1 {
+				err = ErrConflict
+			}
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `INSERT INTO entitlement_components(id,package_id,component_type,credit_lot_id,original_microcredits,available_microcredits,credited_at,expires_at,status,created_at,updated_at) VALUES($1,$2,'BONUS',$1,$3,$3,$4,$5,'ACTIVE',$4,$4)`, lotID, packageID, adjustment.AmountMicrocredits, now, expiresAt)
+		}
 		if err == nil {
 			err = insertPosting(ctx, tx, entryID, walletAccount, adjustment.AmountMicrocredits, &lotID, now)
 		}
@@ -175,18 +189,20 @@ func validateAdjustmentDecision(adjustment ManualAdjustment, actor uuid.UUID, re
 }
 
 func consumeAdjustmentLots(ctx context.Context, tx pgx.Tx, entryID, walletAccount, walletID uuid.UUID, amount int64, now time.Time) error {
-	rows, err := tx.Query(ctx, `SELECT id,remaining_microcredits FROM credit_lots WHERE wallet_id=$1 AND remaining_microcredits > 0 AND (expires_at IS NULL OR expires_at > $2) ORDER BY refundable DESC,created_at,id FOR UPDATE`, walletID, now)
+	rows, err := tx.Query(ctx, `SELECT component.package_id,component.id,component.credit_lot_id,component.available_microcredits FROM entitlement_components component JOIN entitlement_packages package ON package.id=component.package_id WHERE package.wallet_id=$1 AND component.available_microcredits>0 AND component.expires_at>$2 AND component.status='ACTIVE' ORDER BY component.expires_at,CASE component.component_type WHEN 'BONUS' THEN 0 ELSE 1 END,component.credited_at,component.id FOR UPDATE OF component`, walletID, now)
 	if err != nil {
 		return err
 	}
 	type lot struct {
-		id        uuid.UUID
-		remaining int64
+		packageID   uuid.UUID
+		componentID uuid.UUID
+		lotID       uuid.UUID
+		remaining   int64
 	}
 	lots := make([]lot, 0)
 	for rows.Next() {
 		var item lot
-		if err := rows.Scan(&item.id, &item.remaining); err != nil {
+		if err := rows.Scan(&item.packageID, &item.componentID, &item.lotID, &item.remaining); err != nil {
 			rows.Close()
 			return err
 		}
@@ -203,10 +219,24 @@ func consumeAdjustmentLots(ctx context.Context, tx pgx.Tx, entryID, walletAccoun
 			break
 		}
 		consume := min(remaining, item.remaining)
-		if _, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1`, item.id, consume); err != nil {
+		command, err := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits>=$2`, item.lotID, consume)
+		if err != nil {
 			return err
 		}
-		if err := insertPosting(ctx, tx, entryID, walletAccount, -consume, &item.id, now); err != nil {
+		if command.RowsAffected() != 1 {
+			return ErrConflict
+		}
+		command, err = tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=available_microcredits-$2,revoked_microcredits=revoked_microcredits+$2,status=CASE WHEN available_microcredits=$2 AND reserved_microcredits=0 THEN 'REVOKED' ELSE status END,updated_at=$3 WHERE id=$1 AND available_microcredits>=$2`, item.componentID, consume, now)
+		if err != nil {
+			return err
+		}
+		if command.RowsAffected() != 1 {
+			return ErrConflict
+		}
+		if err := insertPosting(ctx, tx, entryID, walletAccount, -consume, &item.lotID, now); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE entitlement_packages package SET status=CASE WHEN EXISTS(SELECT 1 FROM entitlement_components component WHERE component.package_id=package.id AND (component.available_microcredits>0 OR component.reserved_microcredits>0)) THEN 'ACTIVE' ELSE 'CONSUMED' END,updated_at=$2 WHERE id=$1`, item.packageID, now); err != nil {
 			return err
 		}
 		remaining -= consume

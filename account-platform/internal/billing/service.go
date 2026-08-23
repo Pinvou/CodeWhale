@@ -506,6 +506,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusLocked, "WALLET_UNAVAILABLE", "the wallet is not active"
 	case errors.Is(err, ErrUsageAlreadyTerminal):
 		status, code, message = http.StatusConflict, "USAGE_ALREADY_SETTLED", "the usage hold is already terminal"
+	case errors.Is(err, ErrUsagePlatformLossReview):
+		status, code, message = http.StatusConflict, "USAGE_PLATFORM_LOSS_REVIEW", "the usage was reported after its entitlement expired and requires platform-loss review"
 	case errors.Is(err, ErrPaymentProvider):
 		status, code, message = http.StatusBadGateway, "PAYMENT_PROVIDER_UNAVAILABLE", "the payment provider request could not be completed"
 	case errors.Is(err, ErrCommerceCustomerNotReady):

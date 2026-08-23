@@ -14,6 +14,7 @@ var (
 	ErrInsufficientBalance      = errors.New("wallet has insufficient available credits")
 	ErrWalletUnavailable        = errors.New("wallet is unavailable")
 	ErrUsageAlreadyTerminal     = errors.New("usage hold is already terminal")
+	ErrUsagePlatformLossReview  = errors.New("usage arrived after entitlement expiry and requires platform-loss review")
 	ErrCommerceCustomerNotReady = errors.New("commerce customer mapping is not ready")
 )
 
@@ -57,23 +58,44 @@ type Hold struct {
 }
 
 type EntitlementPackage struct {
-	ID              uuid.UUID `json:"package_id"`
-	UserID          uuid.UUID `json:"user_id"`
-	WalletID        uuid.UUID `json:"wallet_id"`
-	PaymentOrderID  uuid.UUID `json:"pinvou_order_id"`
-	MallOrderID     string    `json:"mall_order_id"`
-	ProductID       string    `json:"plan_id"`
-	PlanName        string    `json:"plan_name"`
-	SKUCode         string    `json:"sku_code"`
-	AmountFen       int64     `json:"amount_fen"`
-	PointsTotal     int64     `json:"points_total_microcredits"`
-	PointsReserved  int64     `json:"points_reserved_microcredits"`
-	PointsUsed      int64     `json:"points_used_microcredits"`
-	PointsRemaining int64     `json:"points_remaining_microcredits"`
-	CreditedAt      time.Time `json:"credited_at"`
-	ValidFrom       time.Time `json:"valid_from"`
-	ValidUntil      time.Time `json:"valid_until"`
-	Status          string    `json:"status"`
+	ID              uuid.UUID              `json:"package_id"`
+	UserID          *uuid.UUID             `json:"user_id,omitempty"`
+	WalletID        uuid.UUID              `json:"wallet_id"`
+	PaymentOrderID  *uuid.UUID             `json:"pinvou_order_id,omitempty"`
+	MallOrderID     string                 `json:"mall_order_id"`
+	SourceType      string                 `json:"source_type"`
+	SourceReference string                 `json:"source_reference"`
+	ProductID       string                 `json:"plan_id"`
+	PlanName        string                 `json:"plan_name"`
+	SKUCode         string                 `json:"sku_code"`
+	AmountFen       int64                  `json:"amount_fen"`
+	PointsTotal     int64                  `json:"points_total_microcredits"`
+	PointsReserved  int64                  `json:"points_reserved_microcredits"`
+	PointsUsed      int64                  `json:"points_used_microcredits"`
+	PointsRemaining int64                  `json:"points_remaining_microcredits"`
+	PointsExpired   int64                  `json:"points_expired_microcredits"`
+	PointsRevoked   int64                  `json:"points_revoked_microcredits"`
+	CreditedAt      time.Time              `json:"credited_at"`
+	ValidFrom       time.Time              `json:"valid_from"`
+	ValidUntil      time.Time              `json:"valid_until"`
+	Status          string                 `json:"status"`
+	Components      []EntitlementComponent `json:"components"`
+}
+
+type EntitlementComponent struct {
+	ID                         uuid.UUID `json:"component_id"`
+	ComponentType              string    `json:"component_type"`
+	OriginalMicrocredits       int64     `json:"original_microcredits"`
+	AvailableMicrocredits      int64     `json:"available_microcredits"`
+	ReservedMicrocredits       int64     `json:"reserved_microcredits"`
+	UsedMicrocredits           int64     `json:"used_microcredits"`
+	ActiveGrantMicrocredits    int64     `json:"active_grant_microcredits"`
+	SuspendedGrantMicrocredits int64     `json:"suspended_grant_microcredits"`
+	ExpiredMicrocredits        int64     `json:"expired_microcredits"`
+	RevokedMicrocredits        int64     `json:"revoked_microcredits"`
+	CreditedAt                 time.Time `json:"credited_at"`
+	ExpiresAt                  time.Time `json:"expires_at"`
+	Status                     string    `json:"status"`
 }
 
 type PriceVersion struct {

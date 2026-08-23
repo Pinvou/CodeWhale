@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 88`、`部分实现 82`、`未实现 157`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 98`、`部分实现 78`、`未实现 151`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -35,8 +35,9 @@
 | `IDENTITY-SMS` | Identity 密码边界、原始字符策略、短期引用与策略版本、两类短信 Provider、多维限流审计和登录反枚举 | Go 全量测试、40 个合同测试、桌面 ESLint/三语检查和 Rust `cargo check` 通过；数据库运行级迁移与真实短信待部署 |
 | `REGISTRATION-SAGA` | 唯一值预约、稳定操作/密码指纹、Identity 关联恢复、异步钱包、状态门禁、桌面恢复和证明门禁补偿 | Go 单元测试、41 个合同测试、桌面 ESLint/三语检查和 Rust `cargo check` 通过；数据库运行级迁移、真实 Billing/Identity 故障注入待部署 |
 | `COMMERCE-MAPPING` | 供应商中立 Mapping/任务/证据、版本防迟到覆盖、Adapter 合同边界及支付专用准入查询 | Go 单元测试、42 个 OpenAPI/合同测试、迁移与部署模板检查通过；真实 Provider、数据库运行级迁移和故障注入待部署 |
+| `ENTITLEMENT-COMPONENTS` | BASE/BONUS 组成级入账、确定消费顺序、人工赠送、到期释放、迟到用量损失复核、守恒投影及三语展示 | Go Billing/Token 单元测试、OpenAPI lint、44 个合同测试、Portal 构建和桌面 ESLint 通过；数据库运行级迁移、并发和故障注入待部署 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/42 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/44 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -53,7 +54,7 @@
 | CORE-01 | 已实现 | AUDIT_HEAD | GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Keycloak 是持久身份/会话事实源，独立 Identity Adapter 管理密码策略和厂商协议，Account 只保存业务映射；生产部署待验证 |
 | CORE-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | Account 自有用户、平台/组织角色权限、组织和 Session 上下文；活动上下文仍按 Session 保存，尚未收敛为用户级全局事实 |
 | CORE-03 | 已实现 | AUDIT_HEAD | GO-UNIT; COMMERCE-MAPPING | NOT_DEPLOYED | Commerce Mapping 只维护用户/组织与外部客户的 Provider、Adapter 版本、脱敏引用及状态；授权上下文不读取 Mapping，生产部署待验证 |
-| CORE-04 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 平衡不可变账本已实现；组成级权益、应收和完整支付事实模型未实现 |
+| CORE-04 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 平衡不可变账本及组成级守恒事实已实现；后续应收和支付流水任务必须继续通过同一账本扩展，数据库运行级验证待部署 |
 | CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
 | CORE-06 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 模型不确定结果可进入 REVIEW 并核对 New API；支付和流式派发证据状态机不完整 |
 | CORE-07 | 部分实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | 三服务具备 Outbox/Inbox/Relay，注册 Saga 已闭环；注销、退款和托管路由 Provisioning 等流程仍待收敛 |
@@ -136,13 +137,13 @@
 | TOK-46 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少逻辑模型、目录、协议、能力、价格和路由代次的独立版本生成规则及请求全版本快照 |
 | TOK-47 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少弃用宽限期、新会话/历史继续分离门禁、显式替代分支及下架在途请求处理 |
 | BILL-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | Account 提交原子写入钱包任务与 Outbox，后台使用稳定键调用 Billing、退避重试并在成功后激活账号；bootstrap 不同步调用 Billing |
-| BILL-05 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 商品有 BASE/BONUS 字段，但入账和权益包只保存合计，未形成组成类型约束 |
+| BILL-05 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 权益组成表只允许 BASE/BONUS，商品入账按冻结商品快照拆分且舍入余数归 BONUS，不存在第三种积分类型 |
 | BILL-09 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Hold 只按聚合权益包分配，没有按 BASE/BONUS 组成分配 |
 | BILL-10 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组成级批量授权及逐项部分成功契约 |
 | BILL-11 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组成级授予撤回与重建 |
 | BILL-12 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无 `ACCOUNT_CLOSED` 专用回收和原组成恢复 |
 | BILL-13 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无成员移除后的授予暂停/恢复状态 |
-| BILL-16 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 仅按权益包到期时间消费，无法执行同日 BONUS 优先于 BASE |
+| BILL-16 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | Hold、结算和人工扣减按到期时间、BONUS/BASE、入账时间和稳定组件 ID 确定排序 |
 | BILL-20 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有固定三元组价格，没有版本化计量单位 |
 | BILL-23 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 公式引用单位与固定价格/模型级显式继承配置项的严格绑定待实现 |
 | BILL-24 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | INPUT_TOKEN 与 CACHED_INPUT_TOKEN 互斥归一化和防重复计费待实现 |
@@ -154,7 +155,7 @@
 | BILL-33 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 订单级拒付冲销隔离、关联权益撤销和对应钱包上下文冻结待实现 |
 | BILL-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少可信实际生成量、客户端交付量和平台不可恢复交付故障之间的计费证据边界 |
 | BILL-35 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少取消期间 Hold 的派发前释放、派发后续租、期限收敛和晚到证据处理规则 |
-| BILL-36 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少权益组成可用、有效授予、暂停授予和关联 Hold 四个互斥桶的资金守恒校验 |
+| BILL-36 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 数据库按权益包和组成强制原始额等于可用、Hold、已用、有效/暂停授予、过期及撤销桶之和，包聚合仅由触发器投影 |
 | BILL-37 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少同权益包同组成可用余额上限及禁止跨包、跨组成、跨钱包超额授权的强约束 |
 | BILL-38 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少组成级锁或等价 CAS、请求指纹、并发分配和批量子幂等事务边界 |
 | BILL-39 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少账号注销后组织授予隔离、不自动回池、禁止恢复/普通撤回及未回收剩余量到期失效规则 |
@@ -312,14 +313,14 @@
 | BILL-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 钱包按 Owner 类型和 ID 唯一；组织请求不能隐式扣个人钱包。 |
 | BILL-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Journal Entry 与 Posting 平衡，不能直接覆盖余额。 |
 | BILL-03 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | `10,000 microcredits = 1 展示积分`；金额使用分。 |
-| BILL-06 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有支付来源聚合权益包、有效期和余额；未持久化 BASE/BONUS 组成，且来源绑定订单而非支付流水 |
+| BILL-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 充值按支付订单和冻结商品快照创建独立权益包及 BASE/BONUS 组成，保存起止时间、原始额和各状态桶；支付流水细化由 PAY-11～PAY-14 继续扩展 |
 | BILL-07 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 企业管理员购买时明确受益组织；支付成功幂等创建组织权益包和组织钱包分录，付款人个人钱包不参与。 |
 | BILL-08 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 企业管理员从组织有效权益中给成员分配，员工无领取接口；分配、撤回、占用和消费均审计。 |
-| BILL-14 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 权益包增加基础/赠送组成及各自剩余、预占、已用；按到期顺序分包返回。 |
+| BILL-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 权益 API 按组成返回总额、可用、预占、已用、过期、撤销和到期时间，并提供总可用及 BASE/BONUS 汇总 |
 | BILL-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Hold 分配与结算关联具体权益包。 |
-| BILL-17 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 人工赠送积分必须形成独立权益组成，自入账起 30 天到期，不允许创建无期限人工赠送余额。 |
-| BILL-18 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有到期任务关闭权益包和账本处理；缺 BASE/BONUS 组成及与不确定 Hold 的完整目标规则 |
-| BILL-19 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 权益到期时直接释放并移除仍不确定的 Hold，不恢复已过期可用额度；之后确认的上游用量进入人工损失复核，不重新扣减其他权益。 |
+| BILL-17 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 每次正向人工调整创建独立 BONUS 权益包和组成，自入账起固定 30 天到期 |
+| BILL-18 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 到期 Worker 锁定到期包，先收敛相关 Hold，再按组成写平衡到期分录并保留包及组件历史 |
+| BILL-19 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 到期事务释放涉及该组成的不确定 Hold 且不恢复过期额度；迟到确认写入独立平台损失复核，不扣其他权益或形成负余额 |
 | BILL-21 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前与历史价格并存，结算/核对使用对应时点价格。 |
 | BILL-22 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 支持全局默认和模型覆盖；每个策略可为统一价格或按 `Asia/Shanghai` 时间段计价，区间不重叠且完整可预览。 |
 | BILL-26 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 申请、批准、拒绝和账本入账可审计。 |
@@ -351,7 +352,7 @@
 | UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-UI; UI-I18N; CONTRACT-41 | NOT_DEPLOYED | 桌面个人中心提供用户名/手机号修改及未登录忘记密码入口，复用集中三语词条；资料提交要求重新认证，手机号和密码恢复要求专用短信挑战。 |
 | UI-06 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人上下文显示个人权益；组织上下文只显示当前成员被授予的组织额度，不同时展示其他上下文余额。 |
 | UI-07 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 桌面与 Web 展示同一个服务端活动上下文；收到更高上下文版本、窗口重新聚焦或切换成功时清空旧额度/权限缓存并刷新。 |
-| UI-08 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 需展示总可用积分、每个包的 BASE/BONUS 余额、来源、到期时间、消耗顺序、即将到期提醒，以及 BONUS 零现金退款但普通退款成功时关联未消费 BONUS 随 BASE 撤销。 |
+| UI-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 桌面与 Portal 三语展示总可用、BASE/BONUS、来源、各组成余额、到期提醒及确定消费顺序，并明确 BONUS 零现金退款和普通退款关联撤销规则 |
 | UI-09 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 登录后的账号 Popover 增加入口按钮；使用专用 Tauri 命令打开受信 Portal URL，不复用任意外链接口。 |
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 具有组织采购权限的企业管理员可在显式目标组织管理页购买组织权益。 |
@@ -410,7 +411,7 @@
 | CR-05 | ACC-06–ACC-09, UI-05 | 个人中心支持修改手机号、用户名和忘记密码 | 已实现 | Account 只编排不透明 Identity 端口；Keycloak 更新/重置/会话撤销和新华三重同步协议分别留在 Adapter/Worker。供应商中立 Mapping 由 APT-005 替换现有专用任务。 |
 | CR-06 | ACC-19 | 组织删除为逻辑删除；有余额、有效权益包或未结算 Hold 时禁止删除 | 部分实现 | 当前已逻辑删除，但缺少跨 Billing 的删除前置检查；需增加冻结、预检、幂等删除和审计 |
 | CR-07 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 符合可用条件的模型都可供用户选择 | 已由 CR-35 细化状态语义 | 原记录把目录展示、上下文资格和请求预占混为一个可用条件；模型目录同步要求继续有效，状态划分以 CR-35 为准 |
-| CR-08 | BILL-14, BILL-17, BILL-16, UI-08 | 分别展示基础积分、赠送积分、到期顺序、即将到期提醒和多个权益包，同时展示可用总积分 | 部分实现 | 当前有多个权益包、总可用数和最近到期摘要，但包内没有基础/赠送余额拆分，UI 展示不足 |
+| CR-08 | BILL-14, BILL-17, BILL-16, UI-08 | 分别展示基础积分、赠送积分、到期顺序、即将到期提醒和多个权益包，同时展示可用总积分 | 已实现 | 组成级 API 与三语 UI 已展示 BASE/BONUS、总可用、来源、确定消费顺序和到期提醒；人工赠送为独立 30 天 BONUS |
 | CR-09 | SCOPE-04, SCOPE-05, TOK-15, TOK-35, TOK-36, TOK-37, NFR-20 | 删除旧模型路径及兼容代码，全量迁移到账号平台 + Token Gateway | 未实现 | 实现范围仅限品悟客户端；除删除功能开关、旧 `llmapi_hub` 身份/Token/模型回退和运行时双路径外，还缺少客户端数据迁移、凭据清理、三层门禁、非计费 readiness、升级矩阵及版本级回滚验收；TOK-37 服务端前置能力必须由独立任务先行完成 |
 | CR-10 | ACC-13, ADM-05, ADM-06, ADM-07 | 基于当前全部能力重新设计角色系统 | 设计完成、待实现 | 采用平台与组织两级、权限码驱动、作用域明确、默认拒绝、资金审批分离的 RBAC；见 `role-system-design.md` |
 | CR-11 | UI-09 | 品悟应用内个人中心提供 Web 个人中心入口 | 未实现 | 桌面账号弹层增加“打开 Web 个人中心”按钮，通过受信配置打开 `/account.html`；不在 URL 中携带 OIDC Token |
@@ -427,8 +428,8 @@
 | CR-22 | ACC-29 | 每个有效组织恰好一个所有者 | 待重构 | 所有权只能通过专用原子转让命令变更；普通管理员允许多人，不能用普通角色分配接口增删所有者 |
 | CR-23 | TOK-19, TOK-21, TOK-23, BILL-30 | 动态预占采用已确认的边界策略 | 部分由 CR-36 取代 | 无 Tokenizer 时安全裕量为 0、Hold 续租和追加预占继续有效；“未传最大输出按 1,000,000 Token”和固定 Token 预占公式由 CR-36 取代 |
 | CR-24 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 只展示符合可用条件的模型 | 已由 CR-35 取代 | 原记录要求把上下文和路由资格作为目录展示前提；现行规则允许 CATALOG_VISIBLE 独立展示，并分别计算 CONTEXT_ELIGIBLE 与请求级 RESERVABLE |
-| CR-25 | BILL-16–BILL-17, BILL-19, BILL-28, PAY-24–PAY-31 | 权益退款、消费顺序和过期 Hold 采用确定规则 | 未实现 | 普通退款现金只按目标支付流水与权益包组合的全部未消费 BASE 计算，成功时同时撤销该支付产生的全部未消费关联 BONUS，BONUS 不产生现金退款；人工赠送积分有效期 30 天；同日到期按赠送、基础排序；权益过期时直接释放并移除不确定 Hold，后续证据转人工损失复核 |
-| CR-26 | BILL-05, BILL-08–BILL-13 | 组织额度按权益包分配并保留成员占用 | 未实现 | 管理员选择具体权益包和组成；批量操作逐项提交；非账号注销的成员移除使未消费授予不回池而转为可恢复暂停，原用户 ID 重新加入且未过期时恢复；管理员可给自己分配；授予不能改额，只能撤回后重建；账号注销另按 BILL-39 处理 |
+| CR-25 | BILL-16–BILL-17, BILL-19, BILL-28, PAY-24–PAY-31 | 权益退款、消费顺序和过期 Hold 采用确定规则 | 部分实现 | 已完成确定消费顺序、30 天人工 BONUS、过期 Hold 释放及迟到用量平台损失复核；普通/强制退款的目标支付流水锁定与组成撤销仍由 APT-021 实现 |
+| CR-26 | BILL-05, BILL-08–BILL-13 | 组织额度按权益包分配并保留成员占用 | 部分实现 | 已建立仅 BASE/BONUS 的组成事实与授予守恒桶；组织成员授予、批量分配、暂停/恢复、撤回重建及注销隔离仍由 APT-017/015 实现 |
 | CR-27 | ACC-34, ACC-35–ACC-39, UI-07 | 桌面与 Web 共享一个用户级活动上下文 | 待重构 | 活动上下文不再按 OIDC Session 独立保存；任一端切换后其他端自动同步，进行中的调用按开始快照结算；成员移除或组织停用自动回个人；所有业务 API 返回上下文版本 |
 | CR-28 | ADM-01–ADM-03, ADM-06 | 超级管理员初始化、恢复和授权生命周期 | 未实现、ADM-01 初始化凭据由 CR-58 取代 | 原记录使用一次性8位随机初始密码；现行首个管理员初始化改用交互式直接设密或高熵一次性引导凭据；Break-glass 仅处理全部管理员异常失联，不绕过最后一个有效超级管理员主动注销保护，临时授权和自动回收部分保持有效 |
 | CR-29 | ADM-07 | 审批允许角色兼任和交叉审批 | 未实现、由 CR-59 细化 | 同一用户可同时拥有计费运营和审批角色，仍禁止审批自己的申请；不同用户可以互相审批；强制审批命令只需一名独立审批人，普通退款和组织删除不进入财务审批流，全部写审计 |
@@ -450,7 +451,7 @@
 | CR-47 | REQ-ID-01–REQ-ID-03, CORE-01–CORE-07, SCOPE-01–SCOPE-05, ID-01–ID-16, ACC-01–ACC-39, TOK-01–TOK-37, BILL-01–BILL-33, PAY-01–PAY-36, UI-01–UI-12, ADM-01–ADM-32, NFR-01–NFR-25 | 删除退休需求并按依赖关系重排、重新编号全部目标能力 | 文档完成、实现状态保持原判断 | 删除编号稳定与禁止重排规则；移除目标基线中的退休能力占位；按基础能力、依赖顺序和领域相关性形成连续新编号，并同步全部文档和实现状态引用 |
 | CR-48 | TOK-29, TOK-38–TOK-41, BILL-34–BILL-35, UI-13 | 补齐用户取消、连接断开与模型计费收敛契约 | 未实现 | 取消意图、Provider 取消结果、服务端执行、客户端交付和计费结算分别保存；断线不取消，Provider 不支持取消时继续核对实际用量，按可信实际生成量计费并在取消期间安全续租、结算或超时释放 Hold |
 | CR-49 | PAY-17, PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | 72小时未收敛订单转人工审核并闭合无回调无账单 Provider 的晚到支付处理 | 未实现 | 前72小时查询计划不变；边界最后查询后创建带责任人和 SLA 的审核案件，前7天每日、此后每周人工查询；只有有限晚到窗口、长期历史查询和权威终态的 Provider 才能正式收款，并以最终成功查询作为未支付归档门禁 |
-| CR-50 | BILL-36–BILL-38 | 明确组织权益组成资金守恒、禁止超额授权及并发分配边界 | 未实现 | 每个权益包 BASE/BONUS 组成满足可分配总量等于可用余额、有效授予未消费额、暂停授予未消费额和关联 Hold 之和；所有桶互斥，新增授予只使用组成可用余额，并通过组成级锁/CAS、幂等键和请求指纹防止多管理员并发超分 |
+| CR-50 | BILL-36–BILL-38 | 明确组织权益组成资金守恒、禁止超额授权及并发分配边界 | 部分实现 | 已建立组成级互斥桶和数据库守恒约束；组织授予的额度上限、组成锁/CAS、幂等指纹和并发分配仍由 APT-017 实现 |
 | CR-51 | ACC-10, ACC-11, BILL-12, BILL-13, BILL-36, BILL-39 | 注销用户的未消费组织授予终局占用至原到期日 | 未实现、由 CR-54 调整 | 原规则禁止任何回收；现行规则仍要求 `ACCOUNT_CLOSED` 授予不自动回池、不可恢复、消费或普通撤回，但允许按 CR-54 的独立专用命令主动回收 |
 | CR-52 | ACC-10–ACC-11, ACC-40–ACC-50, BILL-39, UI-14, ADM-34 | 用持久注销 Saga 区分资金阻断、系统自动清理和标识释放门禁 | 未实现 | 待核对用量、拒付、资金性差异、外部待确认关单及资金相关 Commerce 任务阻断注销；组织所有权及最后一个有效超级管理员角色须先交接，资料 Saga、其他角色、临时授权和邀请不要求用户处理但必须自动收敛；全部门禁通过且 Identity 不可认证后才能释放标识，迟到任务不得作用于新账号 |
 | CR-53 | ID-03, ID-14–ID-15, ID-17–ID-18, ACC-02, ACC-51–ACC-55, UI-15, ADM-35, NFR-04, NFR-06 | 闭合注册预检并发、唯一值预约、幂等、密码边界和孤儿 Identity 补偿 | 已实现 | 数据库唯一预约、稳定操作/密码指纹、脱敏查询、Identity 关联向前恢复及24小时证明门禁补偿已闭环；全域日志白名单与幂等治理仍由独立 NFR 任务追踪 |
@@ -640,14 +641,14 @@
 | BILL-01 | 个人和组织钱包独立 | 已实现 | 钱包按 Owner 类型和 ID 唯一；组织请求不能隐式扣个人钱包。 |
 | BILL-02 | 余额以不可变平衡账本为准 | 已实现 | Journal Entry 与 Posting 平衡，不能直接覆盖余额。 |
 | BILL-03 | 积分使用整数最小单位 | 已实现 | `10,000 microcredits = 1 展示积分`；金额使用分。 |
-| BILL-06 | 充值形成有有效期的权益包 | 部分实现 | 当前持久化支付来源、起止时间和聚合剩余额度；商品虽有基础/赠送字段，权益包未保存 BASE/BONUS 组成，来源绑定订单而非成功支付流水。 |
+| BILL-06 | 充值形成有有效期的权益包 | 已实现 | 充值按支付订单和冻结商品快照创建独立权益包及 BASE/BONUS 组成，保存起止时间和组成余额。 |
 | BILL-07 | 组织权益在线购买入账 | 未实现 | 企业管理员购买时明确受益组织；支付成功幂等创建组织权益包和组织钱包分录，付款人个人钱包不参与。 |
 | BILL-08 | 组织成员额度手动分配 | 未实现 | 企业管理员从组织有效权益中给成员分配，员工无领取接口；分配、撤回、占用和消费均审计。 |
-| BILL-14 | 基础积分与赠送积分分项核算展示 | 未实现 | 权益包增加基础/赠送组成及各自剩余、预占、已用；按到期顺序分包返回。 |
+| BILL-14 | 基础积分与赠送积分分项核算展示 | 已实现 | API 与三语 UI 分项返回并展示组成总额、可用、预占、已用、过期、撤销和到期时间。 |
 | BILL-15 | 消费按最早到期权益包优先 | 已实现 | Hold 分配与结算关联具体权益包。 |
-| BILL-17 | 人工赠送积分有效期 | 未实现 | 人工赠送积分必须形成独立权益组成，自入账起 30 天到期，不允许创建无期限人工赠送余额。 |
-| BILL-18 | 权益到期处理 | 部分实现 | 已有到期任务关闭权益包和账本处理；缺 BASE/BONUS 组成及与不确定 Hold 的完整目标规则。 |
-| BILL-19 | 过期不确定 Hold | 未实现 | 权益到期时直接释放并移除仍不确定的 Hold，不恢复已过期可用额度；之后确认的上游用量进入人工损失复核，不重新扣减其他权益。 |
+| BILL-17 | 人工赠送积分有效期 | 已实现 | 每次正向人工调整创建独立 BONUS 组成，自入账起 30 天到期。 |
+| BILL-18 | 权益到期处理 | 已实现 | 可审计到期 Worker 先收敛相关 Hold，再按组成写到期账本分录并保留历史。 |
+| BILL-19 | 过期不确定 Hold | 已实现 | 到期释放不确定 Hold；迟到真实用量进入平台损失复核，不扣其他权益或形成负余额。 |
 | BILL-21 | 定价按模型和版本管理 | 已实现 | 当前与历史价格并存，结算/核对使用对应时点价格。 |
 | BILL-22 | 全局统一价格和分时段计价 | 未实现 | 支持全局默认和模型覆盖；每个策略可为统一价格或按 `Asia/Shanghai` 时间段计价，区间不重叠且完整可预览。 |
 | BILL-23 | 价格只配置协议公式引用的计量单位 | 未实现 | 当前未支持“全局单位必须固定价、模型单位可固定价或显式继承”的完整配置项约束；运行时也未证明只使用公式引用单位和不可变绑定。 |
@@ -659,7 +660,7 @@
 | BILL-33 | 订单级拒付冲销隔离 | 未实现 | 拒付只撤销原支付流水对应权益包的可撤销 BASE 和关联 BONUS；不足现金本金形成订单级应收，不冲销其他权益包，应收未清时冻结对应钱包上下文。 |
 | BILL-34 | 模型计费使用可信实际生成量 | 未实现 | 当前未区分 Provider 实际生成量、Gateway 持久化序号和客户端确认序号，也没有平台不可恢复交付故障转损失复核的计费边界。 |
 | BILL-35 | 取消期间 Hold 生命周期 | 未实现 | 缺少派发前取消全释放、派发后继续续租、Provider 不支持取消时自然收敛、版本化核对期限及晚到用量不得重新扣用户的规则。 |
-| BILL-36 | 权益组成资金守恒 | 未实现 | 当前没有按权益包与 BASE/BONUS 组成核验“可分配总量＝可用＋有效授予未消费＋暂停授予未消费＋Hold”，也未证明四桶互斥。 |
+| BILL-36 | 权益组成资金守恒 | 已实现 | 数据库按权益包/组成强制原始额在可用、Hold、已用、有效/暂停授予、过期和撤销桶间守恒，包汇总由触发器投影。 |
 | BILL-37 | 权益组成禁止超额授权 | 未实现 | 当前缺少只允许从同包同组成可用余额创建授予的数据库强约束，暂停授予和 Hold 可能无法证明不会被重复分配。 |
 | BILL-38 | 并发分配锁与幂等边界 | 未实现 | 当前未证明分配、撤回、Hold、结算、到期和退款共用组成级锁/CAS；缺少同键异请求冲突和多管理员竞争余额的并发测试。 |
 | BILL-39 | 注销授予隔离至到期 | 未实现 | 当前没有区分普通成员移除的可恢复暂停与账号注销的 `ACCOUNT_CLOSED` 隔离暂停，也没有强制不自动回池、不可恢复/普通撤回、未回收部分到期失效及新用户 ID 不继承。 |
@@ -717,7 +718,7 @@
 | UI-05 | 账号资料与密码恢复 | 已实现 | 桌面 Popover 提供三语资料修改和密码恢复入口，并完成重新认证、短信、密码确认和稳定错误映射。 |
 | UI-06 | 个人中心只展示活动上下文额度 | 部分实现 | 个人上下文显示个人权益；组织上下文只显示当前成员被授予的组织额度，不同时展示其他上下文余额。 |
 | UI-07 | 跨端活动上下文同步 | 未实现 | 桌面与 Web 展示同一个服务端活动上下文；收到更高上下文版本、窗口重新聚焦或切换成功时清空旧额度/权限缓存并刷新。 |
-| UI-08 | 权益包、到期与退款说明 | 部分实现 | 需展示总可用积分、每个包的 BASE/BONUS 余额、来源、到期时间、消耗顺序、即将到期提醒，以及 BONUS 零现金退款但普通退款成功时关联未消费 BONUS 随 BASE 撤销。 |
+| UI-08 | 权益包、到期与退款说明 | 已实现 | 桌面与 Portal 三语展示总可用、BASE/BONUS 分项、来源、消费顺序和到期提醒，并明确 BONUS 零现金退款及普通退款关联撤销。 |
 | UI-09 | 桌面跳转 Web 个人中心 | 未实现 | 登录后的账号 Popover 增加入口按钮；使用专用 Tauri 命令打开受信 Portal URL，不复用任意外链接口。 |
 | UI-10 | Web 个人充值入口 | 已实现 | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | Web 组织购买入口 | 未实现 | 具有组织采购权限的企业管理员可在显式目标组织管理页购买组织权益。 |

@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -457,8 +459,12 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 	if repair {
 		journalType, reference, description = "REPAIR_CREDIT", "repair:"+order.ID.String(), "verified payment repair credit"
 	}
+	components, err := splitProductComponents(order.CreditMicrocredits, product.BasePoints, product.BonusPoints)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	amount := order.CreditMicrocredits
-	entryID, lotID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	entryID := uuid.Must(uuid.NewV7())
 	if err := insertJournal(ctx, tx, entryID, journalType, reference, description, now); err != nil {
 		return uuid.Nil, err
 	}
@@ -467,21 +473,62 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 		return uuid.Nil, err
 	}
 	validFrom, validUntil := now, now.AddDate(0, 0, product.ValidityDays)
-	if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,false,$5,$6)`, lotID, order.WalletID, reference, amount, validUntil, now); err != nil {
-		return uuid.Nil, err
-	}
 	packageID := uuid.Must(uuid.NewV7())
-	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,'ACTIVE',$11,$11)`, packageID, order.RequesterID, order.WalletID, order.ID, lotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validFrom, validUntil); err != nil {
+	primaryLotID := components[0].lotID
+	for _, component := range components {
+		lotReference := reference
+		if component.kind == "BONUS" && len(components) > 1 {
+			lotReference += ":bonus"
+		}
+		refundable := component.kind == "BASE"
+		if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,$5,$6,$7)`, component.lotID, order.WalletID, lotReference, component.amount, refundable, validUntil, now); err != nil {
+			return uuid.Nil, err
+		}
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,'ACTIVE',$11,$11,'PAYMENT',$14)`, packageID, order.RequesterID, order.WalletID, order.ID, primaryLotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validFrom, validUntil, reference); err != nil {
 		return uuid.Nil, err
 	}
-	if err = insertPosting(ctx, tx, entryID, accountID, amount, &lotID, now); err != nil {
-		return uuid.Nil, err
+	for _, component := range components {
+		if _, err = tx.Exec(ctx, `INSERT INTO entitlement_components(id,package_id,component_type,credit_lot_id,original_microcredits,available_microcredits,credited_at,expires_at,status,created_at,updated_at) VALUES($1,$2,$3,$1,$4,$4,$5,$6,'ACTIVE',$5,$5)`, component.lotID, packageID, component.kind, component.amount, now, validUntil); err != nil {
+			return uuid.Nil, err
+		}
+		if err = insertPosting(ctx, tx, entryID, accountID, component.amount, &component.lotID, now); err != nil {
+			return uuid.Nil, err
+		}
 	}
 	if err = insertPosting(ctx, tx, entryID, paymentClearingAccount, -amount, nil, now); err != nil {
 		return uuid.Nil, err
 	}
 	_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1`, order.WalletID, amount, now)
 	return packageID, err
+}
+
+type productComponentCredit struct {
+	kind   string
+	amount int64
+	lotID  uuid.UUID
+}
+
+func splitProductComponents(total, basePoints, bonusPoints int64) ([]productComponentCredit, error) {
+	if total <= 0 || basePoints < 0 || bonusPoints < 0 || basePoints > math.MaxInt64-bonusPoints || basePoints+bonusPoints <= 0 {
+		return nil, ErrConflict
+	}
+	weight := basePoints + bonusPoints
+	fraction := new(big.Int).Mul(big.NewInt(total%weight), big.NewInt(basePoints))
+	fraction.Quo(fraction, big.NewInt(weight))
+	base := total/weight*basePoints + fraction.Int64()
+	bonus := total - base
+	components := make([]productComponentCredit, 0, 2)
+	if base > 0 {
+		components = append(components, productComponentCredit{kind: "BASE", amount: base, lotID: uuid.Must(uuid.NewV7())})
+	}
+	if bonus > 0 {
+		components = append(components, productComponentCredit{kind: "BONUS", amount: bonus, lotID: uuid.Must(uuid.NewV7())})
+	}
+	if len(components) == 0 {
+		return nil, ErrConflict
+	}
+	return components, nil
 }
 
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {

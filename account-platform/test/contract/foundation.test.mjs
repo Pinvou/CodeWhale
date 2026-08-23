@@ -157,19 +157,22 @@ test('paid plan orders create independent thirty-day entitlement packages', asyn
 });
 
 test('usage holds reserve and settle entitlement packages in earliest-expiry order', async () => {
-  const migration = await readFile(path.join(root, 'migrations/billing/000012_package_hold_allocations.up.sql'), 'utf8');
-  const postgres = await readFile(path.join(root, 'internal/billing/postgres.go'), 'utf8');
-  assert.match(migration, /CREATE TABLE usage_hold_allocations/);
-  assert.match(postgres, /ORDER BY valid_until,credited_at,id FOR UPDATE/);
-  assert.match(postgres, /points_remaining=points_remaining-\$2,points_reserved=points_reserved\+\$2/);
-  assert.match(postgres, /released_microcredits=reserved_microcredits/);
+	const migration = await readFile(path.join(root, 'migrations/billing/000016_entitlement_components.up.sql'), 'utf8');
+	const postgres = await readFile(path.join(root, 'internal/billing/postgres.go'), 'utf8');
+	assert.match(migration, /ALTER TABLE usage_hold_allocations ADD COLUMN component_id/);
+	assert.match(postgres, /ORDER BY component\.expires_at,CASE component\.component_type WHEN 'BONUS' THEN 0 ELSE 1 END,component\.credited_at,component\.id FOR UPDATE/);
+	assert.match(postgres, /available_microcredits=available_microcredits-\$2,reserved_microcredits=reserved_microcredits\+\$2/);
+	assert.match(postgres, /released_microcredits=reserved_microcredits/);
 });
 
 test('entitlement packages expire locally and remain queryable by the personal user', async () => {
   const gateway = await readYaml('contracts/openapi/token-gateway.yaml');
   const packages = await readFile(path.join(root, 'internal/billing/packages.go'), 'utf8');
   assert.ok(gateway.paths['/me/entitlement-packages']);
-  assert.match(packages, /status='ACTIVE' AND valid_until<=\$1 AND points_reserved=0/);
+	assert.match(packages, /status='ACTIVE' AND valid_until<=\$1 ORDER BY valid_until,credited_at,id LIMIT 1/);
+	assert.match(packages, /lockTransactionKey\(ctx, tx, "entitlement\.expire"/);
+	assert.match(packages, /ENTITLEMENT_EXPIRED_UNCERTAIN/);
+	assert.match(packages, /expired_microcredits=expired_microcredits\+\$2/);
   assert.match(packages, /"EXPIRE", "expire:"\+packageID\.String\(\)/);
 });
 
