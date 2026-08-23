@@ -23,7 +23,7 @@
 - Token Portal 是个人中心和运营后台的 Web BFF，采用 OIDC Authorization Code + PKCE、Redis 服务端会话和 CSRF 防护。
 - 桌面端的内置模型路径使用与登录相同的 OIDC Access Token；旧内置模型运行时路径已移除，并已有本地迁移代码和测试。
 
-当前代码尚未实现的关键目标包括：注册钱包 Outbox Saga、用户级全局上下文、平台角色绑定生命周期与安全引导、托管路由 Provisioning 状态机、模型目录/协议/公式版本、模型结果重放、组成级 BASE/BONUS 权益、目标退款模型、应收/拒付/强制退款状态机和账号注销 Saga。
+当前代码尚未实现的关键目标包括：用户级全局上下文、平台角色绑定生命周期与安全引导、托管路由 Provisioning 状态机、模型目录/协议/公式版本、模型结果重放、组成级 BASE/BONUS 权益、目标退款模型、应收/拒付/强制退款状态机和账号注销 Saga。
 
 ## 2. 逻辑拓扑
 
@@ -86,15 +86,15 @@ flowchart LR
 
 仓库配置要求反向代理只公开认证、账号、Gateway 和 Portal 的受控路径。PostgreSQL、Redis、NATS、Relay、Billing 内部 API 和 New API 管理面保持在内部网络；这属于配置和代码基线，本次审计没有取得实际生产环境与版本证据。
 
-当前注册密码先通过 TLS 进入 Identity Adapter 的公开预检路径，取得 15 分钟有效的不透明引用和冻结的 `password_policy_version`；Account 的预检、短信和注册 API 只接收该引用，最终身份创建由 Identity Adapter 使用原始序列再次权威校验。短期原文与带独立密钥的 HMAC 仅保存在 Identity 进程内，成功创建后清除原文，过期时删除记录。该短期存储尚未构成 ACC-51～ACC-55 的持久注册 Saga；应用重启后客户端必须重新预检。反向方向上，Keycloak 的短信 Direct Grant Authenticator 会携带内部服务凭据调用 Account `/internal/v1/auth/sms/verify` 完成验证码核验。
+当前注册密码先通过 TLS 进入 Identity Adapter 的公开预检路径，取得 15 分钟有效的不透明引用和冻结的 `password_policy_version`；Account 的预检、短信和注册 API 只接收该引用，最终身份创建由 Identity Adapter 使用原始序列再次权威校验。短期原文与带独立密钥的 HMAC 仅保存在 Identity 进程内，成功创建后清除原文，过期时删除记录。Identity 还把服务端生成的注册操作 ID 绑定到密码 HMAC 指纹，并把该 ID 作为 Keycloak 用户属性保存，Account 可先按该关联查询再幂等创建，避免不确定结果下重复建号。反向方向上，Keycloak 的短信 Direct Grant Authenticator 会携带内部服务凭据调用 Account `/internal/v1/auth/sms/verify` 完成验证码核验。
 
 ## 3. 服务边界
 
 | 组件 | 当前职责 | 当前自有状态 | 主要目标差距 |
 |---|---|---|---|
 | Keycloak | 用户认证、密码、OIDC Token/Session；迁移期 Realm Role 不参与业务授权 | Keycloak 数据库 | 生产部署和后续密码重置/资料同步/会话撤销端口仍待环境及任务验证 |
-| Identity Adapter | 注册密码原始字符校验、策略版本、短期引用与 HMAC、Keycloak 用户创建/删除厂商协议 | 进程内 15 分钟短期记录；Keycloak 持久身份 | 注册操作持久恢复、资料同步、密码重置和会话撤销由后续任务补齐 |
-| Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、权限解析、手机注册编排、短信挑战、商城账号同步、组织/节点、成员/角色、Session 上下文、邀请、审计 | Account 数据库 | 注册 Saga、全局上下文、角色绑定生命周期、安全引导、注销 Saga、标识预约与恢复 |
+| Identity Adapter | 注册密码原始字符校验、策略版本、短期引用/HMAC、注册操作关联查询、Keycloak 用户创建及受控停用协议 | 进程内 15 分钟短期密码记录；Keycloak 持久身份与注册关联 | 资料同步、密码重置和会话撤销由后续任务补齐 |
+| Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、权限解析、持久注册 Saga、短信挑战、异步钱包初始化、商城账号同步、组织/节点、成员/角色、Session 上下文、邀请、审计 | Account 数据库 | 全局上下文、角色绑定生命周期、安全引导、注销 Saga |
 | Billing Service | 钱包、账本、聚合权益包、充值、固定定价、Hold、人工调整、支付修复和对账 | Billing 数据库 | 组成级权益、版本化单位/公式、目标支付退款状态机、应收与组织购买 |
 | Token Gateway | Token Account、加密凭据、共享策略、路由、聊天代理、用量和 New API 核对 | Token 数据库 | 模型目录、协议能力、托管 Provisioning、请求重放、持久派发和取消 |
 | Token Portal | OIDC PKCE、Redis Session、CSRF、个人中心、运营后台和路径白名单代理 | Redis Session | 目标后台权限模型、缺失业务页面和发布级三语门禁 |
@@ -128,9 +128,11 @@ flowchart LR
 - `mall_user_sync_jobs`：新华三商城用户同步任务。
 - `audit_logs`、`outbox_events`、`inbox_messages`、`inbox_aggregate_versions`：审计和可靠事件。
 
-手机注册接口先在 Keycloak 创建 Identity，再在 Account 事务中持久化稳定 UUIDv7 用户 ID、独立用户编码和 `PROVISIONING` 状态；唯一冲突只回滚当前保存点、重新随机生成编码，成功后返回格式化编码。两者成功后直接返回 `201`，注册响应不调用 Billing。桌面端随后单独发起登录；登录后的 `/v1/account/bootstrap` 会先确保 Account Session，再同步调用 Billing `EnsurePersonalWallet`，成功后把用户激活为 `ACTIVE`。Billing 失败会阻断本次 bootstrap/激活，但不会把已经成功的注册响应改为失败，也不会删除已提交的 Identity 或 Account。
+手机注册在发送短信前原子创建服务端注册操作、5 分钟唯一值预约和挑战；短信核验成功后把预约提升为 30 分钟注册租约。Account 持久保存非秘密阶段事实，先按稳定操作 ID 查询 Identity，再幂等创建；Identity 成功后预约不再按 TTL 自动释放。Account 提交以候选 UUIDv7 用户 ID 为稳定主键，在一个串行事务内写入用户、永久用户编码、身份映射、商城同步任务、钱包初始化任务、Outbox 和审计，随后返回可登录的 `PROVISIONING`。
 
-因此，当前实现已经满足“已验证身份与 Account 成功后不因 Billing 故障回滚”的基本边界，但仍没有注册钱包 Outbox、后台重试、SLA 和 `REPAIR_REQUIRED` 收敛；Identity 已创建而 Account 提交失败时也仍依赖即时补偿删除，而不是持久恢复 Saga。
+钱包初始化由后台任务使用稳定幂等键调用 Billing；成功后才把用户和注册操作激活为 `ACTIVE`，短暂失败按退避重试，超过快照化 SLA 后进入 `REPAIR_REQUIRED`。`PROVISIONING` 与 `REPAIR_REQUIRED` 均允许登录和资料管理，但 Token Gateway 与充值入口按稳定原因码拒绝平台模型和支付；本地独立模型不受影响。`/v1/account/bootstrap` 不再同步调用 Billing，也不把钱包故障改写为注册失败。
+
+客户端使用操作 ID 与 48 小时签名查询令牌恢复轮询；桌面优先把查询凭据写入系统凭据库，写入失败时只在当前 WebView 会话保留短期降级副本。运营修复入口由 `platform.registrations.repair` 保护，只返回脱敏阶段、责任域、重试和 SLA 元数据。Identity 孤儿默认向前恢复；只有 Identity 创建满 24 小时，且串行事务证明候选 Account 用户、正式映射、钱包任务和 Account Outbox 均不存在时，才能先停用 Identity、撤销会话并确认不可认证，再复核事实并释放预约，不提供直接删除捷径。这里的跨域无事实证明来自封闭发布边界：候选 ID 在 Account 提交前不会通过用户表或 Outbox 发布，Billing/Token/成员/授予/订单入口均不能引用未提交用户；任一 Account 发布事实存在都会使证明失败。
 
 ### 4.2 Billing 域
 
@@ -233,7 +235,7 @@ flowchart LR
 - `billing.recharge.succeeded.v1`
 - `token.usage.settled.v1`
 
-本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。现有事件集也没有实现注册钱包初始化、账号注销、目标退款和托管路由 Provisioning 等 Saga。
+本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；账号注销、目标退款和托管路由 Provisioning 等 Saga 仍未实现。
 
 ## 9. 客户端与 Portal
 
@@ -265,7 +267,7 @@ flowchart LR
 | 项目 | 当前事实 | 风险/下一步 |
 |---|---|---|
 | 部署 | 只有 Compose/Helm 仓库模板，本轮无环境证据 | 不得宣称生产部署、HA、备份或 RPO/RTO 已完成 |
-| 注册 | 注册成功返回 `PROVISIONING` 且不依赖 Billing；后续 bootstrap 同步确保钱包，Billing 故障会阻断激活 | 改为持久 Saga、Outbox 初始化、后台重试和 `REPAIR_REQUIRED` 可恢复状态 |
+| 注册 | 唯一值预约、持久恢复、Identity 关联查询、异步钱包任务、SLA、`REPAIR_REQUIRED` 和证明门禁补偿已闭环 | Identity 短期密码材料仍为单副本内存能力；生产运行和故障注入证据待部署补齐 |
 | 权限 | 平台和组织接口使用 Account 原子权限码、显式作用域和默认拒绝 | 补角色绑定有效期/撤销、最后超级管理员保护、安全引导和受限 Break-glass |
 | 模型调用 | Hold 前置和事后核对已有基础 | 补目录/公式/Provisioning、派发持久化、重放和取消 |
 | 权益 | 权益包仅聚合总额 | 重构为 BASE/BONUS 组成和守恒约束后才能实现目标退款 |

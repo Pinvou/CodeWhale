@@ -12,6 +12,7 @@
       precheckMobileRegistration: function (input) { return invoke("account_platform_precheck_mobile_registration", { input: input }); },
       sendSms: function (input) { return invoke("account_platform_send_sms", { input: input }); },
       registerMobile: function (input) { return invoke("account_platform_register_mobile", { input: input }); },
+      registrationStatus: function () { return invoke("account_platform_registration_status"); },
       loginSms: function (input) { return invoke("account_platform_login_sms", { input: input }); },
       logout: function () { return invoke("account_platform_logout"); },
       request: function (request) {

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pinvou.com/schemas/account.wallet.provisioning.requested.v1.json",
+  "title": "account.wallet.provisioning.requested.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "aggregate_id", "aggregate_version", "occurred_at", "trace_id", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "const": "account.wallet.provisioning.requested.v1" },
+    "aggregate_id": { "type": "string", "format": "uuid" },
+    "aggregate_version": { "const": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user_id", "registration_operation_id", "policy_version"],
+      "properties": {
+        "user_id": { "type": "string", "format": "uuid" },
+        "registration_operation_id": { "type": "string", "format": "uuid" },
+        "policy_version": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    }
+  }
+}

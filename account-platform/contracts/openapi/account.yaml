@@ -68,7 +68,20 @@ paths:
                 captcha_offset: { type: integer, minimum: 0 }
       responses:
         "202":
-          description: SMS challenge accepted; retry_after_seconds is at least 60
+          description: SMS challenge accepted; REGISTER also returns the scoped recovery operation and query token
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [challenge_id, expires_at, retry_after_seconds]
+                properties:
+                  challenge_id: { type: string, format: uuid }
+                  expires_at: { type: string, format: date-time }
+                  retry_after_seconds: { type: integer, minimum: 1 }
+                  registration_operation_id: { type: string, format: uuid }
+                  registration_query_token: { type: string, minLength: 80, maxLength: 256 }
+                  registration_query_token_expires_at: { type: string, format: date-time }
         "400":
           $ref: "#/components/responses/Error"
         "429":
@@ -85,7 +98,7 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [username, mobile, challenge_id, code, password_handle, password_policy_version]
+              required: [username, mobile, challenge_id, code, password_handle, password_policy_version, registration_operation_id, registration_query_token]
               properties:
                 username: { type: string, minLength: 3, maxLength: 32 }
                 mobile: { type: string }
@@ -93,28 +106,53 @@ paths:
                 code: { type: string, minLength: 1, maxLength: 16 }
                 password_handle: { type: string, minLength: 43, maxLength: 43 }
                 password_policy_version: { type: string, minLength: 1, maxLength: 64 }
+                registration_operation_id: { type: string, format: uuid }
+                registration_query_token: { type: string, minLength: 80, maxLength: 256 }
       responses:
         "201":
           description: Account provisioning started
           content:
             application/json:
-              schema:
-                type: object
-                additionalProperties: false
-                required: [user_id, user_code, username, status]
-                properties:
-                  user_id: { type: string, format: uuid }
-                  user_code: { $ref: "#/components/schemas/UserCode" }
-                  username: { type: string }
-                  status: { type: string, const: PROVISIONING }
+              schema: { $ref: "#/components/schemas/RegistrationStatus" }
+        "202":
+          description: Identity or Account recovery continues asynchronously; the client must query the original operation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegistrationStatus" }
         "400":
           $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
+  /auth/registration-operations/{registration_operation_id}:
+    get:
+      security: []
+      operationId: getRegistrationOperation
+      summary: Query one registration operation using its scoped signed query token
+      parameters:
+        - name: registration_operation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Registration-Query-Token
+          in: header
+          required: true
+          schema: { type: string, minLength: 80, maxLength: 256 }
+      responses:
+        "200":
+          description: Redacted registration recovery state
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RegistrationStatus" }
+        "404":
+          $ref: "#/components/responses/Error"
   /account/bootstrap:
     post:
       operationId: bootstrapAccount
-      summary: Idempotently provision the current business user and personal wallet
+      summary: Idempotently provision the current business user and enqueue personal wallet initialization
       responses:
         "200":
           description: Current business user
@@ -123,8 +161,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/Me"
         "401":
-          $ref: "#/components/responses/Error"
-        "503":
           $ref: "#/components/responses/Error"
   /me:
     get:
@@ -541,6 +577,22 @@ components:
         type: string
         format: uuid
   schemas:
+    RegistrationStatus:
+      type: object
+      additionalProperties: false
+      required: [registration_operation_id, status]
+      properties:
+        registration_operation_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        user_code: { $ref: "#/components/schemas/UserCode" }
+        username: { type: string, minLength: 3, maxLength: 32 }
+        status:
+          type: string
+          enum: [SMS_PENDING, REGISTRATION_IN_PROGRESS, IDENTITY_CREATING, IDENTITY_CREATED, ACCOUNT_COMMITTING, ACCOUNT_COMMITTED, PROVISIONING, ACTIVE, REPAIR_REQUIRED, COMPENSATION_PENDING, COMPENSATED, EXPIRED]
+        next_retry_at: { type: string, format: date-time }
+        reason:
+          type: string
+          description: Stable redacted reason code; provider text and secret material are never returned.
     Me:
       type: object
       additionalProperties: false
@@ -553,7 +605,7 @@ components:
           $ref: "#/components/schemas/UserCode"
         status:
           type: string
-          enum: [PROVISIONING, ACTIVE, DISABLED]
+          enum: [PROVISIONING, ACTIVE, REPAIR_REQUIRED, DISABLED]
         username:
           type: [string, "null"]
         display_name:

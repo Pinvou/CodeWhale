@@ -211,6 +211,17 @@ pub struct MobileRegistration {
     pub code: String,
     pub password_handle: String,
     pub password_policy_version: String,
+    pub registration_operation_id: String,
+    #[serde(default)]
+    pub registration_query_token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingRegistrationCredential {
+    operation_id: String,
+    query_token: String,
+    username: String,
+    expires_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -363,7 +374,7 @@ impl AccountPlatformState {
         if purpose != "REGISTER" && purpose != "LOGIN" {
             return Err("mobile_auth_request_invalid: invalid SMS purpose".to_string());
         }
-        self.public_account_request(
+        let mut result = self.public_account_request(
             &config,
             "v1/auth/sms/challenges",
             serde_json::json!({
@@ -372,7 +383,53 @@ impl AccountPlatformState {
                 "purpose": purpose, "captcha_id": input.captcha_id.trim(), "captcha_offset": input.captcha_offset,
             }),
         )
-        .await
+        .await?;
+        if purpose == "REGISTER" {
+            let operation_id = result
+                .get("registration_operation_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let query_token = result
+                .get("registration_query_token")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let expires_at = result
+                .get("registration_query_token_expires_at")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if operation_id.is_empty() || query_token.is_empty() {
+                return Err(
+                    "mobile_auth_response_invalid: registration recovery credential is missing"
+                        .to_string(),
+                );
+            }
+            let credential = PendingRegistrationCredential {
+                operation_id: operation_id.to_string(),
+                query_token: query_token.to_string(),
+                username: input.username.trim().to_string(),
+                expires_at: expires_at.to_string(),
+            };
+            let encoded = serde_json::to_string(&credential).map_err(|_| {
+                "mobile_auth_response_invalid: registration recovery credential is invalid"
+                    .to_string()
+            })?;
+            if self
+                .credentials
+                .set(
+                    &CredentialReference::for_account_platform_registration(),
+                    &encoded,
+                )
+                .is_ok()
+            {
+                if let Some(object) = result.as_object_mut() {
+                    object.remove("registration_query_token");
+                    object.insert("recovery_persisted".to_string(), Value::Bool(true));
+                }
+            } else if let Some(object) = result.as_object_mut() {
+                object.insert("recovery_persisted".to_string(), Value::Bool(false));
+            }
+        }
+        Ok(result)
     }
 
     pub async fn create_slider_captcha(
@@ -433,6 +490,21 @@ impl AccountPlatformState {
 
     pub async fn register_mobile(&self, input: MobileRegistration) -> Result<Value, String> {
         let config = AccountPlatformConfig::from_env()?;
+        let query_token = if input.registration_query_token.trim().is_empty() {
+            let pending = self.pending_registration()?.ok_or_else(|| {
+                "registration_recovery_missing: pending registration credential is unavailable"
+                    .to_string()
+            })?;
+            if pending.operation_id != input.registration_operation_id.trim() {
+                return Err(
+                    "registration_recovery_conflict: pending registration operation changed"
+                        .to_string(),
+                );
+            }
+            pending.query_token
+        } else {
+            input.registration_query_token.trim().to_string()
+        };
         self.public_account_request(
             &config,
             "v1/auth/register",
@@ -440,9 +512,53 @@ impl AccountPlatformState {
                 "username": input.username.trim(), "mobile": input.mobile.trim(), "challenge_id": input.challenge_id.trim(),
                 "code": input.code.trim(), "password_handle": input.password_handle,
                 "password_policy_version": input.password_policy_version,
+                "registration_operation_id": input.registration_operation_id.trim(),
+                "registration_query_token": query_token,
             }),
         )
         .await
+    }
+
+    pub async fn registration_status(&self) -> Result<Value, String> {
+        let Some(pending) = self.pending_registration()? else {
+            return Ok(Value::Null);
+        };
+        let config = AccountPlatformConfig::from_env()?;
+        let mut result = self
+            .public_account_registration_status(
+                &config,
+                &pending.operation_id,
+                &pending.query_token,
+            )
+            .await?;
+        if let Some(object) = result.as_object_mut() {
+            object.insert(
+                "username".to_string(),
+                Value::String(pending.username.clone()),
+            );
+        }
+        if matches!(
+            result.get("status").and_then(Value::as_str),
+            Some("ACTIVE" | "COMPENSATED" | "EXPIRED")
+        ) {
+            self.credentials
+                .delete(&CredentialReference::for_account_platform_registration())
+                .map_err(credential_store_error)?;
+        }
+        Ok(result)
+    }
+
+    fn pending_registration(&self) -> Result<Option<PendingRegistrationCredential>, String> {
+        let Some(encoded) = self
+            .credentials
+            .get(&CredentialReference::for_account_platform_registration())
+            .map_err(credential_store_error)?
+        else {
+            return Ok(None);
+        };
+        serde_json::from_str(&encoded).map(Some).map_err(|_| {
+            "registration_recovery_invalid: stored registration credential is invalid".to_string()
+        })
     }
 
     pub async fn login_sms(
@@ -848,6 +964,41 @@ impl AccountPlatformState {
                 .and_then(Value::as_str)
                 .unwrap_or("IDENTITY_REQUEST_FAILED");
             return Err(format!("mobile_auth_failed: {code}"));
+        }
+        Ok(response.body)
+    }
+
+    async fn public_account_registration_status(
+        &self,
+        config: &AccountPlatformConfig,
+        operation_id: &str,
+        query_token: &str,
+    ) -> Result<Value, String> {
+        let url = config
+            .account_url
+            .join(&format!("v1/auth/registration-operations/{operation_id}"))
+            .map_err(|_| "account_platform_configuration_invalid: cannot resolve registration status endpoint".to_string())?;
+        let response = self
+            .client
+            .get(url)
+            .header("Accept", "application/json")
+            .header("X-Request-ID", random_urlsafe(18))
+            .header("X-Device-ID", &self.device_id)
+            .header("X-Registration-Query-Token", query_token)
+            .send()
+            .await
+            .map_err(|error| format!("account_platform_service_unavailable: {error}"))?;
+        let response = response_to_api(response).await?;
+        if !(200..300).contains(&response.status) {
+            if response.status == 404 {
+                let _ = self
+                    .credentials
+                    .delete(&CredentialReference::for_account_platform_registration());
+            }
+            return Err(
+                "registration_recovery_unavailable: registration operation cannot be queried"
+                    .to_string(),
+            );
         }
         Ok(response.body)
     }

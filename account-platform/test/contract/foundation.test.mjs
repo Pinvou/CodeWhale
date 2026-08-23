@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
@@ -68,6 +69,39 @@ test('registration passwords cross only the Identity Adapter boundary', async ()
   assert.doesNotMatch(accountHandler, /json:"password"/);
   assert.match(desktopBridge, /public_identity_request\([\s\S]*"password": input\.password/);
   assert.match(desktopBridge, /"password_handle": password_handle/);
+});
+
+test('registration recovery is persistent, proof-gated, and wallet provisioning stays asynchronous', async () => {
+  const migration = await readFile(path.join(root, 'migrations/account/000013_registration_saga.up.sql'), 'utf8');
+  const saga = await readFile(path.join(root, 'internal/account/registration_saga.go'), 'utf8');
+  const mobileAuth = await readFile(path.join(root, 'internal/account/mobile_auth.go'), 'utf8');
+  const identityVault = await readFile(path.join(root, 'internal/identityadapter/password.go'), 'utf8');
+  const repair = (await Promise.all(['registration_admin.go', 'registration_admin_http.go'].map((file) => readFile(path.join(root, 'internal/account', file), 'utf8')))).join('\n');
+  const desktop = (await Promise.all([
+    '../pinvou3-app/src-tauri/src/features/account_platform/mod.rs',
+    '../pinvou3-app/src-tauri/src/platform/credential_store.rs',
+  ].map((file) => readFile(path.join(root, file), 'utf8')))).join('\n');
+  const account = await readYaml('contracts/openapi/account.yaml');
+  const admin = await readYaml('contracts/openapi/admin.yaml');
+  const repairCopies = (await import(pathToFileURL(path.join(root, 'internal/portal/static/assets/registration-repair-i18n.js')).href)).registrationRepairCopies;
+
+  assert.match(migration, /CREATE TABLE registration_operations/);
+  assert.match(migration, /registration_operations_active_username_idx/);
+  assert.match(migration, /registration_operations_active_mobile_idx/);
+  assert.match(migration, /CREATE TABLE wallet_provisioning_jobs/);
+  assert.doesNotMatch(migration, /password_handle/);
+  assert.match(saga, /account\.wallet\.provisioning\.requested\.v1/);
+  assert.doesNotMatch(mobileAuth, /DeleteUser\(/);
+  assert.match(mobileAuth, /FindMobileUserByRegistrationOperation/);
+  assert.match(identityVault, /operations map\[uuid\.UUID\]operationPasswordBinding/);
+  assert.match(repair, /DisableUserAndConfirm/);
+  assert.match(repair, /account_outbox_absent/);
+  assert.match(repair, /identity_created_at\+interval '30 minutes'/);
+  assert.match(desktop, /pending-registration/);
+  assert.ok(account.paths['/auth/registration-operations/{registration_operation_id}']);
+  assert.ok(admin.paths['/account/admin/v1/registration-operations']);
+  assert.deepEqual(Object.keys(repairCopies.zh).sort(), Object.keys(repairCopies.en).sort());
+  assert.deepEqual(Object.keys(repairCopies.zh).sort(), Object.keys(repairCopies.ja).sort());
 });
 
 test('SMS adapters support both code ownership modes with versioned risk evidence', async () => {

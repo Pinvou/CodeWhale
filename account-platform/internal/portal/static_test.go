@@ -42,3 +42,18 @@ func TestStaticHandlerServesHashedAssets(t *testing.T) {
 		t.Fatalf("expected embedded asset %q, got HTTP %d", assetURL, assetRecorder.Code)
 	}
 }
+
+func TestStaticHandlerServesRegistrationRepairConsole(t *testing.T) {
+	page := httptest.NewRecorder()
+	StaticHandler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/admin.html", nil))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="registration-repair-root"`) {
+		t.Fatal("expected registration repair root in the admin portal")
+	}
+	for _, asset := range []string{"/assets/registration-repair.js", "/assets/registration-repair-i18n.js", "/assets/registration-repair.css"} {
+		response := httptest.NewRecorder()
+		StaticHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, asset, nil))
+		if response.Code != http.StatusOK || response.Body.Len() == 0 {
+			t.Fatalf("expected embedded repair asset %q", asset)
+		}
+	}
+}

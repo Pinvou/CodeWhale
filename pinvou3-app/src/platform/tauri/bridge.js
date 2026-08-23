@@ -2448,6 +2448,7 @@
       precheckMobileRegistration: accountPlatformFeature.precheckMobileRegistration,
       sendSms: accountPlatformFeature.sendSms,
       registerMobile: accountPlatformFeature.registerMobile,
+      registrationStatus: accountPlatformFeature.registrationStatus,
       loginSms: accountPlatformFeature.loginSms,
       logout: accountPlatformFeature.logout,
       request: accountPlatformFeature.request,

@@ -679,6 +679,7 @@ pub fn run() {
             commands::account_platform::account_platform_create_slider_captcha,
             commands::account_platform::account_platform_precheck_mobile_registration,
             commands::account_platform::account_platform_register_mobile,
+            commands::account_platform::account_platform_registration_status,
             commands::account_platform::account_platform_login_sms,
             commands::account_platform::account_platform_logout,
             commands::account_platform::account_platform_request,

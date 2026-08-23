@@ -10,12 +10,14 @@ import (
 )
 
 var (
-	ErrNotFound          = errors.New("account resource not found")
-	ErrForbidden         = errors.New("account action forbidden")
-	ErrConflict          = errors.New("account resource conflict")
-	ErrLastOwner         = errors.New("organization must retain an owner")
-	ErrInvalidHierarchy  = errors.New("invalid organization hierarchy")
-	ErrInvitationExpired = errors.New("invitation expired")
+	ErrNotFound              = errors.New("account resource not found")
+	ErrForbidden             = errors.New("account action forbidden")
+	ErrConflict              = errors.New("account resource conflict")
+	ErrLastOwner             = errors.New("organization must retain an owner")
+	ErrInvalidHierarchy      = errors.New("invalid organization hierarchy")
+	ErrInvitationExpired     = errors.New("invitation expired")
+	ErrAccountProvisioning   = errors.New("account is provisioning")
+	ErrAccountRepairRequired = errors.New("account provisioning requires repair")
 )
 
 type Context struct {

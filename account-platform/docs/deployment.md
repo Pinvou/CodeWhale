@@ -144,6 +144,9 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - `MOBILE_AUTH_ENABLED`
 - `IDENTITY_HTTP_URL`
 - `IDENTITY_PASSWORD_HMAC_KEY_BASE64`（Identity Adapter 专用、至少 32 随机字节的无填充标准 Base64）
+- `REGISTRATION_QUERY_HMAC_KEY_BASE64`（Account 专用、至少 32 随机字节，与密码和短信 HMAC 密钥隔离）
+- `WALLET_PROVISIONING_POLICY_VERSION`
+- `WALLET_PROVISIONING_SLA_MINUTES`（默认 15 分钟，创建任务时快照）
 - `SMS_PROVIDER=aliyun-managed|http-generated`
 - `ALIYUN_SMS_ACCESS_KEY_ID`
 - `ALIYUN_SMS_ACCESS_KEY_SECRET`
@@ -156,7 +159,9 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 `aliyun-managed` 由供应商生成并核验验证码；`http-generated` 由 Adapter 使用密码学安全随机源生成六位验证码，Account 只持久化带服务端密钥的校验数据，再通过通用 HTTPS 发送端点投递。两种模式由启动配置和依赖注入选择，Account 挑战状态机不包含厂商判断。RAM 用户只授予所选模式所需的最小权限。AccessKey、Bearer Token 和 HMAC 密钥不写入命令行参数、Shell 历史或日志；泄露后立即轮换。
 
-当前 Identity Adapter 的注册密码引用只存在于单进程内存，Helm 固定 `identityService: 1`；滚动重启会使尚未完成的引用失效，客户端必须重新预检。不得通过普通 Redis/业务数据库复制原始密码来扩副本；后续持久注册 Saga 只能保存非秘密操作事实，Identity 高可用需要专门的受保护短期材料方案和安全评审。
+当前 Identity Adapter 的注册密码引用及操作 ID 到密码 HMAC 的短期绑定只存在于单进程内存，Helm 固定 `identityService: 1`；Identity 创建前滚动重启会使尚未完成的引用失效，持久注册 Saga 会安全补偿并要求客户端重新预检。Identity 已创建后，Account 可通过 Keycloak 中的稳定注册操作属性恢复，不依赖内存引用。不得通过普通 Redis/业务数据库复制原始密码来扩副本；Identity 高可用需要专门的受保护短期材料方案和安全评审。
+
+Account 启动注册恢复 worker 和钱包初始化 worker。发布前必须确认 `registration_operations`、`wallet_provisioning_jobs` 迁移完成，注册查询 HMAC 密钥在同一部署周期内稳定，且 Billing 内部钱包接口可用。轮换查询密钥会使尚未完成注册的旧查询令牌失效，必须采用覆盖最长 48 小时令牌窗口的双读或维护窗口方案；当前实现不提供双密钥读取，因此不得无计划直接轮换。运维应监控 `REPAIR_REQUIRED`、`COMPENSATION_PENDING`、钱包 SLA 超时和 `next_retry_at` 积压；人工补偿只能通过受权限保护的命令执行，禁止直接改表或直接删除 Identity。
 
 ### 6.4 新华三商城
 

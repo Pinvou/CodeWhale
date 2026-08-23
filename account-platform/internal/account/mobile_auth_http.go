@@ -66,34 +66,66 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusAccepted, map[string]any{
+	response := map[string]any{
 		"challenge_id":        challenge.ID,
 		"expires_at":          challenge.ExpiresAt,
 		"retry_after_seconds": 60,
-	})
+	}
+	if challenge.RegistrationOperationID != uuid.Nil {
+		response["registration_operation_id"] = challenge.RegistrationOperationID
+		response["registration_query_token"] = challenge.RegistrationQueryToken
+		response["registration_query_token_expires_at"] = challenge.RegistrationQueryTokenExpiresAt
+	}
+	api.WriteJSON(w, http.StatusAccepted, response)
 }
 
 func (s *Service) registerMobile(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username              string    `json:"username"`
-		Mobile                string    `json:"mobile"`
-		ChallengeID           uuid.UUID `json:"challenge_id"`
-		Code                  string    `json:"code"`
-		PasswordHandle        string    `json:"password_handle"`
-		PasswordPolicyVersion string    `json:"password_policy_version"`
+		Username                string    `json:"username"`
+		Mobile                  string    `json:"mobile"`
+		ChallengeID             uuid.UUID `json:"challenge_id"`
+		Code                    string    `json:"code"`
+		PasswordHandle          string    `json:"password_handle"`
+		PasswordPolicyVersion   string    `json:"password_policy_version"`
+		RegistrationOperationID uuid.UUID `json:"registration_operation_id"`
+		RegistrationQueryToken  string    `json:"registration_query_token"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || body.ChallengeID == uuid.Nil {
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.ChallengeID == uuid.Nil || body.RegistrationOperationID == uuid.Nil || strings.TrimSpace(body.RegistrationQueryToken) == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid mobile registration request", httpserver.RequestID(r.Context()))
 		return
 	}
-	userID, userCode, err := s.mobileAuth.Register(r.Context(), body.Username, body.Mobile, body.ChallengeID, body.Code, body.PasswordHandle, body.PasswordPolicyVersion)
+	result, err := s.mobileAuth.Register(r.Context(), body.RegistrationOperationID, body.RegistrationQueryToken, body.Username, body.Mobile, body.ChallengeID, body.Code, body.PasswordHandle, body.PasswordPolicyVersion)
+	if errors.Is(err, ErrRegistrationRecovering) {
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, http.StatusAccepted, result)
+		return
+	}
+	if errors.Is(err, ErrRegistrationRestart) {
+		w.Header().Set("Cache-Control", "no-store")
+		api.WriteJSON(w, http.StatusConflict, map[string]any{"code": "REGISTRATION_RESTART_REQUIRED", "message": "the registration operation can no longer continue", "request_id": httpserver.RequestID(r.Context()), "registration": result})
+		return
+	}
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	username, _ := NormalizeRegistrationUsername(body.Username)
-	api.WriteJSON(w, http.StatusCreated, map[string]any{"user_id": userID, "user_code": userCode, "username": username, "status": "PROVISIONING"})
+	api.WriteJSON(w, http.StatusCreated, result)
+}
+
+func (s *Service) registrationOperationStatus(w http.ResponseWriter, r *http.Request) {
+	operationID, err := uuid.Parse(r.PathValue("operation_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusNotFound, "REGISTRATION_OPERATION_NOT_FOUND", "the registration operation was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := s.mobileAuth.RegistrationStatus(r.Context(), operationID, r.Header.Get("X-Registration-Query-Token"))
+	if err != nil {
+		api.WriteError(w, http.StatusNotFound, "REGISTRATION_OPERATION_NOT_FOUND", "the registration operation was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
@@ -147,6 +179,10 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 		status, code, message = http.StatusUnauthorized, "SMS_CODE_INVALID", "the verification code is invalid or expired"
 	case errors.Is(err, ErrSMSUnavailable):
 		status, code, message = http.StatusServiceUnavailable, "SMS_UNAVAILABLE", "the SMS service is temporarily unavailable"
+	case errors.Is(err, ErrRegistrationConflict):
+		status, code, message = http.StatusConflict, "REGISTRATION_IDEMPOTENCY_CONFLICT", "the registration operation conflicts with the request"
+	case errors.Is(err, ErrRegistrationQueryUnauthorized):
+		status, code, message = http.StatusNotFound, "REGISTRATION_OPERATION_NOT_FOUND", "the registration operation was not found"
 	}
 	if status >= http.StatusInternalServerError {
 		slog.ErrorContext(r.Context(), "mobile authentication request failed", "error", err, "request_id", httpserver.RequestID(r.Context()))

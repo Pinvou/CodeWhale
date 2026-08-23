@@ -10,7 +10,9 @@ database URLs (`account-service-database-url`, `billing-service-database-url`,
 token, payment adapter URL/HMAC keys, the environment-specific external
 secret-provider material, `token-default-provider-api-key`, and the New API
 reconciliation credentials (`token-reconciliation-newapi-admin-token` and
-`token-reconciliation-newapi-admin-user-id`). Never place those values in a
+`token-reconciliation-newapi-admin-user-id`). Mobile registration additionally
+requires `registration-query-hmac-key-base64`, isolated from the Identity password
+and SMS verification HMAC keys. Never place those values in a
 values file.
 
 Production-new deliberately excludes Payment Simulator and Mock New API. Use the

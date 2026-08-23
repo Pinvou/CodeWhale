@@ -68,6 +68,7 @@ fn key_lock_for(service: &str, account: &str) -> Arc<Mutex<()>> {
 const SEARCH_API_KEY_SERVICE: &str = "pinvou3-search-api-key";
 const MCP_SECRET_SERVICE: &str = "pinvou3-mcp-secret";
 const ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE: &str = "pinvou3-account-platform-refresh-token";
+const ACCOUNT_PLATFORM_REGISTRATION_SERVICE: &str = "pinvou3-account-platform-registration";
 const IMA_SECRET_SERVICE: &str = "pinvou3-ima-secret";
 const ACP_PROVIDER_KEY_SERVICE: &str = "pinvou3-acp-provider-key";
 const TEAM_RELAY_DEVICE_SERVICE: &str = "pinvou3-team-relay-device";
@@ -107,6 +108,14 @@ impl CredentialReference {
         Self {
             service: ACCOUNT_PLATFORM_REFRESH_TOKEN_SERVICE.to_string(),
             account: "active-user".to_string(),
+            version: 1,
+        }
+    }
+
+    pub fn for_account_platform_registration() -> Self {
+        Self {
+            service: ACCOUNT_PLATFORM_REGISTRATION_SERVICE.to_string(),
+            account: "pending-registration".to_string(),
             version: 1,
         }
     }

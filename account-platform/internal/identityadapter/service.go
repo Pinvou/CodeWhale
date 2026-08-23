@@ -8,6 +8,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
+	"github.com/google/uuid"
 )
 
 type Service struct {
@@ -29,6 +30,8 @@ func (s *Service) Handler() http.Handler {
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.POST("/registration/password-references/validate", httpserver.AdaptFunc(s.validateReference))
 	internal.POST("/users/mobile", httpserver.AdaptFunc(s.createMobileUser))
+	internal.GET("/registration-operations/:operation_id/user", httpserver.AdaptFunc(s.findRegistrationUser))
+	internal.POST("/users/:subject/disable-and-confirm", httpserver.AdaptFunc(s.disableUserAndConfirm))
 	internal.DELETE("/users/:subject", httpserver.AdaptFunc(s.deleteUser))
 	return router
 }
@@ -50,10 +53,11 @@ func (s *Service) precheckPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 type registrationReferenceRequest struct {
-	PasswordHandle        string `json:"password_handle"`
-	PasswordPolicyVersion string `json:"password_policy_version"`
-	Username              string `json:"username"`
-	Mobile                string `json:"mobile"`
+	RegistrationOperationID uuid.UUID `json:"registration_operation_id"`
+	PasswordHandle          string    `json:"password_handle"`
+	PasswordPolicyVersion   string    `json:"password_policy_version"`
+	Username                string    `json:"username"`
+	Mobile                  string    `json:"mobile"`
 }
 
 func (s *Service) validateReference(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +65,7 @@ func (s *Service) validateReference(w http.ResponseWriter, r *http.Request) {
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	if err := s.vault.ValidateReference(body.PasswordHandle, body.PasswordPolicyVersion, body.Username, body.Mobile); err != nil {
+	if err := s.vault.ValidateReference(body.RegistrationOperationID, body.PasswordHandle, body.PasswordPolicyVersion, body.Username, body.Mobile); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
@@ -73,12 +77,38 @@ func (s *Service) createMobileUser(w http.ResponseWriter, r *http.Request) {
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	subject, err := s.vault.CreateMobileUser(r.Context(), body.PasswordHandle, body.PasswordPolicyVersion, body.Username, body.Mobile)
+	subject, err := s.vault.CreateMobileUser(r.Context(), body.RegistrationOperationID, body.PasswordHandle, body.PasswordPolicyVersion, body.Username, body.Mobile)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	api.WriteJSON(w, http.StatusCreated, map[string]string{"subject": subject})
+}
+
+func (s *Service) findRegistrationUser(w http.ResponseWriter, r *http.Request) {
+	operationID, err := uuid.Parse(r.PathValue("operation_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid registration operation", httpserver.RequestID(r.Context()))
+		return
+	}
+	subject, found, err := s.vault.FindMobileUserByRegistrationOperation(r.Context(), operationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]string{"subject": subject})
+}
+
+func (s *Service) disableUserAndConfirm(w http.ResponseWriter, r *http.Request) {
+	if err := s.vault.DisableUserAndConfirm(r.Context(), r.PathValue("subject")); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) deleteUser(w http.ResponseWriter, r *http.Request) {

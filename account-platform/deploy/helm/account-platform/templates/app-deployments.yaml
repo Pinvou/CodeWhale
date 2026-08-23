@@ -79,10 +79,14 @@ spec:
             - { name: SMS_PROVIDER, value: {{ $root.Values.sms.provider | quote }} }
             - { name: ALIYUN_SMS_ENDPOINT, value: {{ $root.Values.sms.aliyunEndpoint | quote }} }
             - { name: SMS_HTTP_ENDPOINT, value: {{ $root.Values.sms.httpEndpoint | quote }} }
+            - { name: WALLET_PROVISIONING_POLICY_VERSION, value: {{ $root.Values.account.walletProvisioningPolicyVersion | quote }} }
+            - { name: WALLET_PROVISIONING_SLA_MINUTES, value: {{ $root.Values.account.walletProvisioningSlaMinutes | quote }} }
             {{- range $item := list (dict "env" "ALIYUN_SMS_ACCESS_KEY_ID" "key" "aliyun-sms-access-key-id") (dict "env" "ALIYUN_SMS_ACCESS_KEY_SECRET" "key" "aliyun-sms-access-key-secret") (dict "env" "ALIYUN_SMS_SIGN_NAME" "key" "aliyun-sms-sign-name") (dict "env" "ALIYUN_SMS_REGISTER_TEMPLATE" "key" "aliyun-sms-register-template") (dict "env" "ALIYUN_SMS_LOGIN_TEMPLATE" "key" "aliyun-sms-login-template") (dict "env" "SMS_VERIFICATION_HMAC_KEY_BASE64" "key" "sms-verification-hmac-key-base64") (dict "env" "SMS_HTTP_BEARER_TOKEN" "key" "sms-http-bearer-token") }}
             - name: {{ $item.env }}
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }
             {{- end }}
+            - name: REGISTRATION_QUERY_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-query-hmac-key-base64, optional: true } }
             {{- else if eq $app.name "identity-service" }}
             - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
             - { name: KEYCLOAK_ADMIN_API_URL, value: {{ printf "http://%s-keycloak:8080" $fullname | quote }} }

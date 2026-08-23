@@ -59,6 +59,13 @@ pub async fn account_platform_register_mobile(
 }
 
 #[tauri::command]
+pub async fn account_platform_registration_status(
+    state: State<'_, AccountPlatformState>,
+) -> Result<serde_json::Value, String> {
+    state.registration_status().await
+}
+
+#[tauri::command]
 pub async fn account_platform_login_sms(
     input: SMSLoginCredentials,
     state: State<'_, AccountPlatformState>,

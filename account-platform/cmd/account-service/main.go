@@ -27,6 +27,21 @@ func main() {
 		log.Fatal(err)
 	}
 	defer repository.Close()
+	walletPolicyVersion := strings.TrimSpace(os.Getenv("WALLET_PROVISIONING_POLICY_VERSION"))
+	if walletPolicyVersion == "" {
+		walletPolicyVersion = "wallet-provisioning-v1"
+	}
+	walletSLA := 15 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("WALLET_PROVISIONING_SLA_MINUTES")); raw != "" {
+		minutes, parseErr := strconv.Atoi(raw)
+		if parseErr != nil {
+			log.Fatal("WALLET_PROVISIONING_SLA_MINUTES must be an integer")
+		}
+		walletSLA = time.Duration(minutes) * time.Minute
+	}
+	if err := repository.ConfigureWalletProvisioning(walletPolicyVersion, walletSLA); err != nil {
+		log.Fatal(err)
+	}
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal(err)
@@ -36,7 +51,16 @@ func main() {
 		log.Fatal(err)
 	}
 	service := account.NewService(repository, wallets).WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	go account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run(ctx)
 	if enabled("MOBILE_AUTH_ENABLED") {
+		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
+		if decodeErr != nil {
+			log.Fatal("REGISTRATION_QUERY_HMAC_KEY_BASE64 must be unpadded standard Base64")
+		}
+		registrationTokens, err := account.NewRegistrationTokenSigner(registrationQueryKey)
+		if err != nil {
+			log.Fatal(err)
+		}
 		verificationKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("SMS_VERIFICATION_HMAC_KEY_BASE64")))
 		if decodeErr != nil {
 			log.Fatal("SMS_VERIFICATION_HMAC_KEY_BASE64 must be unpadded standard Base64")
@@ -57,11 +81,12 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		auth, err := account.NewMobileAuthService(repository, sms, identities, os.Getenv("OIDC_ISSUER"))
+		auth, err := account.NewMobileAuthService(repository, sms, identities, os.Getenv("OIDC_ISSUER"), registrationTokens)
 		if err != nil {
 			log.Fatal(err)
 		}
 		service.WithMobileAuth(auth, os.Getenv("INTERNAL_SERVICE_TOKEN"))
+		go account.NewRegistrationRecoveryWorker(repository, auth, 5*time.Second).Run(ctx)
 
 		// Mobile authentication and Mall account synchronization use separate
 		// providers. Keep authentication available while Mall integration is not

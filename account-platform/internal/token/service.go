@@ -657,6 +657,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "TOKEN_ROUTE_AMBIGUOUS", "multiple token routes have the same priority"
 	case errors.Is(err, ErrNoEligibleRoute):
 		status, code, message = http.StatusUnprocessableEntity, "TOKEN_ROUTE_UNAVAILABLE", "no eligible token route is available"
+	case errors.Is(err, ErrAccountProvisioning):
+		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
+	case errors.Is(err, ErrAccountRepairRequired):
+		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
@@ -699,6 +703,16 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		var problem struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&problem)
+		if problem.Code == "ACCOUNT_PROVISIONING" {
+			return AuthorizationContext{}, ErrAccountProvisioning
+		}
+		if problem.Code == "ACCOUNT_REPAIR_REQUIRED" {
+			return AuthorizationContext{}, ErrAccountRepairRequired
+		}
 		return AuthorizationContext{}, ErrForbidden
 	}
 	var body struct {

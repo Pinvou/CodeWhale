@@ -20,8 +20,10 @@ import (
 )
 
 type PostgresRepository struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool                  *pgxpool.Pool
+	now                   func() time.Time
+	walletPolicyVersion   string
+	walletProvisioningSLA time.Duration
 }
 
 func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRepository, error) {
@@ -36,12 +38,21 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 	if err != nil {
 		return nil, fmt.Errorf("open account database: %w", err)
 	}
-	repository := &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }}
+	repository := &PostgresRepository{pool: pool, now: func() time.Time { return time.Now().UTC() }, walletPolicyVersion: walletProvisioningPolicyVersion, walletProvisioningSLA: walletProvisioningSLA}
 	if err := repository.Ping(ctx); err != nil {
 		pool.Close()
 		return nil, err
 	}
 	return repository, nil
+}
+
+func (r *PostgresRepository) ConfigureWalletProvisioning(policyVersion string, sla time.Duration) error {
+	policyVersion = strings.TrimSpace(policyVersion)
+	if policyVersion == "" || sla < time.Minute || sla > 24*time.Hour {
+		return errors.New("wallet provisioning policy requires a version and a 1 minute to 24 hour SLA")
+	}
+	r.walletPolicyVersion, r.walletProvisioningSLA = policyVersion, sla
+	return nil
 }
 
 func (r *PostgresRepository) Ping(ctx context.Context) error { return r.pool.Ping(ctx) }
@@ -121,10 +132,25 @@ WHERE user_sessions.user_id = EXCLUDED.user_id`,
 			return Me{}, false, err
 		}
 	}
+	if user.Status == "PROVISIONING" {
+		if err := r.ensureWalletProvisioningJob(ctx, tx, user.UserID, nil, now); err != nil {
+			return Me{}, false, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Me{}, false, err
 	}
 	return user, created, nil
+}
+
+func (r *PostgresRepository) ensureWalletProvisioningJob(ctx context.Context, tx pgx.Tx, userID uuid.UUID, operationID *uuid.UUID, now time.Time) error {
+	command, err := tx.Exec(ctx, `
+INSERT INTO wallet_provisioning_jobs(user_id,registration_operation_id,status,policy_version,sla_expires_at,next_attempt_at,created_at,updated_at)
+VALUES($1,$2,'PENDING',$3,$4,$5,$5,$5) ON CONFLICT (user_id) DO NOTHING`, userID, operationID, r.walletPolicyVersion, now.Add(r.walletProvisioningSLA), now)
+	if err != nil || command.RowsAffected() == 0 {
+		return err
+	}
+	return appendOutbox(ctx, tx, "account.wallet.provisioning.requested.v1", userID, 1, map[string]any{"user_id": userID, "policy_version": r.walletPolicyVersion})
 }
 
 func (r *PostgresRepository) ActivateUser(ctx context.Context, userID uuid.UUID) error {
@@ -194,6 +220,14 @@ GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.memb
 		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified, &resolved.MallSyncStatus,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
+		var status string
+		statusErr := r.pool.QueryRow(ctx, `SELECT u.status FROM identities i JOIN users u ON u.id=i.user_id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&status)
+		if statusErr == nil && status == "PROVISIONING" {
+			return AuthorizationContext{}, ErrAccountProvisioning
+		}
+		if statusErr == nil && status == "REPAIR_REQUIRED" {
+			return AuthorizationContext{}, ErrAccountRepairRequired
+		}
 		return AuthorizationContext{}, ErrNotFound
 	}
 	if err != nil {

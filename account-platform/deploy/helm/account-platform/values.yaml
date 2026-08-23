@@ -57,6 +57,10 @@ sms:
   aliyunEndpoint: https://dypnsapi.aliyuncs.com
   httpEndpoint: ""
 
+account:
+  walletProvisioningPolicyVersion: wallet-provisioning-v1
+  walletProvisioningSlaMinutes: 15
+
 billing:
   paymentExpiryIntervalSeconds: 15
 

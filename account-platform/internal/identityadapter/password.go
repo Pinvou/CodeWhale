@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const PasswordPolicyVersion = "user-v1"
@@ -22,7 +24,9 @@ var (
 )
 
 type UserDirectory interface {
-	CreateMobileUser(context.Context, string, string, string) (string, error)
+	CreateMobileUser(context.Context, uuid.UUID, string, string, string) (string, error)
+	FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error)
+	DisableUserAndConfirm(context.Context, string) error
 	DeleteUser(context.Context, string) error
 }
 
@@ -40,15 +44,25 @@ type passwordRecord struct {
 	username    string
 	mobile      string
 	subject     string
+	operationID uuid.UUID
+}
+
+type operationPasswordBinding struct {
+	fingerprint [32]byte
+	expiresAt   time.Time
+	username    string
+	mobile      string
+	handle      string
 }
 
 type PasswordVault struct {
-	mu        sync.Mutex
-	records   map[string]*passwordRecord
-	hmacKey   []byte
-	directory UserDirectory
-	now       func() time.Time
-	ttl       time.Duration
+	mu         sync.Mutex
+	records    map[string]*passwordRecord
+	operations map[uuid.UUID]operationPasswordBinding
+	hmacKey    []byte
+	directory  UserDirectory
+	now        func() time.Time
+	ttl        time.Duration
 }
 
 func NewPasswordVault(hmacKey []byte, directory UserDirectory) (*PasswordVault, error) {
@@ -59,7 +73,7 @@ func NewPasswordVault(hmacKey []byte, directory UserDirectory) (*PasswordVault, 
 		return nil, errors.New("identity user directory is required")
 	}
 	return &PasswordVault{
-		records: make(map[string]*passwordRecord), hmacKey: append([]byte(nil), hmacKey...),
+		records: make(map[string]*passwordRecord), operations: make(map[uuid.UUID]operationPasswordBinding), hmacKey: append([]byte(nil), hmacKey...),
 		directory: directory, now: func() time.Time { return time.Now().UTC() }, ttl: 15 * time.Minute,
 	}, nil
 }
@@ -105,17 +119,50 @@ func (v *PasswordVault) Precheck(password string) (PasswordReference, error) {
 	return PasswordReference{Handle: handle, PolicyVersion: PasswordPolicyVersion, ExpiresAt: expiresAt}, nil
 }
 
-func (v *PasswordVault) ValidateReference(handle, policyVersion, username, mobile string) error {
+func (v *PasswordVault) ValidateReference(operationID uuid.UUID, handle, policyVersion, username, mobile string) error {
 	record, err := v.record(handle, policyVersion)
 	if err != nil {
 		return err
 	}
 	record.mu.Lock()
-	defer record.mu.Unlock()
-	return bindRecord(record, username, mobile)
+	if err := bindRecord(record, username, mobile); err != nil {
+		record.mu.Unlock()
+		return err
+	}
+	binding := operationPasswordBinding{fingerprint: record.fingerprint, expiresAt: v.now().Add(48 * time.Hour), username: username, mobile: mobile, handle: handle}
+	record.mu.Unlock()
+	if operationID == uuid.Nil {
+		return nil
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.removeExpiredLocked()
+	if existing, ok := v.operations[operationID]; ok {
+		if existing.username != username || existing.mobile != mobile || !hmac.Equal(existing.fingerprint[:], binding.fingerprint[:]) {
+			return ErrReferenceConflict
+		}
+		return nil
+	}
+	v.operations[operationID] = binding
+	return nil
 }
 
-func (v *PasswordVault) CreateMobileUser(ctx context.Context, handle, policyVersion, username, mobile string) (string, error) {
+func (v *PasswordVault) CreateMobileUser(ctx context.Context, operationID uuid.UUID, handle, policyVersion, username, mobile string) (string, error) {
+	if operationID == uuid.Nil {
+		return "", ErrReferenceInvalid
+	}
+	if subject, found, err := v.directory.FindMobileUserByRegistrationOperation(ctx, operationID); err != nil || found {
+		return subject, err
+	}
+	if handle == "" {
+		v.mu.Lock()
+		v.removeExpiredLocked()
+		handle = v.operations[operationID].handle
+		v.mu.Unlock()
+	}
+	if err := v.ValidateReference(operationID, handle, policyVersion, username, mobile); err != nil {
+		return "", err
+	}
 	record, err := v.record(handle, policyVersion)
 	if err != nil {
 		return "", err
@@ -125,6 +172,10 @@ func (v *PasswordVault) CreateMobileUser(ctx context.Context, handle, policyVers
 	if err := bindRecord(record, username, mobile); err != nil {
 		return "", err
 	}
+	if record.operationID != uuid.Nil && record.operationID != operationID {
+		return "", ErrReferenceConflict
+	}
+	record.operationID = operationID
 	if record.subject != "" {
 		return record.subject, nil
 	}
@@ -138,18 +189,31 @@ func (v *PasswordVault) CreateMobileUser(ctx context.Context, handle, policyVers
 	if err := ValidatePassword(record.password); err != nil {
 		return "", err
 	}
-	subject, err := v.directory.CreateMobileUser(ctx, username, mobile, record.password)
+	subject, err := v.directory.CreateMobileUser(ctx, operationID, username, mobile, record.password)
 	if err != nil {
 		return "", err
 	}
 	record.subject = subject
 	record.password = ""
-	record.fingerprint = [32]byte{}
 	return subject, nil
+}
+
+func (v *PasswordVault) FindMobileUserByRegistrationOperation(ctx context.Context, operationID uuid.UUID) (string, bool, error) {
+	if operationID == uuid.Nil {
+		return "", false, ErrReferenceInvalid
+	}
+	return v.directory.FindMobileUserByRegistrationOperation(ctx, operationID)
 }
 
 func (v *PasswordVault) DeleteUser(ctx context.Context, subject string) error {
 	return v.directory.DeleteUser(ctx, subject)
+}
+
+func (v *PasswordVault) DisableUserAndConfirm(ctx context.Context, subject string) error {
+	if strings.TrimSpace(subject) == "" {
+		return ErrReferenceInvalid
+	}
+	return v.directory.DisableUserAndConfirm(ctx, subject)
 }
 
 func (v *PasswordVault) record(handle, policyVersion string) (*passwordRecord, error) {
@@ -175,6 +239,11 @@ func (v *PasswordVault) removeExpiredLocked() {
 			record.fingerprint = [32]byte{}
 			record.mu.Unlock()
 			delete(v.records, handle)
+		}
+	}
+	for operationID, binding := range v.operations {
+		if now.After(binding.expiresAt) {
+			delete(v.operations, operationID)
 		}
 	}
 }

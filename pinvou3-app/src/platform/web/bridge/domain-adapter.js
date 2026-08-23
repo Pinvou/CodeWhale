@@ -126,6 +126,7 @@
       precheckMobileRegistration: unsupportedAccountPlatform,
       sendSms: unsupportedAccountPlatform,
       registerMobile: unsupportedAccountPlatform,
+      registrationStatus: unsupportedAccountPlatform,
       loginSms: unsupportedAccountPlatform,
       logout: unsupportedAccountPlatform,
       request: unsupportedAccountPlatform,

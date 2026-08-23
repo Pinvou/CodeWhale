@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/google/uuid"
 )
 
 var ErrUsernameAlreadyRegistered = errors.New("username is already registered")
@@ -50,14 +51,17 @@ func NewKeycloakDirectory(adminURL, tokenURL, realm, clientID, clientSecret stri
 	return &KeycloakDirectory{adminURL: admin, tokenURL: token, realm: strings.TrimSpace(realm), clientID: strings.TrimSpace(clientID), clientSecret: strings.TrimSpace(clientSecret), client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
-func (p *KeycloakDirectory) CreateMobileUser(ctx context.Context, username, mobile, password string) (string, error) {
+func (p *KeycloakDirectory) CreateMobileUser(ctx context.Context, operationID uuid.UUID, username, mobile, password string) (string, error) {
 	access, err := p.accessToken(ctx)
 	if err != nil {
 		return "", err
 	}
 	body, _ := json.Marshal(map[string]any{
 		"username": username, "enabled": true,
-		"attributes":  map[string][]string{"phone_number": {mobile}, "phone_number_verified": {"true"}},
+		"attributes": map[string][]string{
+			"phone_number": {mobile}, "phone_number_verified": {"true"},
+			"pinvou_registration_operation_id": {operationID.String()},
+		},
 		"credentials": []map[string]any{{"type": "password", "value": password, "temporary": false}},
 	})
 	endpoint := *p.adminURL
@@ -85,6 +89,47 @@ func (p *KeycloakDirectory) CreateMobileUser(ctx context.Context, username, mobi
 	return subject, nil
 }
 
+func (p *KeycloakDirectory) FindMobileUserByRegistrationOperation(ctx context.Context, operationID uuid.UUID) (string, bool, error) {
+	access, err := p.accessToken(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	endpoint := *p.adminURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/admin/realms/" + url.PathEscape(p.realm) + "/users"
+	query := endpoint.Query()
+	query.Set("q", "pinvou_registration_operation_id:"+operationID.String())
+	query.Set("max", "2")
+	endpoint.RawQuery = query.Encode()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	request.Header.Set("Authorization", "Bearer "+access)
+	response, err := p.client.Do(request)
+	if err != nil {
+		return "", false, fmt.Errorf("query Keycloak registration correlation: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("query Keycloak registration correlation returned HTTP %d", response.StatusCode)
+	}
+	var users []struct {
+		ID         string              `json:"id"`
+		Attributes map[string][]string `json:"attributes"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 256<<10)).Decode(&users); err != nil {
+		return "", false, err
+	}
+	matched := ""
+	for _, user := range users {
+		values := user.Attributes["pinvou_registration_operation_id"]
+		if len(values) == 1 && values[0] == operationID.String() {
+			if matched != "" && matched != user.ID {
+				return "", false, errors.New("multiple Keycloak users share a registration correlation")
+			}
+			matched = user.ID
+		}
+	}
+	return matched, matched != "", nil
+}
+
 func (p *KeycloakDirectory) DeleteUser(ctx context.Context, subject string) error {
 	access, err := p.accessToken(ctx)
 	if err != nil {
@@ -102,6 +147,64 @@ func (p *KeycloakDirectory) DeleteUser(ctx context.Context, subject string) erro
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("delete Keycloak user returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func (p *KeycloakDirectory) DisableUserAndConfirm(ctx context.Context, subject string) error {
+	access, err := p.accessToken(ctx)
+	if err != nil {
+		return err
+	}
+	endpoint := *p.adminURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/admin/realms/" + url.PathEscape(p.realm) + "/users/" + url.PathEscape(subject)
+	body, _ := json.Marshal(map[string]bool{"enabled": false})
+	request, _ := http.NewRequestWithContext(ctx, http.MethodPut, endpoint.String(), bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+access)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if response.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("disable Keycloak user returned HTTP %d", response.StatusCode)
+	}
+	logout := endpoint
+	logout.Path += "/logout"
+	request, _ = http.NewRequestWithContext(ctx, http.MethodPost, logout.String(), nil)
+	request.Header.Set("Authorization", "Bearer "+access)
+	response, err = p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent && response.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("revoke Keycloak user sessions returned HTTP %d", response.StatusCode)
+	}
+	request, _ = http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	request.Header.Set("Authorization", "Bearer "+access)
+	response, err = p.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	var user struct {
+		Enabled bool `json:"enabled"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&user) != nil {
+		return errors.New("confirm disabled Keycloak user failed")
+	}
+	if user.Enabled {
+		return errors.New("Keycloak user remains enabled after compensation")
 	}
 	return nil
 }

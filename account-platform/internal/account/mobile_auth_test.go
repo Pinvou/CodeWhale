@@ -71,6 +71,7 @@ type mobileAuthRepositoryFake struct {
 	captchaConsumed    bool
 	sliderChallenge    SliderCaptcha
 	captchaErr         error
+	operation          RegistrationOperation
 }
 
 func (f *mobileAuthRepositoryFake) MobileExists(context.Context, string) (bool, error) {
@@ -103,6 +104,11 @@ func (f *mobileAuthRepositoryFake) CreateSMSChallenge(_ context.Context, challen
 	return nil
 }
 
+func (f *mobileAuthRepositoryFake) CreateRegistrationOperation(_ context.Context, operation RegistrationOperation, challenge SMSChallenge) error {
+	f.operation, f.challenge = operation, challenge
+	return nil
+}
+
 func (f *mobileAuthRepositoryFake) MarkSMSChallengeSent(_ context.Context, _ uuid.UUID, _ string, _ []byte) error {
 	f.challengeSent = true
 	return nil
@@ -122,6 +128,53 @@ func (f *mobileAuthRepositoryFake) ConsumeSMSChallenge(_ context.Context, _ uuid
 	if !verified {
 		return ErrSMSInvalid
 	}
+	return nil
+}
+
+func (f *mobileAuthRepositoryFake) ConsumeRegistrationSMS(_ context.Context, operationID, _ uuid.UUID, _ string, verified bool) error {
+	f.consumeVerified = verified
+	if !verified {
+		return ErrSMSInvalid
+	}
+	if f.operation.ID != operationID {
+		return ErrRegistrationConflict
+	}
+	f.operation.Status = "REGISTRATION_IN_PROGRESS"
+	return nil
+}
+
+func (f *mobileAuthRepositoryFake) RegistrationOperation(_ context.Context, operationID uuid.UUID) (RegistrationOperation, error) {
+	if f.operation.ID != operationID {
+		return RegistrationOperation{}, ErrNotFound
+	}
+	return f.operation, nil
+}
+
+func (f *mobileAuthRepositoryFake) MarkRegistrationIdentityCreating(_ context.Context, operationID uuid.UUID) error {
+	if f.operation.ID != operationID {
+		return ErrNotFound
+	}
+	f.operation.Status = "IDENTITY_CREATING"
+	return nil
+}
+
+func (f *mobileAuthRepositoryFake) MarkRegistrationIdentityCreated(_ context.Context, operationID uuid.UUID, subject string) error {
+	f.operation.Status, f.operation.IdentitySubject = "IDENTITY_CREATED", subject
+	return nil
+}
+
+func (f *mobileAuthRepositoryFake) CommitRegistration(_ context.Context, operationID uuid.UUID, _ string) (RegistrationOperation, error) {
+	userID := uuid.MustParse("018f0f76-3f5d-7d43-b630-163e3f635e5a")
+	f.registeredUsername, f.registeredMobile = f.operation.Username, f.operation.Mobile
+	f.operation.Status, f.operation.UserID, f.operation.UserCode = "PROVISIONING", &userID, "USR-0123-4567-89AB-CDEF-MV"
+	return f.operation, nil
+}
+
+func (*mobileAuthRepositoryFake) ScheduleRegistrationRetry(context.Context, uuid.UUID, string) error {
+	return nil
+}
+func (f *mobileAuthRepositoryFake) CompensatePreIdentityRegistration(_ context.Context, _ uuid.UUID, code string) error {
+	f.operation.Status, f.operation.LastErrorCode = "COMPENSATED", code
 	return nil
 }
 
@@ -159,22 +212,31 @@ type identityProvisionerFake struct {
 	mobile      string
 }
 
-func (*identityProvisionerFake) ValidateMobileUser(context.Context, string, string, string, string) error {
+func (*identityProvisionerFake) ValidateMobileUser(context.Context, uuid.UUID, string, string, string, string) error {
 	return nil
 }
 
-func (f *identityProvisionerFake) CreateMobileUser(_ context.Context, username, mobile, _, _ string) (string, error) {
+func (*identityProvisionerFake) FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error) {
+	return "", false, nil
+}
+
+func (f *identityProvisionerFake) CreateMobileUser(_ context.Context, _ uuid.UUID, username, mobile, _, _ string) (string, error) {
 	f.createCalls++
 	f.username = username
 	f.mobile = mobile
 	return "keycloak-subject", nil
 }
 
-func (*identityProvisionerFake) DeleteUser(context.Context, string) error { return nil }
+func (*identityProvisionerFake) DeleteUser(context.Context, string) error            { return nil }
+func (*identityProvisionerFake) DisableUserAndConfirm(context.Context, string) error { return nil }
 
 func newMobileAuthForTest(t *testing.T, repository MobileAuthRepository, sms SMSProvider, identities IdentityProvisioner) *MobileAuthService {
 	t.Helper()
-	service, err := NewMobileAuthService(repository, sms, identities, "https://account.example.com/realms/pinvou")
+	tokens, err := NewRegistrationTokenSigner([]byte(strings.Repeat("q", 32)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewMobileAuthService(repository, sms, identities, "https://account.example.com/realms/pinvou", tokens)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,9 +399,13 @@ func TestMobileAuthRegisterVerifiesWithProviderBeforeProvisioning(t *testing.T) 
 	sms := &smsProviderFake{verified: true}
 	identities := &identityProvisionerFake{}
 	service := newMobileAuthForTest(t, repository, sms, identities)
-	userID, userCode, err := service.Register(context.Background(), " Pinvou.User ", "13800138000", uuid.New(), "123456", "password-handle", "user-v1")
-	if err != nil || userID == uuid.Nil {
-		t.Fatalf("register userID=%s err=%v", userID, err)
+	challenge, err := service.Send(context.Background(), " Pinvou.User ", "13800138000", "password-handle", "user-v1", SMSPurposeRegister, uuid.New(), 128, "192.0.2.1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Register(context.Background(), challenge.RegistrationOperationID, challenge.RegistrationQueryToken, " Pinvou.User ", "13800138000", challenge.ID, "123456", "password-handle", "user-v1")
+	if err != nil || result.UserID == nil {
+		t.Fatalf("register result=%+v err=%v", result, err)
 	}
 	if sms.verifyCalls != 1 || !repository.consumeVerified || identities.createCalls != 1 {
 		t.Fatalf("verification/provisioning flow mismatch: sms=%d consumed=%v identity=%d", sms.verifyCalls, repository.consumeVerified, identities.createCalls)
@@ -347,8 +413,30 @@ func TestMobileAuthRegisterVerifiesWithProviderBeforeProvisioning(t *testing.T) 
 	if identities.username != "pinvou.user" || repository.registeredUsername != "pinvou.user" || repository.registeredMobile != "+8613800138000" {
 		t.Fatalf("normalized identity was not shared across systems: identity=%q repository=%q mobile=%q", identities.username, repository.registeredUsername, repository.registeredMobile)
 	}
-	if userCode != "USR-0123-4567-89AB-CDEF-MV" {
-		t.Fatalf("user code=%q", userCode)
+	if result.UserCode != "USR-0123-4567-89AB-CDEF-MV" || result.Status != "PROVISIONING" {
+		t.Fatalf("registration result=%+v", result)
+	}
+}
+
+func TestMobileAuthRegistrationRetryReturnsCommittedResultWithoutRepeatingSideEffects(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{}
+	sms := &smsProviderFake{verified: true}
+	identities := &identityProvisionerFake{}
+	service := newMobileAuthForTest(t, repository, sms, identities)
+	challenge, err := service.Send(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1", SMSPurposeRegister, uuid.New(), 128, "192.0.2.1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.Register(context.Background(), challenge.RegistrationOperationID, challenge.RegistrationQueryToken, "pinvou.user", "13800138000", challenge.ID, "123456", "password-handle", "user-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Register(context.Background(), challenge.RegistrationOperationID, challenge.RegistrationQueryToken, "pinvou.user", "13800138000", challenge.ID, "123456", "password-handle", "user-v1")
+	if err != nil || first.UserID == nil || second.UserID == nil || *first.UserID != *second.UserID {
+		t.Fatalf("first=%+v second=%+v err=%v", first, second, err)
+	}
+	if sms.verifyCalls != 1 || identities.createCalls != 1 {
+		t.Fatalf("sms verify calls=%d identity create calls=%d", sms.verifyCalls, identities.createCalls)
 	}
 }
 
@@ -357,7 +445,11 @@ func TestMobileAuthRegisterRejectsFailedProviderVerification(t *testing.T) {
 	sms := &smsProviderFake{verified: false}
 	identities := &identityProvisionerFake{}
 	service := newMobileAuthForTest(t, repository, sms, identities)
-	_, _, err := service.Register(context.Background(), "pinvou.user", "13800138000", uuid.New(), "000000", "password-handle", "user-v1")
+	challenge, err := service.Send(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1", SMSPurposeRegister, uuid.New(), 128, "192.0.2.1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Register(context.Background(), challenge.RegistrationOperationID, challenge.RegistrationQueryToken, "pinvou.user", "13800138000", challenge.ID, "000000", "password-handle", "user-v1")
 	if !errors.Is(err, ErrSMSInvalid) {
 		t.Fatalf("expected invalid SMS code, got %v", err)
 	}

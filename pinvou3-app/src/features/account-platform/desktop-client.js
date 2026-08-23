@@ -29,7 +29,8 @@ export class AccountPlatformDesktopClient {
   createSliderCaptcha(mobile, purpose, signal) { return this.call(() => this.transport.createSliderCaptcha({ mobile, purpose }), signal); }
   precheckMobileRegistration(username, mobile, password, signal) { return this.call(() => this.transport.precheckMobileRegistration({ username, mobile, password }), signal); }
   sendSms(username, mobile, passwordReference, purpose, captchaId, captchaOffset, signal) { return this.call(() => this.transport.sendSms({ username, mobile, password_handle: passwordReference?.password_handle || '', password_policy_version: passwordReference?.password_policy_version || '', purpose, captcha_id: captchaId, captcha_offset: captchaOffset }), signal); }
-  registerMobile(username, mobile, challengeId, code, passwordReference, signal) { return this.call(() => this.transport.registerMobile({ username, mobile, challenge_id: challengeId, code, password_handle: passwordReference?.password_handle || '', password_policy_version: passwordReference?.password_policy_version || '' }), signal); }
+  registerMobile(username, mobile, challengeId, code, passwordReference, recovery, signal) { return this.call(() => this.transport.registerMobile({ username, mobile, challenge_id: challengeId, code, password_handle: passwordReference?.password_handle || '', password_policy_version: passwordReference?.password_policy_version || '', registration_operation_id: recovery?.registration_operation_id || '', registration_query_token: recovery?.registration_query_token || '' }), signal); }
+  registrationStatus(signal) { return this.call(() => this.transport.registrationStatus(), signal); }
   loginSms(mobile, challengeId, code, signal) { return this.call(() => this.transport.loginSms({ mobile, challenge_id: challengeId, code }), signal); }
   logout(signal) { return this.call(() => this.transport.logout(), signal); }
 

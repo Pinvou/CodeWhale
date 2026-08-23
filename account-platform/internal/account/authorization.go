@@ -26,6 +26,7 @@ const (
 	PermissionPlatformOrganizationsOwnerTransfer = "platform.organizations.owner.transfer"
 	PermissionPlatformAuditRead                  = "platform.audit.read"
 	PermissionPlatformSystemStatusRead           = "platform.system.status.read"
+	PermissionPlatformRegistrationsRepair        = "platform.registrations.repair"
 
 	PermissionOrganizationProfileRead   = "org.profile.read"
 	PermissionOrganizationUnitsRead     = "org.units.read"

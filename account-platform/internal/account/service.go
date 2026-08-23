@@ -43,22 +43,7 @@ func (s *Service) WithServiceToken(serviceToken string) *Service {
 
 func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (Me, error) {
 	me, _, err := s.repository.Bootstrap(ctx, principal)
-	if err != nil {
-		return Me{}, err
-	}
-	if me.Status == "ACTIVE" {
-		return me, nil
-	}
-	if me.Status != "PROVISIONING" {
-		return me, ErrForbidden
-	}
-	if err := s.wallets.EnsurePersonalWallet(ctx, me.UserID); err != nil {
-		return me, fmt.Errorf("%w: %v", ErrWalletProvisioning, err)
-	}
-	if err := s.repository.ActivateUser(ctx, me.UserID); err != nil {
-		return me, err
-	}
-	return s.repository.GetMe(ctx, principal)
+	return me, err
 }
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
@@ -71,6 +56,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
 		router.POST("/v1/auth/sms/challenges", httpserver.AdaptFunc(s.sendSMSChallenge))
 		router.POST("/v1/auth/register", httpserver.AdaptFunc(s.registerMobile))
+		router.GET("/v1/auth/registration-operations/:operation_id", httpserver.AdaptFunc(s.registrationOperationStatus))
 		internal.POST("/auth/sms/verify", httpserver.AdaptFunc(s.verifyLoginSMS))
 	}
 	protected := router.Group("")
@@ -113,6 +99,9 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.DELETE("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminDeleteUnit))
 	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
 	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
+	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
+	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRetryRegistration))
+	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminCompensateRegistration))
 	return router
 }
 
@@ -167,12 +156,6 @@ func (s *Service) replaceMemberRoles(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) bootstrap(w http.ResponseWriter, r *http.Request) {
 	me, err := s.Bootstrap(r.Context(), mustPrincipal(r.Context()))
-	if errors.Is(err, ErrWalletProvisioning) {
-		api.WriteJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"code": "BILLING_UNAVAILABLE", "message": "the account is provisioning; retry this request", "request_id": httpserver.RequestID(r.Context()), "account": me,
-		})
-		return
-	}
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -359,6 +342,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusUnprocessableEntity, "ORG_UNIT_HIERARCHY_INVALID", "the requested organization hierarchy is invalid"
 	case errors.Is(err, ErrInvitationExpired):
 		status, code, message = http.StatusGone, "INVITATION_EXPIRED", "the invitation has expired"
+	case errors.Is(err, ErrAccountProvisioning):
+		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
+	case errors.Is(err, ErrAccountRepairRequired):
+		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

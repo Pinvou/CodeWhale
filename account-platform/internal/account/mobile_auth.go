@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -15,29 +16,66 @@ import (
 )
 
 var (
-	ErrMobileInvalid             = errors.New("mobile number is invalid")
-	ErrMobileAlreadyRegistered   = errors.New("mobile number is already registered")
-	ErrUsernameInvalid           = errors.New("username is invalid")
-	ErrUsernameAlreadyRegistered = errors.New("username is already registered")
-	ErrPasswordReferenceInvalid  = errors.New("password reference is invalid or expired")
-	ErrPasswordReferenceConflict = errors.New("password reference conflicts with registration data")
-	ErrCaptchaInvalid            = errors.New("slider captcha is invalid")
-	ErrSMSRateLimited            = errors.New("SMS requests are rate limited")
-	ErrSMSInvalid                = errors.New("SMS challenge is invalid")
-	ErrSMSUnavailable            = errors.New("SMS service is unavailable")
+	ErrMobileInvalid                 = errors.New("mobile number is invalid")
+	ErrMobileAlreadyRegistered       = errors.New("mobile number is already registered")
+	ErrUsernameInvalid               = errors.New("username is invalid")
+	ErrUsernameAlreadyRegistered     = errors.New("username is already registered")
+	ErrPasswordReferenceInvalid      = errors.New("password reference is invalid or expired")
+	ErrPasswordReferenceConflict     = errors.New("password reference conflicts with registration data")
+	ErrCaptchaInvalid                = errors.New("slider captcha is invalid")
+	ErrSMSRateLimited                = errors.New("SMS requests are rate limited")
+	ErrSMSInvalid                    = errors.New("SMS challenge is invalid")
+	ErrSMSUnavailable                = errors.New("SMS service is unavailable")
+	ErrRegistrationConflict          = errors.New("registration operation conflicts with the request")
+	ErrRegistrationQueryUnauthorized = errors.New("registration operation query is unauthorized")
+	ErrRegistrationRecovering        = errors.New("registration is recovering asynchronously")
+	ErrRegistrationRestart           = errors.New("registration must be restarted")
 )
 
 var mainlandMobile = regexp.MustCompile(`^1[3-9][0-9]{9}$`)
 var registrationUsername = regexp.MustCompile(`^[a-z][a-z0-9._-]{2,31}$`)
 
 type SMSChallenge struct {
-	ID        uuid.UUID             `json:"challenge_id"`
-	Mobile    string                `json:"-"`
-	Purpose   SMSPurpose            `json:"-"`
-	ExpiresAt time.Time             `json:"expires_at"`
-	Source    string                `json:"-"`
-	Device    string                `json:"-"`
-	Provider  SMSProviderDescriptor `json:"-"`
+	ID                              uuid.UUID             `json:"challenge_id"`
+	Mobile                          string                `json:"-"`
+	Purpose                         SMSPurpose            `json:"-"`
+	ExpiresAt                       time.Time             `json:"expires_at"`
+	Source                          string                `json:"-"`
+	Device                          string                `json:"-"`
+	Provider                        SMSProviderDescriptor `json:"-"`
+	RegistrationOperationID         uuid.UUID             `json:"registration_operation_id,omitempty"`
+	RegistrationQueryToken          string                `json:"registration_query_token,omitempty"`
+	RegistrationQueryTokenExpiresAt time.Time             `json:"registration_query_token_expires_at,omitempty"`
+}
+
+type RegistrationOperation struct {
+	ID                    uuid.UUID  `json:"registration_operation_id"`
+	CandidateUserID       uuid.UUID  `json:"-"`
+	QueryTokenHash        []byte     `json:"-"`
+	RequestFingerprint    []byte     `json:"-"`
+	Username              string     `json:"-"`
+	Mobile                string     `json:"-"`
+	ChallengeID           uuid.UUID  `json:"-"`
+	PasswordPolicyVersion string     `json:"-"`
+	IdentitySubject       string     `json:"-"`
+	UserID                *uuid.UUID `json:"user_id,omitempty"`
+	UserCode              string     `json:"user_code,omitempty"`
+	Status                string     `json:"status"`
+	Version               int64      `json:"-"`
+	IdentityCreatedAt     *time.Time `json:"-"`
+	NextRetryAt           time.Time  `json:"next_retry_at"`
+	LastErrorCode         string     `json:"reason,omitempty"`
+	CreatedAt             time.Time  `json:"-"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+}
+
+type RegistrationResult struct {
+	OperationID uuid.UUID  `json:"registration_operation_id"`
+	UserID      *uuid.UUID `json:"user_id,omitempty"`
+	UserCode    string     `json:"user_code,omitempty"`
+	Username    string     `json:"username,omitempty"`
+	Status      string     `json:"status"`
+	NextRetryAt time.Time  `json:"next_retry_at,omitempty"`
 }
 
 type MobileAuthRepository interface {
@@ -47,11 +85,18 @@ type MobileAuthRepository interface {
 	CreateSliderCaptcha(context.Context, SliderCaptcha) error
 	ConsumeSliderCaptcha(context.Context, uuid.UUID, string, SMSPurpose, int) error
 	CreateSMSChallenge(context.Context, SMSChallenge) error
+	CreateRegistrationOperation(context.Context, RegistrationOperation, SMSChallenge) error
 	MarkSMSChallengeSent(context.Context, uuid.UUID, string, []byte) error
 	MarkSMSChallengeFailed(context.Context, uuid.UUID) error
 	SMSChallengeReady(context.Context, uuid.UUID, string, SMSPurpose) (SMSVerificationData, error)
 	ConsumeSMSChallenge(context.Context, uuid.UUID, string, SMSPurpose, bool) error
-	RegisterMobileIdentity(context.Context, string, string, string, string) (uuid.UUID, string, error)
+	ConsumeRegistrationSMS(context.Context, uuid.UUID, uuid.UUID, string, bool) error
+	RegistrationOperation(context.Context, uuid.UUID) (RegistrationOperation, error)
+	MarkRegistrationIdentityCreating(context.Context, uuid.UUID) error
+	MarkRegistrationIdentityCreated(context.Context, uuid.UUID, string) error
+	CommitRegistration(context.Context, uuid.UUID, string) (RegistrationOperation, error)
+	ScheduleRegistrationRetry(context.Context, uuid.UUID, string) error
+	CompensatePreIdentityRegistration(context.Context, uuid.UUID, string) error
 }
 
 type SMSRateLimitError struct {
@@ -68,14 +113,15 @@ type MobileAuthService struct {
 	issuer             string
 	now                func() time.Time
 	loginResponseFloor time.Duration
+	tokens             *RegistrationTokenSigner
 }
 
-func NewMobileAuthService(repository MobileAuthRepository, sms SMSProvider, identities IdentityProvisioner, issuer string) (*MobileAuthService, error) {
+func NewMobileAuthService(repository MobileAuthRepository, sms SMSProvider, identities IdentityProvisioner, issuer string, tokens *RegistrationTokenSigner) (*MobileAuthService, error) {
 	issuer = strings.TrimRight(strings.TrimSpace(issuer), "/")
-	if repository == nil || sms == nil || identities == nil || issuer == "" {
+	if repository == nil || sms == nil || identities == nil || issuer == "" || tokens == nil {
 		return nil, errors.New("mobile authentication is not fully configured")
 	}
-	return &MobileAuthService{repository: repository, sms: sms, identities: identities, issuer: issuer, now: func() time.Time { return time.Now().UTC() }, loginResponseFloor: 750 * time.Millisecond}, nil
+	return &MobileAuthService{repository: repository, sms: sms, identities: identities, issuer: issuer, tokens: tokens, now: func() time.Time { return time.Now().UTC() }, loginResponseFloor: 750 * time.Millisecond}, nil
 }
 
 func NormalizeMainlandMobile(value string) (string, error) {
@@ -105,7 +151,7 @@ func (s *MobileAuthService) PrecheckRegistration(ctx context.Context, rawUsernam
 	if err != nil {
 		return "", err
 	}
-	if err := s.identities.ValidateMobileUser(ctx, username, mobile, passwordHandle, passwordPolicyVersion); err != nil {
+	if err := s.identities.ValidateMobileUser(ctx, uuid.Nil, username, mobile, passwordHandle, passwordPolicyVersion); err != nil {
 		return "", err
 	}
 	usernameExists, err := s.repository.UsernameExists(ctx, username)
@@ -137,8 +183,9 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	if err := s.repository.ConsumeSliderCaptcha(ctx, captchaID, mobile, purpose, captchaOffset); err != nil {
 		return SMSChallenge{}, err
 	}
+	username := ""
 	if purpose == SMSPurposeRegister {
-		if _, err := s.PrecheckRegistration(ctx, rawUsername, mobile, passwordHandle, passwordPolicyVersion); err != nil {
+		if username, err = s.PrecheckRegistration(ctx, rawUsername, mobile, passwordHandle, passwordPolicyVersion); err != nil {
 			return SMSChallenge{}, err
 		}
 	}
@@ -150,7 +197,29 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 		return SMSChallenge{}, ErrMobileAlreadyRegistered
 	}
 	challenge := SMSChallenge{ID: uuid.Must(uuid.NewV7()), Mobile: mobile, Purpose: purpose, ExpiresAt: s.now().Add(5 * time.Minute), Source: strings.TrimSpace(source), Device: strings.TrimSpace(device), Provider: s.sms.Descriptor()}
-	if err := s.repository.CreateSMSChallenge(ctx, challenge); err != nil {
+	if purpose == SMSPurposeRegister {
+		operationID := uuid.Must(uuid.NewV7())
+		if err := s.identities.ValidateMobileUser(ctx, operationID, username, mobile, passwordHandle, passwordPolicyVersion); err != nil {
+			return SMSChallenge{}, err
+		}
+		token, tokenExpiresAt, tokenErr := s.tokens.Issue(operationID)
+		if tokenErr != nil {
+			return SMSChallenge{}, tokenErr
+		}
+		fingerprint := registrationFingerprint(username, mobile, challenge.ID, passwordPolicyVersion)
+		tokenHash := registrationTokenHash(token)
+		operation := RegistrationOperation{
+			ID: operationID, CandidateUserID: uuid.Must(uuid.NewV7()), QueryTokenHash: tokenHash[:], RequestFingerprint: fingerprint[:],
+			Username: username, Mobile: mobile, ChallengeID: challenge.ID, PasswordPolicyVersion: passwordPolicyVersion,
+			Status: "SMS_PENDING", NextRetryAt: challenge.ExpiresAt, CreatedAt: s.now(), UpdatedAt: s.now(),
+		}
+		challenge.RegistrationOperationID = operationID
+		challenge.RegistrationQueryToken = token
+		challenge.RegistrationQueryTokenExpiresAt = tokenExpiresAt
+		if err := s.repository.CreateRegistrationOperation(ctx, operation, challenge); err != nil {
+			return SMSChallenge{}, err
+		}
+	} else if err := s.repository.CreateSMSChallenge(ctx, challenge); err != nil {
 		return SMSChallenge{}, err
 	}
 	// Login delivery is deliberately detached from the external response. Known
@@ -169,6 +238,10 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 		return SMSChallenge{}, err
 	}
 	return challenge, nil
+}
+
+func registrationFingerprint(username, mobile string, challengeID uuid.UUID, policyVersion string) [32]byte {
+	return sha256.Sum256([]byte(strings.Join([]string{username, mobile, challengeID.String(), policyVersion, "registration-v1"}, "\x00")))
 }
 
 func (s *MobileAuthService) deliverSMS(ctx context.Context, challenge SMSChallenge) error {
@@ -195,35 +268,122 @@ func waitForResponseFloor(ctx context.Context, startedAt time.Time, floor time.D
 	}
 }
 
-func (s *MobileAuthService) Register(ctx context.Context, rawUsername, rawMobile string, challengeID uuid.UUID, code, passwordHandle, passwordPolicyVersion string) (uuid.UUID, string, error) {
+func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID, queryToken, rawUsername, rawMobile string, challengeID uuid.UUID, code, passwordHandle, passwordPolicyVersion string) (RegistrationResult, error) {
 	username, err := NormalizeRegistrationUsername(rawUsername)
 	if err != nil {
-		return uuid.Nil, "", err
+		return RegistrationResult{}, err
 	}
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil {
-		return uuid.Nil, "", err
+		return RegistrationResult{}, err
 	}
-	exists, err := s.repository.UsernameExists(ctx, username)
+	operation, err := s.authorizeRegistrationQuery(ctx, operationID, queryToken)
 	if err != nil {
-		return uuid.Nil, "", err
+		return RegistrationResult{}, err
 	}
-	if exists {
-		return uuid.Nil, "", ErrUsernameAlreadyRegistered
+	if err := s.identities.ValidateMobileUser(ctx, operationID, username, mobile, passwordHandle, passwordPolicyVersion); err != nil {
+		if operation.UserID != nil && errors.Is(err, ErrPasswordReferenceInvalid) {
+			return registrationResult(operation), nil
+		}
+		return RegistrationResult{}, err
 	}
-	if err := s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeRegister, code); err != nil {
-		return uuid.Nil, "", err
+	fingerprint := registrationFingerprint(username, mobile, challengeID, passwordPolicyVersion)
+	if operation.Username != username || operation.Mobile != mobile || operation.ChallengeID != challengeID || operation.PasswordPolicyVersion != passwordPolicyVersion || !hmac.Equal(operation.RequestFingerprint, fingerprint[:]) {
+		return RegistrationResult{}, ErrRegistrationConflict
 	}
-	subject, err := s.identities.CreateMobileUser(ctx, username, mobile, passwordHandle, passwordPolicyVersion)
+	if operation.Status == "COMPENSATED" || operation.Status == "EXPIRED" {
+		return registrationResult(operation), ErrRegistrationRestart
+	}
+	if operation.Status == "PROVISIONING" || operation.Status == "ACCOUNT_COMMITTED" {
+		return registrationResult(operation), nil
+	}
+	if operation.Status == "SMS_PENDING" {
+		verificationData, readyErr := s.repository.SMSChallengeReady(ctx, challengeID, mobile, SMSPurposeRegister)
+		if readyErr != nil {
+			return RegistrationResult{}, readyErr
+		}
+		verified, verifyErr := s.sms.VerifyCode(ctx, mobile, challengeID, verificationData, strings.TrimSpace(code))
+		if verifyErr != nil {
+			return RegistrationResult{}, fmt.Errorf("%w: %v", ErrSMSUnavailable, verifyErr)
+		}
+		if err := s.repository.ConsumeRegistrationSMS(ctx, operationID, challengeID, mobile, verified); err != nil {
+			return RegistrationResult{}, err
+		}
+	}
+	operation, err = s.repository.RegistrationOperation(ctx, operationID)
 	if err != nil {
-		return uuid.Nil, "", err
+		return RegistrationResult{}, err
 	}
-	userID, userCode, err := s.repository.RegisterMobileIdentity(ctx, s.issuer, subject, username, mobile)
+	return s.resumeRegistration(ctx, operation)
+}
+
+func (s *MobileAuthService) RegistrationStatus(ctx context.Context, operationID uuid.UUID, queryToken string) (RegistrationResult, error) {
+	operation, err := s.authorizeRegistrationQuery(ctx, operationID, queryToken)
 	if err != nil {
-		_ = s.identities.DeleteUser(context.WithoutCancel(ctx), subject)
-		return uuid.Nil, "", err
+		return RegistrationResult{}, err
 	}
-	return userID, userCode, nil
+	result := registrationResult(operation)
+	result.Username = ""
+	return result, nil
+}
+
+func (s *MobileAuthService) authorizeRegistrationQuery(ctx context.Context, operationID uuid.UUID, token string) (RegistrationOperation, error) {
+	if err := s.tokens.Validate(operationID, strings.TrimSpace(token)); err != nil {
+		return RegistrationOperation{}, err
+	}
+	operation, err := s.repository.RegistrationOperation(ctx, operationID)
+	if err != nil {
+		return RegistrationOperation{}, ErrRegistrationQueryUnauthorized
+	}
+	hash := registrationTokenHash(strings.TrimSpace(token))
+	if !hmac.Equal(operation.QueryTokenHash, hash[:]) {
+		return RegistrationOperation{}, ErrRegistrationQueryUnauthorized
+	}
+	return operation, nil
+}
+
+func (s *MobileAuthService) resumeRegistration(ctx context.Context, operation RegistrationOperation) (RegistrationResult, error) {
+	if operation.Status == "REGISTRATION_IN_PROGRESS" || operation.Status == "IDENTITY_CREATING" {
+		if err := s.repository.MarkRegistrationIdentityCreating(ctx, operation.ID); err != nil {
+			return RegistrationResult{}, err
+		}
+		subject, found, err := s.identities.FindMobileUserByRegistrationOperation(ctx, operation.ID)
+		if err == nil && !found {
+			subject, err = s.identities.CreateMobileUser(ctx, operation.ID, operation.Username, operation.Mobile, "", operation.PasswordPolicyVersion)
+		}
+		if err != nil {
+			if errors.Is(err, ErrPasswordReferenceInvalid) {
+				_ = s.repository.CompensatePreIdentityRegistration(context.WithoutCancel(ctx), operation.ID, "PASSWORD_REFERENCE_EXPIRED")
+				operation, _ = s.repository.RegistrationOperation(context.WithoutCancel(ctx), operation.ID)
+				return registrationResult(operation), ErrRegistrationRestart
+			}
+			_ = s.repository.ScheduleRegistrationRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_UNAVAILABLE")
+			operation, _ = s.repository.RegistrationOperation(context.WithoutCancel(ctx), operation.ID)
+			return registrationResult(operation), ErrRegistrationRecovering
+		}
+		if err := s.repository.MarkRegistrationIdentityCreated(ctx, operation.ID, subject); err != nil {
+			_ = s.repository.ScheduleRegistrationRetry(context.WithoutCancel(ctx), operation.ID, "IDENTITY_RESULT_PERSIST_FAILED")
+			return registrationResult(operation), ErrRegistrationRecovering
+		}
+		operation, err = s.repository.RegistrationOperation(ctx, operation.ID)
+		if err != nil {
+			return RegistrationResult{}, err
+		}
+	}
+	if operation.Status == "IDENTITY_CREATED" || operation.Status == "ACCOUNT_COMMITTING" || operation.Status == "REPAIR_REQUIRED" {
+		committed, err := s.repository.CommitRegistration(ctx, operation.ID, s.issuer)
+		if err != nil {
+			_ = s.repository.ScheduleRegistrationRetry(context.WithoutCancel(ctx), operation.ID, "ACCOUNT_COMMIT_FAILED")
+			operation, _ = s.repository.RegistrationOperation(context.WithoutCancel(ctx), operation.ID)
+			return registrationResult(operation), ErrRegistrationRecovering
+		}
+		return registrationResult(committed), nil
+	}
+	return registrationResult(operation), nil
+}
+
+func registrationResult(operation RegistrationOperation) RegistrationResult {
+	return RegistrationResult{OperationID: operation.ID, UserID: operation.UserID, UserCode: operation.UserCode, Username: operation.Username, Status: operation.Status, NextRetryAt: operation.NextRetryAt}
 }
 
 func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (string, error) {

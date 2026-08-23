@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "images", "newApi", "oidc", "public", "observability", "security", "sms", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
+  "required": ["global", "images", "newApi", "oidc", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
   "properties": {
     "global": {
       "type": "object",
@@ -82,6 +82,15 @@
         "provider": { "enum": ["aliyun-managed", "http-generated"] },
         "aliyunEndpoint": { "type": "string", "format": "uri" },
         "httpEndpoint": { "type": "string" }
+      }
+    },
+    "account": {
+      "type": "object",
+      "required": ["walletProvisioningPolicyVersion", "walletProvisioningSlaMinutes"],
+      "additionalProperties": false,
+      "properties": {
+        "walletProvisioningPolicyVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "walletProvisioningSlaMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 }
       }
     },
     "billing": {

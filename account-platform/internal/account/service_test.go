@@ -175,7 +175,7 @@ func (f *fakeWalletProvisioner) EnsurePersonalWallet(context.Context, uuid.UUID)
 	return f.err
 }
 
-func TestBootstrapActivatesOnlyAfterWalletProvisioning(t *testing.T) {
+func TestBootstrapReturnsProvisioningWithoutCallingBilling(t *testing.T) {
 	userID := uuid.Must(uuid.NewV7())
 	repository := &fakeRepository{me: Me{UserID: userID, Status: "PROVISIONING", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
 	wallets := &fakeWalletProvisioner{}
@@ -183,20 +183,20 @@ func TestBootstrapActivatesOnlyAfterWalletProvisioning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if me.Status != "ACTIVE" || wallets.calls != 1 || repository.activateCalls != 1 {
+	if me.Status != "PROVISIONING" || wallets.calls != 0 || repository.activateCalls != 0 {
 		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
 	}
 }
 
-func TestBootstrapRemainsProvisioningWhenBillingIsUnavailable(t *testing.T) {
+func TestBootstrapDoesNotDependOnBillingAvailability(t *testing.T) {
 	repository := &fakeRepository{me: Me{UserID: uuid.Must(uuid.NewV7()), Status: "PROVISIONING", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
 	wallets := &fakeWalletProvisioner{err: errors.New("unavailable")}
 	me, err := NewService(repository, wallets).Bootstrap(context.Background(), identity.Principal{})
-	if !errors.Is(err, ErrWalletProvisioning) {
-		t.Fatalf("error = %v, want ErrWalletProvisioning", err)
+	if err != nil {
+		t.Fatalf("error = %v", err)
 	}
-	if me.Status != "PROVISIONING" || repository.activateCalls != 0 {
-		t.Fatalf("me=%+v activate calls=%d", me, repository.activateCalls)
+	if me.Status != "PROVISIONING" || wallets.calls != 0 || repository.activateCalls != 0 {
+		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)
 	}
 }
 
@@ -204,8 +204,8 @@ func TestBootstrapDoesNotReactivateDisabledUser(t *testing.T) {
 	repository := &fakeRepository{me: Me{UserID: uuid.Must(uuid.NewV7()), Status: "DISABLED", ActiveContext: Context{Type: "PERSONAL", MembershipVersion: 1}}}
 	wallets := &fakeWalletProvisioner{}
 	me, err := NewService(repository, wallets).Bootstrap(context.Background(), identity.Principal{})
-	if !errors.Is(err, ErrForbidden) {
-		t.Fatalf("error = %v, want ErrForbidden", err)
+	if err != nil {
+		t.Fatalf("error = %v", err)
 	}
 	if me.Status != "DISABLED" || wallets.calls != 0 || repository.activateCalls != 0 {
 		t.Fatalf("me=%+v wallet calls=%d activate calls=%d", me, wallets.calls, repository.activateCalls)

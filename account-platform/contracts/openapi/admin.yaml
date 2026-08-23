@@ -307,6 +307,52 @@ paths:
         "200": { $ref: "#/components/responses/Overview" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/registration-operations:
+    get:
+      operationId: listRegistrationRepairQueue
+      summary: List redacted registration and wallet provisioning operations requiring repair
+      description: Requires platform.registrations.repair. Passwords, password fingerprints, SMS codes, mobile numbers, usernames, provider text, and Identity subjects are never returned.
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - name: status
+          in: query
+          schema: { type: string, enum: [REPAIR_REQUIRED, COMPENSATION_PENDING] }
+        - name: stage
+          in: query
+          description: Failed or pending recovery stage derived from persisted operation facts.
+          schema: { type: string, enum: [IDENTITY_CREATING, ACCOUNT_COMMITTING, WALLET_PROVISIONING, COMPENSATION] }
+        - name: responsibility
+          in: query
+          schema: { type: string, enum: [IDENTITY, ACCOUNT, BILLING] }
+        - name: older_than_minutes
+          in: query
+          schema: { type: integer, minimum: 0, maximum: 43200 }
+        - name: sla
+          in: query
+          schema: { type: string, enum: [OVERDUE, WITHIN] }
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/registration-operations/{registration_operation_id}/actions/retry:
+    post:
+      operationId: retryRegistrationRepair
+      summary: Idempotently retry the current proven registration or wallet provisioning stage
+      parameters: [{ $ref: "#/components/parameters/RegistrationOperationID" }]
+      responses:
+        "202": { $ref: "#/components/responses/Overview" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/registration-operations/{registration_operation_id}/actions/compensate:
+    post:
+      operationId: compensateOrphanRegistration
+      summary: Disable an orphan Identity and release its reservation only after the 24-hour no-facts proof gate
+      parameters: [{ $ref: "#/components/parameters/RegistrationOperationID" }]
+      responses:
+        "204": { description: Identity is confirmed non-authenticating and the reservation is released }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/overview:
     get:
       operationId: getAdminBillingOverview
@@ -681,6 +727,11 @@ components:
       schema: { type: string, format: uuid }
     AuditID:
       name: audit_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RegistrationOperationID:
+      name: registration_operation_id
       in: path
       required: true
       schema: { type: string, format: uuid }

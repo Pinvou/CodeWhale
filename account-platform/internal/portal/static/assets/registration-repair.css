@@ -1,0 +1,24 @@
+.registration-repair {
+  margin: 24px auto 48px;
+  max-width: 1440px;
+  padding: 24px;
+  color: var(--ap-text, #172033);
+}
+.registration-repair header,
+.registration-repair .filters,
+.registration-repair .actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.registration-repair header { justify-content: space-between; }
+.registration-repair .filters { margin: 16px 0; }
+.registration-repair select,
+.registration-repair input,
+.registration-repair button { min-height: 36px; padding: 6px 10px; }
+.registration-repair table { width: 100%; border-collapse: collapse; background: #fff; }
+.registration-repair th,
+.registration-repair td { padding: 10px; border-bottom: 1px solid #dce2ec; text-align: left; vertical-align: top; }
+.registration-repair .operation-id { max-width: 180px; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+.registration-repair .error { color: #a61b1b; }
+.registration-repair .muted { color: #657086; }
+@media (max-width: 900px) {
+  .registration-repair { overflow-x: auto; padding: 16px; }
+  .registration-repair table { min-width: 1000px; }
+}

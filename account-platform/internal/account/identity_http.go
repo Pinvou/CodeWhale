@@ -13,11 +13,16 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/google/uuid"
 )
 
+var ErrIdentityRegistrationNotFound = errors.New("identity registration correlation was not found")
+
 type IdentityProvisioner interface {
-	ValidateMobileUser(context.Context, string, string, string, string) error
-	CreateMobileUser(context.Context, string, string, string, string) (string, error)
+	ValidateMobileUser(context.Context, uuid.UUID, string, string, string, string) error
+	CreateMobileUser(context.Context, uuid.UUID, string, string, string, string) (string, error)
+	FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error)
+	DisableUserAndConfirm(context.Context, string) error
 	DeleteUser(context.Context, string) error
 }
 
@@ -38,18 +43,18 @@ func NewHTTPIdentityProvisioner(rawURL, serviceToken string) (*HTTPIdentityProvi
 	return &HTTPIdentityProvisioner{baseURL: parsed, serviceToken: strings.TrimSpace(serviceToken), client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
-func (p *HTTPIdentityProvisioner) ValidateMobileUser(ctx context.Context, username, mobile, handle, policyVersion string) error {
+func (p *HTTPIdentityProvisioner) ValidateMobileUser(ctx context.Context, operationID uuid.UUID, username, mobile, handle, policyVersion string) error {
 	return p.request(ctx, http.MethodPost, "/internal/v1/registration/password-references/validate", map[string]string{
-		"username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion,
+		"registration_operation_id": operationID.String(), "username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion,
 	}, nil)
 }
 
-func (p *HTTPIdentityProvisioner) CreateMobileUser(ctx context.Context, username, mobile, handle, policyVersion string) (string, error) {
+func (p *HTTPIdentityProvisioner) CreateMobileUser(ctx context.Context, operationID uuid.UUID, username, mobile, handle, policyVersion string) (string, error) {
 	var response struct {
 		Subject string `json:"subject"`
 	}
 	err := p.request(ctx, http.MethodPost, "/internal/v1/users/mobile", map[string]string{
-		"username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion,
+		"registration_operation_id": operationID.String(), "username": username, "mobile": mobile, "password_handle": handle, "password_policy_version": policyVersion,
 	}, &response)
 	if err != nil {
 		return "", err
@@ -60,8 +65,26 @@ func (p *HTTPIdentityProvisioner) CreateMobileUser(ctx context.Context, username
 	return response.Subject, nil
 }
 
+func (p *HTTPIdentityProvisioner) FindMobileUserByRegistrationOperation(ctx context.Context, operationID uuid.UUID) (string, bool, error) {
+	var response struct {
+		Subject string `json:"subject"`
+	}
+	err := p.request(ctx, http.MethodGet, "/internal/v1/registration-operations/"+url.PathEscape(operationID.String())+"/user", nil, &response)
+	if errors.Is(err, ErrIdentityRegistrationNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return response.Subject, response.Subject != "", nil
+}
+
 func (p *HTTPIdentityProvisioner) DeleteUser(ctx context.Context, subject string) error {
 	return p.request(ctx, http.MethodDelete, "/internal/v1/users/"+url.PathEscape(subject), nil, nil)
+}
+
+func (p *HTTPIdentityProvisioner) DisableUserAndConfirm(ctx context.Context, subject string) error {
+	return p.request(ctx, http.MethodPost, "/internal/v1/users/"+url.PathEscape(subject)+"/disable-and-confirm", nil, nil)
 }
 
 func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path string, body any, output any) error {
@@ -86,6 +109,9 @@ func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path stri
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusNotFound {
+			return ErrIdentityRegistrationNotFound
+		}
 		var problem struct {
 			Code string `json:"code"`
 		}
