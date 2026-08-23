@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标保留可追溯任务；完成 APT-001～APT-006、APT-008～APT-032 与 APT-046，并完成 APT-007/APT-052/APT-053 仓库实现但等待环境验收后，当前仍有 56 个状态为 `部分实现` 或 `未实现` 的目标编号，每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标保留可追溯任务；完成 APT-001～APT-006、APT-008～APT-033 与 APT-046，并完成 APT-007/APT-052/APT-053 仓库实现但等待环境验收后，当前仍有 54 个状态为 `部分实现` 或 `未实现` 的目标编号，每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -56,7 +56,7 @@
 | APT-030 | 模型取消、执行/交付分离、可信用量核对和取消期 Hold 收敛 | TOK-31, TOK-33, TOK-38–TOK-41, BILL-34, BILL-35, UI-13, ADM-31, ADM-32 | APT-018, APT-029 | CODE | DONE |
 | APT-031 | Token Account、凭据和检查动作的平台权限隔离 | SCOPE-03, ADM-25–ADM-27 | APT-006, APT-026, APT-028 | CODE | DONE |
 | APT-032 | 桌面动态目录消费、按会话冻结模型、显式替代分支与受信个人中心入口 | SCOPE-05, TOK-06, UI-09 | APT-003, APT-027–APT-030 | CODE | DONE |
-| APT-033 | 配置驱动系统探针和受控审计导出 | ADM-09, ADM-10, NFR-19, NFR-48 | APT-006, APT-008, APT-020, APT-023, APT-031 | CODE | PENDING |
+| APT-033 | 配置驱动系统探针与通用响应判定 Adapter | ADM-10, NFR-19 | APT-006, APT-020, APT-023, APT-031 | CODE | DONE |
 | APT-034 | 桌面、个人中心和后台完整三语发布门禁 | UI-16 | APT-003, APT-004, APT-012, APT-013, APT-017, APT-021, APT-030, APT-032, APT-033 | CODE | PENDING |
 | APT-035 | HTTPS、生产 KMS/Vault、密钥轮换和秘密配置验收 | NFR-01, NFR-03 | 无 | CODE+ENV | PENDING |
 | APT-036 | 敏感信息白名单、统一结构化日志、Request ID、Trace、健康和指标 | NFR-04, NFR-21–NFR-25 | 无 | CODE | PENDING |
@@ -78,6 +78,7 @@
 | APT-052 | 非计费客户端切换 Readiness、短时签名准入证明及发布系统前置能力 | TOK-37 | APT-018, APT-027, APT-028 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-053 | 客户端幂等迁移及发布/安装/运行三层门禁的正式制品验收 | TOK-35, TOK-36, NFR-20 | APT-032, APT-052 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-054 | 紧急模型下架触发在途取消并保存实际取消、生成量、Hold 与结算证据 | TOK-47 | APT-030, APT-032 | CODE | PENDING |
+| APT-055 | 服务端受控审计导出、重认证、PII临时授权、加密水印和一次性下载配额 | ADM-09, NFR-48 | APT-006, APT-008 | CODE | PENDING |
 
 ## 3. 独立提交验收模板
 

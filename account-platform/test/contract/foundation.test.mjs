@@ -278,8 +278,10 @@ test('Compose keeps data stores private and simulator development-only', async (
   assert.match(compose.services['billing-service'].environment.DATABASE_URL, /account_platform_billing/);
   assert.equal(compose.services['billing-service'].environment.OIDC_AUDIENCE, compose.services['account-service'].environment.OIDC_AUDIENCE);
   assert.equal(compose.services['token-portal'].environment.BILLING_HTTP_URL, 'http://billing-service:8080');
-  assert.equal(compose.services['token-portal'].environment.SYSTEM_NATS_STATUS_URL, 'http://nats:8222/healthz');
-  assert.equal(compose.services['token-portal'].environment.SYSTEM_ACCOUNT_RELAY_URL, 'http://account-event-relay:9090');
+  const probes = JSON.parse(compose.services['token-portal'].environment.SYSTEM_PROBES_JSON);
+  assert.equal(probes.find(item => item.key === 'event-bus')?.url, 'http://nats:8222/healthz');
+  assert.equal(probes.find(item => item.key === 'account-event-relay')?.url, 'http://account-event-relay:9090');
+  assert.equal(new Set(probes.map(item => item.key)).size, probes.length);
   assert.match(compose.services['account-service'].environment.DATABASE_URL, /account_platform_account/);
   assert.match(compose.services['token-gateway'].environment.DATABASE_URL, /account_platform_token/);
   assert.notEqual(

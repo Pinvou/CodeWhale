@@ -24,19 +24,16 @@ import (
 )
 
 type Config struct {
-	PublicURL         *url.URL
-	AuthorizationURL  *url.URL
-	TokenURL          *url.URL
-	ClientID          string
-	AccountURL        *url.URL
-	BillingURL        *url.URL
-	TokenGatewayURL   *url.URL
-	KeycloakStatusURL *url.URL
-	NewAPIStatusURL   *url.URL
-	NATSStatusURL     *url.URL
-	RelayURLs         map[string]*url.URL
-	SecureCookies     bool
-	SessionMaxAge     time.Duration
+	PublicURL        *url.URL
+	AuthorizationURL *url.URL
+	TokenURL         *url.URL
+	ClientID         string
+	AccountURL       *url.URL
+	BillingURL       *url.URL
+	TokenGatewayURL  *url.URL
+	SystemProbes     []SystemProbe
+	SecureCookies    bool
+	SessionMaxAge    time.Duration
 }
 
 const defaultSessionMaxAge = 30 * 24 * time.Hour

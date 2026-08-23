@@ -37,6 +37,16 @@ export const adminPlatformCopy = {
   },
 };
 
+Object.assign(adminPlatformCopy.zh.system.names, {
+  'identity-provider':'身份提供方', 'model-gateway':'模型网关', 'event-bus':'事件总线',
+});
+Object.assign(adminPlatformCopy.en.system.names, {
+  'identity-provider':'Identity Provider', 'model-gateway':'Model Gateway', 'event-bus':'Event Bus',
+});
+Object.assign(adminPlatformCopy.ja.system.names, {
+  'identity-provider':'ID プロバイダー', 'model-gateway':'モデルゲートウェイ', 'event-bus':'イベントバス',
+});
+
 Object.assign(adminPlatformCopy.zh.billing, {
   repair:'确认补偿', repairReason:'请输入人工补偿原因（系统将再次核验商城订单）',
   orderSearch:'搜索手机号、品悟/商城订单号、支付流水号或 SKU', allStatuses:'全部状态', pinvouOrder:'品悟订单', product:'套餐 / SKU', paymentReference:'支付流水 / 手机号',

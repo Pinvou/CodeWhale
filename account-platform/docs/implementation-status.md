@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 273`、`部分实现 26`、`未实现 30`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 275`、`部分实现 24`、`未实现 30`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -62,6 +62,7 @@
 | `ACCOUNT-CLOSURE-CLEANUP` | 主体生命周期隔离、资料/Commerce/邀请自动收敛、Identity 删除、原标识释放、永久 ID/编码墓碑、三年保留策略，以及组织授予隔离与合规整笔回收 | Account/Billing/Token/Portal Go 单元测试、OpenAPI lint、注销清理合同、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Identity/Commerce 故障注入和三年时钟推进待部署 |
 | `CLIENT-SWITCH-READINESS` | 服务身份保护的只读 OIDC/Account/目录/READY 路由/价格公式检查、公开兼容范围、制品/环境/版本绑定的 Ed25519 短时证明和不可变签发审计 | Go 单元测试、OpenAPI lint、合同测试、Compose/Helm 静态门禁通过；生产密钥注入、真实环境连续无副作用核对和发布系统联调待外部验收 |
 | `DESKTOP-CLIENT-SWITCH` | 动态目录、按会话冻结模型、显式替代分支、受信 Portal、客户端范围守卫及发布/安装/运行三层失败关闭门禁 | Rust check、桌面 lint/build、Bridge 协议、发布门禁签名/篡改测试和全仓 verifier 通过；生产签名身份、正式安装制品原子替换/回滚和真实环境联调待验收 |
+| `CONFIGURED-SYSTEM-PROBES` | Portal 通过运行时注册表装配本地、通用 HTTP/JSON 断言与 Relay 指标 Adapter，不在聚合主流程固定组件或厂商 | Portal Go 单测、Compose/Helm 合同和全仓 verifier 通过；真实环境端点、超时与积压告警待部署验收 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
@@ -392,7 +393,7 @@
 | ADM-07 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 角色可兼任且不同用户可交叉审批；服务端按稳定用户 ID 禁止自审，所有强制审批命令固定只需一名独立审批人。 |
 | ADM-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 不嵌入普通后台；通过受限网络/隧道访问。 |
 | ADM-09 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有筛选和导出基础；需按 NFR-48 增加近期重新认证、默认脱敏、PII临时权限、水印、加密、一次性下载和导出配额。 |
-| ADM-10 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 展示实际部署的 Account、Billing、Gateway、Portal、身份 Provider、模型网关、事件基础设施和 Relay；目标改为配置驱动探针，不在 Portal 写厂商判断分支。 |
+| ADM-10 | 已实现 | DOC_CURRENT | CONFIGURED-SYSTEM-PROBES | NOT_DEPLOYED | `SYSTEM_PROBES_JSON` 配置实际部署组件、通用 HTTP/JSON 断言或 Relay Adapter；页面继续展示健康、积压、核对任务和最近错误，响应不暴露端点或凭据 |
 | NFR-01 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 反向代理、Compose/Helm 和配置校验要求远程 HTTPS、开发 HTTP 限 loopback；无实际部署与证书验收证据 |
 | NFR-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 NOT_DEPLOYED |
 | NFR-03 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 仓库无明文生产密钥且 Provider 凭据加密保存；生产 KMS/Vault、密钥轮换和部署证明未实现 |
@@ -410,7 +411,7 @@
 | NFR-16 | 已实现 | DOC_CURRENT | GO-UNIT; COMMERCE-MAPPING; PAYMENT-PROVIDER-BOUNDARY; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | Commerce Mapping、商品映射、订单/流水/证据及公开 API 使用供应商中立字段并冻结 Provider/Adapter 版本；厂商 SKU、签名、状态和协议仅存在于 Adapter |
 | NFR-17 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY; DESKTOP-39 | NOT_DEPLOYED | `/v1/payment-capabilities` 暴露版本化中立能力；商品渠道、用户/组织 UI、查询 Worker、终态、关单、退款、通知、账单和修复均按同一声明门禁，订单保存能力快照 |
 | NFR-18 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | 通用数据库、API 和三语 UI 只保存 Provider ID、Adapter 版本、上游引用及摘要；New API 专属请求头、日志接口和字段留在 Adapter，并可配置切换通用 OpenAI 兼容 Adapter |
-| NFR-19 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有系统状态聚合和探针函数；组件列表及 New API/Relay 处理仍在 Portal 主流程硬编码 |
+| NFR-19 | 已实现 | DOC_CURRENT | CONFIGURED-SYSTEM-PROBES | NOT_DEPLOYED | 聚合器只迭代配置的探针注册表；通用 HTTP、可配置 JSON 布尔断言和 Relay 指标解析按 Adapter 类型分派，新增或替换组件无需修改 Portal 主流程 |
 | NFR-20 | 部分实现 | DOC_CURRENT | CLIENT-SWITCH-READINESS; DESKTOP-CLIENT-SWITCH | NOT_DEPLOYED | 旧 `llmapi_hub` 运行时已删除，幂等迁移、非计费 readiness 和三层失败关闭门禁已有仓库实现；正式签名制品的安装原子性、回滚及生产联调仍待外部验收 |
 
 ## 1. 产品目标
@@ -447,7 +448,7 @@
 | CR-15 | ACC-05, PAY-06, PAY-01, NFR-16 | 外部商城账号和订单语义与新华三实现隔离 | 已实现 | Account/Gateway 以 Commerce Mapping 和通用状态隔离客户语义，Billing 通过供应商中立商品映射、订单引用、支付流水和证据模型隔离 H3C 状态与协议；厂商字段只留在 Adapter |
 | CR-16 | CORE-01, CORE-02, ACC-01, NFR-15 | 身份认证 Provider 与业务授权隔离 | 已实现 | Keycloak 用户创建/删除及密码策略迁入独立 Identity Adapter；Account 只消费服务端口和不透明引用；OIDC 只提供标准主体和会话身份，平台及组织权限由 Account 权限系统判定 |
 | CR-17 | PAY-01–PAY-04, NFR-17 | 生产/非生产支付 Provider 与支付渠道能力隔离 | 已实现 | H3C 与开发 Simulator 位于独立 Adapter；通用 Billing 只消费版本化能力和不可变商品映射，前端动态渲染渠道；远程 Compose 隔离测试进程、迁移和数据库，生产启动拒绝测试 Provider 且 Helm 无测试支付工作负载或模拟器配置 |
-| CR-18 | ADM-10, NFR-19 | 系统运行探针配置驱动 | 部分实现、待重构 | 系统状态页通过探针注册表声明服务名称、URL、协议和响应判定器；Portal 不使用 `if newapi` 等厂商分支。页面可以展示实际部署组件名称，但采集流程不能依赖固定厂商实现 |
+| CR-18 | ADM-10, NFR-19 | 系统运行探针配置驱动 | 已实现 | 系统状态页通过 `SYSTEM_PROBES_JSON` 注册表声明组件、URL 和通用判定 Adapter；Portal 聚合主流程不包含固定组件清单或厂商分支 |
 | CR-19 | PAY-12, PAY-14–PAY-15, PAY-18–PAY-20, PAY-23, PAY-25, PAY-28–PAY-31, PAY-33–PAY-36 | 支付按完整生命周期设计并允许 Provider 能力降级 | 部分实现、退款范围已由 CR-41 取代 | 原记录包含全额/部分退款；现行支付履约隔离、退款目标、金额和意图事务以 CR-41 及 PAY-24–PAY-31 为准，其他支付生命周期要求继续有效 |
 | CR-20 | BILL-07, PAY-22, PAY-23, UI-11 | 组织资金通过企业管理员在线购买组织权益入账 | 已实现 | 权限化组织购买冻结实际付款管理员、其 Commerce Mapping 快照和受益组织；每笔确认支付流水只向受益组织钱包创建独立权益包 |
 | CR-21 | SCOPE-01, SCOPE-02, TOK-15, TOK-01 | 不实现个人中心自有供应商 Key/自管 Token Account | 移除 | 本地应用直接配置的云端或本地模型完全绕过账号平台，继续由桌面模型配置管理；个人中心不提供供应商 Key、个人 Token Account、共享策略或路由管理 |
@@ -762,7 +763,7 @@
 | ADM-07 | 审批角色兼任和交叉审批 | 已实现 | 角色可兼任且不同用户可交叉审批；服务端按稳定用户 ID 禁止自审，强制审批命令只需一名独立审批人。 |
 | ADM-08 | Keycloak 安全管理入口 | 已实现 | 不嵌入普通后台；通过受限网络/隧道访问。 |
 | ADM-09 | 审计筛选、详情和导出 | 部分实现 | 已有筛选和导出基础；需按 NFR-48 增加近期重新认证、默认脱敏、PII临时权限、水印、加密、一次性下载和导出配额。 |
-| ADM-10 | 系统运行状态 | 部分实现 | 展示实际部署的 Account、Billing、Gateway、Portal、身份 Provider、模型网关、事件基础设施和 Relay；目标改为配置驱动探针，不在 Portal 写厂商判断分支。 |
+| ADM-10 | 系统运行状态 | 已实现 | 运行时注册表配置实际服务和探针 Adapter，页面展示健康、Relay 积压、核对任务和最近错误。 |
 | ADM-11 | 组织模型业务策略管理边界 | 已实现 | 组织后台仅管理显式目标组织的允许/拒绝模型策略和目录资格提示，不返回或接受真实 Token Account、路由、凭据或 Provisioning 字段；Gateway 将策略与平台 READY 路由共同计算资格。 |
 | ADM-12 | 计量单位定义管理 | 已实现 | 支持版本化定义、停用和不可变历史引用保护。 |
 | ADM-13 | 价格版本管理 | 已实现 | 支持全局/模型、固定价/显式继承、逐单位预览、生命周期、并发发布冲突和既有 Hold 保护。 |
@@ -820,7 +821,7 @@
 | NFR-16 | Commerce Provider 可替换性 | 已实现：Commerce Mapping、商品映射、订单/流水/证据及公开 API 均使用供应商中立语义并冻结 Provider/Adapter 版本，厂商字段只存在于 Adapter。 |
 | NFR-17 | 支付能力可发现 | `/v1/payment-capabilities` 提供版本化中立声明，API、UI、任务和订单快照统一使用渠道、查询、时窗、终态及动作能力。 |
 | NFR-18 | 模型网关可替换性 | 已实现：通用记录冻结 Provider ID、Adapter 版本、上游引用和摘要；部署配置可选择 New API 或通用 OpenAI 兼容 Adapter，厂商协议不进入通用 API/UI。 |
-| NFR-19 | 运维探针可扩展 | 已有系统状态聚合和探针函数；组件列表及 New API/Relay 处理仍在 Portal 主流程硬编码。 |
+| NFR-19 | 运维探针可扩展 | 已实现：Portal 聚合器消费配置注册表和通用/Relay Adapter，不硬编码组件或厂商。 |
 | NFR-20 | 无旧模型技术债 | 旧运行时路径、幂等迁移、非计费 readiness 与三层门禁已有仓库实现；正式安装制品原子回滚及生产联调未验收。 |
 | NFR-21 | 结构化日志 | Event Relay 使用 JSON 结构化日志，部分后台任务使用 `slog`；尚无所有服务统一 schema、必需字段和发布门禁。 |
 | NFR-22 | Request ID 关联 | HTTP 中间件生成并返回 Request ID，审计和部分下游调用可关联；尚未证明所有入口、事件、错误和后台任务端到端传播。 |

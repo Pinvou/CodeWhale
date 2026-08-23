@@ -26,6 +26,16 @@ type serviceStatus struct {
 	Message   string `json:"message,omitempty"`
 }
 
+// SystemProbe is the provider-neutral runtime configuration consumed by the
+// Portal aggregator. Adding or replacing a component never requires a vendor
+// branch in collectSystemStatus.
+type SystemProbe struct {
+	Key              string
+	Kind             string
+	Target           *url.URL
+	JSONBooleanField string
+}
+
 type relayStatus struct {
 	Key                 string  `json:"key"`
 	Status              string  `json:"status"`
@@ -111,39 +121,28 @@ func (s *Service) hasSystemStatusPermission(ctx context.Context, accessToken str
 }
 
 func (s *Service) collectSystemStatus(ctx context.Context, accessToken string) systemStatusResponse {
-	result := systemStatusResponse{CheckedAt: s.now(), Services: make([]serviceStatus, 0, 8), Relays: make([]relayStatus, 0, 3), RecentErrors: make([]recentError, 0)}
-	serviceTargets := []struct {
-		key    string
-		target *url.URL
-	}{
-		{key: "account", target: endpoint(s.config.AccountURL, "/health/ready")},
-		{key: "billing", target: endpoint(s.config.BillingURL, "/health/ready")},
-		{key: "token-gateway", target: endpoint(s.config.TokenGatewayURL, "/health/ready")},
-		{key: "keycloak", target: s.config.KeycloakStatusURL},
-		{key: "newapi", target: s.config.NewAPIStatusURL},
-		{key: "nats", target: s.config.NATSStatusURL},
-	}
-	statuses := make(chan serviceStatus, len(serviceTargets))
+	result := systemStatusResponse{CheckedAt: s.now(), Services: make([]serviceStatus, 0, len(s.config.SystemProbes)), Relays: make([]relayStatus, 0, len(s.config.SystemProbes)), RecentErrors: make([]recentError, 0)}
+	statuses := make(chan serviceStatus, len(s.config.SystemProbes))
+	relays := make(chan relayStatus, len(s.config.SystemProbes))
 	var wait sync.WaitGroup
-	for _, target := range serviceTargets {
+	for _, configured := range s.config.SystemProbes {
+		probe := configured
 		wait.Add(1)
-		go func(key string, target *url.URL) {
+		go func() {
 			defer wait.Done()
-			statuses <- s.probe(ctx, key, target)
-		}(target.key, target.target)
-	}
-	relays := make(chan relayStatus, len(s.config.RelayURLs))
-	for key, target := range s.config.RelayURLs {
-		wait.Add(1)
-		go func(key string, target *url.URL) {
-			defer wait.Done()
-			relays <- s.probeRelay(ctx, key, target)
-		}(key, target)
+			switch probe.Kind {
+			case "local":
+				statuses <- serviceStatus{Key: probe.Key, Status: "HEALTHY"}
+			case "relay":
+				relays <- s.probeRelay(ctx, probe.Key, probe.Target)
+			default:
+				statuses <- s.probe(ctx, probe)
+			}
+		}()
 	}
 	wait.Wait()
 	close(statuses)
 	close(relays)
-	result.Services = append(result.Services, serviceStatus{Key: "portal", Status: "HEALTHY"})
 	for status := range statuses {
 		result.Services = append(result.Services, status)
 		if status.Status != "HEALTHY" {
@@ -171,35 +170,37 @@ func (s *Service) collectSystemStatus(ctx context.Context, accessToken string) s
 	return result
 }
 
-func (s *Service) probe(ctx context.Context, key string, target *url.URL) serviceStatus {
-	if target == nil {
-		return serviceStatus{Key: key, Status: "UNKNOWN", Message: "status endpoint is not configured"}
+func (s *Service) probe(ctx context.Context, configured SystemProbe) serviceStatus {
+	if configured.Target == nil {
+		return serviceStatus{Key: configured.Key, Status: "UNKNOWN", Message: "status endpoint is not configured"}
 	}
 	started := time.Now()
-	response, err := s.get(ctx, target, "")
+	response, err := s.get(ctx, configured.Target, "")
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
-		return serviceStatus{Key: key, Status: "UNHEALTHY", LatencyMS: latency, Message: safeProbeError(err)}
+		return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: safeProbeError(err)}
 	}
 	defer response.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return serviceStatus{Key: key, Status: "UNHEALTHY", LatencyMS: latency, Message: fmt.Sprintf("HTTP %d", response.StatusCode)}
+		return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: fmt.Sprintf("HTTP %d", response.StatusCode)}
 	}
-	if key == "newapi" && len(body) > 0 {
+	if configured.JSONBooleanField != "" && len(body) > 0 {
 		var payload map[string]any
 		if json.Unmarshal(body, &payload) == nil {
-			if success, present := payload["success"].(bool); present && !success {
-				return serviceStatus{Key: key, Status: "UNHEALTHY", LatencyMS: latency, Message: "NewAPI status check failed"}
+			if success, present := payload[configured.JSONBooleanField].(bool); !present || !success {
+				return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: "configured status assertion failed"}
 			}
+		} else {
+			return serviceStatus{Key: configured.Key, Status: "UNHEALTHY", LatencyMS: latency, Message: "configured status response is invalid"}
 		}
 	}
-	return serviceStatus{Key: key, Status: "HEALTHY", LatencyMS: latency}
+	return serviceStatus{Key: configured.Key, Status: "HEALTHY", LatencyMS: latency}
 }
 
 func (s *Service) probeRelay(ctx context.Context, key string, base *url.URL) relayStatus {
 	started := time.Now()
-	health := s.probe(ctx, key, endpoint(base, "/health/live"))
+	health := s.probe(ctx, SystemProbe{Key: key, Target: endpoint(base, "/health/live")})
 	result := relayStatus{Key: key, Status: health.Status, Message: health.Message}
 	if health.Status != "HEALTHY" {
 		result.LatencyMS = time.Since(started).Milliseconds()

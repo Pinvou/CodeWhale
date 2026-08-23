@@ -447,6 +447,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 6. 使用 TOK-37 非计费 readiness 验证内置模型路径；如必须验证非流式和流式协议，只使用专用合成验收身份及隔离测试/运营路由，确认其记录和成本不进入任何真实用户或组织钱包、权益、Hold、用量及账单。
 7. 管理后台按 Account 原子平台权限访问，旧 `platform-admin` Claim 不能绕过拒绝；凭据只显示元数据，且只有独立模型运营权限可以访问 Token Account、路由和凭据操作。
 8. 系统运行页的服务、NATS、Relay 和 New API 状态可信。
+9. `SYSTEM_PROBES_JSON` 与实际部署拓扑一致，key 唯一；远端探针 URL 不含凭据或 fragment。通用 JSON 健康接口只通过 `json_boolean_field` 声明成功字段，Relay 才使用 backlog 指标 Adapter；替换 Identity Provider、模型网关或事件组件时修改配置而非 Portal 代码。
 
 ### 11.3 支付烟测
 

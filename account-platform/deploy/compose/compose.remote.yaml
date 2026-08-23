@@ -29,7 +29,7 @@ services:
     environment:
       PORTAL_PUBLIC_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}
       PORTAL_OIDC_AUTHORIZATION_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou/protocol/openid-connect/auth
-      SYSTEM_NEWAPI_STATUS_URL: http://newapi:3000/api/status
+      SYSTEM_PROBES_JSON: '[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"http://newapi:3000/api/status","json_boolean_field":"success"},{"key":"event-bus","kind":"http","url":"http://nats:8222/healthz"},{"key":"account-event-relay","kind":"relay","url":"http://account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://token-event-relay:9090"}]'
 
   payment-simulator:
     profiles: [development-simulator]

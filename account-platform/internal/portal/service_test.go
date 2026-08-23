@@ -154,17 +154,20 @@ func TestSystemStatusAggregatesInternalHealthWithoutExposingEndpoints(t *testing
 	}
 	store := newMemoryStore()
 	service, err := NewService(Config{
-		PublicURL:         parsed,
-		AuthorizationURL:  parsed,
-		TokenURL:          parsed,
-		ClientID:          "portal",
-		AccountURL:        parsed,
-		BillingURL:        parsed,
-		TokenGatewayURL:   parsed,
-		KeycloakStatusURL: endpoint(parsed, "/keycloak"),
-		NewAPIStatusURL:   endpoint(parsed, "/newapi"),
-		NATSStatusURL:     endpoint(parsed, "/nats"),
-		RelayURLs:         map[string]*url.URL{"account-event-relay": parsed, "billing-event-relay": parsed, "token-event-relay": parsed},
+		PublicURL:        parsed,
+		AuthorizationURL: parsed,
+		TokenURL:         parsed,
+		ClientID:         "portal",
+		AccountURL:       parsed,
+		BillingURL:       parsed,
+		TokenGatewayURL:  parsed,
+		SystemProbes: []SystemProbe{
+			{Key: "portal", Kind: "local"},
+			{Key: "identity", Kind: "http", Target: endpoint(parsed, "/keycloak")},
+			{Key: "model-gateway", Kind: "http", Target: endpoint(parsed, "/newapi")},
+			{Key: "event-bus", Kind: "http", Target: endpoint(parsed, "/nats")},
+			{Key: "account-event-relay", Kind: "relay", Target: parsed},
+		},
 	}, store)
 	if err != nil {
 		t.Fatal(err)

@@ -333,12 +333,7 @@ services:
       ACCOUNT_HTTP_URL: http://account-service:8080
       BILLING_HTTP_URL: http://billing-service:8080
       TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
-      SYSTEM_KEYCLOAK_STATUS_URL: http://keycloak:8080/realms/pinvou/.well-known/openid-configuration
-      SYSTEM_NEWAPI_STATUS_URL: ${SYSTEM_NEWAPI_STATUS_URL:-http://mock-newapi:8080/health/ready}
-      SYSTEM_NATS_STATUS_URL: http://nats:8222/healthz
-      SYSTEM_ACCOUNT_RELAY_URL: http://account-event-relay:9090
-      SYSTEM_BILLING_RELAY_URL: http://billing-event-relay:9090
-      SYSTEM_TOKEN_RELAY_URL: http://token-event-relay:9090
+      SYSTEM_PROBES_JSON: '[{"key":"portal","kind":"local"},{"key":"account","kind":"http","url":"http://account-service:8080/health/ready"},{"key":"billing","kind":"http","url":"http://billing-service:8080/health/ready"},{"key":"token-gateway","kind":"http","url":"http://token-gateway:8080/health/ready"},{"key":"identity-provider","kind":"http","url":"http://keycloak:8080/realms/pinvou/.well-known/openid-configuration"},{"key":"model-gateway","kind":"http","url":"http://mock-newapi:8080/health/ready"},{"key":"event-bus","kind":"http","url":"http://nats:8222/healthz"},{"key":"account-event-relay","kind":"relay","url":"http://account-event-relay:9090"},{"key":"billing-event-relay","kind":"relay","url":"http://billing-event-relay:9090"},{"key":"token-event-relay","kind":"relay","url":"http://token-event-relay:9090"}]'
     depends_on:
       redis:
         condition: service_healthy
