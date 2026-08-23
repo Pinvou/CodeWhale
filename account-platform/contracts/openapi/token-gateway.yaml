@@ -447,16 +447,24 @@ paths:
   /chat/completions:
     post:
       operationId: createChatCompletion
-      summary: Authorize, reserve, proxy once, and settle an OpenAI-compatible model request
+      summary: Idempotently execute or replay an encrypted, durable model request
       parameters:
         - name: Idempotency-Key
           in: header
-          required: false
-          description: Optional client key. When omitted, the gateway derives a stable key from the authenticated user, OIDC session, and request body.
+          required: true
+          description: Unique logical-request key in the authenticated stable user's fixed model-inference namespace. The raw value is never persisted.
           schema:
             type: string
             minLength: 16
             maxLength: 128
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: Last confirmed normalized stream sequence. Replays begin strictly after this value.
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
         - name: X-Pinvou-Token-Account-ID
           in: header
           required: false
@@ -484,16 +492,26 @@ paths:
               additionalProperties: true
       responses:
         "200":
-          description: OpenAI-compatible JSON or SSE response
+          description: Newly executed or replayed JSON/SSE response. SSE events carry a monotonic id and normalized event type.
           headers:
             X-Pinvou-Usage-Request-ID:
               required: true
               schema:
                 type: string
                 format: uuid
+        "202":
+          description: Existing execution is still running, awaiting settlement, or under review; no second upstream request was created.
+          headers:
+            Location: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UsageReplayStatus"
         "402":
           $ref: "#/components/responses/Error"
         "409":
+          $ref: "#/components/responses/Error"
+        "410":
           $ref: "#/components/responses/Error"
   /recharge/products:
     get:
@@ -1087,7 +1105,7 @@ components:
     UsageRequestStatus:
       type: object
       additionalProperties: false
-      required: [usage_request_id, status, display_status, token_account_id, wallet_id, model, maximum_microcredits, started_at, updated_at]
+      required: [usage_request_id, status, execution_status, delivery_status, display_status, token_account_id, wallet_id, model, maximum_microcredits, started_at, updated_at]
       properties:
         usage_request_id:
           type: string
@@ -1095,6 +1113,12 @@ components:
         status:
           type: string
           enum: [CREATED, RESERVED, UPSTREAM_ACTIVE, SETTLEMENT_PENDING, COMMITTED, RELEASED, REVIEW]
+        execution_status:
+          type: string
+          enum: [RECEIVED, HOLD_RESERVING, HOLD_RESERVED, DISPATCH_INTENT_PERSISTED, UPSTREAM_DISPATCHING, STREAMING, SETTLEMENT_PENDING, SUCCEEDED, FAILED, REVIEW]
+        delivery_status:
+          type: string
+          enum: [NOT_STARTED, DELIVERING, DISCONNECTED, DELIVERED, USER_STOPPED]
         display_status:
           type: string
           enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW]
@@ -1120,6 +1144,17 @@ components:
         updated_at:
           type: string
           format: date-time
+    UsageReplayStatus:
+      type: object
+      additionalProperties: false
+      required: [code, usage_request_id, execution_status, status_url]
+      properties:
+        code: { type: string }
+        usage_request_id: { type: string, format: uuid }
+        execution_status:
+          type: string
+          enum: [RECEIVED, HOLD_RESERVING, HOLD_RESERVED, DISPATCH_INTENT_PERSISTED, UPSTREAM_DISPATCHING, STREAMING, SETTLEMENT_PENDING, REVIEW]
+        status_url: { type: string }
     UserUsageRecord:
       type: object
       additionalProperties: false

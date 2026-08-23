@@ -61,6 +61,15 @@ type BillingHold struct {
 
 var ErrCommerceCustomerNotReady = errors.New("commerce customer mapping is not ready")
 
+type BillingHTTPError struct {
+	Status int
+	Code   string
+}
+
+func (e *BillingHTTPError) Error() string {
+	return fmt.Sprintf("Billing HTTP %d (%s)", e.Status, e.Code)
+}
+
 type BillingClient interface {
 	Price(context.Context, string) (PriceVersion, error)
 	PriceByID(context.Context, uuid.UUID) (PriceVersion, error)
@@ -217,7 +226,7 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 		if json.Unmarshal(payload, &problem) == nil && problem.Code == "COMMERCE_CUSTOMER_NOT_READY" {
 			return nil, ErrCommerceCustomerNotReady
 		}
-		return nil, fmt.Errorf("Billing HTTP %d: %s", response.StatusCode, payload)
+		return nil, &BillingHTTPError{Status: response.StatusCode, Code: problem.Code}
 	}
 	return json.RawMessage(payload), nil
 }
@@ -394,7 +403,11 @@ func (c *HTTPBillingClient) call(ctx context.Context, method, path string, input
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
-		return fmt.Errorf("Billing HTTP %d: %s", response.StatusCode, data)
+		var problem struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(data, &problem)
+		return &BillingHTTPError{Status: response.StatusCode, Code: problem.Code}
 	}
 	if output == nil {
 		return nil

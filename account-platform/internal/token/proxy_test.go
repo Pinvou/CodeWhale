@@ -3,8 +3,6 @@ package token
 import (
 	"net/http"
 	"testing"
-
-	"github.com/google/uuid"
 )
 
 func TestGatewayAdaptersOwnProtocolAndReferenceMapping(t *testing.T) {
@@ -40,18 +38,30 @@ func TestParseUsageJSONRejectsMissingAndInvalidUsage(t *testing.T) {
 	}
 }
 
-func TestRequestIdempotencyKeyIsStableForDesktopRetries(t *testing.T) {
-	resolved := AuthorizationContext{UserID: uuid.MustParse("0198f8e3-2d27-7a2b-93aa-4f1a8f796e8c"), SessionID: "oidc-session"}
-	body := []byte(`{"model":"example-model","messages":[]}`)
-	first := requestIdempotencyKey("", resolved, body)
-	second := requestIdempotencyKey("", resolved, body)
-	if first != second || len(first) != len("desktop-")+64 {
-		t.Fatalf("unexpected derived key: %q %q", first, second)
+func TestInferenceFingerprintIsCanonicalAndTransportIndependent(t *testing.T) {
+	first, err := normalizeInferenceBody([]byte(`{"model":"example-model","messages":[],"temperature":0.5}`), false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if first == requestIdempotencyKey("", AuthorizationContext{UserID: resolved.UserID, SessionID: "other-session"}, body) {
-		t.Fatal("OIDC sessions must not share an idempotency key")
+	second, err := normalizeInferenceBody([]byte(`{"temperature":0.5,"messages":[],"model":"example-model"}`), false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := requestIdempotencyKey("explicit-request-key", resolved, body); got != "explicit-request-key" {
-		t.Fatalf("explicit key changed: %q", got)
+	if inferenceFingerprint("CHAT", 1, first) != inferenceFingerprint("CHAT", 1, second) {
+		t.Fatal("equivalent JSON requests produced different fingerprints")
+	}
+	changed, _ := normalizeInferenceBody([]byte(`{"model":"example-model","messages":[],"temperature":0.7}`), false)
+	if inferenceFingerprint("CHAT", 1, first) == inferenceFingerprint("CHAT", 1, changed) {
+		t.Fatal("semantic request changes must change the fingerprint")
+	}
+}
+
+func TestStreamingCanonicalizationForcesUsageEvidence(t *testing.T) {
+	body, err := normalizeInferenceBody([]byte(`{"model":"example-model","messages":[],"stream":true}`), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != `{"messages":[],"model":"example-model","stream":true,"stream_options":{"include_usage":true}}` {
+		t.Fatalf("unexpected canonical stream request: %s", body)
 	}
 }

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 229`、`部分实现 37`、`未实现 63`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 237`、`部分实现 36`、`未实现 56`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -56,6 +56,7 @@
 | `GATEWAY-ADAPTER-NEUTRALITY` | 版本化协议能力发现、显式路由协议、Provider/Adapter/上游引用历史证据，以及 New API/通用 OpenAI 兼容 Adapter 隔离 | Go 单测、OpenAPI lint、93 个合同测试、三语运营页面、Portal 构建和 Helm/Compose 配置检查通过；数据库运行级迁移及真实 Adapter 替换/用量证据联调待部署 |
 | `MODEL-CATALOG-LIFECYCLE` | Adapter 目录发现、稳定 UUID、不可变能力/目录版本、草稿 CAS、发布/弃用/移除、连续缺失核验、前向回滚、历史墓碑和请求版本快照 | Go 单测、OpenAPI lint、94 个合同测试、三语运营页面和 Helm/Compose 配置检查通过；桌面目录消费、回滚联合依赖校验、数据库运行级迁移和真实 Adapter 同步待后续任务/部署 |
 | `ROUTE-PROVISIONING-ELIGIBILITY` | 按作用域/模型/协议/代次唯一的托管路由状态机、租约认领、退避/SLA、组织模型策略、READY 资格门禁、回滚联合依赖校验和运营修复 | Go 单元测试、Rust 桌面代理测试、OpenAPI lint、95 个合同测试和三语 Portal 构建通过；数据库运行级迁移、真实 Adapter/凭据和 Worker 故障注入待部署 |
+| `USAGE-EXECUTION-REPLAY` | 稳定用户级键摘要、版本化规范指纹、Hold/派发持久状态、一次性派发租约、加密流事件/结果、Last-Event-ID 重放及24小时/30天/90天分层清理 | Go 全量单元测试、OpenAPI lint、重放结构合同和静态验证通过；数据库运行级崩溃/断线/KMS故障注入待部署，注销调用与备份清除分别由 APT-015/APT-037 接入 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
@@ -76,7 +77,7 @@
 | CORE-03 | 已实现 | AUDIT_HEAD | GO-UNIT; COMMERCE-MAPPING | NOT_DEPLOYED | Commerce Mapping 只维护用户/组织与外部客户的 Provider、Adapter 版本、脱敏引用及状态；授权上下文不读取 Mapping，生产部署待验证 |
 | CORE-04 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 平衡不可变账本及组成级守恒事实已实现；后续应收和支付流水任务必须继续通过同一账本扩展，数据库运行级验证待部署 |
 | CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
-| CORE-06 | 部分实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 支付回调/查询/修复已有不可变证据归并；账单支付证据、模型派发不确定、加密流事件和结果重放仍未统一收敛 |
+| CORE-06 | 部分实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 支付回调/查询/修复与模型派发不确定、加密流事件/结果重放已有独立证据边界；账单支付证据及取消后的可信用量仍待 APT-049/APT-030 后统一收敛 |
 | CORE-07 | 部分实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; TARGETED-REFUND | NOT_DEPLOYED | 三服务具备 Outbox/Inbox/Relay，注册和目标退款 Saga 已闭环；注销与托管路由 Provisioning 等流程仍待收敛 |
 | SCOPE-01 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 本地独立模型仍受保护，账号平台迁移不删除用户自建模型 |
 | SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人中心已移除自管 Token Account 页面；Gateway 仍保留受限普通用户 API，不影响当前 UI 范围结论 |
@@ -137,12 +138,12 @@
 | TOK-20 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 请求在上游前按冻结公式和价格计算最大费用并原子创建组成级 Hold；生产故障注入待部署 |
 | TOK-21 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 请求与 Hold 保存上下文、路由、模型、协议、公式、估算器及逐单位最终价格和来源快照 |
 | TOK-23 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 长调用定时续租，流式与非流式响应在超出授权成本前按原价格快照追加预占；真实长流中断待部署验证 |
-| TOK-25 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 幂等键仍需统一为稳定用户级模型推理命名空间并移除 Session/上下文/协议作用域差异 |
-| TOK-26 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少版本化规范化请求指纹及同键异请求 409 防护 |
-| TOK-27 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少非终态、结果载荷、流事件、防重墓碑的分层保留与 410 过期契约 |
-| TOK-28 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少加密流事件日志、单调序号、完整性校验及按确认序号重放 |
-| TOK-29 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少断线不取消及按执行状态恢复流、结果或核对状态的统一契约 |
-| TOK-30 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少 Hold 后派发状态机、EnsureHold 幂等、派发不确定时禁止盲重试及过期恢复规则 |
+| TOK-25 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 公开模型入口强制客户端键，只保存摘要并以稳定 user_id + 固定 model-inference 命名空间唯一；初次上下文/路由/计价快照不可变，待生产迁移验证 |
+| TOK-26 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | CHAT v1 JSON 使用确定性带版本规范化，覆盖全部请求语义并排除 Session/传输/活动上下文；同键异指纹在 Hold 前稳定返回 `IDEMPOTENCY_KEY_REUSED` |
+| TOK-27 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 非终态保留至收敛，事件/结果/零正文墓碑硬上限为24小时/30天/90天；结果过期且墓碑存在返回410，墓碑清理同时释放键摘要 |
+| TOK-28 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | Adapter 规范数据事件先按独立 AAD 加密落库和完整性校验、取得连续 sequence 后才交付；支持 Last-Event-ID 增量重放及聚合结果回退 |
+| TOK-29 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 上游上下文不继承 HTTP 断线取消；同键重连按 STREAMING、终态、核对状态和载荷过期分别重放、返回202或410，不创建第二次上游调用 |
+| TOK-30 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | Hold 前加密准备、Billing 按 usage_request_id 唯一 EnsureHold、Hold/正式意图原子提升、一次性派发租约及 CAS 审计已闭环；已取得租约且结果未知的非幂等 Adapter 只转 REVIEW |
 | TOK-35 | 部分实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 已有盘点报告、配置备份、幂等迁移、会话/任务模型迁移和凭据清理重试；缺安装崩溃注入与制品级验收 |
 | TOK-36 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少发布、安装、运行三层门禁，更新器尚未证明迁移预检失败不替换旧版本及二进制/配置原子提交回滚 |
 | TOK-37 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少不创建用户 Hold、不产生用户费用的客户端切换 readiness、隔离合成验收身份及绑定制品/环境/服务版本的短时签名准入证明 |
@@ -271,7 +272,7 @@
 | NFR-47 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少当前及前两桌面版本合同测试、90天兼容、60天通知和稳定淘汰响应 |
 | NFR-48 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少审计导出脱敏、独立PII权限、水印、加密、短时下载和配额控制 |
 | UI-16 | 部分实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 当前桌面和 Web 路由三语覆盖测试通过；缺目标页面、错误码和发布制品级门禁 |
-| NFR-49 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少模型流事件、完整/聚合结果、防重墓碑的最大保留期、注销清除、案件保全和备份密码学销毁闭环 |
+| NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 
 ### 0.2 既有目标编号证据索引
@@ -325,7 +326,7 @@
 | TOK-15 | 移除 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 不提供个人供应商 Key、Token Account、共享和路由管理；现有相关个人入口及公开能力从目标范围移除。平台/组织运营管理与本地独立模型配置不受此条影响。 |
 | TOK-19 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; METERING-PRICING-LIFECYCLE; DESKTOP-39 | NOT_DEPLOYED | 请求使用版本化 UTF8_BYTES_DIV4_CEIL 估算器、协议公式和模型输出边界动态预占；Provider 专用精确 Tokenizer 可作为后续估算器版本扩展 |
 | TOK-22 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 每请求独立 Hold；可用余额能够覆盖即可并发。 |
-| TOK-24 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 幂等键能阻止重复上游调用，但重复请求返回 `USAGE_REPLAY_BLOCKED`，不会返回原结果/状态 |
+| TOK-24 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 相同键和指纹恢复既有加密流事件、完整/聚合结果或当前执行/核对状态；重复路径不续租新 Hold、不重新选路且不发起第二次上游调用 |
 | TOK-31 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成功响应有 usage 时按实际成本结算并释放差额；取消终态、累计可信用量和取消核对路径不完整 |
 | TOK-32 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Gateway 对上游结果不确定或网络失败不自动重发模型请求，避免重复消费 |
 | TOK-33 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | REVIEW/SETTLEMENT_PENDING 可按上游证据退避核对并人工重试，且不重发模型请求；协议仍绑定 New API 且完整收敛语义不足 |
@@ -631,13 +632,13 @@
 | TOK-15 | 个人中心用户自管 Token Account | 移除 | 不提供个人供应商 Key、Token Account、共享和路由管理；现有相关个人入口及公开能力从目标范围移除。平台/组织运营管理与本地独立模型配置不受此条影响。 |
 | TOK-19 | 调用前按具体请求和协议动态预占 | 已实现 | 使用版本化确定性估算器、协议公式、请求输入和输出边界预占，并支持原快照续租及追加预占。 |
 | TOK-22 | 支持并发对话且防超扣 | 已实现 | 每请求独立 Hold；可用余额能够覆盖即可并发。 |
-| TOK-24 | 模型请求幂等 | 部分实现 | 显式或稳定派生幂等键可阻止网络重试重复调用上游，但重复请求返回 `USAGE_REPLAY_BLOCKED`，不会按目标返回原执行结果或当前状态。 |
-| TOK-25 | 模型请求幂等键作用域 | 未实现 | 当前派生键包含 OIDC Session，无法提供跨会话稳定防重；需改为稳定业务用户、固定模型推理命名空间和键摘要的唯一约束，并保存初次执行快照。 |
-| TOK-26 | 同键异请求冲突检测 | 未实现 | 当前缺少带算法版本的规范化请求指纹；同键不同语义请求必须返回 409，且不得创建 Hold、调用上游或覆盖原执行。 |
-| TOK-27 | 模型请求幂等记录保留 | 未实现 | 当前未形成非终态至收敛、流事件 24 小时、结果 30 天、防重墓碑 90 天及载荷过期返回 410 的分层保留证据。 |
-| TOK-28 | 流式响应持久化与重放 | 未实现 | 当前流式输出未证明在确认客户端前加密持久化供应商中立事件，也没有连续 sequence、完整性校验和 Last-Event-ID/resume token 重放。 |
-| TOK-29 | 模型请求断线重连 | 未实现 | 当前缺少“断线不取消”语义及按 STREAMING、终态、SETTLEMENT_PENDING/REVIEW、载荷过期分别恢复的统一响应契约。 |
-| TOK-30 | Hold 后上游派发恢复 | 未实现 | 当前缺少从 RECEIVED 到 REVIEW/终态的持久派发状态、Billing EnsureHold 唯一性，以及区分确定未派发和可能已派发后的安全恢复规则。 |
+| TOK-24 | 模型请求幂等 | 已实现 | 同键同指纹恢复既有流、结果或202核对状态，所有重复路径都复用原 usage_request_id。 |
+| TOK-25 | 模型请求幂等键作用域 | 已实现 | 强制客户端逻辑请求键，仅保存 SHA-256 摘要并以稳定用户和固定 model-inference 命名空间唯一；Session、上下文、模型和协议不拆分作用域。 |
+| TOK-26 | 同键异请求冲突检测 | 已实现 | 带版本的确定性 CHAT 请求指纹覆盖规范 JSON 语义，同键异指纹在选路/Hold/上游前返回409。 |
+| TOK-27 | 模型请求幂等记录保留 | 已实现 | 非终态保留至收敛，事件24小时、结果30天、零正文墓碑90天，过期返回410且墓碑到期后释放摘要唯一占用。 |
+| TOK-28 | 流式响应持久化与重放 | 已实现 | 每个规范事件在客户端确认前使用独立 AAD 加密落库、完整性校验和连续编号，支持 Last-Event-ID 重放与聚合结果。 |
+| TOK-29 | 模型请求断线重连 | 已实现 | HTTP/SSE 断开只改变交付状态，上游继续；重连按活动流、终态、核对态和过期态恢复且不再次派发。 |
+| TOK-30 | Hold 后上游派发恢复 | 已实现 | 加密准备快照覆盖 Hold 前崩溃，Billing 幂等 EnsureHold 后原子提升正式意图；首次 Worker 租约唯一，派发不确定且上游不保证幂等时只进 REVIEW。 |
 | TOK-31 | 实际用量结算并释放差额 | 部分实现 | 成功且有 usage 时可以提交实际成本并释放剩余 Hold；取消终态、可信累计用量和取消核对路径仍需按 TOK-38–TOK-41、BILL-34–BILL-35 扩展。 |
 | TOK-32 | Gateway 自动重试模型请求 | 已实现 | 上游是否执行可能不确定，自动重试会造成重复消费；当前 Gateway 不自动重发模型请求。 |
 | TOK-33 | 不确定结果自动核对和人工重试 | 部分实现 | `REVIEW`/`SETTLEMENT_PENDING` 后通过 `UsageEvidenceProvider` 查询证据，24 小时内退避重试并支持管理员重试；协议仍绑定 New API 且完整收敛语义不足。 |
@@ -844,7 +845,7 @@
 | NFR-46 | 统一可信时钟 | 未实现：当前未证明三独立授时源、偏差监测、readiness门禁及数据库/单调时钟职责分离。 |
 | NFR-47 | 桌面 API 兼容与淘汰 | 未实现：当前缺少N/N-1/N-2合同测试、每版90天支持、弃用通知字段及426升级闭环。 |
 | NFR-48 | 审计导出保护 | 未实现：现有导出需补近期重认证、默认脱敏、PII独立权限、水印、文件加密、一次性下载和任务配额。 |
-| NFR-49 | 模型结果重放载荷最小化 | 未实现：当前缺少流事件24小时、完整/聚合结果30天、防重墓碑90天的自动清除，以及注销、案件保全、备份生命周期和密码学销毁证明。 |
+| NFR-49 | 模型结果重放载荷最小化 | 已实现：在线24小时/30天/90天硬上限、自动清除、主体正文即时删除内部入口、派发正文最小化及独立受限案件迁移/解除后30天清除已建立；生产备份生命周期证据随 APT-037 验收。 |
 | NFR-50 | 用户编码查询保护 | 已实现：编码不是认证/授权凭据；查询要求 `platform.users.read`，只做完整等值匹配，使用统一无泄露响应、多维摘要限流和全结果审计，不提供公开、前缀、模糊、自动补全或批量入口。 |
 
 ## 5. 已确认领域规则

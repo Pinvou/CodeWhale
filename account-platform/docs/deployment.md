@@ -602,6 +602,8 @@ helm upgrade --install <release> account-platform/deploy/helm/account-platform \
 
 Token Gateway 同时运行托管路由 Provisioning Worker。上线迁移 `000013_route_provisioning` 后，应监控 `PENDING` 最老年龄、FAILED 重试量、REPAIR_REQUIRED 数量和 Worker 租约过期；滚动发布可安全重领过期租约，但不得通过 SQL 或管理接口直接把聚合改为 READY。模型目录回滚会同步检查 Billing 当前价格及 Token 当前 READY 账号、凭据、路由代次，任一依赖不可确认时失败关闭。生产验收至少应覆盖 Worker 崩溃重领、重复请求不重复建资源、动态目录新增模型、凭据失效后新代重建、SLA 转人工修复及修复命令幂等。
 
+模型执行恢复继续执行 Token `000014_usage_execution_replay`，并先确认生产 Secret Provider 可同时解密旧凭据和新重放载荷。迁移会把既有原始模型幂等键不可逆替换为 SHA-256 摘要，并建立稳定用户级唯一索引；因此必须先滚动 Gateway 客户端，确保每个逻辑模型请求都发送16至128字符且不会复用的 `Idempotency-Key`。发布后验证：跨 OIDC Session 使用同键同请求只恢复同一执行，同键异请求在 Hold 前返回409；分别在 Hold 请求、Hold 成功、派发意图、取得租约及流事件阶段杀进程，只有能够证明未派发的准备阶段继续原执行，已取得派发租约但结果未知且 Adapter 不保证幂等的请求进入 REVIEW；断开 SSE 后服务端继续读取并结算，使用原键和 `Last-Event-ID` 只补发更大序号。监控 `HOLD_RESERVING`、`UPSTREAM_DISPATCHING` 租约过期、`REVIEW`、事件/结果清理失败和 KMS 解密失败；不得通过延长普通表 TTL、复制正文到日志或人工清除墓碑来恢复请求。流事件、结果和墓碑从执行/财务终态起算，硬上限分别为24小时、30天和90天；法律保全/未结案件只能迁入独立受限案件表并在解除后30天内清理。备份必须在30天内生命周期过期或使用可销毁独立数据密钥，三年用量/账本/审计证据禁止包含模型正文。写入新版执行状态、清除派发正文或释放过期墓碑键后不得回滚旧 Gateway；紧急故障应停止接收新模型请求并前向修复。
+
 - `deploy/runbooks/backup-restore.md`
 - `deploy/runbooks/cutover-rollback.md`
 - `deploy/runbooks/newapi-deployment.md`

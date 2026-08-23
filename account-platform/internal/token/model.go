@@ -70,7 +70,10 @@ type UpstreamRequestEvidence struct {
 
 type UsageRequest struct {
 	ID                   uuid.UUID
-	IdempotencyKey       string
+	IdempotencyKeyDigest string
+	IdempotencyNamespace string
+	CanonicalVersion     int
+	RequestFingerprint   string
 	UserID               uuid.UUID
 	SessionID            string
 	OrganizationID       *uuid.UUID
@@ -86,12 +89,51 @@ type UsageRequest struct {
 	ProtocolDefinitionID *uuid.UUID
 	RouteGeneration      *int64
 	ModelSnapshot        json.RawMessage
+	RequestSnapshot      json.RawMessage
 	Status               string
+	ExecutionStatus      string
+	ExecutionVersion     int64
+	DeliveryStatus       string
 	MaximumMicrocredits  int64
 	ActualMicrocredits   *int64
 	ErrorClass           *string
 	StartedAt            time.Time
 	UpdatedAt            time.Time
+}
+
+type DispatchEnvelope struct {
+	BaseURL       string          `json:"base_url"`
+	Provider      string          `json:"provider"`
+	Credential    []byte          `json:"credential"`
+	RequestBody   json.RawMessage `json:"request_body"`
+	Price         PriceVersion    `json:"price"`
+	Stream        bool            `json:"stream"`
+	MaximumCost   int64           `json:"maximum_cost"`
+	MaximumOutput int64           `json:"maximum_output"`
+}
+
+type ReplayEvent struct {
+	Sequence  int64
+	EventType string
+	Payload   []byte
+}
+
+type ReplayResult struct {
+	Kind         string
+	HTTPStatus   int
+	ContentType  string
+	Payload      []byte
+	FinalUsage   *Usage
+	LastSequence int64
+	ExpiresAt    time.Time
+}
+
+type ReplaySnapshot struct {
+	Usage          UsageRequest
+	Events         []ReplayEvent
+	Result         *ReplayResult
+	ResultExpired  bool
+	TombstoneUntil *time.Time
 }
 
 type UsageHistoryCursor struct {
@@ -117,10 +159,25 @@ type UserUsageRecord struct {
 
 type UsageStore interface {
 	GetUsage(context.Context, uuid.UUID) (UsageRequest, error)
+	FindUsageByIdempotency(context.Context, uuid.UUID, string) (UsageRequest, error)
 	BeginUsage(context.Context, UsageRequest, map[string]any) (UsageRequest, bool, error)
+	PrepareDispatch(context.Context, uuid.UUID, DispatchEnvelope) error
+	LoadDispatchPreparation(context.Context, uuid.UUID) (DispatchEnvelope, error)
+	MarkHoldReserving(context.Context, uuid.UUID) error
 	MarkReserved(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	CompleteHoldAndDispatch(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error
+	PersistDispatchIntent(context.Context, uuid.UUID, DispatchEnvelope) error
+	AcquireDispatch(context.Context, uuid.UUID, string, time.Duration) (DispatchEnvelope, bool, error)
 	MarkUpstream(context.Context, uuid.UUID) error
+	MarkStreaming(context.Context, uuid.UUID) error
+	MarkResponseReceived(context.Context, uuid.UUID) error
 	RecordUpstreamRequest(context.Context, uuid.UUID, UpstreamRequestEvidence) error
+	AppendReplayEvent(context.Context, uuid.UUID, string, []byte) (int64, error)
+	SaveReplayResult(context.Context, uuid.UUID, ReplayResult) error
+	LoadReplay(context.Context, uuid.UUID, int64) (ReplaySnapshot, error)
+	MarkDelivery(context.Context, uuid.UUID, string) error
+	CleanupReplayRetention(context.Context) error
+	RecoverUncertainDispatches(context.Context) error
 	MarkCommitted(context.Context, uuid.UUID, int64, map[string]any) error
 	MarkReleased(context.Context, uuid.UUID, string) error
 	MarkReview(context.Context, uuid.UUID, string, map[string]any) error

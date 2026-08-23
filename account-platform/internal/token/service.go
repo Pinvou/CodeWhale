@@ -90,6 +90,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	internal.Use(serviceauth.GinMiddleware(serviceToken))
 	internal.PUT("/organizations/:organization_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	internal.PUT("/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
+	internal.DELETE("/users/:user_id/replay-payloads", httpserver.AdaptFunc(s.anonymizeUserReplayPayloads))
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
 	protected.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
@@ -151,6 +152,26 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/provisionings/:provisioning_id/repair", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ROUTE_PROVISIONING_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairProvisioning))
 	}
 	return router
+}
+
+func (s *Service) anonymizeUserReplayPayloads(w http.ResponseWriter, r *http.Request) {
+	userID, err := uuid.Parse(r.PathValue("user_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid user", httpserver.RequestID(r.Context()))
+		return
+	}
+	repository, ok := s.repository.(interface {
+		AnonymizeUsageReplay(context.Context, uuid.UUID) error
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "REPLAY_RETENTION_UNAVAILABLE", "replay retention is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if err := repository.AnonymizeUsageReplay(r.Context(), userID); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) modelProtocols(w http.ResponseWriter, r *http.Request) {
@@ -660,7 +681,7 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, map[string]any{
-		"usage_request_id": usage.ID, "status": usage.Status, "display_status": usageDisplayStatus(usage),
+		"usage_request_id": usage.ID, "status": usage.Status, "execution_status": usage.ExecutionStatus, "delivery_status": usage.DeliveryStatus, "display_status": usageDisplayStatus(usage),
 		"token_account_id": usage.TokenAccountID, "wallet_id": usage.WalletID, "model": usage.Model,
 		"maximum_microcredits": usage.MaximumMicrocredits, "actual_microcredits": usage.ActualMicrocredits,
 		"started_at": usage.StartedAt, "updated_at": usage.UpdatedAt,

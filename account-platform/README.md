@@ -43,7 +43,8 @@
 - `production`/`production-new` 会拒绝本地密钥 Provider，必须接入 KMS/Vault 实现。
 - `TOKEN_PROVIDER_ALLOWED_HOSTS` 是逗号分隔的精确主机白名单；生产环境同时强制 HTTPS。
 - Gateway 不重试模型调用。上游结果不确定、流式断开或缺失 usage 时保留 Hold 并进入 `REVIEW`。
-- 桌面聊天未显式发送 `Idempotency-Key` 时，Gateway 使用用户、OIDC 会话和请求体生成稳定键；相同请求的网络重试不会重复调用上游。
+- 每个模型逻辑请求必须显式发送16至128字符的 `Idempotency-Key`。Gateway 只保存稳定用户级 `model-inference` 命名空间内的键摘要；同键同指纹恢复既有流、结果或核对状态，同键异请求返回409，不按 OIDC Session、活动上下文、模型或协议拆分防重域。
+- 流式事件会先以连续序号加密持久化再交付；重连可携带原幂等键和 `Last-Event-ID`。客户端断线不取消上游执行，结果不确定时禁止盲目重发模型调用。
 - 支付回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置，客户端不能提交回调 URL。
 
 `mock-newapi` 只属于开发 Compose 后端网络，不发布宿主机端口；可用于验证正常、限流、断流和缺失 usage 场景。

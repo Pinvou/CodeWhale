@@ -60,7 +60,7 @@ SET reconciliation_attempts = request.reconciliation_attempts + 1,
     updated_at = $1
 FROM candidates
 WHERE request.id = candidates.id
-RETURNING request.id,request.idempotency_key,request.user_id,request.session_id,request.organization_id,
+RETURNING request.id,request.idempotency_key_digest,request.user_id,request.session_id,request.organization_id,
           request.token_account_id,request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,
           request.model,request.status,request.maximum_microcredits,request.actual_microcredits,request.error_class,
 		  request.started_at,request.updated_at,request.usage_snapshot,request.request_snapshot,
@@ -72,7 +72,7 @@ RETURNING request.id,request.idempotency_key,request.user_id,request.session_id,
 	items := make([]ReconciliationItem, 0)
 	for rows.Next() {
 		var item ReconciliationItem
-		if err := rows.Scan(&item.ID, &item.IdempotencyKey, &item.UserID, &item.SessionID, &item.OrganizationID,
+		if err := rows.Scan(&item.ID, &item.IdempotencyKeyDigest, &item.UserID, &item.SessionID, &item.OrganizationID,
 			&item.TokenAccountID, &item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID,
 			&item.Model, &item.Status, &item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass,
 			&item.StartedAt, &item.UpdatedAt, &item.UsageSnapshot, &item.RequestSnapshot,
@@ -139,10 +139,10 @@ type ReconciliationBilling interface {
 type NewAPIUsageEvidenceClient struct {
 	providerID     string
 	adapterVersion string
-	baseURL *url.URL
-	token   string
-	userID  int64
-	client  *http.Client
+	baseURL        *url.URL
+	token          string
+	userID         int64
+	client         *http.Client
 }
 
 func NewNewAPIUsageEvidenceClient(rawURL, token string, userID int64, policy ProviderURLPolicy) (*NewAPIUsageEvidenceClient, error) {

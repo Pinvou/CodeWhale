@@ -160,6 +160,7 @@ func main() {
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
+	go token.NewReplayRetentionWorker(repository, 15*time.Second).Run(workerContext)
 	initialSyncContext, cancelInitialSync := context.WithTimeout(workerContext, 30*time.Second)
 	if _, _, syncErr := catalogSync.Sync(initialSyncContext); syncErr != nil {
 		log.Printf("model catalog initial synchronization deferred: %v", syncErr)
