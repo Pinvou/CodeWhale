@@ -135,6 +135,7 @@ spec:
             - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
             - { name: TOKEN_GATEWAY_MAX_INPUT_TOKENS, value: {{ $root.Values.tokenGateway.maxInputTokens | quote }} }
             - { name: TOKEN_DEFAULT_PROVIDER, value: {{ $root.Values.tokenGateway.defaultProvider | quote }} }
+            - { name: TOKEN_GATEWAY_ADAPTER, value: {{ $root.Values.tokenGateway.gatewayAdapter | quote }} }
             - { name: TOKEN_DEFAULT_PROVIDER_BASE_URL, value: {{ $root.Values.tokenGateway.defaultProviderBaseUrl | quote }} }
             - { name: TOKEN_DEFAULT_PROVIDER_MODELS, value: {{ join "," $root.Values.tokenGateway.defaultProviderModels | quote }} }
             - { name: TOKEN_DEFAULT_ROUTE_PRIORITY, value: {{ $root.Values.tokenGateway.defaultRoutePriority | quote }} }

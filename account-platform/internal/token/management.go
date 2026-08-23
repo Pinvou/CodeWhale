@@ -123,10 +123,11 @@ func (r *PostgresRepository) UpdateSharePolicy(ctx context.Context, accountID uu
 	return account, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUID, model string, priority int, defaultScope, healthStatus string, actorID uuid.UUID) (RoutingPolicy, error) {
+func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUID, model, protocolCode string, priority int, defaultScope, healthStatus string, actorID uuid.UUID) (RoutingPolicy, error) {
 	model = strings.TrimSpace(model)
+	protocolCode = strings.ToUpper(strings.TrimSpace(protocolCode))
 	defaultScope, healthStatus = strings.ToUpper(strings.TrimSpace(defaultScope)), strings.ToUpper(strings.TrimSpace(healthStatus))
-	if accountID == uuid.Nil || actorID == uuid.Nil || model == "" || priority < 0 || priority > 10000 || !slices.Contains([]string{"NONE", "UNIT", "ORG"}, defaultScope) || !slices.Contains([]string{"HEALTHY", "DEGRADED", "UNHEALTHY"}, healthStatus) {
+	if accountID == uuid.Nil || actorID == uuid.Nil || model == "" || protocolCode != "CHAT" || priority < 0 || priority > 10000 || !slices.Contains([]string{"NONE", "UNIT", "ORG"}, defaultScope) || !slices.Contains([]string{"HEALTHY", "DEGRADED", "UNHEALTHY"}, healthStatus) {
 		return RoutingPolicy{}, ErrForbidden
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -152,12 +153,12 @@ func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUI
 		return RoutingPolicy{}, ErrNotFound
 	}
 	now := r.now()
-	policy := RoutingPolicy{TokenAccountID: accountID, Model: model, Priority: priority, DefaultScope: defaultScope, HealthStatus: healthStatus, UpdatedAt: now}
-	_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(token_account_id,model) DO UPDATE SET priority=EXCLUDED.priority,default_scope=EXCLUDED.default_scope,health_status=EXCLUDED.health_status,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by`, uuid.Must(uuid.NewV7()), accountID, model, priority, defaultScope, healthStatus, now, actorID)
+	policy := RoutingPolicy{TokenAccountID: accountID, Model: model, ProtocolCode: protocolCode, Priority: priority, DefaultScope: defaultScope, HealthStatus: healthStatus, UpdatedAt: now}
+	_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code=EXCLUDED.protocol_code,priority=EXCLUDED.priority,default_scope=EXCLUDED.default_scope,health_status=EXCLUDED.health_status,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by`, uuid.Must(uuid.NewV7()), accountID, model, protocolCode, priority, defaultScope, healthStatus, now, actorID)
 	if err != nil {
 		return RoutingPolicy{}, err
 	}
-	if err := recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('model',$6,'priority',$7,'default_scope',$8,'health_status',$9)`, model, priority, defaultScope, healthStatus); err != nil {
+	if err := recordTokenAudit(ctx, tx, actorID, "TOKEN_ROUTE_UPSERTED", "TOKEN_ACCOUNT", accountID, `jsonb_build_object('model',$6,'protocol_code',$7,'priority',$8,'default_scope',$9,'health_status',$10)`, model, protocolCode, priority, defaultScope, healthStatus); err != nil {
 		return RoutingPolicy{}, err
 	}
 	return policy, tx.Commit(ctx)

@@ -277,6 +277,13 @@ paths:
           required: true
           schema:
             type: string
+        - name: protocol_code
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [CHAT]
+            default: CHAT
       responses:
         "200":
           description: Eligible Token accounts
@@ -363,6 +370,21 @@ paths:
                   next_cursor:
                     type: [string, "null"]
         "403":
+          $ref: "#/components/responses/Error"
+  /model-protocols:
+    get:
+      operationId: listModelGatewayProtocols
+      summary: List protocols explicitly supported by the active Model Gateway Adapter
+      responses:
+        "200":
+          description: Provider-neutral protocol capabilities; undeclared protocols must not be inferred
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GatewayProtocolCapabilities"
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
           $ref: "#/components/responses/Error"
   /chat/completions:
     post:
@@ -891,7 +913,7 @@ components:
     RoutePolicy:
       type: object
       additionalProperties: false
-      required: [model, priority, default_scope, health_status]
+      required: [model, protocol_code, priority, default_scope, health_status]
       properties:
         token_account_id:
           type: string
@@ -900,6 +922,9 @@ components:
         model:
           type: string
           minLength: 1
+        protocol_code:
+          type: string
+          enum: [CHAT]
         priority:
           type: integer
           minimum: 0
@@ -914,10 +939,30 @@ components:
           type: string
           format: date-time
           readOnly: true
+    GatewayProtocolCapabilities:
+      type: object
+      additionalProperties: false
+      required: [adapter_version, protocols]
+      properties:
+        adapter_version:
+          type: string
+          minLength: 1
+        protocols:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [protocol_code, protocol_version, path, streaming]
+            properties:
+              protocol_code: { type: string, enum: [CHAT, EMBEDDING, RERANK, IMAGE, OTHER] }
+              protocol_version: { type: integer, format: int64, minimum: 1 }
+              path: { type: string, pattern: '^/' }
+              streaming: { type: boolean }
     EligibleTokenAccount:
       type: object
       additionalProperties: false
-      required: [token_account_id, name, owner_type, allowed_models]
+      required: [token_account_id, name, owner_type, allowed_models, protocol_code]
       properties:
         token_account_id:
           type: string
@@ -931,6 +976,9 @@ components:
           type: array
           items:
             type: string
+        protocol_code:
+          type: string
+          enum: [CHAT]
         health_status:
           type: string
           enum: [HEALTHY, DEGRADED]

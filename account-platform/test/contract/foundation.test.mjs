@@ -490,6 +490,7 @@ test('usage review reconciliation is leased, evidence based, and secret backed',
   );
   const reconciler = await readFile(path.join(root, 'internal/token/reconciliation.go'), 'utf8');
   const gateway = await readFile(path.join(root, 'internal/token/proxy.go'), 'utf8');
+  const gatewayAdapter = await readFile(path.join(root, 'internal/token/gateway_adapter.go'), 'utf8');
   const chart = await readFile(
     path.join(root, 'deploy/helm/account-platform/templates/app-deployments.yaml'),
     'utf8',
@@ -499,7 +500,7 @@ test('usage review reconciliation is leased, evidence based, and secret backed',
   assert.match(reconciler, /request_id/);
   assert.match(reconciler, /PriceByID/);
   assert.match(reconciler, /automatic reconciliation exhausted/);
-  assert.match(gateway, /X-Oneapi-Request-Id/);
+  assert.match(gatewayAdapter, /X-Oneapi-Request-Id/);
   assert.match(gateway, /RecordUpstreamRequest/);
   assert.match(chart, /key: token-reconciliation-newapi-admin-token/);
   assert.doesNotMatch(chart, /TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN, value:/);

@@ -97,6 +97,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
 	protected.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
+	protected.GET("/v1/model-protocols", httpserver.AdaptFunc(s.modelProtocols))
 	protected.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
 	protected.GET("/v1/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
@@ -132,6 +133,15 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/formulas/:formula_version_id/preview", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPreviewFormula))
 	}
 	return router
+}
+
+func (s *Service) modelProtocols(w http.ResponseWriter, r *http.Request) {
+	protocols := s.upstream.Protocols()
+	if len(protocols) == 0 {
+		api.WriteError(w, http.StatusServiceUnavailable, "MODEL_PROTOCOLS_UNAVAILABLE", "the model gateway adapter declares no supported protocol", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"adapter_version": s.upstream.AdapterVersion(), "protocols": protocols})
 }
 
 func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +243,7 @@ func (s *Service) upsertTokenRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Model        string `json:"model"`
+		ProtocolCode string `json:"protocol_code"`
 		Priority     int    `json:"priority"`
 		DefaultScope string `json:"default_scope"`
 		HealthStatus string `json:"health_status"`
@@ -240,7 +251,10 @@ func (s *Service) upsertTokenRoute(w http.ResponseWriter, r *http.Request) {
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	policy, err := s.repository.UpsertRoute(r.Context(), account.ID, body.Model, body.Priority, body.DefaultScope, body.HealthStatus, resolved.UserID)
+	if strings.TrimSpace(body.ProtocolCode) == "" {
+		body.ProtocolCode = "CHAT"
+	}
+	policy, err := s.repository.UpsertRoute(r.Context(), account.ID, body.Model, body.ProtocolCode, body.Priority, body.DefaultScope, body.HealthStatus, resolved.UserID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -576,11 +590,19 @@ func (s *Service) listEligible(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	model := strings.TrimSpace(r.URL.Query().Get("model"))
+	protocolCode := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("protocol_code")))
+	if protocolCode == "" {
+		protocolCode = "CHAT"
+	}
 	if model == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "model is required", httpserver.RequestID(r.Context()))
 		return
 	}
-	candidates, err := s.repository.ListCandidates(r.Context(), model)
+	if !gatewaySupportsProtocol(s.upstream.Protocols(), protocolCode) {
+		api.WriteError(w, http.StatusUnprocessableEntity, "PROTOCOL_UNSUPPORTED", "the model gateway adapter does not declare this protocol", httpserver.RequestID(r.Context()))
+		return
+	}
+	candidates, err := s.repository.ListCandidates(r.Context(), model, protocolCode)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -588,10 +610,19 @@ func (s *Service) listEligible(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0)
 	for _, candidate := range candidates {
 		if Eligible(resolved, candidate, model) {
-			items = append(items, map[string]any{"token_account_id": candidate.TokenAccountID, "name": candidate.Name, "owner_type": candidate.OwnerType, "allowed_models": candidate.AllowedModels, "health_status": candidate.HealthStatus})
+			items = append(items, map[string]any{"token_account_id": candidate.TokenAccountID, "name": candidate.Name, "owner_type": candidate.OwnerType, "allowed_models": candidate.AllowedModels, "protocol_code": candidate.ProtocolCode, "health_status": candidate.HealthStatus})
 		}
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items, "membership_version": resolved.MembershipVersion})
+}
+
+func gatewaySupportsProtocol(capabilities []GatewayProtocolCapability, protocolCode string) bool {
+	for _, capability := range capabilities {
+		if capability.ProtocolCode == protocolCode {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {

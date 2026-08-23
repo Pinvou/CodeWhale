@@ -73,8 +73,9 @@ type AdminUsageRequest struct {
 	MaximumMicrocredits     int64      `json:"maximum_microcredits"`
 	ActualMicrocredits      *int64     `json:"actual_microcredits,omitempty"`
 	ErrorClass              *string    `json:"error_class,omitempty"`
-	NewAPIRequestID         *string    `json:"newapi_request_id,omitempty"`
-	ProviderRequestID       *string    `json:"provider_request_id,omitempty"`
+	ProviderID              *string    `json:"provider_id,omitempty"`
+	AdapterVersion          *string    `json:"adapter_version,omitempty"`
+	UpstreamRequestID       *string    `json:"upstream_request_id,omitempty"`
 	AttemptStatus           *string    `json:"attempt_status,omitempty"`
 	InputTokens             *int64     `json:"input_tokens,omitempty"`
 	OutputTokens            *int64     `json:"output_tokens,omitempty"`
@@ -204,6 +205,7 @@ func (s *Service) adminUpsertTokenRoute(w http.ResponseWriter, r *http.Request) 
 	}
 	var body struct {
 		Model        string `json:"model"`
+		ProtocolCode string `json:"protocol_code"`
 		Priority     int    `json:"priority"`
 		DefaultScope string `json:"default_scope"`
 		HealthStatus string `json:"health_status"`
@@ -211,7 +213,10 @@ func (s *Service) adminUpsertTokenRoute(w http.ResponseWriter, r *http.Request) 
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	result, err := s.repository.UpsertRoute(r.Context(), accountID, body.Model, body.Priority, body.DefaultScope, body.HealthStatus, tokenAdminActor(r))
+	if strings.TrimSpace(body.ProtocolCode) == "" {
+		body.ProtocolCode = "CHAT"
+	}
+	result, err := s.repository.UpsertRoute(r.Context(), accountID, body.Model, body.ProtocolCode, body.Priority, body.DefaultScope, body.HealthStatus, tokenAdminActor(r))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -405,7 +410,7 @@ FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, acco
 	if err := credentialRows.Err(); err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
-	routeRows, err := r.pool.Query(ctx, `SELECT token_account_id,model,priority,default_scope,health_status,updated_at FROM routing_policies WHERE token_account_id=$1 ORDER BY priority DESC,model`, accountID)
+	routeRows, err := r.pool.Query(ctx, `SELECT token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at FROM routing_policies WHERE token_account_id=$1 ORDER BY priority DESC,model`, accountID)
 	if err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
@@ -413,7 +418,7 @@ FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, acco
 	result.Routes = make([]RoutingPolicy, 0)
 	for routeRows.Next() {
 		var item RoutingPolicy
-		if err := routeRows.Scan(&item.TokenAccountID, &item.Model, &item.Priority, &item.DefaultScope, &item.HealthStatus, &item.UpdatedAt); err != nil {
+		if err := routeRows.Scan(&item.TokenAccountID, &item.Model, &item.ProtocolCode, &item.Priority, &item.DefaultScope, &item.HealthStatus, &item.UpdatedAt); err != nil {
 			return AdminTokenAccountDetail{}, err
 		}
 		result.Routes = append(result.Routes, item)
@@ -497,8 +502,8 @@ func (r *PostgresRepository) AdminRecordCredentialValidation(ctx context.Context
 func adminUsageQuery() string {
 	return `SELECT request.id,request.user_id,request.session_id,request.organization_id,request.token_account_id,
 request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,request.model,request.status,
-request.maximum_microcredits,request.actual_microcredits,request.error_class,attempt.newapi_request_id,
-attempt.provider_request_id,attempt.status,attempt.input_tokens,attempt.output_tokens,attempt.cached_input_tokens,
+request.maximum_microcredits,request.actual_microcredits,request.error_class,attempt.provider_id,
+attempt.adapter_version,attempt.upstream_request_id,attempt.status,attempt.input_tokens,attempt.output_tokens,attempt.cached_input_tokens,
 request.reconciliation_attempts,request.reconciliation_last_error,request.reconciliation_stopped_at,
 request.started_at,request.updated_at FROM usage_requests request
 LEFT JOIN usage_attempts attempt ON attempt.usage_request_id=request.id`
@@ -508,8 +513,8 @@ func scanAdminUsage(row interface{ Scan(...any) error }) (AdminUsageRequest, err
 	var item AdminUsageRequest
 	err := row.Scan(&item.ID, &item.UserID, &item.SessionID, &item.OrganizationID, &item.TokenAccountID,
 		&item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID, &item.Model, &item.Status,
-		&item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass, &item.NewAPIRequestID,
-		&item.ProviderRequestID, &item.AttemptStatus, &item.InputTokens, &item.OutputTokens, &item.CachedInputTokens,
+		&item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass, &item.ProviderID,
+		&item.AdapterVersion, &item.UpstreamRequestID, &item.AttemptStatus, &item.InputTokens, &item.OutputTokens, &item.CachedInputTokens,
 		&item.ReconciliationAttempts, &item.ReconciliationLastError, &item.ReconciliationStoppedAt, &item.StartedAt, &item.UpdatedAt)
 	return item, err
 }

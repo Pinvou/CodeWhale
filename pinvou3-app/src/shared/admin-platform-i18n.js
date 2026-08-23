@@ -85,3 +85,7 @@ Object.assign(adminPlatformCopy.ja.billing, { anomalies:'支払い異常', anoma
 Object.assign(adminPlatformCopy.zh.billing, { assignOwner:'分配责任人', ownerPrompt:'请输入责任人 UUID', internalSnapshot:'订单/支付快照', refundSnapshot:'退款快照', ledgerSnapshot:'账本快照' });
 Object.assign(adminPlatformCopy.en.billing, { assignOwner:'Assign owner', ownerPrompt:'Owner UUID', internalSnapshot:'Order/payment snapshot', refundSnapshot:'Refund snapshot', ledgerSnapshot:'Ledger snapshot' });
 Object.assign(adminPlatformCopy.ja.billing, { assignOwner:'担当者を割り当て', ownerPrompt:'担当者 UUID', internalSnapshot:'注文・支払いスナップショット', refundSnapshot:'返金スナップショット', ledgerSnapshot:'台帳スナップショット' });
+
+Object.assign(adminPlatformCopy.zh.tokens, { protocol:'协议', adapterVersion:'Adapter 版本', upstreamReference:'上游请求引用' });
+Object.assign(adminPlatformCopy.en.tokens, { protocol:'Protocol', adapterVersion:'Adapter version', upstreamReference:'Upstream request reference' });
+Object.assign(adminPlatformCopy.ja.tokens, { protocol:'プロトコル', adapterVersion:'Adapter バージョン', upstreamReference:'アップストリーム要求参照' });

@@ -9,46 +9,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 )
-
-type UpstreamClient interface {
-	Do(context.Context, string, []byte, []byte, uuid.UUID) (*http.Response, error)
-}
-
-type HTTPUpstreamClient struct{ client *http.Client }
-
-func NewHTTPUpstreamClient() *HTTPUpstreamClient {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.ResponseHeaderTimeout = 30 * time.Second
-	transport.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext
-	return &HTTPUpstreamClient{client: &http.Client{Transport: observability.NewHTTPTransport(transport)}}
-}
-
-func (c *HTTPUpstreamClient) Do(ctx context.Context, baseURL string, secret, body []byte, usageID uuid.UUID) (*http.Response, error) {
-	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, ErrNoEligibleRoute
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, parsed.String()+"/v1/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	request.Header.Set("Authorization", "Bearer "+string(secret))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json, text/event-stream")
-	request.Header.Set("X-Request-ID", usageID.String())
-	return c.client.Do(request)
-}
 
 func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	resolved, ok := s.resolveContext(w, r)
@@ -101,7 +69,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusUnprocessableEntity, "METERING_LIMIT_EXCEEDED", "the request cannot be measured within the configured model limits", httpserver.RequestID(r.Context()))
 		return
 	}
-	candidates, err := s.repository.ListCandidates(r.Context(), request.Model)
+	candidates, err := s.repository.ListCandidates(r.Context(), request.Model, "CHAT")
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -115,17 +83,17 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		explicit = &parsed
 	}
-	route, err := SelectRoute(resolved, RouteRequest{Model: request.Model, ExplicitTokenAccountID: explicit}, candidates)
+	route, err := SelectRoute(resolved, RouteRequest{Model: request.Model, ProtocolCode: "CHAT", ExplicitTokenAccountID: explicit}, candidates)
 	if errors.Is(err, ErrNoEligibleRoute) && explicit == nil && s.defaultRoutes != nil {
 		walletID, provisionErr := s.activeWallet(r.Context(), resolved)
 		if provisionErr == nil {
 			provisionErr = s.defaultRoutes.Ensure(r.Context(), resolved, walletID, request.Model)
 		}
 		if provisionErr == nil {
-			candidates, provisionErr = s.repository.ListCandidates(r.Context(), request.Model)
+			candidates, provisionErr = s.repository.ListCandidates(r.Context(), request.Model, "CHAT")
 		}
 		if provisionErr == nil {
-			route, err = SelectRoute(resolved, RouteRequest{Model: request.Model}, candidates)
+			route, err = SelectRoute(resolved, RouteRequest{Model: request.Model, ProtocolCode: "CHAT"}, candidates)
 		} else if !errors.Is(provisionErr, ErrNoEligibleRoute) {
 			err = provisionErr
 		}
@@ -235,15 +203,15 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer response.Body.Close()
-	if newAPIRequestID := response.Header.Get("X-Oneapi-Request-Id"); newAPIRequestID != "" {
-		_ = s.repository.RecordUpstreamRequest(context.WithoutCancel(r.Context()), usageRequest.ID, newAPIRequestID)
+	if upstreamRequestID := s.upstream.UpstreamRequestID(response); upstreamRequestID != "" {
+		_ = s.repository.RecordUpstreamRequest(context.WithoutCancel(r.Context()), usageRequest.ID, UpstreamRequestEvidence{ProviderID: credential.Provider, AdapterVersion: s.upstream.AdapterVersion(), RequestID: upstreamRequestID})
 	}
 	w.Header().Set("X-Pinvou-Usage-Request-ID", usageRequest.ID.String())
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		s.handleUpstreamFailure(w, r, usageRequest.ID, hold.ID, response)
 		return
 	}
-	copySafeHeaders(w.Header(), response.Header)
+	s.upstream.CopyResponseHeaders(w.Header(), response.Header)
 	if request.Stream || strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
 		w.WriteHeader(response.StatusCode)
 		s.proxyStream(w, r, usageRequest.ID, hold.ID, price, response.Body, renewalFailed, maximumCost, maximumUsage.OutputTokens)
@@ -255,7 +223,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(payload)
 		return
 	}
-	usage, found := parseUsageJSON(payload)
+	usage, found := s.upstream.ParseUsage(payload)
 	if !found {
 		w.WriteHeader(response.StatusCode)
 		_, _ = w.Write(payload)
@@ -289,13 +257,13 @@ func requestIdempotencyKey(provided string, resolved AuthorizationContext, body 
 
 func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, response *http.Response) {
 	payload, _ := io.ReadAll(io.LimitReader(response.Body, 2<<20))
-	if response.StatusCode == 400 || response.StatusCode == 401 || response.StatusCode == 403 || response.StatusCode == 404 || response.StatusCode == 422 || response.StatusCode == 429 {
+	if s.upstream.RejectsBeforeGeneration(response.StatusCode) {
 		_ = s.billing.Release(context.WithoutCancel(r.Context()), usageID, holdID, "upstream rejected before generation")
 		_ = s.repository.MarkReleased(context.WithoutCancel(r.Context()), usageID, "upstream_rejected")
 	} else {
 		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageID, "upstream_error_unknown_usage", map[string]any{"status_code": response.StatusCode})
 	}
-	copySafeHeaders(w.Header(), response.Header)
+	s.upstream.CopyResponseHeaders(w.Header(), response.Header)
 	w.WriteHeader(response.StatusCode)
 	_, _ = w.Write(payload)
 }
@@ -352,7 +320,7 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		if bytes.HasPrefix(line, []byte("data:")) {
 			payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
 			if !bytes.Equal(payload, []byte("[DONE]")) {
-				if parsed, ok := parseUsageJSON(payload); ok {
+				if parsed, ok := s.upstream.ParseUsage(payload); ok {
 					usage, usageFound = parsed, true
 				}
 			}
@@ -446,40 +414,4 @@ func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.
 		}
 	}
 	return actual, true
-}
-
-func parseUsageJSON(payload []byte) (Usage, bool) {
-	var body struct {
-		Usage *struct {
-			PromptTokens       int64 `json:"prompt_tokens"`
-			CompletionTokens   int64 `json:"completion_tokens"`
-			PromptTokenDetails *struct {
-				CachedTokens int64 `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-		} `json:"usage"`
-	}
-	if json.Unmarshal(payload, &body) != nil || body.Usage == nil {
-		return Usage{}, false
-	}
-	usage := Usage{InputTokens: body.Usage.PromptTokens, OutputTokens: body.Usage.CompletionTokens}
-	if body.Usage.PromptTokenDetails != nil {
-		usage.CachedInputTokens = body.Usage.PromptTokenDetails.CachedTokens
-	}
-	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedInputTokens > usage.InputTokens {
-		return Usage{}, false
-	}
-	usage.InputTokens -= usage.CachedInputTokens
-	return usage, true
-}
-
-func copySafeHeaders(destination, source http.Header) {
-	for key, values := range source {
-		switch strings.ToLower(key) {
-		case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "set-cookie", "content-length":
-			continue
-		}
-		for _, value := range values {
-			destination.Add(key, value)
-		}
-	}
 }

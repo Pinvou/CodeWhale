@@ -32,12 +32,16 @@ func Eligible(context AuthorizationContext, candidate Candidate, model string) b
 
 func SelectRoute(context AuthorizationContext, request RouteRequest, candidates []Candidate) (Candidate, error) {
 	model := strings.TrimSpace(request.Model)
+	protocolCode := strings.ToUpper(strings.TrimSpace(request.ProtocolCode))
+	if protocolCode == "" {
+		protocolCode = "CHAT"
+	}
 	if model == "" {
 		return Candidate{}, ErrNoEligibleRoute
 	}
 	eligible := make([]Candidate, 0, len(candidates))
 	for _, candidate := range candidates {
-		if Eligible(context, candidate, model) {
+		if Eligible(context, candidate, model) && (candidate.ProtocolCode == "" || candidate.ProtocolCode == protocolCode) {
 			eligible = append(eligible, candidate)
 		}
 	}

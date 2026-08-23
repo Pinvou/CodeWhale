@@ -84,8 +84,9 @@ func main() {
 		}
 		defaultPriority = parsed
 	}
+	defaultProvider := strings.ToUpper(strings.TrimSpace(os.Getenv("TOKEN_DEFAULT_PROVIDER")))
 	defaultRoutes, err := token.NewDefaultRouteProvisioner(repository, providerURLPolicy, token.DefaultRouteConfig{
-		Provider: os.Getenv("TOKEN_DEFAULT_PROVIDER"),
+		Provider: defaultProvider,
 		BaseURL:  os.Getenv("TOKEN_DEFAULT_PROVIDER_BASE_URL"),
 		Secret:   []byte(os.Getenv("TOKEN_DEFAULT_PROVIDER_API_KEY")),
 		Models:   strings.Split(os.Getenv("TOKEN_DEFAULT_PROVIDER_MODELS"), ","),
@@ -94,17 +95,31 @@ func main() {
 	if err != nil {
 		log.Fatal("default Token Account provisioning is not configured: ", err)
 	}
-	reconciliationUserID, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID")), 10, 64)
-	if err != nil || reconciliationUserID <= 0 {
-		log.Fatal("TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID must be a positive integer")
+	adapterName := strings.ToUpper(strings.TrimSpace(os.Getenv("TOKEN_GATEWAY_ADAPTER")))
+	if adapterName == "" {
+		adapterName = "NEW_API"
 	}
-	reconciliationURL := strings.TrimSpace(os.Getenv("TOKEN_RECONCILIATION_NEWAPI_BASE_URL"))
-	if reconciliationURL == "" {
-		reconciliationURL = os.Getenv("TOKEN_DEFAULT_PROVIDER_BASE_URL")
-	}
-	evidenceClient, err := token.NewNewAPIUsageEvidenceClient(reconciliationURL, os.Getenv("TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN"), reconciliationUserID, providerURLPolicy)
-	if err != nil {
-		log.Fatal("New API usage reconciliation is not configured: ", err)
+	var gatewayAdapter token.UpstreamClient
+	var evidenceClient token.UsageEvidenceProvider
+	switch adapterName {
+	case "NEW_API":
+		gatewayAdapter = token.NewNewAPIGatewayAdapter()
+		reconciliationUserID, parseErr := strconv.ParseInt(strings.TrimSpace(os.Getenv("TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID")), 10, 64)
+		if parseErr != nil || reconciliationUserID <= 0 {
+			log.Fatal("TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID must be a positive integer")
+		}
+		reconciliationURL := strings.TrimSpace(os.Getenv("TOKEN_RECONCILIATION_NEWAPI_BASE_URL"))
+		if reconciliationURL == "" {
+			reconciliationURL = os.Getenv("TOKEN_DEFAULT_PROVIDER_BASE_URL")
+		}
+		evidenceClient, err = token.NewNewAPIUsageEvidenceProvider(defaultProvider, gatewayAdapter.AdapterVersion(), reconciliationURL, os.Getenv("TOKEN_RECONCILIATION_NEWAPI_ADMIN_TOKEN"), reconciliationUserID, providerURLPolicy)
+		if err != nil {
+			log.Fatal("New API usage reconciliation is not configured: ", err)
+		}
+	case "OPENAI_COMPATIBLE":
+		gatewayAdapter = token.NewHTTPUpstreamClient()
+	default:
+		log.Fatal("TOKEN_GATEWAY_ADAPTER must be NEW_API or OPENAI_COMPATIBLE")
 	}
 	reconciliationInterval := 15 * time.Second
 	if raw := strings.TrimSpace(os.Getenv("TOKEN_RECONCILIATION_INTERVAL_SECONDS")); raw != "" {
@@ -117,7 +132,7 @@ func main() {
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithAuthorizer(authorizer)
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithAuthorizer(authorizer)
 	if err := httpserver.RunWithApplication("token-gateway", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

@@ -114,8 +114,9 @@
     },
     "tokenGateway": {
       "type": "object",
-      "required": ["secretProvider", "secretKeyId", "providerAllowedHosts", "maxInputTokens"],
+      "required": ["gatewayAdapter", "secretProvider", "secretKeyId", "providerAllowedHosts", "maxInputTokens"],
       "properties": {
+        "gatewayAdapter": { "enum": ["NEW_API", "OPENAI_COMPATIBLE"] },
         "secretProvider": { "enum": ["local", "remote"] },
         "secretKeyId": { "type": "string" },
         "providerAllowedHosts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },

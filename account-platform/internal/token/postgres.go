@@ -2,6 +2,8 @@ package token
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,6 +46,7 @@ type Credential struct {
 type RoutingPolicy struct {
 	TokenAccountID uuid.UUID `json:"token_account_id"`
 	Model          string    `json:"model"`
+	ProtocolCode   string    `json:"protocol_code"`
 	Priority       int       `json:"priority"`
 	DefaultScope   string    `json:"default_scope"`
 	HealthStatus   string    `json:"health_status"`
@@ -77,8 +80,8 @@ type Repository interface {
 	SetAccountStatus(context.Context, uuid.UUID, string, uuid.UUID, string) (TokenAccount, error)
 	RevokeCredential(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (Credential, error)
 	UpdateSharePolicy(context.Context, uuid.UUID, string, []uuid.UUID, uuid.UUID) (TokenAccount, error)
-	UpsertRoute(context.Context, uuid.UUID, string, int, string, string, uuid.UUID) (RoutingPolicy, error)
-	ListCandidates(context.Context, string) ([]Candidate, error)
+	UpsertRoute(context.Context, uuid.UUID, string, string, int, string, string, uuid.UUID) (RoutingPolicy, error)
+	ListCandidates(context.Context, string, string) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
 	ListUsageForContext(context.Context, AuthorizationContext, int, *UsageHistoryCursor) ([]UserUsageRecord, error)
 	ApplyOrganizationUnitLifecycle(context.Context, uuid.UUID, uuid.UUID, string, int64) (OrganizationUnitDeletionAssessment, error)
@@ -233,15 +236,18 @@ func (r *PostgresRepository) MarkUpstream(ctx context.Context, usageID uuid.UUID
 	return nil
 }
 
-func (r *PostgresRepository) RecordUpstreamRequest(ctx context.Context, usageID uuid.UUID, newAPIRequestID string) error {
-	newAPIRequestID = strings.TrimSpace(newAPIRequestID)
-	if usageID == uuid.Nil || newAPIRequestID == "" || len(newAPIRequestID) > 128 {
+func (r *PostgresRepository) RecordUpstreamRequest(ctx context.Context, usageID uuid.UUID, evidence UpstreamRequestEvidence) error {
+	evidence.ProviderID = strings.ToUpper(strings.TrimSpace(evidence.ProviderID))
+	evidence.AdapterVersion = strings.TrimSpace(evidence.AdapterVersion)
+	evidence.RequestID = strings.TrimSpace(evidence.RequestID)
+	if usageID == uuid.Nil || evidence.ProviderID == "" || len(evidence.ProviderID) > 80 || evidence.AdapterVersion == "" || len(evidence.AdapterVersion) > 80 || evidence.RequestID == "" || len(evidence.RequestID) > 128 {
 		return ErrForbidden
 	}
-	command, err := r.pool.Exec(ctx, `INSERT INTO usage_attempts(id,usage_request_id,newapi_request_id,status,started_at)
-VALUES($1,$2,$3,'STARTED',$4)
-ON CONFLICT(usage_request_id) DO UPDATE SET newapi_request_id=EXCLUDED.newapi_request_id
-WHERE usage_attempts.newapi_request_id=EXCLUDED.newapi_request_id`, uuid.Must(uuid.NewV7()), usageID, newAPIRequestID, r.now())
+	digest := sha256.Sum256([]byte(evidence.RequestID))
+	command, err := r.pool.Exec(ctx, `INSERT INTO usage_attempts(id,usage_request_id,provider_id,adapter_version,upstream_request_id,upstream_reference_digest,status,started_at)
+VALUES($1,$2,$3,$4,$5,$6,'STARTED',$7)
+ON CONFLICT(usage_request_id) DO UPDATE SET provider_id=EXCLUDED.provider_id,adapter_version=EXCLUDED.adapter_version,upstream_request_id=EXCLUDED.upstream_request_id,upstream_reference_digest=EXCLUDED.upstream_reference_digest
+WHERE usage_attempts.provider_id=EXCLUDED.provider_id AND usage_attempts.adapter_version=EXCLUDED.adapter_version AND usage_attempts.upstream_reference_digest=EXCLUDED.upstream_reference_digest`, uuid.Must(uuid.NewV7()), usageID, evidence.ProviderID, evidence.AdapterVersion, evidence.RequestID, hex.EncodeToString(digest[:]), r.now())
 	if err != nil {
 		return err
 	}
@@ -494,7 +500,7 @@ func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, ac
 		if err != nil {
 			break
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at) SELECT $1,id,$2,default_priority,'NONE','HEALTHY',$3 FROM token_accounts WHERE id=$4 ON CONFLICT(token_account_id,model) DO UPDATE SET health_status='HEALTHY',updated_at=EXCLUDED.updated_at`, uuid.Must(uuid.NewV7()), model, now, accountID)
+		_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at) SELECT $1,id,$2,'CHAT',default_priority,'NONE','HEALTHY',$3 FROM token_accounts WHERE id=$4 ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code='CHAT',health_status='HEALTHY',updated_at=EXCLUDED.updated_at`, uuid.Must(uuid.NewV7()), model, now, accountID)
 	}
 	if err != nil {
 		return Credential{}, err
@@ -502,18 +508,19 @@ func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, ac
 	return credential, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) ListCandidates(ctx context.Context, model string) ([]Candidate, error) {
+func (r *PostgresRepository) ListCandidates(ctx context.Context, model, protocolCode string) ([]Candidate, error) {
+	protocolCode = strings.ToUpper(strings.TrimSpace(protocolCode))
 	rows, err := r.pool.Query(ctx, `
 SELECT ta.id,ta.name,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.status,
        sp.scope,pc.allowed_models,
        ARRAY(SELECT em.user_id FROM token_explicit_members em WHERE em.token_account_id=ta.id ORDER BY em.user_id),
-       rp.default_scope,rp.priority,rp.health_status,pc.id
+       rp.default_scope,rp.priority,rp.health_status,pc.id,rp.protocol_code
 FROM token_accounts ta
 JOIN token_share_policies sp ON sp.token_account_id=ta.id
 JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID'
-JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=$1
+JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=$1 AND rp.protocol_code=$2
 WHERE ta.status='ACTIVE'
-ORDER BY rp.priority DESC,ta.id`, model)
+ORDER BY rp.priority DESC,ta.id`, model, protocolCode)
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +528,7 @@ ORDER BY rp.priority DESC,ta.id`, model)
 	items := make([]Candidate, 0)
 	for rows.Next() {
 		var item Candidate
-		if err := rows.Scan(&item.TokenAccountID, &item.Name, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Status, &item.ShareScope, &item.AllowedModels, &item.ExplicitMembers, &item.DefaultScope, &item.Priority, &item.HealthStatus, &item.CredentialID); err != nil {
+		if err := rows.Scan(&item.TokenAccountID, &item.Name, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Status, &item.ShareScope, &item.AllowedModels, &item.ExplicitMembers, &item.DefaultScope, &item.Priority, &item.HealthStatus, &item.CredentialID, &item.ProtocolCode); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

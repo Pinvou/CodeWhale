@@ -43,3 +43,12 @@ func TestExplicitMemberScope(t *testing.T) {
 		t.Fatal("non-member was authorized")
 	}
 }
+
+func TestSelectRouteRequiresDeclaredProtocol(t *testing.T) {
+	userID := uuid.Must(uuid.NewV7())
+	candidate := Candidate{TokenAccountID: uuid.Must(uuid.NewV7()), OwnerType: "USER", OwnerID: userID, WalletID: uuid.Must(uuid.NewV7()), CredentialID: uuid.Must(uuid.NewV7()), Status: "ACTIVE", HealthStatus: "HEALTHY", AllowedModels: []string{"gpt-test"}, ProtocolCode: "CHAT"}
+	context := AuthorizationContext{UserID: userID, ContextType: "PERSONAL"}
+	if _, err := SelectRoute(context, RouteRequest{Model: "gpt-test", ProtocolCode: "EMBEDDING"}, []Candidate{candidate}); !errors.Is(err, ErrNoEligibleRoute) {
+		t.Fatalf("undeclared protocol should be unavailable: %v", err)
+	}
+}

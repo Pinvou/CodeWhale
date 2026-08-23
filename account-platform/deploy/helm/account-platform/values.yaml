@@ -70,6 +70,7 @@ billing:
   paymentExpiryIntervalSeconds: 15
 
 tokenGateway:
+  gatewayAdapter: NEW_API
   secretProvider: remote
   secretKeyId: ""
   providerAllowedHosts: []

@@ -1041,7 +1041,7 @@ paths:
   /token/admin/v1/usage-requests/{usage_request_id}:
     get:
       operationId: getAdminUsageRequest
-      summary: Get settlement, attempt, and NewAPI correlation metadata without conversation content
+      summary: Get settlement and provider-neutral Adapter correlation metadata without conversation content
       parameters: [{ $ref: "#/components/parameters/UsageRequestID" }]
       responses:
         "200": { $ref: "#/components/responses/Overview" }
@@ -1728,9 +1728,10 @@ components:
     TokenRouteChange:
       type: object
       additionalProperties: false
-      required: [model, priority, default_scope, health_status]
+      required: [model, protocol_code, priority, default_scope, health_status]
       properties:
         model: { type: string, minLength: 1, maxLength: 160 }
+        protocol_code: { type: string, enum: [CHAT] }
         priority: { type: integer, minimum: 0, maximum: 10000 }
         default_scope: { type: string, enum: [NONE, UNIT, ORG] }
         health_status: { type: string, enum: [HEALTHY, DEGRADED, UNHEALTHY] }

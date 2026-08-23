@@ -63,8 +63,8 @@ func TestUsageReconcilerReleasesOnlyWithExplicitRejectionEvidence(t *testing.T) 
 	store := &reconciliationStoreFake{}
 	billing := &reconciliationBillingFake{}
 	reconciler := NewUsageReconciler(store, billing, evidenceClientFake{evidence: UsageEvidence{Rejected: true}}, time.Second)
-	newAPIRequestID := "newapi-request-456"
-	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", Status: "REVIEW", MaximumMicrocredits: 100}, NewAPIRequestID: &newAPIRequestID}
+	providerID, adapterVersion, upstreamRequestID := "NEW_API", "new-api-v1", "newapi-request-456"
+	item := ReconciliationItem{UsageRequest: UsageRequest{ID: usageID, HoldID: &holdID, PriceVersionID: &priceID, Model: "test-model", Status: "REVIEW", MaximumMicrocredits: 100}, ProviderID: &providerID, AdapterVersion: &adapterVersion, UpstreamRequestID: &upstreamRequestID}
 
 	if err := reconciler.reconcile(context.Background(), item); err != nil {
 		t.Fatal(err)
@@ -128,6 +128,9 @@ func (b *reconciliationBillingFake) Release(_ context.Context, usageID, _ uuid.U
 }
 
 type evidenceClientFake struct{ evidence UsageEvidence }
+
+func (e evidenceClientFake) ProviderID() string { return "NEW_API" }
+func (e evidenceClientFake) AdapterVersion() string { return "new-api-v1" }
 
 func (e evidenceClientFake) Lookup(context.Context, string) (UsageEvidence, error) {
 	return e.evidence, nil

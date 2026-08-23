@@ -459,7 +459,7 @@ CATALOG_VISIBLE
 ### 5.2 平台托管模型调用
 
 1. `[TOK-02]` 桌面聊天携带与个人中心一致的 OIDC 身份调用 Token Gateway，不接受客户端提供付款主体、角色或钱包。
-2. `[TOK-04]` Gateway 提供受支持协议的兼容入口，模型目录必须声明 Chat、Embedding、Rerank、图像或其他协议能力；未声明的协议不得推断可用。
+2. `[TOK-04][TOK-05]` Gateway 提供版本化协议能力发现和受支持协议的兼容入口，模型路由/目录必须显式声明 Chat、Embedding、Rerank、图像或其他协议能力；未声明的协议不得推断可用。请求构造、Provider 请求头、上游引用提取、用量证据查询、响应/错误归一化只存在于所选 Model Gateway Adapter；通用请求、数据库、API 和运营界面只保存 `provider_id`、`adapter_version`、`upstream_request_id` 及脱敏摘要。当前发布的 `CHAT v1` 支持 JSON 与 SSE，其他协议必须在 Adapter 和目录同时声明后才能开放入口。
 3. `[TOK-08]` 首次平台调用幂等确保平台托管 Token Account 和默认路由；创建过程遵守 TOK-09，普通用户不可见、不可修改。
 4. `[TOK-09]` 模型发布、平台托管作用域建立、上下文获得模型策略或请求发现缺失托管路由时，Gateway 以 `scope_type + scope_id + model_id + protocol + desired_generation` 为幂等键确保唯一 Provisioning 记录。并发请求不得创建重复 Token Account、凭据引用或默认路由。
 5. `[TOK-10]` Gateway 每次请求都必须从当前目录版本开始执行完整顺序；不得以客户端缓存、旧 `CONTEXT_ELIGIBLE` 结果、历史 READY 路由或预计算余额跳过任一步骤。

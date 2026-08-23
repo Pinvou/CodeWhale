@@ -19,10 +19,12 @@ import (
 
 type ReconciliationItem struct {
 	UsageRequest
-	UsageSnapshot   []byte
-	RequestSnapshot []byte
-	NewAPIRequestID *string
-	Attempts        int
+	UsageSnapshot     []byte
+	RequestSnapshot   []byte
+	ProviderID        *string
+	AdapterVersion    *string
+	UpstreamRequestID *string
+	Attempts          int
 }
 
 type ReconciliationStore interface {
@@ -40,7 +42,7 @@ func (r *PostgresRepository) ClaimReconciliation(ctx context.Context, limit int,
 	now := r.now()
 	rows, err := r.pool.Query(ctx, `
 WITH candidates AS (
-    SELECT request.id, attempt.newapi_request_id
+    SELECT request.id,attempt.provider_id,attempt.adapter_version,attempt.upstream_request_id
     FROM usage_requests request
     LEFT JOIN usage_attempts attempt ON attempt.usage_request_id = request.id
     WHERE request.status IN ('SETTLEMENT_PENDING','REVIEW')
@@ -61,7 +63,8 @@ WHERE request.id = candidates.id
 RETURNING request.id,request.idempotency_key,request.user_id,request.session_id,request.organization_id,
           request.token_account_id,request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,
           request.model,request.status,request.maximum_microcredits,request.actual_microcredits,request.error_class,
-		  request.started_at,request.updated_at,request.usage_snapshot,request.request_snapshot,candidates.newapi_request_id,request.reconciliation_attempts`, now, limit, now.Add(lease))
+		  request.started_at,request.updated_at,request.usage_snapshot,request.request_snapshot,
+		  candidates.provider_id,candidates.adapter_version,candidates.upstream_request_id,request.reconciliation_attempts`, now, limit, now.Add(lease))
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +75,8 @@ RETURNING request.id,request.idempotency_key,request.user_id,request.session_id,
 		if err := rows.Scan(&item.ID, &item.IdempotencyKey, &item.UserID, &item.SessionID, &item.OrganizationID,
 			&item.TokenAccountID, &item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID,
 			&item.Model, &item.Status, &item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass,
-			&item.StartedAt, &item.UpdatedAt, &item.UsageSnapshot, &item.RequestSnapshot, &item.NewAPIRequestID, &item.Attempts); err != nil {
+			&item.StartedAt, &item.UpdatedAt, &item.UsageSnapshot, &item.RequestSnapshot,
+			&item.ProviderID, &item.AdapterVersion, &item.UpstreamRequestID, &item.Attempts); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -120,7 +124,9 @@ type UsageEvidence struct {
 	Rejected bool
 }
 
-type UsageEvidenceClient interface {
+type UsageEvidenceProvider interface {
+	ProviderID() string
+	AdapterVersion() string
 	Lookup(context.Context, string) (UsageEvidence, error)
 }
 
@@ -131,6 +137,8 @@ type ReconciliationBilling interface {
 }
 
 type NewAPIUsageEvidenceClient struct {
+	providerID     string
+	adapterVersion string
 	baseURL *url.URL
 	token   string
 	userID  int64
@@ -138,8 +146,14 @@ type NewAPIUsageEvidenceClient struct {
 }
 
 func NewNewAPIUsageEvidenceClient(rawURL, token string, userID int64, policy ProviderURLPolicy) (*NewAPIUsageEvidenceClient, error) {
+	return NewNewAPIUsageEvidenceProvider("NEW_API", "new-api-v1", rawURL, token, userID, policy)
+}
+
+func NewNewAPIUsageEvidenceProvider(providerID, adapterVersion, rawURL, token string, userID int64, policy ProviderURLPolicy) (*NewAPIUsageEvidenceClient, error) {
+	providerID = strings.ToUpper(strings.TrimSpace(providerID))
+	adapterVersion = strings.TrimSpace(adapterVersion)
 	rawURL = strings.TrimRight(strings.TrimSpace(rawURL), "/")
-	if err := policy.Validate(rawURL); err != nil || strings.TrimSpace(token) == "" || userID <= 0 {
+	if err := policy.Validate(rawURL); err != nil || providerID == "" || adapterVersion == "" || strings.TrimSpace(token) == "" || userID <= 0 {
 		return nil, errors.New("invalid New API reconciliation configuration")
 	}
 	parsed, err := url.Parse(rawURL)
@@ -148,8 +162,12 @@ func NewNewAPIUsageEvidenceClient(rawURL, token string, userID int64, policy Pro
 	}
 	client := observability.NewHTTPClient(10 * time.Second)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &NewAPIUsageEvidenceClient{baseURL: parsed, token: token, userID: userID, client: client}, nil
+	return &NewAPIUsageEvidenceClient{providerID: providerID, adapterVersion: adapterVersion, baseURL: parsed, token: token, userID: userID, client: client}, nil
 }
+
+func (c *NewAPIUsageEvidenceClient) ProviderID() string { return c.providerID }
+
+func (c *NewAPIUsageEvidenceClient) AdapterVersion() string { return c.adapterVersion }
 
 func (c *NewAPIUsageEvidenceClient) Lookup(ctx context.Context, newAPIRequestID string) (UsageEvidence, error) {
 	newAPIRequestID = strings.TrimSpace(newAPIRequestID)
@@ -264,7 +282,7 @@ func (item newAPILog) usage() (Usage, error) {
 type UsageReconciler struct {
 	store     ReconciliationStore
 	billing   ReconciliationBilling
-	evidence  UsageEvidenceClient
+	evidence  UsageEvidenceProvider
 	interval  time.Duration
 	lease     time.Duration
 	maxAge    time.Duration
@@ -275,7 +293,7 @@ type UsageReconciler struct {
 
 var errManualReconciliationRequired = errors.New("manual reconciliation required")
 
-func NewUsageReconciler(store ReconciliationStore, billing ReconciliationBilling, evidence UsageEvidenceClient, interval time.Duration) *UsageReconciler {
+func NewUsageReconciler(store ReconciliationStore, billing ReconciliationBilling, evidence UsageEvidenceProvider, interval time.Duration) *UsageReconciler {
 	if interval < time.Second {
 		interval = 15 * time.Second
 	}
@@ -329,12 +347,15 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 		return r.commit(ctx, item, *snapshot.Usage, snapshot.ActualMicrocredits)
 	}
 	if r.evidence == nil {
-		return errors.New("New API evidence client is unavailable")
+		return errors.New("usage evidence provider is unavailable")
 	}
-	if item.NewAPIRequestID == nil || strings.TrimSpace(*item.NewAPIRequestID) == "" {
-		return fmt.Errorf("%w: New API request identifier was not captured", errManualReconciliationRequired)
+	if item.ProviderID == nil || item.AdapterVersion == nil || item.UpstreamRequestID == nil || strings.TrimSpace(*item.UpstreamRequestID) == "" {
+		return fmt.Errorf("%w: upstream request evidence was not captured", errManualReconciliationRequired)
 	}
-	evidence, err := r.evidence.Lookup(ctx, *item.NewAPIRequestID)
+	if !strings.EqualFold(*item.ProviderID, r.evidence.ProviderID()) || *item.AdapterVersion != r.evidence.AdapterVersion() {
+		return fmt.Errorf("%w: no evidence adapter matches historical provider %s/%s", errManualReconciliationRequired, *item.ProviderID, *item.AdapterVersion)
+	}
+	evidence, err := r.evidence.Lookup(ctx, *item.UpstreamRequestID)
 	if err != nil {
 		return err
 	}
@@ -342,12 +363,12 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 		return r.commit(ctx, item, *evidence.Usage, nil)
 	}
 	if evidence.Rejected {
-		if err := r.billing.Release(ctx, item.ID, *item.HoldID, "New API reconciliation confirmed no consumption"); err != nil {
+		if err := r.billing.Release(ctx, item.ID, *item.HoldID, "provider evidence confirmed no consumption"); err != nil {
 			return err
 		}
 		return r.store.MarkReleased(ctx, item.ID, "reconciled_upstream_rejected")
 	}
-	return errors.New("New API has no conclusive usage or rejection log yet")
+	return errors.New("provider has no conclusive usage or rejection evidence yet")
 }
 
 func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, usage Usage, expectedActual *int64) error {

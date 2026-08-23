@@ -118,9 +118,9 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,'ACTIVE',$9,$10,$10,$11,$10,'VALID',$11)`, creden
 		return err
 	}
 	for _, allowedModel := range p.config.Models {
-		if _, err := tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,priority,default_scope,health_status,updated_at,updated_by)
-VALUES($1,$2,$3,$4,$5,'HEALTHY',$6,$7)
-ON CONFLICT(token_account_id,model) DO UPDATE SET priority=EXCLUDED.priority,default_scope=EXCLUDED.default_scope,health_status='HEALTHY',updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by`, uuid.Must(uuid.NewV7()), accountID, allowedModel, p.config.Priority, defaultScope, now, resolved.UserID); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by)
+VALUES($1,$2,$3,'CHAT',$4,$5,'HEALTHY',$6,$7)
+ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code='CHAT',priority=EXCLUDED.priority,default_scope=EXCLUDED.default_scope,health_status='HEALTHY',updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by`, uuid.Must(uuid.NewV7()), accountID, allowedModel, p.config.Priority, defaultScope, now, resolved.UserID); err != nil {
 			return err
 		}
 	}
