@@ -2507,10 +2507,6 @@ fn spawn_parameters_refuse_type_mismatches_by_name() {
         ),
         ("worktree", json!({"prompt": "p", "worktree": "true"})),
         (
-            "inherit_disallowed_tools",
-            json!({"prompt": "p", "inherit_disallowed_tools": 1}),
-        ),
-        (
             "allowed_tools",
             json!({"prompt": "p", "allowed_tools": "read_file"}),
         ),
@@ -14910,17 +14906,46 @@ fn test_parse_spawn_request_inherit_disallowed_tools_defaults_true() {
     );
 }
 
+/// Session/operator deny rules are a ceiling, not parent taste: model-supplied
+/// input must not be able to drop them. The out-of-schema
+/// `inherit_disallowed_tools: false` escape hatch is ignored at the
+/// model-input parse boundary, so a child always inherits the session's
+/// `mcp_<server>_*` connector denials.
 #[test]
-fn test_parse_spawn_request_inherit_disallowed_tools_explicit_false() {
+fn forkguard_spawn_request_inherit_disallowed_tools_opt_out_not_honored() {
     let input = json!({
         "prompt": "do something",
         "inherit_disallowed_tools": false
     });
     let req = parse_spawn_request(&input).expect("parse");
     assert!(
-        !req.inherit_disallowed_tools,
-        "inherit_disallowed_tools should parse an explicit false"
+        req.inherit_disallowed_tools,
+        "model input must not lower the inherited deny ceiling"
     );
+
+    // End to end through the real spawn merge: a parent carrying a session
+    // `mcp_<server>_*` denial keeps it in the child even though the model
+    // asked for a clean surface, and the child registry enforces it.
+    let tmp = tempdir().expect("tempdir");
+    let runtime = stub_runtime_with_disallowed(vec!["mcp_disabled_*".to_string()]);
+    let mut child_runtime = runtime.child_runtime();
+    child_runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    apply_spawn_disallowed_tools(&mut child_runtime, &req);
+    assert!(
+        child_runtime
+            .worker_profile
+            .denied_tools
+            .iter()
+            .any(|rule| rule == "mcp_disabled_*"),
+        "session mcp_* deny survives a model-requested opt-out"
+    );
+
+    let registry = new_registry_with_disallowed(child_runtime, None);
+    assert!(
+        !registry.is_tool_allowed("mcp_disabled_search"),
+        "child catalog/execution still denies the disabled connector's tools"
+    );
+    assert!(registry.is_tool_allowed("read_file"));
 }
 
 /// #3874 acceptance: the no-progress heartbeat must not kill a worker whose

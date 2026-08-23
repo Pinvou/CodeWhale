@@ -1756,6 +1756,8 @@ struct SpawnRequest {
     /// When true (default), the child inherits the parent runtime's
     /// `disallowed_tools`. Set `false` to start the child with a clean slate
     /// (only the explicit `disallowed_tools` above, if any, then apply).
+    /// Only programmatic callers can set this: `parse_spawn_request` forces
+    /// `true` so model-supplied input can never drop session deny rules.
     inherit_disallowed_tools: bool,
     /// Declared child write authority. Not schema decoration: `ReadOnly`
     /// narrows the child worker profile's write permission before spawn, so a
@@ -7947,6 +7949,39 @@ fn child_client_for_member(
     child_provider_binding(runtime, member).map(|binding| binding.client)
 }
 
+/// #4042: merge the parent runtime's inherited deny-list with the caller's
+/// explicit `disallowed_tools`. `background_runtime()` already cloned the
+/// parent's `worker_profile.denied_tools` (the session `--disallowed-tools`),
+/// so by default the child inherits it. `inherit_disallowed_tools: false`
+/// drops *only* the inherited list; an explicit caller `disallowed_tools`
+/// always applies (union, deny never relaxes). Model-supplied input cannot
+/// set the opt-out — `parse_spawn_request` forces it to `true` — so session
+/// deny rules are never droppable by the model.
+fn apply_spawn_disallowed_tools(child_runtime: &mut SubAgentRuntime, spawn_request: &SpawnRequest) {
+    if !spawn_request.inherit_disallowed_tools {
+        // Drops the *preference* half of the inherited list only. A rule that
+        // expresses an enforced ceiling survives, because a child that could
+        // clear it would be widening its parent's network/write/execution
+        // envelope by asking — see `crate::fleet::exact::is_posture_denial`.
+        child_runtime
+            .worker_profile
+            .denied_tools
+            .retain(|rule| crate::fleet::exact::is_posture_denial(rule));
+    }
+    if let Some(ref caller_deny) = spawn_request.disallowed_tools {
+        for tool in caller_deny {
+            if !child_runtime
+                .worker_profile
+                .denied_tools
+                .iter()
+                .any(|existing| existing == tool)
+            {
+                child_runtime.worker_profile.denied_tools.push(tool.clone());
+            }
+        }
+    }
+}
+
 async fn spawn_subagent_from_input(
     input: Value,
     manager: SharedSubAgentManager,
@@ -8027,33 +8062,8 @@ async fn spawn_subagent_from_input(
         }
     }
     // #4042: merge the parent runtime's inherited deny-list with the caller's
-    // explicit `disallowed_tools`. `background_runtime()` already cloned the
-    // parent's `worker_profile.denied_tools` (the session `--disallowed-tools`),
-    // so by default the child inherits it. `inherit_disallowed_tools: false`
-    // drops *only* the inherited list; an explicit caller `disallowed_tools`
-    // always applies (union, deny never relaxes).
-    if !spawn_request.inherit_disallowed_tools {
-        // Drops the *preference* half of the inherited list only. A rule that
-        // expresses an enforced ceiling survives, because a child that could
-        // clear it would be widening its parent's network/write/execution
-        // envelope by asking — see `crate::fleet::exact::is_posture_denial`.
-        child_runtime
-            .worker_profile
-            .denied_tools
-            .retain(|rule| crate::fleet::exact::is_posture_denial(rule));
-    }
-    if let Some(ref caller_deny) = spawn_request.disallowed_tools {
-        for tool in caller_deny {
-            if !child_runtime
-                .worker_profile
-                .denied_tools
-                .iter()
-                .any(|existing| existing == tool)
-            {
-                child_runtime.worker_profile.denied_tools.push(tool.clone());
-            }
-        }
-    }
+    // explicit `disallowed_tools`.
+    apply_spawn_disallowed_tools(&mut child_runtime, &spawn_request);
     apply_spawn_write_authority(&mut child_runtime, &spawn_request);
     let write_capable = spawn_request_is_write_capable(&spawn_request);
     let resident_context = spawn_request
@@ -11123,13 +11133,18 @@ fn parse_spawn_request(input: &Value) -> Result<SpawnRequest, ToolError> {
         .map(|seconds| Duration::from_secs(seconds.clamp(1, MAX_CHILD_WALL_TIME.as_secs())));
 
     // #4042: optional caller-supplied tool deny-list (unioned with the parent's
-    // inherited deny-list) and the inheritance opt-out flag (default inherits).
+    // inherited deny-list). Deny only ever narrows the child, so model input
+    // may add rules.
     let disallowed_tools = parse_disallowed_tools(input)?;
-    let inherit_disallowed_tools = parse_optional_bool(
-        input,
-        &["inherit_disallowed_tools", "inheritDisallowedTools"],
-    )?
-    .unwrap_or(true);
+    // The inheritance opt-out is NOT honored from model input. Neither this
+    // flag nor `disallowed_tools` is part of the agent tool's model-facing
+    // schema, and the inherited list carries session/operator ceilings the
+    // engine stamps onto the parent runtime (e.g. `mcp_<server>_*` connector
+    // denials): letting model-supplied input drop them would be a privilege
+    // escalation — a child widening its parent's envelope by asking. The
+    // `SpawnRequest` flag and the spawn-merge branch stay for programmatic
+    // callers; from this (model-input) boundary the child always inherits.
+    let inherit_disallowed_tools = true;
 
     // Deliberate delegation contract: when `deliberate=true`, require the
     // model to declare task type (or profile), workspace policy, expected
