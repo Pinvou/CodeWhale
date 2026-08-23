@@ -329,6 +329,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 - 性能容量不由副本数或单次冒烟推断。`deploy/performance-policy.json` 冻结生产等价资源/数据/样本口径、平台/Provider/排队/客户端分段时延、流式并发、Hold/支付数据规模与事件积压目标；发布只消费聚合摘要证据，低样本、超过声明容量70%、守恒/幂等异常或高水位未阻断均失败关闭。
 - 公网 OIDC Token 精确路径先进入 Identity Adapter 的 Redis 原子风险门禁，再由内网调用 Keycloak；密码/短信登录与 Refresh 分别按来源IP、设备、账号标识、已学习稳定用户、Session和Provider限流，凭据失败只返回统一 `invalid_grant` 并进入固定耗时桶和渐进延迟，成功不立即清除风险历史。桌面始终提交持久设备标识。短信发送和核验由 Account 使用独立单向摘要表，按手机号、来源、设备、用途和Provider 80%安全容量计数；Keycloak 短信 Authenticator 只转发 Identity 已固化的来源和设备维度，不能以内部Pod地址合并所有用户。
 - Billing 在下单、订单查询和目标退款的领域操作前，以 PostgreSQL 事务锁按付款人、受益组织、来源、订单、动作和 Provider 原子准入；Provider 回调走独立容量域，验签后先写不可变 Inbox 并返回 `202`，再由后台 Worker 幂等归并，因此用户侧限流不能丢弃合法通知。Token Gateway 在创建新逻辑用量请求前，以同一数据库事务按用户、组织成员、组织、模型、路由和全局速率/在途数准入；幂等重放先返回既有请求，超限在 Hold 和上游派发前返回 `429`/`Retry-After`。
+- 租户隔离不是单一路由约定：发布合同矩阵同时核验个人对象所有权、显式目标组织、组织闭包节点范围、角色有效期、活动上下文、生命周期撤权、批量逐项、搜索行过滤、授权版本缓存和事件聚合目标。外部拒绝统一收敛为不泄露资源存在性的 `NOT_FOUND` 或 `PERMISSION_DENIED`；新增租户导出面必须先在矩阵中声明授权行过滤，否则发布失败。
 - HTTP 工作负载在业务监听提供独立 liveness/readiness，在受限 `:9090` 提供请求、错误状态、延迟、并发和 readiness 指标；Relay 的 liveness 只代表进程，readiness 同时验证 Outbox PostgreSQL 与 NATS，并输出周期结果、积压和死信指标。普通健康检查不执行收费业务或客户端切换准入。
 
 ## 11. 审计证据与主要风险
@@ -336,7 +337,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 本次代码级校准使用以下验证：
 
 - `node scripts/account-platform.mjs test unit`：所有 Go 包测试通过（项目内置 Go 工具链，`nomsgpack` 标签）。
-- `npm test`（`account-platform/`）：OpenAPI lint 和 127 个合同测试通过。
+- `npm test`（`account-platform/`）：OpenAPI lint 和 131 个合同测试通过。
 - `node --test tests/account_platform_state.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`（`pinvou3-app/`）：41 个测试通过。
 - `node scripts/account-platform.mjs verify`：Go 单测与 Vet、合同测试、架构守卫和差异检查通过。
 

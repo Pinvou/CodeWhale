@@ -43,10 +43,21 @@ func TestUsageStatusRequiresSameSessionAndActiveContext(t *testing.T) {
 	if !usageContextMatches(context, usage) {
 		t.Fatal("same session and organization should be authorized")
 	}
+	otherUser := context
+	otherUser.UserID = uuid.New()
+	if usageContextMatches(otherUser, usage) {
+		t.Fatal("usage leaked across users")
+	}
 	personal := context
 	personal.ContextType, personal.OrganizationID = "PERSONAL", nil
 	if usageContextMatches(personal, usage) {
 		t.Fatal("organization usage leaked into personal context")
+	}
+	otherOrganization := context
+	otherOrganizationID := uuid.New()
+	otherOrganization.OrganizationID = &otherOrganizationID
+	if usageContextMatches(otherOrganization, usage) {
+		t.Fatal("usage leaked across organizations")
 	}
 	otherSession := context
 	otherSession.SessionID = "other"
