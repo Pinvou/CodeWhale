@@ -24,7 +24,13 @@ var (
 	ErrPriceUnavailable              = errors.New("price is unavailable")
 	ErrPriceWindowConflict           = errors.New("price window conflicts with a published version")
 	ErrPriceETagConflict             = errors.New("price space etag conflict")
+	ErrPaymentRateLimited            = errors.New("payment action rate limit reached")
 )
+
+type PaymentRateLimitError struct{ RetryAfter time.Duration }
+
+func (e *PaymentRateLimitError) Error() string { return ErrPaymentRateLimited.Error() }
+func (e *PaymentRateLimitError) Unwrap() error { return ErrPaymentRateLimited }
 
 type Wallet struct {
 	ID                     uuid.UUID `json:"wallet_id"`

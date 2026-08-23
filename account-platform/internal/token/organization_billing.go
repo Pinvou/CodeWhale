@@ -55,8 +55,16 @@ func (s *Service) createOrganizationRechargeOrder(w http.ResponseWriter, r *http
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the organization wallet is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := client.CreateOrganizationRechargeOrder(r.Context(), resolved.UserID, walletID, organizationID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, commerceStatus, r.Header.Get("Idempotency-Key"))
+	payload, err := client.CreateOrganizationRechargeOrder(paymentSourceContext(r), resolved.UserID, walletID, organizationID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, commerceStatus, r.Header.Get("Idempotency-Key"))
 	if err != nil {
+		var limited *BillingHTTPError
+		if errors.As(err, &limited) && limited.Status == http.StatusTooManyRequests {
+			if limited.RetryAfter != "" {
+				w.Header().Set("Retry-After", limited.RetryAfter)
+			}
+			api.WriteError(w, http.StatusTooManyRequests, "PAYMENT_RATE_LIMITED", "the payment action exceeds a rate limit", httpserver.RequestID(r.Context()))
+			return
+		}
 		if errors.Is(err, ErrCommerceCustomerNotReady) {
 			api.WriteError(w, http.StatusConflict, "COMMERCE_CUSTOMER_NOT_READY", "the payment provider requires a ready Commerce Customer mapping", httpserver.RequestID(r.Context()))
 			return

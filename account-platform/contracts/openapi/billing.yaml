@@ -111,6 +111,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /recharge/orders/recent:
     get:
       operationId: getRecentRechargeOrder
@@ -163,6 +165,8 @@ paths:
                 $ref: "#/components/schemas/RechargeOrder"
         "404":
           $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /wallets/{wallet_id}/balance:
     get:
       operationId: getBalance
@@ -204,6 +208,33 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Refund" } } }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+  /internal/payment/notifications:
+    post:
+      servers:
+        - url: /
+      security: []
+      operationId: persistPaymentNotification
+      summary: Verify and durably enqueue a provider callback before asynchronous processing
+      parameters:
+        - name: X-Pinvou-Payment-Channel
+          in: header
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 32 }
+        - name: X-Pinvou-Payment-Signature
+          in: header
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 512 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "202":
+          description: The valid callback is durably persisted for asynchronous idempotent processing
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
   /internal/v1/recharge/orders/{order_id}/payment-claims:
     post:
       operationId: addLatePaymentClaimInternal
@@ -279,6 +310,16 @@ components:
   responses:
     Error:
       description: Stable error response
+      content:
+        application/json:
+          schema:
+            $ref: "common.yaml#/components/schemas/Error"
+    RateLimited:
+      description: The payment action exceeds an atomic multidimensional rate limit
+      headers:
+        Retry-After:
+          required: true
+          schema: { type: integer, minimum: 1 }
       content:
         application/json:
           schema:

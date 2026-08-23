@@ -116,6 +116,10 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return UsageRequest{}, false, err
 	}
+	now := r.now()
+	if err := admitUsage(ctx, tx, request, now); err != nil {
+		return UsageRequest{}, false, err
+	}
 	if request.OrganizationID != nil {
 		var organizationStatus string
 		err := tx.QueryRow(ctx, `SELECT status FROM organization_lifecycle_states WHERE organization_id=$1`, *request.OrganizationID).Scan(&organizationStatus)
@@ -126,7 +130,6 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 			return UsageRequest{}, false, ErrForbidden
 		}
 	}
-	now := r.now()
 	request.Status, request.ExecutionStatus, request.ExecutionVersion, request.DeliveryStatus = "CREATED", "RECEIVED", 1, "NOT_STARTED"
 	request.CancelStatus, request.SettlementStatus, request.StartedAt = "NOT_REQUESTED", "HOLD_PENDING", now
 	command, err := tx.Exec(ctx, `INSERT INTO usage_requests(id,idempotency_namespace,idempotency_key_digest,canonicalization_version,request_fingerprint,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,status,execution_status,execution_version,delivery_status,maximum_microcredits,request_snapshot,started_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'CREATED','RECEIVED',1,'NOT_STARTED',$19,$20,$21,$21) ON CONFLICT(user_id,idempotency_namespace,idempotency_key_digest) WHERE idempotency_key_digest IS NOT NULL DO NOTHING`, request.ID, request.IdempotencyNamespace, request.IdempotencyKeyDigest, request.CanonicalVersion, request.RequestFingerprint, request.UserID, request.SessionID, request.OrganizationID, request.TokenAccountID, request.CredentialID, request.WalletID, request.Model, request.ModelID, request.CatalogVersion, request.CapabilityVersionID, request.ProtocolDefinitionID, request.RouteGeneration, request.ModelSnapshot, request.MaximumMicrocredits, encoded, now)

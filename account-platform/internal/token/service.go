@@ -415,8 +415,16 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := s.billing.CreateRechargeOrder(r.Context(), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, commerceStatus, r.Header.Get("Idempotency-Key"))
+	payload, err := s.billing.CreateRechargeOrder(paymentSourceContext(r), resolved.UserID, walletID, body.ProductID, strings.ToUpper(body.Channel), *resolved.Mobile, commerceStatus, r.Header.Get("Idempotency-Key"))
 	if err != nil {
+		var limited *BillingHTTPError
+		if errors.As(err, &limited) && limited.Status == http.StatusTooManyRequests {
+			if limited.RetryAfter != "" {
+				w.Header().Set("Retry-After", limited.RetryAfter)
+			}
+			api.WriteError(w, http.StatusTooManyRequests, "PAYMENT_RATE_LIMITED", "the payment action exceeds a rate limit", httpserver.RequestID(r.Context()))
+			return
+		}
 		if errors.Is(err, ErrCommerceCustomerNotReady) {
 			api.WriteError(w, http.StatusConflict, "COMMERCE_CUSTOMER_NOT_READY", "the payment provider requires a ready Commerce Customer mapping", httpserver.RequestID(r.Context()))
 			return
@@ -437,8 +445,16 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid recharge order", httpserver.RequestID(r.Context()))
 		return
 	}
-	payload, err := s.billing.RechargeOrder(r.Context(), orderID, resolved.UserID)
+	payload, err := s.billing.RechargeOrder(paymentSourceContext(r), orderID, resolved.UserID)
 	if err != nil {
+		var limited *BillingHTTPError
+		if errors.As(err, &limited) && limited.Status == http.StatusTooManyRequests {
+			if limited.RetryAfter != "" {
+				w.Header().Set("Retry-After", limited.RetryAfter)
+			}
+			api.WriteError(w, http.StatusTooManyRequests, "PAYMENT_RATE_LIMITED", "the payment action exceeds a rate limit", httpserver.RequestID(r.Context()))
+			return
+		}
 		api.WriteError(w, http.StatusNotFound, "RECHARGE_ORDER_NOT_FOUND", "the recharge order was not found", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -916,6 +932,15 @@ func (s *Service) resolveReadContext(w http.ResponseWriter, r *http.Request) (Au
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
+	case errors.Is(err, ErrRateLimited):
+		retryAfter := 1
+		var limited *RateLimitError
+		if errors.As(err, &limited) {
+			retryAfter = max(1, int(limited.RetryAfter.Seconds()+0.999))
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		api.WriteJSON(w, http.StatusTooManyRequests, api.Error{Code: "MODEL_RATE_LIMITED", Message: "the model request exceeds a rate or concurrency limit", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"retry_after_seconds": retryAfter}})
+		return
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "TOKEN_ACCOUNT_NOT_FOUND", "the token account was not found"
 	case errors.Is(err, ErrForbidden):

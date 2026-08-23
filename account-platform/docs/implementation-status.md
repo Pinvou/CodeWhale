@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 284`、`部分实现 30`、`未实现 15`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 286`、`部分实现 30`、`未实现 13`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -70,8 +70,9 @@
 | `HA-RELEASE-GATE` | 双故障域、故障后容量、核心多副本/PDB/滚动策略、外部HA依赖及Pod/节点/区域/主节点故障切换 | Helm schema/合同和证据门禁正负向测试通过；真实集群拓扑、容量与无损切换报告待外部环境验收 |
 | `PERFORMANCE-RELEASE-GATE` | 生产等价资源/数据/样本、分段时延、200并发、十万Hold、百万订单/三百万流水及事件积压排空和高水位准入 | 策略与证据门禁正负向合同通过；真实生产等价负载报告待外部环境验收 |
 | `AUTH-RISK` | 密码/短信登录与刷新按来源、设备、标识、稳定用户、Session 和 Provider 原子准入；短信发送/核验按手机号、来源、设备、用途和 Provider 独立计数，统一无枚举响应、耗时桶和精确重试时间 | Identity/Account Go 单测、Keycloak 风险维度转发、OpenAPI/Helm/桌面合同和迁移不可修改门禁通过；真实 Redis、短信 Provider 与攻击流量演练待部署 |
+| `REQUEST-ADMISSION` | 支付创建/查询/退款按付款人、受益组织、来源、订单、动作和 Provider 原子准入；模型新逻辑请求按用户、组织成员、组织、模型、路由和全局速率/在途数在 Hold 前准入；合法回调先验签持久化再异步归并 | Billing/Token Go 单测、OpenAPI、3 个准入合同测试和迁移不可修改门禁通过；真实 PostgreSQL 高并发、Provider 回调突发与生产容量调参待部署 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/124 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/127 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -265,7 +266,7 @@
 | NFR-27 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 关键读写P95/P99及0.1%错误率已进入门禁；缺真实接口压测指标 |
 | NFR-28 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 外部端到端3s/8s和平台附加500ms/1.5s已分离校验；缺健康Provider实测 |
 | NFR-29 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 流式派发500ms/1.5s、首内容5s/15s及千样本门禁已建立；缺真实模型路由报告 |
-| NFR-30 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 200并发及0.5%错误率为强制证据，容量守卫代码由APT-041继续实现；缺生产等价并发报告 |
+| NFR-30 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; REQUEST-ADMISSION | NOT_DEPLOYED | 200并发及0.5%错误率为强制证据，入口已有全局、模型和路由速率/在途容量原子守卫并在Hold前拒绝；缺生产等价并发报告与容量调参证明 |
 | NFR-31 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 十万Hold、200稳态/500突发60秒、锁等待P99和守恒/幂等证据已进入门禁；缺真实数据库压测 |
 | NFR-32 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 百万订单、三百万流水、50下单/200归并及零重复资金效果已进入门禁；缺真实规模数据报告 |
 | NFR-33 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 每流百万保留、十万积压15分钟排空、50%新流量及高水位停止写入已进入门禁；缺真实NATS积压演练 |
@@ -276,8 +277,8 @@
 | NFR-38 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 支付证据/账本/审计/计费用量1095天、普通日志90天及30天清除SLA已机器化，并强制逐类扫描收据；缺真实归档、法律保全和删除运行证据 |
 | NFR-39 | 已实现 | DOC_CURRENT | GO-UNIT; AUTH-RISK | NOT_DEPLOYED | 公网密码/短信 Direct Grant 与 Refresh 精确路由到 Identity Redis 原子门禁，覆盖来源IP分钟/日、设备、标识失败、已学习稳定用户、Session和Provider；失败采用1～30秒渐进延迟、15分钟锁定和750ms统一耗时桶，成功不清空风险计数，未知/已知账号统一为 `invalid_grant` |
 | NFR-40 | 已实现 | DOC_CURRENT | GO-UNIT; AUTH-RISK | NOT_DEPLOYED | 短信发送保留60秒/5次小时限制并增加手机号日、IP小时/日、设备、用途和Provider 80%配额；核验使用独立单向摘要计数，图形挑战一次性消费，所有限流返回按最早窗口释放计算的统一 `retry_after` |
-| NFR-41 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少支付按付款人/受益组织/IP/订单/动作/Provider的多维限流 |
-| NFR-42 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少模型按用户/上下文/组织/模型/路由的请求速率和并发准入 |
+| NFR-41 | 已实现 | DOC_CURRENT | GO-UNIT; REQUEST-ADMISSION | NOT_DEPLOYED | 下单按付款人分钟/日、受益组织小时、来源IP分钟和Provider安全容量原子计数；订单查询限12次/分钟并以客户端5秒与Provider最小间隔中的较慢值合并真实查询；退款按付款人3次/小时，同流水/权益包未终结唯一性由目标退款状态机保证；合法签名回调不受用户限流影响，先持久化再异步幂等归并 |
+| NFR-42 | 已实现 | DOC_CURRENT | GO-UNIT; REQUEST-ADMISSION | NOT_DEPLOYED | 新逻辑调用在持久请求和Hold之前按用户60次/分钟与5在途、组织成员5在途、组织600次/分钟与100在途，以及模型、路由、全局速率/并发原子准入；幂等重放先命中原请求而不重复计数，超限返回429和精确Retry-After且不调用上游 |
 | NFR-43 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少跨个人、组织、节点、角色、缓存、批量、导出和事件路径的自动隔离矩阵 |
 | NFR-44 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少Provider能力/路由级失败窗口、熔断、半开和不确定高风险请求保护 |
 | NFR-45 | 部分实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 已建立不重置时钟的通用案件/时间线表、P2工作时SLA及认领/响应/止损/解决逾期升级 worker，并接入晚到支付；P0/P1及注册、退款/拒付、用量等其余人工队列统一接入与自动止损评估由 APT-051 完成 |
@@ -839,7 +840,7 @@
 | NFR-27 | 关键内部 API 延迟 | 部分实现：读写P95/P99和错误率门禁已建立，缺实测。 |
 | NFR-28 | 外部依赖接口延迟 | 部分实现：Provider端到端与平台附加耗时独立门禁已建立，缺实测。 |
 | NFR-29 | 流式首个内容事件 | 部分实现：派发与首内容目标及样本门禁已建立，缺真实路由实测。 |
-| NFR-30 | 模型并发容量 | 部分实现：200并发证据门禁已建立，公平准入实现由APT-041补齐，且缺环境报告。 |
+| NFR-30 | 模型并发容量 | 部分实现：200并发证据门禁与全局/模型/路由原子准入已经实现；缺生产等价容量、错误率和公平性环境报告。 |
 | NFR-31 | Hold 容量 | 部分实现：十万Hold、稳态/突发、锁等待与守恒门禁已建立，缺环境报告。 |
 | NFR-32 | 订单容量 | 部分实现：百万订单/三百万流水与吞吐门禁已建立，缺环境报告。 |
 | NFR-33 | 事件积压容量 | 部分实现：百万保留、十万排空和高水位证据门禁已建立，缺环境报告。 |
@@ -850,8 +851,8 @@
 | NFR-38 | 分类保留与清除 | 部分实现：统一机器策略和逐类删除收据门禁已完成，缺真实三年归档、90天日志与法律保全清除证据。 |
 | NFR-39 | 登录多维限流 | 已实现：公网密码/短信 Direct Grant 和 Refresh 统一经 Redis 原子准入，覆盖来源IP分钟/日、设备、标识、已学习稳定用户、Session和Provider；失败渐进延迟并临时锁定，成功不立即清零，已知/未知账号同形响应和统一耗时桶。 |
 | NFR-40 | 短信多维限流 | 已实现：发送与核验分别按手机号、来源IP、设备、用途和Provider计数，Provider固定在安全容量80%，服务端返回窗口实际剩余 `retry_after`，一次性图形挑战与服务端判断不可由前端绕过。 |
-| NFR-41 | 支付多维限流 | 未实现：需增加付款人、受益组织、IP、订单、查询/退款动作及合法回调独立容量控制。 |
-| NFR-42 | 模型调用多维限流 | 未实现：需增加用户/上下文/组织/模型/路由速率和并发配额、Hold前拒绝及重连不重复计数。 |
+| NFR-41 | 支付多维限流 | 已实现：付款人、受益组织、来源IP、订单查询、退款动作和Provider均采用原子准入；真实查询按较慢能力间隔合并，合法回调先持久化后异步处理且不受用户限流影响。 |
+| NFR-42 | 模型调用多维限流 | 已实现：用户、组织成员、组织、模型、路由和全局速率/在途容量在Hold前原子校验；幂等重放不重复计数，超限返回429与Retry-After且不触达上游。 |
 | NFR-43 | 租户隔离验证矩阵 | 未实现：当前没有覆盖直接对象引用、批量、搜索、导出、缓存和异步事件的跨租户发布门禁测试。 |
 | NFR-44 | Provider 熔断 | 未实现：各Adapter尚未统一60秒窗口、最少样本、50%失败/连续5次阈值、半开探测及高风险不重发规则。 |
 | NFR-45 | 人工队列 SLA | 部分实现：通用案件/不可变时间线、P2工作时认领/响应/止损/解决时钟和逐阶段超时升级已接入晚到支付，且认领/安排不重置创建时钟；P0/P1及其他人工队列接入和自动止损评估仍由 APT-051 完成。 |

@@ -21,7 +21,13 @@ var (
 	ErrAccountClosing                = errors.New("account closure is in progress")
 	ErrOrganizationLifecycleConflict = errors.New("organization lifecycle conflicts with current state")
 	ErrCancellationRequested         = errors.New("usage cancellation was requested before dispatch")
+	ErrRateLimited                   = errors.New("model request rate or concurrency limit reached")
 )
+
+type RateLimitError struct{ RetryAfter time.Duration }
+
+func (e *RateLimitError) Error() string { return ErrRateLimited.Error() }
+func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
 type AuthorizationContext struct {
 	UserID               uuid.UUID

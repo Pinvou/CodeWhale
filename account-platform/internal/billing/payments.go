@@ -389,47 +389,90 @@ func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, w
 	return order, err
 }
 
-func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, signature string, body []byte) error {
+type paymentNotification struct {
+	NotificationID     uuid.UUID `json:"notification_id"`
+	MerchantID         string    `json:"merchant_id"`
+	MerchantOrderNo    string    `json:"merchant_order_no"`
+	ChannelTransaction string    `json:"channel_transaction_id"`
+	Channel            string    `json:"channel"`
+	Status             string    `json:"status"`
+	AmountFen          int64     `json:"amount_fen"`
+	Currency           string    `json:"currency"`
+	PaidAt             time.Time `json:"paid_at"`
+	Timestamp          int64     `json:"timestamp"`
+}
+
+func (p *PaymentCoordinator) PersistNotification(ctx context.Context, channel, signature string, body []byte, source string) (uuid.UUID, bool, error) {
 	if !p.Capabilities().NotificationSupported {
-		return payment.ErrUnsupported
+		return uuid.Nil, false, payment.ErrUnsupported
 	}
 	channel = strings.ToUpper(channel)
 	secret := p.secrets[channel]
 	expected := paymentSignature(secret, body)
 	if len(signature) != len(expected) || subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) != 1 {
-		return ErrForbiddenPayment
+		return uuid.Nil, false, ErrForbiddenPayment
 	}
-	var notification struct {
-		NotificationID     uuid.UUID `json:"notification_id"`
-		MerchantID         string    `json:"merchant_id"`
-		MerchantOrderNo    string    `json:"merchant_order_no"`
-		ChannelTransaction string    `json:"channel_transaction_id"`
-		Channel            string    `json:"channel"`
-		Status             string    `json:"status"`
-		AmountFen          int64     `json:"amount_fen"`
-		Currency           string    `json:"currency"`
-		PaidAt             time.Time `json:"paid_at"`
-		Timestamp          int64     `json:"timestamp"`
-	}
+	var notification paymentNotification
 	if err := json.Unmarshal(body, &notification); err != nil || notification.NotificationID == uuid.Nil || time.Unix(notification.Timestamp, 0).Before(p.now().Add(-5*time.Minute)) || time.Unix(notification.Timestamp, 0).After(p.now().Add(5*time.Minute)) {
-		return ErrForbiddenPayment
+		return uuid.Nil, false, ErrForbiddenPayment
 	}
 	tx, err := p.repository.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return uuid.Nil, false, err
 	}
 	defer tx.Rollback(ctx)
 	digest := sha256.Sum256(body)
 	command, err := tx.Exec(ctx, `INSERT INTO payment_notifications(notification_id,channel,request_hash,payload,received_at,result) VALUES ($1,$2,$3,$4,$5,'RECEIVED') ON CONFLICT DO NOTHING`, notification.NotificationID, channel, hex.EncodeToString(digest[:]), body, p.now())
 	if err != nil {
-		return err
+		return uuid.Nil, false, err
 	}
 	if command.RowsAffected() == 0 {
 		var existingHash string
 		if err := tx.QueryRow(ctx, `SELECT request_hash FROM payment_notifications WHERE notification_id=$1`, notification.NotificationID).Scan(&existingHash); err != nil || existingHash != hex.EncodeToString(digest[:]) {
-			return ErrForbiddenPayment
+			return uuid.Nil, false, ErrForbiddenPayment
 		}
+		return notification.NotificationID, false, tx.Commit(ctx)
+	}
+	sourceHash := sha256.Sum256([]byte(strings.TrimSpace(source)))
+	var recent int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM payment_risk_attempts WHERE action='CALLBACK' AND provider_id=$1 AND source_hash=$2 AND occurred_at>$3-interval '1 second'`, p.Capabilities().ProviderID, sourceHash[:], p.now()).Scan(&recent); err != nil {
+		return uuid.Nil, false, err
+	}
+	result := "ACCEPTED"
+	if recent >= 200 {
+		result = "OVER_CAPACITY"
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO payment_risk_attempts(id,action,source_hash,provider_id,result,provider_dispatched,occurred_at) VALUES($1,'CALLBACK',$2,$3,$4,false,$5)`, uuid.Must(uuid.NewV7()), sourceHash[:], p.Capabilities().ProviderID, result, p.now()); err != nil {
+		return uuid.Nil, false, err
+	}
+	return notification.NotificationID, true, tx.Commit(ctx)
+}
+
+func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, signature string, body []byte) error {
+	id, _, err := p.PersistNotification(ctx, channel, signature, body, "source:direct")
+	if err != nil {
+		return err
+	}
+	return p.ProcessPersistedNotification(ctx, id)
+}
+
+func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, notificationID uuid.UUID) error {
+	tx, err := p.repository.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var channel, result string
+	var body []byte
+	if err := tx.QueryRow(ctx, `SELECT channel,payload,result FROM payment_notifications WHERE notification_id=$1 FOR UPDATE`, notificationID).Scan(&channel, &body, &result); err != nil {
+		return err
+	}
+	if result != "RECEIVED" {
 		return tx.Commit(ctx)
+	}
+	var notification paymentNotification
+	if json.Unmarshal(body, &notification) != nil {
+		return ErrForbiddenPayment
 	}
 	order, err := getPaymentOrderForUpdate(ctx, tx, notification.MerchantOrderNo)
 	if err != nil {
@@ -443,7 +486,7 @@ func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, s
 	if mergeErr != nil && !errors.Is(mergeErr, ErrConflict) {
 		return mergeErr
 	}
-	result := "PROCESSED"
+	result = "PROCESSED"
 	if merged.Status == "MANUAL_REVIEW" || errors.Is(mergeErr, ErrConflict) {
 		result = "MANUAL_REVIEW"
 	}

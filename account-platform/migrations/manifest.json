@@ -584,6 +584,16 @@
         "file": "000030_account_closed_grants.up.sql",
         "version": 30,
         "sha256": "d755e44ed179ad5c5f7fe6ad643d2d7a117d5850cac9bbd6334373bbf6b45fdb"
+      },
+      {
+        "file": "000031_payment_risk_admission.down.sql",
+        "version": 31,
+        "sha256": "3ac20cbd127e46b4a04e49f5adf7762bed163b2929eb3a5fb43927b75b4ec11a"
+      },
+      {
+        "file": "000031_payment_risk_admission.up.sql",
+        "version": 31,
+        "sha256": "ccac38b5295e7af136bb8f1be014b6389ff5a6277c4d0e612d16985535fed941"
       }
     ],
     "payment-simulator": [
@@ -788,6 +798,16 @@
         "file": "000016_client_readiness.up.sql",
         "version": 16,
         "sha256": "c87acabfbc2f0048d50c8d58af1b5a9ecf2ce0cbe9789df90c92192e60a692c5"
+      },
+      {
+        "file": "000017_usage_admission_indexes.down.sql",
+        "version": 17,
+        "sha256": "b61e971e2c5fcff420de457c3da870331ec721abd321f11ae6971de6790108ce"
+      },
+      {
+        "file": "000017_usage_admission_indexes.up.sql",
+        "version": 17,
+        "sha256": "fcd9960bf027d6daa6be4c02b109a520398a9515b142f73abd6b9ef5007d09dd"
       }
     ]
   }

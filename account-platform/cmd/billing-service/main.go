@@ -96,6 +96,9 @@ func main() {
 		}
 		go observability.RunBackground(workerContext, "expired-payment-reconciliation", billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run)
 	}
+	if payments.Capabilities().NotificationSupported {
+		go observability.RunBackground(workerContext, "payment-notification-inbox", billing.NewPaymentNotificationWorker(payments, 50*time.Millisecond).Run)
+	}
 	go observability.RunBackground(workerContext, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(workerContext, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute).Run)
 	if payments.Capabilities().BillSupported {

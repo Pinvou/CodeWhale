@@ -551,6 +551,8 @@ paths:
           $ref: "#/components/responses/Error"
         "410":
           $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /recharge/products:
     get:
       operationId: listRechargeProducts
@@ -621,6 +623,8 @@ paths:
           $ref: "#/components/responses/Error"
         "422":
           $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /recharge/orders/recent:
     get:
       operationId: getRecentRechargeOrder
@@ -664,6 +668,8 @@ paths:
                 const: no-store
         "404":
           $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /recharge/orders/{order_id}/close:
     post:
       operationId: closeRechargeOrder
@@ -773,6 +779,7 @@ paths:
         "201": { description: Order records the paying user and beneficiary organization }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
   /organizations/{organization_id}/quota-grants:
     get:
       operationId: listOrganizationQuotaGrants
@@ -891,6 +898,16 @@ components:
   responses:
     Error:
       description: Stable error response
+      content:
+        application/json:
+          schema:
+            $ref: "common.yaml#/components/schemas/Error"
+    RateLimited:
+      description: The request exceeds an atomic multidimensional rate or concurrency limit
+      headers:
+        Retry-After:
+          required: true
+          schema: { type: integer, minimum: 1 }
       content:
         application/json:
           schema:

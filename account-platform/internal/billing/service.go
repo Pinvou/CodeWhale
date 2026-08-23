@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -316,6 +317,10 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrCommerceCustomerNotReady)
 		return
 	}
+	if err := s.payments.AdmitCreate(r.Context(), body.RequesterID, body.BeneficiaryOrganizationID, paymentRequestSource(r)); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	var order PaymentOrder
 	var created bool
 	var err error
@@ -348,7 +353,11 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 	// Mall lookups for another account.
 	order, err := s.payments.GetOrder(r.Context(), orderID, requesterID)
 	if err == nil {
-		order, err = s.payments.SyncOrder(r.Context(), order.ID)
+		var dispatch bool
+		dispatch, err = s.payments.AdmitOrderQuery(r.Context(), order, paymentRequestSource(r))
+		if err == nil && dispatch {
+			order, err = s.payments.SyncOrder(r.Context(), order.ID)
+		}
 	}
 	if err != nil {
 		s.writeError(w, r, err)
@@ -402,6 +411,10 @@ func (s *Service) createRefund(w http.ResponseWriter, r *http.Request) {
 	}
 	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.RequesterID == uuid.Nil || body.PaymentTransactionID == uuid.Nil || body.EntitlementPackageID == uuid.Nil || strings.TrimSpace(body.Reason) == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid refund request", httpserver.RequestID(r.Context()))
+		return
+	}
+	if err := s.payments.AdmitRefund(r.Context(), body.RequesterID, body.PaymentTransactionID, body.EntitlementPackageID, paymentRequestSource(r)); err != nil {
+		s.writeError(w, r, err)
 		return
 	}
 	refund, created, err := s.payments.CreateRefund(r.Context(), orderID, body.RequesterID, body.PaymentTransactionID, body.EntitlementPackageID, r.Header.Get("Idempotency-Key"), body.Reason)
@@ -458,7 +471,8 @@ func (s *Service) paymentNotification(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid notification", httpserver.RequestID(r.Context()))
 		return
 	}
-	err = s.payments.ProcessNotification(r.Context(), r.Header.Get("X-Pinvou-Payment-Channel"), r.Header.Get("X-Pinvou-Payment-Signature"), body)
+	var notificationID uuid.UUID
+	notificationID, _, err = s.payments.PersistNotification(r.Context(), r.Header.Get("X-Pinvou-Payment-Channel"), r.Header.Get("X-Pinvou-Payment-Signature"), body, paymentRequestSource(r))
 	if errors.Is(err, ErrForbiddenPayment) {
 		api.WriteError(w, http.StatusUnauthorized, "PAYMENT_NOTIFICATION_REJECTED", "payment notification rejected", httpserver.RequestID(r.Context()))
 		return
@@ -467,7 +481,7 @@ func (s *Service) paymentNotification(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
+	api.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "notification_id": notificationID.String()})
 }
 
 func (s *Service) ensureWallet(w http.ResponseWriter, r *http.Request) {
@@ -696,6 +710,15 @@ func (s *Service) release(w http.ResponseWriter, r *http.Request) {
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the billing request could not be completed"
 	switch {
+	case errors.Is(err, ErrPaymentRateLimited):
+		retryAfter := 1
+		var limited *PaymentRateLimitError
+		if errors.As(err, &limited) {
+			retryAfter = max(1, int(limited.RetryAfter.Seconds()+0.999))
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		api.WriteJSON(w, http.StatusTooManyRequests, api.Error{Code: "PAYMENT_RATE_LIMITED", Message: "the payment action exceeds a rate limit", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"retry_after_seconds": retryAfter}})
+		return
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "the billing resource was not found"
 	case errors.Is(err, ErrConflict):

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -62,8 +63,9 @@ type BillingHold struct {
 var ErrCommerceCustomerNotReady = errors.New("commerce customer mapping is not ready")
 
 type BillingHTTPError struct {
-	Status int
-	Code   string
+	Status     int
+	Code       string
+	RetryAfter string
 }
 
 func (e *BillingHTTPError) Error() string {
@@ -212,6 +214,9 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	if source, ok := ctx.Value(paymentSourceContextKey{}).(string); ok && source != "" {
+		request.Header.Set("X-Pinvou-Client-Source", source)
+	}
 	if input != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -234,9 +239,28 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 		if json.Unmarshal(payload, &problem) == nil && problem.Code == "COMMERCE_CUSTOMER_NOT_READY" {
 			return nil, ErrCommerceCustomerNotReady
 		}
-		return nil, &BillingHTTPError{Status: response.StatusCode, Code: problem.Code}
+		return nil, &BillingHTTPError{Status: response.StatusCode, Code: problem.Code, RetryAfter: response.Header.Get("Retry-After")}
 	}
 	return json.RawMessage(payload), nil
+}
+
+type paymentSourceContextKey struct{}
+
+func paymentSourceContext(r *http.Request) context.Context {
+	source := "source:unknown"
+	forwarded := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	for index := len(forwarded) - 1; index >= 0; index-- {
+		if candidate := strings.TrimSpace(forwarded[index]); net.ParseIP(candidate) != nil {
+			source = candidate
+			break
+		}
+	}
+	if source == "source:unknown" {
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			source = host
+		}
+	}
+	return context.WithValue(r.Context(), paymentSourceContextKey{}, source)
 }
 
 func Cost(price PriceVersion, usage Usage) (int64, error) {
