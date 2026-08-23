@@ -122,7 +122,7 @@
     "test:markdown": "node tests/render_markdown.test.js && node tests/markdown_syntax_highlight.test.mjs",
     "test:user-journey": "../scripts/run-user-journey-tests.sh",
     "sync:version": "node ../scripts/sync-version.mjs",
-    "release:account-platform-gate": "node ../scripts/account-platform-release-gate.mjs",
+    "release:account-platform-gate": "node ../scripts/check-account-platform-i18n.mjs && node ../scripts/account-platform-release-gate.mjs",
     "check:account-platform-client-scope": "node ../scripts/check-client-migration-scope.mjs"
   },
   "devDependencies": {

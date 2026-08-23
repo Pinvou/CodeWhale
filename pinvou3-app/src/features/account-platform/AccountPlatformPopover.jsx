@@ -31,7 +31,7 @@ function localizedError(copy, reason) {
   if (code === 'PROFILE_CHANGE_CONFLICT') return copy.profileChangeConflict;
   if (code === 'MOBILE_VERIFICATION_REQUIRED') return copy.mobileVerificationRequired;
   if (code === 'PROFILE_CHANGE_NOT_FOUND') return copy.profileChangeNotFound;
-  return copy.errors?.[code] || (reason?.message && typeof reason.message === 'string' ? reason.message : copy.requestFailed);
+  return copy.errors?.[code] || copy.requestFailed;
 }
 
 function retryAfterFromError(reason) {

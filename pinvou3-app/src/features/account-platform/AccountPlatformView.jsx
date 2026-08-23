@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
+import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './account-platform.css';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'MANUAL_REVIEW']);
@@ -39,7 +40,7 @@ function NavIcon({ name }) {
 function localizedError(copy, reason) {
   const raw = String(reason?.code || reason?.message || reason || '');
   const code = raw.split(':', 1)[0].trim();
-  return copy.errors?.[code] || (reason?.message && typeof reason.message === 'string' ? reason.message : copy.requestFailed);
+  return copy.errors?.[code] || copy.requestFailed;
 }
 
 export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false, onClose }) {
@@ -329,7 +330,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       <div className="ap-user-summary"><span className="ap-user-avatar">{userLabel.trim().slice(0, 1).toUpperCase()}</span><div><strong>{userLabel}</strong><span>{identityLabel}</span></div></div>
       <nav>{navigationSections.map(key => <button key={key} className={section === key ? 'active' : ''} onClick={() => setSection(key)}><NavIcon name={key} /><span>{copy.sections[key]}</span></button>)}</nav>
       <div className="ap-sidebar-foot">
-        <select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}><option value="zh">简体中文</option><option value="en">English</option><option value="ja">日本語</option></select>
+        <select aria-label={copy.language} value={language} onChange={event => onLanguageChange(event.target.value)}>{supportedLocales.map(locale => <option key={locale} value={locale}>{localeNames[locale]}</option>)}</select>
         <button onClick={logout}>{copy.logout}</button>
         {onClose && <button onClick={onClose}>{copy.close}</button>}
       </div>
