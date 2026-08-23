@@ -2,6 +2,8 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,13 +36,15 @@ type ReconciliationRun struct {
 }
 
 type ExpiredPaymentCandidate struct {
-	OrderID  uuid.UUID
-	Attempts int
+	OrderID              uuid.UUID
+	Attempts             int
+	LateReviewBoundaryAt time.Time
 }
 
 type ExpiredPaymentStore interface {
 	ClaimExpiredPaymentOrders(context.Context, int, time.Duration) ([]ExpiredPaymentCandidate, error)
 	RescheduleExpiredPaymentOrder(context.Context, uuid.UUID, string, time.Time) error
+	EscalateLatePaymentReview(context.Context, uuid.UUID, string) (LatePaymentReviewCase, error)
 }
 
 type PaymentOrderSynchronizer interface {
@@ -95,6 +99,12 @@ func (r *ExpiredPaymentReconciler) runOnce(ctx context.Context) {
 	for _, item := range items {
 		order, syncErr := r.synchronizer.SyncOrder(ctx, item.OrderID)
 		if syncErr == nil && (order.Status == "CREATED" || order.Status == "PENDING") {
+			if !item.LateReviewBoundaryAt.After(r.now()) {
+				if _, err := r.store.EscalateLatePaymentReview(ctx, item.OrderID, "PENDING"); err != nil {
+					r.logger.Error("escalate late payment review failed", "order_id", item.OrderID, "error", err)
+				}
+				continue
+			}
 			// Providers without notifications converge through server-side polling,
 			// including after the client closes the QR page. A non-terminal state is
 			// expected here and is rescheduled rather than treated as an error.
@@ -111,6 +121,12 @@ func (r *ExpiredPaymentReconciler) runOnce(ctx context.Context) {
 			return
 		}
 		retryReason := safePaymentReconciliationError(syncErr)
+		if !item.LateReviewBoundaryAt.After(r.now()) {
+			if _, err := r.store.EscalateLatePaymentReview(ctx, item.OrderID, retryReason); err != nil {
+				r.logger.Error("escalate late payment review after boundary query failed", "order_id", item.OrderID, "error", err)
+			}
+			continue
+		}
 		delay := paymentReconciliationBackoff(item.Attempts)
 		if delay < r.interval {
 			delay = r.interval
@@ -173,7 +189,7 @@ SET reconciliation_attempts = payment.reconciliation_attempts + 1,
     updated_at = $1
 FROM candidates
 WHERE payment.id = candidates.id
-RETURNING payment.id, payment.reconciliation_attempts`, now, limit, now.Add(lease))
+RETURNING payment.id, payment.reconciliation_attempts, payment.late_review_boundary_at`, now, limit, now.Add(lease))
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +197,7 @@ RETURNING payment.id, payment.reconciliation_attempts`, now, limit, now.Add(leas
 	items := make([]ExpiredPaymentCandidate, 0)
 	for rows.Next() {
 		var item ExpiredPaymentCandidate
-		if err := rows.Scan(&item.OrderID, &item.Attempts); err != nil {
+		if err := rows.Scan(&item.OrderID, &item.Attempts, &item.LateReviewBoundaryAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -205,6 +221,14 @@ func truncatePaymentReconciliationError(value string) string {
 }
 
 func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
+	return p.syncOrder(ctx, orderID, false)
+}
+
+func (p *PaymentCoordinator) SyncReviewedOrder(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
+	return p.syncOrder(ctx, orderID, true)
+}
+
+func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, reviewed bool) (PaymentOrder, error) {
 	if !p.Capabilities().OrderQuerySupported {
 		return PaymentOrder{}, payment.ErrUnsupported
 	}
@@ -219,12 +243,15 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 	if err != nil {
 		return PaymentOrder{}, errors.Join(ErrPaymentProvider, err)
 	}
+	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET last_successful_query_at=$2,last_authoritative_unpaid_at=CASE WHEN $3 AND $4 IN ('CLOSED','FAILED') THEN $2 ELSE last_authoritative_unpaid_at END,updated_at=$2 WHERE id=$1`, order.ID, p.now(), p.Capabilities().AuthoritativeUnpaidTerminal, providerOrder.Status); err != nil {
+		return PaymentOrder{}, err
+	}
 	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET payment_url=NULLIF($2,''),qr_data=NULLIF($3,''),provider_status=NULLIF($4,''),provider_trace_id=NULLIF($5,''),updated_at=$6 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, providerOrder.ProviderStatus, providerOrder.ProviderTraceID, p.now()); err != nil {
 		return PaymentOrder{}, err
 	}
 	order.PaymentURL, order.QRData = providerOrder.PaymentURL, providerOrder.QRData
 	if providerOrder.Status == "SUCCESS" {
-		return p.applyQueriedPayment(ctx, order.ID, providerOrder)
+		return p.applyQueriedPayment(ctx, order.ID, providerOrder, reviewed)
 	}
 	if err := p.recordProviderObservation(ctx, order.ID, "QUERY", providerOrder); err != nil {
 		return PaymentOrder{}, err
@@ -252,7 +279,7 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 		}
 		switch closed.Status {
 		case "SUCCESS":
-			return p.applyQueriedPayment(ctx, order.ID, closed)
+			return p.applyQueriedPayment(ctx, order.ID, closed, reviewed)
 		case "PARTIALLY_REFUNDED", "REFUNDED":
 			if err := p.recordProviderObservation(ctx, order.ID, "QUERY", closed); err != nil {
 				return PaymentOrder{}, err
@@ -296,7 +323,7 @@ WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, status, p.now())
 	return getPaymentOrderByID(ctx, p.repository.pool, order.ID, false)
 }
 
-func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uuid.UUID, provider ProviderOrder) (PaymentOrder, error) {
+func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uuid.UUID, provider ProviderOrder, reviewed bool) (PaymentOrder, error) {
 	if provider.ChannelTransactionID == nil || provider.PaidAt == nil {
 		return PaymentOrder{}, ErrConflict
 	}
@@ -310,7 +337,7 @@ func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uu
 		return PaymentOrder{}, err
 	}
 	now := p.now()
-	order, _, mergeErr := p.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "QUERY", providerEvidenceKey("QUERY", provider), nil, provider, false, now)
+	order, _, mergeErr := p.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "QUERY", providerEvidenceKey("QUERY", provider), nil, provider, reviewed, now)
 	if mergeErr != nil && !errors.Is(mergeErr, ErrConflict) {
 		return PaymentOrder{}, mergeErr
 	}
@@ -437,6 +464,41 @@ func (p *PaymentCoordinator) RunReconciliation(ctx context.Context, channel stri
 	if err != nil {
 		return ReconciliationRun{}, errors.Join(ErrPaymentProvider, err)
 	}
+	return p.persistReconciliation(ctx, channel, date, providerRows, nil)
+}
+
+func (p *PaymentCoordinator) ImportProviderBill(ctx context.Context, actorID uuid.UUID, channel string, businessDate time.Time, providerRows []ProviderBillEntry) (ReconciliationRun, error) {
+	channel = strings.ToUpper(strings.TrimSpace(channel))
+	if !p.Capabilities().BillFileImportSupported || actorID == uuid.Nil || !validPaymentChannel(channel) || !p.Capabilities().SupportsChannel(channel) || len(providerRows) > 100000 {
+		return ReconciliationRun{}, payment.ErrUnsupported
+	}
+	date := businessDate.UTC()
+	for _, row := range providerRows {
+		if strings.TrimSpace(row.MerchantOrderNo) == "" || strings.TrimSpace(row.ChannelTransactionID) == "" || row.AmountFen <= 0 || row.Currency == "" || !strings.EqualFold(row.Channel, channel) || row.PaidAt.Before(date) || !row.PaidAt.Before(date.AddDate(0, 0, 1)) {
+			return ReconciliationRun{}, ErrConflict
+		}
+	}
+	return p.persistReconciliation(ctx, channel, date, providerRows, &actorID)
+}
+
+func (p *PaymentCoordinator) persistReconciliation(ctx context.Context, channel string, date time.Time, providerRows []ProviderBillEntry, importActorID *uuid.UUID) (ReconciliationRun, error) {
+	var importDigest string
+	if importActorID != nil {
+		encoded, marshalErr := json.Marshal(providerRows)
+		if marshalErr != nil {
+			return ReconciliationRun{}, marshalErr
+		}
+		digest := sha256.Sum256(encoded)
+		importDigest = hex.EncodeToString(digest[:])
+		var existing ReconciliationRun
+		err := p.repository.pool.QueryRow(ctx, `SELECT run.id,run.channel,run.business_date::text,run.status,run.provider_row_count,run.case_count,run.started_at,run.completed_at FROM provider_bill_imports import JOIN reconciliation_runs run ON run.id=import.reconciliation_run_id WHERE import.provider_id=$1 AND import.provider_version=$2 AND import.channel=$3 AND import.business_date=$4 AND import.payload_digest=$5`, p.Capabilities().ProviderID, p.Capabilities().Version, channel, date, importDigest).Scan(&existing.ID, &existing.Channel, &existing.BusinessDate, &existing.Status, &existing.ProviderRowCount, &existing.CaseCount, &existing.StartedAt, &existing.CompletedAt)
+		if err == nil {
+			return existing, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return ReconciliationRun{}, err
+		}
+	}
 	start, end := date, date.AddDate(0, 0, 1)
 	internalRows, err := p.listPaidOrders(ctx, channel, start, end)
 	if err != nil {
@@ -453,6 +515,19 @@ func (p *PaymentCoordinator) RunReconciliation(ctx context.Context, channel stri
 	err = tx.QueryRow(ctx, `INSERT INTO reconciliation_runs(id,channel,business_date,status,provider_row_count,case_count,started_at,completed_at) VALUES($1,$2,$3,'COMPLETED',$4,$5,$6,$6) ON CONFLICT(channel,business_date) DO UPDATE SET status='COMPLETED',provider_row_count=EXCLUDED.provider_row_count,case_count=EXCLUDED.case_count,started_at=EXCLUDED.started_at,completed_at=EXCLUDED.completed_at,error_message=NULL RETURNING id`, run.ID, channel, date, len(providerRows), len(differences), now).Scan(&run.ID)
 	if err != nil {
 		return ReconciliationRun{}, err
+	}
+	if importActorID != nil {
+		importID := uuid.Must(uuid.NewV7())
+		_, err = tx.Exec(ctx, `INSERT INTO provider_bill_imports(id,provider_id,provider_version,channel,business_date,payload_digest,row_count,actor_id,reconciliation_run_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, importID, p.Capabilities().ProviderID, p.Capabilities().Version, channel, date, importDigest, len(providerRows), *importActorID, run.ID, now)
+		if err != nil {
+			return ReconciliationRun{}, err
+		}
+		for index, row := range providerRows {
+			_, err = tx.Exec(ctx, `INSERT INTO provider_bill_import_rows(import_id,row_number,merchant_order_no,provider_transaction_id,amount_fen,currency,status,paid_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(import_id,row_number) DO NOTHING`, importID, index+1, row.MerchantOrderNo, row.ChannelTransactionID, row.AmountFen, row.Currency, row.Status, row.PaidAt)
+			if err != nil {
+				return ReconciliationRun{}, err
+			}
+		}
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM reconciliation_cases WHERE reconciliation_run_id=$1`, run.ID); err != nil {
 		return ReconciliationRun{}, err

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pinvou.com/schemas/billing.provider-blind.detected.v1.json",
+  "title": "billing.provider-blind.detected.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "aggregate_id", "aggregate_version", "occurred_at", "trace_id", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "const": "billing.provider-blind.detected.v1" },
+    "aggregate_id": { "type": "string", "format": "uuid" },
+    "aggregate_version": { "type": "integer", "minimum": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "provider_id", "provider_version", "reason", "new_orders_enabled"],
+      "properties": {
+        "case_id": { "type": "string", "format": "uuid" },
+        "payment_order_id": { "type": "string", "format": "uuid" },
+        "provider_id": { "type": "string", "minLength": 1 },
+        "provider_version": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 10, "maxLength": 1000 },
+        "new_orders_enabled": { "const": false }
+      }
+    }
+  }
+}

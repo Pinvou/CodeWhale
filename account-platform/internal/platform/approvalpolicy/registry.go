@@ -67,8 +67,12 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_REGISTRATION_COMPENSATE": "platform.registrations.repair", "ACCOUNT_PROFILE_CHANGE_RETRY": "platform.profile-changes.repair",
 		"BILLING_PRICE_VERSION_CREATE": "platform.pricing.manage", "BILLING_PAYMENT_ORDER_SYNC": "platform.billing.orders.sync",
 		"BILLING_PAYMENT_ORDER_EVIDENCE_REPAIR": "platform.billing.repairs.request", "BILLING_NORMAL_REFUND": "platform.billing.repairs.request",
-		"BILLING_ADJUSTMENT_REQUEST": "platform.billing.repairs.request",
-		"BILLING_ADJUSTMENT_REJECT":  "platform.billing.adjustments.approve", "BILLING_USAGE_HOLD_SAFE_RELEASE": "platform.billing.holds.release",
+		"BILLING_LATE_PAYMENT_CLAIM": "platform.billing.orders.sync", "BILLING_LATE_PAYMENT_QUERY": "platform.billing.orders.sync",
+		"BILLING_LATE_PAYMENT_SCHEDULE": "platform.billing.orders.sync", "BILLING_LATE_PAYMENT_ARCHIVE": "platform.billing.orders.sync",
+		"BILLING_PROVIDER_BLIND_ESCALATE": "platform.billing.orders.sync",
+		"BILLING_PROVIDER_BILL_IMPORT": "platform.usage.reconcile.retry",
+		"BILLING_ADJUSTMENT_REQUEST":      "platform.billing.repairs.request",
+		"BILLING_ADJUSTMENT_REJECT":       "platform.billing.adjustments.approve", "BILLING_USAGE_HOLD_SAFE_RELEASE": "platform.billing.holds.release",
 		"BILLING_ORGANIZATION_LIFECYCLE_APPLY":        "internal.billing.organization.lifecycle",
 		"BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY":   "internal.billing.organization-unit.lifecycle",
 		"BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY": "internal.billing.organization-member.lifecycle",
@@ -86,7 +90,8 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_APPROVAL_EXPIRE": "internal.account.approval.expire", "ACCOUNT_PROFILE_CHANGE_RECOVERY": "internal.account.profile-change.recover",
 		"ACCOUNT_REGISTRATION_RECOVERY": "internal.account.registration.recover", "ACCOUNT_COMMERCE_CUSTOMER_SYNC": "internal.account.commerce-customer.sync",
 		"BILLING_PAYMENT_EXPIRY_RECONCILE": "internal.billing.payment.reconcile", "BILLING_ENTITLEMENT_PACKAGE_EXPIRE": "internal.billing.entitlement.expire",
-		"TOKEN_USAGE_RECONCILE": "internal.token.usage.reconcile", "EVENT_OUTBOX_RELAY": "internal.events.relay",
+		"BILLING_MANUAL_REVIEW_SLA_ESCALATE": "internal.billing.manual-review.escalate",
+		"TOKEN_USAGE_RECONCILE":              "internal.token.usage.reconcile", "EVENT_OUTBOX_RELAY": "internal.events.relay",
 	}
 	for commandType, permission := range auditCommands {
 		result[commandType] = Policy{

@@ -26,7 +26,7 @@ test('provider capability contract is versioned and externally discoverable', as
   const schema = billing.components.schemas.PaymentCapabilities;
   assert.ok(billing.paths['/payment-capabilities'].get);
   assert.ok(gateway.paths['/payment-capabilities'].get);
-  for (const field of ['provider_id', 'version', 'channels', 'order_query_supported', 'order_history_retention_seconds', 'minimum_query_interval_seconds', 'maximum_payable_window_seconds', 'maximum_late_confirmation_seconds', 'authoritative_unpaid_terminal', 'refund_supported', 'refund_idempotency_supported', 'close_supported', 'notification_supported', 'bill_supported']) {
+  for (const field of ['provider_id', 'version', 'channels', 'order_query_supported', 'order_history_retention_seconds', 'minimum_query_interval_seconds', 'maximum_payable_window_seconds', 'maximum_late_confirmation_seconds', 'authoritative_unpaid_terminal', 'refund_supported', 'refund_idempotency_supported', 'close_supported', 'notification_supported', 'bill_supported', 'bill_file_import_supported', 'reconciliation_mode', 'formal_collection_admitted']) {
     assert.ok(schema.required.includes(field), field);
   }
   assert.equal(billing.components.schemas.PaymentChannel.enum, undefined);

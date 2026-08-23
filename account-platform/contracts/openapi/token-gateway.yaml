@@ -544,6 +544,30 @@ paths:
           description: Closed recharge order
         "404":
           $ref: "#/components/responses/Error"
+  /recharge/orders/{order_id}/payment-claims:
+    post:
+      operationId: addLatePaymentClaim
+      summary: Add user-supplied evidence to an existing late-payment review without changing payment facts
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [statement]
+              properties:
+                statement: { type: string, minLength: 10, maxLength: 1000 }
+      responses:
+        "201": { description: Immutable payment claim accepted and review awakened }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /me/balance:
     get:
       operationId: getMyBalance

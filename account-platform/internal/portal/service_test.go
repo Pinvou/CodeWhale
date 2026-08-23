@@ -261,11 +261,15 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 	}
 	organizationID := uuid.Must(uuid.NewV7()).String()
 	grantID := uuid.Must(uuid.NewV7()).String()
+	orderID := uuid.Must(uuid.NewV7()).String()
 	if !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/recharge/orders") || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/quota-grants") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants:batch") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants/"+grantID+"/revoke") {
 		t.Fatal("organization billing paths must be allowlisted")
 	}
 	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-requests") || !accountPathAllowed(http.MethodGet, "/v1/me") {
 		t.Fatal("Portal BFF must expose the documented management APIs")
+	}
+	if !tokenPathAllowed(http.MethodPost, "/v1/recharge/orders/"+orderID+"/payment-claims") || tokenPathAllowed(http.MethodPost, "/v1/recharge/orders/invalid/payment-claims") {
+		t.Fatal("Portal BFF must expose payment claims only for a valid order path")
 	}
 	for _, resource := range []string{"/v1/token-accounts", "/v1/token-accounts/id/credentials", "/v1/token-accounts/eligible", "/v1/usage-requests/id"} {
 		if tokenPathAllowed(http.MethodGet, resource) {
@@ -304,7 +308,7 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/registration-operations") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/retry") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/registration-operations/"+userID+"/actions/compensate") {
 		t.Fatal("admin portal must expose proof-gated registration repair operations")
 	}
-	if !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing-versions") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/refunds") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets/"+userID+"/ledger") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/payment-orders/"+userID+"/sync") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments/"+userID+"/approve") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/usage-holds/"+userID) || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/usage-holds/"+userID+"/release") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-runs") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/reconciliation-runs/"+userID+"/cases") {
+	if !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing-versions") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/refunds") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets/"+userID+"/ledger") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/payment-orders/"+userID+"/sync") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/adjustments/"+userID+"/approve") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/usage-holds/"+userID) || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/usage-holds/"+userID+"/release") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-runs") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/reconciliation-runs/"+userID+"/cases") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/late-payment-reviews") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/late-payment-reviews/"+userID) || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/late-payment-reviews/"+userID+"/query") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/reconciliation-imports") {
 		t.Fatal("admin portal must expose documented billing operations")
 	}
 	if !billingAdminPathAllowed(http.MethodGet, "/admin/v1/metering-units") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/drafts") || !billingAdminPathAllowed(http.MethodPut, "/admin/v1/pricing/"+userID+"/draft") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/pricing/"+userID+"/preview") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/"+userID+"/publish") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/"+userID+"/transition") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/metering-units/"+userID+"/deactivate") {

@@ -102,7 +102,21 @@ export class AdminPlatformClient {
   releaseHold(holdID, reason) { return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }, `hold-release-${crypto.randomUUID()}`); }
   reconciliationRuns(signal) { return this.request('billing', '/admin/v1/reconciliation-runs?limit=100', signal); }
   runReconciliation(channel, businessDate) { return this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', { channel, business_date:businessDate }); }
+  importProviderBill(channel, businessDate, items) { return this.mutate('billing', '/admin/v1/reconciliation-imports', 'POST', { channel, business_date:businessDate, items }); }
   reconciliationCases(runID, signal) { return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal); }
+  latePaymentReviews(filters = {}, signal) {
+    const query = new URLSearchParams({ limit:'100' });
+    for (const key of ['status','provider_id','owner_id']) if (filters[key]) query.set(key, filters[key]);
+    for (const key of ['entered_from','entered_to','next_review_before']) if (filters[key]) query.set(key, new Date(filters[key]).toISOString());
+    if (filters.overdue) query.set('overdue', 'true');
+    return this.request('billing', `/admin/v1/late-payment-reviews?${query}`, signal);
+  }
+  latePaymentReview(caseID, signal) { return this.request('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}`, signal); }
+  claimLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/claim`, 'POST', {}); }
+  queryLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/query`, 'POST', {}); }
+  scheduleLatePaymentReview(caseID, nextReviewAt, reason) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/schedule`, 'POST', { next_review_at:new Date(nextReviewAt).toISOString(), reason }); }
+  archiveLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive`, 'POST', {}); }
+  escalateProviderBlind(caseID, reason) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason }); }
   tokenOverview(signal) { return this.request('token', '/admin/v1/overview', signal); }
   tokenAccounts(signal) { return this.request('token', '/admin/v1/token-accounts?limit=100', signal); }
   tokenAccount(tokenAccountID, signal) { return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal); }

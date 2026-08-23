@@ -223,6 +223,14 @@ type adminRepository interface {
 	AdminReleaseUsageHold(context.Context, uuid.UUID, string, string, string) (AdminHold, error)
 	AdminReconciliationRuns(context.Context, int) ([]ReconciliationRun, error)
 	AdminReconciliationCases(context.Context, uuid.UUID, int) ([]AdminReconciliationCase, error)
+	AdminLatePaymentReviews(context.Context, LatePaymentReviewFilter, int) ([]LatePaymentReviewCase, error)
+	LatePaymentReview(context.Context, uuid.UUID) (LatePaymentReviewCase, error)
+	LatePaymentReviewDetail(context.Context, uuid.UUID) (LatePaymentReviewDetail, error)
+	ClaimLatePaymentReview(context.Context, uuid.UUID, uuid.UUID) (LatePaymentReviewCase, error)
+	ScheduleLatePaymentReview(context.Context, uuid.UUID, uuid.UUID, time.Time, string) (LatePaymentReviewCase, error)
+	RecordLatePaymentReviewQuery(context.Context, uuid.UUID, uuid.UUID, PaymentOrder, error) (LatePaymentReviewCase, error)
+	ArchiveLatePaymentReview(context.Context, uuid.UUID, uuid.UUID) (LatePaymentReviewCase, error)
+	EscalateProviderBlind(context.Context, uuid.UUID, uuid.UUID, string) (LatePaymentReviewCase, error)
 }
 
 type adminAdjustmentRequester interface {
@@ -591,6 +599,186 @@ func (s *Service) adminRefundPaymentOrder(w http.ResponseWriter, r *http.Request
 		return
 	}
 	api.WriteJSON(w, http.StatusCreated, refund)
+}
+
+func (s *Service) adminLatePaymentReviews(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	filter := LatePaymentReviewFilter{Status: strings.TrimSpace(r.URL.Query().Get("status")), ProviderID: strings.TrimSpace(r.URL.Query().Get("provider_id")), Overdue: strings.EqualFold(r.URL.Query().Get("overdue"), "true")}
+	if raw := strings.TrimSpace(r.URL.Query().Get("owner_id")); raw != "" {
+		ownerID, err := uuid.Parse(raw)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid review owner", httpserver.RequestID(r.Context()))
+			return
+		}
+		filter.OwnerID = &ownerID
+	}
+	for raw, target := range map[string]**time.Time{
+		"entered_from":       &filter.EnteredFrom,
+		"entered_to":         &filter.EnteredTo,
+		"next_review_before": &filter.NextReviewBefore,
+	} {
+		value := strings.TrimSpace(r.URL.Query().Get(raw))
+		if value == "" {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", raw+" must use RFC3339", httpserver.RequestID(r.Context()))
+			return
+		}
+		parsed = parsed.UTC()
+		*target = &parsed
+	}
+	items, err := repository.AdminLatePaymentReviews(r.Context(), filter, billingAdminLimit(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) adminLatePaymentReviewDetail(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, valid := parseLatePaymentCaseID(w, r)
+	if !ok || !valid {
+		return
+	}
+	detail, err := repository.LatePaymentReviewDetail(r.Context(), caseID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, detail)
+}
+
+func parseLatePaymentCaseID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	caseID, err := uuid.Parse(r.PathValue("case_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid late payment review", httpserver.RequestID(r.Context()))
+		return uuid.Nil, false
+	}
+	return caseID, true
+}
+
+func (s *Service) adminClaimLatePaymentReview(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, valid := parseLatePaymentCaseID(w, r)
+	if !ok || !valid {
+		return
+	}
+	item, err := repository.ClaimLatePaymentReview(r.Context(), caseID, adminActor(adminPrincipal(r)))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminQueryLatePaymentReview(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, valid := parseLatePaymentCaseID(w, r)
+	if !ok || !valid {
+		return
+	}
+	if s.payments == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	actorID := adminActor(adminPrincipal(r))
+	target, err := repository.LatePaymentReview(r.Context(), caseID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if target.OwnerID == nil || *target.OwnerID != actorID {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	order, queryErr := s.payments.SyncReviewedOrder(r.Context(), target.PaymentOrderID)
+	item, recordErr := repository.RecordLatePaymentReviewQuery(r.Context(), caseID, actorID, order, queryErr)
+	if recordErr != nil {
+		s.writeError(w, r, recordErr)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminScheduleLatePaymentReview(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, valid := parseLatePaymentCaseID(w, r)
+	var body struct {
+		NextReviewAt time.Time `json:"next_review_at"`
+		Reason       string    `json:"reason"`
+	}
+	if !ok || !valid || api.DecodeJSON(w, r, &body) != nil {
+		return
+	}
+	item, err := repository.ScheduleLatePaymentReview(r.Context(), caseID, adminActor(adminPrincipal(r)), body.NextReviewAt, body.Reason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminArchiveLatePaymentReview(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, valid := parseLatePaymentCaseID(w, r)
+	if !ok || !valid {
+		return
+	}
+	item, err := repository.ArchiveLatePaymentReview(r.Context(), caseID, adminActor(adminPrincipal(r)))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminEscalateProviderBlind(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	caseID, valid := parseLatePaymentCaseID(w, r)
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if !ok || !valid || api.DecodeJSON(w, r, &body) != nil {
+		return
+	}
+	item, err := repository.EscalateProviderBlind(r.Context(), caseID, adminActor(adminPrincipal(r)), body.Reason)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
+}
+
+func (s *Service) adminImportReconciliation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Channel      string              `json:"channel"`
+		BusinessDate string              `json:"business_date"`
+		Items        []ProviderBillEntry `json:"items"`
+	}
+	if s.payments == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "PAYMENT_UNAVAILABLE", "payment operations are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if api.DecodeJSON(w, r, &body) != nil {
+		return
+	}
+	businessDate, err := time.Parse("2006-01-02", body.BusinessDate)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "business_date must use YYYY-MM-DD", httpserver.RequestID(r.Context()))
+		return
+	}
+	run, err := s.payments.ImportProviderBill(r.Context(), adminActor(adminPrincipal(r)), body.Channel, businessDate, body.Items)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusCreated, run)
 }
 
 func (s *Service) adminReleaseUsageHold(w http.ResponseWriter, r *http.Request) {

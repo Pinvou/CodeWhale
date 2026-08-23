@@ -24,7 +24,7 @@ import (
 )
 
 func main() {
-	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"BILLING_PAYMENT_EXPIRY_RECONCILE": approvalpolicy.AuditOnly, "BILLING_ENTITLEMENT_PACKAGE_EXPIRE": approvalpolicy.AuditOnly}); err != nil {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"BILLING_PAYMENT_EXPIRY_RECONCILE": approvalpolicy.AuditOnly, "BILLING_ENTITLEMENT_PACKAGE_EXPIRE": approvalpolicy.AuditOnly, "BILLING_MANUAL_REVIEW_SLA_ESCALATE": approvalpolicy.AuditOnly}); err != nil {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
@@ -89,6 +89,7 @@ func main() {
 		go billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run(workerContext)
 	}
 	go billing.NewPackageExpiryWorker(repository, time.Minute).Run(workerContext)
+	go billing.NewManualReviewSLAWorker(repository, time.Minute).Run(workerContext)
 	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

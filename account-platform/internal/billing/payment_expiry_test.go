@@ -15,6 +15,12 @@ type expiredPaymentStoreStub struct {
 	items       []ExpiredPaymentCandidate
 	rescheduled map[uuid.UUID]time.Time
 	errors      map[uuid.UUID]string
+	escalated   map[uuid.UUID]string
+}
+
+func (s *expiredPaymentStoreStub) EscalateLatePaymentReview(_ context.Context, orderID uuid.UUID, queryResult string) (LatePaymentReviewCase, error) {
+	s.escalated[orderID] = queryResult
+	return LatePaymentReviewCase{PaymentOrderID: orderID}, nil
 }
 
 func (s *expiredPaymentStoreStub) ClaimExpiredPaymentOrders(context.Context, int, time.Duration) ([]ExpiredPaymentCandidate, error) {
@@ -40,14 +46,16 @@ func (s *paymentSynchronizerStub) SyncOrder(_ context.Context, orderID uuid.UUID
 
 func TestExpiredPaymentReconcilerReschedulesFailuresAndNonTerminalProviderStates(t *testing.T) {
 	closedID, pendingID, failedID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
 	store := &expiredPaymentStoreStub{
 		items: []ExpiredPaymentCandidate{
-			{OrderID: closedID, Attempts: 1},
-			{OrderID: pendingID, Attempts: 2},
-			{OrderID: failedID, Attempts: 3},
+			{OrderID: closedID, Attempts: 1, LateReviewBoundaryAt: now.Add(time.Hour)},
+			{OrderID: pendingID, Attempts: 2, LateReviewBoundaryAt: now.Add(time.Hour)},
+			{OrderID: failedID, Attempts: 3, LateReviewBoundaryAt: now.Add(time.Hour)},
 		},
 		rescheduled: map[uuid.UUID]time.Time{},
 		errors:      map[uuid.UUID]string{},
+		escalated:   map[uuid.UUID]string{},
 	}
 	synchronizer := &paymentSynchronizerStub{
 		orders: map[uuid.UUID]PaymentOrder{
@@ -56,7 +64,6 @@ func TestExpiredPaymentReconcilerReschedulesFailuresAndNonTerminalProviderStates
 		},
 		errors: map[uuid.UUID]error{failedID: errors.New("provider unavailable")},
 	}
-	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
 	reconciler := NewExpiredPaymentReconciler(store, synchronizer, 15*time.Second)
 	reconciler.now = func() time.Time { return now }
 	reconciler.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -74,6 +81,23 @@ func TestExpiredPaymentReconcilerReschedulesFailuresAndNonTerminalProviderStates
 	}
 	if store.errors[pendingID] != "" || store.errors[failedID] != "payment order synchronization failed" {
 		t.Fatalf("unexpected retry errors: %#v", store.errors)
+	}
+}
+
+func TestExpiredPaymentReconcilerEscalatesExactlyAfterBoundaryQuery(t *testing.T) {
+	orderID := uuid.Must(uuid.NewV7())
+	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+	store := &expiredPaymentStoreStub{items: []ExpiredPaymentCandidate{{OrderID: orderID, Attempts: 9, LateReviewBoundaryAt: now}}, rescheduled: map[uuid.UUID]time.Time{}, errors: map[uuid.UUID]string{}, escalated: map[uuid.UUID]string{}}
+	synchronizer := &paymentSynchronizerStub{orders: map[uuid.UUID]PaymentOrder{orderID: {ID: orderID, Status: "PENDING"}}, errors: map[uuid.UUID]error{}}
+	reconciler := NewExpiredPaymentReconciler(store, synchronizer, 15*time.Second)
+	reconciler.now = func() time.Time { return now }
+	reconciler.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	reconciler.runOnce(context.Background())
+	if store.escalated[orderID] != "PENDING" {
+		t.Fatalf("boundary result = %q", store.escalated[orderID])
+	}
+	if _, exists := store.rescheduled[orderID]; exists {
+		t.Fatal("boundary order must stop high-frequency polling")
 	}
 }
 

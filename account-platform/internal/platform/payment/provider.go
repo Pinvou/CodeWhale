@@ -64,6 +64,9 @@ type Capabilities struct {
 	CloseSupported                 bool     `json:"close_supported"`
 	NotificationSupported          bool     `json:"notification_supported"`
 	BillSupported                  bool     `json:"bill_supported"`
+	BillFileImportSupported        bool     `json:"bill_file_import_supported"`
+	ReconciliationMode             string   `json:"reconciliation_mode"`
+	FormalCollectionAdmitted       bool     `json:"formal_collection_admitted"`
 	ManualRepairSupported          bool     `json:"manual_repair_supported"`
 	CommerceCustomerRequired       bool     `json:"commerce_customer_required"`
 	ReusePendingOrderAfterExpiry   bool     `json:"reuse_pending_order_after_expiry"`
@@ -94,6 +97,17 @@ func (c Capabilities) SupportsChannel(channel string) bool {
 		}
 	}
 	return false
+}
+
+func (c Capabilities) FormalCollectionEligible(reconciliationGraceSeconds int64) bool {
+	if c.NotificationSupported || c.BillSupported || c.BillFileImportSupported {
+		return true
+	}
+	if reconciliationGraceSeconds < 1 {
+		reconciliationGraceSeconds = 7 * 24 * 60 * 60
+	}
+	requiredRetention := c.MaximumPayableWindowSeconds + c.MaximumLateConfirmationSeconds + reconciliationGraceSeconds
+	return c.OrderQuerySupported && c.MaximumPayableWindowSeconds > 0 && c.MaximumLateConfirmationSeconds > 0 && c.AuthoritativeUnpaidTerminal && c.OrderHistoryRetentionSeconds >= requiredRetention
 }
 
 type Provider interface {

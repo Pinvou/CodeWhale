@@ -204,6 +204,30 @@ paths:
           content: { application/json: { schema: { $ref: "#/components/schemas/Refund" } } }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
+  /internal/v1/recharge/orders/{order_id}/payment-claims:
+    post:
+      operationId: addLatePaymentClaimInternal
+      summary: Append a requester-owned payment claim and wake an existing late-payment review
+      parameters:
+        - name: order_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [requester_id, statement]
+              properties:
+                requester_id: { type: string, format: uuid }
+                statement: { type: string, minLength: 10, maxLength: 1000 }
+      responses:
+        "201": { description: Immutable user evidence accepted }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /internal/v1/refunds/forced:
     post:
       operationId: recordForcedRefund
@@ -263,7 +287,7 @@ components:
     PaymentCapabilities:
       type: object
       additionalProperties: false
-      required: [provider_id, version, channels, order_query_supported, order_history_retention_seconds, minimum_query_interval_seconds, maximum_payable_window_seconds, maximum_late_confirmation_seconds, authoritative_unpaid_terminal, refund_supported, refund_idempotency_supported, close_supported, notification_supported, bill_supported, manual_repair_supported, commerce_customer_required, reuse_pending_order_after_expiry, review_late_payment, test_only]
+      required: [provider_id, version, channels, order_query_supported, order_history_retention_seconds, minimum_query_interval_seconds, maximum_payable_window_seconds, maximum_late_confirmation_seconds, authoritative_unpaid_terminal, refund_supported, refund_idempotency_supported, close_supported, notification_supported, bill_supported, bill_file_import_supported, reconciliation_mode, formal_collection_admitted, manual_repair_supported, commerce_customer_required, reuse_pending_order_after_expiry, review_late_payment, test_only]
       properties:
         provider_id: { type: string, minLength: 1 }
         version: { type: string, minLength: 1 }
@@ -279,6 +303,9 @@ components:
         close_supported: { type: boolean }
         notification_supported: { type: boolean }
         bill_supported: { type: boolean }
+        bill_file_import_supported: { type: boolean }
+        reconciliation_mode: { type: string, enum: [API, FILE_IMPORT, QUERY_DEGRADED] }
+        formal_collection_admitted: { type: boolean }
         manual_repair_supported: { type: boolean }
         commerce_customer_required: { type: boolean }
         reuse_pending_order_after_expiry: { type: boolean }

@@ -27,3 +27,18 @@ func TestCapabilitiesRequireVersionedQueryableProvider(t *testing.T) {
 		t.Fatal("idempotent refund capability was rejected")
 	}
 }
+
+func TestFormalCollectionRequiresEvidenceOrBoundedAuthoritativeHistory(t *testing.T) {
+	capabilities := Capabilities{NotificationSupported: true}
+	if !capabilities.FormalCollectionEligible(0) {
+		t.Fatal("notification-capable provider was rejected")
+	}
+	capabilities = Capabilities{OrderQuerySupported: true, MaximumPayableWindowSeconds: 900, MaximumLateConfirmationSeconds: 3600, OrderHistoryRetentionSeconds: 900 + 3600 + 7*24*60*60, AuthoritativeUnpaidTerminal: true}
+	if !capabilities.FormalCollectionEligible(0) {
+		t.Fatal("bounded authoritative history was rejected")
+	}
+	capabilities.OrderHistoryRetentionSeconds--
+	if capabilities.FormalCollectionEligible(0) {
+		t.Fatal("insufficient query retention was accepted")
+	}
+}

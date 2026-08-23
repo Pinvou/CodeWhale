@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 199`、`部分实现 41`、`未实现 88`、`降级实现 1`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 208`、`部分实现 41`、`未实现 80`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -51,8 +51,9 @@
 | `RECEIVABLE-LIFECYCLE` | 用量超额双记、独立应收、钱包上下文冻结、现金 BASE 清偿分配、单支付权益包拒付冲销及三语运营查询 | Go 单测、OpenAPI lint、75 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、并发结算与真实 Provider 拒付故障注入待部署；PAY-33 人工案件队列仍由 APT-025 实现 |
 | `HOLD-OPERATIONS-EVIDENCE` | 钱包 Posting 至权益组成来源、Hold 组成/成员分配、租约历史、异常分类及幂等安全释放证据 | Go 单测、OpenAPI lint、80 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实并发幂等和生产授权隔离待部署 |
 | `TARGETED-REFUND` | 支付流水+权益包精确目标、整笔剩余现金退款、BASE/关联 BONUS 冻结撤销、幂等 Outbox Consumer 恢复和渠道强制退款独立证据 | Go 单测、OpenAPI lint、87 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Provider 幂等/不确定性、并发和故障注入待部署 |
-| `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 40 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/87 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `LATE-PAYMENT-REVIEW` | 72小时边界查询、唯一 P2 案件、每日/每周复核、用户申诉证据、无账单降级、正式收款准入、严格未支付归档与 Provider blind 停单 | Go 单测、OpenAPI lint、90 个合同测试、管理页41项状态测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Provider 历史查询/终态和告警投递待部署 |
+| `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/90 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -184,7 +185,7 @@
 | PAY-12 | 部分实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 回调、主动查询、关单观察和人工修复先保存不可变 Provider/版本/流水/金额/时间/载荷摘要再归并；Provider 账单尚未逐条进入同一证据表 |
 | PAY-13 | 部分实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; RECEIVABLE-LIFECYCLE | NOT_DEPLOYED | 支付流水成功事实不被退款或拒付覆盖，退款和拒付已有独立记录且订单保存可重建摘要；完整关闭中间态仍待实现 |
 | PAY-14 | 部分实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 冲突支付证据不会覆盖既有强事实并进入复核，退款不再改写支付流水；仍缺 `CLOSE_REQUESTED`、`LOCALLY_CLOSED_EXTERNAL_PENDING` 等完整关单单调状态 |
-| PAY-19 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少72小时边界最后查询、停止高频查询及转人工审核的确定性任务 |
+| PAY-19 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 订单冻结72小时边界，后台在边界执行最后查询后停止高频任务并幂等转唯一审核案件；真实 Provider 故障注入待部署 |
 | PAY-20 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 本地关闭或超时后可创建新订单；不同 Provider 成功流水分别幂等履约或复核，同一流水重复证据只归并一次并保留 LATE_PAID |
 | PAY-23 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; COMMERCE-MAPPING | NOT_DEPLOYED | 组织订单冻结实际付款管理员、受益组织及付款人的 Provider Commerce Mapping 快照；组织级 Mapping 只由 Provider 能力选择 |
 | PAY-24 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 普通退款同时绑定并校验支付流水、权益包和订单归属；订单 ID 不能单独执行退款 |
@@ -195,11 +196,11 @@
 | PAY-29 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 退款沿目标支付流水所属订单调用原 Provider，稳定商户退款号受显式幂等能力保护，不借用其他流水或钱包 |
 | PAY-31 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | Provider 不支持退款或未声明退款幂等保证时领域入口拒绝；用户及运营页面按 capabilities 隐藏退款动作 |
 | PAY-32 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 渠道强制退款保存不可变独立证据和案件并立即冻结目标权益包/授予，不覆盖支付成功或伪装普通退款；统一案件结案由 PAY-33 延续 |
-| PAY-35 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 无账单降级尚未与无回调 Provider 的正式收款准入和72小时人工审核闭合 |
-| PAY-37 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少72小时未收敛订单的唯一人工审核案件、责任人、复核 SLA、next_review_at 和逾期升级 |
-| PAY-38 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少对无回调无账单 Provider 的历史查询、有限晚到窗口、权威终态和正式收款准入校验 |
-| PAY-39 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少最晚确认期限、最终成功查询、权威未支付终态及冲突/申诉检查组成的归档门禁 |
-| PAY-40 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少 PROVIDER_BLIND 状态、责任升级、禁止静默归档和必要时停用新订单的闭环 |
+| PAY-35 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 能力显式区分 API、受控不可变文件导入和 QUERY_DEGRADED；查询快照降级不冒充供应商账单对账，真实文件格式联调待部署 |
+| PAY-37 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 72小时最终查询后唯一创建P2案件，未认领进入运营队列并告警，前7天每日、之后每周复核；用户申诉只追加证据，运营查询发现支付后经统一归并器幂等履约 |
+| PAY-38 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 无回调无账单的 FROZEN 映射必须同时声明长期历史查询、有限支付/晚到窗口和权威未支付终态，能力冻结到订单；不合格 Provider 拒绝正式新单 |
+| PAY-39 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 原子归档门禁要求超过 Provider 窗口+晚到窗口+7天、期限后成功查询和权威未支付终态，且无支付流水、冲突证据或未复核用户申诉；归档保留全部事实并可被强支付证据重开 |
+| PAY-40 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 到归档期限仍无成功权威查询会进入 PROVIDER_BLIND、保存原因/责任/下次处置、升级事件并停用该 Provider 版本新订单，不能普通归档 |
 | UI-02 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 桌面区分注册、自动登录与钱包初始化，展示 `PROVISIONING`/`REPAIR_REQUIRED`，初始化期间不请求余额、充值或平台模型 |
 | UI-13 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少停止接收、取消处理中、Provider 不支持取消、待核对和已结算的用户状态反馈 |
 | UI-14 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销阶段、脱敏阻断项和用户恢复动作展示 |
@@ -226,7 +227,7 @@
 | ADM-30 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无托管 Provisioning 修复命令 |
 | ADM-31 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可查询用量请求和上游引用；缺流事件/请求指纹/完整证据 |
 | ADM-32 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有用量核对人工重试且不重发模型请求；完整幂等收敛仍待目标实现 |
-| ADM-33 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少晚到支付案件筛选、认领、受审计查询、复核安排、归档和事实盲区升级页面 |
+| ADM-33 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW; DESKTOP-41 | NOT_DEPLOYED | 三语后台支持按状态、Provider、责任人、进入/复核时间和逾期筛选，展示能力/策略快照及不可变证据/操作时间线，并提供认领、查询、安排、严格归档和 blind 升级；无手工标记已支付入口 |
 | ADM-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销 REPAIR_REQUIRED 队列、阶段重试及禁止绕过门禁的运营能力 |
 | ADM-35 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA; RBAC-AUTH | NOT_DEPLOYED | 三语修复页及脱敏队列支持状态、阶段、责任域、年龄和 SLA 过滤；可重试确定阶段，补偿按钮与命令受24小时、无业务事实、先停用 Identity 后释放预约的证明门禁约束 |
 | ADM-36 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 策略版本 1 以稳定 `command_type` 显式登记全部当前后台写入口；代码覆盖合同检查路由注解，未知或分类冲突均失败关闭 |
@@ -261,7 +262,7 @@
 | NFR-42 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少模型按用户/上下文/组织/模型/路由的请求速率和并发准入 |
 | NFR-43 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少跨个人、组织、节点、角色、缓存、批量、导出和事件路径的自动隔离矩阵 |
 | NFR-44 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少Provider能力/路由级失败窗口、熔断、半开和不确定高风险请求保护 |
-| NFR-45 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少人工队列P0/P1/P2量化认领、响应、止损、解决和超时升级 SLA |
+| NFR-45 | 部分实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 已建立不重置时钟的通用案件/时间线表、P2工作时SLA及认领/响应/止损/解决逾期升级 worker，并接入晚到支付；P0/P1及注册、退款/拒付、用量等其余人工队列统一接入与自动止损评估由 APT-051 完成 |
 | NFR-46 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少三授时源、100ms目标、250ms告警、1s退出就绪及时间敏感操作门禁 |
 | NFR-47 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少当前及前两桌面版本合同测试、90天兼容、60天通知和稳定淘汰响应 |
 | NFR-48 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少审计导出脱敏、独立PII权限、水印、加密、短时下载和配额控制 |
@@ -353,8 +354,8 @@
 | PAY-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | H3C 二维码和实付金额来自 Provider 响应，不由客户端生成 |
 | PAY-15 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 签名回调与服务端主动查询进入同一证据归并器，按通知/流水防重并校验归属、金额和币种；不支持回调的 Provider 按能力声明采用查询补偿 |
 | PAY-16 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Billing 后台查询不依赖客户端二维码页面持续打开 |
-| PAY-17 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有过期/修复基础；无72小时确定性人工审核案件 |
-| PAY-18 | 降级实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前 H3C 不支持外部关单，只能停止本地展示并继续查询 |
+| PAY-17 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 普通 PENDING 在订单期限后继续按退避查询，72小时最终查询仍无终态则转换为明确人工审核，不会永久停留普通 PENDING |
+| PAY-18 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | Provider 支持时调用外部关单并核验；不支持时仅隐藏本地支付入口、继续保存/查询外部可能支付事实，最终进入审核而不伪造关单成功 |
 | PAY-21 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 每笔确认成功支付流水至多幂等创建一个独立权益包和一组平衡账本入账；重复回调、查询或修复不重复增加额度 |
 | PAY-22 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 具备 `org.entitlements.purchase` 权限的管理员可在线购买组织权益；订单冻结付款用户和受益组织，到账只进入受益组织钱包 |
 | PAY-30 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | Provider 成功证据校验后同一事务消费退款预约、撤销目标全部 BASE/关联 BONUS、更新权益/退款终态并写平衡账本；其他来源不受影响 |
@@ -465,7 +466,7 @@
 | CR-46 | TOK-24–TOK-30 | 补齐模型请求幂等、流式重放、断线恢复和 Hold 后派发恢复契约 | 未实现 | TOK-24 继续定义同一逻辑请求不重复调用上游；新增稳定用户级作用域、分层保留、同键异请求冲突、加密流事件重放、断线状态恢复和上游派发不确定时禁止盲重试 |
 | CR-47 | REQ-ID-01–REQ-ID-03, CORE-01–CORE-07, SCOPE-01–SCOPE-05, ID-01–ID-16, ACC-01–ACC-39, TOK-01–TOK-37, BILL-01–BILL-33, PAY-01–PAY-36, UI-01–UI-12, ADM-01–ADM-32, NFR-01–NFR-25 | 删除退休需求并按依赖关系重排、重新编号全部目标能力 | 文档完成、实现状态保持原判断 | 删除编号稳定与禁止重排规则；移除目标基线中的退休能力占位；按基础能力、依赖顺序和领域相关性形成连续新编号，并同步全部文档和实现状态引用 |
 | CR-48 | TOK-29, TOK-38–TOK-41, BILL-34–BILL-35, UI-13 | 补齐用户取消、连接断开与模型计费收敛契约 | 未实现 | 取消意图、Provider 取消结果、服务端执行、客户端交付和计费结算分别保存；断线不取消，Provider 不支持取消时继续核对实际用量，按可信实际生成量计费并在取消期间安全续租、结算或超时释放 Hold |
-| CR-49 | PAY-17, PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | 72小时未收敛订单转人工审核并闭合无回调无账单 Provider 的晚到支付处理 | 未实现 | 前72小时查询计划不变；边界最后查询后创建带责任人和 SLA 的审核案件，前7天每日、此后每周人工查询；只有有限晚到窗口、长期历史查询和权威终态的 Provider 才能正式收款，并以最终成功查询作为未支付归档门禁 |
+| CR-49 | PAY-17, PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | 72小时未收敛订单转人工审核并闭合无回调无账单 Provider 的晚到支付处理 | 已实现 | 前72小时退避查询，边界执行最终查询后创建唯一 P2 案件并告警；前7天每日、此后每周复核，用户申诉只追加证据。正式收款要求有限晚到窗口、长期历史查询和权威未支付终态；归档要求期限后成功权威查询且不存在支付、冲突或未复核申诉，否则升级 Provider blind 并停用该版本新单 |
 | CR-50 | BILL-36–BILL-38 | 明确组织权益组成资金守恒、禁止超额授权及并发分配边界 | 已实现 | 数据库守恒桶、组织/钱包/包/组成归属校验、精确组成与授予行锁、版本化请求指纹、同键异请求冲突及逐项子事务共同禁止超额和重复分配；生产等价并发压力仍待部署验证 |
 | CR-51 | ACC-10, ACC-11, BILL-12, BILL-13, BILL-36, BILL-39 | 注销用户的未消费组织授予终局占用至原到期日 | 未实现、由 CR-54 调整 | 原规则禁止任何回收；现行规则仍要求 `ACCOUNT_CLOSED` 授予不自动回池、不可恢复、消费或普通撤回，但允许按 CR-54 的独立专用命令主动回收 |
 | CR-52 | ACC-10–ACC-11, ACC-40–ACC-50, BILL-39, UI-14, ADM-34 | 用持久注销 Saga 区分资金阻断、系统自动清理和标识释放门禁 | 未实现 | 待核对用量、拒付、资金性差异、外部待确认关单及资金相关 Commerce 任务阻断注销；组织所有权及最后一个有效超级管理员角色须先交接，资料 Saga、其他角色、临时授权和邀请不要求用户处理但必须自动收敛；全部门禁通过且 Identity 不可认证后才能释放标识，迟到任务不得作用于新账号 |
@@ -704,9 +705,9 @@
 | PAY-13 | 支付领域独立状态机与订单派生摘要 | 部分实现 | 支付流水、退款和拒付事实已分离且订单四类摘要可重建；完整订单关闭中间态尚未实现。 |
 | PAY-15 | 支付回调与主动查询 | 已实现 | 签名回调和主动查询使用同一不可变证据归并器；Provider 不支持回调时按冻结能力采用服务端查询补偿。 |
 | PAY-16 | 客户端关闭后订单仍继续收敛 | 已实现 | 查询任务运行在 Billing 服务端。 |
-| PAY-17 | 超时订单不永久停留普通 PENDING | 部分实现 | 本地过期和部分异常修复已实现；尚未按 PAY-37 将72小时未收敛订单确定性转换为具有责任人、SLA 和下次复核时间的人工审核案件。 |
-| PAY-18 | 主动关闭未支付订单 | 降级实现 | 用户或系统可以关闭未支付订单；Provider 支持时调用外部关单并核验，Provider 不支持时降级为停止本地支付展示并持续查询，只有外部事实明确后才收敛最终状态。 |
-| PAY-19 | 主动查询退避与72小时边界 | 未实现 | 当前查询和过期处理尚未证明在72小时执行最后查询、停止高频任务并幂等转入 REVIEW_REQUIRED_LATE_PAYMENT。 |
+| PAY-17 | 超时订单不永久停留普通 PENDING | 已实现 | 订单过期后继续服务端退避查询；72小时仍无终态时转入唯一人工审核案件，订单不再表现为普通 PENDING。 |
+| PAY-18 | 主动关闭未支付订单 | 已实现 | Provider 支持时调用并核验外部关单；不支持时只隐藏本地支付展示并继续查询，72小时后进入审核，绝不以本地状态模拟外部关单成功。 |
+| PAY-19 | 主动查询退避与72小时边界 | 已实现 | 创建订单冻结最小查询间隔、支付窗口和72小时边界；边界任务先完成最后一次查询，再清除高频调度并幂等创建案件。 |
 | PAY-21 | 支付后自动更新额度 | 已实现 | 每个确认支付流水至多创建一个独立权益包、BASE/BONUS 组成和账本入账，重复证据不重复更新额度。 |
 | PAY-22 | 企业管理员在线购买组织权益 | 已实现 | 有 `org.entitlements.purchase` 权限的企业管理员可在组织上下文购买；订单保存付款用户与受益组织，到账后只增加组织权益。 |
 | PAY-24 | 退款目标绑定支付流水和权益包 | 已实现 | 请求和执行均保存并校验 payment_transaction_id、entitlement_package_id 与订单归属；payment_order_id 只作归属和审计。 |
@@ -716,12 +717,12 @@
 | PAY-32 | 渠道部分强制退款异常 | 已实现 | 已发生外部强制退款先保存独立证据和案件、绑定原流水/订单/权益包并冻结，不经过普通退款预检且不覆盖支付成功；后续统一案件结案由 PAY-33 承担。 |
 | PAY-33 | 支付异常人工复核 | 未实现 | 拒付、渠道部分强制退款、重复支付、晚到支付、退款失败和状态冲突进入统一复核队列，同时保持各领域状态独立；拒付绑定原支付流水、订单和权益包，按 BILL-33 撤销关联权益并为不足现金本金登记订单级应收，保留证据、责任人、结论和审计。 |
 | PAY-34 | 每日四方账单对账 | 未实现 | 每日获取 Provider 账单，对订单、支付流水、退款和 Billing 账本入账进行四方核对，生成可追踪差异。 |
-| PAY-35 | 账单能力降级 | 未实现 | 当前缺少无账单 Provider 的受控文件/查询降级证据，也未对同时无回调的 Provider 执行 PAY-38 准入和 PAY-37 人工审核。 |
+| PAY-35 | 账单能力降级 | 已实现 | 能力返回 API、FILE_IMPORT 或 QUERY_DEGRADED；文件逐行受控导入并不可变保留，完全无账单时只称查询快照降级核对，同时执行正式收款准入与72小时人工审核。 |
 | PAY-36 | 对账差异闭环 | 未实现 | 每条差异必须包含分类、严重度、状态、责任人、修复动作、复核结果和审计；修复通过幂等命令写入，不允许直接改表。 |
-| PAY-37 | 72小时未收敛订单转人工审核 | 未实现 | 缺少边界最后查询、唯一审核案件、前7天每日/此后每周的人工复核 SLA、逾期告警和晚到支付幂等履约。 |
-| PAY-38 | 无回调无账单 Provider 正式收款准入 | 未实现 | 缺少历史订单查询保留期、有限支付/确认窗口、权威终态及能力快照校验，现有 Provider 可在这些条件未证明时被配置用于收款。 |
-| PAY-39 | 未支付订单最终归档 | 未实现 | 缺少 final_archive_eligible_at、期限后成功查询、权威未支付终态、冲突证据和用户申诉组成的原子归档门禁。 |
-| PAY-40 | Provider 事实盲区处理 | 未实现 | 查询失效、历史丢失、无限 PENDING 或能力违约尚未形成 PROVIDER_BLIND 案件、升级和停用新订单规则。 |
+| PAY-37 | 72小时未收敛订单转人工审核 | 已实现 | 边界查询后只创建一条P2案件并告警待认领队列，前7天每日、之后每周复核；每次查询结果留证，支付成功经同一流水归并器一次履约。 |
+| PAY-38 | 无回调无账单 Provider 正式收款准入 | 已实现 | FROZEN 商品创建订单前检查历史查询、保留期、有限支付/晚到窗口和权威未支付终态；能力版本冻结到订单，测试映射不被描述为正式能力。 |
+| PAY-39 | 未支付订单最终归档 | 已实现 | `final_archive_eligible_at` 由窗口与宽限期确定；期限后成功权威未支付查询、无冲突/支付/未复核申诉才可原子归档，订单和证据永久保留。 |
+| PAY-40 | Provider 事实盲区处理 | 已实现 | 到归档期限仍无成功权威查询自动升级 `PROVIDER_BLIND` 并停用新单；人工也可留原因升级，案件继续显示且不能按普通未支付归档。 |
 
 ### 3.6 个人中心与运营后台
 
@@ -774,7 +775,7 @@
 | ADM-30 | Provisioning 修复 | 未实现 | 缺少只能推进 PENDING、由协调器验证 READY 的受审计修复命令。 |
 | ADM-31 | 用量请求与证据查询 | 部分实现 | 可查询用量请求和上游引用；缺流事件、请求指纹和完整证据。 |
 | ADM-32 | 用量核对人工重试 | 部分实现 | 有用量核对人工重试且不重发模型请求；完整幂等收敛仍待目标实现。 |
-| ADM-33 | 晚到支付人工审核管理 | 未实现 | 缺少案件筛选、责任人认领、受审计 Provider 查询、next_review_at、逾期升级、证据归档和 PROVIDER_BLIND 处置入口。 |
+| ADM-33 | 晚到支付人工审核管理 | 已实现 | 三语页面支持完整筛选、认领、受审计 Provider 查询、复核安排、严格归档和事实盲区升级，并展示能力/策略快照、证据及操作者时间线；不能手工录入已支付。 |
 | ADM-34 | 注销 Saga 修复 | 未实现 | 当前没有按阶段、阻断类型、SLA 和责任人管理 REPAIR_REQUIRED 注销任务的页面或受限重试命令，也没有禁止强制完成和直接释放标识的权限边界。 |
 | ADM-35 | 注册 Saga 修复 | 已实现 | 三语修复页通过受限 BFF 访问权限保护的脱敏队列，可按状态、阶段、责任域、年龄和 SLA 过滤并重试确定阶段；补偿按钮及命令受24小时和无 Account/映射/钱包/Outbox 事实证明约束。 |
 | ADM-36 | 管理命令审批分类注册 | 已实现 | 版本化策略按稳定命令类型覆盖当前后台写入口；未知命令、未知版本和分类冲突失败关闭。 |
@@ -835,7 +836,7 @@
 | NFR-42 | 模型调用多维限流 | 未实现：需增加用户/上下文/组织/模型/路由速率和并发配额、Hold前拒绝及重连不重复计数。 |
 | NFR-43 | 租户隔离验证矩阵 | 未实现：当前没有覆盖直接对象引用、批量、搜索、导出、缓存和异步事件的跨租户发布门禁测试。 |
 | NFR-44 | Provider 熔断 | 未实现：各Adapter尚未统一60秒窗口、最少样本、50%失败/连续5次阈值、半开探测及高风险不重发规则。 |
-| NFR-45 | 人工队列 SLA | 未实现：现有人工复核状态缺少P0/P1/P2统一时钟、认领/响应/止损/解决期限及超时自动升级。 |
+| NFR-45 | 人工队列 SLA | 部分实现：通用案件/不可变时间线、P2工作时认领/响应/止损/解决时钟和逐阶段超时升级已接入晚到支付，且认领/安排不重置创建时钟；P0/P1及其他人工队列接入和自动止损评估仍由 APT-051 完成。 |
 | NFR-46 | 统一可信时钟 | 未实现：当前未证明三独立授时源、偏差监测、readiness门禁及数据库/单调时钟职责分离。 |
 | NFR-47 | 桌面 API 兼容与淘汰 | 未实现：当前缺少N/N-1/N-2合同测试、每版90天支持、弃用通知字段及426升级闭环。 |
 | NFR-48 | 审计导出保护 | 未实现：现有导出需补近期重认证、默认脱敏、PII独立权限、水印、文件加密、一次性下载和任务配额。 |

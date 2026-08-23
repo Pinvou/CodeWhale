@@ -350,10 +350,11 @@ sequenceDiagram
 
 ### 9.1 渠道适配器
 
-Billing Service 定义统一接口，分别实现银联、支付宝和微信支付适配器：
+Billing Service 通过供应商中立接口和版本化能力声明接入具体支付渠道；当前生产 Adapter 是新华三商城，开发 Simulator 只能在显式开发/测试环境启用。领域层先读取能力，再决定是否开放查询、关单、退款、通知、账单或人工修复动作：
 
 ```go
 type PaymentProvider interface {
+    Capabilities(ctx context.Context) (PaymentCapabilities, error)
     CreateQR(ctx context.Context, req CreateQRRequest) (CreateQRResult, error)
     Query(ctx context.Context, providerOrderID string) (ProviderPayment, error)
     Close(ctx context.Context, providerOrderID string) error
@@ -362,7 +363,7 @@ type PaymentProvider interface {
 }
 ```
 
-适配器负责签名、证书、报文字段和渠道状态映射；领域层只识别统一订单、支付和退款状态。渠道文档或 SDK 升级不得改变前端 API 与账本结构。
+适配器负责签名、证书、报文字段和渠道状态映射；领域层只识别统一订单、支付流水、退款和复核状态。渠道文档或 SDK 升级不得改变前端 API 与账本结构。能力按 Provider/Adapter 版本冻结到商品映射和订单；无回调无账单 Provider 只有同时具备长期历史查询、有限支付/晚到窗口、权威未支付终态和足够证据保留期时才允许正式收款。
 
 ### 9.2 订单状态
 
@@ -373,14 +374,13 @@ payment_status:
   CREATED -> PENDING -> PAID
                     -> CLOSED | EXPIRED | FAILED
   EXPIRED -> PAID_LATE（仅允许已验签的渠道事实触发）
-  PAID -> REFUND_PENDING -> PARTIALLY_REFUNDED | REFUNDED | REFUND_FAILED
-  PAID_LATE -> REFUND_PENDING -> PARTIALLY_REFUNDED | REFUNDED | REFUND_FAILED
-
 fulfillment_status:
-  NOT_CREDITED -> CREDITED -> PARTIALLY_REVERSED | REVERSED
+  NOT_CREDITED -> CREDITED
 ```
 
-支付订单默认 15 分钟过期。只有 `payment_status IN (PAID, PAID_LATE) && fulfillment_status=CREDITED` 才向前端返回业务成功。订单过期后收到渠道成功通知时仍应按渠道事实处理：若渠道确认已收款则前进到 `PAID_LATE`、完成入账并标记“迟到支付”，不能简单丢弃。除这个显式的渠道事实修正外，终态不得倒退。
+支付成功流水是不可变历史事实，退款不再覆盖支付状态或履约摘要。普通退款是独立聚合，必须精确绑定支付流水及该流水产生的权益包；调用方不传金额，只允许对尚未消费、预占、到期或异常冻结的全部 BASE 与关联 BONUS 执行一次整笔剩余退款。渠道强制退款使用独立证据和复核案件，不能伪装成普通退款。
+
+支付订单默认 15 分钟过期。只有 `payment_status IN (PAID, PAID_LATE) && fulfillment_status=CREDITED` 才向前端返回业务成功。订单过期后出现可信成功事实时仍前进到 `PAID_LATE` 并幂等履约；不能简单丢弃，也不能由人工直接标记已支付。除显式的渠道事实修正外，终态不得倒退。
 
 ### 9.3 品悟和 Token 服务前端充值流程
 
@@ -443,9 +443,11 @@ sequenceDiagram
 - 创建订单必须携带 `Idempotency-Key`，作用域为 `caller + user + endpoint`，保存请求哈希和完整响应。
 - 相同键、相同请求返回原结果；相同键、不同请求返回 `409 IDEMPOTENCY_CONFLICT`。
 - 调用渠道超时后先以商户订单号查询，禁止立即创建第二笔渠道订单。
-- 待支付订单由后台任务主动查询，建议 1、2、5、10 分钟退避；过期后尝试关单。
-- 每日下载/查询渠道账单，与内部支付订单、退款和账本三方核对。
-- 差异进入独立 `reconciliation_case`，自动修复只允许执行证明安全的幂等操作；金额不符或多付进入人工队列。
+- 待支付订单由后台任务按 Provider 最小查询间隔退避查询；关单只在能力声明支持时调用，不支持时继续保留外部可能支付事实。
+- 订单在72小时边界执行最后查询，仍未收敛则幂等创建唯一 P2 晚到支付案件并停止高频任务；前7天每日、此后每周复核，认领和安排不能重置创建时钟。
+- 回调、账单 API、受控账单文件和查询降级是不同对账模式。能力不支持账单时，只能称“查询快照降级核对”，不能伪造渠道账单；文件导入逐批、逐行不可变保存。
+- 未支付归档必须越过支付窗口、晚到窗口和七日宽限期，并存在期限后成功的权威未支付查询，且无支付流水、冲突证据或未复核用户申诉。否则升级 `PROVIDER_BLIND`、停用该 Provider 版本新单并继续人工处置。
+- 差异进入独立 `reconciliation_case`；自动修复只允许执行证明安全的幂等操作，金额不符、多付、拒付和强制退款进入受审计人工队列。
 
 ## 10. 核心数据模型
 
@@ -497,10 +499,17 @@ sequenceDiagram
 | `holds` | `id`, `wallet_id`, `usage_request_id`, `amount`, `status`, `lease_expires_at`; 用量请求唯一 |
 | `price_versions` | 模型、输入/输出/缓存价格、有效期、版本、审批人 |
 | `recharge_products` | `product_id`, `amount_fen`, `credit_microcredits`, `channels`, `catalog_version`, `enabled` |
-| `payment_orders` | 内部订单、钱包、用户快照、商品快照、金额、渠道、两类状态、过期时间 |
-| `payment_transactions` | 渠道订单号、渠道交易号、已验签通知摘要；渠道交易号唯一 |
+| `payment_orders` | 内部订单、钱包、付款人/受益方、Provider/商品/能力快照、金额、渠道、两类摘要状态、支付期限、72小时边界和最终归档期限 |
+| `payment_transactions` | Provider 订单号、渠道交易号、金额/币种/付款人和不可变成功事实；Provider+渠道交易号唯一 |
 | `provider_notifications` | 通知 ID/哈希、验签结果、处理结果；敏感字段脱敏或加密 |
-| `refunds` | 原订单、金额、渠道退款号、状态、幂等键 |
+| `payment_evidence` | 回调、查询、关单观察、账单和人工修复的不可变载荷摘要与归并结果 |
+| `refunds` | 精确支付流水与权益包目标、由流水派生的整笔金额、渠道退款号、状态、幂等键 |
+| `refund_component_reservations` / `refund_grant_reservations` | 普通退款冻结的全部 BASE/关联 BONUS 组成及组织授予快照 |
+| `forced_refund_cases` | 渠道主动退款事实、精确目标、冻结和人工复核状态 |
+| `manual_review_cases` / `manual_review_case_events` | P0/P1/P2 案件 SLA、责任人、阶段时间和不可变操作时间线 |
+| `late_payment_review_cases` / `late_payment_review_evidence` | 72小时晚到案件、复核计划、严格归档、blind 状态与用户申诉/查询证据 |
+| `provider_bill_imports` / `provider_bill_rows` | 受控账单文件的不可变批次、摘要和逐行记录 |
+| `payment_provider_controls` | Provider/Adapter 版本新单开关及事实盲区原因 |
 | `reconciliation_cases` | 渠道、内部和账本差异及处置状态 |
 | `idempotency_records` | 调用方、键、请求哈希、响应、过期时间；复合唯一 |
 | `outbox_events` / `inbox_messages` | 可靠事件与消费幂等 |

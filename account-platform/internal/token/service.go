@@ -109,6 +109,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
 	protected.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 	protected.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
+	protected.POST("/v1/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
 	protected.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
 	protected.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
 	admin := protected.Group("/admin/v1")
@@ -411,6 +412,27 @@ func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	var body struct {
+		Statement string `json:"statement"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || len(strings.TrimSpace(body.Statement)) < 10 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a valid order and payment statement are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := s.billing.AddLatePaymentClaim(r.Context(), orderID, resolved.UserID, body.Statement)
+	if err != nil {
+		api.WriteError(w, http.StatusConflict, "PAYMENT_CLAIM_REJECTED", "the payment claim cannot be added to this order", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusCreated, payload)
 }
 
 func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {

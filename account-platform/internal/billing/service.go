@@ -83,6 +83,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		protected.GET("/internal/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
 		protected.POST("/internal/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
 		protected.POST("/internal/v1/recharge/orders/:order_id/refunds", httpserver.AdaptFunc(s.createRefund))
+		protected.POST("/internal/v1/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
 		protected.POST("/internal/v1/recharge/orders/:order_id/sync", httpserver.AdaptFunc(s.syncRechargeOrder))
 		protected.POST("/internal/v1/reconciliation/runs", httpserver.AdaptFunc(s.runReconciliation))
 		router.POST("/internal/payment/notifications", httpserver.AdaptFunc(s.paymentNotification))
@@ -112,6 +113,13 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/payment-orders/:order_id/sync", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncPaymentOrder))
 		admin.POST("/payment-orders/:order_id/repair", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_EVIDENCE_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairPaymentOrder))
 		admin.POST("/payment-orders/:order_id/refunds", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_NORMAL_REFUND", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRefundPaymentOrder))
+		admin.GET("/late-payment-reviews", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminLatePaymentReviews))
+		admin.GET("/late-payment-reviews/:case_id", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminLatePaymentReviewDetail))
+		admin.POST("/late-payment-reviews/:case_id/claim", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_LATE_PAYMENT_CLAIM", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminClaimLatePaymentReview))
+		admin.POST("/late-payment-reviews/:case_id/query", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_LATE_PAYMENT_QUERY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminQueryLatePaymentReview))
+		admin.POST("/late-payment-reviews/:case_id/schedule", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_LATE_PAYMENT_SCHEDULE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminScheduleLatePaymentReview))
+		admin.POST("/late-payment-reviews/:case_id/archive", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_LATE_PAYMENT_ARCHIVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminArchiveLatePaymentReview))
+		admin.POST("/late-payment-reviews/:case_id/provider-blind", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PROVIDER_BLIND_ESCALATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminEscalateProviderBlind))
 		admin.GET("/adjustments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminAdjustments))
 		admin.POST("/adjustments", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_ADJUSTMENT_REQUEST", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRequestAdjustment))
 		admin.POST("/adjustments/:adjustment_id/approve", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("WALLET_ADJUSTMENT", approvalpolicy.ApprovalRequired), httpserver.AdaptFunc(s.adminApproveAdjustment))
@@ -121,6 +129,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/usage-holds/:hold_id/release", s.authorizer.Require("platform.billing.holds.release"), approvalpolicy.Require("BILLING_USAGE_HOLD_SAFE_RELEASE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminReleaseUsageHold))
 		admin.GET("/reconciliation-runs", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationRuns))
 		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("BILLING_RECONCILIATION_RUN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRunReconciliation))
+		admin.POST("/reconciliation-imports", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("BILLING_PROVIDER_BILL_IMPORT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminImportReconciliation))
 		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
@@ -133,6 +142,29 @@ type chargebackRepository interface {
 
 type forcedRefundRepository interface {
 	RecordAndFreezeForcedRefund(context.Context, uuid.UUID, string, int64, json.RawMessage) (ForcedRefundCase, error)
+}
+
+type latePaymentClaimRepository interface {
+	AddLatePaymentClaim(context.Context, uuid.UUID, uuid.UUID, string) (LatePaymentReviewCase, error)
+}
+
+func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.repository.(latePaymentClaimRepository)
+	orderID, parseErr := uuid.Parse(r.PathValue("order_id"))
+	var body struct {
+		RequesterID uuid.UUID `json:"requester_id"`
+		Statement   string    `json:"statement"`
+	}
+	if decodeErr := api.DecodeJSON(w, r, &body); !ok || parseErr != nil || decodeErr != nil || body.RequesterID == uuid.Nil || len(strings.TrimSpace(body.Statement)) < 10 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "payment order, requester and statement are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.AddLatePaymentClaim(r.Context(), orderID, body.RequesterID, body.Statement)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusCreated, item)
 }
 
 func (s *Service) applyConfirmedChargeback(w http.ResponseWriter, r *http.Request) {

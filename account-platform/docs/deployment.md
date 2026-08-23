@@ -79,7 +79,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 远程 Compose 覆盖把 `payment-simulator` 主进程和迁移置于 `development-simulator` profile，并通过 `ENABLE_PAYMENT_SIMULATOR_DB=false` 跳过测试角色和数据库初始化。只有显式启用该 profile 的隔离开发/测试环境才可创建这些资源；生产站点不得覆盖该保护。
 
-生产必须显式选择正式 Payment Provider 并失败关闭。Billing 对 `development_simulator` 只接受 `APP_ENV=development/test`；Helm 默认 `BILLING_PAYMENT_PROVIDER=h3c_mall`、`BILLING_ALLOW_TENTATIVE_PRICES=false`，使用供应商中立通知变量且无 Simulator 工作负载或配置。启动还必须找到与 Adapter 版本匹配的 `FROZEN` 商品映射，否则拒绝就绪，不能回退测试路径。
+生产必须显式选择正式 Payment Provider 并失败关闭。Billing 对 `development_simulator` 只接受 `APP_ENV=development/test`；Helm 默认 `BILLING_PAYMENT_PROVIDER=h3c_mall`、`BILLING_ALLOW_TENTATIVE_PRICES=false`，使用供应商中立通知变量且无 Simulator 工作负载或配置。启动还必须找到与 Adapter 版本匹配的 `FROZEN` 商品映射，否则拒绝就绪，不能回退测试路径。没有回调和账单能力的 Provider 还必须声明长期历史查询、有限支付/晚到窗口、权威未支付终态和足够证据保留期；任一条件不满足时即使存在 `FROZEN` 映射也拒绝创建正式订单。
 
 ## 4. 目录约定
 
@@ -181,7 +181,7 @@ Keycloak provisioner 服务账号还必须具备读取/更新用户、重置密�
 
 Account 的 Commerce Customer worker 还要求显式冻结 `COMMERCE_PROVIDER_ID` 与 `COMMERCE_ADAPTER_VERSION`。两者会写入 Mapping、同步任务和证据，升级 Adapter 时不能用新版本解释旧任务；切换 Provider 后服务启动会为全部已验证手机号且尚无当前 Provider Mapping 的用户幂等补建任务。未配置对应 Adapter 连接时注册和模型能力保持可用，Mapping 留在待处理/重试状态，只有依赖该 Mapping 的支付被拒绝。发布前确认 `commerce_customer_mappings`、`commerce_customer_sync_jobs`、`commerce_customer_sync_evidence` 已迁移，并监控 `RETRY`、`REPAIR_REQUIRED` 及待执行任务积压。
 
-支付 Provider 中立化上线先执行 Billing `000023_payment_provider_catalog`，再滚动 Billing、Token Gateway 和 Portal/桌面。迁移把通用商品的旧 SKU 清空并写入 `TEST_ONLY` 版本映射；正式环境若没有与 `BILLING_PAYMENT_PROVIDER` 及 Adapter 版本匹配的 `FROZEN` 映射，Billing 必须启动失败。发布后抽样核对 `/v1/payment-capabilities`、商品渠道交集和新订单的 Provider/映射/能力快照；已有新版订单后禁止执行 down migration。
+支付 Provider 中立化上线先执行 Billing `000023_payment_provider_catalog`，再滚动 Billing、Token Gateway 和 Portal/桌面。迁移把通用商品的旧 SKU 清空并写入 `TEST_ONLY` 版本映射；正式环境若没有与 `BILLING_PAYMENT_PROVIDER` 及 Adapter 版本匹配的 `FROZEN` 映射，Billing 必须启动失败。发布后抽样核对 `/v1/payment-capabilities`、商品渠道交集和新订单的 Provider/映射/能力快照；没有回调和账单时还要核对正式收款准入字段，不能仅凭可查询能力放行。已有新版订单后禁止执行 down migration。
 
 一单多流水与支付证据上线紧随其后执行 Billing `000024_payment_evidence_lifecycle`，并在滚动 Billing 前完成数据库备份。迁移解除订单到流水及权益包的一对一约束，回填 Provider/版本、付款人、关闭状态、摘要和既有流水来源，新增不可变 `payment_evidence` 及流水到权益包、通知和人工修复的外键。发布后必须抽样验证：同一 Provider 流水重复回调/查询只入账一次；不同成功流水不共享权益包；金额、币种或订单归属冲突只追加证据并进入复核；退款和关单不改写 `PAID/LATE_PAID` 流水；组织订单的付款用户与受益组织分别正确。运营后台订单明细应能看到全部流水、证据和四类摘要。监控证据归并冲突、人工复核、重复流水唯一约束及权益包来源约束。已有多流水订单或按流水创建的多个权益包后，旧模型无法无损恢复，禁止执行 down migration；故障时保留迁移并前向修复应用。
 
@@ -190,6 +190,8 @@ Account 的 Commerce Customer worker 还要求显式冻结 `COMMERCE_PROVIDER_ID
 Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移会为既有 Hold 回填一条 CREATED 租约事件，并创建不可变租约/异常操作表；应先迁移 Billing，再滚动 Billing、Portal 和桌面运营制品。发布后抽样验证个人与组织 Hold 的创建、续租/追加预占都生成有效值历史，详情中的组成总额与 `usage_hold_allocations` 一致，组织 Hold 同时展示成员授予分配；未到期 ACTIVE 的安全释放必须被拒绝，REVIEW 或已过期 ACTIVE 释放要求原因和 Idempotency-Key，同键同请求返回同一结果、异请求冲突。监控 `ALLOCATION_MISMATCH`、`TERMINAL_ALLOCATION_REMAINS`、长期 `REVIEW_REQUIRED` 和幂等冲突。已有新版租约或操作证据后禁止 down migration；故障时禁用异常释放入口并保留只读查询，禁止直接修改 Hold 或分配表。
 
 目标退款上线继续执行 Billing `000027_targeted_refund_lifecycle`。迁移前必须备份数据库，并确认每条历史退款都能唯一映射到一笔成功支付流水和一个来源权益包；存在零个或多个候选时迁移应失败并先由运营完成受审计的数据归并，禁止任意挑选。同一目标可以保留多条历史已成功部分退款记录，但这些记录会永久阻止再发起普通退款，必须通过人工复核处理，不能把历史部分退款余额自动升级成新版整笔退款；同一目标存在多个未终结历史退款时迁移失败。迁移会把历史订单级 `PARTIALLY_REFUNDED/REFUNDED` 摘要归一为 `PAID/PAID_LATE + CREDITED`，新增退款目标、组成/授予预约、渠道强制退款案件和 `REVOKED` 权益终态；支付成功流水本身不被退款覆盖。应先迁移 Billing，再滚动 Billing、Portal 和桌面运营制品。发布后抽样验证：请求不接受金额且必须精确指定支付流水和权益包；任一 BASE/关联 BONUS 已消费、存在 Hold/异常或目标不匹配时在调用 Provider 前拒绝；成功只退该流水全部现金金额并撤销该包全部 BASE/关联 BONUS，明确失败完整解冻，不确定结果保持冻结；同一目标和幂等键不会重复退款；不支持退款的 Provider 在用户和运营页面均无入口；Provider 主动强制退款只建立证据和复核案件，不改写支付成功事实。持续监控长期 `REQUESTED/MANUAL_REVIEW`、`FORCED_REFUND_REVIEW` 冻结、退款 Outbox 死信、目标唯一约束和账本守恒。写入新版预约、撤销终态或强制退款案件后禁止 down migration；故障时禁用新退款动作并保留查询/复核，禁止回退到订单级按金额部分退款或直接改表解冻。
+
+晚到支付复核上线继续执行 Billing `000028_late_payment_review_lifecycle`，再滚动 Billing、Token Gateway、Portal 和桌面运营制品。迁移为既有订单补齐支付期限、72小时边界和最终归档期限，并新增人工案件/不可变时间线、晚到证据、账单文件导入及 Provider 版本新单开关。发布前必须核对 Provider 能力的 `reconciliation_mode`、历史查询保留、支付/晚到窗口和权威未支付终态；H3C 当前为 `QUERY_DEGRADED` 且没有回调/账单，因此现有 `TEST_ONLY` 映射不能直接升级为正式映射。发布后抽样验证：72小时最终查询只创建一个 P2 案件；前7天每日、之后每周的复核计划不因认领或安排重置创建时钟；用户申诉只为本人订单追加不可变证据；严格归档要求期限后成功权威查询且无支付/冲突/未复核申诉；无法取得该事实时升级 `PROVIDER_BLIND` 并停用该 Provider 版本新单。恢复收款不得直接改 `payment_provider_controls`，应在修复和验证能力后发布新的 Provider/Adapter 版本与 `FROZEN` 映射。持续监控 `REVIEW_REQUIRED_LATE_PAYMENT`、`PROVIDER_BLIND`、人工 SLA 升级 Outbox、逾期未认领/未响应/未止损/未解决案件以及账单导入失败；文件导入仅对声明 `FILE_IMPORT` 的能力开放，单批最多 100,000 行。已有案件、证据或停单事实后禁止 down migration；故障时保留只读复核和证据，不得把订单直接改成未支付终态。
 
 ### 6.4 新华三商城
 
@@ -436,8 +438,10 @@ UAT 只使用明确的测试商品和测试商城账号：
 3. 客户端退出后，Billing 继续轮询。
 4. 商城 PAID 后仅入账一次，权益包与平衡账本一致。
 5. 重复查询、服务重启和晚到支付不重复入账。
-6. 退款、主动关单、回调和账单对账入口严格按能力声明启用；H3C 当前应保持不支持。
+6. 退款、主动关单、回调和账单文件入口严格按能力声明启用；H3C 当前保持退款、关单、回调和账单不支持，并明确显示 `QUERY_DEGRADED`，不得把查询快照描述为渠道账单。
 7. 新订单必须保存 Provider/版本、商品映射 ID、映射快照和能力快照；历史订单不随 Adapter 或映射升级变化。
+8. 订单越过72小时边界后只产生一个晚到支付案件；认领、复核查询、安排、用户申诉、归档和 blind 升级均保留不可变时间线。
+9. 无回调无账单 Provider 只有在有限窗口、长期历史查询、权威未支付终态和证据保留均满足时才允许正式新单；blind 后同版本新单立即失败关闭。
 
 ### 11.4 客户端三层发布门禁
 

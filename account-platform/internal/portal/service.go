@@ -419,6 +419,13 @@ func tokenPathAllowed(method, resource string) bool {
 	if method == http.MethodPost && resource == "/v1/recharge/orders" {
 		return true
 	}
+	if method == http.MethodPost {
+		if suffix, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {
+			parts := strings.Split(suffix, "/")
+			_, parseErr := uuid.Parse(parts[0])
+			return len(parts) == 2 && parseErr == nil && (parts[1] == "close" || parts[1] == "payment-claims")
+		}
+	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
 	if len(parts) < 4 || parts[0] != "v1" || parts[1] != "organizations" || !safeProxyPathID(parts[2]) {
 		return false
@@ -549,10 +556,10 @@ func accountAdminPathAllowed(method, resource string) bool {
 }
 
 func billingAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs", "/admin/v1/late-payment-reviews") {
 		return true
 	}
-	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
+	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/reconciliation-imports" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
 		return true
 	}
 	if (resource == "/admin/v1/pricing" || resource == "/admin/v1/metering-units") && method == http.MethodGet || (resource == "/admin/v1/pricing/drafts" || resource == "/admin/v1/metering-units") && method == http.MethodPost {
@@ -562,7 +569,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
-	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "usage-holds" {
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && (parts[2] == "usage-holds" || parts[2] == "late-payment-reviews") {
 		_, err := uuid.Parse(parts[3])
 		return err == nil && method == http.MethodGet
 	}
@@ -589,6 +596,8 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return method == http.MethodPost && parts[4] == "release"
 	case "reconciliation-runs":
 		return method == http.MethodGet && parts[4] == "cases"
+	case "late-payment-reviews":
+		return method == http.MethodGet || method == http.MethodPost && (parts[4] == "claim" || parts[4] == "query" || parts[4] == "schedule" || parts[4] == "archive" || parts[4] == "provider-blind")
 	default:
 		return false
 	}

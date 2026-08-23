@@ -244,8 +244,29 @@ VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,$14,$14,$14)`,
 			return order, evidenceID, err
 		}
 	}
+	if err := reopenArchivedLatePaymentCase(ctx, tx, order.ID, now); err != nil {
+		return order, evidenceID, err
+	}
 	order, err = projectPaymentOrderWithinTransaction(ctx, tx, order.ID, now)
 	return order, evidenceID, err
+}
+
+func reopenArchivedLatePaymentCase(ctx context.Context, tx pgx.Tx, orderID uuid.UUID, now time.Time) error {
+	var caseID uuid.UUID
+	err := tx.QueryRow(ctx, `UPDATE late_payment_review_cases SET review_status='REVIEW_REQUIRED_LATE_PAYMENT',blind_reason='stronger payment evidence arrived after unpaid archive',next_review_at=$2,updated_at=$2,resolved_at=NULL WHERE payment_order_id=$1 AND review_status='ARCHIVED_CONFIRMED_UNPAID' RETURNING id`, orderID, now).Scan(&caseID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_orders SET archive_status='ACTIVE',archived_at=NULL,attention_summary='REVIEW_REQUIRED',summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, orderID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE manual_review_cases SET status='OPEN',resolved_at=NULL,updated_at=$2 WHERE id=$1`, caseID, now); err != nil {
+		return err
+	}
+	return appendManualReviewEvent(ctx, tx, caseID, "ARCHIVE_REOPENED_BY_PAYMENT_EVIDENCE", nil, map[string]any{"payment_order_id": orderID}, now)
 }
 
 func classifyPaymentTransaction(expiresAt, paidAt time.Time, policy PaymentPolicy, priorTransactions int, repair bool) (string, string, bool) {

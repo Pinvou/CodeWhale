@@ -778,6 +778,81 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews:
+    get:
+      operationId: listAdminLatePaymentReviews
+      summary: Filter late-payment and provider-blind review cases without changing payment facts
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: status, in: query, schema: { type: string, enum: [REVIEW_REQUIRED_LATE_PAYMENT, PROVIDER_BLIND, ARCHIVED_CONFIRMED_UNPAID, RESOLVED_PAID] } }
+        - { name: provider_id, in: query, schema: { type: string } }
+        - { name: owner_id, in: query, schema: { type: string, format: uuid } }
+        - { name: entered_from, in: query, schema: { type: string, format: date-time } }
+        - { name: entered_to, in: query, schema: { type: string, format: date-time } }
+        - { name: next_review_before, in: query, schema: { type: string, format: date-time } }
+        - { name: overdue, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}:
+    get:
+      operationId: getAdminLatePaymentReview
+      summary: Read frozen Provider/policy snapshots and the immutable evidence and operator timeline
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Late-payment review detail, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewDetail" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/claim:
+    post:
+      operationId: claimAdminLatePaymentReview
+      summary: Idempotently claim an unowned review without resetting its SLA clocks
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Review claimed, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/query:
+    post:
+      operationId: queryAdminLatePaymentReview
+      summary: Query the frozen Provider adapter and append the result as evidence
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Review updated, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/schedule:
+    post:
+      operationId: scheduleAdminLatePaymentReview
+      summary: Schedule the next evidence review without resetting SLA clocks
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewSchedule" } } }
+      responses:
+        "200": { description: Review scheduled, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/archive:
+    post:
+      operationId: archiveAdminLatePaymentReview
+      summary: Archive only after the policy horizon and a successful authoritative unpaid query
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      responses:
+        "200": { description: Confirmed-unpaid archive written, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/late-payment-reviews/{case_id}/provider-blind:
+    post:
+      operationId: escalateAdminProviderBlind
+      summary: Record a Provider fact blind spot and disable its new production orders
+      parameters: [{ $ref: "#/components/parameters/CaseID" }]
+      requestBody: { $ref: "#/components/requestBodies/Decision" }
+      responses:
+        "200": { description: Provider-blind escalation recorded, content: { application/json: { schema: { $ref: "#/components/schemas/LatePaymentReviewCase" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/reconciliation-runs:
     get:
       operationId: listAdminReconciliationRuns
@@ -795,6 +870,18 @@ paths:
             schema: { $ref: "#/components/schemas/ReconciliationCreate" }
       responses:
         "200": { description: Reconciliation completed }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/reconciliation-imports:
+    post:
+      operationId: importAdminProviderBill
+      summary: Import an immutable bounded Provider bill when the frozen adapter declares file support
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ReconciliationImport" } } }
+      responses:
+        "201": { description: File rows imported and reconciled }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -1169,6 +1256,11 @@ components:
       schema: { type: string, format: uuid }
     RunID:
       name: run_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    CaseID:
+      name: case_id
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1770,6 +1862,97 @@ components:
       properties:
         channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
         business_date: { type: string, format: date }
+    LatePaymentReviewCase:
+      type: object
+      additionalProperties: false
+      required: [case_id, payment_order_id, review_status, severity, provider_id, provider_version, merchant_order_no, provider_capability_snapshot, policy_snapshot, evidence_summary, claim_due_at, first_response_due_at, mitigation_due_at, resolution_due_at, escalation_level, next_review_at, created_at, updated_at]
+      properties:
+        case_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        review_status: { type: string, enum: [REVIEW_REQUIRED_LATE_PAYMENT, PROVIDER_BLIND, ARCHIVED_CONFIRMED_UNPAID, RESOLVED_PAID] }
+        severity: { type: string, enum: [P0, P1, P2] }
+        owner_id: { type: string, format: uuid }
+        provider_id: { type: string }
+        provider_version: { type: string }
+        merchant_order_no: { type: string }
+        provider_capability_snapshot: { type: object, additionalProperties: true }
+        policy_snapshot: { type: object, additionalProperties: true }
+        evidence_summary: { type: object, additionalProperties: true }
+        claimed_at: { type: string, format: date-time }
+        first_response_at: { type: string, format: date-time }
+        claim_due_at: { type: string, format: date-time }
+        first_response_due_at: { type: string, format: date-time }
+        mitigation_due_at: { type: string, format: date-time }
+        resolution_due_at: { type: string, format: date-time }
+        escalation_level: { type: integer, minimum: 0 }
+        last_escalated_at: { type: string, format: date-time }
+        last_query_at: { type: string, format: date-time }
+        last_query_result: { type: string }
+        next_review_at: { type: string, format: date-time }
+        blind_reason: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time }
+    LatePaymentReviewDetail:
+      type: object
+      additionalProperties: false
+      required: [case, events, evidence]
+      properties:
+        case: { $ref: "#/components/schemas/LatePaymentReviewCase" }
+        events:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [event_id, event_type, details, created_at]
+            properties:
+              event_id: { type: string, format: uuid }
+              event_type: { type: string }
+              actor_id: { type: string, format: uuid }
+              details: { type: object, additionalProperties: true }
+              created_at: { type: string, format: date-time }
+        evidence:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [evidence_id, evidence_type, payload_digest, payload_snapshot, created_at]
+            properties:
+              evidence_id: { type: string, format: uuid }
+              evidence_type: { type: string, enum: [BOUNDARY_QUERY, MANUAL_QUERY, USER_PAYMENT_CLAIM, ARCHIVE_QUERY, PROVIDER_BLIND] }
+              payment_evidence_id: { type: string, format: uuid }
+              actor_id: { type: string, format: uuid }
+              payload_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+              payload_snapshot: { type: object, additionalProperties: true }
+              created_at: { type: string, format: date-time }
+    LatePaymentReviewSchedule:
+      type: object
+      additionalProperties: false
+      required: [next_review_at, reason]
+      properties:
+        next_review_at: { type: string, format: date-time }
+        reason: { type: string, minLength: 10, maxLength: 500 }
+    ReconciliationImport:
+      type: object
+      additionalProperties: false
+      required: [channel, business_date, items]
+      properties:
+        channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
+        business_date: { type: string, format: date }
+        items:
+          type: array
+          maxItems: 100000
+          items:
+            type: object
+            additionalProperties: false
+            required: [merchant_order_no, provider_transaction_id, amount_fen, currency, status, paid_at]
+            properties:
+              merchant_order_no: { type: string, minLength: 1 }
+              provider_transaction_id: { type: string, minLength: 1 }
+              amount_fen: { type: integer, format: int64, minimum: 1 }
+              currency: { type: string, minLength: 3, maxLength: 3 }
+              status: { type: string, minLength: 1 }
+              paid_at: { type: string, format: date-time }
   responses:
     SystemStatus:
       description: Aggregated internal operational status without internal endpoint addresses

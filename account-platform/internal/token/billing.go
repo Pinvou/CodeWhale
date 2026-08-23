@@ -73,6 +73,7 @@ type BillingClient interface {
 	RecentRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	RechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	CloseRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
+	AddLatePaymentClaim(context.Context, uuid.UUID, uuid.UUID, string) (json.RawMessage, error)
 	Balance(context.Context, uuid.UUID) (json.RawMessage, error)
 }
 
@@ -165,6 +166,10 @@ func (c *HTTPBillingClient) RechargeOrder(ctx context.Context, orderID, requeste
 
 func (c *HTTPBillingClient) CloseRechargeOrder(ctx context.Context, orderID, requesterID uuid.UUID) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders/"+orderID.String()+"/close", map[string]any{"requester_id": requesterID}, "")
+}
+
+func (c *HTTPBillingClient) AddLatePaymentClaim(ctx context.Context, orderID, requesterID uuid.UUID, statement string) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodPost, "/internal/v1/recharge/orders/"+orderID.String()+"/payment-claims", map[string]any{"requester_id": requesterID, "statement": statement}, "")
 }
 
 func (c *HTTPBillingClient) Balance(ctx context.Context, walletID uuid.UUID) (json.RawMessage, error) {

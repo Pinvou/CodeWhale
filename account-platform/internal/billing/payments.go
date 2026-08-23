@@ -43,6 +43,10 @@ type PaymentOrder struct {
 	ProviderSKU                  string     `json:"-"`
 	ProviderID                   string     `json:"-"`
 	ProviderVersion              string     `json:"-"`
+	ProviderPayableUntil         time.Time  `json:"provider_payable_until"`
+	LateReviewBoundaryAt         time.Time  `json:"late_review_boundary_at"`
+	FinalArchiveEligibleAt       time.Time  `json:"final_archive_eligible_at"`
+	ArchiveStatus                string     `json:"archive_status"`
 }
 
 type PaymentOrderHistoryItem struct {
@@ -210,7 +214,17 @@ func containsFold(values []string, target string) bool {
 }
 
 func (p *PaymentCoordinator) Capabilities() PaymentCapabilities {
-	return p.provider.Capabilities()
+	capabilities := p.provider.Capabilities()
+	switch {
+	case capabilities.BillSupported:
+		capabilities.ReconciliationMode = "API"
+	case capabilities.BillFileImportSupported:
+		capabilities.ReconciliationMode = "FILE_IMPORT"
+	default:
+		capabilities.ReconciliationMode = "QUERY_DEGRADED"
+	}
+	capabilities.FormalCollectionAdmitted = capabilities.FormalCollectionEligible(int64(latePaymentReviewGrace.Seconds()))
+	return capabilities
 }
 
 func (p *PaymentCoordinator) Policy() PaymentPolicy {
@@ -296,9 +310,13 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if err == nil {
 		if policy.ReusePendingOrderAfterExpiry && !existing.ExpiresAt.After(now) {
 			existing.ExpiresAt = now.Add(p.payableWindow())
-			if _, err := tx.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,reconciliation_next_at=$3,reconciliation_attempts=0,reconciliation_last_error=NULL,updated_at=$3 WHERE id=$1`, existing.ID, existing.ExpiresAt, now); err != nil {
+			providerPayableUntil := now.Add(p.payableWindow())
+			lateReviewBoundaryAt := now.Add(72 * time.Hour)
+			finalArchiveEligibleAt := providerPayableUntil.Add(time.Duration(p.Capabilities().MaximumLateConfirmationSeconds)*time.Second + 7*24*time.Hour)
+			if _, err := tx.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,provider_payable_until=$3,late_review_boundary_at=$4,final_archive_eligible_at=$5,reconciliation_next_at=$6,reconciliation_attempts=0,reconciliation_last_error=NULL,updated_at=$6 WHERE id=$1`, existing.ID, existing.ExpiresAt, providerPayableUntil, lateReviewBoundaryAt, finalArchiveEligibleAt, now); err != nil {
 				return PaymentOrder{}, false, err
 			}
+			existing.ProviderPayableUntil, existing.LateReviewBoundaryAt, existing.FinalArchiveEligibleAt = providerPayableUntil, lateReviewBoundaryAt, finalArchiveEligibleAt
 		}
 		responseBody, _ := json.Marshal(existing)
 		if _, err := tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES('payment.create',$1,$2,200,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour)); err != nil {
@@ -313,6 +331,16 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if external.MappingID == uuid.Nil || external.SKU == "" || external.AmountFen != product.AmountFen || external.Currency != product.Currency || !containsFold(external.Channels, channel) || !p.Capabilities().SupportsChannel(channel) || p.Capabilities().CommerceCustomerRequired && mobile == "" {
 		return PaymentOrder{}, false, ErrConflict
 	}
+	if external.Status == "FROZEN" && !p.Capabilities().FormalCollectionEligible(7*24*60*60) {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	var providerOrdersEnabled bool
+	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT new_orders_enabled FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2),TRUE)`, p.Capabilities().ProviderID, p.Capabilities().Version).Scan(&providerOrdersEnabled); err != nil {
+		return PaymentOrder{}, false, err
+	}
+	if !providerOrdersEnabled {
+		return PaymentOrder{}, false, ErrConflict
+	}
 	wallet, walletErr := getWallet(ctx, tx, walletID, false)
 	if walletErr != nil {
 		return PaymentOrder{}, false, ErrNotFound
@@ -324,12 +352,15 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, ErrConflict
 	}
 	merchantDigest := sha256.Sum256([]byte(requesterID.String() + "|" + idempotencyKey))
-	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, BeneficiaryOrganizationID: beneficiaryOrganizationID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(p.payableWindow()), Mobile: mobile, ProviderSKU: external.SKU, ProviderID: p.Capabilities().ProviderID, ProviderVersion: p.Capabilities().Version}
+	providerPayableUntil := now.Add(p.payableWindow())
+	lateReviewBoundaryAt := now.Add(72 * time.Hour)
+	finalArchiveEligibleAt := providerPayableUntil.Add(time.Duration(p.Capabilities().MaximumLateConfirmationSeconds)*time.Second + 7*24*time.Hour)
+	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, BeneficiaryOrganizationID: beneficiaryOrganizationID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(p.payableWindow()), Mobile: mobile, ProviderSKU: external.SKU, ProviderID: p.Capabilities().ProviderID, ProviderVersion: p.Capabilities().Version, ProviderPayableUntil: providerPayableUntil, LateReviewBoundaryAt: lateReviewBoundaryAt, FinalArchiveEligibleAt: finalArchiveEligibleAt, ArchiveStatus: "ACTIVE"}
 	snapshot, _ := json.Marshal(product)
 	mappingSnapshot, _ := json.Marshal(external)
 	capabilitySnapshot, _ := json.Marshal(p.Capabilities())
 	payerMappingSnapshot, _ := json.Marshal(map[string]any{"payer_user_id": requesterID, "provider_id": p.Capabilities().ProviderID, "provider_version": p.Capabilities().Version, "commerce_customer_required": p.Capabilities().CommerceCustomerRequired, "status": map[bool]string{true: "READY", false: "NOT_REQUIRED"}[p.Capabilities().CommerceCustomerRequired]})
-	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,payer_commerce_mapping_snapshot,beneficiary_organization_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,created_at,updated_at,mobile_e164,provider_sku,provider_id,provider_version,product_mapping_id,product_mapping_snapshot,provider_capability_snapshot) VALUES ($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'CREATED','PENDING',$13,$14,$14,NULLIF($15,''),NULLIF($16,''),$17,$18,$19,$20,$21)`, order.ID, order.MerchantOrderNo, requesterID, payerMappingSnapshot, beneficiaryOrganizationID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now, mobile, external.SKU, p.Capabilities().ProviderID, p.Capabilities().Version, external.MappingID, mappingSnapshot, capabilitySnapshot)
+	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id,merchant_order_no,requester_id,payer_user_id,payer_commerce_mapping_snapshot,beneficiary_organization_id,wallet_id,product_id,product_snapshot,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,expires_at,provider_payable_until,late_review_boundary_at,final_archive_eligible_at,created_at,updated_at,mobile_e164,provider_sku,provider_id,provider_version,product_mapping_id,product_mapping_snapshot,provider_capability_snapshot) VALUES ($1,$2,$3,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'CREATED','PENDING',$13,$14,$15,$16,$17,$17,NULLIF($18,''),NULLIF($19,''),$20,$21,$22,$23,$24)`, order.ID, order.MerchantOrderNo, requesterID, payerMappingSnapshot, beneficiaryOrganizationID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, providerPayableUntil, lateReviewBoundaryAt, finalArchiveEligibleAt, now, mobile, external.SKU, p.Capabilities().ProviderID, p.Capabilities().Version, external.MappingID, mappingSnapshot, capabilitySnapshot)
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
