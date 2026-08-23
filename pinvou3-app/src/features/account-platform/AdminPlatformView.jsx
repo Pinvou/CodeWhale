@@ -467,6 +467,7 @@ function Tokens({ copy, language, data, client, setData }) {
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const [route, setRoute] = useState({ model:'', protocol_code:'CHAT', priority:100, default_scope:'NONE', health_status:'HEALTHY' });
+  const [newAccount, setNewAccount] = useState({ owner_type:'ORG', owner_id:'', name:'', default_priority:100 });
   const items = data[tab] || [];
   const perform = async action => {
     setBusy(true); setNotice(''); setError('');
@@ -496,7 +497,20 @@ function Tokens({ copy, language, data, client, setData }) {
     if (!window.confirm(copy.tokens.confirmDeleteRoute(model))) return;
     void perform(async () => { await client.deleteTokenRoute(account.token_account_id, model); await refreshAccount(); });
   };
-  const validateCredential = credentialID => perform(async () => { const result = await client.validateTokenCredential(account.token_account_id, credentialID); await refreshAccount(); return result.valid ? copy.tokens.credentialValid : copy.tokens.credentialInvalid; });
+  const validateCredential = credentialID => perform(async () => { const result = await client.validateTokenCredential(account.token_account_id, credentialID); await refreshAccount(); return result.validation_status === 'VALID' ? copy.tokens.credentialValid : copy.tokens.credentialInvalid; });
+  const createTokenAccount = event => {
+    event.preventDefault();
+    const ownerID = newAccount.owner_id.trim();
+    if (!ownerID || !newAccount.name.trim()) return;
+    const isOrganization = newAccount.owner_type === 'ORG';
+    void perform(async () => {
+      await client.createTokenAccount({ owner_type:newAccount.owner_type, owner_id:ownerID, owner_organization_id:isOrganization ? ownerID : null, owner_unit_id:null, name:newAccount.name.trim(), share_scope:isOrganization ? 'ORG_ALL' : 'OWNER_UNIT_ONLY', default_priority:Number(newAccount.default_priority) });
+      const result = await client.tokenAccounts();
+      setData(current => ({ ...current, tokenAccounts:result.items || [] }));
+      setNewAccount(current => ({ ...current, owner_id:'', name:'' }));
+      return copy.tokens.accountCreated;
+    });
+  };
   const retryReconciliation = () => {
     const reason = window.prompt(copy.tokens.retryReason);
     if (!reason?.trim()) return;
@@ -529,7 +543,7 @@ function Tokens({ copy, language, data, client, setData }) {
   ] : [
 	{key:'provisioning_id',label:copy.tokens.provisioningID,render:item => <code title={item.provisioning_id}>{shortID(item.provisioning_id)}</code>},{key:'scope_type',label:copy.tokens.scope,render:item => `${item.scope_type} · ${shortID(item.scope_id)}`},{key:'model_id',label:copy.tokens.modelID,render:item => <code title={item.model_id}>{shortID(item.model_id)}</code>},{key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},{key:'stage',label:copy.tokens.stage},{key:'desired_generation',label:copy.tokens.generation,render:item => `${item.actual_generation || '—'} / ${item.desired_generation}`},{key:'attempt_count',label:copy.tokens.attempts,render:item => `${item.attempt_count} / ${item.max_attempts}`},{key:'last_error_code',label:copy.tokens.lastError},{key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)},{key:'actions',label:copy.accounts.actions,render:item => <button disabled={busy || !['FAILED','REPAIR_REQUIRED'].includes(item.status)} onClick={() => repairProvisioning(item)}>{copy.tokens.repair}</button>},
   ];
-  return <section className="adm-panel"><SectionHeader title={copy.tokens.title} count={items.length} copy={copy}>{tab === 'models' && <span className="adm-row-actions"><button disabled={busy} onClick={syncModels}>{copy.tokens.syncCatalog}</button><button disabled={busy} onClick={rollbackCatalog}>{copy.tokens.rollbackCatalog}</button></span>}{tab === 'provisionings' && <button disabled={busy} onClick={() => void perform(refreshProvisionings)}>{copy.refresh}</button>}</SectionHeader><Tabs active={tab} onChange={setTab} items={[{key:'tokenAccounts',label:copy.tokens.accounts},{key:'models',label:copy.tokens.modelCatalog},{key:'provisionings',label:copy.tokens.provisionings},{key:'usage',label:copy.tokens.usage}]} />{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}<Table columns={columns} items={items} copy={copy} /></section>;
+  return <section className="adm-panel"><SectionHeader title={copy.tokens.title} count={items.length} copy={copy}>{tab === 'models' && <span className="adm-row-actions"><button disabled={busy} onClick={syncModels}>{copy.tokens.syncCatalog}</button><button disabled={busy} onClick={rollbackCatalog}>{copy.tokens.rollbackCatalog}</button></span>}{tab === 'provisionings' && <button disabled={busy} onClick={() => void perform(refreshProvisionings)}>{copy.refresh}</button>}</SectionHeader><Tabs active={tab} onChange={setTab} items={[{key:'tokenAccounts',label:copy.tokens.accounts},{key:'models',label:copy.tokens.modelCatalog},{key:'provisionings',label:copy.tokens.provisionings},{key:'usage',label:copy.tokens.usage}]} />{tab === 'tokenAccounts' && <form className="adm-ops-form" onSubmit={createTokenAccount}><select value={newAccount.owner_type} onChange={event => setNewAccount(current => ({ ...current, owner_type:event.target.value }))}><option value="ORG">{copy.tokens.organizationScope}</option><option value="USER">{copy.tokens.personalScope}</option></select><input placeholder={copy.tokens.ownerID} value={newAccount.owner_id} onChange={event => setNewAccount(current => ({ ...current, owner_id:event.target.value }))} /><input placeholder={copy.tokens.accountName} value={newAccount.name} onChange={event => setNewAccount(current => ({ ...current, name:event.target.value }))} /><input type="number" min="1" max="10000" value={newAccount.default_priority} onChange={event => setNewAccount(current => ({ ...current, default_priority:event.target.value }))} /><button disabled={busy || !newAccount.owner_id.trim() || !newAccount.name.trim()}>{copy.tokens.createAccount}</button></form>}{notice && <div className="adm-inline-message ok">{notice}</div>}{error && <div className="adm-inline-message error">{error}</div>}<Table columns={columns} items={items} copy={copy} /></section>;
 }
 
 function TokenAccountDetail({ copy, account, route, setRoute, busy, notice, error, onBack, onStatus, onSaveRoute, onDeleteRoute, onValidate }) {

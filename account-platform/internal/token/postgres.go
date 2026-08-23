@@ -63,6 +63,7 @@ type CreateAccountRequest struct {
 	Name              string
 	ShareScope        string
 	DefaultPriority   int
+	ManagementMode    string
 	CreatedBy         uuid.UUID
 }
 
@@ -457,12 +458,16 @@ func (r *PostgresRepository) Close()                         { r.pool.Close() }
 func (r *PostgresRepository) CreateAccount(ctx context.Context, request CreateAccountRequest) (TokenAccount, error) {
 	request.OwnerType = strings.ToUpper(strings.TrimSpace(request.OwnerType))
 	request.ShareScope = strings.ToUpper(strings.TrimSpace(request.ShareScope))
+	request.ManagementMode = strings.ToUpper(strings.TrimSpace(request.ManagementMode))
+	if request.ManagementMode == "" {
+		request.ManagementMode = "USER"
+	}
 	request.Name = strings.TrimSpace(request.Name)
-	if !validOwner(request) || !validShareScope(request.ShareScope) || request.WalletID == uuid.Nil || request.CreatedBy == uuid.Nil || request.Name == "" || request.DefaultPriority < 0 || request.DefaultPriority > 10000 {
+	if !validOwner(request) || !validShareScope(request.ShareScope) || !slices.Contains([]string{"USER", "PLATFORM"}, request.ManagementMode) || request.WalletID == uuid.Nil || request.CreatedBy == uuid.Nil || request.Name == "" || request.DefaultPriority < 0 || request.DefaultPriority > 10000 {
 		return TokenAccount{}, ErrForbidden
 	}
 	now := r.now()
-	account := TokenAccount{ID: uuid.Must(uuid.NewV7()), OwnerType: request.OwnerType, OwnerID: request.OwnerID, OwnerOrganization: request.OwnerOrganization, OwnerUnit: request.OwnerUnit, WalletID: request.WalletID, Name: request.Name, Status: "ACTIVE", ShareScope: request.ShareScope, DefaultPriority: request.DefaultPriority}
+	account := TokenAccount{ID: uuid.Must(uuid.NewV7()), OwnerType: request.OwnerType, OwnerID: request.OwnerID, OwnerOrganization: request.OwnerOrganization, OwnerUnit: request.OwnerUnit, WalletID: request.WalletID, Name: request.Name, Status: "ACTIVE", ShareScope: request.ShareScope, DefaultPriority: request.DefaultPriority, ManagementMode: request.ManagementMode}
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return TokenAccount{}, err
@@ -481,11 +486,14 @@ func (r *PostgresRepository) CreateAccount(ctx context.Context, request CreateAc
 			return TokenAccount{}, ErrForbidden
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,owner_organization_id,owner_unit_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8,$9,$10,$10)`, account.ID, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit, account.WalletID, account.Name, account.DefaultPriority, request.CreatedBy, now)
+	_, err = tx.Exec(ctx, `INSERT INTO token_accounts(id,owner_type,owner_id,owner_organization_id,owner_unit_id,wallet_id,name,status,default_priority,created_by,created_at,updated_at,management_mode) VALUES($1,$2,$3,$4,$5,$6,$7,'ACTIVE',$8,$9,$10,$10,$11)`, account.ID, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit, account.WalletID, account.Name, account.DefaultPriority, request.CreatedBy, now, account.ManagementMode)
 	if err == nil {
 		_, err = tx.Exec(ctx, `INSERT INTO token_share_policies(token_account_id,scope,owner_organization_id,owner_unit_id,updated_at) VALUES($1,$2,$3,$4,$5)`, account.ID, account.ShareScope, account.OwnerOrganization, account.OwnerUnit, now)
 	}
 	if err != nil {
+		return TokenAccount{}, err
+	}
+	if err := recordTokenAudit(ctx, tx, request.CreatedBy, "TOKEN_ACCOUNT_CREATED", "TOKEN_ACCOUNT", account.ID, `jsonb_build_object('owner_type',$6,'owner_id',$7,'management_mode',$8)`, account.OwnerType, account.OwnerID, account.ManagementMode); err != nil {
 		return TokenAccount{}, err
 	}
 	return account, tx.Commit(ctx)

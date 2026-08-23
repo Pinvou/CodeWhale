@@ -614,6 +614,9 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings") {
 		return true
 	}
+	if resource == "/admin/v1/token-accounts" && method == http.MethodPost {
+		return true
+	}
 	if strings.Contains(resource, "..") {
 		return false
 	}

@@ -128,6 +128,7 @@ export class AdminPlatformClient {
   resolvePaymentAnomaly(caseID, resolution, reason) { return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, `payment-anomaly-resolve-${crypto.randomUUID()}`); }
   tokenOverview(signal) { return this.request('token', '/admin/v1/overview', signal); }
   tokenAccounts(signal) { return this.request('token', '/admin/v1/token-accounts?limit=100', signal); }
+  createTokenAccount(input) { return this.mutate('token', '/admin/v1/token-accounts', 'POST', input); }
   tokenAccount(tokenAccountID, signal) { return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal); }
   setTokenAccountStatus(tokenAccountID, status, reason) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/status`, 'PATCH', { status, reason }); }
   upsertTokenRoute(tokenAccountID, route) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route); }

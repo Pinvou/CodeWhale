@@ -965,6 +965,19 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminTokenAccount
+      summary: Create a PLATFORM-managed Token account for a personal, organization, or organization-unit scope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminTokenAccountCreate" }
+      responses:
+        "201": { description: PLATFORM-managed Token account created, content: { application/json: { schema: { $ref: "token-gateway.yaml#/components/schemas/TokenAccount" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts/{token_account_id}:
     get:
       operationId: getAdminTokenAccount
@@ -1027,7 +1040,7 @@ paths:
       summary: Validate a provider credential without returning its secret, ciphertext, or endpoint
       parameters: [{ $ref: "#/components/parameters/TokenAccountID" }, { $ref: "#/components/parameters/CredentialID" }]
       responses:
-        "200": { $ref: "#/components/responses/Overview" }
+        "200": { description: Uniform redacted credential validation result, content: { application/json: { schema: { $ref: "#/components/schemas/CredentialValidationResult" } } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /token/admin/v1/usage-requests:
@@ -1967,6 +1980,29 @@ components:
       properties:
         status: { type: string, enum: [ACTIVE, DISABLED] }
         reason: { type: string, minLength: 1, maxLength: 500 }
+    AdminTokenAccountCreate:
+      type: object
+      additionalProperties: false
+      required: [owner_type, owner_id, name, share_scope]
+      properties:
+        owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        owner_organization_id: { type: [string, "null"], format: uuid }
+        owner_unit_id: { type: [string, "null"], format: uuid }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        share_scope: { type: string, enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS] }
+        default_priority: { type: integer, minimum: 0, maximum: 10000, default: 100 }
+    CredentialValidationResult:
+      type: object
+      additionalProperties: false
+      required: [validation_status, credential]
+      properties:
+        validation_status: { type: string, enum: [VALID, INVALID] }
+        error_code: { type: string, enum: [CREDENTIAL_CHECK_FAILED] }
+        credential:
+          type: object
+          description: Metadata only; secret, ciphertext, and provider endpoint are never returned.
+          additionalProperties: true
     TokenRouteChange:
       type: object
       additionalProperties: false

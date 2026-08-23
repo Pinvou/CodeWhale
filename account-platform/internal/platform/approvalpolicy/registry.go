@@ -80,7 +80,7 @@ func buildPolicies() map[string]Policy {
 		"BILLING_ORGANIZATION_LIFECYCLE_APPLY":        "internal.billing.organization.lifecycle",
 		"BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY":   "internal.billing.organization-unit.lifecycle",
 		"BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY": "internal.billing.organization-member.lifecycle",
-		"BILLING_RECONCILIATION_RUN":                  "platform.usage.reconcile.retry", "TOKEN_ACCOUNT_STATUS_CHANGE": "platform.tokens.manage",
+		"BILLING_RECONCILIATION_RUN":                  "platform.usage.reconcile.retry", "TOKEN_ACCOUNT_CREATE": "platform.tokens.manage", "TOKEN_ACCOUNT_STATUS_CHANGE": "platform.tokens.manage",
 		"TOKEN_ROUTE_UPSERT": "platform.tokens.manage", "TOKEN_ROUTE_DELETE": "platform.tokens.manage",
 		"TOKEN_CREDENTIAL_VALIDATE": "platform.tokens.credentials.validate", "TOKEN_USAGE_RECONCILIATION_RETRY": "platform.usage.reconcile.retry",
 		"TOKEN_MODEL_DRAFT_SAVE": "platform.models.manage", "TOKEN_MODEL_PUBLISH": "platform.models.manage",

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 248`、`部分实现 32`、`未实现 49`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 252`、`部分实现 28`、`未实现 49`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -58,6 +58,7 @@
 | `ROUTE-PROVISIONING-ELIGIBILITY` | 按作用域/模型/协议/代次唯一的托管路由状态机、租约认领、退避/SLA、组织模型策略、READY 资格门禁、回滚联合依赖校验和运营修复 | Go 单元测试、Rust 桌面代理测试、OpenAPI lint、95 个合同测试和三语 Portal 构建通过；数据库运行级迁移、真实 Adapter/凭据和 Worker 故障注入待部署 |
 | `USAGE-EXECUTION-REPLAY` | 稳定用户级键摘要、版本化规范指纹、Hold/派发持久状态、一次性派发租约、加密流事件/结果、Last-Event-ID 重放及24小时/30天/90天分层清理 | Go 全量单元测试、OpenAPI lint、重放结构合同和静态验证通过；数据库运行级崩溃/断线/KMS故障注入待部署，注销调用与备份清除分别由 APT-015/APT-037 接入 |
 | `USAGE-CANCELLATION-CONVERGENCE` | 原稳定用户幂等取消、派发前 Hold 全释放、派发后交付隔离、Adapter 取消能力、可信实际用量、版本化核对期限、损失复核及幂等人工重试 | Go 全量单元测试、OpenAPI lint、取消结构合同、桌面/Portal 构建和静态验证通过；真实 PostgreSQL 竞态、Provider 用量延迟、断线和故障注入待部署 |
+| `TOKEN-OPERATIONS-ISOLATION` | 平台 Token Account 创建/启停、PLATFORM 资源过滤、组织角色默认拒绝、凭据元数据最小化及统一脱敏检查结果 | Go 单元测试、OpenAPI lint、平台 Token 运营隔离合同、三语 Portal 构建和静态验证通过；数据库运行级迁移及真实 Provider 凭据检查待部署 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
@@ -82,7 +83,7 @@
 | CORE-07 | 部分实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; TARGETED-REFUND | NOT_DEPLOYED | 三服务具备 Outbox/Inbox/Relay，注册和目标退款 Saga 已闭环；注销与托管路由 Provisioning 等流程仍待收敛 |
 | SCOPE-01 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 本地独立模型仍受保护，账号平台迁移不删除用户自建模型 |
 | SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人中心已移除自管 Token Account 页面；Gateway 仍保留受限普通用户 API，不影响当前 UI 范围结论 |
-| SCOPE-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 普通用户接口过滤 PLATFORM 账号并拒绝修改；组织业务策略与平台路由的完整隔离矩阵未建立 |
+| SCOPE-03 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 平台运营接口只查询和变更 `management_mode=PLATFORM` 资源并要求 `platform.tokens.*`；组织策略拒绝内部引用字段，普通及全部组织角色无法探测或变更真实账号、路由、凭据和 Provisioning |
 | SCOPE-04 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 桌面运行时不再引用旧 `llmapi_hub`/旧功能开关；仍缺安装与发布制品证明 |
 | SCOPE-05 | 部分实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 当前改动范围可审计，但尚无自动化发布范围门禁 |
 | ID-15 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 注册在 Identity 与 Account 提交后返回，Billing 仅在后续 bootstrap 调用；钱包失败不会删除已提交的已验证身份或 Account |
@@ -225,9 +226,9 @@
 | ADM-22 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 当前 Billing 修复命令均登记稳定类型、目标、原因、脱敏证据、前后快照和幂等键；改变财务事实的修复统一进入审批执行框架，证据收敛类修复固定为仅审计 |
 | ADM-23 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 后台可查看和创建版本化模型协议定义 |
 | ADM-24 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 后台支持公式草稿、校验预览、发布和不可变历史，并同步 Billing 公式单位绑定 |
-| ADM-25 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可管理平台 Token Account 生命周期；目标平台业务 RBAC 未实现 |
-| ADM-26 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可查询脱敏凭据元数据；目标细分角色隔离未实现 |
-| ADM-27 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有凭据检查动作；目标细分角色隔离和统一错误契约待补 |
+| ADM-25 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | `PLATFORM_MODEL_ADMIN` 独占 Token 运营权限，可通过后台创建个人/组织作用域的 PLATFORM 管理账号并启停；其他角色包括超级管理员不隐式继承 |
+| ADM-26 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 平台模型运营接口仅返回凭据类型、状态、版本、更新时间、允许模型及指纹，不返回密钥、密文、Key ID 或 Provider 地址 |
+| ADM-27 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 凭据检查使用独立原子权限和只审计命令，响应只含 `VALID/INVALID`、稳定脱敏错误码与元数据，原始 Provider 错误不出服务边界 |
 | ADM-28 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 路由 CRUD、确定性选择和托管目标/实际代次统一展示；平台候选只有当前 READY 且账号、凭据和路由代次一致时可进入数据面，显式兼容 USER 路由保留原所有权校验 |
 | ADM-29 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 平台模型管理员可查询 Provisioning 作用域、目标/实际代次、状态、阶段、尝试次数、租约、重试/SLA 和脱敏错误，并读取尝试历史 |
 | ADM-30 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | FAILED/REPAIR_REQUIRED 才接受带原因和幂等键的修复命令；命令开启新受限轮次，只有协调 Worker 重建并验证资源后才写 READY，审计不可变 |
@@ -464,10 +465,10 @@
 | CR-37 | ID-14, ID-15, ACC-02–ACC-04, BILL-04, UI-02 | 注册采用持久 PROVISIONING，钱包初始化异步重试 | 已实现 | Identity 与 Account 成功即账号存在；钱包完成前允许登录和资料管理但禁止平台模型及充值；超过快照化 SLA 才进入 REPAIR_REQUIRED，Billing 暂时不可用不删除已验证身份 |
 | CR-38 | SCOPE-01, SCOPE-04, SCOPE-05, TOK-35, TOK-36, TOK-37, NFR-20 | 补齐品悟客户端旧模型路径的数据迁移和切换验收 | 未实现、由 CR-44 细化门禁 | 只改品悟客户端代码及相关文件；一次性幂等迁移旧客户端状态并保护本地独立模型，按三层门禁和升级矩阵完成失败行为、请求目的端及版本级回滚验收，不保留运行时兼容分支；TOK-37 作为独立前置能力，不进入客户端迁移提交 |
 | CR-39 | PAY-33, PAY-14, PAY-12, PAY-32, PAY-13, PAY-26 | 删除主动部分退款状态并拆分支付领域状态机 | 部分实现 | 支付流水成功事实、退款、拒付和异常案件已分离，普通部分退款已移除，渠道强制退款独立留证、冻结和受审计结案；账单逐行支付证据归并与完整关单中间态仍由 PAY-12～PAY-14 补齐 |
-| CR-40 | TOK-07–TOK-10, TOK-12, TOK-16, TOK-20, ADM-25, ADM-28–ADM-30 | 闭合默认托管路由创建与模型资格判断顺序 | 部分实现 | 目录可见、持久 Provisioning、READY/上下文资格、请求级预占、Hold 和上游调用顺序已闭环，运营状态/修复已交付；ADM-25 的目标平台账号查看权限细分仍由 APT-031 收口 |
+| CR-40 | TOK-07–TOK-10, TOK-12, TOK-16, TOK-20, ADM-25, ADM-28–ADM-30 | 闭合默认托管路由创建与模型资格判断顺序 | 已实现 | 目录可见、持久 Provisioning、READY/上下文资格、请求级预占、Hold 和上游调用顺序已闭环；平台账号创建、启停、状态/修复查询均按平台模型运营权限隔离 |
 | CR-41 | BILL-28, PAY-11, PAY-20, PAY-24–PAY-31, PAY-33 | 支付履约隔离并按实际流水和权益包原子创建退款意图 | 已实现 | 多流水独立履约、目标普通退款和异常退款闭环：消费预检、原子冻结/预约、Outbox Consumer、全 BASE/关联 BONUS 撤销，以及拒付/强制退款受审计定向处置均已实现 |
 | CR-42 | BILL-20, BILL-23–BILL-25, ADM-12–ADM-13 | 闭合公式单位、输入缓存计量和零价语义 | 已实现 | 公式引用单位必须完整配置，输入与缓存输入规范化互斥；固定零价、显式继承和缺价已有独立数据与运行时语义 |
-| CR-43 | SCOPE-03, ADM-11, ADM-25–ADM-30 | 隔离组织模型业务策略与平台 Token Gateway 运营权限 | 部分实现 | 组织模型策略与平台 Token Account/路由/凭据/Provisioning 已按组织权限和 `platform.tokens.*` 隔离；APT-031 仍需完成全部 Token 运营接口的目标细分权限和统一错误契约 |
+| CR-43 | SCOPE-03, ADM-11, ADM-25–ADM-30 | 隔离组织模型业务策略与平台 Token Gateway 运营权限 | 已实现 | 组织模型策略只接受业务模型范围；平台 Token Account、路由、凭据和 Provisioning 接口由 `platform.tokens.*` 原子权限独占，资源查询限定 PLATFORM 管理模式，凭据检查使用统一脱敏结果 |
 | CR-44 | SCOPE-04, SCOPE-05, TOK-35, TOK-36, TOK-37, NFR-20 | 将客户端切换拆分为发布、安装和运行三层门禁并移除计费准入请求 | 未实现 | 服务端未就绪时不发布；迁移预检或暂存提交失败时不替换旧版本并原子恢复旧二进制/配置；新版本运行时只显示不可用和修复动作，不回退旧模型路径；准入使用无 Hold readiness 或隔离合成身份，不使用真实用户付费请求 |
 | CR-46 | TOK-24–TOK-30 | 补齐模型请求幂等、流式重放、断线恢复和 Hold 后派发恢复契约 | 已实现 | 稳定用户级作用域、分层保留、同键异请求冲突、加密流事件重放、断线状态恢复、唯一 Hold 和一次性派发租约均已实现；上游派发不确定时禁止盲重试 |
 | CR-47 | REQ-ID-01–REQ-ID-03, CORE-01–CORE-07, SCOPE-01–SCOPE-05, ID-01–ID-16, ACC-01–ACC-39, TOK-01–TOK-37, BILL-01–BILL-33, PAY-01–PAY-36, UI-01–UI-12, ADM-01–ADM-32, NFR-01–NFR-25 | 删除退休需求并按依赖关系重排、重新编号全部目标能力 | 文档完成、实现状态保持原判断 | 删除编号稳定与禁止重排规则；移除目标基线中的退休能力占位；按基础能力、依赖顺序和领域相关性形成连续新编号，并同步全部文档和实现状态引用 |
@@ -773,9 +774,9 @@
 | ADM-22 | Billing 修复执行 | 已实现 | 当前修复动作均绑定稳定命令类型、异常目标、原因、脱敏证据、快照和幂等键；财务事实修复进入审批，证据收敛修复只审计。 |
 | ADM-23 | 模型协议定义管理 | 已实现 | 后台提供独立版本化协议定义管理。 |
 | ADM-24 | 协议预占公式版本管理 | 已实现 | 支持安全公式校验、预览、发布、Billing 绑定同步和不可变历史。 |
-| ADM-25 | Token Account 生命周期管理 | 部分实现 | 可管理平台 Token Account 生命周期；目标平台业务 RBAC 未实现。 |
-| ADM-26 | 凭据元数据查询 | 部分实现 | 可查询脱敏凭据元数据；目标细分角色隔离未实现。 |
-| ADM-27 | 凭据有效性检查 | 部分实现 | 有凭据检查动作；目标细分角色隔离和统一错误契约待补。 |
+| ADM-25 | Token Account 生命周期管理 | 已实现 | 平台模型运营员可创建、查看和启停 PLATFORM 管理账号，平台资源过滤与角色独占权限已闭环。 |
+| ADM-26 | 凭据元数据查询 | 已实现 | 仅按平台模型运营权限返回最小凭据元数据，不返回秘密、密文、Key ID 或 Provider 地址。 |
+| ADM-27 | 凭据有效性检查 | 已实现 | 独立权限和审计命令触发检查，只返回统一状态、稳定脱敏错误码及凭据元数据。 |
 | ADM-28 | 模型路由管理 | 已实现 | 路由 CRUD、确定性选择和模型目录/Provisioning 代次已联结，失配资源不能进入数据面。 |
 | ADM-29 | Provisioning 状态查询 | 已实现 | 平台模型管理员可查看代次、尝试、退避、SLA、租约和脱敏错误的独立列表及详情。 |
 | ADM-30 | Provisioning 修复 | 已实现 | 受审计、幂等的修复命令只从失败终态开启新轮次，由协调器重建并验证后推进 READY。 |

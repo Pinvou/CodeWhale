@@ -34,10 +34,12 @@ type AdminTokenAccount struct {
 	OwnerType             string     `json:"owner_type"`
 	OwnerID               uuid.UUID  `json:"owner_id"`
 	OwnerOrganization     *uuid.UUID `json:"owner_organization_id,omitempty"`
+	OwnerUnit             *uuid.UUID `json:"owner_unit_id,omitempty"`
 	WalletID              uuid.UUID  `json:"wallet_id"`
 	Name                  string     `json:"name"`
 	Status                string     `json:"status"`
 	ShareScope            string     `json:"share_scope"`
+	ManagementMode        string     `json:"management_mode"`
 	ActiveCredentialCount int64      `json:"active_credential_count"`
 	RouteCount            int64      `json:"route_count"`
 	UpdatedAt             time.Time  `json:"updated_at"`
@@ -59,6 +61,12 @@ type AdminTokenAccountDetail struct {
 	AdminTokenAccount
 	Credentials []AdminCredentialMetadata `json:"credentials"`
 	Routes      []RoutingPolicy           `json:"routes"`
+}
+
+type AdminCredentialValidationResult struct {
+	ValidationStatus string                  `json:"validation_status"`
+	ErrorCode        string                  `json:"error_code,omitempty"`
+	Credential       AdminCredentialMetadata `json:"credential"`
 }
 
 type AdminUsageRequest struct {
@@ -112,7 +120,7 @@ type adminRepository interface {
 	AdminTokenAccount(context.Context, uuid.UUID) (AdminTokenAccountDetail, error)
 	AdminDeleteRoute(context.Context, uuid.UUID, string, uuid.UUID) error
 	AdminCredentialMetadata(context.Context, uuid.UUID, uuid.UUID) (AdminCredentialMetadata, error)
-	AdminRecordCredentialValidation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, bool) (AdminCredentialMetadata, error)
+	AdminRecordCredentialValidation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, bool, string) (AdminCredentialMetadata, error)
 	AdminUsageRequests(context.Context, int) ([]AdminUsageRequest, error)
 	AdminUsageRequest(context.Context, uuid.UUID) (AdminUsageRequest, error)
 	AdminRetryReconciliation(context.Context, uuid.UUID, string, uuid.UUID, string) (AdminUsageRequest, error)
@@ -163,6 +171,49 @@ func (s *Service) adminTokenAccounts(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Service) adminCreateTokenAccount(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		OwnerType         string     `json:"owner_type"`
+		OwnerID           uuid.UUID  `json:"owner_id"`
+		OwnerOrganization *uuid.UUID `json:"owner_organization_id"`
+		OwnerUnit         *uuid.UUID `json:"owner_unit_id"`
+		Name              string     `json:"name"`
+		ShareScope        string     `json:"share_scope"`
+		DefaultPriority   int        `json:"default_priority"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	body.OwnerType = strings.ToUpper(strings.TrimSpace(body.OwnerType))
+	body.ShareScope = strings.ToUpper(strings.TrimSpace(body.ShareScope))
+	body.Name = strings.TrimSpace(body.Name)
+	if body.DefaultPriority == 0 {
+		body.DefaultPriority = 100
+	}
+	request := CreateAccountRequest{OwnerType: body.OwnerType, OwnerID: body.OwnerID, OwnerOrganization: body.OwnerOrganization, OwnerUnit: body.OwnerUnit, Name: body.Name, ShareScope: body.ShareScope, DefaultPriority: body.DefaultPriority, ManagementMode: "PLATFORM", CreatedBy: tokenAdminActor(r)}
+	if !validOwner(request) || !validShareScope(request.ShareScope) || request.Name == "" || request.DefaultPriority < 0 || request.DefaultPriority > 10000 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid platform Token Account scope", httpserver.RequestID(r.Context()))
+		return
+	}
+	walletOwnerType, ok := map[string]string{"USER": "PERSONAL", "ORG": "ORGANIZATION", "ORG_UNIT": "ORG_UNIT"}[body.OwnerType]
+	if !ok {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "unsupported Token Account owner type", httpserver.RequestID(r.Context()))
+		return
+	}
+	walletID, err := s.wallets.Ensure(r.Context(), walletOwnerType, body.OwnerID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	request.WalletID = walletID
+	account, err := s.repository.CreateAccount(r.Context(), request)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusCreated, account)
+}
+
 func adminUUID(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, bool) {
 	value, err := uuid.Parse(r.PathValue(name))
 	if err != nil {
@@ -209,6 +260,14 @@ func (s *Service) adminSetTokenAccountStatus(w http.ResponseWriter, r *http.Requ
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
+	repository, repositoryOK := s.requireAdminRepository(w, r)
+	if !repositoryOK {
+		return
+	}
+	if _, err := repository.AdminTokenAccount(r.Context(), accountID); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	account, err := s.repository.SetAccountStatus(r.Context(), accountID, body.Status, tokenAdminActor(r), body.Reason)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -234,6 +293,14 @@ func (s *Service) adminUpsertTokenRoute(w http.ResponseWriter, r *http.Request) 
 	}
 	if strings.TrimSpace(body.ProtocolCode) == "" {
 		body.ProtocolCode = "CHAT"
+	}
+	repository, repositoryOK := s.requireAdminRepository(w, r)
+	if !repositoryOK {
+		return
+	}
+	if _, err := repository.AdminTokenAccount(r.Context(), accountID); err != nil {
+		s.writeError(w, r, err)
+		return
 	}
 	result, err := s.repository.UpsertRoute(r.Context(), accountID, body.Model, body.ProtocolCode, body.Priority, body.DefaultScope, body.HealthStatus, tokenAdminActor(r))
 	if err != nil {
@@ -278,6 +345,10 @@ func (s *Service) adminValidateCredential(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	if _, err := repository.AdminCredentialMetadata(r.Context(), accountID, credentialID); err != nil {
+		s.writeError(w, r, err)
+		return
+	}
 	credential, secret, err := s.repository.CredentialSecret(r.Context(), accountID, credentialID)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -285,12 +356,16 @@ func (s *Service) adminValidateCredential(w http.ResponseWriter, r *http.Request
 	}
 	valid := s.validator != nil && s.validator.Validate(r.Context(), credential.BaseURL, secret, credential.AllowedModels) == nil
 	clear(secret)
-	metadata, err := repository.AdminRecordCredentialValidation(r.Context(), accountID, credentialID, tokenAdminActor(r), valid)
+	errorCode := ""
+	if !valid {
+		errorCode = "CREDENTIAL_CHECK_FAILED"
+	}
+	metadata, err := repository.AdminRecordCredentialValidation(r.Context(), accountID, credentialID, tokenAdminActor(r), valid, errorCode)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"valid": valid, "credential": metadata})
+	api.WriteJSON(w, http.StatusOK, AdminCredentialValidationResult{ValidationStatus: metadata.ValidationStatus, ErrorCode: errorCode, Credential: metadata})
 }
 
 func (s *Service) adminUsageRequests(w http.ResponseWriter, r *http.Request) {
@@ -372,13 +447,14 @@ SELECT
 
 func (r *PostgresRepository) AdminTokenAccounts(ctx context.Context, limit int) ([]AdminTokenAccount, error) {
 	rows, err := r.pool.Query(ctx, `
-SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.wallet_id,a.name,a.status,
-       COALESCE(s.scope,'OWNER_UNIT_ONLY'),
+SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.owner_unit_id,a.wallet_id,a.name,a.status,
+       COALESCE(s.scope,'OWNER_UNIT_ONLY'),a.management_mode,
        count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.updated_at
 FROM token_accounts a
 LEFT JOIN token_share_policies s ON s.token_account_id=a.id
 LEFT JOIN provider_credentials c ON c.token_account_id=a.id
 LEFT JOIN routing_policies p ON p.token_account_id=a.id
+WHERE a.management_mode='PLATFORM'
 GROUP BY a.id,s.scope ORDER BY a.updated_at DESC,a.id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -387,7 +463,7 @@ GROUP BY a.id,s.scope ORDER BY a.updated_at DESC,a.id LIMIT $1`, limit)
 	items := make([]AdminTokenAccount, 0)
 	for rows.Next() {
 		var item AdminTokenAccount
-		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.ActiveCredentialCount, &item.RouteCount, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Name, &item.Status, &item.ShareScope, &item.ManagementMode, &item.ActiveCredentialCount, &item.RouteCount, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -398,16 +474,16 @@ GROUP BY a.id,s.scope ORDER BY a.updated_at DESC,a.id LIMIT $1`, limit)
 func (r *PostgresRepository) AdminTokenAccount(ctx context.Context, accountID uuid.UUID) (AdminTokenAccountDetail, error) {
 	var result AdminTokenAccountDetail
 	err := r.pool.QueryRow(ctx, `
-SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.wallet_id,a.name,a.status,
-       COALESCE(s.scope,'OWNER_UNIT_ONLY'),
+SELECT a.id,a.owner_type,a.owner_id,a.owner_organization_id,a.owner_unit_id,a.wallet_id,a.name,a.status,
+       COALESCE(s.scope,'OWNER_UNIT_ONLY'),a.management_mode,
        count(DISTINCT c.id) FILTER (WHERE c.status='ACTIVE' AND c.validation_status='VALID'),count(DISTINCT p.id),a.updated_at
 FROM token_accounts a
 LEFT JOIN token_share_policies s ON s.token_account_id=a.id
 LEFT JOIN provider_credentials c ON c.token_account_id=a.id
 LEFT JOIN routing_policies p ON p.token_account_id=a.id
-WHERE a.id=$1 GROUP BY a.id,s.scope`, accountID).Scan(
-		&result.ID, &result.OwnerType, &result.OwnerID, &result.OwnerOrganization, &result.WalletID,
-		&result.Name, &result.Status, &result.ShareScope, &result.ActiveCredentialCount, &result.RouteCount, &result.UpdatedAt,
+WHERE a.id=$1 AND a.management_mode='PLATFORM' GROUP BY a.id,s.scope`, accountID).Scan(
+		&result.ID, &result.OwnerType, &result.OwnerID, &result.OwnerOrganization, &result.OwnerUnit, &result.WalletID,
+		&result.Name, &result.Status, &result.ShareScope, &result.ManagementMode, &result.ActiveCredentialCount, &result.RouteCount, &result.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AdminTokenAccountDetail{}, ErrNotFound
@@ -460,7 +536,7 @@ func (r *PostgresRepository) AdminDeleteRoute(ctx context.Context, accountID uui
 		return err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `DELETE FROM routing_policies WHERE token_account_id=$1 AND model=$2`, accountID, model)
+	command, err := tx.Exec(ctx, `DELETE FROM routing_policies route USING token_accounts account WHERE route.token_account_id=$1 AND route.model=$2 AND account.id=route.token_account_id AND account.management_mode='PLATFORM'`, accountID, model)
 	if err != nil {
 		return err
 	}
@@ -478,7 +554,7 @@ func (r *PostgresRepository) AdminCredentialMetadata(ctx context.Context, accoun
 	err := r.pool.QueryRow(ctx, `
 SELECT id,provider,fingerprint,version,status,validation_status,allowed_models,validated_at,
        COALESCE(revoked_at,retired_at,activated_at,validated_at,created_at)
-FROM provider_credentials WHERE token_account_id=$1 AND id=$2`, accountID, credentialID).Scan(
+FROM provider_credentials credential JOIN token_accounts account ON account.id=credential.token_account_id AND account.management_mode='PLATFORM' WHERE credential.token_account_id=$1 AND credential.id=$2`, accountID, credentialID).Scan(
 		&item.ID, &item.Provider, &item.Fingerprint, &item.Version, &item.Status, &item.ValidationStatus,
 		&item.AllowedModels, &item.ValidatedAt, &item.UpdatedAt,
 	)
@@ -488,7 +564,7 @@ FROM provider_credentials WHERE token_account_id=$1 AND id=$2`, accountID, crede
 	return item, err
 }
 
-func (r *PostgresRepository) AdminRecordCredentialValidation(ctx context.Context, accountID, credentialID, actorID uuid.UUID, valid bool) (AdminCredentialMetadata, error) {
+func (r *PostgresRepository) AdminRecordCredentialValidation(ctx context.Context, accountID, credentialID, actorID uuid.UUID, valid bool, errorCode string) (AdminCredentialMetadata, error) {
 	if accountID == uuid.Nil || credentialID == uuid.Nil || actorID == uuid.Nil {
 		return AdminCredentialMetadata{}, ErrForbidden
 	}
@@ -502,7 +578,7 @@ func (r *PostgresRepository) AdminRecordCredentialValidation(ctx context.Context
 		return AdminCredentialMetadata{}, err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE provider_credentials SET validation_status=$3,validated_at=$4,validation_checked_by=$5 WHERE token_account_id=$1 AND id=$2 AND status='ACTIVE'`, accountID, credentialID, status, now, actorID)
+	command, err := tx.Exec(ctx, `UPDATE provider_credentials credential SET validation_status=$3,validated_at=$4,validation_checked_by=$5 WHERE credential.token_account_id=$1 AND credential.id=$2 AND credential.status='ACTIVE' AND EXISTS(SELECT 1 FROM token_accounts account WHERE account.id=credential.token_account_id AND account.management_mode='PLATFORM')`, accountID, credentialID, status, now, actorID)
 	if err != nil {
 		return AdminCredentialMetadata{}, err
 	}
@@ -514,7 +590,7 @@ func (r *PostgresRepository) AdminRecordCredentialValidation(ctx context.Context
 			return AdminCredentialMetadata{}, err
 		}
 	}
-	if err := recordTokenAudit(ctx, tx, actorID, "PROVIDER_CREDENTIAL_VALIDATED", "PROVIDER_CREDENTIAL", credentialID, `jsonb_build_object('token_account_id',$6,'valid',$7)`, accountID, valid); err != nil {
+	if err := recordTokenAudit(ctx, tx, actorID, "PROVIDER_CREDENTIAL_VALIDATED", "PROVIDER_CREDENTIAL", credentialID, `jsonb_build_object('token_account_id',$6,'validation_status',$7,'error_code',$8)`, accountID, status, errorCode); err != nil {
 		return AdminCredentialMetadata{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
