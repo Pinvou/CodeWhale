@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 282`、`部分实现 23`、`未实现 24`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 282`、`部分实现 31`、`未实现 16`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -68,8 +68,9 @@
 | `OBSERVABILITY-RELEASE-GATE` | 稳定 JSON 日志 schema 与字段白名单、秘密标记丢弃、Request ID 校验/传播、HTTP/NATS/后台 Trace、健康分层、独立低基数指标与 Exemplar | Go 注入/关联/健康/指标单测、负向源码门禁与合同测试通过；真实 OTLP/Prometheus/日志采集和三组件 Trace 查询待部署验收 |
 | `RECOVERY-RELEASE-GATE` | 历史迁移规范化 SHA-256 只追加清单、生产迁移前快照和迁移后数据库摘要、分级 RPO/RTO、加密不可变备份、演练时效及分类删除收据 | Go/Node 正负向测试和全量发布门禁通过；真实四库备份、隔离恢复、月季年演练和删除收据待外部环境验收 |
 | `HA-RELEASE-GATE` | 双故障域、故障后容量、核心多副本/PDB/滚动策略、外部HA依赖及Pod/节点/区域/主节点故障切换 | Helm schema/合同和证据门禁正负向测试通过；真实集群拓扑、容量与无损切换报告待外部环境验收 |
+| `PERFORMANCE-RELEASE-GATE` | 生产等价资源/数据/样本、分段时延、200并发、十万Hold、百万订单/三百万流水及事件积压排空和高水位准入 | 策略与证据门禁正负向合同通过；真实生产等价负载报告待外部环境验收 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/121 个合同测试、任务覆盖、迁移/恢复/HA/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/122 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -259,14 +260,14 @@
 | NFR-23 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | HTTP 使用 W3C Trace Context；Outbox 固化 Trace ID，Relay 发布和 NATS Consumer 从事件恢复远端 Trace 并建立子 Span，后台任务建立任务 Span，日志和 Prometheus Exemplar 可按 Trace ID 关联 |
 | NFR-24 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 业务服务独立 live/ready，readiness 只检查安全处理请求所需依赖；Identity 检查 Keycloak，Relay 分别检查 PostgreSQL/NATS，liveness 不因依赖断开失败，且不调用计费/切换准入业务 |
 | NFR-25 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 独立9090监听输出 HTTP 请求/错误状态/延迟/并发/readiness 与 Relay 周期/结果/积压/死信指标；标签仅使用有界 service/method/route/status/source/outcome，Trace ID 只进入 Exemplar |
-| NFR-26 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少固定生产等价环境、数据集、样本量和平台/Provider 分段计时的统一性能基线 |
-| NFR-27 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少关键内部读写接口 P95/P99 和错误率 SLO 证据 |
-| NFR-28 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少登录、短信、支付下单端到端与平台附加延迟的分离 SLO |
-| NFR-29 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少首个非空内容事件定义、平台派发耗时和模型路由 TTFT SLO |
-| NFR-30 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少200并发流式调用容量、硬上限准入和公平反压验收 |
-| NFR-31 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少十万有效 Hold 及持续/突发事务容量与锁等待验收 |
-| NFR-32 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少百万订单/三百万流水数据规模及下单/证据归并吞吐验收 |
-| NFR-33 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少百万事件积压容量、排空速度及高水位停止高风险写入门禁 |
+| NFR-26 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 30分钟、每类一万/流式一千样本、≤70%声明容量、发布/数据/报告摘要和四段计时已失败关闭；缺真实生产等价报告 |
+| NFR-27 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 关键读写P95/P99及0.1%错误率已进入门禁；缺真实接口压测指标 |
+| NFR-28 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 外部端到端3s/8s和平台附加500ms/1.5s已分离校验；缺健康Provider实测 |
+| NFR-29 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 流式派发500ms/1.5s、首内容5s/15s及千样本门禁已建立；缺真实模型路由报告 |
+| NFR-30 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 200并发及0.5%错误率为强制证据，容量守卫代码由APT-041继续实现；缺生产等价并发报告 |
+| NFR-31 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 十万Hold、200稳态/500突发60秒、锁等待P99和守恒/幂等证据已进入门禁；缺真实数据库压测 |
+| NFR-32 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 百万订单、三百万流水、50下单/200归并及零重复资金效果已进入门禁；缺真实规模数据报告 |
+| NFR-33 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 每流百万保留、十万积压15分钟排空、50%新流量及高水位停止写入已进入门禁；缺真实NATS积压演练 |
 | NFR-34 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 资金60秒、账号配置300秒目标已进入机器策略并以四库WAL时效和实测恢复事实失败关闭；缺真实生产等价恢复报告 |
 | NFR-35 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 核心3600秒、非关键14400秒目标及安全降级口径已进入证据门禁；缺真实故障计时和能力验收 |
 | NFR-36 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 连续WAL、日增量、周全量、迁移前快照、TLS/AES-256、KMS分离和异地不可变副本均为强制证据；缺真实备份系统配置与可恢复证明 |
@@ -833,14 +834,14 @@
 | NFR-23 | 分布式 Trace | HTTP、Outbox、Relay、NATS Consumer 和后台任务形成 W3C/等价 Trace 上下文，日志与指标 Exemplar 可关联。 |
 | NFR-24 | 健康检查 | 服务与 Relay 均区分进程 liveness 和关键依赖 readiness；普通健康不执行计费或客户端切换准入。 |
 | NFR-25 | 独立指标 | 独立受限监听输出 HTTP 和 Relay 请求/错误/延迟/任务/领域积压指标，标签有界且 Trace 仅进入 Exemplar。 |
-| NFR-26 | 性能与容量验收基线 | 未实现：当前没有冻结的生产等价资源、基准数据集、样本量、负载脚本和平台/Provider/排队分段计时报告。 |
-| NFR-27 | 关键内部 API 延迟 | 未实现：尚无读接口 P95≤300ms/P99≤1s、事务写 P95≤500ms/P99≤1.5s及错误率≤0.1%的持续证据。 |
-| NFR-28 | 外部依赖接口延迟 | 未实现：登录、短信和支付尚未分别采集平台附加耗时与Provider端到端 P95/P99。 |
-| NFR-29 | 流式首个内容事件 | 未实现：当前未统一排除Header/心跳的TTFT口径，也没有平台派发和模型路由首包SLO。 |
-| NFR-30 | 模型并发容量 | 未实现：尚未证明最小生产部署单元承载200并发流式请求或在容量上限前公平拒绝且不创建Hold。 |
-| NFR-31 | Hold 容量 | 未实现：尚无100,000有效Hold、200次/秒稳态、500次/秒突发和组成守恒/锁等待压测。 |
-| NFR-32 | 订单容量 | 未实现：尚无百万订单、三百万流水和50次/秒下单、200次/秒证据归并压测。 |
-| NFR-33 | 事件积压容量 | 未实现：尚无每关键流百万待消费事件保留、十万积压15分钟排空和高水位门禁证明。 |
+| NFR-26 | 性能与容量验收基线 | 部分实现：资源/数据/样本/负载比例/分段计时证据格式已机器化，缺真实生产等价报告。 |
+| NFR-27 | 关键内部 API 延迟 | 部分实现：读写P95/P99和错误率门禁已建立，缺实测。 |
+| NFR-28 | 外部依赖接口延迟 | 部分实现：Provider端到端与平台附加耗时独立门禁已建立，缺实测。 |
+| NFR-29 | 流式首个内容事件 | 部分实现：派发与首内容目标及样本门禁已建立，缺真实路由实测。 |
+| NFR-30 | 模型并发容量 | 部分实现：200并发证据门禁已建立，公平准入实现由APT-041补齐，且缺环境报告。 |
+| NFR-31 | Hold 容量 | 部分实现：十万Hold、稳态/突发、锁等待与守恒门禁已建立，缺环境报告。 |
+| NFR-32 | 订单容量 | 部分实现：百万订单/三百万流水与吞吐门禁已建立，缺环境报告。 |
+| NFR-33 | 事件积压容量 | 部分实现：百万保留、十万排空和高水位证据门禁已建立，缺环境报告。 |
 | NFR-34 | 分级 RPO | 部分实现：60秒资金域/300秒配置域策略和失败关闭证据校验已完成，缺真实生产等价恢复事实。 |
 | NFR-35 | 分级 RTO | 部分实现：核心60分钟/非关键4小时计时及安全降级门禁已完成，缺实际演练计时。 |
 | NFR-36 | 备份频率与加密 | 部分实现：持续WAL、日增量、周全量、迁移快照、加密、KMS分离和异地不可变副本已纳入发布证据，缺外部备份系统验收。 |

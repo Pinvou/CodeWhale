@@ -8,6 +8,7 @@
 - [Keycloak 受控管理访问](keycloak-admin-access.md)
 - [RPO/RTO 恢复演练记录](rpo-rto-exercise-template.md)
 - [高可用与故障切换验收](high-availability-failover.md)
+- [生产等价性能与容量验收](performance-capacity.md)
 
 生产备份与恢复事实还必须通过 `account-platform/deploy/recovery-policy.json` 和 `scripts/account-platform-recovery-gate.mjs` 的机器校验；runbook 勾选项本身不是部署证据。
 

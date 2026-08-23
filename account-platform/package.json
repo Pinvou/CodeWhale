@@ -16,6 +16,8 @@
     "check:production-recovery": "node ../scripts/account-platform-recovery-gate.mjs",
     "check:ha-policy": "node ../scripts/account-platform-ha-gate.mjs",
     "check:production-ha": "node ../scripts/account-platform-ha-gate.mjs",
+    "check:performance-policy": "node ../scripts/account-platform-performance-gate.mjs",
+    "check:production-performance": "node ../scripts/account-platform-performance-gate.mjs",
     "security:production-readiness": "node ../scripts/account-platform-production-security-gate.mjs",
     "test": "npm run lint:openapi && npm run test:contracts"
   },
