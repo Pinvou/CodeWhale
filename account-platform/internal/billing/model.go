@@ -108,19 +108,23 @@ type PriceVersion struct {
 }
 
 type ManualAdjustment struct {
-	ID                 uuid.UUID  `json:"adjustment_id"`
-	WalletID           uuid.UUID  `json:"wallet_id"`
-	AmountMicrocredits int64      `json:"amount_microcredits"`
-	Reason             string     `json:"reason"`
-	RequestedBy        uuid.UUID  `json:"requested_by"`
-	ApprovedBy         *uuid.UUID `json:"approved_by,omitempty"`
-	RejectedBy         *uuid.UUID `json:"rejected_by,omitempty"`
-	Status             string     `json:"status"`
-	JournalEntryID     *uuid.UUID `json:"journal_entry_id,omitempty"`
-	DecisionReason     *string    `json:"decision_reason,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
-	DecidedAt          *time.Time `json:"decided_at,omitempty"`
+	ID                      uuid.UUID  `json:"adjustment_id"`
+	WalletID                uuid.UUID  `json:"wallet_id"`
+	AmountMicrocredits      int64      `json:"amount_microcredits"`
+	Reason                  string     `json:"reason"`
+	RequestedBy             uuid.UUID  `json:"requested_by"`
+	ApprovedBy              *uuid.UUID `json:"approved_by,omitempty"`
+	RejectedBy              *uuid.UUID `json:"rejected_by,omitempty"`
+	Status                  string     `json:"status"`
+	Version                 int64      `json:"version"`
+	RequestIdempotencyKey   *string    `json:"request_idempotency_key,omitempty"`
+	ApprovalRequestID       *uuid.UUID `json:"approval_request_id,omitempty"`
+	ExecutionIdempotencyKey *string    `json:"execution_idempotency_key,omitempty"`
+	JournalEntryID          *uuid.UUID `json:"journal_entry_id,omitempty"`
+	DecisionReason          *string    `json:"decision_reason,omitempty"`
+	CreatedAt               time.Time  `json:"created_at"`
+	UpdatedAt               time.Time  `json:"updated_at"`
+	DecidedAt               *time.Time `json:"decided_at,omitempty"`
 }
 
 type Repository interface {
@@ -135,7 +139,6 @@ type Repository interface {
 	Release(context.Context, uuid.UUID, uuid.UUID, string) (Hold, error)
 	ExpireHolds(context.Context, int) (int, error)
 	RequestAdjustment(context.Context, uuid.UUID, int64, string, uuid.UUID) (ManualAdjustment, error)
-	ApproveAdjustment(context.Context, uuid.UUID, uuid.UUID, string) (ManualAdjustment, error)
 	RejectAdjustment(context.Context, uuid.UUID, uuid.UUID, string) (ManualAdjustment, error)
 	Ping(context.Context) error
 	Close()

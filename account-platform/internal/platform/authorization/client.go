@@ -15,6 +15,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type Client struct {
@@ -23,8 +24,11 @@ type Client struct {
 	httpClient   *http.Client
 }
 
+var ErrPermissionDenied = errors.New("permission is not granted")
+
 type decision struct {
-	Allowed bool `json:"allowed"`
+	Allowed bool      `json:"allowed"`
+	UserID  uuid.UUID `json:"user_id"`
 }
 
 func NewClient(rawURL, serviceToken string) (*Client, error) {
@@ -41,31 +45,47 @@ func NewClient(rawURL, serviceToken string) (*Client, error) {
 }
 
 func (c *Client) Allowed(ctx context.Context, principal identity.Principal, permission string) (bool, http.Header, error) {
+	result, headers, err := c.decision(ctx, principal, permission)
+	return result.Allowed, headers, err
+}
+
+func (c *Client) AuthorizedUserID(ctx context.Context, principal identity.Principal, permission string) (uuid.UUID, error) {
+	result, _, err := c.decision(ctx, principal, permission)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if !result.Allowed || result.UserID == uuid.Nil {
+		return uuid.Nil, ErrPermissionDenied
+	}
+	return result.UserID, nil
+}
+
+func (c *Client) decision(ctx context.Context, principal identity.Principal, permission string) (decision, http.Header, error) {
 	payload, err := json.Marshal(map[string]string{
 		"issuer": principal.Issuer, "subject": principal.Subject, "permission": strings.TrimSpace(permission),
 	})
 	if err != nil {
-		return false, nil, err
+		return decision{}, nil, err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint.String(), bytes.NewReader(payload))
 	if err != nil {
-		return false, nil, err
+		return decision{}, nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return false, nil, err
+		return decision{}, nil, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return false, response.Header, errors.New("account authorization check failed")
+		return decision{}, response.Header, errors.New("account authorization check failed")
 	}
 	var result decision
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
-		return false, response.Header, err
+		return decision{}, response.Header, err
 	}
-	return result.Allowed, response.Header, nil
+	return result, response.Header, nil
 }
 
 func (c *Client) Require(permission string) gin.HandlerFunc {

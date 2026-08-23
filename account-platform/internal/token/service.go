@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -104,13 +105,13 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
 		admin.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccount))
-		admin.PATCH("/token-accounts/:token_account_id/status", s.authorizer.Require("platform.tokens.manage"), httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
-		admin.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), httpserver.AdaptFunc(s.adminUpsertTokenRoute))
-		admin.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), httpserver.AdaptFunc(s.adminDeleteTokenRoute))
-		admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", s.authorizer.Require("platform.tokens.credentials.validate"), httpserver.AdaptFunc(s.adminValidateCredential))
+		admin.PATCH("/token-accounts/:token_account_id/status", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ACCOUNT_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
+		admin.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ROUTE_UPSERT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpsertTokenRoute))
+		admin.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ROUTE_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteTokenRoute))
+		admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", s.authorizer.Require("platform.tokens.credentials.validate"), approvalpolicy.Require("TOKEN_CREDENTIAL_VALIDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminValidateCredential))
 		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
 		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
-		admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", s.authorizer.Require("platform.usage.reconcile.retry"), httpserver.AdaptFunc(s.adminRetryReconciliation))
+		admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("TOKEN_USAGE_RECONCILIATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryReconciliation))
 	}
 	return router
 }

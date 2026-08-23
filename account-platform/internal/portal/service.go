@@ -435,7 +435,7 @@ func portalClientSource(r *http.Request) string {
 }
 
 func accountAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/role-bindings", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs", "/admin/v1/registration-operations") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/role-bindings", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs", "/admin/v1/registration-operations", "/admin/v1/approval-policies", "/admin/v1/approval-requests") {
 		return true
 	}
 	if method == http.MethodPost && resource == "/admin/v1/organizations" {
@@ -444,10 +444,22 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodPost && resource == "/admin/v1/role-bindings" {
 		return true
 	}
+	if resource == "/admin/v1/approval-requests" && method == http.MethodPost {
+		return true
+	}
 	if strings.Contains(resource, "..") {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) >= 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "approval-requests" {
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		if len(parts) == 4 {
+			return method == http.MethodGet || method == http.MethodPut
+		}
+		return len(parts) == 6 && parts[4] == "actions" && (parts[5] == "submit" || parts[5] == "withdraw" || parts[5] == "decide") && method == http.MethodPost
+	}
 	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "role-bindings" && method == http.MethodDelete {
 		_, err := uuid.Parse(parts[3])
 		return err == nil
@@ -518,7 +530,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs") {
 		return true
 	}
-	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs") && method == http.MethodPost {
+	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
 		return true
 	}
 	if strings.Contains(resource, "..") {

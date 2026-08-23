@@ -517,6 +517,19 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminAdjustmentRequest
+      summary: Create an idempotent pending adjustment before submitting its immutable approval command
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdjustmentRequestCreate" }
+      responses:
+        "201": { description: Pending manual adjustment created }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/adjustments/{adjustment_id}/approve:
     post:
       operationId: approveAdminAdjustment
@@ -699,6 +712,131 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-policies:
+    get:
+      operationId: listAdminApprovalPolicies
+      summary: List the immutable command classifications for the active policy version
+      responses:
+        "200":
+          description: Active command policy registry
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [policy_version, items]
+                properties:
+                  policy_version: { type: integer, format: int64, minimum: 1 }
+                  items: { type: array, items: { $ref: "#/components/schemas/ApprovalPolicy" } }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests:
+    get:
+      operationId: listAdminApprovalRequests
+      summary: Search approval requests visible to the requester or an authorized approver
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: command_type, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/ApprovalStatus" } }
+        - { name: risk_class, in: query, schema: { type: string } }
+        - { name: requester_user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: target, in: query, schema: { type: string, maxLength: 160 } }
+        - { name: submitted_from, in: query, schema: { type: string, format: date-time } }
+        - { name: submitted_to, in: query, schema: { type: string, format: date-time } }
+        - { name: expires_from, in: query, schema: { type: string, format: date-time } }
+        - { name: expires_to, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200":
+          description: Approval requests with server-authorized actions
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/ApprovalRequest" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminApprovalDraft
+      summary: Create an idempotent draft for a command classified as approval-required
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApprovalDraft" }
+      responses:
+        "201":
+          description: Approval draft created
+          content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests/{approval_request_id}:
+    get:
+      operationId: getAdminApprovalRequest
+      summary: Get one immutable approval command and its current allowed actions
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      responses:
+        "200": { description: Approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateAdminApprovalDraft
+      summary: Replace a draft before submission using optimistic concurrency
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: "#/components/schemas/ApprovalDraft" }
+                - type: object
+                  required: [expected_version]
+                  properties: { expected_version: { type: integer, format: int64, minimum: 1 } }
+      responses:
+        "200": { description: Updated approval draft, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests/{approval_request_id}/actions/submit:
+    post:
+      operationId: submitAdminApprovalRequest
+      summary: Freeze and submit a draft for independent approval
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody: { $ref: "#/components/requestBodies/VersionTransition" }
+      responses:
+        "200": { description: Submitted approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests/{approval_request_id}/actions/withdraw:
+    post:
+      operationId: withdrawAdminApprovalRequest
+      summary: Withdraw the requester's own submitted approval request
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody: { $ref: "#/components/requestBodies/VersionTransition" }
+      responses:
+        "200": { description: Withdrawn approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/approval-requests/{approval_request_id}/actions/decide:
+    post:
+      operationId: decideAdminApprovalRequest
+      summary: Approve or reject using an independent current authorization binding
+      parameters: [{ $ref: "#/components/parameters/ApprovalRequestID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApprovalDecision" }
+      responses:
+        "200": { description: Decided approval request, content: { application/json: { schema: { $ref: "#/components/schemas/ApprovalRequest" } } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 components:
   securitySchemes:
     oidc:
@@ -788,6 +926,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    ApprovalRequestID:
+      name: approval_request_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   requestBodies:
     Decision:
       required: true
@@ -799,7 +942,97 @@ components:
             required: [reason]
             properties:
               reason: { type: string, minLength: 1, maxLength: 500 }
+    VersionTransition:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version]
+            properties:
+              expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    ApprovalStatus:
+      type: string
+      enum: [DRAFT, SUBMITTED, APPROVED, REJECTED, WITHDRAWN, EXPIRED, INVALIDATED, EXECUTING, EXECUTED, EXECUTION_FAILED]
+    ApprovalPolicy:
+      type: object
+      additionalProperties: false
+      required: [command_type, approval_mode, requester_permission, risk_class, approval_count, self_approval_forbidden, snapshot_schema_version, critical_resource_fields, expires_after_nanoseconds, execution_window_nanoseconds, executor_identity]
+      properties:
+        command_type: { type: string }
+        approval_mode: { type: string, enum: [APPROVAL_REQUIRED, AUDIT_ONLY] }
+        requester_permission: { type: string }
+        approver_permission: { type: string }
+        risk_class: { type: string }
+        approval_count: { type: integer, minimum: 0 }
+        self_approval_forbidden: { type: boolean }
+        snapshot_schema_version: { type: integer, minimum: 1 }
+        critical_resource_fields: { type: array, items: { type: string } }
+        expires_after_nanoseconds: { type: integer, format: int64, minimum: 1 }
+        execution_window_nanoseconds: { type: integer, format: int64, minimum: 1 }
+        executor_identity: { type: string }
+    ApprovalDraft:
+      type: object
+      additionalProperties: false
+      required: [command_type, idempotency_key, normalized_command, target_resource_type, target_resource_id, reason, critical_resource_versions, financial_snapshot]
+      properties:
+        command_type: { type: string }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
+        normalized_command: { type: object, additionalProperties: true }
+        target_resource_type: { type: string, minLength: 1, maxLength: 80 }
+        target_resource_id: { type: string, minLength: 1, maxLength: 160 }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+        redacted_evidence: { type: [array, object] }
+        expected_impact: { type: object, additionalProperties: true }
+        critical_resource_versions: { type: object, additionalProperties: true }
+        financial_snapshot: { type: object, additionalProperties: true }
+        supersedes_request_id: { type: string, format: uuid }
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      required: [expected_version, decision, reason, observed_versions]
+      properties:
+        expected_version: { type: integer, format: int64, minimum: 1 }
+        decision: { type: string, enum: [APPROVE, REJECT] }
+        reason: { type: string, minLength: 3, maxLength: 2000 }
+        observed_versions: { type: object, additionalProperties: true }
+    ApprovalRequest:
+      type: object
+      additionalProperties: true
+      required: [approval_request_id, command_type, policy_version, approval_mode, risk_class, requester_user_id, normalized_command, command_fingerprint, target_resource_type, target_resource_id, reason, status, version, expires_at, created_at, updated_at, critical_resource_versions, financial_snapshot, policy_snapshot, allowed_actions]
+      properties:
+        approval_request_id: { type: string, format: uuid }
+        command_type: { type: string }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        approval_mode: { type: string, enum: [APPROVAL_REQUIRED] }
+        risk_class: { type: string }
+        requester_user_id: { type: string, format: uuid }
+        requester_binding_id: { type: string, format: uuid }
+        requester_authorization_version: { type: integer, format: int64, minimum: 1 }
+        normalized_command: { type: object, additionalProperties: true }
+        command_fingerprint: { type: string, pattern: '^[0-9a-f]{64}$' }
+        target_resource_type: { type: string }
+        target_resource_id: { type: string }
+        reason: { type: string }
+        redacted_evidence: { type: [array, object] }
+        expected_impact: { type: object, additionalProperties: true }
+        status: { $ref: "#/components/schemas/ApprovalStatus" }
+        version: { type: integer, format: int64, minimum: 1 }
+        supersedes_request_id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        execution_deadline: { type: string, format: date-time }
+        invalidation_code: { type: string }
+        invalidation_details: { type: object, additionalProperties: true }
+        submitted_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        critical_resource_versions: { type: object, additionalProperties: true }
+        financial_snapshot: { type: object, additionalProperties: true }
+        policy_snapshot: { type: object, additionalProperties: true }
+        allowed_actions: { type: array, uniqueItems: true, items: { type: string, enum: [EDIT, SUBMIT, WITHDRAW, APPROVE, REJECT] } }
     RoleBindingGrant:
       type: object
       additionalProperties: false
@@ -942,6 +1175,15 @@ components:
       properties:
         amount_fen: { type: integer, format: int64, minimum: 1 }
         reason: { type: string, minLength: 1, maxLength: 500 }
+    AdjustmentRequestCreate:
+      type: object
+      additionalProperties: false
+      required: [wallet_id, amount_microcredits, reason, idempotency_key]
+      properties:
+        wallet_id: { type: string, format: uuid }
+        amount_microcredits: { type: integer, format: int64, not: { const: 0 } }
+        reason: { type: string, minLength: 10, maxLength: 2000 }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
     ReconciliationCreate:
       type: object
       additionalProperties: false

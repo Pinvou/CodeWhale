@@ -11,11 +11,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/google/uuid"
 )
 
 func main() {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"EVENT_OUTBOX_RELAY": approvalpolicy.AuditOnly}); err != nil {
+		log.Fatal(err)
+	}
 	source := strings.ToLower(strings.TrimSpace(os.Getenv("EVENT_SOURCE")))
 	if source != "account" && source != "billing" && source != "token" {
 		log.Fatal("EVENT_SOURCE must be account, billing, or token")

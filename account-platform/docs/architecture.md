@@ -16,14 +16,14 @@
 
 - Keycloak 是登录身份、密码和 OIDC 会话的事实源；OIDC Claim 只证明主体，不决定业务权限。迁移期保留的 `platform-admin` Realm Role 不再参与业务授权。
 - Identity Adapter 是注册密码预检、策略版本、短期密码材料和 Keycloak 管理协议的唯一边界；Account 只接收不透明密码引用。
-- Account Service 是永久内部用户 ID、独立用户编码、平台/组织角色、权限码、组织树、成员和活动上下文的事实源；当前活动上下文按 OIDC Session 保存，不是用户级全局上下文。
-- Billing Service 是钱包、平衡账本、充值订单、BASE/BONUS 组成级权益、固定三元组定价和 Hold 的事实源。
+- Account Service 是永久内部用户 ID、独立用户编码、平台/组织角色、权限码、组织树、成员、管理命令审批策略/请求和活动上下文的事实源；当前活动上下文按 OIDC Session 保存，不是用户级全局上下文。
+- Billing Service 是钱包、平衡账本、充值订单、BASE/BONUS 组成级权益、固定三元组定价、Hold 和已批准财务命令领域执行结果的事实源。
 - Token Gateway 是 Token Account、加密凭据、共享/路由策略和模型用量请求的事实源；当前模型推理协议仅支持 `/v1/chat/completions`。
 - New API 是模型数据面和上游用量证据源，不承载品悟用户、组织或钱包真相。
 - Token Portal 是个人中心和运营后台的 Web BFF，采用 OIDC Authorization Code + PKCE、Redis 服务端会话和 CSRF 防护。
 - 桌面端的内置模型路径使用与登录相同的 OIDC Access Token；旧内置模型运行时路径已移除，并已有本地迁移代码和测试。
 
-当前代码尚未实现的关键目标包括：用户级全局上下文、超级管理员安全引导与最后管理员保护、托管路由 Provisioning 状态机、模型目录/协议/公式版本、模型结果重放、组成级组织授予、目标退款模型、应收/拒付/强制退款状态机和账号注销 Saga。
+当前代码尚未实现的关键目标包括：用户级全局上下文、托管路由 Provisioning 状态机、模型目录/协议/公式版本、模型结果重放、组成级组织授予、目标退款模型、应收/拒付/强制退款状态机和账号注销 Saga。超级管理员安全恢复已有仓库实现但仍待生产等价演练。
 
 ## 2. 逻辑拓扑
 
@@ -187,6 +187,8 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 - 首个 `admin` 身份由主机/集群受控的 `account-security` 离线命令幂等创建，业务用户在正式密码安全激活前保持 `BOOTSTRAP_PENDING`，Identity 身份保持禁用且没有超级管理员绑定。正式密码只进入 CLI 与 Identity Adapter；Account 数据库只保存一次性凭据的用途/部署代次绑定 SHA-256 校验值和生命周期事实。
 - Break-glass 与普通角色交接分离：仓库不提供公网恢复 API；离线命令必须记录“全部超级管理员异常失联”的显式确认、运维工作负载身份、事故理由、证据摘要、目标和最长 60 分钟有效期，并立即产生不可变审计与 CRITICAL 告警。它不能绕过最后管理员主动注销门禁。
 - 注销 Saga 尚由 APT-014 实现；Account 已提供 ACC-48 的所有者/最后管理员预检和全量角色撤销原语，在 Identity 清理前使有效及未来绑定失效、递增授权/用户版本并清除 Account Session。跨 Identity Refresh Token 撤销仍由注销协调器完成。
+- 后台写命令必须经 `approvalpolicy` 的版本化 `command_type` 注册表分类；当前九类直接改写财务事实的命令固定为 `APPROVAL_REQUIRED`，普通退款、组织删除、治理配置和确定性任务固定为 `AUDIT_ONLY`，未知命令或分类冲突失败关闭。审批申请、不可变快照、决定、状态事件和执行记录归 Account 所有，禁止申请人按稳定用户 ID 自审。
+- 批准事务只写 `account.approval-command.authorized.v1` Outbox，不直接改写账本。Billing 的 `billing-command-executor` 先向 Account 强一致复核申请人/审批人的当前绑定、权限、有效期、授权版本、策略和关键资源版本，再以 `approval_request_id + command_type + command_fingerprint` 派生稳定执行键；人工钱包调整的领域事务保存申请 ID/执行键并由数据库触发器拒绝新的直接入账。九类命令先完整占用稳定分类，当前只有已存在领域语义的 `WALLET_ADJUSTMENT` 可创建申请；其他类型在对应资金领域任务交付执行器前拒绝创建，不能进入永远无法执行的批准状态。当前服务间认证仍使用共享长期令牌，APT-047 负责替换为短期工作负载身份，不改变审批/执行所有权边界。
 
 ### 5.2 当前上下文
 
@@ -248,7 +250,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 - `billing.recharge.succeeded.v1`
 - `token.usage.settled.v1`
 
-本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；账号注销、目标退款和托管路由 Provisioning 等 Saga 仍未实现。
+本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；财务审批成功写入绑定命令指纹、策略、目标和关键版本的 `account.approval-command.authorized.v1`，Billing 重复消费使用同一领域执行键。账号注销、目标退款和托管路由 Provisioning 等 Saga 仍未实现。
 
 ## 9. 客户端与 Portal
 
@@ -281,7 +283,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 |---|---|---|
 | 部署 | 只有 Compose/Helm 仓库模板，本轮无环境证据 | 不得宣称生产部署、HA、备份或 RPO/RTO 已完成 |
 | 注册 | 唯一值预约、持久恢复、Identity 关联查询、异步钱包任务、SLA、`REPAIR_REQUIRED` 和证明门禁补偿已闭环 | Identity 短期密码材料仍为单副本内存能力；生产运行和故障注入证据待部署补齐 |
-| 权限 | 平台和组织接口使用 Account 原子权限码、显式作用域、绑定有效期、单条撤销、自动回收和默认拒绝；最后超级管理员保护、安全引导和离线 Break-glass 已有仓库实现 | 补管理命令审批、注销 Saga 集成和生产等价恢复演练 |
+| 权限与审批 | 平台和组织接口使用 Account 原子权限码、显式作用域、绑定有效期、单条撤销、自动回收和默认拒绝；最后超级管理员保护、安全恢复及版本化管理命令审批/幂等执行已有仓库实现 | 补注销 Saga 集成、短期工作负载身份和生产等价安全恢复/审批故障演练 |
 | 模型调用 | Hold 前置和事后核对已有基础 | 补目录/公式/Provisioning、派发持久化、重放和取消 |
 | 权益 | BASE/BONUS 组成、确定消费/到期和守恒约束已实现 | 补组织授予，并让目标退款/拒付/注销回收复用组成级事务边界 |
 | 支付 | 新华三只有下单与查询；数据模型是一单一流水 | 目标一对多流水、独立状态机、退款/拒付/应收和证据模型均待实现 |

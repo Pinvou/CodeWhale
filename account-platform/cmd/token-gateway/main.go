@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -19,6 +20,9 @@ import (
 )
 
 func main() {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"TOKEN_USAGE_RECONCILE": approvalpolicy.AuditOnly}); err != nil {
+		log.Fatal(err)
+	}
 	ctx := context.Background()
 	cfg, err := config.Load("token-gateway")
 	if err != nil {

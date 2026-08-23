@@ -11,14 +11,19 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 )
 
 func main() {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"BILLING_PAYMENT_EXPIRY_RECONCILE": approvalpolicy.AuditOnly, "BILLING_ENTITLEMENT_PACKAGE_EXPIRE": approvalpolicy.AuditOnly}); err != nil {
+		log.Fatal(err)
+	}
 	ctx := context.Background()
 	cfg, err := config.Load("billing-service")
 	if err != nil {
@@ -37,7 +42,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := billing.NewService(repository).WithPayments(payments).WithAuthorizer(authorizer)
+	approvalGate, err := billing.NewHTTPApprovalExecutionGate(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	service := billing.NewService(repository).WithPayments(payments).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate)
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal(err)
@@ -52,6 +61,16 @@ func main() {
 	}
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
+	broker, err := events.NewNATSBroker(workerContext, os.Getenv("NATS_URL"), "billing-command-executor")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer broker.Close()
+	stopApprovalConsumer, err := broker.Consume(workerContext, "billing-command-executor-v1", "account.approval-command.authorized.v1", billing.NewApprovalCommandConsumer(service).Handle)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stopApprovalConsumer()
 	go billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run(workerContext)
 	go billing.NewPackageExpiryWorker(repository, time.Minute).Run(workerContext)
 	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {

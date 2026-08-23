@@ -161,7 +161,9 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 当前 Identity Adapter 的注册密码引用及操作 ID 到密码 HMAC 的短期绑定只存在于单进程内存，Helm 固定 `identityService: 1`；Identity 创建前滚动重启会使尚未完成的引用失效，持久注册 Saga 会安全补偿并要求客户端重新预检。Identity 已创建后，Account 可通过 Keycloak 中的稳定注册操作属性恢复，不依赖内存引用。不得通过普通 Redis/业务数据库复制原始密码来扩副本；Identity 高可用需要专门的受保护短期材料方案和安全评审。
 
-Account 启动注册恢复、资料变更恢复、钱包初始化和角色绑定到期 worker。发布前必须确认 `registration_operations`、`profile_change_requests`、`password_reset_operations`、`wallet_provisioning_jobs` 以及 Account `000016_role_binding_lifecycle` 迁移完成，注册查询 HMAC 密钥在同一部署周期内稳定，且 Billing 内部钱包接口可用。角色 worker 每分钟固化已到期的组织与平台授权；即使 worker 短暂延迟，授权查询也会按数据库 `now()` 立即拒绝过期绑定。运维应监控仍满足 `revoked_at IS NULL AND expires_at <= now()` 的绑定积压、`account.role-binding.changed.v1` Outbox 和 `role.binding.expire` 审计；不得通过直接改表延长临时/紧急授权。
+Account 启动注册恢复、资料变更恢复、钱包初始化、角色绑定到期和审批期限 worker。发布前必须确认 `registration_operations`、`profile_change_requests`、`password_reset_operations`、`wallet_provisioning_jobs` 以及 Account `000016_role_binding_lifecycle`、`000018_approval_commands` 和 Billing `000017_approval_execution` 迁移完成，注册查询 HMAC 密钥在同一部署周期内稳定，且 Billing 内部钱包接口可用。角色 worker 每分钟固化已到期的组织与平台授权；即使 worker 短暂延迟，授权查询也会按数据库 `now()` 立即拒绝过期绑定。运维应监控仍满足 `revoked_at IS NULL AND expires_at <= now()` 的绑定积压、`account.role-binding.changed.v1` Outbox 和 `role.binding.expire` 审计；不得通过直接改表延长临时/紧急授权。
+
+财务审批发布后，Billing Service 同时以 durable `billing-command-executor-v1` 消费 `account.approval-command.authorized.v1`。上线顺序必须先完成两库迁移，再启动 Account 与 Account Relay，最后滚动 Billing；Billing 必须能访问内部 NATS 和 Account 内部执行复核端点。监控应覆盖批准后五分钟仍未进入 `EXECUTING`、`EXECUTION_FAILED`、消费者重复投递和 `account-platform.dead-letter.account.approval-command.authorized.v1`。重放只能使用原事件和原指纹，禁止修改消息体、直接调用账本 SQL 或恢复旧 `/adjustments/:id/approve` 路径。当前内部调用仍依赖 `INTERNAL_SERVICE_TOKEN`；切换 APT-047 短期工作负载身份前必须保持令牌仅在 Secret 管理系统中分发且 Billing/Account/NATS 均不公开。
 
 Keycloak provisioner 服务账号还必须具备读取/更新用户、重置密码和撤销用户会话的最小管理权限；缺少任一权限会使资料或密码操作进入稳定失败/修复状态，不得临时扩大为 realm-admin。轮换查询密钥会使尚未完成注册的旧查询令牌失效，必须采用覆盖最长 48 小时令牌窗口的双读或维护窗口方案；当前实现不提供双密钥读取，因此不得无计划直接轮换。运维应监控 `REPAIR_REQUIRED`、`COMPENSATION_PENDING`、钱包 SLA 超时和 `next_retry_at` 积压；人工补偿只能通过受权限保护的命令执行，禁止直接改表或直接删除 Identity。
 

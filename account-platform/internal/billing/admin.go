@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
@@ -112,6 +113,10 @@ type adminRepository interface {
 	AdminReconciliationCases(context.Context, uuid.UUID, int) ([]AdminReconciliationCase, error)
 }
 
+type adminAdjustmentRequester interface {
+	RequestAdjustmentWithIdempotency(context.Context, uuid.UUID, int64, string, uuid.UUID, string) (ManualAdjustment, error)
+}
+
 func billingAdminLimit(r *http.Request) int {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 {
@@ -199,6 +204,39 @@ func (s *Service) adminAdjustments(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Service) adminRequestAdjustment(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.repository.(adminAdjustmentRequester)
+	if !ok || s.authorizer == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADJUSTMENT_REQUEST_UNAVAILABLE", "manual adjustment requests are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	var body struct {
+		WalletID           uuid.UUID `json:"wallet_id"`
+		AmountMicrocredits int64     `json:"amount_microcredits"`
+		Reason             string    `json:"reason"`
+		IdempotencyKey     string    `json:"idempotency_key"`
+	}
+	if api.DecodeJSON(w, r, &body) != nil || body.WalletID == uuid.Nil || body.AmountMicrocredits == 0 || len(strings.TrimSpace(body.Reason)) < 10 || len(strings.TrimSpace(body.IdempotencyKey)) < 8 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid manual adjustment request", httpserver.RequestID(r.Context()))
+		return
+	}
+	requesterID, err := s.authorizer.AuthorizedUserID(r.Context(), adminPrincipal(r), "platform.billing.repairs.request")
+	if err != nil {
+		if errors.Is(err, authorization.ErrPermissionDenied) {
+			api.WriteError(w, http.StatusForbidden, "PERMISSION_DENIED", "the adjustment request permission is not granted", httpserver.RequestID(r.Context()))
+		} else {
+			api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
+		}
+		return
+	}
+	adjustment, err := repository.RequestAdjustmentWithIdempotency(r.Context(), body.WalletID, body.AmountMicrocredits, body.Reason, requesterID, body.IdempotencyKey)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusCreated, adjustment)
+}
+
 func (s *Service) adminUsageHolds(w http.ResponseWriter, r *http.Request) {
 	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
 		return repository.AdminUsageHolds(r.Context(), limit)
@@ -263,7 +301,7 @@ func (s *Service) adminWalletLedger(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (s *Service) adminDecideAdjustment(w http.ResponseWriter, r *http.Request, approve bool) {
+func (s *Service) adminRejectAdjustment(w http.ResponseWriter, r *http.Request) {
 	adjustmentID, err := uuid.Parse(r.PathValue("adjustment_id"))
 	var body struct {
 		Reason string `json:"reason"`
@@ -273,12 +311,7 @@ func (s *Service) adminDecideAdjustment(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	actor := adminActor(adminPrincipal(r))
-	var adjustment ManualAdjustment
-	if approve {
-		adjustment, err = s.repository.ApproveAdjustment(r.Context(), adjustmentID, actor, body.Reason)
-	} else {
-		adjustment, err = s.repository.RejectAdjustment(r.Context(), adjustmentID, actor, body.Reason)
-	}
+	adjustment, err := s.repository.RejectAdjustment(r.Context(), adjustmentID, actor, body.Reason)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -287,10 +320,7 @@ func (s *Service) adminDecideAdjustment(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Service) adminApproveAdjustment(w http.ResponseWriter, r *http.Request) {
-	s.adminDecideAdjustment(w, r, true)
-}
-func (s *Service) adminRejectAdjustment(w http.ResponseWriter, r *http.Request) {
-	s.adminDecideAdjustment(w, r, false)
+	api.WriteError(w, http.StatusConflict, "APPROVAL_WORKFLOW_REQUIRED", "submit this adjustment through the approval workflow", httpserver.RequestID(r.Context()))
 }
 
 func (s *Service) adminSyncPaymentOrder(w http.ResponseWriter, r *http.Request) {
@@ -494,7 +524,7 @@ func maskAdminMobile(mobile string) string {
 }
 
 func (r *PostgresRepository) AdminAdjustments(ctx context.Context, limit int) ([]ManualAdjustment, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,wallet_id,amount_microcredits,reason,requested_by,approved_by,rejected_by,status,journal_entry_id,decision_reason,created_at,updated_at,decided_at FROM manual_adjustments ORDER BY updated_at DESC,id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT id,wallet_id,amount_microcredits,reason,requested_by,approved_by,rejected_by,status,version,request_idempotency_key,approval_request_id,execution_idempotency_key,journal_entry_id,decision_reason,created_at,updated_at,decided_at FROM manual_adjustments ORDER BY updated_at DESC,id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -502,7 +532,7 @@ func (r *PostgresRepository) AdminAdjustments(ctx context.Context, limit int) ([
 	items := make([]ManualAdjustment, 0)
 	for rows.Next() {
 		var item ManualAdjustment
-		if err := rows.Scan(&item.ID, &item.WalletID, &item.AmountMicrocredits, &item.Reason, &item.RequestedBy, &item.ApprovedBy, &item.RejectedBy, &item.Status, &item.JournalEntryID, &item.DecisionReason, &item.CreatedAt, &item.UpdatedAt, &item.DecidedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.WalletID, &item.AmountMicrocredits, &item.Reason, &item.RequestedBy, &item.ApprovedBy, &item.RejectedBy, &item.Status, &item.Version, &item.RequestIdempotencyKey, &item.ApprovalRequestID, &item.ExecutionIdempotencyKey, &item.JournalEntryID, &item.DecisionReason, &item.CreatedAt, &item.UpdatedAt, &item.DecidedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

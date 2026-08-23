@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/account"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -17,6 +18,9 @@ import (
 )
 
 func main() {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"ACCOUNT_WALLET_PROVISION": approvalpolicy.AuditOnly, "ACCOUNT_ROLE_BINDING_EXPIRE": approvalpolicy.AuditOnly, "ACCOUNT_APPROVAL_EXPIRE": approvalpolicy.AuditOnly, "ACCOUNT_PROFILE_CHANGE_RECOVERY": approvalpolicy.AuditOnly, "ACCOUNT_REGISTRATION_RECOVERY": approvalpolicy.AuditOnly, "ACCOUNT_COMMERCE_CUSTOMER_SYNC": approvalpolicy.AuditOnly}); err != nil {
+		log.Fatal(err)
+	}
 	ctx := context.Background()
 	cfg, err := config.Load("account-service")
 	if err != nil {
@@ -61,6 +65,7 @@ func main() {
 	service := account.NewService(repository, wallets).WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN"))
 	go account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run(ctx)
 	go account.NewRoleBindingExpiryWorker(repository, time.Minute).Run(ctx)
+	go account.NewApprovalExpiryWorker(repository, time.Minute).Run(ctx)
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
 		if decodeErr != nil {

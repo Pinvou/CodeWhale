@@ -13,9 +13,29 @@ import (
 )
 
 func (r *PostgresRepository) RequestAdjustment(ctx context.Context, walletID uuid.UUID, amount int64, reason string, requestedBy uuid.UUID) (ManualAdjustment, error) {
+	return r.requestAdjustment(ctx, walletID, amount, reason, requestedBy, "")
+}
+
+func (r *PostgresRepository) RequestAdjustmentWithIdempotency(ctx context.Context, walletID uuid.UUID, amount int64, reason string, requestedBy uuid.UUID, idempotencyKey string) (ManualAdjustment, error) {
+	return r.requestAdjustment(ctx, walletID, amount, reason, requestedBy, strings.TrimSpace(idempotencyKey))
+}
+
+func (r *PostgresRepository) requestAdjustment(ctx context.Context, walletID uuid.UUID, amount int64, reason string, requestedBy uuid.UUID, idempotencyKey string) (ManualAdjustment, error) {
 	reason = strings.TrimSpace(reason)
-	if walletID == uuid.Nil || requestedBy == uuid.Nil || amount == 0 || amount == math.MinInt64 || reason == "" {
+	if walletID == uuid.Nil || requestedBy == uuid.Nil || amount == 0 || amount == math.MinInt64 || reason == "" || (idempotencyKey != "" && (len(idempotencyKey) < 8 || len(idempotencyKey) > 120)) {
 		return ManualAdjustment{}, ErrConflict
+	}
+	if idempotencyKey != "" {
+		existing, err := getAdjustmentByRequestKey(ctx, r.pool, requestedBy, idempotencyKey)
+		if err == nil {
+			if existing.WalletID != walletID || existing.AmountMicrocredits != amount || existing.Reason != reason {
+				return ManualAdjustment{}, ErrConflict
+			}
+			return existing, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return ManualAdjustment{}, err
+		}
 	}
 	wallet, err := getWallet(ctx, r.pool, walletID, false)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -35,16 +55,31 @@ func (r *PostgresRepository) RequestAdjustment(ctx context.Context, walletID uui
 		Reason:             reason,
 		RequestedBy:        requestedBy,
 		Status:             "PENDING_APPROVAL",
+		Version:            1,
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
-	_, err = r.pool.Exec(ctx, `INSERT INTO manual_adjustments(id,wallet_id,amount_microcredits,reason,requested_by,status,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'PENDING_APPROVAL',$6,$6)`, adjustment.ID, walletID, amount, reason, requestedBy, now)
-	return adjustment, err
+	if idempotencyKey != "" {
+		adjustment.RequestIdempotencyKey = &idempotencyKey
+	}
+	command, err := r.pool.Exec(ctx, `INSERT INTO manual_adjustments(id,wallet_id,amount_microcredits,reason,requested_by,status,request_idempotency_key,created_at,updated_at) VALUES($1,$2,$3,$4,$5,'PENDING_APPROVAL',NULLIF($6,''),$7,$7) ON CONFLICT (requested_by,request_idempotency_key) WHERE request_idempotency_key IS NOT NULL DO NOTHING`, adjustment.ID, walletID, amount, reason, requestedBy, idempotencyKey, now)
+	if err != nil {
+		return ManualAdjustment{}, err
+	}
+	if command.RowsAffected() == 1 {
+		return adjustment, nil
+	}
+	existing, err := getAdjustmentByRequestKey(ctx, r.pool, requestedBy, idempotencyKey)
+	if err != nil || existing.WalletID != walletID || existing.AmountMicrocredits != amount || existing.Reason != reason {
+		return ManualAdjustment{}, ErrConflict
+	}
+	return existing, nil
 }
 
-func (r *PostgresRepository) ApproveAdjustment(ctx context.Context, adjustmentID, approvedBy uuid.UUID, decisionReason string) (ManualAdjustment, error) {
+func (r *PostgresRepository) ExecuteApprovedAdjustment(ctx context.Context, adjustmentID, approvalRequestID uuid.UUID, executionIdempotencyKey string, approvedBy uuid.UUID, decisionReason string) (ManualAdjustment, error) {
 	decisionReason = strings.TrimSpace(decisionReason)
-	if adjustmentID == uuid.Nil || approvedBy == uuid.Nil || decisionReason == "" {
+	executionIdempotencyKey = strings.TrimSpace(executionIdempotencyKey)
+	if adjustmentID == uuid.Nil || approvalRequestID == uuid.Nil || approvedBy == uuid.Nil || decisionReason == "" || executionIdempotencyKey == "" {
 		return ManualAdjustment{}, ErrConflict
 	}
 	tx, err := r.pool.Begin(ctx)
@@ -59,7 +94,7 @@ func (r *PostgresRepository) ApproveAdjustment(ctx context.Context, adjustmentID
 	if err != nil {
 		return ManualAdjustment{}, err
 	}
-	if adjustment.Status == "POSTED" && adjustment.ApprovedBy != nil && *adjustment.ApprovedBy == approvedBy {
+	if adjustment.Status == "POSTED" && adjustment.ApprovedBy != nil && *adjustment.ApprovedBy == approvedBy && adjustment.ApprovalRequestID != nil && *adjustment.ApprovalRequestID == approvalRequestID && adjustment.ExecutionIdempotencyKey != nil && *adjustment.ExecutionIdempotencyKey == executionIdempotencyKey {
 		return adjustment, tx.Commit(ctx)
 	}
 	if err := validateAdjustmentDecision(adjustment, approvedBy, decisionReason); err != nil {
@@ -126,7 +161,7 @@ func (r *PostgresRepository) ApproveAdjustment(ctx context.Context, adjustmentID
 	if command.RowsAffected() != 1 {
 		return ManualAdjustment{}, ErrInsufficientBalance
 	}
-	command, err = tx.Exec(ctx, `UPDATE manual_adjustments SET approved_by=$2,status='POSTED',journal_entry_id=$3,decision_reason=$4,decided_at=$5,updated_at=$5 WHERE id=$1 AND status='PENDING_APPROVAL'`, adjustment.ID, approvedBy, entryID, decisionReason, now)
+	command, err = tx.Exec(ctx, `UPDATE manual_adjustments SET approved_by=$2,status='POSTED',journal_entry_id=$3,decision_reason=$4,decided_at=$5,updated_at=$5,version=version+1,approval_request_id=$6,execution_idempotency_key=$7 WHERE id=$1 AND status='PENDING_APPROVAL'`, adjustment.ID, approvedBy, entryID, decisionReason, now, approvalRequestID, executionIdempotencyKey)
 	if err != nil {
 		return ManualAdjustment{}, err
 	}
@@ -135,6 +170,9 @@ func (r *PostgresRepository) ApproveAdjustment(ctx context.Context, adjustmentID
 	}
 	adjustment.ApprovedBy = &approvedBy
 	adjustment.Status = "POSTED"
+	adjustment.Version++
+	adjustment.ApprovalRequestID = &approvalRequestID
+	adjustment.ExecutionIdempotencyKey = &executionIdempotencyKey
 	adjustment.JournalEntryID = &entryID
 	adjustment.DecisionReason = &decisionReason
 	adjustment.DecidedAt = &now
@@ -166,7 +204,7 @@ func (r *PostgresRepository) RejectAdjustment(ctx context.Context, adjustmentID,
 		return ManualAdjustment{}, ErrConflict
 	}
 	now := r.now()
-	command, err := tx.Exec(ctx, `UPDATE manual_adjustments SET rejected_by=$2,status='REJECTED',decision_reason=$3,decided_at=$4,updated_at=$4 WHERE id=$1 AND status='PENDING_APPROVAL'`, adjustment.ID, rejectedBy, decisionReason, now)
+	command, err := tx.Exec(ctx, `UPDATE manual_adjustments SET rejected_by=$2,status='REJECTED',decision_reason=$3,decided_at=$4,updated_at=$4,version=version+1 WHERE id=$1 AND status='PENDING_APPROVAL'`, adjustment.ID, rejectedBy, decisionReason, now)
 	if err != nil {
 		return ManualAdjustment{}, err
 	}
@@ -175,6 +213,7 @@ func (r *PostgresRepository) RejectAdjustment(ctx context.Context, adjustmentID,
 	}
 	adjustment.RejectedBy = &rejectedBy
 	adjustment.Status = "REJECTED"
+	adjustment.Version++
 	adjustment.DecisionReason = &decisionReason
 	adjustment.DecidedAt = &now
 	adjustment.UpdatedAt = now
@@ -248,11 +287,19 @@ func consumeAdjustmentLots(ctx context.Context, tx pgx.Tx, entryID, walletAccoun
 }
 
 func getAdjustment(ctx context.Context, database queryable, adjustmentID uuid.UUID, lock bool) (ManualAdjustment, error) {
-	query := `SELECT id,wallet_id,amount_microcredits,reason,requested_by,approved_by,rejected_by,status,journal_entry_id,decision_reason,created_at,updated_at,decided_at FROM manual_adjustments WHERE id=$1`
+	query := `SELECT id,wallet_id,amount_microcredits,reason,requested_by,approved_by,rejected_by,status,version,request_idempotency_key,approval_request_id,execution_idempotency_key,journal_entry_id,decision_reason,created_at,updated_at,decided_at FROM manual_adjustments WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var adjustment ManualAdjustment
-	err := database.QueryRow(ctx, query, adjustmentID).Scan(&adjustment.ID, &adjustment.WalletID, &adjustment.AmountMicrocredits, &adjustment.Reason, &adjustment.RequestedBy, &adjustment.ApprovedBy, &adjustment.RejectedBy, &adjustment.Status, &adjustment.JournalEntryID, &adjustment.DecisionReason, &adjustment.CreatedAt, &adjustment.UpdatedAt, &adjustment.DecidedAt)
+	err := database.QueryRow(ctx, query, adjustmentID).Scan(&adjustment.ID, &adjustment.WalletID, &adjustment.AmountMicrocredits, &adjustment.Reason, &adjustment.RequestedBy, &adjustment.ApprovedBy, &adjustment.RejectedBy, &adjustment.Status, &adjustment.Version, &adjustment.RequestIdempotencyKey, &adjustment.ApprovalRequestID, &adjustment.ExecutionIdempotencyKey, &adjustment.JournalEntryID, &adjustment.DecisionReason, &adjustment.CreatedAt, &adjustment.UpdatedAt, &adjustment.DecidedAt)
 	return adjustment, err
+}
+
+func getAdjustmentByRequestKey(ctx context.Context, database queryable, requestedBy uuid.UUID, idempotencyKey string) (ManualAdjustment, error) {
+	var adjustmentID uuid.UUID
+	if err := database.QueryRow(ctx, `SELECT id FROM manual_adjustments WHERE requested_by=$1 AND request_idempotency_key=$2`, requestedBy, idempotencyKey).Scan(&adjustmentID); err != nil {
+		return ManualAdjustment{}, err
+	}
+	return getAdjustment(ctx, database, adjustmentID, false)
 }

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pinvou.com/schemas/account.approval-command.authorized.v1.json",
+  "title": "account.approval-command.authorized.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "aggregate_id", "aggregate_version", "occurred_at", "trace_id", "payload"],
+  "properties": {
+    "event_id": { "type": "string", "format": "uuid" },
+    "event_type": { "const": "account.approval-command.authorized.v1" },
+    "aggregate_id": { "type": "string", "format": "uuid" },
+    "aggregate_version": { "type": "integer", "minimum": 2 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "trace_id": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approval_request_id", "command_type", "command_fingerprint", "policy_version", "executor_identity", "execution_deadline", "normalized_command", "target_resource_type", "target_resource_id", "critical_resource_versions"],
+      "properties": {
+        "approval_request_id": { "type": "string", "format": "uuid" },
+        "command_type": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "command_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "policy_version": { "type": "integer", "minimum": 1 },
+        "executor_identity": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "execution_deadline": { "type": "string", "format": "date-time" },
+        "normalized_command": { "type": "object", "additionalProperties": true },
+        "target_resource_type": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "target_resource_id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "critical_resource_versions": { "type": "object", "additionalProperties": true }
+      }
+    }
+  }
+}

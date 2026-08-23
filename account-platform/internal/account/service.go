@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -57,6 +58,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.POST("/authorization/check", httpserver.AdaptFunc(s.checkPermission))
+	internal.POST("/approval-requests/:approval_request_id/executions", approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
+	internal.POST("/approval-requests/:approval_request_id/executions/complete", approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))
 	if s.mobileAuth != nil {
 		router.POST("/v1/auth/registration/precheck", httpserver.AdaptFunc(s.precheckMobileRegistration))
 		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
@@ -99,35 +102,43 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.GET("/overview", s.requirePermission(PermissionPlatformSystemStatusRead), httpserver.AdaptFunc(s.adminOverview))
 	admin.GET("/roles", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoles))
 	admin.GET("/role-bindings", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoleBindings))
-	admin.POST("/role-bindings", s.requirePermission(PermissionPlatformRolesAssign), httpserver.AdaptFunc(s.adminGrantRoleBinding))
-	admin.DELETE("/role-bindings/:binding_id", s.requirePermission(PermissionPlatformRolesAssign), httpserver.AdaptFunc(s.adminRevokeRoleBinding))
+	admin.POST("/role-bindings", s.requirePermission(PermissionPlatformRolesAssign), approvalpolicy.Require("ACCOUNT_ROLE_BINDING_GRANT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminGrantRoleBinding))
+	admin.DELETE("/role-bindings/:binding_id", s.requirePermission(PermissionPlatformRolesAssign), approvalpolicy.Require("ACCOUNT_ROLE_BINDING_REVOKE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRevokeRoleBinding))
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
 	admin.GET("/user-code-lookups/:user_code", httpserver.AdaptFunc(s.adminUserByCode))
 	admin.GET("/users/:user_id/memberships", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUserMemberships))
-	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), httpserver.AdaptFunc(s.adminSetUserStatus))
-	admin.DELETE("/users/:user_id", s.requirePermission(PermissionPlatformUsersStatusManage), httpserver.AdaptFunc(s.adminDeleteUser))
+	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
+	admin.DELETE("/users/:user_id", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteUser))
 	admin.GET("/organizations", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminOrganizations))
-	admin.POST("/organizations", s.requirePermission(PermissionPlatformOrganizationsCreate), httpserver.AdaptFunc(s.adminCreateOrganization))
-	admin.PATCH("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminRenameOrganization))
-	admin.PATCH("/organizations/:organization_id/status", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminSetOrganizationStatus))
-	admin.DELETE("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsDelete), httpserver.AdaptFunc(s.adminDeleteOrganization))
+	admin.POST("/organizations", s.requirePermission(PermissionPlatformOrganizationsCreate), approvalpolicy.Require("ACCOUNT_ORGANIZATION_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateOrganization))
+	admin.PATCH("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_ORGANIZATION_RENAME", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRenameOrganization))
+	admin.PATCH("/organizations/:organization_id/status", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_ORGANIZATION_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetOrganizationStatus))
+	admin.DELETE("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsDelete), approvalpolicy.Require("ACCOUNT_ORGANIZATION_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteOrganization))
 	admin.GET("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminUnits))
 	admin.GET("/organizations/:organization_id/members", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminMembers))
-	admin.POST("/organizations/:organization_id/members", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminAddMember))
-	admin.PUT("/organizations/:organization_id/members/:user_id/roles", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminReplaceMemberRoles))
-	admin.DELETE("/organizations/:organization_id/members/:user_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminRemoveMember))
-	admin.POST("/organizations/:organization_id/ownership", s.requirePermission(PermissionPlatformOrganizationsOwnerTransfer), httpserver.AdaptFunc(s.adminTransferOwnership))
-	admin.POST("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminCreateUnit))
-	admin.PATCH("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminRenameUnit))
-	admin.DELETE("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminDeleteUnit))
+	admin.POST("/organizations/:organization_id/members", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_MEMBER_ADD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminAddMember))
+	admin.PUT("/organizations/:organization_id/members/:user_id/roles", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_MEMBER_ROLES_REPLACE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminReplaceMemberRoles))
+	admin.DELETE("/organizations/:organization_id/members/:user_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_MEMBER_REMOVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRemoveMember))
+	admin.POST("/organizations/:organization_id/ownership", s.requirePermission(PermissionPlatformOrganizationsOwnerTransfer), approvalpolicy.Require("ACCOUNT_OWNERSHIP_TRANSFER", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransferOwnership))
+	admin.POST("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_UNIT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateUnit))
+	admin.PATCH("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_UNIT_RENAME", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRenameUnit))
+	admin.DELETE("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_UNIT_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteUnit))
 	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
 	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
+	admin.GET("/approval-policies", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminApprovalPolicies))
+	admin.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequests))
+	admin.POST("/approval-requests", approvalpolicy.Require("APPROVAL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateApprovalDraft))
+	admin.GET("/approval-requests/:approval_request_id", httpserver.AdaptFunc(s.adminApprovalRequest))
+	admin.PUT("/approval-requests/:approval_request_id", approvalpolicy.Require("APPROVAL_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateApprovalDraft))
+	admin.POST("/approval-requests/:approval_request_id/actions/submit", approvalpolicy.Require("APPROVAL_REQUEST_SUBMIT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSubmitApprovalRequest))
+	admin.POST("/approval-requests/:approval_request_id/actions/withdraw", approvalpolicy.Require("APPROVAL_REQUEST_WITHDRAW", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminWithdrawApprovalRequest))
+	admin.POST("/approval-requests/:approval_request_id/actions/decide", approvalpolicy.Require("APPROVAL_REQUEST_DECIDE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDecideApprovalRequest))
 	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
-	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRetryRegistration))
-	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminCompensateRegistration))
+	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryRegistration))
+	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_COMPENSATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCompensateRegistration))
 	if s.profiles != nil {
 		admin.GET("/profile-change-requests", s.requirePermission(PermissionPlatformProfileChangesRepair), httpserver.AdaptFunc(s.adminProfileChanges))
-		admin.POST("/profile-change-requests/:request_id/actions/retry", s.requirePermission(PermissionPlatformProfileChangesRepair), httpserver.AdaptFunc(s.adminRetryProfileChange))
+		admin.POST("/profile-change-requests/:request_id/actions/retry", s.requirePermission(PermissionPlatformProfileChangesRepair), approvalpolicy.Require("ACCOUNT_PROFILE_CHANGE_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryProfileChange))
 	}
 	return router
 }
@@ -457,6 +468,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
 	case errors.Is(err, ErrBootstrapPending):
 		status, code, message = http.StatusForbidden, "ADMIN_BOOTSTRAP_PENDING", "the first administrator must complete secure activation"
+	case errors.Is(err, ErrApprovalSelfDecision):
+		status, code, message = http.StatusConflict, "APPROVAL_SELF_DECISION_FORBIDDEN", "the requester cannot decide their own approval request"
+	case errors.Is(err, ErrApprovalExpired):
+		status, code, message = http.StatusGone, "APPROVAL_REQUEST_EXPIRED", "the approval request has expired"
+	case errors.Is(err, ErrApprovalInvalidated):
+		status, code, message = http.StatusConflict, "APPROVAL_REQUEST_INVALIDATED", "the approval request no longer matches current policy, authorization, or resource facts"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
