@@ -86,6 +86,7 @@ function ensureNodeModules() {
 
 function verify() {
   ensureNodeModules();
+  run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-tasks.mjs')]);
   run(executable('go'), ['test', '-tags=nomsgpack', './...'], { cwd: platformRoot });
   run(executable('go'), ['vet', '-tags=nomsgpack', './...'], { cwd: platformRoot });
   runNpm(['test'], { cwd: platformRoot });
