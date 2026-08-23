@@ -43,6 +43,7 @@ pub struct WindowsUpdateInfo {
     pub sn: String,
     pub update_type: String,
     pub ota_host: String,
+    pub readiness_attestation: Option<super::super::switch_gate::ClientReadinessAttestation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +144,8 @@ struct UpgradeData {
     package_md5: String,
     #[serde(default, rename = "pkgUrl")]
     package_url: String,
+    #[serde(default, rename = "readinessAttestation")]
+    readiness_attestation: Option<super::super::switch_gate::ClientReadinessAttestation>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -221,6 +224,7 @@ pub async fn check_for_update_info(
         update_type: info.update_type,
         platform: "windows".to_string(),
         ota_host: info.ota_host,
+        readiness_attestation: info.readiness_attestation,
         platforms: std::collections::HashMap::new(),
     })
 }
@@ -246,6 +250,7 @@ pub async fn check_for_update(
             sn: config.sn,
             update_type: String::new(),
             ota_host: config.host,
+            readiness_attestation: None,
         });
     }
     let mut data: UpgradeData = response.into_data("获取升级信息")?;
@@ -265,6 +270,7 @@ pub async fn check_for_update(
             sn: config.sn,
             update_type: update_type_name(data.update_type).to_string(),
             ota_host: config.host,
+            readiness_attestation: data.readiness_attestation,
         });
     }
 
@@ -275,6 +281,9 @@ pub async fn check_for_update(
         data.package_url = download.package_url;
         if data.package_md5.trim().is_empty() {
             data.package_md5 = download.package_md5;
+        }
+        if data.readiness_attestation.is_none() {
+            data.readiness_attestation = download.readiness_attestation;
         }
     }
 
@@ -294,6 +303,7 @@ pub async fn check_for_update(
         sn: config.sn,
         update_type: update_type_name(data.update_type).to_string(),
         ota_host: config.host,
+        readiness_attestation: data.readiness_attestation,
     })
 }
 

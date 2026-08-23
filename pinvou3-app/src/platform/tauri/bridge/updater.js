@@ -86,7 +86,7 @@
       var downloadResult = await invoke("download_update", { info: state.updateInfo });
       state.updateProgress = 100; notify();
       if (downloadResult && typeof downloadResult === "object" && downloadResult.installer_path) {
-        await invoke("install_update", { installerPath: downloadResult.installer_path, info: state.updateInfo });
+        await invoke("install_update", { packagePath: downloadResult.package_path, installerPath: downloadResult.installer_path, info: state.updateInfo });
       } else {
         await invoke("install_update", { debPath: downloadResult, info: state.updateInfo });
       }

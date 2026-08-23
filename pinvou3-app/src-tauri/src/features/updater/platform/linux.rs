@@ -81,6 +81,8 @@ struct LatestManifest {
     pub sha256: String,
     #[serde(default)]
     pub size: u64,
+    #[serde(default)]
+    pub readiness_attestation: Option<super::super::switch_gate::ClientReadinessAttestation>,
 }
 
 pub fn check_update_platform_support() -> Result<(), String> {
@@ -117,6 +119,7 @@ pub async fn check_for_update_info(
         update_type: String::new(),
         platform: "linux".to_string(),
         ota_host: String::new(),
+        readiness_attestation: m.readiness_attestation,
         platforms: std::collections::HashMap::new(),
     })
 }

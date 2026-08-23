@@ -37,6 +37,10 @@ export class AccountPlatformDesktopClient {
   }
 
   session(signal) { return this.call(() => this.transport.session(), signal); }
+  openPortal(signal) { return this.call(() => this.transport.openPortal(), signal); }
+  selectCatalogModel(modelId, signal) { return this.call(() => this.transport.selectCatalogModel({ modelId }), signal); }
+  modelCatalog(signal) { return this.call(() => this.transport.modelCatalog(), signal); }
+  branchReplacementSession(input, signal) { return this.call(() => this.transport.branchReplacementSession(input), signal); }
   login(account, password, signal) {
     return this.call(() => this.transport.login({ account, password }), signal);
   }

@@ -219,6 +219,8 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [auth, setAuth] = useState('loading');
   const [me, setMe] = useState(null);
   const [balance, setBalance] = useState(null);
+  const [catalog, setCatalog] = useState({ items: [], selected_model_id: '' });
+  const [catalogBusy, setCatalogBusy] = useState(false);
   const [account, setAccount] = useState('');
   const [password, setPassword] = useState('');
   const [passwordConfirmation, setPasswordConfirmation] = useState('');
@@ -284,10 +286,14 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
         setAuth('ready');
         return;
       }
-      const results = await Promise.allSettled([client.balance(controller.signal)]);
+      const results = await Promise.allSettled([
+        client.balance(controller.signal),
+        client.modelCatalog(controller.signal),
+      ]);
       if (!isCurrent()) return;
       setMe(nextAccount);
       setBalance(results[0].status === 'fulfilled' ? results[0].value : null);
+      setCatalog(results[1].status === 'fulfilled' ? results[1].value : { items: [], selected_model_id: '' });
       setAuth('ready');
       if (results.some(result => result.status === 'rejected')) setError(copy.requestFailed);
     } catch (reason) {
@@ -730,6 +736,21 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     void loadRecharge();
   };
 
+  const selectCatalogModel = async modelId => {
+    if (!modelId || catalogBusy) return;
+    setCatalogBusy(true);
+    setError('');
+    try {
+      await client.selectCatalogModel(modelId);
+      setCatalog(current => ({ ...current, selected_model_id: modelId }));
+      setNotice(copy.modelSelectionSaved);
+    } catch (reason) {
+      setError(localizedError(copy, reason));
+    } finally {
+      setCatalogBusy(false);
+    }
+  };
+
   const createRecharge = async (productId, channel) => {
     if (rechargeBusy) return;
     setRechargeBusy(true);
@@ -816,6 +837,19 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
               <div className={`text-right text-[11px] ${mutedText}`}>{copy.reservedCredits}<div className="mt-1 text-[13px] font-medium tabular-nums">{formatPoints(balance?.reserved_microcredits, language)}</div></div>
             </div>
           </div>
+          <div className={`rounded-2xl border p-3 ${cardTheme}`}>
+            <label className="block">
+              <span className={`mb-1.5 block text-[11px] font-medium ${mutedText}`}>{copy.platformModel}</span>
+              <select value={catalog.selected_model_id || ''} disabled={catalogBusy || !(catalog.items || []).some(item => item.context_eligible && item.lifecycle_status !== 'REMOVED')} onChange={event => void selectCatalogModel(event.target.value)} className={`h-9 w-full rounded-xl border px-3 text-[12px] outline-none ${controlTheme}`}>
+                <option value="" disabled>{copy.selectPlatformModel}</option>
+                {(catalog.items || []).filter(item => item.lifecycle_status !== 'REMOVED').map(item => {
+                  const deprecated = item.lifecycle_status === 'DEPRECATED';
+                  return <option key={item.model_id} value={item.model_id} disabled={!item.context_eligible}>{item.display_name}{deprecated ? ` · ${copy.modelDeprecated}` : ''}{!item.context_eligible ? ` · ${copy.modelUnavailable}` : ''}</option>;
+                })}
+              </select>
+            </label>
+            {(catalog.items || []).find(item => item.model_id === catalog.selected_model_id)?.lifecycle_status === 'DEPRECATED' && <div className={`mt-2 text-[11px] leading-relaxed ${mutedText}`}>{copy.modelDeprecationWarning}</div>}
+          </div>
           </>}
           <div className={`rounded-2xl border p-3 ${cardTheme}`}>
             <button type="button" onClick={() => { setProfileOpen(value => !value); setError(''); }} className="flex w-full items-center justify-between text-left text-[12px] font-semibold"><span>{copy.profileSettings}</span><span className={mutedText}>{profileOpen ? '−' : '+'}</span></button>
@@ -829,6 +863,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
               {!profileRequest && <button type="submit" disabled={busy || !profileValue.trim() || !profilePassword} className="h-9 w-full rounded-xl bg-[#10B981]/10 text-[12px] font-semibold text-[#07966F] disabled:opacity-40">{copy.continueChange}</button>}
             </form>}
           </div>
+          <button type="button" onClick={() => void client.openPortal().catch(reason => setError(localizedError(copy, reason)))} disabled={busy} className="h-9 w-full rounded-xl bg-[#10B981]/10 text-[12px] font-semibold text-[#07966F] transition-colors hover:bg-[#10B981]/20 disabled:opacity-40">{copy.openWebAccount}</button>
           <button type="button" onClick={() => void logout()} disabled={busy} className={`h-9 w-full rounded-xl text-[12px] font-medium transition-colors disabled:opacity-40 ${isDark ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}>{copy.logout}</button>
         </div>
       )}

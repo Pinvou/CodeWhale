@@ -14,6 +14,13 @@ use crate::platform::prefs::{
 
 const MIGRATION_VERSION: u32 = 1;
 const REPORT_FILE: &str = "account-platform-model-v1.json";
+const LEGACY_IDENTITY_FILES: [&str; 4] = [
+    "bindings.json",
+    "device.json",
+    "identity.json",
+    "session.json",
+];
+const LEGACY_CACHE_FILES: [&str; 3] = ["models.json", "catalog.json", "login-cache.json"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +39,12 @@ pub(crate) struct ClientModelMigrationReport {
     pub legacy_bindings_discovered: usize,
     pub credentials_removed: usize,
     pub cleanup_errors: Vec<String>,
+    #[serde(default)]
+    pub legacy_identity_files_discovered: usize,
+    #[serde(default)]
+    pub legacy_cache_files_discovered: usize,
+    #[serde(default)]
+    pub preserved_user_models: usize,
 }
 
 impl Default for ClientModelMigrationReport {
@@ -45,6 +58,9 @@ impl Default for ClientModelMigrationReport {
             legacy_bindings_discovered: 0,
             credentials_removed: 0,
             cleanup_errors: Vec::new(),
+            legacy_identity_files_discovered: 0,
+            legacy_cache_files_discovered: 0,
+            preserved_user_models: 0,
         }
     }
 }
@@ -91,6 +107,10 @@ fn migrate_at<S: CredentialStore>(
         settings_migrated,
         ..ClientModelMigrationReport::default()
     };
+    let inventory = inventory_at(home)?;
+    report.legacy_identity_files_discovered = inventory.legacy_identity_files;
+    report.legacy_cache_files_discovered = inventory.legacy_cache_files;
+    report.preserved_user_models = inventory.preserved_user_models;
     report.session_bindings_migrated = migrate_model_ids_in_json(
         &home.join("sessions").join("_session_models.json"),
         JsonModelIdScope::EveryStringValue,
@@ -153,23 +173,183 @@ fn migrate_at<S: CredentialStore>(
         }
     }
 
-    if bindings_path.exists() {
-        let backup = migration_dir.join("legacy-llmapi-bindings-v1.json");
-        copy_backup_once(&bindings_path, &backup)?;
-        if report.cleanup_errors.is_empty() {
-            std::fs::remove_file(&bindings_path)
-                .with_context(|| format!("remove inactive bindings {}", bindings_path.display()))?;
-            if let Some(parent) = bindings_path.parent() {
-                let _ = std::fs::remove_dir(parent);
-            }
-        }
-    }
+    cleanup_legacy_files(home, &migration_dir, &mut report)?;
 
     if !report.cleanup_errors.is_empty() {
         report.state = MigrationState::CleanupPending;
     }
     persist_report(&report_path, &report)?;
     Ok(report)
+}
+
+fn cleanup_legacy_files(
+    home: &Path,
+    migration_dir: &Path,
+    report: &mut ClientModelMigrationReport,
+) -> Result<()> {
+    let legacy_root = home.join("llmapi-hub");
+    let files: Vec<_> = LEGACY_IDENTITY_FILES
+        .iter()
+        .chain(LEGACY_CACHE_FILES.iter())
+        .map(|name| (name, legacy_root.join(name)))
+        .filter(|(_, path)| path.exists())
+        .collect();
+    for (name, source) in &files {
+        let backup = migration_dir.join(format!(
+            "legacy-llmapi-{}-v1.json",
+            name.trim_end_matches(".json")
+        ));
+        if let Err(error) = copy_backup_once(source, &backup) {
+            report
+                .cleanup_errors
+                .push(format!("legacy_backup_failed:{name}:{error:#}"));
+        }
+    }
+    if report.cleanup_errors.is_empty() {
+        for (name, source) in files {
+            if let Err(error) = std::fs::remove_file(&source) {
+                report
+                    .cleanup_errors
+                    .push(format!("legacy_cleanup_failed:{name}:{error}"));
+            }
+        }
+        if report.cleanup_errors.is_empty() {
+            let _ = std::fs::remove_dir(&legacy_root);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct ClientMigrationPreflight {
+    pub schema_version: u32,
+    pub legacy_identity_files: usize,
+    pub legacy_cache_files: usize,
+    pub legacy_credential_references: usize,
+    pub preserved_user_models: usize,
+    pub legacy_selection_present: bool,
+    pub settings_valid: bool,
+    pub session_bindings_valid: bool,
+    pub scheduled_profiles_valid: bool,
+}
+
+/// Performs the install-gate inventory and migration simulation without
+/// writing configuration or opening credential values.
+pub(crate) fn preflight() -> Result<ClientMigrationPreflight> {
+    preflight_at(&crate::platform::paths::pinvou3_home())
+}
+
+pub(crate) fn runtime_ready() -> Result<(), String> {
+    let report = crate::platform::paths::pinvou3_home()
+        .join("migrations")
+        .join(REPORT_FILE);
+    match load_completed_report(&report) {
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err("account_platform_migration_incomplete: retry migration or reinstall the current version".to_string()),
+        Err(_) => Err("account_platform_migration_invalid: restore the pre-switch configuration backup".to_string()),
+    }
+}
+
+fn preflight_at(home: &Path) -> Result<ClientMigrationPreflight> {
+    let settings_path = home.join("settings.json");
+    let mut settings = if settings_path.exists() {
+        serde_json::from_slice::<Value>(
+            &std::fs::read(&settings_path)
+                .with_context(|| format!("read {}", settings_path.display()))?,
+        )
+        .with_context(|| format!("parse {}", settings_path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    let legacy_selection_present = settings
+        .pointer("/advanced/active_model_id")
+        .and_then(Value::as_str)
+        == Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID);
+    let credential_references = read_legacy_model_credential_references(&settings_path)?
+        .1
+        .len();
+    let inventory = inventory_value(&settings, home);
+    replace_legacy_model_ids(&mut settings, JsonModelIdScope::ModelIdFields, false);
+    serde_json::to_vec(&settings).context("serialize staged settings migration")?;
+
+    let session_bindings_valid = simulate_json_migration(
+        &home.join("sessions").join("_session_models.json"),
+        JsonModelIdScope::EveryStringValue,
+    )?;
+    let scheduled_profiles_valid = simulate_json_migration(
+        &home.join("scheduled-runs").join("session-profiles.json"),
+        JsonModelIdScope::ModelIdFields,
+    )?;
+    let bindings = read_legacy_binding_keys(&home.join("llmapi-hub").join("bindings.json"))?;
+    Ok(ClientMigrationPreflight {
+        schema_version: MIGRATION_VERSION,
+        legacy_identity_files: inventory.legacy_identity_files,
+        legacy_cache_files: inventory.legacy_cache_files,
+        legacy_credential_references: credential_references + bindings.len() * 3,
+        preserved_user_models: inventory.preserved_user_models,
+        legacy_selection_present,
+        settings_valid: true,
+        session_bindings_valid,
+        scheduled_profiles_valid,
+    })
+}
+
+#[derive(Default)]
+struct ClientMigrationInventory {
+    legacy_identity_files: usize,
+    legacy_cache_files: usize,
+    preserved_user_models: usize,
+}
+
+fn inventory_at(home: &Path) -> Result<ClientMigrationInventory> {
+    let settings_path = home.join("settings.json");
+    let settings = if settings_path.exists() {
+        serde_json::from_slice::<Value>(&std::fs::read(&settings_path)?)?
+    } else {
+        serde_json::json!({})
+    };
+    Ok(inventory_value(&settings, home))
+}
+
+fn inventory_value(settings: &Value, home: &Path) -> ClientMigrationInventory {
+    let models = settings
+        .pointer("/advanced/saved_models")
+        .and_then(Value::as_array);
+    let preserved_user_models = models
+        .map(|items| {
+            items
+                .iter()
+                .filter(|model| {
+                    model.get("id").and_then(Value::as_str) != Some(LEGACY_BUILTIN_LLMAPI_MODEL_ID)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let legacy_root = home.join("llmapi-hub");
+    let legacy_identity_files = LEGACY_IDENTITY_FILES
+        .iter()
+        .filter(|name| legacy_root.join(name).exists())
+        .count();
+    let legacy_cache_files = LEGACY_CACHE_FILES
+        .iter()
+        .filter(|name| legacy_root.join(name).exists())
+        .count();
+    ClientMigrationInventory {
+        legacy_identity_files,
+        legacy_cache_files,
+        preserved_user_models,
+    }
+}
+
+fn simulate_json_migration(path: &Path, scope: JsonModelIdScope) -> Result<bool> {
+    if !path.exists() {
+        return Ok(true);
+    }
+    let mut value: Value = serde_json::from_slice(&std::fs::read(path)?)
+        .with_context(|| format!("parse staged migration input {}", path.display()))?;
+    replace_legacy_model_ids(&mut value, scope, false);
+    serde_json::to_vec(&value).context("serialize staged migration output")?;
+    Ok(true)
 }
 
 fn load_completed_report(path: &Path) -> Result<Option<ClientModelMigrationReport>> {
@@ -406,6 +586,8 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        std::fs::write(binding_dir.join("device.json"), r#"{"device":"legacy"}"#).unwrap();
+        std::fs::write(binding_dir.join("models.json"), r#"{"items":[]}"#).unwrap();
         let mut prefs = UserPrefs::default();
         let mut legacy_model = SavedModel::builtin_account_platform();
         legacy_model.id = LEGACY_BUILTIN_LLMAPI_MODEL_ID.to_string();
@@ -438,6 +620,13 @@ mod tests {
         )
         .unwrap();
 
+        let preflight = preflight_at(root.path()).expect("read-only migration preflight");
+        assert_eq!(preflight.legacy_identity_files, 2);
+        assert_eq!(preflight.legacy_cache_files, 1);
+        assert_eq!(preflight.legacy_credential_references, 4);
+        assert!(preflight.legacy_selection_present);
+        assert!(preflight.settings_valid && preflight.session_bindings_valid);
+
         let store = MemoryCredentialStore::default();
         for reference in [
             CredentialReference {
@@ -467,6 +656,8 @@ mod tests {
         assert_eq!(first.legacy_bindings_discovered, 1);
         assert_eq!(first.credentials_removed, 3);
         assert!(!binding_dir.join("bindings.json").exists());
+        assert!(!binding_dir.join("device.json").exists());
+        assert!(!binding_dir.join("models.json").exists());
         assert!(root
             .path()
             .join("migrations/legacy-llmapi-bindings-v1.json")

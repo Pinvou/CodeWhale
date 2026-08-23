@@ -2443,6 +2443,10 @@
     },
     accountPlatform: {
       session: accountPlatformFeature.session,
+      openPortal: accountPlatformFeature.openPortal,
+      modelCatalog: accountPlatformFeature.modelCatalog,
+      selectCatalogModel: accountPlatformFeature.selectCatalogModel,
+      branchReplacementSession: accountPlatformFeature.branchReplacementSession,
       login: accountPlatformFeature.login,
       createSliderCaptcha: accountPlatformFeature.createSliderCaptcha,
       precheckMobileRegistration: accountPlatformFeature.precheckMobileRegistration,

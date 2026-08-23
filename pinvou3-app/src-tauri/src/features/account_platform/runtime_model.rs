@@ -6,6 +6,7 @@ use crate::features::assistant::runtime_model::{
     ModelCredentialMode, PreparedRuntimeModel, RuntimeModelCredential, RuntimeModelProvider,
     RuntimeModelRequest,
 };
+use crate::features::sessions::SessionStore;
 use crate::platform::prefs::SavedModel;
 
 /// Runtime provider for the only platform-managed model path.
@@ -45,6 +46,25 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             return Ok(PreparedRuntimeModel::unchanged(request.model));
         }
 
+        super::client_migration::runtime_ready().map_err(|error| anyhow!(error))?;
+        // The wire model is a property of the conversation, not of the current
+        // global default.  Reading the immutable session snapshot here prevents
+        // a later catalog selection from silently rewriting historical chats.
+        // A removed model can therefore only continue through the explicit
+        // replacement-branch command, whose new session records the replacement
+        // model in its own metadata.
+        let store = self
+            .app
+            .try_state::<SessionStore>()
+            .context("session store is not initialized")?;
+        let session = store
+            .load(&request.session_id)
+            .with_context(|| format!("load model binding for session {}", request.session_id))?;
+        let session_model_ref = session.metadata.model.trim();
+        if session_model_ref.is_empty() {
+            return Err(anyhow!("model_catalog_selection_required: refresh the catalog and create a session with an available platform model"));
+        }
+
         let account = self
             .app
             .try_state::<super::AccountPlatformState>()
@@ -54,6 +74,7 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             .await
             .map_err(|error| anyhow!(error))?;
         let mut model = request.model;
+        model.model = session_model_ref.to_string();
         model.base_url = authorization.base_url;
         Ok(PreparedRuntimeModel {
             model,

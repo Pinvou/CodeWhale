@@ -25,7 +25,7 @@ export const desktopBridgeApi = {
   memory: ['archiveRecentWorkMemory', 'confirmMemoryCandidate', 'deleteMemoryItem', 'deleteMemoryPreference', 'ignoreMemoryCandidate', 'loadMemoryOverview', 'neverMemoryCandidate', 'saveMemoryProfilePatch', 'updateMemoryItem'],
   updater: ['cancelUpdate', 'checkForUpdate', 'downloadAndInstallUpdate', 'restartApp'],
   dependencies: ['checkDependencies', 'installDependencies'],
-  accountPlatform: ['createSliderCaptcha', 'login', 'loginSms', 'logout', 'precheckMobileRegistration', 'registerMobile', 'registrationStatus', 'request', 'resetPassword', 'sendSms', 'session'],
+  accountPlatform: ['branchReplacementSession', 'createSliderCaptcha', 'login', 'loginSms', 'logout', 'modelCatalog', 'openPortal', 'precheckMobileRegistration', 'registerMobile', 'registrationStatus', 'request', 'resetPassword', 'selectCatalogModel', 'sendSms', 'session'],
   teamRelay: ['claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'listDraftSourceSessions', 'load', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'updateProfile', 'verifyAccess'],
 };
 

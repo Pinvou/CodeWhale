@@ -48,6 +48,8 @@ struct LatestManifest {
     pub sha256: String,
     #[serde(default)]
     pub size: u64,
+    #[serde(default)]
+    pub readiness_attestation: Option<super::super::switch_gate::ClientReadinessAttestation>,
     /// 多平台清单(可选):`{ "macos-universal": PlatformAsset, "linux-arm64": ..., ... }`。
     /// 旧版 latest.json 没这字段 → 空 map → 回退到顶层 url/sha256/size。
     #[serde(default)]
@@ -148,6 +150,7 @@ pub async fn check_for_update_info(
         update_type: String::new(),
         platform: "macos".to_string(),
         ota_host: String::new(),
+        readiness_attestation: m.readiness_attestation,
         platforms: m.platforms,
     })
 }
@@ -820,6 +823,7 @@ mod tests {
             url: top.0.to_string(),
             sha256: top.1.to_string(),
             size: top.2,
+            readiness_attestation: None,
             platforms: pf,
         }
     }

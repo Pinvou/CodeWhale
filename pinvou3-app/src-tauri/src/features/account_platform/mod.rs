@@ -29,6 +29,7 @@ const CLIENT_ID_ENV: &str = "PINVOU_ACCOUNT_OIDC_CLIENT_ID";
 const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
 const IDENTITY_URL_ENV: &str = "PINVOU_IDENTITY_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
+const PORTAL_URL_ENV: &str = "PINVOU_ACCOUNT_PORTAL_URL";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHAT_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -132,6 +133,28 @@ fn parse_service_base(name: &str, value: &str) -> Result<Url, String> {
 
 pub fn account_platform_enabled() -> bool {
     platform_supported()
+}
+
+/// Opens the browser-owned account Portal session without accepting a URL
+/// from the WebView. Credentials are deliberately absent from the fixed URL.
+pub fn open_account_portal() -> Result<(), String> {
+    let target = account_portal_url()?;
+    crate::platform::os::open_target(target.as_str(), "账号平台个人中心")
+}
+
+fn account_portal_url() -> Result<Url, String> {
+    account_portal_url_from(&required_env(PORTAL_URL_ENV)?)
+}
+
+fn account_portal_url_from(value: &str) -> Result<Url, String> {
+    let base = parse_service_base(PORTAL_URL_ENV, value)?;
+    let target = base.join("account.html").map_err(|_| {
+        "account_platform_configuration_invalid: cannot resolve account portal URL".to_string()
+    })?;
+    if target.query().is_some() || target.fragment().is_some() {
+        return Err("account_platform_configuration_invalid: account portal URL must not contain query or fragment".to_string());
+    }
+    Ok(target)
 }
 
 const fn platform_supported() -> bool {
@@ -1549,6 +1572,18 @@ mod tests {
         assert!(parse_endpoint("OIDC", "https://user:secret@example.test/token").is_err());
         assert!(parse_endpoint("OIDC", "http://example.test/token").is_err());
         assert!(parse_endpoint("OIDC", "http://127.0.0.1:8080/token").is_ok());
+    }
+
+    #[test]
+    fn account_portal_is_fixed_and_never_carries_credentials() {
+        assert_eq!(
+            account_portal_url_from("https://portal.example.test/tenant/")
+                .unwrap()
+                .as_str(),
+            "https://portal.example.test/tenant/account.html"
+        );
+        assert!(account_portal_url_from("https://portal.example.test/?token=secret").is_err());
+        assert!(account_portal_url_from("https://user:secret@portal.example.test/").is_err());
     }
 
     #[test]

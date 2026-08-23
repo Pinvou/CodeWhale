@@ -7,6 +7,10 @@
     var invoke = context.invoke;
     return {
       session: function () { return invoke("account_platform_session"); },
+      openPortal: function () { return invoke("account_platform_open_portal"); },
+      selectCatalogModel: function (input) { return invoke("account_platform_select_catalog_model", { input: input }); },
+      modelCatalog: function () { return invoke("account_platform_model_catalog"); },
+      branchReplacementSession: function (input) { return invoke("account_platform_branch_replacement_session", { input: input }); },
       login: function (credentials) { return invoke("account_platform_login", { credentials: credentials }); },
       createSliderCaptcha: function (input) { return invoke("account_platform_create_slider_captcha", { input: input }); },
       precheckMobileRegistration: function (input) { return invoke("account_platform_precheck_mobile_registration", { input: input }); },

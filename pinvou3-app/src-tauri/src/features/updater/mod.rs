@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 mod platform;
+mod switch_gate;
 
 pub(crate) fn cleanup_stale_backup() {
     platform::cleanup_stale_backup();
@@ -57,6 +58,8 @@ pub struct UpdateInfo {
     pub platform: String,
     #[serde(default)]
     pub ota_host: String,
+    #[serde(default)]
+    pub readiness_attestation: Option<switch_gate::ClientReadinessAttestation>,
     /// 多平台清单:`{ "macos-universal": PlatformAsset, "linux-arm64": ..., ... }`。
     /// 旧版 latest.json 没这字段 → 空 map → 调用方回退到顶层 url/sha256/size。
     #[serde(default)]
@@ -155,12 +158,19 @@ pub async fn download_update(
 /// 安装下载好的更新包。Linux 走 pkexec apt；Windows 启动 MSI/NSIS 安装器，成功启动后退出进程。
 pub async fn install_update(
     deb_path: Option<String>,
+    package_path: Option<String>,
     installer_path: Option<String>,
     info: Option<UpdateInfo>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let info = info.ok_or_else(|| "更新安装门禁失败：缺少更新清单".to_string())?;
+    let package = package_path
+        .as_deref()
+        .or(deb_path.as_deref())
+        .ok_or_else(|| "更新安装门禁失败：缺少已下载制品".to_string())?;
+    switch_gate::verify_install_gate(package, installer_path.as_deref(), &info)?;
     let exit_after_start = tokio::task::spawn_blocking(move || {
-        platform::install_downloaded_update(deb_path, installer_path, info)
+        platform::install_downloaded_update(deb_path, installer_path, Some(info))
     })
     .await
     .map_err(|e| format!("安装任务失败: {e}"))??;

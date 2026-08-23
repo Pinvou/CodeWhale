@@ -149,6 +149,15 @@ pub struct ChatEngineState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplacementBranchLineage {
+    pub source_conversation_id: String,
+    pub source_turn_id: String,
+    pub original_model_ref: String,
+    pub replacement_model_ref: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ScheduledProfileRegistry {
     schema_version: u32,
     #[serde(default)]
@@ -643,6 +652,13 @@ impl SessionStore {
                 }
             }
             Err(err) => return Err(err).with_context(|| format!("delete_session({id})")),
+        }
+        let lineage = crate::platform::paths::sessions_root()
+            .join(format!("{id}.account-platform-branch.json"));
+        if let Err(error) = std::fs::remove_file(&lineage) {
+            if error.kind() != ErrorKind::NotFound {
+                return Err(error).with_context(|| format!("remove {}", lineage.display()));
+            }
         }
         // 如果删的是 active session，清理 active 标记
         let mut active = self.active.write();
@@ -1367,6 +1383,69 @@ impl SessionStore {
             });
         }
         Ok(session)
+    }
+
+    /// Creates an explicit, traceable branch when a historical platform model
+    /// can no longer continue. The source transcript is never rewritten.
+    pub fn create_replacement_branch(
+        &self,
+        source_id: &str,
+        source_message_count: usize,
+        source_turn_id: String,
+        replacement_model_ref: String,
+    ) -> Result<(SavedSession, ReplacementBranchLineage)> {
+        validate_session_id(source_id)?;
+        let source = self
+            .manager
+            .load_session_snapshot(source_id)
+            .with_context(|| format!("load source session {source_id}"))?;
+        let source_message_count = if source_message_count == 0 {
+            source.messages.len()
+        } else {
+            source_message_count
+        };
+        anyhow::ensure!(
+            source_message_count > 0 && source_message_count <= source.messages.len(),
+            "source turn is outside the committed transcript"
+        );
+        let id = generate_session_id();
+        let mut branch = create_saved_session_with_id_and_mode(
+            id.clone(),
+            &source.messages[..source_message_count],
+            &replacement_model_ref,
+            &source.metadata.workspace,
+            0,
+            None,
+            None,
+        );
+        branch.metadata.title = format!("{} · 替代模型分支", source.metadata.title);
+        branch.metadata.parent_session_id = Some(source_id.to_string());
+        branch.metadata.forked_from_message_count = Some(source_message_count);
+        self.set_session_model_id(
+            &id,
+            Some(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string()),
+        )?;
+        if let Err(error) = self.save(&branch) {
+            let _ = self.delete(&id);
+            return Err(error);
+        }
+        let lineage = ReplacementBranchLineage {
+            source_conversation_id: source_id.to_string(),
+            source_turn_id,
+            original_model_ref: source.metadata.model,
+            replacement_model_ref,
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let lineage_path = crate::platform::paths::sessions_root()
+            .join(format!("{id}.account-platform-branch.json"));
+        let payload = serde_json::to_vec_pretty(&lineage)?;
+        if let Err(error) = deepseek_tui::utils::write_atomic(&lineage_path, &payload) {
+            let _ = self.delete(&id);
+            return Err(anyhow::anyhow!(
+                "persist replacement branch lineage: {error}"
+            ));
+        }
+        Ok((branch, lineage))
     }
 
     /// Replace a transcript for explicit store-maintenance flows. Live ordinary
@@ -2714,6 +2793,38 @@ mod tests {
                 cache_control: None,
             }],
         }
+    }
+
+    #[test]
+    fn replacement_branch_preserves_source_and_records_lineage() {
+        let (store, _guard) = isolated_store();
+        let source = store
+            .create_new("removed-model".into(), None, PathBuf::from("workspace"))
+            .unwrap();
+        let source_id = source.metadata.id.clone();
+        store
+            .update_messages(&source_id, vec![user_text("first"), user_text("second")])
+            .unwrap();
+        let (branch, lineage) = store
+            .create_replacement_branch(
+                &source_id,
+                1,
+                "message:0".into(),
+                "replacement-model".into(),
+            )
+            .unwrap();
+        assert_ne!(branch.metadata.id, source_id);
+        assert_eq!(branch.messages.len(), 1);
+        assert_eq!(store.load(&source_id).unwrap().messages.len(), 2);
+        assert_eq!(lineage.source_conversation_id, source_id);
+        assert_eq!(lineage.original_model_ref, "removed-model");
+        assert_eq!(lineage.replacement_model_ref, "replacement-model");
+        assert!(crate::platform::paths::sessions_root()
+            .join(format!(
+                "{}.account-platform-branch.json",
+                branch.metadata.id
+            ))
+            .exists());
     }
 
     fn assistant_text(text: &str) -> Message {

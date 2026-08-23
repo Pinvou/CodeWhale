@@ -92,6 +92,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] 
 # 0.11 与 CodeWhale 子模块对齐。digest 的 Output 不实现 LowerHex,统一用 hex_lower 编码
 # (见 src/platform/encoding.rs)。
 sha2 = "0.11"
+ring = "0.17"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 md5 = "0.7"
 flate2 = "1"

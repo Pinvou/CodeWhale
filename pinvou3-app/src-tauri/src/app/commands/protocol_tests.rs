@@ -75,6 +75,10 @@ command_protocol!(
     "account_platform.rs",
     [
         "account_platform_session",
+        "account_platform_open_portal",
+        "account_platform_select_catalog_model",
+        "account_platform_model_catalog",
+        "account_platform_branch_replacement_session",
         "account_platform_login",
         "account_platform_reset_password",
         "account_platform_logout",

@@ -674,6 +674,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::chat::chat,
             commands::account_platform::account_platform_session,
+            commands::account_platform::account_platform_open_portal,
             commands::account_platform::account_platform_login,
             commands::account_platform::account_platform_send_sms,
             commands::account_platform::account_platform_create_slider_captcha,
@@ -684,6 +685,9 @@ pub fn run() {
             commands::account_platform::account_platform_reset_password,
             commands::account_platform::account_platform_logout,
             commands::account_platform::account_platform_request,
+            commands::account_platform::account_platform_model_catalog,
+            commands::account_platform::account_platform_select_catalog_model,
+            commands::account_platform::account_platform_branch_replacement_session,
             commands::startup::report_frontend_startup,
             commands::startup::reveal_startup_window,
             commands::connectors::refresh_connector_auth_gates,

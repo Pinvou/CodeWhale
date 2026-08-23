@@ -1060,6 +1060,42 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const canSend = !isMultiAgentReadOnly
         && !firstTurnPending
         && (hasDraftText || hasReadyAttachment);
+      const modelContinuationBlocked = Boolean(activeSessionId && chatItems.slice(-6).some(item => (
+        item?.type === 'system'
+        && /MODEL_(?:DEPRECATED|UNAVAILABLE|REMOVED)|CONTINUATION_CUTOFF|model_catalog_selection_unavailable/i.test(String(item.text || ''))
+      )));
+      const [replacementModels, setReplacementModels] = useState([]);
+      const [replacementModelId, setReplacementModelId] = useState('');
+      const [replacementBusy, setReplacementBusy] = useState(false);
+      const [replacementError, setReplacementError] = useState('');
+      useEffect(() => {
+        if (!modelContinuationBlocked || !bridge.available || !bridge.accountPlatform?.modelCatalog) return;
+        let active = true;
+        bridge.accountPlatform.modelCatalog().then(result => {
+          if (!active) return;
+          const items = (result?.items || []).filter(item => item.context_eligible && item.lifecycle_status === 'ACTIVE');
+          setReplacementModels(items);
+          setReplacementModelId(current => items.some(item => item.model_id === current) ? current : (items[0]?.model_id || ''));
+        }).catch(error => { if (active) setReplacementError(String(error?.message || error || '')); });
+        return () => { active = false; };
+      }, [modelContinuationBlocked, activeSessionId]);
+      const createReplacementBranch = useCallback(async () => {
+        if (!activeSessionId || !replacementModelId || replacementBusy) return;
+        setReplacementBusy(true); setReplacementError('');
+        try {
+          const result = await bridge.accountPlatform.branchReplacementSession({
+            sourceConversationId: activeSessionId,
+            sourceTurnId: `message:${Math.max(0, chatItems.length - 1)}`,
+            sourceMessageCount: 0,
+            replacementModelId,
+          });
+          await bridge.sessions.switchToSession(result.session.id);
+        } catch (error) {
+          setReplacementError(String(error?.message || error || ''));
+        } finally {
+          setReplacementBusy(false);
+        }
+      }, [activeSessionId, chatItems.length, replacementBusy, replacementModelId]);
       const sceneCapabilityPreparing = sceneCapabilityStatus && sceneCapabilityStatus.kind === 'preparing';
       const canFloatingSend = canSend && !voiceActive && !sceneCapabilityPreparing;
       const canClearInput = hasDraftText && !voiceActive;
@@ -1674,6 +1710,19 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           {/* Floating Input Area */}
           <div ref={composerWrapRef} data-testid="chat-composer-wrap" className={`absolute ${isWeb ? 'bottom-2 sm:bottom-8' : 'bottom-8'} inset-x-0 z-20 ${(artifactsVisible && isWide) ? 'px-4 md:px-8' : 'px-4 md:px-20 lg:px-40'}`}>
             <div className="max-w-[800px] w-full mx-auto">
+              {modelContinuationBlocked && (
+                <div className="mb-3 rounded-2xl border border-amber-300/70 bg-amber-50/95 p-3 text-[12px] text-amber-950 shadow-lg backdrop-blur dark:border-amber-700/60 dark:bg-amber-950/90 dark:text-amber-100">
+                  <div className="font-semibold">{t.uiModelReplacement.title}</div>
+                  <div className="mt-1 leading-relaxed opacity-80">{t.uiModelReplacement.lead}</div>
+                  <div className="mt-2 flex gap-2">
+                    <select value={replacementModelId} onChange={event => setReplacementModelId(event.target.value)} disabled={replacementBusy || !replacementModels.length} className="h-9 min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-3 dark:border-amber-700 dark:bg-black/20">
+                      {replacementModels.map(item => <option key={item.model_id} value={item.model_id}>{item.display_name}</option>)}
+                    </select>
+                    <button type="button" onClick={() => void createReplacementBranch()} disabled={replacementBusy || !replacementModelId} className="h-9 rounded-xl bg-amber-600 px-3 font-semibold text-white disabled:opacity-50">{replacementBusy ? t.uiModelReplacement.creating : t.uiModelReplacement.create}</button>
+                  </div>
+                  {replacementError && <div role="alert" className="mt-2 break-words text-red-600 dark:text-red-300">{replacementError}</div>}
+                </div>
+              )}
               {!scheduledRunContext && !conversationStarted && (
                 <HomeModeSwitcher
                   mode={pinvouMode}

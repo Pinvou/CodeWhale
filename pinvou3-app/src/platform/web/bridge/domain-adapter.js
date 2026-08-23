@@ -121,6 +121,10 @@
     dependencies: domain(["checkDependencies", "installDependencies"]),
     accountPlatform: {
       session: function () { return Promise.resolve({ enabled: false, configured: false, authenticated: false, errorCode: "unsupported_platform" }); },
+      openPortal: unsupportedAccountPlatform,
+      selectCatalogModel: unsupportedAccountPlatform,
+      modelCatalog: unsupportedAccountPlatform,
+      branchReplacementSession: unsupportedAccountPlatform,
       login: unsupportedAccountPlatform,
       createSliderCaptcha: unsupportedAccountPlatform,
       precheckMobileRegistration: unsupportedAccountPlatform,

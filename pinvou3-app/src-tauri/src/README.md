@@ -50,3 +50,10 @@ Rust 后端按“功能优先、平台适配次之”组织：
 数据中；迁移重复执行不得再次改写业务数据。对应自动化覆盖位于
 `features/account_platform/client_migration.rs`、`platform/prefs/mod.rs` 和
 `tests/account_platform_state.test.mjs`。
+
+平台模型的实际 wire model 按会话冻结：运行时从 Session 元数据读取，不读取后来变化的
+全局默认。模型移除或继续截止时，`create_replacement_branch` 只复制指定轮次以前的已提交
+消息到新 Session，并写独立 lineage sidecar；原 Session 保持可读且不改写。动态目录、受信
+Portal 入口位于 `features/account_platform/`，发布门禁脚本位于仓库 `scripts/`，更新包证明、
+系统签名和只读迁移预检位于 `features/updater/switch_gate.rs`。这些门禁失败时均失败关闭，
+不会恢复旧内置模型路径。

@@ -269,7 +269,7 @@ node scripts/account-platform.mjs dev down
 
 客户端切换 Readiness 上线执行 Token `000016_client_readiness`。为 Token Gateway 配置当前服务/契约版本、允许的最小和最大桌面版本，并从运行时 Secret 注入独立 Ed25519 私钥及稳定 `key_id`；私钥不得进入 values、镜像、日志或桌面安装包，生产环境缺失私钥时 Gateway 必须拒绝启动。先发布 Account 的服务身份 `/internal/v1/client-compatibility`，再迁移并发布 Token Gateway，最后由发布系统调用 `/internal/v1/client-readiness` 和 `/internal/v1/client-readiness/attestations`。反向代理只公开 `/v1/client-compatibility`，禁止公开两个内部入口。
 
-验收连续执行只读 Readiness，并在调用前后核对用户/组织 Hold、权益桶、用量请求、账本和上游推理日志均无新增；分别注入 OIDC 不可达、Account 契约不可达、空目录、无 READY 路由和价格/公式不完整，结果必须返回稳定失败检查且不得签发证明。对有效证明逐项篡改环境、制品摘要、客户端版本、服务/契约/目录版本、签名和有效期，更新器均须拒绝；轮换密钥时先公开新公钥并保持旧 key 的验证窗口不短于所有已签证明寿命，再停止旧 key 签发。监控各检查失败率、证明签发量、过期拒绝和 `client_readiness_attestations` 连续性；一旦签发记录存在，禁止 down migration。生产等价证据完成前 APT-052 保持 `BLOCKED_EXTERNAL`，不得据此放行 APT-032 正式发布。
+验收连续执行只读 Readiness，并在调用前后核对用户/组织 Hold、权益桶、用量请求、账本和上游推理日志均无新增；分别注入 OIDC 不可达、Account 契约不可达、空目录、无 READY 路由和价格/公式不完整，结果必须返回稳定失败检查且不得签发证明。对有效证明逐项篡改环境、制品摘要、客户端版本、服务/契约/目录版本、签名和有效期，更新器均须拒绝；轮换密钥时先公开新公钥并保持旧 key 的验证窗口不短于所有已签证明寿命，再停止旧 key 签发。监控各检查失败率、证明签发量、过期拒绝和 `client_readiness_attestations` 连续性；一旦签发记录存在，禁止 down migration。生产等价证据完成前 APT-052 与 APT-053 保持 `BLOCKED_EXTERNAL`，不得提升正式客户端更新渠道。
 
 ## 8. 单机 Compose 发布流程
 
@@ -464,10 +464,11 @@ UAT 只使用明确的测试商品和测试商城账号：
 
 ### 11.4 客户端三层发布门禁
 
-1. **发布门禁**：发布流水线通过 TOK-37 并确认服务端兼容后，才能把新客户端提升到正式更新渠道；失败时渠道继续指向上一版本。
-2. **安装门禁**：更新器验证包签名、TOK-37 生成且绑定制品/环境/服务版本的短时签名准入证明，并在暂存副本完成兼容性和迁移预检后，才原子提交应用与配置；失败保持或恢复旧二进制和旧配置的匹配组合。桌面端不得持有内部 readiness 工作负载凭据。
+1. **发布门禁**：发布流水线设置 `PINVOU_RELEASE_ARTIFACT`、`PINVOU_RELEASE_ATTESTATION`、`PINVOU_CLIENT_COMPATIBILITY_URL`、`PINVOU_RELEASE_CLIENT_VERSION`、目标环境、公钥和 key ID，执行 `npm run release:account-platform-gate`。脚本核验 HTTPS 公开兼容范围、OIDC discovery、制品 SHA-256、版本区间以及 TOK-37 Ed25519 证明后，才能把新客户端提升到正式更新渠道；它不接收内部 readiness 工作负载凭据，失败时渠道继续指向上一版本。
+2. **安装门禁**：更新清单或 Windows OTA `UpdatePackInfo.json` 必须携带 `readinessAttestation`。更新器使用 `PINVOU_ACCOUNT_ENVIRONMENT`、`PINVOU_CLIENT_READINESS_KEY_ID`、`PINVOU_CLIENT_READINESS_PUBLIC_KEY` 验证证明绑定的环境、制品、目标版本、CHAT 目录、六项 PASS 检查和 15 分钟有效期，再用 `PINVOU_UPDATE_SIGNER_IDENTITY` 验证 Windows Authenticode、macOS codesign 或 Linux dpkg-sig 身份，并执行只读迁移预检。通过后才写入安装门禁事务证据并调用平台安装器；旧清单、缺字段、签名不符或预检失败一律不进入安装。平台安装器对二进制/配置的原子替换与失败回滚仍须用正式制品做环境验收，桌面端不得持有内部 readiness 工作负载凭据。
 3. **运行门禁**：已经安装的新版本只运行账号平台和 Token Gateway 路径；平台不可用时显示原因与修复动作，不调用旧模型后台。
-4. 三层门禁分别保存构建版本、服务版本、配置 schema、检查结果和脱敏证据。不得以开发机手工调用真实用户付费模型代替任何一层门禁。
+4. Portal 入口另配置 `PINVOU_ACCOUNT_PORTAL_URL`，只允许 HTTPS（或 loopback HTTP），客户端固定打开 `/account.html`，不得把 Token、查询串或任意 WebView URL 传给系统浏览器。
+5. 三层门禁分别保存构建版本、服务版本、配置 schema、检查结果和脱敏证据。客户端范围门禁执行 `npm run check:account-platform-client-scope`；不得以开发机手工调用真实用户付费模型代替任何一层门禁。生产签名身份、正式安装包原子提交/回滚及真实环境连续无副作用证据完成前，APT-053 保持 `BLOCKED_EXTERNAL`。
 
 ### 11.5 首个超级管理员安全激活
 
