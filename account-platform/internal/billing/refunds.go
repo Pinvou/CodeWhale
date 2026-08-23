@@ -101,7 +101,9 @@ func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterI
 	if order.Status != "PENDING" && order.Status != "CREATED" {
 		return PaymentOrder{}, ErrConflict
 	}
-	providerOrder, err := p.provider.Close(ctx, order.MerchantOrderNo)
+	providerOrder, err := providerCall(p, "ORDER_CLOSE", order.Channel, true, func() (ProviderOrder, error) {
+		return p.provider.Close(ctx, order.MerchantOrderNo)
+	})
 	if err != nil {
 		return PaymentOrder{}, fmt.Errorf("%w: %v", ErrPaymentProvider, err)
 	}
@@ -156,7 +158,9 @@ func (p *PaymentCoordinator) ProcessRefund(ctx context.Context, refundID uuid.UU
 	if err != nil {
 		return err
 	}
-	providerRefund, providerErr := p.provider.Refund(ctx, merchantOrderNo, refund.MerchantRefundNo, refund.AmountFen)
+	providerRefund, providerErr := providerCall(p, "REFUND", "default", true, func() (ProviderRefund, error) {
+		return p.provider.Refund(ctx, merchantOrderNo, refund.MerchantRefundNo, refund.AmountFen)
+	})
 	if providerErr != nil {
 		// JetStream may redeliver this event. The stable merchant refund number
 		// makes that safe only because the selected Provider explicitly declared

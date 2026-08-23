@@ -21,6 +21,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
@@ -57,6 +58,7 @@ type Service struct {
 	catalogSync            *CatalogSynchronizer
 	authorizer             *authorization.Client
 	clientReadiness        *ClientReadinessService
+	breaker                *resilience.Breaker
 }
 
 func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
@@ -83,7 +85,7 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 	if maximumInputTokens <= 0 {
 		maximumInputTokens = 128_000
 	}
-	service := &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000}
+	service := &Service{repository: repository, contexts: contexts, wallets: wallets, validator: validator, providerURLs: providerURLs, billing: billing, upstream: upstream, maximumInputTokens: maximumInputTokens, defaultMaxOutputTokens: 4096, maximumOutputTokens: 128_000, breaker: resilience.NewBreaker()}
 	if resolver, ok := contexts.(CommerceCustomerResolver); ok {
 		service.commerceCustomers = resolver
 	}

@@ -1,6 +1,7 @@
 global:
   environment: staging
   runtimeSecret: pinvou-account-platform-staging
+  trustedTimeSources: [time.cloudflare.com:123, time.google.com:123, time.aws.com:123]
 
 externalSecrets:
   enabled: true
@@ -42,6 +43,7 @@ external:
   secretProviderCidrs: [10.122.0.0/24]
   modelProviderCidrs: [10.123.0.0/24]
   telemetryCollectorCidrs: [10.124.0.0/24]
+  timeSourceCidrs: [10.125.0.0/24]
 
 ingress:
   enabled: true

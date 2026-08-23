@@ -3,6 +3,7 @@ global:
   runtimeSecret: pinvou-account-platform-runtime
   imagePullSecrets: []
   podLabels: {}
+  trustedTimeSources: [time.cloudflare.com:123, time.google.com:123, time.aws.com:123]
 
 externalSecrets:
   enabled: false
@@ -118,6 +119,7 @@ external:
   secretProviderCidrs: []
   modelProviderCidrs: []
   telemetryCollectorCidrs: []
+  timeSourceCidrs: []
 
 ingress:
   enabled: false

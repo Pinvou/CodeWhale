@@ -12,12 +12,13 @@ import (
 const defaultShutdownTimeout = 10 * time.Second
 
 type Config struct {
-	ServiceName     string
-	Environment     string
-	Address         string
-	ShutdownTimeout time.Duration
-	RateLimitRPS    float64
-	RateLimitBurst  int
+	ServiceName        string
+	Environment        string
+	Address            string
+	ShutdownTimeout    time.Duration
+	RateLimitRPS       float64
+	RateLimitBurst     int
+	TrustedTimeSources []string
 }
 
 func Load(serviceName string) (Config, error) {
@@ -64,13 +65,31 @@ func Load(serviceName string) (Config, error) {
 		}
 		rateLimitBurst = parsed
 	}
+	timeSources := splitUnique(os.Getenv("TRUSTED_TIME_SOURCES"))
+	if strings.HasPrefix(strings.ToLower(environment), "production") && len(timeSources) < 3 {
+		return Config{}, errors.New("TRUSTED_TIME_SOURCES requires at least three independent sources in production")
+	}
 
 	return Config{
-		ServiceName:     serviceName,
-		Environment:     environment,
-		Address:         fmt.Sprintf(":%d", port),
-		ShutdownTimeout: shutdownTimeout,
-		RateLimitRPS:    rateLimitRPS,
-		RateLimitBurst:  rateLimitBurst,
+		ServiceName:        serviceName,
+		Environment:        environment,
+		Address:            fmt.Sprintf(":%d", port),
+		ShutdownTimeout:    shutdownTimeout,
+		RateLimitRPS:       rateLimitRPS,
+		RateLimitBurst:     rateLimitBurst,
+		TrustedTimeSources: timeSources,
 	}, nil
+}
+
+func splitUnique(raw string) []string {
+	seen := map[string]bool{}
+	values := []string{}
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			values = append(values, value)
+		}
+	}
+	return values
 }

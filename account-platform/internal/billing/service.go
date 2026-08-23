@@ -16,6 +16,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
@@ -719,6 +720,12 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		api.WriteJSON(w, http.StatusTooManyRequests, api.Error{Code: "PAYMENT_RATE_LIMITED", Message: "the payment action exceeds a rate limit", RequestID: httpserver.RequestID(r.Context()), Details: map[string]any{"retry_after_seconds": retryAfter}})
 		return
+	case errors.Is(err, resilience.ErrCircuitOpen):
+		status, code, message = http.StatusServiceUnavailable, "PAYMENT_PROVIDER_CIRCUIT_OPEN", "the payment provider capability is temporarily unavailable"
+		var open *resilience.CircuitOpenError
+		if errors.As(err, &open) {
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(open.RetryAfter.Seconds()+0.999))))
+		}
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "the billing resource was not found"
 	case errors.Is(err, ErrConflict):

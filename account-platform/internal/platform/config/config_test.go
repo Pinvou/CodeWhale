@@ -11,6 +11,7 @@ func TestLoadUsesSafeDefaults(t *testing.T) {
 	t.Setenv("SHUTDOWN_TIMEOUT", "")
 	t.Setenv("RATE_LIMIT_RPS", "")
 	t.Setenv("RATE_LIMIT_BURST", "")
+	t.Setenv("TRUSTED_TIME_SOURCES", "")
 
 	cfg, err := Load("account-service")
 	if err != nil {
@@ -27,6 +28,18 @@ func TestLoadUsesSafeDefaults(t *testing.T) {
 	}
 	if cfg.RateLimitRPS != 100 || cfg.RateLimitBurst != 200 {
 		t.Fatalf("rate limit = %v/%d, want 100/200", cfg.RateLimitRPS, cfg.RateLimitBurst)
+	}
+}
+
+func TestLoadRequiresThreeTrustedTimeSourcesInProduction(t *testing.T) {
+	t.Setenv("APP_ENV", "production-new")
+	t.Setenv("TRUSTED_TIME_SOURCES", "time-a.example:123,time-b.example:123")
+	if _, err := Load("test"); err == nil {
+		t.Fatal("production accepted fewer than three trusted time sources")
+	}
+	t.Setenv("TRUSTED_TIME_SOURCES", "time-a.example:123,time-b.example:123,time-c.example:123")
+	if cfg, err := Load("test"); err != nil || len(cfg.TrustedTimeSources) != 3 {
+		t.Fatalf("production time sources = %v, %v", cfg.TrustedTimeSources, err)
 	}
 }
 

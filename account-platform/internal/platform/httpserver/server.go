@@ -17,6 +17,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/trustedclock"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -65,6 +66,19 @@ func HandlerWithApplication(cfg config.Config, application http.Handler, ready f
 func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(context.Context) error) (http.Handler, *httpMetrics) {
 	health := NewRouter()
 	metrics := newHTTPMetrics(cfg.ServiceName)
+	var clock *trustedclock.Monitor
+	if strings.HasPrefix(strings.ToLower(cfg.Environment), "production") {
+		clock, _ = trustedclock.New(cfg.TrustedTimeSources)
+	}
+	readiness := func(ctx context.Context) error {
+		if clock == nil {
+			return readyOrNil(ctx, ready)
+		}
+		if err := clock.Check(ctx); err != nil {
+			return err
+		}
+		return readyOrNil(ctx, ready)
+	}
 	status := func(state string, check func(context.Context) error) http.HandlerFunc {
 		return func(w http.ResponseWriter, request *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
@@ -96,16 +110,32 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 		}
 	}
 	health.GET("/health/live", AdaptFunc(status("ok", nil)))
-	health.GET("/health/ready", AdaptFunc(status("ready", ready)))
+	health.GET("/health/ready", AdaptFunc(status("ready", readiness)))
 	dispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health/live" || r.URL.Path == "/health/ready" || application == nil {
 			health.ServeHTTP(w, r)
 			return
 		}
+		if clock != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions {
+			if err := clock.Check(r.Context()); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Cache-Control", "no-store")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]string{"code": "CLOCK_UNSAFE", "message": "trusted clock is not safe for time-sensitive operations"})
+				return
+			}
+		}
 		application.ServeHTTP(w, r)
 	})
 	observed := metrics.middleware(withRateLimit(cfg, dispatch), newLogger(cfg))
 	return observability.TraceHTTPHandler(withRequestID(withSecurityHeaders(cfg, observed))), metrics
+}
+
+func readyOrNil(ctx context.Context, ready func(context.Context) error) error {
+	if ready == nil {
+		return nil
+	}
+	return ready(ctx)
 }
 
 func withSecurityHeaders(cfg config.Config, next http.Handler) http.Handler {

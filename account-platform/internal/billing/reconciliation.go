@@ -17,31 +17,31 @@ import (
 )
 
 type ReconciliationDifference struct {
-	MerchantOrderNo string
-	PaymentOrderID  *uuid.UUID
-	CaseType        string
-	Severity        string
-	Provider        *ProviderBillEntry
-	Internal        *PaymentOrder
+	MerchantOrderNo  string
+	PaymentOrderID   *uuid.UUID
+	CaseType         string
+	Severity         string
+	Provider         *ProviderBillEntry
+	Internal         *PaymentOrder
 	InternalSnapshot json.RawMessage
 	RefundSnapshot   json.RawMessage
 	LedgerSnapshot   json.RawMessage
 }
 
 type ReconciliationRun struct {
-	ID               uuid.UUID `json:"reconciliation_run_id"`
-	ProviderID       string    `json:"provider_id"`
-	ProviderVersion  string    `json:"provider_version"`
-	Channel          string    `json:"channel"`
-	BusinessDate     string    `json:"business_date"`
-	SourceMode       string    `json:"source_mode"`
+	ID               uuid.UUID  `json:"reconciliation_run_id"`
+	ProviderID       string     `json:"provider_id"`
+	ProviderVersion  string     `json:"provider_version"`
+	Channel          string     `json:"channel"`
+	BusinessDate     string     `json:"business_date"`
+	SourceMode       string     `json:"source_mode"`
 	RequestedBy      *uuid.UUID `json:"requested_by,omitempty"`
 	InputDigest      *string    `json:"input_digest,omitempty"`
-	Status           string    `json:"status"`
-	ProviderRowCount int       `json:"provider_row_count"`
-	CaseCount        int       `json:"case_count"`
-	StartedAt        time.Time `json:"started_at"`
-	CompletedAt      time.Time `json:"completed_at"`
+	Status           string     `json:"status"`
+	ProviderRowCount int        `json:"provider_row_count"`
+	CaseCount        int        `json:"case_count"`
+	StartedAt        time.Time  `json:"started_at"`
+	CompletedAt      time.Time  `json:"completed_at"`
 }
 
 type ExpiredPaymentCandidate struct {
@@ -248,7 +248,9 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 	if err != nil {
 		return PaymentOrder{}, err
 	}
-	providerOrder, err := p.provider.Get(ctx, order.MerchantOrderNo)
+	providerOrder, err := providerCall(p, "ORDER_QUERY", order.Channel, false, func() (ProviderOrder, error) {
+		return p.provider.Get(ctx, order.MerchantOrderNo)
+	})
 	if err != nil {
 		return PaymentOrder{}, errors.Join(ErrPaymentProvider, err)
 	}
@@ -278,7 +280,9 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 		if !p.Capabilities().CloseSupported {
 			return order, nil
 		}
-		closed, closeErr := p.provider.Close(ctx, order.MerchantOrderNo)
+		closed, closeErr := providerCall(p, "ORDER_CLOSE", order.Channel, true, func() (ProviderOrder, error) {
+			return p.provider.Close(ctx, order.MerchantOrderNo)
+		})
 		if closeErr != nil {
 			return PaymentOrder{}, errors.Join(ErrPaymentProvider, closeErr)
 		}
@@ -398,7 +402,9 @@ func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, a
 	if order.Status != "MANUAL_REVIEW" || order.FulfillmentStatus != "MANUAL_REVIEW" {
 		return PaymentOrder{}, ErrConflict
 	}
-	provider, err := p.provider.Get(ctx, order.MerchantOrderNo)
+	provider, err := providerCall(p, "ORDER_QUERY", order.Channel, false, func() (ProviderOrder, error) {
+		return p.provider.Get(ctx, order.MerchantOrderNo)
+	})
 	if err != nil {
 		return PaymentOrder{}, errors.Join(ErrPaymentProvider, err)
 	}
@@ -508,7 +514,9 @@ func (p *PaymentCoordinator) runProviderReconciliation(ctx context.Context, chan
 		return ReconciliationRun{}, ErrConflict
 	}
 	date := normalizedReconciliationBusinessDate(businessDate)
-	providerRows, err := p.provider.Bill(ctx, channel, date)
+	providerRows, err := providerCall(p, "BILL_QUERY", channel, false, func() ([]ProviderBillEntry, error) {
+		return p.provider.Bill(ctx, channel, date)
+	})
 	if err != nil {
 		return ReconciliationRun{}, errors.Join(ErrPaymentProvider, err)
 	}

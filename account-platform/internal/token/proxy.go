@@ -17,6 +17,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/google/uuid"
 )
 
@@ -197,6 +198,16 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	envelope := DispatchEnvelope{BaseURL: credential.BaseURL, Provider: credential.Provider, Credential: append([]byte(nil), secret...), RequestBody: upstreamBody, Price: price, Stream: request.Stream, MaximumCost: maximumCost, MaximumOutput: maximumUsage.OutputTokens}
+	circuitKey := resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL)
+	if circuitErr := s.breaker.BeforeHighRisk(circuitKey); circuitErr != nil {
+		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "provider_circuit_open")
+		var open *resilience.CircuitOpenError
+		if errors.As(circuitErr, &open) {
+			w.Header().Set("Retry-After", strconv.Itoa(max(1, int(open.RetryAfter.Seconds()+0.999))))
+		}
+		api.WriteError(w, http.StatusServiceUnavailable, "PROVIDER_CIRCUIT_OPEN", "the selected provider route is temporarily unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
 	if err := s.repository.PrepareDispatch(r.Context(), usageRequest.ID, envelope); err != nil {
 		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "dispatch_preparation_failed")
 		s.writeError(w, r, err)
@@ -264,6 +275,7 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 	renewalFailed := s.renewHold(upstreamContext, cancelUpstream, usageRequest.ID, holdID)
 	response, err := s.upstream.Do(upstreamContext, envelope.BaseURL, envelope.Credential, envelope.RequestBody, usageRequest.ID)
 	if err != nil {
+		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.UncertainResult)
 		select {
 		case <-renewalFailed:
 			_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "hold_renewal_failed", map[string]any{"upstream_cancelled": true})
@@ -276,6 +288,13 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 		return
 	}
 	defer response.Body.Close()
+	if response.StatusCode >= 200 && response.StatusCode < 300 {
+		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.Success)
+	} else if response.StatusCode >= 500 || response.StatusCode == http.StatusTooManyRequests {
+		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.InfrastructureFailure)
+	} else {
+		s.breaker.Record(resilience.Key(envelope.Provider, "MODEL_DISPATCH", envelope.BaseURL), resilience.BusinessRejection)
+	}
 	if upstreamRequestID := s.upstream.UpstreamRequestID(response); upstreamRequestID != "" {
 		_ = s.repository.RecordUpstreamRequest(context.WithoutCancel(r.Context()), usageRequest.ID, UpstreamRequestEvidence{ProviderID: envelope.Provider, AdapterVersion: s.upstream.AdapterVersion(), RequestID: upstreamRequestID})
 	}

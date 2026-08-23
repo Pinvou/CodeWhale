@@ -57,6 +57,7 @@ spec:
             - { name: METRICS_ADDRESS, value: ":9090" }
             - { name: RATE_LIMIT_RPS, value: {{ $root.Values.security.rateLimitRPS | quote }} }
             - { name: RATE_LIMIT_BURST, value: {{ $root.Values.security.rateLimitBurst | quote }} }
+            - { name: TRUSTED_TIME_SOURCES, value: {{ join "," $root.Values.global.trustedTimeSources | quote }} }
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - name: DATABASE_URL

@@ -51,7 +51,7 @@ topologySpreadConstraints:
 {{- if not (hasPrefix "tls://" .Values.dependencies.natsUrl) -}}{{ fail "production-new NATS dependency must use TLS" }}{{- end -}}
 {{- if not (hasPrefix "https://" .Values.dependencies.natsMonitorUrl) -}}{{ fail "production-new NATS monitor dependency must use HTTPS" }}{{- end -}}
 {{- if or (lt (int .Values.replicas.accountService) 2) (lt (int .Values.replicas.billingService) 2) (lt (int .Values.replicas.tokenGateway) 2) (lt (int .Values.replicas.tokenPortal) 2) (lt (int .Values.replicas.eventRelay) 2) (lt (int .Values.keycloak.replicas) 2) (lt (int .Values.newApi.replicas) 2) -}}{{ fail "production-new requires at least two replicas for horizontally safe workloads" }}{{- end -}}
-{{- if or (eq (len .Values.external.postgresCidrs) 0) (eq (len .Values.external.paymentProviderCidrs) 0) (eq (len .Values.external.secretProviderCidrs) 0) (eq (len .Values.external.modelProviderCidrs) 0) -}}{{ fail "production-new requires explicit external dependency CIDRs" }}{{- end -}}
+{{- if or (eq (len .Values.external.postgresCidrs) 0) (eq (len .Values.external.paymentProviderCidrs) 0) (eq (len .Values.external.secretProviderCidrs) 0) (eq (len .Values.external.modelProviderCidrs) 0) (eq (len .Values.external.timeSourceCidrs) 0) -}}{{ fail "production-new requires explicit external dependency CIDRs" }}{{- end -}}
 {{- end -}}
 {{- if and (not .Values.keycloak.enabled) (or (eq .Values.oidc.jwksUrl "") (eq .Values.oidc.tokenUrl "")) -}}{{ fail "external Keycloak requires explicit OIDC JWKS and token backchannel URLs" }}{{- end -}}
 {{- end -}}

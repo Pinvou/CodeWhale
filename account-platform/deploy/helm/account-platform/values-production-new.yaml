@@ -1,6 +1,7 @@
 global:
   environment: production-new
   runtimeSecret: pinvou-account-platform-production-new
+  trustedTimeSources: [time.cloudflare.com:123, time.google.com:123, time.aws.com:123]
 
 externalSecrets:
   enabled: true
@@ -80,6 +81,7 @@ external:
   secretProviderCidrs: [10.22.0.0/24]
   modelProviderCidrs: [10.23.0.0/24]
   telemetryCollectorCidrs: [10.24.0.0/24]
+  timeSourceCidrs: [10.25.0.0/24]
 
 ingress:
   enabled: true

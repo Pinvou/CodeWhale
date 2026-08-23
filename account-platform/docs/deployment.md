@@ -447,6 +447,10 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 
 普通 `/health/ready` 只证明单个进程及其关键依赖达到服务级就绪，不能替代 TOK-37 的客户端切换 readiness。后者还必须验证客户端/服务端兼容版本、OIDC、跨服务契约、模型目录、READY 路由及计价配置，并保证不创建用户 Hold 或费用。
 
+生产环境必须通过 `global.trustedTimeSources` 配置至少三个独立 NTP 源，并在 `external.timeSourceCidrs` 只放行这些源的 UDP/123；示例地址必须替换为部署方实际治理的独立授时源。服务取三源中位偏差，100ms 内为正常目标，超过250ms记录告警，超过1秒使 `/health/ready` 失败并以 `CLOCK_UNSAFE` 拒绝新的 POST/PUT/PATCH/DELETE 时间敏感操作。验收需分别注入100ms、250ms和1秒以上偏差，保存三个源的UTC偏差、告警和拒绝证据；未完成真实授时与偏差注入前不得宣称 NFR-46 已部署。
+
+支付和模型 Provider 熔断按 `provider_id + capability/action + route` 隔离：60秒至少20个非业务样本且失败率达到50%，或连续5次连接/超时/不确定失败时打开；30秒后最多三个安全半开探测，连续三次成功关闭，失败按30秒至15分钟指数重开。余额不足、输入错误、明确拒绝和Provider业务限流不计基础设施失败。支付创建、退款和模型派发属于高风险操作，结果不确定后不能充当半开探测或由熔断器自动重发，只能走只读查询/核对或人工复核。生产验收必须覆盖每个已启用Provider能力和路由，并接通告警。
+
 ### 11.2 公共烟测
 
 使用测试账号在 `<public-base-url>` 验证：

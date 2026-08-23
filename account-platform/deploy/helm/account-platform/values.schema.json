@@ -5,10 +5,11 @@
   "properties": {
     "global": {
       "type": "object",
-      "required": ["environment", "runtimeSecret"],
+      "required": ["environment", "runtimeSecret", "trustedTimeSources"],
       "properties": {
         "environment": { "enum": ["development", "test", "staging", "production-new"] },
-        "runtimeSecret": { "type": "string", "minLength": 1 }
+        "runtimeSecret": { "type": "string", "minLength": 1 },
+        "trustedTimeSources": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "type": "string", "minLength": 3 } }
       }
     },
     "images": {
@@ -183,13 +184,14 @@
     },
     "external": {
       "type": "object",
-      "required": ["postgresCidrs", "paymentProviderCidrs", "secretProviderCidrs", "modelProviderCidrs", "telemetryCollectorCidrs"],
+      "required": ["postgresCidrs", "paymentProviderCidrs", "secretProviderCidrs", "modelProviderCidrs", "telemetryCollectorCidrs", "timeSourceCidrs"],
       "properties": {
         "postgresCidrs": { "$ref": "#/definitions/cidrs" },
         "paymentProviderCidrs": { "$ref": "#/definitions/cidrs" },
         "secretProviderCidrs": { "$ref": "#/definitions/cidrs" },
         "modelProviderCidrs": { "$ref": "#/definitions/cidrs" },
-        "telemetryCollectorCidrs": { "$ref": "#/definitions/cidrs" }
+        "telemetryCollectorCidrs": { "$ref": "#/definitions/cidrs" },
+        "timeSourceCidrs": { "$ref": "#/definitions/cidrs" }
       }
     },
     "ingress": { "type": "object", "required": ["enabled", "portalHost", "keycloakHost", "identityHost", "tlsSecretName"], "properties": { "enabled": { "type": "boolean" }, "portalHost": { "type": "string", "minLength": 1 }, "keycloakHost": { "type": "string", "minLength": 1 }, "identityHost": { "type": "string", "minLength": 1 }, "tlsSecretName": { "type": "string" } } },
@@ -297,6 +299,7 @@
             "properties": {
               "postgresCidrs": { "type": "array", "minItems": 1 },
               "paymentProviderCidrs": { "type": "array", "minItems": 1 },
+              "timeSourceCidrs": { "type": "array", "minItems": 1 },
               "secretProviderCidrs": { "type": "array", "minItems": 1 },
               "modelProviderCidrs": { "type": "array", "minItems": 1 },
               "telemetryCollectorCidrs": { "type": "array", "minItems": 1 }

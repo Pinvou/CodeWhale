@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -79,6 +80,7 @@ type PaymentCoordinator struct {
 	now                  func() time.Time
 	productSKUs          map[string]ExternalProduct
 	allowTentativePrices bool
+	breaker              *resilience.Breaker
 }
 
 type ProviderOrder = payment.ProviderOrder
@@ -132,7 +134,7 @@ func NewPaymentCoordinatorWithProvider(repository *PostgresRepository, provider 
 		}
 		validated[productID] = product
 	}
-	return &PaymentCoordinator{repository: repository, provider: provider, productSKUs: validated, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &PaymentCoordinator{repository: repository, provider: provider, productSKUs: validated, now: func() time.Time { return time.Now().UTC() }, breaker: resilience.NewBreaker()}, nil
 }
 
 func (p *PaymentCoordinator) ConfigureNotifications(merchantID, callbackURL string, secrets map[string]string) error {
@@ -364,7 +366,9 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
-	providerOrder, err := p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
+	providerOrder, err := providerCall(p, "ORDER_CREATE", order.Channel, true, func() (payment.ProviderOrder, error) {
+		return p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
+	})
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
