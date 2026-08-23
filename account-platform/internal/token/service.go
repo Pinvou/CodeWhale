@@ -83,6 +83,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(serviceToken))
 	internal.PUT("/organizations/:organization_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
+	internal.PUT("/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
 	protected.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))

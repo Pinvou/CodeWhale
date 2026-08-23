@@ -70,7 +70,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := account.NewService(repository, wallets).WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN")).WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle)
+	service := account.NewService(repository, wallets).
+		WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN")).
+		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
+		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle)
 	go account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run(ctx)
 	go account.NewRoleBindingExpiryWorker(repository, time.Minute).Run(ctx)
 	go account.NewApprovalExpiryWorker(repository, time.Minute).Run(ctx)

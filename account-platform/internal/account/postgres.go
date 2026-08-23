@@ -353,92 +353,150 @@ WHERE issuer = $1 AND session_id = $2 AND user_id = $3`,
 	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: version, ContextVersion: version, AuthorizationVersion: authorizationVersion}, nil
 }
 
-func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name string) (Unit, error) {
+func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name, idempotencyKey string) (UnitMutationResult, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 120 {
-		return Unit{}, ErrConflict
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if name == "" || len([]rune(name)) > 120 || !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		return UnitMutationResult{}, ErrConflict
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	defer tx.Rollback(ctx)
 	userID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, parentID, PermissionOrganizationUnitsManage); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
+	}
+	requestHash := organizationUnitRequestHash("CREATE", uuid.Nil, parentID, name, 0)
+	replayed, err := lockOrganizationUnitCommand(ctx, tx, userID, organizationID, "CREATE", idempotencyKey, requestHash)
+	if err != nil {
+		return UnitMutationResult{}, err
+	}
+	if replayed != nil {
+		return *replayed, tx.Commit(ctx)
+	}
+	var organizationStatus string
+	if err := tx.QueryRow(ctx, `SELECT status FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if organizationStatus != "ACTIVE" {
+		return UnitMutationResult{}, ErrConflict
 	}
 	if parentID != nil {
 		var found bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE organization_id = $1 AND id = $2 AND status = 'ACTIVE')`, organizationID, *parentID).Scan(&found); err != nil {
-			return Unit{}, err
+			return UnitMutationResult{}, err
 		}
 		if !found {
-			return Unit{}, ErrInvalidHierarchy
+			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
 	}
 	now := r.now()
 	unit := Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}
 	if _, err := tx.Exec(ctx, `INSERT INTO organization_units(id, organization_id, parent_id, name, status, created_at, updated_at) VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $5)`, unit.ID, organizationID, parentID, name, now); err != nil {
-		return Unit{}, mapConstraintError(err)
+		return UnitMutationResult{}, mapConstraintError(err)
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO organization_unit_closure(organization_id, ancestor_id, descendant_id, depth) VALUES ($1, $2, $2, 0)`, organizationID, unit.ID); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if parentID != nil {
 		if _, err := tx.Exec(ctx, `
 INSERT INTO organization_unit_closure(organization_id, ancestor_id, descendant_id, depth)
 SELECT organization_id, ancestor_id, $3, depth + 1
-FROM organization_unit_closure WHERE organization_id = $1 AND descendant_id = $2`, organizationID, *parentID, unit.ID); err != nil {
-			return Unit{}, err
+		FROM organization_unit_closure WHERE organization_id = $1 AND descendant_id = $2`, organizationID, *parentID, unit.ID); err != nil {
+			return UnitMutationResult{}, err
 		}
 	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "organization_unit.create", "organization_unit", unit.ID.String(), "SUCCEEDED", map[string]any{"parent_id": parentID}); err != nil {
-		return Unit{}, err
+	structureVersion, err := nextOrganizationStructureVersion(ctx, tx, organizationID, now)
+	if err != nil {
+		return UnitMutationResult{}, err
 	}
-	return unit, tx.Commit(ctx)
+	result := UnitMutationResult{Unit: unit, StructureVersion: structureVersion}
+	if err := saveOrganizationUnitCommand(ctx, tx, userID, organizationID, "CREATE", idempotencyKey, requestHash, result, now); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "organization_unit.create", "organization_unit", unit.ID.String(), "SUCCEEDED", map[string]any{"parent_id": parentID, "idempotency_key": idempotencyKey, "structure_version": structureVersion}); err != nil {
+		return UnitMutationResult{}, err
+	}
+	return result, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) MoveUnit(ctx context.Context, principal identity.Principal, organizationID, unitID uuid.UUID, newParentID *uuid.UUID, expectedVersion int64) (Unit, error) {
+func (r *PostgresRepository) MoveUnit(ctx context.Context, principal identity.Principal, organizationID, unitID uuid.UUID, newParentID *uuid.UUID, expectedStructureVersion int64, idempotencyKey string) (UnitMutationResult, error) {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if expectedStructureVersion < 1 || !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		return UnitMutationResult{}, ErrConflict
+	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, organizationID.String()); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	userID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, &unitID, PermissionOrganizationUnitsManage); err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
+	}
+	requestHash := organizationUnitRequestHash("MOVE", unitID, newParentID, "", expectedStructureVersion)
+	replayed, err := lockOrganizationUnitCommand(ctx, tx, userID, organizationID, "MOVE", idempotencyKey, requestHash)
+	if err != nil {
+		return UnitMutationResult{}, err
+	}
+	if replayed != nil {
+		return *replayed, tx.Commit(ctx)
+	}
+	var organizationStatus string
+	var structureVersion int64
+	if err := tx.QueryRow(ctx, `SELECT status,structure_version FROM organizations WHERE id=$1 FOR UPDATE`, organizationID).Scan(&organizationStatus, &structureVersion); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if organizationStatus != "ACTIVE" || structureVersion != expectedStructureVersion {
+		return UnitMutationResult{}, ErrConflict
 	}
 	var unit Unit
 	err = tx.QueryRow(ctx, `SELECT id, organization_id, parent_id, name, status, version FROM organization_units WHERE organization_id = $1 AND id = $2 FOR UPDATE`, organizationID, unitID).Scan(&unit.ID, &unit.OrganizationID, &unit.ParentID, &unit.Name, &unit.Status, &unit.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Unit{}, ErrNotFound
+		return UnitMutationResult{}, ErrNotFound
 	}
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
-	if unit.Version != expectedVersion {
-		return Unit{}, ErrConflict
+	if unit.Status != "ACTIVE" {
+		return UnitMutationResult{}, ErrConflict
 	}
 	if newParentID != nil {
 		if *newParentID == unitID {
-			return Unit{}, ErrInvalidHierarchy
+			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
 		var isDescendant bool
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_unit_closure WHERE organization_id = $1 AND ancestor_id = $2 AND descendant_id = $3)`, organizationID, unitID, *newParentID).Scan(&isDescendant); err != nil {
-			return Unit{}, err
+			return UnitMutationResult{}, err
 		}
 		if isDescendant {
-			return Unit{}, ErrInvalidHierarchy
+			return UnitMutationResult{}, ErrInvalidHierarchy
 		}
+		var parentActive bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organization_units WHERE organization_id=$1 AND id=$2 AND status='ACTIVE')`, organizationID, *newParentID).Scan(&parentActive); err != nil {
+			return UnitMutationResult{}, err
+		}
+		if !parentActive {
+			return UnitMutationResult{}, ErrInvalidHierarchy
+		}
+	}
+	if (unit.ParentID == nil && newParentID == nil) || (unit.ParentID != nil && newParentID != nil && *unit.ParentID == *newParentID) {
+		result := UnitMutationResult{Unit: unit, StructureVersion: structureVersion}
+		if err := saveOrganizationUnitCommand(ctx, tx, userID, organizationID, "MOVE", idempotencyKey, requestHash, result, r.now()); err != nil {
+			return UnitMutationResult{}, err
+		}
+		return result, tx.Commit(ctx)
 	}
 	_, err = tx.Exec(ctx, `
 DELETE FROM organization_unit_closure c
@@ -446,7 +504,7 @@ WHERE c.organization_id = $1
   AND c.descendant_id IN (SELECT descendant_id FROM organization_unit_closure WHERE organization_id = $1 AND ancestor_id = $2)
   AND c.ancestor_id NOT IN (SELECT descendant_id FROM organization_unit_closure WHERE organization_id = $1 AND ancestor_id = $2)`, organizationID, unitID)
 	if err != nil {
-		return Unit{}, err
+		return UnitMutationResult{}, err
 	}
 	if newParentID != nil {
 		_, err = tx.Exec(ctx, `
@@ -457,18 +515,27 @@ CROSS JOIN organization_unit_closure subtree
 WHERE parent_path.organization_id = $1 AND parent_path.descendant_id = $3
   AND subtree.organization_id = $1 AND subtree.ancestor_id = $2`, organizationID, unitID, *newParentID)
 		if err != nil {
-			return Unit{}, err
+			return UnitMutationResult{}, err
 		}
 	}
+	now := r.now()
 	unit.ParentID = newParentID
 	unit.Version++
-	if _, err := tx.Exec(ctx, `UPDATE organization_units SET parent_id = $3, version = version + 1, updated_at = $4 WHERE organization_id = $1 AND id = $2`, organizationID, unitID, newParentID, r.now()); err != nil {
-		return Unit{}, mapConstraintError(err)
+	if _, err := tx.Exec(ctx, `UPDATE organization_units SET parent_id = $3, version = version + 1, updated_at = $4 WHERE organization_id = $1 AND id = $2`, organizationID, unitID, newParentID, now); err != nil {
+		return UnitMutationResult{}, mapConstraintError(err)
 	}
-	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "organization_unit.move", "organization_unit", unitID.String(), "SUCCEEDED", map[string]any{"new_parent_id": newParentID}); err != nil {
-		return Unit{}, err
+	structureVersion, err = nextOrganizationStructureVersion(ctx, tx, organizationID, now)
+	if err != nil {
+		return UnitMutationResult{}, err
 	}
-	return unit, tx.Commit(ctx)
+	result := UnitMutationResult{Unit: unit, StructureVersion: structureVersion}
+	if err := saveOrganizationUnitCommand(ctx, tx, userID, organizationID, "MOVE", idempotencyKey, requestHash, result, now); err != nil {
+		return UnitMutationResult{}, err
+	}
+	if err := appendAudit(ctx, tx, userID, principal.SessionID, &organizationID, "organization_unit.move", "organization_unit", unitID.String(), "SUCCEEDED", map[string]any{"new_parent_id": newParentID, "idempotency_key": idempotencyKey, "structure_version": structureVersion}); err != nil {
+		return UnitMutationResult{}, err
+	}
+	return result, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, email string, roles []string, expiresAt time.Time) (Invitation, error) {

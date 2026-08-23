@@ -21,17 +21,23 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
-	repository            Repository
-	wallets               WalletProvisioner
-	mobileAuth            *MobileAuthService
-	profiles              *ProfileChangeService
-	organizationLifecycle []OrganizationLifecycleClient
-	serviceToken          string
-	now                   func() time.Time
+	repository                Repository
+	wallets                   WalletProvisioner
+	mobileAuth                *MobileAuthService
+	profiles                  *ProfileChangeService
+	organizationLifecycle     []OrganizationLifecycleClient
+	organizationUnitLifecycle []OrganizationUnitLifecycleClient
+	serviceToken              string
+	now                       func() time.Time
 }
 
 func (s *Service) WithOrganizationLifecycle(clients ...OrganizationLifecycleClient) *Service {
 	s.organizationLifecycle = append([]OrganizationLifecycleClient(nil), clients...)
+	return s
+}
+
+func (s *Service) WithOrganizationUnitLifecycle(clients ...OrganizationUnitLifecycleClient) *Service {
+	s.organizationUnitLifecycle = append([]OrganizationUnitLifecycleClient(nil), clients...)
 	return s
 }
 
@@ -154,12 +160,12 @@ func (s *Service) listUnits(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	units, err := s.repository.ListUnits(r.Context(), mustPrincipal(r.Context()), organizationID)
+	tree, err := s.repository.ListUnits(r.Context(), mustPrincipal(r.Context()), organizationID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": units})
+	api.WriteJSON(w, http.StatusOK, tree)
 }
 
 func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
@@ -338,19 +344,33 @@ func (s *Service) createUnit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ParentID *uuid.UUID `json:"parent_id"`
-		Name     string     `json:"name"`
+		ParentID       *uuid.UUID `json:"parent_id"`
+		Name           string     `json:"name"`
+		IdempotencyKey string     `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid organization unit request", httpserver.RequestID(r.Context()))
 		return
 	}
-	unit, err := s.repository.CreateUnit(r.Context(), mustPrincipal(r.Context()), organizationID, body.ParentID, body.Name)
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "unit-create:"+organizationID.String()+":"+strings.TrimSpace(body.Name)+":"+fmt.Sprint(body.ParentID))
+	if !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "an idempotency key between 8 and 120 characters is required", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := s.repository.CreateUnit(r.Context(), mustPrincipal(r.Context()), organizationID, body.ParentID, body.Name, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusCreated, unit)
+	if _, err := s.applyOrganizationUnitLifecycle(r.Context(), organizationID, result.Unit.ID, "ACTIVE", result.StructureVersion); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_UNIT_LIFECYCLE_UNAVAILABLE", "the unit was created but dependent lifecycle activation must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+		return
+	}
+	status := http.StatusCreated
+	if result.Replayed {
+		status = http.StatusOK
+	}
+	api.WriteJSON(w, status, result)
 }
 
 func (s *Service) moveUnit(w http.ResponseWriter, r *http.Request) {
@@ -363,19 +383,29 @@ func (s *Service) moveUnit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ParentID        *uuid.UUID `json:"parent_id"`
-		ExpectedVersion int64      `json:"expected_version"`
+		ParentID                 *uuid.UUID `json:"parent_id"`
+		ExpectedStructureVersion int64      `json:"expected_structure_version"`
+		ExpectedVersion          int64      `json:"expected_version"`
+		IdempotencyKey           string     `json:"idempotency_key"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || body.ExpectedVersion < 1 {
+	if err := api.DecodeJSON(w, r, &body); err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid unit move request", httpserver.RequestID(r.Context()))
 		return
 	}
-	unit, err := s.repository.MoveUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, body.ParentID, body.ExpectedVersion)
+	if body.ExpectedStructureVersion == 0 {
+		body.ExpectedStructureVersion = body.ExpectedVersion
+	}
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "unit-move:"+organizationID.String()+":"+unitID.String()+":"+fmt.Sprint(body.ParentID)+":"+fmt.Sprint(body.ExpectedStructureVersion))
+	if body.ExpectedStructureVersion < 1 || !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "expected_structure_version and a valid idempotency key are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := s.repository.MoveUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, body.ParentID, body.ExpectedStructureVersion, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, unit)
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) createInvitation(w http.ResponseWriter, r *http.Request) {

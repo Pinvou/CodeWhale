@@ -417,12 +417,15 @@ paths:
               schema:
                 type: object
                 additionalProperties: false
-                required: [items]
+                required: [items, structure_version]
                 properties:
                   items:
                     type: array
                     items:
                       $ref: "#/components/schemas/OrganizationUnit"
+                  structure_version:
+                    type: integer
+                    minimum: 1
         "403":
           $ref: "#/components/responses/Error"
     post:
@@ -430,6 +433,7 @@ paths:
       summary: Create an internal organization unit
       parameters:
         - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -446,13 +450,23 @@ paths:
                 parent_id:
                   type: [string, "null"]
                   format: uuid
+                idempotency_key:
+                  type: string
+                  minLength: 8
+                  maxLength: 120
       responses:
         "201":
           description: Created organization unit
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/OrganizationUnit"
+                $ref: "#/components/schemas/OrganizationUnitMutation"
+        "200":
+          description: Existing result replayed for the same idempotency key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrganizationUnitMutation"
         "400":
           $ref: "#/components/responses/Error"
         "403":
@@ -463,6 +477,7 @@ paths:
       summary: Move an organization unit with optimistic concurrency
       parameters:
         - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
         - name: unit_id
           in: path
           required: true
@@ -476,21 +491,25 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [expected_version]
+              required: [expected_structure_version]
               properties:
                 parent_id:
                   type: [string, "null"]
                   format: uuid
-                expected_version:
+                expected_structure_version:
                   type: integer
                   minimum: 1
+                idempotency_key:
+                  type: string
+                  minLength: 8
+                  maxLength: 120
       responses:
         "200":
           description: Moved organization unit
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/OrganizationUnit"
+                $ref: "#/components/schemas/OrganizationUnitMutation"
         "403":
           $ref: "#/components/responses/Error"
         "409":
@@ -733,6 +752,15 @@ components:
       schema:
         type: string
         format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 120
+      description: Stable operation key; body fallback is accepted for constrained clients.
   schemas:
     RoleBinding:
       type: object
@@ -883,10 +911,22 @@ components:
           type: string
         status:
           type: string
-          enum: [ACTIVE, DISABLED]
+          enum: [ACTIVE, DISABLED, DELETED]
         version:
           type: integer
           minimum: 1
+    OrganizationUnitMutation:
+      type: object
+      additionalProperties: false
+      required: [unit, structure_version, replayed]
+      properties:
+        unit:
+          $ref: "#/components/schemas/OrganizationUnit"
+        structure_version:
+          type: integer
+          minimum: 1
+        replayed:
+          type: boolean
     OrganizationMember:
       type: object
       additionalProperties: false

@@ -77,6 +77,17 @@ type Unit struct {
 	Version        int64      `json:"version"`
 }
 
+type UnitMutationResult struct {
+	Unit             Unit  `json:"unit"`
+	StructureVersion int64 `json:"structure_version"`
+	Replayed         bool  `json:"replayed"`
+}
+
+type UnitTree struct {
+	Items            []Unit `json:"items"`
+	StructureVersion int64  `json:"structure_version"`
+}
+
 type Member struct {
 	UserID       uuid.UUID   `json:"user_id"`
 	DisplayName  *string     `json:"display_name"`
@@ -107,15 +118,15 @@ type Repository interface {
 	GetCommerceCustomerMapping(context.Context, identity.Principal) (CommerceCustomerMapping, error)
 	ListOrganizations(context.Context, identity.Principal) ([]Organization, error)
 	SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error)
-	ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error)
+	ListUnits(context.Context, identity.Principal, uuid.UUID) (UnitTree, error)
 	ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error)
 	ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error)
 	ListOrganizationRoleBindings(context.Context, identity.Principal, uuid.UUID) ([]RoleBinding, error)
 	GrantOrganizationRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)
 	RevokeOrganizationRoleBinding(context.Context, identity.Principal, uuid.UUID, uuid.UUID) (RoleBinding, error)
 	ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error)
-	CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string) (Unit, error)
-	MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64) (Unit, error)
+	CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string, string) (UnitMutationResult, error)
+	MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string) (UnitMutationResult, error)
 	CreateInvitation(context.Context, identity.Principal, uuid.UUID, string, []string, time.Time) (Invitation, error)
 	AcceptInvitation(context.Context, identity.Principal, string) (Organization, error)
 	RevokeMembership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error

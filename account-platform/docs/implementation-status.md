@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 119`、`部分实现 69`、`未实现 139`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 123`、`部分实现 65`、`未实现 139`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -40,8 +40,9 @@
 | `SECURITY-RECOVERY` | `BOOTSTRAP_PENDING` 首管安全激活、256 bit 一次性凭据、5 次锁定、代次失效、最后管理员门禁、ACC-48 撤权原语和离线 Break-glass | Go 单元测试、CLI/迁移合同与全量静态验证通过；生产等价 Keycloak/数据库并发、故障补偿、告警投递和事故演练待执行 |
 | `APPROVAL-COMMANDS` | 版本化命令分类、不可逆审批状态机、不可变快照、独立审批、强一致授权复核、Outbox 授权和 Billing 幂等领域执行 | Account/Billing/Portal Go 单元测试、OpenAPI lint、47 个合同测试与全量静态验证通过；生产工作负载身份由 APT-047 继续替换共享服务令牌 |
 | `ORGANIZATION-LIFECYCLE` | 顶层组织创建幂等、状态/游标搜索、启停投影、组织钱包冻结以及 Account/Billing/Token 删除阻断事实强校验 | Account/Billing/Token Go 单元测试、OpenAPI lint、组织生命周期合同测试与全量静态验证通过；数据库运行级迁移和生产故障注入待部署 |
+| `ORGANIZATION-UNIT-LIFECYCLE` | 节点命令指纹幂等、组织结构版本、闭包树移动以及 Account/Billing/Token 限制态预检和逻辑删除 | Account/Billing/Token Go 单元测试、OpenAPI lint、节点生命周期合同测试与全量静态验证通过；数据库运行级迁移、真实并发和跨服务故障注入待部署 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/47 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/50 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -78,10 +79,10 @@
 | ACC-17 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE | NOT_DEPLOYED | DISABLED→ACTIVE 前由 Billing 强校验生命周期投影和钱包可恢复性；成功时成员、用户/Session 授权版本、审计和唯一状态事件递增，重复启用无重复事件 |
 | ACC-18 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE | NOT_DEPLOYED | ACTIVE→DISABLED 前先在 Billing 冻结组织钱包，因而新购买、额度入账和 Hold 统一失败关闭；Account 同事务暂停成员、回退组织 Session、递增授权版本并写审计/Outbox |
 | ACC-20 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE | NOT_DEPLOYED | 仅停用组织可在 Account/Billing 全部预检清零后进入终态 DELETED；成员撤权、Session 回退、资料脱敏、审计/Outbox 与 Billing 钱包关闭均保留历史，重复删除返回成功 |
-| ACC-21 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有显式目标组织、父节点状态校验、同组织闭包写入和审计；缺稳定幂等键 |
-| ACC-23 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | 已有原子权限保护的独立重命名接口、显式编辑 UI、名称校验、节点 ID/层级保持和审计；缺稳定幂等键 |
-| ACC-24 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有同组织移动、防自身/后代成环、串行事务和版本更新；缺稳定幂等键及独立结构版本契约 |
-| ACC-25 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有叶节点检查和审计，但当前物理删除节点并删除成员/角色关联，未按目标对授予、路由和任务执行阻断后逻辑删除 |
+| ACC-21 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE; RBAC-AUTH | NOT_DEPLOYED | 显式目标组织及活动父节点校验、闭包树写入、操作者隔离幂等键与版本化请求指纹同事务保存；重放返回原节点，同键异请求冲突并写审计 |
+| ACC-23 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | 显式编辑 UI 与原子权限保护的独立接口共同约束重命名；稳定命令键返回原结果，名称变化只递增节点/结构版本，不改变节点 ID、父子关系和历史审计 |
+| ACC-24 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE; RBAC-AUTH | NOT_DEPLOYED | 移动以组织级 advisory lock 和 `expected_structure_version` 串行提交，拒绝跨组织、停用父节点、自身和后代成环；闭包关系与父节点在同一事务切换 |
+| ACC-25 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE | NOT_DEPLOYED | 删除先使 Billing/Token 投影进入 DELETION_PENDING，阻止新授予/治理事实和节点 Token Account，再汇总子节点、成员、角色、审批、授予登记、Token 路由及未终态用量阻断；清零后只写 DELETED/删除时间并永久保留树、命令、审计和关联历史 |
 | ACC-27 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有用户/组织状态、重复成员、角色边界、授权版本和 Outbox；重复有效成员返回冲突而非幂等原结果 |
 | ACC-28 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有成员撤销、角色清理、授权版本和 Outbox；管理端路径未自动回退活动上下文，也未处理 BILL-13 授予暂停 |
 | ACC-31 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 普通组织/节点角色按显式目标作用域校验 `org.roles.assign`，拒绝 OWNER、基础角色和平台角色；支持开始/到期时间及成员级稳定幂等键，重复请求返回原绑定 |
@@ -563,11 +564,11 @@
 | ACC-18 | 停用组织 | 已实现 | Billing 钱包先冻结，Account 再暂停成员并回退活动 Session；新购买、入账与 Hold 失败关闭。 |
 | ACC-19 | 组织安全逻辑删除 | 已实现 | Account 治理事实与 Billing 资金、权益、Hold、支付/退款/差异/用量事实执行跨域预检并返回结构化阻断原因。 |
 | ACC-20 | 逻辑删除组织 | 已实现 | 预检清零后写终态 DELETED、关闭组织钱包并保留财务/审计历史；重复调用幂等成功。 |
-| ACC-21 | 创建组织子节点 | 部分实现 | 已有显式目标组织、父节点状态校验、同组织闭包写入和审计；缺稳定幂等键。 |
+| ACC-21 | 创建组织子节点 | 已实现 | 操作者、组织、命令类型和稳定幂等键冻结请求指纹；活动父节点、同组织闭包、结构版本和审计在同一串行事务提交，重放返回原结果。 |
 | ACC-22 | 组织名称和节点名称显式进入编辑态后修改 | 已实现 | 管理 UI 提供启动编辑动作，避免误改。 |
-| ACC-23 | 重命名组织节点 | 部分实现 | 已有独立重命名接口、显式编辑 UI、名称校验、节点 ID/层级保持和审计；服务端权限仍是迁移期角色模型。 |
-| ACC-24 | 调整组织节点父节点 | 部分实现 | 已有同组织移动、防自身/后代成环、串行事务和版本更新；缺稳定幂等键及独立结构版本契约。 |
-| ACC-25 | 删除组织节点 | 部分实现 | 已有叶节点检查和审计，但当前物理删除节点并删除成员/角色关联，未按目标对授予、路由和任务执行阻断后逻辑删除。 |
+| ACC-23 | 重命名组织节点 | 已实现 | 显式编辑 UI、原子目标权限、名称规则和幂等命令共同约束；成功只更新名称及节点/结构版本，节点 ID、父子关系和历史审计不变。 |
+| ACC-24 | 调整组织节点父节点 | 已实现 | `expected_structure_version`、组织串行锁和稳定请求指纹保证同组织原子移动；跨组织、停用父节点、自身及后代父级均拒绝。 |
+| ACC-25 | 删除组织节点 | 已实现 | Account/Billing/Token 先进入限制态并汇总成员、角色、子节点、授予登记、路由、用量和任务阻断；全部清零后仅写 DELETED，保留闭包树及历史，重试返回原结果。 |
 | ACC-26 | 组织邀请 | 部分实现 | 当前支持电子邮箱和一次性邀请 Token，并有创建、接受、过期/撤销状态；手机号、用户名邀请及目标反枚举恢复契约未实现。 |
 | ACC-27 | 添加组织成员 | 部分实现 | 已有用户/组织状态、重复成员、角色边界、授权版本和 Outbox；重复有效成员返回冲突而非幂等原结果。 |
 | ACC-28 | 移除组织成员 | 部分实现 | 已有成员撤销、角色清理、授权版本和 Outbox；管理端路径未自动回退活动上下文，也未处理 BILL-13 授予暂停。 |

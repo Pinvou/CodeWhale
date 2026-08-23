@@ -140,6 +140,7 @@ type Repository interface {
 	ExpireHolds(context.Context, int) (int, error)
 	RequestAdjustment(context.Context, uuid.UUID, int64, string, uuid.UUID) (ManualAdjustment, error)
 	RejectAdjustment(context.Context, uuid.UUID, uuid.UUID, string) (ManualAdjustment, error)
+	ApplyOrganizationUnitLifecycle(context.Context, uuid.UUID, uuid.UUID, string, int64) (OrganizationUnitDeletionAssessment, error)
 	Ping(context.Context) error
 	Close()
 }

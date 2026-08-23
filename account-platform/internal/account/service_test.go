@@ -59,7 +59,7 @@ func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([
 func (*fakeRepository) SetActiveContext(context.Context, identity.Principal, *uuid.UUID) (Context, error) {
 	panic("not used")
 }
-func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) ([]Unit, error) {
+func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) (UnitTree, error) {
 	panic("not used")
 }
 func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error) {
@@ -80,10 +80,10 @@ func (*fakeRepository) RevokeOrganizationRoleBinding(context.Context, identity.P
 func (*fakeRepository) ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error) {
 	panic("not used")
 }
-func (*fakeRepository) CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string) (Unit, error) {
+func (*fakeRepository) CreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string, string) (UnitMutationResult, error) {
 	panic("not used")
 }
-func (*fakeRepository) MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64) (Unit, error) {
+func (*fakeRepository) MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string) (UnitMutationResult, error) {
 	panic("not used")
 }
 func (*fakeRepository) CreateInvitation(context.Context, identity.Principal, uuid.UUID, string, []string, time.Time) (Invitation, error) {
@@ -150,9 +150,12 @@ func (f *fakeRepository) AdminDeleteOrganization(_ context.Context, _ identity.P
 	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":DELETE")
 	return nil
 }
-func (f *fakeRepository) AdminUnits(_ context.Context, organizationID uuid.UUID) ([]Unit, error) {
+func (f *fakeRepository) AdminUnits(_ context.Context, organizationID uuid.UUID) (UnitTree, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":units")
-	return []Unit{}, nil
+	return UnitTree{Items: []Unit{}, StructureVersion: 1}, nil
+}
+func (f *fakeRepository) AdminUnitState(_ context.Context, organizationID, unitID uuid.UUID) (UnitMutationResult, error) {
+	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, Status: "DELETED", Version: 2}, StructureVersion: 2}, nil
 }
 func (f *fakeRepository) AdminMembers(_ context.Context, organizationID uuid.UUID) ([]Member, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":members")
@@ -174,21 +177,24 @@ func (f *fakeRepository) AdminTransferOwnership(_ context.Context, _ identity.Pr
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":owner:"+ownerID.String())
 	return nil
 }
-func (f *fakeRepository) AdminCreateUnit(_ context.Context, _ identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name string) (Unit, error) {
+func (f *fakeRepository) AdminCreateUnit(_ context.Context, _ identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name, _ string) (UnitMutationResult, error) {
 	parent := "root"
 	if parentID != nil {
 		parent = parentID.String()
 	}
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:create:"+parent+":"+name)
-	return Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}, nil
+	return UnitMutationResult{Unit: Unit{ID: uuid.Must(uuid.NewV7()), OrganizationID: organizationID, ParentID: parentID, Name: name, Status: "ACTIVE", Version: 1}, StructureVersion: 2}, nil
 }
-func (f *fakeRepository) AdminRenameUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID, name string) error {
+func (f *fakeRepository) AdminRenameUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID, name, _ string) (UnitMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":rename:"+name)
-	return nil
+	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, Name: name, Status: "ACTIVE", Version: 2}, StructureVersion: 2}, nil
 }
-func (f *fakeRepository) AdminDeleteUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID) error {
+func (*fakeRepository) AdminUnitDeletionBlockers(context.Context, uuid.UUID, uuid.UUID) ([]OrganizationLifecycleBlocker, error) {
+	return []OrganizationLifecycleBlocker{}, nil
+}
+func (f *fakeRepository) AdminDeleteUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID, _ string) (UnitMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":DELETE")
-	return nil
+	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, Status: "DELETED", Version: 2}, StructureVersion: 2}, nil
 }
 func (*fakeRepository) AdminAuditLogs(context.Context, AdminAuditFilter) ([]AdminAuditLog, error) {
 	return nil, nil
@@ -360,8 +366,8 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/members", "", http.StatusOK, "organization:" + organizationID.String() + ":members"},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/ownership", `{"new_owner_user_id":"` + ownerID.String() + `"}`, http.StatusNoContent, "organization:" + organizationID.String() + ":owner:" + ownerID.String()},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/units", `{"name":"Engineering","parent_id":"` + parentID.String() + `"}`, http.StatusCreated, "organization:" + organizationID.String() + ":unit:create:" + parentID.String() + ":Engineering"},
-		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusNoContent, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
-		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), "", http.StatusNoContent, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":DELETE"},
+		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
+		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), "", http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":DELETE"},
 	}
 	for _, test := range tests {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))

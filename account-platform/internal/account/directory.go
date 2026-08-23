@@ -11,36 +11,42 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]Unit, error) {
+func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) (UnitTree, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
 	defer tx.Rollback(ctx)
 	actorID, err := activeUserID(ctx, tx, principal)
 	if err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
 	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationUnitsRead); err != nil {
-		return nil, err
+		return UnitTree{}, err
+	}
+	var structureVersion int64
+	if err := tx.QueryRow(ctx, `SELECT structure_version FROM organizations WHERE id=$1 AND status='ACTIVE'`, organizationID).Scan(&structureVersion); errors.Is(err, pgx.ErrNoRows) {
+		return UnitTree{}, ErrNotFound
+	} else if err != nil {
+		return UnitTree{}, err
 	}
 	rows, err := tx.Query(ctx, `SELECT id,organization_id,parent_id,name,status,version FROM organization_units WHERE organization_id=$1 AND status='ACTIVE' ORDER BY parent_id NULLS FIRST,name,id`, organizationID)
 	if err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
 	defer rows.Close()
 	items := make([]Unit, 0)
 	for rows.Next() {
 		var item Unit
 		if err := rows.Scan(&item.ID, &item.OrganizationID, &item.ParentID, &item.Name, &item.Status, &item.Version); err != nil {
-			return nil, err
+			return UnitTree{}, err
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return UnitTree{}, err
 	}
-	return items, tx.Commit(ctx)
+	return UnitTree{Items: items, StructureVersion: structureVersion}, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]Member, error) {
