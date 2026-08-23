@@ -85,6 +85,30 @@ func TestProductionRemoteProviderRequiresHTTPS(t *testing.T) {
 	}
 }
 
+func TestRemoteEnvelopeProviderDecryptsHistoricalKeyDuringRotation(t *testing.T) {
+	requestedKey := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		requestedKey = body["key_id"]
+		_ = json.NewEncoder(w).Encode(map[string]string{"value_base64": body["value_base64"]})
+	}))
+	defer server.Close()
+	provider, err := NewRemoteEnvelopeProvider("development", "kms-key-v2", server.URL, "remote-provider-token-that-is-long-enough")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := provider.DecryptWithKeyID("kms-key-v1", []byte("historical-envelope"), []byte("credential-id"))
+	if err != nil || string(plaintext) != "historical-envelope" {
+		t.Fatalf("historical key decrypt failed: %q, %v", plaintext, err)
+	}
+	if requestedKey != "kms-key-v1" {
+		t.Fatalf("decrypt used %q instead of the stored key id", requestedKey)
+	}
+}
+
 func TestRemoteEnvelopeProviderDoesNotFollowRedirects(t *testing.T) {
 	received := false
 	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { received = true }))

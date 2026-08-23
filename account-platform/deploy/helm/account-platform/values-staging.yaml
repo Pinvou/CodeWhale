@@ -2,6 +2,13 @@ global:
   environment: staging
   runtimeSecret: pinvou-account-platform-staging
 
+externalSecrets:
+  enabled: true
+  secretStoreKind: ClusterSecretStore
+  secretStoreName: pinvou-staging-vault
+  remoteKey: pinvou/staging/account-platform
+  refreshInterval: 5m
+
 replicas:
   accountService: 1
   identityService: 1
@@ -25,6 +32,8 @@ observability:
 tokenGateway:
   secretProvider: remote
   secretKeyId: staging-account-token-v1
+  secretRotationIntervalSeconds: 300
+  secretRotationBatchSize: 100
   providerAllowedHosts: [newapi]
 
 external:

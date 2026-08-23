@@ -638,10 +638,7 @@ func (r *PostgresRepository) CredentialSecret(ctx context.Context, accountID, cr
 	if err != nil {
 		return Credential{}, nil, err
 	}
-	if keyID != r.secrets.KeyID() {
-		return Credential{}, nil, ErrInvalidSecret
-	}
-	plaintext, err := r.secrets.Decrypt(ciphertext, []byte(accountID.String()+":"+credentialID.String()))
+	plaintext, err := r.secrets.DecryptWithKeyID(keyID, ciphertext, []byte(accountID.String()+":"+credentialID.String()))
 	if err != nil {
 		return Credential{}, nil, err
 	}

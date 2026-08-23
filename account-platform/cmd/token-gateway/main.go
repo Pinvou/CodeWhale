@@ -185,6 +185,27 @@ func main() {
 	defer stopWorker()
 	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
 	go token.NewReplayRetentionWorker(repository, 15*time.Second).Run(workerContext)
+	secretRotationInterval := 5 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("TOKEN_SECRET_ROTATION_INTERVAL_SECONDS")); raw != "" {
+		seconds, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || seconds < 60 || seconds > 86400 {
+			log.Fatal("TOKEN_SECRET_ROTATION_INTERVAL_SECONDS must be between 60 and 86400")
+		}
+		secretRotationInterval = time.Duration(seconds) * time.Second
+	}
+	secretRotationBatchSize := 100
+	if raw := strings.TrimSpace(os.Getenv("TOKEN_SECRET_ROTATION_BATCH_SIZE")); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 1000 {
+			log.Fatal("TOKEN_SECRET_ROTATION_BATCH_SIZE must be between 1 and 1000")
+		}
+		secretRotationBatchSize = parsed
+	}
+	secretRotation, err := token.NewSecretRotationWorker(repository, secretRotationInterval, secretRotationBatchSize)
+	if err != nil {
+		log.Fatal("secret rotation is not configured: ", err)
+	}
+	go secretRotation.Run(workerContext)
 	initialSyncContext, cancelInitialSync := context.WithTimeout(workerContext, 30*time.Second)
 	if _, _, syncErr := catalogSync.Sync(initialSyncContext); syncErr != nil {
 		log.Printf("model catalog initial synchronization deferred: %v", syncErr)
@@ -193,7 +214,23 @@ func main() {
 	go catalogSync.Run(workerContext)
 	go defaultRoutes.Run(workerContext)
 	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness)
-	if err := httpserver.RunWithApplication("token-gateway", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
+	ready := repository.Ping
+	if strings.EqualFold(cfg.Environment, "production") || strings.EqualFold(cfg.Environment, "production-new") {
+		ready = func(ctx context.Context) error {
+			if err := repository.Ping(ctx); err != nil {
+				return err
+			}
+			remaining, err := repository.SecretRotationRemaining(ctx)
+			if err != nil {
+				return err
+			}
+			if remaining != 0 {
+				return token.ErrSecretRotationPending
+			}
+			return nil
+		}
+	}
+	if err := httpserver.RunWithApplication("token-gateway", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), ready); err != nil {
 		log.Fatal(err)
 	}
 }

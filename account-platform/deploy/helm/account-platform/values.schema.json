@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "images", "newApi", "oidc", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
+  "required": ["global", "externalSecrets", "images", "newApi", "oidc", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
   "properties": {
     "global": {
       "type": "object",
@@ -73,6 +73,18 @@
         "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 }
       }
     },
+    "externalSecrets": {
+      "type": "object",
+      "required": ["enabled", "secretStoreKind", "secretStoreName", "remoteKey", "refreshInterval"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretStoreKind": { "enum": ["SecretStore", "ClusterSecretStore"] },
+        "secretStoreName": { "type": "string" },
+        "remoteKey": { "type": "string" },
+        "refreshInterval": { "type": "string", "pattern": "^[1-9][0-9]*[smh]$" }
+      }
+    },
     "sms": {
       "type": "object",
       "required": ["enabled", "provider", "aliyunEndpoint", "httpEndpoint"],
@@ -114,11 +126,13 @@
     },
     "tokenGateway": {
       "type": "object",
-      "required": ["gatewayAdapter", "secretProvider", "secretKeyId", "providerAllowedHosts", "maxInputTokens", "modelCatalogDefaultContextTokens", "modelCatalogDefaultMaxOutputTokens", "modelCatalogSyncMinutes", "clientContractVersion", "minimumClientVersion", "maximumClientVersion", "readinessAttestationKeyId", "readinessAttestationTtlSeconds"],
+      "required": ["gatewayAdapter", "secretProvider", "secretKeyId", "secretRotationIntervalSeconds", "secretRotationBatchSize", "providerAllowedHosts", "maxInputTokens", "modelCatalogDefaultContextTokens", "modelCatalogDefaultMaxOutputTokens", "modelCatalogSyncMinutes", "clientContractVersion", "minimumClientVersion", "maximumClientVersion", "readinessAttestationKeyId", "readinessAttestationTtlSeconds"],
       "properties": {
         "gatewayAdapter": { "enum": ["NEW_API", "OPENAI_COMPATIBLE"] },
         "secretProvider": { "enum": ["local", "remote"] },
         "secretKeyId": { "type": "string" },
+        "secretRotationIntervalSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+        "secretRotationBatchSize": { "type": "integer", "minimum": 1, "maximum": 1000 },
         "providerAllowedHosts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
         "maxInputTokens": { "type": "integer", "minimum": 1 },
         "modelCatalogDefaultContextTokens": { "type": "integer", "minimum": 1 },
@@ -142,7 +156,7 @@
         "telemetryCollectorCidrs": { "$ref": "#/definitions/cidrs" }
       }
     },
-    "ingress": { "type": "object", "required": ["enabled", "identityHost"], "properties": { "enabled": { "type": "boolean" }, "identityHost": { "type": "string", "minLength": 1 } } },
+    "ingress": { "type": "object", "required": ["enabled", "portalHost", "keycloakHost", "identityHost", "tlsSecretName"], "properties": { "enabled": { "type": "boolean" }, "portalHost": { "type": "string", "minLength": 1 }, "keycloakHost": { "type": "string", "minLength": 1 }, "identityHost": { "type": "string", "minLength": 1 }, "tlsSecretName": { "type": "string" } } },
     "keycloak": {
       "type": "object",
       "required": ["hostname", "adminHostname"],
@@ -199,6 +213,14 @@
               "providerAllowedHosts": { "type": "array", "minItems": 1 }
             }
           },
+          "externalSecrets": {
+            "type": "object",
+            "properties": {
+              "enabled": { "const": true },
+              "secretStoreName": { "type": "string", "minLength": 1 },
+              "remoteKey": { "type": "string", "minLength": 1 }
+            }
+          },
           "newApi": { "type": "object", "properties": { "enabled": { "const": true } } },
           "billing": { "type": "object", "properties": { "paymentProvider": { "const": "h3c_mall" }, "allowTentativePrices": { "const": false } } },
           "images": {
@@ -219,7 +241,10 @@
             }
           },
           "observability": { "type": "object", "properties": { "otlpEndpoint": { "type": "string", "pattern": "^https://" }, "prometheusRulesEnabled": { "const": true } } },
-          "ingress": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } },
+          "oidc": { "type": "object", "properties": { "issuer": { "type": "string", "pattern": "^https://" } } },
+          "public": { "type": "object", "properties": { "portalUrl": { "type": "string", "pattern": "^https://" }, "paymentCallbackUrl": { "type": "string", "pattern": "^https://" } } },
+          "keycloak": { "type": "object", "properties": { "hostname": { "type": "string", "pattern": "^https://" } } },
+          "ingress": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true }, "tlsSecretName": { "type": "string", "minLength": 1 } } },
           "networkPolicy": { "type": "object", "properties": { "enabled": { "type": "boolean", "const": true } } }
         }
       }

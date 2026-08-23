@@ -4,6 +4,13 @@ global:
   imagePullSecrets: []
   podLabels: {}
 
+externalSecrets:
+  enabled: false
+  secretStoreKind: ClusterSecretStore
+  secretStoreName: ""
+  remoteKey: ""
+  refreshInterval: 5m
+
 images:
   accountService: { repository: pinvou/account-service, tag: dev, pullPolicy: IfNotPresent }
   identityService: { repository: pinvou/identity-service, tag: dev, pullPolicy: IfNotPresent }
@@ -73,6 +80,8 @@ tokenGateway:
   gatewayAdapter: NEW_API
   secretProvider: remote
   secretKeyId: ""
+  secretRotationIntervalSeconds: 300
+  secretRotationBatchSize: 100
   providerAllowedHosts: []
   maxInputTokens: 128000
   modelCatalogDefaultContextTokens: 128000

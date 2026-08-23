@@ -26,6 +26,7 @@ type SecretProvider interface {
 	KeyID() string
 	Encrypt(plaintext, associatedData []byte) ([]byte, error)
 	Decrypt(ciphertext, associatedData []byte) ([]byte, error)
+	DecryptWithKeyID(keyID string, ciphertext, associatedData []byte) ([]byte, error)
 }
 
 type LocalAESProvider struct {
@@ -89,6 +90,13 @@ func (p *LocalAESProvider) Encrypt(plaintext, associatedData []byte) ([]byte, er
 }
 
 func (p *LocalAESProvider) Decrypt(ciphertext, associatedData []byte) ([]byte, error) {
+	return p.DecryptWithKeyID(p.keyID, ciphertext, associatedData)
+}
+
+func (p *LocalAESProvider) DecryptWithKeyID(keyID string, ciphertext, associatedData []byte) ([]byte, error) {
+	if keyID != p.keyID {
+		return nil, ErrInvalidSecret
+	}
 	if len(ciphertext) <= p.aead.NonceSize() {
 		return nil, ErrInvalidSecret
 	}
@@ -127,19 +135,23 @@ func (p *RemoteEnvelopeProvider) Encrypt(plaintext, associatedData []byte) ([]by
 	if len(plaintext) == 0 || len(associatedData) == 0 {
 		return nil, ErrInvalidSecret
 	}
-	return p.call("encrypt", plaintext, associatedData)
+	return p.call("encrypt", p.keyID, plaintext, associatedData)
 }
 
 func (p *RemoteEnvelopeProvider) Decrypt(ciphertext, associatedData []byte) ([]byte, error) {
-	if len(ciphertext) == 0 || len(associatedData) == 0 {
-		return nil, ErrInvalidSecret
-	}
-	return p.call("decrypt", ciphertext, associatedData)
+	return p.DecryptWithKeyID(p.keyID, ciphertext, associatedData)
 }
 
-func (p *RemoteEnvelopeProvider) call(operation string, value, associatedData []byte) ([]byte, error) {
+func (p *RemoteEnvelopeProvider) DecryptWithKeyID(keyID string, ciphertext, associatedData []byte) ([]byte, error) {
+	if strings.TrimSpace(keyID) == "" || len(ciphertext) == 0 || len(associatedData) == 0 {
+		return nil, ErrInvalidSecret
+	}
+	return p.call("decrypt", keyID, ciphertext, associatedData)
+}
+
+func (p *RemoteEnvelopeProvider) call(operation, keyID string, value, associatedData []byte) ([]byte, error) {
 	payload, err := json.Marshal(map[string]string{
-		"key_id":              p.keyID,
+		"key_id":              keyID,
 		"value_base64":        base64.StdEncoding.EncodeToString(value),
 		"associated_data_b64": base64.StdEncoding.EncodeToString(associatedData),
 	})

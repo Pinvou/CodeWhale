@@ -109,10 +109,10 @@ func (r *PostgresRepository) LoadDispatchPreparation(ctx context.Context, usageI
 	} else if err != nil {
 		return DispatchEnvelope{}, err
 	}
-	if keyID != r.secrets.KeyID() || replayDigest(ciphertext) != integrity {
+	if replayDigest(ciphertext) != integrity {
 		return DispatchEnvelope{}, ErrInvalidSecret
 	}
-	plaintext, err := r.secrets.Decrypt(ciphertext, replayAAD(usageID, "dispatch", 0))
+	plaintext, err := r.secrets.DecryptWithKeyID(keyID, ciphertext, replayAAD(usageID, "dispatch", 0))
 	if err != nil {
 		return DispatchEnvelope{}, err
 	}
@@ -230,8 +230,9 @@ func (r *PostgresRepository) AcquireDispatch(ctx context.Context, usageID uuid.U
 	defer tx.Rollback(ctx)
 	var ciphertext []byte
 	var keyID string
+	var integrity string
 	var acquiredAt *time.Time
-	if err := tx.QueryRow(ctx, `SELECT encrypted_envelope,key_id,worker_acquired_at FROM usage_dispatch_intents WHERE usage_request_id=$1 FOR UPDATE`, usageID).Scan(&ciphertext, &keyID, &acquiredAt); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT encrypted_envelope,key_id,envelope_integrity,worker_acquired_at FROM usage_dispatch_intents WHERE usage_request_id=$1 FOR UPDATE`, usageID).Scan(&ciphertext, &keyID, &integrity, &acquiredAt); errors.Is(err, pgx.ErrNoRows) {
 		return DispatchEnvelope{}, false, ErrNotFound
 	} else if err != nil {
 		return DispatchEnvelope{}, false, err
@@ -239,10 +240,10 @@ func (r *PostgresRepository) AcquireDispatch(ctx context.Context, usageID uuid.U
 	if acquiredAt != nil {
 		return DispatchEnvelope{}, false, tx.Commit(ctx)
 	}
-	if keyID != r.secrets.KeyID() {
+	if replayDigest(ciphertext) != integrity {
 		return DispatchEnvelope{}, false, ErrInvalidSecret
 	}
-	plaintext, err := r.secrets.Decrypt(ciphertext, replayAAD(usageID, "dispatch", 0))
+	plaintext, err := r.secrets.DecryptWithKeyID(keyID, ciphertext, replayAAD(usageID, "dispatch", 0))
 	if err != nil {
 		return DispatchEnvelope{}, false, err
 	}
@@ -375,10 +376,10 @@ func (r *PostgresRepository) LoadReplay(ctx context.Context, usageID uuid.UUID, 
 		if err := rows.Scan(&event.Sequence, &event.EventType, &ciphertext, &keyID, &integrity); err != nil {
 			return ReplaySnapshot{}, err
 		}
-		if keyID != r.secrets.KeyID() || replayDigest(ciphertext) != integrity {
+		if replayDigest(ciphertext) != integrity {
 			return ReplaySnapshot{}, ErrInvalidSecret
 		}
-		event.Payload, err = r.secrets.Decrypt(ciphertext, replayAAD(usageID, "event:"+event.EventType, event.Sequence))
+		event.Payload, err = r.secrets.DecryptWithKeyID(keyID, ciphertext, replayAAD(usageID, "event:"+event.EventType, event.Sequence))
 		if err != nil {
 			return ReplaySnapshot{}, err
 		}
@@ -397,10 +398,10 @@ func (r *PostgresRepository) LoadReplay(ctx context.Context, usageID uuid.UUID, 
 		if resultExpiresAt != nil {
 			result.ExpiresAt = *resultExpiresAt
 		}
-		if keyID != r.secrets.KeyID() || replayDigest(ciphertext) != integrity {
+		if replayDigest(ciphertext) != integrity {
 			return ReplaySnapshot{}, ErrInvalidSecret
 		}
-		result.Payload, err = r.secrets.Decrypt(ciphertext, replayAAD(usageID, "result:"+result.Kind, result.LastSequence))
+		result.Payload, err = r.secrets.DecryptWithKeyID(keyID, ciphertext, replayAAD(usageID, "result:"+result.Kind, result.LastSequence))
 		if err != nil {
 			return ReplaySnapshot{}, err
 		}

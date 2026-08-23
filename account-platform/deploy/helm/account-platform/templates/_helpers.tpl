@@ -13,6 +13,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "pinvou.validate" -}}
 {{- if eq .Values.global.environment "production-new" -}}
 {{- if or (not .Values.networkPolicy.enabled) (not .Values.ingress.enabled) -}}{{ fail "production-new requires NetworkPolicy and ingress" }}{{- end -}}
+{{- if eq .Values.ingress.tlsSecretName "" -}}{{ fail "production-new requires an ingress TLS secret" }}{{- end -}}
+{{- if not .Values.externalSecrets.enabled -}}{{ fail "production-new requires an external KMS/Vault-backed runtime secret" }}{{- end -}}
+{{- if or (eq .Values.externalSecrets.secretStoreName "") (eq .Values.externalSecrets.remoteKey "") -}}{{ fail "production-new requires an external secret store and remote key" }}{{- end -}}
 {{- if or (eq .Values.tokenGateway.secretProvider "") (eq .Values.tokenGateway.secretProvider "local") -}}{{ fail "production-new requires an external Token secret provider" }}{{- end -}}
 {{- if or (contains "localhost" .Values.oidc.issuer) (contains "127.0.0.1" .Values.oidc.issuer) -}}{{ fail "production-new OIDC issuer must not be local" }}{{- end -}}
 {{- if or (contains "simulator" .Values.public.paymentCallbackUrl) (contains "mock" .Values.public.paymentCallbackUrl) -}}{{ fail "production-new must not reference a payment simulator" }}{{- end -}}

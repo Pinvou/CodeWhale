@@ -130,6 +130,8 @@ spec:
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             - { name: TOKEN_SECRET_PROVIDER, value: {{ $root.Values.tokenGateway.secretProvider | quote }} }
             - { name: TOKEN_SECRET_KEY_ID, value: {{ $root.Values.tokenGateway.secretKeyId | quote }} }
+            - { name: TOKEN_SECRET_ROTATION_INTERVAL_SECONDS, value: {{ $root.Values.tokenGateway.secretRotationIntervalSeconds | quote }} }
+            - { name: TOKEN_SECRET_ROTATION_BATCH_SIZE, value: {{ $root.Values.tokenGateway.secretRotationBatchSize | quote }} }
             - name: TOKEN_SECRET_PROVIDER_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-url } }
             - name: TOKEN_SECRET_PROVIDER_TOKEN

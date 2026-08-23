@@ -15,6 +15,7 @@ var (
 	ErrAmbiguousRoute                = errors.New("token route is ambiguous")
 	ErrNoEligibleRoute               = errors.New("no eligible token route")
 	ErrInvalidSecret                 = errors.New("invalid token secret configuration")
+	ErrSecretRotationPending         = errors.New("secret key rotation is pending")
 	ErrAccountProvisioning           = errors.New("account is provisioning")
 	ErrAccountRepairRequired         = errors.New("account provisioning requires repair")
 	ErrAccountClosing                = errors.New("account closure is in progress")

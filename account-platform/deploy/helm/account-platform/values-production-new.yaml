@@ -2,6 +2,13 @@ global:
   environment: production-new
   runtimeSecret: pinvou-account-platform-production-new
 
+externalSecrets:
+  enabled: true
+  secretStoreKind: ClusterSecretStore
+  secretStoreName: pinvou-production-vault
+  remoteKey: pinvou/production/account-platform
+  refreshInterval: 5m
+
 images:
   accountService: { repository: registry.example.com/pinvou/account-service, tag: 0.1.0, pullPolicy: IfNotPresent }
   identityService: { repository: registry.example.com/pinvou/identity-service, tag: 0.1.0, pullPolicy: IfNotPresent }
@@ -28,6 +35,8 @@ observability:
 tokenGateway:
   secretProvider: remote
   secretKeyId: production-account-token-v1
+  secretRotationIntervalSeconds: 300
+  secretRotationBatchSize: 100
   providerAllowedHosts: [newapi]
 
 external:

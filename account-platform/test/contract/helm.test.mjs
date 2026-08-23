@@ -15,6 +15,10 @@ test('Helm production-new values contain references, not secret material or simu
   assert.equal(values.global.environment, 'production-new');
   assert.match(values.global.runtimeSecret, /production-new/);
   assert.equal(values.tokenGateway.secretProvider, 'remote');
+  assert.equal(values.externalSecrets.enabled, true);
+  assert.match(values.externalSecrets.secretStoreName, /production/);
+  assert.match(values.externalSecrets.remoteKey, /production/);
+  assert.ok(values.tokenGateway.secretRotationIntervalSeconds >= 60);
   assert.equal(values.keycloak.adminHostname, 'http://127.0.0.1:18081');
   assert.equal(values.tokenGateway.providerAllowedHosts.includes('newapi'), true);
   assert.match(values.images.newApi.digest, /^sha256:[a-f0-9]{64}$/);
@@ -39,6 +43,9 @@ test('Helm values schema rejects unsafe production-new overrides', async () => {
   assert.equal(validate(values), true, JSON.stringify(validate.errors));
   assert.equal(validate({ ...values, networkPolicy: { ...values.networkPolicy, enabled: false } }), false);
   assert.equal(validate({ ...values, tokenGateway: { ...values.tokenGateway, secretProvider: 'local' } }), false);
+  assert.equal(validate({ ...values, externalSecrets: { ...values.externalSecrets, enabled: false } }), false);
+  assert.equal(validate({ ...values, ingress: { ...values.ingress, tlsSecretName: '' } }), false);
+  assert.equal(validate({ ...values, public: { ...values.public, portalUrl: 'http://tokens.example.com' } }), false);
   assert.equal(validate({ ...values, newApi: { ...values.newApi, enabled: false } }), false);
   assert.equal(validate({ ...values, images: { ...values.images, newApi: { ...values.images.newApi, digest: '' } } }), false);
   assert.equal(validate({ ...values, external: { ...values.external, postgresCidrs: ['0.0.0.0/0'] } }), false);
@@ -59,6 +66,9 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   assert.match(combined, /newapi-database-url/);
   assert.match(combined, /newapi-session-secret/);
   assert.match(combined, /SYSTEM_PROBES_JSON/);
+  assert.match(combined, /kind: ExternalSecret/);
+  assert.match(combined, /creationPolicy: Owner/);
+  assert.match(combined, /TOKEN_SECRET_ROTATION_INTERVAL_SECONDS/);
   assert.match(combined, /range \$source := list "account" "billing" "token"/);
   assert.match(combined, /kind: Service[\s\S]*name: \{\{ \$fullname \}\}-\{\{ \$source \}\}-event-relay/);
   assert.match(combined, /name: monitor, port: 8222/);

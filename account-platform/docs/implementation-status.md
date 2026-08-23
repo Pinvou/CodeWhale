@@ -64,6 +64,7 @@
 | `DESKTOP-CLIENT-SWITCH` | 动态目录、按会话冻结模型、显式替代分支、受信 Portal、客户端范围守卫及发布/安装/运行三层失败关闭门禁 | Rust check、桌面 lint/build、Bridge 协议、发布门禁签名/篡改测试和全仓 verifier 通过；生产签名身份、正式安装制品原子替换/回滚和真实环境联调待验收 |
 | `CONFIGURED-SYSTEM-PROBES` | Portal 通过运行时注册表装配本地、通用 HTTP/JSON 断言与 Relay 指标 Adapter，不在聚合主流程固定组件或厂商 | Portal Go 单测、Compose/Helm 合同和全仓 verifier 通过；真实环境端点、超时与积压告警待部署验收 |
 | `I18N-RELEASE-GATE` | 桌面账号弹层、Web 个人中心和管理后台的精确三语词条对称、空值、单语硬编码、原始错误回显及 Portal 构建制品检查 | 缺键/多键/空词条、单语 JSX/属性、后端 message 回退与制品缺词条负向合同通过；发布命令与全量 verify 均串联该门禁 |
+| `PRODUCTION-SECURITY-GATE` | 生产 Ingress TLS、ExternalSecret KMS/Vault 来源、远程包络加密、持久 `key_id` 双读、全密文分批重加密、轮换 readiness 与旧 Key 停用验收 | Go 轮换/历史 Key 单测、Helm schema/ExternalSecret 负向合同和 TLS/KMS 环境门禁合同通过；无真实域名证书、SecretStore、KMS Key 轮换或部署版本证据 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
@@ -395,9 +396,9 @@
 | ADM-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 不嵌入普通后台；通过受限网络/隧道访问。 |
 | ADM-09 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有筛选和导出基础；需按 NFR-48 增加近期重新认证、默认脱敏、PII临时权限、水印、加密、一次性下载和导出配额。 |
 | ADM-10 | 已实现 | DOC_CURRENT | CONFIGURED-SYSTEM-PROBES | NOT_DEPLOYED | `SYSTEM_PROBES_JSON` 配置实际部署组件、通用 HTTP/JSON 断言或 Relay Adapter；页面继续展示健康、积压、核对任务和最近错误，响应不暴露端点或凭据 |
-| NFR-01 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 反向代理、Compose/Helm 和配置校验要求远程 HTTPS、开发 HTTP 限 loopback；无实际部署与证书验收证据 |
+| NFR-01 | 部分实现 | DOC_CURRENT | PRODUCTION-SECURITY-GATE | NOT_DEPLOYED | Helm production-new 强制启用 Ingress 且绑定非空 TLS Secret，远程 URL 失败关闭为 HTTPS；环境门禁实际连接 Portal/Identity/OIDC、校验受信证书并要求剩余有效期不少于14天。无可访问的生产等价端点与证书证据 |
 | NFR-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 NOT_DEPLOYED |
-| NFR-03 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 仓库无明文生产密钥且 Provider 凭据加密保存；生产 KMS/Vault、密钥轮换和部署证明未实现 |
+| NFR-03 | 部分实现 | DOC_CURRENT | GO-UNIT; PRODUCTION-SECURITY-GATE | NOT_DEPLOYED | production-new 禁止本地 KEK，ExternalSecret 只从 KMS/Vault SecretStore 提取运行时秘密；Gateway 按行持久 Key ID 双读并将凭据、派发包络、流事件与结果分批重加密，旧密文归零前 readiness 失败；环境门禁要求新 Key 可加解密、旧 Key 已停用。缺真实 SecretStore/KMS 和轮换证据 |
 | NFR-05 | 部分实现 | DOC_CURRENT | CODE-AUDIT; GO-UNIT; REGISTRATION-SAGA; APPROVAL-COMMANDS; DESKTOP-39 | NOT_DEPLOYED | 账号、资金、Token、注册修复和审批生命周期已有审计；注销 Saga、Provider 事实修复等目标动作仍缺失 |
 | NFR-06 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约 |
 | NFR-07 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 三服务具备事务 Outbox/Inbox、至少一次 Relay、死信和人工重放；业务最终收敛依赖死信处置且多项 Saga 缺失 |
@@ -804,9 +805,9 @@
 
 | target_requirement_id | 需求 | 当前实现/边界 |
 |---|---|---|
-| NFR-01 | 安全传输 | 反向代理、Compose/Helm 和配置校验要求远程 HTTPS、开发 HTTP 仅限 loopback；无实际部署与证书验收证据。 |
+| NFR-01 | 安全传输 | production-new 强制 Ingress TLS Secret 和 HTTPS URL；环境门禁校验三个公开边界的受信证书、状态及14天续期窗口，仍缺真实部署证据。 |
 | NFR-02 | 最小暴露 | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 `NOT_DEPLOYED`。 |
-| NFR-03 | 密钥管理 | 仓库无明文生产密钥且 Provider 凭据加密保存；生产 KMS/Vault、密钥轮换和部署证明未实现。 |
+| NFR-03 | 密钥管理 | production-new 使用 ExternalSecret + 远程 KMS/Vault 包络加密；按持久 Key ID 双读、全表分批重加密和 readiness 关闭完成新旧 Key 过渡，真实 SecretStore/KMS 轮换证据待外部环境验收。 |
 | NFR-04 | 日志敏感信息保护 | 错误响应和多数日志避免直接输出秘密，合同测试扫描配置；缺统一字段白名单、日志/Trace 正文脱敏和自动秘密扫描门禁。 |
 | NFR-05 | 审计 | 账号、资金、Token、注册修复和审批生命周期已有审计；注销 Saga、Provider 事实修复等目标动作仍缺失。 |
 | NFR-06 | 幂等 | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约。 |

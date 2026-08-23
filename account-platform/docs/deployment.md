@@ -213,6 +213,8 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务
 - `TOKEN_SECRET_PROVIDER`
 - `TOKEN_SECRET_KEY_ID`
 - `TOKEN_LOCAL_KEK_BASE64`（仅开发/测试）
+- `TOKEN_SECRET_ROTATION_INTERVAL_SECONDS`（旧密文批量重加密周期，60 至 86400 秒）
+- `TOKEN_SECRET_ROTATION_BATCH_SIZE`（每批 1 至 1000 条）
 - `TOKEN_PROVIDER_ALLOWED_HOSTS`
 - `TOKEN_DEFAULT_PROVIDER`
 - `TOKEN_GATEWAY_ADAPTER`（`NEW_API` 或 `OPENAI_COMPATIBLE`；决定请求构造、上游引用提取与用量证据 Adapter，不改变通用数据库/API 字段）
@@ -228,7 +230,9 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务
 - `TOKEN_RECONCILIATION_NEWAPI_ADMIN_USER_ID`
 - `TOKEN_RECONCILIATION_INTERVAL_SECONDS`
 
-`production`/`production-new` 环境必须拒绝本地 KEK，使用 KMS/Vault 类 Provider。Provider URL 必须是 HTTPS 且主机精确命中白名单。
+`production`/`production-new` 环境必须拒绝本地 KEK，使用 KMS/Vault 类 Provider。Provider URL 必须是 HTTPS 且主机精确命中白名单。Helm 通过 External Secrets Operator 从已审核的 `SecretStore`/`ClusterSecretStore` 同步运行时 Secret，正式环境禁止关闭该资源或把 Secret 明文写入 values、渲染产物、日志和验收证据。
+
+密钥轮换采用“旧 key 可解密、新 key 负责加密”的双读窗口：先在 KMS/Vault 中将旧 key 保持 `DECRYPT_ONLY`、新 key 置为 `ENCRYPT_DECRYPT`，再更新 `TOKEN_SECRET_KEY_ID` 并滚动发布。Token Gateway 会按批重加密 Provider 凭据、派发准备/意图、流事件和重放结果；任一旧 key 密文尚未收敛时生产 readiness 返回失败，因此新 Pod 不接流量。全部 Pod 就绪且旧密文计数为零后，才可将旧 key 置为 `DISABLED`。失败时保留旧 Pod 与旧 key 解密能力，不得强制提升或直接改表。
 
 ### 6.6 桌面端
 
@@ -598,13 +602,14 @@ New API 自身日志位置由其独立部署定义决定；核对用量优先调
 Chart 位于 `deploy/helm/account-platform/`。使用前：
 
 1. 为所有镜像固定不可变 tag/digest。
-2. 使用外部 Secret 管理，不把 Secret 值写进 values 文件或渲染产物。
+2. 预先安装 External Secrets Operator，并配置最小权限的 `SecretStore`/`ClusterSecretStore`；Chart 的 `externalSecrets` 只引用远端对象，不把 Secret 值写进 values 文件或渲染产物。
 3. 将 PostgreSQL、Redis、NATS、Keycloak 和 New API 的持久性、高可用和备份责任明确分配给平台组件或托管服务。
 4. 配置 Ingress 只公开允许路径，NetworkPolicy 默认拒绝并只放行必要服务流向。
 5. 迁移使用一次性 Job，并在应用滚动前完成。
 6. 为应用配置 readiness/liveness、资源请求限制、PodDisruptionBudget 和指标采集。
 7. Keycloak Admin 使用 port-forward/VPN/受限入口，不建公网 Ingress。
 8. 先在非生产命名空间执行 Helm 渲染、合同测试、故障测试和恢复演练。
+9. 为 Portal、Identity、OIDC 三个公网入口配置受信任 TLS 证书，并确保发布验收时剩余有效期不少于 14 天。
 
 示例只使用占位符：
 
@@ -613,6 +618,16 @@ helm upgrade --install <release> account-platform/deploy/helm/account-platform \
   --namespace <namespace> --create-namespace \
   -f <non-secret-values.yaml>
 ```
+
+### 15.1 生产 TLS 与密钥轮换验收
+
+发布系统必须在站点专用 Secret 中提供三个公网 HTTPS 探针、Token Gateway readiness、KMS/Vault 健康接口、当前/上一 key ID 和短期工作负载令牌，然后执行：
+
+```text
+npm --prefix account-platform run security:production-readiness
+```
+
+Token Gateway 不应建立公网入口；可通过受控网络访问其 HTTPS 内部端点，或先 `port-forward` 后使用 `http://127.0.0.1:<port>/health/ready`。验收会验证公网端点不经重定向返回预期状态、证书链可信且未进入 14 天续期窗口、所有旧密文已重加密、当前 key 为 `ENCRYPT_DECRYPT` 且上一 key 已 `DISABLED`。只归档命令输出的脱敏 JSON、制品版本与部署标识；不得归档工作负载令牌或 Secret 响应。任一检查失败均为 NO-GO，继续保留旧 key 的解密能力并停止提升。
 
 ## 16. 相关 Runbook
 
