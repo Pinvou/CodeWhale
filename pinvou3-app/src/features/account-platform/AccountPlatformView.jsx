@@ -31,6 +31,7 @@ function NavIcon({ name }) {
     orders: <><path d="M6 3h12v18H6z" /><path d="M9 8h6M9 12h6M9 16h4" /></>,
     invoice: <><path d="M5 3h14v18l-3-2-4 2-4-2-3 2z" /><path d="M8 8h8M8 12h8" /></>,
     usage: <><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></>,
+    closure: <><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" /></>,
   };
   return <svg className="ap-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -65,6 +66,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [quotaMembers, setQuotaMembers] = useState([]);
   const [catalogModels, setCatalogModels] = useState([]);
   const [modelPolicy, setModelPolicy] = useState(null);
+  const [closure, setClosure] = useState(null);
   const [qrData, setQrData] = useState('');
   const guardRef = useRef(createContextRequestGuard());
   const meRef = useRef(null);
@@ -80,7 +82,13 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     'usage',
     ...(organizations.length > 0 ? ['organization'] : []),
     ...(personalContext ? ['orders', 'invoice'] : []),
+    'closure',
   ];
+
+  const refreshClosure = async signal => {
+    try { setClosure(await client.accountClosure(signal)); }
+    catch (reason) { if (reason?.status !== 404 && reason?.name !== 'AbortError') throw reason; }
+  };
 
   const clearContextResources = () => {
     guardRef.current.cancel();
@@ -156,7 +164,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         meRef.current = account;
         setMe(account);
         setAuth('ready');
-        await loadContext(account);
+        await Promise.all([loadContext(account), refreshClosure()]);
       } catch {
         if (active) { setAuth('error'); setError(copy.requestFailed); }
       }
@@ -202,6 +210,12 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   useEffect(() => {
     setQrData(order?.qr_data || '');
   }, [order?.qr_data]);
+
+  useEffect(() => {
+    if (!closure || closure.status === 'COMPLETED') return undefined;
+    const timer = globalThis.setInterval(() => { void refreshClosure().catch(reason => setError(localizedError(copy, reason))); }, 5000);
+    return () => globalThis.clearInterval(timer);
+  }, [closure?.closure_request_id, closure?.status]);
 
   useEffect(() => {
     if (!navigationSections.includes(section)) setSection('overview');
@@ -293,6 +307,16 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     setUsageCursor(page.next_cursor || null);
   });
 
+  const requestClosure = () => run(async () => {
+    const confirmation = globalThis.prompt(copy.closure.confirmPrompt);
+    if (confirmation !== 'CLOSE_MY_ACCOUNT') {
+      if (confirmation !== null) setError(copy.closure.confirmMismatch);
+      return;
+    }
+    const created = await client.createAccountClosure(confirmation, idempotencyKey('account-closure'));
+    setClosure(created); setNotice(copy.closure.requested);
+  });
+
   if (auth === 'loading') return <div className={`ap-shell ap-centered ${portal ? 'ap-portal' : 'ap-desktop'}`}><div className="ap-spinner" />{copy.loading}</div>;
   if (auth === 'guest' || auth === 'error') return <div className={`ap-shell ap-login ${portal ? 'ap-portal' : 'ap-desktop'}`}><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{portal ? copy.loginIntro : copy.desktopLoginIntro}</p>{error && <div role="alert" className="ap-alert error">{error}</div>}{portal ? <a className="ap-primary" href="/auth/login">{copy.login}</a> : <button className="ap-primary" disabled={busy} onClick={login}>{busy ? copy.signingIn : copy.login}</button>}{onClose && <button className="ap-close" onClick={onClose}>{copy.close}</button>}</div></div>;
 
@@ -319,8 +343,13 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {section === 'orders' && <Orders copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
       {section === 'invoice' && <Invoice copy={copy} />}
       {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={loadMoreUsage} onCancel={usageRequestID => run(async () => { await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel')); await loadContext(me); setNotice(copy.stopRequested); })} />}
+      {section === 'closure' && <AccountClosure copy={copy} item={closure} busy={busy} onRequest={requestClosure} />}
     </main>
   </div>;
+}
+
+function AccountClosure({ copy, item, busy, onRequest }) {
+  return <section><p className="ap-eyebrow">{copy.sections.closure}</p><h2>{copy.closure.title}</h2><p className="ap-lead">{copy.closure.lead}</p><article className="ap-card">{item ? <><div className="ap-inline"><span className="ap-status">{item.status}</span><strong>{item.stage}</strong></div><p>{copy.closure.sla}: {new Date(item.sla_expires_at).toLocaleString()}</p><p className="ap-muted">{copy.closure.updated}: {new Date(item.updated_at).toLocaleString()}</p>{item.blockers?.length ? <ul className="ap-list">{item.blockers.map(blocker => <li key={`${blocker.domain}:${blocker.code}`}><span>{copy.closure.blockerCodes[blocker.code] || blocker.code}</span><small>{copy.closure.actionCodes[blocker.user_action] || blocker.user_action || blocker.domain}</small></li>)}</ul> : <p className="ap-muted">{copy.closure.noBlockers}</p>}</> : <><h3>{copy.closure.beforeTitle}</h3><p className="ap-muted">{copy.closure.before}</p><button className="ap-primary" disabled={busy} onClick={onRequest}>{copy.closure.start}</button></>}</article></section>;
 }
 
 function Overview({ copy, language, me, organizations, balance, activeOrganization, activeOrganizationId, busy, onSwitchContext }) {

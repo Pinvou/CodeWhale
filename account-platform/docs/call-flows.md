@@ -8,6 +8,15 @@
 >
 > 目标变更提示：本文已按用户级全局上下文、异步钱包 bootstrap 和版本化计量/定价链路更新。注册在 Identity 与 Account 成功后持久进入 `PROVISIONING`，钱包通过 Outbox 异步初始化；钱包完成前可登录和管理资料但不能调用平台模型或充值，超过 SLA 才进入 `REPAIR_REQUIRED`，Billing 短暂不可用不得删除已验证身份。支付回调/查询证据和目标支付流水+权益包的整笔剩余退款已在仓库闭环；尚未实现的完整关单、统一支付异常案件和四方对账等能力以 `requirements.md` 和 `role-system-design.md` 为准。
 
+## 账号注销资格与静默期
+
+1. 用户在最近五分钟完成认证后，以幂等键和精确确认文本创建唯一注销请求。
+2. Account 在串行化事务中检查组织所有权和最后有效超级管理员。存在阻断时请求保持 `CLOSURE_REQUESTED/BLOCKED`，用户仍为 ACTIVE，可完成所有权或管理员交接。
+3. 本地角色门禁通过后，Account 原子写入 `QUIESCING` 并将用户置为 `CLOSING`；普通 Account 授权和 Token 新业务统一返回 `ACCOUNT_CLOSING`，只读历史及既有订单/用量修复走显式白名单。
+4. Worker 使用租约认领请求，分别调用 Billing 与 Token 的服务身份评估接口，保存脱敏阻断快照。任何评估不可用都按退避重试，不能按“无阻断”处理。
+5. 所有账务和用量阻断清除后进入 `IDENTITY_CLEANUP`。Identity、资料、Commerce、邀请、组织授予和标识墓碑由后续清理阶段继续，当前实现不会提前宣称注销完成。
+6. 超过 SLA 的请求进入 `REPAIR_REQUIRED`；管理员只能用独立权限和幂等命令重试当前阶段，不能强制完成或恢复管理员直删入口。
+
 ## 1. 入口与凭据
 
 | 调用方 | 身份/凭据 | 主要入口 |

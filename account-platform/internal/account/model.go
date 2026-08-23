@@ -19,6 +19,7 @@ var (
 	ErrInvitationExpired     = errors.New("invitation expired")
 	ErrAccountProvisioning   = errors.New("account is provisioning")
 	ErrAccountRepairRequired = errors.New("account provisioning requires repair")
+	ErrAccountClosing        = errors.New("account closure is in progress")
 	ErrBootstrapPending      = errors.New("super administrator bootstrap is pending")
 )
 

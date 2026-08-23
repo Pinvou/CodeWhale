@@ -56,7 +56,8 @@ export class AdminPlatformClient {
   userByCode(userCode, signal) { return this.request('account', `/admin/v1/user-code-lookups/${encodeURIComponent(userCode)}`, signal); }
   userMemberships(userID, signal) { return this.request('account', `/admin/v1/users/${encodeURIComponent(userID)}/memberships`, signal); }
   setUserStatus(userID, status) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}/status`, 'PATCH', { status }); }
-  deleteUser(userID) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}`, 'DELETE'); }
+  accountClosures(signal) { return this.request('account', '/admin/v1/account-closure-requests', signal); }
+  retryAccountClosure(closureRequestID, reason) { return this.mutate('account', `/admin/v1/account-closure-requests/${encodeURIComponent(closureRequestID)}/actions/retry`, 'POST', { reason }, `account-closure-retry-${crypto.randomUUID()}`); }
   organizations(search, signal) { return this.request('account', `/admin/v1/organizations?limit=100&q=${encodeURIComponent(search || '')}`, signal); }
   createOrganization(name, ownerUserID) { return this.mutate('account', '/admin/v1/organizations', 'POST', { name, owner_user_id: ownerUserID }); }
   renameOrganization(organizationID, name) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'PATCH', { name }); }

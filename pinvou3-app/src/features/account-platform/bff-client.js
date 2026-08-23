@@ -54,6 +54,8 @@ export class AccountPlatformBffClient {
   }
 
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
+  accountClosure(signal) { return this.request('account', '/v1/me/account-closure-request', { signal }); }
+  createAccountClosure(confirmation, key) { return this.request('account', '/v1/me/account-closure-requests', { method: 'POST', headers: { 'Idempotency-Key': key }, body: { confirmation } }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }
   switchContext(contextType, organizationId, expectedContextVersion, signal) {
     return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null, expected_context_version: expectedContextVersion }, signal });

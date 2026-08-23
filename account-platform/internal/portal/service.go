@@ -467,7 +467,7 @@ func portalClientSource(r *http.Request) string {
 }
 
 func accountAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/role-bindings", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs", "/admin/v1/registration-operations", "/admin/v1/approval-policies", "/admin/v1/approval-requests") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/role-bindings", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs", "/admin/v1/registration-operations", "/admin/v1/account-closure-requests", "/admin/v1/approval-policies", "/admin/v1/approval-requests") {
 		return true
 	}
 	if method == http.MethodPost && resource == "/admin/v1/organizations" {
@@ -496,6 +496,10 @@ func accountAdminPathAllowed(method, resource string) bool {
 		_, err := uuid.Parse(parts[3])
 		return err == nil
 	}
+	if len(parts) == 6 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "account-closure-requests" && parts[4] == "actions" && parts[5] == "retry" && method == http.MethodPost {
+		_, err := uuid.Parse(parts[3])
+		return err == nil
+	}
 	if len(parts) == 6 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "registration-operations" && parts[4] == "actions" && (parts[5] == "retry" || parts[5] == "compensate") {
 		_, err := uuid.Parse(parts[3])
 		return err == nil && method == http.MethodPost
@@ -513,7 +517,7 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if _, err := uuid.Parse(parts[3]); err != nil {
 		return false
 	}
-	if method == http.MethodDelete && len(parts) == 4 {
+	if method == http.MethodDelete && len(parts) == 4 && parts[2] == "organizations" {
 		return true
 	}
 	if parts[2] == "users" && len(parts) == 5 && parts[4] == "memberships" {

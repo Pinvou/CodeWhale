@@ -117,16 +117,6 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
-  /account/admin/v1/users/{user_id}:
-    delete:
-      operationId: deleteAdminUser
-      summary: Soft-delete a user and revoke sessions and memberships
-      parameters: [{ $ref: "#/components/parameters/UserID" }]
-      responses:
-        "204": { description: User deleted }
-        "403": { $ref: "#/components/responses/Error" }
-        "404": { $ref: "#/components/responses/Error" }
-        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations:
     get:
       operationId: listAdminOrganizations
@@ -444,6 +434,42 @@ paths:
         "202": { $ref: "#/components/responses/Overview" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/account-closure-requests:
+    get:
+      operationId: listAccountClosureRepairQueue
+      summary: List redacted non-completed account-closure stages and blockers
+      description: Requires platform.account-closures.read. Domain resource identifiers remain restricted to administrators.
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/account-closure-requests/{closure_request_id}/actions/retry:
+    post:
+      operationId: retryAccountClosureStage
+      summary: Retry the current forward-only stage without bypassing any blocker
+      parameters:
+        - name: closure_request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "200": { description: Retry accepted and current stage returned }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/overview:
     get:
       operationId: getAdminBillingOverview

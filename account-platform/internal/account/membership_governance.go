@@ -283,7 +283,7 @@ func (r *PostgresRepository) transferOwnership(ctx context.Context, principal id
 		}
 		actorID = *resolved
 	} else {
-		actorID, err = activeUserID(ctx, tx, principal)
+		actorID, err = activeOrClosingUserID(ctx, tx, principal)
 		if err != nil {
 			return OwnershipTransferResult{}, err
 		}

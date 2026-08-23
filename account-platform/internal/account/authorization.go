@@ -20,6 +20,8 @@ const (
 	PermissionPlatformRolesAssign                = "platform.roles.assign"
 	PermissionPlatformUsersRead                  = "platform.users.read"
 	PermissionPlatformUsersStatusManage          = "platform.users.status.manage"
+	PermissionPlatformAccountClosuresRead        = "platform.account-closures.read"
+	PermissionPlatformAccountClosuresRepair      = "platform.account-closures.repair"
 	PermissionPlatformOrganizationsRead          = "platform.organizations.read"
 	PermissionPlatformOrganizationsCreate        = "platform.organizations.create"
 	PermissionPlatformOrganizationsStatusManage  = "platform.organizations.status.manage"

@@ -261,6 +261,8 @@ node scripts/account-platform.mjs dev down
 
 `dev down` 不应被用于生产。集成测试使用独立 Compose project，并只清理自己的卷。
 
+账号注销资格与静默期上线执行 Account `000027_account_closure_saga`。滚动顺序必须先发布提供只读资格评估端点的 Billing 和 Token，再迁移并发布 Account，最后发布 Portal 与桌面制品；Account 继续通过现有 `BILLING_SERVICE_URL`、`TOKEN_SERVICE_URL` 和内部服务身份访问评估端点。上线后验证：最后组织所有者或最后有效超级管理员只会停留在静默期前且仍可完成交接；进入 `CLOSING` 后新支付、新权益与新模型调用统一返回 `ACCOUNT_CLOSING`，注销进度、历史查询及必要修复入口仍可用；任一领域不可用或存在阻断时请求保持持久化并按租约重试，运营只能提交带原因的幂等重试命令，不能跳过阻断。监控请求阶段、租约超时、阻断码、重试次数和 30 分钟 SLA。禁止恢复直接删除用户接口或通过 SQL 推进阶段。库中出现 `CLOSING` 用户、注销请求或不可变审计后禁止执行 down migration；故障时暂停 worker、保留查询与修复能力，待依赖恢复后从原阶段续跑。
+
 ## 8. 单机 Compose 发布流程
 
 下面流程以 `<release-dir>`、`<backup-dir>` 和 `<compose-files>` 为占位符。站点专用配置和 Secret 不进入仓库。

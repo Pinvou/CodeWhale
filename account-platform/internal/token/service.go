@@ -91,6 +91,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	internal.PUT("/organizations/:organization_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	internal.PUT("/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	internal.DELETE("/users/:user_id/replay-payloads", httpserver.AdaptFunc(s.anonymizeUserReplayPayloads))
+	internal.GET("/users/:user_id/account-closure-assessment", httpserver.AdaptFunc(s.accountClosureAssessment))
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
 	protected.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
@@ -186,7 +187,7 @@ func (s *Service) modelProtocols(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -208,7 +209,7 @@ func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) listManagedTokenAccounts(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -343,7 +344,7 @@ func (s *Service) resolveOwnedAccount(w http.ResponseWriter, r *http.Request) (A
 }
 
 func (s *Service) rechargeProducts(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.resolveContext(w, r); !ok {
+	if _, ok := s.resolveReadContext(w, r); !ok {
 		return
 	}
 	payload, err := s.billing.Products(r.Context())
@@ -355,7 +356,7 @@ func (s *Service) rechargeProducts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) paymentCapabilities(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.resolveContext(w, r); !ok {
+	if _, ok := s.resolveReadContext(w, r); !ok {
 		return
 	}
 	client, ok := s.billing.(PaymentCapabilitiesBillingClient)
@@ -416,7 +417,7 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -434,7 +435,7 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getRecentRechargeOrder(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -452,7 +453,7 @@ func (s *Service) getRecentRechargeOrder(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -470,7 +471,7 @@ func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -491,7 +492,7 @@ func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -509,7 +510,7 @@ func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getEntitlementPackages(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -667,7 +668,7 @@ func gatewaySupportsProtocol(capabilities []GatewayProtocolCapability, protocolC
 }
 
 func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -693,7 +694,7 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) cancelUsageRequest(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -769,7 +770,7 @@ func (s *Service) finishPreDispatchCancellation(ctx context.Context, usageID uui
 }
 
 func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveReadContext(w, r)
 	if !ok {
 		return
 	}
@@ -881,6 +882,26 @@ func (s *Service) resolveContext(w http.ResponseWriter, r *http.Request) (Author
 	return resolved, true
 }
 
+func (s *Service) resolveReadContext(w http.ResponseWriter, r *http.Request) (AuthorizationContext, bool) {
+	value := r.Header.Get("Authorization")
+	resolved, err := s.contexts.Resolve(r.Context(), value)
+	if errors.Is(err, ErrAccountClosing) {
+		reader, ok := s.contexts.(interface {
+			ResolveClosureRead(context.Context, string) (AuthorizationContext, error)
+		})
+		if ok {
+			resolved, err = reader.ResolveClosureRead(r.Context(), value)
+		}
+	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return AuthorizationContext{}, false
+	}
+	w.Header().Set("X-Context-Version", strconv.FormatInt(max(resolved.ContextVersion, 1), 10))
+	w.Header().Set("X-Authorization-Version", strconv.FormatInt(max(resolved.AuthorizationVersion, 1), 10))
+	return resolved, true
+}
+
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the token request could not be completed"
 	switch {
@@ -896,6 +917,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
 	case errors.Is(err, ErrAccountRepairRequired):
 		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
+	case errors.Is(err, ErrAccountClosing):
+		status, code, message = http.StatusConflict, "ACCOUNT_CLOSING", "the account is in its closure quiet period"
 	case errors.Is(err, ErrOrganizationLifecycleConflict):
 		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle version or state conflicts with current facts"
 	case errors.Is(err, ErrCatalogVersionConflict):
@@ -970,6 +993,9 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		if problem.Code == "ACCOUNT_REPAIR_REQUIRED" {
 			return AuthorizationContext{}, ErrAccountRepairRequired
 		}
+		if problem.Code == "ACCOUNT_CLOSING" {
+			return AuthorizationContext{}, ErrAccountClosing
+		}
 		return AuthorizationContext{}, ErrForbidden
 	}
 	var body struct {
@@ -991,6 +1017,37 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		return AuthorizationContext{}, err
 	}
 	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Permissions: body.Permissions, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
+}
+
+func (r *HTTPContextResolver) ResolveClosureRead(ctx context.Context, authorization string) (AuthorizationContext, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, r.baseURL.String()+"/v1/me", nil)
+	if err != nil {
+		return AuthorizationContext{}, err
+	}
+	request.Header.Set("Authorization", authorization)
+	response, err := r.client.Do(request)
+	if err != nil {
+		return AuthorizationContext{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return AuthorizationContext{}, ErrForbidden
+	}
+	var body struct {
+		UserID        uuid.UUID `json:"user_id"`
+		Status        string    `json:"status"`
+		ActiveContext struct {
+			Type                 string     `json:"context_type"`
+			OrganizationID       *uuid.UUID `json:"organization_id"`
+			MembershipVersion    int64      `json:"membership_version"`
+			ContextVersion       int64      `json:"context_version"`
+			AuthorizationVersion int64      `json:"authorization_version"`
+		} `json:"active_context"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&body); err != nil || body.UserID == uuid.Nil || body.Status != "CLOSING" {
+		return AuthorizationContext{}, ErrForbidden
+	}
+	return AuthorizationContext{UserID: body.UserID, ContextType: body.ActiveContext.Type, OrganizationID: body.ActiveContext.OrganizationID, MembershipVersion: body.ActiveContext.MembershipVersion, ContextVersion: body.ActiveContext.ContextVersion, AuthorizationVersion: body.ActiveContext.AuthorizationVersion, Closing: true}, nil
 }
 
 func (r *HTTPContextResolver) ResolveCommerceCustomer(ctx context.Context, authorization string) (string, error) {

@@ -94,6 +94,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.Use(s.contextVersionHeaders())
 	protected.POST("/v1/account/bootstrap", httpserver.AdaptFunc(s.bootstrap))
 	protected.GET("/v1/me", httpserver.AdaptFunc(s.getMe))
+	protected.POST("/v1/me/account-closure-requests", httpserver.AdaptFunc(s.createAccountClosure))
+	protected.GET("/v1/me/account-closure-request", httpserver.AdaptFunc(s.getAccountClosure))
 	protected.GET("/v1/me/commerce-customer-mapping", httpserver.AdaptFunc(s.getCommerceCustomerMapping))
 	if s.profiles != nil {
 		protected.POST("/v1/me/profile-change-requests", httpserver.AdaptFunc(s.createProfileChange))
@@ -130,7 +132,6 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.GET("/user-code-lookups/:user_code", httpserver.AdaptFunc(s.adminUserByCode))
 	admin.GET("/users/:user_id/memberships", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUserMemberships))
 	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetUserStatus))
-	admin.DELETE("/users/:user_id", s.requirePermission(PermissionPlatformUsersStatusManage), approvalpolicy.Require("ACCOUNT_USER_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteUser))
 	admin.GET("/organizations", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminOrganizations))
 	admin.POST("/organizations", s.requirePermission(PermissionPlatformOrganizationsCreate), approvalpolicy.Require("ACCOUNT_ORGANIZATION_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateOrganization))
 	admin.PATCH("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_ORGANIZATION_RENAME", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRenameOrganization))
@@ -158,6 +159,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.GET("/registration-operations", s.requirePermission(PermissionPlatformRegistrationsRepair), httpserver.AdaptFunc(s.adminRegistrationOperations))
 	admin.POST("/registration-operations/:operation_id/actions/retry", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryRegistration))
 	admin.POST("/registration-operations/:operation_id/actions/compensate", s.requirePermission(PermissionPlatformRegistrationsRepair), approvalpolicy.Require("ACCOUNT_REGISTRATION_COMPENSATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCompensateRegistration))
+	admin.GET("/account-closure-requests", s.requirePermission(PermissionPlatformAccountClosuresRead), httpserver.AdaptFunc(s.adminAccountClosures))
+	admin.POST("/account-closure-requests/:closure_request_id/actions/retry", s.requirePermission(PermissionPlatformAccountClosuresRepair), approvalpolicy.Require("ACCOUNT_CLOSURE_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryAccountClosure))
 	if s.profiles != nil {
 		admin.GET("/profile-change-requests", s.requirePermission(PermissionPlatformProfileChangesRepair), httpserver.AdaptFunc(s.adminProfileChanges))
 		admin.POST("/profile-change-requests/:request_id/actions/retry", s.requirePermission(PermissionPlatformProfileChangesRepair), approvalpolicy.Require("ACCOUNT_PROFILE_CHANGE_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryProfileChange))
@@ -578,6 +581,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
 	case errors.Is(err, ErrAccountRepairRequired):
 		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
+	case errors.Is(err, ErrAccountClosing):
+		status, code, message = http.StatusConflict, "ACCOUNT_CLOSING", "the account is in its closure quiet period"
 	case errors.Is(err, ErrBootstrapPending):
 		status, code, message = http.StatusForbidden, "ADMIN_BOOTSTRAP_PENDING", "the first administrator must complete secure activation"
 	case errors.Is(err, ErrApprovalSelfDecision):

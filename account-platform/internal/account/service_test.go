@@ -355,7 +355,6 @@ func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 		want   string
 	}{
 		{http.MethodPatch, "/admin/v1/users/" + userID.String() + "/status", `{"status":"DISABLED"}`, "user:" + userID.String() + ":DISABLED"},
-		{http.MethodDelete, "/admin/v1/users/" + userID.String(), "", "user:" + userID.String() + ":DELETE"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String(), `{"name":"Renamed"}`, "organization:" + organizationID.String() + ":rename:Renamed"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/status", `{"status":"ACTIVE"}`, "organization:" + organizationID.String() + ":ACTIVE"},
 		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String(), "", "organization:" + organizationID.String() + ":DELETE"},
@@ -373,6 +372,13 @@ func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 		if got := repository.adminCalls[len(repository.adminCalls)-1]; got != test.want {
 			t.Fatalf("admin call=%q want=%q", got, test.want)
 		}
+	}
+	request := httptest.NewRequest(http.MethodDelete, "/admin/v1/users/"+userID.String(), nil)
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("direct administrator deletion must not bypass closure saga: status=%d", response.Code)
 	}
 }
 

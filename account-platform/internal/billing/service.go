@@ -57,6 +57,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/holds/extend", httpserver.AdaptFunc(s.extendHold))
 	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
 	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
+	protected.GET("/internal/v1/users/:user_id/account-closure-assessment", httpserver.AdaptFunc(s.accountClosureAssessment))
 	protected.GET("/internal/v1/pricing/current", httpserver.AdaptFunc(s.currentPrice))
 	protected.GET("/internal/v1/pricing/:price_version_id", httpserver.AdaptFunc(s.priceByID))
 	protected.PUT("/internal/v1/pricing/formula-bindings/:formula_version_id", httpserver.AdaptFunc(s.putFormulaBinding))

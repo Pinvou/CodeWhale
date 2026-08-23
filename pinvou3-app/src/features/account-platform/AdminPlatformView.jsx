@@ -75,6 +75,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         next = { systemStatus:await client.systemStatus(signal) };
       } else if (target === 'audit') {
         const audits = await client.audits({}, signal); next = { audits:audits.items || [] };
+      } else if (target === 'identity') {
+        const closures = await client.accountClosures(signal); next = { accountClosures:closures.items || [] };
       } else {
         return;
       }
@@ -121,13 +123,13 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} />}
       {section === 'system' && <SystemStatus copy={copy} data={data} />}
       {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} />}
-      {section === 'identity' && <IdentitySecurity copy={copy} />}
+      {section === 'identity' && <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} />}
     </main>
   </div>;
 }
 
 function sectionHasData(section, data) {
-  return section === 'identity' || (section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : section === 'system' ? data.systemStatus : data.audits);
+  return section === 'identity' ? data.accountClosures : (section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : section === 'system' ? data.systemStatus : data.audits);
 }
 
 function StatePage({ copy, kind, onRetry }) {
@@ -168,12 +170,11 @@ function AccountDirectory({ section, copy, data, client, setData }) {
     const isUser = isUserSection;
     const id = isUser ? item.user_id : item.organization_id;
     const label = isUser ? userLabel(item) : item.name;
-    if (action === 'delete' && !window.confirm(isUser ? copy.accounts.confirmUser(label) : copy.accounts.confirmOrganization(label))) return;
+    if (action === 'delete' && !window.confirm(copy.accounts.confirmOrganization(label))) return;
     setActionKey(`${section}:${id}:${action}`); setNotice(''); setActionError('');
     try {
       if (isUser) {
-        if (action === 'delete') await client.deleteUser(id);
-        else await client.setUserStatus(id, action === 'enable' ? 'ACTIVE' : 'DISABLED');
+        await client.setUserStatus(id, action === 'enable' ? 'ACTIVE' : 'DISABLED');
       } else if (action === 'delete') await client.deleteOrganization(id);
       else await client.setOrganizationStatus(id, action === 'enable' ? 'ACTIVE' : 'DISABLED');
       await reload(); setNotice(copy.accounts.updated);
@@ -187,7 +188,7 @@ function AccountDirectory({ section, copy, data, client, setData }) {
     const buttons = [];
     if (item.status === 'DISABLED') buttons.push(<button key="enable" disabled={Boolean(actionKey)} onClick={() => perform(item, 'enable')}>{copy.accounts.enable}</button>);
     if (item.status === 'ACTIVE' || (isUser && item.status === 'PROVISIONING')) buttons.push(<button key="disable" disabled={Boolean(actionKey)} onClick={() => perform(item, 'disable')}>{copy.accounts.disable}</button>);
-    buttons.push(<button key="delete" className="danger" disabled={Boolean(actionKey)} onClick={() => perform(item, 'delete')}>{actionKey === `${prefix}delete` ? '…' : copy.accounts.delete}</button>);
+    if (!isUser) buttons.push(<button key="delete" className="danger" disabled={Boolean(actionKey)} onClick={() => perform(item, 'delete')}>{actionKey === `${prefix}delete` ? '…' : copy.accounts.delete}</button>);
     return <div className="adm-row-actions">{buttons}</div>;
   };
   const columns = isUserSection ? [
@@ -568,8 +569,10 @@ function SystemStatus({ copy, data }) {
   return <section><div className="adm-metrics"><Metric label={copy.system.healthyServices} value={status.services.filter(item => item.status === 'HEALTHY').length} /><Metric label={copy.system.pendingReconciliation} value={status.reconciliation.pending} /><Metric label={copy.system.stoppedReconciliation} value={status.reconciliation.stopped} tone={Number(status.reconciliation.stopped) ? 'accent' : ''} /></div><article className="adm-panel"><SectionHeader title={copy.system.services} count={status.services.length} copy={copy} /><Table columns={serviceColumns} items={status.services} copy={copy} /><h3>{copy.system.relays}</h3><Table columns={relayColumns} items={status.relays} copy={copy} /><h3>{copy.system.recentErrors}</h3><Table columns={errorColumns} items={status.recent_errors} copy={copy} /></article></section>;
 }
 
-function IdentitySecurity({ copy }) {
+function IdentitySecurity({ copy, closures, client, setData }) {
   const [copied, setCopied] = useState('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
   const commands = {
     ssh:'ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 18081:127.0.0.1:18080 <ssh-user>@<server>',
     kubernetes:'kubectl -n <namespace> port-forward service/<release>-account-platform-keycloak 18081:8080 --address 127.0.0.1',
@@ -578,6 +581,25 @@ function IdentitySecurity({ copy }) {
     try { await navigator.clipboard.writeText(commands[key]); setCopied(key); }
     catch { setCopied(''); }
   };
+  const retryClosure = async item => {
+    const reason = window.prompt(copy.closure.retryReason);
+    if (!reason?.trim()) return;
+    setBusy(item.closure_request_id); setError('');
+    try {
+      const updated = await client.retryAccountClosure(item.closure_request_id, reason.trim());
+      setData(current => ({ ...current, accountClosures:(current.accountClosures || []).map(candidate => candidate.closure_request_id === updated.closure_request_id ? updated : candidate) }));
+    } catch { setError(copy.closure.retryFailed); }
+    finally { setBusy(''); }
+  };
+  const closureColumns = [
+    {key:'closure_request_id',label:copy.closure.request,render:item => <code title={item.closure_request_id}>{shortID(item.closure_request_id)}</code>},
+    {key:'user_id',label:copy.closure.user,render:item => <code title={item.user_id}>{shortID(item.user_id)}</code>},
+    {key:'stage',label:copy.closure.stage,render:item => <Status value={item.stage} />},
+    {key:'status',label:copy.accounts.status,render:item => <Status value={item.status} />},
+    {key:'blockers',label:copy.closure.blockers,render:item => (item.blockers || []).map(blocker => blocker.code).join(' · ') || copy.closure.none},
+    {key:'updated_at',label:copy.billing.updated,render:item => formatDate(item.updated_at)},
+    {key:'actions',label:copy.accounts.actions,render:item => <button disabled={Boolean(busy)} onClick={() => retryClosure(item)}>{busy === item.closure_request_id ? '…' : copy.closure.retry}</button>},
+  ];
   return <section className="adm-security-grid">
     <article className="adm-panel adm-security-intro">
       <span className="adm-eyebrow">KEYCLOAK</span><h2>{copy.identity.title}</h2><p>{copy.identity.lead}</p>
@@ -590,6 +612,11 @@ function IdentitySecurity({ copy }) {
       <SecureCommand title={copy.identity.ssh} help={copy.identity.sshHelp} command={commands.ssh} copied={copied === 'ssh'} copy={copy} onCopy={() => copyCommand('ssh')} />
       <SecureCommand title={copy.identity.kubernetes} help={copy.identity.kubernetesHelp} command={commands.kubernetes} copied={copied === 'kubernetes'} copy={copy} onCopy={() => copyCommand('kubernetes')} />
       <ol className="adm-security-steps"><li>{copy.identity.stepTunnel}</li><li>{copy.identity.stepOpen}</li><li>{copy.identity.stepClose}</li></ol>
+    </article>
+    <article className="adm-panel" style={{gridColumn:'1 / -1'}}>
+      <SectionHeader title={copy.closure.title} count={closures.length} copy={copy} />
+      <p>{copy.closure.lead}</p>{error && <div className="adm-inline-message error">{error}</div>}
+      <Table columns={closureColumns} items={closures} copy={copy} />
     </article>
   </section>;
 }

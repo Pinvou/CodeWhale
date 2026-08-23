@@ -17,6 +17,7 @@ var (
 	ErrInvalidSecret                 = errors.New("invalid token secret configuration")
 	ErrAccountProvisioning           = errors.New("account is provisioning")
 	ErrAccountRepairRequired         = errors.New("account provisioning requires repair")
+	ErrAccountClosing                = errors.New("account closure is in progress")
 	ErrOrganizationLifecycleConflict = errors.New("organization lifecycle conflicts with current state")
 	ErrCancellationRequested         = errors.New("usage cancellation was requested before dispatch")
 )
@@ -35,6 +36,7 @@ type AuthorizationContext struct {
 	Permissions          []string
 	Mobile               *string
 	MobileVerified       bool
+	Closing              bool
 }
 
 type Candidate struct {

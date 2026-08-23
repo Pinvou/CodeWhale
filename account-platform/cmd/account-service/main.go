@@ -18,7 +18,7 @@ import (
 )
 
 func main() {
-	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"ACCOUNT_WALLET_PROVISION": approvalpolicy.AuditOnly, "ACCOUNT_ROLE_BINDING_EXPIRE": approvalpolicy.AuditOnly, "ACCOUNT_APPROVAL_EXPIRE": approvalpolicy.AuditOnly, "ACCOUNT_PROFILE_CHANGE_RECOVERY": approvalpolicy.AuditOnly, "ACCOUNT_REGISTRATION_RECOVERY": approvalpolicy.AuditOnly, "ACCOUNT_COMMERCE_CUSTOMER_SYNC": approvalpolicy.AuditOnly}); err != nil {
+	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"ACCOUNT_WALLET_PROVISION": approvalpolicy.AuditOnly, "ACCOUNT_ROLE_BINDING_EXPIRE": approvalpolicy.AuditOnly, "ACCOUNT_APPROVAL_EXPIRE": approvalpolicy.AuditOnly, "ACCOUNT_PROFILE_CHANGE_RECOVERY": approvalpolicy.AuditOnly, "ACCOUNT_REGISTRATION_RECOVERY": approvalpolicy.AuditOnly, "ACCOUNT_COMMERCE_CUSTOMER_SYNC": approvalpolicy.AuditOnly, "ACCOUNT_CLOSURE_RETRY": approvalpolicy.AuditOnly}); err != nil {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
@@ -70,6 +70,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	billingAccountClosure, err := account.NewHTTPAccountClosureClient(os.Getenv("BILLING_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "BILLING")
+	if err != nil {
+		log.Fatal(err)
+	}
+	tokenAccountClosure, err := account.NewHTTPAccountClosureClient(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "TOKEN")
+	if err != nil {
+		log.Fatal(err)
+	}
 	service := account.NewService(repository, wallets).
 		WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN")).
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
@@ -78,6 +86,7 @@ func main() {
 	go account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run(ctx)
 	go account.NewRoleBindingExpiryWorker(repository, time.Minute).Run(ctx)
 	go account.NewApprovalExpiryWorker(repository, time.Minute).Run(ctx)
+	go account.NewAccountClosureWorker(repository, 5*time.Second, billingAccountClosure, tokenAccountClosure).Run(ctx)
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
 		if decodeErr != nil {

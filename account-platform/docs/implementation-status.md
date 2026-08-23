@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 252`、`部分实现 28`、`未实现 49`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 261`、`部分实现 28`、`未实现 40`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -110,12 +110,12 @@
 | ACC-37 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | usage_request 与 Hold 冻结活动上下文、成员关系、路由、凭据、模型、协议、公式、估算器和逐单位价格事实；数据库迁移与真实并发待部署验证 |
 | ACC-38 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; GLOBAL-CONTEXT | NOT_DEPLOYED | 普通或平台入口移除成员、停用或删除组织时均在同一 Account 事务把命中的用户级活动上下文回退 PERSONAL 并递增 context_version；Session 兼容投影同时收敛 |
 | ACC-39 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; GLOBAL-CONTEXT | NOT_DEPLOYED | Account 全部认证路由、Token 用户路由及跨服务平台授权响应使用标准版本头；组织路径返回目标 authorization_version，Portal 与桌面桥接不丢弃版本 |
-| ACC-40 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少持久化、幂等、可恢复且禁止跳阶段的注销 Saga |
-| ACC-41 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销静默期新业务冻结和修复动作白名单 |
-| ACC-42 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少待核对模型用量的注销阻断及平台承担安全终态 |
-| ACC-43 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少拒付权益冲销、应收认定及清偿完成门禁 |
-| ACC-44 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少资金性与纯信息对账差异分类及注销门禁 |
-| ACC-45 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少外部待确认关单、晚到审核和 Provider 事实盲区注销门禁 |
+| ACC-40 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | 独立注销聚合、命令与不可变审计已持久化；状态机只前进，Worker 使用租约、版本和退避恢复，超过30分钟 SLA 转人工修复 |
+| ACC-41 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | 本地角色交接完成后用户原子进入 CLOSING；Account 授权解析和 Token 新业务稳定拒绝，历史查询及既有订单关闭、申诉和用量取消使用显式只读/修复白名单 |
+| ACC-42 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | Token 评估覆盖预占、派发/流式执行和待核对用量；仅已结算/释放终态或具有禁止客户追扣证据的平台承担终态放行 |
+| ACC-43 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | Billing 评估同时检查未解决拒付、个人钱包余额和未清应收，任一未收敛即保持 FINANCIAL_CLEARANCE 阻断 |
+| ACC-44 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | 开放/复核中的资金性支付对账案件阻断；既有明确纯信息 `UNSUPPORTED_PROVIDER_ENTRY` 不阻断，案件证据和受控结案链保留 |
+| ACC-45 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | 支付处理中、关单请求、外部待确认、失败关单、晚到支付复核及 PROVIDER_BLIND 均进入稳定注销阻断项 |
 | ACC-46 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少 Commerce Mapping 任务分类、取消和主体生命周期版本防迟到回写 |
 | ACC-47 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销时资料修改 Saga 自动取消或向前收敛规则 |
 | ACC-48 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有所有者/最后有效超级管理员注销门禁、稳定 `LAST_ACTIVE_SUPER_ADMIN`、数据库同类停用/删除保护，以及通过门禁后撤销全部有效/未来角色、递增版本和清除 Account Session 的事务原语；APT-014 尚需把它接入持久注销 Saga 并在 Identity 清理前撤销 Refresh Token |
@@ -210,7 +210,7 @@
 | PAY-40 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 到归档期限仍无成功权威查询会进入 PROVIDER_BLIND、保存原因/责任/下次处置、升级事件并停用该 Provider 版本新订单，不能普通归档 |
 | UI-02 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 桌面区分注册、自动登录与钱包初始化，展示 `PROVISIONING`/`REPAIR_REQUIRED`，初始化期间不请求余额、充值或平台模型 |
 | UI-13 | 已实现 | DOC_CURRENT | DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 三语用量页可停止当前客户端交付，并分别展示执行和结算状态；UNSUPPORTED 明示后台继续结束并按可信实际用量结算，不显示为即时免费 |
-| UI-14 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销阶段、脱敏阻断项和用户恢复动作展示 |
+| UI-14 | 已实现 | DOC_CURRENT | ACCOUNT-CLOSURE-SAGA; UI-LINT; ACCOUNT-PORTAL-BUILD | NOT_DEPLOYED | 个人中心提供明确确认、阶段/SLA、脱敏阻断分类和用户动作；轮询持久状态，不展示 Provider 响应、内部资源 ID 或其他用户信息 |
 | UI-15 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 系统凭据库保存恢复查询凭据，启动后按 `next_retry_at` 轮询并区分 Identity、Account、钱包、修复和补偿状态，处理中禁止重复注册 |
 | ADM-11 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 组织端仅以 `org.models.read/manage` 读取或 CAS 修改允许/拒绝模型策略和资格提示；真实 Token Account、路由、凭据及 Provisioning 只由平台模型运营权限访问 |
 | ADM-12 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 后台可查看、创建版本和停用计量单位；历史引用受不可变约束保护 |
@@ -235,7 +235,7 @@
 | ADM-31 | 已实现 | DOC_CURRENT | GO-UNIT; CONTRACT-36; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 平台模型运营查询返回请求/上下文、请求指纹、四类状态、上游引用、持久化/客户端确认序号和不可变脱敏取消证据，不返回用户正文或秘密 |
 | ADM-32 | 已实现 | DOC_CURRENT | GO-UNIT; CONTRACT-36; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 人工核对重试强制幂等键与请求指纹，只调度原上游证据查询且不重发模型请求；已释放并禁止用户扣款的平台损失案件拒绝重开收费路径 |
 | ADM-33 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW; DESKTOP-41 | NOT_DEPLOYED | 三语后台支持按状态、Provider、责任人、进入/复核时间和逾期筛选，展示能力/策略快照及不可变证据/操作时间线，并提供认领、查询、安排、严格归档和 blind 升级；无手工标记已支付入口 |
-| ADM-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销 REPAIR_REQUIRED 队列、阶段重试及禁止绕过门禁的运营能力 |
+| ADM-34 | 已实现 | DOC_CURRENT | ACCOUNT-CLOSURE-SAGA; UI-LINT; ACCOUNT-PORTAL-BUILD | NOT_DEPLOYED | 独立权限保护的注销队列展示阶段、SLA、阻断快照和脱敏错误；幂等重试只能重新评估当前阶段，没有强制完成、忽略阻断或直接删除用户入口 |
 | ADM-35 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA; RBAC-AUTH | NOT_DEPLOYED | 三语修复页及脱敏队列支持状态、阶段、责任域、年龄和 SLA 过滤；可重试确定阶段，补偿按钮与命令受24小时、无业务事实、先停用 Identity 后释放预约的证明门禁约束 |
 | ADM-36 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 策略版本 1 以稳定 `command_type` 显式登记全部当前后台写入口；代码覆盖合同检查路由注解，未知或分类冲突均失败关闭 |
 | ADM-37 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 九类直接改变资金事实的命令固定为 `APPROVAL_REQUIRED`、恰好一名独立审批人且禁止自审；当前仅已实现领域语义的钱包调整可申请，其余类型在对应领域执行器交付前失败关闭 |
@@ -304,7 +304,7 @@
 | ACC-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; DESKTOP-UI | NOT_DEPLOYED | 桌面个人中心先以密码 Direct Grant 获得五分钟内的 `auth_time`，再预约用户名；Account 与 Keycloak 都执行唯一性门禁，成功后撤销会话。 |
 | ACC-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; COMMERCE-MAPPING; DESKTOP-UI | NOT_DEPLOYED | 新手机号绑定滑块和专用短信用途；Identity/Account 提交后递增当前 Commerce Mapping 版本并创建资料同步任务，旧版本迟到结果不能覆盖新映射。 |
 | ACC-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; DESKTOP-UI | NOT_DEPLOYED | 未登录入口对已知/未知手机号保持同形响应；短信成功后只向 Identity 传递不透明密码引用，Keycloak 重置密码并撤销全部会话，Account 同步清除 Session 投影。 |
-| ACC-10 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 重新认证后可以持久化注销请求；完成前强一致检查个人余额、未清应收、本人订单/退款、Hold、待核对用量、拒付、资金性差异、外部关单和 Commerce 任务，并要求转让组织所有权。组织余额和未消费组织授予不阻断；授予按 BILL-39 进入账号注销隔离暂停。 |
+| ACC-10 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA; UI-LINT | NOT_DEPLOYED | 最近5分钟认证、精确确认和幂等键可创建唯一注销请求；所有权/最后有效超级管理员在静默前阻断，进入静默后由账务和 Token 强一致评估推进到自动清理边界，后续资料及标识清理由 ACC-46–ACC-50 独立约束。 |
 | ACC-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前管理员删除保留 UUID 并清除部分资料，但完整注销 Saga、用户名/手机号安全释放、三年分类保留和永久 `user_code` 墓碑均未实现。 |
 | ACC-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
 | ACC-13 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | Account 持久化平台/组织角色、原子权限、组织/节点作用域和授权版本；服务端默认拒绝并按接口所需权限判定，客户端显示不作为授权依据 |
@@ -571,7 +571,7 @@
 | ACC-07 | 修改用户名 | 已实现 | 个人中心重新认证后规范化并预约唯一用户名，经 Identity Adapter 和 Account CAS 提交。 |
 | ACC-08 | 修改手机号 | 已实现 | 新手机号短信验证、重新认证、Identity/Account 提交和现有 Commerce 同步任务重置均已落地。 |
 | ACC-09 | 忘记密码 | 已实现 | 未登录手机号短信验证后由 Identity Adapter 重置密码并撤销会话；Account 不接触密码原文。 |
-| ACC-10 | 用户主动注销 | 未实现 | 重新认证后可以持久化注销请求；完成前强一致检查个人余额、未清应收、本人订单/退款、Hold、待核对用量、拒付、资金性差异、外部关单和 Commerce 任务，并要求转让组织所有权。组织余额和未消费组织授予不阻断；授予按 BILL-39 进入账号注销隔离暂停。 |
+| ACC-10 | 用户主动注销 | 已实现 | 最近5分钟认证、`CLOSE_MY_ACCOUNT` 明确确认和幂等键创建唯一持久请求；本地角色门禁、静默期和跨 Billing/Token 阻断已接通，资料/标识/组织授予的后续自动清理由 ACC-46–ACC-50 与 BILL-39/BILL-40 继续约束。 |
 | ACC-11 | 注销记录保留 | 未实现 | 当前管理员删除保留 UUID 并清除部分资料，但完整注销 Saga、用户名/手机号安全释放、三年分类保留和永久 `user_code` 墓碑均未实现。 |
 | ACC-12 | 一个用户可属于多个组织 | 已实现 | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
 | ACC-13 | 角色系统按权限码和作用域管理 | 已实现 | Account 持久化并解析平台/组织角色、原子权限及组织/节点作用域，所有服务端授权默认拒绝。 |
@@ -596,12 +596,12 @@
 | ACC-32 | 撤销普通组织角色 | 已实现 | 支持单绑定幂等撤销，事务内刷新成员、Session 和授权版本并发送变更事件。 |
 | ACC-33 | 无组织用户不显示组织页签 | 已实现 | 个人中心按组织列表动态隐藏。 |
 | ACC-34 | 当前上下文按用户全局保存并跨端同步 | 已实现 | 每个 user_id 只有一条活动上下文；期望版本 CAS 防止旧端覆盖新端，桌面与 Web 按响应版本和聚焦事件同步。 |
-| ACC-40 | 持久化注销 Saga | 未实现 | 当前没有独立注销聚合、阶段版本、幂等恢复、SLA 和 REPAIR_REQUIRED；现有注销无法证明跨 Identity、Account、Billing 与 Commerce 的崩溃恢复。 |
-| ACC-41 | 注销静默期业务冻结 | 未实现 | 当前没有主体生命周期版本及注销修复动作白名单，无法统一禁止新模型、Hold、订单、资料、成员和授权事实。 |
-| ACC-42 | 待核对模型用量阻断注销 | 未实现 | 当前注销预检只检查 Hold，未覆盖上游可能已派发、取消不确定、SETTLEMENT_PENDING、REVIEW 及以后仍可能追扣的用量状态。 |
-| ACC-43 | 未解决拒付阻断注销 | 未实现 | 当前没有把拒付案件、权益冲销结果和订单级应收作为同一注销门禁。 |
-| ACC-44 | 资金性对账差异阻断注销 | 未实现 | 当前对账差异缺少强制 financial_impact 分类及“未分类默认阻断”规则，也没有防止只改标签绕过的复核门禁。 |
-| ACC-45 | 外部待确认关单阻断注销 | 未实现 | 当前未把 CLOSE_REQUESTED、LOCALLY_CLOSED_EXTERNAL_PENDING、晚到审核和 PROVIDER_BLIND 纳入注销预检。 |
+| ACC-40 | 持久化注销 Saga | 已实现 | `account_closure_requests/commands/audit` 保存唯一请求、命令指纹、阶段版本、租约、重试、SLA 和不可变审计；数据库触发器拒绝阶段回退。 |
+| ACC-41 | 注销静默期业务冻结 | 已实现 | 角色交接未完成时停在静默前且用户仍可自救；通过后原子置为 CLOSING，Account/Token 拒绝新业务，只开放历史读取与既有订单/用量修复动作。 |
+| ACC-42 | 待核对模型用量阻断注销 | 已实现 | Token 内部评估覆盖未结算 Hold、派发/流式执行、取消/核对未终态；平台承担且明确禁止以后追扣客户的证据终态不阻断。 |
+| ACC-43 | 未解决拒付阻断注销 | 已实现 | 未解决拒付、非零个人余额和未清应收共同阻断财务清算阶段，历史案件及资金证据不随请求删除。 |
+| ACC-44 | 资金性对账差异阻断注销 | 已实现 | 开放或复核中的支付/退款/拒付/账本差异默认阻断；明确纯信息且不关联内部支付事实的 Provider 不支持行可保留而不阻断。 |
+| ACC-45 | 外部待确认关单阻断注销 | 已实现 | 订单支付处理中、`CLOSE_REQUESTED`、`LOCALLY_CLOSED_EXTERNAL_PENDING`、失败关单、晚到复核和 `PROVIDER_BLIND` 全部进入跨域阻断快照。 |
 | ACC-46 | 注销处理 Commerce Mapping 任务 | 未实现 | 当前同步任务缺少资金/资料分类和主体生命周期版本，迟到同步可能在 Mapping DETACHED 或标识复用后回写。 |
 | ACC-47 | 注销自动收敛资料修改 Saga | 未实现 | 当前没有区分 Identity 更新前取消与更新后向前收敛，也未证明预约能安全释放且不会产生第二个业务用户。 |
 | ACC-48 | 注销自动撤销角色与临时授权 | 部分实现 | Account 已提供所有者/最后管理员门禁和统一撤销平台、组织、未来、临时/紧急授权的事务原语，并递增授权/用户版本和删除 Account Session；APT-014 仍需接入注销 Saga、Identity Refresh Token 撤销和跨域恢复。 |
@@ -747,7 +747,7 @@
 | UI-11 | Web 组织购买入口 | 已实现 | 具有组织采购权限的管理员可在显式活动组织页面购买组织权益；读取、授予与撤回入口分别按对应原子权限显示。 |
 | UI-12 | 支付能力降级展示 | 已实现 | 退款动作按 Provider capabilities 展示，不支持时用户及运营界面完全隐藏入口；其他能力继续按各自声明降级。 |
 | UI-13 | 模型停止与结算状态反馈 | 已实现 | 三语用量页提供显式停止并同时展示 execution/settlement；不支持取消时明确后台继续和按可信实际用量结算，重开后读取同一请求真实状态。 |
-| UI-14 | 注销进度与阻断原因展示 | 未实现 | 当前没有持久注销状态页、脱敏阻断分类、用户恢复动作或“自动处理中”与“需要本人处理”的区分。 |
+| UI-14 | 注销进度与阻断原因展示 | 已实现 | 桌面与 Web 个人中心三语展示持久阶段、状态、SLA、稳定阻断原因和用户动作；响应删除内部资源 ID 并自动刷新，未完成前不显示完成。 |
 | UI-15 | 未完成注册恢复状态展示 | 已实现 | 桌面优先在系统凭据库保存操作查询凭据，重启后按 `next_retry_at` 轮询，区分 Identity、Account、钱包、修复与补偿状态并阻止重复注册。 |
 | UI-16 | 桌面与 Web 三语完整性 | 部分实现 | 当前桌面、Portal 和管理后台路由的简中/英文/日文词条测试通过；仍需覆盖全部目标页面、错误码以及发布制品级缺词条、回退和单语硬编码门禁。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 仓库已实现 BOOTSTRAP_PENDING/禁用 Identity 门禁、无回显或受控 FD 设密、默认256 bit一次性凭据、15分钟有效、5次锁定、一次交付、不可逆校验值、代次隔离、Identity 高权限密码策略、会话撤销和失败补偿；缺生产等价环境并发及故障演练证据。 |
@@ -783,7 +783,7 @@
 | ADM-31 | 用量请求与证据查询 | 已实现 | 可按请求读取上下文、请求指纹、Adapter/上游引用、四类状态、持久化/确认序号和脱敏取消证据，不返回正文或秘密。 |
 | ADM-32 | 用量核对人工重试 | 已实现 | 人工重试要求幂等键并冻结原因指纹，只查询既有上游证据；已进入禁止用户扣款的平台损失案件不能重开收费路径。 |
 | ADM-33 | 晚到支付人工审核管理 | 已实现 | 三语页面支持完整筛选、认领、受审计 Provider 查询、复核安排、严格归档和事实盲区升级，并展示能力/策略快照、证据及操作者时间线；不能手工录入已支付。 |
-| ADM-34 | 注销 Saga 修复 | 未实现 | 当前没有按阶段、阻断类型、SLA 和责任人管理 REPAIR_REQUIRED 注销任务的页面或受限重试命令，也没有禁止强制完成和直接释放标识的权限边界。 |
+| ADM-34 | 注销 Saga 修复 | 已实现 | 管理台三语注销队列和受独立权限、审批策略、幂等命令保护的当前阶段重试已实现；API 不提供强制完成、忽略阻断或管理员直删用户。 |
 | ADM-35 | 注册 Saga 修复 | 已实现 | 三语修复页通过受限 BFF 访问权限保护的脱敏队列，可按状态、阶段、责任域、年龄和 SLA 过滤并重试确定阶段；补偿按钮及命令受24小时和无 Account/映射/钱包/Outbox 事实证明约束。 |
 | ADM-36 | 管理命令审批分类注册 | 已实现 | 版本化策略按稳定命令类型覆盖当前后台写入口；未知命令、未知版本和分类冲突失败关闭。 |
 | ADM-37 | 强制审批命令清单 | 已实现 | 九类人工财务事实变更固定要求一名独立审批人并禁止自审；仅已有领域执行器的类型可申请，其余失败关闭。 |

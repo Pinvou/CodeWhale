@@ -39,6 +39,10 @@ func (r *PostgresRepository) CheckAccountClosureRoleGate(ctx context.Context, us
 		return err
 	}
 	defer tx.Rollback(ctx)
+	return checkAccountClosureRoleGateTx(ctx, tx, userID)
+}
+
+func checkAccountClosureRoleGateTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) error {
 	var ownsOrganization bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(
 SELECT 1 FROM memberships m JOIN role_bindings rb ON rb.membership_id=m.id AND rb.role='OWNER'

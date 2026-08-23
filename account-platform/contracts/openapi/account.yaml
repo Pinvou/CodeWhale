@@ -198,6 +198,48 @@ paths:
                 $ref: "#/components/schemas/Me"
         "401":
           $ref: "#/components/responses/Error"
+  /me/account-closure-request:
+    get:
+      operationId: getMyAccountClosure
+      summary: Get the current durable account-closure state and user-actionable blockers
+      responses:
+        "200":
+          description: Redacted account-closure progress
+          headers:
+            Cache-Control:
+              required: true
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountClosure" }
+        "404": { $ref: "#/components/responses/Error" }
+  /me/account-closure-requests:
+    post:
+      operationId: createMyAccountClosure
+      summary: Request account closure after recent authentication and exact explicit confirmation
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [confirmation]
+              properties:
+                confirmation: { type: string, const: CLOSE_MY_ACCOUNT }
+      responses:
+        "202":
+          description: Durable closure requested; local role blockers may keep the user active until handoff is possible
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AccountClosure" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /me/commerce-customer-mapping:
     get:
       operationId: getCommerceCustomerMapping
@@ -859,6 +901,37 @@ components:
         maxLength: 120
       description: Stable operation key; body fallback is accepted for constrained clients.
   schemas:
+    AccountClosureBlocker:
+      type: object
+      additionalProperties: false
+      required: [code, domain, resource_type]
+      properties:
+        code: { type: string }
+        domain: { type: string, enum: [ACCOUNT, BILLING, TOKEN] }
+        resource_type: { type: string }
+        user_action: { type: string }
+    AccountClosure:
+      type: object
+      additionalProperties: false
+      required: [closure_request_id, status, stage, policy_version, blockers, attempts, reauthenticated_at, sla_expires_at, version, created_at, updated_at, replayed]
+      properties:
+        closure_request_id: { type: string, format: uuid }
+        status: { type: string, enum: [IN_PROGRESS, BLOCKED, RETRY, REPAIR_REQUIRED, COMPLETED] }
+        stage: { type: string, enum: [CLOSURE_REQUESTED, QUIESCING, FINANCIAL_CLEARANCE, IDENTITY_CLEANUP, ANONYMIZED, COMPLETED] }
+        policy_version: { type: integer, minimum: 1 }
+        blockers:
+          type: array
+          items: { $ref: "#/components/schemas/AccountClosureBlocker" }
+        attempts: { type: integer, minimum: 0 }
+        last_error_code: { type: string }
+        next_attempt_at: { type: string, format: date-time }
+        reauthenticated_at: { type: string, format: date-time }
+        sla_expires_at: { type: string, format: date-time }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
+        replayed: { type: boolean }
     RoleBinding:
       type: object
       additionalProperties: false

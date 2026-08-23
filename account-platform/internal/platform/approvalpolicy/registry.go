@@ -65,6 +65,7 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_UNIT_CREATE": "platform.organizations.status.manage", "ACCOUNT_UNIT_RENAME": "platform.organizations.status.manage",
 		"ACCOUNT_UNIT_DELETE": "platform.organizations.status.manage", "ACCOUNT_REGISTRATION_RETRY": "platform.registrations.repair",
 		"ACCOUNT_REGISTRATION_COMPENSATE": "platform.registrations.repair", "ACCOUNT_PROFILE_CHANGE_RETRY": "platform.profile-changes.repair",
+		"ACCOUNT_CLOSURE_RETRY":        "platform.account-closures.repair",
 		"BILLING_PRICE_VERSION_CREATE": "platform.pricing.manage", "BILLING_PAYMENT_ORDER_SYNC": "platform.billing.orders.sync",
 		"BILLING_PAYMENT_ORDER_EVIDENCE_REPAIR": "platform.billing.repairs.request", "BILLING_NORMAL_REFUND": "platform.billing.repairs.request",
 		"BILLING_LATE_PAYMENT_CLAIM": "platform.billing.orders.sync", "BILLING_LATE_PAYMENT_QUERY": "platform.billing.orders.sync",

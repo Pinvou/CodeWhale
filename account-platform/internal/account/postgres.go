@@ -253,6 +253,9 @@ GROUP BY u.id,s.session_id,active.context_type,active.organization_id,active.con
 		if statusErr == nil && status == "REPAIR_REQUIRED" {
 			return AuthorizationContext{}, ErrAccountRepairRequired
 		}
+		if statusErr == nil && status == "CLOSING" {
+			return AuthorizationContext{}, ErrAccountClosing
+		}
 		return AuthorizationContext{}, ErrNotFound
 	}
 	if err != nil {
@@ -583,6 +586,18 @@ func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Princ
 func activeUserID(ctx context.Context, tx pgx.Tx, principal identity.Principal) (uuid.UUID, error) {
 	var userID uuid.UUID
 	err := tx.QueryRow(ctx, `SELECT u.id FROM identities i JOIN users u ON u.id = i.user_id WHERE i.issuer = $1 AND i.subject = $2 AND u.status = 'ACTIVE'`, principal.Issuer, principal.Subject).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrForbidden
+	}
+	return userID, err
+}
+
+// activeOrClosingUserID is intentionally used only by the ownership handoff
+// repair action. A closing account remains unable to create any other business
+// or authorization fact.
+func activeOrClosingUserID(ctx context.Context, tx pgx.Tx, principal identity.Principal) (uuid.UUID, error) {
+	var userID uuid.UUID
+	err := tx.QueryRow(ctx, `SELECT u.id FROM identities i JOIN users u ON u.id=i.user_id WHERE i.issuer=$1 AND i.subject=$2 AND u.status IN ('ACTIVE','CLOSING')`, principal.Issuer, principal.Subject).Scan(&userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, ErrForbidden
 	}
