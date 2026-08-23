@@ -74,28 +74,29 @@ type HoldPricingContext struct {
 }
 
 type EntitlementPackage struct {
-	ID              uuid.UUID              `json:"package_id"`
-	UserID          *uuid.UUID             `json:"user_id,omitempty"`
-	WalletID        uuid.UUID              `json:"wallet_id"`
-	PaymentOrderID  *uuid.UUID             `json:"pinvou_order_id,omitempty"`
-	MallOrderID     string                 `json:"mall_order_id"`
-	SourceType      string                 `json:"source_type"`
-	SourceReference string                 `json:"source_reference"`
-	ProductID       string                 `json:"plan_id"`
-	PlanName        string                 `json:"plan_name"`
-	SKUCode         string                 `json:"sku_code"`
-	AmountFen       int64                  `json:"amount_fen"`
-	PointsTotal     int64                  `json:"points_total_microcredits"`
-	PointsReserved  int64                  `json:"points_reserved_microcredits"`
-	PointsUsed      int64                  `json:"points_used_microcredits"`
-	PointsRemaining int64                  `json:"points_remaining_microcredits"`
-	PointsExpired   int64                  `json:"points_expired_microcredits"`
-	PointsRevoked   int64                  `json:"points_revoked_microcredits"`
-	CreditedAt      time.Time              `json:"credited_at"`
-	ValidFrom       time.Time              `json:"valid_from"`
-	ValidUntil      time.Time              `json:"valid_until"`
-	Status          string                 `json:"status"`
-	Components      []EntitlementComponent `json:"components"`
+	ID                     uuid.UUID              `json:"package_id"`
+	UserID                 *uuid.UUID             `json:"user_id,omitempty"`
+	WalletID               uuid.UUID              `json:"wallet_id"`
+	PaymentOrderID         *uuid.UUID             `json:"pinvou_order_id,omitempty"`
+	PaymentTransactionID   *uuid.UUID             `json:"source_payment_transaction_id,omitempty"`
+	ProviderOrderReference string                 `json:"provider_order_reference"`
+	SourceType             string                 `json:"source_type"`
+	SourceReference        string                 `json:"source_reference"`
+	ProductID              string                 `json:"plan_id"`
+	PlanName               string                 `json:"plan_name"`
+	SKUCode                string                 `json:"sku_code"`
+	AmountFen              int64                  `json:"amount_fen"`
+	PointsTotal            int64                  `json:"points_total_microcredits"`
+	PointsReserved         int64                  `json:"points_reserved_microcredits"`
+	PointsUsed             int64                  `json:"points_used_microcredits"`
+	PointsRemaining        int64                  `json:"points_remaining_microcredits"`
+	PointsExpired          int64                  `json:"points_expired_microcredits"`
+	PointsRevoked          int64                  `json:"points_revoked_microcredits"`
+	CreditedAt             time.Time              `json:"credited_at"`
+	ValidFrom              time.Time              `json:"valid_from"`
+	ValidUntil             time.Time              `json:"valid_until"`
+	Status                 string                 `json:"status"`
+	Components             []EntitlementComponent `json:"components"`
 }
 
 type EntitlementComponent struct {

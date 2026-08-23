@@ -751,13 +751,14 @@ components:
     EntitlementPackage:
       type: object
       additionalProperties: false
-      required: [package_id, mall_order_id, source_type, source_reference, plan_id, plan_name, sku_code, amount_fen, points_total_microcredits, points_reserved_microcredits, points_used_microcredits, points_remaining_microcredits, points_expired_microcredits, points_revoked_microcredits, credited_at, valid_from, valid_until, status, components]
+      required: [package_id, provider_order_reference, source_type, source_reference, plan_id, plan_name, sku_code, amount_fen, points_total_microcredits, points_reserved_microcredits, points_used_microcredits, points_remaining_microcredits, points_expired_microcredits, points_revoked_microcredits, credited_at, valid_from, valid_until, status, components]
       properties:
         package_id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
         wallet_id: { type: string, format: uuid }
         pinvou_order_id: { type: string, format: uuid }
-        mall_order_id: { type: string }
+        source_payment_transaction_id: { type: string, format: uuid }
+        provider_order_reference: { type: string, description: Supplier-neutral external order correlation reference. }
         source_type: { type: string, enum: [PAYMENT, MANUAL_ADJUSTMENT, SYSTEM] }
         source_reference: { type: string, minLength: 1 }
         plan_id: { type: string }

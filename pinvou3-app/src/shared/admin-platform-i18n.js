@@ -59,3 +59,7 @@ Object.assign(adminPlatformCopy.ja.accounts, { userCode:'ユーザーコード',
 Object.assign(adminPlatformCopy.zh, { search:'搜索用户名、名称、邮箱、ID，或输入完整用户编码精确查询' });
 Object.assign(adminPlatformCopy.en, { search:'Search username, name, email, ID, or enter a complete user code' });
 Object.assign(adminPlatformCopy.ja, { search:'ユーザー名、名前、メール、ID を検索、または完全なユーザーコードを入力' });
+
+Object.assign(adminPlatformCopy.zh.billing, { orderDetail:'支付订单明细', payer:'付款用户', beneficiary:'权益受益方', personalBeneficiary:'个人钱包', paymentSummary:'支付汇总', refundSummary:'退款汇总', chargebackSummary:'拒付汇总', attentionSummary:'关注状态', transactions:'支付流水', evidence:'不可变支付证据', provider:'支付提供方', evidenceKey:'证据键', mergeResult:'归并结果' });
+Object.assign(adminPlatformCopy.en.billing, { orderDetail:'Payment order detail', payer:'Payer', beneficiary:'Benefit recipient', personalBeneficiary:'Personal wallet', paymentSummary:'Payment summary', refundSummary:'Refund summary', chargebackSummary:'Chargeback summary', attentionSummary:'Attention', transactions:'Payment transactions', evidence:'Immutable payment evidence', provider:'Provider', evidenceKey:'Evidence key', mergeResult:'Merge result' });
+Object.assign(adminPlatformCopy.ja.billing, { orderDetail:'支払い注文詳細', payer:'支払者', beneficiary:'特典の受益者', personalBeneficiary:'個人ウォレット', paymentSummary:'支払い集計', refundSummary:'返金集計', chargebackSummary:'チャージバック集計', attentionSummary:'要確認状態', transactions:'支払いトランザクション', evidence:'変更不可の支払い証拠', provider:'決済プロバイダー', evidenceKey:'証拠キー', mergeResult:'統合結果' });

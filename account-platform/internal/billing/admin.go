@@ -30,22 +30,33 @@ type AdminOverview struct {
 }
 
 type AdminPaymentOrder struct {
-	ID                 uuid.UUID  `json:"order_id"`
-	MerchantOrderNo    string     `json:"merchant_order_no"`
-	ProductID          string     `json:"product_id"`
-	ProviderSKU        string     `json:"provider_sku"`
-	ChannelTransaction string     `json:"channel_transaction_id"`
-	MobileMasked       string     `json:"mobile_masked"`
-	RequesterID        uuid.UUID  `json:"requester_id"`
-	WalletID           uuid.UUID  `json:"wallet_id"`
-	Channel            string     `json:"channel"`
-	AmountFen          int64      `json:"amount_fen"`
-	CreditMicrocredits int64      `json:"credit_microcredits"`
-	Status             string     `json:"status"`
-	FulfillmentStatus  string     `json:"fulfillment_status"`
-	PaidAt             *time.Time `json:"paid_at,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	ID                         uuid.UUID            `json:"order_id"`
+	MerchantOrderNo            string               `json:"merchant_order_no"`
+	ProviderID                 string               `json:"provider_id"`
+	ProviderVersion            string               `json:"provider_version"`
+	ProductID                  string               `json:"product_id"`
+	ProviderSKU                string               `json:"provider_sku"`
+	PrimaryProviderTransaction string               `json:"primary_provider_transaction_id"`
+	MobileMasked               string               `json:"mobile_masked"`
+	RequesterID                uuid.UUID            `json:"requester_id"`
+	PayerUserID                uuid.UUID            `json:"payer_user_id"`
+	BeneficiaryOrganizationID  *uuid.UUID           `json:"beneficiary_organization_id,omitempty"`
+	WalletID                   uuid.UUID            `json:"wallet_id"`
+	Channel                    string               `json:"channel"`
+	AmountFen                  int64                `json:"amount_fen"`
+	CreditMicrocredits         int64                `json:"credit_microcredits"`
+	Status                     string               `json:"status"`
+	FulfillmentStatus          string               `json:"fulfillment_status"`
+	PaidAt                     *time.Time           `json:"paid_at,omitempty"`
+	PaymentSummary             json.RawMessage      `json:"payment_summary"`
+	RefundSummary              json.RawMessage      `json:"refund_summary"`
+	ChargebackSummary          json.RawMessage      `json:"chargeback_summary"`
+	AttentionSummary           string               `json:"attention_summary"`
+	SummaryVersion             int64                `json:"summary_version"`
+	Transactions               []PaymentTransaction `json:"transactions,omitempty"`
+	Evidence                   []PaymentEvidence    `json:"evidence,omitempty"`
+	CreatedAt                  time.Time            `json:"created_at"`
+	UpdatedAt                  time.Time            `json:"updated_at"`
 }
 
 type AdminPaymentOrderFilter struct {
@@ -187,6 +198,24 @@ func (s *Service) adminPaymentOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) adminPaymentOrderDetail(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid payment order", httpserver.RequestID(r.Context()))
+		return
+	}
+	item, err := repository.AdminPaymentOrder(r.Context(), orderID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, item)
 }
 
 func validAdminPaymentStatus(status string) bool {
@@ -494,9 +523,9 @@ func (r *PostgresRepository) AdminWallets(ctx context.Context, limit int) ([]Wal
 }
 
 func (r *PostgresRepository) AdminPaymentOrders(ctx context.Context, filter AdminPaymentOrderFilter, limit int) ([]AdminPaymentOrder, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,merchant_order_no,product_id,COALESCE(provider_sku,''),COALESCE(channel_transaction_id,''),COALESCE(mobile_e164,''),requester_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,created_at,updated_at
+	rows, err := r.pool.Query(ctx, `SELECT id,merchant_order_no,provider_id,provider_version,product_id,COALESCE(provider_sku,''),COALESCE(primary_provider_transaction_id,''),COALESCE(mobile_e164,''),requester_id,payer_user_id,beneficiary_organization_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,payment_summary,refund_summary,chargeback_summary,attention_summary,summary_version,created_at,updated_at
 		FROM payment_orders
-		WHERE ($1='' OR id::text ILIKE '%'||$1||'%' OR merchant_order_no ILIKE '%'||$1||'%' OR COALESCE(channel_transaction_id,'') ILIKE '%'||$1||'%' OR COALESCE(mobile_e164,'') ILIKE '%'||$1||'%' OR COALESCE(provider_sku,'') ILIKE '%'||$1||'%')
+		WHERE ($1='' OR id::text ILIKE '%'||$1||'%' OR merchant_order_no ILIKE '%'||$1||'%' OR COALESCE(primary_provider_transaction_id,'') ILIKE '%'||$1||'%' OR EXISTS(SELECT 1 FROM payment_transactions transaction WHERE transaction.payment_order_id=payment_orders.id AND transaction.provider_transaction_id ILIKE '%'||$1||'%') OR COALESCE(mobile_e164,'') ILIKE '%'||$1||'%' OR COALESCE(provider_sku,'') ILIKE '%'||$1||'%')
 		AND ($2='' OR status=$2)
 		ORDER BY updated_at DESC,id LIMIT $3`, filter.Query, filter.Status, limit)
 	if err != nil {
@@ -507,7 +536,7 @@ func (r *PostgresRepository) AdminPaymentOrders(ctx context.Context, filter Admi
 	for rows.Next() {
 		var item AdminPaymentOrder
 		var mobile string
-		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.ProductID, &item.ProviderSKU, &item.ChannelTransaction, &mobile, &item.RequesterID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.ProviderID, &item.ProviderVersion, &item.ProductID, &item.ProviderSKU, &item.PrimaryProviderTransaction, &mobile, &item.RequesterID, &item.PayerUserID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.PaymentSummary, &item.RefundSummary, &item.ChargebackSummary, &item.AttentionSummary, &item.SummaryVersion, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.MobileMasked = maskAdminMobile(mobile)
@@ -645,11 +674,45 @@ WHERE la.wallet_id=$1 ORDER BY lp.created_at DESC,lp.id LIMIT $2`, walletID, lim
 
 func (r *PostgresRepository) AdminPaymentOrder(ctx context.Context, orderID uuid.UUID) (AdminPaymentOrder, error) {
 	var item AdminPaymentOrder
-	err := r.pool.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,created_at,updated_at FROM payment_orders WHERE id=$1`, orderID).Scan(&item.ID, &item.MerchantOrderNo, &item.RequesterID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.CreatedAt, &item.UpdatedAt)
+	var mobile string
+	err := r.pool.QueryRow(ctx, `SELECT id,merchant_order_no,provider_id,provider_version,product_id,COALESCE(provider_sku,''),COALESCE(primary_provider_transaction_id,''),COALESCE(mobile_e164,''),requester_id,payer_user_id,beneficiary_organization_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,payment_summary,refund_summary,chargeback_summary,attention_summary,summary_version,created_at,updated_at FROM payment_orders WHERE id=$1`, orderID).Scan(&item.ID, &item.MerchantOrderNo, &item.ProviderID, &item.ProviderVersion, &item.ProductID, &item.ProviderSKU, &item.PrimaryProviderTransaction, &mobile, &item.RequesterID, &item.PayerUserID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.PaymentSummary, &item.RefundSummary, &item.ChargebackSummary, &item.AttentionSummary, &item.SummaryVersion, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AdminPaymentOrder{}, ErrNotFound
 	}
-	return item, err
+	if err != nil {
+		return item, err
+	}
+	item.MobileMasked = maskAdminMobile(mobile)
+	transactionRows, err := r.pool.Query(ctx, `SELECT id,payment_order_id,provider_id,provider_version,provider_transaction_id,channel,status,fulfillment_status,amount_fen,currency,COALESCE(provider_status,''),provider_paid_at,verified_at,fulfilled_at FROM payment_transactions WHERE payment_order_id=$1 ORDER BY created_at,id`, orderID)
+	if err != nil {
+		return item, err
+	}
+	defer transactionRows.Close()
+	item.Transactions = []PaymentTransaction{}
+	for transactionRows.Next() {
+		var transaction PaymentTransaction
+		if err := transactionRows.Scan(&transaction.ID, &transaction.PaymentOrderID, &transaction.ProviderID, &transaction.ProviderVersion, &transaction.ProviderTransactionID, &transaction.Channel, &transaction.Status, &transaction.FulfillmentStatus, &transaction.AmountFen, &transaction.Currency, &transaction.ProviderStatus, &transaction.PaidAt, &transaction.VerifiedAt, &transaction.FulfilledAt); err != nil {
+			return item, err
+		}
+		item.Transactions = append(item.Transactions, transaction)
+	}
+	if err := transactionRows.Err(); err != nil {
+		return item, err
+	}
+	evidenceRows, err := r.pool.Query(ctx, `SELECT id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,evidence_key,provider_transaction_id,amount_fen,COALESCE(currency,''),COALESCE(provider_status,''),provider_event_at,received_at,payload_digest,payload_snapshot,merge_result FROM payment_evidence WHERE payment_order_id=$1 ORDER BY received_at,id`, orderID)
+	if err != nil {
+		return item, err
+	}
+	defer evidenceRows.Close()
+	item.Evidence = []PaymentEvidence{}
+	for evidenceRows.Next() {
+		var evidence PaymentEvidence
+		if err := evidenceRows.Scan(&evidence.ID, &evidence.PaymentOrderID, &evidence.PaymentTransactionID, &evidence.EvidenceType, &evidence.ProviderID, &evidence.ProviderVersion, &evidence.EvidenceKey, &evidence.ProviderTransactionID, &evidence.AmountFen, &evidence.Currency, &evidence.ProviderStatus, &evidence.ProviderEventAt, &evidence.ReceivedAt, &evidence.PayloadDigest, &evidence.PayloadSnapshot, &evidence.MergeResult); err != nil {
+			return item, err
+		}
+		item.Evidence = append(item.Evidence, evidence)
+	}
+	return item, evidenceRows.Err()
 }
 
 func (r *PostgresRepository) AdminReleaseUsageHold(ctx context.Context, holdID uuid.UUID, reason, actor string) (AdminHold, error) {

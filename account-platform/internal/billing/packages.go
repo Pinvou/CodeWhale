@@ -28,7 +28,7 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 	if limit < 1 || limit > 200 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT ep.id,ep.user_id,ep.wallet_id,ep.payment_order_id,COALESCE(po.merchant_order_no,''),ep.source_type,ep.source_reference,ep.product_id,ep.plan_name,ep.sku_code,ep.amount_fen,ep.points_total,ep.points_reserved,ep.points_used,ep.points_remaining,ep.points_expired,ep.points_revoked,ep.credited_at,ep.valid_from,ep.valid_until,ep.status FROM entitlement_packages ep LEFT JOIN payment_orders po ON po.id=ep.payment_order_id WHERE ep.wallet_id=$2 AND (ep.user_id=$1 OR ep.user_id IS NULL) ORDER BY ep.credited_at DESC,ep.id DESC LIMIT $3`, userID, walletID, limit)
+	rows, err := r.pool.Query(ctx, `SELECT ep.id,ep.user_id,ep.wallet_id,ep.payment_order_id,ep.source_payment_transaction_id,COALESCE(po.merchant_order_no,''),ep.source_type,ep.source_reference,ep.product_id,ep.plan_name,ep.sku_code,ep.amount_fen,ep.points_total,ep.points_reserved,ep.points_used,ep.points_remaining,ep.points_expired,ep.points_revoked,ep.credited_at,ep.valid_from,ep.valid_until,ep.status FROM entitlement_packages ep LEFT JOIN payment_orders po ON po.id=ep.payment_order_id WHERE ep.wallet_id=$2 AND (ep.user_id=$1 OR ep.user_id IS NULL) ORDER BY ep.credited_at DESC,ep.id DESC LIMIT $3`, userID, walletID, limit)
 	if err != nil {
 		return nil, PackageSummary{}, err
 	}
@@ -36,7 +36,7 @@ func (r *PostgresRepository) ListPackages(ctx context.Context, userID, walletID 
 	items := make([]EntitlementPackage, 0)
 	for rows.Next() {
 		var item EntitlementPackage
-		if err := rows.Scan(&item.ID, &item.UserID, &item.WalletID, &item.PaymentOrderID, &item.MallOrderID, &item.SourceType, &item.SourceReference, &item.ProductID, &item.PlanName, &item.SKUCode, &item.AmountFen, &item.PointsTotal, &item.PointsReserved, &item.PointsUsed, &item.PointsRemaining, &item.PointsExpired, &item.PointsRevoked, &item.CreditedAt, &item.ValidFrom, &item.ValidUntil, &item.Status); err != nil {
+		if err := rows.Scan(&item.ID, &item.UserID, &item.WalletID, &item.PaymentOrderID, &item.PaymentTransactionID, &item.ProviderOrderReference, &item.SourceType, &item.SourceReference, &item.ProductID, &item.PlanName, &item.SKUCode, &item.AmountFen, &item.PointsTotal, &item.PointsReserved, &item.PointsUsed, &item.PointsRemaining, &item.PointsExpired, &item.PointsRevoked, &item.CreditedAt, &item.ValidFrom, &item.ValidUntil, &item.Status); err != nil {
 			return nil, PackageSummary{}, err
 		}
 		items = append(items, item)

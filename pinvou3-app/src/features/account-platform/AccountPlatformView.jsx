@@ -380,7 +380,7 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
     [copy.packageId, item.package_id],
     [copy.entitlementSource, item.source_reference],
     [copy.pinvouOrder, item.pinvou_order_id],
-    [copy.mallOrder, item.mall_order_id],
+    [copy.providerOrderReference, item.provider_order_reference],
     [copy.amount, formatMoney(item.amount_fen)],
     [copy.creditedAt, formatUsageTime(item.credited_at, language)],
     [copy.validPeriod, `${formatUsageTime(item.valid_from, language)} — ${formatUsageTime(item.valid_until, language)}`],
@@ -403,7 +403,7 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
 function Orders({ copy, language, orders, unavailable }) {
   return <section><p className="ap-eyebrow">{copy.sections.orders}</p><h2>{copy.ordersTitle}</h2><p className="ap-lead">{copy.ordersLead}</p>{unavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : orders.length ? <div className="ap-order-list">{orders.map(item => <article className="ap-trace-card" key={item.order_id}><header><div><strong>{item.plan_name}</strong><small>{item.sku_code} · {copy.channels[item.channel] || item.channel}</small></div><div><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{copy.orderStatuses[item.status] || item.status}</span></div></header><TraceDetails items={[
     [copy.pinvouOrder, item.pinvou_order_id || item.order_id],
-    [copy.mallOrder, item.mall_order_id],
+    [copy.providerOrderReference, item.provider_order_reference],
     [copy.createdAt, formatUsageTime(item.created_at, language)],
     [copy.paidAt, formatUsageTime(item.paid_at, language)],
     [copy.creditedAt, formatUsageTime(item.credited_at, language)],

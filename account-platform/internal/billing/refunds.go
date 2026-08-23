@@ -47,10 +47,10 @@ func (p *PaymentCoordinator) GetOrder(ctx context.Context, orderID, requesterID 
 }
 
 func (p *PaymentCoordinator) RecentOrder(ctx context.Context, requesterID, walletID uuid.UUID) (*PaymentOrder, error) {
-	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at
+	query := `SELECT id,merchant_order_no,requester_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,provider_id,provider_version
 		FROM payment_orders WHERE requester_id=$1 AND wallet_id=$2 ORDER BY created_at DESC LIMIT 1`
 	var order PaymentOrder
-	err := p.repository.pool.QueryRow(ctx, query, requesterID, walletID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
+	err := p.repository.pool.QueryRow(ctx, query, requesterID, walletID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.PrimaryProviderTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderID, &order.ProviderVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -64,8 +64,8 @@ func (p *PaymentCoordinator) ListOrders(ctx context.Context, requesterID, wallet
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := p.repository.pool.Query(ctx, `SELECT po.id,po.merchant_order_no,po.product_id,COALESCE(po.product_snapshot->>'plan_name',po.product_id),COALESCE(po.provider_sku,po.product_snapshot->>'sku_code',''),po.amount_fen,COALESCE((po.product_snapshot->>'display_points')::bigint,po.credit_microcredits/10000),po.channel,po.status,po.fulfillment_status,po.expires_at,po.paid_at,ep.credited_at,ep.valid_until,po.created_at
-		FROM payment_orders po LEFT JOIN entitlement_packages ep ON ep.payment_order_id=po.id WHERE po.requester_id=$1 AND po.wallet_id=$2 ORDER BY po.created_at DESC,po.id DESC LIMIT $3`, requesterID, walletID, limit)
+	rows, err := p.repository.pool.Query(ctx, `SELECT po.id,po.merchant_order_no,po.product_id,COALESCE(po.product_snapshot->>'plan_name',po.product_id),COALESCE(po.provider_sku,po.product_snapshot->>'sku_code',''),po.amount_fen,COALESCE((po.product_snapshot->>'display_points')::bigint,po.credit_microcredits/10000),po.channel,po.status,po.fulfillment_status,po.expires_at,po.paid_at,packages.credited_at,packages.valid_until,po.created_at
+		FROM payment_orders po LEFT JOIN LATERAL (SELECT min(credited_at) credited_at,max(valid_until) valid_until FROM entitlement_packages WHERE payment_order_id=po.id) packages ON true WHERE po.requester_id=$1 AND po.wallet_id=$2 ORDER BY po.created_at DESC,po.id DESC LIMIT $3`, requesterID, walletID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +73,7 @@ func (p *PaymentCoordinator) ListOrders(ctx context.Context, requesterID, wallet
 	items := make([]PaymentOrderHistoryItem, 0)
 	for rows.Next() {
 		var item PaymentOrderHistoryItem
-		if err := rows.Scan(&item.ID, &item.MallOrderID, &item.ProductID, &item.PlanName, &item.SKUCode, &item.AmountFen, &item.DisplayPoints, &item.Channel, &item.Status, &item.FulfillmentStatus, &item.ExpiresAt, &item.PaidAt, &item.CreditedAt, &item.ValidUntil, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProviderOrderReference, &item.ProductID, &item.PlanName, &item.SKUCode, &item.AmountFen, &item.DisplayPoints, &item.Channel, &item.Status, &item.FulfillmentStatus, &item.ExpiresAt, &item.PaidAt, &item.CreditedAt, &item.ValidUntil, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		item.PinvouOrderID, item.OrderType, item.InvoiceStatus = item.ID, "PLAN", "NOT_SUPPORTED"
@@ -100,11 +100,14 @@ func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterI
 	if err != nil {
 		return PaymentOrder{}, fmt.Errorf("%w: %v", ErrPaymentProvider, err)
 	}
+	if err := p.recordProviderObservation(ctx, order.ID, "QUERY", providerOrder); err != nil {
+		return PaymentOrder{}, err
+	}
 	if providerOrder.Status != "CLOSED" {
 		return PaymentOrder{}, ErrConflict
 	}
 	now := p.now()
-	command, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET status='CLOSED',updated_at=$3 WHERE id=$1 AND requester_id=$2 AND status IN ('CREATED','PENDING')`, orderID, requesterID, now)
+	command, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET close_status='CLOSED',status='CLOSED',updated_at=$3 WHERE id=$1 AND requester_id=$2 AND status IN ('CREATED','PENDING')`, orderID, requesterID, now)
 	if err != nil {
 		return PaymentOrder{}, err
 	}
@@ -272,20 +275,7 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 	if err != nil {
 		return Refund{}, created, err
 	}
-	var refundedFen int64
-	if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(amount_fen),0) FROM refunds WHERE payment_order_id=$1 AND status='SUCCEEDED'`, order.ID).Scan(&refundedFen); err != nil {
-		return Refund{}, created, err
-	}
-	orderStatus := "PARTIALLY_REFUNDED"
-	fulfillment := "CREDITED"
-	if refundedFen == order.AmountFen {
-		orderStatus, fulfillment = "REFUNDED", "REFUNDED"
-	}
-	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2,fulfillment_status=$3,updated_at=$4 WHERE id=$1`, order.ID, orderStatus, fulfillment, now)
-	if err == nil && order.ChannelTransactionID != nil {
-		_, err = tx.Exec(ctx, `UPDATE payment_transactions SET status=$2,updated_at=$3 WHERE channel_transaction_id=$1`, *order.ChannelTransactionID, map[bool]string{true: "REFUNDED", false: "PARTIALLY_REFUNDED"}[refundedFen == order.AmountFen], now)
-	}
-	if err != nil {
+	if _, err = projectPaymentOrderWithinTransaction(ctx, tx, order.ID, now); err != nil {
 		return Refund{}, created, err
 	}
 	refund.Status, refund.ChannelRefundID, refund.UpdatedAt = "SUCCEEDED", &provider.ChannelRefundID, now
@@ -311,12 +301,12 @@ func refundMerchantOrder(ctx context.Context, database queryable, orderID uuid.U
 }
 
 func getPaymentOrderByID(ctx context.Context, database queryable, orderID uuid.UUID, lock bool) (PaymentOrder, error) {
-	query := `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at,COALESCE(provider_sku,'') FROM payment_orders WHERE id=$1`
+	query := `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),primary_provider_transaction_id,expires_at,paid_at,COALESCE(provider_sku,''),provider_id,provider_version FROM payment_orders WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var order PaymentOrder
-	err := database.QueryRow(ctx, query, orderID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderSKU)
+	err := database.QueryRow(ctx, query, orderID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.PrimaryProviderTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderSKU, &order.ProviderID, &order.ProviderVersion)
 	return order, err
 }
 

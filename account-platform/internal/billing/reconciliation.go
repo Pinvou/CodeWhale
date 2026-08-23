@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -220,15 +219,15 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 	if err != nil {
 		return PaymentOrder{}, errors.Join(ErrPaymentProvider, err)
 	}
-	if providerOrder.MerchantOrderNo != order.MerchantOrderNo || providerOrder.Channel != order.Channel || providerOrder.AmountFen != order.AmountFen || providerOrder.Currency != order.Currency {
-		return PaymentOrder{}, ErrConflict
-	}
 	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET payment_url=NULLIF($2,''),qr_data=NULLIF($3,''),provider_status=NULLIF($4,''),provider_trace_id=NULLIF($5,''),updated_at=$6 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, providerOrder.ProviderStatus, providerOrder.ProviderTraceID, p.now()); err != nil {
 		return PaymentOrder{}, err
 	}
 	order.PaymentURL, order.QRData = providerOrder.PaymentURL, providerOrder.QRData
 	if providerOrder.Status == "SUCCESS" {
 		return p.applyQueriedPayment(ctx, order.ID, providerOrder)
+	}
+	if err := p.recordProviderObservation(ctx, order.ID, "QUERY", providerOrder); err != nil {
+		return PaymentOrder{}, err
 	}
 	if providerOrder.Status == "PARTIALLY_REFUNDED" || providerOrder.Status == "REFUNDED" {
 		if order.FulfillmentStatus == "PENDING" {
@@ -251,14 +250,21 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 			return PaymentOrder{}, errors.Join(ErrPaymentProvider, closeErr)
 		}
 		if closed.MerchantOrderNo != order.MerchantOrderNo || closed.Channel != order.Channel || closed.AmountFen != order.AmountFen || closed.Currency != order.Currency {
+			_ = p.recordProviderObservation(ctx, order.ID, "QUERY", closed)
 			return PaymentOrder{}, ErrConflict
 		}
 		switch closed.Status {
 		case "SUCCESS":
 			return p.applyQueriedPayment(ctx, order.ID, closed)
 		case "PARTIALLY_REFUNDED", "REFUNDED":
+			if err := p.recordProviderObservation(ctx, order.ID, "QUERY", closed); err != nil {
+				return PaymentOrder{}, err
+			}
 			return p.applyProviderReviewStatus(ctx, order)
 		case "CLOSED", "FAILED":
+			if err := p.recordProviderObservation(ctx, order.ID, "QUERY", closed); err != nil {
+				return PaymentOrder{}, err
+			}
 			if !p.Capabilities().AuthoritativeUnpaidTerminal {
 				return order, nil
 			}
@@ -270,7 +276,7 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 
 func (p *PaymentCoordinator) applyProviderReviewStatus(ctx context.Context, order PaymentOrder) (PaymentOrder, error) {
 	_, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders
-SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$2
+SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',attention_summary='REVIEW_REQUIRED',summary_version=summary_version+1,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$2
 WHERE id=$1 AND status IN ('CREATED','PENDING') AND fulfillment_status='PENDING'`, order.ID, p.now())
 	if err != nil {
 		return PaymentOrder{}, err
@@ -283,7 +289,7 @@ func (p *PaymentCoordinator) applyProviderTerminalStatus(ctx context.Context, or
 		return PaymentOrder{}, fmt.Errorf("unsupported provider terminal status %q", status)
 	}
 	_, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders
-SET status=$2,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$3
+SET status=$2,close_status=$2,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$3
 WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, status, p.now())
 	if err != nil {
 		return PaymentOrder{}, err
@@ -304,44 +310,15 @@ func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uu
 	if err != nil {
 		return PaymentOrder{}, err
 	}
-	if order.FulfillmentStatus == "CREDITED" || order.FulfillmentStatus == "REFUNDED" {
-		return order, tx.Commit(ctx)
-	}
-	if provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency {
-		return PaymentOrder{}, ErrConflict
-	}
 	now := p.now()
-	command, err := tx.Exec(ctx, `INSERT INTO payment_transactions(id,payment_order_id,channel,channel_transaction_id,status,amount_fen,currency,source,verified_at,created_at,updated_at) VALUES($1,$2,$3,$4,'SUCCEEDED',$5,$6,'QUERY',$7,$7,$7) ON CONFLICT (channel_transaction_id) DO NOTHING`, uuid.Must(uuid.NewV7()), order.ID, order.Channel, *provider.ChannelTransactionID, order.AmountFen, order.Currency, now)
-	if err != nil {
+	order, _, mergeErr := p.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "QUERY", providerEvidenceKey("QUERY", provider), nil, provider, false, now)
+	if mergeErr != nil && !errors.Is(mergeErr, ErrConflict) {
+		return PaymentOrder{}, mergeErr
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return PaymentOrder{}, err
 	}
-	if command.RowsAffected() == 0 {
-		var existingOrderID uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT payment_order_id FROM payment_transactions WHERE channel_transaction_id=$1`, *provider.ChannelTransactionID).Scan(&existingOrderID); err != nil || existingOrderID != order.ID {
-			return PaymentOrder{}, ErrConflict
-		}
-	}
-	if p.Policy().RequiresReview(order.ExpiresAt, *provider.PaidAt) {
-		_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',channel_transaction_id=$2,paid_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$4 WHERE id=$1`, order.ID, *provider.ChannelTransactionID, *provider.PaidAt, now)
-		if err != nil {
-			return PaymentOrder{}, err
-		}
-		order.Status, order.FulfillmentStatus, order.ChannelTransactionID, order.PaidAt = "MANUAL_REVIEW", "MANUAL_REVIEW", provider.ChannelTransactionID, provider.PaidAt
-		return order, tx.Commit(ctx)
-	}
-	status := "PAID"
-	if !order.ExpiresAt.After(*provider.PaidAt) {
-		status = "PAID_LATE"
-	}
-	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=$2,fulfillment_status='CREDITED',channel_transaction_id=$3,paid_at=$4,updated_at=$5 WHERE id=$1`, order.ID, status, *provider.ChannelTransactionID, *provider.PaidAt, now)
-	if err == nil {
-		_, err = issuePackageWithinTransaction(ctx, tx, order, now, false)
-	}
-	if err != nil {
-		return PaymentOrder{}, err
-	}
-	order.Status, order.FulfillmentStatus, order.ChannelTransactionID, order.PaidAt = status, "CREDITED", provider.ChannelTransactionID, provider.PaidAt
-	return order, tx.Commit(ctx)
+	return order, mergeErr
 }
 
 func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, actorID uuid.UUID, reason string) (PaymentOrder, error) {
@@ -366,7 +343,7 @@ func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, a
 	if err != nil {
 		return PaymentOrder{}, errors.Join(ErrPaymentProvider, err)
 	}
-	if provider.Status != "SUCCESS" || provider.ChannelTransactionID == nil || provider.PaidAt == nil || provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency || !p.Policy().RequiresReview(order.ExpiresAt, *provider.PaidAt) {
+	if provider.Status != "SUCCESS" || provider.ChannelTransactionID == nil || provider.PaidAt == nil || provider.MerchantOrderNo != order.MerchantOrderNo || provider.Channel != order.Channel || provider.AmountFen != order.AmountFen || provider.Currency != order.Currency {
 		return PaymentOrder{}, ErrConflict
 	}
 	tx, err := p.repository.pool.Begin(ctx)
@@ -382,40 +359,31 @@ func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, a
 		return PaymentOrder{}, ErrConflict
 	}
 	now := p.now()
-	command, err := tx.Exec(ctx, `INSERT INTO payment_transactions(id,payment_order_id,channel,channel_transaction_id,status,amount_fen,currency,source,verified_at,created_at,updated_at) VALUES($1,$2,$3,$4,'SUCCEEDED',$5,$6,'QUERY',$7,$7,$7) ON CONFLICT (channel_transaction_id) DO NOTHING`, uuid.Must(uuid.NewV7()), order.ID, order.Channel, *provider.ChannelTransactionID, order.AmountFen, order.Currency, now)
-	if err != nil {
-		return PaymentOrder{}, err
-	}
-	if command.RowsAffected() == 0 {
-		var existingOrderID uuid.UUID
-		if err := tx.QueryRow(ctx, `SELECT payment_order_id FROM payment_transactions WHERE channel_transaction_id=$1`, *provider.ChannelTransactionID).Scan(&existingOrderID); err != nil || existingOrderID != order.ID {
-			return PaymentOrder{}, ErrConflict
-		}
-	}
 	snapshot, _ := json.Marshal(map[string]any{
 		"status": provider.Status, "provider_status": provider.ProviderStatus, "provider_trace_id": provider.ProviderTraceID,
-		"channel_transaction_id": *provider.ChannelTransactionID, "paid_at": *provider.PaidAt,
+		"provider_transaction_id": *provider.ChannelTransactionID, "paid_at": *provider.PaidAt,
 	})
 	var balanceBefore int64
 	if err := tx.QueryRow(ctx, `SELECT posted_microcredits FROM wallets WHERE id=$1 FOR UPDATE`, order.WalletID).Scan(&balanceBefore); err != nil {
 		return PaymentOrder{}, err
 	}
-	packageID, err := issuePackageWithinTransaction(ctx, tx, order, now, true)
-	if err != nil {
+	order, evidenceID, mergeErr := p.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "MANUAL_REPAIR", "repair:"+order.ID.String()+":"+*provider.ChannelTransactionID, snapshot, provider, true, now)
+	if mergeErr != nil {
+		if !errors.Is(mergeErr, ErrConflict) {
+			return PaymentOrder{}, mergeErr
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return PaymentOrder{}, err
+		}
+		return order, mergeErr
+	}
+	var transactionID, packageID uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT transaction.id,package.id FROM payment_transactions transaction JOIN entitlement_packages package ON package.source_payment_transaction_id=transaction.id WHERE transaction.payment_order_id=$1 AND transaction.provider_transaction_id=$2`, order.ID, *provider.ChannelTransactionID).Scan(&transactionID, &packageID); err != nil {
 		return PaymentOrder{}, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO payment_order_repairs(id,payment_order_id,actor_id,reason,provider_snapshot,entitlement_package_id,points_awarded,wallet_balance_before,wallet_balance_after,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.Must(uuid.NewV7()), order.ID, actorID, reason, snapshot, packageID, order.CreditMicrocredits, balanceBefore, balanceBefore+order.CreditMicrocredits, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO payment_order_repairs(id,payment_order_id,payment_transaction_id,payment_evidence_id,actor_id,reason,provider_snapshot,entitlement_package_id,points_awarded,wallet_balance_before,wallet_balance_after,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (payment_transaction_id) DO NOTHING`, uuid.Must(uuid.NewV7()), order.ID, transactionID, evidenceID, actorID, reason, snapshot, packageID, order.CreditMicrocredits, balanceBefore, balanceBefore+order.CreditMicrocredits, now); err != nil {
 		return PaymentOrder{}, err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE payment_orders SET status='PAID_LATE',fulfillment_status='CREDITED',channel_transaction_id=$2,paid_at=$3,updated_at=$4 WHERE id=$1`, order.ID, *provider.ChannelTransactionID, *provider.PaidAt, now); err != nil {
-		return PaymentOrder{}, err
-	}
-	if err := events.AppendOutbox(ctx, tx, "billing.recharge.succeeded.v1", order.ID, 1, map[string]any{
-		"order_id": order.ID, "wallet_id": order.WalletID, "channel": order.Channel, "amount_fen": order.AmountFen, "credit_microcredits": order.CreditMicrocredits,
-	}); err != nil {
-		return PaymentOrder{}, err
-	}
-	order.Status, order.FulfillmentStatus, order.ChannelTransactionID, order.PaidAt = "PAID_LATE", "CREDITED", provider.ChannelTransactionID, provider.PaidAt
 	return order, tx.Commit(ctx)
 }
 
@@ -502,7 +470,7 @@ func (p *PaymentCoordinator) RunReconciliation(ctx context.Context, channel stri
 }
 
 func (p *PaymentCoordinator) listPaidOrders(ctx context.Context, channel string, start, end time.Time) ([]PaymentOrder, error) {
-	rows, err := p.repository.pool.Query(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE channel=$1 AND paid_at >= $2 AND paid_at < $3 AND fulfillment_status IN ('CREDITED','REFUNDED') ORDER BY paid_at,merchant_order_no`, channel, start, end)
+	rows, err := p.repository.pool.Query(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),primary_provider_transaction_id,expires_at,paid_at,provider_id,provider_version FROM payment_orders WHERE channel=$1 AND paid_at >= $2 AND paid_at < $3 AND fulfillment_status='CREDITED' ORDER BY paid_at,merchant_order_no`, channel, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +478,7 @@ func (p *PaymentCoordinator) listPaidOrders(ctx context.Context, channel string,
 	items := make([]PaymentOrder, 0)
 	for rows.Next() {
 		var item PaymentOrder
-		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.RequesterID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.ProductID, &item.Channel, &item.AmountFen, &item.Currency, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaymentURL, &item.ChannelTransactionID, &item.ExpiresAt, &item.PaidAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.RequesterID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.ProductID, &item.Channel, &item.AmountFen, &item.Currency, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaymentURL, &item.PrimaryProviderTransactionID, &item.ExpiresAt, &item.PaidAt, &item.ProviderID, &item.ProviderVersion); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

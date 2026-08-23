@@ -183,6 +183,8 @@ Account 的 Commerce Customer worker 还要求显式冻结 `COMMERCE_PROVIDER_ID
 
 支付 Provider 中立化上线先执行 Billing `000023_payment_provider_catalog`，再滚动 Billing、Token Gateway 和 Portal/桌面。迁移把通用商品的旧 SKU 清空并写入 `TEST_ONLY` 版本映射；正式环境若没有与 `BILLING_PAYMENT_PROVIDER` 及 Adapter 版本匹配的 `FROZEN` 映射，Billing 必须启动失败。发布后抽样核对 `/v1/payment-capabilities`、商品渠道交集和新订单的 Provider/映射/能力快照；已有新版订单后禁止执行 down migration。
 
+一单多流水与支付证据上线紧随其后执行 Billing `000024_payment_evidence_lifecycle`，并在滚动 Billing 前完成数据库备份。迁移解除订单到流水及权益包的一对一约束，回填 Provider/版本、付款人、关闭状态、摘要和既有流水来源，新增不可变 `payment_evidence` 及流水到权益包、通知和人工修复的外键。发布后必须抽样验证：同一 Provider 流水重复回调/查询只入账一次；不同成功流水不共享权益包；金额、币种或订单归属冲突只追加证据并进入复核；退款和关单不改写 `PAID/LATE_PAID` 流水；组织订单的付款用户与受益组织分别正确。运营后台订单明细应能看到全部流水、证据和四类摘要。监控证据归并冲突、人工复核、重复流水唯一约束及权益包来源约束。已有多流水订单或按流水创建的多个权益包后，旧模型无法无损恢复，禁止执行 down migration；故障时保留迁移并前向修复应用。
+
 ### 6.4 新华三商城
 
 - `COMMERCE_PROVIDER_ID=h3c_mall`

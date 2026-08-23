@@ -103,6 +103,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/metering-units", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateMeteringUnit))
 		admin.POST("/metering-units/:unit_definition_id/deactivate", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_DEACTIVATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeactivateMeteringUnit))
 		admin.GET("/payment-orders", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrders))
+		admin.GET("/payment-orders/:order_id", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrderDetail))
 		admin.POST("/payment-orders/:order_id/sync", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncPaymentOrder))
 		admin.POST("/payment-orders/:order_id/repair", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_EVIDENCE_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairPaymentOrder))
 		admin.POST("/payment-orders/:order_id/refunds", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_NORMAL_REFUND", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRefundPaymentOrder))

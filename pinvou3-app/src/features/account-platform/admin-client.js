@@ -86,6 +86,7 @@ export class AdminPlatformClient {
     if (filters.status) query.set('status', filters.status);
     return this.request('billing', `/admin/v1/payment-orders?${query}`, signal);
   }
+  paymentOrder(orderID, signal) { return this.request('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}`, signal); }
   syncPaymentOrder(orderID) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {}); }
   repairPaymentOrder(orderID, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason }); }
   refundPaymentOrder(orderID, amountFen, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { amount_fen:amountFen, reason }); }

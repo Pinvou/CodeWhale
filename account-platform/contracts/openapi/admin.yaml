@@ -611,6 +611,17 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-orders/{order_id}:
+    get:
+      operationId: getAdminPaymentOrder
+      summary: Inspect an order with its independently versioned transactions, immutable evidence, and derived summaries
+      parameters: [{ $ref: "#/components/parameters/OrderID" }]
+      responses:
+        "200":
+          description: Payment order operations detail
+          content: { application/json: { schema: { $ref: "#/components/schemas/PaymentOrderDetail" } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders/{order_id}/repair:
     post:
       operationId: repairAdminPaymentOrder
@@ -1496,6 +1507,65 @@ components:
       properties:
         amount_fen: { type: integer, format: int64, minimum: 1 }
         reason: { type: string, minLength: 1, maxLength: 500 }
+    PaymentTransaction:
+      type: object
+      additionalProperties: false
+      required: [payment_transaction_id, payment_order_id, provider_id, provider_version, provider_transaction_id, channel, status, fulfillment_status, amount_fen, currency, provider_status, verified_at]
+      properties:
+        payment_transaction_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        provider_id: { type: string, minLength: 1 }
+        provider_version: { type: string, minLength: 1 }
+        provider_transaction_id: { type: string, minLength: 1 }
+        channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
+        status: { type: string, enum: [PAID, LATE_PAID, REVIEW_REQUIRED] }
+        fulfillment_status: { type: string, enum: [PENDING, CREDITED, REVIEW_REQUIRED] }
+        amount_fen: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        provider_status: { type: string }
+        paid_at: { type: string, format: date-time }
+        verified_at: { type: string, format: date-time }
+        fulfilled_at: { type: string, format: date-time }
+    PaymentEvidence:
+      type: object
+      additionalProperties: false
+      required: [payment_evidence_id, payment_order_id, evidence_type, provider_id, provider_version, evidence_key, received_at, payload_digest, payload_snapshot, merge_result]
+      properties:
+        payment_evidence_id: { type: string, format: uuid }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        evidence_type: { type: string, enum: [CALLBACK, QUERY, BILL, MANUAL_REPAIR] }
+        provider_id: { type: string, minLength: 1 }
+        provider_version: { type: string, minLength: 1 }
+        evidence_key: { type: string, minLength: 1 }
+        provider_transaction_id: { type: string }
+        amount_fen: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string }
+        provider_status: { type: string }
+        provider_event_at: { type: string, format: date-time }
+        received_at: { type: string, format: date-time }
+        payload_digest: { type: string, pattern: '^[0-9a-f]{64}$' }
+        payload_snapshot: { type: object, additionalProperties: true }
+        merge_result: { type: string, enum: [RECORDED, DUPLICATE, MERGED, REVIEW_REQUIRED] }
+    PaymentOrderDetail:
+      type: object
+      additionalProperties: true
+      required: [order_id, merchant_order_no, provider_id, provider_version, payer_user_id, wallet_id, payment_summary, refund_summary, chargeback_summary, attention_summary, summary_version, transactions, evidence]
+      properties:
+        order_id: { type: string, format: uuid }
+        merchant_order_no: { type: string }
+        provider_id: { type: string }
+        provider_version: { type: string }
+        payer_user_id: { type: string, format: uuid }
+        beneficiary_organization_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        payment_summary: { type: object, additionalProperties: true }
+        refund_summary: { type: object, additionalProperties: true }
+        chargeback_summary: { type: object, additionalProperties: true }
+        attention_summary: { type: string, enum: [NORMAL, PROCESSING, REVIEW_REQUIRED, RECEIVABLE_OPEN] }
+        summary_version: { type: integer, format: int64, minimum: 1 }
+        transactions: { type: array, items: { $ref: "#/components/schemas/PaymentTransaction" } }
+        evidence: { type: array, items: { $ref: "#/components/schemas/PaymentEvidence" } }
     AdjustmentRequestCreate:
       type: object
       additionalProperties: false

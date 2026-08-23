@@ -32,7 +32,7 @@ export const accountPlatformCopy = {
 };
 
 Object.assign(accountPlatformCopy.zh, {
-  packageId:'权益包编号', pinvouOrder:'品悟订单号', mallOrder:'商城订单号', amount:'支付金额', creditedAt:'到账时间', validPeriod:'权益有效期', totalPoints:'总积分', usedPoints:'已用积分', createdAt:'创建时间', paidAt:'支付时间', fulfillmentStatus:'发放状态', invoiceStatus:'发票状态',
+  packageId:'权益包编号', pinvouOrder:'品悟订单号', providerOrderReference:'支付方订单引用', amount:'支付金额', creditedAt:'到账时间', validPeriod:'权益有效期', totalPoints:'总积分', usedPoints:'已用积分', createdAt:'创建时间', paidAt:'支付时间', fulfillmentStatus:'发放状态', invoiceStatus:'发票状态',
   fulfillmentStatuses:{ PENDING:'待发放', CREDITED:'已到账', MANUAL_REVIEW:'人工复核中', REVOKED:'已撤销' }, invoiceStatuses:{ NOT_SUPPORTED:'当前接口不支持' },
   invoiceUnavailable:'当前支付渠道尚未开放发票申请与查询，因此此处仅展示说明，不提供不可用的操作按钮。',
 });
@@ -69,12 +69,12 @@ Object.assign(accountPlatformCopy.ja, {
   grantStatuses:{ACTIVE:'有効',SUSPENDED:'一時停止',REVOKED:'撤回済み',EXPIRED:'期限切れ',ACCOUNT_CLOSED:'アカウント解約済み',RECLAIMED_ACCOUNT_CLOSED:'解約枠を回収済み'},
 });
 Object.assign(accountPlatformCopy.en, {
-  packageId:'Package ID', pinvouOrder:'Pinvou order', mallOrder:'Mall order', amount:'Amount paid', creditedAt:'Credited at', validPeriod:'Benefit validity', totalPoints:'Total points', usedPoints:'Used points', createdAt:'Created at', paidAt:'Paid at', fulfillmentStatus:'Fulfillment', invoiceStatus:'Invoice status',
+  packageId:'Package ID', pinvouOrder:'Pinvou order', providerOrderReference:'Payment provider reference', amount:'Amount paid', creditedAt:'Credited at', validPeriod:'Benefit validity', totalPoints:'Total points', usedPoints:'Used points', createdAt:'Created at', paidAt:'Paid at', fulfillmentStatus:'Fulfillment', invoiceStatus:'Invoice status',
   fulfillmentStatuses:{ PENDING:'Pending', CREDITED:'Credited', MANUAL_REVIEW:'Manual review', REVOKED:'Revoked' }, invoiceStatuses:{ NOT_SUPPORTED:'Not supported by the current API' },
   invoiceUnavailable:'The current payment channel does not expose invoice application or lookup operations, so unavailable actions are not shown.',
 });
 Object.assign(accountPlatformCopy.ja, {
-  packageId:'特典パッケージ ID', pinvouOrder:'品悟注文番号', mallOrder:'モール注文番号', amount:'支払金額', creditedAt:'付与日時', validPeriod:'特典有効期間', totalPoints:'合計ポイント', usedPoints:'使用済みポイント', createdAt:'作成日時', paidAt:'支払日時', fulfillmentStatus:'付与状態', invoiceStatus:'請求書状態',
+  packageId:'特典パッケージ ID', pinvouOrder:'品悟注文番号', providerOrderReference:'決済事業者注文参照', amount:'支払金額', creditedAt:'付与日時', validPeriod:'特典有効期間', totalPoints:'合計ポイント', usedPoints:'使用済みポイント', createdAt:'作成日時', paidAt:'支払日時', fulfillmentStatus:'付与状態', invoiceStatus:'請求書状態',
   fulfillmentStatuses:{ PENDING:'付与待ち', CREDITED:'付与済み', MANUAL_REVIEW:'手動確認中', REVOKED:'取消済み' }, invoiceStatuses:{ NOT_SUPPORTED:'現在の API では未対応' },
   invoiceUnavailable:'現在の決済チャネルでは請求書の申請・照会が公開されていないため、利用できない操作ボタンは表示しません。',
 });
