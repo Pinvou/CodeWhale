@@ -2,7 +2,7 @@
 
 > 状态：当前部署基线
 >
-> 校准日期：2026-08-22
+> 校准日期：2026-08-23
 >
 > 安全要求：本文只列配置名称和占位符，不保存真实域名、IP、账号、密码、AccessKey、Token 或商城密钥。
 
@@ -35,11 +35,12 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 | Account Service | 18101 | 仅反代桌面注册/账号所需路径 |
 | Billing Service | 18102 | 不直接公开；通过 Portal/Gateway BFF |
 | Token Gateway | 18103 | 反代 OIDC 保护的模型和用户业务入口 |
-| Payment Simulator | 18104 | 仅开发/测试；生产不得公开或选用 |
 | Token Portal | 18105 | 公开个人中心、管理后台及同源 `/api/*` |
 | Compose 内 New API profile | 18106 | 仅本机初始化/受限管理；模型调用走私网 |
 | PostgreSQL / Redis / NATS | 不绑定公网 | 仅 backend 网络 |
 | Event Relay ×3 | 不公开 | 指标与健康仅供内部监控 |
+
+开发/测试 Compose 另将非生产 Payment Simulator 绑定到回环端口 `18104`，只供自动化验证和测试付款页面使用。该端口、工作负载和数据库不属于生产服务清单或生产公开面。
 
 远程部署必须把所有用户可见 URL 统一到 `<public-base-url>`，避免 OIDC issuer、回调 URL、Cookie 域和桌面配置不一致。
 
@@ -66,13 +67,17 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - `billing-migrate`
 - `token-migrate`
 
-仅开发/测试服务：
+仅开发/测试支撑组件：
 
 - `mock-newapi`
 - `payment-simulator`
 - `payment-simulator-migrate`
 
-站点可以保留测试容器以便隔离测试，但生产 Provider 选择、反向代理和网络策略必须确保用户流量永远不会进入它们。
+这些组件不属于产品服务边界。它们可以部署在与真实用户、真实钱包和真实 Provider 隔离的开发/测试环境；生产环境不得启动、路由或保留其数据库，生产 Helm 也不得包含对应工作负载。
+
+远程 Compose 覆盖已把 `payment-simulator` 主进程置于 `development-simulator` profile，但基础 Compose 的数据库初始化仍创建模拟器数据库和角色，`payment-simulator-migrate` 也尚未进入同一 profile。因此当前单机模板还没有完成“生产不保留测试数据库”的隔离，不能据此宣称生产清单已净化；应在部署前通过站点覆盖排除，并在后续代码变更中把初始化、迁移和主进程统一纳入非生产 profile。
+
+生产必须显式选择正式 Payment Provider 并失败关闭，不能沿用 Compose 的默认模拟路径。当前 Billing 启动和 Helm 模板仍使用 `PAYMENT_SIMULATOR_URL`、`PAYMENT_SIM_HMAC_*` 等历史命名承载部分 Provider 配置；在这些配置迁移为供应商中立名称前，部署验收必须证明 `BILLING_PAYMENT_PROVIDER=h3c_mall`、正式 Adapter 配置和路由均已生效，且 Simulator 分支不可达。历史命名和仍待隔离的测试数据库属于实现债务，不表示 Simulator 是生产依赖。
 
 ## 4. 目录约定
 
@@ -339,7 +344,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 - Account/Gateway 的 `/internal/*`。
 - PostgreSQL、Redis、NATS 和 Relay 端口。
 - New API 管理面及 Provider Token。
-- Payment Simulator 和 Mock New API。
+- 任何非生产 Payment Simulator、测试支付页面和 Mock New API。
 - 服务独立 Metrics 端口。
 
 反向代理必须传递可信的 `X-Forwarded-Proto`/Host，限制请求体大小，并为 SSE 禁用代理缓冲和配置合理的长连接超时。不要让客户端覆盖内部身份头或服务凭据头。

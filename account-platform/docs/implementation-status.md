@@ -53,11 +53,11 @@
 | SCOPE-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 普通用户接口过滤 PLATFORM 账号并拒绝修改；组织业务策略与平台路由的完整隔离矩阵未建立 |
 | SCOPE-04 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 桌面运行时不再引用旧 `llmapi_hub`/旧功能开关；仍缺安装与发布制品证明 |
 | SCOPE-05 | 部分实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 当前改动范围可审计，但尚无自动化发布范围门禁 |
-| ID-15 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Account 创建失败会补偿删除 Keycloak Identity；钱包仍同步调用，未满足已验证身份不因 Billing 故障删除的持久恢复模型 |
+| ID-15 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 注册在 Identity 与 Account 提交后返回，Billing 仅在后续 bootstrap 调用；钱包失败不会删除已提交的已验证身份或 Account |
 | ID-17 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少密码预检、最终策略和注册幂等指纹只位于 Identity 边界的强制隔离 |
 | ID-18 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少首尾空格明确拒绝及禁止 trim、规范化、转换和截断的端到端契约 |
-| ACC-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | `PROVISIONING` 已持久化，但注册响应仍同步依赖钱包初始化成功 |
-| ACC-03 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 未形成 PROVISIONING 可登录/资料可用而模型和充值关闭的完整门禁 |
+| ACC-02 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Identity 与 Account 创建成功后，注册接口返回稳定 `user_id` 和 `PROVISIONING`，不调用 Billing；部署证据待补 |
+| ACC-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | `PROVISIONING` Identity 可登录，Account 资料可读取，模型授权上下文要求 `ACTIVE`；充值门禁、稳定错误语义及 `REPAIR_REQUIRED` 闭环尚不完整 |
 | ACC-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无 Provisioning SLA、自动重试和 `REPAIR_REQUIRED` 状态 |
 | ACC-15 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 顶层组织创建需独立核验权限、幂等和审计 |
 | ACC-16 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 组织搜索需独立核验授权过滤、分页和稳定排序 |
@@ -123,7 +123,7 @@
 | TOK-45 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少以历史版本为来源向前创建新版本、按当前依赖重新校验并原子发布的目录回滚 |
 | TOK-46 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少逻辑模型、目录、协议、能力、价格和路由代次的独立版本生成规则及请求全版本快照 |
 | TOK-47 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少弃用宽限期、新会话/历史继续分离门禁、显式替代分支及下架在途请求处理 |
-| BILL-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Account 注册同步调用 `EnsurePersonalWallet`，没有 Outbox 驱动的异步初始化 |
+| BILL-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 注册接口不调用 Billing，但后续 `/v1/account/bootstrap` 同步调用 `EnsurePersonalWallet`；没有 Outbox 驱动的异步初始化和后台重试 |
 | BILL-05 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 商品有 BASE/BONUS 字段，但入账和权益包只保存合计，未形成组成类型约束 |
 | BILL-09 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Hold 只按聚合权益包分配，没有按 BASE/BONUS 组成分配 |
 | BILL-10 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无组成级批量授权及逐项部分成功契约 |
@@ -172,7 +172,7 @@
 | PAY-38 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少对无回调无账单 Provider 的历史查询、有限晚到窗口、权威终态和正式收款准入校验 |
 | PAY-39 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少最晚确认期限、最终成功查询、权威未支付终态及冲突/申诉检查组成的归档门禁 |
 | PAY-40 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少 PROVIDER_BLIND 状态、责任升级、禁止静默归档和必要时停用新订单的闭环 |
-| UI-02 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 后端注册仍同步等待钱包，前端没有异步初始化/修复状态反馈 |
+| UI-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 桌面端将注册与后续自动登录分开并可提示“注册成功但自动登录失败”，但没有展示钱包初始化、`PROVISIONING` 重试或 `REPAIR_REQUIRED` 修复状态 |
 | UI-13 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少停止接收、取消处理中、Provider 不支持取消、待核对和已结算的用户状态反馈 |
 | UI-14 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少注销阶段、脱敏阻断项和用户恢复动作展示 |
 | UI-15 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 缺少未完成注册查询、处理中/修复中展示及防重复注册恢复流程 |
@@ -259,7 +259,7 @@
 | ID-11 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ID-12 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ID-13 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
-| ID-14 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
+| ID-14 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Identity 与 Account 均成功后返回可登录的 `PROVISIONING` 且不依赖钱包；Identity 已创建而 Account 提交失败仍使用即时删除补偿，缺少持久恢复 Saga |
 | ID-16 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ACC-01 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
 | ACC-05 | 待核验 | SNAPSHOT_HEAD | 待补证 | 待补证 | 需按目标需求完成代码、测试与部署证据核验 |
@@ -314,7 +314,7 @@
 | BILL-28 | 未实现 | 待实现 | 待补证 | NOT_DEPLOYED | 普通退款成功时撤销目标支付全部未消费 BASE 与关联 BONUS、BONUS 零现金退款及平衡账本待实现 |
 | PAY-01 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | H3C 与 Simulator 均实现 Provider 接口；部分通用流程仍按当前能力和旧状态模型耦合 |
 | PAY-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider capabilities 已存在并驱动部分 API/UI；UI 对退款仍显示禁用入口，目标能力快照不完整 |
-| PAY-03 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 真实流程只有新华三支付宝；模拟器渠道不算生产能力 |
+| PAY-03 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前生产候选流程只有新华三支付宝；开发/测试 Payment Provider 的银联、微信等渠道不计入生产能力 |
 | PAY-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 商品直接保存单一外部 SKU，无多 Provider 映射版本表 |
 | PAY-05 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前目录仍明确为 UAT 暂定 |
 | PAY-06 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有新华三手机号同步任务；尚未抽象供应商中立 Commerce Mapping |
@@ -406,7 +406,7 @@
 | CR-14 | TOK-05, NFR-18 | 模型网关与 New API 具体实现隔离 | 部分实现、待重构 | Token Gateway 领域、数据库、公开 API 和管理 UI 统一使用 `upstream_request_id`、`UsageEvidenceProvider`、`ModelCatalogProvider` 等供应商中立概念；New API 请求头、日志接口、响应字段、状态与错误映射只能存在于 New API Adapter |
 | CR-15 | ACC-05, PAY-06, PAY-01, NFR-16 | 外部商城账号和订单语义与新华三实现隔离 | 部分实现、待重构 | `mall_user_sync_jobs`、`mall_sync_status`、`mall_order_id` 等厂商语义迁移为外部客户开通状态和 Provider 订单引用；Account、Gateway、Billing 及用户 UI 不直接识别新华三商城，充值前置条件由当前支付 Provider 的能力与客户要求表达 |
 | CR-16 | CORE-01, CORE-02, ACC-01, NFR-15 | 身份认证 Provider 与业务授权隔离 | 部分实现、待重构 | Keycloak 用户创建/删除迁入身份 Adapter；OIDC 只提供标准主体和会话身份；平台及组织权限由 Account 权限系统判定，业务服务不再把 Keycloak `realm_access` 或固定 `platform-admin` Realm Role 作为长期授权事实源 |
-| CR-17 | PAY-01–PAY-04, NFR-17 | 支付 Provider、模拟器和支付渠道能力隔离 | 部分实现、待重构 | 保留通用 `PaymentProvider` 端口，将 H3C Mall 与 Simulator 实现移出 Billing 业务包；前端根据商品渠道和 Provider capabilities 渲染，不硬编码支付宝或某商城 SKU；多 Provider 时使用独立商品映射 |
+| CR-17 | PAY-01–PAY-04, NFR-17 | 生产/非生产支付 Provider 与支付渠道能力隔离 | 部分实现、待重构 | 保留通用 `PaymentProvider` 端口，将 H3C Mall 与 Simulator 实现移出 Billing 业务包；远程 Compose 已隔离 Simulator 主进程，但测试数据库初始化/迁移仍在基础清单，启动和 Helm 仍有模拟器命名配置；需迁移为供应商中立配置并彻底排除生产测试依赖；前端按商品渠道和 Provider capabilities 渲染，多 Provider 使用独立商品映射 |
 | CR-18 | ADM-10, NFR-19 | 系统运行探针配置驱动 | 部分实现、待重构 | 系统状态页通过探针注册表声明服务名称、URL、协议和响应判定器；Portal 不使用 `if newapi` 等厂商分支。页面可以展示实际部署组件名称，但采集流程不能依赖固定厂商实现 |
 | CR-19 | PAY-12, PAY-14–PAY-15, PAY-18–PAY-20, PAY-23, PAY-25, PAY-28–PAY-31, PAY-33–PAY-36 | 支付按完整生命周期设计并允许 Provider 能力降级 | 部分实现、退款范围已由 CR-41 取代 | 原记录包含全额/部分退款；现行支付履约隔离、退款目标、金额和意图事务以 CR-41 及 PAY-24–PAY-31 为准，其他支付生命周期要求继续有效 |
 | CR-20 | BILL-07, PAY-22, PAY-23, UI-11 | 组织资金通过企业管理员在线购买组织权益入账 | 未实现 | 企业管理员在组织管理界面选择组织商品并在线支付；订单付款人与权益受益组织分离，成功后直接形成组织权益包和组织钱包账本，不经过个人钱包 |
@@ -516,7 +516,7 @@
 | ID-11 | 短信反枚举 | 已实现 | 未知手机号的短信登录请求返回与已知用户一致的外部响应，但不实际发送。 |
 | ID-12 | 登录成功后下次启动自动登录 | 已实现 | Refresh Token 仅存系统凭据库，启动时刷新。 |
 | ID-13 | 登出、刷新失败或凭据错误后停止自动登录 | 已实现 | 失败路径删除持久化 Refresh Token，不回退历史缓存。 |
-| ID-14 | 注册不留下不可登录的半成品账号 | 待重构 | 当前路径把业务账号与钱包 bootstrap 结果耦合；目标是 Identity/Account 成功后持久 PROVISIONING，只有 Account 从未提交时才允许补偿 Identity。 |
+| ID-14 | 注册不留下不可登录的半成品账号 | 部分实现、待重构 | Identity/Account 成功后已持久返回可登录的 `PROVISIONING`，钱包 bootstrap 不决定注册响应；Identity 已创建而 Account 提交失败仍依赖即时删除补偿，尚无持久恢复 Saga。 |
 | ID-16 | 除密码/短信外的 MFA 和账号申诉 | 非当前范围 | Keycloak 具备扩展基础，但当前产品闭环未实现；短信找回密码已纳入 ACC-09。 |
 | ID-17 | 密码只在 Identity 边界处理 | 未实现 | 当前注册预检和编排尚未证明 Account、短信及其他服务完全不接收密码，也没有密码策略版本快照和 Identity 边界短期幂等指纹。 |
 | ID-18 | 密码原始字符策略 | 未实现 | 当前缺少端到端首尾空格明确拒绝、中间半角空格允许、原始序列精确比较及禁止 trim/规范化/转换/截断测试。 |
@@ -659,7 +659,7 @@
 |---|---|---|---|
 | PAY-01 | 支付实现位于独立 Adapter | 部分实现 | H3C Mall 与 Simulator 分别实现通用 `PaymentProvider`；仍需用合同和架构门禁证明业务状态机不依赖具体 Provider。 |
 | PAY-02 | 渠道和动作由能力声明驱动 | 部分实现、待重构 | 已有 Provider capabilities 并驱动部分 API/UI；尚未覆盖历史保留、晚到窗口、权威终态和完整能力快照，退款不支持时 UI 仍显示禁用入口。 |
-| PAY-03 | 多支付渠道 | 未实现 | 当前真实流程仅支付宝；模拟器的银联/微信能力不属于生产能力。 |
+| PAY-03 | 多支付渠道 | 未实现 | 当前生产候选流程仅支持新华三支付宝；开发/测试 Payment Provider 的银联、微信能力不属于生产能力。 |
 | PAY-04 | 多 Provider 商品映射 | 未实现 | 通用充值商品与外部 SKU 分表映射，至少包含 Provider、外部 SKU、金额校验、状态和有效期；历史订单固定创建时的映射版本。 |
 | PAY-05 | 充值商品正式冻结 | 未实现 | 当前 SKU/金额/权益为 UAT 暂定，正式收款前必须冻结。 |
 | PAY-06 | 个人用户与当前 Commerce Provider 客户一一对应 | 已实现、需隔离 | 当前通过同一手机号异步确保新华三商城账号；目标状态使用供应商中立的外部客户开通任务，仅对依赖该客户的支付动作生效。 |
@@ -925,4 +925,4 @@
 - 不允许 Gateway 因网络失败自动重发模型请求。
 - 不允许有效组织没有所有者或同时存在多个所有者；所有权变更必须使用唯一所有者转让流程。
 - 不允许把个人上下文和组织上下文的余额、Token 路由或审计混在一起。
-- 不允许将开发支付模拟器或 Mock New API 的能力描述为生产接口能力。
+- 不允许将任何开发/测试 Payment Provider、测试渠道或 Mock New API 的能力描述为生产接口能力。

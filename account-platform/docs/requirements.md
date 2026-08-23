@@ -702,7 +702,7 @@ USAGE_PENDING -> SETTLED | REVIEW
 |---|---|---|
 | PAY-01 | Payment Provider Adapter 隔离 | 通用 Billing 不导入厂商客户端、不识别厂商状态。 |
 | PAY-02 | 支付能力可发现 | UI、API 和后台任务使用同一 capabilities 决定状态查询、历史保留、晚到窗口、权威终态、关单、退款、回调、账单和渠道行为。 |
-| PAY-03 | 多支付渠道 | 渠道由商品目录和 Provider capabilities 决定，不把模拟渠道当生产能力。 |
+| PAY-03 | 多支付渠道 | 渠道由商品目录和 Provider capabilities 决定；开发/测试 Payment Provider 及其渠道不计入生产渠道能力。 |
 | PAY-04 | 多 Provider 商品映射 | 通用商品与外部 SKU 分表并冻结订单创建时版本。 |
 | PAY-05 | 正式商品目录冻结 | SKU、金额、权益、有效期和 Provider 映射版本化，正式收款前完成冻结。 |
 | PAY-06 | Commerce Customer 映射 | 需要外部客户时使用供应商中立映射，映射状态不参与认证和授权。 |
@@ -1454,7 +1454,7 @@ EXECUTION_FAILED -> EXECUTING | INVALIDATED
 - `[BILL-44]` 禁止把 PUBLISHED/ACTIVE/ENDED/CANCELLED 价格版本退回 DRAFT、原地修改或物理删除，禁止追溯撤销 ACTIVE 价格，也禁止提前结束后产生未声明的全局回退。
 - `[BILL-45]` 禁止因价格取消、结束、替代、回滚或缓存刷新重算已有 Hold，禁止续租或追加预占切换到新价格，也禁止价格不可用时先调用上游再补价格。
 - `[BILL-24]` 禁止把包含缓存的输入总量与缓存输入量同时作为独立费用相加，或让同一个输入 Token 同时计入 `INPUT_TOKEN` 和 `CACHED_INPUT_TOKEN`。
-- `[PAY-03]` 禁止把开发支付模拟器或 Mock Model Gateway 描述为生产能力。
+- `[PAY-03]` 禁止把任何开发/测试 Payment Provider、测试渠道或 Mock Model Gateway 描述为生产能力。
 - 联合验收 SCOPE-01、TOK-35：禁止以旧路径迁移为由删除、改写或上传本地独立模型和用户自配第三方模型的配置及凭据。
 - 联合验收 SCOPE-05、TOK-36：禁止为完成客户端切换而修改账号平台服务端、数据库、接口或部署；发现服务端前置能力不满足时必须阻止切换。
 - `[TOK-36]` 禁止把“发布前不发布”“安装前不替换”和“安装后不回退旧路径”合并成一个运行时开关；安装门禁失败不得留下二进制与配置 schema 的半切换组合。
