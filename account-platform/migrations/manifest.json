@@ -1,0 +1,784 @@
+{
+  "schema_version": 1,
+  "algorithm": "sha256-normalized-lf",
+  "domains": {
+    "account": [
+      {
+        "file": "000001_foundation.down.sql",
+        "version": 1,
+        "sha256": "fb7b8c75f38e2a14968f7c25e25e10033e23361d6763e52f2e319d66f27f78f2"
+      },
+      {
+        "file": "000001_foundation.up.sql",
+        "version": 1,
+        "sha256": "4e62f96ea4686990053ee91745023af5cd57b1ddf7fa82ec25ab1b25fd9ef579"
+      },
+      {
+        "file": "000002_account_domain.down.sql",
+        "version": 2,
+        "sha256": "f027515fea2f760847db37fbc2b52acd7d95e8f71c2bc899b0aa6aa4fbf17278"
+      },
+      {
+        "file": "000002_account_domain.up.sql",
+        "version": 2,
+        "sha256": "3196789811ed1798b160a0bb0948d762fbecead4cc4ad7d07562179f56a1446c"
+      },
+      {
+        "file": "000003_event_delivery.down.sql",
+        "version": 3,
+        "sha256": "40473a08b1e36dbab9985b192599af7e38e2a5ec70dab32482c79725e93ecd89"
+      },
+      {
+        "file": "000003_event_delivery.up.sql",
+        "version": 3,
+        "sha256": "e75bccd8da580606c7d4800f19267aa930ea08c97cc1b3b58a2d7806d6cea90b"
+      },
+      {
+        "file": "000004_admin_lifecycle.down.sql",
+        "version": 4,
+        "sha256": "951ebd5f9cd2408ee745c52d9c2be6107919583b97a69b085dded274289fcee0"
+      },
+      {
+        "file": "000004_admin_lifecycle.up.sql",
+        "version": 4,
+        "sha256": "5d2a37eef79b42a7b9149f49c5e0e98b9966530aa02d67250f8eda28f9e7fd62"
+      },
+      {
+        "file": "000005_audit_search.down.sql",
+        "version": 5,
+        "sha256": "9f2a552b32b226081a9c8676bc9b1c41de31788108b7165bfef32a5ce3b57ece"
+      },
+      {
+        "file": "000005_audit_search.up.sql",
+        "version": 5,
+        "sha256": "a238129aa085e74884f21f118f1e65d302df17c2e934ac62f95e854d4f98881d"
+      },
+      {
+        "file": "000006_mobile_identity.down.sql",
+        "version": 6,
+        "sha256": "8618731751779bd5d53e57a75a03020f5f79a6b00d0821b821c3fee45dd37245"
+      },
+      {
+        "file": "000006_mobile_identity.up.sql",
+        "version": 6,
+        "sha256": "84905a8260dcf8c1fca963bb819321869094bcfed068e2d84505f8d19e10d15f"
+      },
+      {
+        "file": "000007_username.down.sql",
+        "version": 7,
+        "sha256": "52f2204cdc3e729bbd7ac664ff907061cb2338ace0f8ec8cbe6130aa69d90a92"
+      },
+      {
+        "file": "000007_username.up.sql",
+        "version": 7,
+        "sha256": "00b533f915f32b5ca4e4ecdb57c08c995ce237aacbd54093e5d4b3407714d199"
+      },
+      {
+        "file": "000008_provider_sms_verification.down.sql",
+        "version": 8,
+        "sha256": "5edc95218dcae5121852f1ece136e1d6bc01f67a807d03a2684cadbebf13d236"
+      },
+      {
+        "file": "000008_provider_sms_verification.up.sql",
+        "version": 8,
+        "sha256": "d7757464329446a55787bc09436764bc961c9df5770a5c22854d1386b7681e2a"
+      },
+      {
+        "file": "000009_slider_captcha.down.sql",
+        "version": 9,
+        "sha256": "50be98032a89f8b49bf62eeca34801e9134d8fe32352753b9093626fd1dde993"
+      },
+      {
+        "file": "000009_slider_captcha.up.sql",
+        "version": 9,
+        "sha256": "7397a9b66cbac880ebae1f04bcf386e367a4badf59e98f521810f814b03a1767"
+      },
+      {
+        "file": "000010_authorization_rbac.down.sql",
+        "version": 10,
+        "sha256": "09ac83480dd31edd9a9e7d97e1c57013e4077faa24aad3350e6e22df22cbdef0"
+      },
+      {
+        "file": "000010_authorization_rbac.up.sql",
+        "version": 10,
+        "sha256": "c67a427e7153aa546606f5d6ce4037168d2122f8fc1034f96d6ba9cf71ab72ba"
+      },
+      {
+        "file": "000011_permanent_user_codes.down.sql",
+        "version": 11,
+        "sha256": "030d1ec5b1a72d3d0d98176af358f2956c58a8e31123250c06f25a45449857b4"
+      },
+      {
+        "file": "000011_permanent_user_codes.up.sql",
+        "version": 11,
+        "sha256": "f68a4b9b21354596d71dbfcb9f843f0a0ff0993d6462e0e3a53d3396ee7746f7"
+      },
+      {
+        "file": "000012_sms_risk_dimensions.down.sql",
+        "version": 12,
+        "sha256": "b2e83686d789a04097a23eb868cc4dc0215d21d6ae6bbbbe2c24eedc462e910e"
+      },
+      {
+        "file": "000012_sms_risk_dimensions.up.sql",
+        "version": 12,
+        "sha256": "3a4aae8c77eb2f4b2e12ece90d8e94a7729790e718ef921ab4be5fa535efa67f"
+      },
+      {
+        "file": "000013_registration_saga.down.sql",
+        "version": 13,
+        "sha256": "dfef389890d89eb7f54fe37778c2224b4e3546f1a7c0546104b48f77bdbf9798"
+      },
+      {
+        "file": "000013_registration_saga.up.sql",
+        "version": 13,
+        "sha256": "eac3d4d4209d11d69cf128ca28135b31833c70d812c4ccd7e7b9969f9c6bc753"
+      },
+      {
+        "file": "000014_profile_change_saga.down.sql",
+        "version": 14,
+        "sha256": "d9d17eabfe841dac9e2eeb1560c2f77ae8c908c1b41fd1eecd87565216cf1978"
+      },
+      {
+        "file": "000014_profile_change_saga.up.sql",
+        "version": 14,
+        "sha256": "9bdd1adb908df99ece1e4506e25df1484b5765906741109316187af4d6ce37b7"
+      },
+      {
+        "file": "000015_commerce_customer_mapping.down.sql",
+        "version": 15,
+        "sha256": "08de00fa385efb81bb353d13835a85b375d1d6ca2c175f74bb3224a11dbf40f7"
+      },
+      {
+        "file": "000015_commerce_customer_mapping.up.sql",
+        "version": 15,
+        "sha256": "92d97005182e4dcbea1e9950ecf4a565aa8a61a50acba5b9bd410436d8659d49"
+      },
+      {
+        "file": "000016_role_binding_lifecycle.down.sql",
+        "version": 16,
+        "sha256": "9891f5eb2230c98767f2c56bf43975ae8c8c2f5d1567e3a5abc869c91f7ddd3c"
+      },
+      {
+        "file": "000016_role_binding_lifecycle.up.sql",
+        "version": 16,
+        "sha256": "64b599f6512ebddc3874b2caf2251b915a2a60e7fe46da61c1af84b99f52d582"
+      },
+      {
+        "file": "000017_super_admin_recovery.down.sql",
+        "version": 17,
+        "sha256": "8e8c800bb8caf7898482082b3f578cf0e45acf57d061713452aae349fd7ae606"
+      },
+      {
+        "file": "000017_super_admin_recovery.up.sql",
+        "version": 17,
+        "sha256": "8c142e730f3b0cd1e6d889da54471512599f96485243f7bb0fa0f64106371c26"
+      },
+      {
+        "file": "000018_approval_commands.down.sql",
+        "version": 18,
+        "sha256": "b173d3e9cdc2392c547efdb113b00de01366ccecc89c062dbf5643886945bb7c"
+      },
+      {
+        "file": "000018_approval_commands.up.sql",
+        "version": 18,
+        "sha256": "5353eaad858a1c033ba4659b92dd16744d828c363eae6771437ef9b6b62de0cf"
+      },
+      {
+        "file": "000019_organization_lifecycle.down.sql",
+        "version": 19,
+        "sha256": "26ff6707974840fa668a6e69312eb4b37a8a69d62870d6a62a63e267eaeee7f1"
+      },
+      {
+        "file": "000019_organization_lifecycle.up.sql",
+        "version": 19,
+        "sha256": "3bb1dfee1f23ff84847f06624c13fbaa4f65a9628f8b7677fda85aed3a8eecd8"
+      },
+      {
+        "file": "000020_organization_unit_lifecycle.down.sql",
+        "version": 20,
+        "sha256": "6cc4f28152457a75ec03c24500e66d26206582b9e414a003da580f1fc90ba9c1"
+      },
+      {
+        "file": "000020_organization_unit_lifecycle.up.sql",
+        "version": 20,
+        "sha256": "28dedb0b9cdb96a441edd81ab5796d2be1c74fe23e032b8cd514abb6d128fa6b"
+      },
+      {
+        "file": "000021_membership_governance.down.sql",
+        "version": 21,
+        "sha256": "61dc47ca2cb2d4355cfc6dcb71865ae16a300cb6099f3e375c05fe6052fe92db"
+      },
+      {
+        "file": "000021_membership_governance.up.sql",
+        "version": 21,
+        "sha256": "4190ea5063aa4b12bd94280e77128d4f7e068b608f21c7cafbdd7accecf6f58d"
+      },
+      {
+        "file": "000022_global_active_context.down.sql",
+        "version": 22,
+        "sha256": "53c24543347cde3f49cfdaceb01715918acbb5cdc79b9739a2b537b15309a306"
+      },
+      {
+        "file": "000022_global_active_context.up.sql",
+        "version": 22,
+        "sha256": "1f756028b785bd9e1b5b51c005ae68018acac6c3ed3c8107d5db4960fa04a354"
+      },
+      {
+        "file": "000023_payment_anomaly_commands.down.sql",
+        "version": 23,
+        "sha256": "842592ad9018e306695e8ab392981b5a8141431773f13de57bbdc9df59b7e86d"
+      },
+      {
+        "file": "000023_payment_anomaly_commands.up.sql",
+        "version": 23,
+        "sha256": "78781226e20aa52e0d7199679a6bb44ea68118af92e735e12dda474d93585709"
+      },
+      {
+        "file": "000024_model_catalog_commands.down.sql",
+        "version": 24,
+        "sha256": "925bbf6423805324cd961feb9de6e1522ef6491935b07925900594a904c73d64"
+      },
+      {
+        "file": "000024_model_catalog_commands.up.sql",
+        "version": 24,
+        "sha256": "6516049314b81ce1d8921ff2ae225d968a478f82bfb2cd97c024040372b0d034"
+      },
+      {
+        "file": "000025_route_provisioning_commands.down.sql",
+        "version": 25,
+        "sha256": "21a7a1050a48bc854f109a6730d4dca4646e7b38ef56772f35135375ee5f408e"
+      },
+      {
+        "file": "000025_route_provisioning_commands.up.sql",
+        "version": 25,
+        "sha256": "7cb56b00e7f0d4e72576f045fce9e24fa24501ad1c905579f7e244a11d429acf"
+      },
+      {
+        "file": "000026_token_account_operations.down.sql",
+        "version": 26,
+        "sha256": "2e6c3cb2c00d75c035bdceb35fd464ecda1be31ebd6d361da1a763940a4be673"
+      },
+      {
+        "file": "000026_token_account_operations.up.sql",
+        "version": 26,
+        "sha256": "eb4063d7cfa9e349df4edec55c5cc12fb6578cbfbd54e393b20484998217de80"
+      },
+      {
+        "file": "000027_account_closure_saga.down.sql",
+        "version": 27,
+        "sha256": "ee0a0388e3c90e48def9092158b10f5a01f96956bc06dd2f4fea5064d6a01741"
+      },
+      {
+        "file": "000027_account_closure_saga.up.sql",
+        "version": 27,
+        "sha256": "cfd14d187cd1c3fa3aab134de59cbfb88a44a7bbc88bc3e3406d8d6c7d2505db"
+      },
+      {
+        "file": "000028_account_closure_cleanup.down.sql",
+        "version": 28,
+        "sha256": "892ef66a631b11c31edbb205252d41fcba91454f98c90533725c99067e1ed680"
+      },
+      {
+        "file": "000028_account_closure_cleanup.up.sql",
+        "version": 28,
+        "sha256": "05eec7870758d9eb29248236a389f7facfbc4025d1fa711d40775d3fe96855b9"
+      }
+    ],
+    "billing": [
+      {
+        "file": "000001_foundation.down.sql",
+        "version": 1,
+        "sha256": "694f148cedb118328e90ee64d56d747f98819e13455eb4ab13f1f49ad644b4a9"
+      },
+      {
+        "file": "000001_foundation.up.sql",
+        "version": 1,
+        "sha256": "8d9b0e0a9a025079fb0c3549b19fde8d15bba429199756c1fb3696427d5b6530"
+      },
+      {
+        "file": "000002_ledger.down.sql",
+        "version": 2,
+        "sha256": "5480fae65dd250523da91fb5dad987d4f95eecb82dc209ea0bd0727d4fbddcda"
+      },
+      {
+        "file": "000002_ledger.up.sql",
+        "version": 2,
+        "sha256": "4a2f79809b367750a7140d57fa1f02106b640b036ebed2bfe783708b80ba51c6"
+      },
+      {
+        "file": "000003_payments.down.sql",
+        "version": 3,
+        "sha256": "e46c5d14b3c024157d6cefa6ee9c24938cd177bae80bcad2e9150a5aa7e806f1"
+      },
+      {
+        "file": "000003_payments.up.sql",
+        "version": 3,
+        "sha256": "7ee785a2d5dc77fdc9e51e1d2a2a3a460c78fa20ed14cacccecc5ebb73f22697"
+      },
+      {
+        "file": "000004_refunds_reconciliation.down.sql",
+        "version": 4,
+        "sha256": "c5fde383bc0022d16636207fd9474b3277cba1856103fc39be66274b031f63ee"
+      },
+      {
+        "file": "000004_refunds_reconciliation.up.sql",
+        "version": 4,
+        "sha256": "62b2333b912bb5a28dd569160b3c996e014189f560015a8e0c528403011acd53"
+      },
+      {
+        "file": "000005_manual_adjustment_decisions.down.sql",
+        "version": 5,
+        "sha256": "bd1cc0bbd1558331234f98e5fbb4d8a704ef016511f5d2999fd08a3735609ca8"
+      },
+      {
+        "file": "000005_manual_adjustment_decisions.up.sql",
+        "version": 5,
+        "sha256": "71d5f1a8dbf0606f868e40934063989d000e4b48e9b6360cd80b5e9989786021"
+      },
+      {
+        "file": "000006_event_delivery.down.sql",
+        "version": 6,
+        "sha256": "40473a08b1e36dbab9985b192599af7e38e2a5ec70dab32482c79725e93ecd89"
+      },
+      {
+        "file": "000006_event_delivery.up.sql",
+        "version": 6,
+        "sha256": "e75bccd8da580606c7d4800f19267aa930ea08c97cc1b3b58a2d7806d6cea90b"
+      },
+      {
+        "file": "000007_payment_expiry_reconciliation.down.sql",
+        "version": 7,
+        "sha256": "2c9efbc079621e502d667f6c4b8d67e1471d6d955f1e67ef302c09873961bccd"
+      },
+      {
+        "file": "000007_payment_expiry_reconciliation.up.sql",
+        "version": 7,
+        "sha256": "2f96ad76984dc397b17805e10361ee9eb674de13194b5b7afee405f30611c57a"
+      },
+      {
+        "file": "000009_h3c_mall_payments.down.sql",
+        "version": 9,
+        "sha256": "a0d83c81090c78b60b68db571219810a5adffbf50694c017d8f7ba06cbf2234e"
+      },
+      {
+        "file": "000009_h3c_mall_payments.up.sql",
+        "version": 9,
+        "sha256": "4b5c2bfcbb40b3379694687c46a4e853b5e5f93d979628b7b23255acb979b38d"
+      },
+      {
+        "file": "000010_plan_catalog.down.sql",
+        "version": 10,
+        "sha256": "5ba08f243e0f7d493b83ed1d4e2d6561632696bf21746b225d963e08c2d6f51c"
+      },
+      {
+        "file": "000010_plan_catalog.up.sql",
+        "version": 10,
+        "sha256": "5fb4350e0b63eb7bd6a62e631be87b40027fe8f72162651bb322e14cd8fc65a2"
+      },
+      {
+        "file": "000011_entitlement_packages.down.sql",
+        "version": 11,
+        "sha256": "3572a59412d9aed9871a374493e7554cc62d684990663e097f51f34e146d8ac0"
+      },
+      {
+        "file": "000011_entitlement_packages.up.sql",
+        "version": 11,
+        "sha256": "864c34fc69af9d4a93f26371864ac0fc5de7f523595a97e5ae0de2926f5ce4c9"
+      },
+      {
+        "file": "000012_package_hold_allocations.down.sql",
+        "version": 12,
+        "sha256": "fa594f0b874010f49a4f2fc17d7115698db34a14a89f4209f79f481b871eaf4d"
+      },
+      {
+        "file": "000012_package_hold_allocations.up.sql",
+        "version": 12,
+        "sha256": "e4fd8b9a0d6172d6ccae4469eb8224802ae0758de07aff094861406f1f59fe8c"
+      },
+      {
+        "file": "000013_package_expiry.down.sql",
+        "version": 13,
+        "sha256": "ede6716b84bf6fdf975297996a6dc0ec6f9df1c10b28e8f5ac24e38ff8295ea0"
+      },
+      {
+        "file": "000013_package_expiry.up.sql",
+        "version": 13,
+        "sha256": "546f51bdf66ed256ea70baf3f50aeb02dc375a97df30be9fc3fda633a4c1805d"
+      },
+      {
+        "file": "000014_payment_repairs.down.sql",
+        "version": 14,
+        "sha256": "727de1486a2e7c2ac1c2af948a84361da2d1be5780fe2e7d57f4a5655914f689"
+      },
+      {
+        "file": "000014_payment_repairs.up.sql",
+        "version": 14,
+        "sha256": "416f0d1ff871a17cf2bdf498d8e0aeb01d436fbc9c3d45cc52459ad6a6a27e54"
+      },
+      {
+        "file": "000015_payment_repair_details.down.sql",
+        "version": 15,
+        "sha256": "4ff441f61a196fb27ad22a2f85b4d55b5072a06f4b97bd8b29098210a6dd603b"
+      },
+      {
+        "file": "000015_payment_repair_details.up.sql",
+        "version": 15,
+        "sha256": "d641406659efb57bc7b0214a7fd1fed225cba413c1985662f8dc0eb33f63ae0c"
+      },
+      {
+        "file": "000016_entitlement_components.down.sql",
+        "version": 16,
+        "sha256": "ada832a071431d761322ee2b40fdb7b4b1527349e0c8b454f0f43cac78d647ac"
+      },
+      {
+        "file": "000016_entitlement_components.up.sql",
+        "version": 16,
+        "sha256": "bfcba8858a2c6e1312dbcd3d96eb163263f62220ad816c41f339fda198944335"
+      },
+      {
+        "file": "000017_approval_execution.down.sql",
+        "version": 17,
+        "sha256": "ae9808de73d273c54dcb37c02b47126e828a4b473c92e4d5ffd8292abe0ecd7c"
+      },
+      {
+        "file": "000017_approval_execution.up.sql",
+        "version": 17,
+        "sha256": "f4d6ad26e66ab16e8c030adf5b3f22246459c2d4d844116fe50e57d537631b11"
+      },
+      {
+        "file": "000018_organization_lifecycle.down.sql",
+        "version": 18,
+        "sha256": "f32ad1ab0d9ff8d42e7d901830ea1799b440763e01cf4386f8038d2f1ef74508"
+      },
+      {
+        "file": "000018_organization_lifecycle.up.sql",
+        "version": 18,
+        "sha256": "179836c8532c5b6ad3fd628c7f9934525292935c10cf64e143a86d76c395b072"
+      },
+      {
+        "file": "000019_organization_unit_blockers.down.sql",
+        "version": 19,
+        "sha256": "3808826093f96cde619ab7a9836925da286b478c77abe5f1f48a3d6c48164186"
+      },
+      {
+        "file": "000019_organization_unit_blockers.up.sql",
+        "version": 19,
+        "sha256": "ec8be96b67b071aeed1280a71c459465a935d0fddb5542edbf6f876935b8178f"
+      },
+      {
+        "file": "000020_organization_member_lifecycle.down.sql",
+        "version": 20,
+        "sha256": "55750028e3ad1360ed34512b7a6d5de1c3e8fd6d48b3db17af90f0d5f39c6634"
+      },
+      {
+        "file": "000020_organization_member_lifecycle.up.sql",
+        "version": 20,
+        "sha256": "7dd8d0ae53e2dbfcfe8ea4f7933975318b59e2503e79156bd7ba783fbaec6054"
+      },
+      {
+        "file": "000021_organization_entitlement_grants.down.sql",
+        "version": 21,
+        "sha256": "87369a77f092765f1dce25e883469dda5241193dc5846b13d1e467f3960cd53c"
+      },
+      {
+        "file": "000021_organization_entitlement_grants.up.sql",
+        "version": 21,
+        "sha256": "e706288f9962e9a6eebdc813b1b8d4132daacd67abc69fe33d2515c36ec5a404"
+      },
+      {
+        "file": "000022_versioned_metering_pricing.down.sql",
+        "version": 22,
+        "sha256": "70b89f83b1cb2917935d93d682b8430dd0bf9f2f344afeeb796c23cfc87d2e4c"
+      },
+      {
+        "file": "000022_versioned_metering_pricing.up.sql",
+        "version": 22,
+        "sha256": "8e24669aa734b01a8a2aef5bc1a79a2784d1c0737191935e98b1aab0617bb04a"
+      },
+      {
+        "file": "000023_payment_provider_catalog.down.sql",
+        "version": 23,
+        "sha256": "ade8e62696ece865e003c66e3e1526c8732ff86ec0daa8a7b31d1271cc397df0"
+      },
+      {
+        "file": "000023_payment_provider_catalog.up.sql",
+        "version": 23,
+        "sha256": "bc3b6c275037787bb3dc5bc85d0d0b1f0f7e0473cd673b492cb1481bcd5ada16"
+      },
+      {
+        "file": "000024_payment_evidence_lifecycle.down.sql",
+        "version": 24,
+        "sha256": "62d531672380392caadf52a02e5e3bc3a30193114cd6c8ed5ae272ff92911553"
+      },
+      {
+        "file": "000024_payment_evidence_lifecycle.up.sql",
+        "version": 24,
+        "sha256": "355263e508dce60428fe74445588ecdc261e4306b7ec3b54991d13682f6ddf18"
+      },
+      {
+        "file": "000025_receivables_and_context_freeze.down.sql",
+        "version": 25,
+        "sha256": "f1a10e157810b518d97d0085eddf68ae24d751083c81e76e786f4e765745588f"
+      },
+      {
+        "file": "000025_receivables_and_context_freeze.up.sql",
+        "version": 25,
+        "sha256": "a5015c7fdaa8948820967a887c556cf55ca70be5078d4378fb5457dca9dec23d"
+      },
+      {
+        "file": "000026_hold_operations_evidence.down.sql",
+        "version": 26,
+        "sha256": "921fd87b32d86ddb3fe05beb7726f3718d8083878febaff093d93d7cef363064"
+      },
+      {
+        "file": "000026_hold_operations_evidence.up.sql",
+        "version": 26,
+        "sha256": "6a1985280bad6704730786d142e5224fe53a3c242759e6b4d67914d788d6d2a4"
+      },
+      {
+        "file": "000027_targeted_refund_lifecycle.down.sql",
+        "version": 27,
+        "sha256": "c24dc4b69e05d595220984d513298a2ce9f147e90395fbcf6fdbe1abf3c2e201"
+      },
+      {
+        "file": "000027_targeted_refund_lifecycle.up.sql",
+        "version": 27,
+        "sha256": "65755ba6c88de24886417e30fa3ec0c0c706f302cd7db3362fa5de2c5247181d"
+      },
+      {
+        "file": "000028_late_payment_review_lifecycle.down.sql",
+        "version": 28,
+        "sha256": "3c9d8b5a4d24b707ca15e22a82711e6bbc1e1e87ec097c86c33e506ea171e18c"
+      },
+      {
+        "file": "000028_late_payment_review_lifecycle.up.sql",
+        "version": 28,
+        "sha256": "041aa69914358d2f5f6bd4c686002ba218cafdf393af02afaaf42043657b0f97"
+      },
+      {
+        "file": "000029_payment_anomaly_reconciliation.down.sql",
+        "version": 29,
+        "sha256": "00288dc0ba23cdad81973fc96fe50a2508fb1539b080357a980a294a078b4164"
+      },
+      {
+        "file": "000029_payment_anomaly_reconciliation.up.sql",
+        "version": 29,
+        "sha256": "849e4ae4ff57132486992216005fc56a3f9a06c31a3cc84bc14c60c5fbe9bedb"
+      },
+      {
+        "file": "000030_account_closed_grants.down.sql",
+        "version": 30,
+        "sha256": "dd47913366453ec2ed14f1d6f3fc77463f051714e4aee2b436eaba18d807fc78"
+      },
+      {
+        "file": "000030_account_closed_grants.up.sql",
+        "version": 30,
+        "sha256": "d755e44ed179ad5c5f7fe6ad643d2d7a117d5850cac9bbd6334373bbf6b45fdb"
+      }
+    ],
+    "payment-simulator": [
+      {
+        "file": "000001_foundation.down.sql",
+        "version": 1,
+        "sha256": "0eeb0717096a21cb5f0009c9594a1565dfae7ce3dac761d30300c60db6e5c3f9"
+      },
+      {
+        "file": "000001_foundation.up.sql",
+        "version": 1,
+        "sha256": "e4bfa3768d3efbdbe37e20bcbf29e0cc45e0c86b6a962360a8d83ca3d7d1c054"
+      },
+      {
+        "file": "000002_payment_simulator.down.sql",
+        "version": 2,
+        "sha256": "ceb9ba7772f16c05565553072f6dee56d35f9afec8ee5b7b93de815a83e1f64d"
+      },
+      {
+        "file": "000002_payment_simulator.up.sql",
+        "version": 2,
+        "sha256": "f140bb7e96b92ec455abe28460324a6bd6508a5e57df6e4086b76792749ee4aa"
+      },
+      {
+        "file": "000003_refunds_and_bills.down.sql",
+        "version": 3,
+        "sha256": "dfc5217134ad607c218509595ebc64c78b6f795533dbc21c2af3219b5d534593"
+      },
+      {
+        "file": "000003_refunds_and_bills.up.sql",
+        "version": 3,
+        "sha256": "1d913da8934e9796dcba902fdad6c2c3613a7a0a5169569ad9a97c94f8f6a2b7"
+      },
+      {
+        "file": "000004_exact_notification_payload.down.sql",
+        "version": 4,
+        "sha256": "e2f75dafed9183f2d92b131b1e60517e7d44cf0c9732896f9d7792b9f8f2619b"
+      },
+      {
+        "file": "000004_exact_notification_payload.up.sql",
+        "version": 4,
+        "sha256": "ac40233dbc9bd6f7a1d04df3f3673b270945fee9251620a751d384a9f035cac1"
+      }
+    ],
+    "token": [
+      {
+        "file": "000001_foundation.down.sql",
+        "version": 1,
+        "sha256": "694f148cedb118328e90ee64d56d747f98819e13455eb4ab13f1f49ad644b4a9"
+      },
+      {
+        "file": "000001_foundation.up.sql",
+        "version": 1,
+        "sha256": "8d9b0e0a9a025079fb0c3549b19fde8d15bba429199756c1fb3696427d5b6530"
+      },
+      {
+        "file": "000002_token_domain.down.sql",
+        "version": 2,
+        "sha256": "53ec51ea986293088294a20c181bb04d339f65d279df2dfeb198a7b0fa25a528"
+      },
+      {
+        "file": "000002_token_domain.up.sql",
+        "version": 2,
+        "sha256": "ab5175d41e0627cc5d7a8227ccc055b93ec4cc4be09ed857dcdd7455dfaa1fb1"
+      },
+      {
+        "file": "000003_token_management_audit.down.sql",
+        "version": 3,
+        "sha256": "f58dde2cd385347dff75d09b9c479e17dd483cbdfe5cfb414e08213b80116ce2"
+      },
+      {
+        "file": "000003_token_management_audit.up.sql",
+        "version": 3,
+        "sha256": "0c785bf4c2f92f34e283e392b9a552ea34d2f7857975727d2416f5c3b6b4bf3c"
+      },
+      {
+        "file": "000004_event_delivery.down.sql",
+        "version": 4,
+        "sha256": "40473a08b1e36dbab9985b192599af7e38e2a5ec70dab32482c79725e93ecd89"
+      },
+      {
+        "file": "000004_event_delivery.up.sql",
+        "version": 4,
+        "sha256": "e75bccd8da580606c7d4800f19267aa930ea08c97cc1b3b58a2d7806d6cea90b"
+      },
+      {
+        "file": "000005_platform_managed_routes.down.sql",
+        "version": 5,
+        "sha256": "58be33664d79125fe58b26eb7d96e16382991dc6b69b0cfb52df9b98d0052e3c"
+      },
+      {
+        "file": "000005_platform_managed_routes.up.sql",
+        "version": 5,
+        "sha256": "8f883d69bd354f3df610cbec935620147c10d2953a43b1306da9b912532e014c"
+      },
+      {
+        "file": "000006_usage_reconciliation.down.sql",
+        "version": 6,
+        "sha256": "5fea6a6d5473a6673808b218e42a7942926dad5756bc15d163ab06253f153da4"
+      },
+      {
+        "file": "000006_usage_reconciliation.up.sql",
+        "version": 6,
+        "sha256": "fbe6f72000c39b0eb730a28c297f8336655fa084f48ebf2309388cad96f4e52b"
+      },
+      {
+        "file": "000007_gateway_operations.down.sql",
+        "version": 7,
+        "sha256": "e0eeb8bdf985867d519bee2116f58a6ffad0e33bf9fb1fba513f5251ec9caf34"
+      },
+      {
+        "file": "000007_gateway_operations.up.sql",
+        "version": 7,
+        "sha256": "edf07b129b426eaca42ff452c77b8f835754071c05263de89ba895fca89c66c0"
+      },
+      {
+        "file": "000008_organization_lifecycle.down.sql",
+        "version": 8,
+        "sha256": "f7238ab3f21eeb95df0eac6ec66ff8c0b6380adc10cffcf42f2273048d973f3e"
+      },
+      {
+        "file": "000008_organization_lifecycle.up.sql",
+        "version": 8,
+        "sha256": "eb4fa4e06482ca9a29e8d9eb95d0b83a07e12d1c9771a0afed7174713b5268a5"
+      },
+      {
+        "file": "000009_organization_unit_blockers.down.sql",
+        "version": 9,
+        "sha256": "3808826093f96cde619ab7a9836925da286b478c77abe5f1f48a3d6c48164186"
+      },
+      {
+        "file": "000009_organization_unit_blockers.up.sql",
+        "version": 9,
+        "sha256": "ec8be96b67b071aeed1280a71c459465a935d0fddb5542edbf6f876935b8178f"
+      },
+      {
+        "file": "000010_protocol_formula_versions.down.sql",
+        "version": 10,
+        "sha256": "8d2e3d5efe27c742dd9580b14e392ae0a7724dd17b93db912916214d3d8c09b4"
+      },
+      {
+        "file": "000010_protocol_formula_versions.up.sql",
+        "version": 10,
+        "sha256": "40a37eb1ab122daa40b27ba2554c1dcfda0b066ed174705be1adfc2164fa3734"
+      },
+      {
+        "file": "000011_gateway_adapter_neutrality.down.sql",
+        "version": 11,
+        "sha256": "0ae06c1a023e4afa6982f6a86234c9a54eeec903748ece2f2888f16a46a5b006"
+      },
+      {
+        "file": "000011_gateway_adapter_neutrality.up.sql",
+        "version": 11,
+        "sha256": "368c439e88cc3aafd1a173d049f68522c1b83013cb6c3abd65308f141e62fc90"
+      },
+      {
+        "file": "000012_model_catalog_lifecycle.down.sql",
+        "version": 12,
+        "sha256": "09ac8b24d9163faff505a464608602f0d96637029f8b201c6339cc0ef4b054c2"
+      },
+      {
+        "file": "000012_model_catalog_lifecycle.up.sql",
+        "version": 12,
+        "sha256": "dda62680bc527e56036b3c8e7d1c05efea45da8aa1f667676708f41e4f3cffe4"
+      },
+      {
+        "file": "000013_route_provisioning.down.sql",
+        "version": 13,
+        "sha256": "40f46c41dcfc933a680f9c0d4cc7a0c5a96e85356eec75dd09f431ea93ae0cfa"
+      },
+      {
+        "file": "000013_route_provisioning.up.sql",
+        "version": 13,
+        "sha256": "3a47b52f1258f67781cb123fafa86ec9dea4d2a03707ed57a14cc8f562d4996e"
+      },
+      {
+        "file": "000014_usage_execution_replay.down.sql",
+        "version": 14,
+        "sha256": "92cbc8a1f4d521008ec001aaa70f73a6a9c915fc32b13de56b7a6252c7e059a0"
+      },
+      {
+        "file": "000014_usage_execution_replay.up.sql",
+        "version": 14,
+        "sha256": "50a85bb91fc6e15c9a0630d1b28f4effd54d8550492a30c8b1cc371f267fa69a"
+      },
+      {
+        "file": "000015_usage_cancellation_convergence.down.sql",
+        "version": 15,
+        "sha256": "3c759ce74e539f5dcf63c0564d8f34487d8f9d2c329ca6db5c9de68825bf7a77"
+      },
+      {
+        "file": "000015_usage_cancellation_convergence.up.sql",
+        "version": 15,
+        "sha256": "59c817da9f5f1a7acf8651008e6da260de1ec03fdce86a003cc53a516ed500ed"
+      },
+      {
+        "file": "000016_client_readiness.down.sql",
+        "version": 16,
+        "sha256": "d9aeecb29706b1e11db1962815e738de870c1356fb153abe1ee7577a0f85bbe1"
+      },
+      {
+        "file": "000016_client_readiness.up.sql",
+        "version": 16,
+        "sha256": "c87acabfbc2f0048d50c8d58af1b5a9ecf2ce0cbe9789df90c92192e60a692c5"
+      }
+    ]
+  }
+}

@@ -121,6 +121,12 @@ func Up(ctx context.Context, connection *pgx.Conn, migrations []Migration) error
 	return nil
 }
 
+type Verification struct {
+	AppliedCount   int    `json:"applied_count"`
+	LatestVersion  int64  `json:"latest_version"`
+	LatestChecksum string `json:"latest_checksum"`
+}
+
 func normalizedChecksum(sql string) string {
 	return checksum(normalizeLineEndings(sql))
 }
@@ -179,6 +185,47 @@ func DownOne(ctx context.Context, connection *pgx.Conn, migrations []Migration) 
 		return tx.Commit(ctx)
 	}
 	return fmt.Errorf("applied migration %d is absent from filesystem", version)
+}
+
+// VerifyApplied proves that the database contains exactly the checked-in
+// forward migration history. It is intentionally run after Up so release
+// evidence cannot be produced from a partially migrated database.
+func VerifyApplied(ctx context.Context, connection *pgx.Conn, loaded []Migration) (Verification, error) {
+	rows, err := connection.Query(ctx, `SELECT version, checksum FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		return Verification{}, fmt.Errorf("query applied migration inventory: %w", err)
+	}
+	defer rows.Close()
+
+	applied := make(map[int64]string)
+	for rows.Next() {
+		var version int64
+		var migrationChecksum string
+		if err := rows.Scan(&version, &migrationChecksum); err != nil {
+			return Verification{}, fmt.Errorf("scan applied migration inventory: %w", err)
+		}
+		applied[version] = migrationChecksum
+	}
+	if err := rows.Err(); err != nil {
+		return Verification{}, fmt.Errorf("read applied migration inventory: %w", err)
+	}
+	if len(applied) != len(loaded) {
+		return Verification{}, fmt.Errorf("applied migration count %d does not match packaged count %d", len(applied), len(loaded))
+	}
+
+	verification := Verification{AppliedCount: len(applied)}
+	for _, migration := range loaded {
+		existing, ok := applied[migration.Version]
+		if !ok {
+			return Verification{}, fmt.Errorf("packaged migration %d is not applied", migration.Version)
+		}
+		if !checksumMatches(existing, migration.UpSQL) {
+			return Verification{}, fmt.Errorf("applied migration %d checksum does not match package", migration.Version)
+		}
+		verification.LatestVersion = migration.Version
+		verification.LatestChecksum = migration.Checksum
+	}
+	return verification, nil
 }
 
 func prepare(ctx context.Context, connection *pgx.Conn) error {

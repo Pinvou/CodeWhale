@@ -11,6 +11,9 @@
     "test:contracts": "node --test test/contract/*.test.mjs",
     "check:i18n-release": "node ../scripts/check-account-platform-i18n.mjs",
     "check:observability-release": "node ../scripts/check-account-platform-observability.mjs",
+    "check:migration-immutability": "node ../scripts/account-platform-migration-manifest.mjs",
+    "check:recovery-policy": "node ../scripts/account-platform-recovery-gate.mjs",
+    "check:production-recovery": "node ../scripts/account-platform-recovery-gate.mjs",
     "security:production-readiness": "node ../scripts/account-platform-production-security-gate.mjs",
     "test": "npm run lint:openapi && npm run test:contracts"
   },

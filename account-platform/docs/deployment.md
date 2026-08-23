@@ -101,6 +101,10 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 不要在原目录上直接覆盖源码。新版本在独立目录完成构建、迁移和验证后，再原子切换 `pinvou-account-platform-current`。
 
+每次正式迁移必须先运行 `node scripts/account-platform-migration-manifest.mjs check`，创建24小时内的一致性快照，并把不含凭据的快照 ID、完成时间和 SHA-256 注入迁移 Job；缺项会在连接数据库前失败。Job 成功后还要归档 `migration.post_verification` 摘要及四库只读审计结果。新增迁移只能运行 `node scripts/account-platform-migration-manifest.mjs append` 追加更高版本，禁止编辑、删除或重命名清单内历史文件。
+
+正式流量开放前运行 `npm --prefix account-platform run check:production-recovery -- <evidence.json>`。该证据必须来自实际备份系统和隔离恢复演练，覆盖资金60秒/配置300秒 RPO、核心60分钟/非关键4小时 RTO、连续WAL、日增量、周全量、TLS/AES-256、独立KMS、异地不可变副本、月/季/年演练以及三年财务证据/90天普通日志的到期清除收据；仓库默认值和模板不能替代证据。
+
 ## 5. 前置条件
 
 - Linux 主机、Docker Engine 和 Compose Plugin。

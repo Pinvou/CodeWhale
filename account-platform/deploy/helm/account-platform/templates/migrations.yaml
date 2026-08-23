@@ -28,6 +28,14 @@ spec:
           args: ["--dir", "/migrations/{{ $domain }}"]
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
           env:
+            - name: PINVOU_DEPLOYMENT_ENVIRONMENT
+              value: {{ $root.Values.global.environment | quote }}
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $domain }}-service-database-url } }
+            - name: MIGRATION_BACKUP_EVIDENCE_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: migration-backup-evidence-id, optional: true } }
+            - name: MIGRATION_BACKUP_COMPLETED_AT
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: migration-backup-completed-at, optional: true } }
+            - name: MIGRATION_BACKUP_SHA256
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: migration-backup-sha256, optional: true } }
 {{- end }}

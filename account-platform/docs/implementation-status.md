@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 282`、`部分实现 17`、`未实现 30`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 282`、`部分实现 22`、`未实现 25`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -66,8 +66,9 @@
 | `I18N-RELEASE-GATE` | 桌面账号弹层、Web 个人中心和管理后台的精确三语词条对称、空值、单语硬编码、原始错误回显及 Portal 构建制品检查 | 缺键/多键/空词条、单语 JSX/属性、后端 message 回退与制品缺词条负向合同通过；发布命令与全量 verify 均串联该门禁 |
 | `PRODUCTION-SECURITY-GATE` | 生产 Ingress TLS、ExternalSecret KMS/Vault 来源、远程包络加密、持久 `key_id` 双读、全密文分批重加密、轮换 readiness 与旧 Key 停用验收 | Go 轮换/历史 Key 单测、Helm schema/ExternalSecret 负向合同和 TLS/KMS 环境门禁合同通过；无真实域名证书、SecretStore、KMS Key 轮换或部署版本证据 |
 | `OBSERVABILITY-RELEASE-GATE` | 稳定 JSON 日志 schema 与字段白名单、秘密标记丢弃、Request ID 校验/传播、HTTP/NATS/后台 Trace、健康分层、独立低基数指标与 Exemplar | Go 注入/关联/健康/指标单测、负向源码门禁与合同测试通过；真实 OTLP/Prometheus/日志采集和三组件 Trace 查询待部署验收 |
+| `RECOVERY-RELEASE-GATE` | 历史迁移规范化 SHA-256 只追加清单、生产迁移前快照和迁移后数据库摘要、分级 RPO/RTO、加密不可变备份、演练时效及分类删除收据 | Go/Node 正负向测试和全量发布门禁通过；真实四库备份、隔离恢复、月季年演练和删除收据待外部环境验收 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/118 个合同测试、任务覆盖、i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/120 个合同测试、任务覆盖、迁移/恢复/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -265,11 +266,11 @@
 | NFR-31 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少十万有效 Hold 及持续/突发事务容量与锁等待验收 |
 | NFR-32 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少百万订单/三百万流水数据规模及下单/证据归并吞吐验收 |
 | NFR-33 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少百万事件积压容量、排空速度及高水位停止高风险写入门禁 |
-| NFR-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少资金事实1分钟、账号配置5分钟的分级 RPO 验证 |
-| NFR-35 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少核心60分钟、非关键4小时的分级 RTO 验证 |
-| NFR-36 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少持续日志归档、日增量/周全量、加密、密钥分离及异地不可变备份闭环 |
-| NFR-37 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少月度抽样、季度端到端和年度灾难恢复演练及整改复测 |
-| NFR-38 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少支付/账本/审计/用量三年、普通日志90天及到期清除证明的分类策略 |
+| NFR-34 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 资金60秒、账号配置300秒目标已进入机器策略并以四库WAL时效和实测恢复事实失败关闭；缺真实生产等价恢复报告 |
+| NFR-35 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 核心3600秒、非关键14400秒目标及安全降级口径已进入证据门禁；缺真实故障计时和能力验收 |
+| NFR-36 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 连续WAL、日增量、周全量、迁移前快照、TLS/AES-256、KMS分离和异地不可变副本均为强制证据；缺真实备份系统配置与可恢复证明 |
+| NFR-37 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 月度35天、季度100天、年度400天新鲜度以及失败整改复测已进入门禁和演练模板；缺真实月季年演练记录 |
+| NFR-38 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 支付证据/账本/审计/计费用量1095天、普通日志90天及30天清除SLA已机器化，并强制逐类扫描收据；缺真实归档、法律保全和删除运行证据 |
 | NFR-39 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少登录按IP/设备/标识/用户/会话的统一限流和反枚举验证 |
 | NFR-40 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有手机号60秒与小时限制基础，缺少IP/设备/用途/日上限及统一Provider配额门禁 |
 | NFR-41 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少支付按付款人/受益组织/IP/订单/动作/Provider的多维限流 |
@@ -404,8 +405,8 @@
 | NFR-06 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约 |
 | NFR-07 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 三服务具备事务 Outbox/Inbox、至少一次 Relay、死信和人工重放；业务最终收敛依赖死信处置且多项 Saga 缺失 |
 | NFR-08 | 已实现 | DOC_CURRENT | GO-UNIT; GLOBAL-CONTEXT | NOT_DEPLOYED | 用户级 context_version 数据库单调保护，切换要求 expected_context_version；响应头跨 Account、Token、Portal 与桌面桥接传播，客户端只接受更高版本并刷新缓存 |
-| NFR-09 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 迁移按服务版本化且 up/down 成对并受合同检查；缺已执行迁移不可修改门禁及环境级迁移前后证明 |
-| NFR-10 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有备份恢复、切换回滚 runbook 和版本目录约定；无实际备份、恢复演练和部署验收证据 |
+| NFR-09 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 仓库清单拒绝历史迁移改名/删除/改写且仅追加更高版本，目标库再次校验已执行SHA；生产迁移强制24小时内快照并输出迁移后摘要，缺真实环境证据 |
+| NFR-10 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 版本目录、恢复/回滚runbook、只读核验SQL及生产证据门禁已闭环；缺实际备份恢复和周期演练报告 |
 | NFR-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移 |
 | NFR-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 内部服务主要共享长期 INTERNAL_SERVICE_TOKEN，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权 |
 | NFR-13 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 注销在 Identity 不可认证证明后立即随机去标识化直接资料并释放用户名/手机号，法律记录只按永久内部主体引用保留；三年分类记录支持法律保全并由 worker 到期标记清除完成。 |
@@ -814,8 +815,8 @@
 | NFR-06 | 幂等 | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约。 |
 | NFR-07 | 最终一致性 | 三服务具备事务 Outbox/Inbox、至少一次 Relay、死信和人工重放；业务最终收敛依赖死信处置且多项 Saga 缺失。 |
 | NFR-08 | 全局上下文一致性 | 已实现用户级唯一上下文、数据库单调版本、期望版本 CAS、标准响应头和桌面/Web 缓存失效；生产多端并发仍待部署验证。 |
-| NFR-09 | 数据迁移 | 迁移按服务版本化且 up/down 成对并受合同检查；缺已执行迁移不可修改门禁及环境级迁移前后证明。 |
-| NFR-10 | 可恢复性 | 已有备份恢复、切换回滚 runbook 和版本目录约定；无实际备份、恢复演练和部署验收证据。 |
+| NFR-09 | 数据迁移 | 历史迁移清单只允许追加更高版本，运行时复核数据库校验和；生产迁移强制快照凭证与迁移后实际摘要，待真实环境验收。 |
+| NFR-10 | 可恢复性 | 版本目录、恢复/回滚步骤、只读核验和生产证据门禁已建立；实际备份恢复和周期演练仍为外部阻塞。 |
 | NFR-11 | 高可用 | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移。 |
 | NFR-12 | 工作负载身份 | 内部服务主要共享长期 `INTERNAL_SERVICE_TOKEN`，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权。 |
 | NFR-13 | 个人信息去标识化与保留 | 已实现 Identity 删除证明后的随机墓碑和标识释放；用户 ID/编码与法定内部引用保留，三年分类记录、法律保全开关及到期自动清除状态独立持久化。 |
@@ -839,11 +840,11 @@
 | NFR-31 | Hold 容量 | 未实现：尚无100,000有效Hold、200次/秒稳态、500次/秒突发和组成守恒/锁等待压测。 |
 | NFR-32 | 订单容量 | 未实现：尚无百万订单、三百万流水和50次/秒下单、200次/秒证据归并压测。 |
 | NFR-33 | 事件积压容量 | 未实现：尚无每关键流百万待消费事件保留、十万积压15分钟排空和高水位门禁证明。 |
-| NFR-34 | 分级 RPO | 未实现：现有单机部署未证明资金事实1分钟及账号/策略5分钟恢复点。 |
-| NFR-35 | 分级 RTO | 未实现：现有部署未证明核心服务60分钟及非关键能力4小时恢复。 |
-| NFR-36 | 备份频率与加密 | 未实现：需配置持续日志、日增量、周全量、发布前快照、TLS/静态加密、KMS分离和异地不可变副本。 |
-| NFR-37 | 恢复演练 | 未实现：需建立月度抽样、季度端到端、年度整机/可用区丢失演练和30天整改复测记录。 |
-| NFR-38 | 分类保留与清除 | 未实现：当前缺少统一策略及自动清除证明；不得仅凭数据库仍存在历史数据视为满足三年保留。 |
+| NFR-34 | 分级 RPO | 部分实现：60秒资金域/300秒配置域策略和失败关闭证据校验已完成，缺真实生产等价恢复事实。 |
+| NFR-35 | 分级 RTO | 部分实现：核心60分钟/非关键4小时计时及安全降级门禁已完成，缺实际演练计时。 |
+| NFR-36 | 备份频率与加密 | 部分实现：持续WAL、日增量、周全量、迁移快照、加密、KMS分离和异地不可变副本已纳入发布证据，缺外部备份系统验收。 |
+| NFR-37 | 恢复演练 | 部分实现：月/季/年时效、整改和复测模板及门禁已完成，缺实际连续演练记录。 |
+| NFR-38 | 分类保留与清除 | 部分实现：统一机器策略和逐类删除收据门禁已完成，缺真实三年归档、90天日志与法律保全清除证据。 |
 | NFR-39 | 登录多维限流 | 未实现：需增加IP、设备、账号标识、稳定用户和Session维度及失败渐进延迟/临时锁定。 |
 | NFR-40 | 短信多维限流 | 部分实现、待扩展：现有手机号频率限制需补日上限、IP、设备、用途、Provider配额和统一retry_after。 |
 | NFR-41 | 支付多维限流 | 未实现：需增加付款人、受益组织、IP、订单、查询/退款动作及合法回调独立容量控制。 |
