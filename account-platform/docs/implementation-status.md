@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 261`、`部分实现 28`、`未实现 40`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 270`、`部分实现 26`、`未实现 33`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -59,6 +59,7 @@
 | `USAGE-EXECUTION-REPLAY` | 稳定用户级键摘要、版本化规范指纹、Hold/派发持久状态、一次性派发租约、加密流事件/结果、Last-Event-ID 重放及24小时/30天/90天分层清理 | Go 全量单元测试、OpenAPI lint、重放结构合同和静态验证通过；数据库运行级崩溃/断线/KMS故障注入待部署，注销调用与备份清除分别由 APT-015/APT-037 接入 |
 | `USAGE-CANCELLATION-CONVERGENCE` | 原稳定用户幂等取消、派发前 Hold 全释放、派发后交付隔离、Adapter 取消能力、可信实际用量、版本化核对期限、损失复核及幂等人工重试 | Go 全量单元测试、OpenAPI lint、取消结构合同、桌面/Portal 构建和静态验证通过；真实 PostgreSQL 竞态、Provider 用量延迟、断线和故障注入待部署 |
 | `TOKEN-OPERATIONS-ISOLATION` | 平台 Token Account 创建/启停、PLATFORM 资源过滤、组织角色默认拒绝、凭据元数据最小化及统一脱敏检查结果 | Go 单元测试、OpenAPI lint、平台 Token 运营隔离合同、三语 Portal 构建和静态验证通过；数据库运行级迁移及真实 Provider 凭据检查待部署 |
+| `ACCOUNT-CLOSURE-CLEANUP` | 主体生命周期隔离、资料/Commerce/邀请自动收敛、Identity 删除、原标识释放、永久 ID/编码墓碑、三年保留策略，以及组织授予隔离与合规整笔回收 | Account/Billing/Token/Portal Go 单元测试、OpenAPI lint、注销清理合同、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Identity/Commerce 故障注入和三年时钟推进待部署 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
@@ -116,11 +117,11 @@
 | ACC-43 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | Billing 评估同时检查未解决拒付、个人钱包余额和未清应收，任一未收敛即保持 FINANCIAL_CLEARANCE 阻断 |
 | ACC-44 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | 开放/复核中的资金性支付对账案件阻断；既有明确纯信息 `UNSUPPORTED_PROVIDER_ENTRY` 不阻断，案件证据和受控结案链保留 |
 | ACC-45 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA | NOT_DEPLOYED | 支付处理中、关单请求、外部待确认、失败关单、晚到支付复核及 PROVIDER_BLIND 均进入稳定注销阻断项 |
-| ACC-46 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少 Commerce Mapping 任务分类、取消和主体生命周期版本防迟到回写 |
-| ACC-47 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销时资料修改 Saga 自动取消或向前收敛规则 |
-| ACC-48 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有所有者/最后有效超级管理员注销门禁、稳定 `LAST_ACTIVE_SUPER_ADMIN`、数据库同类停用/删除保护，以及通过门禁后撤销全部有效/未来角色、递增版本和清除 Account Session 的事务原语；APT-014 尚需把它接入持久注销 Saga 并在 Identity 清理前撤销 Refresh Token |
-| ACC-49 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少未接受邀请自动失效及标识复用隔离 |
-| ACC-50 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少 Identity 不可认证、自动清理完成和生命周期隔离组成的标识释放原子门禁 |
+| ACC-46 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | Commerce 任务保存真实主体生命周期版本；注销拒绝未收敛资金任务，取消资料类任务，完成/重试回写均以当前生命周期和 ACTIVE 主体双重失败关闭，Mapping 最终转为 DETACHED。 |
+| ACC-47 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | Identity 尚未更新的资料请求自动取消；已更新的请求先向前提交到同一用户，再进入取消和统一去标识化，预约随终态释放且不会生成第二个用户。 |
+| ACC-48 | 已实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 所有者和最后有效超级管理员仍须先交接；通过后清理事务撤销全部有效/未来平台及组织绑定、终止成员关系、递增授权与主体版本、清除 Account Session，并由 Identity 删除撤销全部远端认证会话。 |
+| ACC-49 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 当前、待生效标识命中的未接受邀请及由注销用户创建的未接受邀请统一进入 `CANCELLED_ACCOUNT_CLOSURE`，目标摘要、提示和一次性令牌被随机覆盖并保留不可变审计。 |
+| ACC-50 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 只有本地自动清理、Identity 幂等删除和 Billing 授予隔离均留有证明后，才在串行事务中校验主体版本、删除本地身份映射、DETACH Commerce、随机墓碑直接标识并写入 `ANONYMIZED` 与 Outbox；迟到旧版本不可回写。 |
 | ACC-51 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | 正式映射与全部活动预约由数据库唯一约束共同保护，Account 提交时在串行事务内重检 |
 | ACC-52 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | 发送前5分钟预约、核验后30分钟租约及 Identity 创建后无 TTL 恢复锁均已持久化并有确定释放规则 |
 | ACC-53 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | 服务端操作 ID 贯穿短信、Identity、Account 与钱包；请求指纹、Identity 密码 HMAC 绑定和稳定钱包幂等键拒绝同键异请求 |
@@ -181,8 +182,8 @@
 | BILL-36 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 数据库按权益包和组成强制原始额等于可用、Hold、已用、有效/暂停授予、过期及撤销桶之和，包聚合仅由触发器投影 |
 | BILL-37 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 授予事务校验组织钱包、权益包和精确组成归属，只从该组成可用桶转入活动授予桶；数据库同时强制授予自身和组成总额守恒 |
 | BILL-38 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 分配、撤回、成员 Hold、结算、释放和到期均锁定精确组成/授予事实；组织级幂等键保存版本化请求指纹，同键异请求稳定冲突，批量子项各自提交 |
-| BILL-39 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少账号注销后组织授予隔离、不自动回池、禁止恢复/普通撤回及未回收剩余量到期失效规则 |
-| BILL-40 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少账号去标识化后的授权管理员专用全额回收、资格校验、守恒事务、幂等边界和完整审计 |
+| BILL-39 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 注销以闭包请求和主体版本幂等隔离该用户全部有效/普通暂停授予为 `SUSPENDED/ACCOUNT_CLOSED`；不回池、不能恢复/消费/普通撤回，既有到期路径从暂停桶转入过期桶。 |
+| BILL-40 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 组织权限码保护单条及逐项批量回收；Billing 强校验 Account 已 `ANONYMIZED`、原包/组成、有效期、Hold 与资金冻结，以稳定指纹将全部当前剩余量从暂停桶原子移回原组成并写不可变命令、审计和 Outbox。 |
 | BILL-41 | 已实现 | AUDIT_HEAD | CODE-AUDIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 按请求时间唯一选择模型覆盖，无覆盖才选全局；缺失、歧义和不可用使用稳定错误 |
 | BILL-42 | 已实现 | AUDIT_HEAD | CODE-AUDIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 逐单位解析 FIXED_PRICE/INHERIT_GLOBAL，固定零价阻止回退并冻结最终来源 |
 | BILL-43 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 发布事务按定价空间串行锁定并执行区间冲突、ETag、幂等键和请求指纹校验；真实数据库并发待部署验证 |
@@ -305,7 +306,7 @@
 | ACC-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; COMMERCE-MAPPING; DESKTOP-UI | NOT_DEPLOYED | 新手机号绑定滑块和专用短信用途；Identity/Account 提交后递增当前 Commerce Mapping 版本并创建资料同步任务，旧版本迟到结果不能覆盖新映射。 |
 | ACC-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; DESKTOP-UI | NOT_DEPLOYED | 未登录入口对已知/未知手机号保持同形响应；短信成功后只向 Identity 传递不透明密码引用，Keycloak 重置密码并撤销全部会话，Account 同步清除 Session 投影。 |
 | ACC-10 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA; UI-LINT | NOT_DEPLOYED | 最近5分钟认证、精确确认和幂等键可创建唯一注销请求；所有权/最后有效超级管理员在静默前阻断，进入静默后由账务和 Token 强一致评估推进到自动清理边界，后续资料及标识清理由 ACC-46–ACC-50 独立约束。 |
-| ACC-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前管理员删除保留 UUID 并清除部分资料，但完整注销 Saga、用户名/手机号安全释放、三年分类保留和永久 `user_code` 墓碑均未实现。 |
+| ACC-11 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | Identity 删除确认后随机覆盖用户、资料请求、注册/短信和邀请直接标识，永久保留不可变 user_id/user_code；分类保留记录固定三年期限、法律保全例外及到期自动 PURGED 状态。 |
 | ACC-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
 | ACC-13 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | Account 持久化平台/组织角色、原子权限、组织/节点作用域和授权版本；服务端默认拒绝并按接口所需权限判定，客户端显示不作为授权依据 |
 | ACC-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 顶层组织创建位于平台管理 API/UI。 |
@@ -401,7 +402,7 @@
 | NFR-10 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有备份恢复、切换回滚 runbook 和版本目录约定；无实际备份、恢复演练和部署验收证据 |
 | NFR-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移 |
 | NFR-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 内部服务主要共享长期 INTERNAL_SERVICE_TOKEN，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权 |
-| NFR-13 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 管理员删除可清理部分资料和 Session；未完成 Identity 不可认证、用户名/手机号安全释放、三年分类保留及自动清除 |
+| NFR-13 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 注销在 Identity 不可认证证明后立即随机去标识化直接资料并释放用户名/手机号，法律记录只按永久内部主体引用保留；三年分类记录支持法律保全并由 worker 到期标记清除完成。 |
 | NFR-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 启动工厂按配置注入 `aliyun-managed` 或 `http-generated`；核心挑战状态机没有厂商条件，历史挑战保存 Provider ID 与 Adapter 版本 |
 | NFR-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | OIDC 仅证明 issuer、subject 和会话；Account 是平台/组织业务授权事实源，三业务服务均不再读取 Realm Role 决定后台权限 |
 | NFR-16 | 已实现 | DOC_CURRENT | GO-UNIT; COMMERCE-MAPPING; PAYMENT-PROVIDER-BOUNDARY; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | Commerce Mapping、商品映射、订单/流水/证据及公开 API 使用供应商中立字段并冻结 Provider/Adapter 版本；厂商 SKU、签名、状态和协议仅存在于 Adapter |
@@ -572,7 +573,7 @@
 | ACC-08 | 修改手机号 | 已实现 | 新手机号短信验证、重新认证、Identity/Account 提交和现有 Commerce 同步任务重置均已落地。 |
 | ACC-09 | 忘记密码 | 已实现 | 未登录手机号短信验证后由 Identity Adapter 重置密码并撤销会话；Account 不接触密码原文。 |
 | ACC-10 | 用户主动注销 | 已实现 | 最近5分钟认证、`CLOSE_MY_ACCOUNT` 明确确认和幂等键创建唯一持久请求；本地角色门禁、静默期和跨 Billing/Token 阻断已接通，资料/标识/组织授予的后续自动清理由 ACC-46–ACC-50 与 BILL-39/BILL-40 继续约束。 |
-| ACC-11 | 注销记录保留 | 未实现 | 当前管理员删除保留 UUID 并清除部分资料，但完整注销 Saga、用户名/手机号安全释放、三年分类保留和永久 `user_code` 墓碑均未实现。 |
+| ACC-11 | 注销记录保留 | 已实现 | 外部 Identity 删除后，Account 随机覆盖全部直接标识并释放用户名/手机号；user_id、user_code 和内部主体引用永久保留，三年分类保留及法律保全状态由独立记录和到期 worker 管理。 |
 | ACC-12 | 一个用户可属于多个组织 | 已实现 | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
 | ACC-13 | 角色系统按权限码和作用域管理 | 已实现 | Account 持久化并解析平台/组织角色、原子权限及组织/节点作用域，所有服务端授权默认拒绝。 |
 | ACC-14 | 个人用户不能创建顶层组织 | 已实现 | 顶层组织创建位于平台管理 API/UI。 |
@@ -602,11 +603,11 @@
 | ACC-43 | 未解决拒付阻断注销 | 已实现 | 未解决拒付、非零个人余额和未清应收共同阻断财务清算阶段，历史案件及资金证据不随请求删除。 |
 | ACC-44 | 资金性对账差异阻断注销 | 已实现 | 开放或复核中的支付/退款/拒付/账本差异默认阻断；明确纯信息且不关联内部支付事实的 Provider 不支持行可保留而不阻断。 |
 | ACC-45 | 外部待确认关单阻断注销 | 已实现 | 订单支付处理中、`CLOSE_REQUESTED`、`LOCALLY_CLOSED_EXTERNAL_PENDING`、失败关单、晚到复核和 `PROVIDER_BLIND` 全部进入跨域阻断快照。 |
-| ACC-46 | 注销处理 Commerce Mapping 任务 | 未实现 | 当前同步任务缺少资金/资料分类和主体生命周期版本，迟到同步可能在 Mapping DETACHED 或标识复用后回写。 |
-| ACC-47 | 注销自动收敛资料修改 Saga | 未实现 | 当前没有区分 Identity 更新前取消与更新后向前收敛，也未证明预约能安全释放且不会产生第二个业务用户。 |
-| ACC-48 | 注销自动撤销角色与临时授权 | 部分实现 | Account 已提供所有者/最后管理员门禁和统一撤销平台、组织、未来、临时/紧急授权的事务原语，并递增授权/用户版本和删除 Account Session；APT-014 仍需接入注销 Saga、Identity Refresh Token 撤销和跨域恢复。 |
-| ACC-49 | 注销自动失效未接受邀请 | 未实现 | 当前邀请没有 ACCOUNT_CLOSURE 终态，也未阻止复用手机号/用户名的新账号接受旧邀请。 |
-| ACC-50 | 注销标识释放门禁 | 未实现 | 当前没有在 Identity 不可认证、自动清理完成、Mapping DETACHED 和生命周期防迟到写之间建立原子门禁。 |
+| ACC-46 | 注销处理 Commerce Mapping 任务 | 已实现 | 真实主体生命周期版本进入每个任务；资料类任务自动取消，资金任务必须收敛，旧版本完成/失败证据只能标记 STALE，Mapping 在匿名化事务中 DETACHED。 |
+| ACC-47 | 注销自动收敛资料修改 Saga | 已实现 | Identity 更新前的请求直接取消；更新后的请求先提交到同一用户再取消，随后旧值、新值、预约证据统一随机去标识化。 |
+| ACC-48 | 注销自动撤销角色与临时授权 | 已实现 | 通过所有者和最后管理员门禁后，清理事务撤销全部当前/未来角色与授权、终止成员关系、递增版本、清除本地 Session，随后幂等删除 Identity 主体及 Refresh Token。 |
+| ACC-49 | 注销自动失效未接受邀请 | 已实现 | 当前/待生效标识命中或由注销主体创建的 PENDING 邀请统一取消，摘要、提示和令牌随机覆盖；终态与审计永久保留且新账号不能接受。 |
+| ACC-50 | 注销标识释放门禁 | 已实现 | 资料/邀请/Commerce/角色/成员清理、Identity 删除和 BILL-39 隔离均提交后，Account 才按主体版本原子写随机墓碑、DETACHED、DELETED、ANONYMIZED 与 Outbox。 |
 | ACC-51 | 注册最终唯一约束 | 已实现 | 正式用户名/手机号映射与全部活动预约均有数据库唯一约束，Account 提交在串行事务内重检最终事实。 |
 | ACC-52 | 注册唯一值分阶段预约 | 已实现 | 发送短信前5分钟预约、短信验证后30分钟租约和 Identity 创建后无 TTL 恢复锁均已落库，终态释放规则明确。 |
 | ACC-53 | 注册操作稳定幂等 | 已实现 | 服务端操作 ID 贯穿短信、Identity、Account 和钱包；非秘密请求指纹、Identity 密码 HMAC 及稳定下游键拒绝同键异请求。 |
@@ -686,8 +687,8 @@
 | BILL-36 | 权益组成资金守恒 | 已实现 | 数据库按权益包/组成强制原始额在可用、Hold、已用、有效/暂停授予、过期和撤销桶间守恒，包汇总由触发器投影。 |
 | BILL-37 | 权益组成禁止超额授权 | 已实现 | 授予只从同组织钱包、同包、同 BASE/BONUS 组成的可用桶转出；授予与组成均由数据库守恒约束保护。 |
 | BILL-38 | 并发分配锁与幂等边界 | 已实现 | 分配、撤回、成员 Hold、结算、释放和到期共用精确组成/授予行锁；同键异请求稳定冲突，批量逐项派生稳定子键并独立提交。 |
-| BILL-39 | 注销授予隔离至到期 | 未实现 | 当前没有区分普通成员移除的可恢复暂停与账号注销的 `ACCOUNT_CLOSED` 隔离暂停，也没有强制不自动回池、不可恢复/普通撤回、未回收部分到期失效及新用户 ID 不继承。 |
-| BILL-40 | 注销授予可选全额回收 | 未实现 | 当前没有账号 `ANONYMIZED` 后的专用授权回收命令，也没有对消费、Hold、待核对用量、资金冻结、全额边界、原组成守恒、幂等、批量部分成功与完整审计的强制校验。 |
+| BILL-39 | 注销授予隔离至到期 | 已实现 | `ACCOUNT_CLOSED` 与普通 `MEMBER_REMOVED` 分离；隔离保持原用户、包、组成、余额和到期日，占用暂停桶且不能恢复、消费或普通撤回，到期只转过期桶。 |
+| BILL-40 | 注销授予可选全额回收 | 已实现 | 授权组织管理员在 Account 强一致证明 `ANONYMIZED` 后，可对无 Hold/冻结且未过期的关闭授予执行一次性全剩余回收；单条及批量逐项具备稳定指纹、原组成守恒、不可变审计和 Outbox。 |
 | BILL-41 | 模型覆盖价优先匹配 | 已实现 | 按请求时间唯一选择模型覆盖，无覆盖才选择全局，并统一 PRICE_MISSING/PRICE_AMBIGUOUS/PRICE_UNAVAILABLE。 |
 | BILL-42 | 计量单位显式继承解析 | 已实现 | 逐单位 FIXED_PRICE/INHERIT_GLOBAL、同时间全局来源、固定零价和最终来源快照均已实现。 |
 | BILL-43 | 未来价格区间冲突拒绝 | 已实现 | 同定价空间发布使用事务锁、ETag、幂等指纹和区间冲突校验；真实 PostgreSQL 并发执行待部署验证。 |
@@ -811,7 +812,7 @@
 | NFR-10 | 可恢复性 | 已有备份恢复、切换回滚 runbook 和版本目录约定；无实际备份、恢复演练和部署验收证据。 |
 | NFR-11 | 高可用 | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移。 |
 | NFR-12 | 工作负载身份 | 内部服务主要共享长期 `INTERNAL_SERVICE_TOKEN`，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权。 |
-| NFR-13 | 个人信息去标识化与保留 | 管理员删除可清理部分资料和 Session；未完成 Identity 不可认证、用户名/手机号安全释放、三年分类保留及自动清除。 |
+| NFR-13 | 个人信息去标识化与保留 | 已实现 Identity 删除证明后的随机墓碑和标识释放；用户 ID/编码与法定内部引用保留，三年分类记录、法律保全开关及到期自动清除状态独立持久化。 |
 | NFR-14 | 短信供应商可替换性 | `SMSProvider` 由启动工厂按配置注入，核心状态机无厂商分支；支持 `aliyun-managed` 与 `http-generated`，并保存 Provider ID 和 Adapter 版本。 |
 | NFR-15 | 身份与授权分离 | OIDC 只证明主体与会话；Account 决定平台和组织业务权限，业务路由不再依赖 Identity Provider 角色 Claim。 |
 | NFR-16 | Commerce Provider 可替换性 | 已实现：Commerce Mapping、商品映射、订单/流水/证据及公开 API 均使用供应商中立语义并冻结 Provider/Adapter 版本，厂商字段只存在于 Adapter。 |

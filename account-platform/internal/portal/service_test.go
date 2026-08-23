@@ -262,7 +262,7 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 	organizationID := uuid.Must(uuid.NewV7()).String()
 	grantID := uuid.Must(uuid.NewV7()).String()
 	orderID := uuid.Must(uuid.NewV7()).String()
-	if !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/recharge/orders") || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/quota-grants") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants:batch") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants/"+grantID+"/revoke") {
+	if !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/recharge/orders") || !tokenPathAllowed(http.MethodGet, "/v1/organizations/"+organizationID+"/quota-grants") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants:batch") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/quota-grants/"+grantID+"/revoke") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/account-closed-grants/"+grantID+"/reclaim") || !tokenPathAllowed(http.MethodPost, "/v1/organizations/"+organizationID+"/account-closed-grants:reclaim-batch") {
 		t.Fatal("organization billing paths must be allowlisted")
 	}
 	if !tokenPathAllowed(http.MethodGet, "/v1/me/balance") || !tokenPathAllowed(http.MethodGet, "/v1/me/usage-requests") || !accountPathAllowed(http.MethodGet, "/v1/me") {

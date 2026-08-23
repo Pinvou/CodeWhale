@@ -2,7 +2,7 @@
 
 > 状态：当前实现基线
 >
-> 校准日期：2026-08-23
+> 校准日期：2026-08-24
 >
 > 说明：本文描述业务调用顺序和失败收敛方式；具体字段以 `contracts/openapi/` 和事件 Schema 为准。
 >
@@ -14,8 +14,11 @@
 2. Account 在串行化事务中检查组织所有权和最后有效超级管理员。存在阻断时请求保持 `CLOSURE_REQUESTED/BLOCKED`，用户仍为 ACTIVE，可完成所有权或管理员交接。
 3. 本地角色门禁通过后，Account 原子写入 `QUIESCING` 并将用户置为 `CLOSING`；普通 Account 授权和 Token 新业务统一返回 `ACCOUNT_CLOSING`，只读历史及既有订单/用量修复走显式白名单。
 4. Worker 使用租约认领请求，分别调用 Billing 与 Token 的服务身份评估接口，保存脱敏阻断快照。任何评估不可用都按退避重试，不能按“无阻断”处理。
-5. 所有账务和用量阻断清除后进入 `IDENTITY_CLEANUP`。Identity、资料、Commerce、邀请、组织授予和标识墓碑由后续清理阶段继续，当前实现不会提前宣称注销完成。
-6. 超过 SLA 的请求进入 `REPAIR_REQUIRED`；管理员只能用独立权限和幂等命令重试当前阶段，不能强制完成或恢复管理员直删入口。
+5. 所有账务和用量阻断清除后进入 `IDENTITY_CLEANUP`。Account 先递增主体生命周期，撤销角色、成员关系和 Session，取消或向前归并资料 Saga、未接受邀请及非资金 Commerce 任务；资金 Commerce 任务未收敛时继续失败关闭。旧生命周期的 Commerce 迟到结果只能记为 `STALE` 证据。
+6. Worker 幂等删除该用户的全部远端 Identity 主体，并调用 Billing 将全部有效或普通暂停的组织授予隔离为 `SUSPENDED/ACCOUNT_CLOSED`。任一远端副作用没有持久完成证明时均不进入去标识化。
+7. 两项证明齐备后，Account 在单一事务中删除本地 Identity 映射、分离 Commerce Mapping、随机墓碑化可复用用户名和手机号，并将永久 `user_id`、`user_code` 和三年法律记录留在 `DELETED` 主体上；同一事务写出 `account.user.anonymized.v1`，阶段进入 `ANONYMIZED`。
+8. Relay 确认匿名化事件已发布后才将 Saga 标记为 `COMPLETED`。超过 SLA 的请求进入 `REPAIR_REQUIRED`；管理员只能用独立权限和幂等命令重试当前阶段，不能强制完成或恢复管理员直删入口。
+9. `ACCOUNT_CLOSED` 授予不能恢复、消费或普通撤回。账号达到 `ANONYMIZED` 后，具备 `organization.grant.reclaim_closed` 的组织管理员可对无冻结的单条授予幂等回收其全部当前剩余量至原权益包原 BASE/BONUS 组成；批量请求逐项独立处理，不接受客户端指定金额。
 
 ## 1. 入口与凭据
 

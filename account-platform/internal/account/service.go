@@ -76,6 +76,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.POST("/authorization/check", httpserver.AdaptFunc(s.checkPermission))
+	internal.GET("/users/:user_id/account-closure-state", httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.POST("/approval-requests/:approval_request_id/executions", approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))
 	internal.POST("/approval-requests/:approval_request_id/executions/complete", approvalpolicy.Require("APPROVAL_EXECUTION_COMPLETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.completeApprovalExecution))
 	if s.mobileAuth != nil {

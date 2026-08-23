@@ -96,3 +96,24 @@ func (s *Service) adminRetryAccountClosure(w http.ResponseWriter, r *http.Reques
 	}
 	api.WriteJSON(w, http.StatusOK, item)
 }
+
+func (s *Service) internalAccountClosureState(w http.ResponseWriter, r *http.Request) {
+	userID, err := uuid.Parse(r.PathValue("user_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid user identifier", httpserver.RequestID(r.Context()))
+		return
+	}
+	repository, ok := s.repository.(interface {
+		AccountClosureState(context.Context, uuid.UUID) (string, int64, error)
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ACCOUNT_CLOSURE_UNAVAILABLE", "account closure state is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	stage, lifecycleVersion, err := repository.AccountClosureState(r.Context(), userID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"stage": stage, "subject_lifecycle_version": lifecycleVersion})
+}

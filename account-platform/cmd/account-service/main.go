@@ -78,6 +78,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	identities, err := account.NewHTTPIdentityProvisioner(os.Getenv("IDENTITY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	service := account.NewService(repository, wallets).
 		WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN")).
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
@@ -86,7 +90,7 @@ func main() {
 	go account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run(ctx)
 	go account.NewRoleBindingExpiryWorker(repository, time.Minute).Run(ctx)
 	go account.NewApprovalExpiryWorker(repository, time.Minute).Run(ctx)
-	go account.NewAccountClosureWorker(repository, 5*time.Second, billingAccountClosure, tokenAccountClosure).Run(ctx)
+	go account.NewAccountClosureWorker(repository, 5*time.Second, billingAccountClosure, tokenAccountClosure).WithCleanup(identities, billingAccountClosure).Run(ctx)
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
 		if decodeErr != nil {
@@ -109,10 +113,6 @@ func main() {
 			},
 			HTTPGenerated: account.HTTPGeneratedSMSConfig{Endpoint: os.Getenv("SMS_HTTP_ENDPOINT"), BearerToken: os.Getenv("SMS_HTTP_BEARER_TOKEN"), VerificationKey: verificationKey, AllowInsecure: cfg.Environment == "development" || cfg.Environment == "test"},
 		})
-		if err != nil {
-			log.Fatal(err)
-		}
-		identities, err := account.NewHTTPIdentityProvisioner(os.Getenv("IDENTITY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
 		if err != nil {
 			log.Fatal(err)
 		}

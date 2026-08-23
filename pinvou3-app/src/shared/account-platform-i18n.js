@@ -123,3 +123,6 @@ Object.assign(accountPlatformCopy.ja, { closure:{ title:'アカウント削除',
 Object.assign(accountPlatformCopy.zh.closure, { updated:'最后更新时间' });
 Object.assign(accountPlatformCopy.en.closure, { updated:'Last updated' });
 Object.assign(accountPlatformCopy.ja.closure, { updated:'最終更新日時' });
+Object.assign(accountPlatformCopy.zh, { reclaimClosedQuota:'整笔回收注销账号剩余额度' });
+Object.assign(accountPlatformCopy.en, { reclaimClosedQuota:'Reclaim full closed-account remainder' });
+Object.assign(accountPlatformCopy.ja, { reclaimClosedQuota:'解約アカウントの残額を全額回収' });

@@ -123,6 +123,10 @@ type OrganizationBillingClient interface {
 	ReserveMemberQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, uuid.UUID) (BillingHold, error)
 }
 
+type AccountClosedGrantBillingClient interface {
+	ReclaimAccountClosedGrant(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string, string) (json.RawMessage, error)
+}
+
 func (c *HTTPBillingClient) Products(ctx context.Context) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodGet, "/v1/recharge/products", nil, "")
 }
@@ -157,6 +161,10 @@ func (c *HTTPBillingClient) AllocateOrganizationQuotaBatch(ctx context.Context, 
 
 func (c *HTTPBillingClient) RevokeOrganizationQuota(ctx context.Context, organizationID, grantID, actorUserID uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/quota-grants/"+grantID.String()+"/revoke", map[string]any{"actor_user_id": actorUserID, "reason": reason}, idempotencyKey)
+}
+
+func (c *HTTPBillingClient) ReclaimAccountClosedGrant(ctx context.Context, organizationID, grantID, actorUserID uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/account-closed-grants/"+grantID.String()+"/reclaim", map[string]any{"actor_user_id": actorUserID, "reason": reason}, idempotencyKey)
 }
 
 func (c *HTTPBillingClient) RechargeOrders(ctx context.Context, requesterID, walletID uuid.UUID) (json.RawMessage, error) {

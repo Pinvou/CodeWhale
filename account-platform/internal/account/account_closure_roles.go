@@ -58,8 +58,8 @@ WHERE m.user_id=$1 AND m.status IN ('ACTIVE','SUSPENDED') AND rb.revoked_at IS N
 }
 
 // RevokeAccountClosureRoleBindings atomically invalidates every effective and
-// scheduled binding after the closure gate passes. APT-014's closure saga calls
-// this before Identity cleanup and performs the external refresh-token revoke.
+// scheduled binding after the closure gate passes. It remains the reusable
+// primitive for callers outside the full cleanup preparation transaction.
 func (r *PostgresRepository) RevokeAccountClosureRoleBindings(ctx context.Context, userID uuid.UUID) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {

@@ -93,6 +93,7 @@ export class AccountPlatformDesktopClient {
   organizationQuotaGrants(organizationId, signal) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants`, { signal }); }
   allocateOrganizationQuota(organizationId, items, key) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants:batch`, { method: 'POST', idempotencyKey: key, body: { items } }); }
   revokeOrganizationQuota(organizationId, grantId, reason, key) { return this.request('token', `/v1/organizations/${organizationId}/quota-grants/${grantId}/revoke`, { method: 'POST', idempotencyKey: key, body: { reason } }); }
+  reclaimAccountClosedGrant(organizationId, grantId, reason, key) { return this.request('token', `/v1/organizations/${organizationId}/account-closed-grants/${grantId}/reclaim`, { method: 'POST', idempotencyKey: key, body: { reason } }); }
   recentRechargeOrder(signal) { return this.request('token', '/v1/recharge/orders/recent', { signal }); }
   rechargeOrders(signal) { return this.request('token', '/v1/recharge/orders', { signal }); }
   rechargeOrder(orderId, signal) { return this.request('token', `/v1/recharge/orders/${orderId}`, { signal }); }

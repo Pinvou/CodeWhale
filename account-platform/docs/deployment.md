@@ -263,6 +263,10 @@ node scripts/account-platform.mjs dev down
 
 账号注销资格与静默期上线执行 Account `000027_account_closure_saga`。滚动顺序必须先发布提供只读资格评估端点的 Billing 和 Token，再迁移并发布 Account，最后发布 Portal 与桌面制品；Account 继续通过现有 `BILLING_SERVICE_URL`、`TOKEN_SERVICE_URL` 和内部服务身份访问评估端点。上线后验证：最后组织所有者或最后有效超级管理员只会停留在静默期前且仍可完成交接；进入 `CLOSING` 后新支付、新权益与新模型调用统一返回 `ACCOUNT_CLOSING`，注销进度、历史查询及必要修复入口仍可用；任一领域不可用或存在阻断时请求保持持久化并按租约重试，运营只能提交带原因的幂等重试命令，不能跳过阻断。监控请求阶段、租约超时、阻断码、重试次数和 30 分钟 SLA。禁止恢复直接删除用户接口或通过 SQL 推进阶段。库中出现 `CLOSING` 用户、注销请求或不可变审计后禁止执行 down migration；故障时暂停 worker、保留查询与修复能力，待依赖恢复后从原阶段续跑。
 
+注销后半段清理与组织授予隔离上线执行 Account `000028_account_closure_cleanup` 和 Billing `000030_account_closed_grants`。先完成两库迁移，再发布具备 Account 注销状态校验和内部隔离/回收端点的 Billing，随后发布 Account，最后发布 Token、Portal 与桌面制品；这样 Account Worker 首次进入 `IDENTITY_CLEANUP` 前，Billing 已能幂等接收隔离命令。Account 必须配置可用的 `IDENTITY_SERVICE_URL` 和服务凭据，即使没有开启手机号登录，也不能把 Identity 删除失败当作成功。上线后至少验证：注销期间角色、成员、Session、邀请和非资金 Commerce 任务自动收敛；资料 Saga 在 Identity 更新前取消、更新后向前归并；旧生命周期迟到结果不能重绑 Mapping；全部远端 Identity 删除和全部组织授予隔离均有完成证明后才进入 `ANONYMIZED`；永久 `user_id/user_code` 不变，原用户名/手机号可被全新用户使用；匿名化事件发布后才显示 `COMPLETED`。
+
+授予回收验收必须使用具有 `organization.grant.reclaim_closed` 的组织管理员，通过 Token Gateway 的组织接口发起；请求不接受金额，只能一次性回收单条授予的全部当前可回收剩余量。验证普通撤回、恢复、消费、创建 Hold 仍拒绝 `ACCOUNT_CLOSED`，并分别注入关联 Hold、待核对用量、退款/拒付、支付异常和资金性对账差异，确认回收失败且余额守恒；批量请求中的失败项不得回滚成功项。监控 `IDENTITY_CLEANUP/ANONYMIZED` 停留时长、外部证明、主体生命周期不匹配的 Commerce `STALE` 证据、授予隔离/回收审计、Outbox 延迟和三年保留/法律保全任务。任一库产生清理、匿名化、隔离或回收事实后禁止对这两项迁移执行 down；故障时暂停注销 Worker 或关闭回收入口，保留已提交证明并从原阶段重试。
+
 ## 8. 单机 Compose 发布流程
 
 下面流程以 `<release-dir>`、`<backup-dir>` 和 `<compose-files>` 为占位符。站点专用配置和 Secret 不进入仓库。

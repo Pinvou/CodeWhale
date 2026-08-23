@@ -1,6 +1,7 @@
 package account
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,6 +32,10 @@ type AccountClosureAssessment struct {
 
 type AccountClosureClient interface {
 	Assess(context.Context, uuid.UUID) (AccountClosureAssessment, error)
+}
+
+type AccountClosureGrantClient interface {
+	IsolateGrants(context.Context, uuid.UUID, uuid.UUID, int64) error
 }
 
 type HTTPAccountClosureClient struct {
@@ -81,4 +86,29 @@ func (c *HTTPAccountClosureClient) Assess(ctx context.Context, userID uuid.UUID)
 	}
 	assessment.Ready = len(assessment.Blockers) == 0
 	return assessment, nil
+}
+
+func (c *HTTPAccountClosureClient) IsolateGrants(ctx context.Context, userID, closureID uuid.UUID, lifecycleVersion int64) error {
+	if c.domain != "BILLING" || userID == uuid.Nil || closureID == uuid.Nil || lifecycleVersion < 2 {
+		return errors.New("billing grant isolation request is invalid")
+	}
+	endpoint := *c.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/internal/v1/users/" + userID.String() + "/account-closure-grants/isolate"
+	payload, _ := json.Marshal(map[string]any{"closure_request_id": closureID, "subject_lifecycle_version": lifecycleVersion})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("billing account closure grant isolation returned HTTP %d", response.StatusCode)
+	}
+	return nil
 }

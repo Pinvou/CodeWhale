@@ -1,8 +1,11 @@
 package token
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -126,6 +129,71 @@ func (s *Service) revokeOrganizationQuotaGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) reclaimAccountClosedGrant(w http.ResponseWriter, r *http.Request) {
+	resolved, organizationID, baseClient, ok := s.resolveOrganizationBilling(w, r, "organization.grant.reclaim_closed")
+	if !ok {
+		return
+	}
+	client, supported := baseClient.(AccountClosedGrantBillingClient)
+	if !supported {
+		s.writeError(w, r, ErrForbidden)
+		return
+	}
+	grantID, err := uuid.Parse(r.PathValue("grant_id"))
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if err != nil || api.DecodeJSON(w, r, &body) != nil || strings.TrimSpace(body.Reason) == "" || len(key) < 16 || len(key) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid account-closed grant reclaim", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := client.ReclaimAccountClosedGrant(r.Context(), organizationID, grantID, resolved.UserID, body.Reason, key)
+	if err != nil {
+		api.WriteError(w, http.StatusConflict, "ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED", "the account-closed grant cannot be reclaimed in its current state", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) reclaimAccountClosedGrantsBatch(w http.ResponseWriter, r *http.Request) {
+	resolved, organizationID, baseClient, ok := s.resolveOrganizationBilling(w, r, "organization.grant.reclaim_closed")
+	if !ok {
+		return
+	}
+	client, supported := baseClient.(AccountClosedGrantBillingClient)
+	if !supported {
+		s.writeError(w, r, ErrForbidden)
+		return
+	}
+	var body struct {
+		GrantIDs []uuid.UUID `json:"grant_ids"`
+		Reason   string      `json:"reason"`
+	}
+	batchKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if api.DecodeJSON(w, r, &body) != nil || len(body.GrantIDs) == 0 || len(body.GrantIDs) > 200 || strings.TrimSpace(body.Reason) == "" || len(batchKey) < 16 || len(batchKey) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid account-closed grant reclaim batch", httpserver.RequestID(r.Context()))
+		return
+	}
+	type result struct {
+		GrantID uuid.UUID       `json:"grant_id"`
+		Status  string          `json:"status"`
+		Result  json.RawMessage `json:"result,omitempty"`
+		Code    string          `json:"code,omitempty"`
+	}
+	items := make([]result, 0, len(body.GrantIDs))
+	for index, grantID := range body.GrantIDs {
+		digest := sha256.Sum256([]byte(fmt.Sprintf("account-closed-reclaim-batch-v1\n%s\n%d\n%s", batchKey, index, grantID)))
+		payload, err := client.ReclaimAccountClosedGrant(r.Context(), organizationID, grantID, resolved.UserID, body.Reason, hex.EncodeToString(digest[:]))
+		item := result{GrantID: grantID, Status: "SUCCEEDED", Result: payload}
+		if err != nil {
+			item.Status, item.Result, item.Code = "FAILED", nil, "ACCOUNT_CLOSED_GRANT_RECLAIM_REJECTED"
+		}
+		items = append(items, item)
+	}
+	api.WriteJSON(w, http.StatusMultiStatus, map[string]any{"items": items})
 }
 
 func hasPermission(resolved AuthorizationContext, permission string) bool {

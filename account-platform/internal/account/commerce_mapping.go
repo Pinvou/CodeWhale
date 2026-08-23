@@ -113,7 +113,7 @@ func (r *PostgresRepository) EnsureCommerceProviderMappings(ctx context.Context)
 SELECT u.id,u.mobile_e164 FROM users u
 LEFT JOIN commerce_customer_mappings m
   ON m.subject_type='USER' AND m.subject_id=u.id AND m.provider_id=$1
-WHERE u.mobile_verified_at IS NOT NULL AND u.mobile_e164 IS NOT NULL AND u.status <> 'DELETED'
+WHERE u.mobile_verified_at IS NOT NULL AND u.mobile_e164 IS NOT NULL AND u.status='ACTIVE'
   AND (m.id IS NULL OR (m.status <> 'READY' AND m.adapter_version <> $2))
 ORDER BY u.id FOR UPDATE OF u`, r.commerceProviderID, r.commerceAdapterVersion)
 	if err != nil {
@@ -162,12 +162,18 @@ RETURNING id,version`, mappingID, subjectType, subjectID, providerID, adapterVer
 	if _, err = tx.Exec(ctx, `UPDATE commerce_customer_sync_jobs SET status='COMPLETED',completed_at=$2,updated_at=$2,last_error_code='SUPERSEDED' WHERE mapping_id=$1 AND status IN ('PENDING','RETRY')`, mappingID, now); err != nil {
 		return err
 	}
+	subjectLifecycleVersion := int64(1)
+	if subjectType == "USER" {
+		if err := tx.QueryRow(ctx, `SELECT subject_lifecycle_version FROM users WHERE id=$1`, subjectID).Scan(&subjectLifecycleVersion); err != nil {
+			return err
+		}
+	}
 	_, err = tx.Exec(ctx, `
 INSERT INTO commerce_customer_sync_jobs(
     id,mapping_id,mapping_version,subject_type,subject_id,subject_lifecycle_version,provider_id,adapter_version,
     task_category,contact_mobile_e164,status,next_attempt_at,created_at,updated_at
-) VALUES($1,$2,$3,$4,$5,1,$6,$7,$8,$9,'PENDING',$10,$10,$10)`,
-		uuid.Must(uuid.NewV7()), mappingID, mappingVersion, subjectType, subjectID, providerID, adapterVersion, taskCategory, mobile, now)
+) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'PENDING',$11,$11,$11)`,
+		uuid.Must(uuid.NewV7()), mappingID, mappingVersion, subjectType, subjectID, subjectLifecycleVersion, providerID, adapterVersion, taskCategory, mobile, now)
 	return err
 }
 
@@ -183,6 +189,7 @@ func (r *PostgresRepository) ClaimCommerceCustomerSyncJob(ctx context.Context, p
 SELECT id,mapping_id,mapping_version,subject_type,subject_id,subject_lifecycle_version,provider_id,adapter_version,task_category,contact_mobile_e164,attempts
 FROM commerce_customer_sync_jobs
 WHERE provider_id=$2 AND adapter_version=$3
+  AND (subject_type<>'USER' OR EXISTS(SELECT 1 FROM users WHERE id=subject_id AND status='ACTIVE' AND subject_lifecycle_version=commerce_customer_sync_jobs.subject_lifecycle_version))
   AND ((status IN ('PENDING','RETRY') AND next_attempt_at<=$1) OR (status='LEASED' AND lease_until<$1))
 ORDER BY next_attempt_at,created_at FOR UPDATE SKIP LOCKED LIMIT 1`, now, providerID, adapterVersion).Scan(
 		&job.ID, &job.MappingID, &job.MappingVersion, &job.SubjectType, &job.SubjectID, &job.SubjectLifecycleVersion,
@@ -224,8 +231,16 @@ func (r *PostgresRepository) CompleteCommerceCustomerSyncJob(ctx context.Context
 	if err != nil {
 		return err
 	}
+	currentLifecycle, lifecycleCurrent := job.SubjectLifecycleVersion, true
+	if job.SubjectType == "USER" {
+		var userStatus string
+		if err := tx.QueryRow(ctx, `SELECT subject_lifecycle_version,status FROM users WHERE id=$1`, job.SubjectID).Scan(&currentLifecycle, &userStatus); err != nil {
+			return err
+		}
+		lifecycleCurrent = currentLifecycle == job.SubjectLifecycleVersion && userStatus == "ACTIVE"
+	}
 	outcome := "SUCCEEDED"
-	if mappingStatus == "DETACHED" || currentProvider != job.ProviderID || currentAdapter != job.AdapterVersion || currentVersion != job.MappingVersion {
+	if mappingStatus == "DETACHED" || currentProvider != job.ProviderID || currentAdapter != job.AdapterVersion || currentVersion != job.MappingVersion || !lifecycleCurrent {
 		outcome = "STALE"
 	} else {
 		if _, err = tx.Exec(ctx, `UPDATE commerce_customer_mappings SET status='READY',external_reference_redacted=NULLIF($2,''),last_error_code=NULL,provisioned_at=$3,version=version+1,updated_at=$3 WHERE id=$1`, job.MappingID, result.ExternalReferenceRedacted, now); err != nil {
@@ -266,7 +281,7 @@ func (r *PostgresRepository) RetryCommerceCustomerSyncJob(ctx context.Context, j
 	if _, err = tx.Exec(ctx, `UPDATE commerce_customer_sync_jobs SET status=$2,lease_until=NULL,last_error_code=$3,next_attempt_at=$4,updated_at=$5 WHERE id=$1 AND status='LEASED'`, job.ID, jobStatus, reason, next, now); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE commerce_customer_mappings SET status=$2,last_error_code=$3,updated_at=$4 WHERE id=$1 AND status <> 'DETACHED' AND version=$5`, job.MappingID, mappingStatus, reason, now, job.MappingVersion); err != nil {
+	if _, err = tx.Exec(ctx, `UPDATE commerce_customer_mappings SET status=$2,last_error_code=$3,updated_at=$4 WHERE id=$1 AND status <> 'DETACHED' AND version=$5 AND ($6<>'USER' OR EXISTS(SELECT 1 FROM users WHERE id=$7 AND status='ACTIVE' AND subject_lifecycle_version=$8))`, job.MappingID, mappingStatus, reason, now, job.MappingVersion, job.SubjectType, job.SubjectID, job.SubjectLifecycleVersion); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `INSERT INTO commerce_customer_sync_evidence(id,job_id,mapping_id,provider_id,adapter_version,outcome,error_code,recorded_at) VALUES($1,$2,$3,$4,$5,'FAILED',$6,$7)`, uuid.Must(uuid.NewV7()), job.ID, job.MappingID, job.ProviderID, job.AdapterVersion, reason, now); err != nil {

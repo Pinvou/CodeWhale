@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标保留可追溯任务；完成 APT-001～APT-006、APT-008～APT-014、APT-016～APT-031 与 APT-046，并完成 APT-007 仓库实现但等待环境验收后，当前仍有 68 个状态为 `部分实现` 或 `未实现` 的目标编号，每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标保留可追溯任务；完成 APT-001～APT-006、APT-008～APT-031 与 APT-046，并完成 APT-007 仓库实现但等待环境验收后，当前仍有 59 个状态为 `部分实现` 或 `未实现` 的目标编号，每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -30,7 +30,7 @@
 | APT-004 | 用户名/手机号变更 Saga、忘记密码及个人中心入口 | ACC-06–ACC-09, UI-05 | APT-002 | CODE | DONE |
 | APT-005 | 供应商中立 Commerce Customer Mapping 与同步生命周期 | CORE-03, ACC-05, PAY-06 | 无 | CODE | DONE |
 | APT-006 | Account 平台/组织 RBAC、原子权限码和显式授权作用域 | ACC-13, ACC-35, NFR-15 | 无 | CODE | DONE |
-| APT-007 | 超级管理员安全引导、异常失联 Break-glass 与最后管理员保护 | ACC-48, ADM-01, ADM-02 | APT-006, APT-046 | CODE+ENV | BLOCKED_EXTERNAL |
+| APT-007 | 超级管理员安全引导与异常失联 Break-glass 的生产等价演练 | ADM-01, ADM-02 | APT-006, APT-046 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-008 | 管理命令审批分类、生命周期、失效、授权复核和幂等执行 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | APT-006, APT-046 | CODE | DONE |
 | APT-009 | 顶层组织创建、搜索、启停和跨域安全逻辑删除 | ACC-15–ACC-20 | APT-006, APT-008 | CODE | DONE |
 | APT-010 | 组织节点创建、移动、重命名和受阻逻辑删除 | ACC-21, ACC-23–ACC-25 | APT-006, APT-009 | CODE | DONE |
@@ -38,7 +38,7 @@
 | APT-012 | 用户级全局活动上下文、跨端版本同步和成员失效回退 | CORE-02, ACC-34, ACC-38, ACC-39, NFR-08, UI-06, UI-07 | APT-006, APT-011 | CODE | DONE |
 | APT-013 | 个人中心信息架构与普通用户资源边界收敛 | UI-03 | APT-012 | CODE | DONE |
 | APT-014 | 账号注销资格、持久 Saga、静默期、跨域阻断与修复入口 | ACC-10, ACC-40–ACC-45, UI-14, ADM-34 | APT-003, APT-006, APT-018, APT-021–APT-025, APT-030 | CODE | DONE |
-| APT-015 | 注销资料清理、标识墓碑、Commerce/邀请收敛及组织授予隔离回收 | ACC-11, ACC-46, ACC-47, ACC-49, ACC-50, BILL-39, BILL-40, NFR-13 | APT-014, APT-016, APT-017, APT-019, APT-025 | CODE | PENDING |
+| APT-015 | 注销资料清理、标识墓碑、Commerce/邀请收敛及组织授予隔离回收 | ACC-11, ACC-46, ACC-47, ACC-49, ACC-50, BILL-39, BILL-40, NFR-13 | APT-014, APT-016, APT-017, APT-019, APT-025 | CODE | DONE |
 | APT-016 | BASE/BONUS 组成级权益、消费顺序、到期与守恒约束 | CORE-04, BILL-05, BILL-06, BILL-14, BILL-16–BILL-19, BILL-36, UI-08 | 无 | CODE | DONE |
 | APT-017 | 组织购买权益后的组成级成员授予、暂停、撤回和并发约束 | BILL-07–BILL-13, BILL-37, BILL-38, UI-11 | APT-006, APT-009–APT-012, APT-016 | CODE | DONE |
 | APT-018 | 版本化计量单位、协议公式、动态预占和确定性价格生命周期 | ACC-37, TOK-17–TOK-21, TOK-23, BILL-20, BILL-22–BILL-25, BILL-41–BILL-45, ADM-12, ADM-13, ADM-23, ADM-24 | APT-012, APT-016 | CODE | DONE |

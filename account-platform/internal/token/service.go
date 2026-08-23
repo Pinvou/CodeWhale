@@ -118,6 +118,8 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listOrganizationQuotaGrants))
 	protected.POST("/v1/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
 	protected.POST("/v1/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeOrganizationQuotaGrant))
+	protected.POST("/v1/organizations/:organization_id/account-closed-grants/:grant_id/reclaim", httpserver.AdaptFunc(s.reclaimAccountClosedGrant))
+	protected.POST("/v1/organizations/:organization_id/account-closed-grants:reclaim-batch", httpserver.AdaptFunc(s.reclaimAccountClosedGrantsBatch))
 	protected.GET("/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
 	protected.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
 	protected.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))

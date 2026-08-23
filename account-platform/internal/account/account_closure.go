@@ -157,7 +157,7 @@ func (r *PostgresRepository) ClaimAccountClosure(ctx context.Context) (*AccountC
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	item, err := scanAccountClosure(tx.QueryRow(ctx, accountClosureSelect+` WHERE status IN ('IN_PROGRESS','RETRY','BLOCKED') AND stage IN ('CLOSURE_REQUESTED','QUIESCING','FINANCIAL_CLEARANCE') AND next_attempt_at<=$1 AND (lease_until IS NULL OR lease_until<$1) ORDER BY next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT 1`, now))
+	item, err := scanAccountClosure(tx.QueryRow(ctx, accountClosureSelect+` WHERE status IN ('IN_PROGRESS','RETRY','BLOCKED') AND stage IN ('CLOSURE_REQUESTED','QUIESCING','FINANCIAL_CLEARANCE','IDENTITY_CLEANUP','ANONYMIZED') AND next_attempt_at<=$1 AND (lease_until IS NULL OR lease_until<$1) ORDER BY next_attempt_at,id FOR UPDATE SKIP LOCKED LIMIT 1`, now))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, tx.Commit(ctx)
 	}
@@ -275,7 +275,7 @@ func (r *PostgresRepository) AdvanceAccountClosureToIdentityCleanup(ctx context.
 		return err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='IN_PROGRESS',stage='IDENTITY_CLEANUP',blocker_snapshot='[]'::jsonb,next_attempt_at=NULL,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND version=$3 AND stage IN ('QUIESCING','FINANCIAL_CLEARANCE')`, item.ID, now, item.Version)
+	command, err := tx.Exec(ctx, `UPDATE account_closure_requests SET status='IN_PROGRESS',stage='IDENTITY_CLEANUP',blocker_snapshot='[]'::jsonb,next_attempt_at=$2,lease_until=NULL,last_error_code=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND version=$3 AND stage IN ('QUIESCING','FINANCIAL_CLEARANCE')`, item.ID, now, item.Version)
 	if err != nil {
 		return err
 	}
@@ -356,7 +356,7 @@ func (r *PostgresRepository) RetryAccountClosure(ctx context.Context, principal 
 	if err != nil {
 		return AccountClosureRequest{}, err
 	}
-	if item.Stage != "CLOSURE_REQUESTED" && item.Stage != "QUIESCING" && item.Stage != "FINANCIAL_CLEARANCE" || item.Status == "COMPLETED" {
+	if item.Stage != "CLOSURE_REQUESTED" && item.Stage != "QUIESCING" && item.Stage != "FINANCIAL_CLEARANCE" && item.Stage != "IDENTITY_CLEANUP" && item.Stage != "ANONYMIZED" || item.Status == "COMPLETED" {
 		return AccountClosureRequest{}, ErrConflict
 	}
 	now := r.now()
@@ -376,11 +376,18 @@ func (r *PostgresRepository) RetryAccountClosure(ctx context.Context, principal 
 type AccountClosureWorker struct {
 	repository *PostgresRepository
 	clients    []AccountClosureClient
+	identities IdentityProvisioner
+	grants     AccountClosureGrantClient
 	interval   time.Duration
 }
 
 func NewAccountClosureWorker(repository *PostgresRepository, interval time.Duration, clients ...AccountClosureClient) *AccountClosureWorker {
 	return &AccountClosureWorker{repository: repository, clients: append([]AccountClosureClient(nil), clients...), interval: interval}
+}
+
+func (w *AccountClosureWorker) WithCleanup(identities IdentityProvisioner, grants AccountClosureGrantClient) *AccountClosureWorker {
+	w.identities, w.grants = identities, grants
+	return w
 }
 
 func (w *AccountClosureWorker) Run(ctx context.Context) {
@@ -400,6 +407,7 @@ func (w *AccountClosureWorker) Run(ctx context.Context) {
 }
 
 func (w *AccountClosureWorker) runOnce(ctx context.Context) {
+	_, _ = w.repository.PurgeExpiredAccountClosureRetention(ctx, 100)
 	for processed := 0; processed < 20; processed++ {
 		item, err := w.repository.ClaimAccountClosure(ctx)
 		if err != nil || item == nil {
@@ -417,6 +425,50 @@ func (w *AccountClosureWorker) runOnce(ctx context.Context) {
 			}
 			if err := w.repository.EnterAccountClosureQuiescing(ctx, *item); err != nil {
 				_ = w.repository.ScheduleAccountClosureError(ctx, *item, "QUIET_PERIOD_ENTRY_FAILED")
+			}
+			continue
+		}
+		if item.Stage == "IDENTITY_CLEANUP" {
+			if w.identities == nil || w.grants == nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "CLEANUP_DEPENDENCY_UNAVAILABLE")
+				continue
+			}
+			preparation, err := w.repository.PrepareAccountClosureCleanup(ctx, item.ID, item.UserID)
+			if err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "ACCOUNT_CLEANUP_PREPARATION_FAILED")
+				continue
+			}
+			identityFailed := false
+			for _, subject := range preparation.IdentitySubjects {
+				if err := w.identities.DeleteUser(ctx, subject); err != nil {
+					_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "IDENTITY_DELETE_UNAVAILABLE")
+					identityFailed = true
+					break
+				}
+			}
+			if identityFailed {
+				continue
+			}
+			if err := w.repository.MarkAccountClosureIdentityDeleted(ctx, item.ID, preparation.SubjectLifecycleVersion); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "IDENTITY_DELETE_COMMIT_FAILED")
+				continue
+			}
+			if err := w.grants.IsolateGrants(ctx, item.UserID, item.ID, preparation.SubjectLifecycleVersion); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "GRANT_ISOLATION_FAILED")
+				continue
+			}
+			if err := w.repository.MarkAccountClosureGrantsIsolated(ctx, item.ID, preparation.SubjectLifecycleVersion); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "GRANT_ISOLATION_COMMIT_FAILED")
+				continue
+			}
+			if err := w.repository.AnonymizeAccountClosure(ctx, item.ID, item.UserID, preparation.SubjectLifecycleVersion); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "ANONYMIZATION_FAILED")
+			}
+			continue
+		}
+		if item.Stage == "ANONYMIZED" {
+			if err := w.repository.CompleteAccountClosure(ctx, item.ID); err != nil {
+				_ = w.repository.ScheduleAccountClosureCleanupError(ctx, item.ID, "OUTBOX_CONFIRMATION_PENDING")
 			}
 			continue
 		}

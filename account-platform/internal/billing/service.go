@@ -20,11 +20,12 @@ import (
 )
 
 type Service struct {
-	repository   Repository
-	payments     *PaymentCoordinator
-	authorizer   *authorization.Client
-	approvalGate ApprovalExecutionGate
-	now          func() time.Time
+	repository    Repository
+	payments      *PaymentCoordinator
+	authorizer    *authorization.Client
+	approvalGate  ApprovalExecutionGate
+	closureStates AccountClosureStateVerifier
+	now           func() time.Time
 }
 
 func NewService(repository Repository) *Service {
@@ -46,6 +47,11 @@ func (s *Service) WithApprovalExecutionGate(gate ApprovalExecutionGate) *Service
 	return s
 }
 
+func (s *Service) WithAccountClosureStateVerifier(verifier AccountClosureStateVerifier) *Service {
+	s.closureStates = verifier
+	return s
+}
+
 func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	protected := router.Group("")
@@ -58,6 +64,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
 	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
 	protected.GET("/internal/v1/users/:user_id/account-closure-assessment", httpserver.AdaptFunc(s.accountClosureAssessment))
+	protected.POST("/internal/v1/users/:user_id/account-closure-grants/isolate", httpserver.AdaptFunc(s.isolateAccountClosedGrants))
+	protected.POST("/internal/v1/organizations/:organization_id/account-closed-grants/:grant_id/reclaim", httpserver.AdaptFunc(s.reclaimAccountClosedGrantInternal))
 	protected.GET("/internal/v1/pricing/current", httpserver.AdaptFunc(s.currentPrice))
 	protected.GET("/internal/v1/pricing/:price_version_id", httpserver.AdaptFunc(s.priceByID))
 	protected.PUT("/internal/v1/pricing/formula-bindings/:formula_version_id", httpserver.AdaptFunc(s.putFormulaBinding))
