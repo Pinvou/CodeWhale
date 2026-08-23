@@ -63,6 +63,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", httpserver.AdaptFunc(s.executeApprovedAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
+	protected.POST("/internal/v1/chargebacks/confirmed", approvalpolicy.Require("BILLING_CONFIRMED_CHARGEBACK_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyConfirmedChargeback))
 	protected.PUT("/internal/v1/organizations/:organization_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	protected.PUT("/internal/v1/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	protected.PUT("/internal/v1/organizations/:organization_id/members/:user_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationMemberLifecycle))
@@ -91,6 +92,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/wallets", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminWallets))
 		admin.GET("/wallets/:wallet_id/ledger", s.authorizer.Require("platform.billing.ledger.read"), httpserver.AdaptFunc(s.adminWalletLedger))
+		admin.GET("/receivables", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminReceivables))
+		admin.GET("/receivables/:receivable_id/allocations", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminReceivableAllocations))
 		admin.GET("/pricing-versions", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPriceVersions))
 		admin.POST("/pricing-versions", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_VERSION_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreatePriceVersion))
 		admin.POST("/pricing/drafts", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreatePriceDraftV2))
@@ -118,6 +121,37 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
+}
+
+type chargebackRepository interface {
+	ApplyConfirmedChargeback(context.Context, uuid.UUID, string) (ChargebackCase, error)
+	RecordAndApplyConfirmedChargeback(context.Context, uuid.UUID, string, json.RawMessage) (ChargebackCase, error)
+}
+
+func (s *Service) applyConfirmedChargeback(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PaymentEvidenceID    uuid.UUID       `json:"payment_evidence_id"`
+		PaymentTransactionID uuid.UUID       `json:"payment_transaction_id"`
+		ProviderChargebackID string          `json:"provider_chargeback_id"`
+		PayloadSnapshot      json.RawMessage `json:"payload_snapshot"`
+	}
+	repository, ok := s.repository.(chargebackRepository)
+	if err := api.DecodeJSON(w, r, &body); err != nil || !ok || (body.PaymentEvidenceID == uuid.Nil) == (body.PaymentTransactionID == uuid.Nil) || strings.TrimSpace(body.ProviderChargebackID) == "" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid confirmed chargeback", httpserver.RequestID(r.Context()))
+		return
+	}
+	var result ChargebackCase
+	var err error
+	if body.PaymentEvidenceID != uuid.Nil {
+		result, err = repository.ApplyConfirmedChargeback(r.Context(), body.PaymentEvidenceID, body.ProviderChargebackID)
+	} else {
+		result, err = repository.RecordAndApplyConfirmedChargeback(r.Context(), body.PaymentTransactionID, body.ProviderChargebackID, body.PayloadSnapshot)
+	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) paymentCapabilities(w http.ResponseWriter, _ *http.Request) {

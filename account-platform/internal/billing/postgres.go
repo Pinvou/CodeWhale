@@ -203,7 +203,7 @@ func (r *PostgresRepository) Credit(ctx context.Context, walletID uuid.UUID, bus
 	if err != nil {
 		return Wallet{}, err
 	}
-	if wallet.Status != "ACTIVE" {
+	if wallet.Status != "ACTIVE" || wallet.FinancialStatus != "CLEAR" {
 		return Wallet{}, ErrWalletUnavailable
 	}
 	var existingAmount int64
@@ -341,7 +341,7 @@ func (r *PostgresRepository) reserve(ctx context.Context, usageRequestID, wallet
 	}
 	command, err := tx.Exec(ctx, `
 UPDATE wallets SET reserved_microcredits = reserved_microcredits + $2, version = version + 1, updated_at = $3
-WHERE id = $1 AND status = 'ACTIVE' AND posted_microcredits - reserved_microcredits >= $2`, walletID, maxAmount, now)
+WHERE id = $1 AND status = 'ACTIVE' AND receivable_microcredits=0 AND posted_microcredits - reserved_microcredits >= $2`, walletID, maxAmount, now)
 	if err != nil {
 		return Hold{}, err
 	}
@@ -432,10 +432,9 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 	if hold.Status != "ACTIVE" {
 		return Hold{}, ErrUsageAlreadyTerminal
 	}
-	if actual > hold.MaxMicrocredits {
-		return Hold{}, ErrConflict
-	}
 	now := r.now()
+	backedActual := min(actual, hold.MaxMicrocredits)
+	overage := actual - backedActual
 	entryID := uuid.Nil
 	var walletAccount uuid.UUID
 	if actual > 0 {
@@ -468,7 +467,7 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 		allocations = append(allocations, item)
 	}
 	rows.Close()
-	remaining := actual
+	remaining := backedActual
 	for _, item := range allocations {
 		settled := min(remaining, item.reserved)
 		released := item.reserved - settled
@@ -516,12 +515,20 @@ func (r *PostgresRepository) Commit(ctx context.Context, usageRequestID, holdID 
 	if remaining != 0 {
 		return Hold{}, errors.New("usage hold is not backed by entitlement packages")
 	}
+	if overage > 0 {
+		if err := insertPosting(ctx, tx, entryID, receivableAccount, -overage, nil, now); err != nil {
+			return Hold{}, err
+		}
+		if _, err := createReceivableWithinTransaction(ctx, tx, hold.WalletID, "USAGE_OVERAGE", usageRequestID.String(), overage, nil, nil, nil, &usageRequestID, now); err != nil {
+			return Hold{}, err
+		}
+	}
 	if actual > 0 {
 		if err := insertPosting(ctx, tx, entryID, usageRevenueAccount, actual, nil, now); err != nil {
 			return Hold{}, err
 		}
 	}
-	command, err := tx.Exec(ctx, `UPDATE wallets SET posted_microcredits = posted_microcredits - $2, reserved_microcredits = reserved_microcredits - $3, version = version + 1, updated_at = $4 WHERE id = $1 AND reserved_microcredits >= $3`, hold.WalletID, actual, hold.MaxMicrocredits, now)
+	command, err := tx.Exec(ctx, `UPDATE wallets SET posted_microcredits = posted_microcredits - $2, reserved_microcredits = reserved_microcredits - $3, version = version + 1, updated_at = $4 WHERE id = $1 AND reserved_microcredits >= $3 AND posted_microcredits >= $2`, hold.WalletID, backedActual, hold.MaxMicrocredits, now)
 	if err == nil && command.RowsAffected() != 1 {
 		err = ErrConflict
 	}
@@ -618,7 +625,7 @@ func extendPersonalHold(ctx context.Context, tx pgx.Tx, hold Hold, additional in
 	if remaining != 0 {
 		return ErrInsufficientBalance
 	}
-	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND posted_microcredits-reserved_microcredits>=$2`, hold.WalletID, additional, now)
+	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits>=$2`, hold.WalletID, additional, now)
 	if err != nil {
 		return err
 	}
@@ -820,18 +827,18 @@ func lockTransactionKey(ctx context.Context, tx pgx.Tx, scope, key string) error
 }
 
 func getWallet(ctx context.Context, database queryable, walletID uuid.UUID, lock bool) (Wallet, error) {
-	query := `SELECT id, owner_type, owner_id, status, posted_microcredits, reserved_microcredits, posted_microcredits - reserved_microcredits, version FROM wallets WHERE id = $1`
+	query := `SELECT id,owner_type,owner_id,status,posted_microcredits,reserved_microcredits,receivable_microcredits,posted_microcredits-reserved_microcredits-receivable_microcredits,financial_status,financial_freeze_reason,version FROM wallets WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var wallet Wallet
-	err := database.QueryRow(ctx, query, walletID).Scan(&wallet.ID, &wallet.OwnerType, &wallet.OwnerID, &wallet.Status, &wallet.PostedMicrocredits, &wallet.ReservedMicrocredits, &wallet.AvailableMicrocredits, &wallet.Version)
+	err := database.QueryRow(ctx, query, walletID).Scan(&wallet.ID, &wallet.OwnerType, &wallet.OwnerID, &wallet.Status, &wallet.PostedMicrocredits, &wallet.ReservedMicrocredits, &wallet.ReceivableMicrocredits, &wallet.AvailableMicrocredits, &wallet.FinancialStatus, &wallet.FinancialFreezeReason, &wallet.Version)
 	return wallet, err
 }
 
 func getWalletByOwner(ctx context.Context, database queryable, ownerType string, ownerID uuid.UUID) (Wallet, error) {
 	var wallet Wallet
-	err := database.QueryRow(ctx, `SELECT id, owner_type, owner_id, status, posted_microcredits, reserved_microcredits, posted_microcredits - reserved_microcredits, version FROM wallets WHERE owner_type = $1 AND owner_id = $2`, ownerType, ownerID).Scan(&wallet.ID, &wallet.OwnerType, &wallet.OwnerID, &wallet.Status, &wallet.PostedMicrocredits, &wallet.ReservedMicrocredits, &wallet.AvailableMicrocredits, &wallet.Version)
+	err := database.QueryRow(ctx, `SELECT id,owner_type,owner_id,status,posted_microcredits,reserved_microcredits,receivable_microcredits,posted_microcredits-reserved_microcredits-receivable_microcredits,financial_status,financial_freeze_reason,version FROM wallets WHERE owner_type=$1 AND owner_id=$2`, ownerType, ownerID).Scan(&wallet.ID, &wallet.OwnerType, &wallet.OwnerID, &wallet.Status, &wallet.PostedMicrocredits, &wallet.ReservedMicrocredits, &wallet.ReceivableMicrocredits, &wallet.AvailableMicrocredits, &wallet.FinancialStatus, &wallet.FinancialFreezeReason, &wallet.Version)
 	return wallet, err
 }
 

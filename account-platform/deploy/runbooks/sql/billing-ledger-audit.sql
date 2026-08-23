@@ -26,6 +26,36 @@ LEFT JOIN (
 ) holds ON holds.wallet_id=wallet.id
 WHERE wallet.reserved_microcredits <> COALESCE(holds.actual,0);
 
+SELECT 'wallet_receivable_snapshot_mismatch' AS check_name, count(*) AS violations
+FROM wallets wallet
+LEFT JOIN (
+  SELECT wallet_id,sum(outstanding_microcredits) AS actual
+  FROM receivables WHERE outstanding_microcredits>0 GROUP BY wallet_id
+) receivable ON receivable.wallet_id=wallet.id
+WHERE wallet.receivable_microcredits <> COALESCE(receivable.actual,0)
+   OR (wallet.financial_status='RECEIVABLE_OPEN') <> (COALESCE(receivable.actual,0)>0);
+
+SELECT 'receivable_amount_mismatch' AS check_name, count(*) AS violations
+FROM receivables
+WHERE original_microcredits <> settled_microcredits + outstanding_microcredits
+   OR (status='SETTLED') <> (outstanding_microcredits=0);
+
+SELECT 'receivable_allocation_mismatch' AS check_name, count(*) AS violations
+FROM receivables receivable
+LEFT JOIN (
+  SELECT receivable_id,sum(amount_microcredits) AS actual
+  FROM receivable_allocations GROUP BY receivable_id
+) allocation ON allocation.receivable_id=receivable.id
+WHERE receivable.settled_microcredits <> COALESCE(allocation.actual,0);
+
+SELECT 'chargeback_package_mismatch' AS check_name, count(*) AS violations
+FROM chargeback_cases chargeback
+JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id
+JOIN entitlement_packages package ON package.id=chargeback.entitlement_package_id
+WHERE transaction.payment_order_id<>chargeback.payment_order_id
+   OR package.payment_transaction_id<>chargeback.payment_transaction_id
+   OR package.wallet_id<>chargeback.wallet_id;
+
 SELECT 'entitlement_component_conservation_mismatch' AS check_name, count(*) AS violations
 FROM entitlement_components
 WHERE original_microcredits <>

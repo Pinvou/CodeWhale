@@ -182,6 +182,54 @@ func (s *Service) adminWallets(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type adminReceivableRepository interface {
+	ListReceivables(context.Context, *uuid.UUID, string, int) ([]Receivable, error)
+	ReceivableAllocations(context.Context, uuid.UUID) ([]ReceivableAllocation, error)
+}
+
+func (s *Service) adminReceivables(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.repository.(adminReceivableRepository)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_UNAVAILABLE", "receivable administration is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	var walletID *uuid.UUID
+	if value := strings.TrimSpace(r.URL.Query().Get("wallet_id")); value != "" {
+		parsed, err := uuid.Parse(value)
+		if err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "receivable wallet filter is invalid", httpserver.RequestID(r.Context()))
+			return
+		}
+		walletID = &parsed
+	}
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status != "" && status != "OPEN" && status != "PARTIALLY_SETTLED" && status != "SETTLED" && status != "WRITTEN_OFF" {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_FILTER", "receivable status filter is invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := repository.ListReceivables(r.Context(), walletID, status, billingAdminLimit(r))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) adminReceivableAllocations(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.repository.(adminReceivableRepository)
+	receivableID, err := uuid.Parse(r.PathValue("receivable_id"))
+	if !ok || err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid receivable", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := repository.ReceivableAllocations(r.Context(), receivableID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Service) adminPaymentOrders(w http.ResponseWriter, r *http.Request) {
 	repository, ok := s.requireAdminRepository(w, r)
 	if !ok {
@@ -506,7 +554,7 @@ SELECT
 }
 
 func (r *PostgresRepository) AdminWallets(ctx context.Context, limit int) ([]Wallet, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,owner_type,owner_id,status,posted_microcredits,reserved_microcredits,posted_microcredits-reserved_microcredits,version FROM wallets ORDER BY updated_at DESC,id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT id,owner_type,owner_id,status,posted_microcredits,reserved_microcredits,receivable_microcredits,posted_microcredits-reserved_microcredits-receivable_microcredits,financial_status,financial_freeze_reason,version FROM wallets ORDER BY updated_at DESC,id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +562,7 @@ func (r *PostgresRepository) AdminWallets(ctx context.Context, limit int) ([]Wal
 	items := make([]Wallet, 0)
 	for rows.Next() {
 		var item Wallet
-		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.Status, &item.PostedMicrocredits, &item.ReservedMicrocredits, &item.AvailableMicrocredits, &item.Version); err != nil {
+		if err := rows.Scan(&item.ID, &item.OwnerType, &item.OwnerID, &item.Status, &item.PostedMicrocredits, &item.ReservedMicrocredits, &item.ReceivableMicrocredits, &item.AvailableMicrocredits, &item.FinancialStatus, &item.FinancialFreezeReason, &item.Version); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

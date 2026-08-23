@@ -27,14 +27,17 @@ var (
 )
 
 type Wallet struct {
-	ID                    uuid.UUID `json:"wallet_id"`
-	OwnerType             string    `json:"owner_type"`
-	OwnerID               uuid.UUID `json:"owner_id"`
-	Status                string    `json:"status"`
-	PostedMicrocredits    int64     `json:"posted_microcredits"`
-	ReservedMicrocredits  int64     `json:"reserved_microcredits"`
-	AvailableMicrocredits int64     `json:"available_microcredits"`
-	Version               int64     `json:"version"`
+	ID                     uuid.UUID `json:"wallet_id"`
+	OwnerType              string    `json:"owner_type"`
+	OwnerID                uuid.UUID `json:"owner_id"`
+	Status                 string    `json:"status"`
+	PostedMicrocredits     int64     `json:"posted_microcredits"`
+	ReservedMicrocredits   int64     `json:"reserved_microcredits"`
+	ReceivableMicrocredits int64     `json:"receivable_microcredits"`
+	AvailableMicrocredits  int64     `json:"available_microcredits"`
+	FinancialStatus        string    `json:"financial_status"`
+	FinancialFreezeReason  *string   `json:"financial_freeze_reason,omitempty"`
+	Version                int64     `json:"version"`
 }
 
 type Product struct {

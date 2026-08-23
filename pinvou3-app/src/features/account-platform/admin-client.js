@@ -78,6 +78,8 @@ export class AdminPlatformClient {
   billingOverview(signal) { return this.request('billing', '/admin/v1/overview', signal); }
   wallets(signal) { return this.request('billing', '/admin/v1/wallets?limit=100', signal); }
   walletLedger(walletID, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal); }
+  receivables(signal) { return this.request('billing', '/admin/v1/receivables?limit=100', signal); }
+  receivableAllocations(receivableID, signal) { return this.request('billing', `/admin/v1/receivables/${encodeURIComponent(receivableID)}/allocations`, signal); }
   priceVersions(signal) { return this.request('billing', '/admin/v1/pricing-versions?limit=100', signal); }
   createPriceVersion(input) { return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input); }
   paymentOrders(filters = {}, signal) {

@@ -468,6 +468,45 @@ paths:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/receivables:
+    get:
+      operationId: listAdminReceivables
+      summary: Query wallet receivables and their settlement state
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: wallet_id, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string, enum: [OPEN, PARTIALLY_SETTLED, SETTLED, WRITTEN_OFF] } }
+      responses:
+        "200":
+          description: Receivable collection
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Receivable" } }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/receivables/{receivable_id}/allocations:
+    get:
+      operationId: listAdminReceivableAllocations
+      summary: List immutable settlement allocations for one receivable
+      parameters:
+        - { name: receivable_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Immutable settlement allocation collection
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/ReceivableAllocation" } }
+        "403": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/pricing-versions:
     get:
       operationId: listAdminPricingVersions
@@ -1162,6 +1201,40 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    Receivable:
+      type: object
+      additionalProperties: false
+      required: [receivable_id, wallet_id, source_type, source_reference, original_microcredits, settled_microcredits, outstanding_microcredits, status, version, created_at, updated_at]
+      properties:
+        receivable_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        source_type: { type: string, enum: [USAGE_OVERAGE, CHARGEBACK] }
+        source_reference: { type: string }
+        payment_order_id: { type: string, format: uuid }
+        payment_transaction_id: { type: string, format: uuid }
+        entitlement_package_id: { type: string, format: uuid }
+        usage_request_id: { type: string, format: uuid }
+        original_microcredits: { type: integer, format: int64, minimum: 1 }
+        settled_microcredits: { type: integer, format: int64, minimum: 0 }
+        outstanding_microcredits: { type: integer, format: int64, minimum: 0 }
+        status: { type: string, enum: [OPEN, PARTIALLY_SETTLED, SETTLED, WRITTEN_OFF] }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        settled_at: { type: string, format: date-time }
+    ReceivableAllocation:
+      type: object
+      additionalProperties: false
+      required: [allocation_id, receivable_id, wallet_id, source_type, source_reference, amount_microcredits, journal_entry_id, created_at]
+      properties:
+        allocation_id: { type: string, format: uuid }
+        receivable_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        source_type: { type: string, enum: [CASH_RECHARGE_BASE, REFUND_RECOVERY, APPROVED_MANUAL_REPAYMENT, APPROVED_WRITE_OFF] }
+        source_reference: { type: string }
+        amount_microcredits: { type: integer, format: int64, minimum: 1 }
+        journal_entry_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
     ApprovalStatus:
       type: string
       enum: [DRAFT, SUBMITTED, APPROVED, REJECTED, WITHDRAWN, EXPIRED, INVALIDATED, EXECUTING, EXECUTED, EXECUTION_FAILED]
@@ -1534,7 +1607,7 @@ components:
         payment_evidence_id: { type: string, format: uuid }
         payment_order_id: { type: string, format: uuid }
         payment_transaction_id: { type: string, format: uuid }
-        evidence_type: { type: string, enum: [CALLBACK, QUERY, BILL, MANUAL_REPAIR] }
+        evidence_type: { type: string, enum: [CALLBACK, QUERY, BILL, MANUAL_REPAIR, CHARGEBACK] }
         provider_id: { type: string, minLength: 1 }
         provider_version: { type: string, minLength: 1 }
         evidence_key: { type: string, minLength: 1 }

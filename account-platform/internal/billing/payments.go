@@ -474,6 +474,17 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 	if err := insertJournal(ctx, tx, entryID, journalType, reference, description, now); err != nil {
 		return uuid.Nil, err
 	}
+	baseAmount := int64(0)
+	for _, component := range components {
+		if component.kind == "BASE" {
+			baseAmount = component.amount
+			break
+		}
+	}
+	appliedToReceivables, err := settleOpenReceivablesWithinTransaction(ctx, tx, order.WalletID, baseAmount, "CASH_RECHARGE_BASE", reference, entryID, now)
+	if err != nil {
+		return uuid.Nil, err
+	}
 	accountID, err := walletLedgerAccount(ctx, tx, order.WalletID)
 	if err != nil {
 		return uuid.Nil, err
@@ -487,7 +498,11 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 			lotReference += ":bonus"
 		}
 		refundable := component.kind == "BASE"
-		if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$4,$5,$6,$7)`, component.lotID, order.WalletID, lotReference, component.amount, refundable, validUntil, now); err != nil {
+		remaining := component.amount
+		if component.kind == "BASE" {
+			remaining -= appliedToReceivables
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO credit_lots(id,wallet_id,source_type,source_reference,original_microcredits,remaining_microcredits,refundable,expires_at,created_at) VALUES ($1,$2,'RECHARGE',$3,$4,$5,$6,$7,$8)`, component.lotID, order.WalletID, lotReference, component.amount, remaining, refundable, validUntil, now); err != nil {
 			return uuid.Nil, err
 		}
 	}
@@ -495,21 +510,40 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 	if beneficiaryOrganizationID == nil {
 		packageUserID = &order.RequesterID
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,source_payment_transaction_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$11,$12,$13,$14,'ACTIVE',$12,$12,'PAYMENT',$15)`, packageID, packageUserID, order.WalletID, order.ID, paymentTransactionID, primaryLotID, order.ProductID, product.PlanName, order.ProviderSKU, order.AmountFen, amount, now, validFrom, validUntil, reference); err != nil {
+	packageStatus := "ACTIVE"
+	if amount-appliedToReceivables == 0 {
+		packageStatus = "CONSUMED"
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,source_payment_transaction_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_used,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$14,$14,'PAYMENT',$18)`, packageID, packageUserID, order.WalletID, order.ID, paymentTransactionID, primaryLotID, order.ProductID, product.PlanName, order.ProviderSKU, order.AmountFen, amount, appliedToReceivables, amount-appliedToReceivables, now, validFrom, validUntil, packageStatus, reference); err != nil {
 		return uuid.Nil, err
 	}
 	for _, component := range components {
-		if _, err = tx.Exec(ctx, `INSERT INTO entitlement_components(id,package_id,component_type,credit_lot_id,original_microcredits,available_microcredits,credited_at,expires_at,status,created_at,updated_at) VALUES($1,$2,$3,$1,$4,$4,$5,$6,'ACTIVE',$5,$5)`, component.lotID, packageID, component.kind, component.amount, now, validUntil); err != nil {
+		available, used := component.amount, int64(0)
+		if component.kind == "BASE" {
+			available, used = component.amount-appliedToReceivables, appliedToReceivables
+		}
+		status := "ACTIVE"
+		if available == 0 {
+			status = "CONSUMED"
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO entitlement_components(id,package_id,component_type,credit_lot_id,original_microcredits,available_microcredits,used_microcredits,credited_at,expires_at,status,created_at,updated_at) VALUES($1,$2,$3,$1,$4,$5,$6,$7,$8,$9,$7,$7)`, component.lotID, packageID, component.kind, component.amount, available, used, now, validUntil, status); err != nil {
 			return uuid.Nil, err
 		}
-		if err = insertPosting(ctx, tx, entryID, accountID, component.amount, &component.lotID, now); err != nil {
+		if available > 0 {
+			if err = insertPosting(ctx, tx, entryID, accountID, available, &component.lotID, now); err != nil {
+				return uuid.Nil, err
+			}
+		}
+	}
+	if appliedToReceivables > 0 {
+		if err = insertPosting(ctx, tx, entryID, receivableAccount, appliedToReceivables, nil, now); err != nil {
 			return uuid.Nil, err
 		}
 	}
 	if err = insertPosting(ctx, tx, entryID, paymentClearingAccount, -amount, nil, now); err != nil {
 		return uuid.Nil, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1`, order.WalletID, amount, now)
+	_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1`, order.WalletID, amount-appliedToReceivables, now)
 	return packageID, err
 }
 

@@ -192,7 +192,7 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 	}
 	now := p.now()
 	refund = Refund{ID: uuid.Must(uuid.NewV7()), PaymentOrderID: orderID, RequesterID: requesterID, MerchantRefundNo: "pvr-" + uuid.Must(uuid.NewV7()).String(), AmountFen: amountFen, CreditMicrocredits: credits, Status: "REQUESTED", Reason: reason, CreatedAt: now, UpdatedAt: now}
-	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND posted_microcredits-reserved_microcredits >= $2`, order.WalletID, credits, now)
+	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits >= $2`, order.WalletID, credits, now)
 	if err != nil || command.RowsAffected() != 1 {
 		return Refund{}, false, ErrInsufficientBalance
 	}

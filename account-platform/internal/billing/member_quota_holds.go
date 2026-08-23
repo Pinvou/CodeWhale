@@ -101,7 +101,7 @@ FOR UPDATE OF grant,component`, organizationID, memberUserID, membershipVersion,
 	if remaining != 0 {
 		return Hold{}, ErrInsufficientComponentCapacity
 	}
-	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND posted_microcredits-reserved_microcredits>=$2`, walletID, maxAmount, now)
+	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits>=$2`, walletID, maxAmount, now)
 	if err != nil || command.RowsAffected() != 1 {
 		if err == nil {
 			err = ErrInsufficientBalance
@@ -206,7 +206,7 @@ func (r *PostgresRepository) extendMemberQuotaHold(ctx context.Context, tx pgx.T
 	if remaining != 0 {
 		return ErrInsufficientComponentCapacity
 	}
-	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND posted_microcredits-reserved_microcredits>=$2`, hold.WalletID, additional, now)
+	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND status='ACTIVE' AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits>=$2`, hold.WalletID, additional, now)
 	if err != nil {
 		return err
 	}
