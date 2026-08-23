@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 215`、`部分实现 38`、`未实现 76`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 220`、`部分实现 41`、`未实现 68`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -54,8 +54,9 @@
 | `LATE-PAYMENT-REVIEW` | 72小时边界查询、唯一 P2 案件、每日/每周复核、用户申诉证据、无账单降级、正式收款准入、严格未支付归档与 Provider blind 停单 | Go 单测、OpenAPI lint、90 个合同测试、管理页41项状态测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Provider 历史查询/终态和告警投递待部署 |
 | `PAYMENT-ANOMALY-RECONCILIATION` | 拒付、强制退款、重复/晚到冲突、退款失败与非法迁移统一案件；Provider、订单/流水、退款、账本每日四方对账；不可变证据和幂等处置命令 | Go 单测、OpenAPI lint、92 个合同测试、三语运营页面和 Portal 构建通过；数据库运行级迁移、真实 Provider 账单、跨日时区、并发定时任务及财务故障注入待部署 |
 | `GATEWAY-ADAPTER-NEUTRALITY` | 版本化协议能力发现、显式路由协议、Provider/Adapter/上游引用历史证据，以及 New API/通用 OpenAI 兼容 Adapter 隔离 | Go 单测、OpenAPI lint、93 个合同测试、三语运营页面、Portal 构建和 Helm/Compose 配置检查通过；数据库运行级迁移及真实 Adapter 替换/用量证据联调待部署 |
+| `MODEL-CATALOG-LIFECYCLE` | Adapter 目录发现、稳定 UUID、不可变能力/目录版本、草稿 CAS、发布/弃用/移除、连续缺失核验、前向回滚、历史墓碑和请求版本快照 | Go 单测、OpenAPI lint、94 个合同测试、三语运营页面和 Helm/Compose 配置检查通过；桌面目录消费、回滚联合依赖校验、数据库运行级迁移和真实 Adapter 同步待后续任务/部署 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/93 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -125,7 +126,7 @@
 | ACC-57 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | Account 用密码学安全随机源均匀生成 16 位 Crockford 载荷和 SHA-256 前 10 bit 校验码；具备格式/非空/唯一约束、保存点冲突重试、永久登记及不可变触发器 |
 | ACC-58 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE; DESKTOP-39 | NOT_DEPLOYED | 本人资料、桌面/Web 个人入口及运营列表/详情展示格式化编码；授权运营人员可按完整编码精确识别活动或已注销墓碑主体 |
 | TOK-04 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | `/v1/model-protocols` 暴露 Adapter 版本和显式 `CHAT v1` JSON/SSE 能力；路由持久化 `protocol_code`，未声明的 Embedding/Rerank/Image 等协议不会被推断可用 |
-| TOK-07 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 没有独立模型目录和 `CATALOG_VISIBLE` 状态 |
+| TOK-07 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 独立版本化目录只把 PUBLISHED 及处于允许宽限期的 DEPRECATED 模型作为 `CATALOG_VISIBLE` 返回；目录展示不读取上下文资格、钱包或请求级预占结果 |
 | TOK-09 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 托管路由 PENDING/READY/FAILED/REPAIR_REQUIRED 状态机及自动/人工修复待实现 |
 | TOK-10 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 目录、托管路由 Provisioning、上下文资格、请求预占、Hold 与上游调用的强制顺序待实现 |
 | TOK-12 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Gateway 每请求检查 Account 上下文和路由共享策略；缺目录/Provisioning 联合资格状态 |
@@ -148,12 +149,12 @@
 | TOK-39 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | Model Gateway Adapter 尚未声明显式取消、断流可确认取消或不支持取消的统一能力 |
 | TOK-40 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 客户端连接、交付状态与服务端模型执行仍缺少可验证的独立状态契约 |
 | TOK-41 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少取消结果、执行终态和最终实际用量的统一证据核对闭环 |
-| TOK-42 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少独立于调用资格的 DRAFT/PUBLISHED/DEPRECATED/REMOVED 目录管理状态机、并发控制和审计 |
-| TOK-43 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少上游模型消失后的连续核验、历史显示快照、目录墓碑及不依赖实时 Model Gateway 的历史会话展示 |
-| TOK-44 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少稳定模型 ID、版本化显示名称和无歧义别名映射及冲突校验 |
-| TOK-45 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少以历史版本为来源向前创建新版本、按当前依赖重新校验并原子发布的目录回滚 |
-| TOK-46 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少逻辑模型、目录、协议、能力、价格和路由代次的独立版本生成规则及请求全版本快照 |
-| TOK-47 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少弃用宽限期、新会话/历史继续分离门禁、显式替代分支及下架在途请求处理 |
+| TOK-42 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 草稿 CAS、发布、弃用、正常/紧急移除均使用合法迁移、稳定幂等键、不可变新目录版本和审计；已发布历史由数据库触发器禁止更新/删除 |
+| TOK-43 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 连续两次上游缺失才自动弃用且从不物理删除；目录墓碑和 usage_request 显示/能力快照独立于实时 Model Gateway 保留 |
+| TOK-44 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 稳定 UUID 身份与版本化名称/别名分离；别名直接指向模型身份，结构上不能成环，发布拒绝重复别名、规范名称冲突和 REMOVED 目标 |
+| TOK-45 | 部分实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 已复制历史期望状态形成更高版本，保留来源/原因/操作者，不复活当前 REMOVED 墓碑并校验当前 Adapter 协议和来源可用性；当前价格、Provisioning 路由及凭据联合校验由 APT-028 接入后方可完成 |
+| TOK-46 | 已实现 | DOC_CURRENT | GO-UNIT; METERING-PRICING-LIFECYCLE; GATEWAY-ADAPTER-NEUTRALITY; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 模型身份、目录、能力、协议、价格/公式和路由代次独立版本化；请求在 Hold/派发前冻结全部引用和生命周期显示快照，显示变化不创建新身份 |
+| TOK-47 | 部分实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | Gateway 已保存弃用生效、新会话/继续截止、替代模型和强制取消标志，并在每个新请求按当前目录门禁；桌面显式替代会话分支与在途强制取消证据仍由 APT-032/APT-030 收口 |
 | BILL-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | Account 提交原子写入钱包任务与 Outbox，后台使用稳定键调用 Billing、退避重试并在成功后激活账号；bootstrap 不同步调用 Billing |
 | BILL-05 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 权益组成表只允许 BASE/BONUS，商品入账按冻结商品快照拆分且舍入余数归 BONUS，不存在第三种积分类型 |
 | BILL-09 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 组织用量 Hold 同时锁定成员授予与其精确权益包、BASE/BONUS 组成，不跨包或跨组成回退；结算和释放同步维护成员授予及组织组成桶 |
@@ -315,7 +316,7 @@
 | TOK-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 启用账号平台后，Rust 运行时以当前 Access Token 调用 Gateway。 |
 | TOK-03 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | `POST /v1/chat/completions` 支持 JSON 和 SSE；桌面原生流式路径使用该入口。 |
 | TOK-05 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | 请求构造、响应头引用提取和 New API 日志/用量归一化封装于版本化 Adapter；通用 Handler 与核对器只消费协议能力和 `UsageEvidenceProvider` |
-| TOK-06 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Gateway 同步模型目录并提供 `CATALOG_VISIBLE` 用户模型列表；上下文资格和请求级预占不作为目录同步字段，桌面不再读取旧模型服务或固定环境变量列表。 |
+| TOK-06 | 部分实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE; DESKTOP-39 | NOT_DEPLOYED | Gateway 已经定时/手动通过 Adapter 同步并提供 `CATALOG_VISIBLE` 列表，且不把上下文资格或请求级预占写入目录；桌面仍保留固定账号平台模型占位，须由 APT-032 改为动态消费目录。 |
 | TOK-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 平台托管、幂等创建，普通用户不可见不可改。 |
 | TOK-11 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Gateway 从 Account 获取服务端可信上下文，不接受客户端伪造 payer。 |
 | TOK-13 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 按作用域、默认级别和优先级选择，歧义拒绝。 |
@@ -455,7 +456,7 @@
 | CR-31 | ACC-10, ACC-11 | 用户可主动注销并保留三年法定记录 | 未实现、由 CR-52 细化 | 有个人余额、未清应收、本人未完成订单、未结算 Hold 或尚未转让的组织所有权时禁止完成注销，其他资金/外部事实及自动清理门禁按 CR-52；未消费组织授予不阻止注销并按 CR-51 处理；注销后标识可复用，法定记录以不可反查业务身份保存 3 年 |
 | CR-32 | ACC-07, ACC-08, ACC-06 | 用户资料修改采用可恢复 Saga | 已实现 | `profile_change_requests` 保存旧值、新值、资料版本和各阶段时间；Identity 成功后只向前重试，Account CAS 后异步重置 Commerce 任务，失败退避或进入修复状态。 |
 | CR-34 | BILL-29–BILL-33, PAY-33 | 用量负余额与拒付应收分场景记账并按钱包上下文隔离冻结 | 已实现 | 用量超额双记独立应收；拒付统一案件确认后只冲销目标支付权益包，现金 BASE 缺口形成订单应收，后续现金 BASE 优先清偿且按钱包隔离冻结，证据、责任人和结论完整保留 |
-| CR-35 | TOK-07, TOK-12, TOK-16, TOK-20 | 模型状态拆分为目录展示、上下文资格和请求级实时预占 | 未实现 | CATALOG_VISIBLE 只表示目录展示；CONTEXT_ELIGIBLE 判断当前上下文权限、策略和路由；RESERVABLE 在具体请求创建 Hold 时实时计算；客户端“可调用”仅为提示，Gateway 每次请求必须重新判断 |
+| CR-35 | TOK-07, TOK-12, TOK-16, TOK-20 | 模型状态拆分为目录展示、上下文资格和请求级实时预占 | 部分实现 | CATALOG_VISIBLE 已由独立目录实现且不混入资格/余额；RESERVABLE 仍在请求级创建 Hold 时实时判断；完整 CONTEXT_ELIGIBLE 和 READY Provisioning 由 APT-028 收口 |
 | CR-36 | TOK-04, TOK-17–TOK-20, BILL-20–BILL-21, BILL-23–BILL-25 | 模型协议和计价抽象为版本化计量单位及协议预占公式 | 已实现（当前 CHAT 协议） | 版本化能力发现、路由协议、单位、公式、缺省量为 0、输入互斥计量和零价语义均已落地；新增协议须由 Adapter 与模型目录共同声明 |
 | CR-37 | ID-14, ID-15, ACC-02–ACC-04, BILL-04, UI-02 | 注册采用持久 PROVISIONING，钱包初始化异步重试 | 已实现 | Identity 与 Account 成功即账号存在；钱包完成前允许登录和资料管理但禁止平台模型及充值；超过快照化 SLA 才进入 REPAIR_REQUIRED，Billing 暂时不可用不删除已验证身份 |
 | CR-38 | SCOPE-01, SCOPE-04, SCOPE-05, TOK-35, TOK-36, TOK-37, NFR-20 | 补齐品悟客户端旧模型路径的数据迁移和切换验收 | 未实现、由 CR-44 细化门禁 | 只改品悟客户端代码及相关文件；一次性幂等迁移旧客户端状态并保护本地独立模型，按三层门禁和升级矩阵完成失败行为、请求目的端及版本级回滚验收，不保留运行时兼容分支；TOK-37 作为独立前置能力，不进入客户端迁移提交 |
@@ -474,8 +475,8 @@
 | CR-52 | ACC-10–ACC-11, ACC-40–ACC-50, BILL-39, UI-14, ADM-34 | 用持久注销 Saga 区分资金阻断、系统自动清理和标识释放门禁 | 未实现 | 待核对用量、拒付、资金性差异、外部待确认关单及资金相关 Commerce 任务阻断注销；组织所有权及最后一个有效超级管理员角色须先交接，资料 Saga、其他角色、临时授权和邀请不要求用户处理但必须自动收敛；全部门禁通过且 Identity 不可认证后才能释放标识，迟到任务不得作用于新账号 |
 | CR-53 | ID-03, ID-14–ID-15, ID-17–ID-18, ACC-02, ACC-51–ACC-55, UI-15, ADM-35, NFR-04, NFR-06 | 闭合注册预检并发、唯一值预约、幂等、密码边界和孤儿 Identity 补偿 | 已实现 | 数据库唯一预约、稳定操作/密码指纹、脱敏查询、Identity 关联向前恢复及24小时证明门禁补偿已闭环；全域日志白名单与幂等治理仍由独立 NFR 任务追踪 |
 | CR-54 | BILL-12, BILL-36, BILL-38–BILL-40 | 允许授权管理员选择性回收注销账号的未消费组织授予 | 未实现 | 注销授予不自动回池；账号完成 `ANONYMIZED` 且不存在消费、Hold、待核对用量或资金冻结时，授权管理员可用专用命令一次性全额回收至原权益包原组成，禁止部分回收、跨组成转换、现金退款或直接授予新账号 |
-| CR-55 | TOK-42–TOK-45 | 补齐模型目录管理生命周期、历史展示、重命名/别名和版本回滚 | 未实现 | 目录管理使用 DRAFT/PUBLISHED/DEPRECATED/REMOVED；上游删除不清除历史快照；模型 ID 稳定且名称/别名版本化；回滚通过复制历史期望状态形成经当前依赖重新校验的新版本 |
-| CR-56 | TOK-46–TOK-47 | 明确模型关联版本生成边界及下架后的新旧会话和在途请求策略 | 未实现 | 协议、能力、价格、路由和目录独立版本化并冻结到请求；弃用可配置新会话/继续会话截止时间，移除后历史仍可读、替代必须显式分支，在途请求按受理快照完成或走证据化紧急取消 |
+| CR-55 | TOK-42–TOK-45 | 补齐模型目录管理生命周期、历史展示、重命名/别名和版本回滚 | 部分实现 | 生命周期、历史墓碑、稳定模型 ID、版本化名称/别名和前向回滚已实现；回滚仍待 APT-028 用当前价格、Provisioning 路由和凭据完成联合发布校验 |
+| CR-56 | TOK-46–TOK-47 | 明确模型关联版本生成边界及下架后的新旧会话和在途请求策略 | 部分实现 | 独立版本生成与请求快照已实现，Gateway 也保存并执行弃用截止；桌面显式替代分支和在途紧急取消证据仍由 APT-032/APT-030 完成 |
 | CR-57 | BILL-21–BILL-25, BILL-41–BILL-45, ADM-13 | 明确定价匹配优先级、显式单位继承、时间冲突、生命周期及 Hold 不变性 | 已实现 | 模型覆盖优先、显式继承、固定零价、区间冲突、完整生命周期及既有 Hold 不重算均由数据约束和服务契约实现 |
 | CR-58 | ADM-01, ID-18, NFR-04 | 用交互式设密或高熵一次性引导替代8位超级管理员初始密码 | 未实现 | admin 激活前保持 BOOTSTRAP_PENDING；直接设密使用高权限密码策略；引导凭据默认256 bit、最少128 bit、Base64URL、15分钟有效、最多5次失败、一次读取销毁且成功兑换原子失效 |
 | CR-59 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | 补齐管理命令审批对象、生命周期、失效和执行契约 | 已实现 | 后台写命令已版本化分类；审批支持独立决定、过期、撤回、新申请重提、快照失效、实时授权复核、Outbox 授权与 Billing 幂等执行 |
@@ -619,7 +620,7 @@
 | TOK-02 | 桌面聊天携带与个人中心一致的 OIDC 身份 | 已实现 | 启用账号平台后，Rust 运行时以当前 Access Token 调用 Gateway。 |
 | TOK-03 | Token Gateway 提供 OpenAI 兼容聊天入口 | 已实现 | `POST /v1/chat/completions` 支持 JSON 和 SSE；桌面原生流式路径使用该入口。 |
 | TOK-05 | 模型网关协议适配 | 已实现 | 通用领域和核对器只消费版本化 Adapter/`UsageEvidenceProvider`；New API 请求头、日志查询与用量字段不再泄漏到数据库、API 或运营 UI。 |
-| TOK-06 | 模型目录自动提供模型 | 未实现 | Gateway 同步模型目录并提供 `CATALOG_VISIBLE` 用户模型列表；上下文资格和请求级预占不作为目录同步字段，桌面不再读取旧模型服务或固定环境变量列表。 |
+| TOK-06 | 模型目录自动提供模型 | 部分实现 | Gateway 已通过 Adapter 自动/手动同步并提供独立 `CATALOG_VISIBLE` 列表；桌面动态目录消费仍由 APT-032 完成。 |
 | TOK-08 | 首次调用自动创建默认 Token Account 和路由 | 已实现 | 平台托管、幂等创建，普通用户不可见不可改。 |
 | TOK-09 | 托管路由 Provisioning 生命周期 | 未实现 | 当前缺少按作用域、模型、协议和期望代唯一的 Provisioning 聚合，以及 PENDING/READY/FAILED/REPAIR_REQUIRED、指数退避、SLA 转修复和受审计人工重试。 |
 | TOK-10 | 托管模型调用资格顺序闭环 | 未实现 | 当前首次请求可直接触发默认资源创建，但尚未以统一管线强制执行目录可见、Provisioning READY、上下文资格、请求级预占、Hold、上游调用的先后顺序和阶段原因码。 |
@@ -645,12 +646,12 @@
 | TOK-39 | Provider 取消能力适配 | 未实现 | 当前 Model Gateway Adapter 未统一声明 EXPLICIT_CANCEL、STREAM_ABORT_CONFIRMED_CANCEL、UNSUPPORTED，也未证明取消重试幂等和最终用量获取能力。 |
 | TOK-40 | 传输连接与模型执行状态隔离 | 未实现 | 缺少 execution/cancel/delivery/settlement 四类独立状态；断线、应用退出和停止显示尚未形成“不取消、不判失败、不释放 Hold”的可验证契约。 |
 | TOK-41 | 取消结果和实际用量核对 | 未实现 | 缺少取消时间线、Provider 证据、取消不确定状态退避查询、最终用量核对和超时转 REVIEW 的闭环。 |
-| TOK-42 | 模型目录管理生命周期 | 未实现 | 当前目录同步与展示状态未形成 DRAFT/PUBLISHED/DEPRECATED/REMOVED 管理状态机，也没有合法迁移、ETag/版本并发控制、幂等和审计。 |
-| TOK-43 | 已移除模型的历史展示 | 未实现 | 当前未证明 Model Gateway 删除模型后仍能以不可变目录快照展示历史会话，也没有上游缺失连续核验、墓碑和历史数据保留边界。 |
-| TOK-44 | 模型重命名和别名 | 未实现 | 当前缺少稳定逻辑模型 ID、版本化显示名称、别名有效期、唯一解析和冲突/循环校验。 |
-| TOK-45 | 模型目录版本回滚 | 未实现 | 当前缺少复制历史版本形成新版本、按当前协议/价格/路由/凭据重新校验、原子切换和禁止复活 REMOVED 模型的回滚流程。 |
-| TOK-46 | 模型关联对象版本生成边界 | 未实现 | 当前没有证明目录、协议、能力、价格和路由代次独立演进，也没有冻结全部版本引用的请求快照；配置变化可能无法与新逻辑模型身份变化区分。 |
-| TOK-47 | 模型下架后的会话处理 | 未实现 | 当前缺少新会话与历史继续的独立截止时间、下架后显式替代分支、旧缓存拒绝及生效点前后在途请求/紧急取消的确定规则。 |
+| TOK-42 | 模型目录管理生命周期 | 已实现 | DRAFT/PUBLISHED/DEPRECATED/REMOVED、CAS/ETag、幂等命令、合法迁移、不可变版本和审计已经闭环。 |
+| TOK-43 | 已移除模型的历史展示 | 已实现 | 连续缺失核验、目录墓碑和请求显示/能力快照均持久保存，不依赖实时 Model Gateway 读取历史名称。 |
+| TOK-44 | 模型重命名和别名 | 已实现 | 稳定逻辑模型 UUID 与版本化名称/别名分离，直接身份映射结构性排除循环，并拒绝别名/规范名称冲突及 REMOVED 目标。 |
+| TOK-45 | 模型目录版本回滚 | 部分实现 | 已以前向更高版本复制历史内容并保留来源、审计和 REMOVED 墓碑；仍待当前价格、路由和凭据联合校验。 |
+| TOK-46 | 模型关联对象版本生成边界 | 已实现 | 目录、协议、能力、价格/公式和路由代次独立演进，请求冻结全部版本与显示/生命周期快照。 |
+| TOK-47 | 模型下架后的会话处理 | 部分实现 | 服务端已保存并执行弃用/移除截止及替代引用；桌面显式替代分支和强制取消在途请求的证据收敛尚未完成。 |
 
 ### 3.4 钱包、积分、定价和权益
 

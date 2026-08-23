@@ -54,6 +54,7 @@ type Service struct {
 	defaultMaxOutputTokens int64
 	maximumOutputTokens    int64
 	defaultRoutes          DefaultRouteProvisioner
+	catalogSync            *CatalogSynchronizer
 	authorizer             *authorization.Client
 }
 
@@ -64,6 +65,11 @@ func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Servic
 
 func (s *Service) WithAuthorizer(authorizer *authorization.Client) *Service {
 	s.authorizer = authorizer
+	return s
+}
+
+func (s *Service) WithCatalogSynchronizer(synchronizer *CatalogSynchronizer) *Service {
+	s.catalogSync = synchronizer
 	return s
 }
 
@@ -98,6 +104,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
 	protected.GET("/v1/model-protocols", httpserver.AdaptFunc(s.modelProtocols))
+	protected.GET("/v1/models", httpserver.AdaptFunc(s.listCatalogModels))
 	protected.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
 	protected.GET("/v1/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
@@ -131,6 +138,12 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/protocols/:protocol_definition_id/formulas", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateFormula))
 		admin.POST("/formulas/:formula_version_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishFormula))
 		admin.GET("/formulas/:formula_version_id/preview", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPreviewFormula))
+		admin.GET("/models", s.authorizer.Require("platform.models.read"), httpserver.AdaptFunc(s.adminCatalogModels))
+		admin.PUT("/models/:model_id/draft", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_DRAFT_SAVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSaveCatalogDraft))
+		admin.POST("/models/:model_id/publish", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishCatalogDraft))
+		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_LIFECYCLE_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransitionCatalogModel))
+		admin.POST("/models:sync", s.authorizer.Require("platform.models.sync"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncCatalog))
+		admin.POST("/model-catalog:rollback", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_ROLLBACK", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRollbackCatalog))
 	}
 	return router
 }
@@ -773,6 +786,16 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
 	case errors.Is(err, ErrOrganizationLifecycleConflict):
 		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle version or state conflicts with current facts"
+	case errors.Is(err, ErrCatalogVersionConflict):
+		status, code, message = http.StatusConflict, "MODEL_CATALOG_VERSION_CONFLICT", "the model catalog or draft version has changed"
+	case errors.Is(err, ErrCatalogAliasConflict):
+		status, code, message = http.StatusConflict, "MODEL_ALIAS_CONFLICT", "the model name or alias is ambiguous"
+	case errors.Is(err, ErrIdempotencyConflict):
+		status, code, message = http.StatusConflict, "IDEMPOTENCY_CONFLICT", "the idempotency key was already used with different input"
+	case errors.Is(err, ErrModelDeprecated):
+		status, code, message = http.StatusGone, "MODEL_DEPRECATION_CUTOFF_REACHED", "the model can no longer be used for this conversation mode"
+	case errors.Is(err, ErrModelUnavailable):
+		status, code, message = http.StatusUnprocessableEntity, "MODEL_UNAVAILABLE", "the catalog model is not available for new requests"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

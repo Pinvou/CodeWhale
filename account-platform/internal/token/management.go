@@ -154,7 +154,7 @@ func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUI
 	}
 	now := r.now()
 	policy := RoutingPolicy{TokenAccountID: accountID, Model: model, ProtocolCode: protocolCode, Priority: priority, DefaultScope: defaultScope, HealthStatus: healthStatus, UpdatedAt: now}
-	_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code=EXCLUDED.protocol_code,priority=EXCLUDED.priority,default_scope=EXCLUDED.default_scope,health_status=EXCLUDED.health_status,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by`, uuid.Must(uuid.NewV7()), accountID, model, protocolCode, priority, defaultScope, healthStatus, now, actorID)
+	err = tx.QueryRow(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,updated_by,route_generation) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,1) ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code=EXCLUDED.protocol_code,priority=EXCLUDED.priority,default_scope=EXCLUDED.default_scope,health_status=EXCLUDED.health_status,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,route_generation=routing_policies.route_generation+1 RETURNING route_generation`, uuid.Must(uuid.NewV7()), accountID, model, protocolCode, priority, defaultScope, healthStatus, now, actorID).Scan(&policy.RouteGeneration)
 	if err != nil {
 		return RoutingPolicy{}, err
 	}

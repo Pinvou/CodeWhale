@@ -10,6 +10,25 @@ servers:
 security:
   - oidc: []
 paths:
+  /models:
+    get:
+      operationId: listCatalogModels
+      summary: List the immutable current catalog independently from context eligibility and balance
+      responses:
+        "200":
+          description: Current CATALOG_VISIBLE models and monotonic catalog version
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [catalog_version, items]
+                properties:
+                  catalog_version: { type: integer, format: int64, minimum: 0 }
+                  items: { type: array, items: { $ref: "#/components/schemas/CatalogModel" } }
+        "401": { $ref: "#/components/responses/Error" }
   /payment-capabilities:
     get:
       operationId: getPaymentCapabilities
@@ -745,6 +764,34 @@ components:
         type: string
         format: uuid
   schemas:
+    CatalogModel:
+      type: object
+      additionalProperties: false
+      required: [model_id, catalog_version, display_name, description, aliases, lifecycle_status, protocol_code, protocol_version, protocol_definition_id, model_capability_version_id, capability_version, context_length, maximum_output_tokens, supported_modalities, tokenizer_version, source_available, source_missing_confirmations, force_cancel_inflight]
+      properties:
+        model_id: { type: string, format: uuid }
+        catalog_version: { type: integer, format: int64, minimum: 1 }
+        display_name: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string }
+        aliases: { type: array, uniqueItems: true, items: { type: string } }
+        lifecycle_status: { type: string, enum: [PUBLISHED, DEPRECATED, REMOVED] }
+        protocol_code: { type: string }
+        protocol_version: { type: integer, format: int64, minimum: 1 }
+        protocol_definition_id: { type: string, format: uuid }
+        model_capability_version_id: { type: string, format: uuid }
+        capability_version: { type: integer, format: int64, minimum: 1 }
+        context_length: { type: integer, format: int64, minimum: 1 }
+        maximum_output_tokens: { type: integer, format: int64, minimum: 0 }
+        supported_modalities: { type: array, uniqueItems: true, items: { type: string } }
+        tokenizer_version: { type: string }
+        source_available: { type: boolean }
+        source_missing_since: { type: [string, "null"], format: date-time }
+        source_missing_confirmations: { type: integer, minimum: 0 }
+        deprecation_effective_at: { type: [string, "null"], format: date-time }
+        replacement_model_id: { type: [string, "null"], format: uuid }
+        new_session_cutoff_at: { type: [string, "null"], format: date-time }
+        continuation_cutoff_at: { type: [string, "null"], format: date-time }
+        force_cancel_inflight: { type: boolean }
     MemberQuotaAllocation:
       type: object
       additionalProperties: false

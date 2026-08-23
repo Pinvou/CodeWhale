@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +32,10 @@ type GatewayProtocolCapability struct {
 	ProtocolVersion int64  `json:"protocol_version"`
 	Path            string `json:"path"`
 	Streaming       bool   `json:"streaming"`
+}
+
+type ModelCatalogAdapter interface {
+	DiscoverModels(context.Context, string, []byte) ([]DiscoveredModel, error)
 }
 
 type HTTPUpstreamClient struct {
@@ -144,4 +151,45 @@ func (c *HTTPUpstreamClient) Do(ctx context.Context, baseURL string, secret, bod
 	request.Header.Set("Accept", "application/json, text/event-stream")
 	request.Header.Set("X-Request-ID", usageID.String())
 	return c.client.Do(request)
+}
+
+func (c *HTTPUpstreamClient) DiscoverModels(ctx context.Context, baseURL string, secret []byte) ([]DiscoveredModel, error) {
+	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || len(secret) == 0 {
+		return nil, ErrNoEligibleRoute
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String()+"/v1/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Authorization", "Bearer "+string(secret))
+	request.Header.Set("Accept", "application/json")
+	response, err := c.client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("model catalog discovery returned status %d", response.StatusCode)
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<20))
+	if err := decoder.Decode(&payload); err != nil {
+		return nil, err
+	}
+	models := make([]DiscoveredModel, 0, len(payload.Data))
+	seen := map[string]bool{}
+	for _, entry := range payload.Data {
+		model := strings.TrimSpace(entry.ID)
+		if model != "" && !seen[model] {
+			seen[model] = true
+			models = append(models, DiscoveredModel{UpstreamModelRef: model, DisplayName: model})
+		}
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].UpstreamModelRef < models[j].UpstreamModelRef })
+	return models, nil
 }

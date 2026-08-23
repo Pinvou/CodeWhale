@@ -1117,6 +1117,60 @@ paths:
       responses:
         "200": { description: Safe formula preview }
         "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/models:
+    get:
+      operationId: listAdminCatalogModels
+      summary: List current catalog models, immutable tombstones, and editable drafts
+      responses:
+        "200": { description: Current model catalog and drafts, content: { application/json: { schema: { $ref: "#/components/schemas/AdminModelCatalog" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/models/{model_id}/draft:
+    put:
+      operationId: saveAdminModelDraft
+      summary: Create or CAS-update a DRAFT without mutating published history
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelDraftChange" } } } }
+      responses:
+        "200": { description: Draft saved }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/models/{model_id}/publish:
+    post:
+      operationId: publishAdminModelDraft
+      summary: Publish an immutable catalog revision with stable idempotency
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelPublishCommand" } } } }
+      responses:
+        "200": { description: New catalog version published }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/models/{model_id}/lifecycle:
+    post:
+      operationId: transitionAdminModelLifecycle
+      summary: Deprecate or remove a model using legal forward-only transitions and explicit cutoffs
+      parameters: [{ $ref: "#/components/parameters/ModelID" }]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelLifecycleCommand" } } } }
+      responses:
+        "200": { description: New catalog version published }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/models:sync:
+    post:
+      operationId: synchronizeAdminModelCatalog
+      summary: Discover models through the selected Adapter and record consecutive absence evidence
+      responses:
+        "200": { description: Synchronization result }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/model-catalog:rollback:
+    post:
+      operationId: rollbackAdminModelCatalog
+      summary: Copy a historical version forward after current validation without reviving REMOVED models
+      requestBody: { required: true, content: { application/json: { schema: { $ref: "#/components/schemas/ModelCatalogRollbackCommand" } } } }
+      responses:
+        "200": { description: Forward rollback version published }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-policies:
     get:
@@ -1249,6 +1303,11 @@ components:
       type: openIdConnect
       openIdConnectUrl: /realms/pinvou/.well-known/openid-configuration
   parameters:
+    ModelID:
+      name: model_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     Search:
       name: q
       in: query
@@ -1372,6 +1431,86 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    AdminModelCatalog:
+      type: object
+      additionalProperties: false
+      required: [catalog_version, items]
+      properties:
+        catalog_version: { type: integer, format: int64, minimum: 0 }
+        items: { type: array, items: { $ref: "#/components/schemas/AdminCatalogModel" } }
+    AdminCatalogModel:
+      allOf:
+        - { $ref: "token-gateway.yaml#/components/schemas/CatalogModel" }
+        - type: object
+          properties:
+            draft: { $ref: "#/components/schemas/ModelDraft" }
+    ModelDraft:
+      type: object
+      additionalProperties: false
+      required: [model_id, base_catalog_version, draft_version, display_name, description, aliases, protocol_code, protocol_version, context_length, maximum_output_tokens, supported_modalities, tokenizer_version, updated_by, updated_at]
+      properties:
+        model_id: { type: string, format: uuid }
+        base_catalog_version: { type: integer, format: int64, minimum: 1 }
+        draft_version: { type: integer, format: int64, minimum: 1 }
+        display_name: { type: string }
+        description: { type: string }
+        aliases: { type: array, items: { type: string } }
+        protocol_code: { type: string }
+        protocol_version: { type: integer, format: int64, minimum: 1 }
+        context_length: { type: integer, format: int64, minimum: 1 }
+        maximum_output_tokens: { type: integer, format: int64, minimum: 0 }
+        supported_modalities: { type: array, items: { type: string } }
+        tokenizer_version: { type: string }
+        updated_by: { type: string, format: uuid }
+        updated_at: { type: string, format: date-time }
+    ModelDraftChange:
+      type: object
+      additionalProperties: false
+      required: [expected_catalog_version, expected_draft_version, display_name, description, aliases, protocol_code, protocol_version, context_length, maximum_output_tokens, supported_modalities, tokenizer_version]
+      properties:
+        expected_catalog_version: { type: integer, format: int64, minimum: 1 }
+        expected_draft_version: { type: integer, format: int64, minimum: 0 }
+        display_name: { type: string, minLength: 1, maxLength: 160 }
+        description: { type: string }
+        aliases: { type: array, uniqueItems: true, items: { type: string } }
+        protocol_code: { type: string, const: CHAT }
+        protocol_version: { type: integer, const: 1 }
+        context_length: { type: integer, format: int64, minimum: 1 }
+        maximum_output_tokens: { type: integer, format: int64, minimum: 0 }
+        supported_modalities: { type: array, minItems: 1, uniqueItems: true, items: { type: string } }
+        tokenizer_version: { type: string, minLength: 1 }
+    ModelPublishCommand:
+      type: object
+      additionalProperties: false
+      required: [expected_catalog_version, expected_draft_version, idempotency_key, reason]
+      properties:
+        expected_catalog_version: { type: integer, format: int64, minimum: 1 }
+        expected_draft_version: { type: integer, format: int64, minimum: 1 }
+        idempotency_key: { type: string, minLength: 16, maxLength: 128 }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    ModelLifecycleCommand:
+      type: object
+      additionalProperties: false
+      required: [expected_catalog_version, target_status, idempotency_key, reason]
+      properties:
+        expected_catalog_version: { type: integer, format: int64, minimum: 1 }
+        target_status: { type: string, enum: [DEPRECATED, REMOVED] }
+        effective_at: { type: [string, "null"], format: date-time }
+        replacement_model_id: { type: [string, "null"], format: uuid }
+        new_session_cutoff_at: { type: [string, "null"], format: date-time }
+        continuation_cutoff_at: { type: [string, "null"], format: date-time }
+        force_cancel_inflight: { type: boolean, default: false }
+        idempotency_key: { type: string, minLength: 16, maxLength: 128 }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    ModelCatalogRollbackCommand:
+      type: object
+      additionalProperties: false
+      required: [source_catalog_version, expected_catalog_version, idempotency_key, reason]
+      properties:
+        source_catalog_version: { type: integer, format: int64, minimum: 1 }
+        expected_catalog_version: { type: integer, format: int64, minimum: 1 }
+        idempotency_key: { type: string, minLength: 16, maxLength: 128 }
+        reason: { type: string, minLength: 1, maxLength: 500 }
     UsageHold:
       type: object
       additionalProperties: true

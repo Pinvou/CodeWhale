@@ -134,6 +134,9 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: token-secret-provider-token } }
             - { name: TOKEN_PROVIDER_ALLOWED_HOSTS, value: {{ join "," $root.Values.tokenGateway.providerAllowedHosts | quote }} }
             - { name: TOKEN_GATEWAY_MAX_INPUT_TOKENS, value: {{ $root.Values.tokenGateway.maxInputTokens | quote }} }
+            - { name: TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS, value: {{ $root.Values.tokenGateway.modelCatalogDefaultContextTokens | quote }} }
+            - { name: TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS, value: {{ $root.Values.tokenGateway.modelCatalogDefaultMaxOutputTokens | quote }} }
+            - { name: TOKEN_MODEL_CATALOG_SYNC_MINUTES, value: {{ $root.Values.tokenGateway.modelCatalogSyncMinutes | quote }} }
             - { name: TOKEN_DEFAULT_PROVIDER, value: {{ $root.Values.tokenGateway.defaultProvider | quote }} }
             - { name: TOKEN_GATEWAY_ADAPTER, value: {{ $root.Values.tokenGateway.gatewayAdapter | quote }} }
             - { name: TOKEN_DEFAULT_PROVIDER_BASE_URL, value: {{ $root.Values.tokenGateway.defaultProviderBaseUrl | quote }} }

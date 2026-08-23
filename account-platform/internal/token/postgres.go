@@ -44,13 +44,14 @@ type Credential struct {
 }
 
 type RoutingPolicy struct {
-	TokenAccountID uuid.UUID `json:"token_account_id"`
-	Model          string    `json:"model"`
-	ProtocolCode   string    `json:"protocol_code"`
-	Priority       int       `json:"priority"`
-	DefaultScope   string    `json:"default_scope"`
-	HealthStatus   string    `json:"health_status"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	TokenAccountID  uuid.UUID `json:"token_account_id"`
+	Model           string    `json:"model"`
+	ProtocolCode    string    `json:"protocol_code"`
+	Priority        int       `json:"priority"`
+	DefaultScope    string    `json:"default_scope"`
+	HealthStatus    string    `json:"health_status"`
+	RouteGeneration int64     `json:"route_generation"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type CreateAccountRequest struct {
@@ -125,7 +126,7 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 	}
 	now := r.now()
 	request.Status, request.StartedAt = "CREATED", now
-	_, err = tx.Exec(ctx, `INSERT INTO usage_requests(id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,model,status,maximum_microcredits,request_snapshot,started_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'CREATED',$10,$11,$12,$12)`, request.ID, request.IdempotencyKey, request.UserID, request.SessionID, request.OrganizationID, request.TokenAccountID, request.CredentialID, request.WalletID, request.Model, request.MaximumMicrocredits, encoded, now)
+	_, err = tx.Exec(ctx, `INSERT INTO usage_requests(id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,status,maximum_microcredits,request_snapshot,started_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'CREATED',$16,$17,$18,$18)`, request.ID, request.IdempotencyKey, request.UserID, request.SessionID, request.OrganizationID, request.TokenAccountID, request.CredentialID, request.WalletID, request.Model, request.ModelID, request.CatalogVersion, request.CapabilityVersionID, request.ProtocolDefinitionID, request.RouteGeneration, request.ModelSnapshot, request.MaximumMicrocredits, encoded, now)
 	if err != nil {
 		return UsageRequest{}, false, err
 	}
@@ -133,9 +134,9 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 }
 
 func (r *PostgresRepository) GetUsage(ctx context.Context, usageID uuid.UUID) (UsageRequest, error) {
-	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at FROM usage_requests WHERE id=$1`
+	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at FROM usage_requests WHERE id=$1`
 	var usage UsageRequest
-	err := r.pool.QueryRow(ctx, query, usageID).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
+	err := r.pool.QueryRow(ctx, query, usageID).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.ModelID, &usage.CatalogVersion, &usage.CapabilityVersionID, &usage.ProtocolDefinitionID, &usage.RouteGeneration, &usage.ModelSnapshot, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return UsageRequest{}, ErrNotFound
 	}
@@ -146,26 +147,26 @@ func (r *PostgresRepository) ListUsageForContext(ctx context.Context, resolved A
 	if resolved.UserID == uuid.Nil || limit < 1 || limit > 101 {
 		return nil, ErrForbidden
 	}
-	query := `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+	query := `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL
 ORDER BY started_at DESC,id DESC LIMIT $2`
 	arguments := []any{resolved.UserID, limit}
 	if cursor != nil {
-		query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+		query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL AND (started_at,id)<($2,$3)
 ORDER BY started_at DESC,id DESC LIMIT $4`
 		arguments = []any{resolved.UserID, cursor.StartedAt, cursor.ID, limit}
 	}
 	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
-		query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+		query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2
 ORDER BY started_at DESC,id DESC LIMIT $3`
 		arguments = []any{resolved.UserID, *resolved.OrganizationID, limit}
 		if cursor != nil {
-			query = `SELECT id,model,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+			query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2 AND (started_at,id)<($3,$4)
 ORDER BY started_at DESC,id DESC LIMIT $5`
@@ -183,7 +184,7 @@ ORDER BY started_at DESC,id DESC LIMIT $5`
 	for rows.Next() {
 		var item UserUsageRecord
 		var snapshot []byte
-		if err := rows.Scan(&item.UsageRequestID, &item.Model, &item.status, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.UsageRequestID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.status, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if len(snapshot) > 0 {
@@ -344,12 +345,12 @@ func (r *PostgresRepository) ensureUsageState(ctx context.Context, usageID uuid.
 func getUsageByIdempotency(ctx context.Context, database interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, key string, lock bool) (UsageRequest, error) {
-	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at FROM usage_requests WHERE idempotency_key=$1`
+	query := `SELECT id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at FROM usage_requests WHERE idempotency_key=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var usage UsageRequest
-	err := database.QueryRow(ctx, query, key).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
+	err := database.QueryRow(ctx, query, key).Scan(&usage.ID, &usage.IdempotencyKey, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.ModelID, &usage.CatalogVersion, &usage.CapabilityVersionID, &usage.ProtocolDefinitionID, &usage.RouteGeneration, &usage.ModelSnapshot, &usage.Status, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
 	return usage, err
 }
 
@@ -500,7 +501,7 @@ func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, ac
 		if err != nil {
 			break
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at) SELECT $1,id,$2,'CHAT',default_priority,'NONE','HEALTHY',$3 FROM token_accounts WHERE id=$4 ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code='CHAT',health_status='HEALTHY',updated_at=EXCLUDED.updated_at`, uuid.Must(uuid.NewV7()), model, now, accountID)
+		_, err = tx.Exec(ctx, `INSERT INTO routing_policies(id,token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at,route_generation) SELECT $1,id,$2,'CHAT',default_priority,'NONE','HEALTHY',$3,1 FROM token_accounts WHERE id=$4 ON CONFLICT(token_account_id,model) DO UPDATE SET protocol_code='CHAT',health_status='HEALTHY',updated_at=EXCLUDED.updated_at,route_generation=routing_policies.route_generation+1`, uuid.Must(uuid.NewV7()), model, now, accountID)
 	}
 	if err != nil {
 		return Credential{}, err
@@ -514,7 +515,7 @@ func (r *PostgresRepository) ListCandidates(ctx context.Context, model, protocol
 SELECT ta.id,ta.name,ta.owner_type,ta.owner_id,ta.owner_organization_id,ta.owner_unit_id,ta.wallet_id,ta.status,
        sp.scope,pc.allowed_models,
        ARRAY(SELECT em.user_id FROM token_explicit_members em WHERE em.token_account_id=ta.id ORDER BY em.user_id),
-       rp.default_scope,rp.priority,rp.health_status,pc.id,rp.protocol_code
+	       rp.default_scope,rp.priority,rp.health_status,pc.id,rp.protocol_code,rp.route_generation
 FROM token_accounts ta
 JOIN token_share_policies sp ON sp.token_account_id=ta.id
 JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID'
@@ -528,7 +529,7 @@ ORDER BY rp.priority DESC,ta.id`, model, protocolCode)
 	items := make([]Candidate, 0)
 	for rows.Next() {
 		var item Candidate
-		if err := rows.Scan(&item.TokenAccountID, &item.Name, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Status, &item.ShareScope, &item.AllowedModels, &item.ExplicitMembers, &item.DefaultScope, &item.Priority, &item.HealthStatus, &item.CredentialID, &item.ProtocolCode); err != nil {
+		if err := rows.Scan(&item.TokenAccountID, &item.Name, &item.OwnerType, &item.OwnerID, &item.OwnerOrganization, &item.OwnerUnit, &item.WalletID, &item.Status, &item.ShareScope, &item.AllowedModels, &item.ExplicitMembers, &item.DefaultScope, &item.Priority, &item.HealthStatus, &item.CredentialID, &item.ProtocolCode, &item.RouteGeneration); err != nil {
 			return nil, err
 		}
 		items = append(items, item)

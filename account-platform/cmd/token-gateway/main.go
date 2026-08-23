@@ -129,10 +129,44 @@ func main() {
 		}
 		reconciliationInterval = time.Duration(seconds) * time.Second
 	}
+	catalogContextLength := maximumInputTokens
+	if raw := strings.TrimSpace(os.Getenv("TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS")); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || parsed <= 0 {
+			log.Fatal("TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS must be a positive integer")
+		}
+		catalogContextLength = parsed
+	}
+	catalogMaximumOutput := int64(4096)
+	if raw := strings.TrimSpace(os.Getenv("TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS")); raw != "" {
+		parsed, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || parsed < 0 || parsed > catalogContextLength {
+			log.Fatal("TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS must be within the catalog context limit")
+		}
+		catalogMaximumOutput = parsed
+	}
+	catalogInterval := 15 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("TOKEN_MODEL_CATALOG_SYNC_MINUTES")); raw != "" {
+		minutes, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || minutes < 1 || minutes > 1440 {
+			log.Fatal("TOKEN_MODEL_CATALOG_SYNC_MINUTES must be between 1 and 1440")
+		}
+		catalogInterval = time.Duration(minutes) * time.Minute
+	}
+	catalogSync, err := token.NewCatalogSynchronizer(repository, gatewayAdapter, defaultProvider, os.Getenv("TOKEN_DEFAULT_PROVIDER_BASE_URL"), []byte(os.Getenv("TOKEN_DEFAULT_PROVIDER_API_KEY")), catalogContextLength, catalogMaximumOutput, catalogInterval)
+	if err != nil {
+		log.Fatal("model catalog synchronization is not configured: ", err)
+	}
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithAuthorizer(authorizer)
+	initialSyncContext, cancelInitialSync := context.WithTimeout(workerContext, 30*time.Second)
+	if _, _, syncErr := catalogSync.Sync(initialSyncContext); syncErr != nil {
+		log.Printf("model catalog initial synchronization deferred: %v", syncErr)
+	}
+	cancelInitialSync()
+	go catalogSync.Run(workerContext)
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer)
 	if err := httpserver.RunWithApplication("token-gateway", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

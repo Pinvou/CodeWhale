@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标保留可追溯任务；完成 APT-001～APT-006、APT-008～APT-013、APT-016～APT-026 与 APT-046，并完成 APT-007 仓库实现但等待环境验收后，当前仍有 114 个状态为 `部分实现` 或 `未实现` 的目标编号，每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标保留可追溯任务；完成 APT-001～APT-006、APT-008～APT-013、APT-016～APT-027 与 APT-046，并完成 APT-007 仓库实现但等待环境验收后，当前仍有 109 个状态为 `部分实现` 或 `未实现` 的目标编号，每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -50,12 +50,12 @@
 | APT-024 | 晚到支付、无回调/账单降级、人工案件和事实盲区处置 | PAY-17–PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | APT-022, APT-023 | CODE | DONE |
 | APT-025 | 拒付/异常复核、四方对账和受审计修复 | PAY-33, PAY-34, PAY-36, ADM-21 | APT-019, APT-023, APT-024 | CODE | DONE |
 | APT-026 | 供应商中立模型网关协议和用量证据 Adapter | TOK-04, TOK-05, NFR-18 | 无 | CODE | DONE |
-| APT-027 | 独立模型目录、稳定模型身份、版本/弃用/下架/回滚生命周期 | TOK-06, TOK-07, TOK-42–TOK-47 | APT-026 | CODE | PENDING |
-| APT-028 | 平台托管路由 Provisioning、资格管线及运营修复 | TOK-09, TOK-10, TOK-12, TOK-16, ADM-11, ADM-28–ADM-30 | APT-006, APT-026, APT-027 | CODE | PENDING |
+| APT-027 | 独立模型目录、稳定模型身份及不可变目录生命周期 | TOK-07, TOK-42–TOK-44, TOK-46 | APT-026 | CODE | DONE |
+| APT-028 | 平台托管路由 Provisioning、资格管线、目录回滚依赖校验及运营修复 | TOK-09, TOK-10, TOK-12, TOK-16, TOK-45, ADM-11, ADM-28–ADM-30 | APT-006, APT-026, APT-027 | CODE | PENDING |
 | APT-029 | 模型请求幂等指纹、持久派发、流事件加密与结果重放保留 | TOK-24–TOK-30, NFR-49 | APT-012, APT-018, APT-026–APT-028 | CODE | PENDING |
 | APT-030 | 模型取消、执行/交付分离、可信用量核对和取消期 Hold 收敛 | TOK-31, TOK-33, TOK-38–TOK-41, BILL-34, BILL-35, UI-13, ADM-31, ADM-32 | APT-018, APT-029 | CODE | PENDING |
 | APT-031 | Token Account、凭据和检查动作的平台权限隔离 | SCOPE-03, ADM-25–ADM-27 | APT-006, APT-026, APT-028 | CODE | PENDING |
-| APT-032 | 桌面发布/安装/运行三层切换门禁与非计费 readiness | SCOPE-05, TOK-35–TOK-37, NFR-20, UI-09 | APT-003, APT-027–APT-029 | CODE+ENV | PENDING |
+| APT-032 | 桌面目录消费、下架会话分支、发布/安装/运行三层切换门禁与非计费 readiness | SCOPE-05, TOK-06, TOK-35–TOK-37, TOK-47, NFR-20, UI-09 | APT-003, APT-027–APT-030 | CODE+ENV | PENDING |
 | APT-033 | 配置驱动系统探针和受控审计导出 | ADM-09, ADM-10, NFR-19, NFR-48 | APT-006, APT-008, APT-020, APT-023, APT-031 | CODE | PENDING |
 | APT-034 | 桌面、个人中心和后台完整三语发布门禁 | UI-16 | APT-003, APT-004, APT-012, APT-013, APT-017, APT-021, APT-030, APT-032, APT-033 | CODE | PENDING |
 | APT-035 | HTTPS、生产 KMS/Vault、密钥轮换和秘密配置验收 | NFR-01, NFR-03 | 无 | CODE+ENV | PENDING |

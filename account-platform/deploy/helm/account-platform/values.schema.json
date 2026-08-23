@@ -114,13 +114,16 @@
     },
     "tokenGateway": {
       "type": "object",
-      "required": ["gatewayAdapter", "secretProvider", "secretKeyId", "providerAllowedHosts", "maxInputTokens"],
+      "required": ["gatewayAdapter", "secretProvider", "secretKeyId", "providerAllowedHosts", "maxInputTokens", "modelCatalogDefaultContextTokens", "modelCatalogDefaultMaxOutputTokens", "modelCatalogSyncMinutes"],
       "properties": {
         "gatewayAdapter": { "enum": ["NEW_API", "OPENAI_COMPATIBLE"] },
         "secretProvider": { "enum": ["local", "remote"] },
         "secretKeyId": { "type": "string" },
         "providerAllowedHosts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
-        "maxInputTokens": { "type": "integer", "minimum": 1 }
+        "maxInputTokens": { "type": "integer", "minimum": 1 },
+        "modelCatalogDefaultContextTokens": { "type": "integer", "minimum": 1 },
+        "modelCatalogDefaultMaxOutputTokens": { "type": "integer", "minimum": 0 },
+        "modelCatalogSyncMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 }
       }
     },
     "external": {

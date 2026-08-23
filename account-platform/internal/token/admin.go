@@ -69,6 +69,11 @@ type AdminUsageRequest struct {
 	PriceVersionID          *uuid.UUID `json:"price_version_id,omitempty"`
 	HoldID                  *uuid.UUID `json:"hold_id,omitempty"`
 	Model                   string     `json:"model"`
+	ModelID                 *uuid.UUID `json:"model_id,omitempty"`
+	CatalogVersion          *int64     `json:"catalog_version,omitempty"`
+	CapabilityVersionID     *uuid.UUID `json:"model_capability_version_id,omitempty"`
+	ProtocolDefinitionID    *uuid.UUID `json:"protocol_definition_id,omitempty"`
+	RouteGeneration         *int64     `json:"route_generation,omitempty"`
 	Status                  string     `json:"status"`
 	MaximumMicrocredits     int64      `json:"maximum_microcredits"`
 	ActualMicrocredits      *int64     `json:"actual_microcredits,omitempty"`
@@ -410,7 +415,7 @@ FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, acco
 	if err := credentialRows.Err(); err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
-	routeRows, err := r.pool.Query(ctx, `SELECT token_account_id,model,protocol_code,priority,default_scope,health_status,updated_at FROM routing_policies WHERE token_account_id=$1 ORDER BY priority DESC,model`, accountID)
+	routeRows, err := r.pool.Query(ctx, `SELECT token_account_id,model,protocol_code,priority,default_scope,health_status,route_generation,updated_at FROM routing_policies WHERE token_account_id=$1 ORDER BY priority DESC,model`, accountID)
 	if err != nil {
 		return AdminTokenAccountDetail{}, err
 	}
@@ -418,7 +423,7 @@ FROM provider_credentials WHERE token_account_id=$1 ORDER BY version DESC`, acco
 	result.Routes = make([]RoutingPolicy, 0)
 	for routeRows.Next() {
 		var item RoutingPolicy
-		if err := routeRows.Scan(&item.TokenAccountID, &item.Model, &item.ProtocolCode, &item.Priority, &item.DefaultScope, &item.HealthStatus, &item.UpdatedAt); err != nil {
+		if err := routeRows.Scan(&item.TokenAccountID, &item.Model, &item.ProtocolCode, &item.Priority, &item.DefaultScope, &item.HealthStatus, &item.RouteGeneration, &item.UpdatedAt); err != nil {
 			return AdminTokenAccountDetail{}, err
 		}
 		result.Routes = append(result.Routes, item)
@@ -501,7 +506,7 @@ func (r *PostgresRepository) AdminRecordCredentialValidation(ctx context.Context
 
 func adminUsageQuery() string {
 	return `SELECT request.id,request.user_id,request.session_id,request.organization_id,request.token_account_id,
-request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,request.model,request.status,
+request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,COALESCE(request.model_snapshot->>'display_name',request.model),request.model_id,request.catalog_version,request.model_capability_version_id,request.protocol_definition_id,request.route_generation,request.status,
 request.maximum_microcredits,request.actual_microcredits,request.error_class,attempt.provider_id,
 attempt.adapter_version,attempt.upstream_request_id,attempt.status,attempt.input_tokens,attempt.output_tokens,attempt.cached_input_tokens,
 request.reconciliation_attempts,request.reconciliation_last_error,request.reconciliation_stopped_at,
@@ -512,7 +517,7 @@ LEFT JOIN usage_attempts attempt ON attempt.usage_request_id=request.id`
 func scanAdminUsage(row interface{ Scan(...any) error }) (AdminUsageRequest, error) {
 	var item AdminUsageRequest
 	err := row.Scan(&item.ID, &item.UserID, &item.SessionID, &item.OrganizationID, &item.TokenAccountID,
-		&item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID, &item.Model, &item.Status,
+		&item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.CapabilityVersionID, &item.ProtocolDefinitionID, &item.RouteGeneration, &item.Status,
 		&item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass, &item.ProviderID,
 		&item.AdapterVersion, &item.UpstreamRequestID, &item.AttemptStatus, &item.InputTokens, &item.OutputTokens, &item.CachedInputTokens,
 		&item.ReconciliationAttempts, &item.ReconciliationLastError, &item.ReconciliationStoppedAt, &item.StartedAt, &item.UpdatedAt)

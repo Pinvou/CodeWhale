@@ -38,6 +38,20 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
 		return
 	}
+	catalog, ok := s.repository.(CatalogRepository)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "MODEL_CATALOG_UNAVAILABLE", "the model catalog is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	catalogModel, err := catalog.ResolveCatalogModel(r.Context(), request.Model, r.Header.Get("X-Pinvou-Conversation-Mode"), time.Now().UTC())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if catalogModel.ProtocolCode != "CHAT" || catalogModel.ProtocolVersion != 1 {
+		api.WriteError(w, http.StatusUnprocessableEntity, "MODEL_PROTOCOL_UNSUPPORTED", "the catalog model does not support CHAT v1", httpserver.RequestID(r.Context()))
+		return
+	}
 	if request.Stream {
 		var payload map[string]any
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -65,11 +79,23 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	maximumUsage, err := EstimateChatUsage(body, maximumOutput)
-	if err != nil || maximumUsage.InputTokens > s.maximumInputTokens {
+	if err != nil || maximumUsage.InputTokens > s.maximumInputTokens || catalogModel.ValidateRequestLimits(maximumUsage.InputTokens, maximumOutput) != nil {
 		api.WriteError(w, http.StatusUnprocessableEntity, "METERING_LIMIT_EXCEEDED", "the request cannot be measured within the configured model limits", httpserver.RequestID(r.Context()))
 		return
 	}
-	candidates, err := s.repository.ListCandidates(r.Context(), request.Model, "CHAT")
+	logicalBody := append([]byte(nil), body...)
+	var upstreamPayload map[string]any
+	if err := json.Unmarshal(logicalBody, &upstreamPayload); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
+		return
+	}
+	upstreamPayload["model"] = catalogModel.UpstreamModelRef
+	upstreamBody, err := json.Marshal(upstreamPayload)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
+		return
+	}
+	candidates, err := s.repository.ListCandidates(r.Context(), catalogModel.UpstreamModelRef, "CHAT")
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -83,17 +109,17 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		explicit = &parsed
 	}
-	route, err := SelectRoute(resolved, RouteRequest{Model: request.Model, ProtocolCode: "CHAT", ExplicitTokenAccountID: explicit}, candidates)
+	route, err := SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: "CHAT", ExplicitTokenAccountID: explicit}, candidates)
 	if errors.Is(err, ErrNoEligibleRoute) && explicit == nil && s.defaultRoutes != nil {
 		walletID, provisionErr := s.activeWallet(r.Context(), resolved)
 		if provisionErr == nil {
-			provisionErr = s.defaultRoutes.Ensure(r.Context(), resolved, walletID, request.Model)
+			provisionErr = s.defaultRoutes.Ensure(r.Context(), resolved, walletID, catalogModel.UpstreamModelRef)
 		}
 		if provisionErr == nil {
-			candidates, provisionErr = s.repository.ListCandidates(r.Context(), request.Model, "CHAT")
+			candidates, provisionErr = s.repository.ListCandidates(r.Context(), catalogModel.UpstreamModelRef, "CHAT")
 		}
 		if provisionErr == nil {
-			route, err = SelectRoute(resolved, RouteRequest{Model: request.Model, ProtocolCode: "CHAT"}, candidates)
+			route, err = SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: "CHAT"}, candidates)
 		} else if !errors.Is(provisionErr, ErrNoEligibleRoute) {
 			err = provisionErr
 		}
@@ -102,7 +128,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	price, err := s.billing.Price(r.Context(), request.Model)
+	price, err := s.billing.Price(r.Context(), catalogModel.ModelID.String())
 	if err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "PRICING_UNAVAILABLE", "the model price is unavailable", httpserver.RequestID(r.Context()))
 		return
@@ -116,16 +142,19 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusUnprocessableEntity, "PRICE_INVALID", "the model request cannot be priced", httpserver.RequestID(r.Context()))
 		return
 	}
-	idempotencyKey := requestIdempotencyKey(r.Header.Get("Idempotency-Key"), resolved, body)
+	idempotencyKey := requestIdempotencyKey(r.Header.Get("Idempotency-Key"), resolved, logicalBody)
 	if len(idempotencyKey) < 16 || len(idempotencyKey) > 128 {
 		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key must contain between 16 and 128 characters", httpserver.RequestID(r.Context()))
 		return
 	}
 	usageID := uuid.Must(uuid.NewV7())
-	digest := sha256.Sum256(body)
-	usageRequest := UsageRequest{ID: usageID, IdempotencyKey: idempotencyKey, UserID: resolved.UserID, SessionID: resolved.SessionID, OrganizationID: resolved.OrganizationID, TokenAccountID: route.TokenAccountID, CredentialID: route.CredentialID, WalletID: route.WalletID, Model: request.Model, MaximumMicrocredits: maximumCost}
+	digest := sha256.Sum256(logicalBody)
+	modelSnapshot, _ := json.Marshal(catalogModel.Snapshot())
+	catalogVersion, routeGeneration := catalogModel.CatalogVersion, route.RouteGeneration
+	modelID, capabilityID, protocolID := catalogModel.ModelID, catalogModel.ModelCapabilityVersionID, catalogModel.ProtocolDefinitionID
+	usageRequest := UsageRequest{ID: usageID, IdempotencyKey: idempotencyKey, UserID: resolved.UserID, SessionID: resolved.SessionID, OrganizationID: resolved.OrganizationID, TokenAccountID: route.TokenAccountID, CredentialID: route.CredentialID, WalletID: route.WalletID, Model: catalogModel.ModelID.String(), ModelID: &modelID, CatalogVersion: &catalogVersion, CapabilityVersionID: &capabilityID, ProtocolDefinitionID: &protocolID, RouteGeneration: &routeGeneration, ModelSnapshot: modelSnapshot, MaximumMicrocredits: maximumCost}
 	pricingSnapshot, _ := json.Marshal(price)
-	requestSnapshot := map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model": request.Model, "protocol_code": "CHAT", "stream": request.Stream, "estimated_input_tokens": maximumUsage.InputTokens, "maximum_output_tokens": maximumOutput, "estimator": map[string]any{"code": "UTF8_BYTES_DIV4_CEIL", "version": 1}, "context_type": resolved.ContextType, "organization_id": resolved.OrganizationID, "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "membership_version": resolved.MembershipVersion, "wallet_id": route.WalletID, "token_account_id": route.TokenAccountID, "credential_id": route.CredentialID, "formula_version_id": price.FormulaVersionID, "price_version_id": price.ID, "pricing_snapshot": json.RawMessage(pricingSnapshot)}
+	requestSnapshot := map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model_id": catalogModel.ModelID, "catalog_version": catalogModel.CatalogVersion, "model_capability_version_id": catalogModel.ModelCapabilityVersionID, "protocol_definition_id": catalogModel.ProtocolDefinitionID, "protocol_code": "CHAT", "protocol_version": catalogModel.ProtocolVersion, "route_generation": route.RouteGeneration, "lifecycle_status": catalogModel.LifecycleStatus, "deprecation_effective_at": catalogModel.DeprecationEffectiveAt, "display_name": catalogModel.DisplayName, "context_length": catalogModel.ContextLength, "stream": request.Stream, "estimated_input_tokens": maximumUsage.InputTokens, "maximum_output_tokens": maximumOutput, "estimator": map[string]any{"code": "UTF8_BYTES_DIV4_CEIL", "version": 1}, "context_type": resolved.ContextType, "organization_id": resolved.OrganizationID, "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "membership_version": resolved.MembershipVersion, "wallet_id": route.WalletID, "token_account_id": route.TokenAccountID, "credential_id": route.CredentialID, "formula_version_id": price.FormulaVersionID, "price_version_id": price.ID, "pricing_snapshot": json.RawMessage(pricingSnapshot)}
 	requestSnapshotJSON, _ := json.Marshal(requestSnapshot)
 	usageRequest, created, err := s.repository.BeginUsage(r.Context(), usageRequest, requestSnapshot)
 	if err != nil {
@@ -137,7 +166,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var hold BillingHold
-	pricingContext := HoldPricingContext{ModelID: request.Model, ProtocolCode: "CHAT", FormulaVersionID: price.FormulaVersionID, PricingSnapshot: pricingSnapshot, RequestSnapshot: requestSnapshotJSON}
+	pricingContext := HoldPricingContext{ModelID: catalogModel.ModelID.String(), ProtocolCode: "CHAT", FormulaVersionID: price.FormulaVersionID, PricingSnapshot: pricingSnapshot, RequestSnapshot: requestSnapshotJSON}
 	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
 		organizationBilling, supported := s.billing.(OrganizationBillingClient)
 		if !supported {
@@ -189,7 +218,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	upstreamContext, cancelUpstream := context.WithCancel(r.Context())
 	defer cancelUpstream()
 	renewalFailed := s.renewHold(upstreamContext, cancelUpstream, usageRequest.ID, hold.ID)
-	response, err := s.upstream.Do(upstreamContext, credential.BaseURL, secret, body, usageRequest.ID)
+	response, err := s.upstream.Do(upstreamContext, credential.BaseURL, secret, upstreamBody, usageRequest.ID)
 	if err != nil {
 		select {
 		case <-renewalFailed:

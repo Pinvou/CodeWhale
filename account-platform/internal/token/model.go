@@ -2,6 +2,7 @@ package token
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -52,6 +53,7 @@ type Candidate struct {
 	HealthStatus      string
 	CredentialID      uuid.UUID
 	ProtocolCode      string
+	RouteGeneration   int64
 }
 
 type RouteRequest struct {
@@ -67,23 +69,29 @@ type UpstreamRequestEvidence struct {
 }
 
 type UsageRequest struct {
-	ID                  uuid.UUID
-	IdempotencyKey      string
-	UserID              uuid.UUID
-	SessionID           string
-	OrganizationID      *uuid.UUID
-	TokenAccountID      uuid.UUID
-	CredentialID        uuid.UUID
-	WalletID            uuid.UUID
-	PriceVersionID      *uuid.UUID
-	HoldID              *uuid.UUID
-	Model               string
-	Status              string
-	MaximumMicrocredits int64
-	ActualMicrocredits  *int64
-	ErrorClass          *string
-	StartedAt           time.Time
-	UpdatedAt           time.Time
+	ID                   uuid.UUID
+	IdempotencyKey       string
+	UserID               uuid.UUID
+	SessionID            string
+	OrganizationID       *uuid.UUID
+	TokenAccountID       uuid.UUID
+	CredentialID         uuid.UUID
+	WalletID             uuid.UUID
+	PriceVersionID       *uuid.UUID
+	HoldID               *uuid.UUID
+	Model                string
+	ModelID              *uuid.UUID
+	CatalogVersion       *int64
+	CapabilityVersionID  *uuid.UUID
+	ProtocolDefinitionID *uuid.UUID
+	RouteGeneration      *int64
+	ModelSnapshot        json.RawMessage
+	Status               string
+	MaximumMicrocredits  int64
+	ActualMicrocredits   *int64
+	ErrorClass           *string
+	StartedAt            time.Time
+	UpdatedAt            time.Time
 }
 
 type UsageHistoryCursor struct {
@@ -94,6 +102,8 @@ type UsageHistoryCursor struct {
 type UserUsageRecord struct {
 	UsageRequestID     uuid.UUID  `json:"usage_request_id"`
 	Model              string     `json:"model"`
+	ModelID            *uuid.UUID `json:"model_id,omitempty"`
+	CatalogVersion     *int64     `json:"catalog_version,omitempty"`
 	DisplayStatus      string     `json:"display_status"`
 	ActualMicrocredits *int64     `json:"actual_microcredits"`
 	InputTokens        *int64     `json:"input_tokens"`
