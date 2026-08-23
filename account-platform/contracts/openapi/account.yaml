@@ -519,9 +519,10 @@ paths:
   /organizations/{organization_id}/invitations:
     post:
       operationId: createOrganizationInvitation
-      summary: Create a one-time organization invitation
+      summary: Create a target-bound or one-time-link organization invitation without revealing target existence
       parameters:
         - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -529,11 +530,18 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [email, roles, expires_in_hours]
+              required: [target_type, roles, expires_in_hours]
               properties:
+                target_type:
+                  type: string
+                  enum: [PHONE, USERNAME, LINK, EMAIL]
+                target:
+                  type: string
+                  description: Required for PHONE, USERNAME, and legacy EMAIL; omitted for LINK.
                 email:
                   type: string
                   format: email
+                  deprecated: true
                 roles:
                   type: array
                   uniqueItems: true
@@ -544,9 +552,19 @@ paths:
                   type: integer
                   minimum: 1
                   maximum: 720
+                idempotency_key:
+                  type: string
+                  minLength: 8
+                  maxLength: 120
       responses:
         "201":
           description: Invitation; token is returned only on creation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Invitation"
+        "200":
+          description: Existing metadata replayed without returning the one-time token again
           content:
             application/json:
               schema:
@@ -555,6 +573,41 @@ paths:
           $ref: "#/components/responses/Error"
         "403":
           $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/invitations/{invitation_id}:
+    delete:
+      operationId: revokeOrganizationInvitation
+      summary: Idempotently revoke a pending invitation while retaining history
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - name: invitation_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Revoked invitation or its existing terminal result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Invitation" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /me/invitations:
+    get:
+      operationId: listMyOrganizationInvitations
+      summary: Recover invitations from the authenticated identity without accepting an arbitrary lookup target
+      responses:
+        "200":
+          description: Pending targeted invitations for the current identity
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Invitation" } }
+        "401": { $ref: "#/components/responses/Error" }
   /invitations/accept:
     post:
       operationId: acceptOrganizationInvitation
@@ -564,21 +617,24 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              additionalProperties: false
-              required: [token]
-              properties:
-                token:
-                  type: string
-                  minLength: 32
-                  maxLength: 128
+              oneOf:
+                - type: object
+                  additionalProperties: false
+                  required: [token]
+                  properties:
+                    token: { type: string, minLength: 32, maxLength: 128 }
+                - type: object
+                  additionalProperties: false
+                  required: [invitation_id]
+                  properties:
+                    invitation_id: { type: string, format: uuid }
       responses:
         "200":
-          description: Joined organization
+          description: Membership established, or the same existing relationship returned
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Organization"
+                $ref: "#/components/schemas/MembershipMutationResult"
         "403":
           $ref: "#/components/responses/Error"
         "410":
@@ -589,6 +645,7 @@ paths:
       summary: Revoke a membership while preserving the final owner invariant
       parameters:
         - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
         - name: user_id
           in: path
           required: true
@@ -596,8 +653,11 @@ paths:
             type: string
             format: uuid
       responses:
-        "204":
-          description: Membership revoked
+        "200":
+          description: Membership revoked, or the same terminal relationship returned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MembershipMutationResult" }
         "403":
           $ref: "#/components/responses/Error"
         "409":
@@ -713,6 +773,7 @@ paths:
       summary: Atomically transfer organization ownership
       parameters:
         - $ref: "#/components/parameters/OrganizationId"
+        - $ref: "#/components/parameters/IdempotencyKey"
       requestBody:
         required: true
         content:
@@ -725,9 +786,16 @@ paths:
                 new_owner_user_id:
                   type: string
                   format: uuid
+                idempotency_key:
+                  type: string
+                  minLength: 8
+                  maxLength: 120
       responses:
-        "204":
-          description: Ownership transferred
+        "200":
+          description: Ownership transferred, or the same result returned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OwnershipTransferResult" }
         "403":
           $ref: "#/components/responses/Error"
         "404":
@@ -871,28 +939,6 @@ components:
           items:
             type: string
             enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
-    Organization:
-      type: object
-      additionalProperties: false
-      required: [organization_id, name, status, version]
-      properties:
-        organization_id:
-          type: string
-          format: uuid
-        name:
-          type: string
-        status:
-          type: string
-          enum: [ACTIVE, DISABLED]
-        version:
-          type: integer
-          minimum: 1
-        roles:
-          type: array
-          uniqueItems: true
-          items:
-            type: string
-            enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
     OrganizationUnit:
       type: object
       additionalProperties: false
@@ -967,7 +1013,7 @@ components:
     Invitation:
       type: object
       additionalProperties: false
-      required: [invitation_id, organization_id, email, roles, expires_at, token]
+      required: [invitation_id, organization_id, target_type, roles, status, version, expires_at, replayed]
       properties:
         invitation_id:
           type: string
@@ -975,9 +1021,11 @@ components:
         organization_id:
           type: string
           format: uuid
-        email:
+        target_type:
           type: string
-          format: email
+          enum: [PHONE, USERNAME, LINK, EMAIL]
+        target_hint:
+          type: string
         roles:
           type: array
           uniqueItems: true
@@ -986,8 +1034,43 @@ components:
         expires_at:
           type: string
           format: date-time
+        status:
+          type: string
+          enum: [PENDING, ACCEPTED, REVOKED, EXPIRED]
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        accepted_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
         token:
           type: string
+          minLength: 32
+          description: Present only in the first successful creation response.
+        replayed:
+          type: boolean
+    MembershipMutationResult:
+      type: object
+      additionalProperties: false
+      required: [organization_id, member, replayed]
+      properties:
+        organization_id: { type: string, format: uuid }
+        member: { $ref: "#/components/schemas/OrganizationMember" }
+        replayed: { type: boolean }
+    OwnershipTransferResult:
+      type: object
+      additionalProperties: false
+      required: [organization_id, previous_owner_user_id, new_owner_user_id, new_owner_membership, replayed]
+      properties:
+        organization_id: { type: string, format: uuid }
+        previous_owner_user_id: { type: string, format: uuid }
+        new_owner_user_id: { type: string, format: uuid }
+        new_owner_membership: { $ref: "#/components/schemas/OrganizationMember" }
+        replayed: { type: boolean }
     SetActiveContextRequest:
       oneOf:
         - type: object

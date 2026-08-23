@@ -86,16 +86,22 @@ func (*fakeRepository) CreateUnit(context.Context, identity.Principal, uuid.UUID
 func (*fakeRepository) MoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string) (UnitMutationResult, error) {
 	panic("not used")
 }
-func (*fakeRepository) CreateInvitation(context.Context, identity.Principal, uuid.UUID, string, []string, time.Time) (Invitation, error) {
+func (*fakeRepository) CreateInvitation(context.Context, identity.Principal, uuid.UUID, InvitationCreateRequest) (Invitation, error) {
 	panic("not used")
 }
-func (*fakeRepository) AcceptInvitation(context.Context, identity.Principal, string) (Organization, error) {
+func (*fakeRepository) ListMyInvitations(context.Context, identity.Principal) ([]Invitation, error) {
 	panic("not used")
 }
-func (*fakeRepository) RevokeMembership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error {
+func (*fakeRepository) RevokeInvitation(context.Context, identity.Principal, uuid.UUID, uuid.UUID) (Invitation, error) {
 	panic("not used")
 }
-func (*fakeRepository) TransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID) error {
+func (*fakeRepository) AcceptInvitation(context.Context, identity.Principal, string, *uuid.UUID) (MembershipMutationResult, error) {
+	panic("not used")
+}
+func (*fakeRepository) RevokeMembership(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (MembershipMutationResult, error) {
+	panic("not used")
+}
+func (*fakeRepository) TransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (OwnershipTransferResult, error) {
 	panic("not used")
 }
 func (*fakeRepository) AdminOverview(context.Context) (AdminOverview, error) {
@@ -161,21 +167,21 @@ func (f *fakeRepository) AdminMembers(_ context.Context, organizationID uuid.UUI
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":members")
 	return []Member{}, nil
 }
-func (f *fakeRepository) AdminAddMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID) (Member, error) {
+func (f *fakeRepository) AdminAddMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID, _ string) (MembershipMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:add:"+userID.String())
-	return Member{UserID: userID, Roles: roles, UnitAdminIDs: unitIDs}, nil
+	return MembershipMutationResult{OrganizationID: organizationID, Member: Member{UserID: userID, Roles: roles, UnitAdminIDs: unitIDs}}, nil
 }
 func (f *fakeRepository) AdminReplaceMemberRoles(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID) (Member, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:roles:"+userID.String())
 	return Member{UserID: userID, Roles: roles, UnitAdminIDs: unitIDs}, nil
 }
-func (f *fakeRepository) AdminRemoveMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID) error {
+func (f *fakeRepository) AdminRemoveMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, _ string) (MembershipMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:remove:"+userID.String())
-	return nil
+	return MembershipMutationResult{OrganizationID: organizationID, Member: Member{UserID: userID, Status: "REVOKED"}}, nil
 }
-func (f *fakeRepository) AdminTransferOwnership(_ context.Context, _ identity.Principal, organizationID, ownerID uuid.UUID) error {
+func (f *fakeRepository) AdminTransferOwnership(_ context.Context, _ identity.Principal, organizationID, ownerID uuid.UUID, _ string) (OwnershipTransferResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":owner:"+ownerID.String())
-	return nil
+	return OwnershipTransferResult{OrganizationID: organizationID, NewOwnerID: ownerID}, nil
 }
 func (f *fakeRepository) AdminCreateUnit(_ context.Context, _ identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name, _ string) (UnitMutationResult, error) {
 	parent := "root"
@@ -364,7 +370,7 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 		{http.MethodPost, "/admin/v1/organizations", `{"name":"Example","owner_user_id":"` + ownerID.String() + `"}`, http.StatusCreated, "organization:create:" + ownerID.String() + ":Example"},
 		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/units", "", http.StatusOK, "organization:" + organizationID.String() + ":units"},
 		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/members", "", http.StatusOK, "organization:" + organizationID.String() + ":members"},
-		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/ownership", `{"new_owner_user_id":"` + ownerID.String() + `"}`, http.StatusNoContent, "organization:" + organizationID.String() + ":owner:" + ownerID.String()},
+		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/ownership", `{"new_owner_user_id":"` + ownerID.String() + `"}`, http.StatusOK, "organization:" + organizationID.String() + ":owner:" + ownerID.String()},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/units", `{"name":"Engineering","parent_id":"` + parentID.String() + `"}`, http.StatusCreated, "organization:" + organizationID.String() + ":unit:create:" + parentID.String() + ":Engineering"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
 		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), "", http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":DELETE"},

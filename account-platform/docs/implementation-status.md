@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 123`、`部分实现 65`、`未实现 139`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 127`、`部分实现 61`、`未实现 139`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -41,8 +41,9 @@
 | `APPROVAL-COMMANDS` | 版本化命令分类、不可逆审批状态机、不可变快照、独立审批、强一致授权复核、Outbox 授权和 Billing 幂等领域执行 | Account/Billing/Portal Go 单元测试、OpenAPI lint、47 个合同测试与全量静态验证通过；生产工作负载身份由 APT-047 继续替换共享服务令牌 |
 | `ORGANIZATION-LIFECYCLE` | 顶层组织创建幂等、状态/游标搜索、启停投影、组织钱包冻结以及 Account/Billing/Token 删除阻断事实强校验 | Account/Billing/Token Go 单元测试、OpenAPI lint、组织生命周期合同测试与全量静态验证通过；数据库运行级迁移和生产故障注入待部署 |
 | `ORGANIZATION-UNIT-LIFECYCLE` | 节点命令指纹幂等、组织结构版本、闭包树移动以及 Account/Billing/Token 限制态预检和逻辑删除 | Account/Billing/Token Go 单元测试、OpenAPI lint、节点生命周期合同测试与全量静态验证通过；数据库运行级迁移、真实并发和跨服务故障注入待部署 |
+| `MEMBERSHIP-GOVERNANCE` | 多目标邀请反枚举、成员命令幂等、即时撤权/上下文回退、Billing 限制投影和单 OWNER 数据库约束 | Account/Billing Go 单元测试、OpenAPI lint、成员治理合同测试与全量静态验证通过；数据库运行级迁移、真实并发、通知通道和跨服务故障注入待部署 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/50 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/52 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -83,8 +84,8 @@
 | ACC-23 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | 显式编辑 UI 与原子权限保护的独立接口共同约束重命名；稳定命令键返回原结果，名称变化只递增节点/结构版本，不改变节点 ID、父子关系和历史审计 |
 | ACC-24 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE; RBAC-AUTH | NOT_DEPLOYED | 移动以组织级 advisory lock 和 `expected_structure_version` 串行提交，拒绝跨组织、停用父节点、自身和后代成环；闭包关系与父节点在同一事务切换 |
 | ACC-25 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-UNIT-LIFECYCLE | NOT_DEPLOYED | 删除先使 Billing/Token 投影进入 DELETION_PENDING，阻止新授予/治理事实和节点 Token Account，再汇总子节点、成员、角色、审批、授予登记、Token 路由及未终态用量阻断；清零后只写 DELETED/删除时间并永久保留树、命令、审计和关联历史 |
-| ACC-27 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有用户/组织状态、重复成员、角色边界、授权版本和 Outbox；重复有效成员返回冲突而非幂等原结果 |
-| ACC-28 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有成员撤销、角色清理、授权版本和 Outbox；管理端路径未自动回退活动上下文，也未处理 BILL-13 授予暂停 |
+| ACC-27 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; RBAC-AUTH | NOT_DEPLOYED | 邀请接受和平台直接添加都校验组织/用户状态与原子权限；操作者隔离的幂等键冻结目标、角色和节点请求指纹，重复添加返回同一成员关系且不重复递增版本或发送事件 |
+| ACC-28 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; RBAC-AUTH | NOT_DEPLOYED | 移除在串行事务内幂等写 REVOKED、终止全部当前/未来角色、递增成员/用户/Session/授权版本并回退该用户所有相关活动上下文；唯一 Outbox 后同步 Billing REVOKED 投影，作为 BILL-13 授予暂停门禁 |
 | ACC-31 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 普通组织/节点角色按显式目标作用域校验 `org.roles.assign`，拒绝 OWNER、基础角色和平台角色；支持开始/到期时间及成员级稳定幂等键，重复请求返回原绑定 |
 | ACC-32 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 单绑定撤销可重复调用并返回同一终态，OWNER/平台/基础角色拒绝走普通接口；事务内同步递增成员、用户、Session 与授权版本并发送变更事件 |
 | ACC-35 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | 组织管理路由显式携带 target organization_id，不切换活动上下文，并按目标组织、成员状态、原子权限码及组织/节点作用域默认拒绝 |
@@ -293,8 +294,8 @@
 | ACC-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 顶层组织创建位于平台管理 API/UI。 |
 | ACC-19 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE | NOT_DEPLOYED | Account 核验停用状态、邀请和审批治理任务；Token 核验未终态用量；Billing 在串行事务中核验余额/预留、有效权益、Hold、支付、退款、对账差异、用量复核、财务调整及可扩展治理阻断登记，任一未收敛即返回结构化原因并保持停用 |
 | ACC-22 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 管理 UI 提供启动编辑动作，避免误改。 |
-| ACC-26 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前仅支持电子邮箱 + 一次性 Token 邀请；手机号/用户名邀请未实现 |
-| ACC-29 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有专用串行事务维持唯一 OWNER 并更新版本/审计；缺稳定幂等键和目标 Account 权限码 |
+| ACC-26 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE | NOT_DEPLOYED | PHONE、USERNAME、LINK 使用统一持久实体并保留 EMAIL 兼容入口；目标只存摘要/提示，创建不探测用户存在，本人列表只按认证身份反向恢复；Token 或目标邀请 ID 均一次消费，接受时再次绑定当前稳定用户 ID，过期/撤销/接受历史永久保留 |
+| ACC-29 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; RBAC-AUTH | NOT_DEPLOYED | 用户入口强制 `org.owner.transfer`、平台入口强制专用平台权限；稳定命令指纹串行撤销旧 OWNER 并保留历史、建立新 OWNER、刷新双方版本/事件，延迟数据库约束保证每个有效组织提交时恰有一个当前所有者 |
 | ACC-30 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 本人接口只按已认证主体返回自己的平台/组织绑定；组织与运营视图展示角色、作用域、起止时间、授权来源和生命周期状态，响应禁止缓存 |
 | ACC-33 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 个人中心按组织列表动态隐藏。 |
 | ACC-34 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有个人/组织活动上下文和版本字段，但按 OIDC Session 保存，不是用户级全局上下文，也无跨端同步 |
@@ -430,7 +431,7 @@
 | CR-19 | PAY-12, PAY-14–PAY-15, PAY-18–PAY-20, PAY-23, PAY-25, PAY-28–PAY-31, PAY-33–PAY-36 | 支付按完整生命周期设计并允许 Provider 能力降级 | 部分实现、退款范围已由 CR-41 取代 | 原记录包含全额/部分退款；现行支付履约隔离、退款目标、金额和意图事务以 CR-41 及 PAY-24–PAY-31 为准，其他支付生命周期要求继续有效 |
 | CR-20 | BILL-07, PAY-22, PAY-23, UI-11 | 组织资金通过企业管理员在线购买组织权益入账 | 未实现 | 企业管理员在组织管理界面选择组织商品并在线支付；订单付款人与权益受益组织分离，成功后直接形成组织权益包和组织钱包账本，不经过个人钱包 |
 | CR-21 | SCOPE-01, SCOPE-02, TOK-15, TOK-01 | 不实现个人中心自有供应商 Key/自管 Token Account | 移除 | 本地应用直接配置的云端或本地模型完全绕过账号平台，继续由桌面模型配置管理；个人中心不提供供应商 Key、个人 Token Account、共享策略或路由管理 |
-| CR-22 | ACC-29 | 每个有效组织恰好一个所有者 | 待重构 | 所有权只能通过专用原子转让命令变更；普通管理员允许多人，不能用普通角色分配接口增删所有者 |
+| CR-22 | ACC-29 | 每个有效组织恰好一个所有者 | 已实现 | 所有权只能通过带稳定幂等指纹的专用原子转让命令变更；旧绑定只撤销不删除，延迟数据库约束在提交时强制每个有效组织恰有一个 OWNER，普通角色接口不能增删所有者 |
 | CR-23 | TOK-19, TOK-21, TOK-23, BILL-30 | 动态预占采用已确认的边界策略 | 部分由 CR-36 取代 | 无 Tokenizer 时安全裕量为 0、Hold 续租和追加预占继续有效；“未传最大输出按 1,000,000 Token”和固定 Token 预占公式由 CR-36 取代 |
 | CR-24 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 只展示符合可用条件的模型 | 已由 CR-35 取代 | 原记录要求把上下文和路由资格作为目录展示前提；现行规则允许 CATALOG_VISIBLE 独立展示，并分别计算 CONTEXT_ELIGIBLE 与请求级 RESERVABLE |
 | CR-25 | BILL-16–BILL-17, BILL-19, BILL-28, PAY-24–PAY-31 | 权益退款、消费顺序和过期 Hold 采用确定规则 | 部分实现 | 已完成确定消费顺序、30 天人工 BONUS、过期 Hold 释放及迟到用量平台损失复核；普通/强制退款的目标支付流水锁定与组成撤销仍由 APT-021 实现 |
@@ -438,7 +439,7 @@
 | CR-27 | ACC-34, ACC-35–ACC-39, UI-07 | 桌面与 Web 共享一个用户级活动上下文 | 待重构 | 活动上下文不再按 OIDC Session 独立保存；任一端切换后其他端自动同步，进行中的调用按开始快照结算；成员移除或组织停用自动回个人；所有业务 API 返回上下文版本 |
 | CR-28 | ADM-01–ADM-03, ADM-06 | 超级管理员初始化、恢复和授权生命周期 | 未实现、ADM-01 初始化凭据由 CR-58 取代 | 原记录使用一次性8位随机初始密码；现行首个管理员初始化改用交互式直接设密或高熵一次性引导凭据；Break-glass 仅处理全部管理员异常失联，不绕过最后一个有效超级管理员主动注销保护，临时授权和自动回收部分保持有效 |
 | CR-29 | ADM-07 | 审批允许角色兼任和交叉审批 | 已实现 | 同一用户可同时拥有计费运营和审批角色；服务端按稳定用户 ID 禁止自审，不同用户可交叉审批，强制审批命令只需一名独立审批人 |
-| CR-30 | ACC-26 | 组织邀请支持手机号、用户名和一次性链接 | 部分实现、待重构 | 三种方式都使用统一邀请实体、过期与一次性消费规则；邀请链接只保存摘要，手机号/用户名查询防枚举，接受时绑定当前已认证用户 |
+| CR-30 | ACC-26 | 组织邀请支持手机号、用户名和一次性链接 | 已实现 | 三种方式使用统一不可物理删除实体、过期与一次性消费规则；链接只保存 Token 摘要，手机号/用户名只保存目标摘要和提示，创建不探测目标，本人恢复查询不接收任意目标输入，接受时绑定当前已认证稳定用户 ID |
 | CR-31 | ACC-10, ACC-11 | 用户可主动注销并保留三年法定记录 | 未实现、由 CR-52 细化 | 有个人余额、未清应收、本人未完成订单、未结算 Hold 或尚未转让的组织所有权时禁止完成注销，其他资金/外部事实及自动清理门禁按 CR-52；未消费组织授予不阻止注销并按 CR-51 处理；注销后标识可复用，法定记录以不可反查业务身份保存 3 年 |
 | CR-32 | ACC-07, ACC-08, ACC-06 | 用户资料修改采用可恢复 Saga | 已实现 | `profile_change_requests` 保存旧值、新值、资料版本和各阶段时间；Identity 成功后只向前重试，Account CAS 后异步重置 Commerce 任务，失败退避或进入修复状态。 |
 | CR-34 | BILL-29–BILL-33, PAY-33 | 用量负余额与拒付应收分场景记账并按钱包上下文隔离冻结 | 未实现 | 用量超额结算按 BILL-29 双记钱包负余额与独立应收；拒付按原支付流水和权益包撤销可撤销 BASE/关联 BONUS，不从聚合钱包反推或冲销其他权益；不足现金本金形成订单级应收，后续现金充值 BASE 优先清偿；个人与组织债务只冻结各自上下文 |
@@ -569,10 +570,10 @@
 | ACC-23 | 重命名组织节点 | 已实现 | 显式编辑 UI、原子目标权限、名称规则和幂等命令共同约束；成功只更新名称及节点/结构版本，节点 ID、父子关系和历史审计不变。 |
 | ACC-24 | 调整组织节点父节点 | 已实现 | `expected_structure_version`、组织串行锁和稳定请求指纹保证同组织原子移动；跨组织、停用父节点、自身及后代父级均拒绝。 |
 | ACC-25 | 删除组织节点 | 已实现 | Account/Billing/Token 先进入限制态并汇总成员、角色、子节点、授予登记、路由、用量和任务阻断；全部清零后仅写 DELETED，保留闭包树及历史，重试返回原结果。 |
-| ACC-26 | 组织邀请 | 部分实现 | 当前支持电子邮箱和一次性邀请 Token，并有创建、接受、过期/撤销状态；手机号、用户名邀请及目标反枚举恢复契约未实现。 |
-| ACC-27 | 添加组织成员 | 部分实现 | 已有用户/组织状态、重复成员、角色边界、授权版本和 Outbox；重复有效成员返回冲突而非幂等原结果。 |
-| ACC-28 | 移除组织成员 | 部分实现 | 已有成员撤销、角色清理、授权版本和 Outbox；管理端路径未自动回退活动上下文，也未处理 BILL-13 授予暂停。 |
-| ACC-29 | 所有者安全转让 | 部分实现 | 已有专用串行事务维持唯一 OWNER 并更新版本/审计；缺稳定幂等键和目标 Account 权限码。 |
+| ACC-26 | 组织邀请 | 已实现 | 手机号、用户名和一次性链接共用不可物理删除的邀请实体；创建不泄露目标存在，认证身份可反向恢复目标邀请，接受时绑定稳定用户且所有终态幂等保留。 |
+| ACC-27 | 添加组织成员 | 已实现 | 邀请接受与平台直接添加均校验目标和权限；稳定请求指纹使重复命令返回同一成员关系，只有真实状态变化才递增版本并发送事件。 |
+| ACC-28 | 移除组织成员 | 已实现 | 幂等撤销全部有效/未来角色，递增授权与 Session 版本并让所有相关上下文立即回退个人；Billing 成员投影同步进入 REVOKED，供授予暂停强制使用。 |
+| ACC-29 | 所有者安全转让 | 已实现 | `org.owner.transfer`/平台专用权限和稳定幂等键保护专用事务；旧 OWNER 只撤销不删除，新 OWNER 原子建立，延迟数据库约束禁止有效组织零个或多个所有者。 |
 | ACC-30 | 查看角色定义和用户关联角色 | 已实现 | 本人只看自身绑定；组织和运营视图完整展示角色作用域、开始/到期、来源和状态。 |
 | ACC-31 | 授予普通组织角色 | 已实现 | 普通组织/节点角色按授权作用域、起止时间和稳定幂等键创建，拒绝 OWNER、平台和基础角色。 |
 | ACC-32 | 撤销普通组织角色 | 已实现 | 支持单绑定幂等撤销，事务内刷新成员、Session 和授权版本并发送变更事件。 |

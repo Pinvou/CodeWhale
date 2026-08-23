@@ -21,14 +21,15 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
-	repository                Repository
-	wallets                   WalletProvisioner
-	mobileAuth                *MobileAuthService
-	profiles                  *ProfileChangeService
-	organizationLifecycle     []OrganizationLifecycleClient
-	organizationUnitLifecycle []OrganizationUnitLifecycleClient
-	serviceToken              string
-	now                       func() time.Time
+	repository                  Repository
+	wallets                     WalletProvisioner
+	mobileAuth                  *MobileAuthService
+	profiles                    *ProfileChangeService
+	organizationLifecycle       []OrganizationLifecycleClient
+	organizationUnitLifecycle   []OrganizationUnitLifecycleClient
+	organizationMemberLifecycle []OrganizationMemberLifecycleClient
+	serviceToken                string
+	now                         func() time.Time
 }
 
 func (s *Service) WithOrganizationLifecycle(clients ...OrganizationLifecycleClient) *Service {
@@ -38,6 +39,11 @@ func (s *Service) WithOrganizationLifecycle(clients ...OrganizationLifecycleClie
 
 func (s *Service) WithOrganizationUnitLifecycle(clients ...OrganizationUnitLifecycleClient) *Service {
 	s.organizationUnitLifecycle = append([]OrganizationUnitLifecycleClient(nil), clients...)
+	return s
+}
+
+func (s *Service) WithOrganizationMemberLifecycle(clients ...OrganizationMemberLifecycleClient) *Service {
+	s.organizationMemberLifecycle = append([]OrganizationMemberLifecycleClient(nil), clients...)
 	return s
 }
 
@@ -107,6 +113,8 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.PUT("/v1/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.replaceMemberRoles))
 	protected.PATCH("/v1/organizations/:organization_id/units/:unit_id/parent", httpserver.AdaptFunc(s.moveUnit))
 	protected.POST("/v1/organizations/:organization_id/invitations", httpserver.AdaptFunc(s.createInvitation))
+	protected.GET("/v1/me/invitations", httpserver.AdaptFunc(s.listMyInvitations))
+	protected.DELETE("/v1/organizations/:organization_id/invitations/:invitation_id", httpserver.AdaptFunc(s.revokeInvitation))
 	protected.POST("/v1/invitations/accept", httpserver.AdaptFunc(s.acceptInvitation))
 	protected.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
 	protected.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
@@ -414,15 +422,22 @@ func (s *Service) createInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		TargetType     string   `json:"target_type"`
+		Target         string   `json:"target"`
 		Email          string   `json:"email"`
 		Roles          []string `json:"roles"`
 		ExpiresInHours int      `json:"expires_in_hours"`
+		IdempotencyKey string   `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.ExpiresInHours < 1 || body.ExpiresInHours > 24*30 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid invitation request", httpserver.RequestID(r.Context()))
 		return
 	}
-	invitation, err := s.repository.CreateInvitation(r.Context(), mustPrincipal(r.Context()), organizationID, body.Email, body.Roles, s.now().Add(time.Duration(body.ExpiresInHours)*time.Hour))
+	if strings.TrimSpace(body.TargetType) == "" && strings.TrimSpace(body.Email) != "" {
+		body.TargetType, body.Target = "EMAIL", body.Email
+	}
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "invitation-create:"+organizationID.String()+":"+strings.ToUpper(strings.TrimSpace(body.TargetType))+":"+strings.TrimSpace(body.Target))
+	invitation, err := s.repository.CreateInvitation(r.Context(), mustPrincipal(r.Context()), organizationID, InvitationCreateRequest{TargetType: body.TargetType, Target: body.Target, Roles: body.Roles, ExpiresInHours: body.ExpiresInHours, IdempotencyKey: idempotencyKey})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -430,20 +445,51 @@ func (s *Service) createInvitation(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusCreated, invitation)
 }
 
-func (s *Service) acceptInvitation(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token string `json:"token"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.Token) == "" {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid invitation token", httpserver.RequestID(r.Context()))
-		return
-	}
-	organization, err := s.repository.AcceptInvitation(r.Context(), mustPrincipal(r.Context()), body.Token)
+func (s *Service) listMyInvitations(w http.ResponseWriter, r *http.Request) {
+	items, err := s.repository.ListMyInvitations(r.Context(), mustPrincipal(r.Context()))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, organization)
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) revokeInvitation(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	invitationID, ok := pathUUID(w, r, "invitation_id")
+	if !ok {
+		return
+	}
+	invitation, err := s.repository.RevokeInvitation(r.Context(), mustPrincipal(r.Context()), organizationID, invitationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, invitation)
+}
+
+func (s *Service) acceptInvitation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token        string     `json:"token"`
+		InvitationID *uuid.UUID `json:"invitation_id"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil || (strings.TrimSpace(body.Token) == "") == (body.InvitationID == nil) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid invitation token", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := s.repository.AcceptInvitation(r.Context(), mustPrincipal(r.Context()), body.Token, body.InvitationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "ACTIVE"); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the invitation was accepted locally but grant activation must be retried", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) revokeMembership(w http.ResponseWriter, r *http.Request) {
@@ -455,11 +501,17 @@ func (s *Service) revokeMembership(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.repository.RevokeMembership(r.Context(), mustPrincipal(r.Context()), organizationID, userID); err != nil {
+	idempotencyKey := organizationUnitIdempotencyKey(r, r.URL.Query().Get("idempotency_key"), "membership-remove:"+organizationID.String()+":"+userID.String())
+	result, err := s.repository.RevokeMembership(r.Context(), mustPrincipal(r.Context()), organizationID, userID, idempotencyKey)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	if err := s.applyOrganizationMemberLifecycle(r.Context(), result, "REVOKED"); err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_MEMBER_LIFECYCLE_UNAVAILABLE", "the membership was revoked locally but grant suspension must be retried with the same idempotency key", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) transferOwnership(w http.ResponseWriter, r *http.Request) {
@@ -469,16 +521,19 @@ func (s *Service) transferOwnership(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		NewOwnerUserID uuid.UUID `json:"new_owner_user_id"`
+		IdempotencyKey string    `json:"idempotency_key"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.NewOwnerUserID == uuid.Nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid ownership transfer request", httpserver.RequestID(r.Context()))
 		return
 	}
-	if err := s.repository.TransferOwnership(r.Context(), mustPrincipal(r.Context()), organizationID, body.NewOwnerUserID); err != nil {
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "ownership-transfer:"+organizationID.String()+":"+body.NewOwnerUserID.String())
+	result, err := s.repository.TransferOwnership(r.Context(), mustPrincipal(r.Context()), organizationID, body.NewOwnerUserID, idempotencyKey)
+	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	api.WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {

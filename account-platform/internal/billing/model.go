@@ -141,6 +141,7 @@ type Repository interface {
 	RequestAdjustment(context.Context, uuid.UUID, int64, string, uuid.UUID) (ManualAdjustment, error)
 	RejectAdjustment(context.Context, uuid.UUID, uuid.UUID, string) (ManualAdjustment, error)
 	ApplyOrganizationUnitLifecycle(context.Context, uuid.UUID, uuid.UUID, string, int64) (OrganizationUnitDeletionAssessment, error)
+	ApplyOrganizationMemberLifecycle(context.Context, uuid.UUID, uuid.UUID, string, int64) (OrganizationMemberLifecycleState, error)
 	Ping(context.Context) error
 	Close()
 }

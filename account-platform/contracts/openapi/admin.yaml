@@ -214,14 +214,19 @@ paths:
     post:
       operationId: addAdminOrganizationMember
       summary: Add or reactivate a platform user as an organization member
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/MemberRoleChange" }
       responses:
-        "201": { description: Member added }
+        "201":
+          description: Member added
+          content: { application/json: { schema: { $ref: "#/components/schemas/MembershipMutationResult" } } }
+        "200":
+          description: Existing membership result replayed
+          content: { application/json: { schema: { $ref: "#/components/schemas/MembershipMutationResult" } } }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -229,10 +234,12 @@ paths:
   /account/admin/v1/organizations/{organization_id}/members/{user_id}:
     delete:
       operationId: removeAdminOrganizationMember
-      summary: Revoke a non-owner organization membership
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }]
+      summary: Idempotently revoke a non-owner membership, reset its active sessions, and suspend grants
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
-        "204": { description: Member removed }
+        "200":
+          description: Member removed or existing terminal result returned
+          content: { application/json: { schema: { $ref: "#/components/schemas/MembershipMutationResult" } } }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -255,15 +262,17 @@ paths:
   /account/admin/v1/organizations/{organization_id}/ownership:
     post:
       operationId: transferAdminOrganizationOwnership
-      summary: Replace the organization owner with an active member
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      summary: Atomically and idempotently replace the unique organization owner with an active member
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/OwnershipTransfer" }
       responses:
-        "204": { description: Organization ownership transferred }
+        "200":
+          description: Organization ownership transferred or existing result returned
+          content: { application/json: { schema: { $ref: "#/components/schemas/OwnershipTransferResult" } } }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
@@ -1123,6 +1132,7 @@ components:
       required: [new_owner_user_id]
       properties:
         new_owner_user_id: { type: string, format: uuid }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
     MemberRoleChange:
       type: object
       additionalProperties: false
@@ -1137,6 +1147,11 @@ components:
           type: array
           uniqueItems: true
           items: { type: string, format: uuid }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
+    MembershipMutationResult:
+      $ref: "account.yaml#/components/schemas/MembershipMutationResult"
+    OwnershipTransferResult:
+      $ref: "account.yaml#/components/schemas/OwnershipTransferResult"
     OrganizationUnitCreate:
       type: object
       additionalProperties: false
