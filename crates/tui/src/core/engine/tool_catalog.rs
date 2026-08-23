@@ -517,7 +517,10 @@ pub(super) fn tool_denied(disallowed_tools: Option<&[String]>, tool_name: &str) 
     disallowed_tools.is_some_and(|rules| tool_matches_any_rule(rules, tool_name))
 }
 
-fn tool_matches_any_rule(rules: &[String], tool_name: &str) -> bool {
+/// Shared rule matcher for allow/deny lists: case-insensitive, a trailing
+/// `*` makes the rule a prefix. `pub(crate)` so the MCP pool can apply the
+/// exact same semantics to synthetic per-server tool names.
+pub(crate) fn tool_matches_any_rule(rules: &[String], tool_name: &str) -> bool {
     let tool_name = tool_name.to_ascii_lowercase();
     rules.iter().any(|rule| {
         let rule = rule.to_ascii_lowercase();

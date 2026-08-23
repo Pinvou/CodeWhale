@@ -2825,6 +2825,14 @@ impl Engine {
                     Op::SetDisallowedTools { tools } => {
                         self.config.disallowed_tools =
                             if tools.is_empty() { None } else { Some(tools) };
+                        // Hot-apply to the shared MCP pool so newly denied
+                        // servers drop out (and their connections close)
+                        // without a session restart.
+                        if let Some(pool) = self.mcp_pool.as_ref() {
+                            pool.lock().await.set_denied_tool_rules(
+                                self.config.disallowed_tools.clone().unwrap_or_default(),
+                            );
+                        }
                     }
                     Op::SetSubagentRuntimeConfig {
                         enabled,
@@ -5803,6 +5811,13 @@ impl Engine {
         });
         if let Some(decider) = self.config.network_policy.as_ref() {
             pool = pool.with_network_policy(decider.clone());
+        }
+        // The session's disallowed-tools rules also gate the pool itself:
+        // `mcp_<server>_*` rules keep a denied server out of every pool
+        // surface (connections, enumerations, meta-tool advertisement), not
+        // just out of the model catalog.
+        if let Some(rules) = self.config.disallowed_tools.as_ref() {
+            pool = pool.with_denied_tool_rules(rules.clone());
         }
         let pool = Arc::new(AsyncMutex::new(pool));
         self.mcp_pool = Some(Arc::clone(&pool));

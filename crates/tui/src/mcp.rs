@@ -2670,6 +2670,11 @@ pub struct McpPool {
     connections: HashMap<String, McpConnection>,
     config: McpConfig,
     network_policy: Option<NetworkPolicyDecider>,
+    /// Session disallowed-tools rules (`--disallowed-tools`). A rule that
+    /// matches `mcp_<server>_*` denies the whole server pool-side: it is
+    /// never connected, never enumerated, and its resources/prompts stop
+    /// gating the MCP meta-tools. Empty means no pool-side filtering.
+    denied_tool_rules: Vec<String>,
     /// Source paths the config was loaded from. Empty for pools constructed
     /// directly via `new` (tests, ad-hoc snapshots). Workspace-aware pools
     /// track both global and project-level MCP config paths so lazy reload sees
@@ -2700,6 +2705,7 @@ impl McpPool {
             connections: HashMap::new(),
             config,
             network_policy: None,
+            denied_tool_rules: Vec::new(),
             config_sources: Vec::new(),
             workspace: None,
             plugin_registry: None,
@@ -2795,6 +2801,44 @@ impl McpPool {
     pub fn with_network_policy(mut self, policy: NetworkPolicyDecider) -> Self {
         self.network_policy = Some(policy);
         self
+    }
+
+    /// Attach the session's disallowed-tools rules. Any rule matching
+    /// `mcp_<server>_*` removes that server from this pool's surface.
+    pub fn with_denied_tool_rules(mut self, rules: Vec<String>) -> Self {
+        self.set_denied_tool_rules(rules);
+        self
+    }
+
+    /// Replace the disallowed-tools rules (hot reload without rebuilding the
+    /// pool). Connections to servers denied by the new rules are dropped so a
+    /// live update stops their processes and empties their catalogs at once.
+    pub fn set_denied_tool_rules(&mut self, rules: Vec<String>) {
+        self.denied_tool_rules = rules;
+        if self.denied_tool_rules.is_empty() {
+            return;
+        }
+        let denied: Vec<String> = self
+            .connections
+            .keys()
+            .filter(|server| self.server_denied(server))
+            .cloned()
+            .collect();
+        for server in denied {
+            self.drop_connection(&server, "server denied by disallowed-tools");
+        }
+    }
+
+    /// Whether the disallowed-tools rules deny `server` as a whole. Tested
+    /// with a synthetic tool name (`mcp_<server>_x`) through the shared rule
+    /// matcher, so server names containing `_` and prefix rules like `mcp_*`
+    /// resolve exactly the way the tool catalog resolves them.
+    fn server_denied(&self, server: &str) -> bool {
+        !self.denied_tool_rules.is_empty()
+            && crate::core::engine::tool_catalog::tool_matches_any_rule(
+                &self.denied_tool_rules,
+                &Self::mcp_model_tool_name(server, "x"),
+            )
     }
 
     fn drop_connection(&mut self, server_name: &str, reason: &str) {
@@ -2947,6 +2991,14 @@ impl McpPool {
             tracing::warn!("MCP config reload check failed: {e:#}");
         }
 
+        // A server denied by the session's disallowed-tools rules is
+        // indistinguishable from an unknown one — same error text as the
+        // not-found branch below, and before the ready-connection early
+        // return so a hot-applied rule also cuts off live connections.
+        if self.server_denied(server_name) {
+            return Err(anyhow::anyhow!("Failed to find MCP server: {server_name}"));
+        }
+
         let plugin_source = self
             .connections
             .get(server_name)
@@ -3021,7 +3073,7 @@ impl McpPool {
             .config
             .servers
             .keys()
-            .filter(|n| self.config.servers[*n].is_enabled())
+            .filter(|n| self.config.servers[*n].is_enabled() && !self.server_denied(n))
             .cloned()
             .collect();
 
@@ -3034,6 +3086,7 @@ impl McpPool {
         for (name, server_cfg) in &self.config.servers {
             if server_cfg.required
                 && server_cfg.is_enabled()
+                && !self.server_denied(name)
                 && !self
                     .connections
                     .get(name)
@@ -3110,7 +3163,7 @@ impl McpPool {
         let mut by_name: std::collections::BTreeMap<String, Option<&McpTool>> =
             std::collections::BTreeMap::new();
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if self.server_denied(server) || !conn.catalog_authorized() {
                 continue;
             }
             for tool in conn.tools() {
@@ -3143,7 +3196,7 @@ impl McpPool {
     pub fn all_resources(&self) -> Vec<(String, &McpResource)> {
         let mut resources = Vec::new();
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if self.server_denied(server) || !conn.catalog_authorized() {
                 continue;
             }
             for resource in conn.resources() {
@@ -3161,7 +3214,7 @@ impl McpPool {
     pub fn all_resource_templates(&self) -> Vec<(String, &McpResourceTemplate)> {
         let mut templates = Vec::new();
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if self.server_denied(server) || !conn.catalog_authorized() {
                 continue;
             }
             for template in conn.resource_templates() {
@@ -3200,7 +3253,7 @@ impl McpPool {
             }
         }
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if self.server_denied(server) || !conn.catalog_authorized() {
                 continue;
             }
             for resource in conn.resources() {
@@ -3249,7 +3302,7 @@ impl McpPool {
             }
         }
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if self.server_denied(server) || !conn.catalog_authorized() {
                 continue;
             }
             for template in conn.resource_templates() {
@@ -3277,7 +3330,7 @@ impl McpPool {
     pub fn all_prompts(&self) -> Vec<(String, &McpPrompt)> {
         let mut prompts = Vec::new();
         for (server, conn) in &self.connections {
-            if !conn.catalog_authorized() {
+            if self.server_denied(server) || !conn.catalog_authorized() {
                 continue;
             }
             for prompt in conn.prompts() {
@@ -3378,7 +3431,11 @@ impl McpPool {
                 .servers
                 .iter()
                 .filter_map(|(name, config)| {
+                    // Denied servers stay unresolvable here so a denied tool
+                    // name falls through to the same "Unknown MCP tool name"
+                    // error a nonexistent server produces.
                     (config.is_enabled()
+                        && !self.server_denied(name)
                         && rest
                             .strip_prefix(name)
                             .is_some_and(|suffix| suffix.starts_with('_')))
@@ -3386,6 +3443,7 @@ impl McpPool {
                 })
                 .chain(dynamic.iter().filter_map(|(name, config)| {
                     (config.is_enabled()
+                        && !self.server_denied(name)
                         && rest
                             .strip_prefix(name)
                             .is_some_and(|suffix| suffix.starts_with('_')))
