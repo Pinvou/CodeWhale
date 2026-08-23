@@ -17,6 +17,9 @@ spec:
     - host: {{ .Values.ingress.keycloakHost | quote }}
       http:
         paths:
+          - path: /realms/pinvou/protocol/openid-connect/token
+            pathType: Exact
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-identity-service, port: { number: 8080 } } }
           - path: /realms
             pathType: Prefix
             backend: { service: { name: {{ include "pinvou.fullname" . }}-keycloak, port: { number: 8080 } } }

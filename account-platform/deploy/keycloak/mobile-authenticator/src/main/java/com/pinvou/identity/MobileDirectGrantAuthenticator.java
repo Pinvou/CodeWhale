@@ -45,7 +45,7 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         boolean valid;
         if (smsLogin) {
             Optional<String> subject = !mobile.isEmpty() && CHALLENGE.matcher(challenge).matches()
-                && CODE.matcher(code).matches() ? verifySMS(mobile, challenge, code) : Optional.empty();
+                && CODE.matcher(code).matches() ? verifySMS(context, mobile, challenge, code) : Optional.empty();
             user = subject.map(value -> context.getSession().users().getUserById(context.getRealm(), value)).orElse(null);
             valid = user != null;
         } else {
@@ -84,7 +84,7 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         }
     }
 
-    private Optional<String> verifySMS(String mobile, String challenge, String code) {
+    private Optional<String> verifySMS(AuthenticationFlowContext context, String mobile, String challenge, String code) {
         String endpoint = System.getenv("PINVOU_SMS_VERIFY_URL");
         String serviceToken = System.getenv("PINVOU_INTERNAL_SERVICE_TOKEN");
         if (endpoint == null || serviceToken == null || endpoint.isBlank() || serviceToken.length() < 32) {
@@ -93,9 +93,12 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         }
         String body = "{\"mobile\":\"" + mobile + "\",\"challenge_id\":\"" + challenge + "\",\"code\":\"" + code + "\"}";
         try {
+            String source = boundedHeader(context, "X-Pinvou-Client-Source", "source:unknown");
+            String device = boundedHeader(context, "X-Device-ID", "device:absent:" + source);
             HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))
                 .timeout(Duration.ofSeconds(5)).header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + serviceToken)
+                .header("X-Pinvou-Client-Source", source).header("X-Device-ID", device)
                 .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build();
             HttpResponse<Void> response = HTTP.send(request, HttpResponse.BodyHandlers.discarding());
             String subject = response.headers().firstValue("X-Pinvou-Identity-Subject").orElse("");
@@ -125,6 +128,10 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
     }
 
     private static String trim(String value) { return value == null ? "" : value.trim(); }
+    private static String boundedHeader(AuthenticationFlowContext context, String name, String fallback) {
+        String value = trim(context.getHttpRequest().getHttpHeaders().getHeaderString(name));
+        return value.isEmpty() || value.length() > 128 ? fallback : value;
+    }
     @Override public void action(AuthenticationFlowContext context) { authenticate(context); }
     @Override public boolean requiresUser() { return false; }
     @Override public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) { return true; }

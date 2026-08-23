@@ -108,19 +108,47 @@ func enforceSMSRateLimits(ctx context.Context, tx pgx.Tx, challenge SMSChallenge
 		}
 		return err
 	}
-	var sourceHour, sourceDay, deviceHour int
+	// The adapter safety envelope is 125 sends/minute and 1,250/hour. Admission is
+	// deliberately capped at 80% so application traffic cannot exhaust the provider.
+	const providerMinuteLimit, providerHourLimit = 125 * 80 / 100, 1250 * 80 / 100
+	var sourceHour, sourceDay, deviceHour, deviceDay, mobileDay, purposeSourceHour, providerMinute, providerHour int
+	var sourceHourOldest, sourceDayOldest, deviceHourOldest, deviceDayOldest, mobileDayOldest, purposeOldest, providerMinuteOldest, providerHourOldest *time.Time
 	if err := tx.QueryRow(ctx, `SELECT
-count(*) FILTER (WHERE source_hash=$1 AND occurred_at>$3-interval '1 hour'),
-count(*) FILTER (WHERE source_hash=$1 AND occurred_at>$3-interval '1 day'),
-count(*) FILTER (WHERE device_hash=$2 AND occurred_at>$3-interval '1 hour')
-FROM sms_send_attempts WHERE occurred_at>$3-interval '1 day'`, sourceHash[:], deviceHash[:], now).Scan(&sourceHour, &sourceDay, &deviceHour); err != nil {
+count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$3-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$3-interval '1 hour'),
+count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$3-interval '1 day'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$3-interval '1 day'),
+count(*) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$3-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$3-interval '1 hour'),
+count(*) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$3-interval '1 day'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$3-interval '1 day'),
+count(*) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$4 AND occurred_at>$3-interval '1 day'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$4 AND occurred_at>$3-interval '1 day'),
+count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$3-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$3-interval '1 hour'),
+count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$3-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$3-interval '1 minute'),
+count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$3-interval '1 hour'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$3-interval '1 hour')
+FROM sms_send_attempts WHERE occurred_at>$3-interval '1 day'`, sourceHash[:], deviceHash[:], now, mobileHash[:], challenge.Purpose, challenge.Provider.ID).Scan(
+		&sourceHour, &sourceHourOldest, &sourceDay, &sourceDayOldest, &deviceHour, &deviceHourOldest, &deviceDay, &deviceDayOldest,
+		&mobileDay, &mobileDayOldest, &purposeSourceHour, &purposeOldest, &providerMinute, &providerMinuteOldest, &providerHour, &providerHourOldest,
+	); err != nil {
 		return err
 	}
-	if sourceHour >= 20 || sourceDay >= 100 || deviceHour >= 10 {
+	retryAfter := time.Duration(0)
+	limits := []struct {
+		reached bool
+		oldest  *time.Time
+		window  time.Duration
+	}{
+		{sourceHour >= 20, sourceHourOldest, time.Hour}, {sourceDay >= 100, sourceDayOldest, 24 * time.Hour},
+		{deviceHour >= 10, deviceHourOldest, time.Hour}, {deviceDay >= 30, deviceDayOldest, 24 * time.Hour},
+		{mobileDay >= 10, mobileDayOldest, 24 * time.Hour}, {purposeSourceHour >= 10, purposeOldest, time.Hour},
+		{providerMinute >= providerMinuteLimit, providerMinuteOldest, time.Minute}, {providerHour >= providerHourLimit, providerHourOldest, time.Hour},
+	}
+	for _, limit := range limits {
+		if limit.reached && limit.oldest != nil {
+			retryAfter = max(retryAfter, limit.oldest.Add(limit.window).Sub(now))
+		}
+	}
+	if retryAfter > 0 {
 		if err := recordSMSAttempt(ctx, tx, challenge, mobileHash, sourceHash, deviceHash, "RATE_LIMITED", now); err != nil {
 			return err
 		}
-		return &SMSRateLimitError{RetryAfter: time.Hour}
+		return &SMSRateLimitError{RetryAfter: max(retryAfter, time.Second)}
 	}
 	return nil
 }

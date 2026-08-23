@@ -67,10 +67,11 @@
     },
     "security": {
       "type": "object",
-      "required": ["rateLimitRPS", "rateLimitBurst"],
+      "required": ["rateLimitRPS", "rateLimitBurst", "authRiskEnabled"],
       "properties": {
         "rateLimitRPS": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000 },
-        "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+        "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "authRiskEnabled": { "type": "boolean" }
       }
     },
     "replicas": {
@@ -259,6 +260,8 @@
             }
           },
           "availability": { "type": "object", "properties": { "enabled": { "const": true } } },
+          "security": { "type": "object", "properties": { "authRiskEnabled": { "const": true } } },
+		  "sms": { "type": "object", "properties": { "enabled": { "const": true } } },
           "dependencies": {
             "type": "object",
             "properties": {

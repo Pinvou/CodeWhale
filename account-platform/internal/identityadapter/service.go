@@ -14,18 +14,26 @@ import (
 type Service struct {
 	vault        *PasswordVault
 	serviceToken string
+	tokenProxy   http.Handler
 }
 
-func NewService(vault *PasswordVault, serviceToken string) (*Service, error) {
+func NewService(vault *PasswordVault, serviceToken string, tokenProxy ...http.Handler) (*Service, error) {
 	if vault == nil || strings.TrimSpace(serviceToken) == "" {
 		return nil, errors.New("identity adapter is not fully configured")
 	}
-	return &Service{vault: vault, serviceToken: strings.TrimSpace(serviceToken)}, nil
+	service := &Service{vault: vault, serviceToken: strings.TrimSpace(serviceToken)}
+	if len(tokenProxy) > 0 {
+		service.tokenProxy = tokenProxy[0]
+	}
+	return service, nil
 }
 
 func (s *Service) Handler() http.Handler {
 	router := httpserver.NewRouter()
 	router.POST("/v1/registration/password-prechecks", httpserver.AdaptFunc(s.precheckPassword))
+	if s.tokenProxy != nil {
+		router.POST("/realms/pinvou/protocol/openid-connect/token", httpserver.AdaptFunc(s.tokenProxy.ServeHTTP))
+	}
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.POST("/registration/password-references/validate", httpserver.AdaptFunc(s.validateReference))

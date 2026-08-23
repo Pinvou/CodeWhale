@@ -10,6 +10,46 @@ servers:
   - url: /v1
 security: []
 paths:
+  /realms/pinvou/protocol/openid-connect/token:
+    post:
+      servers:
+        - url: /
+      operationId: exchangeOidcTokenWithRiskAdmission
+      summary: Exchange password, SMS, or refresh credentials behind multidimensional risk admission
+      parameters:
+        - name: X-Device-ID
+          in: header
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: true
+              required: [grant_type, client_id]
+              properties:
+                grant_type: { type: string, enum: [password, refresh_token] }
+                client_id: { type: string }
+                username: { type: string }
+                password: { type: string, writeOnly: true }
+                refresh_token: { type: string, writeOnly: true }
+                sms_challenge_id: { type: string, format: uuid }
+                sms_code: { type: string, writeOnly: true }
+      responses:
+        "200":
+          description: Standard no-store OIDC token response
+        "400":
+          description: Unsupported or malformed grant
+        "401":
+          description: Stable invalid_grant response independent of account existence
+        "429":
+          description: Multidimensional risk limit reached
+          headers:
+            Retry-After: { required: true, schema: { type: integer, minimum: 1 } }
+        "503":
+          description: Risk admission or identity provider unavailable; authentication fails closed
   /registration/password-prechecks:
     post:
       operationId: precheckRegistrationPassword

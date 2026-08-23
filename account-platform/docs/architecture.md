@@ -327,6 +327,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 - 恢复与保留目标由 `deploy/recovery-policy.json` 机器定义，环境证据门禁同时检查资金/配置两级 RPO、核心/非关键两级 RTO、WAL/日增量/周全量/迁移前快照、TLS与静态加密、KMS分离、异地不可变副本、月/季/年恢复演练和分类删除收据。Payment Simulator 不进入生产恢复边界。仓库门禁只定义和校验证据，未取得真实生产等价报告前不得宣称满足 RPO/RTO 或备份闭环。
 - 正式 Helm 形态把可水平扩展的核心服务、Portal、Relay、Keycloak 和 New API 设为至少双副本，通过跨区/跨节点拓扑约束、零不可用滚动策略和 PDB 维持独立容量；单副本内置 Redis/NATS 在生产被禁止，必须接入 TLS 的外部高可用依赖。Identity Adapter 的短期密码材料刻意只在单进程内存，Pod 丢失时引用失效并由持久 Saga 补偿，核心登录由多副本 Keycloak 保持；不能为追求副本数把明文密码复制到普通缓存。
 - 性能容量不由副本数或单次冒烟推断。`deploy/performance-policy.json` 冻结生产等价资源/数据/样本口径、平台/Provider/排队/客户端分段时延、流式并发、Hold/支付数据规模与事件积压目标；发布只消费聚合摘要证据，低样本、超过声明容量70%、守恒/幂等异常或高水位未阻断均失败关闭。
+- 公网 OIDC Token 精确路径先进入 Identity Adapter 的 Redis 原子风险门禁，再由内网调用 Keycloak；密码/短信登录与 Refresh 分别按来源IP、设备、账号标识、已学习稳定用户、Session和Provider限流，凭据失败只返回统一 `invalid_grant` 并进入固定耗时桶和渐进延迟，成功不立即清除风险历史。桌面始终提交持久设备标识。短信发送和核验由 Account 使用独立单向摘要表，按手机号、来源、设备、用途和Provider 80%安全容量计数；Keycloak 短信 Authenticator 只转发 Identity 已固化的来源和设备维度，不能以内部Pod地址合并所有用户。
 - HTTP 工作负载在业务监听提供独立 liveness/readiness，在受限 `:9090` 提供请求、错误状态、延迟、并发和 readiness 指标；Relay 的 liveness 只代表进程，readiness 同时验证 Outbox PostgreSQL 与 NATS，并输出周期结果、积压和死信指标。普通健康检查不执行收费业务或客户端切换准入。
 
 ## 11. 审计证据与主要风险
@@ -334,8 +335,8 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 本次代码级校准使用以下验证：
 
 - `node scripts/account-platform.mjs test unit`：所有 Go 包测试通过（项目内置 Go 工具链，`nomsgpack` 标签）。
-- `npm test`（`account-platform/`）：OpenAPI lint 和 118 个合同测试通过。
-- `node --test tests/account_platform_state.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`（`pinvou3-app/`）：40 个测试通过。
+- `npm test`（`account-platform/`）：OpenAPI lint 和 124 个合同测试通过。
+- `node --test tests/account_platform_state.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`（`pinvou3-app/`）：41 个测试通过。
 - `node scripts/account-platform.mjs verify`：Go 单测与 Vet、合同测试、架构守卫和差异检查通过。
 
 | 项目 | 当前事实 | 风险/下一步 |

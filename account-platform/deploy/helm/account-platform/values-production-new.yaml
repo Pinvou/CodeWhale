@@ -61,6 +61,12 @@ observability:
   otlpEndpoint: https://otel.example.com
   prometheusRulesEnabled: true
 
+security:
+  authRiskEnabled: true
+
+sms:
+  enabled: true
+
 tokenGateway:
   secretProvider: remote
   secretKeyId: production-account-token-v1

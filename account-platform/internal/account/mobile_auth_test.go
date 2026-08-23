@@ -131,6 +131,10 @@ func (f *mobileAuthRepositoryFake) ConsumeSMSChallenge(_ context.Context, _ uuid
 	return nil
 }
 
+func (f *mobileAuthRepositoryFake) AdmitSMSVerification(context.Context, uuid.UUID, string, SMSPurpose, string, string) error {
+	return nil
+}
+
 func (f *mobileAuthRepositoryFake) ConsumeRegistrationSMS(_ context.Context, operationID, _ uuid.UUID, _ string, verified bool) error {
 	f.consumeVerified = verified
 	if !verified {

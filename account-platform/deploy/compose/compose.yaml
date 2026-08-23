@@ -164,6 +164,8 @@ services:
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       MOBILE_AUTH_ENABLED: ${MOBILE_AUTH_ENABLED:-false}
       IDENTITY_PASSWORD_HMAC_KEY_BASE64: ${IDENTITY_PASSWORD_HMAC_KEY_BASE64:-}
+      AUTH_RISK_REDIS_URL: ${AUTH_RISK_REDIS_URL:-}
+      AUTH_RISK_HMAC_KEY_BASE64: ${AUTH_RISK_HMAC_KEY_BASE64:-}
       KEYCLOAK_ADMIN_API_URL: http://keycloak:8080
       KEYCLOAK_PROVISIONER_TOKEN_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/token
       KEYCLOAK_REALM: pinvou
@@ -172,6 +174,8 @@ services:
     depends_on:
       keycloak:
         condition: service_started
+      redis:
+        condition: service_healthy
     ports:
       - "127.0.0.1:18107:8080"
     networks:

@@ -69,6 +69,7 @@ observability:
 security:
   rateLimitRPS: 100
   rateLimitBurst: 200
+  authRiskEnabled: false
 
 sms:
   enabled: false

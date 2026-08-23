@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -37,11 +39,30 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service, err := identityadapter.NewService(vault, os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	var tokenHandlers []http.Handler
+	ready := directory.Ping
+	if strings.TrimSpace(os.Getenv("AUTH_RISK_REDIS_URL")) != "" {
+		admission, admissionErr := identityadapter.NewRedisTokenAdmission(os.Getenv("AUTH_RISK_REDIS_URL"), os.Getenv("AUTH_RISK_HMAC_KEY_BASE64"))
+		if admissionErr != nil {
+			log.Fatal(admissionErr)
+		}
+		proxy, proxyErr := identityadapter.NewTokenProxy(os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"), admission)
+		if proxyErr != nil {
+			log.Fatal(proxyErr)
+		}
+		tokenHandlers = append(tokenHandlers, proxy)
+		ready = func(ctx context.Context) error {
+			if err := directory.Ping(ctx); err != nil {
+				return err
+			}
+			return proxy.Ping(ctx)
+		}
+	}
+	service, err := identityadapter.NewService(vault, os.Getenv("INTERNAL_SERVICE_TOKEN"), tokenHandlers...)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := httpserver.RunWithApplication("identity-service", service.Handler(), directory.Ping); err != nil {
+	if err := httpserver.RunWithApplication("identity-service", service.Handler(), ready); err != nil {
 		log.Fatal(err)
 	}
 }

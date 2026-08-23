@@ -393,7 +393,7 @@ test('mobile authentication provisioning works in the minimal Keycloak image', a
   }
   assert.match(authenticator, /firstValue\("X-Pinvou-Identity-Subject"\)/);
   assert.match(authenticator, /getUserById\(context\.getRealm\(\), value\)/);
-  assert.match(authenticator, /if \(smsLogin\) \{[\s\S]*verifySMS\(mobile, challenge, code\)[\s\S]*getUserById/);
+  assert.match(authenticator, /if \(smsLogin\) \{[\s\S]*verifySMS\(context, mobile, challenge, code\)[\s\S]*getUserById/);
 });
 
 test('remote Keycloak administration is available only through a controlled local channel', async () => {

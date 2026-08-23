@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 282`、`部分实现 31`、`未实现 16`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 284`、`部分实现 30`、`未实现 15`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -69,8 +69,9 @@
 | `RECOVERY-RELEASE-GATE` | 历史迁移规范化 SHA-256 只追加清单、生产迁移前快照和迁移后数据库摘要、分级 RPO/RTO、加密不可变备份、演练时效及分类删除收据 | Go/Node 正负向测试和全量发布门禁通过；真实四库备份、隔离恢复、月季年演练和删除收据待外部环境验收 |
 | `HA-RELEASE-GATE` | 双故障域、故障后容量、核心多副本/PDB/滚动策略、外部HA依赖及Pod/节点/区域/主节点故障切换 | Helm schema/合同和证据门禁正负向测试通过；真实集群拓扑、容量与无损切换报告待外部环境验收 |
 | `PERFORMANCE-RELEASE-GATE` | 生产等价资源/数据/样本、分段时延、200并发、十万Hold、百万订单/三百万流水及事件积压排空和高水位准入 | 策略与证据门禁正负向合同通过；真实生产等价负载报告待外部环境验收 |
+| `AUTH-RISK` | 密码/短信登录与刷新按来源、设备、标识、稳定用户、Session 和 Provider 原子准入；短信发送/核验按手机号、来源、设备、用途和 Provider 独立计数，统一无枚举响应、耗时桶和精确重试时间 | Identity/Account Go 单测、Keycloak 风险维度转发、OpenAPI/Helm/桌面合同和迁移不可修改门禁通过；真实 Redis、短信 Provider 与攻击流量演练待部署 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/122 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/124 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -273,8 +274,8 @@
 | NFR-36 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 连续WAL、日增量、周全量、迁移前快照、TLS/AES-256、KMS分离和异地不可变副本均为强制证据；缺真实备份系统配置与可恢复证明 |
 | NFR-37 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 月度35天、季度100天、年度400天新鲜度以及失败整改复测已进入门禁和演练模板；缺真实月季年演练记录 |
 | NFR-38 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 支付证据/账本/审计/计费用量1095天、普通日志90天及30天清除SLA已机器化，并强制逐类扫描收据；缺真实归档、法律保全和删除运行证据 |
-| NFR-39 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少登录按IP/设备/标识/用户/会话的统一限流和反枚举验证 |
-| NFR-40 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有手机号60秒与小时限制基础，缺少IP/设备/用途/日上限及统一Provider配额门禁 |
+| NFR-39 | 已实现 | DOC_CURRENT | GO-UNIT; AUTH-RISK | NOT_DEPLOYED | 公网密码/短信 Direct Grant 与 Refresh 精确路由到 Identity Redis 原子门禁，覆盖来源IP分钟/日、设备、标识失败、已学习稳定用户、Session和Provider；失败采用1～30秒渐进延迟、15分钟锁定和750ms统一耗时桶，成功不清空风险计数，未知/已知账号统一为 `invalid_grant` |
+| NFR-40 | 已实现 | DOC_CURRENT | GO-UNIT; AUTH-RISK | NOT_DEPLOYED | 短信发送保留60秒/5次小时限制并增加手机号日、IP小时/日、设备、用途和Provider 80%配额；核验使用独立单向摘要计数，图形挑战一次性消费，所有限流返回按最早窗口释放计算的统一 `retry_after` |
 | NFR-41 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少支付按付款人/受益组织/IP/订单/动作/Provider的多维限流 |
 | NFR-42 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少模型按用户/上下文/组织/模型/路由的请求速率和并发准入 |
 | NFR-43 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少跨个人、组织、节点、角色、缓存、批量、导出和事件路径的自动隔离矩阵 |
@@ -847,8 +848,8 @@
 | NFR-36 | 备份频率与加密 | 部分实现：持续WAL、日增量、周全量、迁移快照、加密、KMS分离和异地不可变副本已纳入发布证据，缺外部备份系统验收。 |
 | NFR-37 | 恢复演练 | 部分实现：月/季/年时效、整改和复测模板及门禁已完成，缺实际连续演练记录。 |
 | NFR-38 | 分类保留与清除 | 部分实现：统一机器策略和逐类删除收据门禁已完成，缺真实三年归档、90天日志与法律保全清除证据。 |
-| NFR-39 | 登录多维限流 | 未实现：需增加IP、设备、账号标识、稳定用户和Session维度及失败渐进延迟/临时锁定。 |
-| NFR-40 | 短信多维限流 | 部分实现、待扩展：现有手机号频率限制需补日上限、IP、设备、用途、Provider配额和统一retry_after。 |
+| NFR-39 | 登录多维限流 | 已实现：公网密码/短信 Direct Grant 和 Refresh 统一经 Redis 原子准入，覆盖来源IP分钟/日、设备、标识、已学习稳定用户、Session和Provider；失败渐进延迟并临时锁定，成功不立即清零，已知/未知账号同形响应和统一耗时桶。 |
+| NFR-40 | 短信多维限流 | 已实现：发送与核验分别按手机号、来源IP、设备、用途和Provider计数，Provider固定在安全容量80%，服务端返回窗口实际剩余 `retry_after`，一次性图形挑战与服务端判断不可由前端绕过。 |
 | NFR-41 | 支付多维限流 | 未实现：需增加付款人、受益组织、IP、订单、查询/退款动作及合法回调独立容量控制。 |
 | NFR-42 | 模型调用多维限流 | 未实现：需增加用户/上下文/组织/模型/路由速率和并发配额、Hold前拒绝及重连不重复计数。 |
 | NFR-43 | 租户隔离验证矩阵 | 未实现：当前没有覆盖直接对象引用、批量、搜索、导出、缓存和异步事件的跨租户发布门禁测试。 |

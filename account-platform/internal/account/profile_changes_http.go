@@ -2,6 +2,8 @@ package account
 
 import (
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"strings"
 
@@ -60,7 +62,8 @@ func (s *Service) completeProfileChange(w http.ResponseWriter, r *http.Request) 
 	if api.DecodeJSON(w, r, &body) != nil {
 		return
 	}
-	change, err := s.profiles.Complete(r.Context(), mustPrincipal(r.Context()), id, body.Code)
+	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
+	change, err := s.profiles.Complete(ctx, mustPrincipal(r.Context()), id, body.Code)
 	if err != nil {
 		if recovering, loadErr := s.profiles.store.ProfileChange(r.Context(), id, nil); loadErr == nil && (recovering.Status == "RETRY" || recovering.Status == "REPAIR_REQUIRED") {
 			w.Header().Set("Cache-Control", "no-store")
@@ -101,7 +104,8 @@ func (s *Service) resetForgottenPassword(w http.ResponseWriter, r *http.Request)
 	if api.DecodeJSON(w, r, &body) != nil || body.ChallengeID == uuid.Nil {
 		return
 	}
-	if err := s.profiles.ResetPassword(r.Context(), body.Mobile, body.ChallengeID, body.Code, body.PasswordHandle, body.PasswordPolicyVersion); err != nil {
+	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
+	if err := s.profiles.ResetPassword(ctx, body.Mobile, body.ChallengeID, body.Code, body.PasswordHandle, body.PasswordPolicyVersion); err != nil {
 		s.writeProfileError(w, r, err)
 		return
 	}
@@ -128,6 +132,14 @@ func (s *Service) writeProfileError(w http.ResponseWriter, r *http.Request, err 
 		status, code, message = http.StatusBadRequest, "MOBILE_VERIFICATION_REQUIRED", "verify the new mobile number first"
 	case errors.Is(err, ErrSMSInvalid):
 		status, code, message = http.StatusUnauthorized, "SMS_CODE_INVALID", "the verification code is invalid or expired"
+	case errors.Is(err, ErrSMSRateLimited):
+		status, code, message = http.StatusTooManyRequests, "SMS_RATE_LIMITED", "too many verification code attempts"
+		retryAfter := 60
+		var limited *SMSRateLimitError
+		if errors.As(err, &limited) {
+			retryAfter = max(1, int(math.Ceil(limited.RetryAfter.Seconds())))
+		}
+		w.Header().Set("Retry-After", fmt.Sprint(retryAfter))
 	case errors.Is(err, ErrPasswordReferenceInvalid):
 		status, code, message = http.StatusGone, "PASSWORD_REFERENCE_INVALID", "the password precheck has expired"
 	case errors.Is(err, ErrNotFound):

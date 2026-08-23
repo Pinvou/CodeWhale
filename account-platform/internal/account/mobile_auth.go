@@ -90,6 +90,7 @@ type MobileAuthRepository interface {
 	MarkSMSChallengeFailed(context.Context, uuid.UUID) error
 	SMSChallengeReady(context.Context, uuid.UUID, string, SMSPurpose) (SMSVerificationData, error)
 	ConsumeSMSChallenge(context.Context, uuid.UUID, string, SMSPurpose, bool) error
+	AdmitSMSVerification(context.Context, uuid.UUID, string, SMSPurpose, string, string) error
 	ConsumeRegistrationSMS(context.Context, uuid.UUID, uuid.UUID, string, bool) error
 	RegistrationOperation(context.Context, uuid.UUID) (RegistrationOperation, error)
 	MarkRegistrationIdentityCreating(context.Context, uuid.UUID) error
@@ -101,6 +102,29 @@ type MobileAuthRepository interface {
 
 type SMSRateLimitError struct {
 	RetryAfter time.Duration
+}
+
+type authRiskContextKey struct{}
+
+type authRiskDimensions struct{ source, device string }
+
+func withAuthRisk(ctx context.Context, source, device string) context.Context {
+	source = strings.TrimSpace(source)
+	device = strings.TrimSpace(device)
+	if source == "" {
+		source = "source:unknown"
+	}
+	if device == "" || len(device) > 128 {
+		device = "device:absent:" + source
+	}
+	return context.WithValue(ctx, authRiskContextKey{}, authRiskDimensions{source: source, device: device})
+}
+
+func authRiskFromContext(ctx context.Context) authRiskDimensions {
+	if dimensions, ok := ctx.Value(authRiskContextKey{}).(authRiskDimensions); ok {
+		return dimensions
+	}
+	return authRiskDimensions{source: "source:unknown", device: "device:absent:source:unknown"}
 }
 
 func (e *SMSRateLimitError) Error() string { return ErrSMSRateLimited.Error() }
@@ -317,6 +341,10 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 		return registrationResult(operation), nil
 	}
 	if operation.Status == "SMS_PENDING" {
+		risk := authRiskFromContext(ctx)
+		if err := s.repository.AdmitSMSVerification(ctx, challengeID, mobile, SMSPurposeRegister, risk.source, risk.device); err != nil {
+			return RegistrationResult{}, err
+		}
 		verificationData, readyErr := s.repository.SMSChallengeReady(ctx, challengeID, mobile, SMSPurposeRegister)
 		if readyErr != nil {
 			return RegistrationResult{}, readyErr
@@ -405,12 +433,22 @@ func registrationResult(operation RegistrationOperation) RegistrationResult {
 	return RegistrationResult{OperationID: operation.ID, UserID: operation.UserID, UserCode: operation.UserCode, Username: operation.Username, Status: operation.Status, NextRetryAt: operation.NextRetryAt}
 }
 
-func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (string, error) {
+func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, challengeID uuid.UUID, code string) (subject string, resultErr error) {
+	startedAt := s.now()
+	defer func() {
+		if err := waitForResponseFloor(ctx, startedAt, s.loginResponseFloor); err != nil && resultErr == nil {
+			subject, resultErr = "", err
+		}
+	}()
 	mobile, err := NormalizeMainlandMobile(rawMobile)
 	if err != nil {
 		return "", ErrSMSInvalid
 	}
-	subject, err := s.repository.MobileIdentitySubject(ctx, s.issuer, mobile)
+	risk := authRiskFromContext(ctx)
+	if err := s.repository.AdmitSMSVerification(ctx, challengeID, mobile, SMSPurposeLogin, risk.source, risk.device); err != nil {
+		return "", err
+	}
+	subject, err = s.repository.MobileIdentitySubject(ctx, s.issuer, mobile)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", ErrSMSInvalid
 	}
@@ -420,13 +458,21 @@ func (s *MobileAuthService) VerifyLogin(ctx context.Context, rawMobile string, c
 	if strings.TrimSpace(subject) == "" {
 		return "", ErrSMSInvalid
 	}
-	if err := s.verifyChallenge(ctx, challengeID, mobile, SMSPurposeLogin, code); err != nil {
+	if err := s.verifyChallengeAccepted(ctx, challengeID, mobile, SMSPurposeLogin, code); err != nil {
 		return "", err
 	}
 	return subject, nil
 }
 
 func (s *MobileAuthService) verifyChallenge(ctx context.Context, challengeID uuid.UUID, mobile string, purpose SMSPurpose, code string) error {
+	risk := authRiskFromContext(ctx)
+	if err := s.repository.AdmitSMSVerification(ctx, challengeID, mobile, purpose, risk.source, risk.device); err != nil {
+		return err
+	}
+	return s.verifyChallengeAccepted(ctx, challengeID, mobile, purpose, code)
+}
+
+func (s *MobileAuthService) verifyChallengeAccepted(ctx context.Context, challengeID uuid.UUID, mobile string, purpose SMSPurpose, code string) error {
 	code = strings.TrimSpace(code)
 	if code == "" {
 		return ErrSMSInvalid
@@ -481,37 +527,14 @@ func (r *PostgresRepository) CreateSMSChallenge(ctx context.Context, challenge S
 	}
 	now := r.now()
 	mobileHash, sourceHash, deviceHash := sha256.Sum256([]byte(challenge.Mobile)), sha256.Sum256([]byte(challenge.Source)), sha256.Sum256([]byte(challenge.Device))
-	var last *time.Time
-	var oldest *time.Time
-	var hourly int
-	if err := tx.QueryRow(ctx, `SELECT max(created_at) FILTER (WHERE status<>'FAILED'),min(created_at) FILTER (WHERE created_at>$2 AND status<>'FAILED'),count(*) FILTER (WHERE created_at>$2 AND status<>'FAILED') FROM sms_challenges WHERE mobile_e164=$1`, challenge.Mobile, now.Add(-time.Hour)).Scan(&last, &oldest, &hourly); err != nil {
-		return err
-	}
-	if err := smsRateLimit(now, last, oldest, hourly); err != nil {
-		if recordErr := recordSMSAttempt(ctx, tx, challenge, mobileHash, sourceHash, deviceHash, "RATE_LIMITED", now); recordErr != nil {
-			return recordErr
+	if err := enforceSMSRateLimits(ctx, tx, challenge, now); err != nil {
+		if !errors.Is(err, ErrSMSRateLimited) {
+			return err
 		}
 		if commitErr := tx.Commit(ctx); commitErr != nil {
 			return commitErr
 		}
 		return err
-	}
-	var sourceHour, sourceDay, deviceHour int
-	if err := tx.QueryRow(ctx, `SELECT
-count(*) FILTER (WHERE source_hash=$1 AND occurred_at>$3-interval '1 hour'),
-count(*) FILTER (WHERE source_hash=$1 AND occurred_at>$3-interval '1 day'),
-count(*) FILTER (WHERE device_hash=$2 AND occurred_at>$3-interval '1 hour')
-FROM sms_send_attempts WHERE occurred_at>$3-interval '1 day'`, sourceHash[:], deviceHash[:], now).Scan(&sourceHour, &sourceDay, &deviceHour); err != nil {
-		return err
-	}
-	if sourceHour >= 20 || sourceDay >= 100 || deviceHour >= 10 {
-		if err := recordSMSAttempt(ctx, tx, challenge, mobileHash, sourceHash, deviceHash, "RATE_LIMITED", now); err != nil {
-			return err
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return err
-		}
-		return &SMSRateLimitError{RetryAfter: time.Hour}
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO sms_challenges(id,mobile_e164,purpose,code_hash,status,expires_at,created_at,updated_at,provider_id,adapter_version) VALUES($1,$2,$3,NULL,'CREATED',$4,$5,$5,$6,$7)`, challenge.ID, challenge.Mobile, challenge.Purpose, challenge.ExpiresAt, now, challenge.Provider.ID, challenge.Provider.AdapterVersion)
 	if err != nil {
@@ -528,7 +551,7 @@ func recordSMSAttempt(ctx context.Context, tx pgx.Tx, challenge SMSChallenge, mo
 	if result == "ACCEPTED" {
 		challengeID = &challenge.ID
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO sms_send_attempts(id,challenge_id,mobile_hash,source_hash,device_hash,purpose,result,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, uuid.Must(uuid.NewV7()), challengeID, mobileHash[:], sourceHash[:], deviceHash[:], challenge.Purpose, result, now)
+	_, err := tx.Exec(ctx, `INSERT INTO sms_send_attempts(id,challenge_id,mobile_hash,source_hash,device_hash,purpose,result,occurred_at,provider_id,adapter_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, uuid.Must(uuid.NewV7()), challengeID, mobileHash[:], sourceHash[:], deviceHash[:], challenge.Purpose, result, now, challenge.Provider.ID, challenge.Provider.AdapterVersion)
 	return err
 }
 
@@ -612,6 +635,80 @@ func (r *PostgresRepository) ConsumeSMSChallenge(ctx context.Context, id uuid.UU
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) AdmitSMSVerification(ctx context.Context, challengeID uuid.UUID, mobile string, purpose SMSPurpose, source, device string) error {
+	if source == "" {
+		source = "source:unknown"
+	}
+	if device == "" {
+		device = "device:absent:" + source
+	}
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	mobileHash, sourceHash, deviceHash := sha256.Sum256([]byte(mobile)), sha256.Sum256([]byte(source)), sha256.Sum256([]byte(device))
+	locks := []string{"sms-verify-device:" + device, "sms-verify-mobile:" + mobile, "sms-verify-source:" + source}
+	sort.Strings(locks)
+	for _, lock := range locks {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, lock); err != nil {
+			return err
+		}
+	}
+	providerID := "unknown"
+	_ = tx.QueryRow(ctx, `SELECT provider_id FROM sms_challenges WHERE id=$1 AND mobile_e164=$2 AND purpose=$3`, challengeID, mobile, purpose).Scan(&providerID)
+	now := r.now()
+	// Verification has a separate provider safety envelope of 375/minute and is
+	// admitted at 80% (300/minute), independent from send quotas.
+	const providerVerificationLimit = 375 * 80 / 100
+	var sourceWindow, deviceWindow, mobileWindow, purposeSourceWindow, providerMinute int
+	var sourceOldest, deviceOldest, mobileOldest, purposeOldest, providerOldest *time.Time
+	if err := tx.QueryRow(ctx, `SELECT
+count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$4-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$4-interval '10 minutes'),
+count(*) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$4-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$4-interval '10 minutes'),
+count(*) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$3 AND occurred_at>$4-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$3 AND occurred_at>$4-interval '10 minutes'),
+count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$4-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$4-interval '10 minutes'),
+count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$4-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$4-interval '1 minute')
+FROM sms_verification_attempts WHERE occurred_at>$4-interval '10 minutes'`, sourceHash[:], deviceHash[:], mobileHash[:], now, purpose, providerID).Scan(
+		&sourceWindow, &sourceOldest, &deviceWindow, &deviceOldest, &mobileWindow, &mobileOldest, &purposeSourceWindow, &purposeOldest, &providerMinute, &providerOldest,
+	); err != nil {
+		return err
+	}
+	result := "ACCEPTED"
+	retryAfter := time.Duration(0)
+	limits := []struct {
+		reached bool
+		oldest  *time.Time
+		window  time.Duration
+	}{
+		{sourceWindow >= 30, sourceOldest, 10 * time.Minute}, {deviceWindow >= 20, deviceOldest, 10 * time.Minute},
+		{mobileWindow >= 10, mobileOldest, 10 * time.Minute}, {purposeSourceWindow >= 20, purposeOldest, 10 * time.Minute},
+		{providerMinute >= providerVerificationLimit, providerOldest, time.Minute},
+	}
+	for _, limit := range limits {
+		if limit.reached && limit.oldest != nil {
+			retryAfter = max(retryAfter, limit.oldest.Add(limit.window).Sub(now))
+		}
+	}
+	if retryAfter > 0 {
+		result = "RATE_LIMITED"
+	}
+	var storedChallengeID *uuid.UUID
+	if providerID != "unknown" {
+		storedChallengeID = &challengeID
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO sms_verification_attempts(id,challenge_id,mobile_hash,source_hash,device_hash,purpose,provider_id,result,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.Must(uuid.NewV7()), storedChallengeID, mobileHash[:], sourceHash[:], deviceHash[:], purpose, providerID, result, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if result == "RATE_LIMITED" {
+		return &SMSRateLimitError{RetryAfter: max(retryAfter, time.Second)}
+	}
+	return nil
 }
 
 func (r *PostgresRepository) RegisterMobileIdentity(ctx context.Context, issuer, subject, username, mobile string) (uuid.UUID, string, error) {

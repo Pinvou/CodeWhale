@@ -781,6 +781,7 @@ impl AccountPlatformState {
         let response = self
             .client
             .post(config.token_url.clone())
+            .header("X-Device-ID", &self.device_id)
             .form(form)
             .send()
             .await

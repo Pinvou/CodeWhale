@@ -282,6 +282,16 @@
         "file": "000028_account_closure_cleanup.up.sql",
         "version": 28,
         "sha256": "05eec7870758d9eb29248236a389f7facfbc4025d1fa711d40775d3fe96855b9"
+      },
+      {
+        "file": "000029_authentication_risk_limits.down.sql",
+        "version": 29,
+        "sha256": "cfb69f8a8f4609826b9d08eb258e040406a3b61afbaa3671fa802f3e0a1dfa8e"
+      },
+      {
+        "file": "000029_authentication_risk_limits.up.sql",
+        "version": 29,
+        "sha256": "c6f5ee5c40d7f28e5fae7519e683a792e0fa690f8f0b77685ccb6f8c280ba37d"
       }
     ],
     "billing": [

@@ -98,7 +98,8 @@ func (s *Service) registerMobile(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid mobile registration request", httpserver.RequestID(r.Context()))
 		return
 	}
-	result, err := s.mobileAuth.Register(r.Context(), body.RegistrationOperationID, body.RegistrationQueryToken, body.Username, body.Mobile, body.ChallengeID, body.Code, body.PasswordHandle, body.PasswordPolicyVersion)
+	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
+	result, err := s.mobileAuth.Register(ctx, body.RegistrationOperationID, body.RegistrationQueryToken, body.Username, body.Mobile, body.ChallengeID, body.Code, body.PasswordHandle, body.PasswordPolicyVersion)
 	if errors.Is(err, ErrRegistrationRecovering) {
 		w.Header().Set("Cache-Control", "no-store")
 		api.WriteJSON(w, http.StatusAccepted, result)
@@ -142,8 +143,13 @@ func (s *Service) verifyLoginSMS(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid SMS login verification request", httpserver.RequestID(r.Context()))
 		return
 	}
-	subject, err := s.mobileAuth.VerifyLogin(r.Context(), body.Mobile, body.ChallengeID, body.Code)
+	ctx := withAuthRisk(r.Context(), requestSource(r), r.Header.Get("X-Device-ID"))
+	subject, err := s.mobileAuth.VerifyLogin(ctx, body.Mobile, body.ChallengeID, body.Code)
 	if err != nil {
+		if errors.Is(err, ErrSMSRateLimited) {
+			s.writeMobileAuthError(w, r, err)
+			return
+		}
 		api.WriteError(w, http.StatusUnauthorized, "SMS_CODE_INVALID", "the verification code is invalid or expired", httpserver.RequestID(r.Context()))
 		return
 	}

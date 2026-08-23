@@ -110,6 +110,11 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
             - name: IDENTITY_PASSWORD_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: identity-password-hmac-key-base64, optional: true } }
+            {{- if $root.Values.security.authRiskEnabled }}
+            - { name: AUTH_RISK_REDIS_URL, value: {{ include "pinvou.redisUrl" $root | quote }} }
+            - name: AUTH_RISK_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: auth-risk-hmac-key-base64 } }
+            {{- end }}
             {{- else if eq $app.name "billing-service" }}
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - { name: BILLING_PAYMENT_PROVIDER, value: {{ $root.Values.billing.paymentProvider | quote }} }

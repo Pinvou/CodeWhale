@@ -22,6 +22,8 @@ test('Helm production-new values contain references, not secret material or simu
   assert.equal(values.keycloak.adminHostname, 'http://127.0.0.1:18081');
   assert.equal(values.tokenGateway.providerAllowedHosts.includes('newapi'), true);
   assert.equal(values.availability.enabled, true);
+	assert.equal(values.security.authRiskEnabled, true);
+	assert.equal(values.sms.enabled, true);
   assert.equal(values.redis.enabled, false);
   assert.equal(values.nats.enabled, false);
   assert.match(values.dependencies.redisUrl, /^rediss:\/\//);
@@ -94,6 +96,7 @@ test('Helm exposes only public authentication paths and keeps Keycloak administr
   const ingress = await readFile(path.join(chart, 'templates/ingress.yaml'), 'utf8');
   const keycloakRule = ingress.slice(ingress.indexOf('- host: {{ .Values.ingress.keycloakHost'));
   assert.match(ingress, /^\s*- path: \/realms\s*$/m);
+	assert.match(keycloakRule, /path: \/realms\/pinvou\/protocol\/openid-connect\/token[\s\S]*pathType: Exact[\s\S]*identity-service/);
   assert.match(ingress, /^\s*- path: \/resources\s*$/m);
   assert.doesNotMatch(keycloakRule, /path:\s*\/(?=\s*[,}\n])/);
   assert.doesNotMatch(keycloakRule, /\/admin/);

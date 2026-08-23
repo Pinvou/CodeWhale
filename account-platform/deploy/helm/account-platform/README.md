@@ -15,7 +15,10 @@ secret-provider material, `token-default-provider-api-key`, and the New API
 reconciliation credentials (`token-reconciliation-newapi-admin-token` and
 `token-reconciliation-newapi-admin-user-id`). Mobile registration additionally
 requires `registration-query-hmac-key-base64`, isolated from the Identity password
-and SMS verification HMAC keys. Never place those values in a
+and SMS verification HMAC keys. Production authentication risk admission also
+requires an independent `auth-risk-hmac-key-base64`; the exact public OIDC token
+path is routed through Identity Adapter and fails closed when its external Redis
+or Keycloak dependency is unavailable. Never place those values in a
 values file or rendered manifest.
 
 Production-new deliberately excludes Payment Simulator and Mock New API. Use the
