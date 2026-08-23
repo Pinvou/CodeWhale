@@ -562,6 +562,10 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "usage-holds" {
+		_, err := uuid.Parse(parts[3])
+		return err == nil && method == http.MethodGet
+	}
 	if len(parts) != 5 || parts[0] != "admin" || parts[1] != "v1" {
 		return false
 	}

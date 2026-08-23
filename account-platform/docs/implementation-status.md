@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 185`、`部分实现 45`、`未实现 98`、`降级实现 1`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 187`、`部分实现 43`、`未实现 98`、`降级实现 1`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -49,8 +49,9 @@
 | `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、63 个合同测试、Portal 构建和部署模板检查通过；数据库运行级迁移及真实 H3C 联调待部署，正式目录由 APT-048 等待业务冻结 |
 | `PAYMENT-EVIDENCE-LIFECYCLE` | 一单多流水、不可变回调/查询/修复证据、逐流水权益包、付款人与受益方冻结、订单派生摘要及运营明细 | Go 单测、OpenAPI lint、69 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移及真实 Provider 乱序/重复证据故障注入待部署；账单证据和完整关单中间态仍待后续任务 |
 | `RECEIVABLE-LIFECYCLE` | 用量超额双记、独立应收、钱包上下文冻结、现金 BASE 清偿分配、单支付权益包拒付冲销及三语运营查询 | Go 单测、OpenAPI lint、75 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、并发结算与真实 Provider 拒付故障注入待部署；PAY-33 人工案件队列仍由 APT-025 实现 |
+| `HOLD-OPERATIONS-EVIDENCE` | 钱包 Posting 至权益组成来源、Hold 组成/成员分配、租约历史、异常分类及幂等安全释放证据 | Go 单测、OpenAPI lint、80 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实并发幂等和生产授权隔离待部署 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 40 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/75 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/80 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -209,7 +210,7 @@
 | ADM-15 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 管理后台可查询 Journal/Posting，数据库保护已入账分录不可变 |
 | ADM-16 | 已实现 | DOC_CURRENT | GO-UNIT; RECEIVABLE-LIFECYCLE | NOT_DEPLOYED | 运营 API 和三语账务页展示应收来源、原始/已清/未清金额、钱包冻结状态及不可变清偿分配；没有直接降低应收的管理写接口 |
 | ADM-17 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 人工调整冻结目标、钱包、金额和调整版本；独立审批后由 Billing 执行端使用稳定幂等键写一次平衡账本，旧直接批准入口失败关闭 |
-| ADM-18 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有 Hold 查询/释放；缺目标异常状态与组成级证据 |
+| ADM-18 | 已实现 | DOC_CURRENT | GO-UNIT; HOLD-OPERATIONS-EVIDENCE | NOT_DEPLOYED | 运营 API 和三语页面查询 Hold、组成/成员分配、当前租约及不可变租约历史；异常释放只允许 REVIEW 或租约已过期 ACTIVE，要求权限、原因和幂等键并保存操作前后及分配快照 |
 | ADM-19 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 后台支持订单搜索、同步、修复及单订单明细，展示实际付款人、受益方、全部支付流水、不可变证据和派生摘要 |
 | ADM-20 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有旧订单级部分退款，不满足目标普通退款运营模型 |
 | ADM-21 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有模拟器账单对账基础；新华三无账单且四方证据模型未完成 |
@@ -337,7 +338,7 @@
 | BILL-21 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前与历史价格并存，结算/核对使用对应时点价格。 |
 | BILL-22 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 全局默认和模型覆盖均支持立即或未来时间区间，发布拒绝重叠并可预览请求时间的逐单位结果。 |
 | BILL-26 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 申请、批准、拒绝和账本入账可审计。 |
-| BILL-27 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有钱包、分录、Hold、调整、应收和对账查询；组成级权益及完整授权/导出保护未实现 |
+| BILL-27 | 已实现 | DOC_CURRENT | CODE-AUDIT; GO-UNIT; HOLD-OPERATIONS-EVIDENCE | NOT_DEPLOYED | 受权运营查询覆盖钱包投影、Journal/Posting、账本科目、lot/权益包/BASE-BONUS 组成来源、Hold、调整、应收和对账；接口只读且不提供余额覆盖或未受审计导出 |
 | BILL-28 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 普通退款成功时撤销目标支付全部未消费 BASE 与关联 BONUS、BONUS 零现金退款及平衡账本待实现 |
 | PAY-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | Billing 只依赖供应商中立 `payment.Provider`；H3C 状态映射和开发 Simulator HTTP 协议分别位于独立平台 Adapter |
 | PAY-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 版本化能力声明覆盖渠道、查询/保留/间隔、支付与晚到窗口、权威终态、关闭、退款、通知、账单和修复；API、UI、后台轮询与领域动作统一消费该声明，订单冻结能力快照 |
@@ -668,7 +669,7 @@
 | BILL-24 | 输入与缓存输入互斥计量 | 已实现 | 当前 Provider Adapter 将总输入规范化为非缓存输入与缓存输入的互斥集合；跨 Provider 通用化由 APT-026 延续相同契约。 |
 | BILL-25 | 零价、显式继承与缺失分离 | 已实现 | 固定零价被保存并阻止回退，模型继承显式配置，缺失稳定返回 PRICE_MISSING。 |
 | BILL-26 | 人工积分调整需审批 | 已实现 | 申请、批准、拒绝和账本入账可审计。 |
-| BILL-27 | 管理员查看钱包账本详情 | 部分实现 | 已有钱包、分录、Hold、调整、应收和对账查询；组成级权益及完整授权/导出保护未实现。 |
+| BILL-27 | 管理员查看钱包账本详情 | 已实现 | 钱包账本查询展示 Posting、科目、业务引用、lot、权益包及 BASE/BONUS 组成，并返回每个 Journal 的零和校验；钱包、Hold、调整、应收和对账均由独立权限保护且无直接余额覆盖。 |
 | BILL-28 | 退款权益与账本冲销 | 未实现 | 普通退款成功时冲销目标支付流水与权益包组合的全部未消费 BASE、该支付产生的全部未消费关联 BONUS 及对应账本负债；现金退款只按 BASE 计算，BONUS 零折现；人工赠送和其他支付来源权益不受影响。 |
 | BILL-33 | 订单级拒付冲销隔离 | 已实现 | 已确认拒付证据只冲销原支付流水唯一权益包的可撤销 BASE 和关联 BONUS；不足现金本金形成订单级应收，不冲销其他权益包，应收未清时冻结对应钱包上下文。 |
 | BILL-34 | 模型计费使用可信实际生成量 | 未实现 | 当前未区分 Provider 实际生成量、Gateway 持久化序号和客户端确认序号，也没有平台不可恢复交付故障转损失复核的计费边界。 |
@@ -757,7 +758,7 @@
 | ADM-15 | 钱包账本详情查询 | 已实现 | 已有 Journal/Posting 查询，数据库约束保护已入账分录不可变。 |
 | ADM-16 | 应收管理 | 已实现 | 运营人员可查询独立应收、清偿分配和钱包上下文冻结状态；清偿只能经不可变账本事务分配。 |
 | ADM-17 | 人工积分调整 | 已实现 | 调整目标、钱包、金额和版本被冻结；独立审批后由 Billing 以稳定执行键写一次平衡账本，直接批准路径失败关闭。 |
-| ADM-18 | Hold 运营 | 部分实现 | 有 Hold 查询/释放；缺目标异常状态与组成级证据。 |
+| ADM-18 | Hold 运营 | 已实现 | 可查询 Hold 的价格/请求/用量快照、组成与成员授予分配、当前租约和不可变租约历史；异常释放限 REVIEW 或已过期 ACTIVE，要求原因和幂等键并保存操作证据。 |
 | ADM-19 | 支付订单运营 | 已实现 | 支持订单查询、同步、受审计修复和明细查看；明细包含付款人、受益方、多笔支付流水、不可变证据及订单派生摘要。 |
 | ADM-20 | 退款运营 | 未实现 | 普通退款意图、BASE/关联 BONUS 累计消费资格预检、只按全部未消费 BASE 计算整笔现金退款、成功后同步撤销关联 BONUS 及 Provider 能力降级待实现。 |
 | ADM-21 | Billing 对账管理 | 部分实现 | 已有内部对账基础；四方对账、责任人和 Provider 账单降级待实现。 |

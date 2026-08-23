@@ -31,14 +31,16 @@ export class AdminPlatformClient {
     return payload;
   }
 
-  async mutate(area, resource, method, body) {
+  async mutate(area, resource, method, body, idempotencyKey = '') {
+	const headers = {
+	  Accept: 'application/json',
+	  'Content-Type': 'application/json',
+	  'X-CSRF-Token': this.csrfToken,
+	};
+	if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
     const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, {
       method,
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': this.csrfToken,
-      },
+      headers,
       credentials: 'same-origin',
       cache: 'no-store',
       body: body === undefined ? undefined : JSON.stringify(body),
@@ -95,7 +97,8 @@ export class AdminPlatformClient {
   adjustments(signal) { return this.request('billing', '/admin/v1/adjustments?limit=100', signal); }
   decideAdjustment(adjustmentID, decision, reason) { return this.mutate('billing', `/admin/v1/adjustments/${encodeURIComponent(adjustmentID)}/${decision}`, 'POST', { reason }); }
   holds(signal) { return this.request('billing', '/admin/v1/usage-holds?limit=100', signal); }
-  releaseHold(holdID, reason) { return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }); }
+  hold(holdID, signal) { return this.request('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}`, signal); }
+  releaseHold(holdID, reason) { return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }, `hold-release-${crypto.randomUUID()}`); }
   reconciliationRuns(signal) { return this.request('billing', '/admin/v1/reconciliation-runs?limit=100', signal); }
   runReconciliation(channel, businessDate) { return this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', { channel, business_date:businessDate }); }
   reconciliationCases(runID, signal) { return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal); }

@@ -115,6 +115,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/adjustments/:adjustment_id/approve", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("WALLET_ADJUSTMENT", approvalpolicy.ApprovalRequired), httpserver.AdaptFunc(s.adminApproveAdjustment))
 		admin.POST("/adjustments/:adjustment_id/reject", s.authorizer.Require("platform.billing.adjustments.approve"), approvalpolicy.Require("BILLING_ADJUSTMENT_REJECT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRejectAdjustment))
 		admin.GET("/usage-holds", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageHolds))
+		admin.GET("/usage-holds/:hold_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageHold))
 		admin.POST("/usage-holds/:hold_id/release", s.authorizer.Require("platform.billing.holds.release"), approvalpolicy.Require("BILLING_USAGE_HOLD_SAFE_RELEASE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminReleaseUsageHold))
 		admin.GET("/reconciliation-runs", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationRuns))
 		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("BILLING_RECONCILIATION_RUN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRunReconciliation))

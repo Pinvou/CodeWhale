@@ -367,6 +367,9 @@ WHERE id = $1 AND status = 'ACTIVE' AND receivable_microcredits=0 AND posted_mic
 	if err != nil {
 		return Hold{}, err
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_lease_events(id,hold_id,event_type,expires_at,previous_max_microcredits,max_microcredits,additional_microcredits,created_at) VALUES($1,$2,'CREATED',$3,0,$4,$4,$5)`, uuid.Must(uuid.NewV7()), hold.ID, hold.ExpiresAt, hold.MaxMicrocredits, now); err != nil {
+		return Hold{}, err
+	}
 	for _, allocation := range allocations {
 		command, err := tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=available_microcredits-$2,reserved_microcredits=reserved_microcredits+$2,updated_at=$3 WHERE id=$1 AND available_microcredits>=$2`, allocation.componentID, allocation.amount, now)
 		if err != nil {
@@ -563,6 +566,7 @@ func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, hol
 		return Hold{}, ErrUsageAlreadyTerminal
 	}
 	now := r.now()
+	previousExpiresAt, previousMaximum := hold.ExpiresAt, hold.MaxMicrocredits
 	if additional > 0 {
 		var organizationID, memberUserID *uuid.UUID
 		var membershipVersion *int64
@@ -583,6 +587,11 @@ func (r *PostgresRepository) ExtendHold(ctx context.Context, usageRequestID, hol
 	}
 	if _, err := tx.Exec(ctx, `UPDATE usage_holds SET expires_at=$2,max_microcredits=$3,updated_at=$4 WHERE id=$1 AND status='ACTIVE'`, hold.ID, hold.ExpiresAt, hold.MaxMicrocredits, now); err != nil {
 		return Hold{}, err
+	}
+	if hold.ExpiresAt.After(previousExpiresAt) || hold.MaxMicrocredits != previousMaximum {
+		if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_lease_events(id,hold_id,event_type,previous_expires_at,expires_at,previous_max_microcredits,max_microcredits,additional_microcredits,created_at) VALUES($1,$2,'EXTENDED',$3,$4,$5,$6,$7,$8)`, uuid.Must(uuid.NewV7()), hold.ID, previousExpiresAt, hold.ExpiresAt, previousMaximum, hold.MaxMicrocredits, hold.MaxMicrocredits-previousMaximum, now); err != nil {
+			return Hold{}, err
+		}
 	}
 	return hold, tx.Commit(ctx)
 }

@@ -119,6 +119,9 @@ FOR UPDATE OF grant,component`, organizationID, memberUserID, membershipVersion,
 	if _, err := tx.Exec(ctx, `INSERT INTO usage_holds(id,usage_request_id,wallet_id,price_version_id,status,max_microcredits,expires_at,model_id,protocol_code,formula_version_id,pricing_snapshot,request_snapshot,organization_id,member_user_id,membership_version,created_at,updated_at) VALUES($1,$2,$3,$4,'ACTIVE',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$15)`, hold.ID, usageRequestID, walletID, priceVersionID, maxAmount, hold.ExpiresAt, modelID, protocolCode, formulaVersionID, pricingSnapshot, requestSnapshot, organizationID, memberUserID, membershipVersion, now); err != nil {
 		return Hold{}, err
 	}
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_lease_events(id,hold_id,event_type,expires_at,previous_max_microcredits,max_microcredits,additional_microcredits,created_at) VALUES($1,$2,'CREATED',$3,0,$4,$4,$5)`, uuid.Must(uuid.NewV7()), hold.ID, hold.ExpiresAt, hold.MaxMicrocredits, now); err != nil {
+		return Hold{}, err
+	}
 	componentAmounts := make(map[uuid.UUID]int64)
 	componentPackages := make(map[uuid.UUID]uuid.UUID)
 	for _, allocation := range allocations {

@@ -2,8 +2,10 @@ package billing
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -65,14 +67,85 @@ type AdminPaymentOrderFilter struct {
 }
 
 type AdminHold struct {
-	ID                 uuid.UUID `json:"hold_id"`
-	UsageRequestID     uuid.UUID `json:"usage_request_id"`
-	WalletID           uuid.UUID `json:"wallet_id"`
-	Status             string    `json:"status"`
-	MaxMicrocredits    int64     `json:"max_microcredits"`
-	ActualMicrocredits *int64    `json:"actual_microcredits,omitempty"`
-	ExpiresAt          time.Time `json:"expires_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                 uuid.UUID       `json:"hold_id"`
+	UsageRequestID     uuid.UUID       `json:"usage_request_id"`
+	WalletID           uuid.UUID       `json:"wallet_id"`
+	PriceVersionID     *uuid.UUID      `json:"price_version_id,omitempty"`
+	Status             string          `json:"status"`
+	AnomalyState       string          `json:"anomaly_state"`
+	MaxMicrocredits    int64           `json:"max_microcredits"`
+	ActualMicrocredits *int64          `json:"actual_microcredits,omitempty"`
+	ExpiresAt          time.Time       `json:"expires_at"`
+	TerminalAt         *time.Time      `json:"terminal_at,omitempty"`
+	ModelID            *string         `json:"model_id,omitempty"`
+	ProtocolCode       *string         `json:"protocol_code,omitempty"`
+	FormulaVersionID   *uuid.UUID      `json:"formula_version_id,omitempty"`
+	PricingSnapshot    json.RawMessage `json:"pricing_snapshot,omitempty"`
+	RequestSnapshot    json.RawMessage `json:"request_snapshot,omitempty"`
+	UsageSnapshot      json.RawMessage `json:"usage_snapshot,omitempty"`
+	OrganizationID     *uuid.UUID      `json:"organization_id,omitempty"`
+	MemberUserID       *uuid.UUID      `json:"member_user_id,omitempty"`
+	MembershipVersion  *int64          `json:"membership_version,omitempty"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+}
+
+type AdminHoldComponentAllocation struct {
+	PackageID                  uuid.UUID `json:"package_id"`
+	ComponentID                uuid.UUID `json:"component_id"`
+	ComponentType              string    `json:"component_type"`
+	CreditLotID                uuid.UUID `json:"credit_lot_id"`
+	ReservedMicrocredits       int64     `json:"reserved_microcredits"`
+	SettledMicrocredits        int64     `json:"settled_microcredits"`
+	ReleasedMicrocredits       int64     `json:"released_microcredits"`
+	AvailableMicrocredits      int64     `json:"component_available_microcredits"`
+	CurrentReserved            int64     `json:"component_reserved_microcredits"`
+	UsedMicrocredits           int64     `json:"component_used_microcredits"`
+	ActiveGrantMicrocredits    int64     `json:"component_active_grant_microcredits"`
+	SuspendedGrantMicrocredits int64     `json:"component_suspended_grant_microcredits"`
+	Status                     string    `json:"component_status"`
+}
+
+type AdminHoldMemberAllocation struct {
+	GrantID              uuid.UUID `json:"grant_id"`
+	ComponentID          uuid.UUID `json:"component_id"`
+	OrganizationID       uuid.UUID `json:"organization_id"`
+	MemberUserID         uuid.UUID `json:"member_user_id"`
+	ReservedMicrocredits int64     `json:"reserved_microcredits"`
+	SettledMicrocredits  int64     `json:"settled_microcredits"`
+	ReleasedMicrocredits int64     `json:"released_microcredits"`
+	Status               string    `json:"grant_status"`
+	AllocationVersion    int64     `json:"allocation_version"`
+}
+
+type AdminHoldLeaseEvent struct {
+	ID                      uuid.UUID  `json:"lease_event_id"`
+	EventType               string     `json:"event_type"`
+	PreviousExpiresAt       *time.Time `json:"previous_expires_at,omitempty"`
+	ExpiresAt               time.Time  `json:"expires_at"`
+	PreviousMaxMicrocredits int64      `json:"previous_max_microcredits"`
+	MaxMicrocredits         int64      `json:"max_microcredits"`
+	AdditionalMicrocredits  int64      `json:"additional_microcredits"`
+	CreatedAt               time.Time  `json:"created_at"`
+}
+
+type AdminHoldAction struct {
+	ID           uuid.UUID       `json:"action_id"`
+	Action       string          `json:"action"`
+	Reason       string          `json:"reason"`
+	Actor        string          `json:"actor"`
+	BeforeStatus string          `json:"before_status"`
+	AfterStatus  string          `json:"after_status"`
+	Allocations  json.RawMessage `json:"allocation_snapshot"`
+	CreatedAt    time.Time       `json:"created_at"`
+}
+
+type AdminHoldDetail struct {
+	Hold                 AdminHold                      `json:"hold"`
+	ComponentAllocations []AdminHoldComponentAllocation `json:"component_allocations"`
+	MemberAllocations    []AdminHoldMemberAllocation    `json:"member_allocations"`
+	LeaseEvents          []AdminHoldLeaseEvent          `json:"lease_events"`
+	AdminActions         []AdminHoldAction              `json:"admin_actions"`
 }
 
 type AdminPriceVersion struct {
@@ -87,12 +160,21 @@ type AdminPriceVersion struct {
 }
 
 type AdminLedgerEntry struct {
-	JournalEntryID   uuid.UUID `json:"journal_entry_id"`
-	EntryType        string    `json:"entry_type"`
-	BusinessRef      string    `json:"business_reference"`
-	Description      string    `json:"description"`
-	DeltaMicrocredit int64     `json:"delta_microcredits"`
-	CreatedAt        time.Time `json:"created_at"`
+	JournalEntryID         uuid.UUID  `json:"journal_entry_id"`
+	PostingID              uuid.UUID  `json:"posting_id"`
+	LedgerAccountID        uuid.UUID  `json:"ledger_account_id"`
+	LedgerAccountCode      string     `json:"ledger_account_code"`
+	LedgerAccountType      string     `json:"ledger_account_type"`
+	CreditLotID            *uuid.UUID `json:"credit_lot_id,omitempty"`
+	EntitlementPackageID   *uuid.UUID `json:"entitlement_package_id,omitempty"`
+	EntitlementComponentID *uuid.UUID `json:"entitlement_component_id,omitempty"`
+	ComponentType          *string    `json:"component_type,omitempty"`
+	EntryType              string     `json:"entry_type"`
+	BusinessRef            string     `json:"business_reference"`
+	Description            string     `json:"description"`
+	DeltaMicrocredit       int64      `json:"delta_microcredits"`
+	JournalBalance         int64      `json:"journal_balance_microcredits"`
+	CreatedAt              time.Time  `json:"created_at"`
 }
 
 type AdminReconciliationCase struct {
@@ -115,11 +197,12 @@ type adminRepository interface {
 	AdminPaymentOrders(context.Context, AdminPaymentOrderFilter, int) ([]AdminPaymentOrder, error)
 	AdminAdjustments(context.Context, int) ([]ManualAdjustment, error)
 	AdminUsageHolds(context.Context, int) ([]AdminHold, error)
+	AdminUsageHold(context.Context, uuid.UUID) (AdminHoldDetail, error)
 	AdminPriceVersions(context.Context, int) ([]AdminPriceVersion, error)
 	AdminCreatePriceVersion(context.Context, string, int64, int64, int64) (AdminPriceVersion, error)
 	AdminWalletLedger(context.Context, uuid.UUID, int) ([]AdminLedgerEntry, error)
 	AdminPaymentOrder(context.Context, uuid.UUID) (AdminPaymentOrder, error)
-	AdminReleaseUsageHold(context.Context, uuid.UUID, string, string) (AdminHold, error)
+	AdminReleaseUsageHold(context.Context, uuid.UUID, string, string, string) (AdminHold, error)
 	AdminReconciliationRuns(context.Context, int) ([]ReconciliationRun, error)
 	AdminReconciliationCases(context.Context, uuid.UUID, int) ([]AdminReconciliationCase, error)
 }
@@ -320,6 +403,24 @@ func (s *Service) adminUsageHolds(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Service) adminUsageHold(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	holdID, err := uuid.Parse(r.PathValue("hold_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid usage hold", httpserver.RequestID(r.Context()))
+		return
+	}
+	detail, err := repository.AdminUsageHold(r.Context(), holdID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, detail)
+}
+
 func adminActor(principal identity.Principal) uuid.UUID {
 	if actor, err := uuid.Parse(principal.Subject); err == nil {
 		return actor
@@ -476,12 +577,13 @@ func (s *Service) adminReleaseUsageHold(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		Reason string `json:"reason"`
 	}
-	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "release reason is required", httpserver.RequestID(r.Context()))
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" || len(idempotencyKey) < 8 || len(idempotencyKey) > 120 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "release reason and idempotency key are required", httpserver.RequestID(r.Context()))
 		return
 	}
 	principal := adminPrincipal(r)
-	hold, err := repository.AdminReleaseUsageHold(r.Context(), holdID, body.Reason, principal.Issuer+"|"+principal.Subject)
+	hold, err := repository.AdminReleaseUsageHold(r.Context(), holdID, body.Reason, principal.Issuer+"|"+principal.Subject, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -618,7 +720,17 @@ func (r *PostgresRepository) AdminAdjustments(ctx context.Context, limit int) ([
 }
 
 func (r *PostgresRepository) AdminUsageHolds(ctx context.Context, limit int) ([]AdminHold, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,usage_request_id,wallet_id,status,max_microcredits,actual_microcredits,expires_at,updated_at FROM usage_holds ORDER BY updated_at DESC,id LIMIT $1`, limit)
+	rows, err := r.pool.Query(ctx, `SELECT hold.id,hold.usage_request_id,hold.wallet_id,hold.price_version_id,hold.status,
+CASE WHEN hold.status='REVIEW' THEN 'REVIEW_REQUIRED'
+ WHEN hold.status='ACTIVE' AND hold.expires_at<=now() THEN 'LEASE_EXPIRED'
+ WHEN hold.status<>'ACTIVE' AND COALESCE(allocation.outstanding,0)<>0 THEN 'TERMINAL_ALLOCATION_REMAINS'
+ WHEN hold.status='ACTIVE' AND COALESCE(allocation.outstanding,0)<>hold.max_microcredits THEN 'ALLOCATION_MISMATCH'
+ ELSE 'NONE' END,
+hold.max_microcredits,hold.actual_microcredits,hold.expires_at,hold.terminal_at,hold.model_id,hold.protocol_code,hold.formula_version_id,hold.pricing_snapshot,hold.request_snapshot,hold.usage_snapshot,hold.organization_id,hold.member_user_id,hold.membership_version,hold.created_at,hold.updated_at
+FROM usage_holds hold LEFT JOIN (
+ SELECT hold_id,sum(reserved_microcredits-settled_microcredits-released_microcredits) outstanding
+ FROM usage_hold_allocations GROUP BY hold_id
+) allocation ON allocation.hold_id=hold.id ORDER BY hold.updated_at DESC,hold.id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -626,12 +738,118 @@ func (r *PostgresRepository) AdminUsageHolds(ctx context.Context, limit int) ([]
 	items := make([]AdminHold, 0)
 	for rows.Next() {
 		var item AdminHold
-		if err := rows.Scan(&item.ID, &item.UsageRequestID, &item.WalletID, &item.Status, &item.MaxMicrocredits, &item.ActualMicrocredits, &item.ExpiresAt, &item.UpdatedAt); err != nil {
+		if err := scanAdminHold(rows, &item); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+type adminHoldScanner interface {
+	Scan(...any) error
+}
+
+func scanAdminHold(row adminHoldScanner, item *AdminHold) error {
+	return row.Scan(&item.ID, &item.UsageRequestID, &item.WalletID, &item.PriceVersionID, &item.Status, &item.AnomalyState, &item.MaxMicrocredits, &item.ActualMicrocredits, &item.ExpiresAt, &item.TerminalAt, &item.ModelID, &item.ProtocolCode, &item.FormulaVersionID, &item.PricingSnapshot, &item.RequestSnapshot, &item.UsageSnapshot, &item.OrganizationID, &item.MemberUserID, &item.MembershipVersion, &item.CreatedAt, &item.UpdatedAt)
+}
+
+func (r *PostgresRepository) AdminUsageHold(ctx context.Context, holdID uuid.UUID) (AdminHoldDetail, error) {
+	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return AdminHoldDetail{}, err
+	}
+	defer tx.Rollback(ctx)
+	detail := AdminHoldDetail{
+		ComponentAllocations: []AdminHoldComponentAllocation{}, MemberAllocations: []AdminHoldMemberAllocation{},
+		LeaseEvents: []AdminHoldLeaseEvent{}, AdminActions: []AdminHoldAction{},
+	}
+	err = scanAdminHold(tx.QueryRow(ctx, `SELECT hold.id,hold.usage_request_id,hold.wallet_id,hold.price_version_id,hold.status,
+CASE WHEN hold.status='REVIEW' THEN 'REVIEW_REQUIRED'
+ WHEN hold.status='ACTIVE' AND hold.expires_at<=now() THEN 'LEASE_EXPIRED'
+ WHEN hold.status<>'ACTIVE' AND COALESCE(allocation.outstanding,0)<>0 THEN 'TERMINAL_ALLOCATION_REMAINS'
+ WHEN hold.status='ACTIVE' AND COALESCE(allocation.outstanding,0)<>hold.max_microcredits THEN 'ALLOCATION_MISMATCH'
+ ELSE 'NONE' END,
+hold.max_microcredits,hold.actual_microcredits,hold.expires_at,hold.terminal_at,hold.model_id,hold.protocol_code,hold.formula_version_id,hold.pricing_snapshot,hold.request_snapshot,hold.usage_snapshot,hold.organization_id,hold.member_user_id,hold.membership_version,hold.created_at,hold.updated_at
+FROM usage_holds hold LEFT JOIN (
+ SELECT hold_id,sum(reserved_microcredits-settled_microcredits-released_microcredits) outstanding
+ FROM usage_hold_allocations GROUP BY hold_id
+) allocation ON allocation.hold_id=hold.id WHERE hold.id=$1`, holdID), &detail.Hold)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AdminHoldDetail{}, ErrNotFound
+	}
+	if err != nil {
+		return AdminHoldDetail{}, err
+	}
+	componentRows, err := tx.Query(ctx, `SELECT allocation.package_id,allocation.component_id,component.component_type,component.credit_lot_id,allocation.reserved_microcredits,allocation.settled_microcredits,allocation.released_microcredits,component.available_microcredits,component.reserved_microcredits,component.used_microcredits,component.active_grant_microcredits,component.suspended_grant_microcredits,component.status FROM usage_hold_allocations allocation JOIN entitlement_components component ON component.id=allocation.component_id WHERE allocation.hold_id=$1 ORDER BY component.expires_at,component.component_type,component.id`, holdID)
+	if err != nil {
+		return AdminHoldDetail{}, err
+	}
+	for componentRows.Next() {
+		var item AdminHoldComponentAllocation
+		if err := componentRows.Scan(&item.PackageID, &item.ComponentID, &item.ComponentType, &item.CreditLotID, &item.ReservedMicrocredits, &item.SettledMicrocredits, &item.ReleasedMicrocredits, &item.AvailableMicrocredits, &item.CurrentReserved, &item.UsedMicrocredits, &item.ActiveGrantMicrocredits, &item.SuspendedGrantMicrocredits, &item.Status); err != nil {
+			componentRows.Close()
+			return AdminHoldDetail{}, err
+		}
+		detail.ComponentAllocations = append(detail.ComponentAllocations, item)
+	}
+	if err := componentRows.Err(); err != nil {
+		componentRows.Close()
+		return AdminHoldDetail{}, err
+	}
+	componentRows.Close()
+	memberRows, err := tx.Query(ctx, `SELECT allocation.grant_id,allocation.component_id,grant.organization_id,grant.member_user_id,allocation.reserved_microcredits,allocation.settled_microcredits,allocation.released_microcredits,grant.status,grant.allocation_version FROM member_quota_hold_allocations allocation JOIN member_quota_grants grant ON grant.id=allocation.grant_id WHERE allocation.hold_id=$1 ORDER BY allocation.component_id,allocation.grant_id`, holdID)
+	if err != nil {
+		return AdminHoldDetail{}, err
+	}
+	for memberRows.Next() {
+		var item AdminHoldMemberAllocation
+		if err := memberRows.Scan(&item.GrantID, &item.ComponentID, &item.OrganizationID, &item.MemberUserID, &item.ReservedMicrocredits, &item.SettledMicrocredits, &item.ReleasedMicrocredits, &item.Status, &item.AllocationVersion); err != nil {
+			memberRows.Close()
+			return AdminHoldDetail{}, err
+		}
+		detail.MemberAllocations = append(detail.MemberAllocations, item)
+	}
+	if err := memberRows.Err(); err != nil {
+		memberRows.Close()
+		return AdminHoldDetail{}, err
+	}
+	memberRows.Close()
+	leaseRows, err := tx.Query(ctx, `SELECT id,event_type,previous_expires_at,expires_at,previous_max_microcredits,max_microcredits,additional_microcredits,created_at FROM usage_hold_lease_events WHERE hold_id=$1 ORDER BY created_at,id`, holdID)
+	if err != nil {
+		return AdminHoldDetail{}, err
+	}
+	for leaseRows.Next() {
+		var item AdminHoldLeaseEvent
+		if err := leaseRows.Scan(&item.ID, &item.EventType, &item.PreviousExpiresAt, &item.ExpiresAt, &item.PreviousMaxMicrocredits, &item.MaxMicrocredits, &item.AdditionalMicrocredits, &item.CreatedAt); err != nil {
+			leaseRows.Close()
+			return AdminHoldDetail{}, err
+		}
+		detail.LeaseEvents = append(detail.LeaseEvents, item)
+	}
+	if err := leaseRows.Err(); err != nil {
+		leaseRows.Close()
+		return AdminHoldDetail{}, err
+	}
+	leaseRows.Close()
+	actionRows, err := tx.Query(ctx, `SELECT id,action,reason,actor,before_status,after_status,allocation_snapshot,created_at FROM usage_hold_admin_actions WHERE hold_id=$1 ORDER BY created_at,id`, holdID)
+	if err != nil {
+		return AdminHoldDetail{}, err
+	}
+	for actionRows.Next() {
+		var item AdminHoldAction
+		if err := actionRows.Scan(&item.ID, &item.Action, &item.Reason, &item.Actor, &item.BeforeStatus, &item.AfterStatus, &item.Allocations, &item.CreatedAt); err != nil {
+			actionRows.Close()
+			return AdminHoldDetail{}, err
+		}
+		detail.AdminActions = append(detail.AdminActions, item)
+	}
+	if err := actionRows.Err(); err != nil {
+		actionRows.Close()
+		return AdminHoldDetail{}, err
+	}
+	actionRows.Close()
+	return detail, tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) AdminPriceVersions(ctx context.Context, limit int) ([]AdminPriceVersion, error) {
@@ -702,8 +920,11 @@ func (r *PostgresRepository) AdminWalletLedger(ctx context.Context, walletID uui
 		return nil, ErrNotFound
 	}
 	rows, err := r.pool.Query(ctx, `
-SELECT je.id,je.entry_type,je.business_reference,je.description,lp.delta_microcredits,lp.created_at
+SELECT je.id,lp.id,la.id,la.code,la.account_type,lp.credit_lot_id,component.package_id,component.id,component.component_type,
+je.entry_type,je.business_reference,je.description,lp.delta_microcredits,
+(SELECT COALESCE(sum(peer.delta_microcredits),0) FROM ledger_postings peer WHERE peer.journal_entry_id=je.id),lp.created_at
 FROM ledger_postings lp JOIN journal_entries je ON je.id=lp.journal_entry_id JOIN ledger_accounts la ON la.id=lp.ledger_account_id
+LEFT JOIN entitlement_components component ON component.credit_lot_id=lp.credit_lot_id
 WHERE la.wallet_id=$1 ORDER BY lp.created_at DESC,lp.id LIMIT $2`, walletID, limit)
 	if err != nil {
 		return nil, err
@@ -712,7 +933,7 @@ WHERE la.wallet_id=$1 ORDER BY lp.created_at DESC,lp.id LIMIT $2`, walletID, lim
 	items := make([]AdminLedgerEntry, 0)
 	for rows.Next() {
 		var item AdminLedgerEntry
-		if err := rows.Scan(&item.JournalEntryID, &item.EntryType, &item.BusinessRef, &item.Description, &item.DeltaMicrocredit, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.JournalEntryID, &item.PostingID, &item.LedgerAccountID, &item.LedgerAccountCode, &item.LedgerAccountType, &item.CreditLotID, &item.EntitlementPackageID, &item.EntitlementComponentID, &item.ComponentType, &item.EntryType, &item.BusinessRef, &item.Description, &item.DeltaMicrocredit, &item.JournalBalance, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -763,28 +984,46 @@ func (r *PostgresRepository) AdminPaymentOrder(ctx context.Context, orderID uuid
 	return item, evidenceRows.Err()
 }
 
-func (r *PostgresRepository) AdminReleaseUsageHold(ctx context.Context, holdID uuid.UUID, reason, actor string) (AdminHold, error) {
-	reason, actor = strings.TrimSpace(reason), strings.TrimSpace(actor)
-	if reason == "" || actor == "" {
+func (r *PostgresRepository) AdminReleaseUsageHold(ctx context.Context, holdID uuid.UUID, reason, actor, idempotencyKey string) (AdminHold, error) {
+	reason, actor, idempotencyKey = strings.TrimSpace(reason), strings.TrimSpace(actor), strings.TrimSpace(idempotencyKey)
+	if holdID == uuid.Nil || reason == "" || len(reason) > 500 || actor == "" || len(idempotencyKey) < 8 || len(idempotencyKey) > 120 {
 		return AdminHold{}, ErrConflict
 	}
+	fingerprintBytes := sha256.Sum256([]byte(holdID.String() + "\x00" + reason + "\x00" + actor))
+	fingerprint := fmt.Sprintf("%x", fingerprintBytes[:])
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return AdminHold{}, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockTransactionKey(ctx, tx, "usage-hold.admin.safe-release", idempotencyKey); err != nil {
+		return AdminHold{}, err
+	}
+	var existingHoldID uuid.UUID
+	var existingFingerprint string
+	err = tx.QueryRow(ctx, `SELECT hold_id,request_fingerprint FROM usage_hold_admin_actions WHERE action='SAFE_RELEASE' AND idempotency_key=$1`, idempotencyKey).Scan(&existingHoldID, &existingFingerprint)
+	if err == nil {
+		if existingHoldID != holdID || existingFingerprint != fingerprint {
+			return AdminHold{}, ErrIdempotencyConflict
+		}
+		return adminHoldByID(ctx, tx, holdID)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return AdminHold{}, err
+	}
 	var hold AdminHold
-	err = tx.QueryRow(ctx, `SELECT id,usage_request_id,wallet_id,status,max_microcredits,actual_microcredits,expires_at,updated_at FROM usage_holds WHERE id=$1 FOR UPDATE`, holdID).Scan(&hold.ID, &hold.UsageRequestID, &hold.WalletID, &hold.Status, &hold.MaxMicrocredits, &hold.ActualMicrocredits, &hold.ExpiresAt, &hold.UpdatedAt)
+	err = tx.QueryRow(ctx, `SELECT id,usage_request_id,wallet_id,price_version_id,status,max_microcredits,actual_microcredits,expires_at,terminal_at,model_id,protocol_code,formula_version_id,pricing_snapshot,request_snapshot,usage_snapshot,organization_id,member_user_id,membership_version,created_at,updated_at FROM usage_holds WHERE id=$1 FOR UPDATE`, holdID).Scan(&hold.ID, &hold.UsageRequestID, &hold.WalletID, &hold.PriceVersionID, &hold.Status, &hold.MaxMicrocredits, &hold.ActualMicrocredits, &hold.ExpiresAt, &hold.TerminalAt, &hold.ModelID, &hold.ProtocolCode, &hold.FormulaVersionID, &hold.PricingSnapshot, &hold.RequestSnapshot, &hold.UsageSnapshot, &hold.OrganizationID, &hold.MemberUserID, &hold.MembershipVersion, &hold.CreatedAt, &hold.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AdminHold{}, ErrNotFound
 	}
 	if err != nil {
 		return AdminHold{}, err
 	}
-	if hold.Status != "ACTIVE" && hold.Status != "REVIEW" {
-		return AdminHold{}, ErrUsageAlreadyTerminal
-	}
 	now := r.now()
+	if hold.Status != "REVIEW" && !(hold.Status == "ACTIVE" && !hold.ExpiresAt.After(now)) {
+		return AdminHold{}, ErrConflict
+	}
+	beforeStatus := hold.Status
 	if err := releasePackageAllocations(ctx, tx, hold.ID, now); err != nil {
 		return AdminHold{}, err
 	}
@@ -799,8 +1038,39 @@ func (r *PostgresRepository) AdminReleaseUsageHold(ctx context.Context, holdID u
 	if _, err := tx.Exec(ctx, `UPDATE usage_holds SET status='RELEASED',usage_snapshot=COALESCE(usage_snapshot,'{}'::jsonb) || $2::jsonb,terminal_at=$3,updated_at=$3 WHERE id=$1`, holdID, snapshot, now); err != nil {
 		return AdminHold{}, err
 	}
-	hold.Status, hold.UpdatedAt = "RELEASED", now
-	return hold, tx.Commit(ctx)
+	var allocationSnapshot json.RawMessage
+	if err := tx.QueryRow(ctx, `SELECT jsonb_build_object(
+'component_allocations',COALESCE((SELECT jsonb_agg(jsonb_build_object('package_id',package_id,'component_id',component_id,'reserved_microcredits',reserved_microcredits,'settled_microcredits',settled_microcredits,'released_microcredits',released_microcredits) ORDER BY component_id) FROM usage_hold_allocations WHERE hold_id=$1),'[]'::jsonb),
+'member_allocations',COALESCE((SELECT jsonb_agg(jsonb_build_object('grant_id',grant_id,'component_id',component_id,'reserved_microcredits',reserved_microcredits,'settled_microcredits',settled_microcredits,'released_microcredits',released_microcredits) ORDER BY grant_id) FROM member_quota_hold_allocations WHERE hold_id=$1),'[]'::jsonb))`, holdID).Scan(&allocationSnapshot); err != nil {
+		return AdminHold{}, err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_hold_admin_actions(id,hold_id,action,idempotency_key,request_fingerprint,reason,actor,before_status,after_status,allocation_snapshot,created_at) VALUES($1,$2,'SAFE_RELEASE',$3,$4,$5,$6,$7,'RELEASED',$8,$9)`, uuid.Must(uuid.NewV7()), holdID, idempotencyKey, fingerprint, reason, actor, beforeStatus, allocationSnapshot, now); err != nil {
+		return AdminHold{}, err
+	}
+	hold.Status, hold.AnomalyState, hold.TerminalAt, hold.UpdatedAt = "RELEASED", "NONE", &now, now
+	if err := tx.Commit(ctx); err != nil {
+		return AdminHold{}, err
+	}
+	return hold, nil
+}
+
+func adminHoldByID(ctx context.Context, tx pgx.Tx, holdID uuid.UUID) (AdminHold, error) {
+	var hold AdminHold
+	err := tx.QueryRow(ctx, `SELECT hold.id,hold.usage_request_id,hold.wallet_id,hold.price_version_id,hold.status,
+CASE WHEN hold.status='REVIEW' THEN 'REVIEW_REQUIRED'
+ WHEN hold.status='ACTIVE' AND hold.expires_at<=now() THEN 'LEASE_EXPIRED'
+ WHEN hold.status<>'ACTIVE' AND COALESCE(allocation.outstanding,0)<>0 THEN 'TERMINAL_ALLOCATION_REMAINS'
+ WHEN hold.status='ACTIVE' AND COALESCE(allocation.outstanding,0)<>hold.max_microcredits THEN 'ALLOCATION_MISMATCH'
+ ELSE 'NONE' END,
+hold.max_microcredits,hold.actual_microcredits,hold.expires_at,hold.terminal_at,hold.model_id,hold.protocol_code,hold.formula_version_id,hold.pricing_snapshot,hold.request_snapshot,hold.usage_snapshot,hold.organization_id,hold.member_user_id,hold.membership_version,hold.created_at,hold.updated_at
+FROM usage_holds hold LEFT JOIN (
+ SELECT hold_id,sum(reserved_microcredits-settled_microcredits-released_microcredits) outstanding
+ FROM usage_hold_allocations GROUP BY hold_id
+) allocation ON allocation.hold_id=hold.id WHERE hold.id=$1`, holdID).Scan(&hold.ID, &hold.UsageRequestID, &hold.WalletID, &hold.PriceVersionID, &hold.Status, &hold.AnomalyState, &hold.MaxMicrocredits, &hold.ActualMicrocredits, &hold.ExpiresAt, &hold.TerminalAt, &hold.ModelID, &hold.ProtocolCode, &hold.FormulaVersionID, &hold.PricingSnapshot, &hold.RequestSnapshot, &hold.UsageSnapshot, &hold.OrganizationID, &hold.MemberUserID, &hold.MembershipVersion, &hold.CreatedAt, &hold.UpdatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AdminHold{}, ErrNotFound
+	}
+	return hold, err
 }
 
 func (r *PostgresRepository) AdminReconciliationRuns(ctx context.Context, limit int) ([]ReconciliationRun, error) {

@@ -95,7 +95,7 @@ flowchart LR
 | Keycloak | 用户认证、密码、OIDC Token/Session；迁移期 Realm Role 不参与业务授权 | Keycloak 数据库 | 生产部署和后续密码重置/资料同步/会话撤销端口仍待环境及任务验证 |
 | Identity Adapter | 密码原始字符校验、策略版本、短期引用/HMAC、注册操作关联查询、Keycloak 用户创建/资料更新/密码重置/会话撤销及受控停用协议 | 进程内 15 分钟短期密码记录；Keycloak 持久身份与操作关联 | MFA 和账号申诉仍不在当前闭环 |
 | Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、绑定有效期/撤销/自动回收、权限解析、持久注册 Saga、短信挑战、异步钱包初始化、商城账号同步、组织/节点、成员/角色、用户级全局上下文、邀请、审计 | Account 数据库 | 超级管理员生产等价演练、注销 Saga |
-| Billing Service | 钱包、账本、BASE/BONUS 组成级权益、组织购买与成员授予、版本化计量单位、全局/模型价格解析、价格生命周期、不可变 Hold 快照、独立应收与清偿分配、单流水拒付冲销、供应商中立支付能力/商品映射、人工调整、到期/损失复核、支付修复和对账 | Billing 数据库 | 正式商品业务冻结、目标支付退款状态机、统一拒付复核队列及完整账单证据 |
+| Billing Service | 钱包、账本、BASE/BONUS 组成级权益、组织购买与成员授予、版本化计量单位、全局/模型价格解析、价格生命周期、Hold/组成分配/租约及异常处理证据、独立应收与清偿分配、单流水拒付冲销、供应商中立支付能力/商品映射、人工调整、到期/损失复核、支付修复和对账 | Billing 数据库 | 正式商品业务冻结、目标支付退款状态机、统一拒付复核队列及完整账单证据 |
 | Token Gateway | Token Account、加密凭据、共享策略、路由、协议/公式版本、安全参数映射、动态预占、聊天代理、用量和 New API 核对 | Token 数据库 | 独立模型目录、更多数据面协议 Adapter、托管 Provisioning、请求重放、持久派发和取消 |
 | Token Portal | OIDC PKCE、Redis Session、CSRF、个人中心、运营后台和路径白名单代理 | Redis Session | 目标后台权限模型、缺失业务页面和发布级三语门禁 |
 | Event Relay ×3 | 事务 Outbox 投递、重试和死信 | 各服务 Outbox/Inbox | 现有事件有限，不能替代缺失的跨域 Saga |
@@ -156,6 +156,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 
 - `wallets`、`ledger_accounts`、`journal_entries`、`ledger_postings`：钱包缓存余额和平衡账本；数据库触发器保护分录平衡和已入账记录不可变。
 - `credit_lots`、`entitlement_packages`、`entitlement_components`、`usage_hold_allocations`：批次、兼容聚合投影、BASE/BONUS 组成事实和组成级 Hold 分配。
+- `usage_hold_lease_events`、`usage_hold_admin_actions`：Hold 创建/续租的不可变有效值历史，以及仅针对 REVIEW 或租约已过期 ACTIVE 的幂等安全释放证据；释放同时快照组成和成员分配结果。
 - `usage_loss_reviews`：权益到期释放不确定 Hold 后，迟到真实用量的平台损失复核证据。
 - `recharge_products`：可售商品及冻结的权益组成快照。
 - `payment_product_mappings`：通用商品到 Provider/版本/外部 SKU 的不可变版本映射，保存金额、币种、渠道、状态和有效期；`TEST_ONLY` 映射在正式环境不可用。

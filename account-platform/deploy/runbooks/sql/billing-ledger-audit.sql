@@ -99,6 +99,24 @@ WHERE component.reserved_microcredits <> COALESCE(allocation.reserved,0);
 SELECT 'expired_active_holds' AS check_name, count(*) AS violations
 FROM usage_holds WHERE status='ACTIVE' AND expires_at <= now();
 
+SELECT 'usage_hold_allocation_mismatch' AS check_name, count(*) AS violations
+FROM usage_holds hold
+LEFT JOIN (
+  SELECT hold_id,sum(reserved_microcredits-settled_microcredits-released_microcredits) outstanding
+  FROM usage_hold_allocations GROUP BY hold_id
+) allocation ON allocation.hold_id=hold.id
+WHERE (hold.status IN ('ACTIVE','REVIEW') AND COALESCE(allocation.outstanding,0)<>hold.max_microcredits)
+   OR (hold.status IN ('COMMITTED','RELEASED','EXPIRED') AND COALESCE(allocation.outstanding,0)<>0);
+
+SELECT 'usage_hold_latest_lease_mismatch' AS check_name, count(*) AS violations
+FROM usage_holds hold
+LEFT JOIN LATERAL (
+  SELECT expires_at,max_microcredits FROM usage_hold_lease_events event
+  WHERE event.hold_id=hold.id ORDER BY event.created_at DESC,event.id DESC LIMIT 1
+) latest ON true
+WHERE latest.expires_at IS NULL
+   OR (latest.expires_at,latest.max_microcredits)<>(hold.expires_at,hold.max_microcredits);
+
 SELECT 'paid_orders_not_credited' AS check_name, count(*) AS violations
 FROM payment_orders
 WHERE status IN ('PAID','PAID_LATE') AND fulfillment_status <> 'CREDITED';

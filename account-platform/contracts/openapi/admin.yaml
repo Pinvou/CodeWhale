@@ -744,11 +744,26 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/usage-holds/{hold_id}:
+    get:
+      operationId: getAdminUsageHold
+      summary: Read one hold with component, member, lease, and operator evidence
+      parameters: [{ $ref: "#/components/parameters/HoldID" }]
+      responses:
+        "200":
+          description: Complete hold operational evidence
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UsageHoldDetail" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/usage-holds/{hold_id}/release:
     post:
       operationId: releaseAdminUsageHold
       summary: Release an active or review usage hold with an audit reason
-      parameters: [{ $ref: "#/components/parameters/HoldID" }]
+      parameters:
+        - { $ref: "#/components/parameters/HoldID" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
       requestBody: { $ref: "#/components/requestBodies/Decision" }
       responses:
         "200": { description: Hold released }
@@ -1201,6 +1216,69 @@ components:
             properties:
               expected_version: { type: integer, format: int64, minimum: 1 }
   schemas:
+    UsageHold:
+      type: object
+      additionalProperties: true
+      required: [hold_id, usage_request_id, wallet_id, status, anomaly_state, max_microcredits, expires_at, created_at, updated_at]
+      properties:
+        hold_id: { type: string, format: uuid }
+        usage_request_id: { type: string, format: uuid }
+        wallet_id: { type: string, format: uuid }
+        status: { type: string, enum: [ACTIVE, COMMITTED, RELEASED, EXPIRED, REVIEW] }
+        anomaly_state: { type: string, enum: [NONE, REVIEW_REQUIRED, LEASE_EXPIRED, TERMINAL_ALLOCATION_REMAINS, ALLOCATION_MISMATCH] }
+        max_microcredits: { type: integer, format: int64, minimum: 0 }
+        actual_microcredits: { type: integer, format: int64, minimum: 0 }
+        expires_at: { type: string, format: date-time }
+        terminal_at: { type: string, format: date-time }
+        pricing_snapshot: { type: object, additionalProperties: true }
+        request_snapshot: { type: object, additionalProperties: true }
+        usage_snapshot: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    HoldComponentAllocation:
+      type: object
+      additionalProperties: true
+      required: [package_id, component_id, component_type, credit_lot_id, reserved_microcredits, settled_microcredits, released_microcredits, component_status]
+      properties:
+        package_id: { type: string, format: uuid }
+        component_id: { type: string, format: uuid }
+        component_type: { type: string, enum: [BASE, BONUS] }
+        credit_lot_id: { type: string, format: uuid }
+        reserved_microcredits: { type: integer, format: int64, minimum: 0 }
+        settled_microcredits: { type: integer, format: int64, minimum: 0 }
+        released_microcredits: { type: integer, format: int64, minimum: 0 }
+        component_status: { type: string }
+    HoldLeaseEvent:
+      type: object
+      additionalProperties: false
+      required: [lease_event_id, event_type, expires_at, previous_max_microcredits, max_microcredits, additional_microcredits, created_at]
+      properties:
+        lease_event_id: { type: string, format: uuid }
+        event_type: { type: string, enum: [CREATED, EXTENDED] }
+        previous_expires_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        previous_max_microcredits: { type: integer, format: int64, minimum: 0 }
+        max_microcredits: { type: integer, format: int64, minimum: 0 }
+        additional_microcredits: { type: integer, format: int64, minimum: 0 }
+        created_at: { type: string, format: date-time }
+    UsageHoldDetail:
+      type: object
+      additionalProperties: false
+      required: [hold, component_allocations, member_allocations, lease_events, admin_actions]
+      properties:
+        hold: { $ref: "#/components/schemas/UsageHold" }
+        component_allocations:
+          type: array
+          items: { $ref: "#/components/schemas/HoldComponentAllocation" }
+        member_allocations:
+          type: array
+          items: { type: object, additionalProperties: true }
+        lease_events:
+          type: array
+          items: { $ref: "#/components/schemas/HoldLeaseEvent" }
+        admin_actions:
+          type: array
+          items: { type: object, additionalProperties: true }
     Receivable:
       type: object
       additionalProperties: false
