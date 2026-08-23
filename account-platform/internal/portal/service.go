@@ -435,16 +435,23 @@ func portalClientSource(r *http.Request) string {
 }
 
 func accountAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs", "/admin/v1/registration-operations") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/roles", "/admin/v1/role-bindings", "/admin/v1/users", "/admin/v1/organizations", "/admin/v1/audit-logs", "/admin/v1/registration-operations") {
 		return true
 	}
 	if method == http.MethodPost && resource == "/admin/v1/organizations" {
+		return true
+	}
+	if method == http.MethodPost && resource == "/admin/v1/role-bindings" {
 		return true
 	}
 	if strings.Contains(resource, "..") {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "role-bindings" && method == http.MethodDelete {
+		_, err := uuid.Parse(parts[3])
+		return err == nil
+	}
 	if len(parts) == 6 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "registration-operations" && parts[4] == "actions" && (parts[5] == "retry" || parts[5] == "compensate") {
 		_, err := uuid.Parse(parts[3])
 		return err == nil && method == http.MethodPost

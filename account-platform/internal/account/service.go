@@ -80,11 +80,15 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 		protected.GET("/v1/me/profile-change-requests/:request_id", httpserver.AdaptFunc(s.getProfileChange))
 	}
 	protected.GET("/v1/me/authorization-context", httpserver.AdaptFunc(s.getAuthorizationContext))
+	protected.GET("/v1/me/role-bindings", httpserver.AdaptFunc(s.listMyRoleBindings))
 	protected.GET("/v1/me/organizations", httpserver.AdaptFunc(s.listOrganizations))
 	protected.POST("/v1/sessions/current/active-context", httpserver.AdaptFunc(s.setActiveContext))
 	protected.GET("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.listUnits))
 	protected.POST("/v1/organizations/:organization_id/units", httpserver.AdaptFunc(s.createUnit))
 	protected.GET("/v1/organizations/:organization_id/members", httpserver.AdaptFunc(s.listMembers))
+	protected.GET("/v1/organizations/:organization_id/role-bindings", httpserver.AdaptFunc(s.listOrganizationRoleBindings))
+	protected.POST("/v1/organizations/:organization_id/role-bindings", httpserver.AdaptFunc(s.grantOrganizationRoleBinding))
+	protected.DELETE("/v1/organizations/:organization_id/role-bindings/:binding_id", httpserver.AdaptFunc(s.revokeOrganizationRoleBinding))
 	protected.PUT("/v1/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.replaceMemberRoles))
 	protected.PATCH("/v1/organizations/:organization_id/units/:unit_id/parent", httpserver.AdaptFunc(s.moveUnit))
 	protected.POST("/v1/organizations/:organization_id/invitations", httpserver.AdaptFunc(s.createInvitation))
@@ -94,6 +98,9 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin := protected.Group("/admin/v1")
 	admin.GET("/overview", s.requirePermission(PermissionPlatformSystemStatusRead), httpserver.AdaptFunc(s.adminOverview))
 	admin.GET("/roles", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoles))
+	admin.GET("/role-bindings", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoleBindings))
+	admin.POST("/role-bindings", s.requirePermission(PermissionPlatformRolesAssign), httpserver.AdaptFunc(s.adminGrantRoleBinding))
+	admin.DELETE("/role-bindings/:binding_id", s.requirePermission(PermissionPlatformRolesAssign), httpserver.AdaptFunc(s.adminRevokeRoleBinding))
 	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
 	admin.GET("/user-code-lookups/:user_code", httpserver.AdaptFunc(s.adminUserByCode))
 	admin.GET("/users/:user_id/memberships", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUserMemberships))
@@ -149,6 +156,76 @@ func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": members})
+}
+
+func (s *Service) listMyRoleBindings(w http.ResponseWriter, r *http.Request) {
+	items, err := s.repository.ListMyRoleBindings(r.Context(), mustPrincipal(r.Context()))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) listOrganizationRoleBindings(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	items, err := s.repository.ListOrganizationRoleBindings(r.Context(), mustPrincipal(r.Context()), organizationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type roleBindingGrantBody struct {
+	UserID         uuid.UUID  `json:"user_id"`
+	RoleCode       string     `json:"role_code"`
+	OrganizationID *uuid.UUID `json:"organization_id"`
+	UnitID         *uuid.UUID `json:"unit_id"`
+	StartsAt       *time.Time `json:"starts_at"`
+	ExpiresAt      *time.Time `json:"expires_at"`
+	IdempotencyKey string     `json:"idempotency_key"`
+}
+
+func (s *Service) grantOrganizationRoleBinding(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	var body roleBindingGrantBody
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	item, err := s.repository.GrantOrganizationRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: &organizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusCreated, item)
+}
+
+func (s *Service) revokeOrganizationRoleBinding(w http.ResponseWriter, r *http.Request) {
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	bindingID, ok := pathUUID(w, r, "binding_id")
+	if !ok {
+		return
+	}
+	item, err := s.repository.RevokeOrganizationRoleBinding(r.Context(), mustPrincipal(r.Context()), organizationID, bindingID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, item)
 }
 
 func (s *Service) replaceMemberRoles(w http.ResponseWriter, r *http.Request) {

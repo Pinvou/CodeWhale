@@ -69,6 +69,7 @@ SELECT EXISTS(
   SELECT 1 FROM role_assignments ra
   JOIN role_permissions rp ON rp.role_code=ra.role_code
   WHERE ra.user_id=$1 AND ra.organization_id IS NULL AND rp.permission_code=$2
+    AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
 )`, actorID, PermissionPlatformUsersRead).Scan(&allowed)
 	if err != nil {
 		return AdminUser{}, err

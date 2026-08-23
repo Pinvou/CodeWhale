@@ -17,6 +17,7 @@ import (
 
 const (
 	PermissionPlatformRolesRead                  = "platform.roles.read"
+	PermissionPlatformRolesAssign                = "platform.roles.assign"
 	PermissionPlatformUsersRead                  = "platform.users.read"
 	PermissionPlatformUsersStatusManage          = "platform.users.status.manage"
 	PermissionPlatformOrganizationsRead          = "platform.organizations.read"
@@ -78,6 +79,7 @@ SELECT u.id, u.membership_version,
          JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$3
          LEFT JOIN memberships m ON m.user_id=ra.user_id AND m.organization_id=ra.organization_id
          WHERE ra.user_id=u.id
+	       AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
            AND (
              ($4::uuid IS NULL AND ra.organization_id IS NULL AND ro.scope='PLATFORM')
              OR
@@ -197,6 +199,7 @@ SELECT EXISTS(
   JOIN memberships m ON m.user_id=ra.user_id AND m.organization_id=ra.organization_id AND m.status='ACTIVE'
   JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$4
   WHERE ra.user_id=$1 AND ra.organization_id=$2
+	AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
     AND (ra.unit_id IS NULL OR ($3::uuid IS NOT NULL AND EXISTS(
       SELECT 1 FROM organization_unit_closure c
       WHERE c.organization_id=$2 AND c.ancestor_id=ra.unit_id AND c.descendant_id=$3

@@ -92,6 +92,9 @@ type AdminAuditFilter struct {
 
 type adminRepository interface {
 	AdminOverview(context.Context) (AdminOverview, error)
+	AdminRoleBindings(context.Context, *uuid.UUID, *uuid.UUID) ([]RoleBinding, error)
+	AdminGrantRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)
+	AdminRevokeRoleBinding(context.Context, identity.Principal, uuid.UUID) (RoleBinding, error)
 	AdminUsers(context.Context, string, int) ([]AdminUser, error)
 	AdminUserMemberships(context.Context, uuid.UUID) ([]AdminUserMembership, error)
 	AdminSetUserStatus(context.Context, identity.Principal, uuid.UUID, string) error
@@ -158,6 +161,78 @@ func (s *Service) adminRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Service) adminRoleBindings(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	userID, err := optionalQueryUUID(r, "user_id")
+	if err != nil {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	organizationID, err := optionalQueryUUID(r, "organization_id")
+	if err != nil {
+		s.writeError(w, r, ErrConflict)
+		return
+	}
+	items, err := repository.AdminRoleBindings(r.Context(), userID, organizationID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func optionalQueryUUID(r *http.Request, name string) (*uuid.UUID, error) {
+	value := strings.TrimSpace(r.URL.Query().Get(name))
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+func (s *Service) adminGrantRoleBinding(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	var body roleBindingGrantBody
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		return
+	}
+	item, err := repository.AdminGrantRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: body.OrganizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey})
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusCreated, item)
+}
+
+func (s *Service) adminRevokeRoleBinding(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	bindingID, ok := pathUUID(w, r, "binding_id")
+	if !ok {
+		return
+	}
+	item, err := repository.AdminRevokeRoleBinding(r.Context(), mustPrincipal(r.Context()), bindingID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, item)
 }
 
 func (s *Service) adminUsers(w http.ResponseWriter, r *http.Request) {
@@ -639,8 +714,8 @@ func (r *PostgresRepository) AdminUserMemberships(ctx context.Context, userID uu
 	}
 	rows, err := r.pool.Query(ctx, `
 SELECT o.id,o.name,m.status,
-       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id ORDER BY rb.role),
-       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' ORDER BY rb.unit_id)
+       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.role),
+       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.unit_id)
 FROM memberships m JOIN organizations o ON o.id=m.organization_id
 WHERE m.user_id=$1 AND m.status<>'REVOKED' AND o.status<>'DELETED'
 ORDER BY lower(o.name),o.id`, userID)
@@ -715,7 +790,7 @@ func (r *PostgresRepository) AdminCreateOrganization(ctx context.Context, princi
 	if _, err := tx.Exec(ctx, `INSERT INTO memberships(id,organization_id,user_id,status,joined_at,updated_at) VALUES($1,$2,$3,'ACTIVE',$4,$4)`, membershipID, organization.ID, ownerUserID, now); err != nil {
 		return Organization{}, mapConstraintError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) VALUES($1,$2,'OWNER',$3,$4)`, uuid.Must(uuid.NewV7()), membershipID, ownerUserID, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,'ORGANIZATION_CREATION')`, uuid.Must(uuid.NewV7()), membershipID, ownerUserID, now); err != nil {
 		return Organization{}, mapConstraintError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=$1`, ownerUserID, now); err != nil {
@@ -798,12 +873,12 @@ func (r *PostgresRepository) AdminMembers(ctx context.Context, organizationID uu
 	}
 	rows, err := r.pool.Query(ctx, `
 SELECT m.id,m.user_id,u.display_name,u.email,m.status,m.version,m.joined_at,
-       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id ORDER BY rb.role),
+       ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.role),
        ARRAY(SELECT mu.unit_id FROM membership_units mu WHERE mu.membership_id=m.id ORDER BY mu.unit_id),
-       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' ORDER BY rb.unit_id)
+       ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.unit_id)
 FROM memberships m JOIN users u ON u.id=m.user_id
 WHERE m.organization_id=$1 AND m.status<>'REVOKED' AND u.status='ACTIVE'
-ORDER BY CASE WHEN EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='OWNER') THEN 0 ELSE 1 END,
+ORDER BY CASE WHEN EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now())) THEN 0 ELSE 1 END,
          lower(COALESCE(u.display_name,u.email,'')),m.user_id`, organizationID)
 	if err != nil {
 		return nil, err
@@ -865,16 +940,16 @@ func validateAdminUnits(ctx context.Context, tx pgx.Tx, organizationID uuid.UUID
 }
 
 func replaceAdminMemberRoles(ctx context.Context, tx pgx.Tx, membershipID, userID, actorID uuid.UUID, roles []string, unitAdminIDs []uuid.UUID, now time.Time) (int64, error) {
-	if _, err := tx.Exec(ctx, `DELETE FROM role_bindings WHERE membership_id=$1 AND role<>'OWNER'`, membershipID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND role<>'OWNER' AND revoked_at IS NULL`, membershipID, now, actorID); err != nil {
 		return 0, err
 	}
 	for _, role := range roles {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) VALUES($1,$2,$3,$4,$5)`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,$3,$4,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, role, actorID, now); err != nil {
 			return 0, mapConstraintError(err)
 		}
 	}
 	for _, unitID := range unitAdminIDs {
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at) VALUES($1,$2,'UNIT_ADMIN',$3,$4,$5)`, uuid.Must(uuid.NewV7()), membershipID, unitID, actorID, now); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,unit_id,created_by,created_at,grant_source) VALUES($1,$2,'UNIT_ADMIN',$3,$4,$5,'ADMIN')`, uuid.Must(uuid.NewV7()), membershipID, unitID, actorID, now); err != nil {
 			return 0, mapConstraintError(err)
 		}
 	}
@@ -1122,7 +1197,7 @@ FOR UPDATE OF m,rb`, organizationID)
 		createdBy = *actorID
 	}
 	now := r.now()
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at) VALUES($1,$2,'OWNER',$3,$4)`, uuid.Must(uuid.NewV7()), targetMembership, createdBy, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,'OWNERSHIP_TRANSFER')`, uuid.Must(uuid.NewV7()), targetMembership, createdBy, now); err != nil {
 		return mapConstraintError(err)
 	}
 	affectedMemberships := append(ownerMemberships, targetMembership)

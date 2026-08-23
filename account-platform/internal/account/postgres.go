@@ -207,10 +207,10 @@ func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, pr
 SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version,
        COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
        COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
-       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id),'{}'),
-       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id),'{}'),
-       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id IS NULL),'{}'),
-       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())),'{}'),
        COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
        u.mobile_e164,u.mobile_verified_at IS NOT NULL
 FROM identities i
@@ -272,7 +272,7 @@ SELECT o.id, o.name, o.status, o.version, array_agg(rb.role ORDER BY rb.role)
 FROM identities i
 JOIN memberships m ON m.user_id = i.user_id AND m.status = 'ACTIVE'
 JOIN organizations o ON o.id = m.organization_id AND o.status = 'ACTIVE'
-JOIN role_bindings rb ON rb.membership_id = m.id
+JOIN role_bindings rb ON rb.membership_id = m.id AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now())
 WHERE i.issuer = $1 AND i.subject = $2
 GROUP BY o.id, o.name, o.status, o.version
 ORDER BY o.name, o.id`, principal.Issuer, principal.Subject)
@@ -566,7 +566,7 @@ RETURNING id,version`, membershipID, organizationID, userID, now).Scan(&membersh
 		return Organization{}, err
 	}
 	for _, role := range roles {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), membershipID, role, userID, now)
+		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at, grant_source) VALUES ($1, $2, $3, $4, $5, 'INVITATION') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), membershipID, role, userID, now)
 		if err != nil {
 			return Organization{}, err
 		}
@@ -663,6 +663,7 @@ WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE'
   AND EXISTS(
     SELECT 1 FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code
     WHERE ra.user_id=m.user_id AND ra.organization_id=m.organization_id
+      AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
       AND ra.unit_id IS NULL AND rp.permission_code=$3
   )
 FOR UPDATE OF m`, organizationID, actorID, PermissionOrganizationOwnerTransfer).Scan(&actorMembership)
@@ -685,7 +686,7 @@ FOR UPDATE OF m`, organizationID, actorID, PermissionOrganizationOwnerTransfer).
 	now := r.now()
 	_, err = tx.Exec(ctx, `DELETE FROM role_bindings WHERE membership_id = $1 AND role = 'OWNER'`, actorMembership)
 	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at) VALUES ($1, $2, 'OWNER', $3, $4) ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), targetMembership, actorID, now)
+		_, err = tx.Exec(ctx, `INSERT INTO role_bindings(id, membership_id, role, created_by, created_at, grant_source) VALUES ($1, $2, 'OWNER', $3, $4, 'OWNERSHIP_TRANSFER') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), targetMembership, actorID, now)
 	}
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE users SET membership_version = membership_version + 1, updated_at = $2 WHERE id = ANY($1)`, []uuid.UUID{actorID, targetUserID}, now)

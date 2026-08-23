@@ -60,6 +60,7 @@ func main() {
 	}
 	service := account.NewService(repository, wallets).WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN"))
 	go account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run(ctx)
+	go account.NewRoleBindingExpiryWorker(repository, time.Minute).Run(ctx)
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
 		if decodeErr != nil {

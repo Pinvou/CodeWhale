@@ -65,6 +65,18 @@ func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID)
 func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error) {
 	panic("not used")
 }
+func (*fakeRepository) ListMyRoleBindings(context.Context, identity.Principal) ([]RoleBinding, error) {
+	return []RoleBinding{}, nil
+}
+func (*fakeRepository) ListOrganizationRoleBindings(context.Context, identity.Principal, uuid.UUID) ([]RoleBinding, error) {
+	return []RoleBinding{}, nil
+}
+func (*fakeRepository) GrantOrganizationRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error) {
+	return RoleBinding{}, nil
+}
+func (*fakeRepository) RevokeOrganizationRoleBinding(context.Context, identity.Principal, uuid.UUID, uuid.UUID) (RoleBinding, error) {
+	return RoleBinding{}, nil
+}
 func (*fakeRepository) ReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string) (Member, error) {
 	panic("not used")
 }
@@ -88,6 +100,15 @@ func (*fakeRepository) TransferOwnership(context.Context, identity.Principal, uu
 }
 func (*fakeRepository) AdminOverview(context.Context) (AdminOverview, error) {
 	return AdminOverview{}, nil
+}
+func (*fakeRepository) AdminRoleBindings(context.Context, *uuid.UUID, *uuid.UUID) ([]RoleBinding, error) {
+	return []RoleBinding{}, nil
+}
+func (*fakeRepository) AdminGrantRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error) {
+	return RoleBinding{}, nil
+}
+func (*fakeRepository) AdminRevokeRoleBinding(context.Context, identity.Principal, uuid.UUID) (RoleBinding, error) {
+	return RoleBinding{}, nil
 }
 func (*fakeRepository) AdminUsers(context.Context, string, int) ([]AdminUser, error) { return nil, nil }
 func (*fakeRepository) AdminUserMemberships(context.Context, uuid.UUID) ([]AdminUserMembership, error) {
@@ -367,6 +388,23 @@ func TestManagedRolesCannotGrantOwnership(t *testing.T) {
 	}
 	if _, err := validateManagedRoles([]string{"UNIT_ADMIN"}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("unit admin requires a scoped assignment workflow: %v", err)
+	}
+}
+
+func TestRoleBindingGrantNormalizesValidityAndIdempotency(t *testing.T) {
+	now := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC)
+	organizationID := uuid.Must(uuid.NewV7())
+	expiresAt := now.Add(time.Hour)
+	request, err := normalizeRoleBindingGrant(RoleBindingGrant{UserID: uuid.Must(uuid.NewV7()), OrganizationID: &organizationID, RoleCode: " auditor ", ExpiresAt: &expiresAt, IdempotencyKey: " grant-123 "}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.RoleCode != "AUDITOR" || request.IdempotencyKey != "grant-123" || request.StartsAt == nil || !request.StartsAt.Equal(now) {
+		t.Fatalf("unexpected normalized grant: %#v", request)
+	}
+	invalidExpiry := now.Add(-time.Second)
+	if _, err := normalizeRoleBindingGrant(RoleBindingGrant{UserID: request.UserID, OrganizationID: &organizationID, RoleCode: "AUDITOR", ExpiresAt: &invalidExpiry, IdempotencyKey: "grant-456"}, now); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected invalid validity window conflict, got %v", err)
 	}
 }
 

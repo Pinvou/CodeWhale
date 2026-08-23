@@ -366,6 +366,24 @@ paths:
                       $ref: "#/components/schemas/OrganizationSummary"
         "401":
           $ref: "#/components/responses/Error"
+  /me/role-bindings:
+    get:
+      operationId: listMyRoleBindings
+      summary: List only the current user's platform and organization role bindings, including validity and grant source
+      responses:
+        "200":
+          description: Current user's role bindings; never contains another user's assignment
+          headers:
+            Cache-Control: { required: true, schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/RoleBinding" } }
+        "401": { $ref: "#/components/responses/Error" }
   /sessions/current/active-context:
     post:
       operationId: setActiveContext
@@ -625,6 +643,51 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/role-bindings:
+    get:
+      operationId: listOrganizationRoleBindings
+      summary: List organization and node role bindings with validity, source, and lifecycle status
+      parameters: [{ $ref: "#/components/parameters/OrganizationId" }]
+      responses:
+        "200":
+          description: Organization role bindings visible under org.roles.read
+          headers:
+            Cache-Control: { required: true, schema: { type: string, const: no-store } }
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/RoleBinding" } }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: grantOrganizationRoleBinding
+      summary: Idempotently grant an assignable non-owner organization or node role with an optional validity window
+      parameters: [{ $ref: "#/components/parameters/OrganizationId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoleBindingGrant" }
+      responses:
+        "201": { description: Role binding created or the idempotent original returned, content: { application/json: { schema: { $ref: "#/components/schemas/RoleBinding" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /organizations/{organization_id}/role-bindings/{binding_id}:
+    delete:
+      operationId: revokeOrganizationRoleBinding
+      summary: Idempotently revoke one ordinary role binding and invalidate authorization caches
+      parameters:
+        - $ref: "#/components/parameters/OrganizationId"
+        - { name: binding_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Revoked binding or the already revoked original, content: { application/json: { schema: { $ref: "#/components/schemas/RoleBinding" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { description: "Owner, platform, or non-assignable base role must use its dedicated lifecycle API", content: { application/json: { schema: { $ref: "common.yaml#/components/schemas/Error" } } } }
   /organizations/{organization_id}/ownership:
     post:
       operationId: transferOrganizationOwnership
@@ -671,6 +734,36 @@ components:
         type: string
         format: uuid
   schemas:
+    RoleBinding:
+      type: object
+      additionalProperties: false
+      required: [binding_id, user_id, role_code, scope, starts_at, status, grant_source, created_at]
+      properties:
+        binding_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        role_code: { type: string }
+        scope: { type: string, enum: [PLATFORM, ORGANIZATION, UNIT] }
+        organization_id: { type: string, format: uuid }
+        unit_id: { type: string, format: uuid }
+        starts_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        status: { type: string, enum: [SCHEDULED, ACTIVE, EXPIRED, REVOKED] }
+        grant_source: { type: string }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        revoked_by: { type: string, format: uuid }
+    RoleBindingGrant:
+      type: object
+      additionalProperties: false
+      required: [user_id, role_code, idempotency_key]
+      properties:
+        user_id: { type: string, format: uuid }
+        role_code: { type: string, enum: [ORG_ADMIN, BILLING_ADMIN, AUDITOR, UNIT_ADMIN] }
+        unit_id: { type: string, format: uuid }
+        starts_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
     RegistrationStatus:
       type: object
       additionalProperties: false

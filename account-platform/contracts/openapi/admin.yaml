@@ -60,6 +60,38 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/role-bindings:
+    get:
+      operationId: listAdminRoleBindings
+      summary: List platform and organization role associations with validity, grant source, and lifecycle state
+      parameters:
+        - { name: user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: organization_id, in: query, schema: { type: string, format: uuid } }
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: grantAdminRoleBinding
+      summary: Idempotently grant a non-owner, non-super-admin role with an optional validity window
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RoleBindingGrant" }
+      responses:
+        "201": { description: Role binding created or idempotent original returned }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/role-bindings/{binding_id}:
+    delete:
+      operationId: revokeAdminRoleBinding
+      summary: Idempotently revoke one ordinary role binding and invalidate authorization caches
+      parameters: [{ name: binding_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Revoked binding or already revoked original }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/users/{user_id}/memberships:
     get:
       operationId: listAdminUserMemberships
@@ -768,6 +800,18 @@ components:
             properties:
               reason: { type: string, minLength: 1, maxLength: 500 }
   schemas:
+    RoleBindingGrant:
+      type: object
+      additionalProperties: false
+      required: [user_id, role_code, idempotency_key]
+      properties:
+        user_id: { type: string, format: uuid }
+        role_code: { type: string }
+        organization_id: { type: string, format: uuid }
+        unit_id: { type: string, format: uuid }
+        starts_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        idempotency_key: { type: string, minLength: 8, maxLength: 120 }
     AdminUser:
       type: object
       additionalProperties: false

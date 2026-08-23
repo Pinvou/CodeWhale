@@ -271,13 +271,17 @@ func TestPortalProxyExcludesModelDataPlane(t *testing.T) {
 }
 
 func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
-	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/roles") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
+	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/users") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/roles") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/role-bindings") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/wallets") || !tokenAdminPathAllowed(http.MethodGet, "/admin/v1/token-accounts") {
 		t.Fatal("admin portal must expose the documented management APIs")
 	}
 	userID := "0198fbf7-c3ba-7bc4-8849-c157740963de"
 	organizationID := "0198fbf7-c3ba-7bc4-8849-c157740963df"
 	unitID := "0198fbf7-c3ba-7bc4-8849-c157740963e0"
 	memberID := "0198fbf7-c3ba-7bc4-8849-c157740963e1"
+	bindingID := "0198fbf7-c3ba-7bc4-8849-c157740963e2"
+	if !accountAdminPathAllowed(http.MethodPost, "/admin/v1/role-bindings") || !accountAdminPathAllowed(http.MethodDelete, "/admin/v1/role-bindings/"+bindingID) {
+		t.Fatal("admin portal must expose role binding grant and single-binding revoke")
+	}
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/user-code-lookups/USR-0123-4567-89AB-CDEF-MV") {
 		t.Fatal("admin portal must expose complete user-code lookup")
 	}
