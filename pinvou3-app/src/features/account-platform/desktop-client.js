@@ -82,6 +82,9 @@ export class AccountPlatformDesktopClient {
   createUnit(organizationId, name, parentId = null) { return this.request('account', `/v1/organizations/${organizationId}/units`, { method: 'POST', body: { name, parent_id: parentId } }); }
   invite(organizationId, email, roles) { return this.request('account', `/v1/organizations/${organizationId}/invitations`, { method: 'POST', body: { email, roles, expires_in_hours: 72 } }); }
   products(signal) { return this.request('token', '/v1/recharge/products', { signal }); }
+  models(signal) { return this.request('token', '/v1/models', { signal }); }
+  organizationModelPolicy(organizationId, signal) { return this.request('token', `/v1/organizations/${organizationId}/model-policy`, { signal }); }
+  updateOrganizationModelPolicy(organizationId, policy, key) { return this.request('token', `/v1/organizations/${organizationId}/model-policy`, { method: 'PUT', idempotencyKey: key, body: policy }); }
   balance(signal) { return this.request('token', '/v1/me/balance?consistency=strong', { signal }); }
   createRecharge(productId, channel, key) { return this.request('token', '/v1/recharge/orders', { method: 'POST', idempotencyKey: key, body: { product_id: productId, channel } }); }
   purchaseOrganizationEntitlements(organizationId, productId, channel, key) { return this.request('token', `/v1/organizations/${organizationId}/recharge/orders`, { method: 'POST', idempotencyKey: key, body: { product_id: productId, channel } }); }

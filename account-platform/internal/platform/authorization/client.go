@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,12 +46,12 @@ func NewClient(rawURL, serviceToken string) (*Client, error) {
 }
 
 func (c *Client) Allowed(ctx context.Context, principal identity.Principal, permission string) (bool, http.Header, error) {
-	result, headers, err := c.decision(ctx, principal, permission)
+	result, headers, err := c.decision(ctx, principal, permission, nil)
 	return result.Allowed, headers, err
 }
 
 func (c *Client) AuthorizedUserID(ctx context.Context, principal identity.Principal, permission string) (uuid.UUID, error) {
-	result, _, err := c.decision(ctx, principal, permission)
+	result, _, err := c.decision(ctx, principal, permission, nil)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -60,9 +61,24 @@ func (c *Client) AuthorizedUserID(ctx context.Context, principal identity.Princi
 	return result.UserID, nil
 }
 
-func (c *Client) decision(ctx context.Context, principal identity.Principal, permission string) (decision, http.Header, error) {
-	payload, err := json.Marshal(map[string]string{
-		"issuer": principal.Issuer, "subject": principal.Subject, "permission": strings.TrimSpace(permission),
+func (c *Client) AuthorizedOrganizationUserID(ctx context.Context, principal identity.Principal, permission string, organizationID uuid.UUID) (uuid.UUID, int64, error) {
+	result, headers, err := c.decision(ctx, principal, permission, &organizationID)
+	if err != nil {
+		return uuid.Nil, 0, err
+	}
+	if !result.Allowed || result.UserID == uuid.Nil {
+		return uuid.Nil, 0, ErrPermissionDenied
+	}
+	version, _ := strconv.ParseInt(headers.Get("X-Authorization-Version"), 10, 64)
+	if version < 1 {
+		version = 1
+	}
+	return result.UserID, version, nil
+}
+
+func (c *Client) decision(ctx context.Context, principal identity.Principal, permission string, organizationID *uuid.UUID) (decision, http.Header, error) {
+	payload, err := json.Marshal(map[string]any{
+		"issuer": principal.Issuer, "subject": principal.Subject, "permission": strings.TrimSpace(permission), "target_organization_id": organizationID,
 	})
 	if err != nil {
 		return decision{}, nil, err

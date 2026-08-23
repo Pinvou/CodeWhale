@@ -142,6 +142,9 @@ export class AdminPlatformClient {
   transitionModel(modelID, input) { return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle`, 'POST', input); }
   syncModelCatalog() { return this.mutate('token', '/admin/v1/models:sync', 'POST'); }
   rollbackModelCatalog(input) { return this.mutate('token', '/admin/v1/model-catalog:rollback', 'POST', input); }
+  provisionings(signal) { return this.request('token', '/admin/v1/provisionings?limit=100', signal); }
+  provisioning(provisioningID, signal) { return this.request('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}`, signal); }
+  repairProvisioning(provisioningID, reason) { return this.mutate('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/repair`, 'POST', { reason }, `provisioning-repair-${crypto.randomUUID()}`); }
   systemStatus(signal) { return this.request('system', '/status', signal); }
 
   logout() {

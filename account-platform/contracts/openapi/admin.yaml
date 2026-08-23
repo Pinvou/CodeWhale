@@ -1172,6 +1172,54 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/provisionings:
+    get:
+      operationId: listAdminRouteProvisionings
+      summary: List managed route provisioning state without credential secrets
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { name: status, in: query, schema: { type: string, enum: [PENDING, READY, FAILED, REPAIR_REQUIRED] } }
+      responses:
+        "200":
+          description: Managed route provisioning state
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/RouteProvisioning" } }
+        "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/provisionings/{provisioning_id}:
+    get:
+      operationId: getAdminRouteProvisioning
+      summary: Get one provisioning generation and its bounded attempt history
+      parameters: [{ $ref: "#/components/parameters/ProvisioningID" }]
+      responses:
+        "200": { description: Provisioning detail, content: { application/json: { schema: { $ref: "#/components/schemas/ProvisioningDetail" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/provisionings/{provisioning_id}/repair:
+    post:
+      operationId: repairAdminRouteProvisioning
+      summary: Start a new bounded repair round for a terminal failed provisioning
+      parameters: [{ $ref: "#/components/parameters/ProvisioningID" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "202": { description: Repair round accepted, content: { application/json: { schema: { $ref: "#/components/schemas/RouteProvisioning" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-policies:
     get:
       operationId: listAdminApprovalPolicies
@@ -1379,6 +1427,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    ProvisioningID:
+      name: provisioning_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     TokenAccountID:
       name: token_account_id
       in: path
@@ -1511,6 +1564,54 @@ components:
         expected_catalog_version: { type: integer, format: int64, minimum: 1 }
         idempotency_key: { type: string, minLength: 16, maxLength: 128 }
         reason: { type: string, minLength: 1, maxLength: 500 }
+    RouteProvisioning:
+      type: object
+      required: [provisioning_id, scope_type, scope_id, model_id, protocol_code, desired_generation, status, stage, policy_version, attempt_count, repair_round, max_attempts, sla_deadline_at, updated_at]
+      properties:
+        provisioning_id: { type: string, format: uuid }
+        scope_type: { type: string, enum: [PERSONAL, ORGANIZATION] }
+        scope_id: { type: string, format: uuid }
+        model_id: { type: string, format: uuid }
+        protocol_code: { type: string }
+        desired_generation: { type: integer, format: int64, minimum: 1 }
+        actual_generation: { type: integer, format: int64, minimum: 1 }
+        status: { type: string, enum: [PENDING, READY, FAILED, REPAIR_REQUIRED] }
+        stage: { type: string }
+        policy_version: { type: integer, format: int64, minimum: 1 }
+        attempt_count: { type: integer, minimum: 0 }
+        repair_round: { type: integer, minimum: 0 }
+        max_attempts: { type: integer, minimum: 1 }
+        sla_deadline_at: { type: string, format: date-time }
+        lease_until: { type: string, format: date-time }
+        next_retry_at: { type: string, format: date-time }
+        last_error_code: { type: string }
+        last_error_detail: { type: string }
+        active_token_account_id: { type: string, format: uuid }
+        active_credential_id: { type: string, format: uuid }
+        updated_at: { type: string, format: date-time }
+    ProvisioningAttempt:
+      type: object
+      additionalProperties: false
+      required: [attempt_id, repair_round, attempt_number, worker_id, status, stage, started_at]
+      properties:
+        attempt_id: { type: string, format: uuid }
+        repair_round: { type: integer, minimum: 0 }
+        attempt_number: { type: integer, minimum: 1 }
+        worker_id: { type: string }
+        status: { type: string, enum: [RUNNING, SUCCEEDED, FAILED, TIMED_OUT] }
+        stage: { type: string }
+        error_code: { type: string }
+        error_detail: { type: string }
+        started_at: { type: string, format: date-time }
+        ended_at: { type: string, format: date-time }
+    ProvisioningDetail:
+      unevaluatedProperties: false
+      allOf:
+        - { $ref: "#/components/schemas/RouteProvisioning" }
+        - type: object
+          required: [attempts]
+          properties:
+            attempts: { type: array, items: { $ref: "#/components/schemas/ProvisioningAttempt" } }
     UsageHold:
       type: object
       additionalProperties: true

@@ -409,7 +409,7 @@ func accountPathAllowed(method, resource string) bool {
 func tokenPathAllowed(method, resource string) bool {
 	if method == http.MethodGet {
 		switch resource {
-		case "/v1/recharge/products", "/v1/recharge/orders", "/v1/recharge/orders/recent", "/v1/me/balance", "/v1/me/entitlement-packages", "/v1/me/usage-requests":
+		case "/v1/models", "/v1/recharge/products", "/v1/recharge/orders", "/v1/recharge/orders/recent", "/v1/me/balance", "/v1/me/entitlement-packages", "/v1/me/usage-requests":
 			return true
 		}
 		if orderID, ok := strings.CutPrefix(resource, "/v1/recharge/orders/"); ok {
@@ -432,6 +432,9 @@ func tokenPathAllowed(method, resource string) bool {
 	}
 	if len(parts) == 4 && parts[3] == "quota-grants" {
 		return method == http.MethodGet
+	}
+	if len(parts) == 4 && parts[3] == "model-policy" {
+		return method == http.MethodGet || method == http.MethodPut
 	}
 	if len(parts) == 4 && parts[3] == "quota-grants:batch" {
 		return method == http.MethodPost
@@ -608,7 +611,7 @@ func billingAdminPathAllowed(method, resource string) bool {
 }
 
 func tokenAdminPathAllowed(method, resource string) bool {
-	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests") {
+	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/token-accounts", "/admin/v1/usage-requests", "/admin/v1/models", "/admin/v1/provisionings") {
 		return true
 	}
 	if strings.Contains(resource, "..") {
@@ -616,6 +619,9 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	}
 	if resource == "/admin/v1/protocols" {
 		return method == http.MethodGet || method == http.MethodPost
+	}
+	if resource == "/admin/v1/models:sync" || resource == "/admin/v1/model-catalog:rollback" {
+		return method == http.MethodPost
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
 	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" {
@@ -633,6 +639,12 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	}
 	if parts[2] == "formulas" {
 		return len(parts) == 5 && (parts[4] == "publish" && method == http.MethodPost || parts[4] == "preview" && method == http.MethodGet)
+	}
+	if parts[2] == "models" {
+		return len(parts) == 5 && ((parts[4] == "draft" && method == http.MethodPut) || ((parts[4] == "publish" || parts[4] == "lifecycle") && method == http.MethodPost))
+	}
+	if parts[2] == "provisionings" {
+		return len(parts) == 4 && method == http.MethodGet || len(parts) == 5 && parts[4] == "repair" && method == http.MethodPost
 	}
 	if parts[2] != "token-accounts" {
 		return false

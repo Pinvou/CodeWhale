@@ -1159,7 +1159,7 @@ fn prepare_request(
 ) -> Result<PreparedRequest, String> {
     let method = Method::from_bytes(input.method.as_bytes())
         .map_err(|_| "account_platform_request_invalid: invalid method".to_string())?;
-    if !matches!(method, Method::GET | Method::POST) {
+    if !matches!(method, Method::GET | Method::POST | Method::PUT) {
         return Err("account_platform_request_denied: method is not allowlisted".to_string());
     }
     let parsed = Url::parse(&format!("http://desktop.invalid{}", input.resource))
@@ -1201,6 +1201,9 @@ fn prepare_request(
             parsed.path(),
             "/v1/recharge/orders" | "/v1/chat/completions"
         )
+        && !(method == Method::PUT
+            && parsed.path().starts_with("/v1/organizations/")
+            && parsed.path().ends_with("/model-policy"))
     {
         return Err(
             "account_platform_request_denied: idempotency key is not allowed for this route"
@@ -1251,6 +1254,7 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
+        | ("token", &Method::GET, ["v1", "models"], None)
         | ("token", &Method::GET, ["v1", "recharge", "orders"], None)
         | ("token", &Method::POST, ["v1", "recharge", "orders"], None)
         | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None)
@@ -1273,7 +1277,9 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("account", &Method::POST, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::GET, ["v1", "organizations", id, "members"], None)
         | ("account", &Method::POST, ["v1", "organizations", id, "invitations"], None)
-        | ("token", &Method::GET, ["v1", "recharge", "orders", id], None) => safe_id(id),
+        | ("token", &Method::GET, ["v1", "recharge", "orders", id], None)
+        | ("token", &Method::GET, ["v1", "organizations", id, "model-policy"], None)
+        | ("token", &Method::PUT, ["v1", "organizations", id, "model-policy"], None) => safe_id(id),
         ("token", &Method::GET, ["v1", "me", "balance"], Some("consistency=strong")) => true,
         ("token", &Method::GET, ["v1", "me", "usage-requests"], query) => {
             usage_history_query_allowed(query)
@@ -1364,6 +1370,7 @@ mod tests {
     fn config() -> AccountPlatformConfig {
         AccountPlatformConfig {
             token_url: Url::parse("https://id.example.test/token").unwrap(),
+            identity_url: Some(Url::parse("https://id.example.test/").unwrap()),
             client_id: "desktop-client".to_string(),
             account_url: Url::parse("https://account.example.test/").unwrap(),
             token_gateway_url: Url::parse("https://token.example.test/").unwrap(),
@@ -1440,6 +1447,36 @@ mod tests {
             usage.url.as_str(),
             "https://token.example.test/v1/me/usage-requests?limit=50"
         );
+
+        assert!(prepare_request(
+            &config(),
+            ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/models".to_string(),
+                method: "GET".to_string(),
+                body: None,
+                idempotency_key: None,
+            },
+        )
+        .is_ok());
+
+        assert!(prepare_request(
+            &config(),
+            ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/organizations/018f47b4-e124-7dca-9c85-6f7688436600/model-policy"
+                    .to_string(),
+                method: "PUT".to_string(),
+                body: Some(serde_json::json!({
+                    "expected_version": 0,
+                    "mode": "ALLOW_ALL",
+                    "model_ids": [],
+                    "reason": "initial policy"
+                })),
+                idempotency_key: Some("model-policy-0001".to_string()),
+            },
+        )
+        .is_ok());
 
         assert!(prepare_request(
             &config(),

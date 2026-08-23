@@ -464,7 +464,7 @@ test('every migration up script has a matching down script', async () => {
   }
 });
 
-test('default model routes are platform managed and deployment-secret backed', async () => {
+test('default model routes are asynchronously platform managed and deployment-secret backed', async () => {
   const migration = await readFile(
     path.join(root, 'migrations/token/000005_platform_managed_routes.up.sql'),
     'utf8',
@@ -478,7 +478,8 @@ test('default model routes are platform managed and deployment-secret backed', a
   assert.match(migration, /management_mode IN \('USER', 'PLATFORM'\)/);
   assert.match(provisioner, /pg_advisory_xact_lock/);
   assert.match(provisioner, /p\.repository\.secrets\.Encrypt/);
-  assert.match(gateway, /explicit == nil && s\.defaultRoutes != nil/);
+  assert.match(gateway, /s\.defaultRoutes\.Ensure[\s\S]*provisioningError[\s\S]*ListCandidates/);
+  assert.doesNotMatch(gateway, /provisionResources/);
   assert.match(chart, /key: token-default-provider-api-key/);
   assert.doesNotMatch(chart, /TOKEN_DEFAULT_PROVIDER_API_KEY, value:/);
 });

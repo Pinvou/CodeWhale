@@ -24,11 +24,50 @@ paths:
               schema:
                 type: object
                 additionalProperties: false
-                required: [catalog_version, items]
+                required: [catalog_version, context_version, authorization_version, items]
                 properties:
                   catalog_version: { type: integer, format: int64, minimum: 0 }
+                  context_version: { type: integer, format: int64, minimum: 1 }
+                  authorization_version: { type: integer, format: int64, minimum: 1 }
                   items: { type: array, items: { $ref: "#/components/schemas/CatalogModel" } }
         "401": { $ref: "#/components/responses/Error" }
+  /organizations/{organization_id}/model-policy:
+    parameters:
+      - name: organization_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      operationId: getOrganizationModelPolicy
+      summary: Read only the business model policy for an explicit organization
+      responses:
+        "200": { description: Organization model policy, content: { application/json: { schema: { $ref: "#/components/schemas/OrganizationModelPolicy" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+    put:
+      operationId: updateOrganizationModelPolicy
+      summary: CAS-update an organization business policy without accepting routing or credential fields
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_version, mode, model_ids, reason]
+              properties:
+                expected_version: { type: integer, format: int64, minimum: 0 }
+                mode: { type: string, enum: [ALLOW_ALL, ALLOW_LIST, DENY_LIST] }
+                model_ids: { type: array, uniqueItems: true, items: { type: string, format: uuid } }
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        "200": { description: Updated organization model policy, content: { application/json: { schema: { $ref: "#/components/schemas/OrganizationModelPolicy" } } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /payment-capabilities:
     get:
       operationId: getPaymentCapabilities
@@ -792,6 +831,22 @@ components:
         new_session_cutoff_at: { type: [string, "null"], format: date-time }
         continuation_cutoff_at: { type: [string, "null"], format: date-time }
         force_cancel_inflight: { type: boolean }
+        context_eligible: { type: boolean, description: Non-authoritative context hint; request admission always rechecks. }
+        eligibility_reason: { type: string }
+        context_version: { type: integer, format: int64, minimum: 1 }
+        authorization_version: { type: integer, format: int64, minimum: 1 }
+    OrganizationModelPolicy:
+      type: object
+      additionalProperties: false
+      required: [organization_id, version, mode, model_ids, authorization_version]
+      properties:
+        organization_id: { type: string, format: uuid }
+        version: { type: integer, format: int64, minimum: 0 }
+        mode: { type: string, enum: [ALLOW_ALL, ALLOW_LIST, DENY_LIST] }
+        model_ids: { type: array, uniqueItems: true, items: { type: string, format: uuid } }
+        authorization_version: { type: integer, format: int64, minimum: 1 }
+        updated_by: { type: string, format: uuid }
+        updated_at: { type: string, format: date-time }
     MemberQuotaAllocation:
       type: object
       additionalProperties: false

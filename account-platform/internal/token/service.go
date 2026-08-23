@@ -105,6 +105,8 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
 	protected.GET("/v1/model-protocols", httpserver.AdaptFunc(s.modelProtocols))
 	protected.GET("/v1/models", httpserver.AdaptFunc(s.listCatalogModels))
+	protected.GET("/v1/organizations/:organization_id/model-policy", httpserver.AdaptFunc(s.organizationModelPolicy))
+	protected.PUT("/v1/organizations/:organization_id/model-policy", approvalpolicy.Require("TOKEN_ORGANIZATION_MODEL_POLICY_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationModelPolicy))
 	protected.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
 	protected.GET("/v1/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
@@ -144,6 +146,9 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.POST("/models/:model_id/lifecycle", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_LIFECYCLE_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransitionCatalogModel))
 		admin.POST("/models:sync", s.authorizer.Require("platform.models.sync"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncCatalog))
 		admin.POST("/model-catalog:rollback", s.authorizer.Require("platform.models.manage"), approvalpolicy.Require("TOKEN_MODEL_CATALOG_ROLLBACK", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRollbackCatalog))
+		admin.GET("/provisionings", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisionings))
+		admin.GET("/provisionings/:provisioning_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminProvisioning))
+		admin.POST("/provisionings/:provisioning_id/repair", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ROUTE_PROVISIONING_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairProvisioning))
 	}
 	return router
 }
@@ -796,6 +801,16 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusGone, "MODEL_DEPRECATION_CUTOFF_REACHED", "the model can no longer be used for this conversation mode"
 	case errors.Is(err, ErrModelUnavailable):
 		status, code, message = http.StatusUnprocessableEntity, "MODEL_UNAVAILABLE", "the catalog model is not available for new requests"
+	case errors.Is(err, ErrModelPolicyDenied):
+		status, code, message = http.StatusForbidden, "MODEL_POLICY_DENIED", "the current organization policy does not allow this model"
+	case errors.Is(err, ErrModelPolicyVersionConflict):
+		status, code, message = http.StatusConflict, "MODEL_POLICY_VERSION_CONFLICT", "the organization model policy has changed"
+	case errors.Is(err, ErrRouteProvisioningPending):
+		status, code, message = http.StatusConflict, "ROUTE_PROVISIONING_PENDING", "the managed model route is being prepared"
+	case errors.Is(err, ErrRouteProvisioningFailed):
+		status, code, message = http.StatusServiceUnavailable, "ROUTE_PROVISIONING_FAILED", "the managed model route is temporarily unavailable"
+	case errors.Is(err, ErrRouteRepairRequired):
+		status, code, message = http.StatusServiceUnavailable, "ROUTE_REPAIR_REQUIRED", "the managed model route requires operator repair"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 220`、`部分实现 41`、`未实现 68`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 229`、`部分实现 37`、`未实现 63`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -55,6 +55,7 @@
 | `PAYMENT-ANOMALY-RECONCILIATION` | 拒付、强制退款、重复/晚到冲突、退款失败与非法迁移统一案件；Provider、订单/流水、退款、账本每日四方对账；不可变证据和幂等处置命令 | Go 单测、OpenAPI lint、92 个合同测试、三语运营页面和 Portal 构建通过；数据库运行级迁移、真实 Provider 账单、跨日时区、并发定时任务及财务故障注入待部署 |
 | `GATEWAY-ADAPTER-NEUTRALITY` | 版本化协议能力发现、显式路由协议、Provider/Adapter/上游引用历史证据，以及 New API/通用 OpenAI 兼容 Adapter 隔离 | Go 单测、OpenAPI lint、93 个合同测试、三语运营页面、Portal 构建和 Helm/Compose 配置检查通过；数据库运行级迁移及真实 Adapter 替换/用量证据联调待部署 |
 | `MODEL-CATALOG-LIFECYCLE` | Adapter 目录发现、稳定 UUID、不可变能力/目录版本、草稿 CAS、发布/弃用/移除、连续缺失核验、前向回滚、历史墓碑和请求版本快照 | Go 单测、OpenAPI lint、94 个合同测试、三语运营页面和 Helm/Compose 配置检查通过；桌面目录消费、回滚联合依赖校验、数据库运行级迁移和真实 Adapter 同步待后续任务/部署 |
+| `ROUTE-PROVISIONING-ELIGIBILITY` | 按作用域/模型/协议/代次唯一的托管路由状态机、租约认领、退避/SLA、组织模型策略、READY 资格门禁、回滚联合依赖校验和运营修复 | Go 单元测试、Rust 桌面代理测试、OpenAPI lint、95 个合同测试和三语 Portal 构建通过；数据库运行级迁移、真实 Adapter/凭据和 Worker 故障注入待部署 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
@@ -127,10 +128,10 @@
 | ACC-58 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE; DESKTOP-39 | NOT_DEPLOYED | 本人资料、桌面/Web 个人入口及运营列表/详情展示格式化编码；授权运营人员可按完整编码精确识别活动或已注销墓碑主体 |
 | TOK-04 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | `/v1/model-protocols` 暴露 Adapter 版本和显式 `CHAT v1` JSON/SSE 能力；路由持久化 `protocol_code`，未声明的 Embedding/Rerank/Image 等协议不会被推断可用 |
 | TOK-07 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 独立版本化目录只把 PUBLISHED 及处于允许宽限期的 DEPRECATED 模型作为 `CATALOG_VISIBLE` 返回；目录展示不读取上下文资格、钱包或请求级预占结果 |
-| TOK-09 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 托管路由 PENDING/READY/FAILED/REPAIR_REQUIRED 状态机及自动/人工修复待实现 |
-| TOK-10 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 目录、托管路由 Provisioning、上下文资格、请求预占、Hold 与上游调用的强制顺序待实现 |
-| TOK-12 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Gateway 每请求检查 Account 上下文和路由共享策略；缺目录/Provisioning 联合资格状态 |
-| TOK-16 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Gateway 会在请求时重选路由并预占；客户端提示与目标资格版本未完整实现 |
+| TOK-09 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 按作用域、模型、协议和目标代次持久化 PENDING/READY/FAILED/REPAIR_REQUIRED；Worker 使用租约、SKIP LOCKED、指数退避、SLA 和修复轮次收敛，资源代次验证通过后才进入 READY |
+| TOK-10 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 请求强制依次执行目录解析、托管 Provisioning、上下文资格、路由选择、定价/预占、Hold 和上游调用；非 READY 使用稳定阶段原因码失败关闭 |
+| TOK-12 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | Gateway 每请求解析服务端可信上下文，组织调用同时复核 `model.invoke`、组织模型策略和当前 READY Provisioning，候选查询只接受同代有效账号/凭据/路由 |
+| TOK-16 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 模型列表返回当前上下文及授权版本和非权威资格提示；请求仍重新解析目录、策略、Provisioning 和路由，不信任客户端缓存 |
 | TOK-17 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | CHAT 协议使用不可变版本公式绑定计量单位；新增协议沿用同一发布契约 |
 | TOK-18 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 公式缺省量按 0，发布前执行安全函数和单位引用校验，缺失绑定失败关闭 |
 | TOK-20 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 请求在上游前按冻结公式和价格计算最大费用并原子创建组成级 Hold；生产故障注入待部署 |
@@ -152,7 +153,7 @@
 | TOK-42 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 草稿 CAS、发布、弃用、正常/紧急移除均使用合法迁移、稳定幂等键、不可变新目录版本和审计；已发布历史由数据库触发器禁止更新/删除 |
 | TOK-43 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 连续两次上游缺失才自动弃用且从不物理删除；目录墓碑和 usage_request 显示/能力快照独立于实时 Model Gateway 保留 |
 | TOK-44 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 稳定 UUID 身份与版本化名称/别名分离；别名直接指向模型身份，结构上不能成环，发布拒绝重复别名、规范名称冲突和 REMOVED 目标 |
-| TOK-45 | 部分实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 已复制历史期望状态形成更高版本，保留来源/原因/操作者，不复活当前 REMOVED 墓碑并校验当前 Adapter 协议和来源可用性；当前价格、Provisioning 路由及凭据联合校验由 APT-028 接入后方可完成 |
+| TOK-45 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 回滚以前向更高版本复制历史内容，保留来源/原因/操作者且不复活 REMOVED 墓碑；发布前逐模型校验当前 Adapter、协议、有效价格及同代 READY Provisioning/账号/凭据/路由，并在事务内重检路由依赖 |
 | TOK-46 | 已实现 | DOC_CURRENT | GO-UNIT; METERING-PRICING-LIFECYCLE; GATEWAY-ADAPTER-NEUTRALITY; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 模型身份、目录、能力、协议、价格/公式和路由代次独立版本化；请求在 Hold/派发前冻结全部引用和生命周期显示快照，显示变化不创建新身份 |
 | TOK-47 | 部分实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | Gateway 已保存弃用生效、新会话/继续截止、替代模型和强制取消标志，并在每个新请求按当前目录门禁；桌面显式替代会话分支与在途强制取消证据仍由 APT-032/APT-030 收口 |
 | BILL-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | Account 提交原子写入钱包任务与 Outbox，后台使用稳定键调用 Billing、退避重试并在成功后激活账号；bootstrap 不同步调用 Billing |
@@ -208,7 +209,7 @@
 | UI-13 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少停止接收、取消处理中、Provider 不支持取消、待核对和已结算的用户状态反馈 |
 | UI-14 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销阶段、脱敏阻断项和用户恢复动作展示 |
 | UI-15 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 系统凭据库保存恢复查询凭据，启动后按 `next_retry_at` 轮询并区分 Identity、Account、钱包、修复和补偿状态，处理中禁止重复注册 |
-| ADM-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 组织模型业务策略与平台 Token Account、真实路由及凭据运营权限隔离待实现 |
+| ADM-11 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 组织端仅以 `org.models.read/manage` 读取或 CAS 修改允许/拒绝模型策略和资格提示；真实 Token Account、路由、凭据及 Provisioning 只由平台模型运营权限访问 |
 | ADM-12 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 后台可查看、创建版本和停用计量单位；历史引用受不可变约束保护 |
 | ADM-13 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 后台支持全局/模型草稿、逐单位配置、预览、发布、撤销和 ACTIVE 显式结束，带 ETag 与幂等冲突控制 |
 | ADM-14 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 管理后台可查询钱包状态；生产授权隔离仍需部署验证 |
@@ -225,9 +226,9 @@
 | ADM-25 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可管理平台 Token Account 生命周期；目标平台业务 RBAC 未实现 |
 | ADM-26 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可查询脱敏凭据元数据；目标细分角色隔离未实现 |
 | ADM-27 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有凭据检查动作；目标细分角色隔离和统一错误契约待补 |
-| ADM-28 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有路由 CRUD 和确定性选择；模型目录/Provisioning 代次缺失 |
-| ADM-29 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无托管 Provisioning 状态和代次视图 |
-| ADM-30 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无托管 Provisioning 修复命令 |
+| ADM-28 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 路由 CRUD、确定性选择和托管目标/实际代次统一展示；平台候选只有当前 READY 且账号、凭据和路由代次一致时可进入数据面，显式兼容 USER 路由保留原所有权校验 |
+| ADM-29 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 平台模型管理员可查询 Provisioning 作用域、目标/实际代次、状态、阶段、尝试次数、租约、重试/SLA 和脱敏错误，并读取尝试历史 |
+| ADM-30 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | FAILED/REPAIR_REQUIRED 才接受带原因和幂等键的修复命令；命令开启新受限轮次，只有协调 Worker 重建并验证资源后才写 READY，审计不可变 |
 | ADM-31 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可查询用量请求和上游引用；缺流事件/请求指纹/完整证据 |
 | ADM-32 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有用量核对人工重试且不重发模型请求；完整幂等收敛仍待目标实现 |
 | ADM-33 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW; DESKTOP-41 | NOT_DEPLOYED | 三语后台支持按状态、Provider、责任人、进入/复核时间和逾期筛选，展示能力/策略快照及不可变证据/操作时间线，并提供认领、查询、安排、严格归档和 blind 升级；无手工标记已支付入口 |
@@ -461,10 +462,10 @@
 | CR-37 | ID-14, ID-15, ACC-02–ACC-04, BILL-04, UI-02 | 注册采用持久 PROVISIONING，钱包初始化异步重试 | 已实现 | Identity 与 Account 成功即账号存在；钱包完成前允许登录和资料管理但禁止平台模型及充值；超过快照化 SLA 才进入 REPAIR_REQUIRED，Billing 暂时不可用不删除已验证身份 |
 | CR-38 | SCOPE-01, SCOPE-04, SCOPE-05, TOK-35, TOK-36, TOK-37, NFR-20 | 补齐品悟客户端旧模型路径的数据迁移和切换验收 | 未实现、由 CR-44 细化门禁 | 只改品悟客户端代码及相关文件；一次性幂等迁移旧客户端状态并保护本地独立模型，按三层门禁和升级矩阵完成失败行为、请求目的端及版本级回滚验收，不保留运行时兼容分支；TOK-37 作为独立前置能力，不进入客户端迁移提交 |
 | CR-39 | PAY-33, PAY-14, PAY-12, PAY-32, PAY-13, PAY-26 | 删除主动部分退款状态并拆分支付领域状态机 | 部分实现 | 支付流水成功事实、退款、拒付和异常案件已分离，普通部分退款已移除，渠道强制退款独立留证、冻结和受审计结案；账单逐行支付证据归并与完整关单中间态仍由 PAY-12～PAY-14 补齐 |
-| CR-40 | TOK-07–TOK-10, TOK-12, TOK-16, TOK-20, ADM-25, ADM-28–ADM-30 | 闭合默认托管路由创建与模型资格判断顺序 | 未实现 | 目录可见后先完成托管 Token Account/路由 Provisioning，只有 READY 路由参与 CONTEXT_ELIGIBLE；状态查询和修复分别由 ADM-29、ADM-30 验收，再执行请求级 RESERVABLE、原子 Hold 和上游调用 |
+| CR-40 | TOK-07–TOK-10, TOK-12, TOK-16, TOK-20, ADM-25, ADM-28–ADM-30 | 闭合默认托管路由创建与模型资格判断顺序 | 部分实现 | 目录可见、持久 Provisioning、READY/上下文资格、请求级预占、Hold 和上游调用顺序已闭环，运营状态/修复已交付；ADM-25 的目标平台账号查看权限细分仍由 APT-031 收口 |
 | CR-41 | BILL-28, PAY-11, PAY-20, PAY-24–PAY-31, PAY-33 | 支付履约隔离并按实际流水和权益包原子创建退款意图 | 已实现 | 多流水独立履约、目标普通退款和异常退款闭环：消费预检、原子冻结/预约、Outbox Consumer、全 BASE/关联 BONUS 撤销，以及拒付/强制退款受审计定向处置均已实现 |
 | CR-42 | BILL-20, BILL-23–BILL-25, ADM-12–ADM-13 | 闭合公式单位、输入缓存计量和零价语义 | 已实现 | 公式引用单位必须完整配置，输入与缓存输入规范化互斥；固定零价、显式继承和缺价已有独立数据与运行时语义 |
-| CR-43 | SCOPE-03, ADM-11, ADM-25–ADM-30 | 隔离组织模型业务策略与平台 Token Gateway 运营权限 | 未实现 | 组织模型管理员只能管理模型允许/拒绝策略、目录范围等业务策略；任何组织角色都不能读取或管理真实 Token Account、路由、凭据和 Provisioning，相关平台原子权限只授予 PLATFORM_MODEL_ADMIN |
+| CR-43 | SCOPE-03, ADM-11, ADM-25–ADM-30 | 隔离组织模型业务策略与平台 Token Gateway 运营权限 | 部分实现 | 组织模型策略与平台 Token Account/路由/凭据/Provisioning 已按组织权限和 `platform.tokens.*` 隔离；APT-031 仍需完成全部 Token 运营接口的目标细分权限和统一错误契约 |
 | CR-44 | SCOPE-04, SCOPE-05, TOK-35, TOK-36, TOK-37, NFR-20 | 将客户端切换拆分为发布、安装和运行三层门禁并移除计费准入请求 | 未实现 | 服务端未就绪时不发布；迁移预检或暂存提交失败时不替换旧版本并原子恢复旧二进制/配置；新版本运行时只显示不可用和修复动作，不回退旧模型路径；准入使用无 Hold readiness 或隔离合成身份，不使用真实用户付费请求 |
 | CR-46 | TOK-24–TOK-30 | 补齐模型请求幂等、流式重放、断线恢复和 Hold 后派发恢复契约 | 未实现 | TOK-24 继续定义同一逻辑请求不重复调用上游；新增稳定用户级作用域、分层保留、同键异请求冲突、加密流事件重放、断线状态恢复和上游派发不确定时禁止盲重试 |
 | CR-47 | REQ-ID-01–REQ-ID-03, CORE-01–CORE-07, SCOPE-01–SCOPE-05, ID-01–ID-16, ACC-01–ACC-39, TOK-01–TOK-37, BILL-01–BILL-33, PAY-01–PAY-36, UI-01–UI-12, ADM-01–ADM-32, NFR-01–NFR-25 | 删除退休需求并按依赖关系重排、重新编号全部目标能力 | 文档完成、实现状态保持原判断 | 删除编号稳定与禁止重排规则；移除目标基线中的退休能力占位；按基础能力、依赖顺序和领域相关性形成连续新编号，并同步全部文档和实现状态引用 |
@@ -622,8 +623,8 @@
 | TOK-05 | 模型网关协议适配 | 已实现 | 通用领域和核对器只消费版本化 Adapter/`UsageEvidenceProvider`；New API 请求头、日志查询与用量字段不再泄漏到数据库、API 或运营 UI。 |
 | TOK-06 | 模型目录自动提供模型 | 部分实现 | Gateway 已通过 Adapter 自动/手动同步并提供独立 `CATALOG_VISIBLE` 列表；桌面动态目录消费仍由 APT-032 完成。 |
 | TOK-08 | 首次调用自动创建默认 Token Account 和路由 | 已实现 | 平台托管、幂等创建，普通用户不可见不可改。 |
-| TOK-09 | 托管路由 Provisioning 生命周期 | 未实现 | 当前缺少按作用域、模型、协议和期望代唯一的 Provisioning 聚合，以及 PENDING/READY/FAILED/REPAIR_REQUIRED、指数退避、SLA 转修复和受审计人工重试。 |
-| TOK-10 | 托管模型调用资格顺序闭环 | 未实现 | 当前首次请求可直接触发默认资源创建，但尚未以统一管线强制执行目录可见、Provisioning READY、上下文资格、请求级预占、Hold、上游调用的先后顺序和阶段原因码。 |
+| TOK-09 | 托管路由 Provisioning 生命周期 | 已实现 | 已交付按作用域、模型、协议和期望代唯一的 Provisioning 聚合，以及 PENDING/READY/FAILED/REPAIR_REQUIRED、租约认领、指数退避、SLA 转修复和受审计人工重试。 |
+| TOK-10 | 托管模型调用资格顺序闭环 | 已实现 | 已强制执行目录可见、Provisioning READY、上下文资格、请求级预占、Hold、上游调用顺序；非 READY 不进入路由候选或计费链路。 |
 | TOK-11 | 请求前解析个人/组织上下文和角色 | 已实现 | Gateway 从 Account 获取服务端可信上下文，不接受客户端伪造 payer。 |
 | TOK-13 | 模型和 Provider 路由确定且可审计 | 已实现 | 按作用域、默认级别和优先级选择，歧义拒绝。 |
 | TOK-14 | 凭据加密且 UI 不返回明文 | 已实现 | API 只返回类型、状态、指纹、更新时间等元数据。 |
@@ -649,7 +650,7 @@
 | TOK-42 | 模型目录管理生命周期 | 已实现 | DRAFT/PUBLISHED/DEPRECATED/REMOVED、CAS/ETag、幂等命令、合法迁移、不可变版本和审计已经闭环。 |
 | TOK-43 | 已移除模型的历史展示 | 已实现 | 连续缺失核验、目录墓碑和请求显示/能力快照均持久保存，不依赖实时 Model Gateway 读取历史名称。 |
 | TOK-44 | 模型重命名和别名 | 已实现 | 稳定逻辑模型 UUID 与版本化名称/别名分离，直接身份映射结构性排除循环，并拒绝别名/规范名称冲突及 REMOVED 目标。 |
-| TOK-45 | 模型目录版本回滚 | 部分实现 | 已以前向更高版本复制历史内容并保留来源、审计和 REMOVED 墓碑；仍待当前价格、路由和凭据联合校验。 |
+| TOK-45 | 模型目录版本回滚 | 已实现 | 以前向更高版本复制历史内容并保留来源、审计和 REMOVED 墓碑；提交前联合校验当前价格、READY Provisioning、路由代次和有效凭据。 |
 | TOK-46 | 模型关联对象版本生成边界 | 已实现 | 目录、协议、能力、价格/公式和路由代次独立演进，请求冻结全部版本与显示/生命周期快照。 |
 | TOK-47 | 模型下架后的会话处理 | 部分实现 | 服务端已保存并执行弃用/移除截止及替代引用；桌面显式替代分支和强制取消在途请求的证据收敛尚未完成。 |
 
@@ -756,7 +757,7 @@
 | ADM-08 | Keycloak 安全管理入口 | 已实现 | 不嵌入普通后台；通过受限网络/隧道访问。 |
 | ADM-09 | 审计筛选、详情和导出 | 部分实现 | 已有筛选和导出基础；需按 NFR-48 增加近期重新认证、默认脱敏、PII临时权限、水印、加密、一次性下载和导出配额。 |
 | ADM-10 | 系统运行状态 | 部分实现 | 展示实际部署的 Account、Billing、Gateway、Portal、身份 Provider、模型网关、事件基础设施和 Relay；目标改为配置驱动探针，不在 Portal 写厂商判断分支。 |
-| ADM-11 | 组织模型业务策略管理边界 | 未实现 | 组织后台仅管理显式目标组织的模型允许策略和目录范围；不得返回或接受真实 Token Account、路由、凭据或 Provisioning 字段，Gateway 将业务策略与平台运营维护的 READY 路由共同计算资格。 |
+| ADM-11 | 组织模型业务策略管理边界 | 已实现 | 组织后台仅管理显式目标组织的允许/拒绝模型策略和目录资格提示，不返回或接受真实 Token Account、路由、凭据或 Provisioning 字段；Gateway 将策略与平台 READY 路由共同计算资格。 |
 | ADM-12 | 计量单位定义管理 | 已实现 | 支持版本化定义、停用和不可变历史引用保护。 |
 | ADM-13 | 价格版本管理 | 已实现 | 支持全局/模型、固定价/显式继承、逐单位预览、生命周期、并发发布冲突和既有 Hold 保护。 |
 | ADM-14 | 钱包状态查询 | 已实现 | 已有钱包详情；生产授权过滤和部署行为仍未验证。 |
@@ -773,9 +774,9 @@
 | ADM-25 | Token Account 生命周期管理 | 部分实现 | 可管理平台 Token Account 生命周期；目标平台业务 RBAC 未实现。 |
 | ADM-26 | 凭据元数据查询 | 部分实现 | 可查询脱敏凭据元数据；目标细分角色隔离未实现。 |
 | ADM-27 | 凭据有效性检查 | 部分实现 | 有凭据检查动作；目标细分角色隔离和统一错误契约待补。 |
-| ADM-28 | 模型路由管理 | 部分实现 | 有路由 CRUD 和确定性选择；模型目录/Provisioning 代次缺失。 |
-| ADM-29 | Provisioning 状态查询 | 未实现 | 缺少代次、尝试、退避、SLA 和脱敏错误的独立视图。 |
-| ADM-30 | Provisioning 修复 | 未实现 | 缺少只能推进 PENDING、由协调器验证 READY 的受审计修复命令。 |
+| ADM-28 | 模型路由管理 | 已实现 | 路由 CRUD、确定性选择和模型目录/Provisioning 代次已联结，失配资源不能进入数据面。 |
+| ADM-29 | Provisioning 状态查询 | 已实现 | 平台模型管理员可查看代次、尝试、退避、SLA、租约和脱敏错误的独立列表及详情。 |
+| ADM-30 | Provisioning 修复 | 已实现 | 受审计、幂等的修复命令只从失败终态开启新轮次，由协调器重建并验证后推进 READY。 |
 | ADM-31 | 用量请求与证据查询 | 部分实现 | 可查询用量请求和上游引用；缺流事件、请求指纹和完整证据。 |
 | ADM-32 | 用量核对人工重试 | 部分实现 | 有用量核对人工重试且不重发模型请求；完整幂等收敛仍待目标实现。 |
 | ADM-33 | 晚到支付人工审核管理 | 已实现 | 三语页面支持完整筛选、认领、受审计 Provider 查询、复核安排、严格归档和事实盲区升级，并展示能力/策略快照、证据及操作者时间线；不能手工录入已支付。 |

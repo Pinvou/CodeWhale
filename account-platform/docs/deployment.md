@@ -600,6 +600,8 @@ helm upgrade --install <release> account-platform/deploy/helm/account-platform \
 
 ## 16. 相关 Runbook
 
+Token Gateway 同时运行托管路由 Provisioning Worker。上线迁移 `000013_route_provisioning` 后，应监控 `PENDING` 最老年龄、FAILED 重试量、REPAIR_REQUIRED 数量和 Worker 租约过期；滚动发布可安全重领过期租约，但不得通过 SQL 或管理接口直接把聚合改为 READY。模型目录回滚会同步检查 Billing 当前价格及 Token 当前 READY 账号、凭据、路由代次，任一依赖不可确认时失败关闭。生产验收至少应覆盖 Worker 崩溃重领、重复请求不重复建资源、动态目录新增模型、凭据失效后新代重建、SLA 转人工修复及修复命令幂等。
+
 - `deploy/runbooks/backup-restore.md`
 - `deploy/runbooks/cutover-rollback.md`
 - `deploy/runbooks/newapi-deployment.md`

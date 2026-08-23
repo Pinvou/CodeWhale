@@ -1,6 +1,7 @@
 package token
 
 import (
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -28,8 +29,33 @@ func (s *Service) listCatalogModels(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	w.Header().Set("ETag", catalogETag(version))
-	api.WriteJSON(w, http.StatusOK, map[string]any{"catalog_version": version, "items": items})
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	publicItems := make([]map[string]any, 0, len(items))
+	operations, supportsEligibility := s.defaultRoutes.(provisioningOperations)
+	for _, item := range items {
+		payload, _ := json.Marshal(item)
+		var public map[string]any
+		_ = json.Unmarshal(payload, &public)
+		eligible, reason := false, "ROUTE_PROVISIONING_UNAVAILABLE"
+		if supportsEligibility {
+			var eligibilityErr error
+			eligible, reason, eligibilityErr = operations.ContextEligible(r.Context(), resolved, item.ModelID, item.ProtocolCode)
+			if eligibilityErr != nil {
+				reason = "ROUTE_PROVISIONING_UNAVAILABLE"
+			}
+		}
+		public["context_eligible"] = eligible
+		public["eligibility_reason"] = reason
+		public["context_version"] = resolved.ContextVersion
+		public["authorization_version"] = resolved.AuthorizationVersion
+		publicItems = append(publicItems, public)
+	}
+	w.Header().Set("Cache-Control", "private, no-cache")
+	w.Header().Set("ETag", catalogContextETag(version, resolved.ContextVersion, resolved.AuthorizationVersion))
+	api.WriteJSON(w, http.StatusOK, map[string]any{"catalog_version": version, "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "items": publicItems})
 }
 
 func (s *Service) adminCatalogModels(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +74,10 @@ func (s *Service) adminCatalogModels(w http.ResponseWriter, r *http.Request) {
 
 func catalogETag(version int64) string {
 	return `"model-catalog-` + strconv.FormatInt(version, 10) + `"`
+}
+
+func catalogContextETag(catalogVersion, contextVersion, authorizationVersion int64) string {
+	return `"model-catalog-` + strconv.FormatInt(catalogVersion, 10) + `-context-` + strconv.FormatInt(contextVersion, 10) + `-authorization-` + strconv.FormatInt(authorizationVersion, 10) + `"`
 }
 
 func (s *Service) adminSaveCatalogDraft(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +175,25 @@ func (s *Service) adminRollbackCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
+	}
+	models, err := repository.CatalogModelsAtVersion(r.Context(), body.SourceCatalogVersion)
+	if err != nil || len(models) == 0 {
+		s.writeError(w, r, ErrModelUnavailable)
+		return
+	}
+	operations, ok := s.provisioningOperations(w, r)
+	if !ok {
+		return
+	}
+	for _, model := range models {
+		if _, priceErr := s.billing.Price(r.Context(), model.ModelID.String()); priceErr != nil {
+			s.writeError(w, r, ErrModelUnavailable)
+			return
+		}
+		if readyErr := operations.ValidateModelReady(r.Context(), model.ModelID, model.ProtocolCode); readyErr != nil {
+			s.writeError(w, r, readyErr)
+			return
+		}
 	}
 	version, err := repository.RollbackCatalog(r.Context(), body.SourceCatalogVersion, body.ExpectedCatalogVersion, body.IdempotencyKey, body.Reason, tokenAdminActor(r), s.upstream.Protocols())
 	if err != nil {

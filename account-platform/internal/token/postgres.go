@@ -520,7 +520,8 @@ FROM token_accounts ta
 JOIN token_share_policies sp ON sp.token_account_id=ta.id
 JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID'
 JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=$1 AND rp.protocol_code=$2
-WHERE ta.status='ACTIVE'
+LEFT JOIN route_provisionings provision ON provision.active_token_account_id=ta.id AND provision.active_credential_id=pc.id AND provision.upstream_model_ref=rp.model AND provision.protocol_code=rp.protocol_code AND provision.status='READY' AND provision.actual_generation=rp.route_generation
+WHERE ta.status='ACTIVE' AND (ta.management_mode='USER' OR ta.management_mode='PLATFORM' AND provision.id IS NOT NULL)
 ORDER BY rp.priority DESC,ta.id`, model, protocolCode)
 	if err != nil {
 		return nil, err

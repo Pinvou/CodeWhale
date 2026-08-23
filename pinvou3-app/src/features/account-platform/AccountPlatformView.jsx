@@ -63,6 +63,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [packages, setPackages] = useState({ summary: null, items: [] });
   const [quotaGrants, setQuotaGrants] = useState([]);
   const [quotaMembers, setQuotaMembers] = useState([]);
+  const [catalogModels, setCatalogModels] = useState([]);
+  const [modelPolicy, setModelPolicy] = useState(null);
   const [qrData, setQrData] = useState('');
   const guardRef = useRef(createContextRequestGuard());
   const meRef = useRef(null);
@@ -83,7 +85,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const clearContextResources = () => {
     guardRef.current.cancel();
     setBalance(null); setUsageRecords([]); setUsageCursor(null); setUsageUnavailable(false);
-    setUnits([]); setMembers([]); setOrder(null); setOrders([]); setPackages({ summary: null, items: [] }); setQuotaGrants([]); setQuotaMembers([]);
+    setUnits([]); setMembers([]); setOrder(null); setOrders([]); setPackages({ summary: null, items: [] }); setQuotaGrants([]); setQuotaMembers([]); setCatalogModels([]); setModelPolicy(null);
     setBillingUnavailable(false); setBillingDetailsUnavailable(false);
   };
 
@@ -98,6 +100,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       const canReadQuota = permissions.has('org.quota.read.self') || permissions.has('org.quota.read.all');
       const canReadMembers = permissions.has('org.members.read');
       const canAllocateQuota = permissions.has('org.quota.allocate');
+      const canReadModelPolicy = permissions.has('org.models.read') || permissions.has('org.models.manage');
       const results = await Promise.allSettled([
         client.organizations(request.signal), client.products(request.signal), client.balance(request.signal),
         client.recentRechargeOrder(request.signal),
@@ -108,6 +111,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         isPersonal ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }),
         organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }),
         organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }),
+        client.models(request.signal),
+        organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null),
       ]);
       if (!guardRef.current.isCurrent(request.generation)) return;
       const value = index => results[index].status === 'fulfilled' ? results[index].value : null;
@@ -124,6 +129,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setOrders(value(8)?.items || []);
       setQuotaGrants(value(9)?.items || []);
       setQuotaMembers(value(10)?.items || []);
+      setCatalogModels(value(11)?.items || []);
+      setModelPolicy(value(12));
       const billingFailed = [1, 2, 3].some(index => results[index].status === 'rejected');
       setBillingUnavailable(billingFailed);
       setBillingDetailsUnavailable([7, 8, 9].some(index => results[index].status === 'rejected'));
@@ -308,7 +315,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} />}
       {section === 'credits' && <ResourceSection name="credits" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <ContextCredits copy={copy} language={language} balance={balance} />}</ResourceSection>}
       {section === 'entitlements' && <ResourceSection name="entitlements" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <OrganizationEntitlements copy={copy} language={language} organizationId={activeOrganizationId} permissions={me?.active_context?.permissions || []} products={products} packages={packages} members={quotaMembers} grants={quotaGrants} order={order} busy={busy} onPurchase={(productId, channel) => run(async () => setOrder(await client.purchaseOrganizationEntitlements(activeOrganizationId, productId, channel, idempotencyKey('org-recharge'))))} onAllocate={items => run(async () => { await client.allocateOrganizationQuota(activeOrganizationId, items, idempotencyKey('quota-batch')); await loadContext(me); })} onRevoke={(grantId, reason) => run(async () => { await client.revokeOrganizationQuota(activeOrganizationId, grantId, reason, idempotencyKey('quota-revoke')); await loadContext(me); })} />}</ResourceSection>}
-      {section === 'organization' && <Organization copy={copy} organization={activeOrganization} units={units} members={members} busy={busy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} />}
+      {section === 'organization' && <Organization copy={copy} organization={activeOrganization} units={units} members={members} models={catalogModels} modelPolicy={modelPolicy} permissions={me?.active_context?.permissions || []} busy={busy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} onUpdateModelPolicy={(mode, modelIds, reason) => run(async () => { await client.updateOrganizationModelPolicy(activeOrganizationId, { expected_version:modelPolicy?.version || 0, mode, model_ids:modelIds, reason }, idempotencyKey('model-policy')); await loadContext(me); })} />}
       {section === 'orders' && <Orders copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
       {section === 'invoice' && <Invoice copy={copy} />}
       {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={loadMoreUsage} />}
@@ -320,10 +327,19 @@ function Overview({ copy, language, me, organizations, balance, activeOrganizati
   return <section><p className="ap-eyebrow">{copy.sections.overview}</p><h2>{copy.welcome(me?.display_name || copy.user)}</h2><p className="ap-lead">{copy.overviewLead}</p><div className="ap-context-card"><div><span>{copy.activeContext}</span><strong>{activeOrganization ? copy.organizationIdentity(activeOrganization.name) : copy.personal}</strong><small>{copy.identityHelp}</small></div><label><span>{copy.switchContext}</span><select value={activeOrganizationId} onChange={event => onSwitchContext(event.target.value)} disabled={busy}><option value="">{copy.personal}</option>{organizations.map(item => <option key={item.organization_id} value={item.organization_id}>{copy.organizationIdentity(item.name)}</option>)}</select></label></div><div className="ap-metrics"><article><span>{copy.userCode}</span><strong>{me?.user_code || '—'}</strong></article><article><span>{copy.organizations}</span><strong>{organizations.length}</strong></article><article><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong></article><article><span>{copy.accountStatus}</span><strong>{me?.status || '—'}</strong></article></div></section>;
 }
 
-function Organization({ copy, organization, units, members, busy, onCreateUnit, onInvite }) {
+function Organization({ copy, organization, units, members, models, modelPolicy, permissions, busy, onCreateUnit, onInvite, onUpdateModelPolicy }) {
   const [unitName, setUnitName] = useState(''); const [parentId, setParentId] = useState(''); const [email, setEmail] = useState('');
   if (!organization) return <Empty>{copy.chooseOrganization}</Empty>;
-  return <section><p className="ap-eyebrow">{copy.sections.organization}</p><h2>{organization.name}</h2><div className="ap-grid"><article className="ap-card"><h3>{copy.organizationTree}</h3>{units.length ? <ul className="ap-list">{units.map(unit => <li key={unit.unit_id}><span>{unit.name}</span><small>{unit.parent_id ? copy.childUnit : copy.rootUnit}</small></li>)}</ul> : <Empty>{copy.noUnits}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (unitName.trim()) onCreateUnit(unitName.trim(), parentId || null).then?.(() => setUnitName('')); }}><Field label={copy.unitName}><input value={unitName} onChange={event => setUnitName(event.target.value)} /></Field><Field label={copy.parentUnit}><select value={parentId} onChange={event => setParentId(event.target.value)}><option value="">{copy.rootUnit}</option>{units.map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select></Field><button disabled={busy || !unitName.trim()}>{copy.createUnit}</button></form></article><article className="ap-card"><h3>{copy.members}</h3>{members.length ? <ul className="ap-list">{members.map(member => <li key={member.user_id}><span>{member.display_name || member.email || member.user_id}</span><small>{member.roles.join(' · ')}</small></li>)}</ul> : <Empty>{copy.noMembers}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (email.trim()) onInvite(email.trim(), ['MEMBER']).then?.(() => setEmail('')); }}><Field label={copy.memberEmail}><input type="email" value={email} onChange={event => setEmail(event.target.value)} /></Field><button disabled={busy || !email.trim()}>{copy.createInvitation}</button></form></article></div></section>;
+  return <section><p className="ap-eyebrow">{copy.sections.organization}</p><h2>{organization.name}</h2><div className="ap-grid"><article className="ap-card"><h3>{copy.organizationTree}</h3>{units.length ? <ul className="ap-list">{units.map(unit => <li key={unit.unit_id}><span>{unit.name}</span><small>{unit.parent_id ? copy.childUnit : copy.rootUnit}</small></li>)}</ul> : <Empty>{copy.noUnits}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (unitName.trim()) onCreateUnit(unitName.trim(), parentId || null).then?.(() => setUnitName('')); }}><Field label={copy.unitName}><input value={unitName} onChange={event => setUnitName(event.target.value)} /></Field><Field label={copy.parentUnit}><select value={parentId} onChange={event => setParentId(event.target.value)}><option value="">{copy.rootUnit}</option>{units.map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select></Field><button disabled={busy || !unitName.trim()}>{copy.createUnit}</button></form></article><article className="ap-card"><h3>{copy.members}</h3>{members.length ? <ul className="ap-list">{members.map(member => <li key={member.user_id}><span>{member.display_name || member.email || member.user_id}</span><small>{member.roles.join(' · ')}</small></li>)}</ul> : <Empty>{copy.noMembers}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (email.trim()) onInvite(email.trim(), ['MEMBER']).then?.(() => setEmail('')); }}><Field label={copy.memberEmail}><input type="email" value={email} onChange={event => setEmail(event.target.value)} /></Field><button disabled={busy || !email.trim()}>{copy.createInvitation}</button></form></article></div>{modelPolicy && <ModelPolicy copy={copy} policy={modelPolicy} models={models} canManage={(permissions || []).includes('org.models.manage')} busy={busy} onSave={onUpdateModelPolicy} />}</section>;
+}
+
+function ModelPolicy({ copy, policy, models, canManage, busy, onSave }) {
+  const [mode, setMode] = useState(policy.mode);
+  const [selected, setSelected] = useState(policy.model_ids || []);
+  useEffect(() => { setMode(policy.mode); setSelected(policy.model_ids || []); }, [policy.version, policy.mode]);
+  const toggle = id => setSelected(current => current.includes(id) ? current.filter(value => value !== id) : [...current, id]);
+  const save = () => { const reason = window.prompt(copy.modelPolicyReason); if (reason?.trim()) onSave(mode, mode === 'ALLOW_ALL' ? [] : selected, reason.trim()); };
+  return <article className="ap-card"><h3>{copy.modelPolicy}</h3><p className="ap-muted">{copy.modelPolicyLead}</p><Field label={copy.modelPolicyMode}><select value={mode} disabled={!canManage || busy} onChange={event => setMode(event.target.value)}><option value="ALLOW_ALL">{copy.modelPolicyModes.ALLOW_ALL}</option><option value="ALLOW_LIST">{copy.modelPolicyModes.ALLOW_LIST}</option><option value="DENY_LIST">{copy.modelPolicyModes.DENY_LIST}</option></select></Field>{mode !== 'ALLOW_ALL' && <div className="ap-stack">{models.map(model => <label key={model.model_id} className="ap-inline"><input type="checkbox" checked={selected.includes(model.model_id)} disabled={!canManage || busy} onChange={() => toggle(model.model_id)} /><span>{model.display_name}</span><small>{model.eligibility_reason}</small></label>)}</div>}{canManage && <button disabled={busy} onClick={save}>{copy.saveModelPolicy}</button>}</article>;
 }
 
 function OrganizationEntitlements({ copy, language, permissions, products, packages, members, grants, order, busy, onPurchase, onAllocate, onRevoke }) {

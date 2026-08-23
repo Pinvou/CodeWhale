@@ -109,11 +109,29 @@ type CatalogRepository interface {
 	ListCatalog(context.Context) (int64, []CatalogModel, error)
 	ResolveCatalogModel(context.Context, string, string, time.Time) (CatalogModel, error)
 	AdminCatalogModels(context.Context) (int64, []AdminCatalogModel, error)
+	CatalogModelsAtVersion(context.Context, int64) ([]CatalogModel, error)
 	SaveCatalogDraft(context.Context, uuid.UUID, CatalogDraftInput, uuid.UUID) (CatalogDraft, error)
 	PublishCatalogDraft(context.Context, uuid.UUID, int64, int64, string, string, uuid.UUID, []GatewayProtocolCapability) (CatalogModel, error)
 	TransitionCatalogModel(context.Context, uuid.UUID, CatalogLifecycleInput, uuid.UUID) (CatalogModel, error)
 	RollbackCatalog(context.Context, int64, int64, string, string, uuid.UUID, []GatewayProtocolCapability) (int64, error)
 	SyncCatalog(context.Context, string, string, []DiscoveredModel, int64, int64, uuid.UUID) (int64, bool, error)
+}
+
+func (r *PostgresRepository) CatalogModelsAtVersion(ctx context.Context, version int64) ([]CatalogModel, error) {
+	rows, err := r.pool.Query(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.lifecycle_status<>'REMOVED' ORDER BY e.model_id`, version)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CatalogModel{}
+	for rows.Next() {
+		item, scanErr := scanCatalogModel(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 const catalogSelect = `SELECT e.model_id,e.catalog_version,e.display_name,e.description,e.aliases,e.lifecycle_status,
@@ -631,7 +649,7 @@ func (r *PostgresRepository) RollbackCatalog(ctx context.Context, sourceVersion,
 	if err != nil || current != expectedVersion {
 		return 0, ErrCatalogVersionConflict
 	}
-	rows, err := tx.Query(ctx, `SELECT p.protocol_code,p.version,e.source_available FROM model_catalog_entries e JOIN protocol_definitions p ON p.id=e.protocol_definition_id WHERE e.catalog_version=$1 AND e.lifecycle_status<>'REMOVED'`, sourceVersion)
+	rows, err := tx.Query(ctx, `SELECT p.protocol_code,p.version,e.source_available,EXISTS(SELECT 1 FROM route_provisionings provision JOIN token_accounts ta ON ta.id=provision.active_token_account_id AND ta.status='ACTIVE' JOIN provider_credentials credential ON credential.id=provision.active_credential_id AND credential.status='ACTIVE' AND credential.validation_status='VALID' JOIN routing_policies route ON route.token_account_id=ta.id AND route.model=provision.upstream_model_ref AND route.protocol_code=provision.protocol_code AND route.route_generation=provision.actual_generation WHERE provision.model_id=e.model_id AND provision.protocol_code=p.protocol_code AND provision.status='READY') FROM model_catalog_entries e JOIN protocol_definitions p ON p.id=e.protocol_definition_id WHERE e.catalog_version=$1 AND e.lifecycle_status<>'REMOVED'`, sourceVersion)
 	if err != nil {
 		return 0, err
 	}
@@ -639,11 +657,12 @@ func (r *PostgresRepository) RollbackCatalog(ctx context.Context, sourceVersion,
 		var code string
 		var version int64
 		var available bool
-		if err := rows.Scan(&code, &version, &available); err != nil {
+		var ready bool
+		if err := rows.Scan(&code, &version, &available, &ready); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		if !available || !protocolSupported(capabilities, code, version) {
+		if !available || !ready || !protocolSupported(capabilities, code, version) {
 			rows.Close()
 			return 0, ErrModelUnavailable
 		}

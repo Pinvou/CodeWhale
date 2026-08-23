@@ -7,7 +7,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -52,6 +51,14 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusUnprocessableEntity, "MODEL_PROTOCOL_UNSUPPORTED", "the catalog model does not support CHAT v1", httpserver.RequestID(r.Context()))
 		return
 	}
+	if validator, supported := s.defaultRoutes.(interface {
+		ValidateContextModelPolicy(context.Context, AuthorizationContext, uuid.UUID) error
+	}); supported {
+		if err := validator.ValidateContextModelPolicy(r.Context(), resolved, catalogModel.ModelID); err != nil {
+			s.writeError(w, r, err)
+			return
+		}
+	}
 	if request.Stream {
 		var payload map[string]any
 		if err := json.Unmarshal(body, &payload); err != nil {
@@ -95,11 +102,6 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
 		return
 	}
-	candidates, err := s.repository.ListCandidates(r.Context(), catalogModel.UpstreamModelRef, "CHAT")
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
 	var explicit *uuid.UUID
 	if raw := strings.TrimSpace(r.Header.Get("X-Pinvou-Token-Account-ID")); raw != "" {
 		parsed, parseErr := uuid.Parse(raw)
@@ -109,21 +111,32 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		explicit = &parsed
 	}
-	route, err := SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: "CHAT", ExplicitTokenAccountID: explicit}, candidates)
-	if errors.Is(err, ErrNoEligibleRoute) && explicit == nil && s.defaultRoutes != nil {
-		walletID, provisionErr := s.activeWallet(r.Context(), resolved)
-		if provisionErr == nil {
-			provisionErr = s.defaultRoutes.Ensure(r.Context(), resolved, walletID, catalogModel.UpstreamModelRef)
+	if explicit == nil {
+		if s.defaultRoutes == nil {
+			s.writeError(w, r, ErrRouteRepairRequired)
+			return
 		}
-		if provisionErr == nil {
-			candidates, provisionErr = s.repository.ListCandidates(r.Context(), catalogModel.UpstreamModelRef, "CHAT")
+		walletID, walletErr := s.activeWallet(r.Context(), resolved)
+		if walletErr != nil {
+			api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
+			return
 		}
-		if provisionErr == nil {
-			route, err = SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: "CHAT"}, candidates)
-		} else if !errors.Is(provisionErr, ErrNoEligibleRoute) {
-			err = provisionErr
+		provisioning, provisioningErr := s.defaultRoutes.Ensure(r.Context(), resolved, walletID, catalogModel)
+		if provisioningErr != nil {
+			s.writeError(w, r, provisioningErr)
+			return
+		}
+		if provisioningErr := provisioningError(provisioning); provisioningErr != nil {
+			s.writeError(w, r, provisioningErr)
+			return
 		}
 	}
+	candidates, err := s.repository.ListCandidates(r.Context(), catalogModel.UpstreamModelRef, "CHAT")
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	route, err := SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: "CHAT", ExplicitTokenAccountID: explicit}, candidates)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
