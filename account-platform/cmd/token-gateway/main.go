@@ -118,7 +118,7 @@ func main() {
 	defer stopWorker()
 	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
 	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithAuthorizer(authorizer)
-	if err := httpserver.RunWithApplication("token-gateway", service.Handler(verify), repository.Ping); err != nil {
+	if err := httpserver.RunWithApplication("token-gateway", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}
 }

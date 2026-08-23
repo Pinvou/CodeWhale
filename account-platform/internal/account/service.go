@@ -21,12 +21,18 @@ import (
 var ErrWalletProvisioning = errors.New("personal wallet provisioning is incomplete")
 
 type Service struct {
-	repository   Repository
-	wallets      WalletProvisioner
-	mobileAuth   *MobileAuthService
-	profiles     *ProfileChangeService
-	serviceToken string
-	now          func() time.Time
+	repository            Repository
+	wallets               WalletProvisioner
+	mobileAuth            *MobileAuthService
+	profiles              *ProfileChangeService
+	organizationLifecycle []OrganizationLifecycleClient
+	serviceToken          string
+	now                   func() time.Time
+}
+
+func (s *Service) WithOrganizationLifecycle(clients ...OrganizationLifecycleClient) *Service {
+	s.organizationLifecycle = append([]OrganizationLifecycleClient(nil), clients...)
+	return s
 }
 
 func (s *Service) WithProfileChanges(profiles *ProfileChangeService) *Service {

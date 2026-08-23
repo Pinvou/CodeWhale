@@ -139,6 +139,11 @@ func (s *Service) requirePermission(permission string) gin.HandlerFunc {
 		}
 		decision, err := repository.Authorize(c.Request.Context(), principal, permission, nil, nil)
 		if err != nil || !decision.Allowed {
+			if auditor, auditOK := s.repository.(interface {
+				RecordPermissionDenial(context.Context, identity.Principal, string, string) error
+			}); auditOK {
+				_ = auditor.RecordPermissionDenial(c.Request.Context(), principal, permission, c.Request.URL.Path)
+			}
 			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "the requested permission is not granted", httpserver.RequestID(c.Request.Context()))
 			c.Abort()
 			return
@@ -146,6 +151,22 @@ func (s *Service) requirePermission(permission string) gin.HandlerFunc {
 		writeAuthorizationVersions(c.Writer.Header(), decision)
 		c.Next()
 	}
+}
+
+func (r *PostgresRepository) RecordPermissionDenial(ctx context.Context, principal identity.Principal, permission, resourcePath string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	actorID, err := adminActorID(ctx, tx, principal)
+	if err != nil {
+		return err
+	}
+	if err := appendAdminAuditResult(ctx, tx, actorID, principal, nil, "authorization.permission.denied", "http_route", resourcePath, "DENIED", map[string]any{"permission": strings.TrimSpace(permission)}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func writeAuthorizationVersions(header http.Header, decision AuthorizationDecision) {

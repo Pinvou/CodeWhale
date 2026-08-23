@@ -109,6 +109,16 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return UsageRequest{}, false, err
 	}
+	if request.OrganizationID != nil {
+		var organizationStatus string
+		err := tx.QueryRow(ctx, `SELECT status FROM organization_lifecycle_states WHERE organization_id=$1`, *request.OrganizationID).Scan(&organizationStatus)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return UsageRequest{}, false, err
+		}
+		if err == nil && organizationStatus != "ACTIVE" {
+			return UsageRequest{}, false, ErrForbidden
+		}
+	}
 	now := r.now()
 	request.Status, request.StartedAt = "CREATED", now
 	_, err = tx.Exec(ctx, `INSERT INTO usage_requests(id,idempotency_key,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,model,status,maximum_microcredits,request_snapshot,started_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'CREATED',$10,$11,$12,$12)`, request.ID, request.IdempotencyKey, request.UserID, request.SessionID, request.OrganizationID, request.TokenAccountID, request.CredentialID, request.WalletID, request.Model, request.MaximumMicrocredits, encoded, now)

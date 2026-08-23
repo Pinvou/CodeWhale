@@ -21,6 +21,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -77,30 +78,34 @@ func NewService(repository Repository, contexts ContextResolver, wallets WalletR
 	return service
 }
 
-func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
+func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
-	router.Use(identity.GinMiddleware(verify))
-	router.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
-	router.POST("/v1/token-accounts", httpserver.AdaptFunc(s.createTokenAccount))
-	router.PATCH("/v1/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.setTokenAccountStatus))
-	router.PUT("/v1/token-accounts/:token_account_id/sharing", httpserver.AdaptFunc(s.updateTokenSharing))
-	router.PUT("/v1/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.upsertTokenRoute))
-	router.POST("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.rotateCredential))
-	router.GET("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.listCredentials))
-	router.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
-	router.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
-	router.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
-	router.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
-	router.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
-	router.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
-	router.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
-	router.GET("/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
-	router.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
-	router.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
-	router.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
-	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
-	router.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
-	admin := router.Group("/admin/v1")
+	internal := router.Group("/internal/v1")
+	internal.Use(serviceauth.GinMiddleware(serviceToken))
+	internal.PUT("/organizations/:organization_id/lifecycle", approvalpolicy.Require("TOKEN_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
+	protected := router.Group("")
+	protected.Use(identity.GinMiddleware(verify))
+	protected.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
+	protected.POST("/v1/token-accounts", httpserver.AdaptFunc(s.createTokenAccount))
+	protected.PATCH("/v1/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.setTokenAccountStatus))
+	protected.PUT("/v1/token-accounts/:token_account_id/sharing", httpserver.AdaptFunc(s.updateTokenSharing))
+	protected.PUT("/v1/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.upsertTokenRoute))
+	protected.POST("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.rotateCredential))
+	protected.GET("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.listCredentials))
+	protected.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
+	protected.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
+	protected.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
+	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
+	protected.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
+	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
+	protected.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+	protected.GET("/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
+	protected.GET("/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
+	protected.GET("/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
+	protected.POST("/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
+	protected.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
+	protected.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
+	admin := protected.Group("/admin/v1")
 	if s.authorizer != nil {
 		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
@@ -682,6 +687,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
 	case errors.Is(err, ErrAccountRepairRequired):
 		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
+	case errors.Is(err, ErrOrganizationLifecycleConflict):
+		status, code, message = http.StatusConflict, "ORGANIZATION_LIFECYCLE_CONFLICT", "the organization lifecycle version or state conflicts with current facts"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

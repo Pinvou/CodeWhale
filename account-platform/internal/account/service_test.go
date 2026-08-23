@@ -122,12 +122,21 @@ func (f *fakeRepository) AdminDeleteUser(_ context.Context, _ identity.Principal
 	f.adminCalls = append(f.adminCalls, "user:"+id.String()+":DELETE")
 	return nil
 }
-func (*fakeRepository) AdminOrganizations(context.Context, string, int) ([]AdminOrganization, error) {
-	return nil, nil
+func (*fakeRepository) AdminOrganizations(context.Context, AdminOrganizationFilter) (AdminOrganizationPage, error) {
+	return AdminOrganizationPage{Items: []AdminOrganization{}}, nil
 }
-func (f *fakeRepository) AdminCreateOrganization(_ context.Context, _ identity.Principal, ownerID uuid.UUID, name string) (Organization, error) {
+func (f *fakeRepository) AdminCreateOrganization(_ context.Context, _ identity.Principal, ownerID uuid.UUID, name, _ string) (Organization, error) {
 	f.adminCalls = append(f.adminCalls, "organization:create:"+ownerID.String()+":"+name)
 	return Organization{ID: uuid.Must(uuid.NewV7()), Name: name, Status: "ACTIVE", Version: 1}, nil
+}
+func (*fakeRepository) AdminRecordOrganizationCreationFailure(context.Context, identity.Principal, uuid.UUID, string, string) error {
+	return nil
+}
+func (f *fakeRepository) AdminOrganizationState(_ context.Context, id uuid.UUID) (AdminOrganizationState, error) {
+	return AdminOrganizationState{ID: id, Status: "DISABLED", Version: 1}, nil
+}
+func (*fakeRepository) AdminOrganizationDeletionBlockers(context.Context, uuid.UUID) ([]OrganizationLifecycleBlocker, error) {
+	return []OrganizationLifecycleBlocker{}, nil
 }
 func (f *fakeRepository) AdminRenameOrganization(_ context.Context, _ identity.Principal, id uuid.UUID, name string) error {
 	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":rename:"+name)
@@ -317,6 +326,7 @@ func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 		request.Header.Set("Authorization", "Bearer test-token")
 		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", "organization-test-key")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != http.StatusNoContent {
@@ -357,6 +367,7 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 		request.Header.Set("Authorization", "Bearer test-token")
 		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Idempotency-Key", "organization-create-test")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != test.status {
@@ -364,6 +375,30 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 		}
 		if got := repository.adminCalls[len(repository.adminCalls)-1]; got != test.want {
 			t.Fatalf("admin call=%q want=%q", got, test.want)
+		}
+	}
+}
+
+func TestAdminOrganizationFilterCursorRoundTrip(t *testing.T) {
+	item := AdminOrganization{ID: uuid.Must(uuid.NewV7()), UpdatedAt: time.Date(2026, time.August, 23, 12, 34, 56, 0, time.UTC)}
+	cursor, err := encodeAdminOrganizationCursor(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/organizations?status=disabled&limit=25&cursor="+cursor, nil)
+	filter, err := parseAdminOrganizationFilter(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filter.Status != "DISABLED" || filter.Limit != 25 || filter.CursorID == nil || *filter.CursorID != item.ID || filter.CursorUpdatedAt == nil || !filter.CursorUpdatedAt.Equal(item.UpdatedAt) {
+		t.Fatalf("unexpected filter: %#v", filter)
+	}
+}
+
+func TestAdminOrganizationFilterRejectsUnknownStatusAndMalformedCursor(t *testing.T) {
+	for _, target := range []string{"/admin/v1/organizations?status=PAUSED", "/admin/v1/organizations?cursor=not-base64"} {
+		if _, err := parseAdminOrganizationFilter(httptest.NewRequest(http.MethodGet, target, nil)); err == nil {
+			t.Fatalf("expected invalid filter for %s", target)
 		}
 	}
 }

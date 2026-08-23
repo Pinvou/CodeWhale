@@ -62,7 +62,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := account.NewService(repository, wallets).WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	tokenOrganizationLifecycle, err := account.NewHTTPOrganizationLifecycleClient(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "TOKEN")
+	if err != nil {
+		log.Fatal(err)
+	}
+	billingOrganizationLifecycle, err := account.NewHTTPOrganizationLifecycleClient(os.Getenv("BILLING_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "BILLING")
+	if err != nil {
+		log.Fatal(err)
+	}
+	service := account.NewService(repository, wallets).WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN")).WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle)
 	go account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run(ctx)
 	go account.NewRoleBindingExpiryWorker(repository, time.Minute).Run(ctx)
 	go account.NewApprovalExpiryWorker(repository, time.Minute).Run(ctx)

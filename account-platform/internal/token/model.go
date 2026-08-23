@@ -9,13 +9,14 @@ import (
 )
 
 var (
-	ErrNotFound              = errors.New("token account not found")
-	ErrForbidden             = errors.New("token account is not authorized")
-	ErrAmbiguousRoute        = errors.New("token route is ambiguous")
-	ErrNoEligibleRoute       = errors.New("no eligible token route")
-	ErrInvalidSecret         = errors.New("invalid token secret configuration")
-	ErrAccountProvisioning   = errors.New("account is provisioning")
-	ErrAccountRepairRequired = errors.New("account provisioning requires repair")
+	ErrNotFound                      = errors.New("token account not found")
+	ErrForbidden                     = errors.New("token account is not authorized")
+	ErrAmbiguousRoute                = errors.New("token route is ambiguous")
+	ErrNoEligibleRoute               = errors.New("no eligible token route")
+	ErrInvalidSecret                 = errors.New("invalid token secret configuration")
+	ErrAccountProvisioning           = errors.New("account is provisioning")
+	ErrAccountRepairRequired         = errors.New("account provisioning requires repair")
+	ErrOrganizationLifecycleConflict = errors.New("organization lifecycle conflicts with current state")
 )
 
 type AuthorizationContext struct {

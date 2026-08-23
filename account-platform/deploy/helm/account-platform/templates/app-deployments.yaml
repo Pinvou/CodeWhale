@@ -74,6 +74,7 @@ spec:
             {{- end }}
             {{- if eq $app.name "account-service" }}
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
+            - { name: TOKEN_GATEWAY_HTTP_URL, value: {{ printf "http://%s-token-gateway:8080" $fullname | quote }} }
             - { name: IDENTITY_HTTP_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
             - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
             - { name: SMS_PROVIDER, value: {{ $root.Values.sms.provider | quote }} }

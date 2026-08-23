@@ -59,6 +59,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", httpserver.AdaptFunc(s.executeApprovedAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
+	protected.PUT("/internal/v1/organizations/:organization_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.listProducts))
 	protected.GET("/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
 	if s.payments != nil {

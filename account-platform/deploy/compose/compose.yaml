@@ -111,6 +111,7 @@ services:
       OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
       OIDC_AUDIENCE: pinvou-desktop-dev
       BILLING_HTTP_URL: http://billing-service:8080
+      TOKEN_GATEWAY_HTTP_URL: http://token-gateway:8080
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}
       NATS_URL: nats://nats:4222
       MOBILE_AUTH_ENABLED: ${MOBILE_AUTH_ENABLED:-false}
