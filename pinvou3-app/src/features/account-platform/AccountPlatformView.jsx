@@ -12,11 +12,22 @@ function Field({ label, children }) {
 
 function Empty({ children }) { return <div className="ap-empty">{children}</div>; }
 
+function ResourceSection({ name, personalContext, copy, children }) {
+  const title = name === 'credits' ? copy.creditsTitle : copy.entitlementsTitle;
+  const lead = name === 'credits' ? copy.creditsLead : copy.entitlementsLead;
+  return <div className={`ap-resource-section ap-${name}-section ${personalContext ? 'ap-context-personal' : 'ap-context-organization'}`}><p className="ap-eyebrow">{copy.sections[name]}</p><h2>{title}</h2><p className="ap-lead">{lead}</p>{children}</div>;
+}
+
+function ContextCredits({ copy, language, balance }) {
+  return <div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong><small>{copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}</small></div>;
+}
+
 function NavIcon({ name }) {
   const paths = {
     overview: <><rect x="3" y="3" width="7" height="7" rx="2" /><rect x="14" y="3" width="7" height="7" rx="2" /><rect x="3" y="14" width="7" height="7" rx="2" /><rect x="14" y="14" width="7" height="7" rx="2" /></>,
     organization: <><circle cx="12" cy="7" r="3" /><circle cx="6" cy="17" r="2.5" /><circle cx="18" cy="17" r="2.5" /><path d="M12 10v3M8 15l4-2 4 2" /></>,
-    wallet: <><rect x="3" y="5" width="18" height="14" rx="3" /><path d="M3 9h18M16 14h2" /></>,
+    credits: <><rect x="3" y="5" width="18" height="14" rx="3" /><path d="M3 9h18M16 14h2" /></>,
+    entitlements: <><path d="M4 7h16v13H4zM2 7h20M12 7v13M7 3c2.5 0 5 4 5 4S9.5 7 7 7a2 2 0 1 1 0-4ZM17 3c-2.5 0-5 4-5 4s2.5 0 5 0a2 2 0 1 0 0-4Z" /></>,
     orders: <><path d="M6 3h12v18H6z" /><path d="M9 8h6M9 12h6M9 16h4" /></>,
     invoice: <><path d="M5 3h14v18l-3-2-4 2-4-2-3 2z" /><path d="M8 8h8M8 12h8" /></>,
     usage: <><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></>,
@@ -60,9 +71,11 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const personalContext = !activeOrganizationId;
   const navigationSections = [
     'overview',
-    ...(organizations.length > 0 ? ['organization'] : []),
-    ...(personalContext ? ['wallet', 'orders', 'invoice'] : []),
+    'credits',
+    'entitlements',
     'usage',
+    ...(organizations.length > 0 ? ['organization'] : []),
+    ...(personalContext ? ['orders', 'invoice'] : []),
   ];
 
   const clearContextResources = () => {
@@ -282,8 +295,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     <main className="ap-main">
       {error && <div role="alert" className="ap-alert error">{error}</div>}{notice && <div className="ap-alert success">{notice}</div>}
       {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} />}
+      {section === 'credits' && <ResourceSection name="credits" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <ContextCredits copy={copy} language={language} balance={balance} />}</ResourceSection>}
+      {section === 'entitlements' && <ResourceSection name="entitlements" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <Empty>{copy.noEntitlements}</Empty>}</ResourceSection>}
       {section === 'organization' && <Organization copy={copy} organization={activeOrganization} units={units} members={members} busy={busy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} />}
-      {section === 'wallet' && <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} />}
       {section === 'orders' && <Orders copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
       {section === 'invoice' && <Invoice copy={copy} />}
       {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={loadMoreUsage} />}

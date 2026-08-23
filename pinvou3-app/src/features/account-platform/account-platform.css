@@ -127,6 +127,13 @@
 .ap-payment img { width: 180px; border: 1px solid var(--ap-border-soft); border-radius: 16px; }
 .ap-status { display: inline-flex; padding: 3px 9px; border-radius: 999px; color: #16765f; background: var(--ap-accent-soft); font-size: 11px; font-weight: 600; }
 .ap-entitlements { margin-top: 24px; }
+.ap-resource-section > section > .ap-eyebrow,
+.ap-resource-section > section > h2,
+.ap-resource-section > section > .ap-lead { display: none; }
+.ap-credits-section > section > .ap-entitlements { display: none; }
+.ap-entitlements-section > section > .ap-alert,
+.ap-entitlements-section > section > .ap-balance-hero,
+.ap-entitlements-section > section > .ap-card:not(.ap-entitlements) { display: none; }
 .ap-order-list { display: grid; gap: 12px; }
 .ap-order-list article { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 22px; border: 1px solid rgba(0, 0, 0, .08); border-radius: 16px; background: var(--ap-card); }
 .ap-order-list article > div { display: grid; gap: 5px; }
