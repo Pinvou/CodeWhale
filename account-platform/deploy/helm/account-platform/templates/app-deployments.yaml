@@ -108,13 +108,20 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: identity-password-hmac-key-base64, optional: true } }
             {{- else if eq $app.name "billing-service" }}
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
-            - name: PAYMENT_SIMULATOR_URL
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-provider-url } }
+            - { name: BILLING_PAYMENT_PROVIDER, value: {{ $root.Values.billing.paymentProvider | quote }} }
+            - { name: BILLING_ALLOW_TENTATIVE_PRICES, value: {{ $root.Values.billing.allowTentativePrices | quote }} }
+            - { name: H3C_MALL_BASE_URL, value: {{ $root.Values.account.commerceAdapterBaseUrl | quote }} }
+            {{- range $item := list (dict "env" "H3C_MALL_APP_KEY" "key" "h3c-mall-app-key") (dict "env" "H3C_MALL_APP_SECRET" "key" "h3c-mall-app-secret") }}
+            - name: {{ $item.env }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }} } }
+            {{- end }}
             - { name: BILLING_PAYMENT_CALLBACK_URL, value: {{ $root.Values.public.paymentCallbackUrl | quote }} }
             - { name: BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS, value: {{ $root.Values.billing.paymentExpiryIntervalSeconds | quote }} }
+            - name: PAYMENT_MERCHANT_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-merchant-id, optional: true } }
             {{- range $channel := list "UNIONPAY" "ALIPAY" "WECHAT" }}
-            - name: PAYMENT_SIM_HMAC_{{ $channel }}
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "payment-hmac-%s" ($channel | lower) }} } }
+            - name: PAYMENT_NOTIFICATION_HMAC_{{ $channel }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "payment-hmac-%s" ($channel | lower) }}, optional: true } }
             {{- end }}
             {{- else if eq $app.name "token-gateway" }}
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }

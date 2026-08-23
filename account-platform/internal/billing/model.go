@@ -40,7 +40,7 @@ type Wallet struct {
 type Product struct {
 	ProductID          string   `json:"product_id"`
 	PlanName           string   `json:"plan_name"`
-	SKUCode            string   `json:"sku_code"`
+	SKUCode            string   `json:"sku_code,omitempty"`
 	AmountFen          int64    `json:"amount_fen"`
 	CreditMicrocredits int64    `json:"credit_microcredits"`
 	DisplayPoints      int64    `json:"display_points"`

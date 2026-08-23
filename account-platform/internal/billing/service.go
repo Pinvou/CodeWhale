@@ -14,6 +14,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
@@ -69,6 +70,9 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateMemberQuotaBatch))
 	protected.POST("/internal/v1/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeMemberQuotaGrant))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.listProducts))
+	if s.payments != nil {
+		protected.GET("/v1/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
+	}
 	protected.GET("/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
 	if s.payments != nil {
 		protected.POST("/internal/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
@@ -113,6 +117,11 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
+}
+
+func (s *Service) paymentCapabilities(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, s.payments.Capabilities())
 }
 
 func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
@@ -590,6 +599,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusNotFound, "NOT_FOUND", "the billing resource was not found"
 	case errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "BILLING_CONFLICT", "the billing request conflicts with existing state"
+	case errors.Is(err, payment.ErrUnsupported):
+		status, code, message = http.StatusUnprocessableEntity, "PAYMENT_CAPABILITY_UNSUPPORTED", "the selected payment provider does not support this operation"
 	case errors.Is(err, ErrInsufficientBalance):
 		status, code, message = http.StatusPaymentRequired, "WALLET_INSUFFICIENT", "the wallet has insufficient available credits"
 	case errors.Is(err, ErrWalletUnavailable):

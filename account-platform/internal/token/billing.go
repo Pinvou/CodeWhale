@@ -76,6 +76,10 @@ type BillingClient interface {
 	Balance(context.Context, uuid.UUID) (json.RawMessage, error)
 }
 
+type PaymentCapabilitiesBillingClient interface {
+	PaymentCapabilities(context.Context) (json.RawMessage, error)
+}
+
 type HoldPricingContext struct {
 	ModelID          string
 	ProtocolCode     string
@@ -111,6 +115,10 @@ type OrganizationBillingClient interface {
 
 func (c *HTTPBillingClient) Products(ctx context.Context) (json.RawMessage, error) {
 	return c.raw(ctx, http.MethodGet, "/v1/recharge/products", nil, "")
+}
+
+func (c *HTTPBillingClient) PaymentCapabilities(ctx context.Context) (json.RawMessage, error) {
+	return c.raw(ctx, http.MethodGet, "/v1/payment-capabilities", nil, "")
 }
 
 func (c *HTTPBillingClient) CreateRechargeOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, mobile, commerceCustomerStatus, idempotencyKey string) (json.RawMessage, error) {

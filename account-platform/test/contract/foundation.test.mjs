@@ -32,9 +32,10 @@ test('billing products are server-authoritative and fixed to the approved catalo
   assert.deepEqual(productIDs, ['PLAN_TRIAL', 'PLAN_STANDARD', 'PLAN_ADVANCED', 'PLAN_FLAGSHIP']);
 
   const product = billing.components.schemas.RechargeProduct;
-  for (const field of ['plan_name', 'sku_code', 'base_points', 'bonus_points', 'validity_days', 'price_status', 'invoice_product_name']) {
+  for (const field of ['plan_name', 'base_points', 'bonus_points', 'validity_days', 'price_status', 'invoice_product_name']) {
     assert.ok(product.required.includes(field), field);
   }
+  assert.equal(product.properties.sku_code, undefined);
 
   const createProperties = billing.components.schemas.CreateRechargeOrderRequest.properties;
   assert.equal(createProperties.amount_fen, undefined);
@@ -206,7 +207,7 @@ test('late Mall payments require audited operator repair before fulfillment', as
   assert.ok(admin.paths['/billing/admin/v1/payment-orders/{order_id}/repair']);
   assert.match(migration, /CREATE TABLE payment_order_repairs/);
   assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
-  assert.match(reconciliation, /p\.Policy\(\)\.ReviewLatePayment/);
+  assert.match(reconciliation, /p\.Policy\(\)\.RequiresReview\(order\.ExpiresAt, \*provider\.PaidAt\)/);
   assert.match(reconciliation, /provider\.Status != "SUCCESS"/);
   assert.match(reconciliation, /INSERT INTO payment_order_repairs/);
   assert.match(reconciliation, /issuePackageWithinTransaction/);
@@ -215,7 +216,7 @@ test('late Mall payments require audited operator repair before fulfillment', as
 });
 
 test('provider-specific payment rules remain inside the provider adapter', async () => {
-  const adapter = await readFile(path.join(root, 'internal/billing/h3c_mall.go'), 'utf8');
+  const adapter = await readFile(path.join(root, 'internal/platform/h3cpayment/provider.go'), 'utf8');
   const genericFiles = await Promise.all(['payments.go', 'reconciliation.go', 'refunds.go', 'admin.go'].map(file => readFile(path.join(root, 'internal/billing', file), 'utf8')));
   assert.match(adapter, /ReusePendingOrderAfterExpiry:\s+true/);
   assert.match(adapter, /ReviewLatePayment:\s+true/);

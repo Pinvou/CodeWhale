@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -82,6 +83,9 @@ func (p *PaymentCoordinator) ListOrders(ctx context.Context, requesterID, wallet
 }
 
 func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterID uuid.UUID) (PaymentOrder, error) {
+	if !p.Capabilities().CloseSupported {
+		return PaymentOrder{}, payment.ErrUnsupported
+	}
 	order, err := p.GetOrder(ctx, orderID, requesterID)
 	if err != nil {
 		return PaymentOrder{}, err
@@ -112,6 +116,9 @@ func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterI
 }
 
 func (p *PaymentCoordinator) CreateRefund(ctx context.Context, orderID, requesterID uuid.UUID, amountFen int64, idempotencyKey, reason string) (Refund, bool, error) {
+	if !p.Capabilities().RefundSupported {
+		return Refund{}, false, payment.ErrUnsupported
+	}
 	idempotencyKey = strings.TrimSpace(idempotencyKey)
 	reason = strings.TrimSpace(reason)
 	if orderID == uuid.Nil || requesterID == uuid.Nil || amountFen <= 0 || len(idempotencyKey) < 16 || reason == "" {
@@ -304,12 +311,12 @@ func refundMerchantOrder(ctx context.Context, database queryable, orderID uuid.U
 }
 
 func getPaymentOrderByID(ctx context.Context, database queryable, orderID uuid.UUID, lock bool) (PaymentOrder, error) {
-	query := `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE id=$1`
+	query := `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at,COALESCE(provider_sku,'') FROM payment_orders WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var order PaymentOrder
-	err := database.QueryRow(ctx, query, orderID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt)
+	err := database.QueryRow(ctx, query, orderID).Scan(&order.ID, &order.MerchantOrderNo, &order.RequesterID, &order.BeneficiaryOrganizationID, &order.WalletID, &order.ProductID, &order.Channel, &order.AmountFen, &order.Currency, &order.CreditMicrocredits, &order.Status, &order.FulfillmentStatus, &order.PaymentURL, &order.QRData, &order.ChannelTransactionID, &order.ExpiresAt, &order.PaidAt, &order.ProviderSKU)
 	return order, err
 }
 

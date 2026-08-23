@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 166`、`部分实现 50`、`未实现 111`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 171`、`部分实现 47`、`未实现 109`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -46,8 +46,9 @@
 | `PERSONAL-CENTER-IA` | 个人中心概览、额度、权益、用量和按成员关系显示的组织导航，以及个人/组织资源显示边界 | 桌面账户状态测试、UI ESLint 和 Portal 构建通过；组织成员权益仅按活动组织及原子权限展示，个人权益不回退到组织视图 |
 | `ORGANIZATION-MEMBER-QUOTA` | 组织购买、精确 BASE/BONUS 组成授予、逐项批量、成员生命周期、Hold/结算及权限化 UI | Go 单测、OpenAPI、组织额度合同、桌面状态测试及 Portal 构建通过；真实 PostgreSQL 并发竞争和生产迁移仍待部署验证 |
 | `METERING-PRICING-LIFECYCLE` | 版本化计量单位/协议公式、确定性估算、动态 Hold 续租与追加预占、逐单位价格匹配及完整生命周期 | Billing/Token/Portal Go 单测、OpenAPI lint、59 个合同测试和全量静态验证通过；数据库运行级迁移、真实并发发布和长流故障注入待部署 |
+| `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、63 个合同测试、Portal 构建和部署模板检查通过；数据库运行级迁移及真实 H3C 联调待部署，正式目录由 APT-048 等待业务冻结 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 40 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/59 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/63 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -336,11 +337,11 @@
 | BILL-26 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 申请、批准、拒绝和账本入账可审计。 |
 | BILL-27 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有钱包、分录、Hold、调整和对账查询；应收、组成级权益及完整授权/导出保护未实现 |
 | BILL-28 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 普通退款成功时撤销目标支付全部未消费 BASE 与关联 BONUS、BONUS 零现金退款及平衡账本待实现 |
-| PAY-01 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | H3C 与 Simulator 均实现 Provider 接口；部分通用流程仍按当前能力和旧状态模型耦合 |
-| PAY-02 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider capabilities 已存在并驱动部分 API/UI；UI 对退款仍显示禁用入口，目标能力快照不完整 |
-| PAY-03 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前生产候选流程只有新华三支付宝；开发/测试 Payment Provider 的银联、微信等渠道不计入生产能力 |
-| PAY-04 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 商品直接保存单一外部 SKU，无多 Provider 映射版本表 |
-| PAY-05 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前目录仍明确为 UAT 暂定 |
+| PAY-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | Billing 只依赖供应商中立 `payment.Provider`；H3C 状态映射和开发 Simulator HTTP 协议分别位于独立平台 Adapter |
+| PAY-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 版本化能力声明覆盖渠道、查询/保留/间隔、支付与晚到窗口、权威终态、关闭、退款、通知、账单和修复；API、UI、后台轮询与领域动作统一消费该声明，订单冻结能力快照 |
+| PAY-03 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 可售渠道取通用商品、Provider 映射及当前能力交集；测试 Provider 标记 `test_only`，生产启动拒绝且 Helm 不部署，不能扩张正式能力 |
+| PAY-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 通用商品不再拥有外部 SKU；独立不可变映射保存 Provider/版本、外部 SKU、金额、币种、渠道、状态和有效期，订单冻结映射 ID、映射与能力快照 |
+| PAY-05 | 未实现 | AUDIT_HEAD | CODE-AUDIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 代码已以 `TEST_ONLY` 和生产失败关闭阻止 UAT 目录收款；正式 SKU、金额、权益及映射仍须业务确认后由 APT-048 冻结并取得环境验收 |
 | PAY-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; COMMERCE-MAPPING | NOT_DEPLOYED | 个人充值从独立 Commerce Mapping 端点读取当前 Provider 的 READY 状态；Mapping 不进入认证/授权上下文，未完成只拒绝依赖它的下单 |
 | PAY-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 充值选择、二维码和结果留在品悟应用/Portal 内 |
 | PAY-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 每次充值从服务端商品选择开始，不恢复旧二维码作为新订单 |
@@ -392,7 +393,7 @@
 | NFR-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 启动工厂按配置注入 `aliyun-managed` 或 `http-generated`；核心挑战状态机没有厂商条件，历史挑战保存 Provider ID 与 Adapter 版本 |
 | NFR-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | OIDC 仅证明 issuer、subject 和会话；Account 是平台/组织业务授权事实源，三业务服务均不再读取 Realm Role 决定后台权限 |
 | NFR-16 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; COMMERCE-MAPPING | NOT_DEPLOYED | Account 的 Commerce Mapping、任务、公开 API 和支付准入已中立化并冻结 Provider/Adapter 版本；Billing 商品映射和订单引用仍含 `mall_*`，归 APT-022/023 收敛 |
-| NFR-17 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有 PaymentProvider capabilities 并驱动部分操作；缺历史保留、权威终态、晚到窗口、账单及统一 UI/API/任务快照 |
+| NFR-17 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY; DESKTOP-39 | NOT_DEPLOYED | `/v1/payment-capabilities` 暴露版本化中立能力；商品渠道、用户/组织 UI、查询 Worker、终态、关单、退款、通知、账单和修复均按同一声明门禁，订单保存能力快照 |
 | NFR-18 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有模型网关调用和 UsageEvidenceProvider 抽象；数据库、字段和核对流程仍含 New API 专属语义 |
 | NFR-19 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有系统状态聚合和探针函数；组件列表及 New API/Relay 处理仍在 Portal 主流程硬编码 |
 | NFR-20 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 桌面运行时旧 llmapi_hub 路径已移除并有迁移测试；发布、安装、运行三层门禁及非计费 readiness 尚不完整 |
@@ -428,9 +429,9 @@
 | CR-12 | UI-10, PAY-07, PAY-08 | Web 个人中心提供充值入口 | 已实现、需保留 | 当前个人活动上下文的“额度”页已经支持套餐选择、商城二维码和到账查询；后续 UI/角色重构不得删除 |
 | CR-13 | ID-08, NFR-14 | 短信业务流程与供应商实现隔离 | 已实现 | 启动工厂按配置注入供应商托管或平台生成/通用 HTTP 发送 Adapter；业务状态机无厂商条件并持久化 Provider ID、Adapter 版本和不透明校验数据，见 `sms-verification-provider-design.md` |
 | CR-14 | TOK-05, NFR-18 | 模型网关与 New API 具体实现隔离 | 部分实现、待重构 | Token Gateway 领域、数据库、公开 API 和管理 UI 统一使用 `upstream_request_id`、`UsageEvidenceProvider`、`ModelCatalogProvider` 等供应商中立概念；New API 请求头、日志接口、响应字段、状态与错误映射只能存在于 New API Adapter |
-| CR-15 | ACC-05, PAY-06, PAY-01, NFR-16 | 外部商城账号和订单语义与新华三实现隔离 | 部分实现、支付侧待重构 | Account/Gateway 已以 Commerce Mapping、通用状态和支付专用查询替代 `mall_user_sync_jobs`/`mall_sync_status`；Billing 的 `mall_order_id`、单一商品映射及厂商订单语义仍由 APT-022/023 迁移 |
+| CR-15 | ACC-05, PAY-06, PAY-01, NFR-16 | 外部商城账号和订单语义与新华三实现隔离 | 部分实现、订单证据待重构 | Account/Gateway 已以 Commerce Mapping 和通用状态隔离客户语义，Billing 已通过独立 Adapter 隔离 H3C 状态与协议；历史 `mall_order_id` 兼容字段和目标多流水证据仍由 APT-023 迁移 |
 | CR-16 | CORE-01, CORE-02, ACC-01, NFR-15 | 身份认证 Provider 与业务授权隔离 | 已实现 | Keycloak 用户创建/删除及密码策略迁入独立 Identity Adapter；Account 只消费服务端口和不透明引用；OIDC 只提供标准主体和会话身份，平台及组织权限由 Account 权限系统判定 |
-| CR-17 | PAY-01–PAY-04, NFR-17 | 生产/非生产支付 Provider 与支付渠道能力隔离 | 部分实现、待重构 | 保留通用 `PaymentProvider` 端口，将 H3C Mall 与 Simulator 实现移出 Billing 业务包；远程 Compose 已隔离 Simulator 主进程，但测试数据库初始化/迁移仍在基础清单，启动和 Helm 仍有模拟器命名配置；需迁移为供应商中立配置并彻底排除生产测试依赖；前端按商品渠道和 Provider capabilities 渲染，多 Provider 使用独立商品映射 |
+| CR-17 | PAY-01–PAY-04, NFR-17 | 生产/非生产支付 Provider 与支付渠道能力隔离 | 已实现 | H3C 与开发 Simulator 位于独立 Adapter；通用 Billing 只消费版本化能力和不可变商品映射，前端动态渲染渠道；远程 Compose 隔离测试进程、迁移和数据库，生产启动拒绝测试 Provider 且 Helm 无测试支付工作负载或模拟器配置 |
 | CR-18 | ADM-10, NFR-19 | 系统运行探针配置驱动 | 部分实现、待重构 | 系统状态页通过探针注册表声明服务名称、URL、协议和响应判定器；Portal 不使用 `if newapi` 等厂商分支。页面可以展示实际部署组件名称，但采集流程不能依赖固定厂商实现 |
 | CR-19 | PAY-12, PAY-14–PAY-15, PAY-18–PAY-20, PAY-23, PAY-25, PAY-28–PAY-31, PAY-33–PAY-36 | 支付按完整生命周期设计并允许 Provider 能力降级 | 部分实现、退款范围已由 CR-41 取代 | 原记录包含全额/部分退款；现行支付履约隔离、退款目标、金额和意图事务以 CR-41 及 PAY-24–PAY-31 为准，其他支付生命周期要求继续有效 |
 | CR-20 | BILL-07, PAY-22, PAY-23, UI-11 | 组织资金通过企业管理员在线购买组织权益入账 | 部分实现 | APT-017 已完成受益组织与付款申请人分离、组织钱包履约及权限化购买 UI；PAY-22/PAY-23 要求的独立付款人资格快照和完整支付证据仍由 APT-023 实现 |
@@ -685,11 +686,11 @@
 
 | target_requirement_id | 需求 | 状态 | 当前实现/边界 |
 |---|---|---|---|
-| PAY-01 | 支付实现位于独立 Adapter | 部分实现 | H3C Mall 与 Simulator 分别实现通用 `PaymentProvider`；仍需用合同和架构门禁证明业务状态机不依赖具体 Provider。 |
-| PAY-02 | 渠道和动作由能力声明驱动 | 部分实现 | 已有 Provider capabilities 并驱动部分 API/UI；尚未覆盖历史保留、晚到窗口、权威终态和完整能力快照，退款不支持时 UI 仍显示禁用入口。 |
-| PAY-03 | 多支付渠道 | 未实现 | 当前生产候选流程仅支持新华三支付宝；开发/测试 Payment Provider 的银联、微信能力不属于生产能力。 |
-| PAY-04 | 多 Provider 商品映射 | 未实现 | 通用充值商品与外部 SKU 分表映射，至少包含 Provider、外部 SKU、金额校验、状态和有效期；历史订单固定创建时的映射版本。 |
-| PAY-05 | 充值商品正式冻结 | 未实现 | 当前 SKU/金额/权益为 UAT 暂定，正式收款前必须冻结。 |
+| PAY-01 | 支付实现位于独立 Adapter | 已实现 | Billing 仅依赖中立支付端口，H3C 和开发 Simulator 分别在平台 Adapter 内解释厂商协议与状态。 |
+| PAY-02 | 渠道和动作由能力声明驱动 | 已实现 | 版本化能力统一驱动公开发现接口、商品渠道、前端、轮询间隔、权威终态、关单、退款、通知、账单和修复，并冻结到订单。 |
+| PAY-03 | 多支付渠道 | 已实现 | 可售渠道取商品、映射和当前 Provider 能力交集；开发测试渠道不进入生产能力或生产部署。 |
+| PAY-04 | 多 Provider 商品映射 | 已实现 | 外部 SKU 已从通用商品分离到不可变版本映射，订单固定创建时映射 ID、映射事实和 Provider 能力。 |
+| PAY-05 | 充值商品正式冻结 | 未实现 | UAT 映射均为 `TEST_ONLY` 且生产失败关闭；正式目录仍由 APT-048 等待业务确认和环境验收。 |
 | PAY-06 | 个人用户与当前 Commerce Provider 客户一一对应 | 已实现 | 当前 Provider 使用用户级唯一 Mapping；充值单独查询 READY 状态，未完成不影响登录、模型调用或组织授权。 |
 | PAY-07 | 充值全程留在品悟应用内 | 已实现 | 用户图标旁额度入口进入商品选择、二维码和结果页，不跳商城后台网页。 |
 | PAY-08 | 每次点击充值先进入商品选择 | 已实现 | 不恢复到上次二维码页。 |
@@ -802,7 +803,7 @@
 | NFR-14 | 短信供应商可替换性 | `SMSProvider` 由启动工厂按配置注入，核心状态机无厂商分支；支持 `aliyun-managed` 与 `http-generated`，并保存 Provider ID 和 Adapter 版本。 |
 | NFR-15 | 身份与授权分离 | OIDC 只证明主体与会话；Account 决定平台和组织业务权限，业务路由不再依赖 Identity Provider 角色 Claim。 |
 | NFR-16 | Commerce Provider 可替换性 | Account Mapping/任务/证据及公开 API 已供应商中立并保存 Provider/Adapter 版本；Billing 商品映射与订单引用仍含 `mall_*`，整体保持部分实现。 |
-| NFR-17 | 支付能力可发现 | 已有 `PaymentProvider capabilities` 并驱动部分操作；缺历史保留、权威终态、晚到窗口、账单及统一 UI/API/任务快照。 |
+| NFR-17 | 支付能力可发现 | `/v1/payment-capabilities` 提供版本化中立声明，API、UI、任务和订单快照统一使用渠道、查询、时窗、终态及动作能力。 |
 | NFR-18 | 模型网关可替换性 | 已有模型网关调用和 `UsageEvidenceProvider` 抽象；数据库、字段和核对流程仍含 New API 专属语义。 |
 | NFR-19 | 运维探针可扩展 | 已有系统状态聚合和探针函数；组件列表及 New API/Relay 处理仍在 Portal 主流程硬编码。 |
 | NFR-20 | 无旧模型技术债 | 桌面运行时旧 `llmapi_hub` 路径已移除并有迁移测试；发布、安装、运行三层门禁及非计费 readiness 尚不完整。 |

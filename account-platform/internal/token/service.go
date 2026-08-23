@@ -99,6 +99,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
 	protected.POST("/v1/chat/completions", httpserver.AdaptFunc(s.chatCompletions))
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
+	protected.GET("/v1/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
 	protected.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
 	protected.POST("/v1/organizations/:organization_id/recharge/orders", httpserver.AdaptFunc(s.createOrganizationRechargeOrder))
 	protected.GET("/v1/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listOrganizationQuotaGrants))
@@ -292,6 +293,23 @@ func (s *Service) rechargeProducts(w http.ResponseWriter, r *http.Request) {
 	payload, err := s.billing.Products(r.Context())
 	if err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the recharge catalog is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) paymentCapabilities(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.resolveContext(w, r); !ok {
+		return
+	}
+	client, ok := s.billing.(PaymentCapabilitiesBillingClient)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "payment capabilities are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := client.PaymentCapabilities(r.Context())
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "payment capabilities are unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)

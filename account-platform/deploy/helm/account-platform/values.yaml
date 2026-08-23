@@ -65,6 +65,8 @@ account:
   commerceAdapterBaseUrl: ""
 
 billing:
+  paymentProvider: h3c_mall
+  allowTentativePrices: false
   paymentExpiryIntervalSeconds: 15
 
 tokenGateway:

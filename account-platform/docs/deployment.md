@@ -77,9 +77,9 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 这些组件不属于产品服务边界。它们可以部署在与真实用户、真实钱包和真实 Provider 隔离的开发/测试环境；生产环境不得启动、路由或保留其数据库，生产 Helm 也不得包含对应工作负载。
 
-远程 Compose 覆盖已把 `payment-simulator` 主进程置于 `development-simulator` profile，但基础 Compose 的数据库初始化仍创建模拟器数据库和角色，`payment-simulator-migrate` 也尚未进入同一 profile。因此当前单机模板还没有完成“生产不保留测试数据库”的隔离，不能据此宣称生产清单已净化；应在部署前通过站点覆盖排除，并在后续代码变更中把初始化、迁移和主进程统一纳入非生产 profile。
+远程 Compose 覆盖把 `payment-simulator` 主进程和迁移置于 `development-simulator` profile，并通过 `ENABLE_PAYMENT_SIMULATOR_DB=false` 跳过测试角色和数据库初始化。只有显式启用该 profile 的隔离开发/测试环境才可创建这些资源；生产站点不得覆盖该保护。
 
-生产必须显式选择正式 Payment Provider 并失败关闭，不能沿用 Compose 的默认模拟路径。当前 Billing 启动和 Helm 模板仍使用 `PAYMENT_SIMULATOR_URL`、`PAYMENT_SIM_HMAC_*` 等历史命名承载部分 Provider 配置；在这些配置迁移为供应商中立名称前，部署验收必须证明 `BILLING_PAYMENT_PROVIDER=h3c_mall`、正式 Adapter 配置和路由均已生效，且 Simulator 分支不可达。历史命名和仍待隔离的测试数据库属于实现债务，不表示 Simulator 是生产依赖。
+生产必须显式选择正式 Payment Provider 并失败关闭。Billing 对 `development_simulator` 只接受 `APP_ENV=development/test`；Helm 默认 `BILLING_PAYMENT_PROVIDER=h3c_mall`、`BILLING_ALLOW_TENTATIVE_PRICES=false`，使用供应商中立通知变量且无 Simulator 工作负载或配置。启动还必须找到与 Adapter 版本匹配的 `FROZEN` 商品映射，否则拒绝就绪，不能回退测试路径。
 
 ## 4. 目录约定
 
@@ -181,6 +181,8 @@ Keycloak provisioner 服务账号还必须具备读取/更新用户、重置密�
 
 Account 的 Commerce Customer worker 还要求显式冻结 `COMMERCE_PROVIDER_ID` 与 `COMMERCE_ADAPTER_VERSION`。两者会写入 Mapping、同步任务和证据，升级 Adapter 时不能用新版本解释旧任务；切换 Provider 后服务启动会为全部已验证手机号且尚无当前 Provider Mapping 的用户幂等补建任务。未配置对应 Adapter 连接时注册和模型能力保持可用，Mapping 留在待处理/重试状态，只有依赖该 Mapping 的支付被拒绝。发布前确认 `commerce_customer_mappings`、`commerce_customer_sync_jobs`、`commerce_customer_sync_evidence` 已迁移，并监控 `RETRY`、`REPAIR_REQUIRED` 及待执行任务积压。
 
+支付 Provider 中立化上线先执行 Billing `000023_payment_provider_catalog`，再滚动 Billing、Token Gateway 和 Portal/桌面。迁移把通用商品的旧 SKU 清空并写入 `TEST_ONLY` 版本映射；正式环境若没有与 `BILLING_PAYMENT_PROVIDER` 及 Adapter 版本匹配的 `FROZEN` 映射，Billing 必须启动失败。发布后抽样核对 `/v1/payment-capabilities`、商品渠道交集和新订单的 Provider/映射/能力快照；已有新版订单后禁止执行 down migration。
+
 ### 6.4 新华三商城
 
 - `COMMERCE_PROVIDER_ID=h3c_mall`
@@ -190,8 +192,9 @@ Account 的 Commerce Customer worker 还要求显式冻结 `COMMERCE_PROVIDER_ID
 - `H3C_MALL_APP_SECRET`
 - `BILLING_PAYMENT_PROVIDER=h3c_mall`
 - `BILLING_ALLOW_TENTATIVE_PRICES`
+- `BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS`（不得小于 Adapter 声明的最小查询间隔）
 
-UAT 联调可显式允许暂定目录；正式环境必须冻结商品后关闭该开关。商城特殊状态映射由 H3C 适配层处理，不能通过通用环境变量绕过服务端商品目录。
+UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C 适配层处理，不能通过通用环境变量绕过服务端商品目录。
 
 ### 6.5 Token Gateway 与 New API
 
@@ -420,12 +423,13 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 
 UAT 只使用明确的测试商品和测试商城账号：
 
-1. 创建订单前确认商品金额、SKU、积分和有效期。
+1. 创建订单前确认 `/v1/payment-capabilities` 的 Provider/版本、渠道和动作与正式合同一致，并确认商品金额、映射 SKU、积分和有效期。
 2. 返回二维码和应付金额必须与商城事实一致。
 3. 客户端退出后，Billing 继续轮询。
 4. 商城 PAID 后仅入账一次，权益包与平衡账本一致。
 5. 重复查询、服务重启和晚到支付不重复入账。
-6. 退款、主动关单、回调和账单对账入口保持禁用/不支持。
+6. 退款、主动关单、回调和账单对账入口严格按能力声明启用；H3C 当前应保持不支持。
+7. 新订单必须保存 Provider/版本、商品映射 ID、映射快照和能力快照；历史订单不随 Adapter 或映射升级变化。
 
 ### 11.4 客户端三层发布门禁
 

@@ -1510,7 +1510,7 @@ components:
       additionalProperties: false
       required: [channel, business_date]
       properties:
-        channel: { type: string, enum: [UNIONPAY, ALIPAY, WECHAT] }
+        channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
         business_date: { type: string, format: date }
   responses:
     SystemStatus:

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -111,7 +112,11 @@ func (r *ExpiredPaymentReconciler) runOnce(ctx context.Context) {
 			return
 		}
 		retryReason := safePaymentReconciliationError(syncErr)
-		nextAt := r.now().Add(paymentReconciliationBackoff(item.Attempts))
+		delay := paymentReconciliationBackoff(item.Attempts)
+		if delay < r.interval {
+			delay = r.interval
+		}
+		nextAt := r.now().Add(delay)
 		if err := r.store.RescheduleExpiredPaymentOrder(ctx, item.OrderID, retryReason, nextAt); err != nil {
 			r.logger.Error("reschedule expired payment order failed", "order_id", item.OrderID, "error", err)
 			continue
@@ -201,6 +206,9 @@ func truncatePaymentReconciliationError(value string) string {
 }
 
 func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
+	if !p.Capabilities().OrderQuerySupported {
+		return PaymentOrder{}, payment.ErrUnsupported
+	}
 	order, err := getPaymentOrderByID(ctx, p.repository.pool, orderID, false)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, ErrNotFound
@@ -229,6 +237,9 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 		return order, nil
 	}
 	if providerOrder.Status == "CLOSED" || providerOrder.Status == "FAILED" {
+		if !p.Capabilities().AuthoritativeUnpaidTerminal {
+			return order, nil
+		}
 		return p.applyProviderTerminalStatus(ctx, order, providerOrder.Status)
 	}
 	if (order.Status == "CREATED" || order.Status == "PENDING") && !order.ExpiresAt.After(p.now()) && providerOrder.Status == "PENDING" {
@@ -248,6 +259,9 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 		case "PARTIALLY_REFUNDED", "REFUNDED":
 			return p.applyProviderReviewStatus(ctx, order)
 		case "CLOSED", "FAILED":
+			if !p.Capabilities().AuthoritativeUnpaidTerminal {
+				return order, nil
+			}
 			return p.applyProviderTerminalStatus(ctx, order, closed.Status)
 		}
 	}
@@ -331,8 +345,11 @@ func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uu
 }
 
 func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, actorID uuid.UUID, reason string) (PaymentOrder, error) {
+	if !p.Capabilities().ManualRepairSupported || !p.Capabilities().OrderQuerySupported {
+		return PaymentOrder{}, payment.ErrUnsupported
+	}
 	reason = strings.TrimSpace(reason)
-	if actorID == uuid.Nil || reason == "" || len(reason) > 500 || !p.Policy().ReviewLatePayment {
+	if actorID == uuid.Nil || reason == "" || len(reason) > 500 {
 		return PaymentOrder{}, ErrConflict
 	}
 	order, err := getPaymentOrderByID(ctx, p.repository.pool, orderID, false)
@@ -442,7 +459,10 @@ func CompareReconciliation(provider []ProviderBillEntry, internal []PaymentOrder
 
 func (p *PaymentCoordinator) RunReconciliation(ctx context.Context, channel string, businessDate time.Time) (ReconciliationRun, error) {
 	channel = strings.ToUpper(strings.TrimSpace(channel))
-	if !validPaymentChannel(channel) {
+	if !p.Capabilities().BillSupported {
+		return ReconciliationRun{}, payment.ErrUnsupported
+	}
+	if !validPaymentChannel(channel) || !p.Capabilities().SupportsChannel(channel) {
 		return ReconciliationRun{}, ErrConflict
 	}
 	date := businessDate.UTC()

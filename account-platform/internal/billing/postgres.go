@@ -118,8 +118,8 @@ ORDER BY amount_fen`, currency, channel)
 	return products, rows.Err()
 }
 
-func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context) (map[string]ExternalProduct, error) {
-	rows, err := r.pool.Query(ctx, `SELECT product_id,sku_code,amount_fen FROM recharge_products WHERE enabled AND sku_code<>'' ORDER BY product_id`)
+func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context, providerID, providerVersion string, allowTestOnly bool) (map[string]ExternalProduct, error) {
+	rows, err := r.pool.Query(ctx, `SELECT id,product_id,mapping_version,provider_id,provider_version,external_sku,amount_fen,currency,channels,status FROM payment_product_mappings WHERE provider_id=$1 AND provider_version=$2 AND effective_from<=now() AND (effective_to IS NULL OR effective_to>now()) AND (status='FROZEN' OR ($3 AND status='TEST_ONLY')) ORDER BY product_id,mapping_version DESC`, providerID, providerVersion, allowTestOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -128,8 +128,11 @@ func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context) (map[st
 	for rows.Next() {
 		var productID string
 		var product ExternalProduct
-		if err := rows.Scan(&productID, &product.SKU, &product.AmountFen); err != nil {
+		if err := rows.Scan(&product.MappingID, &productID, &product.MappingVersion, &product.ProviderID, &product.ProviderVersion, &product.SKU, &product.AmountFen, &product.Currency, &product.Channels, &product.Status); err != nil {
 			return nil, err
+		}
+		if _, duplicate := products[productID]; duplicate {
+			return nil, fmt.Errorf("multiple active payment product mappings for %s", productID)
 		}
 		products[productID] = product
 	}
@@ -137,7 +140,7 @@ func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context) (map[st
 		return nil, err
 	}
 	if len(products) == 0 {
-		return nil, errors.New("no enabled Mall products are configured")
+		return nil, errors.New("no active payment product mappings are configured")
 	}
 	return products, nil
 }

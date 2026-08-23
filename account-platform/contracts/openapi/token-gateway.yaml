@@ -10,6 +10,21 @@ servers:
 security:
   - oidc: []
 paths:
+  /payment-capabilities:
+    get:
+      operationId: getPaymentCapabilities
+      summary: Discover the selected Payment Provider behavior for the active context
+      responses:
+        "200":
+          description: Provider-neutral, versioned capability declaration
+          content:
+            application/json:
+              schema:
+                $ref: "billing.yaml#/components/schemas/PaymentCapabilities"
+        "401":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /token-accounts:
     get:
       operationId: listManagedTokenAccounts
@@ -455,7 +470,7 @@ paths:
                   enum: [PLAN_TRIAL, PLAN_STANDARD, PLAN_ADVANCED, PLAN_FLAGSHIP]
                 channel:
                   type: string
-                  enum: [UNIONPAY, ALIPAY, WECHAT]
+                  pattern: '^[A-Z0-9_]{1,32}$'
       responses:
         "201":
           description: Recharge order created by Billing Service
@@ -593,7 +608,7 @@ paths:
               required: [product_id, channel]
               properties:
                 product_id: { type: string, minLength: 1 }
-                channel: { type: string, enum: [UNIONPAY, ALIPAY, WECHAT] }
+                channel: { type: string, pattern: '^[A-Z0-9_]{1,32}$' }
       responses:
         "201": { description: Order records the paying user and beneficiary organization }
         "403": { $ref: "#/components/responses/Error" }

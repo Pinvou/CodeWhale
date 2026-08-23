@@ -1,7 +1,6 @@
 package billing
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -11,16 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"math/big"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -79,52 +76,23 @@ type PaymentCoordinator struct {
 	allowTentativePrices bool
 }
 
-type ProviderOrder struct {
-	MerchantOrderNo      string     `json:"merchant_order_no"`
-	PaymentURL           string     `json:"payment_url"`
-	QRData               string     `json:"qr_data,omitempty"`
-	Status               string     `json:"status"`
-	Channel              string     `json:"channel"`
-	AmountFen            int64      `json:"amount_fen"`
-	Currency             string     `json:"currency"`
-	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
-	PaidAt               *time.Time `json:"paid_at,omitempty"`
-	ProviderStatus       string     `json:"provider_status,omitempty"`
-	ProviderTraceID      string     `json:"provider_trace_id,omitempty"`
-}
+type ProviderOrder = payment.ProviderOrder
 
 type ExternalProduct struct {
-	SKU       string `json:"sku"`
-	AmountFen int64  `json:"amount_fen"`
+	MappingID       uuid.UUID `json:"mapping_id"`
+	MappingVersion  int64     `json:"mapping_version"`
+	ProviderID      string    `json:"provider_id"`
+	ProviderVersion string    `json:"provider_version"`
+	SKU             string    `json:"external_sku"`
+	AmountFen       int64     `json:"amount_fen"`
+	Currency        string    `json:"currency"`
+	Channels        []string  `json:"channels"`
+	Status          string    `json:"status"`
 }
 
-type ProviderRefund struct {
-	MerchantRefundNo string `json:"merchant_refund_no"`
-	ChannelRefundID  string `json:"channel_refund_id,omitempty"`
-	AmountFen        int64  `json:"amount_fen"`
-	Status           string `json:"status"`
-}
-
-type ProviderBillEntry struct {
-	MerchantOrderNo      string    `json:"merchant_order_no"`
-	ChannelTransactionID string    `json:"channel_transaction_id"`
-	Channel              string    `json:"channel"`
-	AmountFen            int64     `json:"amount_fen"`
-	Currency             string    `json:"currency"`
-	Status               string    `json:"status"`
-	PaidAt               time.Time `json:"paid_at"`
-}
-
-type PaymentCapabilities struct {
-	Provider                 string `json:"provider"`
-	OrderSyncSupported       bool   `json:"order_sync_supported"`
-	RefundSupported          bool   `json:"refund_supported"`
-	CloseSupported           bool   `json:"close_supported"`
-	NotificationSupported    bool   `json:"notification_supported"`
-	ReconciliationSupported  bool   `json:"reconciliation_supported"`
-	ManualRepairSupported    bool   `json:"manual_repair_supported"`
-	CommerceCustomerRequired bool   `json:"commerce_customer_required"`
-}
+type ProviderRefund = payment.Refund
+type ProviderBillEntry = payment.BillEntry
+type PaymentCapabilities = payment.Capabilities
 
 // PaymentPolicy describes provider-specific behavior that the generic billing
 // workflow must honor. Providers opt in explicitly; future providers keep the
@@ -132,60 +100,53 @@ type PaymentCapabilities struct {
 type PaymentPolicy struct {
 	ReusePendingOrderAfterExpiry bool
 	ReviewLatePayment            bool
+	MaximumLateConfirmation      time.Duration
 }
 
 func (p PaymentPolicy) RequiresReview(expiresAt, paidAt time.Time) bool {
-	return p.ReviewLatePayment && !expiresAt.After(paidAt)
-}
-
-type paymentCapabilityProvider interface {
-	Capabilities() PaymentCapabilities
-}
-
-type paymentPolicyProvider interface {
-	Policy() PaymentPolicy
-}
-
-type PaymentProvider interface {
-	Create(context.Context, PaymentOrder, string) (ProviderOrder, error)
-	Get(context.Context, string) (ProviderOrder, error)
-	Close(context.Context, string) (ProviderOrder, error)
-	Refund(context.Context, string, string, int64) (ProviderRefund, error)
-	Bill(context.Context, string, time.Time) ([]ProviderBillEntry, error)
-}
-
-func NewPaymentCoordinator(repository *PostgresRepository, providerURL, serviceToken, merchantID, callbackURL string, secrets map[string]string) (*PaymentCoordinator, error) {
-	provider, err := NewSimulatorProvider(providerURL, serviceToken)
-	if err != nil {
-		return nil, err
+	if expiresAt.After(paidAt) {
+		return false
 	}
-	parsedSecrets := make(map[string][]byte)
-	for _, channel := range []string{"UNIONPAY", "ALIPAY", "WECHAT"} {
-		if len(secrets[channel]) < 32 {
-			return nil, fmt.Errorf("%s notification secret must contain at least 32 characters", channel)
-		}
-		parsedSecrets[channel] = []byte(secrets[channel])
-	}
-	parsedCallback, err := url.Parse(strings.TrimSpace(callbackURL))
-	if err != nil || parsedCallback.Scheme == "" || parsedCallback.Host == "" {
-		return nil, errors.New("invalid Billing payment callback URL")
-	}
-	return &PaymentCoordinator{repository: repository, provider: provider, secrets: parsedSecrets, merchantID: merchantID, callbackURL: parsedCallback.String(), now: func() time.Time { return time.Now().UTC() }, allowTentativePrices: true}, nil
+	return p.ReviewLatePayment || p.MaximumLateConfirmation <= 0 || paidAt.After(expiresAt.Add(p.MaximumLateConfirmation))
 }
+
+type PaymentProvider = payment.Provider
 
 func NewPaymentCoordinatorWithProvider(repository *PostgresRepository, provider PaymentProvider, products map[string]ExternalProduct) (*PaymentCoordinator, error) {
 	if repository == nil || provider == nil || len(products) == 0 {
 		return nil, errors.New("external payment provider and product mapping are required")
 	}
+	if !provider.Capabilities().Valid() {
+		return nil, errors.New("payment provider capabilities are invalid")
+	}
 	validated := make(map[string]ExternalProduct, len(products))
 	for productID, product := range products {
 		productID, product.SKU = strings.TrimSpace(productID), strings.TrimSpace(product.SKU)
-		if productID == "" || product.SKU == "" || product.AmountFen <= 0 {
+		if productID == "" || product.MappingID == uuid.Nil || product.MappingVersion < 1 || product.SKU == "" || product.AmountFen <= 0 || product.ProviderID != provider.Capabilities().ProviderID || product.ProviderVersion != provider.Capabilities().Version || len(product.Channels) == 0 || product.Status != "FROZEN" && product.Status != "TEST_ONLY" {
 			return nil, errors.New("external payment product mapping is invalid")
 		}
 		validated[productID] = product
 	}
 	return &PaymentCoordinator{repository: repository, provider: provider, productSKUs: validated, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+func (p *PaymentCoordinator) ConfigureNotifications(merchantID, callbackURL string, secrets map[string]string) error {
+	if !p.Capabilities().NotificationSupported {
+		return payment.ErrUnsupported
+	}
+	parsedSecrets := make(map[string][]byte)
+	for _, channel := range p.Capabilities().Channels {
+		if len(secrets[channel]) < 32 {
+			return fmt.Errorf("%s notification secret must contain at least 32 characters", channel)
+		}
+		parsedSecrets[channel] = []byte(secrets[channel])
+	}
+	parsedCallback, err := url.Parse(strings.TrimSpace(callbackURL))
+	if strings.TrimSpace(merchantID) == "" || err != nil || parsedCallback.Host == "" || parsedCallback.Scheme != "https" && parsedCallback.Scheme != "http" {
+		return errors.New("invalid payment notification configuration")
+	}
+	p.merchantID, p.callbackURL, p.secrets = merchantID, strings.TrimRight(callbackURL, "/"), parsedSecrets
+	return nil
 }
 
 func (p *PaymentCoordinator) AllowTentativePrices(allowed bool) *PaymentCoordinator {
@@ -202,26 +163,66 @@ func (p *PaymentCoordinator) FilterProducts(products []Product) []Product {
 		if product.PriceStatus != "FROZEN" && !p.allowTentativePrices {
 			continue
 		}
-		if external, ok := p.productSKUs[product.ProductID]; ok && external.AmountFen == product.AmountFen {
-			product.Channels = []string{"ALIPAY"}
+		if external, ok := p.productSKUs[product.ProductID]; ok && external.AmountFen == product.AmountFen && external.Currency == product.Currency {
+			product.Channels = intersectChannels(product.Channels, external.Channels, p.Capabilities().Channels)
+			if len(product.Channels) == 0 {
+				continue
+			}
 			filtered = append(filtered, product)
 		}
 	}
 	return filtered
 }
 
-func (p *PaymentCoordinator) Capabilities() PaymentCapabilities {
-	if provider, ok := p.provider.(paymentCapabilityProvider); ok {
-		return provider.Capabilities()
+func intersectChannels(groups ...[]string) []string {
+	if len(groups) == 0 {
+		return nil
 	}
-	return PaymentCapabilities{Provider: "unknown", OrderSyncSupported: true}
+	result := make([]string, 0, len(groups[0]))
+	for _, channel := range groups[0] {
+		channel = strings.ToUpper(strings.TrimSpace(channel))
+		if channel == "" {
+			continue
+		}
+		present := true
+		for _, group := range groups[1:] {
+			found := false
+			for _, candidate := range group {
+				found = found || strings.EqualFold(candidate, channel)
+			}
+			present = present && found
+		}
+		if present {
+			result = append(result, channel)
+		}
+	}
+	return result
+}
+
+func containsFold(values []string, target string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *PaymentCoordinator) Capabilities() PaymentCapabilities {
+	return p.provider.Capabilities()
 }
 
 func (p *PaymentCoordinator) Policy() PaymentPolicy {
-	if provider, ok := p.provider.(paymentPolicyProvider); ok {
-		return provider.Policy()
+	capabilities := p.Capabilities()
+	return PaymentPolicy{ReusePendingOrderAfterExpiry: capabilities.ReusePendingOrderAfterExpiry, ReviewLatePayment: capabilities.ReviewLatePayment, MaximumLateConfirmation: time.Duration(capabilities.MaximumLateConfirmationSeconds) * time.Second}
+}
+
+func (p *PaymentCoordinator) payableWindow() time.Duration {
+	window := time.Duration(p.Capabilities().MaximumPayableWindowSeconds) * time.Second
+	if window <= 0 {
+		return 15 * time.Minute
 	}
-	return PaymentPolicy{}
+	return window
 }
 
 func (p *PaymentCoordinator) CreateOrder(ctx context.Context, requesterID, walletID uuid.UUID, productID, channel, idempotencyKey string) (PaymentOrder, bool, error) {
@@ -241,7 +242,7 @@ func (p *PaymentCoordinator) CreateOrganizationMobileOrder(ctx context.Context, 
 
 func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walletID uuid.UUID, beneficiaryOrganizationID *uuid.UUID, productID, channel, mobile, idempotencyKey string) (PaymentOrder, bool, error) {
 	channel = strings.ToUpper(channel)
-	if len(idempotencyKey) < 16 || !validPaymentChannel(channel) {
+	if len(idempotencyKey) < 16 || !validPaymentChannel(channel) || !p.Capabilities().SupportsChannel(channel) {
 		return PaymentOrder{}, false, ErrConflict
 	}
 	tx, err := p.repository.pool.Begin(ctx)
@@ -293,7 +294,7 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	existing, err := getPendingPlanOrderForUpdate(ctx, tx, requesterID, walletID, productID, channel, now, policy.ReusePendingOrderAfterExpiry)
 	if err == nil {
 		if policy.ReusePendingOrderAfterExpiry && !existing.ExpiresAt.After(now) {
-			existing.ExpiresAt = now.Add(15 * time.Minute)
+			existing.ExpiresAt = now.Add(p.payableWindow())
 			if _, err := tx.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,reconciliation_next_at=$3,reconciliation_attempts=0,reconciliation_last_error=NULL,updated_at=$3 WHERE id=$1`, existing.ID, existing.ExpiresAt, now); err != nil {
 				return PaymentOrder{}, false, err
 			}
@@ -308,7 +309,7 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 	external := p.productSKUs[productID]
-	if len(p.productSKUs) > 0 && (channel != "ALIPAY" || mobile == "" || external.SKU == "" || external.AmountFen != product.AmountFen) {
+	if external.MappingID == uuid.Nil || external.SKU == "" || external.AmountFen != product.AmountFen || external.Currency != product.Currency || !containsFold(external.Channels, channel) || !p.Capabilities().SupportsChannel(channel) || p.Capabilities().CommerceCustomerRequired && mobile == "" {
 		return PaymentOrder{}, false, ErrConflict
 	}
 	wallet, walletErr := getWallet(ctx, tx, walletID, false)
@@ -322,13 +323,15 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, ErrConflict
 	}
 	merchantDigest := sha256.Sum256([]byte(requesterID.String() + "|" + idempotencyKey))
-	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, BeneficiaryOrganizationID: beneficiaryOrganizationID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(15 * time.Minute), Mobile: mobile, ProviderSKU: external.SKU}
+	order := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "pv-" + hex.EncodeToString(merchantDigest[:16]), RequesterID: requesterID, BeneficiaryOrganizationID: beneficiaryOrganizationID, WalletID: walletID, ProductID: productID, Channel: channel, AmountFen: product.AmountFen, Currency: product.Currency, CreditMicrocredits: product.CreditMicrocredits, Status: "CREATED", FulfillmentStatus: "PENDING", ExpiresAt: now.Add(p.payableWindow()), Mobile: mobile, ProviderSKU: external.SKU}
 	snapshot, _ := json.Marshal(product)
-	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, beneficiary_organization_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at, mobile_e164, provider_sku) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'CREATED','PENDING',$12,$13,$13,NULLIF($14,''),NULLIF($15,''))`, order.ID, order.MerchantOrderNo, requesterID, beneficiaryOrganizationID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now, mobile, external.SKU)
+	mappingSnapshot, _ := json.Marshal(external)
+	capabilitySnapshot, _ := json.Marshal(p.Capabilities())
+	_, err = tx.Exec(ctx, `INSERT INTO payment_orders(id, merchant_order_no, requester_id, beneficiary_organization_id, wallet_id, product_id, product_snapshot, channel, amount_fen, currency, credit_microcredits, status, fulfillment_status, expires_at, created_at, updated_at, mobile_e164, provider_sku,provider_id,provider_version,product_mapping_id,product_mapping_snapshot,provider_capability_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'CREATED','PENDING',$12,$13,$13,NULLIF($14,''),NULLIF($15,''),$16,$17,$18,$19,$20)`, order.ID, order.MerchantOrderNo, requesterID, beneficiaryOrganizationID, walletID, productID, snapshot, channel, order.AmountFen, order.Currency, order.CreditMicrocredits, order.ExpiresAt, now, mobile, external.SKU, p.Capabilities().ProviderID, p.Capabilities().Version, external.MappingID, mappingSnapshot, capabilitySnapshot)
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
-	providerOrder, err := p.provider.Create(ctx, order, p.callbackURL)
+	providerOrder, err := p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
@@ -354,6 +357,9 @@ func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, w
 }
 
 func (p *PaymentCoordinator) ProcessNotification(ctx context.Context, channel, signature string, body []byte) error {
+	if !p.Capabilities().NotificationSupported {
+		return payment.ErrUnsupported
+	}
 	channel = strings.ToUpper(channel)
 	secret := p.secrets[channel]
 	expected := paymentSignature(secret, body)
@@ -516,7 +522,7 @@ func issuePackageWithinTransaction(ctx context.Context, tx pgx.Tx, order Payment
 	if beneficiaryOrganizationID == nil {
 		packageUserID = &order.RequesterID
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,'ACTIVE',$11,$11,'PAYMENT',$14)`, packageID, packageUserID, order.WalletID, order.ID, primaryLotID, order.ProductID, product.PlanName, product.SKUCode, order.AmountFen, amount, now, validFrom, validUntil, reference); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO entitlement_packages(id,user_id,wallet_id,payment_order_id,credit_lot_id,product_id,plan_name,sku_code,amount_fen,points_total,points_remaining,credited_at,valid_from,valid_until,status,created_at,updated_at,source_type,source_reference) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,'ACTIVE',$11,$11,'PAYMENT',$14)`, packageID, packageUserID, order.WalletID, order.ID, primaryLotID, order.ProductID, product.PlanName, order.ProviderSKU, order.AmountFen, amount, now, validFrom, validUntil, reference); err != nil {
 		return uuid.Nil, err
 	}
 	for _, component := range components {
@@ -564,112 +570,23 @@ func splitProductComponents(total, basePoints, bonusPoints int64) ([]productComp
 
 func getPaymentOrderForUpdate(ctx context.Context, tx pgx.Tx, merchant string) (PaymentOrder, error) {
 	var o PaymentOrder
-	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.BeneficiaryOrganizationID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.QRData, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt)
+	err := tx.QueryRow(ctx, `SELECT id,merchant_order_no,requester_id,beneficiary_organization_id,wallet_id,product_id,channel,amount_fen,currency,credit_microcredits,status,fulfillment_status,COALESCE(payment_url,''),COALESCE(qr_data,''),channel_transaction_id,expires_at,paid_at,COALESCE(provider_sku,'') FROM payment_orders WHERE merchant_order_no=$1 FOR UPDATE`, merchant).Scan(&o.ID, &o.MerchantOrderNo, &o.RequesterID, &o.BeneficiaryOrganizationID, &o.WalletID, &o.ProductID, &o.Channel, &o.AmountFen, &o.Currency, &o.CreditMicrocredits, &o.Status, &o.FulfillmentStatus, &o.PaymentURL, &o.QRData, &o.ChannelTransactionID, &o.ExpiresAt, &o.PaidAt, &o.ProviderSKU)
 	return o, err
 }
 
-type SimulatorProvider struct {
-	base   *url.URL
-	token  string
-	client *http.Client
-}
-
-func (p *SimulatorProvider) Capabilities() PaymentCapabilities {
-	return PaymentCapabilities{
-		Provider: "simulator", OrderSyncSupported: true, RefundSupported: true,
-		CloseSupported: true, NotificationSupported: true, ReconciliationSupported: true,
-	}
-}
-
-func NewSimulatorProvider(raw, token string) (*SimulatorProvider, error) {
-	u, e := url.Parse(strings.TrimRight(raw, "/"))
-	if e != nil || u.Host == "" || token == "" {
-		return nil, errors.New("invalid payment simulator configuration")
-	}
-	return &SimulatorProvider{u, token, observability.NewHTTPClient(5 * time.Second)}, nil
-}
-func (p *SimulatorProvider) Create(ctx context.Context, o PaymentOrder, callback string) (ProviderOrder, error) {
-	var result ProviderOrder
-	body, _ := json.Marshal(map[string]any{"merchant_order_no": o.MerchantOrderNo, "channel": o.Channel, "amount_fen": o.AmountFen, "currency": o.Currency, "callback_url": callback, "scenario": "SUCCESS", "expires_in_seconds": 900})
-	req, e := http.NewRequestWithContext(ctx, http.MethodPost, p.base.String()+"/internal/v1/orders", bytes.NewReader(body))
-	if e != nil {
-		return result, e
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
-	req.Header.Set("Content-Type", "application/json")
-	resp, e := p.client.Do(req)
-	if e != nil {
-		return result, e
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return result, fmt.Errorf("simulator HTTP %d: %s", resp.StatusCode, data)
-	}
-	return result, json.NewDecoder(resp.Body).Decode(&result)
-}
-
-func (p *SimulatorProvider) Get(ctx context.Context, merchantOrderNo string) (ProviderOrder, error) {
-	var result ProviderOrder
-	err := p.doJSON(ctx, http.MethodGet, "/internal/v1/orders/"+url.PathEscape(merchantOrderNo), nil, &result)
-	return result, err
-}
-
-func (p *SimulatorProvider) Close(ctx context.Context, merchantOrderNo string) (ProviderOrder, error) {
-	var result ProviderOrder
-	err := p.doJSON(ctx, http.MethodPost, "/internal/v1/orders/"+url.PathEscape(merchantOrderNo)+"/close", map[string]any{}, &result)
-	return result, err
-}
-
-func (p *SimulatorProvider) Refund(ctx context.Context, merchantOrderNo, merchantRefundNo string, amountFen int64) (ProviderRefund, error) {
-	var result ProviderRefund
-	err := p.doJSON(ctx, http.MethodPost, "/internal/v1/orders/"+url.PathEscape(merchantOrderNo)+"/refunds", map[string]any{"merchant_refund_no": merchantRefundNo, "amount_fen": amountFen}, &result)
-	return result, err
-}
-
-func (p *SimulatorProvider) Bill(ctx context.Context, channel string, businessDate time.Time) ([]ProviderBillEntry, error) {
-	var result struct {
-		Items []ProviderBillEntry `json:"items"`
-	}
-	path := "/internal/v1/bills/" + businessDate.UTC().Format("2006-01-02") + "?channel=" + url.QueryEscape(strings.ToUpper(channel))
-	err := p.doJSON(ctx, http.MethodGet, path, nil, &result)
-	return result.Items, err
-}
-
-func (p *SimulatorProvider) doJSON(ctx context.Context, method, path string, input any, output any) error {
-	var body io.Reader
-	if input != nil {
-		encoded, err := json.Marshal(input)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(encoded)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, p.base.String()+path, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+p.token)
-	if input != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return fmt.Errorf("simulator HTTP %d: %s", resp.StatusCode, data)
-	}
-	if output == nil || resp.StatusCode == http.StatusNoContent {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(output)
-}
 func paymentSignature(secret, body []byte) string {
 	m := hmac.New(sha256.New, secret)
 	_, _ = m.Write(body)
 	return base64.StdEncoding.EncodeToString(m.Sum(nil))
 }
-func validPaymentChannel(v string) bool { return v == "UNIONPAY" || v == "ALIPAY" || v == "WECHAT" }
+func validPaymentChannel(v string) bool {
+	if v == "" || len(v) > 32 {
+		return false
+	}
+	for _, char := range v {
+		if char != '_' && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
