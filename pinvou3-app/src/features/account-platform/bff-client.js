@@ -81,5 +81,6 @@ export class AccountPlatformBffClient {
     const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
     return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
   }
+  cancelUsage(usageRequestId, key) { return this.request('token', `/v1/usage-requests/${encodeURIComponent(usageRequestId)}/cancel`, { method: 'POST', headers: { 'Idempotency-Key': key }, body: {} }); }
   logout() { return fetch(`${this.baseURL}/api/logout`, { method: 'POST', headers: { 'X-CSRF-Token': this.csrfToken }, credentials: 'same-origin' }); }
 }

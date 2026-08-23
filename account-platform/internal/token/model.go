@@ -18,6 +18,7 @@ var (
 	ErrAccountProvisioning           = errors.New("account is provisioning")
 	ErrAccountRepairRequired         = errors.New("account provisioning requires repair")
 	ErrOrganizationLifecycleConflict = errors.New("organization lifecycle conflicts with current state")
+	ErrCancellationRequested         = errors.New("usage cancellation was requested before dispatch")
 )
 
 type AuthorizationContext struct {
@@ -69,36 +70,55 @@ type UpstreamRequestEvidence struct {
 }
 
 type UsageRequest struct {
-	ID                   uuid.UUID
-	IdempotencyKeyDigest string
-	IdempotencyNamespace string
-	CanonicalVersion     int
-	RequestFingerprint   string
-	UserID               uuid.UUID
-	SessionID            string
-	OrganizationID       *uuid.UUID
-	TokenAccountID       uuid.UUID
-	CredentialID         uuid.UUID
-	WalletID             uuid.UUID
-	PriceVersionID       *uuid.UUID
-	HoldID               *uuid.UUID
-	Model                string
-	ModelID              *uuid.UUID
-	CatalogVersion       *int64
-	CapabilityVersionID  *uuid.UUID
-	ProtocolDefinitionID *uuid.UUID
-	RouteGeneration      *int64
-	ModelSnapshot        json.RawMessage
-	RequestSnapshot      json.RawMessage
-	Status               string
-	ExecutionStatus      string
-	ExecutionVersion     int64
-	DeliveryStatus       string
-	MaximumMicrocredits  int64
-	ActualMicrocredits   *int64
-	ErrorClass           *string
-	StartedAt            time.Time
-	UpdatedAt            time.Time
+	ID                          uuid.UUID
+	IdempotencyKeyDigest        string
+	IdempotencyNamespace        string
+	CanonicalVersion            int
+	RequestFingerprint          string
+	UserID                      uuid.UUID
+	SessionID                   string
+	OrganizationID              *uuid.UUID
+	TokenAccountID              uuid.UUID
+	CredentialID                uuid.UUID
+	WalletID                    uuid.UUID
+	PriceVersionID              *uuid.UUID
+	HoldID                      *uuid.UUID
+	Model                       string
+	ModelID                     *uuid.UUID
+	CatalogVersion              *int64
+	CapabilityVersionID         *uuid.UUID
+	ProtocolDefinitionID        *uuid.UUID
+	RouteGeneration             *int64
+	ModelSnapshot               json.RawMessage
+	RequestSnapshot             json.RawMessage
+	Status                      string
+	ExecutionStatus             string
+	ExecutionVersion            int64
+	DeliveryStatus              string
+	CancelStatus                string
+	SettlementStatus            string
+	CancelRequestedAt           *time.Time
+	UserStoppedAt               *time.Time
+	ProviderTerminalAt          *time.Time
+	FinalUsageObservedAt        *time.Time
+	LastPersistedSequence       int64
+	LastClientConfirmedSequence int64
+	MaximumMicrocredits         int64
+	ActualMicrocredits          *int64
+	ErrorClass                  *string
+	StartedAt                   time.Time
+	UpdatedAt                   time.Time
+}
+
+type CancellationResult struct {
+	UsageRequestID       uuid.UUID  `json:"usage_request_id"`
+	ExecutionStatus      string     `json:"execution_status"`
+	CancelStatus         string     `json:"cancel_status"`
+	DeliveryStatus       string     `json:"delivery_status"`
+	SettlementStatus     string     `json:"settlement_status"`
+	CancelRequestedAt    *time.Time `json:"cancel_requested_at,omitempty"`
+	ProviderTerminalAt   *time.Time `json:"provider_terminal_at,omitempty"`
+	FinalUsageObservedAt *time.Time `json:"final_usage_observed_at,omitempty"`
 }
 
 type DispatchEnvelope struct {
@@ -147,6 +167,10 @@ type UserUsageRecord struct {
 	ModelID            *uuid.UUID `json:"model_id,omitempty"`
 	CatalogVersion     *int64     `json:"catalog_version,omitempty"`
 	DisplayStatus      string     `json:"display_status"`
+	ExecutionStatus    string     `json:"execution_status"`
+	DeliveryStatus     string     `json:"delivery_status"`
+	CancelStatus       string     `json:"cancel_status"`
+	SettlementStatus   string     `json:"settlement_status"`
 	ActualMicrocredits *int64     `json:"actual_microcredits"`
 	InputTokens        *int64     `json:"input_tokens"`
 	OutputTokens       *int64     `json:"output_tokens"`
@@ -176,6 +200,9 @@ type UsageStore interface {
 	SaveReplayResult(context.Context, uuid.UUID, ReplayResult) error
 	LoadReplay(context.Context, uuid.UUID, int64) (ReplaySnapshot, error)
 	MarkDelivery(context.Context, uuid.UUID, string) error
+	RequestCancellation(context.Context, uuid.UUID, uuid.UUID, string, string, string) (CancellationResult, bool, error)
+	ConfirmPreDispatchCancellation(context.Context, uuid.UUID) (CancellationResult, error)
+	RecordDeliveryConfirmation(context.Context, uuid.UUID, string, int64) error
 	CleanupReplayRetention(context.Context) error
 	RecoverUncertainDispatches(context.Context) error
 	MarkCommitted(context.Context, uuid.UUID, int64, map[string]any) error

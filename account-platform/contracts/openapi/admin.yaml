@@ -1050,8 +1050,10 @@ paths:
   /token/admin/v1/usage-requests/{usage_request_id}/retry-reconciliation:
     post:
       operationId: retryAdminUsageReconciliation
-      summary: Reschedule a failed automatic usage reconciliation
-      parameters: [{ $ref: "#/components/parameters/UsageRequestID" }]
+      summary: Idempotently retry evidence reconciliation without resending the model request
+      parameters:
+        - { $ref: "#/components/parameters/UsageRequestID" }
+        - { $ref: "#/components/parameters/IdempotencyKey" }
       requestBody:
         required: true
         content:

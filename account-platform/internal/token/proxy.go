@@ -218,6 +218,15 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.repository.CompleteHoldAndDispatch(r.Context(), usageRequest.ID, hold.ID, price.ID); err != nil {
+		if errors.Is(err, ErrCancellationRequested) {
+			result, cancelErr := s.finishPreDispatchCancellation(context.WithoutCancel(r.Context()), usageRequest.ID)
+			if cancelErr != nil {
+				s.writeError(w, r, cancelErr)
+				return
+			}
+			api.WriteJSON(w, http.StatusOK, result)
+			return
+		}
 		_ = s.billing.Release(r.Context(), usageRequest.ID, hold.ID, "usage state persistence failed")
 		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "dispatch_intent_persistence_failed")
 		s.writeError(w, r, err)
@@ -387,6 +396,15 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 			return
 		}
 		if err := s.repository.CompleteHoldAndDispatch(context.WithoutCancel(r.Context()), usage.ID, hold.ID, envelope.Price.ID); err != nil {
+			if errors.Is(err, ErrCancellationRequested) {
+				result, cancelErr := s.finishPreDispatchCancellation(context.WithoutCancel(r.Context()), usage.ID)
+				if cancelErr != nil {
+					s.writeError(w, r, cancelErr)
+					return
+				}
+				api.WriteJSON(w, http.StatusOK, result)
+				return
+			}
 			s.writeError(w, r, err)
 			return
 		}
@@ -415,6 +433,11 @@ func (s *Service) replayUsage(w http.ResponseWriter, r *http.Request, usage Usag
 			return
 		}
 		after = parsed
+		deliveryID := strings.TrimSpace(r.Header.Get("X-Pinvou-Delivery-ID"))
+		if deliveryID == "" {
+			deliveryID = usage.SessionID
+		}
+		_ = s.repository.RecordDeliveryConfirmation(context.WithoutCancel(r.Context()), usage.ID, deliveryID, parsed)
 	}
 	w.Header().Set("X-Pinvou-Usage-Request-ID", usage.ID.String())
 	w.Header().Set("Cache-Control", "no-store")
@@ -678,6 +701,12 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 				return
 			}
 			lastSequence = sequence
+			if deliveryConnected {
+				current, stateErr := s.repository.GetUsage(context.WithoutCancel(r.Context()), usageID)
+				if stateErr == nil && current.DeliveryStatus == "USER_STOPPED" {
+					deliveryConnected = false
+				}
+			}
 			if deliveryConnected {
 				if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", sequence, strings.ToLower(eventType), payload); err != nil {
 					deliveryConnected = false

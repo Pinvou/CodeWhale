@@ -384,6 +384,30 @@ paths:
                 $ref: "#/components/schemas/UsageRequestStatus"
         "404":
           $ref: "#/components/responses/Error"
+  /usage-requests/{usage_request_id}/cancel:
+    post:
+      operationId: cancelUsageRequest
+      summary: Idempotently stop client delivery and request cancellation for the original stable user
+      description: Before a dispatch intent this releases the whole Hold and prevents provider dispatch. After a dispatch intent, unsupported adapters keep provider execution and trusted-usage settlement running in the background.
+      parameters:
+        - name: usage_request_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 16, maxLength: 128 }
+      responses:
+        "200":
+          description: Durable cancellation state; intent is not proof of provider cancellation
+          content: { application/json: { schema: { $ref: "#/components/schemas/CancellationStatus" } } }
+        "202":
+          description: Cancellation is durable while Hold or provider evidence is converging
+          content: { application/json: { schema: { $ref: "#/components/schemas/CancellationStatus" } } }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /me/usage-requests:
     get:
       operationId: listMyUsageRequests
@@ -1105,7 +1129,7 @@ components:
     UsageRequestStatus:
       type: object
       additionalProperties: false
-      required: [usage_request_id, status, execution_status, delivery_status, display_status, token_account_id, wallet_id, model, maximum_microcredits, started_at, updated_at]
+      required: [usage_request_id, status, execution_status, delivery_status, cancel_status, settlement_status, display_status, token_account_id, wallet_id, model, maximum_microcredits, last_persisted_sequence, last_client_confirmed_sequence, started_at, updated_at]
       properties:
         usage_request_id:
           type: string
@@ -1115,13 +1139,19 @@ components:
           enum: [CREATED, RESERVED, UPSTREAM_ACTIVE, SETTLEMENT_PENDING, COMMITTED, RELEASED, REVIEW]
         execution_status:
           type: string
-          enum: [RECEIVED, HOLD_RESERVING, HOLD_RESERVED, DISPATCH_INTENT_PERSISTED, UPSTREAM_DISPATCHING, STREAMING, SETTLEMENT_PENDING, SUCCEEDED, FAILED, REVIEW]
+          enum: [RECEIVED, HOLD_RESERVING, HOLD_RESERVED, DISPATCH_INTENT_PERSISTED, UPSTREAM_DISPATCHING, STREAMING, SETTLEMENT_PENDING, SUCCEEDED, FAILED, CANCELLED_BEFORE_DISPATCH, REVIEW]
         delivery_status:
           type: string
           enum: [NOT_STARTED, DELIVERING, DISCONNECTED, DELIVERED, USER_STOPPED]
+        cancel_status:
+          type: string
+          enum: [NOT_REQUESTED, CANCEL_REQUESTED, LOCAL_CONFIRMED, PROVIDER_SENT, PROVIDER_CONFIRMED, PROVIDER_REJECTED, UNSUPPORTED, RESULT_UNKNOWN, ALREADY_TERMINAL]
+        settlement_status:
+          type: string
+          enum: [HOLD_PENDING, HOLD_ACTIVE, USAGE_PENDING, SETTLED, RELEASED, REVIEW]
         display_status:
           type: string
-          enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW]
+          enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW, DISPLAY_STOPPED_EXECUTION_CONTINUES, CANCELLED_BEFORE_DISPATCH]
         token_account_id:
           type: string
           format: uuid
@@ -1138,12 +1168,30 @@ components:
           type: [integer, "null"]
           format: int64
           minimum: 0
+        cancel_requested_at: { type: [string, "null"], format: date-time }
+        provider_terminal_at: { type: [string, "null"], format: date-time }
+        final_usage_observed_at: { type: [string, "null"], format: date-time }
+        last_persisted_sequence: { type: integer, format: int64, minimum: 0 }
+        last_client_confirmed_sequence: { type: integer, format: int64, minimum: 0 }
         started_at:
           type: string
           format: date-time
         updated_at:
           type: string
           format: date-time
+    CancellationStatus:
+      type: object
+      additionalProperties: false
+      required: [usage_request_id, execution_status, cancel_status, delivery_status, settlement_status]
+      properties:
+        usage_request_id: { type: string, format: uuid }
+        execution_status: { type: string }
+        cancel_status: { type: string }
+        delivery_status: { type: string }
+        settlement_status: { type: string }
+        cancel_requested_at: { type: [string, "null"], format: date-time }
+        provider_terminal_at: { type: [string, "null"], format: date-time }
+        final_usage_observed_at: { type: [string, "null"], format: date-time }
     UsageReplayStatus:
       type: object
       additionalProperties: false
@@ -1158,7 +1206,7 @@ components:
     UserUsageRecord:
       type: object
       additionalProperties: false
-      required: [usage_request_id, model, display_status, actual_microcredits, input_tokens, output_tokens, cached_input_tokens, started_at, completed_at, updated_at]
+      required: [usage_request_id, model, display_status, execution_status, delivery_status, cancel_status, settlement_status, actual_microcredits, input_tokens, output_tokens, cached_input_tokens, started_at, completed_at, updated_at]
       properties:
         usage_request_id:
           type: string
@@ -1167,7 +1215,11 @@ components:
           type: string
         display_status:
           type: string
-          enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW]
+          enum: [IN_PROGRESS, SETTLED, SETTLEMENT_PENDING, RELEASED, MANUAL_REVIEW, DISPLAY_STOPPED_EXECUTION_CONTINUES, CANCELLED_BEFORE_DISPATCH]
+        execution_status: { type: string }
+        delivery_status: { type: string }
+        cancel_status: { type: string }
+        settlement_status: { type: string }
         actual_microcredits:
           type: [integer, "null"]
           format: int64

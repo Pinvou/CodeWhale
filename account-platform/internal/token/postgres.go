@@ -126,7 +126,8 @@ func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageReques
 		}
 	}
 	now := r.now()
-	request.Status, request.ExecutionStatus, request.ExecutionVersion, request.DeliveryStatus, request.StartedAt = "CREATED", "RECEIVED", 1, "NOT_STARTED", now
+	request.Status, request.ExecutionStatus, request.ExecutionVersion, request.DeliveryStatus = "CREATED", "RECEIVED", 1, "NOT_STARTED"
+	request.CancelStatus, request.SettlementStatus, request.StartedAt = "NOT_REQUESTED", "HOLD_PENDING", now
 	command, err := tx.Exec(ctx, `INSERT INTO usage_requests(id,idempotency_namespace,idempotency_key_digest,canonicalization_version,request_fingerprint,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,status,execution_status,execution_version,delivery_status,maximum_microcredits,request_snapshot,started_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'CREATED','RECEIVED',1,'NOT_STARTED',$19,$20,$21,$21) ON CONFLICT(user_id,idempotency_namespace,idempotency_key_digest) WHERE idempotency_key_digest IS NOT NULL DO NOTHING`, request.ID, request.IdempotencyNamespace, request.IdempotencyKeyDigest, request.CanonicalVersion, request.RequestFingerprint, request.UserID, request.SessionID, request.OrganizationID, request.TokenAccountID, request.CredentialID, request.WalletID, request.Model, request.ModelID, request.CatalogVersion, request.CapabilityVersionID, request.ProtocolDefinitionID, request.RouteGeneration, request.ModelSnapshot, request.MaximumMicrocredits, encoded, now)
 	if err != nil {
 		return UsageRequest{}, false, err
@@ -162,26 +163,26 @@ func (r *PostgresRepository) ListUsageForContext(ctx context.Context, resolved A
 	if resolved.UserID == uuid.Nil || limit < 1 || limit > 101 {
 		return nil, ErrForbidden
 	}
-	query := `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+	query := `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL
 ORDER BY started_at DESC,id DESC LIMIT $2`
 	arguments := []any{resolved.UserID, limit}
 	if cursor != nil {
-		query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+		query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL AND (started_at,id)<($2,$3)
 ORDER BY started_at DESC,id DESC LIMIT $4`
 		arguments = []any{resolved.UserID, cursor.StartedAt, cursor.ID, limit}
 	}
 	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
-		query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+		query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2
 ORDER BY started_at DESC,id DESC LIMIT $3`
 		arguments = []any{resolved.UserID, *resolved.OrganizationID, limit}
 		if cursor != nil {
-			query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+			query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2 AND (started_at,id)<($3,$4)
 ORDER BY started_at DESC,id DESC LIMIT $5`
@@ -199,7 +200,7 @@ ORDER BY started_at DESC,id DESC LIMIT $5`
 	for rows.Next() {
 		var item UserUsageRecord
 		var snapshot []byte
-		if err := rows.Scan(&item.UsageRequestID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.status, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.UsageRequestID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.status, &item.ExecutionStatus, &item.DeliveryStatus, &item.CancelStatus, &item.SettlementStatus, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if len(snapshot) > 0 {
@@ -297,7 +298,7 @@ func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUI
 	defer tx.Rollback(ctx)
 	now := r.now()
 	var walletID, tokenAccountID uuid.UUID
-	err = tx.QueryRow(ctx, `UPDATE usage_requests SET status='COMMITTED',actual_microcredits=$2,usage_snapshot=$3,terminal_at=$4,updated_at=$4,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW') RETURNING wallet_id,token_account_id`, usageID, actual, encoded, now).Scan(&walletID, &tokenAccountID)
+	err = tx.QueryRow(ctx, `UPDATE usage_requests SET status='COMMITTED',settlement_status='SETTLED',actual_microcredits=$2,usage_snapshot=$3,trusted_usage_snapshot=$3,trusted_usage_source=COALESCE(trusted_usage_source,'PROVIDER_FINAL_USAGE'),provider_terminal_at=COALESCE(provider_terminal_at,$4),final_usage_observed_at=COALESCE(final_usage_observed_at,$4),terminal_at=$4,updated_at=$4,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW') RETURNING wallet_id,token_account_id`, usageID, actual, encoded, now).Scan(&walletID, &tokenAccountID)
 	if err == nil {
 		_, err = tx.Exec(ctx, `UPDATE usage_attempts SET status='SUCCEEDED',ended_at=$2 WHERE usage_request_id=$1 AND status IN ('STARTED','STREAMING')`, usageID, now)
 	}
@@ -336,7 +337,7 @@ func (r *PostgresRepository) MarkReleased(ctx context.Context, usageID uuid.UUID
 		return err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',error_class=$2,terminal_at=$3,updated_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('CREATED','RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, strings.TrimSpace(reason), now)
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',settlement_status='RELEASED',error_class=$2,terminal_at=$3,updated_at=$3,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL WHERE id=$1 AND status IN ('CREATED','RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, strings.TrimSpace(reason), now)
 	if err != nil {
 		return err
 	}
@@ -372,7 +373,11 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 		return err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status=$2,error_class=$3,usage_snapshot=$4,reconciliation_next_at=$5,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, status, reason, encoded, now)
+	settlementStatus := "REVIEW"
+	if status == "SETTLEMENT_PENDING" || reason == "upstream_transport_unknown" || reason == "upstream_error_unknown_usage" || reason == "stream_usage_missing" || reason == "usage_missing" {
+		settlementStatus = "USAGE_PENDING"
+	}
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status=$2,settlement_status=$6,error_class=$3,usage_snapshot=$4,reconciliation_next_at=$5,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,reconciliation_stopped_at=NULL,updated_at=$5 WHERE id=$1 AND status NOT IN ('COMMITTED','RELEASED')`, usageID, status, reason, encoded, now, settlementStatus)
 	if err != nil {
 		return err
 	}
@@ -402,12 +407,12 @@ func (r *PostgresRepository) ensureUsageState(ctx context.Context, usageID uuid.
 	return nil
 }
 
-const usageSelectColumns = `id,idempotency_key_digest,idempotency_namespace,canonicalization_version,request_fingerprint,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,request_snapshot,status,execution_status,execution_version,delivery_status,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at`
+const usageSelectColumns = `id,idempotency_key_digest,idempotency_namespace,canonicalization_version,request_fingerprint,user_id,session_id,organization_id,token_account_id,credential_id,wallet_id,price_version_id,hold_id,model,model_id,catalog_version,model_capability_version_id,protocol_definition_id,route_generation,model_snapshot,request_snapshot,status,execution_status,execution_version,delivery_status,cancel_status,settlement_status,cancel_requested_at,user_stopped_at,provider_terminal_at,final_usage_observed_at,last_persisted_sequence,last_client_confirmed_sequence,maximum_microcredits,actual_microcredits,error_class,started_at,updated_at`
 
 type rowScanner interface{ Scan(...any) error }
 
 func scanUsage(row rowScanner, usage *UsageRequest) error {
-	return row.Scan(&usage.ID, &usage.IdempotencyKeyDigest, &usage.IdempotencyNamespace, &usage.CanonicalVersion, &usage.RequestFingerprint, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.ModelID, &usage.CatalogVersion, &usage.CapabilityVersionID, &usage.ProtocolDefinitionID, &usage.RouteGeneration, &usage.ModelSnapshot, &usage.RequestSnapshot, &usage.Status, &usage.ExecutionStatus, &usage.ExecutionVersion, &usage.DeliveryStatus, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
+	return row.Scan(&usage.ID, &usage.IdempotencyKeyDigest, &usage.IdempotencyNamespace, &usage.CanonicalVersion, &usage.RequestFingerprint, &usage.UserID, &usage.SessionID, &usage.OrganizationID, &usage.TokenAccountID, &usage.CredentialID, &usage.WalletID, &usage.PriceVersionID, &usage.HoldID, &usage.Model, &usage.ModelID, &usage.CatalogVersion, &usage.CapabilityVersionID, &usage.ProtocolDefinitionID, &usage.RouteGeneration, &usage.ModelSnapshot, &usage.RequestSnapshot, &usage.Status, &usage.ExecutionStatus, &usage.ExecutionVersion, &usage.DeliveryStatus, &usage.CancelStatus, &usage.SettlementStatus, &usage.CancelRequestedAt, &usage.UserStoppedAt, &usage.ProviderTerminalAt, &usage.FinalUsageObservedAt, &usage.LastPersistedSequence, &usage.LastClientConfirmedSequence, &usage.MaximumMicrocredits, &usage.ActualMicrocredits, &usage.ErrorClass, &usage.StartedAt, &usage.UpdatedAt)
 }
 
 func getUsageByIdempotency(ctx context.Context, database interface {

@@ -39,3 +39,21 @@ test('gateway persists before delivery and never binds inference keys to session
   assert.match(replay, /dispatch_result_unknown/);
   assert.match(replay, /idempotency_key_digest=NULL/);
 });
+
+test('usage cancellation separates delivery execution and trusted settlement', async () => {
+  const migration = await read('migrations/token/000015_usage_cancellation_convergence.up.sql');
+  const cancellation = await read('internal/token/cancellation.go');
+  const proxy = await read('internal/token/proxy.go');
+  const adapter = await read('internal/token/gateway_adapter.go');
+  const contract = await read('contracts/openapi/token-gateway.yaml');
+  assert.match(contract, /\/usage-requests\/\{usage_request_id\}\/cancel:/);
+  assert.match(migration, /CANCELLED_BEFORE_DISPATCH/);
+  for (const table of ['usage_cancel_commands', 'usage_cancellation_evidence', 'usage_delivery_confirmations', 'usage_platform_loss_reviews']) assert.match(migration, new RegExp(`CREATE TABLE ${table}`));
+  assert.match(migration, /last_persisted_sequence/);
+  assert.match(migration, /last_client_confirmed_sequence/);
+  assert.match(migration, /customer_debit_prohibited/);
+  assert.match(cancellation, /usage\.UserID != userID/);
+  assert.match(cancellation, /LOCAL_CONFIRMED/);
+  assert.match(proxy, /context\.WithoutCancel/);
+  assert.match(adapter, /ProviderCancelUnsupported/);
+});

@@ -335,6 +335,8 @@ docker compose --env-file <secret-env> <compose-files> build \
 
 Account `000011_permanent_user_codes` 会为历史用户回填永久编码并建立不可变触发器。迁移后必须核验：所有用户均有格式与校验码有效的唯一编码、`user_code_registry` 与用户一一对应、更新 `users.id/user_code` 和物理删除用户均被拒绝。不得通过禁用触发器、清空登记表或回滚迁移来“释放”已发放编码。
 
+Token `000015_usage_cancellation_convergence` 增加执行/取消/交付/结算四类独立状态、幂等取消与人工核对命令、不可变脱敏证据、客户端确认序号、版本化收敛时限和平台损失复核。滚动升级前必须确认旧 Gateway 不会在新迁移后写入未知状态；应先完成 Token 数据库迁移，再同时升级 Token Gateway、Portal 和桌面制品。发布后至少验证：原稳定用户在 Session/组织上下文变化后仍可取消自己的请求；派发意图前取消不调用 Provider 且唯一 Hold 全释放；意图形成后停止仅写 `USER_STOPPED`，当前 `UNSUPPORTED` Adapter 继续后台读取并按可信实际用量结算；断线不会释放 Hold 或创建第二次模型调用；人工核对重试要求幂等键且不重发模型；期限后无可信用量会释放 Hold、转 REVIEW 并永久禁止晚到证据再次扣用户。迁移会建立不可变命令/证据触发器，产生新版记录后禁止回滚到不能表达取消与损失边界的旧 Schema。
+
 不要默认执行 down migration。涉及破坏性 Schema 的发布必须先提供前向兼容阶段和单独数据迁移方案。
 
 ### 8.6 替换应用服务

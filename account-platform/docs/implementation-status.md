@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 237`、`部分实现 36`、`未实现 56`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 248`、`部分实现 32`、`未实现 49`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -57,6 +57,7 @@
 | `MODEL-CATALOG-LIFECYCLE` | Adapter 目录发现、稳定 UUID、不可变能力/目录版本、草稿 CAS、发布/弃用/移除、连续缺失核验、前向回滚、历史墓碑和请求版本快照 | Go 单测、OpenAPI lint、94 个合同测试、三语运营页面和 Helm/Compose 配置检查通过；桌面目录消费、回滚联合依赖校验、数据库运行级迁移和真实 Adapter 同步待后续任务/部署 |
 | `ROUTE-PROVISIONING-ELIGIBILITY` | 按作用域/模型/协议/代次唯一的托管路由状态机、租约认领、退避/SLA、组织模型策略、READY 资格门禁、回滚联合依赖校验和运营修复 | Go 单元测试、Rust 桌面代理测试、OpenAPI lint、95 个合同测试和三语 Portal 构建通过；数据库运行级迁移、真实 Adapter/凭据和 Worker 故障注入待部署 |
 | `USAGE-EXECUTION-REPLAY` | 稳定用户级键摘要、版本化规范指纹、Hold/派发持久状态、一次性派发租约、加密流事件/结果、Last-Event-ID 重放及24小时/30天/90天分层清理 | Go 全量单元测试、OpenAPI lint、重放结构合同和静态验证通过；数据库运行级崩溃/断线/KMS故障注入待部署，注销调用与备份清除分别由 APT-015/APT-037 接入 |
+| `USAGE-CANCELLATION-CONVERGENCE` | 原稳定用户幂等取消、派发前 Hold 全释放、派发后交付隔离、Adapter 取消能力、可信实际用量、版本化核对期限、损失复核及幂等人工重试 | Go 全量单元测试、OpenAPI lint、取消结构合同、桌面/Portal 构建和静态验证通过；真实 PostgreSQL 竞态、Provider 用量延迟、断线和故障注入待部署 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
 | `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
@@ -147,10 +148,10 @@
 | TOK-35 | 部分实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 已有盘点报告、配置备份、幂等迁移、会话/任务模型迁移和凭据清理重试；缺安装崩溃注入与制品级验收 |
 | TOK-36 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少发布、安装、运行三层门禁，更新器尚未证明迁移预检失败不替换旧版本及二进制/配置原子提交回滚 |
 | TOK-37 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少不创建用户 Hold、不产生用户费用的客户端切换 readiness、隔离合成验收身份及绑定制品/环境/服务版本的短时签名准入证明 |
-| TOK-38 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少按原请求所有者授权、持久化取消意图、派发前安全终止及竞态处理的幂等取消命令 |
-| TOK-39 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | Model Gateway Adapter 尚未声明显式取消、断流可确认取消或不支持取消的统一能力 |
-| TOK-40 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 客户端连接、交付状态与服务端模型执行仍缺少可验证的独立状态契约 |
-| TOK-41 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少取消结果、执行终态和最终实际用量的统一证据核对闭环 |
+| TOK-38 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 取消仅按原稳定 user_id 授权并持久化键摘要/指纹；派发前竞态在用量行锁内阻止意图提升、幂等释放唯一 Hold 并终结为 LOCAL_CONFIRMED/CANCELLED_BEFORE_DISPATCH，终态返回 ALREADY_TERMINAL |
+| TOK-39 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | Adapter 统一声明 EXPLICIT_CANCEL、STREAM_ABORT_CONFIRMED_CANCEL 或 UNSUPPORTED；当前 OpenAI-compatible/New API 明确为 UNSUPPORTED，不把普通 HTTP/SSE 断开伪装成取消成功 |
+| TOK-40 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-EXECUTION-REPLAY; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | execution/cancel/delivery/settlement 独立持久；断线只改 delivery，后台上下文继续读取、持久化和结算，显式停止写 USER_STOPPED 且不覆盖真实执行状态 |
+| TOK-41 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 保存取消、Provider 终态、最终用量时间线、Adapter/上游引用及不可变脱敏证据；不支持取消继续自然收敛，结果不确定按原引用退避核对并在期限转 REVIEW |
 | TOK-42 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 草稿 CAS、发布、弃用、正常/紧急移除均使用合法迁移、稳定幂等键、不可变新目录版本和审计；已发布历史由数据库触发器禁止更新/删除 |
 | TOK-43 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 连续两次上游缺失才自动弃用且从不物理删除；目录墓碑和 usage_request 显示/能力快照独立于实时 Model Gateway 保留 |
 | TOK-44 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 稳定 UUID 身份与版本化名称/别名分离；别名直接指向模型身份，结构上不能成环，发布拒绝重复别名、规范名称冲突和 REMOVED 目标 |
@@ -174,8 +175,8 @@
 | BILL-31 | 已实现 | DOC_CURRENT | GO-UNIT; RECEIVABLE-LIFECYCLE | NOT_DEPLOYED | 现金充值仅以 BASE 按最老未清应收逐笔分配，分配记录和账本不可变；退款追回、批准人工还款与核销被限制为显式受审计来源类型，不提供直接改应收入口 |
 | BILL-32 | 已实现 | DOC_CURRENT | GO-UNIT; RECEIVABLE-LIFECYCLE | NOT_DEPLOYED | BONUS 不参与清偿；应收未清期间即使存在其他可用 BONUS，该钱包上下文也不能创建新 Hold，清偿后仍沿用原到期日 |
 | BILL-33 | 已实现 | DOC_CURRENT | GO-UNIT; RECEIVABLE-LIFECYCLE | NOT_DEPLOYED | Provider 已确认拒付证据只定位一笔支付流水和其唯一权益包；撤销该包可撤销 BASE/关联 BONUS，现金本金缺口形成该订单应收，不改写支付成功事实或其他权益包；人工案件队列属于 PAY-33 |
-| BILL-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少可信实际生成量、客户端交付量和平台不可恢复交付故障之间的计费证据边界 |
-| BILL-35 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少取消期间 Hold 的派发前释放、派发后续租、期限收敛和晚到证据处理规则 |
+| BILL-34 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 结算只使用 Adapter 归一化的 Provider 最终/累计可信用量；分别保存可信用量、持久化序号、客户端确认序号和停止时间，禁止按 Hold 或字节估算收费，不可恢复证据缺口进入禁止用户扣款的平台损失复核 |
+| BILL-35 | 已实现 | DOC_CURRENT | GO-UNIT; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 派发前取消释放全部 Hold；派发后保持原 Hold 续租并按实际用量收敛，版本化最大执行/最终用量延迟/核对期限后最终查询、释放未结算 Hold并转 REVIEW，晚到证据不得重新扣用户 |
 | BILL-36 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 数据库按权益包和组成强制原始额等于可用、Hold、已用、有效/暂停授予、过期及撤销桶之和，包聚合仅由触发器投影 |
 | BILL-37 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 授予事务校验组织钱包、权益包和精确组成归属，只从该组成可用桶转入活动授予桶；数据库同时强制授予自身和组成总额守恒 |
 | BILL-38 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 分配、撤回、成员 Hold、结算、释放和到期均锁定精确组成/授予事实；组织级幂等键保存版本化请求指纹，同键异请求稳定冲突，批量子项各自提交 |
@@ -207,7 +208,7 @@
 | PAY-39 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 原子归档门禁要求超过 Provider 窗口+晚到窗口+7天、期限后成功查询和权威未支付终态，且无支付流水、冲突证据或未复核用户申诉；归档保留全部事实并可被强支付证据重开 |
 | PAY-40 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 到归档期限仍无成功权威查询会进入 PROVIDER_BLIND、保存原因/责任/下次处置、升级事件并停用该 Provider 版本新订单，不能普通归档 |
 | UI-02 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 桌面区分注册、自动登录与钱包初始化，展示 `PROVISIONING`/`REPAIR_REQUIRED`，初始化期间不请求余额、充值或平台模型 |
-| UI-13 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少停止接收、取消处理中、Provider 不支持取消、待核对和已结算的用户状态反馈 |
+| UI-13 | 已实现 | DOC_CURRENT | DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 三语用量页可停止当前客户端交付，并分别展示执行和结算状态；UNSUPPORTED 明示后台继续结束并按可信实际用量结算，不显示为即时免费 |
 | UI-14 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销阶段、脱敏阻断项和用户恢复动作展示 |
 | UI-15 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 系统凭据库保存恢复查询凭据，启动后按 `next_retry_at` 轮询并区分 Identity、Account、钱包、修复和补偿状态，处理中禁止重复注册 |
 | ADM-11 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 组织端仅以 `org.models.read/manage` 读取或 CAS 修改允许/拒绝模型策略和资格提示；真实 Token Account、路由、凭据及 Provisioning 只由平台模型运营权限访问 |
@@ -230,8 +231,8 @@
 | ADM-28 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 路由 CRUD、确定性选择和托管目标/实际代次统一展示；平台候选只有当前 READY 且账号、凭据和路由代次一致时可进入数据面，显式兼容 USER 路由保留原所有权校验 |
 | ADM-29 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 平台模型管理员可查询 Provisioning 作用域、目标/实际代次、状态、阶段、尝试次数、租约、重试/SLA 和脱敏错误，并读取尝试历史 |
 | ADM-30 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | FAILED/REPAIR_REQUIRED 才接受带原因和幂等键的修复命令；命令开启新受限轮次，只有协调 Worker 重建并验证资源后才写 READY，审计不可变 |
-| ADM-31 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 可查询用量请求和上游引用；缺流事件/请求指纹/完整证据 |
-| ADM-32 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有用量核对人工重试且不重发模型请求；完整幂等收敛仍待目标实现 |
+| ADM-31 | 已实现 | DOC_CURRENT | GO-UNIT; CONTRACT-36; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 平台模型运营查询返回请求/上下文、请求指纹、四类状态、上游引用、持久化/客户端确认序号和不可变脱敏取消证据，不返回用户正文或秘密 |
+| ADM-32 | 已实现 | DOC_CURRENT | GO-UNIT; CONTRACT-36; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 人工核对重试强制幂等键与请求指纹，只调度原上游证据查询且不重发模型请求；已释放并禁止用户扣款的平台损失案件拒绝重开收费路径 |
 | ADM-33 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW; DESKTOP-41 | NOT_DEPLOYED | 三语后台支持按状态、Provider、责任人、进入/复核时间和逾期筛选，展示能力/策略快照及不可变证据/操作时间线，并提供认领、查询、安排、严格归档和 blind 升级；无手工标记已支付入口 |
 | ADM-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销 REPAIR_REQUIRED 队列、阶段重试及禁止绕过门禁的运营能力 |
 | ADM-35 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA; RBAC-AUTH | NOT_DEPLOYED | 三语修复页及脱敏队列支持状态、阶段、责任域、年龄和 SLA 过滤；可重试确定阶段，补偿按钮与命令受24小时、无业务事实、先停用 Identity 后释放预约的证明门禁约束 |
@@ -327,9 +328,9 @@
 | TOK-19 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; METERING-PRICING-LIFECYCLE; DESKTOP-39 | NOT_DEPLOYED | 请求使用版本化 UTF8_BYTES_DIV4_CEIL 估算器、协议公式和模型输出边界动态预占；Provider 专用精确 Tokenizer 可作为后续估算器版本扩展 |
 | TOK-22 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 每请求独立 Hold；可用余额能够覆盖即可并发。 |
 | TOK-24 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 相同键和指纹恢复既有加密流事件、完整/聚合结果或当前执行/核对状态；重复路径不续租新 Hold、不重新选路且不发起第二次上游调用 |
-| TOK-31 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成功响应有 usage 时按实际成本结算并释放差额；取消终态、累计可信用量和取消核对路径不完整 |
+| TOK-31 | 已实现 | DOC_CURRENT | GO-UNIT; CONTRACT-36; DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 正常完成、失败和取消均只按 Adapter 归一化的可信 Provider 最终或累计用量结算；缺少可信用量保持 USAGE_PENDING 并走证据核对，不按 Hold 或客户端交付估算 |
 | TOK-32 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Gateway 对上游结果不确定或网络失败不自动重发模型请求，避免重复消费 |
-| TOK-33 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | REVIEW/SETTLEMENT_PENDING 可按上游证据退避核对并人工重试，且不重发模型请求；协议仍绑定 New API 且完整收敛语义不足 |
+| TOK-33 | 已实现 | DOC_CURRENT | GO-UNIT; CONTRACT-36; DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | REVIEW/SETTLEMENT_PENDING 按历史 Provider/Adapter/上游引用退避查询证据；人工重试幂等且不重发模型调用，期限后释放未结算 Hold 并进入终态复核 |
 | TOK-34 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 提供个人用量请求列表和详情，不暴露内部凭据。 |
 | BILL-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 钱包按 Owner 类型和 ID 唯一；组织请求不能隐式扣个人钱包。 |
 | BILL-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Journal Entry 与 Posting 平衡，不能直接覆盖余额。 |
@@ -468,9 +469,9 @@
 | CR-42 | BILL-20, BILL-23–BILL-25, ADM-12–ADM-13 | 闭合公式单位、输入缓存计量和零价语义 | 已实现 | 公式引用单位必须完整配置，输入与缓存输入规范化互斥；固定零价、显式继承和缺价已有独立数据与运行时语义 |
 | CR-43 | SCOPE-03, ADM-11, ADM-25–ADM-30 | 隔离组织模型业务策略与平台 Token Gateway 运营权限 | 部分实现 | 组织模型策略与平台 Token Account/路由/凭据/Provisioning 已按组织权限和 `platform.tokens.*` 隔离；APT-031 仍需完成全部 Token 运营接口的目标细分权限和统一错误契约 |
 | CR-44 | SCOPE-04, SCOPE-05, TOK-35, TOK-36, TOK-37, NFR-20 | 将客户端切换拆分为发布、安装和运行三层门禁并移除计费准入请求 | 未实现 | 服务端未就绪时不发布；迁移预检或暂存提交失败时不替换旧版本并原子恢复旧二进制/配置；新版本运行时只显示不可用和修复动作，不回退旧模型路径；准入使用无 Hold readiness 或隔离合成身份，不使用真实用户付费请求 |
-| CR-46 | TOK-24–TOK-30 | 补齐模型请求幂等、流式重放、断线恢复和 Hold 后派发恢复契约 | 未实现 | TOK-24 继续定义同一逻辑请求不重复调用上游；新增稳定用户级作用域、分层保留、同键异请求冲突、加密流事件重放、断线状态恢复和上游派发不确定时禁止盲重试 |
+| CR-46 | TOK-24–TOK-30 | 补齐模型请求幂等、流式重放、断线恢复和 Hold 后派发恢复契约 | 已实现 | 稳定用户级作用域、分层保留、同键异请求冲突、加密流事件重放、断线状态恢复、唯一 Hold 和一次性派发租约均已实现；上游派发不确定时禁止盲重试 |
 | CR-47 | REQ-ID-01–REQ-ID-03, CORE-01–CORE-07, SCOPE-01–SCOPE-05, ID-01–ID-16, ACC-01–ACC-39, TOK-01–TOK-37, BILL-01–BILL-33, PAY-01–PAY-36, UI-01–UI-12, ADM-01–ADM-32, NFR-01–NFR-25 | 删除退休需求并按依赖关系重排、重新编号全部目标能力 | 文档完成、实现状态保持原判断 | 删除编号稳定与禁止重排规则；移除目标基线中的退休能力占位；按基础能力、依赖顺序和领域相关性形成连续新编号，并同步全部文档和实现状态引用 |
-| CR-48 | TOK-29, TOK-38–TOK-41, BILL-34–BILL-35, UI-13 | 补齐用户取消、连接断开与模型计费收敛契约 | 未实现 | 取消意图、Provider 取消结果、服务端执行、客户端交付和计费结算分别保存；断线不取消，Provider 不支持取消时继续核对实际用量，按可信实际生成量计费并在取消期间安全续租、结算或超时释放 Hold |
+| CR-48 | TOK-29, TOK-38–TOK-41, BILL-34–BILL-35, UI-13 | 补齐用户取消、连接断开与模型计费收敛契约 | 已实现 | 取消意图、服务端执行、客户端交付、可信用量和结算分别保存；当前 Adapter 明确不支持取消时后台继续，按实际用量结算并在版本化期限安全续租或释放 Hold |
 | CR-49 | PAY-17, PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | 72小时未收敛订单转人工审核并闭合无回调无账单 Provider 的晚到支付处理 | 已实现 | 前72小时退避查询，边界执行最终查询后创建唯一 P2 案件并告警；前7天每日、此后每周复核，用户申诉只追加证据。正式收款要求有限晚到窗口、长期历史查询和权威未支付终态；归档要求期限后成功权威查询且不存在支付、冲突或未复核申诉，否则升级 Provider blind 并停用该版本新单 |
 | CR-50 | BILL-36–BILL-38 | 明确组织权益组成资金守恒、禁止超额授权及并发分配边界 | 已实现 | 数据库守恒桶、组织/钱包/包/组成归属校验、精确组成与授予行锁、版本化请求指纹、同键异请求冲突及逐项子事务共同禁止超额和重复分配；生产等价并发压力仍待部署验证 |
 | CR-51 | ACC-10, ACC-11, BILL-12, BILL-13, BILL-36, BILL-39 | 注销用户的未消费组织授予终局占用至原到期日 | 未实现、由 CR-54 调整 | 原规则禁止任何回收；现行规则仍要求 `ACCOUNT_CLOSED` 授予不自动回池、不可恢复、消费或普通撤回，但允许按 CR-54 的独立专用命令主动回收 |
@@ -639,15 +640,15 @@
 | TOK-28 | 流式响应持久化与重放 | 已实现 | 每个规范事件在客户端确认前使用独立 AAD 加密落库、完整性校验和连续编号，支持 Last-Event-ID 重放与聚合结果。 |
 | TOK-29 | 模型请求断线重连 | 已实现 | HTTP/SSE 断开只改变交付状态，上游继续；重连按活动流、终态、核对态和过期态恢复且不再次派发。 |
 | TOK-30 | Hold 后上游派发恢复 | 已实现 | 加密准备快照覆盖 Hold 前崩溃，Billing 幂等 EnsureHold 后原子提升正式意图；首次 Worker 租约唯一，派发不确定且上游不保证幂等时只进 REVIEW。 |
-| TOK-31 | 实际用量结算并释放差额 | 部分实现 | 成功且有 usage 时可以提交实际成本并释放剩余 Hold；取消终态、可信累计用量和取消核对路径仍需按 TOK-38–TOK-41、BILL-34–BILL-35 扩展。 |
+| TOK-31 | 实际用量结算并释放差额 | 已实现 | 成功、失败和取消均只使用归一化可信 Provider 最终或累计用量；无可信用量保持待核对，不按 Hold、字节或客户端已显示量结算。 |
 | TOK-32 | Gateway 自动重试模型请求 | 已实现 | 上游是否执行可能不确定，自动重试会造成重复消费；当前 Gateway 不自动重发模型请求。 |
-| TOK-33 | 不确定结果自动核对和人工重试 | 部分实现 | `REVIEW`/`SETTLEMENT_PENDING` 后通过 `UsageEvidenceProvider` 查询证据，24 小时内退避重试并支持管理员重试；协议仍绑定 New API 且完整收敛语义不足。 |
+| TOK-33 | 不确定结果自动核对和人工重试 | 已实现 | `REVIEW`/`SETTLEMENT_PENDING` 后按历史 Adapter 和上游引用退避查询；管理员重试具备独立幂等指纹且不重发模型，期限后释放未结算 Hold 并进入复核。 |
 | TOK-34 | 普通用户查看用量历史 | 已实现 | 提供个人用量请求列表和详情，不暴露内部凭据。 |
 | TOK-37 | 非计费客户端切换 Readiness | 未实现 | 当前没有覆盖兼容版本、OIDC、Account/Gateway 契约、目录、READY 路由和计价完整性的无副作用 readiness，也没有与真实用户钱包/账单隔离的专用合成验收身份或供桌面安全验证的短时签名准入证明。 |
-| TOK-38 | 用户取消模型请求 | 未实现 | 缺少按原请求所有者授权、持久化取消意图、派发前终止、完成竞态和幂等重复取消的统一命令。 |
-| TOK-39 | Provider 取消能力适配 | 未实现 | 当前 Model Gateway Adapter 未统一声明 EXPLICIT_CANCEL、STREAM_ABORT_CONFIRMED_CANCEL、UNSUPPORTED，也未证明取消重试幂等和最终用量获取能力。 |
-| TOK-40 | 传输连接与模型执行状态隔离 | 未实现 | 缺少 execution/cancel/delivery/settlement 四类独立状态；断线、应用退出和停止显示尚未形成“不取消、不判失败、不释放 Hold”的可验证契约。 |
-| TOK-41 | 取消结果和实际用量核对 | 未实现 | 缺少取消时间线、Provider 证据、取消不确定状态退避查询、最终用量核对和超时转 REVIEW 的闭环。 |
+| TOK-38 | 用户取消模型请求 | 已实现 | 仅原稳定用户可执行持久幂等取消；派发前通过行锁阻止意图提升、释放唯一 Hold 并写 LOCAL_CONFIRMED，完成事实优先且重复取消不重复调用。 |
+| TOK-39 | Provider 取消能力适配 | 已实现 | Adapter 统一声明三类取消能力；当前两个 Adapter 明确 UNSUPPORTED，因此停止交付但继续受控读取原调用并核对用量，不从断流推断取消。 |
+| TOK-40 | 传输连接与模型执行状态隔离 | 已实现 | execution/cancel/delivery/settlement 独立持久，断线和 USER_STOPPED 不取消、不判失败、不释放 Hold，上游在受限后台上下文继续且原请求可重放。 |
+| TOK-41 | 取消结果和实际用量核对 | 已实现 | 取消时间线、Adapter/上游引用、终态、最终用量和脱敏证据分别保存；不确定结果退避核对，期限后转 REVIEW 并进入禁止晚扣的平台损失边界。 |
 | TOK-42 | 模型目录管理生命周期 | 已实现 | DRAFT/PUBLISHED/DEPRECATED/REMOVED、CAS/ETag、幂等命令、合法迁移、不可变版本和审计已经闭环。 |
 | TOK-43 | 已移除模型的历史展示 | 已实现 | 连续缺失核验、目录墓碑和请求显示/能力快照均持久保存，不依赖实时 Model Gateway 读取历史名称。 |
 | TOK-44 | 模型重命名和别名 | 已实现 | 稳定逻辑模型 UUID 与版本化名称/别名分离，直接身份映射结构性排除循环，并拒绝别名/规范名称冲突及 REMOVED 目标。 |
@@ -679,8 +680,8 @@
 | BILL-27 | 管理员查看钱包账本详情 | 已实现 | 钱包账本查询展示 Posting、科目、业务引用、lot、权益包及 BASE/BONUS 组成，并返回每个 Journal 的零和校验；钱包、Hold、调整、应收和对账均由独立权限保护且无直接余额覆盖。 |
 | BILL-28 | 退款权益与账本冲销 | 已实现 | Provider 确认后同一事务冲销目标支付流水与权益包组合的全部 BASE、该支付产生的全部关联 BONUS 及对应账本负债；BONUS 零折现，人工赠送和其他支付来源不受影响。 |
 | BILL-33 | 订单级拒付冲销隔离 | 已实现 | 已确认拒付证据只冲销原支付流水唯一权益包的可撤销 BASE 和关联 BONUS；不足现金本金形成订单级应收，不冲销其他权益包，应收未清时冻结对应钱包上下文。 |
-| BILL-34 | 模型计费使用可信实际生成量 | 未实现 | 当前未区分 Provider 实际生成量、Gateway 持久化序号和客户端确认序号，也没有平台不可恢复交付故障转损失复核的计费边界。 |
-| BILL-35 | 取消期间 Hold 生命周期 | 未实现 | 缺少派发前取消全释放、派发后继续续租、Provider 不支持取消时自然收敛、版本化核对期限及晚到用量不得重新扣用户的规则。 |
+| BILL-34 | 模型计费使用可信实际生成量 | 已实现 | Provider 可信用量、Gateway 最后持久化序号、各客户端确认序号和用户停止时间独立保存；缺可信用量不估算结算，不可恢复缺口进入禁止用户扣款的平台损失复核。 |
+| BILL-35 | 取消期间 Hold 生命周期 | 已实现 | 派发前取消全释放，派发后继续续租并自然收敛；最大执行、最终用量延迟和核对期限按请求版本冻结，期限后释放并 REVIEW，晚到证据不得重开用户扣款。 |
 | BILL-36 | 权益组成资金守恒 | 已实现 | 数据库按权益包/组成强制原始额在可用、Hold、已用、有效/暂停授予、过期和撤销桶间守恒，包汇总由触发器投影。 |
 | BILL-37 | 权益组成禁止超额授权 | 已实现 | 授予只从同组织钱包、同包、同 BASE/BONUS 组成的可用桶转出；授予与组成均由数据库守恒约束保护。 |
 | BILL-38 | 并发分配锁与幂等边界 | 已实现 | 分配、撤回、成员 Hold、结算、释放和到期共用精确组成/授予行锁；同键异请求稳定冲突，批量逐项派生稳定子键并独立提交。 |
@@ -744,7 +745,7 @@
 | UI-10 | Web 个人充值入口 | 已实现 | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | Web 组织购买入口 | 已实现 | 具有组织采购权限的管理员可在显式活动组织页面购买组织权益；读取、授予与撤回入口分别按对应原子权限显示。 |
 | UI-12 | 支付能力降级展示 | 已实现 | 退款动作按 Provider capabilities 展示，不支持时用户及运营界面完全隐藏入口；其他能力继续按各自声明降级。 |
-| UI-13 | 模型停止与结算状态反馈 | 未实现 | 当前缺少停止接收、取消请求已受理、Provider 不支持取消、后台结束处理中、待核对和已结算的区分，也未提示取消生效前按实际用量计费。 |
+| UI-13 | 模型停止与结算状态反馈 | 已实现 | 三语用量页提供显式停止并同时展示 execution/settlement；不支持取消时明确后台继续和按可信实际用量结算，重开后读取同一请求真实状态。 |
 | UI-14 | 注销进度与阻断原因展示 | 未实现 | 当前没有持久注销状态页、脱敏阻断分类、用户恢复动作或“自动处理中”与“需要本人处理”的区分。 |
 | UI-15 | 未完成注册恢复状态展示 | 已实现 | 桌面优先在系统凭据库保存操作查询凭据，重启后按 `next_retry_at` 轮询，区分 Identity、Account、钱包、修复与补偿状态并阻止重复注册。 |
 | UI-16 | 桌面与 Web 三语完整性 | 部分实现 | 当前桌面、Portal 和管理后台路由的简中/英文/日文词条测试通过；仍需覆盖全部目标页面、错误码以及发布制品级缺词条、回退和单语硬编码门禁。 |
@@ -778,8 +779,8 @@
 | ADM-28 | 模型路由管理 | 已实现 | 路由 CRUD、确定性选择和模型目录/Provisioning 代次已联结，失配资源不能进入数据面。 |
 | ADM-29 | Provisioning 状态查询 | 已实现 | 平台模型管理员可查看代次、尝试、退避、SLA、租约和脱敏错误的独立列表及详情。 |
 | ADM-30 | Provisioning 修复 | 已实现 | 受审计、幂等的修复命令只从失败终态开启新轮次，由协调器重建并验证后推进 READY。 |
-| ADM-31 | 用量请求与证据查询 | 部分实现 | 可查询用量请求和上游引用；缺流事件、请求指纹和完整证据。 |
-| ADM-32 | 用量核对人工重试 | 部分实现 | 有用量核对人工重试且不重发模型请求；完整幂等收敛仍待目标实现。 |
+| ADM-31 | 用量请求与证据查询 | 已实现 | 可按请求读取上下文、请求指纹、Adapter/上游引用、四类状态、持久化/确认序号和脱敏取消证据，不返回正文或秘密。 |
+| ADM-32 | 用量核对人工重试 | 已实现 | 人工重试要求幂等键并冻结原因指纹，只查询既有上游证据；已进入禁止用户扣款的平台损失案件不能重开收费路径。 |
 | ADM-33 | 晚到支付人工审核管理 | 已实现 | 三语页面支持完整筛选、认领、受审计 Provider 查询、复核安排、严格归档和事实盲区升级，并展示能力/策略快照、证据及操作者时间线；不能手工录入已支付。 |
 | ADM-34 | 注销 Saga 修复 | 未实现 | 当前没有按阶段、阻断类型、SLA 和责任人管理 REPAIR_REQUIRED 注销任务的页面或受限重试命令，也没有禁止强制完成和直接释放标识的权限边界。 |
 | ADM-35 | 注册 Saga 修复 | 已实现 | 三语修复页通过受限 BFF 访问权限保护的脱敏队列，可按状态、阶段、责任域、年龄和 SLA 过滤并重试确定阶段；补偿按钮及命令受24小时和无 Account/映射/钱包/Outbox 事实证明约束。 |

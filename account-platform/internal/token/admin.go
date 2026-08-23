@@ -2,6 +2,9 @@ package token
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -59,37 +62,48 @@ type AdminTokenAccountDetail struct {
 }
 
 type AdminUsageRequest struct {
-	ID                      uuid.UUID  `json:"usage_request_id"`
-	UserID                  uuid.UUID  `json:"user_id"`
-	SessionID               string     `json:"session_id"`
-	OrganizationID          *uuid.UUID `json:"organization_id,omitempty"`
-	TokenAccountID          uuid.UUID  `json:"token_account_id"`
-	CredentialID            uuid.UUID  `json:"credential_id"`
-	WalletID                uuid.UUID  `json:"wallet_id"`
-	PriceVersionID          *uuid.UUID `json:"price_version_id,omitempty"`
-	HoldID                  *uuid.UUID `json:"hold_id,omitempty"`
-	Model                   string     `json:"model"`
-	ModelID                 *uuid.UUID `json:"model_id,omitempty"`
-	CatalogVersion          *int64     `json:"catalog_version,omitempty"`
-	CapabilityVersionID     *uuid.UUID `json:"model_capability_version_id,omitempty"`
-	ProtocolDefinitionID    *uuid.UUID `json:"protocol_definition_id,omitempty"`
-	RouteGeneration         *int64     `json:"route_generation,omitempty"`
-	Status                  string     `json:"status"`
-	MaximumMicrocredits     int64      `json:"maximum_microcredits"`
-	ActualMicrocredits      *int64     `json:"actual_microcredits,omitempty"`
-	ErrorClass              *string    `json:"error_class,omitempty"`
-	ProviderID              *string    `json:"provider_id,omitempty"`
-	AdapterVersion          *string    `json:"adapter_version,omitempty"`
-	UpstreamRequestID       *string    `json:"upstream_request_id,omitempty"`
-	AttemptStatus           *string    `json:"attempt_status,omitempty"`
-	InputTokens             *int64     `json:"input_tokens,omitempty"`
-	OutputTokens            *int64     `json:"output_tokens,omitempty"`
-	CachedInputTokens       *int64     `json:"cached_input_tokens,omitempty"`
-	ReconciliationAttempts  int        `json:"reconciliation_attempts"`
-	ReconciliationLastError *string    `json:"reconciliation_last_error,omitempty"`
-	ReconciliationStoppedAt *time.Time `json:"reconciliation_stopped_at,omitempty"`
-	StartedAt               time.Time  `json:"started_at"`
-	UpdatedAt               time.Time  `json:"updated_at"`
+	ID                          uuid.UUID       `json:"usage_request_id"`
+	UserID                      uuid.UUID       `json:"user_id"`
+	SessionID                   string          `json:"session_id"`
+	OrganizationID              *uuid.UUID      `json:"organization_id,omitempty"`
+	TokenAccountID              uuid.UUID       `json:"token_account_id"`
+	CredentialID                uuid.UUID       `json:"credential_id"`
+	WalletID                    uuid.UUID       `json:"wallet_id"`
+	PriceVersionID              *uuid.UUID      `json:"price_version_id,omitempty"`
+	HoldID                      *uuid.UUID      `json:"hold_id,omitempty"`
+	Model                       string          `json:"model"`
+	ModelID                     *uuid.UUID      `json:"model_id,omitempty"`
+	CatalogVersion              *int64          `json:"catalog_version,omitempty"`
+	CapabilityVersionID         *uuid.UUID      `json:"model_capability_version_id,omitempty"`
+	ProtocolDefinitionID        *uuid.UUID      `json:"protocol_definition_id,omitempty"`
+	RouteGeneration             *int64          `json:"route_generation,omitempty"`
+	Status                      string          `json:"status"`
+	RequestFingerprint          string          `json:"request_fingerprint"`
+	ExecutionStatus             string          `json:"execution_status"`
+	DeliveryStatus              string          `json:"delivery_status"`
+	CancelStatus                string          `json:"cancel_status"`
+	SettlementStatus            string          `json:"settlement_status"`
+	MaximumMicrocredits         int64           `json:"maximum_microcredits"`
+	ActualMicrocredits          *int64          `json:"actual_microcredits,omitempty"`
+	ErrorClass                  *string         `json:"error_class,omitempty"`
+	ProviderID                  *string         `json:"provider_id,omitempty"`
+	AdapterVersion              *string         `json:"adapter_version,omitempty"`
+	UpstreamRequestID           *string         `json:"upstream_request_id,omitempty"`
+	AttemptStatus               *string         `json:"attempt_status,omitempty"`
+	InputTokens                 *int64          `json:"input_tokens,omitempty"`
+	OutputTokens                *int64          `json:"output_tokens,omitempty"`
+	CachedInputTokens           *int64          `json:"cached_input_tokens,omitempty"`
+	ReconciliationAttempts      int             `json:"reconciliation_attempts"`
+	ReconciliationLastError     *string         `json:"reconciliation_last_error,omitempty"`
+	ReconciliationStoppedAt     *time.Time      `json:"reconciliation_stopped_at,omitempty"`
+	CancelRequestedAt           *time.Time      `json:"cancel_requested_at,omitempty"`
+	ProviderTerminalAt          *time.Time      `json:"provider_terminal_at,omitempty"`
+	FinalUsageObservedAt        *time.Time      `json:"final_usage_observed_at,omitempty"`
+	LastPersistedSequence       int64           `json:"last_persisted_sequence"`
+	LastClientConfirmedSequence int64           `json:"last_client_confirmed_sequence"`
+	CancellationEvidence        json.RawMessage `json:"cancellation_evidence"`
+	StartedAt                   time.Time       `json:"started_at"`
+	UpdatedAt                   time.Time       `json:"updated_at"`
 }
 
 type adminRepository interface {
@@ -101,7 +115,7 @@ type adminRepository interface {
 	AdminRecordCredentialValidation(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, bool) (AdminCredentialMetadata, error)
 	AdminUsageRequests(context.Context, int) ([]AdminUsageRequest, error)
 	AdminUsageRequest(context.Context, uuid.UUID) (AdminUsageRequest, error)
-	AdminRetryReconciliation(context.Context, uuid.UUID, string, uuid.UUID) (AdminUsageRequest, error)
+	AdminRetryReconciliation(context.Context, uuid.UUID, string, uuid.UUID, string) (AdminUsageRequest, error)
 }
 
 func tokenAdminLimit(r *http.Request) int {
@@ -324,7 +338,12 @@ func (s *Service) adminRetryReconciliation(w http.ResponseWriter, r *http.Reques
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	result, err := repository.AdminRetryReconciliation(r.Context(), usageID, body.Reason, tokenAdminActor(r))
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(key) < 16 || len(key) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := repository.AdminRetryReconciliation(r.Context(), usageID, body.Reason, tokenAdminActor(r), replayDigest([]byte(key)))
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -506,10 +525,13 @@ func (r *PostgresRepository) AdminRecordCredentialValidation(ctx context.Context
 
 func adminUsageQuery() string {
 	return `SELECT request.id,request.user_id,request.session_id,request.organization_id,request.token_account_id,
-request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,COALESCE(request.model_snapshot->>'display_name',request.model),request.model_id,request.catalog_version,request.model_capability_version_id,request.protocol_definition_id,request.route_generation,request.status,
+request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,COALESCE(request.model_snapshot->>'display_name',request.model),request.model_id,request.catalog_version,request.model_capability_version_id,request.protocol_definition_id,request.route_generation,request.status,request.request_fingerprint,
+request.execution_status,request.delivery_status,request.cancel_status,request.settlement_status,
 request.maximum_microcredits,request.actual_microcredits,request.error_class,attempt.provider_id,
 attempt.adapter_version,attempt.upstream_request_id,attempt.status,attempt.input_tokens,attempt.output_tokens,attempt.cached_input_tokens,
 request.reconciliation_attempts,request.reconciliation_last_error,request.reconciliation_stopped_at,
+request.cancel_requested_at,request.provider_terminal_at,request.final_usage_observed_at,request.last_persisted_sequence,request.last_client_confirmed_sequence,
+COALESCE((SELECT jsonb_agg(jsonb_build_object('evidence_type',evidence.evidence_type,'provider_id',evidence.provider_id,'adapter_version',evidence.adapter_version,'upstream_reference_digest',evidence.upstream_reference_digest,'evidence',evidence.sanitized_evidence,'occurred_at',evidence.occurred_at) ORDER BY evidence.occurred_at) FROM usage_cancellation_evidence evidence WHERE evidence.usage_request_id=request.id),'[]'::jsonb),
 request.started_at,request.updated_at FROM usage_requests request
 LEFT JOIN usage_attempts attempt ON attempt.usage_request_id=request.id`
 }
@@ -517,10 +539,12 @@ LEFT JOIN usage_attempts attempt ON attempt.usage_request_id=request.id`
 func scanAdminUsage(row interface{ Scan(...any) error }) (AdminUsageRequest, error) {
 	var item AdminUsageRequest
 	err := row.Scan(&item.ID, &item.UserID, &item.SessionID, &item.OrganizationID, &item.TokenAccountID,
-		&item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.CapabilityVersionID, &item.ProtocolDefinitionID, &item.RouteGeneration, &item.Status,
+		&item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.CapabilityVersionID, &item.ProtocolDefinitionID, &item.RouteGeneration, &item.Status, &item.RequestFingerprint,
+		&item.ExecutionStatus, &item.DeliveryStatus, &item.CancelStatus, &item.SettlementStatus,
 		&item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass, &item.ProviderID,
 		&item.AdapterVersion, &item.UpstreamRequestID, &item.AttemptStatus, &item.InputTokens, &item.OutputTokens, &item.CachedInputTokens,
-		&item.ReconciliationAttempts, &item.ReconciliationLastError, &item.ReconciliationStoppedAt, &item.StartedAt, &item.UpdatedAt)
+		&item.ReconciliationAttempts, &item.ReconciliationLastError, &item.ReconciliationStoppedAt,
+		&item.CancelRequestedAt, &item.ProviderTerminalAt, &item.FinalUsageObservedAt, &item.LastPersistedSequence, &item.LastClientConfirmedSequence, &item.CancellationEvidence, &item.StartedAt, &item.UpdatedAt)
 	return item, err
 }
 
@@ -549,9 +573,9 @@ func (r *PostgresRepository) AdminUsageRequest(ctx context.Context, usageID uuid
 	return item, err
 }
 
-func (r *PostgresRepository) AdminRetryReconciliation(ctx context.Context, usageID uuid.UUID, reason string, actorID uuid.UUID) (AdminUsageRequest, error) {
+func (r *PostgresRepository) AdminRetryReconciliation(ctx context.Context, usageID uuid.UUID, reason string, actorID uuid.UUID, keyDigest string) (AdminUsageRequest, error) {
 	reason = strings.TrimSpace(reason)
-	if usageID == uuid.Nil || actorID == uuid.Nil || reason == "" {
+	if usageID == uuid.Nil || actorID == uuid.Nil || reason == "" || len(keyDigest) != 64 {
 		return AdminUsageRequest{}, ErrForbidden
 	}
 	now := r.now()
@@ -560,7 +584,28 @@ func (r *PostgresRepository) AdminRetryReconciliation(ctx context.Context, usage
 		return AdminUsageRequest{}, err
 	}
 	defer tx.Rollback(ctx)
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=$3,reconciliation_stopped_at=NULL,updated_at=$2 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')`, usageID, now, truncateReconciliationError("manual retry requested: "+reason))
+	fingerprintBytes := sha256.Sum256([]byte("pinvou-usage-reconcile-v1\x00" + usageID.String() + "\x00" + reason))
+	fingerprint := hex.EncodeToString(fingerprintBytes[:])
+	commandID := uuid.Must(uuid.NewV7())
+	insert, err := tx.Exec(ctx, `INSERT INTO usage_reconciliation_commands(id,usage_request_id,actor_user_id,idempotency_key_digest,request_fingerprint,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(actor_user_id,idempotency_key_digest) DO NOTHING`, commandID, usageID, actorID, keyDigest, fingerprint, reason, now)
+	if err != nil {
+		return AdminUsageRequest{}, err
+	}
+	if insert.RowsAffected() == 0 {
+		var storedUsage uuid.UUID
+		var storedFingerprint string
+		if err := tx.QueryRow(ctx, `SELECT usage_request_id,request_fingerprint FROM usage_reconciliation_commands WHERE actor_user_id=$1 AND idempotency_key_digest=$2`, actorID, keyDigest).Scan(&storedUsage, &storedFingerprint); err != nil {
+			return AdminUsageRequest{}, err
+		}
+		if storedUsage != usageID || storedFingerprint != fingerprint {
+			return AdminUsageRequest{}, ErrIdempotencyConflict
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return AdminUsageRequest{}, err
+		}
+		return r.AdminUsageRequest(ctx, usageID)
+	}
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=$3,reconciliation_stopped_at=NULL,updated_at=$2 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND NOT EXISTS(SELECT 1 FROM usage_platform_loss_reviews loss WHERE loss.usage_request_id=usage_requests.id AND loss.customer_debit_prohibited)`, usageID, now, truncateReconciliationError("manual retry requested: "+reason))
 	if err != nil {
 		return AdminUsageRequest{}, err
 	}

@@ -99,16 +99,29 @@ WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_sto
 
 func (r *PostgresRepository) StopReconciliation(ctx context.Context, usageID uuid.UUID, reason string) error {
 	now := r.now()
-	command, err := r.pool.Exec(ctx, `UPDATE usage_requests
-SET status='REVIEW',error_class='automatic_reconciliation_exhausted',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=$2,reconciliation_stopped_at=$3,updated_at=$3
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	command, err := tx.Exec(ctx, `UPDATE usage_requests
+SET status='REVIEW',settlement_status='REVIEW',cancel_status=CASE WHEN cancel_status IN ('CANCEL_REQUESTED','PROVIDER_SENT','PROVIDER_CONFIRMED') THEN 'RESULT_UNKNOWN' ELSE cancel_status END,error_class='automatic_reconciliation_exhausted',reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=$2,reconciliation_stopped_at=$3,updated_at=$3
 WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')`, usageID, truncateReconciliationError(reason), now)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() == 0 {
+		if err := tx.Rollback(ctx); err != nil {
+			return err
+		}
 		return r.ensureUsageState(ctx, usageID, "COMMITTED", "RELEASED")
 	}
-	return nil
+	if strings.Contains(reason, "trusted usage deadline exceeded") {
+		if _, err := tx.Exec(ctx, `INSERT INTO usage_platform_loss_reviews(id,usage_request_id,cause_code,provider_cost_evidence,created_at) VALUES($1,$2,'TRUSTED_USAGE_DEADLINE_EXCEEDED',jsonb_build_object('customer_hold_released',true,'late_usage_customer_debit_prohibited',true),$3) ON CONFLICT(usage_request_id) DO NOTHING`, uuid.Must(uuid.NewV7()), usageID, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func truncateReconciliationError(value string) string {
@@ -323,8 +336,18 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 	for _, item := range items {
 		if err := r.reconcile(ctx, item); err != nil {
 			r.logger.Warn("request reconciliation deferred", "usage_request_id", item.ID, "attempt", item.Attempts, "error", err)
-			if errors.Is(err, errManualReconciliationRequired) || r.now().Sub(item.StartedAt) >= r.maxAge {
+			if errors.Is(err, errManualReconciliationRequired) {
 				_ = r.store.StopReconciliation(ctx, item.ID, "automatic reconciliation exhausted: "+err.Error())
+				continue
+			}
+			if r.now().Sub(item.StartedAt) >= r.maxAge {
+				if item.HoldID != nil {
+					if releaseErr := r.billing.Release(ctx, item.ID, *item.HoldID, "trusted usage deadline exceeded"); releaseErr != nil {
+						_ = r.store.RescheduleReconciliation(ctx, item.ID, "deadline hold release failed: "+releaseErr.Error(), r.now().Add(reconciliationBackoff(item.Attempts)))
+						continue
+					}
+				}
+				_ = r.store.StopReconciliation(ctx, item.ID, "trusted usage deadline exceeded after final evidence check: "+err.Error())
 				continue
 			}
 			_ = r.store.RescheduleReconciliation(ctx, item.ID, err.Error(), r.now().Add(reconciliationBackoff(item.Attempts)))

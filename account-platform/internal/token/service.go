@@ -103,6 +103,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
 	protected.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
 	protected.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
+	protected.POST("/v1/usage-requests/:usage_request_id/cancel", httpserver.AdaptFunc(s.cancelUsageRequest))
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
 	protected.GET("/v1/model-protocols", httpserver.AdaptFunc(s.modelProtocols))
 	protected.GET("/v1/models", httpserver.AdaptFunc(s.listCatalogModels))
@@ -681,11 +682,89 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, map[string]any{
-		"usage_request_id": usage.ID, "status": usage.Status, "execution_status": usage.ExecutionStatus, "delivery_status": usage.DeliveryStatus, "display_status": usageDisplayStatus(usage),
+		"usage_request_id": usage.ID, "status": usage.Status, "execution_status": usage.ExecutionStatus, "delivery_status": usage.DeliveryStatus, "cancel_status": usage.CancelStatus, "settlement_status": usage.SettlementStatus, "display_status": usageDisplayStatus(usage),
 		"token_account_id": usage.TokenAccountID, "wallet_id": usage.WalletID, "model": usage.Model,
 		"maximum_microcredits": usage.MaximumMicrocredits, "actual_microcredits": usage.ActualMicrocredits,
+		"cancel_requested_at": usage.CancelRequestedAt, "provider_terminal_at": usage.ProviderTerminalAt, "final_usage_observed_at": usage.FinalUsageObservedAt,
+		"last_persisted_sequence": usage.LastPersistedSequence, "last_client_confirmed_sequence": usage.LastClientConfirmedSequence,
 		"started_at": usage.StartedAt, "updated_at": usage.UpdatedAt,
 	})
+}
+
+func (s *Service) cancelUsageRequest(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return
+	}
+	usageID, err := uuid.Parse(r.PathValue("usage_request_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid usage request", httpserver.RequestID(r.Context()))
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if len(key) < 16 || len(key) > 128 {
+		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, preDispatch, err := s.repository.RequestCancellation(r.Context(), usageID, resolved.UserID, digestString([]byte(key)), cancellationFingerprint(usageID), s.upstream.AdapterVersion())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	if preDispatch {
+		result, err = s.finishPreDispatchCancellation(context.WithoutCancel(r.Context()), usageID)
+		if err != nil {
+			if definitiveBillingFailure(err) {
+				s.writeError(w, r, err)
+				return
+			}
+			w.Header().Set("Location", "/v1/usage-requests/"+usageID.String())
+			api.WriteJSON(w, http.StatusAccepted, result)
+			return
+		}
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	api.WriteJSON(w, http.StatusOK, result)
+}
+
+func (s *Service) finishPreDispatchCancellation(ctx context.Context, usageID uuid.UUID) (CancellationResult, error) {
+	usage, err := s.repository.GetUsage(ctx, usageID)
+	if err != nil {
+		return CancellationResult{}, err
+	}
+	if usage.ExecutionStatus == "RECEIVED" {
+		return s.repository.ConfirmPreDispatchCancellation(ctx, usageID)
+	}
+	if usage.HoldID == nil {
+		envelope, err := s.repository.LoadDispatchPreparation(ctx, usageID)
+		if err != nil {
+			return CancellationResult{}, err
+		}
+		hold, err := s.ensureUsageHold(ctx, usage, envelope)
+		if err != nil {
+			if definitiveBillingFailure(err) {
+				return s.repository.ConfirmPreDispatchCancellation(ctx, usageID)
+			}
+			return cancellationSnapshot(usage), err
+		}
+		err = s.repository.CompleteHoldAndDispatch(ctx, usageID, hold.ID, envelope.Price.ID)
+		if err != nil && !errors.Is(err, ErrCancellationRequested) {
+			return CancellationResult{}, err
+		}
+		usage, err = s.repository.GetUsage(ctx, usageID)
+		if err != nil {
+			return CancellationResult{}, err
+		}
+	}
+	if usage.ExecutionStatus != "HOLD_RESERVING" && usage.ExecutionStatus != "HOLD_RESERVED" {
+		return cancellationSnapshot(usage), nil
+	}
+	if usage.HoldID != nil {
+		if err := s.billing.Release(ctx, usageID, *usage.HoldID, "cancelled before dispatch intent"); err != nil {
+			return cancellationSnapshot(usage), err
+		}
+	}
+	return s.repository.ConfirmPreDispatchCancellation(ctx, usageID)
 }
 
 func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
@@ -724,7 +803,7 @@ func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
 		usageRequests = usageRequests[:limit]
 	}
 	for index := range usageRequests {
-		usageRequests[index].DisplayStatus = usageDisplayStatus(UsageRequest{Status: usageRequests[index].status})
+		usageRequests[index].DisplayStatus = usageDisplayStatus(UsageRequest{Status: usageRequests[index].status, ExecutionStatus: usageRequests[index].ExecutionStatus, DeliveryStatus: usageRequests[index].DeliveryStatus, CancelStatus: usageRequests[index].CancelStatus, SettlementStatus: usageRequests[index].SettlementStatus})
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": usageRequests, "next_cursor": nextCursor})
@@ -769,6 +848,12 @@ func usageContextMatches(context AuthorizationContext, usage UsageRequest) bool 
 }
 
 func usageDisplayStatus(usage UsageRequest) string {
+	if usage.DeliveryStatus == "USER_STOPPED" && usage.CancelStatus != "LOCAL_CONFIRMED" {
+		return "DISPLAY_STOPPED_EXECUTION_CONTINUES"
+	}
+	if usage.CancelStatus == "LOCAL_CONFIRMED" {
+		return "CANCELLED_BEFORE_DISPATCH"
+	}
 	switch usage.Status {
 	case "CREATED", "RESERVED", "UPSTREAM_ACTIVE":
 		return "IN_PROGRESS"

@@ -134,8 +134,8 @@ func (r *PostgresRepository) CompleteHoldAndDispatch(ctx context.Context, usageI
 	}
 	defer tx.Rollback(ctx)
 	now := r.now()
-	var status string
-	if err := tx.QueryRow(ctx, `SELECT execution_status FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status); errors.Is(err, pgx.ErrNoRows) {
+	var status, cancelStatus string
+	if err := tx.QueryRow(ctx, `SELECT execution_status,cancel_status FROM usage_requests WHERE id=$1 FOR UPDATE`, usageID).Scan(&status, &cancelStatus); errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
@@ -146,7 +146,7 @@ func (r *PostgresRepository) CompleteHoldAndDispatch(ctx context.Context, usageI
 	if status != "HOLD_RESERVING" {
 		return ErrForbidden
 	}
-	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',hold_id=$2,price_version_id=$3,updated_at=$4 WHERE id=$1 AND status='CREATED'`, usageID, holdID, priceVersionID, now)
+	command, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RESERVED',settlement_status='HOLD_ACTIVE',hold_id=$2,price_version_id=$3,updated_at=$4 WHERE id=$1 AND status='CREATED'`, usageID, holdID, priceVersionID, now)
 	if err != nil {
 		return err
 	}
@@ -155,6 +155,12 @@ func (r *PostgresRepository) CompleteHoldAndDispatch(ctx context.Context, usageI
 	}
 	if err := transitionExecutionTx(ctx, tx, usageID, []string{"HOLD_RESERVING"}, "HOLD_RESERVED", "billing ensured one hold", now); err != nil {
 		return err
+	}
+	if cancelStatus == "CANCEL_REQUESTED" {
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return ErrCancellationRequested
 	}
 	command, err = tx.Exec(ctx, `INSERT INTO usage_dispatch_intents(usage_request_id,encrypted_envelope,key_id,envelope_integrity,upstream_idempotency_key,adapter_supports_idempotency,created_at) SELECT usage_request_id,encrypted_envelope,key_id,envelope_integrity,$2,false,$3 FROM usage_dispatch_preparations WHERE usage_request_id=$1 ON CONFLICT(usage_request_id) DO NOTHING`, usageID, "pinvou-"+usageID.String(), now)
 	if err != nil {
@@ -266,7 +272,11 @@ func (r *PostgresRepository) MarkHoldReserving(ctx context.Context, usageID uuid
 }
 
 func (r *PostgresRepository) MarkResponseReceived(ctx context.Context, usageID uuid.UUID) error {
-	return r.transitionExecution(ctx, usageID, []string{"UPSTREAM_DISPATCHING", "STREAMING"}, "SETTLEMENT_PENDING", "complete upstream response persisted")
+	if err := r.transitionExecution(ctx, usageID, []string{"UPSTREAM_DISPATCHING", "STREAMING"}, "SETTLEMENT_PENDING", "complete upstream response persisted"); err != nil {
+		return err
+	}
+	_, err := r.pool.Exec(ctx, `UPDATE usage_requests SET settlement_status='USAGE_PENDING',provider_terminal_at=COALESCE(provider_terminal_at,$2),updated_at=$2 WHERE id=$1`, usageID, r.now())
+	return err
 }
 
 func (r *PostgresRepository) AppendReplayEvent(ctx context.Context, usageID uuid.UUID, eventType string, payload []byte) (int64, error) {
@@ -303,6 +313,9 @@ func (r *PostgresRepository) AppendReplayEvent(ctx context.Context, usageID uuid
 	if err != nil {
 		return 0, err
 	}
+	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET last_persisted_sequence=$2,updated_at=$3 WHERE id=$1`, usageID, sequence, now); err != nil {
+		return 0, err
+	}
 	return sequence, tx.Commit(ctx)
 }
 
@@ -319,7 +332,27 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 		finalUsage = result.FinalUsage
 	}
 	now := r.now()
-	_, err = r.pool.Exec(ctx, `INSERT INTO usage_replay_results(usage_request_id,response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,final_usage,last_sequence,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL) ON CONFLICT(usage_request_id) DO NOTHING`, usageID, result.Kind, result.HTTPStatus, result.ContentType, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), finalUsage, result.LastSequence, now)
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	_, err = tx.Exec(ctx, `INSERT INTO usage_replay_results(usage_request_id,response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,final_usage,last_sequence,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL) ON CONFLICT(usage_request_id) DO NOTHING`, usageID, result.Kind, result.HTTPStatus, result.ContentType, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), finalUsage, result.LastSequence, now)
+	if err != nil {
+		return err
+	}
+	if result.FinalUsage != nil {
+		encodedUsage, marshalErr := json.Marshal(result.FinalUsage)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, err = tx.Exec(ctx, `UPDATE usage_requests SET trusted_usage_snapshot=$2,trusted_usage_source='PROVIDER_FINAL_USAGE',final_usage_observed_at=COALESCE(final_usage_observed_at,$3),provider_terminal_at=COALESCE(provider_terminal_at,$3),settlement_status='USAGE_PENDING',updated_at=$3 WHERE id=$1`, usageID, encodedUsage, now); err != nil {
+			return err
+		}
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
 	return err
 }
 
@@ -398,14 +431,41 @@ func (r *PostgresRepository) MarkDelivery(ctx context.Context, usageID uuid.UUID
 	default:
 		return ErrForbidden
 	}
-	command, err := r.pool.Exec(ctx, `UPDATE usage_requests SET delivery_status=$2,updated_at=$3 WHERE id=$1`, usageID, status, r.now())
+	command, err := r.pool.Exec(ctx, `UPDATE usage_requests SET delivery_status=$2,user_stopped_at=CASE WHEN $2='USER_STOPPED' THEN COALESCE(user_stopped_at,$3) ELSE user_stopped_at END,updated_at=$3 WHERE id=$1 AND (delivery_status<>'USER_STOPPED' OR $2='USER_STOPPED')`, usageID, status, r.now())
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() != 1 {
-		return ErrNotFound
+		var exists bool
+		if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM usage_requests WHERE id=$1)`, usageID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return ErrNotFound
+		}
 	}
 	return nil
+}
+
+func (r *PostgresRepository) RecordDeliveryConfirmation(ctx context.Context, usageID uuid.UUID, deliveryID string, sequence int64) error {
+	deliveryID = strings.TrimSpace(deliveryID)
+	if usageID == uuid.Nil || deliveryID == "" || sequence < 0 {
+		return ErrForbidden
+	}
+	digest := replayDigest([]byte(deliveryID))
+	now := r.now()
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `INSERT INTO usage_delivery_confirmations(usage_request_id,delivery_id_digest,last_confirmed_sequence,confirmed_at) VALUES($1,$2,$3,$4) ON CONFLICT(usage_request_id,delivery_id_digest) DO UPDATE SET last_confirmed_sequence=GREATEST(usage_delivery_confirmations.last_confirmed_sequence,EXCLUDED.last_confirmed_sequence),confirmed_at=EXCLUDED.confirmed_at`, usageID, digest, sequence, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET last_client_confirmed_sequence=GREATEST(last_client_confirmed_sequence,$2),updated_at=$3 WHERE id=$1`, usageID, sequence, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func addReplayTombstone(ctx context.Context, tx pgx.Tx, usageID uuid.UUID, terminal string, now time.Time) error {

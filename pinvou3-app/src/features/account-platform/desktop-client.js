@@ -99,4 +99,5 @@ export class AccountPlatformDesktopClient {
     const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
     return this.request('token', `/v1/me/usage-requests?limit=20${next}`, { signal });
   }
+  cancelUsage(usageRequestId, key) { return this.request('token', `/v1/usage-requests/${encodeURIComponent(usageRequestId)}/cancel`, { method: 'POST', idempotencyKey: key, body: {} }); }
 }

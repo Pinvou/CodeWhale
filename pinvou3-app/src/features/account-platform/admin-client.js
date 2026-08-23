@@ -135,7 +135,7 @@ export class AdminPlatformClient {
   validateTokenCredential(tokenAccountID, credentialID) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credentials/${encodeURIComponent(credentialID)}/validate`, 'POST', {}); }
   usageRequests(signal) { return this.request('token', '/admin/v1/usage-requests?limit=100', signal); }
   usageRequest(usageRequestID, signal) { return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal); }
-  retryUsageReconciliation(usageRequestID, reason) { return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }); }
+  retryUsageReconciliation(usageRequestID, reason) { return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }, `usage-reconcile-${crypto.randomUUID()}`); }
   catalogModels(signal) { return this.request('token', '/admin/v1/models', signal); }
   saveModelDraft(modelID, input) { return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/draft`, 'PUT', input); }
   publishModelDraft(modelID, input) { return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/publish`, 'POST', input); }

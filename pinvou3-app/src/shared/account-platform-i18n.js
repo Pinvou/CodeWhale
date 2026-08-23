@@ -32,6 +32,19 @@ export const accountPlatformCopy = {
 };
 
 Object.assign(accountPlatformCopy.zh, {
+  stopDelivery:'停止显示并请求取消', stopRequested:'已停止当前客户端显示；请以执行与结算状态为准。', executionState:'执行', settlementState:'结算',
+  usageStatuses:{ ...accountPlatformCopy.zh.usageStatuses, DISPLAY_STOPPED_EXECUTION_CONTINUES:'已停止显示，后台仍在执行并按实际用量结算', CANCELLED_BEFORE_DISPATCH:'派发前已取消' },
+});
+Object.assign(accountPlatformCopy.en, {
+  stopDelivery:'Stop display and request cancellation', stopRequested:'Display stopped on this client. Execution and settlement states remain authoritative.', executionState:'Execution', settlementState:'Settlement',
+  usageStatuses:{ ...accountPlatformCopy.en.usageStatuses, DISPLAY_STOPPED_EXECUTION_CONTINUES:'Display stopped; background execution and actual-usage billing continue', CANCELLED_BEFORE_DISPATCH:'Cancelled before dispatch' },
+});
+Object.assign(accountPlatformCopy.ja, {
+  stopDelivery:'表示を停止してキャンセルを要求', stopRequested:'このクライアントでの表示を停止しました。実行・決済状態を確認してください。', executionState:'実行', settlementState:'決済',
+  usageStatuses:{ ...accountPlatformCopy.ja.usageStatuses, DISPLAY_STOPPED_EXECUTION_CONTINUES:'表示停止済み。バックグラウンド実行と実使用量による決済は継続', CANCELLED_BEFORE_DISPATCH:'送信前にキャンセル済み' },
+});
+
+Object.assign(accountPlatformCopy.zh, {
   packageId:'权益包编号', pinvouOrder:'品悟订单号', providerOrderReference:'支付方订单引用', amount:'支付金额', creditedAt:'到账时间', validPeriod:'权益有效期', totalPoints:'总积分', usedPoints:'已用积分', createdAt:'创建时间', paidAt:'支付时间', fulfillmentStatus:'发放状态', invoiceStatus:'发票状态',
   fulfillmentStatuses:{ PENDING:'待发放', CREDITED:'已到账', MANUAL_REVIEW:'人工复核中', REVOKED:'已撤销' }, invoiceStatuses:{ NOT_SUPPORTED:'当前接口不支持' },
   invoiceUnavailable:'当前支付渠道尚未开放发票申请与查询，因此此处仅展示说明，不提供不可用的操作按钮。',
