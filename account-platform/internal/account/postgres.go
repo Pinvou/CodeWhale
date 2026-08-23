@@ -65,7 +65,7 @@ func (r *PostgresRepository) Bootstrap(ctx context.Context, principal identity.P
 		now := r.now()
 		user.UserID = uuid.Must(uuid.NewV7())
 		user.Status = "PROVISIONING"
-		user.ActiveContext = Context{Type: "PERSONAL", MembershipVersion: 1}
+		user.ActiveContext = Context{Type: "PERSONAL", MembershipVersion: 1, ContextVersion: 1, AuthorizationVersion: 1}
 		if username := strings.TrimSpace(principal.Username); username != "" {
 			user.Username = &username
 		}
@@ -146,18 +146,20 @@ func (r *PostgresRepository) GetMe(ctx context.Context, principal identity.Princ
 	var organizationID *uuid.UUID
 	err := r.pool.QueryRow(ctx, `
 SELECT u.id, u.status, u.username, u.display_name, u.mobile_e164, u.mobile_verified_at IS NOT NULL,
-       COALESCE(ms.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version
+       COALESCE(ms.status,'NOT_CONFIGURED'), s.active_context_type, s.active_organization_id, u.membership_version,
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1)
 FROM identities i
 JOIN users u ON u.id = i.user_id
 JOIN user_sessions s ON s.user_id = u.id AND s.issuer = i.issuer AND s.session_id = $3
 LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id
 WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&me.UserID, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion,
+		&me.UserID, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion, &me.ActiveContext.AuthorizationVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Me{}, ErrNotFound
 	}
 	me.ActiveContext.OrganizationID = organizationID
+	me.ActiveContext.ContextVersion = me.ActiveContext.MembershipVersion
 	return me, err
 }
 
@@ -167,7 +169,11 @@ func (r *PostgresRepository) ResolveAuthorizationContext(ctx context.Context, pr
 SELECT u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version,
        COALESCE(array_agg(DISTINCT mu.unit_id) FILTER (WHERE mu.unit_id IS NOT NULL),'{}'),
        COALESCE(array_agg(DISTINCT c.ancestor_id) FILTER (WHERE c.ancestor_id IS NOT NULL),'{}'),
-       COALESCE(array_agg(DISTINCT rb.role) FILTER (WHERE rb.role IS NOT NULL),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id=s.active_organization_id),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT ra.role_code ORDER BY ra.role_code) FROM role_assignments ra WHERE ra.user_id=u.id AND ra.organization_id IS NULL),'{}'),
+       COALESCE((SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code) FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code WHERE ra.user_id=u.id AND ra.organization_id IS NULL),'{}'),
+       COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN s.active_organization_id IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(s.active_organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
        u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(ms.status,'NOT_CONFIGURED')
 FROM identities i
 JOIN users u ON u.id=i.user_id AND u.status='ACTIVE'
@@ -177,10 +183,9 @@ LEFT JOIN organizations o ON o.id=s.active_organization_id
 LEFT JOIN memberships m ON m.user_id=u.id AND m.organization_id=s.active_organization_id AND m.status='ACTIVE'
 LEFT JOIN membership_units mu ON mu.membership_id=m.id
 LEFT JOIN organization_unit_closure c ON c.organization_id=m.organization_id AND c.descendant_id=mu.unit_id
-LEFT JOIN role_bindings rb ON rb.membership_id=m.id
 WHERE i.issuer=$1 AND i.subject=$2 AND (s.active_organization_id IS NULL OR o.status='ACTIVE')
 GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.membership_version,ms.status`, principal.Issuer, principal.Subject, principal.SessionID).Scan(
-		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Mobile, &resolved.MobileVerified, &resolved.MallSyncStatus,
+		&resolved.UserID, &resolved.SessionID, &resolved.ContextType, &resolved.OrganizationID, &resolved.MembershipVersion, &resolved.UnitIDs, &resolved.AncestorUnitIDs, &resolved.Roles, &resolved.Permissions, &resolved.PlatformRoles, &resolved.PlatformPermissions, &resolved.AuthorizationVersion, &resolved.Mobile, &resolved.MobileVerified, &resolved.MallSyncStatus,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AuthorizationContext{}, ErrNotFound
@@ -199,6 +204,19 @@ GROUP BY u.id,s.session_id,s.active_context_type,s.active_organization_id,s.memb
 	}
 	if resolved.Roles == nil {
 		resolved.Roles = []string{}
+	}
+	resolved.ContextVersion = resolved.MembershipVersion
+	if resolved.AuthorizationVersion < 1 {
+		resolved.AuthorizationVersion = 1
+	}
+	if resolved.Permissions == nil {
+		resolved.Permissions = []string{}
+	}
+	if resolved.PlatformRoles == nil {
+		resolved.PlatformRoles = []string{}
+	}
+	if resolved.PlatformPermissions == nil {
+		resolved.PlatformPermissions = []string{}
 	}
 	return resolved, nil
 }
@@ -279,7 +297,12 @@ WHERE issuer = $1 AND session_id = $2 AND user_id = $3`,
 	if err := tx.Commit(ctx); err != nil {
 		return Context{}, err
 	}
-	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: version}, nil
+	var authorizationVersion int64
+	err = r.pool.QueryRow(ctx, `SELECT COALESCE((SELECT version FROM authorization_versions WHERE user_id=$1 AND scope=CASE WHEN $2::uuid IS NULL THEN 'PLATFORM' ELSE 'ORGANIZATION' END AND scope_id=COALESCE($2::uuid,'00000000-0000-0000-0000-000000000000'::uuid)),1)`, userID, organizationID).Scan(&authorizationVersion)
+	if err != nil {
+		return Context{}, err
+	}
+	return Context{Type: contextType, OrganizationID: organizationID, MembershipVersion: version, ContextVersion: version, AuthorizationVersion: authorizationVersion}, nil
 }
 
 func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, parentID *uuid.UUID, name string) (Unit, error) {
@@ -296,7 +319,7 @@ func (r *PostgresRepository) CreateUnit(ctx context.Context, principal identity.
 	if err != nil {
 		return Unit{}, err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, userID, organizationID, parentID); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, parentID, PermissionOrganizationUnitsManage); err != nil {
 		return Unit{}, err
 	}
 	if parentID != nil {
@@ -343,7 +366,7 @@ func (r *PostgresRepository) MoveUnit(ctx context.Context, principal identity.Pr
 	if err != nil {
 		return Unit{}, err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, userID, organizationID, &unitID); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, &unitID, PermissionOrganizationUnitsManage); err != nil {
 		return Unit{}, err
 	}
 	var unit Unit
@@ -415,7 +438,7 @@ func (r *PostgresRepository) CreateInvitation(ctx context.Context, principal ide
 	if err != nil {
 		return Invitation{}, err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, userID, organizationID, nil); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, nil, PermissionOrganizationMembersManage); err != nil {
 		return Invitation{}, err
 	}
 	tokenBytes := make([]byte, 32)
@@ -533,7 +556,7 @@ func (r *PostgresRepository) RevokeMembership(ctx context.Context, principal ide
 	if err != nil {
 		return err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, actorID, organizationID, nil); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersManage); err != nil {
 		return err
 	}
 	var membershipID uuid.UUID
@@ -589,7 +612,15 @@ func (r *PostgresRepository) TransferOwnership(ctx context.Context, principal id
 		return err
 	}
 	var actorMembership, targetMembership uuid.UUID
-	err = tx.QueryRow(ctx, `SELECT m.id FROM memberships m JOIN role_bindings rb ON rb.membership_id = m.id WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE' AND rb.role = 'OWNER' FOR UPDATE OF m`, organizationID, actorID).Scan(&actorMembership)
+	err = tx.QueryRow(ctx, `
+SELECT m.id FROM memberships m
+WHERE m.organization_id=$1 AND m.user_id=$2 AND m.status='ACTIVE'
+  AND EXISTS(
+    SELECT 1 FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code
+    WHERE ra.user_id=m.user_id AND ra.organization_id=m.organization_id
+      AND ra.unit_id IS NULL AND rp.permission_code=$3
+  )
+FOR UPDATE OF m`, organizationID, actorID, PermissionOrganizationOwnerTransfer).Scan(&actorMembership)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrForbidden
 	}
@@ -627,6 +658,8 @@ func loadUserByIdentity(ctx context.Context, tx pgx.Tx, principal identity.Princ
 	var me Me
 	err := tx.QueryRow(ctx, `SELECT u.id,u.status,u.username,u.display_name,u.mobile_e164,u.mobile_verified_at IS NOT NULL,COALESCE(ms.status,'NOT_CONFIGURED'),u.membership_version FROM identities i JOIN users u ON u.id=i.user_id LEFT JOIN mall_user_sync_jobs ms ON ms.user_id=u.id WHERE i.issuer=$1 AND i.subject=$2`, principal.Issuer, principal.Subject).Scan(&me.UserID, &me.Status, &me.Username, &me.DisplayName, &me.Mobile, &me.MobileVerified, &me.MallSyncStatus, &me.ActiveContext.MembershipVersion)
 	me.ActiveContext.Type = "PERSONAL"
+	me.ActiveContext.ContextVersion = me.ActiveContext.MembershipVersion
+	me.ActiveContext.AuthorizationVersion = 1
 	return me, err
 }
 
@@ -637,30 +670,6 @@ func activeUserID(ctx context.Context, tx pgx.Tx, principal identity.Principal) 
 		return uuid.Nil, ErrForbidden
 	}
 	return userID, err
-}
-
-func requireOrganizationAdmin(ctx context.Context, tx pgx.Tx, userID, organizationID uuid.UUID, unitID *uuid.UUID) error {
-	var allowed bool
-	err := tx.QueryRow(ctx, `
-SELECT EXISTS(
-  SELECT 1 FROM memberships m
-  JOIN role_bindings rb ON rb.membership_id = m.id
-  WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'ACTIVE'
-    AND (
-      rb.role IN ('OWNER', 'ORG_ADMIN')
-      OR ($3::uuid IS NOT NULL AND rb.role = 'UNIT_ADMIN' AND EXISTS(
-        SELECT 1 FROM organization_unit_closure c
-        WHERE c.organization_id = $1 AND c.ancestor_id = rb.unit_id AND c.descendant_id = $3
-      ))
-    )
-)`, organizationID, userID, unitID).Scan(&allowed)
-	if err != nil {
-		return err
-	}
-	if !allowed {
-		return ErrForbidden
-	}
-	return nil
 }
 
 func loadOrganization(ctx context.Context, tx pgx.Tx, organizationID uuid.UUID) (Organization, error) {

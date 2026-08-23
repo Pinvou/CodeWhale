@@ -29,13 +29,13 @@
 | APT-003 | 注册唯一值预约、持久恢复 Saga、异步钱包 Provisioning 与恢复 UI | CORE-07, ID-14, ACC-03, ACC-04, ACC-51–ACC-55, BILL-04, UI-02, UI-15, ADM-35 | APT-001, APT-002 | CODE | PENDING |
 | APT-004 | 用户名/手机号变更 Saga、忘记密码及个人中心入口 | ACC-06–ACC-09, UI-05 | APT-002 | CODE | PENDING |
 | APT-005 | 供应商中立 Commerce Customer Mapping 与同步生命周期 | CORE-03, ACC-05, PAY-06, NFR-16 | 无 | CODE | PENDING |
-| APT-006 | Account 平台/组织 RBAC、权限码、作用域和授权版本响应 | CORE-02, SCOPE-03, ACC-13, ACC-30, ACC-35, ACC-39, ADM-05, NFR-15 | 无 | CODE | PENDING |
+| APT-006 | Account 平台/组织 RBAC、原子权限码和显式授权作用域 | ACC-13, ACC-35, NFR-15 | 无 | CODE | DONE |
 | APT-007 | 超级管理员安全引导、异常失联 Break-glass 与最后管理员保护 | ACC-48, ADM-01, ADM-02 | APT-006, APT-046 | CODE+ENV | PENDING |
 | APT-008 | 管理命令审批分类、生命周期、失效、授权复核和幂等执行 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | APT-006, APT-046 | CODE | PENDING |
 | APT-009 | 顶层组织创建、搜索、启停和跨域安全逻辑删除 | ACC-15–ACC-20 | APT-006, APT-008 | CODE | PENDING |
 | APT-010 | 组织节点创建、移动、重命名和受阻逻辑删除 | ACC-21, ACC-23–ACC-25 | APT-006, APT-009 | CODE | PENDING |
 | APT-011 | 多方式邀请、成员增删、所有权转让和即时撤权 | ACC-26–ACC-29 | APT-006, APT-009, APT-010 | CODE | PENDING |
-| APT-012 | 用户级全局活动上下文、跨端版本同步和成员失效回退 | ACC-34, ACC-38, NFR-08, UI-06, UI-07 | APT-006, APT-011 | CODE | PENDING |
+| APT-012 | 用户级全局活动上下文、跨端版本同步和成员失效回退 | CORE-02, ACC-34, ACC-38, ACC-39, NFR-08, UI-06, UI-07 | APT-006, APT-011 | CODE | PENDING |
 | APT-013 | 个人中心信息架构与普通用户资源边界收敛 | UI-03 | APT-012 | CODE | PENDING |
 | APT-014 | 账号注销资格、持久 Saga、静默期、跨域阻断与修复入口 | ACC-10, ACC-40–ACC-45, UI-14, ADM-34 | APT-003, APT-006, APT-018, APT-021–APT-025, APT-030 | CODE | PENDING |
 | APT-015 | 注销资料清理、标识墓碑、Commerce/邀请收敛及组织授予隔离回收 | ACC-11, ACC-46, ACC-47, ACC-49, ACC-50, BILL-39, BILL-40, NFR-13 | APT-014, APT-016, APT-017, APT-019, APT-025 | CODE | PENDING |
@@ -54,7 +54,7 @@
 | APT-028 | 平台托管路由 Provisioning、资格管线及运营修复 | TOK-09, TOK-10, TOK-12, TOK-16, ADM-11, ADM-28–ADM-30 | APT-006, APT-026, APT-027 | CODE | PENDING |
 | APT-029 | 模型请求幂等指纹、持久派发、流事件加密与结果重放保留 | TOK-24–TOK-30, NFR-49 | APT-012, APT-018, APT-026–APT-028 | CODE | PENDING |
 | APT-030 | 模型取消、执行/交付分离、可信用量核对和取消期 Hold 收敛 | TOK-31, TOK-33, TOK-38–TOK-41, BILL-34, BILL-35, UI-13, ADM-31, ADM-32 | APT-018, APT-029 | CODE | PENDING |
-| APT-031 | Token Account、凭据和检查动作的平台权限隔离 | ADM-25–ADM-27 | APT-006, APT-026, APT-028 | CODE | PENDING |
+| APT-031 | Token Account、凭据和检查动作的平台权限隔离 | SCOPE-03, ADM-25–ADM-27 | APT-006, APT-026, APT-028 | CODE | PENDING |
 | APT-032 | 桌面发布/安装/运行三层切换门禁与非计费 readiness | SCOPE-05, TOK-35–TOK-37, NFR-20, UI-09 | APT-003, APT-027–APT-029 | CODE+ENV | PENDING |
 | APT-033 | 配置驱动系统探针和受控审计导出 | ADM-09, ADM-10, NFR-19, NFR-48 | APT-006, APT-008, APT-020, APT-023, APT-031 | CODE | PENDING |
 | APT-034 | 桌面、个人中心和后台完整三语发布门禁 | UI-16 | APT-003, APT-004, APT-012, APT-013, APT-017, APT-021, APT-030, APT-032, APT-033 | CODE | PENDING |
@@ -69,7 +69,7 @@
 | APT-043 | Provider/路由熔断、半开探测和统一可信时钟门禁 | NFR-44, NFR-46 | APT-022, APT-026, APT-036 | CODE+ENV | PENDING |
 | APT-044 | 当前及前两桌面版本兼容、弃用通知和 426 升级闭环 | NFR-47 | APT-032, APT-034 | CODE | PENDING |
 | APT-045 | 全域审计、幂等指纹、Outbox/Inbox 收敛和死信恢复闭环 | NFR-05–NFR-07 | APT-003–APT-034, APT-046, APT-047 | CODE | PENDING |
-| APT-046 | 普通组织角色绑定的有效期、单绑定幂等撤销和缓存失效 | ACC-31, ACC-32, ADM-06 | APT-006 | CODE | PENDING |
+| APT-046 | 普通组织角色绑定的展示、有效期、授权撤销和缓存失效 | ACC-30–ACC-32, ADM-05, ADM-06 | APT-006 | CODE | PENDING |
 | APT-047 | 服务账号、后台任务和 Event Relay 的短期工作负载身份与最小 Subject 权限 | ADM-03, NFR-12 | APT-006 | CODE+ENV | PENDING |
 
 ## 3. 独立提交验收模板

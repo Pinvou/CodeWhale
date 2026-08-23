@@ -99,7 +99,7 @@ paths:
   /me/authorization-context:
     get:
       operationId: resolveAuthorizationContext
-      summary: Resolve the current user, session, organization, units, ancestors, roles, and membership version
+      summary: Resolve the current user, explicit context, scoped roles, permission codes, and authorization versions
       responses:
         "200":
           description: Session-scoped authorization context
@@ -114,7 +114,7 @@ paths:
               schema:
                 type: object
                 additionalProperties: false
-                required: [user_id, session_id, context_type, membership_version, unit_ids, ancestor_unit_ids, roles]
+                required: [user_id, session_id, context_type, membership_version, context_version, authorization_version, unit_ids, ancestor_unit_ids, roles, permissions, platform_roles, platform_permissions]
                 properties:
                   user_id:
                     type: string
@@ -131,6 +131,14 @@ paths:
                     type: integer
                     format: int64
                     minimum: 1
+                  context_version:
+                    type: integer
+                    format: int64
+                    minimum: 1
+                  authorization_version:
+                    type: integer
+                    format: int64
+                    minimum: 1
                   unit_ids:
                     type: array
                     uniqueItems: true
@@ -144,6 +152,21 @@ paths:
                       type: string
                       format: uuid
                   roles:
+                    type: array
+                    uniqueItems: true
+                    items:
+                      type: string
+                  permissions:
+                    type: array
+                    uniqueItems: true
+                    items:
+                      type: string
+                  platform_roles:
+                    type: array
+                    uniqueItems: true
+                    items:
+                      type: string
+                  platform_permissions:
                     type: array
                     uniqueItems: true
                     items:

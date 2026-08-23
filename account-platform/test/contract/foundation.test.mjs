@@ -241,6 +241,28 @@ test('Keycloak development client enables password login without enabling implic
   assert.doesNotMatch(provisioning, /PINVOU_ADMIN_PASSWORD=['"][^$]/);
 });
 
+test('business authorization is owned by Account permission codes rather than Realm roles', async () => {
+  const migration = await readFile(path.join(root, 'migrations/account/000010_authorization_rbac.up.sql'), 'utf8');
+  const accountService = await readFile(path.join(root, 'internal/account/service.go'), 'utf8');
+  const billingService = await readFile(path.join(root, 'internal/billing/service.go'), 'utf8');
+  const tokenService = await readFile(path.join(root, 'internal/token/service.go'), 'utf8');
+  const authorizer = await readFile(path.join(root, 'internal/platform/authorization/client.go'), 'utf8');
+  for (const table of ['permissions', 'roles', 'role_permissions', 'role_assignments', 'authorization_versions']) {
+    assert.match(migration, new RegExp(`CREATE TABLE ${table} \\(`));
+  }
+  assert.match(migration, /PLATFORM_SUPER_ADMIN/);
+  assert.match(migration, /platform\.tokens\.credentials\.validate/);
+  assert.match(migration, /org\.roles\.assign/);
+  assert.match(accountService, /Group\("\/internal\/v1"\)/);
+  assert.match(accountService, /POST\("\/authorization\/check"/);
+  assert.match(authorizer, /INTERNAL_SERVICE_TOKEN is required/);
+  for (const source of [accountService, billingService, tokenService]) {
+    assert.doesNotMatch(source, /RequireRealmRoleGin|HasRealmRole/);
+  }
+  assert.match(billingService, /platform\.billing\.wallets\.read/);
+  assert.match(tokenService, /platform\.tokens\.read/);
+});
+
 test('mobile authentication provisioning works in the minimal Keycloak image', async () => {
   const provisioning = await readFile(path.join(root, 'deploy/keycloak/provision-mobile-auth.sh'), 'utf8');
   const authenticator = await readFile(path.join(root, 'deploy/keycloak/mobile-authenticator/src/main/java/com/pinvou/identity/MobileDirectGrantAuthenticator.java'), 'utf8');

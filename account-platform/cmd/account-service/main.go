@@ -34,7 +34,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := account.NewService(repository, wallets)
+	service := account.NewService(repository, wallets).WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN"))
 	if enabled("MOBILE_AUTH_ENABLED") {
 		sms, err := account.NewAliyunSMSProvider(account.AliyunSMSConfig{
 			AccessKeyID: os.Getenv("ALIYUN_SMS_ACCESS_KEY_ID"), AccessKeySecret: os.Getenv("ALIYUN_SMS_ACCESS_KEY_SECRET"),

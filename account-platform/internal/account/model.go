@@ -19,9 +19,11 @@ var (
 )
 
 type Context struct {
-	Type              string     `json:"context_type"`
-	OrganizationID    *uuid.UUID `json:"organization_id,omitempty"`
-	MembershipVersion int64      `json:"membership_version"`
+	Type                 string     `json:"context_type"`
+	OrganizationID       *uuid.UUID `json:"organization_id,omitempty"`
+	MembershipVersion    int64      `json:"membership_version"`
+	ContextVersion       int64      `json:"context_version"`
+	AuthorizationVersion int64      `json:"authorization_version"`
 }
 
 type Me struct {
@@ -36,17 +38,22 @@ type Me struct {
 }
 
 type AuthorizationContext struct {
-	UserID            uuid.UUID   `json:"user_id"`
-	SessionID         string      `json:"session_id"`
-	ContextType       string      `json:"context_type"`
-	OrganizationID    *uuid.UUID  `json:"organization_id,omitempty"`
-	MembershipVersion int64       `json:"membership_version"`
-	UnitIDs           []uuid.UUID `json:"unit_ids"`
-	AncestorUnitIDs   []uuid.UUID `json:"ancestor_unit_ids"`
-	Roles             []string    `json:"roles"`
-	Mobile            *string     `json:"mobile,omitempty"`
-	MobileVerified    bool        `json:"mobile_verified"`
-	MallSyncStatus    string      `json:"mall_sync_status"`
+	UserID               uuid.UUID   `json:"user_id"`
+	SessionID            string      `json:"session_id"`
+	ContextType          string      `json:"context_type"`
+	OrganizationID       *uuid.UUID  `json:"organization_id,omitempty"`
+	MembershipVersion    int64       `json:"membership_version"`
+	ContextVersion       int64       `json:"context_version"`
+	AuthorizationVersion int64       `json:"authorization_version"`
+	UnitIDs              []uuid.UUID `json:"unit_ids"`
+	AncestorUnitIDs      []uuid.UUID `json:"ancestor_unit_ids"`
+	Roles                []string    `json:"roles"`
+	Permissions          []string    `json:"permissions"`
+	PlatformRoles        []string    `json:"platform_roles"`
+	PlatformPermissions  []string    `json:"platform_permissions"`
+	Mobile               *string     `json:"mobile,omitempty"`
+	MobileVerified       bool        `json:"mobile_verified"`
+	MallSyncStatus       string      `json:"mall_sync_status"`
 }
 
 type Organization struct {

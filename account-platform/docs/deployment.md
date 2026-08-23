@@ -315,7 +315,9 @@ docker compose --env-file <secret-env> <compose-files> exec \
   sh /opt/keycloak/data/import/provision-platform-admin.sh
 ```
 
-脚本确保用户和 `platform-admin` Realm 角色存在。密码不能写入仓库、共享聊天、部署日志或永久 Shell 配置。
+脚本确保登录用户和迁移期 `platform-admin` Realm 角色存在，但 Realm Role 不再授予任何 Account 业务权限。密码不能写入仓库、共享聊天、部署日志或永久 Shell 配置。
+
+完成数据库迁移并让目标用户至少 bootstrap 一次后，必须按 [`deploy/runbooks/account-rbac-migration.md`](../deploy/runbooks/account-rbac-migration.md) 使用经审批清单把 `issuer + subject` 明确映射到具体 Account 平台角色。不得把全部旧 `platform-admin` 自动升级为超级管理员；开放后台流量前至少核验一名 `PLATFORM_SUPER_ADMIN`，并验证职责分离的允许/拒绝矩阵。
 
 ### 9.2 手机认证 Flow
 
@@ -373,7 +375,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 4. Account bootstrap、个人信息、无组织时隐藏组织页签。
 5. 余额、权益包和用量列表。
 6. 使用 TOK-37 非计费 readiness 验证内置模型路径；如必须验证非流式和流式协议，只使用专用合成验收身份及隔离测试/运营路由，确认其记录和成本不进入任何真实用户或组织钱包、权益、Hold、用量及账单。
-7. 管理后台只有 `platform-admin` 可访问，凭据只显示元数据。
+7. 管理后台按 Account 原子平台权限访问，旧 `platform-admin` Claim 不能绕过拒绝；凭据只显示元数据，且只有独立模型运营权限可以访问 Token Account、路由和凭据操作。
 8. 系统运行页的服务、NATS、Relay 和 New API 状态可信。
 
 ### 11.3 支付烟测

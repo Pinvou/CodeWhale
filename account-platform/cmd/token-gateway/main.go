@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
@@ -44,6 +45,10 @@ func main() {
 		log.Fatal(err)
 	}
 	contexts, err := token.NewHTTPContextResolver(os.Getenv("ACCOUNT_HTTP_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -108,7 +113,7 @@ func main() {
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
-	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes)
+	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, token.NewHTTPUpstreamClient(), maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithAuthorizer(authorizer)
 	if err := httpserver.RunWithApplication("token-gateway", service.Handler(verify), repository.Ping); err != nil {
 		log.Fatal(err)
 	}

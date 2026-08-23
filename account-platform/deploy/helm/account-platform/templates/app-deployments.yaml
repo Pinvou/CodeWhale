@@ -72,6 +72,7 @@ spec:
             {{- if eq $app.name "account-service" }}
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
             {{- else if eq $app.name "billing-service" }}
+            - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - name: PAYMENT_SIMULATOR_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-provider-url } }
             - { name: BILLING_PAYMENT_CALLBACK_URL, value: {{ $root.Values.public.paymentCallbackUrl | quote }} }

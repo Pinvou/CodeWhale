@@ -46,7 +46,7 @@ components:
     Context:
       type: object
       additionalProperties: false
-      required: [context_type, membership_version]
+      required: [context_type, membership_version, context_version, authorization_version]
       properties:
         context_type:
           type: string
@@ -55,5 +55,11 @@ components:
           type: [string, "null"]
           format: uuid
         membership_version:
+          type: integer
+          minimum: 1
+        context_version:
+          type: integer
+          minimum: 1
+        authorization_version:
           type: integer
           minimum: 1

@@ -156,7 +156,7 @@ sequenceDiagram
 3. 回调由 Portal 服务端交换 Token，并将会话保存在 Redis；浏览器仅持有 HttpOnly 会话 Cookie。
 4. 浏览器调用同源 `/api/*`，写操作携带 CSRF 证明。
 5. Portal 只代理白名单内的 Account、Billing 和 Gateway API。
-6. `/admin.html` 还要求 OIDC 声明包含 `platform-admin`；普通组织角色不能进入平台后台。
+6. `/admin.html` 只复用 OIDC 主体；Account、Billing 和 Token Gateway 分别向 Account 权限系统校验当前操作的原子平台权限，迁移期 `platform-admin` Claim 不能授予或绕过权限。
 7. Portal 登出删除 Redis 会话并结束浏览器身份会话。
 
 ## 7. 账号 Bootstrap 与活动上下文
@@ -338,7 +338,7 @@ sequenceDiagram
 ## 11. 管理后台调用流程
 
 1. 管理员通过 Token Portal 登录 Keycloak。
-2. Portal 和下游服务都检查 `platform-admin` Realm 角色，不能只依赖前端隐藏页签。
+2. Portal 只代理 OIDC Access Token；Account、Billing 和 Token Gateway 对每个后台接口向 Account 权限系统校验原子权限，默认拒绝，不能只依赖前端隐藏页签或 Identity Provider 角色 Claim。
 3. 用户/组织操作进入 Account Admin API；资金操作进入 Billing Admin API；Token/用量操作进入 Gateway Admin API。
 4. Portal 的“系统运行”聚合各服务健康、Keycloak、New API、NATS 和 Relay 指标，不把基础设施凭据传给浏览器。
 5. 所有变更记录操作者、资源、动作、结果、Request ID 和时间；高风险资金操作保留审批或人工修复记录。

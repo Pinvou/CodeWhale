@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
@@ -18,6 +19,7 @@ import (
 type Service struct {
 	repository Repository
 	payments   *PaymentCoordinator
+	authorizer *authorization.Client
 	now        func() time.Time
 }
 
@@ -27,6 +29,11 @@ func NewService(repository Repository) *Service {
 
 func (s *Service) WithPayments(payments *PaymentCoordinator) *Service {
 	s.payments = payments
+	return s
+}
+
+func (s *Service) WithAuthorizer(authorizer *authorization.Client) *Service {
+	s.authorizer = authorizer
 	return s
 }
 
@@ -58,26 +65,26 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		protected.POST("/internal/v1/reconciliation/runs", httpserver.AdaptFunc(s.runReconciliation))
 		router.POST("/internal/payment/notifications", httpserver.AdaptFunc(s.paymentNotification))
 	}
-	if len(adminVerify) > 0 && adminVerify[0] != nil {
+	if len(adminVerify) > 0 && adminVerify[0] != nil && s.authorizer != nil {
 		admin := router.Group("/admin/v1")
-		admin.Use(identity.GinMiddleware(adminVerify[0]), identity.RequireRealmRoleGin("platform-admin"))
-		admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
-		admin.GET("/wallets", httpserver.AdaptFunc(s.adminWallets))
-		admin.GET("/wallets/:wallet_id/ledger", httpserver.AdaptFunc(s.adminWalletLedger))
-		admin.GET("/pricing-versions", httpserver.AdaptFunc(s.adminPriceVersions))
-		admin.POST("/pricing-versions", httpserver.AdaptFunc(s.adminCreatePriceVersion))
-		admin.GET("/payment-orders", httpserver.AdaptFunc(s.adminPaymentOrders))
-		admin.POST("/payment-orders/:order_id/sync", httpserver.AdaptFunc(s.adminSyncPaymentOrder))
-		admin.POST("/payment-orders/:order_id/repair", httpserver.AdaptFunc(s.adminRepairPaymentOrder))
-		admin.POST("/payment-orders/:order_id/refunds", httpserver.AdaptFunc(s.adminRefundPaymentOrder))
-		admin.GET("/adjustments", httpserver.AdaptFunc(s.adminAdjustments))
-		admin.POST("/adjustments/:adjustment_id/approve", httpserver.AdaptFunc(s.adminApproveAdjustment))
-		admin.POST("/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.adminRejectAdjustment))
-		admin.GET("/usage-holds", httpserver.AdaptFunc(s.adminUsageHolds))
-		admin.POST("/usage-holds/:hold_id/release", httpserver.AdaptFunc(s.adminReleaseUsageHold))
-		admin.GET("/reconciliation-runs", httpserver.AdaptFunc(s.adminReconciliationRuns))
-		admin.POST("/reconciliation-runs", httpserver.AdaptFunc(s.adminRunReconciliation))
-		admin.GET("/reconciliation-runs/:run_id/cases", httpserver.AdaptFunc(s.adminReconciliationCases))
+		admin.Use(identity.GinMiddleware(adminVerify[0]))
+		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/wallets", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminWallets))
+		admin.GET("/wallets/:wallet_id/ledger", s.authorizer.Require("platform.billing.ledger.read"), httpserver.AdaptFunc(s.adminWalletLedger))
+		admin.GET("/pricing-versions", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPriceVersions))
+		admin.POST("/pricing-versions", s.authorizer.Require("platform.pricing.manage"), httpserver.AdaptFunc(s.adminCreatePriceVersion))
+		admin.GET("/payment-orders", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrders))
+		admin.POST("/payment-orders/:order_id/sync", s.authorizer.Require("platform.billing.orders.sync"), httpserver.AdaptFunc(s.adminSyncPaymentOrder))
+		admin.POST("/payment-orders/:order_id/repair", s.authorizer.Require("platform.billing.repairs.request"), httpserver.AdaptFunc(s.adminRepairPaymentOrder))
+		admin.POST("/payment-orders/:order_id/refunds", s.authorizer.Require("platform.billing.repairs.request"), httpserver.AdaptFunc(s.adminRefundPaymentOrder))
+		admin.GET("/adjustments", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminAdjustments))
+		admin.POST("/adjustments/:adjustment_id/approve", s.authorizer.Require("platform.billing.adjustments.approve"), httpserver.AdaptFunc(s.adminApproveAdjustment))
+		admin.POST("/adjustments/:adjustment_id/reject", s.authorizer.Require("platform.billing.adjustments.approve"), httpserver.AdaptFunc(s.adminRejectAdjustment))
+		admin.GET("/usage-holds", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageHolds))
+		admin.POST("/usage-holds/:hold_id/release", s.authorizer.Require("platform.billing.holds.release"), httpserver.AdaptFunc(s.adminReleaseUsageHold))
+		admin.GET("/reconciliation-runs", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationRuns))
+		admin.POST("/reconciliation-runs", s.authorizer.Require("platform.usage.reconcile.retry"), httpserver.AdaptFunc(s.adminRunReconciliation))
+		admin.GET("/reconciliation-runs/:run_id/cases", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminReconciliationCases))
 	}
 	return router
 }

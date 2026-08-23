@@ -49,10 +49,11 @@ type AdminOrganization struct {
 }
 
 type AdminRoleDefinition struct {
-	Code        string `json:"code"`
-	Scope       string `json:"scope"`
-	Assignable  bool   `json:"assignable"`
-	Description string `json:"description"`
+	Code        string   `json:"code"`
+	Scope       string   `json:"scope"`
+	Assignable  bool     `json:"assignable"`
+	Description string   `json:"description"`
+	Permissions []string `json:"permissions"`
 }
 
 type AdminUserMembership struct {
@@ -145,14 +146,17 @@ func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) adminRoles(w http.ResponseWriter, r *http.Request) {
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": []AdminRoleDefinition{
-		{Code: "OWNER", Scope: "ORGANIZATION", Assignable: false, Description: "Organization owner; transfer ownership to change this role."},
-		{Code: "ORG_ADMIN", Scope: "ORGANIZATION", Assignable: true, Description: "Manage organization members, roles and units."},
-		{Code: "BILLING_ADMIN", Scope: "ORGANIZATION", Assignable: true, Description: "Manage organization billing and usage."},
-		{Code: "UNIT_ADMIN", Scope: "UNIT", Assignable: true, Description: "Manage one or more assigned organization units."},
-		{Code: "MEMBER", Scope: "ORGANIZATION", Assignable: false, Description: "Base role automatically retained for every active member."},
-		{Code: "AUDITOR", Scope: "ORGANIZATION", Assignable: true, Description: "Read organization activity and billing records."},
-	}})
+	repository, ok := s.repository.(authorizationRepository)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	items, err := repository.RoleDefinitions(r.Context())
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Service) adminUsers(w http.ResponseWriter, r *http.Request) {

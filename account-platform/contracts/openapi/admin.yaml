@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Pinvou Operations Console API
   version: 0.2.0
-  description: Platform operations API. Every operation requires the platform-admin Keycloak Realm role; mutations are audited.
+  description: Platform operations API. Every operation requires its documented Account permission code; OIDC proves identity only and mutations are audited.
   license:
     name: MIT
     identifier: MIT
@@ -37,7 +37,7 @@ paths:
   /account/admin/v1/roles:
     get:
       operationId: listAdminRoleDefinitions
-      summary: List organization role definitions and assignment scopes
+      summary: List platform and organization role definitions, scopes, and permission codes
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "403": { $ref: "#/components/responses/Error" }

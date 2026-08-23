@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 54`、`部分实现 102`、`未实现 171`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 57`、`部分实现 99`、`未实现 171`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -29,9 +29,10 @@
 | `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 331/331 个唯一目标编号均有结论 |
 | `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 331 个唯一编号一一覆盖，无缺失、无额外编号 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
-| `CONTRACT-36` | 在 `account-platform/` 执行 `npm test` | OpenAPI lint 与 36 个合同测试通过 |
+| `CONTRACT-36` | 本轮 RBAC 前基线合同集 | OpenAPI lint 与原 36 个合同测试通过 |
+| `RBAC-AUTH` | Account RBAC 迁移、默认拒绝、旧 Realm Role 不可绕过、跨服务原子权限和版本响应定向测试 | Go 单元测试与新增合同测试通过；合同总数增至 37 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/36 个合同测试、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/37 个合同测试、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -46,7 +47,7 @@
 | REQ-ID-02 | 已实现 | DOC_CURRENT | DOC-COVERAGE | NOT_APPLICABLE | 331 个规范状态行均包含状态、源码基线、验证证据、部署版本和已知差距字段 |
 | REQ-ID-03 | 已实现 | DOC_CURRENT | DOC-COVERAGE | NOT_APPLICABLE | 规范性表格和补充规则均复用稳定 target_requirement_id；重复出现作为同一能力的补充验收条件 |
 | CORE-01 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Keycloak/Identity 与 Account 映射边界已存在；生产部署与 Identity 边界密码策略仍待补 |
-| CORE-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Account 自有用户、组织和 Session 上下文；平台权限仍依赖 Keycloak Realm Role，全局上下文未实现 |
+| CORE-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | Account 自有用户、平台/组织角色权限、组织和 Session 上下文；活动上下文仍按 Session 保存，尚未收敛为用户级全局事实 |
 | CORE-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有新华三专用 `mall_user_sync_jobs`，尚无供应商中立 Commerce Mapping 模型 |
 | CORE-04 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 平衡不可变账本已实现；组成级权益、应收和完整支付事实模型未实现 |
 | CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
@@ -63,20 +64,20 @@
 | ACC-02 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Identity 与 Account 创建成功后，注册接口返回稳定 `user_id` 和 `PROVISIONING`，不调用 Billing；部署证据待补 |
 | ACC-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | `PROVISIONING` Identity 可登录，Account 资料可读取，模型授权上下文要求 `ACTIVE`；充值门禁、稳定错误语义及 `REPAIR_REQUIRED` 闭环尚不完整 |
 | ACC-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无 Provisioning SLA、自动重试和 `REPAIR_REQUIRED` 状态 |
-| ACC-15 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有平台管理员创建接口/UI、字段校验、串行事务和审计/Outbox；缺目标 Account 平台权限与稳定幂等键 |
-| ACC-16 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有按名称或 ID 搜索及稳定更新时间排序；缺状态筛选、游标分页和 Account 平台权限模型 |
+| ACC-15 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | 已有 Account 原子权限保护的平台创建接口/UI、字段校验、串行事务和审计/Outbox；缺稳定幂等键 |
+| ACC-16 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | 已有 Account 原子权限保护、按名称或 ID 搜索及稳定更新时间排序；缺状态筛选和游标分页 |
 | ACC-17 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有 DISABLED→ACTIVE 幂等转换、成员/授权版本更新和审计；缺跨 Billing 恢复条件检查 |
 | ACC-18 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有 ACTIVE→DISABLED、成员暂停、Session 回退和审计；未阻止 Billing 购买、分配和既有 Hold |
 | ACC-20 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有 DELETED 状态、成员撤销、Session 回退和资料脱敏；未执行 ACC-19 全量预检，重复删除返回未找到而非幂等原结果 |
 | ACC-21 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有显式目标组织、父节点状态校验、同组织闭包写入和审计；缺稳定幂等键 |
-| ACC-23 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有独立重命名接口、显式编辑 UI、名称校验、节点 ID/层级保持和审计；服务端权限仍是迁移期角色模型 |
+| ACC-23 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | 已有原子权限保护的独立重命名接口、显式编辑 UI、名称校验、节点 ID/层级保持和审计；缺稳定幂等键 |
 | ACC-24 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有同组织移动、防自身/后代成环、串行事务和版本更新；缺稳定幂等键及独立结构版本契约 |
 | ACC-25 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有叶节点检查和审计，但当前物理删除节点并删除成员/角色关联，未按目标对授予、路由和任务执行阻断后逻辑删除 |
 | ACC-27 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有用户/组织状态、重复成员、角色边界、授权版本和 Outbox；重复有效成员返回冲突而非幂等原结果 |
 | ACC-28 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 已有成员撤销、角色清理、授权版本和 Outbox；管理端路径未自动回退活动上下文，也未处理 BILL-13 授予暂停 |
-| ACC-31 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 普通角色接口拒绝 OWNER/平台角色并递增授权版本；缺起止时间、细粒度权限码和稳定幂等键 |
+| ACC-31 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | 普通角色接口拒绝 OWNER/平台角色，授权解析已使用细粒度权限码并递增版本；缺绑定起止时间和稳定幂等键 |
 | ACC-32 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 角色替换会递增用户/Session 授权版本且 OWNER 走专用路径；缺单绑定幂等撤销、有效期和缓存失效契约 |
-| ACC-35 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 组织管理路由显式携带 organization_id 且不会切换活动上下文；授权仍依赖迁移期固定角色而非目标权限码 |
+| ACC-35 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | 组织管理路由显式携带 target organization_id，不切换活动上下文，并按目标组织、成员状态、原子权限码及组织/节点作用域默认拒绝 |
 | ACC-36 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 平台管理路由仅检查平台管理员身份，不读取或切换聊天计费活动上下文 |
 | ACC-37 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | usage_request 与 Hold 保存上下文、钱包、价格和路由等请求开始事实；缺完整授权、目录、协议和公式版本快照 |
 | ACC-38 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 组织停用和普通成员移除可回退对应 Session；平台管理端移除成员未回退，且当前上下文不是用户级全局值 |
@@ -278,13 +279,13 @@
 | ACC-10 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 重新认证后可以持久化注销请求；完成前强一致检查个人余额、未清应收、本人订单/退款、Hold、待核对用量、拒付、资金性差异、外部关单和 Commerce 任务，并要求转让组织所有权。组织余额和未消费组织授予不阻断；授予按 BILL-39 进入账号注销隔离暂停。 |
 | ACC-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前管理员删除保留 UUID 并清除部分资料，但完整注销 Saga、用户名/手机号安全释放、三年分类保留和永久 `user_code` 墓碑均未实现。 |
 | ACC-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
-| ACC-13 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 组织角色与作用域已有基础，但权限判断仍硬编码，平台权限继续依赖 Keycloak Realm Role |
+| ACC-13 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | Account 持久化平台/组织角色、原子权限、组织/节点作用域和授权版本；服务端默认拒绝并按接口所需权限判定，客户端显示不作为授权依据 |
 | ACC-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 顶层组织创建位于平台管理 API/UI。 |
 | ACC-19 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有逻辑删除与审计，但删除前未跨 Billing/Token 核验余额、权益、Hold、支付、差异和待核对用量 |
 | ACC-22 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 管理 UI 提供启动编辑动作，避免误改。 |
 | ACC-26 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前仅支持电子邮箱 + 一次性 Token 邀请；手机号/用户名邀请未实现 |
 | ACC-29 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有专用串行事务维持唯一 OWNER 并更新版本/审计；缺稳定幂等键和目标 Account 权限码 |
-| ACC-30 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 可查看组织角色定义、成员和本人角色；缺 Account 平台角色、授权有效期及完整平台角色关联 |
+| ACC-30 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | 可查看平台/组织角色定义及权限码、组织成员和本人角色；缺授权有效期、授予来源详情及完整平台角色关联视图 |
 | ACC-33 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 个人中心按组织列表动态隐藏。 |
 | ACC-34 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有个人/组织活动上下文和版本字段，但按 OIDC Session 保存，不是用户级全局上下文，也无跨端同步 |
 | TOK-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 用户在桌面直接配置的本地模型或第三方云模型由本地模型系统管理，不携带账号平台身份、不使用平台钱包和 Token Gateway。 |
@@ -355,7 +356,7 @@
 | ADM-02 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 仅在凭据丢失、意外停用或身份故障等异常导致全部超级管理员无法登录时，通过主机/集群受控离线命令创建短时紧急授权或恢复账号；禁止公网 API、禁止绕过最后一个有效超级管理员主动注销保护或替代计划内交接，执行必须告警并写不可删除审计。 |
 | ADM-03 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 服务账号、后台任务和 Event Relay 使用独立工作负载身份、短期凭据和最小权限，不继承人类平台角色；审计记录 `actor_type=SERVICE`、服务名和任务运行 ID。 |
 | ADM-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 支持列表、搜索、详情和生命周期操作。 |
-| ADM-05 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有组织成员、固定角色和所有权管理；缺 Account 平台 RBAC、授权有效期和目标权限码体系 |
+| ADM-05 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | 已有 Account 平台/组织 RBAC、权限码、组织成员和所有权管理；缺平台角色授予入口、绑定有效期和单绑定撤销 |
 | ADM-06 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 角色绑定支持开始/到期时间；临时和紧急授权到期自动失效、撤销缓存并记录审计。 |
 | ADM-07 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 允许运营/审批角色兼任和不同用户交叉审批，但禁止自审；ADM-37 强制审批命令只需一名独立审批人。 |
 | ADM-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 不嵌入普通后台；通过受限网络/隧道访问。 |
@@ -374,7 +375,7 @@
 | NFR-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 内部服务主要共享长期 INTERNAL_SERVICE_TOKEN，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权 |
 | NFR-13 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 管理员删除可清理部分资料和 Session；未完成 Identity 不可认证、用户名/手机号安全释放、三年分类保留及自动清除 |
 | NFR-14 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有 SMSProvider 接口和厂商错误映射基础；启动路径及挑战模型仍绑定阿里云托管核验模式 |
-| NFR-15 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | OIDC 负责主体、Account 负责组织权限；平台后台仍直接依赖 Keycloak platform-admin Realm Role |
+| NFR-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | OIDC 仅证明 issuer、subject 和会话；Account 是平台/组织业务授权事实源，三业务服务均不再读取 Realm Role 决定后台权限 |
 | NFR-16 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 新华三客户端已隔离在 Adapter，但 Account/Billing 数据模型仍含 mall_*、单一 SKU 和厂商同步语义 |
 | NFR-17 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有 PaymentProvider capabilities 并驱动部分操作；缺历史保留、权威终态、晚到窗口、账单及统一 UI/API/任务快照 |
 | NFR-18 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有模型网关调用和 UsageEvidenceProvider 抽象；数据库、字段和核对流程仍含 New API 专属语义 |
@@ -545,7 +546,7 @@
 | ACC-10 | 用户主动注销 | 未实现 | 重新认证后可以持久化注销请求；完成前强一致检查个人余额、未清应收、本人订单/退款、Hold、待核对用量、拒付、资金性差异、外部关单和 Commerce 任务，并要求转让组织所有权。组织余额和未消费组织授予不阻断；授予按 BILL-39 进入账号注销隔离暂停。 |
 | ACC-11 | 注销记录保留 | 未实现 | 当前管理员删除保留 UUID 并清除部分资料，但完整注销 Saga、用户名/手机号安全释放、三年分类保留和永久 `user_code` 墓碑均未实现。 |
 | ACC-12 | 一个用户可属于多个组织 | 已实现 | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
-| ACC-13 | 角色系统按权限码和作用域管理 | 部分实现 | 组织角色与作用域已有基础，但权限判断仍硬编码，平台权限继续依赖 Keycloak Realm Role。 |
+| ACC-13 | 角色系统按权限码和作用域管理 | 已实现 | Account 持久化并解析平台/组织角色、原子权限及组织/节点作用域，所有服务端授权默认拒绝。 |
 | ACC-14 | 个人用户不能创建顶层组织 | 已实现 | 顶层组织创建位于平台管理 API/UI。 |
 | ACC-15 | 创建顶层组织 | 部分实现 | 已有平台管理员创建接口/UI、字段校验、串行事务和审计/Outbox；缺目标 Account 平台权限与稳定幂等键。 |
 | ACC-16 | 搜索组织 | 部分实现 | 已有按名称或 ID 搜索及稳定更新时间排序；缺状态筛选、游标分页和 Account 平台权限模型。 |
@@ -562,7 +563,7 @@
 | ACC-27 | 添加组织成员 | 部分实现 | 已有用户/组织状态、重复成员、角色边界、授权版本和 Outbox；重复有效成员返回冲突而非幂等原结果。 |
 | ACC-28 | 移除组织成员 | 部分实现 | 已有成员撤销、角色清理、授权版本和 Outbox；管理端路径未自动回退活动上下文，也未处理 BILL-13 授予暂停。 |
 | ACC-29 | 所有者安全转让 | 部分实现 | 已有专用串行事务维持唯一 OWNER 并更新版本/审计；缺稳定幂等键和目标 Account 权限码。 |
-| ACC-30 | 查看角色定义和用户关联角色 | 部分实现 | 可查看组织角色定义、成员和本人角色；缺 Account 平台角色、授权有效期及完整平台角色关联。 |
+| ACC-30 | 查看角色定义和用户关联角色 | 部分实现 | 可查看平台/组织角色定义及权限码、组织成员和本人角色；缺授权有效期、授予来源详情及完整平台角色关联视图。 |
 | ACC-31 | 授予普通组织角色 | 部分实现 | 普通角色接口拒绝 OWNER/平台角色并递增授权版本；缺起止时间、细粒度权限码和稳定幂等键。 |
 | ACC-32 | 撤销普通组织角色 | 部分实现 | 角色替换会递增用户/Session 授权版本且 OWNER 走专用路径；缺单绑定幂等撤销、有效期和缓存失效契约。 |
 | ACC-33 | 无组织用户不显示组织页签 | 已实现 | 个人中心按组织列表动态隐藏。 |
@@ -725,7 +726,7 @@
 | ADM-02 | Break-glass 恢复 | 未实现 | 仅在凭据丢失、意外停用或身份故障等异常导致全部超级管理员无法登录时，通过主机/集群受控离线命令创建短时紧急授权或恢复账号；禁止公网 API、禁止绕过最后一个有效超级管理员主动注销保护或替代计划内交接，执行必须告警并写不可删除审计。 |
 | ADM-03 | 服务身份权限 | 未实现 | 服务账号、后台任务和 Event Relay 使用独立工作负载身份、短期凭据和最小权限，不继承人类平台角色；审计记录 `actor_type=SERVICE`、服务名和任务运行 ID。 |
 | ADM-04 | 用户与组织分为独立页签 | 已实现 | 支持列表、搜索、详情和生命周期操作。 |
-| ADM-05 | 角色与成员权限管理 | 部分实现 | 已有组织成员、固定角色和所有权管理；缺 Account 平台 RBAC、授权有效期和目标权限码体系。 |
+| ADM-05 | 角色与成员权限管理 | 部分实现 | 已有 Account 平台/组织 RBAC、权限码、组织成员和所有权管理；缺平台角色授予入口、绑定有效期和单绑定撤销。 |
 | ADM-06 | 角色授权自动回收 | 未实现 | 角色绑定支持开始/到期时间；临时和紧急授权到期自动失效、撤销缓存并记录审计。 |
 | ADM-07 | 审批角色兼任和交叉审批 | 未实现 | 允许运营/审批角色兼任和不同用户交叉审批，但禁止自审；ADM-37 强制审批命令只需一名独立审批人。 |
 | ADM-08 | Keycloak 安全管理入口 | 已实现 | 不嵌入普通后台；通过受限网络/隧道访问。 |
@@ -784,7 +785,7 @@
 | NFR-12 | 工作负载身份 | 内部服务主要共享长期 `INTERNAL_SERVICE_TOKEN`，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权。 |
 | NFR-13 | 个人信息去标识化与保留 | 管理员删除可清理部分资料和 Session；未完成 Identity 不可认证、用户名/手机号安全释放、三年分类保留及自动清除。 |
 | NFR-14 | 短信供应商可替换性 | 已有 `SMSProvider` 接口和厂商错误映射基础；启动路径及挑战模型仍绑定阿里云托管核验模式。 |
-| NFR-15 | 身份与授权分离 | OIDC 负责主体、Account 负责组织权限；平台后台仍直接依赖 Keycloak `platform-admin` Realm Role。 |
+| NFR-15 | 身份与授权分离 | OIDC 只证明主体与会话；Account 决定平台和组织业务权限，业务路由不再依赖 Identity Provider 角色 Claim。 |
 | NFR-16 | Commerce Provider 可替换性 | 新华三客户端已隔离在 Adapter，但 Account/Billing 数据模型仍含 `mall_*`、单一 SKU 和厂商同步语义。 |
 | NFR-17 | 支付能力可发现 | 已有 `PaymentProvider capabilities` 并驱动部分操作；缺历史保留、权威终态、晚到窗口、账单及统一 UI/API/任务快照。 |
 | NFR-18 | 模型网关可替换性 | 已有模型网关调用和 `UsageEvidenceProvider` 抽象；数据库、字段和核对流程仍含 New API 专属语义。 |

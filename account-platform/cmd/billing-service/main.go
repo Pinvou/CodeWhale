@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/billing"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
@@ -32,7 +33,11 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := billing.NewService(repository).WithPayments(payments)
+	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	service := billing.NewService(repository).WithPayments(payments).WithAuthorizer(authorizer)
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal(err)

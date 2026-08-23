@@ -21,7 +21,7 @@ func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.P
 	if err != nil {
 		return nil, err
 	}
-	if err := requireOrganizationMember(ctx, tx, actorID, organizationID); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationUnitsRead); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `SELECT id,organization_id,parent_id,name,status,version FROM organization_units WHERE organization_id=$1 AND status='ACTIVE' ORDER BY parent_id NULLS FIRST,name,id`, organizationID)
@@ -53,7 +53,7 @@ func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity
 	if err != nil {
 		return nil, err
 	}
-	if err := requireOrganizationMember(ctx, tx, actorID, organizationID); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersRead); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `
@@ -96,7 +96,7 @@ func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal i
 	if err != nil {
 		return Member{}, err
 	}
-	if err := requireOrganizationAdmin(ctx, tx, actorID, organizationID, nil); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationRolesAssign); err != nil {
 		return Member{}, err
 	}
 	var membershipID uuid.UUID
@@ -138,17 +138,6 @@ func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal i
 		return Member{}, err
 	}
 	return member, tx.Commit(ctx)
-}
-
-func requireOrganizationMember(ctx context.Context, tx pgx.Tx, userID, organizationID uuid.UUID) error {
-	var allowed bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM memberships WHERE organization_id=$1 AND user_id=$2 AND status='ACTIVE')`, organizationID, userID).Scan(&allowed); err != nil {
-		return err
-	}
-	if !allowed {
-		return ErrForbidden
-	}
-	return nil
 }
 
 func validateManagedRoles(roles []string) ([]string, error) {

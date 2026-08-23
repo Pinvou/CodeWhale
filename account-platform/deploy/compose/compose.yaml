@@ -151,6 +151,7 @@ services:
       APP_ENV: development
       PORT: 8080
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
+      ACCOUNT_HTTP_URL: http://account-service:8080
       OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
       OIDC_JWKS_URL: http://keycloak:8080/realms/pinvou/protocol/openid-connect/certs
       OIDC_AUDIENCE: pinvou-desktop-dev

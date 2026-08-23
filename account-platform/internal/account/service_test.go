@@ -17,6 +17,7 @@ type fakeRepository struct {
 	me            Me
 	activateCalls int
 	adminCalls    []string
+	deny          bool
 }
 
 func (f *fakeRepository) Bootstrap(context.Context, identity.Principal) (Me, bool, error) {
@@ -35,6 +36,12 @@ func (f *fakeRepository) GetMe(context.Context, identity.Principal) (Me, error) 
 }
 func (*fakeRepository) ResolveAuthorizationContext(context.Context, identity.Principal) (AuthorizationContext, error) {
 	panic("not used")
+}
+func (f *fakeRepository) Authorize(_ context.Context, _ identity.Principal, permission string, organizationID, _ *uuid.UUID) (AuthorizationDecision, error) {
+	return AuthorizationDecision{Allowed: !f.deny, Permission: permission, OrganizationID: organizationID, ContextVersion: 1, AuthorizationVersion: 1}, nil
+}
+func (*fakeRepository) RoleDefinitions(context.Context) ([]AdminRoleDefinition, error) {
+	return []AdminRoleDefinition{{Code: "PLATFORM_SUPER_ADMIN", Scope: "PLATFORM", Permissions: []string{PermissionPlatformRolesRead}}}, nil
 }
 func (*fakeRepository) ListOrganizations(context.Context, identity.Principal) ([]Organization, error) {
 	panic("not used")
@@ -214,10 +221,24 @@ func TestPersonalUsersCannotCreateOrganizations(t *testing.T) {
 	}
 }
 
+func TestLegacyRealmRoleCannotBypassAccountPermissionDenial(t *testing.T) {
+	repository := &fakeRepository{deny: true}
+	verify := func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "legacy-admin", SessionID: "session", RealmRoles: []string{"platform-admin"}}, nil
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/users", nil)
+	request.Header.Set("Authorization", "Bearer valid")
+	response := httptest.NewRecorder()
+	NewService(repository, &fakeWalletProvisioner{}).Handler(verify).ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "PERMISSION_DENIED") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 	repository := &fakeRepository{}
 	verify := func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session", RealmRoles: []string{"platform-admin"}}, nil
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session"}, nil
 	}
 	handler := NewService(repository, &fakeWalletProvisioner{}).Handler(verify)
 	userID := uuid.Must(uuid.NewV7())
@@ -252,7 +273,7 @@ func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing.T) {
 	repository := &fakeRepository{}
 	verify := func(context.Context, string) (identity.Principal, error) {
-		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session", RealmRoles: []string{"platform-admin"}}, nil
+		return identity.Principal{Issuer: "https://issuer.example", Subject: "admin", SessionID: "session"}, nil
 	}
 	handler := NewService(repository, &fakeWalletProvisioner{}).Handler(verify)
 	ownerID := uuid.Must(uuid.NewV7())

@@ -51,6 +51,7 @@ const expectedIncomplete = new Set(
   [...canonical].filter(([, status]) => incompleteStatuses.has(status)).map(([target]) => target),
 );
 const owners = new Map();
+const activeOwners = new Map();
 const taskNumbers = [];
 
 for (const line of taskMarkdown.split(/\r?\n/)) {
@@ -68,11 +69,12 @@ for (const line of taskMarkdown.split(/\r?\n/)) {
       assert.equal(expectedIncomplete.has(target), false, `${taskID} is DONE but ${target} remains incomplete`);
     } else {
       assert.ok(expectedIncomplete.has(target), `${taskID} is ${taskStatus} but ${target} is complete`);
+      activeOwners.set(target, taskID);
     }
   }
 }
 
 assert.deepEqual(taskNumbers, Array.from({ length: taskNumbers.length }, (_, index) => index + 1));
-assert.equal(owners.size, expectedIncomplete.size);
-assert.deepEqual([...owners.keys()].sort(), [...expectedIncomplete].sort());
-console.log(`implementation task coverage passed: ${taskNumbers.length} tasks own ${owners.size} incomplete targets`);
+assert.equal(activeOwners.size, expectedIncomplete.size);
+assert.deepEqual([...activeOwners.keys()].sort(), [...expectedIncomplete].sort());
+console.log(`implementation task coverage passed: ${taskNumbers.length} tasks own ${activeOwners.size} incomplete targets; ${owners.size - activeOwners.size} completed targets retained for traceability`);

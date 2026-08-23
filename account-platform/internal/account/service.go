@@ -33,6 +33,10 @@ func NewService(repository Repository, wallets WalletProvisioner) *Service {
 
 func (s *Service) WithMobileAuth(auth *MobileAuthService, serviceToken string) *Service {
 	s.mobileAuth = auth
+	return s.WithServiceToken(serviceToken)
+}
+
+func (s *Service) WithServiceToken(serviceToken string) *Service {
 	s.serviceToken = strings.TrimSpace(serviceToken)
 	return s
 }
@@ -59,14 +63,15 @@ func (s *Service) Bootstrap(ctx context.Context, principal identity.Principal) (
 
 func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
+	internal := router.Group("/internal/v1")
+	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
+	internal.POST("/authorization/check", httpserver.AdaptFunc(s.checkPermission))
 	if s.mobileAuth != nil {
 		router.POST("/v1/auth/registration/precheck", httpserver.AdaptFunc(s.precheckMobileRegistration))
 		router.POST("/v1/auth/captcha/challenges", httpserver.AdaptFunc(s.createSliderCaptcha))
 		router.POST("/v1/auth/sms/challenges", httpserver.AdaptFunc(s.sendSMSChallenge))
 		router.POST("/v1/auth/register", httpserver.AdaptFunc(s.registerMobile))
-		internal := router.Group("/internal/v1/auth")
-		internal.Use(serviceauth.GinMiddleware(s.serviceToken))
-		internal.POST("/sms/verify", httpserver.AdaptFunc(s.verifyLoginSMS))
+		internal.POST("/auth/sms/verify", httpserver.AdaptFunc(s.verifyLoginSMS))
 	}
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
@@ -85,29 +90,28 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
 	protected.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
 	admin := protected.Group("/admin/v1")
-	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
-	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
-	admin.GET("/roles", httpserver.AdaptFunc(s.adminRoles))
-	admin.GET("/users", httpserver.AdaptFunc(s.adminUsers))
-	admin.GET("/users/:user_id/memberships", httpserver.AdaptFunc(s.adminUserMemberships))
-	admin.PATCH("/users/:user_id/status", httpserver.AdaptFunc(s.adminSetUserStatus))
-	admin.DELETE("/users/:user_id", httpserver.AdaptFunc(s.adminDeleteUser))
-	admin.GET("/organizations", httpserver.AdaptFunc(s.adminOrganizations))
-	admin.POST("/organizations", httpserver.AdaptFunc(s.adminCreateOrganization))
-	admin.PATCH("/organizations/:organization_id", httpserver.AdaptFunc(s.adminRenameOrganization))
-	admin.PATCH("/organizations/:organization_id/status", httpserver.AdaptFunc(s.adminSetOrganizationStatus))
-	admin.DELETE("/organizations/:organization_id", httpserver.AdaptFunc(s.adminDeleteOrganization))
-	admin.GET("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminUnits))
-	admin.GET("/organizations/:organization_id/members", httpserver.AdaptFunc(s.adminMembers))
-	admin.POST("/organizations/:organization_id/members", httpserver.AdaptFunc(s.adminAddMember))
-	admin.PUT("/organizations/:organization_id/members/:user_id/roles", httpserver.AdaptFunc(s.adminReplaceMemberRoles))
-	admin.DELETE("/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.adminRemoveMember))
-	admin.POST("/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.adminTransferOwnership))
-	admin.POST("/organizations/:organization_id/units", httpserver.AdaptFunc(s.adminCreateUnit))
-	admin.PATCH("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminRenameUnit))
-	admin.DELETE("/organizations/:organization_id/units/:unit_id", httpserver.AdaptFunc(s.adminDeleteUnit))
-	admin.GET("/audit-logs", httpserver.AdaptFunc(s.adminAuditLogs))
-	admin.GET("/audit-logs/:audit_id", httpserver.AdaptFunc(s.adminAuditLog))
+	admin.GET("/overview", s.requirePermission(PermissionPlatformSystemStatusRead), httpserver.AdaptFunc(s.adminOverview))
+	admin.GET("/roles", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoles))
+	admin.GET("/users", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUsers))
+	admin.GET("/users/:user_id/memberships", s.requirePermission(PermissionPlatformUsersRead), httpserver.AdaptFunc(s.adminUserMemberships))
+	admin.PATCH("/users/:user_id/status", s.requirePermission(PermissionPlatformUsersStatusManage), httpserver.AdaptFunc(s.adminSetUserStatus))
+	admin.DELETE("/users/:user_id", s.requirePermission(PermissionPlatformUsersStatusManage), httpserver.AdaptFunc(s.adminDeleteUser))
+	admin.GET("/organizations", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminOrganizations))
+	admin.POST("/organizations", s.requirePermission(PermissionPlatformOrganizationsCreate), httpserver.AdaptFunc(s.adminCreateOrganization))
+	admin.PATCH("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminRenameOrganization))
+	admin.PATCH("/organizations/:organization_id/status", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminSetOrganizationStatus))
+	admin.DELETE("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsDelete), httpserver.AdaptFunc(s.adminDeleteOrganization))
+	admin.GET("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminUnits))
+	admin.GET("/organizations/:organization_id/members", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminMembers))
+	admin.POST("/organizations/:organization_id/members", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminAddMember))
+	admin.PUT("/organizations/:organization_id/members/:user_id/roles", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminReplaceMemberRoles))
+	admin.DELETE("/organizations/:organization_id/members/:user_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminRemoveMember))
+	admin.POST("/organizations/:organization_id/ownership", s.requirePermission(PermissionPlatformOrganizationsOwnerTransfer), httpserver.AdaptFunc(s.adminTransferOwnership))
+	admin.POST("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminCreateUnit))
+	admin.PATCH("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminRenameUnit))
+	admin.DELETE("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), httpserver.AdaptFunc(s.adminDeleteUnit))
+	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
+	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
 	return router
 }
 

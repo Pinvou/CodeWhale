@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -46,10 +47,16 @@ type Service struct {
 	defaultMaxOutputTokens int64
 	maximumOutputTokens    int64
 	defaultRoutes          DefaultRouteProvisioner
+	authorizer             *authorization.Client
 }
 
 func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {
 	s.defaultRoutes = provisioner
+	return s
+}
+
+func (s *Service) WithAuthorizer(authorizer *authorization.Client) *Service {
+	s.authorizer = authorizer
 	return s
 }
 
@@ -84,17 +91,18 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	router.GET("/v1/me/balance", httpserver.AdaptFunc(s.getBalance))
 	router.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
 	admin := router.Group("/admin/v1")
-	admin.Use(identity.RequireRealmRoleGin("platform-admin"))
-	admin.GET("/overview", httpserver.AdaptFunc(s.adminOverview))
-	admin.GET("/token-accounts", httpserver.AdaptFunc(s.adminTokenAccounts))
-	admin.GET("/token-accounts/:token_account_id", httpserver.AdaptFunc(s.adminTokenAccount))
-	admin.PATCH("/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
-	admin.PUT("/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.adminUpsertTokenRoute))
-	admin.DELETE("/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.adminDeleteTokenRoute))
-	admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", httpserver.AdaptFunc(s.adminValidateCredential))
-	admin.GET("/usage-requests", httpserver.AdaptFunc(s.adminUsageRequests))
-	admin.GET("/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.adminUsageRequest))
-	admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", httpserver.AdaptFunc(s.adminRetryReconciliation))
+	if s.authorizer != nil {
+		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
+		admin.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccount))
+		admin.PATCH("/token-accounts/:token_account_id/status", s.authorizer.Require("platform.tokens.manage"), httpserver.AdaptFunc(s.adminSetTokenAccountStatus))
+		admin.PUT("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), httpserver.AdaptFunc(s.adminUpsertTokenRoute))
+		admin.DELETE("/token-accounts/:token_account_id/routes", s.authorizer.Require("platform.tokens.manage"), httpserver.AdaptFunc(s.adminDeleteTokenRoute))
+		admin.POST("/token-accounts/:token_account_id/credentials/:credential_id/validate", s.authorizer.Require("platform.tokens.credentials.validate"), httpserver.AdaptFunc(s.adminValidateCredential))
+		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
+		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
+		admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", s.authorizer.Require("platform.usage.reconcile.retry"), httpserver.AdaptFunc(s.adminRetryReconciliation))
+	}
 	return router
 }
 
