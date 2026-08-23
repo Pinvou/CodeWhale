@@ -4,6 +4,7 @@ global:
 
 images:
   accountService: { repository: registry.example.com/pinvou/account-service, tag: 0.1.0, pullPolicy: IfNotPresent }
+  identityService: { repository: registry.example.com/pinvou/identity-service, tag: 0.1.0, pullPolicy: IfNotPresent }
   billingService: { repository: registry.example.com/pinvou/billing-service, tag: 0.1.0, pullPolicy: IfNotPresent }
   tokenGateway: { repository: registry.example.com/pinvou/token-gateway, tag: 0.1.0, pullPolicy: IfNotPresent }
   tokenPortal: { repository: registry.example.com/pinvou/token-portal, tag: 0.1.0, pullPolicy: IfNotPresent }
@@ -40,6 +41,7 @@ ingress:
   enabled: true
   portalHost: tokens.example.com
   keycloakHost: accounts.example.com
+  identityHost: identity.example.com
   tlsSecretName: pinvou-account-platform-production-tls
 
 keycloak:

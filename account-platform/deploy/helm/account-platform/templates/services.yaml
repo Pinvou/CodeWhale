@@ -1,5 +1,5 @@
 {{- $root := . -}}
-{{- range $component := list "account-service" "billing-service" "token-gateway" "token-portal" "keycloak" "redis" "nats" }}
+{{- range $component := list "account-service" "identity-service" "billing-service" "token-gateway" "token-portal" "keycloak" "redis" "nats" }}
 ---
 apiVersion: v1
 kind: Service

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"log"
 	"os"
 	"strconv"
@@ -36,18 +37,23 @@ func main() {
 	}
 	service := account.NewService(repository, wallets).WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN"))
 	if enabled("MOBILE_AUTH_ENABLED") {
-		sms, err := account.NewAliyunSMSProvider(account.AliyunSMSConfig{
-			AccessKeyID: os.Getenv("ALIYUN_SMS_ACCESS_KEY_ID"), AccessKeySecret: os.Getenv("ALIYUN_SMS_ACCESS_KEY_SECRET"),
-			SignName: os.Getenv("ALIYUN_SMS_SIGN_NAME"), RegisterTemplate: os.Getenv("ALIYUN_SMS_REGISTER_TEMPLATE"),
-			LoginTemplate: os.Getenv("ALIYUN_SMS_LOGIN_TEMPLATE"), Endpoint: os.Getenv("ALIYUN_SMS_ENDPOINT"),
+		verificationKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("SMS_VERIFICATION_HMAC_KEY_BASE64")))
+		if decodeErr != nil {
+			log.Fatal("SMS_VERIFICATION_HMAC_KEY_BASE64 must be unpadded standard Base64")
+		}
+		sms, err := account.NewSMSProvider(account.SMSProviderConfig{
+			Mode: os.Getenv("SMS_PROVIDER"),
+			Aliyun: account.AliyunSMSConfig{
+				AccessKeyID: os.Getenv("ALIYUN_SMS_ACCESS_KEY_ID"), AccessKeySecret: os.Getenv("ALIYUN_SMS_ACCESS_KEY_SECRET"),
+				SignName: os.Getenv("ALIYUN_SMS_SIGN_NAME"), RegisterTemplate: os.Getenv("ALIYUN_SMS_REGISTER_TEMPLATE"),
+				LoginTemplate: os.Getenv("ALIYUN_SMS_LOGIN_TEMPLATE"), Endpoint: os.Getenv("ALIYUN_SMS_ENDPOINT"),
+			},
+			HTTPGenerated: account.HTTPGeneratedSMSConfig{Endpoint: os.Getenv("SMS_HTTP_ENDPOINT"), BearerToken: os.Getenv("SMS_HTTP_BEARER_TOKEN"), VerificationKey: verificationKey, AllowInsecure: cfg.Environment == "development" || cfg.Environment == "test"},
 		})
 		if err != nil {
 			log.Fatal(err)
 		}
-		identities, err := account.NewKeycloakProvisioner(
-			os.Getenv("KEYCLOAK_ADMIN_API_URL"), os.Getenv("KEYCLOAK_PROVISIONER_TOKEN_URL"), os.Getenv("KEYCLOAK_REALM"),
-			os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_ID"), os.Getenv("KEYCLOAK_PROVISIONER_CLIENT_SECRET"),
-		)
+		identities, err := account.NewHTTPIdentityProvisioner(os.Getenv("IDENTITY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
 		if err != nil {
 			log.Fatal(err)
 		}

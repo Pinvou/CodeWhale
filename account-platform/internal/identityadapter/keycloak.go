@@ -1,4 +1,4 @@
-package account
+package identityadapter
 
 import (
 	"bytes"
@@ -16,25 +16,19 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 )
 
-type IdentityProvisioner interface {
-	CreateMobileUser(context.Context, string, string, string) (string, error)
-	DeleteUser(context.Context, string) error
+var ErrUsernameAlreadyRegistered = errors.New("username is already registered")
+
+type KeycloakDirectory struct {
+	adminURL                      *url.URL
+	tokenURL                      *url.URL
+	realm, clientID, clientSecret string
+	client                        *http.Client
+	mu                            sync.Mutex
+	token                         string
+	expiresAt                     time.Time
 }
 
-type KeycloakProvisioner struct {
-	adminURL     *url.URL
-	tokenURL     *url.URL
-	realm        string
-	clientID     string
-	clientSecret string
-	client       *http.Client
-
-	mu        sync.Mutex
-	token     string
-	expiresAt time.Time
-}
-
-func NewKeycloakProvisioner(adminURL, tokenURL, realm, clientID, clientSecret string) (*KeycloakProvisioner, error) {
+func NewKeycloakDirectory(adminURL, tokenURL, realm, clientID, clientSecret string) (*KeycloakDirectory, error) {
 	parse := func(name, raw string) (*url.URL, error) {
 		parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(raw), "/"))
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.User != nil {
@@ -53,10 +47,10 @@ func NewKeycloakProvisioner(adminURL, tokenURL, realm, clientID, clientSecret st
 	if strings.TrimSpace(realm) == "" || strings.TrimSpace(clientID) == "" || strings.TrimSpace(clientSecret) == "" {
 		return nil, errors.New("Keycloak provisioner realm and client credentials are required")
 	}
-	return &KeycloakProvisioner{adminURL: admin, tokenURL: token, realm: strings.TrimSpace(realm), clientID: strings.TrimSpace(clientID), clientSecret: strings.TrimSpace(clientSecret), client: observability.NewHTTPClient(10 * time.Second)}, nil
+	return &KeycloakDirectory{adminURL: admin, tokenURL: token, realm: strings.TrimSpace(realm), clientID: strings.TrimSpace(clientID), clientSecret: strings.TrimSpace(clientSecret), client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
-func (p *KeycloakProvisioner) CreateMobileUser(ctx context.Context, username, mobile, password string) (string, error) {
+func (p *KeycloakDirectory) CreateMobileUser(ctx context.Context, username, mobile, password string) (string, error) {
 	access, err := p.accessToken(ctx)
 	if err != nil {
 		return "", err
@@ -91,7 +85,7 @@ func (p *KeycloakProvisioner) CreateMobileUser(ctx context.Context, username, mo
 	return subject, nil
 }
 
-func (p *KeycloakProvisioner) DeleteUser(ctx context.Context, subject string) error {
+func (p *KeycloakDirectory) DeleteUser(ctx context.Context, subject string) error {
 	access, err := p.accessToken(ctx)
 	if err != nil {
 		return err
@@ -112,7 +106,7 @@ func (p *KeycloakProvisioner) DeleteUser(ctx context.Context, subject string) er
 	return nil
 }
 
-func (p *KeycloakProvisioner) accessToken(ctx context.Context) (string, error) {
+func (p *KeycloakDirectory) accessToken(ctx context.Context) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.token != "" && time.Now().Before(p.expiresAt.Add(-30*time.Second)) {

@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "images", "newApi", "oidc", "public", "observability", "security", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
+  "required": ["global", "images", "newApi", "oidc", "public", "observability", "security", "sms", "billing", "tokenGateway", "external", "ingress", "keycloak", "networkPolicy"],
   "properties": {
     "global": {
       "type": "object",
@@ -13,10 +13,11 @@
     },
     "images": {
       "type": "object",
-      "required": ["accountService", "billingService", "tokenGateway", "tokenPortal", "eventRelay", "migrate", "newApi", "keycloak", "redis", "nats"],
+      "required": ["accountService", "identityService", "billingService", "tokenGateway", "tokenPortal", "eventRelay", "migrate", "newApi", "keycloak", "redis", "nats"],
       "additionalProperties": false,
       "properties": {
         "accountService": { "$ref": "#/definitions/image" },
+        "identityService": { "$ref": "#/definitions/image" },
         "billingService": { "$ref": "#/definitions/image" },
         "tokenGateway": { "$ref": "#/definitions/image" },
         "tokenPortal": { "$ref": "#/definitions/image" },
@@ -72,6 +73,17 @@
         "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 }
       }
     },
+    "sms": {
+      "type": "object",
+      "required": ["enabled", "provider", "aliyunEndpoint", "httpEndpoint"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "provider": { "enum": ["aliyun-managed", "http-generated"] },
+        "aliyunEndpoint": { "type": "string", "format": "uri" },
+        "httpEndpoint": { "type": "string" }
+      }
+    },
     "billing": {
       "type": "object",
       "required": ["paymentExpiryIntervalSeconds"],
@@ -101,7 +113,7 @@
         "telemetryCollectorCidrs": { "$ref": "#/definitions/cidrs" }
       }
     },
-    "ingress": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } },
+    "ingress": { "type": "object", "required": ["enabled", "identityHost"], "properties": { "enabled": { "type": "boolean" }, "identityHost": { "type": "string", "minLength": 1 } } },
     "keycloak": {
       "type": "object",
       "required": ["hostname", "adminHostname"],

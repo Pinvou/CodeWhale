@@ -15,14 +15,15 @@ import (
 
 func (s *Service) precheckMobileRegistration(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username string `json:"username"`
-		Mobile   string `json:"mobile"`
-		Password string `json:"password"`
+		Username              string `json:"username"`
+		Mobile                string `json:"mobile"`
+		PasswordHandle        string `json:"password_handle"`
+		PasswordPolicyVersion string `json:"password_policy_version"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	username, err := s.mobileAuth.PrecheckRegistration(r.Context(), body.Username, body.Mobile, body.Password)
+	username, err := s.mobileAuth.PrecheckRegistration(r.Context(), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion)
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
@@ -48,17 +49,18 @@ func (s *Service) createSliderCaptcha(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username      string     `json:"username"`
-		Mobile        string     `json:"mobile"`
-		Password      string     `json:"password"`
-		Purpose       SMSPurpose `json:"purpose"`
-		CaptchaID     uuid.UUID  `json:"captcha_id"`
-		CaptchaOffset int        `json:"captcha_offset"`
+		Username              string     `json:"username"`
+		Mobile                string     `json:"mobile"`
+		PasswordHandle        string     `json:"password_handle"`
+		PasswordPolicyVersion string     `json:"password_policy_version"`
+		Purpose               SMSPurpose `json:"purpose"`
+		CaptchaID             uuid.UUID  `json:"captcha_id"`
+		CaptchaOffset         int        `json:"captcha_offset"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	challenge, err := s.mobileAuth.Send(r.Context(), body.Username, body.Mobile, body.Password, SMSPurpose(strings.ToUpper(string(body.Purpose))), body.CaptchaID, body.CaptchaOffset)
+	challenge, err := s.mobileAuth.Send(r.Context(), body.Username, body.Mobile, body.PasswordHandle, body.PasswordPolicyVersion, SMSPurpose(strings.ToUpper(string(body.Purpose))), body.CaptchaID, body.CaptchaOffset, requestSource(r), r.Header.Get("X-Device-ID"))
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
@@ -73,17 +75,18 @@ func (s *Service) sendSMSChallenge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) registerMobile(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username    string    `json:"username"`
-		Mobile      string    `json:"mobile"`
-		ChallengeID uuid.UUID `json:"challenge_id"`
-		Code        string    `json:"code"`
-		Password    string    `json:"password"`
+		Username              string    `json:"username"`
+		Mobile                string    `json:"mobile"`
+		ChallengeID           uuid.UUID `json:"challenge_id"`
+		Code                  string    `json:"code"`
+		PasswordHandle        string    `json:"password_handle"`
+		PasswordPolicyVersion string    `json:"password_policy_version"`
 	}
 	if err := api.DecodeJSON(w, r, &body); err != nil || body.ChallengeID == uuid.Nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid mobile registration request", httpserver.RequestID(r.Context()))
 		return
 	}
-	userID, userCode, err := s.mobileAuth.Register(r.Context(), body.Username, body.Mobile, body.ChallengeID, body.Code, body.Password)
+	userID, userCode, err := s.mobileAuth.Register(r.Context(), body.Username, body.Mobile, body.ChallengeID, body.Code, body.PasswordHandle, body.PasswordPolicyVersion)
 	if err != nil {
 		s.writeMobileAuthError(w, r, err)
 		return
@@ -124,8 +127,10 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 		status, code, message = http.StatusBadRequest, "USERNAME_INVALID", "username must start with a letter and contain 3 to 32 letters, digits, dots, underscores, or hyphens"
 	case errors.Is(err, ErrUsernameAlreadyRegistered):
 		status, code, message = http.StatusConflict, "USERNAME_ALREADY_REGISTERED", "the username is already registered"
-	case errors.Is(err, ErrPasswordInvalid):
-		status, code, message = http.StatusBadRequest, "PASSWORD_INVALID", "password must be 8 to 128 printable characters and contain a letter and a digit"
+	case errors.Is(err, ErrPasswordReferenceInvalid):
+		status, code, message = http.StatusGone, "PASSWORD_REFERENCE_INVALID", "the password precheck has expired; restart registration"
+	case errors.Is(err, ErrPasswordReferenceConflict):
+		status, code, message = http.StatusConflict, "PASSWORD_REFERENCE_CONFLICT", "the password precheck belongs to different registration data"
 	case errors.Is(err, ErrCaptchaInvalid):
 		status, code, message = http.StatusBadRequest, "CAPTCHA_INVALID", "the slider verification is invalid or expired"
 	case errors.Is(err, ErrSMSRateLimited):

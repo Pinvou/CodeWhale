@@ -14,7 +14,7 @@ async function readYaml(relative) {
 }
 
 test('OpenAPI contracts expose stable versions and no inline credentials', async () => {
-  const files = ['account.yaml', 'billing.yaml', 'token-gateway.yaml', 'admin.yaml'];
+  const files = ['account.yaml', 'identity.yaml', 'billing.yaml', 'token-gateway.yaml', 'admin.yaml'];
   for (const file of files) {
     const raw = await readFile(path.join(root, 'contracts/openapi', file), 'utf8');
     const document = YAML.parse(raw);
@@ -51,6 +51,37 @@ test('recent recharge lookup is wallet-scoped internally and context-scoped publ
     gateway.paths['/recharge/orders/recent'].get.responses['200'].content['application/json'].schema.$ref,
     'billing.yaml#/components/schemas/RecentRechargeOrder',
   );
+});
+
+test('registration passwords cross only the Identity Adapter boundary', async () => {
+  const accountRaw = await readFile(path.join(root, 'contracts/openapi/account.yaml'), 'utf8');
+  const identity = await readYaml('contracts/openapi/identity.yaml');
+  assert.doesNotMatch(accountRaw, /^\s+password:/m);
+  assert.equal(identity.paths['/registration/password-prechecks'].post.requestBody.content['application/json'].schema.properties.password.writeOnly, true);
+  for (const pathName of ['/auth/registration/precheck', '/auth/register']) {
+    const schema = (await readYaml('contracts/openapi/account.yaml')).paths[pathName].post.requestBody.content['application/json'].schema;
+    assert.ok(schema.required.includes('password_handle'));
+    assert.ok(schema.required.includes('password_policy_version'));
+  }
+  const accountHandler = await readFile(path.join(root, 'internal/account/mobile_auth_http.go'), 'utf8');
+  const desktopBridge = await readFile(path.join(root, '../pinvou3-app/src-tauri/src/features/account_platform/mod.rs'), 'utf8');
+  assert.doesNotMatch(accountHandler, /json:"password"/);
+  assert.match(desktopBridge, /public_identity_request\([\s\S]*"password": input\.password/);
+  assert.match(desktopBridge, /"password_handle": password_handle/);
+});
+
+test('SMS adapters support both code ownership modes with versioned risk evidence', async () => {
+  const factory = await readFile(path.join(root, 'internal/account/sms_factory.go'), 'utf8');
+  const migration = await readFile(path.join(root, 'migrations/account/000012_sms_risk_dimensions.up.sql'), 'utf8');
+  const mobileAuth = await readFile(path.join(root, 'internal/account/mobile_auth.go'), 'utf8');
+  assert.match(factory, /case "aliyun-managed"/);
+  assert.match(factory, /case "http-generated"/);
+  assert.match(migration, /ADD COLUMN provider_id/);
+  assert.match(migration, /ADD COLUMN adapter_version/);
+  assert.match(migration, /CREATE TABLE sms_send_attempts/);
+  assert.match(migration, /source_hash BYTEA/);
+  assert.match(migration, /device_hash BYTEA/);
+  assert.doesNotMatch(mobileAuth, /AliyunSMSProvider|HTTPGeneratedSMSProvider/);
 });
 
 test('personal usage history exposes only user-facing fields', async () => {

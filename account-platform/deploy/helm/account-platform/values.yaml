@@ -6,6 +6,7 @@ global:
 
 images:
   accountService: { repository: pinvou/account-service, tag: dev, pullPolicy: IfNotPresent }
+  identityService: { repository: pinvou/identity-service, tag: dev, pullPolicy: IfNotPresent }
   billingService: { repository: pinvou/billing-service, tag: dev, pullPolicy: IfNotPresent }
   tokenGateway: { repository: pinvou/token-gateway, tag: dev, pullPolicy: IfNotPresent }
   tokenPortal: { repository: pinvou/token-portal, tag: dev, pullPolicy: IfNotPresent }
@@ -18,6 +19,7 @@ images:
 
 replicas:
   accountService: 2
+  identityService: 1
   billingService: 2
   tokenGateway: 2
   tokenPortal: 2
@@ -49,6 +51,12 @@ security:
   rateLimitRPS: 100
   rateLimitBurst: 200
 
+sms:
+  enabled: false
+  provider: aliyun-managed
+  aliyunEndpoint: https://dypnsapi.aliyuncs.com
+  httpEndpoint: ""
+
 billing:
   paymentExpiryIntervalSeconds: 15
 
@@ -76,6 +84,7 @@ ingress:
   className: ""
   portalHost: tokens.example.invalid
   keycloakHost: accounts.example.invalid
+  identityHost: identity.example.invalid
   tlsSecretName: ""
 
 keycloak:

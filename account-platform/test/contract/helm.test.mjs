@@ -49,7 +49,7 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   const templateDirectory = path.join(chart, 'templates');
   const files = await readdir(templateDirectory);
   const combined = (await Promise.all(files.map(name => readFile(path.join(templateDirectory, name), 'utf8')))).join('\n');
-  for (const component of ['account-service', 'billing-service', 'token-gateway', 'token-portal', 'new-api', 'keycloak', 'redis', 'nats']) {
+  for (const component of ['account-service', 'identity-service', 'billing-service', 'token-gateway', 'token-portal', 'new-api', 'keycloak', 'redis', 'nats']) {
     assert.match(combined, new RegExp(component));
   }
   assert.match(combined, /pre-install,pre-upgrade/);
@@ -66,11 +66,12 @@ test('Helm chart includes required workloads, migration hooks, and deny-by-defau
   assert.doesNotMatch(combined, /kind:\s*Secret/);
 });
 
-test('Helm exposes only Keycloak authentication paths and keeps administration tunneled', async () => {
+test('Helm exposes only public authentication paths and keeps Keycloak administration tunneled', async () => {
   const ingress = await readFile(path.join(chart, 'templates/ingress.yaml'), 'utf8');
   const keycloakRule = ingress.slice(ingress.indexOf('- host: {{ .Values.ingress.keycloakHost'));
   assert.match(ingress, /^\s*- path: \/realms\s*$/m);
   assert.match(ingress, /^\s*- path: \/resources\s*$/m);
   assert.doesNotMatch(keycloakRule, /path:\s*\/(?=\s*[,}\n])/);
   assert.doesNotMatch(keycloakRule, /\/admin/);
+  assert.match(ingress, /path: \/v1\/registration\/password-prechecks/);
 });

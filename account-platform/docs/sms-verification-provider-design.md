@@ -1,6 +1,6 @@
 # 短信验证后端可替换设计
 
-> 状态：已确认目标设计，待实现
+> 状态：基础双模式 Adapter、配置注入、Provider 版本留痕和业务状态机隔离已实现；用途扩展由后续任务继续
 >
 > 日期：2026-08-22
 >
@@ -16,24 +16,17 @@
 - 支持“供应商生成并核验验证码”和“平台生成验证码、供应商只发送短信”两类方案。
 - 风控、挑战状态、一次性消费、反枚举和审计始终由品悟业务层控制，不能交给某一家供应商成为唯一事实源。
 
-## 2. 当前实现与差距
+## 2. 当前实现
 
-当前代码已经有一个初步接口：
+当前代码通过供应商中立接口提供两类实现：
 
 ```text
-SMSProvider.SendCode(...)
+SMSProvider.Descriptor() -> provider_id + adapter_version
+SMSProvider.SendCode(...) -> message_id + opaque_verification_data
 SMSProvider.VerifyCode(...)
 ```
 
-但仍存在耦合：
-
-1. 接口假定同一个 Provider 同时发送和核验验证码，只适合阿里云号码认证这类托管验证码产品。
-2. `account-service` 启动代码直接读取 `ALIYUN_SMS_*` 并构造 `AliyunSMSProvider`，没有 Provider 注册和选择层。
-3. 阿里云 Action、签名、模板和验证码参数与 Account 包放在一起。
-4. 挑战记录没有稳定的后端类型/版本，切换 Provider 后，切换前已发送的验证码无法可靠路由到原后端核验。
-5. 当前用途只有注册和登录；改手机号、找回密码接入后容易继续复制供应商分支。
-
-因此，当前属于“有接口但仍绑定一种供应商能力模型”，尚未达到方便替换的目标。
+`SMS_PROVIDER` 在启动时选择 `aliyun-managed` 或 `http-generated`，核心挑战状态机不判断厂商。前者由阿里云生成并核验验证码；后者使用密码学安全随机源在 Adapter 中生成验证码，通过通用 HTTPS 发送端点投递，并向 Account 返回带独立密钥的 HMAC 校验数据。`sms_challenges` 保存创建时的 Provider ID 和 Adapter 版本，`sms_send_attempts` 只保存手机号、来源和设备的单向摘要用于限流审计。当前用途仍只有注册和登录；改手机号、找回密码由 ACC-06～ACC-09 的后续任务接入同一端口。
 
 ## 3. 分层架构
 

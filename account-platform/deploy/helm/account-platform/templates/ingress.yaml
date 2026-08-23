@@ -9,7 +9,7 @@ spec:
   {{- with .Values.ingress.tlsSecretName }}
   tls:
     - secretName: {{ . }}
-      hosts: [{{ $.Values.ingress.portalHost | quote }}, {{ $.Values.ingress.keycloakHost | quote }}]
+      hosts: [{{ $.Values.ingress.portalHost | quote }}, {{ $.Values.ingress.keycloakHost | quote }}, {{ $.Values.ingress.identityHost | quote }}]
   {{- end }}
   rules:
     - host: {{ .Values.ingress.portalHost | quote }}
@@ -23,4 +23,10 @@ spec:
           - path: /resources
             pathType: Prefix
             backend: { service: { name: {{ include "pinvou.fullname" . }}-keycloak, port: { number: 8080 } } }
+    - host: {{ .Values.ingress.identityHost | quote }}
+      http:
+        paths:
+          - path: /v1/registration/password-prechecks
+            pathType: Exact
+            backend: { service: { name: {{ include "pinvou.fullname" . }}-identity-service, port: { number: 8080 } } }
 {{- end }}

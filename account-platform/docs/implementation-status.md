@@ -14,14 +14,14 @@
 
 | 字段 | 要求 |
 |---|---|
-| `source_commit` | 本轮连续实施的代码起点为 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`；APT-001 结论还包含本文件所在的同一提交。它证明结论对应的代码快照，不表示所有实现均由该提交引入 |
+| `source_commit` | 本轮连续实施的代码起点为 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`；APT-001 与 APT-002 结论还包含各自状态文件所在的同一提交。它证明结论对应的代码快照，不表示所有实现均由该提交引入 |
 | `tests` | 覆盖正常、权限拒绝、幂等、异常与恢复路径的测试名称或报告 |
 | `deployment_version` | 已验证的部署版本、环境和验证时间；未部署写 `NOT_DEPLOYED` |
 | `known_gaps` | 与目标需求的剩余差异、Provider 降级和未验证风险 |
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 61`、`部分实现 98`、`未实现 168`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 68`、`部分实现 93`、`未实现 166`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -32,8 +32,9 @@
 | `CONTRACT-36` | 本轮 RBAC 前基线合同集 | OpenAPI lint 与原 36 个合同测试通过 |
 | `RBAC-AUTH` | Account RBAC 迁移、默认拒绝、旧 Realm Role 不可绕过、跨服务原子权限和版本响应定向测试 | Go 单元测试与新增合同测试通过；合同总数增至 37 |
 | `USER-CODE` | UUIDv7 永久守卫、百万编码生成/校验、永久登记、本人/运营展示、精确查询防枚举与 OpenAPI 合同 | Go 单元测试、38 个合同测试及桌面三语 40 项定向测试通过；数据库运行级迁移验证待部署 |
+| `IDENTITY-SMS` | Identity 密码边界、原始字符策略、短期引用与策略版本、两类短信 Provider、多维限流审计和登录反枚举 | Go 全量测试、40 个合同测试、桌面 ESLint/三语检查和 Rust `cargo check` 通过；数据库运行级迁移与真实短信待部署 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/38 个合同测试、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/40 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -47,7 +48,7 @@
 | REQ-ID-01 | 已实现 | DOC_CURRENT | DOC-COVERAGE | NOT_APPLICABLE | 需求文档共 331 个唯一目标编号，规范证据矩阵逐项一一覆盖且无缺失或额外编号 |
 | REQ-ID-02 | 已实现 | DOC_CURRENT | DOC-COVERAGE | NOT_APPLICABLE | 331 个规范状态行均包含状态、源码基线、验证证据、部署版本和已知差距字段 |
 | REQ-ID-03 | 已实现 | DOC_CURRENT | DOC-COVERAGE | NOT_APPLICABLE | 规范性表格和补充规则均复用稳定 target_requirement_id；重复出现作为同一能力的补充验收条件 |
-| CORE-01 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Keycloak/Identity 与 Account 映射边界已存在；生产部署与 Identity 边界密码策略仍待补 |
+| CORE-01 | 已实现 | AUDIT_HEAD | GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Keycloak 是持久身份/会话事实源，独立 Identity Adapter 管理密码策略和厂商协议，Account 只保存业务映射；生产部署待验证 |
 | CORE-02 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36; RBAC-AUTH | NOT_DEPLOYED | Account 自有用户、平台/组织角色权限、组织和 Session 上下文；活动上下文仍按 Session 保存，尚未收敛为用户级全局事实 |
 | CORE-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有新华三专用 `mall_user_sync_jobs`，尚无供应商中立 Commerce Mapping 模型 |
 | CORE-04 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 平衡不可变账本已实现；组成级权益、应收和完整支付事实模型未实现 |
@@ -60,8 +61,8 @@
 | SCOPE-04 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 桌面运行时不再引用旧 `llmapi_hub`/旧功能开关；仍缺安装与发布制品证明 |
 | SCOPE-05 | 部分实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 当前改动范围可审计，但尚无自动化发布范围门禁 |
 | ID-15 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 注册在 Identity 与 Account 提交后返回，Billing 仅在后续 bootstrap 调用；钱包失败不会删除已提交的已验证身份或 Account |
-| ID-17 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少密码预检、最终策略和注册幂等指纹只位于 Identity 边界的强制隔离 |
-| ID-18 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少首尾空格明确拒绝及禁止 trim、规范化、转换和截断的端到端契约 |
+| ID-17 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 原始密码、冻结策略版本、短期带密钥 HMAC 和最终创建只位于 Identity Adapter；Account/短信 API 只接收 15 分钟不透明引用，持久注册 Saga 另由 ACC-51～ACC-55 追踪 |
+| ID-18 | 已实现 | AUDIT_HEAD | GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Identity 按原始字节执行 8–128 可打印 ASCII、字母和数字规则；允许中间半角空格，首尾空格返回专用错误，客户端精确确认且不 trim 密码 |
 | ACC-02 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Identity 与 Account 创建成功后，注册接口返回稳定 `user_id` 和 `PROVISIONING`，不调用 Billing；部署证据待补 |
 | ACC-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | `PROVISIONING` Identity 可登录，Account 资料可读取，模型授权上下文要求 `ACTIVE`；充值门禁、稳定错误语义及 `REPAIR_REQUIRED` 闭环尚不完整 |
 | ACC-04 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 无 Provisioning SLA、自动重试和 `REPAIR_REQUIRED` 状态 |
@@ -258,20 +259,20 @@
 |---|---|---|---|---|---|
 | ID-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 8–128 位可打印 ASCII，至少一个字母和一个数字。 |
 | ID-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 前端核对两次密码，后端仍独立校验用户名、手机号和密码。 |
-| ID-03 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已在短信前完成用户名、手机号和密码预检，但密码仍由 Account 接收和校验，未收敛到 Identity Adapter |
+| ID-03 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 客户端即时预检后，Account 在消费图形挑战且发送短信前再次校验用户名/手机号，并通过不透明引用请求 Identity 权威校验；预检不替代最终唯一约束 |
 | ID-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 服务端生成一次性挑战，客户端用覆盖登录框的弹层完成；不是第三方 CAPTCHA。 |
 | ID-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 同手机号至少间隔 60 秒，最多 5 次/小时；前端显示倒计时。供应商明确发送失败不占冷却。 |
 | ID-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 5 分钟有效，最多 5 次核验，成功后不可复用。 |
 | ID-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Account 只保存 Provider 挑战标识和状态元数据。 |
-| ID-08 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 业务层只管理挑战、用途、风控和结果；Provider 适配层负责厂商协议。既支持厂商托管验证码，也支持平台安全生成、仅通过短信厂商发送的模式。 |
+| ID-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | `SMSProvider` 由配置/依赖注入选择；阿里云托管模式由厂商生成核验，通用 HTTP 模式由平台安全生成并只交供应商发送；挑战保存 Provider ID、Adapter 版本和不透明校验数据 |
 | ID-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 桌面端通过 Keycloak Direct Access Grant；不持久化密码。 |
 | ID-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Keycloak 自定义 Direct Grant 调用 Account 内部核验接口；仅中国大陆手机号。 |
-| ID-11 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 未知手机号返回相同外部响应且不发送短信，但尚无统一耗时和完整多维限流证据 |
+| ID-11 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 已知/未知手机号都创建挑战并在同一最小耗时桶返回 `202`；已知账号异步投递、未知账号不发送，供应商故障不改变外部响应；手机号、来源和设备摘要共同限流并审计 |
 | ID-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Refresh Token 仅存系统凭据库，启动时刷新。 |
 | ID-13 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 失败路径删除持久化 Refresh Token，不回退历史缓存。 |
 | ID-14 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Identity 与 Account 均成功后返回可登录的 `PROVISIONING` 且不依赖钱包；Identity 已创建而 Account 提交失败仍使用即时删除补偿，缺少持久恢复 Saga |
 | ID-16 | 非当前范围 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Keycloak 具备扩展基础，但当前产品闭环未实现；短信找回密码已纳入 ACC-09。 |
-| ACC-01 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有 Keycloak 身份管理 Adapter 接口；Account 仍接收注册密码并直接编排厂商管理语义，边界未完全收敛 |
+| ACC-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Account 仅依赖服务鉴权的 Identity HTTP 端口及不透明密码引用；Keycloak Token、管理 URL、客户端密钥、用户创建/删除协议均只存在于独立 Identity Adapter |
 | ACC-05 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有新华三专用 mall_user_sync_jobs 异步任务；缺供应商中立 Commerce Mapping、Adapter 版本和通用状态模型 |
 | ACC-06 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 用户名和手机号变更使用唯一变更请求、字段预约、版本检查、Identity Provider 更新、Account 提交、会话撤销及 Commerce 异步同步；失败可重试或进入人工修复。 |
 | ACC-07 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 个人中心发起，重新认证后检查规范化用户名唯一，并通过身份 Adapter 与 Account 保持一致。 |
@@ -375,7 +376,7 @@
 | NFR-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移 |
 | NFR-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 内部服务主要共享长期 INTERNAL_SERVICE_TOKEN，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权 |
 | NFR-13 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 管理员删除可清理部分资料和 Session；未完成 Identity 不可认证、用户名/手机号安全释放、三年分类保留及自动清除 |
-| NFR-14 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有 SMSProvider 接口和厂商错误映射基础；启动路径及挑战模型仍绑定阿里云托管核验模式 |
+| NFR-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 启动工厂按配置注入 `aliyun-managed` 或 `http-generated`；核心挑战状态机没有厂商条件，历史挑战保存 Provider ID 与 Adapter 版本 |
 | NFR-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | OIDC 仅证明 issuer、subject 和会话；Account 是平台/组织业务授权事实源，三业务服务均不再读取 Realm Role 决定后台权限 |
 | NFR-16 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 新华三客户端已隔离在 Adapter，但 Account/Billing 数据模型仍含 mall_*、单一 SKU 和厂商同步语义 |
 | NFR-17 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有 PaymentProvider capabilities 并驱动部分操作；缺历史保留、权威终态、晚到窗口、账单及统一 UI/API/任务快照 |
@@ -412,10 +413,10 @@
 | CR-10 | ACC-13, ADM-05, ADM-06, ADM-07 | 基于当前全部能力重新设计角色系统 | 设计完成、待实现 | 采用平台与组织两级、权限码驱动、作用域明确、默认拒绝、资金审批分离的 RBAC；见 `role-system-design.md` |
 | CR-11 | UI-09 | 品悟应用内个人中心提供 Web 个人中心入口 | 未实现 | 桌面账号弹层增加“打开 Web 个人中心”按钮，通过受信配置打开 `/account.html`；不在 URL 中携带 OIDC Token |
 | CR-12 | UI-10, PAY-07, PAY-08 | Web 个人中心提供充值入口 | 已实现、需保留 | 当前个人活动上下文的“额度”页已经支持套餐选择、商城二维码和到账查询；后续 UI/角色重构不得删除 |
-| CR-13 | ID-08, NFR-14 | 短信业务流程与供应商实现隔离 | 部分实现、待重构 | 当前已有 `SMSProvider` 接口，但接口绑定“供应商生成并核验验证码”模式且启动代码直接构造阿里云实现；目标支持阿里云号码认证、阿里云普通短信和其他平台的可替换适配器，见 `sms-verification-provider-design.md` |
+| CR-13 | ID-08, NFR-14 | 短信业务流程与供应商实现隔离 | 已实现 | 启动工厂按配置注入供应商托管或平台生成/通用 HTTP 发送 Adapter；业务状态机无厂商条件并持久化 Provider ID、Adapter 版本和不透明校验数据，见 `sms-verification-provider-design.md` |
 | CR-14 | TOK-05, NFR-18 | 模型网关与 New API 具体实现隔离 | 部分实现、待重构 | Token Gateway 领域、数据库、公开 API 和管理 UI 统一使用 `upstream_request_id`、`UsageEvidenceProvider`、`ModelCatalogProvider` 等供应商中立概念；New API 请求头、日志接口、响应字段、状态与错误映射只能存在于 New API Adapter |
 | CR-15 | ACC-05, PAY-06, PAY-01, NFR-16 | 外部商城账号和订单语义与新华三实现隔离 | 部分实现、待重构 | `mall_user_sync_jobs`、`mall_sync_status`、`mall_order_id` 等厂商语义迁移为外部客户开通状态和 Provider 订单引用；Account、Gateway、Billing 及用户 UI 不直接识别新华三商城，充值前置条件由当前支付 Provider 的能力与客户要求表达 |
-| CR-16 | CORE-01, CORE-02, ACC-01, NFR-15 | 身份认证 Provider 与业务授权隔离 | 部分实现、待重构 | Keycloak 用户创建/删除迁入身份 Adapter；OIDC 只提供标准主体和会话身份；平台及组织权限由 Account 权限系统判定，业务服务不再把 Keycloak `realm_access` 或固定 `platform-admin` Realm Role 作为长期授权事实源 |
+| CR-16 | CORE-01, CORE-02, ACC-01, NFR-15 | 身份认证 Provider 与业务授权隔离 | 已实现 | Keycloak 用户创建/删除及密码策略迁入独立 Identity Adapter；Account 只消费服务端口和不透明引用；OIDC 只提供标准主体和会话身份，平台及组织权限由 Account 权限系统判定 |
 | CR-17 | PAY-01–PAY-04, NFR-17 | 生产/非生产支付 Provider 与支付渠道能力隔离 | 部分实现、待重构 | 保留通用 `PaymentProvider` 端口，将 H3C Mall 与 Simulator 实现移出 Billing 业务包；远程 Compose 已隔离 Simulator 主进程，但测试数据库初始化/迁移仍在基础清单，启动和 Helm 仍有模拟器命名配置；需迁移为供应商中立配置并彻底排除生产测试依赖；前端按商品渠道和 Provider capabilities 渲染，多 Provider 使用独立商品映射 |
 | CR-18 | ADM-10, NFR-19 | 系统运行探针配置驱动 | 部分实现、待重构 | 系统状态页通过探针注册表声明服务名称、URL、协议和响应判定器；Portal 不使用 `if newapi` 等厂商分支。页面可以展示实际部署组件名称，但采集流程不能依赖固定厂商实现 |
 | CR-19 | PAY-12, PAY-14–PAY-15, PAY-18–PAY-20, PAY-23, PAY-25, PAY-28–PAY-31, PAY-33–PAY-36 | 支付按完整生命周期设计并允许 Provider 能力降级 | 部分实现、退款范围已由 CR-41 取代 | 原记录包含全额/部分退款；现行支付履约隔离、退款目标、金额和意图事务以 CR-41 及 PAY-24–PAY-31 为准，其他支付生命周期要求继续有效 |
@@ -450,7 +451,7 @@
 | CR-50 | BILL-36–BILL-38 | 明确组织权益组成资金守恒、禁止超额授权及并发分配边界 | 未实现 | 每个权益包 BASE/BONUS 组成满足可分配总量等于可用余额、有效授予未消费额、暂停授予未消费额和关联 Hold 之和；所有桶互斥，新增授予只使用组成可用余额，并通过组成级锁/CAS、幂等键和请求指纹防止多管理员并发超分 |
 | CR-51 | ACC-10, ACC-11, BILL-12, BILL-13, BILL-36, BILL-39 | 注销用户的未消费组织授予终局占用至原到期日 | 未实现、由 CR-54 调整 | 原规则禁止任何回收；现行规则仍要求 `ACCOUNT_CLOSED` 授予不自动回池、不可恢复、消费或普通撤回，但允许按 CR-54 的独立专用命令主动回收 |
 | CR-52 | ACC-10–ACC-11, ACC-40–ACC-50, BILL-39, UI-14, ADM-34 | 用持久注销 Saga 区分资金阻断、系统自动清理和标识释放门禁 | 未实现 | 待核对用量、拒付、资金性差异、外部待确认关单及资金相关 Commerce 任务阻断注销；组织所有权及最后一个有效超级管理员角色须先交接，资料 Saga、其他角色、临时授权和邀请不要求用户处理但必须自动收敛；全部门禁通过且 Identity 不可认证后才能释放标识，迟到任务不得作用于新账号 |
-| CR-53 | ID-03, ID-14–ID-15, ID-17–ID-18, ACC-02, ACC-51–ACC-55, UI-15, ADM-35, NFR-04, NFR-06 | 闭合注册预检并发、唯一值预约、幂等、密码边界和孤儿 Identity 补偿 | 未实现 | 预检不代替数据库唯一约束；短信前创建短预约，验证后升级，Identity 创建后预约无 TTL；稳定操作 ID 贯穿全流程；密码只进入 Identity Adapter且不得 trim；Identity 孤儿先向前恢复，30分钟转修复、24小时且证明无业务事实后才可补偿 |
+| CR-53 | ID-03, ID-14–ID-15, ID-17–ID-18, ACC-02, ACC-51–ACC-55, UI-15, ADM-35, NFR-04, NFR-06 | 闭合注册预检并发、唯一值预约、幂等、密码边界和孤儿 Identity 补偿 | 部分实现 | 密码边界、原始字符策略和提示性预检已完成；唯一值预约、持久操作 ID、恢复查询、孤儿 Identity 向前恢复和受控补偿仍由 APT-003 实现 |
 | CR-54 | BILL-12, BILL-36, BILL-38–BILL-40 | 允许授权管理员选择性回收注销账号的未消费组织授予 | 未实现 | 注销授予不自动回池；账号完成 `ANONYMIZED` 且不存在消费、Hold、待核对用量或资金冻结时，授权管理员可用专用命令一次性全额回收至原权益包原组成，禁止部分回收、跨组成转换、现金退款或直接授予新账号 |
 | CR-55 | TOK-42–TOK-45 | 补齐模型目录管理生命周期、历史展示、重命名/别名和版本回滚 | 未实现 | 目录管理使用 DRAFT/PUBLISHED/DEPRECATED/REMOVED；上游删除不清除历史快照；模型 ID 稳定且名称/别名版本化；回滚通过复制历史期望状态形成经当前依赖重新校验的新版本 |
 | CR-56 | TOK-46–TOK-47 | 明确模型关联版本生成边界及下架后的新旧会话和在途请求策略 | 未实现 | 协议、能力、价格、路由和目录独立版本化并冻结到请求；弃用可配置新会话/继续会话截止时间，移除后历史仍可读、替代必须显式分支，在途请求按受理快照完成或走证据化紧急取消 |
@@ -516,21 +517,21 @@
 |---|---|---|---|
 | ID-01 | 密码支持常用英文符号 | 已实现 | 8–128 位可打印 ASCII，至少一个字母和一个数字。 |
 | ID-02 | 手机注册必须填写唯一用户名、手机号和两次一致的密码 | 已实现 | 前端核对两次密码，后端仍独立校验用户名、手机号和密码。 |
-| ID-03 | 用户名、手机号和密码在发短信前预检 | 部分实现 | 已在短信前完成用户名、手机号和密码预检，但密码仍由 Account 接收和校验，未收敛到 Identity Adapter。 |
+| ID-03 | 用户名、手机号和密码在发短信前预检 | 已实现 | 图形挑战消费后、短信发送前由 Account 校验用户名/手机号，并以不透明引用调用 Identity 权威预检密码；最终唯一约束仍独立执行。 |
 | ID-04 | 获取短信前完成滑块挑战 | 已实现 | 服务端生成一次性挑战，客户端用覆盖登录框的弹层完成；不是第三方 CAPTCHA。 |
 | ID-05 | 短信请求限流 | 已实现 | 同手机号至少间隔 60 秒，最多 5 次/小时；前端显示倒计时。供应商明确发送失败不占冷却。 |
 | ID-06 | 短信挑战有过期、尝试次数和一次性消费约束 | 已实现 | 5 分钟有效，最多 5 次核验，成功后不可复用。 |
 | ID-07 | 阿里云发送并核验验证码，平台不保存明文验证码 | 已实现 | Account 只保存 Provider 挑战标识和状态元数据。 |
-| ID-08 | 可替换短信验证后端 | 部分实现 | 业务层只管理挑战、用途、风控和结果；Provider 适配层负责厂商协议。既支持厂商托管验证码，也支持平台安全生成、仅通过短信厂商发送的模式。 |
+| ID-08 | 可替换短信验证后端 | 已实现 | 配置与依赖注入支持厂商托管验证码和平台安全生成、供应商仅发送两种模式；业务状态机只保存供应商中立的描述和校验数据。 |
 | ID-09 | 账号密码登录支持手机号或用户名 | 已实现 | 桌面端通过 Keycloak Direct Access Grant；不持久化密码。 |
 | ID-10 | 手机号 + 短信验证码登录 | 已实现 | Keycloak 自定义 Direct Grant 调用 Account 内部核验接口；仅中国大陆手机号。 |
-| ID-11 | 短信反枚举 | 部分实现 | 未知手机号返回相同外部响应且不发送短信，但尚无统一耗时和完整多维限流证据。 |
+| ID-11 | 短信反枚举 | 已实现 | 已知/未知手机号使用相同 `202` 响应和最小耗时桶；登录短信异步投递使供应商状态不泄露账号存在性，并按手机号、来源、设备摘要限流审计。 |
 | ID-12 | 登录成功后下次启动自动登录 | 已实现 | Refresh Token 仅存系统凭据库，启动时刷新。 |
 | ID-13 | 登出、刷新失败或凭据错误后停止自动登录 | 已实现 | 失败路径删除持久化 Refresh Token，不回退历史缓存。 |
 | ID-14 | 注册不留下不可登录的半成品账号 | 部分实现 | Identity/Account 成功后已持久返回可登录的 `PROVISIONING`，钱包 bootstrap 不决定注册响应；Identity 已创建而 Account 提交失败仍依赖即时删除补偿，尚无持久恢复 Saga。 |
 | ID-16 | 除密码/短信外的 MFA 和账号申诉 | 非当前范围 | Keycloak 具备扩展基础，但当前产品闭环未实现；短信找回密码已纳入 ACC-09。 |
-| ID-17 | 密码只在 Identity 边界处理 | 未实现 | 当前注册预检和编排尚未证明 Account、短信及其他服务完全不接收密码，也没有密码策略版本快照和 Identity 边界短期幂等指纹。 |
-| ID-18 | 密码原始字符策略 | 未实现 | 当前缺少端到端首尾空格明确拒绝、中间半角空格允许、原始序列精确比较及禁止 trim/规范化/转换/截断测试。 |
+| ID-17 | 密码只在 Identity 边界处理 | 已实现 | 独立 Identity Adapter 持有原始密码、冻结策略版本和短期带密钥 HMAC；Account/短信接口仅接收不透明引用，最终创建后清除原文、到期删除记录。 |
+| ID-18 | 密码原始字符策略 | 已实现 | 客户端与 Identity 均按原始序列校验；中间半角空格可用，首尾空格返回 `PASSWORD_EDGE_SPACE_NOT_ALLOWED`，Tab、换行、非 ASCII 和超长输入明确拒绝。 |
 
 验收重点：Identity 与 Account 已成功时必须返回“账号已创建”的 PROVISIONING/ACTIVE 结果；钱包短暂失败不得返回注册失败、密码错误或删除手机号身份。短信前预检不替代数据库唯一约束；Identity 创建后的预约不得按 TTL 释放。密码只进入 Identity 边界，首尾空格明确拒绝且任何层不得 trim；密码、验证码、Access Token 和 Refresh Token 不得出现在日志或前端业务 JSON 中。
 
@@ -538,7 +539,7 @@
 
 | target_requirement_id | 需求 | 状态 | 当前实现/边界 |
 |---|---|---|---|
-| ACC-01 | 身份 Provider 管理适配 | 部分实现 | 已有 Keycloak 身份管理 Adapter 接口；Account 仍接收注册密码并直接编排厂商管理语义，边界未完全收敛。 |
+| ACC-01 | 身份 Provider 管理适配 | 已实现 | Account 仅调用 Identity HTTP 端口并传递不透明引用；Keycloak 管理协议、Token 和客户端密钥全部位于独立 Adapter。 |
 | ACC-05 | 外部 Commerce Customer 开通 | 部分实现 | 已有新华三专用 `mall_user_sync_jobs` 异步任务；缺供应商中立 Commerce Mapping、Adapter 版本和通用状态模型。 |
 | ACC-06 | 资料变更 Saga | 未实现 | 用户名和手机号变更使用唯一变更请求、字段预约、版本检查、Identity Provider 更新、Account 提交、会话撤销及 Commerce 异步同步；失败可重试或进入人工修复。 |
 | ACC-07 | 修改用户名 | 未实现 | 个人中心发起，重新认证后检查规范化用户名唯一，并通过身份 Adapter 与 Account 保持一致。 |
@@ -785,7 +786,7 @@
 | NFR-11 | 高可用 | 当前单机 Compose 不具备高可用；Helm 仅为未部署模板，不能证明多副本或故障转移。 |
 | NFR-12 | 工作负载身份 | 内部服务主要共享长期 `INTERNAL_SERVICE_TOKEN`，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权。 |
 | NFR-13 | 个人信息去标识化与保留 | 管理员删除可清理部分资料和 Session；未完成 Identity 不可认证、用户名/手机号安全释放、三年分类保留及自动清除。 |
-| NFR-14 | 短信供应商可替换性 | 已有 `SMSProvider` 接口和厂商错误映射基础；启动路径及挑战模型仍绑定阿里云托管核验模式。 |
+| NFR-14 | 短信供应商可替换性 | `SMSProvider` 由启动工厂按配置注入，核心状态机无厂商分支；支持 `aliyun-managed` 与 `http-generated`，并保存 Provider ID 和 Adapter 版本。 |
 | NFR-15 | 身份与授权分离 | OIDC 只证明主体与会话；Account 决定平台和组织业务权限，业务路由不再依赖 Identity Provider 角色 Claim。 |
 | NFR-16 | Commerce Provider 可替换性 | 新华三客户端已隔离在 Adapter，但 Account/Billing 数据模型仍含 `mall_*`、单一 SKU 和厂商同步语义。 |
 | NFR-17 | 支付能力可发现 | 已有 `PaymentProvider capabilities` 并驱动部分操作；缺历史保留、权威终态、晚到窗口、账单及统一 UI/API/任务快照。 |

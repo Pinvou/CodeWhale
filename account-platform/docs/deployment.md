@@ -33,6 +33,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 |---|---:|---|
 | Keycloak | 18080 | 只公开 Realm 登录和静态资源路径；不公开 `/admin/` |
 | Account Service | 18101 | 仅反代桌面注册/账号所需路径 |
+| Identity Adapter | 18107 | 只公开密码预检路径；内部身份管理路径不公开 |
 | Billing Service | 18102 | 不直接公开；通过 Portal/Gateway BFF |
 | Token Gateway | 18103 | 反代 OIDC 保护的模型和用户业务入口 |
 | Token Portal | 18105 | 公开个人中心、管理后台及同源 `/api/*` |
@@ -49,6 +50,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 生产业务服务：
 
 - `account-service`
+- `identity-service`
 - `billing-service`
 - `token-gateway`
 - `token-portal`
@@ -140,14 +142,21 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 ### 6.3 手机认证
 
 - `MOBILE_AUTH_ENABLED`
+- `IDENTITY_HTTP_URL`
+- `IDENTITY_PASSWORD_HMAC_KEY_BASE64`（Identity Adapter 专用、至少 32 随机字节的无填充标准 Base64）
+- `SMS_PROVIDER=aliyun-managed|http-generated`
 - `ALIYUN_SMS_ACCESS_KEY_ID`
 - `ALIYUN_SMS_ACCESS_KEY_SECRET`
 - `ALIYUN_SMS_SIGN_NAME`
 - `ALIYUN_SMS_REGISTER_TEMPLATE`
 - `ALIYUN_SMS_LOGIN_TEMPLATE`
 - `ALIYUN_SMS_ENDPOINT`
+- `SMS_VERIFICATION_HMAC_KEY_BASE64`（仅平台生成验证码模式，独立密钥）
+- `SMS_HTTP_ENDPOINT`、`SMS_HTTP_BEARER_TOKEN`（仅平台生成验证码的通用发送 Adapter）
 
-RAM 用户只授予发送和核验验证码所需的最小权限。AccessKey 不写入命令行参数、Shell 历史或日志；泄露后立即轮换。
+`aliyun-managed` 由供应商生成并核验验证码；`http-generated` 由 Adapter 使用密码学安全随机源生成六位验证码，Account 只持久化带服务端密钥的校验数据，再通过通用 HTTPS 发送端点投递。两种模式由启动配置和依赖注入选择，Account 挑战状态机不包含厂商判断。RAM 用户只授予所选模式所需的最小权限。AccessKey、Bearer Token 和 HMAC 密钥不写入命令行参数、Shell 历史或日志；泄露后立即轮换。
+
+当前 Identity Adapter 的注册密码引用只存在于单进程内存，Helm 固定 `identityService: 1`；滚动重启会使尚未完成的引用失效，客户端必须重新预检。不得通过普通 Redis/业务数据库复制原始密码来扩副本；后续持久注册 Saga 只能保存非秘密操作事实，Identity 高可用需要专门的受保护短期材料方案和安全评审。
 
 ### 6.4 新华三商城
 
@@ -184,6 +193,7 @@ UAT 联调可显式允许暂定目录；正式环境必须冻结商品后关闭�
 - `PINVOU_ACCOUNT_OIDC_ISSUER` 或显式 Token URL
 - `PINVOU_ACCOUNT_OIDC_CLIENT_ID`
 - `PINVOU_ACCOUNT_SERVICE_URL`
+- `PINVOU_IDENTITY_SERVICE_URL`
 - `PINVOU_TOKEN_GATEWAY_URL`
 
 开发态 `npm run dev` 不需要每次生成安装包。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。

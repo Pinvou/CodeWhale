@@ -4,7 +4,7 @@
 >
 > 校准日期：2026-08-23
 >
-> 代码审计基线：`75a29f822f339787c3a3457f521209368e2f6f34`（从该提交到本次校准仅有账号平台文档变化）
+> 代码审计基线：本轮连续实施起点 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`，并包含本文件所在提交
 >
 > 文档版本：以本文件所在 Git 提交为准
 >
@@ -15,6 +15,7 @@
 当前代码已经形成身份、业务账号、资金账务和模型访问四个服务边界，但部分目标能力仍停留在需求模型，不能按目标架构宣称已完成：
 
 - Keycloak 是登录身份、密码和 OIDC 会话的事实源；OIDC Claim 只证明主体，不决定业务权限。迁移期保留的 `platform-admin` Realm Role 不再参与业务授权。
+- Identity Adapter 是注册密码预检、策略版本、短期密码材料和 Keycloak 管理协议的唯一边界；Account 只接收不透明密码引用。
 - Account Service 是永久内部用户 ID、独立用户编码、平台/组织角色、权限码、组织树、成员和活动上下文的事实源；当前活动上下文按 OIDC Session 保存，不是用户级全局上下文。
 - Billing Service 是钱包、平衡账本、充值订单、聚合权益包、固定三元组定价和 Hold 的事实源。
 - Token Gateway 是 Token Account、加密凭据、共享/路由策略和模型用量请求的事实源；当前模型推理协议仅支持 `/v1/chat/completions`。
@@ -33,22 +34,25 @@ flowchart LR
     Proxy["HTTPS 反向代理"]
     Portal["Token Portal\nWeb BFF"]
     KC["Keycloak\nOIDC 身份"]
+    Identity["Identity Adapter\n密码策略、短期引用、身份管理"]
     Account["Account Service\n用户、组织、角色、Session 上下文"]
     Billing["Billing Service\n钱包、账本、支付、定价、Hold"]
     Gateway["Token Gateway\n账号、凭据、路由、模型用量"]
     NewAPI["独立 New API\n模型数据面"]
     Provider["真实模型供应商"]
-    Aliyun["阿里云短信"]
+    SMS["SMS Provider Adapter\n厂商托管或平台生成"]
+    Aliyun["短信供应商"]
     Mall["新华三商城"]
     PG[("PostgreSQL\n按服务分库分用户")]
     Redis[("Redis\nPortal 会话")]
     NATS[("NATS JetStream")]
     Relays["Account / Billing / Token\nEvent Relay"]
 
-    Desktop -->|"登录、注册（当前含密码）、业务 API"| Proxy
+    Desktop -->|"登录、注册、业务 API"| Proxy
     Browser --> Proxy
     Proxy --> Portal
     Proxy --> KC
+    Proxy -->|"仅密码预检公开路径"| Identity
     Proxy --> Account
     Proxy --> Gateway
     Portal --> KC
@@ -56,9 +60,12 @@ flowchart LR
     Portal --> Billing
     Portal --> Gateway
     Desktop -->|"OIDC Bearer + chat/completions"| Gateway
-    Account -->|"身份创建/删除（当前含注册密码）"| KC
+    Desktop -->|"原始注册密码"| Identity
+    Account -->|"不透明引用、身份创建/删除"| Identity
+    Identity -->|"厂商管理协议"| KC
     KC -->|"短信 Direct Grant 验证"| Account
-    Account --> Aliyun
+    Account --> SMS
+    SMS --> Aliyun
     Account --> Mall
     Account -->|"账号 bootstrap 确保钱包"| Billing
     Gateway --> Account
@@ -79,14 +86,15 @@ flowchart LR
 
 仓库配置要求反向代理只公开认证、账号、Gateway 和 Portal 的受控路径。PostgreSQL、Redis、NATS、Relay、Billing 内部 API 和 New API 管理面保持在内部网络；这属于配置和代码基线，本次审计没有取得实际生产环境与版本证据。
 
-当前注册密码信任边界尚未达到目标设计：桌面端把原始密码提交给 Account 的注册预检、短信挑战和注册接口，Account 在进程内校验后把密码传给 Keycloak Adapter 创建身份。Account 不持久化密码，但仍实际接收并处理原始密码；目标要求原始密码和密码策略只进入 Identity 边界。反向方向上，Keycloak 的短信 Direct Grant Authenticator 会携带内部服务凭据调用 Account `/internal/v1/auth/sms/verify` 完成验证码核验。
+当前注册密码先通过 TLS 进入 Identity Adapter 的公开预检路径，取得 15 分钟有效的不透明引用和冻结的 `password_policy_version`；Account 的预检、短信和注册 API 只接收该引用，最终身份创建由 Identity Adapter 使用原始序列再次权威校验。短期原文与带独立密钥的 HMAC 仅保存在 Identity 进程内，成功创建后清除原文，过期时删除记录。该短期存储尚未构成 ACC-51～ACC-55 的持久注册 Saga；应用重启后客户端必须重新预检。反向方向上，Keycloak 的短信 Direct Grant Authenticator 会携带内部服务凭据调用 Account `/internal/v1/auth/sms/verify` 完成验证码核验。
 
 ## 3. 服务边界
 
 | 组件 | 当前职责 | 当前自有状态 | 主要目标差距 |
 |---|---|---|---|
-| Keycloak | 用户认证、密码、OIDC Token/Session、身份创建删除；迁移期 Realm Role 不参与业务授权 | Keycloak 数据库 | 当前注册原始密码先经过 Account；密码策略、原始密码处理与注册幂等需收敛到 Identity 边界 |
-| Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、权限解析、手机注册及当前密码编排、商城账号同步、组织/节点、成员/角色、Session 上下文、邀请、审计 | Account 数据库 | 移除原始密码处理、注册 Saga、全局上下文、角色绑定生命周期、安全引导、注销 Saga、标识预约与恢复 |
+| Keycloak | 用户认证、密码、OIDC Token/Session；迁移期 Realm Role 不参与业务授权 | Keycloak 数据库 | 生产部署和后续密码重置/资料同步/会话撤销端口仍待环境及任务验证 |
+| Identity Adapter | 注册密码原始字符校验、策略版本、短期引用与 HMAC、Keycloak 用户创建/删除厂商协议 | 进程内 15 分钟短期记录；Keycloak 持久身份 | 注册操作持久恢复、资料同步、密码重置和会话撤销由后续任务补齐 |
+| Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、权限解析、手机注册编排、短信挑战、商城账号同步、组织/节点、成员/角色、Session 上下文、邀请、审计 | Account 数据库 | 注册 Saga、全局上下文、角色绑定生命周期、安全引导、注销 Saga、标识预约与恢复 |
 | Billing Service | 钱包、账本、聚合权益包、充值、固定定价、Hold、人工调整、支付修复和对账 | Billing 数据库 | 组成级权益、版本化单位/公式、目标支付退款状态机、应收与组织购买 |
 | Token Gateway | Token Account、加密凭据、共享策略、路由、聊天代理、用量和 New API 核对 | Token 数据库 | 模型目录、协议能力、托管 Provisioning、请求重放、持久派发和取消 |
 | Token Portal | OIDC PKCE、Redis Session、CSRF、个人中心、运营后台和路径白名单代理 | Redis Session | 目标后台权限模型、缺失业务页面和发布级三语门禁 |
@@ -115,7 +123,8 @@ flowchart LR
 - `memberships`、`membership_units`、`role_bindings`：成员和节点范围；`role_bindings` 在迁移期通过数据库触发器投影到 `role_assignments`，不再被授权查询直接读取。
 - `invitations`：当前邀请使用电子邮箱和一次性 Token，不支持需求目标中的手机号/用户名邀请。
 - `user_sessions`：按 issuer + OIDC Session 保存当前上下文。
-- `slider_captcha_challenges`、`sms_challenges`：滑块和短信挑战元数据。
+- `slider_captcha_challenges`、`sms_challenges`：滑块和短信挑战元数据；平台生成验证码模式只保存带密钥校验数据，不保存明文。
+- `sms_send_attempts`：手机号、来源和设备的单向摘要、用途、结果与时间，用于短信多维限流和反枚举审计。
 - `mall_user_sync_jobs`：新华三商城用户同步任务。
 - `audit_logs`、`outbox_events`、`inbox_messages`、`inbox_aggregate_versions`：审计和可靠事件。
 
@@ -239,7 +248,7 @@ flowchart LR
 
 - 远程用户入口要求 HTTPS；开发态 HTTP 仅限 loopback。
 - Portal 内部服务凭据不下发浏览器或桌面端；桌面 OIDC Token 不进入 WebView JavaScript。
-- 当前注册原始密码会进入 Account 的预检、短信挑战和注册处理，再传给 Keycloak Adapter；虽然不落 Account 数据库，但该信任边界仍需按目标收敛到 Identity Adapter，且不得 trim、记录或跨越无关业务层。
+- 注册原始密码只进入 Identity Adapter 的预检和最终创建边界；Account、短信、Billing、Commerce、事件和普通可观测链路只接收不透明引用或非秘密注册事实。Identity 不 trim、规范化、转换或截断密码，并在创建完成或引用到期后清除短期原文。
 - Provider 地址使用 HTTPS 和主机白名单；生产密钥目标为 KMS/Vault，本地 KEK 只用于开发/测试。
 - Keycloak `/admin/` 应限制在受控网络或隧道内。
 - 日志不得记录密码、短信验证码、OIDC Token、供应商密钥或支付密钥。

@@ -27,6 +27,7 @@ const ISSUER_ENV: &str = "PINVOU_ACCOUNT_OIDC_ISSUER";
 const TOKEN_URL_ENV: &str = "PINVOU_ACCOUNT_OIDC_TOKEN_URL";
 const CLIENT_ID_ENV: &str = "PINVOU_ACCOUNT_OIDC_CLIENT_ID";
 const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
+const IDENTITY_URL_ENV: &str = "PINVOU_IDENTITY_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
@@ -37,6 +38,7 @@ struct AccountPlatformConfig {
     token_url: Url,
     client_id: String,
     account_url: Url,
+    identity_url: Option<Url>,
     token_gateway_url: Url,
 }
 
@@ -63,6 +65,9 @@ impl AccountPlatformConfig {
             token_url: parse_endpoint(TOKEN_URL_ENV, &token_url)?,
             client_id,
             account_url: parse_service_base(ACCOUNT_URL_ENV, &required_env(ACCOUNT_URL_ENV)?)?,
+            identity_url: optional_env(IDENTITY_URL_ENV)
+                .map(|value| parse_service_base(IDENTITY_URL_ENV, &value))
+                .transpose()?,
             token_gateway_url: parse_service_base(
                 TOKEN_GATEWAY_URL_ENV,
                 &required_env(TOKEN_GATEWAY_URL_ENV)?,
@@ -171,7 +176,8 @@ pub struct LoginCredentials {
 pub struct SMSRequest {
     pub username: String,
     pub mobile: String,
-    pub password: String,
+    pub password_handle: String,
+    pub password_policy_version: String,
     pub purpose: String,
     pub captcha_id: String,
     pub captcha_offset: u16,
@@ -203,7 +209,8 @@ pub struct MobileRegistration {
     pub mobile: String,
     pub challenge_id: String,
     pub code: String,
-    pub password: String,
+    pub password_handle: String,
+    pub password_policy_version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,6 +262,7 @@ pub struct AccountPlatformState {
     client: reqwest::Client,
     credentials: SystemCredentialStore,
     session_generation: AtomicU64,
+    device_id: String,
 }
 
 impl AccountPlatformState {
@@ -272,6 +280,7 @@ impl AccountPlatformState {
             client,
             credentials: SystemCredentialStore::new(),
             session_generation: AtomicU64::new(0),
+            device_id: random_urlsafe(24),
         })
     }
 
@@ -358,7 +367,8 @@ impl AccountPlatformState {
             &config,
             "v1/auth/sms/challenges",
             serde_json::json!({
-                "username": input.username.trim(), "mobile": input.mobile.trim(), "password": input.password,
+                "username": input.username.trim(), "mobile": input.mobile.trim(),
+                "password_handle": input.password_handle, "password_policy_version": input.password_policy_version,
                 "purpose": purpose, "captcha_id": input.captcha_id.trim(), "captcha_offset": input.captcha_offset,
             }),
         )
@@ -387,14 +397,38 @@ impl AccountPlatformState {
         input: MobileRegistrationPrecheck,
     ) -> Result<Value, String> {
         let config = AccountPlatformConfig::from_env()?;
-        self.public_account_request(
-            &config,
-            "v1/auth/registration/precheck",
-            serde_json::json!({
-                "username": input.username.trim(), "mobile": input.mobile.trim(), "password": input.password,
-            }),
-        )
-        .await
+        let reference = self
+            .public_identity_request(
+                &config,
+                "v1/registration/password-prechecks",
+                serde_json::json!({"password": input.password}),
+            )
+            .await?;
+        let password_handle = reference
+            .get("password_handle")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "identity_adapter_response_invalid: password handle is missing".to_string()
+            })?;
+        let password_policy_version = reference
+            .get("password_policy_version")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                "identity_adapter_response_invalid: password policy version is missing".to_string()
+            })?;
+        let mut result = self.public_account_request(
+            &config, "v1/auth/registration/precheck",
+            serde_json::json!({"username": input.username.trim(), "mobile": input.mobile.trim(),
+                "password_handle": password_handle, "password_policy_version": password_policy_version}),
+        ).await?;
+        if let (Some(result), Some(reference)) = (result.as_object_mut(), reference.as_object()) {
+            for key in ["password_handle", "password_policy_version", "expires_at"] {
+                if let Some(value) = reference.get(key) {
+                    result.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub async fn register_mobile(&self, input: MobileRegistration) -> Result<Value, String> {
@@ -404,7 +438,8 @@ impl AccountPlatformState {
             "v1/auth/register",
             serde_json::json!({
                 "username": input.username.trim(), "mobile": input.mobile.trim(), "challenge_id": input.challenge_id.trim(),
-                "code": input.code.trim(), "password": input.password,
+                "code": input.code.trim(), "password_handle": input.password_handle,
+                "password_policy_version": input.password_policy_version,
             }),
         )
         .await
@@ -525,6 +560,7 @@ impl AccountPlatformState {
             .bearer_auth(access_token)
             .header("Accept", "application/json")
             .header("X-Request-ID", random_urlsafe(18))
+            .header("X-Device-ID", &self.device_id)
             .json(&serde_json::json!({}))
             .send()
             .await
@@ -760,6 +796,7 @@ impl AccountPlatformState {
             .post(url)
             .header("Accept", "application/json")
             .header("X-Request-ID", random_urlsafe(18))
+            .header("X-Device-ID", &self.device_id)
             .json(&body)
             .send()
             .await
@@ -778,6 +815,39 @@ impl AccountPlatformState {
                 .map(|seconds| format!(":{seconds}"))
                 .unwrap_or_default();
             return Err(format!("mobile_auth_failed: {code}{retry_after}"));
+        }
+        Ok(response.body)
+    }
+
+    async fn public_identity_request(
+        &self,
+        config: &AccountPlatformConfig,
+        path: &str,
+        body: Value,
+    ) -> Result<Value, String> {
+        let identity_url = config.identity_url.as_ref().ok_or_else(|| {
+            format!("account_platform_configuration_missing: {IDENTITY_URL_ENV} is required for registration")
+        })?;
+        let url = identity_url.join(path).map_err(|_| {
+            "account_platform_configuration_invalid: cannot resolve identity endpoint".to_string()
+        })?;
+        let response = self
+            .client
+            .post(url)
+            .header("Accept", "application/json")
+            .header("X-Request-ID", random_urlsafe(18))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| format!("identity_adapter_unavailable: {error}"))?;
+        let response = response_to_api(response).await?;
+        if !(200..300).contains(&response.status) {
+            let code = response
+                .body
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("IDENTITY_REQUEST_FAILED");
+            return Err(format!("mobile_auth_failed: {code}"));
         }
         Ok(response.body)
     }

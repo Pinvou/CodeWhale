@@ -17,6 +17,7 @@
 ## 服务
 
 - `account-service`：用户、组织、成员、角色和活动上下文。
+- `identity-service`：注册密码策略、短期不透明引用和身份供应商管理协议。
 - `billing-service`：钱包、账本、支付、预占、退款和对账。
 - `token-gateway`：Token 授权、路由、New API 代理和计费编排。
 - `token-portal`：OIDC Authorization Code + PKCE、Redis 服务端会话和同源 CSRF 保护的 Web BFF；OIDC Token 不进入浏览器 JavaScript。
@@ -31,9 +32,10 @@
 - `PINVOU_ACCOUNT_OIDC_ISSUER`，或配置 `PINVOU_ACCOUNT_OIDC_TOKEN_URL`；
 - `PINVOU_ACCOUNT_OIDC_CLIENT_ID`（公开客户端，桌面内登录必须启用 Direct Access Grants；Web Portal 仍使用 Authorization Code + PKCE）；
 - `PINVOU_ACCOUNT_SERVICE_URL`；
+- `PINVOU_IDENTITY_SERVICE_URL`；
 - `PINVOU_TOKEN_GATEWAY_URL`。
 
-远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端支持原有账号/密码、中国大陆手机号/密码和手机号/短信验证码登录；新注册必须填写与原有账号体系共用的唯一用户名，先完成用户名、手机号和密码规则预检，再通过一次性滑块挑战及阿里云短信验证。同一手机号的短信请求至少间隔 60 秒，不区分注册或登录用途；供应商明确发送失败的请求不占用该冷却时间。密码允许英文大小写字母、数字和常用英文符号，要求 8 至 128 位且至少包含一个字母和一个数字；服务不会比较或泄露其他用户是否使用相同密码。密码不持久化、不写日志，完成请求后即释放。Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。启用账号平台后，内置模型运行时直接使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`，不会再把 New API 用户 Token 当作聊天身份。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。注册成功后服务异步创建同手机号商城账号，完成前禁止充值。
+远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端支持原有账号/密码、中国大陆手机号/密码和手机号/短信验证码登录；新注册必须填写与原有账号体系共用的唯一用户名，先由 Identity Adapter 完成密码规则预检并取得短期不透明引用，再通过一次性滑块挑战及可配置短信 Provider 验证。Account 和短信 API 不接收原始密码。密码按原始 8 至 128 位可打印 ASCII 序列校验，至少包含一个字母和一个数字，允许中间半角空格但明确拒绝首尾空格；不 trim、不规范化、不转换大小写。密码不持久化、不写日志，Identity 创建完成或短期引用过期后释放。Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。启用账号平台后，内置模型运行时直接使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`，不会再把 New API 用户 Token 当作聊天身份。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。注册成功后服务异步创建同手机号商城账号，完成前禁止充值。
 
 ## Token Gateway 安全默认值
 

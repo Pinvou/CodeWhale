@@ -27,12 +27,6 @@ func TestNormalizeMainlandMobile(t *testing.T) {
 	}
 }
 
-func TestRegistrationPasswordPolicy(t *testing.T) {
-	if !validPassword("pinvou2026") || !validPassword("Pinvou2026@*+-&") || validPassword("password") || validPassword("12345678") || validPassword("a1") || validPassword("pinvou 2026") {
-		t.Fatal("registration password policy mismatch")
-	}
-}
-
 func TestSMSRateLimitReturnsRemainingCooldown(t *testing.T) {
 	now := time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC)
 	last := now.Add(-17 * time.Second)
@@ -109,7 +103,7 @@ func (f *mobileAuthRepositoryFake) CreateSMSChallenge(_ context.Context, challen
 	return nil
 }
 
-func (f *mobileAuthRepositoryFake) MarkSMSChallengeSent(_ context.Context, _ uuid.UUID, _ string) error {
+func (f *mobileAuthRepositoryFake) MarkSMSChallengeSent(_ context.Context, _ uuid.UUID, _ string, _ []byte) error {
 	f.challengeSent = true
 	return nil
 }
@@ -119,8 +113,8 @@ func (f *mobileAuthRepositoryFake) MarkSMSChallengeFailed(context.Context, uuid.
 	return nil
 }
 
-func (f *mobileAuthRepositoryFake) SMSChallengeReady(context.Context, uuid.UUID, string, SMSPurpose) error {
-	return f.readyErr
+func (f *mobileAuthRepositoryFake) SMSChallengeReady(context.Context, uuid.UUID, string, SMSPurpose) (SMSVerificationData, error) {
+	return SMSVerificationData{Provider: SMSProviderDescriptor{ID: "fake", AdapterVersion: "v1"}, Opaque: []byte("verification")}, f.readyErr
 }
 
 func (f *mobileAuthRepositoryFake) ConsumeSMSChallenge(_ context.Context, _ uuid.UUID, _ string, _ SMSPurpose, verified bool) error {
@@ -145,12 +139,16 @@ type smsProviderFake struct {
 	verifyErr     error
 }
 
-func (f *smsProviderFake) SendCode(_ context.Context, _ string, _ SMSPurpose, challengeID uuid.UUID) (string, error) {
-	f.sentChallenge = challengeID
-	return "provider-message", f.sendErr
+func (*smsProviderFake) Descriptor() SMSProviderDescriptor {
+	return SMSProviderDescriptor{ID: "fake", AdapterVersion: "v1"}
 }
 
-func (f *smsProviderFake) VerifyCode(context.Context, string, uuid.UUID, string) (bool, error) {
+func (f *smsProviderFake) SendCode(_ context.Context, _ string, _ SMSPurpose, challengeID uuid.UUID) (SMSDelivery, error) {
+	f.sentChallenge = challengeID
+	return SMSDelivery{MessageID: "provider-message", VerificationData: []byte("verification")}, f.sendErr
+}
+
+func (f *smsProviderFake) VerifyCode(context.Context, string, uuid.UUID, SMSVerificationData, string) (bool, error) {
 	f.verifyCalls++
 	return f.verified, f.verifyErr
 }
@@ -161,7 +159,11 @@ type identityProvisionerFake struct {
 	mobile      string
 }
 
-func (f *identityProvisionerFake) CreateMobileUser(_ context.Context, username, mobile, _ string) (string, error) {
+func (*identityProvisionerFake) ValidateMobileUser(context.Context, string, string, string, string) error {
+	return nil
+}
+
+func (f *identityProvisionerFake) CreateMobileUser(_ context.Context, username, mobile, _, _ string) (string, error) {
 	f.createCalls++
 	f.username = username
 	f.mobile = mobile
@@ -177,6 +179,7 @@ func newMobileAuthForTest(t *testing.T, repository MobileAuthRepository, sms SMS
 		t.Fatal(err)
 	}
 	service.now = func() time.Time { return time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC) }
+	service.loginResponseFloor = 0
 	return service
 }
 
@@ -184,7 +187,7 @@ func TestMobileAuthSendUsesProviderGeneratedChallenge(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{}
 	sms := &smsProviderFake{}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	challenge, err := service.Send(context.Background(), "pinvou.user", "13800138000", "Pinvou2026@", SMSPurposeRegister, uuid.New(), 128)
+	challenge, err := service.Send(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1", SMSPurposeRegister, uuid.New(), 128, "192.0.2.1", "device-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +218,7 @@ func TestMobileAuthSendRejectsInvalidCaptchaBeforeProvider(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{captchaErr: ErrCaptchaInvalid}
 	sms := &smsProviderFake{}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	_, err := service.Send(context.Background(), "pinvou.user", "13800138000", "Pinvou2026@", SMSPurposeRegister, uuid.New(), 0)
+	_, err := service.Send(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1", SMSPurposeRegister, uuid.New(), 0, "192.0.2.1", "device-1")
 	if !errors.Is(err, ErrCaptchaInvalid) {
 		t.Fatalf("expected invalid captcha, got %v", err)
 	}
@@ -228,7 +231,7 @@ func TestMobileAuthSendMarksProviderFailureAndKeepsUnavailableClassification(t *
 	repository := &mobileAuthRepositoryFake{}
 	sms := &smsProviderFake{sendErr: errors.New("provider rejected request")}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	_, err := service.Send(context.Background(), "pinvou.user", "13800138000", "Pinvou2026@", SMSPurposeRegister, uuid.New(), 128)
+	_, err := service.Send(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1", SMSPurposeRegister, uuid.New(), 128, "192.0.2.1", "device-1")
 	if !errors.Is(err, ErrSMSUnavailable) {
 		t.Fatalf("expected SMS_UNAVAILABLE classification, got %v", err)
 	}
@@ -241,7 +244,7 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{readyErr: ErrSMSInvalid}
 	sms := &smsProviderFake{verified: true}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
-	challenge, err := service.Send(context.Background(), "", "13800138000", "", SMSPurposeLogin, uuid.New(), 128)
+	challenge, err := service.Send(context.Background(), "", "13800138000", "", "", SMSPurposeLogin, uuid.New(), 128, "192.0.2.1", "device-1")
 	if err != nil || challenge.ID == uuid.Nil {
 		t.Fatalf("unknown account response must be indistinguishable: challenge=%#v err=%v", challenge, err)
 	}
@@ -253,6 +256,23 @@ func TestMobileAuthUnknownLoginDoesNotSendOrVerifySMS(t *testing.T) {
 	}
 	if sms.verifyCalls != 0 {
 		t.Fatal("local challenge state must be checked before calling Aliyun")
+	}
+}
+
+func TestMobileAuthKnownLoginHidesProviderFailureBehindSameResponse(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{mobileExists: true}
+	sms := &smsProviderFake{sendErr: errors.New("provider unavailable")}
+	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
+	challenge, err := service.Send(context.Background(), "", "13800138000", "", "", SMSPurposeLogin, uuid.New(), 128, "192.0.2.1", "device-1")
+	if err != nil || challenge.ID == uuid.Nil {
+		t.Fatalf("known account response must not expose provider state: challenge=%#v err=%v", challenge, err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for !repository.challengeFailed && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !repository.challengeFailed {
+		t.Fatal("asynchronous provider failure must still update challenge state")
 	}
 }
 
@@ -304,7 +324,7 @@ func TestMobileAuthLoginRejectsMissingIdentityBeforeConsumingCode(t *testing.T) 
 func TestRegistrationPrecheckRejectsDuplicatesBeforeSMS(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{usernameExists: true}
 	service := newMobileAuthForTest(t, repository, &smsProviderFake{}, &identityProvisionerFake{})
-	if _, err := service.PrecheckRegistration(context.Background(), "pinvou.user", "13800138000", "Pinvou2026@"); !errors.Is(err, ErrUsernameAlreadyRegistered) {
+	if _, err := service.PrecheckRegistration(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1"); !errors.Is(err, ErrUsernameAlreadyRegistered) {
 		t.Fatalf("expected duplicate username, got %v", err)
 	}
 	if repository.captchaConsumed {
@@ -317,7 +337,7 @@ func TestMobileAuthRegisterVerifiesWithProviderBeforeProvisioning(t *testing.T) 
 	sms := &smsProviderFake{verified: true}
 	identities := &identityProvisionerFake{}
 	service := newMobileAuthForTest(t, repository, sms, identities)
-	userID, userCode, err := service.Register(context.Background(), " Pinvou.User ", "13800138000", uuid.New(), "123456", "pinvou2026")
+	userID, userCode, err := service.Register(context.Background(), " Pinvou.User ", "13800138000", uuid.New(), "123456", "password-handle", "user-v1")
 	if err != nil || userID == uuid.Nil {
 		t.Fatalf("register userID=%s err=%v", userID, err)
 	}
@@ -337,7 +357,7 @@ func TestMobileAuthRegisterRejectsFailedProviderVerification(t *testing.T) {
 	sms := &smsProviderFake{verified: false}
 	identities := &identityProvisionerFake{}
 	service := newMobileAuthForTest(t, repository, sms, identities)
-	_, _, err := service.Register(context.Background(), "pinvou.user", "13800138000", uuid.New(), "000000", "pinvou2026")
+	_, _, err := service.Register(context.Background(), "pinvou.user", "13800138000", uuid.New(), "000000", "password-handle", "user-v1")
 	if !errors.Is(err, ErrSMSInvalid) {
 		t.Fatalf("expected invalid SMS code, got %v", err)
 	}

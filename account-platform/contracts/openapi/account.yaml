@@ -14,7 +14,7 @@ paths:
     post:
       security: []
       operationId: precheckMobileRegistration
-      summary: Validate username, mobile availability, and password policy before sending SMS
+      summary: Validate username and mobile availability using an opaque Identity password reference
       requestBody:
         required: true
         content:
@@ -22,11 +22,12 @@ paths:
             schema:
               type: object
               additionalProperties: false
-              required: [username, mobile, password]
+              required: [username, mobile, password_handle, password_policy_version]
               properties:
                 username: { type: string, minLength: 3, maxLength: 32 }
                 mobile: { type: string }
-                password: { type: string, minLength: 8, maxLength: 128 }
+                password_handle: { type: string, minLength: 43, maxLength: 43 }
+                password_policy_version: { type: string, minLength: 1, maxLength: 64 }
       responses:
         "200":
           description: Registration fields are valid and available
@@ -49,6 +50,22 @@ paths:
       security: []
       operationId: sendSMSChallenge
       summary: Send an SMS after registration precheck and slider verification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mobile, purpose, captcha_id, captcha_offset]
+              properties:
+                username: { type: string, maxLength: 32 }
+                mobile: { type: string }
+                password_handle: { type: string, maxLength: 43 }
+                password_policy_version: { type: string, maxLength: 64 }
+                purpose: { type: string, enum: [REGISTER, LOGIN] }
+                captcha_id: { type: string, format: uuid }
+                captcha_offset: { type: integer, minimum: 0 }
       responses:
         "202":
           description: SMS challenge accepted; retry_after_seconds is at least 60
@@ -61,6 +78,21 @@ paths:
       security: []
       operationId: registerMobile
       summary: Register a mobile identity after provider-side SMS verification
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username, mobile, challenge_id, code, password_handle, password_policy_version]
+              properties:
+                username: { type: string, minLength: 3, maxLength: 32 }
+                mobile: { type: string }
+                challenge_id: { type: string, format: uuid }
+                code: { type: string, minLength: 1, maxLength: 16 }
+                password_handle: { type: string, minLength: 43, maxLength: 43 }
+                password_policy_version: { type: string, minLength: 1, maxLength: 64 }
       responses:
         "201":
           description: Account provisioning started

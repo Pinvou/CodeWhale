@@ -69,11 +69,11 @@ func TestAliyunSMSProviderSendAndVerify(t *testing.T) {
 	provider.client = server.Client()
 	provider.now = func() time.Time { return time.Date(2026, time.August, 20, 3, 0, 0, 0, time.UTC) }
 
-	messageID, err := provider.SendCode(context.Background(), "+8613800138000", SMSPurposeRegister, challengeID)
-	if err != nil || messageID != "biz-1" {
-		t.Fatalf("send message id=%q err=%v", messageID, err)
+	delivery, err := provider.SendCode(context.Background(), "+8613800138000", SMSPurposeRegister, challengeID)
+	if err != nil || delivery.MessageID != "biz-1" {
+		t.Fatalf("send delivery=%#v err=%v", delivery, err)
 	}
-	verified, err := provider.VerifyCode(context.Background(), "+8613800138000", challengeID, " 123456 ")
+	verified, err := provider.VerifyCode(context.Background(), "+8613800138000", challengeID, SMSVerificationData{Provider: provider.Descriptor()}, " 123456 ")
 	if err != nil || !verified {
 		t.Fatalf("verify result=%v err=%v", verified, err)
 	}
@@ -97,7 +97,7 @@ func TestAliyunSMSProviderTreatsUnknownAsInvalidCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	provider.client = server.Client()
-	verified, err := provider.VerifyCode(context.Background(), "+8613800138000", uuid.New(), "000000")
+	verified, err := provider.VerifyCode(context.Background(), "+8613800138000", uuid.New(), SMSVerificationData{Provider: provider.Descriptor()}, "000000")
 	if err != nil || verified {
 		t.Fatalf("UNKNOWN must be a normal failed verification: verified=%v err=%v", verified, err)
 	}

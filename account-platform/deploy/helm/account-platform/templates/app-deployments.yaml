@@ -8,6 +8,7 @@
 {{- end -}}
 {{- $apps := list
   (dict "name" "account-service" "image" .Values.images.accountService "replicas" .Values.replicas.accountService)
+  (dict "name" "identity-service" "image" .Values.images.identityService "replicas" .Values.replicas.identityService)
   (dict "name" "billing-service" "image" .Values.images.billingService "replicas" .Values.replicas.billingService)
   (dict "name" "token-gateway" "image" .Values.images.tokenGateway "replicas" .Values.replicas.tokenGateway)
   (dict "name" "token-portal" "image" .Values.images.tokenPortal "replicas" .Values.replicas.tokenPortal)
@@ -55,7 +56,7 @@ spec:
             - { name: RATE_LIMIT_RPS, value: {{ $root.Values.security.rateLimitRPS | quote }} }
             - { name: RATE_LIMIT_BURST, value: {{ $root.Values.security.rateLimitBurst | quote }} }
             - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
-            {{- if ne $app.name "token-portal" }}
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $app.name }}-database-url } }
             {{- end }}
@@ -67,10 +68,32 @@ spec:
             {{- if ne $app.name "token-portal" }}
             - name: INTERNAL_SERVICE_TOKEN
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: internal-service-token } }
+            {{- end }}
+            {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
             {{- end }}
             {{- if eq $app.name "account-service" }}
             - { name: BILLING_HTTP_URL, value: {{ printf "http://%s-billing-service:8080" $fullname | quote }} }
+            - { name: IDENTITY_HTTP_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
+            - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
+            - { name: SMS_PROVIDER, value: {{ $root.Values.sms.provider | quote }} }
+            - { name: ALIYUN_SMS_ENDPOINT, value: {{ $root.Values.sms.aliyunEndpoint | quote }} }
+            - { name: SMS_HTTP_ENDPOINT, value: {{ $root.Values.sms.httpEndpoint | quote }} }
+            {{- range $item := list (dict "env" "ALIYUN_SMS_ACCESS_KEY_ID" "key" "aliyun-sms-access-key-id") (dict "env" "ALIYUN_SMS_ACCESS_KEY_SECRET" "key" "aliyun-sms-access-key-secret") (dict "env" "ALIYUN_SMS_SIGN_NAME" "key" "aliyun-sms-sign-name") (dict "env" "ALIYUN_SMS_REGISTER_TEMPLATE" "key" "aliyun-sms-register-template") (dict "env" "ALIYUN_SMS_LOGIN_TEMPLATE" "key" "aliyun-sms-login-template") (dict "env" "SMS_VERIFICATION_HMAC_KEY_BASE64" "key" "sms-verification-hmac-key-base64") (dict "env" "SMS_HTTP_BEARER_TOKEN" "key" "sms-http-bearer-token") }}
+            - name: {{ $item.env }}
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $item.key }}, optional: true } }
+            {{- end }}
+            {{- else if eq $app.name "identity-service" }}
+            - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
+            - { name: KEYCLOAK_ADMIN_API_URL, value: {{ printf "http://%s-keycloak:8080" $fullname | quote }} }
+            - { name: KEYCLOAK_PROVISIONER_TOKEN_URL, value: {{ $oidcTokenURL | quote }} }
+            - { name: KEYCLOAK_REALM, value: "pinvou" }
+            - name: KEYCLOAK_PROVISIONER_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-id } }
+            - name: KEYCLOAK_PROVISIONER_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: keycloak-provisioner-client-secret } }
+            - name: IDENTITY_PASSWORD_HMAC_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: identity-password-hmac-key-base64, optional: true } }
             {{- else if eq $app.name "billing-service" }}
             - { name: ACCOUNT_HTTP_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
             - name: PAYMENT_SIMULATOR_URL

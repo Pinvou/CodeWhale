@@ -9,9 +9,9 @@
 
 ## 决策
 
-Keycloak 负责注册、登录、密码、MFA、会话、OIDC 和令牌签发。Account Service 以 `issuer + subject` 映射业务用户，并拥有组织、角色和业务状态。Web 客户端使用 Authorization Code + PKCE；桌面客户端使用仅对公开桌面 client 开启的 Direct Access Grant，在应用内完成基础账号密码登录。所有客户端禁用 Implicit。
+Keycloak 负责持久身份、登录、密码、MFA、会话、OIDC 和令牌签发；独立 Identity Adapter 是密码策略、注册短期密码材料和 Keycloak 管理协议的唯一应用边界。Account Service 以 `issuer + subject` 映射业务用户，并拥有组织、角色和业务状态，只通过服务端口使用不透明密码引用。Web 客户端使用 Authorization Code + PKCE；桌面客户端使用仅对公开桌面 client 开启的 Direct Access Grant，在应用内完成基础账号密码登录。所有客户端禁用 Implicit。
 
-桌面密码只在一次 Tauri IPC 和 HTTPS Token 请求中存在，不持久化、不写日志；仅 Refresh Token 进入系统凭据存储。Direct Access Grant 不承担注册、找回密码、第三方身份或复杂 MFA，这些能力必须走独立的受控流程。
+桌面登录密码只在一次 Tauri IPC 和 HTTPS Token 请求中存在；注册密码只通过 Tauri 发往 Identity Adapter，Account 与短信 API 仅接收 15 分钟短期不透明引用。密码不持久化、不写日志；仅 Refresh Token 进入系统凭据存储。Direct Access Grant 不承担注册、找回密码、第三方身份或复杂 MFA，这些能力必须走独立的受控流程。
 
 注册中 Identity 与 Account 均成功后，账号事实已经成立并持久进入 `PROVISIONING`。个人钱包由 Billing 异步初始化；Billing 故障只能延迟平台模型和充值能力，不能回滚或删除已经验证成功的手机号身份。超过 Provisioning SLA 后进入 `REPAIR_REQUIRED`，仍允许登录和管理资料。
 
