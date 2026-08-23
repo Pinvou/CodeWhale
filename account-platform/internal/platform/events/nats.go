@@ -6,8 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type NATSBroker struct {
@@ -45,8 +47,20 @@ func NewNATSBroker(ctx context.Context, rawURL, clientName string) (*NATSBroker,
 }
 
 func (broker *NATSBroker) Publish(ctx context.Context, subject string, body []byte, messageID string) error {
+	ctx, span := observability.StartSpan(ctx, "messaging.publish")
+	defer span.End()
 	_, err := broker.stream.Publish(ctx, subject, body, jetstream.WithMsgID(messageID))
+	if err != nil {
+		span.SetStatus(codes.Error, "EVENT_BROKER_PUBLISH_FAILED")
+	}
 	return err
+}
+
+func (broker *NATSBroker) Ping(ctx context.Context) error {
+	if broker == nil || broker.connection == nil || !broker.connection.IsConnected() {
+		return errorsNewConfiguration("NATS is not connected")
+	}
+	return broker.connection.FlushWithContext(ctx)
 }
 
 type ConsumerHandler func(context.Context, Event) error
@@ -70,7 +84,13 @@ func (broker *NATSBroker) Consume(ctx context.Context, durable, filterSubject st
 	consumerContext, err := consumer.Consume(func(message jetstream.Msg) {
 		event, processErr := Unmarshal(message.Data())
 		if processErr == nil {
-			processErr = handler(ctx, event)
+			eventContext := observability.ContextForTrace(ctx, event.ID.String(), event.TraceID)
+			eventContext, span := observability.StartSpan(eventContext, "messaging.consume")
+			processErr = handler(eventContext, event)
+			if processErr != nil {
+				span.SetStatus(codes.Error, "EVENT_CONSUMER_FAILED")
+			}
+			span.End()
 		}
 		if processErr == nil {
 			_ = message.DoubleAck(ctx)
@@ -84,7 +104,7 @@ func (broker *NATSBroker) Consume(ctx context.Context, durable, filterSubject st
 				messageID = durable + ":" + metadata.Stream + ":" + fmt.Sprint(metadata.Sequence.Stream)
 			}
 			if err := broker.Publish(context.Background(), subject, message.Data(), messageID); err == nil {
-				_ = message.TermWithReason(truncateError(processErr))
+				_ = message.TermWithReason(safeDeliveryError(processErr))
 				return
 			}
 		}

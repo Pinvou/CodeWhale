@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
+
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"go.opentelemetry.io/otel/codes"
 )
 
 type Broker interface {
@@ -58,34 +62,44 @@ func (relay Relay) RunOnce(ctx context.Context) (RelayResult, error) {
 		return result, err
 	}
 	for _, event := range events {
+		eventContext := observability.ContextForTrace(ctx, event.ID.String(), event.TraceID)
+		eventContext, span := observability.StartSpan(eventContext, "event.relay.publish")
 		body, marshalErr := event.Marshal()
 		if marshalErr == nil {
-			marshalErr = relay.Broker.Publish(ctx, event.Type, body, event.ID.String())
+			marshalErr = relay.Broker.Publish(eventContext, event.Type, body, event.ID.String())
 		}
 		if marshalErr == nil {
-			if err := relay.Store.MarkPublished(ctx, relay.WorkerID, event); err != nil {
+			if err := relay.Store.MarkPublished(eventContext, relay.WorkerID, event); err != nil {
+				span.SetStatus(codes.Error, "EVENT_ACKNOWLEDGEMENT_FAILED")
+				span.End()
 				return result, err
 			}
 			result.Published++
+			span.End()
 			continue
 		}
+		span.SetStatus(codes.Error, safeDeliveryError(marshalErr))
 		nextAttempt := event.Attempts + 1
-		message := truncateError(marshalErr)
+		message := safeDeliveryError(marshalErr)
 		if nextAttempt >= relay.MaxAttempts {
 			deadLetterSubject := "account-platform.dead-letter." + event.Type
-			if err := relay.Broker.Publish(ctx, deadLetterSubject, body, event.ID.String()+":dead-letter"); err == nil {
-				if err := relay.Store.MarkDeadLettered(ctx, relay.WorkerID, event, message); err != nil {
+			if err := relay.Broker.Publish(eventContext, deadLetterSubject, body, event.ID.String()+":dead-letter"); err == nil {
+				if err := relay.Store.MarkDeadLettered(eventContext, relay.WorkerID, event, message); err != nil {
+					span.End()
 					return result, err
 				}
 				result.DeadLettered++
+				span.End()
 				continue
 			}
 		}
 		retryAt := relay.Now().Add(retryDelay(nextAttempt))
-		if err := relay.Store.MarkFailed(ctx, relay.WorkerID, event, retryAt, message); err != nil {
+		if err := relay.Store.MarkFailed(eventContext, relay.WorkerID, event, retryAt, message); err != nil {
+			span.End()
 			return result, err
 		}
 		result.Failed++
+		span.End()
 	}
 	return result, nil
 }
@@ -95,13 +109,17 @@ func retryDelay(attempt int) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func truncateError(err error) string {
+func safeDeliveryError(err error) string {
 	if err == nil {
-		return "unknown event delivery error"
+		return "EVENT_DELIVERY_FAILED"
 	}
-	message := fmt.Sprintf("%v", err)
-	if len(message) > 512 {
-		message = message[:512]
+	message := strings.ToLower(fmt.Sprintf("%T", err))
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "EVENT_DELIVERY_TIMEOUT"
+	case strings.Contains(message, "nats"):
+		return "EVENT_BROKER_UNAVAILABLE"
+	default:
+		return "EVENT_DELIVERY_FAILED"
 	}
-	return message
 }

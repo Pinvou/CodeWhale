@@ -16,10 +16,14 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
 )
 
 func main() {
+	if err := httpserver.ConfigureProcessLogging("token-gateway"); err != nil {
+		log.Fatal(err)
+	}
 	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"TOKEN_USAGE_RECONCILE": approvalpolicy.AuditOnly}); err != nil {
 		log.Fatal(err)
 	}
@@ -183,8 +187,8 @@ func main() {
 	}
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
-	go token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run(workerContext)
-	go token.NewReplayRetentionWorker(repository, 15*time.Second).Run(workerContext)
+	go observability.RunBackground(workerContext, "usage-reconciliation", token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run)
+	go observability.RunBackground(workerContext, "replay-retention", token.NewReplayRetentionWorker(repository, 15*time.Second).Run)
 	secretRotationInterval := 5 * time.Minute
 	if raw := strings.TrimSpace(os.Getenv("TOKEN_SECRET_ROTATION_INTERVAL_SECONDS")); raw != "" {
 		seconds, parseErr := strconv.Atoi(raw)
@@ -205,14 +209,14 @@ func main() {
 	if err != nil {
 		log.Fatal("secret rotation is not configured: ", err)
 	}
-	go secretRotation.Run(workerContext)
+	go observability.RunBackground(workerContext, "secret-rotation", secretRotation.Run)
 	initialSyncContext, cancelInitialSync := context.WithTimeout(workerContext, 30*time.Second)
 	if _, _, syncErr := catalogSync.Sync(initialSyncContext); syncErr != nil {
 		log.Printf("model catalog initial synchronization deferred: %v", syncErr)
 	}
 	cancelInitialSync()
-	go catalogSync.Run(workerContext)
-	go defaultRoutes.Run(workerContext)
+	go observability.RunBackground(workerContext, "model-catalog-sync", catalogSync.Run)
+	go observability.RunBackground(workerContext, "default-route-provisioning", defaultRoutes.Run)
 	service := token.NewService(repository, contexts, wallets, token.NewHTTPModelValidator(providerURLPolicy), providerURLPolicy, billingClient, gatewayAdapter, maximumInputTokens).WithDefaultRoutes(defaultRoutes).WithCatalogSynchronizer(catalogSync).WithAuthorizer(authorizer).WithClientReadiness(readiness)
 	ready := repository.Ping
 	if strings.EqualFold(cfg.Environment, "production") || strings.EqualFold(cfg.Environment, "production-new") {

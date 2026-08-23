@@ -20,10 +20,14 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cpayment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
 )
 
 func main() {
+	if err := httpserver.ConfigureProcessLogging("billing-service"); err != nil {
+		log.Fatal(err)
+	}
 	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"BILLING_PAYMENT_EXPIRY_RECONCILE": approvalpolicy.AuditOnly, "BILLING_ENTITLEMENT_PACKAGE_EXPIRE": approvalpolicy.AuditOnly, "BILLING_MANUAL_REVIEW_SLA_ESCALATE": approvalpolicy.AuditOnly}); err != nil {
 		log.Fatal(err)
 	}
@@ -90,12 +94,12 @@ func main() {
 		if reconciliationInterval < minimumQueryInterval {
 			reconciliationInterval = minimumQueryInterval
 		}
-		go billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run(workerContext)
+		go observability.RunBackground(workerContext, "expired-payment-reconciliation", billing.NewExpiredPaymentReconciler(repository, payments, reconciliationInterval).Run)
 	}
-	go billing.NewPackageExpiryWorker(repository, time.Minute).Run(workerContext)
-	go billing.NewManualReviewSLAWorker(repository, time.Minute).Run(workerContext)
+	go observability.RunBackground(workerContext, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(workerContext, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute).Run)
 	if payments.Capabilities().BillSupported {
-		go billing.NewDailyPaymentReconciliationWorker(payments).Run(workerContext)
+		go observability.RunBackground(workerContext, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
 	}
 	if err := httpserver.RunWithApplication("billing-service", service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify), repository.Ping); err != nil {
 		log.Fatal(err)

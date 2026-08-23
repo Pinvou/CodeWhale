@@ -97,6 +97,19 @@ func TestRequestIDIsGeneratedWhenMissing(t *testing.T) {
 	}
 }
 
+func TestRequestIDRejectsMalformedOrOversizedExternalValues(t *testing.T) {
+	for _, external := range []string{"contains spaces", strings.Repeat("a", 65), "token\r\ninjected: value"} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/health/live", nil)
+		request.Header.Set("X-Request-ID", external)
+		Handler(config.Config{ServiceName: "test"}).ServeHTTP(response, request)
+		requestID := response.Header().Get("X-Request-ID")
+		if requestID == external || len(requestID) != 32 {
+			t.Fatalf("external request ID %q was trusted as %q", external, requestID)
+		}
+	}
+}
+
 func TestTraceIDIsAcceptedOnlyFromValidTraceparent(t *testing.T) {
 	for _, item := range []struct {
 		name       string
@@ -127,13 +140,18 @@ func TestMetricsUseRouteTemplatesWithoutRequestIdentifiers(t *testing.T) {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health/live", nil))
 	metrics := httptest.NewRecorder()
-	registry.handler().ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metricsRequest := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	metricsRequest.Header.Set("Accept", "application/openmetrics-text")
+	registry.handler().ServeHTTP(metrics, metricsRequest)
 	body := metrics.Body.String()
 	if !strings.Contains(body, `pinvou_http_requests_total{method="GET",route="GET /health/live",service="test-service",status="200"} 1`) {
 		t.Fatalf("route-safe request metric not found:\n%s", body)
 	}
-	if strings.Contains(body, "request_id") || strings.Contains(body, "trace_id") {
-		t.Fatal("high-cardinality correlation identifier leaked into metrics")
+	if strings.Contains(body, "request_id=") {
+		t.Fatal("request identifier leaked into metrics")
+	}
+	if !strings.Contains(body, `# {trace_id="`) {
+		t.Fatal("trace exemplar is missing from metrics")
 	}
 }
 

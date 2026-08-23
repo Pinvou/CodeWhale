@@ -46,11 +46,13 @@ spec:
           securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } }
           resources: {{ toYaml $root.Values.resources | nindent 12 }}
           env:
+            - { name: APP_ENV, value: {{ $root.Values.global.environment | quote }} }
+            - { name: OTEL_EXPORTER_OTLP_ENDPOINT, value: {{ $root.Values.observability.otlpEndpoint | quote }} }
             - { name: EVENT_SOURCE, value: {{ $source | quote }} }
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "%s-service-database-url" $source }} } }
             - { name: NATS_URL, value: {{ printf "nats://%s-nats:4222" $fullname | quote }} }
-          readinessProbe: { httpGet: { path: /health/live, port: metrics }, periodSeconds: 10, timeoutSeconds: 3 }
+          readinessProbe: { httpGet: { path: /health/ready, port: metrics }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: metrics }, periodSeconds: 20, timeoutSeconds: 3 }
           volumeMounts: [{ name: tmp, mountPath: /tmp }]
       volumes: [{ name: tmp, emptyDir: { sizeLimit: 16Mi } }]

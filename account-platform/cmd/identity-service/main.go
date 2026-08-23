@@ -12,6 +12,9 @@ import (
 )
 
 func main() {
+	if err := httpserver.ConfigureProcessLogging("identity-service"); err != nil {
+		log.Fatal(err)
+	}
 	if !enabled("MOBILE_AUTH_ENABLED") {
 		if err := httpserver.Run("identity-service"); err != nil {
 			log.Fatal(err)
@@ -38,7 +41,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := httpserver.RunWithApplication("identity-service", service.Handler(), nil); err != nil {
+	if err := httpserver.RunWithApplication("identity-service", service.Handler(), directory.Ping); err != nil {
 		log.Fatal(err)
 	}
 }

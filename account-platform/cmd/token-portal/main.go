@@ -13,6 +13,9 @@ import (
 )
 
 func main() {
+	if err := httpserver.ConfigureProcessLogging("token-portal"); err != nil {
+		log.Fatal(err)
+	}
 	cfg, err := config.Load("token-portal")
 	if err != nil {
 		log.Fatal(err)

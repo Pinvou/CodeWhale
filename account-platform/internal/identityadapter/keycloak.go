@@ -139,6 +139,11 @@ func NewKeycloakDirectory(adminURL, tokenURL, realm, clientID, clientSecret stri
 	return &KeycloakDirectory{adminURL: admin, tokenURL: token, realm: strings.TrimSpace(realm), clientID: strings.TrimSpace(clientID), clientSecret: strings.TrimSpace(clientSecret), client: observability.NewHTTPClient(10 * time.Second)}, nil
 }
 
+func (p *KeycloakDirectory) Ping(ctx context.Context) error {
+	_, err := p.accessToken(ctx)
+	return err
+}
+
 func (p *KeycloakDirectory) CreateMobileUser(ctx context.Context, operationID uuid.UUID, username, mobile, password string) (string, error) {
 	access, err := p.accessToken(ctx)
 	if err != nil {

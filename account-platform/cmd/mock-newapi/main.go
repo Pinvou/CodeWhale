@@ -19,6 +19,9 @@ import (
 var models = []string{"pinvou-mock", "pinvou-mock-rate-limit", "pinvou-mock-disconnect", "pinvou-mock-missing-usage"}
 
 func main() {
+	if err := httpserver.ConfigureProcessLogging("mock-newapi"); err != nil {
+		log.Fatal(err)
+	}
 	apiKey := os.Getenv("MOCK_NEWAPI_KEY")
 	if len(apiKey) < 16 {
 		log.Fatal("MOCK_NEWAPI_KEY must contain at least 16 characters")

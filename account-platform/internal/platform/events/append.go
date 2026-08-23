@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -14,9 +14,9 @@ func AppendOutbox(ctx context.Context, tx pgx.Tx, eventType string, aggregateID 
 	if err != nil {
 		return err
 	}
-	traceID := httpserver.TraceID(ctx)
+	traceID := observability.TraceID(ctx)
 	if traceID == "" {
-		traceID = httpserver.RequestID(ctx)
+		traceID = observability.RequestID(ctx)
 	}
 	if traceID == "" {
 		traceID = "internal"

@@ -336,22 +336,34 @@ func (r *UsageReconciler) runOnce(ctx context.Context) {
 	for _, item := range items {
 		if err := r.reconcile(ctx, item); err != nil {
 			r.logger.Warn("request reconciliation deferred", "usage_request_id", item.ID, "attempt", item.Attempts, "error", err)
+			errorCode := reconciliationErrorCode(err)
 			if errors.Is(err, errManualReconciliationRequired) {
-				_ = r.store.StopReconciliation(ctx, item.ID, "automatic reconciliation exhausted: "+err.Error())
+				_ = r.store.StopReconciliation(ctx, item.ID, errorCode)
 				continue
 			}
 			if r.now().Sub(item.StartedAt) >= r.maxAge {
 				if item.HoldID != nil {
 					if releaseErr := r.billing.Release(ctx, item.ID, *item.HoldID, "trusted usage deadline exceeded"); releaseErr != nil {
-						_ = r.store.RescheduleReconciliation(ctx, item.ID, "deadline hold release failed: "+releaseErr.Error(), r.now().Add(reconciliationBackoff(item.Attempts)))
+						_ = r.store.RescheduleReconciliation(ctx, item.ID, "HOLD_RELEASE_UNAVAILABLE", r.now().Add(reconciliationBackoff(item.Attempts)))
 						continue
 					}
 				}
-				_ = r.store.StopReconciliation(ctx, item.ID, "trusted usage deadline exceeded after final evidence check: "+err.Error())
+				_ = r.store.StopReconciliation(ctx, item.ID, "TRUSTED_USAGE_DEADLINE_EXCEEDED:"+errorCode)
 				continue
 			}
-			_ = r.store.RescheduleReconciliation(ctx, item.ID, err.Error(), r.now().Add(reconciliationBackoff(item.Attempts)))
+			_ = r.store.RescheduleReconciliation(ctx, item.ID, errorCode, r.now().Add(reconciliationBackoff(item.Attempts)))
 		}
+	}
+}
+
+func reconciliationErrorCode(err error) string {
+	switch {
+	case errors.Is(err, errManualReconciliationRequired):
+		return "MANUAL_RECONCILIATION_REQUIRED"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "USAGE_EVIDENCE_TIMEOUT"
+	default:
+		return "USAGE_EVIDENCE_UNAVAILABLE"
 	}
 }
 

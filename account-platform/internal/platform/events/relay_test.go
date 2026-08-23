@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
 )
 
@@ -36,10 +38,12 @@ func (store *memoryStore) MarkDeadLettered(_ context.Context, _ string, event Ev
 type memoryBroker struct {
 	failPrimary bool
 	published   []string
+	traceIDs    []string
 }
 
-func (broker *memoryBroker) Publish(_ context.Context, subject string, _ []byte, _ string) error {
+func (broker *memoryBroker) Publish(ctx context.Context, subject string, _ []byte, _ string) error {
 	broker.published = append(broker.published, subject)
+	broker.traceIDs = append(broker.traceIDs, observability.TraceID(ctx))
 	if broker.failPrimary && subject == "account.membership.changed.v1" {
 		return errors.New("NATS unavailable")
 	}
@@ -56,6 +60,16 @@ func TestRelayPublishesEnvelopeAndAcknowledgesOutbox(t *testing.T) {
 	result, err := (Relay{Store: store, Broker: broker, WorkerID: "worker-1"}).RunOnce(context.Background())
 	if err != nil || result.Published != 1 || len(store.published) != 1 || broker.published[0] != store.events[0].Type {
 		t.Fatalf("unexpected relay result: %#v, %v", result, err)
+	}
+	if broker.traceIDs[0] != store.events[0].TraceID {
+		t.Fatalf("relay trace ID = %q, want %q", broker.traceIDs[0], store.events[0].TraceID)
+	}
+}
+
+func TestDeliveryErrorsNeverPersistOriginalMessage(t *testing.T) {
+	const marker = "secret-token-in-provider-error"
+	if message := safeDeliveryError(errors.New(marker)); message != "EVENT_DELIVERY_FAILED" || strings.Contains(message, marker) {
+		t.Fatalf("unsafe delivery error = %q", message)
 	}
 }
 

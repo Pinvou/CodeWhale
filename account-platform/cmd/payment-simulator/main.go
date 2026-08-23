@@ -10,6 +10,9 @@ import (
 )
 
 func main() {
+	if err := httpserver.ConfigureProcessLogging("payment-simulator"); err != nil {
+		log.Fatal(err)
+	}
 	ctx := context.Background()
 	repository, err := paymentsim.NewPostgresRepository(ctx, os.Getenv("DATABASE_URL"), os.Getenv("PAYMENT_SIM_PUBLIC_URL"), os.Getenv("PAYMENT_SIM_PAY_TOKEN_SECRET"), map[string]string{
 		"UNIONPAY": os.Getenv("PAYMENT_SIM_HMAC_UNIONPAY"),

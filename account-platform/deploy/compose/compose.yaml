@@ -280,8 +280,9 @@ services:
       <<: *service-build
       args: { SERVICE: event-relay }
     environment:
+      APP_ENV: development
       EVENT_SOURCE: account
-      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready
       DATABASE_URL: postgresql://account_service:${ACCOUNT_DB_PASSWORD}@postgres:5432/account_platform_account?sslmode=disable
       NATS_URL: nats://nats:4222
     depends_on:
@@ -294,8 +295,9 @@ services:
       <<: *service-build
       args: { SERVICE: event-relay }
     environment:
+      APP_ENV: development
       EVENT_SOURCE: billing
-      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready
       DATABASE_URL: postgresql://billing_service:${BILLING_DB_PASSWORD}@postgres:5432/account_platform_billing?sslmode=disable
       NATS_URL: nats://nats:4222
     depends_on:
@@ -308,8 +310,9 @@ services:
       <<: *service-build
       args: { SERVICE: event-relay }
     environment:
+      APP_ENV: development
       EVENT_SOURCE: token
-      HEALTHCHECK_URL: http://127.0.0.1:9090/health/live
+      HEALTHCHECK_URL: http://127.0.0.1:9090/health/ready
       DATABASE_URL: postgresql://token_gateway:${TOKEN_DB_PASSWORD}@postgres:5432/account_platform_token?sslmode=disable
       NATS_URL: nats://nats:4222
     depends_on:

@@ -15,9 +15,13 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 )
 
 func main() {
+	if err := httpserver.ConfigureProcessLogging("account-service"); err != nil {
+		log.Fatal(err)
+	}
 	if err := approvalpolicy.ValidateAll(map[string]approvalpolicy.Mode{"ACCOUNT_WALLET_PROVISION": approvalpolicy.AuditOnly, "ACCOUNT_ROLE_BINDING_EXPIRE": approvalpolicy.AuditOnly, "ACCOUNT_APPROVAL_EXPIRE": approvalpolicy.AuditOnly, "ACCOUNT_PROFILE_CHANGE_RECOVERY": approvalpolicy.AuditOnly, "ACCOUNT_REGISTRATION_RECOVERY": approvalpolicy.AuditOnly, "ACCOUNT_COMMERCE_CUSTOMER_SYNC": approvalpolicy.AuditOnly, "ACCOUNT_CLOSURE_RETRY": approvalpolicy.AuditOnly}); err != nil {
 		log.Fatal(err)
 	}
@@ -88,10 +92,10 @@ func main() {
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationMemberLifecycle(billingOrganizationLifecycle)
-	go account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run(ctx)
-	go account.NewRoleBindingExpiryWorker(repository, time.Minute).Run(ctx)
-	go account.NewApprovalExpiryWorker(repository, time.Minute).Run(ctx)
-	go account.NewAccountClosureWorker(repository, 5*time.Second, billingAccountClosure, tokenAccountClosure).WithCleanup(identities, billingAccountClosure).Run(ctx)
+	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
+	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(ctx, "approval-expiry", account.NewApprovalExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(ctx, "account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, billingAccountClosure, tokenAccountClosure).WithCleanup(identities, billingAccountClosure).Run)
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))
 		if decodeErr != nil {
@@ -127,8 +131,8 @@ func main() {
 			log.Fatal(err)
 		}
 		service.WithProfileChanges(profiles)
-		go account.NewProfileChangeWorker(profiles, 5*time.Second).Run(ctx)
-		go account.NewRegistrationRecoveryWorker(repository, auth, 5*time.Second).Run(ctx)
+		go observability.RunBackground(ctx, "profile-change", account.NewProfileChangeWorker(profiles, 5*time.Second).Run)
+		go observability.RunBackground(ctx, "registration-recovery", account.NewRegistrationRecoveryWorker(repository, auth, 5*time.Second).Run)
 
 		// Authentication and Commerce Customer provisioning are independent.
 		// Keep authentication available while the configured Commerce Adapter is
@@ -138,7 +142,7 @@ func main() {
 			if err != nil {
 				log.Fatal(err)
 			}
-			go account.NewCommerceCustomerSyncWorker(repository, mall, commerceProviderID, commerceAdapterVersion, 5*time.Second).Run(ctx)
+			go observability.RunBackground(ctx, "commerce-customer-sync", account.NewCommerceCustomerSyncWorker(repository, mall, commerceProviderID, commerceAdapterVersion, 5*time.Second).Run)
 		}
 	}
 	if err := httpserver.RunWithApplication("account-service", service.Handler(verify), repository.Ping); err != nil {

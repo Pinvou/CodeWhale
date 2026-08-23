@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 276`、`部分实现 23`、`未实现 30`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 282`、`部分实现 17`、`未实现 30`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -65,8 +65,9 @@
 | `CONFIGURED-SYSTEM-PROBES` | Portal 通过运行时注册表装配本地、通用 HTTP/JSON 断言与 Relay 指标 Adapter，不在聚合主流程固定组件或厂商 | Portal Go 单测、Compose/Helm 合同和全仓 verifier 通过；真实环境端点、超时与积压告警待部署验收 |
 | `I18N-RELEASE-GATE` | 桌面账号弹层、Web 个人中心和管理后台的精确三语词条对称、空值、单语硬编码、原始错误回显及 Portal 构建制品检查 | 缺键/多键/空词条、单语 JSX/属性、后端 message 回退与制品缺词条负向合同通过；发布命令与全量 verify 均串联该门禁 |
 | `PRODUCTION-SECURITY-GATE` | 生产 Ingress TLS、ExternalSecret KMS/Vault 来源、远程包络加密、持久 `key_id` 双读、全密文分批重加密、轮换 readiness 与旧 Key 停用验收 | Go 轮换/历史 Key 单测、Helm schema/ExternalSecret 负向合同和 TLS/KMS 环境门禁合同通过；无真实域名证书、SecretStore、KMS Key 轮换或部署版本证据 |
+| `OBSERVABILITY-RELEASE-GATE` | 稳定 JSON 日志 schema 与字段白名单、秘密标记丢弃、Request ID 校验/传播、HTTP/NATS/后台 Trace、健康分层、独立低基数指标与 Exemplar | Go 注入/关联/健康/指标单测、负向源码门禁与合同测试通过；真实 OTLP/Prometheus/日志采集和三组件 Trace 查询待部署验收 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/94 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/118 个合同测试、任务覆盖、i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -250,12 +251,12 @@
 | ADM-40 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 申请保存规范化命令 SHA-256 指纹、目标、关键版本、财务/策略/授权快照和预期影响；审批与执行不匹配时写结构化失效原因 |
 | ADM-41 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 申请、审批、执行分别直接读取 Account 用户、平台绑定、有效期和授权版本；撤权、停用、到期、版本变化或授权事实不可确认时失败关闭 |
 | ADM-42 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 批准事务仅发布绑定指纹/策略/快照的 Outbox 授权；Billing 执行端在短窗口内复核并以稳定执行键原子入账，失败可按原命令重试且数据库阻止新调整绕过审批 |
-| NFR-04 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 错误响应和多数日志避免直接输出秘密，合同测试扫描配置；缺统一字段白名单、日志/Trace 正文脱敏和自动秘密扫描门禁 |
-| NFR-21 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Event Relay 使用 JSON 结构化日志，部分后台任务使用 slog；尚无所有服务统一 schema、必需字段和发布门禁 |
-| NFR-22 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | HTTP 中间件生成/返回 Request ID，审计和部分下游调用可关联；尚未证明所有入口、事件、错误和后台任务端到端传播 |
-| NFR-23 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | HTTP 客户端传播 W3C traceparent，Outbox 记录 trace_id，并有 OTLP 配置测试；NATS 消费和全部后台任务的跨信号传播不完整 |
-| NFR-24 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 共享 HTTP Server 提供 live/ready 并覆盖依赖失败测试，Relay 提供 live；尚未逐工作负载统一 readiness 语义 |
-| NFR-25 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 业务 HTTP Server 和 Event Relay 提供独立 metrics 监听及低基数测试；目标核心指标覆盖和所有工作负载隔离仍不完整 |
+| NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
+| NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
+| NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |
+| NFR-23 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | HTTP 使用 W3C Trace Context；Outbox 固化 Trace ID，Relay 发布和 NATS Consumer 从事件恢复远端 Trace 并建立子 Span，后台任务建立任务 Span，日志和 Prometheus Exemplar 可按 Trace ID 关联 |
+| NFR-24 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 业务服务独立 live/ready，readiness 只检查安全处理请求所需依赖；Identity 检查 Keycloak，Relay 分别检查 PostgreSQL/NATS，liveness 不因依赖断开失败，且不调用计费/切换准入业务 |
+| NFR-25 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 独立9090监听输出 HTTP 请求/错误状态/延迟/并发/readiness 与 Relay 周期/结果/积压/死信指标；标签仅使用有界 service/method/route/status/source/outcome，Trace ID 只进入 Exemplar |
 | NFR-26 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少固定生产等价环境、数据集、样本量和平台/Provider 分段计时的统一性能基线 |
 | NFR-27 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少关键内部读写接口 P95/P99 和错误率 SLO 证据 |
 | NFR-28 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少登录、短信、支付下单端到端与平台附加延迟的分离 SLO |
@@ -483,12 +484,12 @@
 | CR-50 | BILL-36–BILL-38 | 明确组织权益组成资金守恒、禁止超额授权及并发分配边界 | 已实现 | 数据库守恒桶、组织/钱包/包/组成归属校验、精确组成与授予行锁、版本化请求指纹、同键异请求冲突及逐项子事务共同禁止超额和重复分配；生产等价并发压力仍待部署验证 |
 | CR-51 | ACC-10, ACC-11, BILL-12, BILL-13, BILL-36, BILL-39 | 注销用户的未消费组织授予终局占用至原到期日 | 未实现、由 CR-54 调整 | 原规则禁止任何回收；现行规则仍要求 `ACCOUNT_CLOSED` 授予不自动回池、不可恢复、消费或普通撤回，但允许按 CR-54 的独立专用命令主动回收 |
 | CR-52 | ACC-10–ACC-11, ACC-40–ACC-50, BILL-39, UI-14, ADM-34 | 用持久注销 Saga 区分资金阻断、系统自动清理和标识释放门禁 | 未实现 | 待核对用量、拒付、资金性差异、外部待确认关单及资金相关 Commerce 任务阻断注销；组织所有权及最后一个有效超级管理员角色须先交接，资料 Saga、其他角色、临时授权和邀请不要求用户处理但必须自动收敛；全部门禁通过且 Identity 不可认证后才能释放标识，迟到任务不得作用于新账号 |
-| CR-53 | ID-03, ID-14–ID-15, ID-17–ID-18, ACC-02, ACC-51–ACC-55, UI-15, ADM-35, NFR-04, NFR-06 | 闭合注册预检并发、唯一值预约、幂等、密码边界和孤儿 Identity 补偿 | 已实现 | 数据库唯一预约、稳定操作/密码指纹、脱敏查询、Identity 关联向前恢复及24小时证明门禁补偿已闭环；全域日志白名单与幂等治理仍由独立 NFR 任务追踪 |
+| CR-53 | ID-03, ID-14–ID-15, ID-17–ID-18, ACC-02, ACC-51–ACC-55, UI-15, ADM-35, NFR-04, NFR-06 | 闭合注册预检并发、唯一值预约、幂等、密码边界和孤儿 Identity 补偿 | 已实现 | 数据库唯一预约、稳定操作/密码指纹、脱敏查询、Identity 关联向前恢复及24小时证明门禁补偿已闭环；全域日志字段白名单和自动秘密扫描已完成，剩余全域幂等治理由 APT-045 追踪 |
 | CR-54 | BILL-12, BILL-36, BILL-38–BILL-40 | 允许授权管理员选择性回收注销账号的未消费组织授予 | 未实现 | 注销授予不自动回池；账号完成 `ANONYMIZED` 且不存在消费、Hold、待核对用量或资金冻结时，授权管理员可用专用命令一次性全额回收至原权益包原组成，禁止部分回收、跨组成转换、现金退款或直接授予新账号 |
 | CR-55 | TOK-42–TOK-45 | 补齐模型目录管理生命周期、历史展示、重命名/别名和版本回滚 | 部分实现 | 生命周期、历史墓碑、稳定模型 ID、版本化名称/别名和前向回滚已实现；回滚仍待 APT-028 用当前价格、Provisioning 路由和凭据完成联合发布校验 |
 | CR-56 | TOK-46–TOK-47 | 明确模型关联版本生成边界及下架后的新旧会话和在途请求策略 | 部分实现 | 独立版本、请求快照、截止门禁和桌面显式替代分支已实现；紧急 `force_cancel_inflight` 的实际触发及取消结果证据仍缺 |
 | CR-57 | BILL-21–BILL-25, BILL-41–BILL-45, ADM-13 | 明确定价匹配优先级、显式单位继承、时间冲突、生命周期及 Hold 不变性 | 已实现 | 模型覆盖优先、显式继承、固定零价、区间冲突、完整生命周期及既有 Hold 不重算均由数据约束和服务契约实现 |
-| CR-58 | ADM-01, ID-18, NFR-04 | 用交互式设密或高熵一次性引导替代8位超级管理员初始密码 | 未实现 | admin 激活前保持 BOOTSTRAP_PENDING；直接设密使用高权限密码策略；引导凭据默认256 bit、最少128 bit、Base64URL、15分钟有效、最多5次失败、一次读取销毁且成功兑换原子失效 |
+| CR-58 | ADM-01, ID-18, NFR-04 | 用交互式设密或高熵一次性引导替代8位超级管理员初始密码 | 已实现 | admin 激活前保持 BOOTSTRAP_PENDING；直接设密使用高权限密码策略；引导凭据默认256 bit、最少128 bit、Base64URL、15分钟有效、最多5次失败、一次读取销毁且成功兑换原子失效；输出和统一日志不记录凭据原文 |
 | CR-59 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | 补齐管理命令审批对象、生命周期、失效和执行契约 | 已实现 | 后台写命令已版本化分类；审批支持独立决定、过期、撤回、新申请重提、快照失效、实时授权复核、Outbox 授权与 Billing 幂等执行 |
 | CR-60 | NFR-26–NFR-48, ADM-09 | 建立性能、容量、灾备、保留、限流、隔离、Provider韧性、时钟、客户端兼容和审计导出的量化验收基线 | 未实现 | 在生产等价环境按固定样本测量P95/P99/TTFT和容量；定义分级RPO/RTO、加密备份与演练、分类保留、多维限流、租户隔离矩阵、熔断/人工SLA、授时偏差、N/N-1/N-2桌面兼容及受控审计导出 |
 | CR-61 | ACC-02, ACC-11, ACC-56–ACC-58, NFR-50 | 建立永久内部用户 ID 和独立可展示用户编码 | 部分实现 | ACC-56–ACC-58 与 NFR-50 已完成；ACC-11 的完整注销 Saga、资料清理和三年分类保留仍待实现 |
@@ -808,7 +809,7 @@
 | NFR-01 | 安全传输 | production-new 强制 Ingress TLS Secret 和 HTTPS URL；环境门禁校验三个公开边界的受信证书、状态及14天续期窗口，仍缺真实部署证据。 |
 | NFR-02 | 最小暴露 | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 `NOT_DEPLOYED`。 |
 | NFR-03 | 密钥管理 | production-new 使用 ExternalSecret + 远程 KMS/Vault 包络加密；按持久 Key ID 双读、全表分批重加密和 readiness 关闭完成新旧 Key 过渡，真实 SecretStore/KMS 轮换证据待外部环境验收。 |
-| NFR-04 | 日志敏感信息保护 | 错误响应和多数日志避免直接输出秘密，合同测试扫描配置；缺统一字段白名单、日志/Trace 正文脱敏和自动秘密扫描门禁。 |
+| NFR-04 | 日志敏感信息保护 | 共享结构化 Handler 使用稳定事件/字段白名单，未知消息折叠并丢弃原始错误与受保护字段；注入秘密标记和绕过源码扫描已进入全量发布门禁。 |
 | NFR-05 | 审计 | 账号、资金、Token、注册修复和审批生命周期已有审计；注销 Saga、Provider 事实修复等目标动作仍缺失。 |
 | NFR-06 | 幂等 | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约。 |
 | NFR-07 | 最终一致性 | 三服务具备事务 Outbox/Inbox、至少一次 Relay、死信和人工重放；业务最终收敛依赖死信处置且多项 Saga 缺失。 |
@@ -825,11 +826,11 @@
 | NFR-18 | 模型网关可替换性 | 已实现：通用记录冻结 Provider ID、Adapter 版本、上游引用和摘要；部署配置可选择 New API 或通用 OpenAI 兼容 Adapter，厂商协议不进入通用 API/UI。 |
 | NFR-19 | 运维探针可扩展 | 已实现：Portal 聚合器消费配置注册表和通用/Relay Adapter，不硬编码组件或厂商。 |
 | NFR-20 | 无旧模型技术债 | 旧运行时路径、幂等迁移、非计费 readiness 与三层门禁已有仓库实现；正式安装制品原子回滚及生产联调未验收。 |
-| NFR-21 | 结构化日志 | Event Relay 使用 JSON 结构化日志，部分后台任务使用 `slog`；尚无所有服务统一 schema、必需字段和发布门禁。 |
-| NFR-22 | Request ID 关联 | HTTP 中间件生成并返回 Request ID，审计和部分下游调用可关联；尚未证明所有入口、事件、错误和后台任务端到端传播。 |
-| NFR-23 | 分布式 Trace | HTTP 客户端传播 W3C `traceparent`，Outbox 记录 `trace_id`，并有 OTLP 配置测试；NATS 消费和全部后台任务的跨信号传播不完整。 |
-| NFR-24 | 健康检查 | 共享 HTTP Server 提供 live/ready 并覆盖依赖失败测试，Relay 提供 live；尚未逐工作负载统一 readiness 语义。 |
-| NFR-25 | 独立指标 | 业务 HTTP Server 和 Event Relay 提供独立 metrics 监听及低基数测试；目标核心指标覆盖和所有工作负载隔离仍不完整。 |
+| NFR-21 | 结构化日志 | 全服务统一 JSON schema 必含时间、级别、服务、环境、版本、事件和结果，HTTP/Relay/后台任务无旁路 Logger。 |
+| NFR-22 | Request ID 关联 | HTTP/Relay 入口校验或替换外部值，响应、日志与同步下游传播受信 Request ID，事件处理建立独立关联。 |
+| NFR-23 | 分布式 Trace | HTTP、Outbox、Relay、NATS Consumer 和后台任务形成 W3C/等价 Trace 上下文，日志与指标 Exemplar 可关联。 |
+| NFR-24 | 健康检查 | 服务与 Relay 均区分进程 liveness 和关键依赖 readiness；普通健康不执行计费或客户端切换准入。 |
+| NFR-25 | 独立指标 | 独立受限监听输出 HTTP 和 Relay 请求/错误/延迟/任务/领域积压指标，标签有界且 Trace 仅进入 Exemplar。 |
 | NFR-26 | 性能与容量验收基线 | 未实现：当前没有冻结的生产等价资源、基准数据集、样本量、负载脚本和平台/Provider/排队分段计时报告。 |
 | NFR-27 | 关键内部 API 延迟 | 未实现：尚无读接口 P95≤300ms/P99≤1s、事务写 P95≤500ms/P99≤1.5s及错误率≤0.1%的持续证据。 |
 | NFR-28 | 外部依赖接口延迟 | 未实现：登录、短信和支付尚未分别采集平台附加耗时与Provider端到端 P95/P99。 |

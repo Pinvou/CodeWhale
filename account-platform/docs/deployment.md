@@ -518,7 +518,7 @@ account-security break-glass \
 
 ### 12.1 日志位置
 
-当前 Compose 服务以结构化 JSON 写标准输出/错误，首选通过 Docker 查看：
+当前 Compose 服务以统一结构化 JSON 写标准输出/错误，固定字段为 `time/level/service/environment/version/event/result`，按请求或任务补充 `request_id/trace_id`；首选通过 Docker 查看：
 
 ```text
 docker compose --env-file <secret-env> <compose-files> logs --since 30m <service>
@@ -534,10 +534,11 @@ New API 自身日志位置由其独立部署定义决定；核对用量优先调
 - `X-Request-ID`
 - `X-Trace-ID`
 - `traceparent`
-- 业务资源 ID（只在受控系统中记录订单 ID、Usage Request ID 等）
 - 服务名、环境、版本和 Commit
 
-禁止记录密码、短信验证码、Access/Refresh Token、Cookie、商城 App Secret、阿里云 AccessKey Secret、内部服务 Token、New API Admin Token 和真实供应商密钥。
+外部 `X-Request-ID` 仅允许64字符内的字母数字及 `._:-`，否则服务生成新的128-bit值；共享 HTTP Client 自动传播受信值。Trace 通过 W3C `traceparent`、Outbox `trace_id` 和 NATS 消费上下文延续，Trace ID 只写日志和 Prometheus Exemplar，不作为普通标签。业务资源 ID 只进入受权限控制的领域证据/审计，不进入通用日志或指标。
+
+日志字段采用失败关闭白名单。禁止记录密码、短信验证码、Access/Refresh Token、Cookie、商城 App Secret、阿里云 AccessKey Secret、内部服务 Token、New API Admin Token、真实供应商密钥、请求/响应正文、事件 Payload 或完整模型正文；原始 error 只映射为稳定事件/错误码。发布前必须运行 `npm --prefix account-platform run check:observability-release`，发现绕过共享 Handler 或附加受保护字段即阻断。
 
 ### 12.3 关键告警
 

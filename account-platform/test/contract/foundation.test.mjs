@@ -506,7 +506,8 @@ test('usage review reconciliation is leased, evidence based, and secret backed',
   assert.match(reconciler, /FOR UPDATE(?: OF request)? SKIP LOCKED/);
   assert.match(reconciler, /request_id/);
   assert.match(reconciler, /PriceByID/);
-  assert.match(reconciler, /automatic reconciliation exhausted/);
+  assert.match(reconciler, /MANUAL_RECONCILIATION_REQUIRED/);
+  assert.doesNotMatch(reconciler, /(?:Stop|Reschedule)Reconciliation\([^\n]*\.Error\(\)/);
   assert.match(gatewayAdapter, /X-Oneapi-Request-Id/);
   assert.match(gateway, /RecordUpstreamRequest/);
   assert.match(chart, /key: token-reconciliation-newapi-admin-token/);

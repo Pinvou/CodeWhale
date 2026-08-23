@@ -15,21 +15,23 @@ import (
 )
 
 type httpMetrics struct {
-	requests *prometheus.CounterVec
-	duration *prometheus.HistogramVec
-	inFlight prometheus.Gauge
-	registry *prometheus.Registry
+	requests  *prometheus.CounterVec
+	duration  *prometheus.HistogramVec
+	inFlight  prometheus.Gauge
+	readiness prometheus.Gauge
+	registry  *prometheus.Registry
 }
 
 func newHTTPMetrics(service string) *httpMetrics {
 	labels := prometheus.Labels{"service": service}
 	metrics := &httpMetrics{
-		requests: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_requests_total", Help: "Completed account platform HTTP requests.", ConstLabels: labels}, []string{"method", "route", "status"}),
-		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pinvou_http_request_duration_seconds", Help: "Account platform HTTP request latency.", ConstLabels: labels, Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2, 5}}, []string{"method", "route"}),
-		inFlight: prometheus.NewGauge(prometheus.GaugeOpts{Name: "pinvou_http_in_flight_requests", Help: "Account platform HTTP requests currently executing.", ConstLabels: labels}),
-		registry: prometheus.NewRegistry(),
+		requests:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "pinvou_http_requests_total", Help: "Completed account platform HTTP requests.", ConstLabels: labels}, []string{"method", "route", "status"}),
+		duration:  prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "pinvou_http_request_duration_seconds", Help: "Account platform HTTP request latency.", ConstLabels: labels, Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.5, 1, 2, 5}}, []string{"method", "route"}),
+		inFlight:  prometheus.NewGauge(prometheus.GaugeOpts{Name: "pinvou_http_in_flight_requests", Help: "Account platform HTTP requests currently executing.", ConstLabels: labels}),
+		readiness: prometheus.NewGauge(prometheus.GaugeOpts{Name: "pinvou_service_readiness", Help: "Whether the service's critical request dependencies are ready.", ConstLabels: labels}),
+		registry:  prometheus.NewRegistry(),
 	}
-	metrics.registry.MustRegister(metrics.requests, metrics.duration, metrics.inFlight)
+	metrics.registry.MustRegister(metrics.requests, metrics.duration, metrics.inFlight, metrics.readiness)
 	return metrics
 }
 
@@ -49,9 +51,18 @@ func (metrics *httpMetrics) middleware(next http.Handler, logger *slog.Logger) h
 			route = "unmatched"
 		}
 		status := strconv.Itoa(wrapped.status)
-		metrics.requests.WithLabelValues(r.Method, route, status).Inc()
-		metrics.duration.WithLabelValues(r.Method, route).Observe(time.Since(start).Seconds())
-		logger.Info("http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", time.Since(start).Milliseconds(), "request_id", RequestID(r.Context()), "trace_id", TraceID(r.Context()))
+		requestCounter := metrics.requests.WithLabelValues(r.Method, route, status)
+		durationObserver := metrics.duration.WithLabelValues(r.Method, route)
+		elapsed := time.Since(start)
+		traceID := TraceID(r.Context())
+		if traceID != "" {
+			requestCounter.(prometheus.ExemplarAdder).AddWithExemplar(1, prometheus.Labels{"trace_id": traceID})
+			durationObserver.(prometheus.ExemplarObserver).ObserveWithExemplar(elapsed.Seconds(), prometheus.Labels{"trace_id": traceID})
+		} else {
+			requestCounter.Inc()
+			durationObserver.Observe(elapsed.Seconds())
+		}
+		logger.InfoContext(r.Context(), "http request completed", "method", r.Method, "route", route, "status", wrapped.status, "duration_ms", elapsed.Milliseconds())
 	})
 }
 

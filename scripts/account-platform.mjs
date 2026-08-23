@@ -91,6 +91,7 @@ function verify() {
   run(executable('go'), ['vet', '-tags=nomsgpack', './...'], { cwd: platformRoot });
   runNpm(['test'], { cwd: platformRoot });
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-i18n.mjs')]);
+  run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-observability.mjs')]);
   run('python', ['scripts/architecture-guard.py']);
   run('git', ['diff', '--check']);
 }

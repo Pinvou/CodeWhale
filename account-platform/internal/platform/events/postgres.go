@@ -42,6 +42,8 @@ func NewPostgresStore(ctx context.Context, databaseURL string) (*PostgresStore, 
 
 func (store *PostgresStore) Close() { store.pool.Close() }
 
+func (store *PostgresStore) Ping(ctx context.Context) error { return store.pool.Ping(ctx) }
+
 func (store *PostgresStore) Stats(ctx context.Context) (OutboxStats, error) {
 	var stats OutboxStats
 	var oldestSeconds float64

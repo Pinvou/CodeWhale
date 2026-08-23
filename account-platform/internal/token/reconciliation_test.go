@@ -3,6 +3,7 @@ package token
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -83,6 +84,13 @@ func TestNewAPILogDoesNotTreatGenericFailureAsConclusiveRejection(t *testing.T) 
 	}
 }
 
+func TestReconciliationErrorCodeDoesNotPersistProviderMessage(t *testing.T) {
+	const marker = "secret-provider-response-marker"
+	if code := reconciliationErrorCode(errors.New(marker)); code != "USAGE_EVIDENCE_UNAVAILABLE" || code == marker {
+		t.Fatalf("unsafe reconciliation error code %q", code)
+	}
+}
+
 type reconciliationStoreFake struct {
 	committedID     uuid.UUID
 	committedActual int64
@@ -129,7 +137,7 @@ func (b *reconciliationBillingFake) Release(_ context.Context, usageID, _ uuid.U
 
 type evidenceClientFake struct{ evidence UsageEvidence }
 
-func (e evidenceClientFake) ProviderID() string { return "NEW_API" }
+func (e evidenceClientFake) ProviderID() string     { return "NEW_API" }
 func (e evidenceClientFake) AdapterVersion() string { return "new-api-v1" }
 
 func (e evidenceClientFake) Lookup(context.Context, string) (UsageEvidence, error) {

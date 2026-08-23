@@ -33,11 +33,11 @@ func (s *Service) executeApprovedAdjustment(w http.ResponseWriter, r *http.Reque
 	posted, err := s.executeApprovedAdjustmentCommand(r.Context(), adjustmentID, body.ApprovalRequestID, strings.TrimSpace(body.JobRunID), body.ObservedVersions)
 	if err != nil {
 		if errors.Is(err, ErrApprovalExecutionUnavailable) || errors.Is(err, ErrApprovalCompletionPending) {
-			api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_EXECUTION_UNAVAILABLE", err.Error(), httpserver.RequestID(r.Context()))
+			api.WriteError(w, http.StatusServiceUnavailable, "APPROVAL_EXECUTION_UNAVAILABLE", "approved command execution is temporarily unavailable", httpserver.RequestID(r.Context()))
 			return
 		}
 		if errors.Is(err, ErrApprovalNotExecutable) || errors.Is(err, ErrApprovalSnapshotMismatch) {
-			api.WriteError(w, http.StatusConflict, "APPROVAL_NOT_EXECUTABLE", err.Error(), httpserver.RequestID(r.Context()))
+			api.WriteError(w, http.StatusConflict, "APPROVAL_NOT_EXECUTABLE", "the approved command cannot be executed", httpserver.RequestID(r.Context()))
 			return
 		}
 		s.writeError(w, r, err)

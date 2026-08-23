@@ -1,7 +1,6 @@
 package httpserver
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -19,7 +18,7 @@ func NewRouter() *gin.Engine {
 	router.RedirectFixedPath = false
 	router.RemoveExtraSlash = false
 	router.Use(gin.CustomRecovery(func(c *gin.Context, recovered any) {
-		slog.Error("http handler panic recovered", "panic", fmt.Sprint(recovered), "request_id", RequestID(c.Request.Context()))
+		slog.ErrorContext(c.Request.Context(), "http handler panic recovered", "error_code", "HTTP_HANDLER_PANIC")
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 			"code":       "INTERNAL_ERROR",
 			"message":    "the request could not be completed",

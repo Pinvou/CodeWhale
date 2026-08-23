@@ -10,6 +10,7 @@
     "lint:openapi": "redocly lint contracts/openapi/account.yaml contracts/openapi/identity.yaml contracts/openapi/billing.yaml contracts/openapi/token-gateway.yaml contracts/openapi/admin.yaml",
     "test:contracts": "node --test test/contract/*.test.mjs",
     "check:i18n-release": "node ../scripts/check-account-platform-i18n.mjs",
+    "check:observability-release": "node ../scripts/check-account-platform-observability.mjs",
     "security:production-readiness": "node ../scripts/account-platform-production-security-gate.mjs",
     "test": "npm run lint:openapi && npm run test:contracts"
   },

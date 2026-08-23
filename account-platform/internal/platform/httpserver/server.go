@@ -2,7 +2,6 @@ package httpserver
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,34 +11,34 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
-	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
-type requestIDContextKey struct{}
-type traceIDContextKey struct{}
-
 func RequestID(ctx context.Context) string {
-	value, _ := ctx.Value(requestIDContextKey{}).(string)
-	return value
+	return observability.RequestID(ctx)
 }
 
 func TraceID(ctx context.Context) string {
 	if traceID := oteltrace.SpanContextFromContext(ctx).TraceID(); traceID.IsValid() {
 		return traceID.String()
 	}
-	value, _ := ctx.Value(traceIDContextKey{}).(string)
-	return value
+	return observability.TraceID(ctx)
 }
 
 var (
-	version = "dev"
-	commit  = "unknown"
+	version            = "dev"
+	commit             = "unknown"
+	tracingPreparation struct {
+		sync.Mutex
+		service  string
+		shutdown observability.Shutdown
+	}
 )
 
 type statusResponse struct {
@@ -53,6 +52,8 @@ func Handler(cfg config.Config) http.Handler {
 	return HandlerWithApplication(cfg, nil, nil)
 }
 
+func CorrelationHandler(next http.Handler) http.Handler { return withRequestID(next) }
+
 // HandlerWithApplication mounts a service handler behind the common health,
 // request-correlation and cache-safety middleware. A readiness check should
 // verify only dependencies required for safe request handling.
@@ -65,17 +66,24 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 	health := NewRouter()
 	metrics := newHTTPMetrics(cfg.ServiceName)
 	status := func(state string, check func(context.Context) error) http.HandlerFunc {
-		return func(w http.ResponseWriter, _ *http.Request) {
+		return func(w http.ResponseWriter, request *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Type", "application/json")
 			statusCode := http.StatusOK
 			responseState := state
 			if check != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				ctx, cancel := context.WithTimeout(request.Context(), 2*time.Second)
 				defer cancel()
 				if err := check(ctx); err != nil {
 					responseState = "not_ready"
 					statusCode = http.StatusServiceUnavailable
+				}
+			}
+			if state == "ready" {
+				if statusCode == http.StatusOK {
+					metrics.readiness.Set(1)
+				} else {
+					metrics.readiness.Set(0)
 				}
 			}
 			w.WriteHeader(statusCode)
@@ -97,7 +105,7 @@ func handlerWithMetrics(cfg config.Config, application http.Handler, ready func(
 		application.ServeHTTP(w, r)
 	})
 	observed := metrics.middleware(withRateLimit(cfg, dispatch), newLogger(cfg))
-	return otelhttp.NewHandler(withRequestID(withSecurityHeaders(cfg, observed)), cfg.ServiceName), metrics
+	return observability.TraceHTTPHandler(withRequestID(withSecurityHeaders(cfg, observed))), metrics
 }
 
 func withSecurityHeaders(cfg config.Config, next http.Handler) http.Handler {
@@ -119,6 +127,24 @@ func Run(serviceName string) error {
 	return RunWithApplication(serviceName, nil, nil)
 }
 
+func ConfigureProcessLogging(serviceName string) error {
+	environment := strings.TrimSpace(os.Getenv("APP_ENV"))
+	if environment == "" {
+		environment = "development"
+	}
+	config := observability.Config{Service: serviceName, Environment: environment, Version: version, Commit: commit}
+	observability.ConfigureDefaultLogger(config)
+	shutdown, err := observability.SetupTracing(context.Background(), config)
+	if err != nil {
+		return err
+	}
+	tracingPreparation.Lock()
+	tracingPreparation.service = serviceName
+	tracingPreparation.shutdown = shutdown
+	tracingPreparation.Unlock()
+	return nil
+}
+
 func RunWithApplication(serviceName string, application http.Handler, ready func(context.Context) error) error {
 	cfg, err := config.Load(serviceName)
 	if err != nil {
@@ -127,9 +153,19 @@ func RunWithApplication(serviceName string, application http.Handler, ready func
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	shutdownTracing, err := observability.SetupTracing(ctx, observability.Config{Service: cfg.ServiceName, Environment: cfg.Environment, Version: version, Commit: commit})
-	if err != nil {
-		return err
+	tracingPreparation.Lock()
+	shutdownTracing := observability.Shutdown(nil)
+	if tracingPreparation.service == serviceName {
+		shutdownTracing = tracingPreparation.shutdown
+		tracingPreparation.service = ""
+		tracingPreparation.shutdown = nil
+	}
+	tracingPreparation.Unlock()
+	if shutdownTracing == nil {
+		shutdownTracing, err = observability.SetupTracing(ctx, observability.Config{Service: cfg.ServiceName, Environment: cfg.Environment, Version: version, Commit: commit})
+		if err != nil {
+			return err
+		}
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -137,6 +173,7 @@ func RunWithApplication(serviceName string, application http.Handler, ready func
 		_ = shutdownTracing(shutdownCtx)
 	}()
 	logger := newLogger(cfg)
+	slog.SetDefault(logger)
 	applicationHandler, metrics := handlerWithMetrics(cfg, application, ready)
 	server := &http.Server{
 		Addr:              cfg.Address,
@@ -187,26 +224,25 @@ func RunWithApplication(serviceName string, application http.Handler, ready func
 }
 
 func newLogger(cfg config.Config) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{})).With("service", cfg.ServiceName, "environment", cfg.Environment, "version", version, "commit", commit)
+	return observability.ConfigureDefaultLogger(observability.Config{Service: cfg.ServiceName, Environment: cfg.Environment, Version: version, Commit: commit})
 }
 
 func withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
-			requestID = newRequestID()
+		requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		if !observability.ValidRequestID(requestID) {
+			requestID = observability.NewCorrelationID()
 		}
 		traceID := TraceID(r.Context())
 		if traceID == "" {
 			traceID = traceIDFromParent(r.Header.Get("traceparent"))
 		}
 		if traceID == "" {
-			traceID = newRequestID()
+			traceID = observability.NewCorrelationID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
 		w.Header().Set("X-Trace-ID", traceID)
-		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
-		ctx = context.WithValue(ctx, traceIDContextKey{}, traceID)
+		ctx := observability.WithCorrelation(r.Context(), requestID, traceID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -220,12 +256,4 @@ func traceIDFromParent(value string) string {
 		return ""
 	}
 	return strings.ToLower(parts[1])
-}
-
-func newRequestID() string {
-	var value [16]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return "request-id-unavailable"
-	}
-	return hex.EncodeToString(value[:])
 }
