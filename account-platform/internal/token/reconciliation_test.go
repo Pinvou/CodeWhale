@@ -38,7 +38,7 @@ func TestNewAPIUsageEvidenceClientReadsConsumptionByRequestID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if evidence.Usage == nil || *evidence.Usage != (Usage{InputTokens: 12, OutputTokens: 3, CachedInputTokens: 4}) || evidence.Rejected {
+	if evidence.Usage == nil || *evidence.Usage != (Usage{InputTokens: 8, OutputTokens: 3, CachedInputTokens: 4}) || evidence.Rejected {
 		t.Fatalf("unexpected evidence: %#v", evidence)
 	}
 }

@@ -18,11 +18,33 @@ import (
 )
 
 type PriceVersion struct {
-	ID                    uuid.UUID `json:"price_version_id"`
-	Model                 string    `json:"model"`
-	InputPerMillion       int64     `json:"input_per_million"`
-	OutputPerMillion      int64     `json:"output_per_million"`
-	CachedInputPerMillion int64     `json:"cached_input_per_million"`
+	ID                    uuid.UUID           `json:"price_version_id"`
+	Model                 string              `json:"model"`
+	InputPerMillion       int64               `json:"input_per_million"`
+	OutputPerMillion      int64               `json:"output_per_million"`
+	CachedInputPerMillion int64               `json:"cached_input_per_million"`
+	ScopeType             string              `json:"scope_type"`
+	ProtocolCode          string              `json:"protocol_code"`
+	FormulaVersionID      uuid.UUID           `json:"formula_version_id"`
+	FormulaSnapshot       json.RawMessage     `json:"formula_snapshot"`
+	CreditUnit            string              `json:"credit_unit"`
+	EffectiveFrom         time.Time           `json:"effective_from"`
+	EffectiveTo           *time.Time          `json:"effective_to,omitempty"`
+	ResolvedAt            time.Time           `json:"resolved_at"`
+	Units                 []ResolvedUnitPrice `json:"units"`
+}
+
+type ResolvedUnitPrice struct {
+	UnitCode             string    `json:"unit_code"`
+	UnitDefinitionID     uuid.UUID `json:"unit_definition_id"`
+	UnitVersion          int64     `json:"unit_version"`
+	MinimumPrecision     int64     `json:"minimum_precision"`
+	PriceDenominator     int64     `json:"price_denominator"`
+	RoundingRule         string    `json:"rounding_rule"`
+	ResolvedPrice        int64     `json:"resolved_price"`
+	ConfigurationType    string    `json:"configuration_type"`
+	PriceSourceScope     string    `json:"price_source_scope"`
+	SourcePriceVersionID uuid.UUID `json:"source_price_version_id"`
 }
 
 type Usage struct {
@@ -52,6 +74,27 @@ type BillingClient interface {
 	RechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	CloseRechargeOrder(context.Context, uuid.UUID, uuid.UUID) (json.RawMessage, error)
 	Balance(context.Context, uuid.UUID) (json.RawMessage, error)
+}
+
+type HoldPricingContext struct {
+	ModelID          string
+	ProtocolCode     string
+	FormulaVersionID uuid.UUID
+	PricingSnapshot  json.RawMessage
+	RequestSnapshot  json.RawMessage
+}
+
+type SnapshotBillingClient interface {
+	ReservePriced(context.Context, uuid.UUID, uuid.UUID, int64, uuid.UUID, HoldPricingContext) (BillingHold, error)
+	Extend(context.Context, uuid.UUID, uuid.UUID, int64) error
+}
+
+type FormulaBindingClient interface {
+	RegisterFormulaBinding(context.Context, uuid.UUID, string, []uuid.UUID, json.RawMessage, time.Time) error
+}
+
+type SnapshotOrganizationBillingClient interface {
+	ReserveMemberQuotaPriced(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, uuid.UUID, HoldPricingContext) (BillingHold, error)
 }
 
 type EntitlementPackageBillingClient interface {
@@ -167,23 +210,72 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 }
 
 func Cost(price PriceVersion, usage Usage) (int64, error) {
-	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedInputTokens > usage.InputTokens {
+	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 {
 		return 0, ErrForbidden
 	}
-	regularInput := usage.InputTokens - usage.CachedInputTokens
-	input, err := tokenCost(regularInput, price.InputPerMillion)
-	if err != nil {
-		return 0, err
+	if len(price.Units) == 0 {
+		input, err := tokenCost(usage.InputTokens, price.InputPerMillion)
+		if err != nil {
+			return 0, err
+		}
+		cached, err := tokenCost(usage.CachedInputTokens, price.CachedInputPerMillion)
+		if err != nil || input > math.MaxInt64-cached {
+			return 0, ErrForbidden
+		}
+		output, err := tokenCost(usage.OutputTokens, price.OutputPerMillion)
+		if err != nil || input+cached > math.MaxInt64-output {
+			return 0, ErrForbidden
+		}
+		return input + cached + output, nil
 	}
-	cached, err := tokenCost(usage.CachedInputTokens, price.CachedInputPerMillion)
-	if err != nil || input > math.MaxInt64-cached {
+	quantities := map[string]int64{"INPUT_TOKEN": usage.InputTokens, "CACHED_INPUT_TOKEN": usage.CachedInputTokens, "OUTPUT_TOKEN": usage.OutputTokens}
+	var total int64
+	for _, unit := range price.Units {
+		quantity, ok := quantities[unit.UnitCode]
+		if !ok || unit.MinimumPrecision <= 0 || unit.PriceDenominator <= 0 || unit.ResolvedPrice < 0 {
+			return 0, ErrForbidden
+		}
+		component, err := unitCost(quantity, unit)
+		if err != nil || total > math.MaxInt64-component {
+			return 0, ErrForbidden
+		}
+		total += component
+		delete(quantities, unit.UnitCode)
+	}
+	if len(quantities) != 0 {
 		return 0, ErrForbidden
 	}
-	output, err := tokenCost(usage.OutputTokens, price.OutputPerMillion)
-	if err != nil || input+cached > math.MaxInt64-output {
+	return total, nil
+}
+
+func unitCost(quantity int64, unit ResolvedUnitPrice) (int64, error) {
+	if quantity < 0 || unit.ResolvedPrice < 0 || unit.PriceDenominator <= 0 || unit.MinimumPrecision <= 0 || quantity > math.MaxInt64/unit.MinimumPrecision {
 		return 0, ErrForbidden
 	}
-	return input + cached + output, nil
+	precisionUnits := quantity / unit.MinimumPrecision
+	if quantity%unit.MinimumPrecision != 0 {
+		precisionUnits++
+	}
+	if unit.ResolvedPrice != 0 && precisionUnits > math.MaxInt64/unit.ResolvedPrice {
+		return 0, ErrForbidden
+	}
+	numerator := precisionUnits * unit.ResolvedPrice
+	switch unit.RoundingRule {
+	case "CEILING":
+		if numerator > math.MaxInt64-(unit.PriceDenominator-1) {
+			return 0, ErrForbidden
+		}
+		return (numerator + unit.PriceDenominator - 1) / unit.PriceDenominator, nil
+	case "FLOOR":
+		return numerator / unit.PriceDenominator, nil
+	case "HALF_UP":
+		if numerator > math.MaxInt64-unit.PriceDenominator/2 {
+			return 0, ErrForbidden
+		}
+		return (numerator + unit.PriceDenominator/2) / unit.PriceDenominator, nil
+	default:
+		return 0, ErrForbidden
+	}
 }
 
 func tokenCost(tokens, rate int64) (int64, error) {
@@ -225,10 +317,36 @@ func (c *HTTPBillingClient) Reserve(ctx context.Context, usageID, walletID uuid.
 	return hold, err
 }
 
+func (c *HTTPBillingClient) ReservePriced(ctx context.Context, usageID, walletID uuid.UUID, maximum int64, priceID uuid.UUID, pricing HoldPricingContext) (BillingHold, error) {
+	var hold BillingHold
+	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", holdReservationBody(usageID, walletID, maximum, priceID, pricing), &hold)
+	return hold, err
+}
+
+func holdReservationBody(usageID, walletID uuid.UUID, maximum int64, priceID uuid.UUID, pricing HoldPricingContext) map[string]any {
+	return map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900, "model_id": pricing.ModelID, "protocol_code": pricing.ProtocolCode, "formula_version_id": pricing.FormulaVersionID, "pricing_snapshot": pricing.PricingSnapshot, "request_snapshot": pricing.RequestSnapshot}
+}
+
 func (c *HTTPBillingClient) ReserveMemberQuota(ctx context.Context, usageID, walletID, organizationID, memberUserID uuid.UUID, membershipVersion, maximum int64, priceID uuid.UUID) (BillingHold, error) {
 	var hold BillingHold
 	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "organization_id": organizationID, "member_user_id": memberUserID, "membership_version": membershipVersion, "maximum_microcredits": maximum, "price_version_id": priceID, "lease_seconds": 900}, &hold)
 	return hold, err
+}
+
+func (c *HTTPBillingClient) ReserveMemberQuotaPriced(ctx context.Context, usageID, walletID, organizationID, memberUserID uuid.UUID, membershipVersion, maximum int64, priceID uuid.UUID, pricing HoldPricingContext) (BillingHold, error) {
+	var hold BillingHold
+	body := holdReservationBody(usageID, walletID, maximum, priceID, pricing)
+	body["organization_id"], body["member_user_id"], body["membership_version"] = organizationID, memberUserID, membershipVersion
+	err := c.call(ctx, http.MethodPost, "/internal/v1/holds/reserve", body, &hold)
+	return hold, err
+}
+
+func (c *HTTPBillingClient) Extend(ctx context.Context, usageID, holdID uuid.UUID, additional int64) error {
+	return c.call(ctx, http.MethodPost, "/internal/v1/holds/extend", map[string]any{"usage_request_id": usageID, "hold_id": holdID, "lease_seconds": 900, "additional_microcredits": additional}, nil)
+}
+
+func (c *HTTPBillingClient) RegisterFormulaBinding(ctx context.Context, formulaID uuid.UUID, protocol string, required []uuid.UUID, snapshot json.RawMessage, publishedAt time.Time) error {
+	return c.call(ctx, http.MethodPut, "/internal/v1/pricing/formula-bindings/"+formulaID.String(), map[string]any{"protocol_code": protocol, "required_unit_definition_ids": required, "formula_snapshot": snapshot, "published_at": publishedAt}, nil)
 }
 
 func (c *HTTPBillingClient) Commit(ctx context.Context, usageID, holdID uuid.UUID, actual int64, usage Usage) error {

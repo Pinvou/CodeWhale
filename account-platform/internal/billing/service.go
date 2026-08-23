@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -52,10 +53,12 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.GET("/internal/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
 	protected.GET("/internal/v1/entitlement-packages", httpserver.AdaptFunc(s.listEntitlementPackages))
 	protected.POST("/internal/v1/holds/reserve", httpserver.AdaptFunc(s.reserve))
+	protected.POST("/internal/v1/holds/extend", httpserver.AdaptFunc(s.extendHold))
 	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
 	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
 	protected.GET("/internal/v1/pricing/current", httpserver.AdaptFunc(s.currentPrice))
 	protected.GET("/internal/v1/pricing/:price_version_id", httpserver.AdaptFunc(s.priceByID))
+	protected.PUT("/internal/v1/pricing/formula-bindings/:formula_version_id", httpserver.AdaptFunc(s.putFormulaBinding))
 	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", httpserver.AdaptFunc(s.executeApprovedAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
@@ -86,6 +89,15 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/wallets/:wallet_id/ledger", s.authorizer.Require("platform.billing.ledger.read"), httpserver.AdaptFunc(s.adminWalletLedger))
 		admin.GET("/pricing-versions", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPriceVersions))
 		admin.POST("/pricing-versions", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_VERSION_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreatePriceVersion))
+		admin.POST("/pricing/drafts", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreatePriceDraftV2))
+		admin.GET("/pricing", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminManagedPrices))
+		admin.PUT("/pricing/:price_version_id/draft", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_DRAFT_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdatePriceDraft))
+		admin.GET("/pricing/:price_version_id/preview", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPreviewPrice))
+		admin.POST("/pricing/:price_version_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishPrice))
+		admin.POST("/pricing/:price_version_id/transition", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_PRICE_TRANSITION", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransitionPrice))
+		admin.GET("/metering-units", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminMeteringUnits))
+		admin.POST("/metering-units", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateMeteringUnit))
+		admin.POST("/metering-units/:unit_definition_id/deactivate", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_DEACTIVATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeactivateMeteringUnit))
 		admin.GET("/payment-orders", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrders))
 		admin.POST("/payment-orders/:order_id/sync", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncPaymentOrder))
 		admin.POST("/payment-orders/:order_id/repair", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_EVIDENCE_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairPaymentOrder))
@@ -435,16 +447,21 @@ func (s *Service) priceByID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		UsageRequestID    uuid.UUID  `json:"usage_request_id"`
-		WalletID          uuid.UUID  `json:"wallet_id"`
-		Maximum           int64      `json:"maximum_microcredits"`
-		PriceVersionID    *uuid.UUID `json:"price_version_id"`
-		LeaseSeconds      int        `json:"lease_seconds"`
-		OrganizationID    *uuid.UUID `json:"organization_id"`
-		MemberUserID      *uuid.UUID `json:"member_user_id"`
-		MembershipVersion int64      `json:"membership_version"`
+		UsageRequestID    uuid.UUID       `json:"usage_request_id"`
+		WalletID          uuid.UUID       `json:"wallet_id"`
+		Maximum           int64           `json:"maximum_microcredits"`
+		PriceVersionID    *uuid.UUID      `json:"price_version_id"`
+		LeaseSeconds      int             `json:"lease_seconds"`
+		OrganizationID    *uuid.UUID      `json:"organization_id"`
+		MemberUserID      *uuid.UUID      `json:"member_user_id"`
+		MembershipVersion int64           `json:"membership_version"`
+		ModelID           string          `json:"model_id"`
+		ProtocolCode      string          `json:"protocol_code"`
+		FormulaVersionID  uuid.UUID       `json:"formula_version_id"`
+		PricingSnapshot   json.RawMessage `json:"pricing_snapshot"`
+		RequestSnapshot   json.RawMessage `json:"request_snapshot"`
 	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || body.UsageRequestID == uuid.Nil || body.WalletID == uuid.Nil || body.Maximum <= 0 {
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.UsageRequestID == uuid.Nil || body.WalletID == uuid.Nil || body.Maximum < 0 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid credit reservation", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -457,6 +474,14 @@ func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 	}
 	var hold Hold
 	var err error
+	var pricing *HoldPricingContext
+	if strings.TrimSpace(body.ModelID) != "" || strings.TrimSpace(body.ProtocolCode) != "" || body.FormulaVersionID != uuid.Nil || len(body.PricingSnapshot) > 0 || len(body.RequestSnapshot) > 0 {
+		pricing = &HoldPricingContext{ModelID: strings.TrimSpace(body.ModelID), ProtocolCode: strings.TrimSpace(body.ProtocolCode), FormulaVersionID: body.FormulaVersionID, PricingSnapshot: body.PricingSnapshot, RequestSnapshot: body.RequestSnapshot}
+		if pricing.ModelID == "" || pricing.ProtocolCode == "" || pricing.FormulaVersionID == uuid.Nil || !json.Valid(pricing.PricingSnapshot) || !json.Valid(pricing.RequestSnapshot) {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "incomplete hold pricing context", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
 	if body.OrganizationID != nil || body.MemberUserID != nil {
 		repository, ok := s.repository.(interface {
 			ReserveMemberQuota(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, *uuid.UUID, time.Time) (Hold, error)
@@ -465,10 +490,55 @@ func (s *Service) reserve(w http.ResponseWriter, r *http.Request) {
 			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid member quota reservation", httpserver.RequestID(r.Context()))
 			return
 		}
-		hold, err = repository.ReserveMemberQuota(r.Context(), body.UsageRequestID, body.WalletID, *body.OrganizationID, *body.MemberUserID, body.MembershipVersion, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
+		if priced, supported := s.repository.(interface {
+			ReserveMemberQuotaPriced(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, int64, int64, *uuid.UUID, time.Time, *HoldPricingContext) (Hold, error)
+		}); supported && pricing != nil {
+			hold, err = priced.ReserveMemberQuotaPriced(r.Context(), body.UsageRequestID, body.WalletID, *body.OrganizationID, *body.MemberUserID, body.MembershipVersion, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second), pricing)
+		} else {
+			hold, err = repository.ReserveMemberQuota(r.Context(), body.UsageRequestID, body.WalletID, *body.OrganizationID, *body.MemberUserID, body.MembershipVersion, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
+		}
 	} else {
-		hold, err = s.repository.Reserve(r.Context(), body.UsageRequestID, body.WalletID, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
+		if priced, supported := s.repository.(interface {
+			ReservePriced(context.Context, uuid.UUID, uuid.UUID, int64, *uuid.UUID, time.Time, *HoldPricingContext) (Hold, error)
+		}); supported && pricing != nil {
+			hold, err = priced.ReservePriced(r.Context(), body.UsageRequestID, body.WalletID, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second), pricing)
+		} else {
+			hold, err = s.repository.Reserve(r.Context(), body.UsageRequestID, body.WalletID, body.Maximum, body.PriceVersionID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second))
+		}
 	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, hold)
+}
+
+func (s *Service) extendHold(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		UsageRequestID         uuid.UUID `json:"usage_request_id"`
+		HoldID                 uuid.UUID `json:"hold_id"`
+		LeaseSeconds           int       `json:"lease_seconds"`
+		AdditionalMicrocredits int64     `json:"additional_microcredits"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil || body.UsageRequestID == uuid.Nil || body.HoldID == uuid.Nil || body.AdditionalMicrocredits < 0 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid hold extension", httpserver.RequestID(r.Context()))
+		return
+	}
+	if body.LeaseSeconds == 0 {
+		body.LeaseSeconds = 900
+	}
+	if body.LeaseSeconds < 30 || body.LeaseSeconds > 1800 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "hold lease must be between 30 and 1800 seconds", httpserver.RequestID(r.Context()))
+		return
+	}
+	repository, ok := s.repository.(interface {
+		ExtendHold(context.Context, uuid.UUID, uuid.UUID, time.Time, int64) (Hold, error)
+	})
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "HOLD_EXTENSION_UNAVAILABLE", "hold extension is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	hold, err := repository.ExtendHold(r.Context(), body.UsageRequestID, body.HoldID, s.now().Add(time.Duration(body.LeaseSeconds)*time.Second), body.AdditionalMicrocredits)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -536,6 +606,16 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "INSUFFICIENT_COMPONENT_CAPACITY", "the selected entitlement component has insufficient allocatable capacity"
 	case errors.Is(err, ErrIdempotencyConflict):
 		status, code, message = http.StatusConflict, "IDEMPOTENCY_CONFLICT", "the idempotency key was used with a different request"
+	case errors.Is(err, ErrPriceMissing):
+		status, code, message = http.StatusUnprocessableEntity, "PRICE_MISSING", "an exact price or required unit configuration is missing"
+	case errors.Is(err, ErrPriceAmbiguous):
+		status, code, message = http.StatusConflict, "PRICE_AMBIGUOUS", "more than one price matches the request"
+	case errors.Is(err, ErrPriceUnavailable):
+		status, code, message = http.StatusServiceUnavailable, "PRICE_UNAVAILABLE", "pricing is explicitly unavailable for this model"
+	case errors.Is(err, ErrPriceWindowConflict):
+		status, code, message = http.StatusConflict, "PRICE_WINDOW_CONFLICT", "the price effective window overlaps a published version"
+	case errors.Is(err, ErrPriceETagConflict):
+		status, code, message = http.StatusPreconditionFailed, "PRICE_ETAG_CONFLICT", "the pricing space changed; reload it before retrying"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

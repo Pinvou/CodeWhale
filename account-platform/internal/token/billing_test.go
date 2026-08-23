@@ -15,14 +15,14 @@ func TestCostUsesIntegerCeilingAndCachedRate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cost != 7 {
-		t.Fatalf("Cost = %d, want 7", cost)
+	if cost != 8 {
+		t.Fatalf("Cost = %d, want 8", cost)
 	}
 }
 
 func TestCostRejectsInvalidUsage(t *testing.T) {
-	if _, err := Cost(PriceVersion{}, Usage{InputTokens: 1, CachedInputTokens: 2}); err == nil {
-		t.Fatal("cached tokens greater than input were accepted")
+	if _, err := Cost(PriceVersion{}, Usage{InputTokens: -1, CachedInputTokens: 2}); err == nil {
+		t.Fatal("negative exclusive input tokens were accepted")
 	}
 }
 

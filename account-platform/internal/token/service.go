@@ -122,6 +122,12 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 		admin.GET("/usage-requests", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequests))
 		admin.GET("/usage-requests/:usage_request_id", s.authorizer.Require("platform.usage.read"), httpserver.AdaptFunc(s.adminUsageRequest))
 		admin.POST("/usage-requests/:usage_request_id/retry-reconciliation", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("TOKEN_USAGE_RECONCILIATION_RETRY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryReconciliation))
+		admin.GET("/protocols", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminProtocols))
+		admin.POST("/protocols", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateProtocol))
+		admin.POST("/protocols/:protocol_definition_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_PROTOCOL_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishProtocol))
+		admin.POST("/protocols/:protocol_definition_id/formulas", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateFormula))
+		admin.POST("/formulas/:formula_version_id/publish", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("TOKEN_FORMULA_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishFormula))
+		admin.GET("/formulas/:formula_version_id/preview", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminPreviewFormula))
 	}
 	return router
 }

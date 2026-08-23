@@ -88,7 +88,7 @@ type Repository interface {
 }
 
 func (r *PostgresRepository) BeginUsage(ctx context.Context, request UsageRequest, snapshot map[string]any) (UsageRequest, bool, error) {
-	if request.ID == uuid.Nil || len(strings.TrimSpace(request.IdempotencyKey)) < 16 || request.UserID == uuid.Nil || request.SessionID == "" || request.TokenAccountID == uuid.Nil || request.CredentialID == uuid.Nil || request.WalletID == uuid.Nil || request.Model == "" || request.MaximumMicrocredits <= 0 {
+	if request.ID == uuid.Nil || len(strings.TrimSpace(request.IdempotencyKey)) < 16 || request.UserID == uuid.Nil || request.SessionID == "" || request.TokenAccountID == uuid.Nil || request.CredentialID == uuid.Nil || request.WalletID == uuid.Nil || request.Model == "" || request.MaximumMicrocredits < 0 {
 		return UsageRequest{}, false, ErrForbidden
 	}
 	encoded, err := json.Marshal(snapshot)
@@ -204,6 +204,20 @@ func (r *PostgresRepository) MarkReserved(ctx context.Context, usageID, holdID, 
 	}
 	if command.RowsAffected() == 0 {
 		return r.ensureUsageState(ctx, usageID, "RESERVED", "UPSTREAM_ACTIVE", "SETTLEMENT_PENDING", "COMMITTED")
+	}
+	return nil
+}
+
+func (r *PostgresRepository) IncreaseMaximum(ctx context.Context, usageID uuid.UUID, additional int64) error {
+	if usageID == uuid.Nil || additional <= 0 {
+		return ErrForbidden
+	}
+	command, err := r.pool.Exec(ctx, `UPDATE usage_requests SET maximum_microcredits=maximum_microcredits+$2,updated_at=$3 WHERE id=$1 AND status IN ('RESERVED','UPSTREAM_ACTIVE','SETTLEMENT_PENDING','REVIEW')`, usageID, additional, r.now())
+	if err != nil {
+		return err
+	}
+	if command.RowsAffected() != 1 {
+		return ErrForbidden
 	}
 	return nil
 }

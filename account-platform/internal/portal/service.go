@@ -555,6 +555,9 @@ func billingAdminPathAllowed(method, resource string) bool {
 	if (resource == "/admin/v1/pricing-versions" || resource == "/admin/v1/reconciliation-runs" || resource == "/admin/v1/adjustments") && method == http.MethodPost {
 		return true
 	}
+	if (resource == "/admin/v1/pricing" || resource == "/admin/v1/metering-units") && method == http.MethodGet || (resource == "/admin/v1/pricing/drafts" || resource == "/admin/v1/metering-units") && method == http.MethodPost {
+		return true
+	}
 	if strings.Contains(resource, "..") {
 		return false
 	}
@@ -566,6 +569,10 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	switch parts[2] {
+	case "pricing":
+		return (parts[4] == "publish" || parts[4] == "transition") && method == http.MethodPost || parts[4] == "draft" && method == http.MethodPut || parts[4] == "preview" && method == http.MethodGet
+	case "metering-units":
+		return parts[4] == "deactivate" && method == http.MethodPost
 	case "wallets":
 		return method == http.MethodGet && parts[4] == "ledger"
 	case "payment-orders":
@@ -588,6 +595,9 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if strings.Contains(resource, "..") {
 		return false
 	}
+	if resource == "/admin/v1/protocols" {
+		return method == http.MethodGet || method == http.MethodPost
+	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
 	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" {
 		return false
@@ -598,6 +608,12 @@ func tokenAdminPathAllowed(method, resource string) bool {
 	if parts[2] == "usage-requests" {
 		return (len(parts) == 4 && method == http.MethodGet) ||
 			(len(parts) == 5 && parts[4] == "retry-reconciliation" && method == http.MethodPost)
+	}
+	if parts[2] == "protocols" {
+		return len(parts) == 5 && ((parts[4] == "publish" || parts[4] == "formulas") && method == http.MethodPost)
+	}
+	if parts[2] == "formulas" {
+		return len(parts) == 5 && (parts[4] == "publish" && method == http.MethodPost || parts[4] == "preview" && method == http.MethodGet)
 	}
 	if parts[2] != "token-accounts" {
 		return false

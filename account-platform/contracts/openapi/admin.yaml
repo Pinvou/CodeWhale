@@ -488,6 +488,102 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/metering-units:
+    get:
+      operationId: listAdminMeteringUnitVersions
+      summary: List immutable versioned metering unit definitions
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminMeteringUnitVersion
+      summary: Create a new metering unit version
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/MeteringUnitCreate" } } }
+      responses:
+        "201": { description: Metering unit version created }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/metering-units/{unit_definition_id}/deactivate:
+    post:
+      operationId: deactivateAdminMeteringUnitVersion
+      summary: Deactivate a metering unit version without deleting or changing its facts
+      parameters: [{ name: unit_definition_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Metering unit deactivated }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing:
+    get:
+      operationId: listAdminManagedPrices
+      summary: List price drafts and published lifecycle versions with derived status
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/drafts:
+    post:
+      operationId: createAdminPriceDraft
+      summary: Create an ETag-protected global or model price draft
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PriceDraft" } } }
+      responses:
+        "201": { description: Price draft created }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/{price_version_id}/draft:
+    put:
+      operationId: updateAdminPriceDraft
+      summary: Replace mutable draft facts before publication
+      parameters: [{ name: price_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PriceDraft" } } }
+      responses:
+        "200": { description: Price draft updated }
+        "403": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/{price_version_id}/preview:
+    get:
+      operationId: previewAdminPrice
+      summary: Resolve all inherited units and preview the exact immutable price snapshot
+      parameters: [{ name: price_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Resolved price preview }
+        "403": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/{price_version_id}/publish:
+    post:
+      operationId: publishAdminPrice
+      summary: Idempotently publish a non-overlapping price version with compare-and-swap
+      parameters:
+        - { name: price_version_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [expected_etag], properties: { expected_etag: { type: integer, format: int64, minimum: 1 } } } } }
+      responses:
+        "200": { description: Price published }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/pricing/{price_version_id}/transition:
+    post:
+      operationId: transitionAdminPriceLifecycle
+      summary: Cancel a future price or end an active price with continuation, global fallback, or explicit block
+      parameters:
+        - { name: price_version_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PriceTransition" } } }
+      responses:
+        "200": { description: Price lifecycle transitioned }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders:
     get:
       operationId: listAdminPaymentOrders
@@ -748,6 +844,62 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Overview" }
         "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/protocols:
+    get:
+      operationId: listAdminProtocolsAndFormulas
+      summary: List versioned protocol definitions and safe formula versions
+      responses:
+        "200": { description: Protocol and formula versions }
+        "403": { $ref: "#/components/responses/Error" }
+    post:
+      operationId: createAdminProtocolDraft
+      summary: Create a new protocol definition draft version
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ProtocolDraft" } } }
+      responses:
+        "201": { description: Protocol draft created }
+        "403": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/protocols/{protocol_definition_id}/publish:
+    post:
+      operationId: publishAdminProtocol
+      summary: Publish an immutable protocol definition version
+      parameters: [{ name: protocol_definition_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Protocol version published }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/protocols/{protocol_definition_id}/formulas:
+    post:
+      operationId: createAdminFormulaDraft
+      summary: Create a safe parameter-map formula draft bound to exact unit versions
+      parameters: [{ name: protocol_definition_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/FormulaDraft" } } }
+      responses:
+        "201": { description: Formula draft created }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/formulas/{formula_version_id}/publish:
+    post:
+      operationId: publishAdminFormula
+      summary: Publish an immutable formula and synchronize its snapshot to Billing
+      parameters: [{ name: formula_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Formula published and synchronized }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /token/admin/v1/formulas/{formula_version_id}/preview:
+    get:
+      operationId: previewAdminFormula
+      summary: Validate and preview deterministic zero-default evaluation without executing arbitrary code
+      parameters: [{ name: formula_version_id, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses:
+        "200": { description: Safe formula preview }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
   /account/admin/v1/approval-policies:
@@ -1279,6 +1431,64 @@ components:
         input_per_million: { type: integer, format: int64, minimum: 0 }
         output_per_million: { type: integer, format: int64, minimum: 0 }
         cached_input_per_million: { type: integer, format: int64, minimum: 0 }
+    MeteringUnitCreate:
+      type: object
+      additionalProperties: false
+      required: [unit_code, minimum_precision, price_denominator, rounding_rule]
+      properties:
+        unit_code: { type: string, minLength: 1, maxLength: 80 }
+        minimum_precision: { type: integer, format: int64, minimum: 1 }
+        price_denominator: { type: integer, format: int64, minimum: 1 }
+        rounding_rule: { type: string, enum: [CEILING, FLOOR, HALF_UP] }
+    PriceUnitConfiguration:
+      type: object
+      additionalProperties: false
+      required: [unit_definition_id, config_type]
+      properties:
+        unit_definition_id: { type: string, format: uuid }
+        config_type: { type: string, enum: [FIXED_PRICE, INHERIT_GLOBAL] }
+        fixed_price_per_denominator: { type: [integer, "null"], format: int64, minimum: 0 }
+    PriceDraft:
+      type: object
+      additionalProperties: false
+      required: [scope_type, protocol_code, formula_version_id, credit_unit, effective_from, expected_etag, units]
+      properties:
+        scope_type: { type: string, enum: [GLOBAL, MODEL] }
+        scope_id: { type: [string, "null"], maxLength: 160 }
+        protocol_code: { type: string, minLength: 1 }
+        formula_version_id: { type: string, format: uuid }
+        credit_unit: { type: string, const: MICROCREDIT }
+        effective_from: { type: string, format: date-time, description: Asia/Shanghai full-day boundary }
+        effective_to: { type: [string, "null"], format: date-time, description: Exclusive Asia/Shanghai full-day boundary }
+        expected_etag: { type: integer, format: int64, minimum: 1 }
+        units: { type: array, minItems: 1, items: { $ref: "#/components/schemas/PriceUnitConfiguration" } }
+    PriceTransition:
+      type: object
+      additionalProperties: false
+      required: [action, reason]
+      properties:
+        action: { type: string, enum: [CANCEL, END] }
+        mode: { type: string, enum: [FALLBACK_GLOBAL, BLOCK, CONTINUATION] }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+        replacement_price_version_id: { type: [string, "null"], format: uuid }
+    ProtocolDraft:
+      type: object
+      additionalProperties: false
+      required: [protocol_code, request_schema]
+      properties:
+        protocol_code: { type: string, minLength: 1, maxLength: 80 }
+        request_schema: { type: object, additionalProperties: true }
+    FormulaDraft:
+      type: object
+      additionalProperties: false
+      required: [required_unit_versions, expression]
+      properties:
+        required_unit_versions:
+          type: object
+          additionalProperties: { type: string, format: uuid }
+        expression:
+          type: object
+          additionalProperties: { type: string, enum: [estimated_input_tokens, cached_input_tokens, max_output_tokens, image_count, request_count, document_count] }
     RefundCreate:
       type: object
       additionalProperties: false

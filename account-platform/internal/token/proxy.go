@@ -92,11 +92,13 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if maximumOutput == 0 {
 		maximumOutput = request.MaxTokens
 	}
-	if maximumOutput == 0 {
-		maximumOutput = s.defaultMaxOutputTokens
-	}
-	if maximumOutput < 1 || maximumOutput > s.maximumOutputTokens {
+	if maximumOutput < 0 || maximumOutput > s.maximumOutputTokens {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "maximum output tokens are outside the allowed range", httpserver.RequestID(r.Context()))
+		return
+	}
+	maximumUsage, err := EstimateChatUsage(body, maximumOutput)
+	if err != nil || maximumUsage.InputTokens > s.maximumInputTokens {
+		api.WriteError(w, http.StatusUnprocessableEntity, "METERING_LIMIT_EXCEEDED", "the request cannot be measured within the configured model limits", httpserver.RequestID(r.Context()))
 		return
 	}
 	candidates, err := s.repository.ListCandidates(r.Context(), request.Model)
@@ -137,8 +139,12 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusServiceUnavailable, "PRICING_UNAVAILABLE", "the model price is unavailable", httpserver.RequestID(r.Context()))
 		return
 	}
-	maximumCost, err := Cost(price, MaximumUsage(s.maximumInputTokens, maximumOutput))
-	if err != nil || maximumCost <= 0 {
+	if err := ValidatePriceFormula(price); err != nil {
+		api.WriteError(w, http.StatusUnprocessableEntity, "FORMULA_INVALID", "the published metering formula is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	maximumCost, err := Cost(price, maximumUsage)
+	if err != nil {
 		api.WriteError(w, http.StatusUnprocessableEntity, "PRICE_INVALID", "the model request cannot be priced", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -150,7 +156,10 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	usageID := uuid.Must(uuid.NewV7())
 	digest := sha256.Sum256(body)
 	usageRequest := UsageRequest{ID: usageID, IdempotencyKey: idempotencyKey, UserID: resolved.UserID, SessionID: resolved.SessionID, OrganizationID: resolved.OrganizationID, TokenAccountID: route.TokenAccountID, CredentialID: route.CredentialID, WalletID: route.WalletID, Model: request.Model, MaximumMicrocredits: maximumCost}
-	usageRequest, created, err := s.repository.BeginUsage(r.Context(), usageRequest, map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model": request.Model, "stream": request.Stream, "maximum_output_tokens": maximumOutput})
+	pricingSnapshot, _ := json.Marshal(price)
+	requestSnapshot := map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model": request.Model, "protocol_code": "CHAT", "stream": request.Stream, "estimated_input_tokens": maximumUsage.InputTokens, "maximum_output_tokens": maximumOutput, "estimator": map[string]any{"code": "UTF8_BYTES_DIV4_CEIL", "version": 1}, "context_type": resolved.ContextType, "organization_id": resolved.OrganizationID, "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "membership_version": resolved.MembershipVersion, "wallet_id": route.WalletID, "token_account_id": route.TokenAccountID, "credential_id": route.CredentialID, "formula_version_id": price.FormulaVersionID, "price_version_id": price.ID, "pricing_snapshot": json.RawMessage(pricingSnapshot)}
+	requestSnapshotJSON, _ := json.Marshal(requestSnapshot)
+	usageRequest, created, err := s.repository.BeginUsage(r.Context(), usageRequest, requestSnapshot)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -160,15 +169,24 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var hold BillingHold
+	pricingContext := HoldPricingContext{ModelID: request.Model, ProtocolCode: "CHAT", FormulaVersionID: price.FormulaVersionID, PricingSnapshot: pricingSnapshot, RequestSnapshot: requestSnapshotJSON}
 	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
 		organizationBilling, supported := s.billing.(OrganizationBillingClient)
 		if !supported {
 			s.writeError(w, r, ErrForbidden)
 			return
 		}
-		hold, err = organizationBilling.ReserveMemberQuota(r.Context(), usageRequest.ID, route.WalletID, *resolved.OrganizationID, resolved.UserID, resolved.MembershipVersion, maximumCost, price.ID)
+		if snapshotBilling, supported := s.billing.(SnapshotOrganizationBillingClient); supported {
+			hold, err = snapshotBilling.ReserveMemberQuotaPriced(r.Context(), usageRequest.ID, route.WalletID, *resolved.OrganizationID, resolved.UserID, resolved.MembershipVersion, maximumCost, price.ID, pricingContext)
+		} else {
+			hold, err = organizationBilling.ReserveMemberQuota(r.Context(), usageRequest.ID, route.WalletID, *resolved.OrganizationID, resolved.UserID, resolved.MembershipVersion, maximumCost, price.ID)
+		}
 	} else {
-		hold, err = s.billing.Reserve(r.Context(), usageRequest.ID, route.WalletID, maximumCost, price.ID)
+		if snapshotBilling, supported := s.billing.(SnapshotBillingClient); supported {
+			hold, err = snapshotBilling.ReservePriced(r.Context(), usageRequest.ID, route.WalletID, maximumCost, price.ID, pricingContext)
+		} else {
+			hold, err = s.billing.Reserve(r.Context(), usageRequest.ID, route.WalletID, maximumCost, price.ID)
+		}
 	}
 	if err != nil {
 		_ = s.repository.MarkReleased(r.Context(), usageRequest.ID, "reserve_failed")
@@ -200,8 +218,18 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	response, err := s.upstream.Do(r.Context(), credential.BaseURL, secret, body, usageRequest.ID)
+	upstreamContext, cancelUpstream := context.WithCancel(r.Context())
+	defer cancelUpstream()
+	renewalFailed := s.renewHold(upstreamContext, cancelUpstream, usageRequest.ID, hold.ID)
+	response, err := s.upstream.Do(upstreamContext, credential.BaseURL, secret, body, usageRequest.ID)
 	if err != nil {
+		select {
+		case <-renewalFailed:
+			_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "hold_renewal_failed", map[string]any{"upstream_cancelled": true})
+			api.WriteError(w, http.StatusServiceUnavailable, "HOLD_RENEWAL_FAILED", "the usage authorization could not be renewed", httpserver.RequestID(r.Context()))
+			return
+		default:
+		}
 		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "upstream_transport_unknown", map[string]any{"error_class": "transport"})
 		api.WriteError(w, http.StatusBadGateway, "UPSTREAM_RESULT_UNKNOWN", "the upstream result is unknown and will be reconciled", httpserver.RequestID(r.Context()))
 		return
@@ -216,9 +244,9 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	copySafeHeaders(w.Header(), response.Header)
-	w.WriteHeader(response.StatusCode)
 	if request.Stream || strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
-		s.proxyStream(w, r, usageRequest.ID, hold.ID, price, response.Body)
+		w.WriteHeader(response.StatusCode)
+		s.proxyStream(w, r, usageRequest.ID, hold.ID, price, response.Body, renewalFailed, maximumCost, maximumUsage.OutputTokens)
 		return
 	}
 	payload, readErr := io.ReadAll(io.LimitReader(response.Body, 32<<20))
@@ -227,13 +255,22 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(payload)
 		return
 	}
-	_, _ = w.Write(payload)
 	usage, found := parseUsageJSON(payload)
 	if !found {
+		w.WriteHeader(response.StatusCode)
+		_, _ = w.Write(payload)
 		_ = s.repository.MarkReview(context.WithoutCancel(r.Context()), usageRequest.ID, "usage_missing", map[string]any{"response_received": true})
 		return
 	}
-	s.settle(context.WithoutCancel(r.Context()), usageRequest.ID, hold.ID, price, usage)
+	background := context.WithoutCancel(r.Context())
+	maximumCost, ok = s.authorizeAdditional(background, usageRequest.ID, hold.ID, price, usage, maximumCost)
+	if !ok {
+		api.WriteError(w, http.StatusServiceUnavailable, "ADDITIONAL_PREAUTHORIZATION_FAILED", "the final response could not be authorized", httpserver.RequestID(r.Context()))
+		return
+	}
+	w.WriteHeader(response.StatusCode)
+	_, _ = w.Write(payload)
+	s.settle(background, usageRequest.ID, hold.ID, price, usage, maximumCost)
 }
 
 func requestIdempotencyKey(provided string, resolved AuthorizationContext, body []byte) string {
@@ -263,14 +300,50 @@ func (s *Service) handleUpstreamFailure(w http.ResponseWriter, r *http.Request, 
 	_, _ = w.Write(payload)
 }
 
-func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader) {
+func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, holdID uuid.UUID, price PriceVersion, body io.Reader, renewalFailed <-chan struct{}, authorizedValues ...int64) {
 	flusher, _ := w.(http.Flusher)
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 64*1024), 2<<20)
 	var usage Usage
 	usageFound := false
+	authorizedMaximum, authorizedOutputTokens := int64(0), int64(0)
+	if len(authorizedValues) > 0 {
+		authorizedMaximum = authorizedValues[0]
+	}
+	if len(authorizedValues) > 1 {
+		authorizedOutputTokens = authorizedValues[1]
+	}
+	outputAuthorization, _ := Cost(price, Usage{OutputTokens: authorizedOutputTokens})
+	var streamedBytes int64
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		streamedBytes += int64(len(line))
+		estimatedOutputTokens := streamedBytes / 4
+		if streamedBytes%4 != 0 {
+			estimatedOutputTokens++
+		}
+		if estimatedOutputTokens > authorizedOutputTokens {
+			required, _ := Cost(price, Usage{OutputTokens: estimatedOutputTokens})
+			if required > outputAuthorization {
+				additional := required - outputAuthorization
+				client, ok := s.billing.(SnapshotBillingClient)
+				background := context.WithoutCancel(r.Context())
+				if !ok || client.Extend(background, usageID, holdID, additional) != nil {
+					_ = s.repository.MarkReview(background, usageID, "additional_preauthorization_failed", map[string]any{"stream_stopped": true, "additional_microcredits": additional})
+					return
+				}
+				if repository, ok := s.repository.(interface {
+					IncreaseMaximum(context.Context, uuid.UUID, int64) error
+				}); ok {
+					if repository.IncreaseMaximum(background, usageID, additional) != nil {
+						_ = s.repository.MarkReview(background, usageID, "local_preauthorization_record_pending", map[string]any{"additional_microcredits": additional})
+						return
+					}
+				}
+				authorizedMaximum += additional
+				outputAuthorization = required
+			}
+		}
 		_, _ = w.Write(line)
 		_, _ = w.Write([]byte("\n"))
 		if flusher != nil {
@@ -286,17 +359,58 @@ func (s *Service) proxyStream(w http.ResponseWriter, r *http.Request, usageID, h
 		}
 	}
 	background := context.WithoutCancel(r.Context())
+	select {
+	case <-renewalFailed:
+		_ = s.repository.MarkReview(background, usageID, "hold_renewal_failed", map[string]any{"stream_stopped": true})
+		return
+	default:
+	}
 	if scanner.Err() != nil || !usageFound {
 		_ = s.repository.MarkReview(background, usageID, "stream_usage_missing", map[string]any{"stream_error": scanner.Err() != nil})
 		return
 	}
-	s.settle(background, usageID, holdID, price, usage)
+	s.settle(background, usageID, holdID, price, usage, authorizedMaximum)
 }
 
-func (s *Service) settle(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage) {
+func (s *Service) renewHold(ctx context.Context, cancel context.CancelFunc, usageID, holdID uuid.UUID) <-chan struct{} {
+	failed := make(chan struct{})
+	client, supported := s.billing.(SnapshotBillingClient)
+	if !supported {
+		return failed
+	}
+	go func() {
+		ticker := time.NewTicker(4 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				renewalContext, stop := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				err := client.Extend(renewalContext, usageID, holdID, 0)
+				stop()
+				if err != nil {
+					close(failed)
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return failed
+}
+
+func (s *Service) settle(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, authorizedMaximum ...int64) {
 	actual, err := Cost(price, usage)
 	if err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})
+		return
+	}
+	maximum := int64(0)
+	if len(authorizedMaximum) > 0 {
+		maximum = authorizedMaximum[0]
+	}
+	if _, ok := s.authorizeAdditional(ctx, usageID, holdID, price, usage, maximum); !ok {
 		return
 	}
 	if err := s.billing.Commit(ctx, usageID, holdID, actual, usage); err != nil {
@@ -306,6 +420,32 @@ func (s *Service) settle(ctx context.Context, usageID, holdID uuid.UUID, price P
 	if err := s.repository.MarkCommitted(ctx, usageID, actual, map[string]any{"usage": usage}); err != nil {
 		_ = s.repository.MarkReview(ctx, usageID, "local_commit_record_pending", map[string]any{"usage": usage, "actual_microcredits": actual})
 	}
+}
+
+func (s *Service) authorizeAdditional(ctx context.Context, usageID, holdID uuid.UUID, price PriceVersion, usage Usage, maximum int64) (int64, bool) {
+	actual, err := Cost(price, usage)
+	if err != nil {
+		_ = s.repository.MarkReview(ctx, usageID, "usage_invalid", map[string]any{"usage": usage})
+		return maximum, false
+	}
+	if actual <= maximum {
+		return maximum, true
+	}
+	additional := actual - maximum
+	client, ok := s.billing.(SnapshotBillingClient)
+	if !ok || client.Extend(ctx, usageID, holdID, additional) != nil {
+		_ = s.repository.MarkReview(ctx, usageID, "additional_preauthorization_failed", map[string]any{"usage": usage, "required_microcredits": additional})
+		return maximum, false
+	}
+	if repository, ok := s.repository.(interface {
+		IncreaseMaximum(context.Context, uuid.UUID, int64) error
+	}); ok {
+		if err := repository.IncreaseMaximum(ctx, usageID, additional); err != nil {
+			_ = s.repository.MarkReview(ctx, usageID, "local_preauthorization_record_pending", map[string]any{"additional_microcredits": additional})
+			return maximum, false
+		}
+	}
+	return actual, true
 }
 
 func parseUsageJSON(payload []byte) (Usage, bool) {
@@ -328,6 +468,7 @@ func parseUsageJSON(payload []byte) (Usage, bool) {
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CachedInputTokens < 0 || usage.CachedInputTokens > usage.InputTokens {
 		return Usage{}, false
 	}
+	usage.InputTokens -= usage.CachedInputTokens
 	return usage, true
 }
 

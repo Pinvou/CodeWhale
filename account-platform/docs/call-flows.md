@@ -6,7 +6,7 @@
 >
 > 说明：本文描述业务调用顺序和失败收敛方式；具体字段以 `contracts/openapi/` 和事件 Schema 为准。
 >
-> 目标变更提示：本文已按用户级全局上下文和异步钱包 bootstrap 更新，仍保留当前固定 Token 预占和新华三轮询流程。注册在 Identity 与 Account 成功后持久进入 `PROVISIONING`，钱包通过 Outbox 异步初始化；钱包完成前可登录和管理资料但不能调用平台模型或充值，超过 SLA 才进入 `REPAIR_REQUIRED`，Billing 短暂不可用不得删除已验证身份。其他尚未实现的版本化计量单位、每协议预占公式、公式缺省参数为 0、Hold 续租/追加、支付回调主收敛、完整退款/四方对账及组织在线购买权益以 `requirements.md` 和 `role-system-design.md` 为准。
+> 目标变更提示：本文已按用户级全局上下文、异步钱包 bootstrap 和版本化计量/定价链路更新。注册在 Identity 与 Account 成功后持久进入 `PROVISIONING`，钱包通过 Outbox 异步初始化；钱包完成前可登录和管理资料但不能调用平台模型或充值，超过 SLA 才进入 `REPAIR_REQUIRED`，Billing 短暂不可用不得删除已验证身份。尚未实现的支付回调主收敛、完整退款/四方对账等能力以 `requirements.md` 和 `role-system-design.md` 为准。
 
 ## 1. 入口与凭据
 
@@ -208,16 +208,20 @@ sequenceDiagram
     opt 首次调用无默认路由
         G->>G: 幂等创建平台托管账号、加密凭据和路由
     end
-    G->>B: 获取 payer 钱包和当前定价
-    B-->>G: 可用积分、定价版本
-    G->>G: 计算最大可能费用
-    G->>B: Reserve Hold（默认租期 900 秒）
+    G->>G: CHAT v1 UTF-8 字节估算器<br/>缺省可选数值参数按 0
+    G->>B: 按模型、协议/公式和请求时间解析价格
+    B-->>G: 唯一作用域 + 逐单位最终价格/来源
+    G->>G: 安全公式计算本次最大费用
+    G->>B: 原子 Reserve Hold（默认租期 900 秒）<br/>冻结上下文、授权、路由、公式和价格快照
     B-->>G: hold_id / 余额不足
     G->>G: 仅在内存解密 Provider 凭据
     G->>N: 单次转发模型请求
     N->>P: 调用真实模型
     P-->>N: 响应和用量
     N-->>G: JSON/SSE + usage + request id
+    loop 长调用到期前
+        G->>B: 续租；必要时沿原快照追加预占
+    end
     alt 成功且用量完整
         G->>B: Commit 实际费用并释放差额
         G-->>D: 完整响应
@@ -233,9 +237,11 @@ sequenceDiagram
 ### 8.1 请求约束
 
 - 模型字段必填；普通请求体上限 4 MiB。
-- 最大输出优先读取 `max_completion_tokens`，其次 `max_tokens`，缺省 4,096，上限 128,000。
+- 最大输出优先读取 `max_completion_tokens`，其次 `max_tokens`；未提供时公式参数为 `0`，显式值上限 128,000。
 - 流式请求强制要求最终 usage；桌面端用原生流式运行时，不通过普通业务 JSON 代理。
-- 最大预占使用配置的最大输入 Token，当前默认 128,000，再加本次最大输出成本。
+- CHAT v1 使用版本化 `UTF8_BYTES_DIV4_CEIL` 估算器测量本次请求内容，不再按全局 128,000 输入上限统一预占；超过当前模型/协议上限时在 Hold 前拒绝。
+- Billing 先唯一选择模型覆盖或全局版本，再逐单位解析 `FIXED_PRICE`/`INHERIT_GLOBAL`；固定零价不回退，缺价、歧义和阻断分别稳定失败。
+- 长调用每四分钟续租九分钟租约；流式输出按已传输证据保守追加预占，追加失败停止仍可控制的输出并进入复核。非流式最终响应在交付前完成必要追加。
 - 未提供 `Idempotency-Key` 时，Gateway 使用用户、OIDC Session 和请求体派生稳定键；相同请求的网络重试不再次调用 New API。
 
 ### 8.2 路由顺序
@@ -250,7 +256,7 @@ sequenceDiagram
 
 | 上游结果 | Gateway 状态 | Billing 动作 |
 |---|---|---|
-| 2xx 且 usage 完整 | `SETTLED` | 按实际 Token 和价格版本提交，释放差额 |
+| 2xx 且 usage 完整 | `SETTLED` | 按 Hold 内逐单位价格快照和规范化用量提交，释放差额 |
 | 400/401/403/404/422/429 等确定性拒绝 | `RELEASED`/失败 | 释放全部 Hold |
 | 传输超时、连接断开、5xx | `REVIEW` | 暂保留 Hold，等待核对 |
 | SSE 中途断开或没有最终 usage | `SETTLEMENT_PENDING` | 暂保留 Hold，等待核对 |
@@ -263,7 +269,7 @@ sequenceDiagram
 1. Gateway 保存 New API 返回的请求 ID、Token Account、模型、定价版本、Hold 和尝试结果。
 2. 后台 Usage Reconciler 周期扫描 `REVIEW`/`SETTLEMENT_PENDING`。
 3. Reconciler 通过 New API 管理日志按请求 ID 查询实际用量。
-4. 查到明确用量：使用请求时对应的历史价格结算 Hold。
+4. 查到明确用量：使用请求/Hold 内冻结的逐单位价格与来源快照结算，不查询当前价格重算。
 5. 查到明确未执行/拒绝：释放 Hold。
 6. 仍不确定：按退避策略重试；自动窗口最长 24 小时。
 7. 超出窗口后保留人工复核状态和完整证据，不自动猜测。

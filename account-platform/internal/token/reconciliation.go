@@ -20,6 +20,7 @@ import (
 type ReconciliationItem struct {
 	UsageRequest
 	UsageSnapshot   []byte
+	RequestSnapshot []byte
 	NewAPIRequestID *string
 	Attempts        int
 }
@@ -60,7 +61,7 @@ WHERE request.id = candidates.id
 RETURNING request.id,request.idempotency_key,request.user_id,request.session_id,request.organization_id,
           request.token_account_id,request.credential_id,request.wallet_id,request.price_version_id,request.hold_id,
           request.model,request.status,request.maximum_microcredits,request.actual_microcredits,request.error_class,
-          request.started_at,request.updated_at,request.usage_snapshot,candidates.newapi_request_id,request.reconciliation_attempts`, now, limit, now.Add(lease))
+		  request.started_at,request.updated_at,request.usage_snapshot,request.request_snapshot,candidates.newapi_request_id,request.reconciliation_attempts`, now, limit, now.Add(lease))
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +72,7 @@ RETURNING request.id,request.idempotency_key,request.user_id,request.session_id,
 		if err := rows.Scan(&item.ID, &item.IdempotencyKey, &item.UserID, &item.SessionID, &item.OrganizationID,
 			&item.TokenAccountID, &item.CredentialID, &item.WalletID, &item.PriceVersionID, &item.HoldID,
 			&item.Model, &item.Status, &item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass,
-			&item.StartedAt, &item.UpdatedAt, &item.UsageSnapshot, &item.NewAPIRequestID, &item.Attempts); err != nil {
+			&item.StartedAt, &item.UpdatedAt, &item.UsageSnapshot, &item.RequestSnapshot, &item.NewAPIRequestID, &item.Attempts); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -253,10 +254,10 @@ func (item newAPILog) usage() (Usage, error) {
 		}
 		cached = max(other.CacheTokens, other.CachedTokens)
 	}
-	usage := Usage{InputTokens: item.PromptTokens, OutputTokens: item.CompletionTokens, CachedInputTokens: cached}
-	if _, err := Cost(PriceVersion{}, usage); err != nil {
+	if item.PromptTokens < 0 || item.CompletionTokens < 0 || cached < 0 || cached > item.PromptTokens {
 		return Usage{}, errors.New("New API returned invalid token usage")
 	}
+	usage := Usage{InputTokens: item.PromptTokens - cached, OutputTokens: item.CompletionTokens, CachedInputTokens: cached}
 	return usage, nil
 }
 
@@ -350,9 +351,19 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 }
 
 func (r *UsageReconciler) commit(ctx context.Context, item ReconciliationItem, usage Usage, expectedActual *int64) error {
-	price, err := r.billing.PriceByID(ctx, *item.PriceVersionID)
-	if err != nil {
-		return err
+	var snapshot struct {
+		PricingSnapshot *PriceVersion `json:"pricing_snapshot"`
+	}
+	_ = json.Unmarshal(item.RequestSnapshot, &snapshot)
+	var price PriceVersion
+	var err error
+	if snapshot.PricingSnapshot != nil {
+		price = *snapshot.PricingSnapshot
+	} else {
+		price, err = r.billing.PriceByID(ctx, *item.PriceVersionID)
+		if err != nil {
+			return err
+		}
 	}
 	if price.ID != *item.PriceVersionID || price.Model != item.Model {
 		return fmt.Errorf("%w: historical price does not match usage request", errManualReconciliationRequired)

@@ -2,6 +2,7 @@ package billing
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -18,6 +19,11 @@ var (
 	ErrCommerceCustomerNotReady      = errors.New("commerce customer mapping is not ready")
 	ErrInsufficientComponentCapacity = errors.New("entitlement component has insufficient allocatable capacity")
 	ErrIdempotencyConflict           = errors.New("idempotency key was used with a different request")
+	ErrPriceMissing                  = errors.New("price is missing")
+	ErrPriceAmbiguous                = errors.New("price is ambiguous")
+	ErrPriceUnavailable              = errors.New("price is unavailable")
+	ErrPriceWindowConflict           = errors.New("price window conflicts with a published version")
+	ErrPriceETagConflict             = errors.New("price space etag conflict")
 )
 
 type Wallet struct {
@@ -57,6 +63,14 @@ type Hold struct {
 	MaxMicrocredits    int64      `json:"max_microcredits"`
 	ActualMicrocredits *int64     `json:"actual_microcredits,omitempty"`
 	ExpiresAt          time.Time  `json:"expires_at"`
+}
+
+type HoldPricingContext struct {
+	ModelID          string          `json:"model_id"`
+	ProtocolCode     string          `json:"protocol_code"`
+	FormulaVersionID uuid.UUID       `json:"formula_version_id"`
+	PricingSnapshot  json.RawMessage `json:"pricing_snapshot"`
+	RequestSnapshot  json.RawMessage `json:"request_snapshot"`
 }
 
 type EntitlementPackage struct {
@@ -136,12 +150,33 @@ type MemberQuotaAllocation struct {
 }
 
 type PriceVersion struct {
-	ID                    uuid.UUID `json:"price_version_id"`
-	Model                 string    `json:"model"`
-	InputPerMillion       int64     `json:"input_per_million"`
-	OutputPerMillion      int64     `json:"output_per_million"`
-	CachedInputPerMillion int64     `json:"cached_input_per_million"`
-	EffectiveFrom         time.Time `json:"effective_from"`
+	ID                    uuid.UUID           `json:"price_version_id"`
+	Model                 string              `json:"model"`
+	InputPerMillion       int64               `json:"input_per_million"`
+	OutputPerMillion      int64               `json:"output_per_million"`
+	CachedInputPerMillion int64               `json:"cached_input_per_million"`
+	ScopeType             string              `json:"scope_type"`
+	ProtocolCode          string              `json:"protocol_code"`
+	FormulaVersionID      uuid.UUID           `json:"formula_version_id"`
+	FormulaSnapshot       json.RawMessage     `json:"formula_snapshot"`
+	CreditUnit            string              `json:"credit_unit"`
+	EffectiveFrom         time.Time           `json:"effective_from"`
+	EffectiveTo           *time.Time          `json:"effective_to,omitempty"`
+	ResolvedAt            time.Time           `json:"resolved_at"`
+	Units                 []ResolvedUnitPrice `json:"units"`
+}
+
+type ResolvedUnitPrice struct {
+	UnitCode             string    `json:"unit_code"`
+	UnitDefinitionID     uuid.UUID `json:"unit_definition_id"`
+	UnitVersion          int64     `json:"unit_version"`
+	MinimumPrecision     int64     `json:"minimum_precision"`
+	PriceDenominator     int64     `json:"price_denominator"`
+	RoundingRule         string    `json:"rounding_rule"`
+	ResolvedPrice        int64     `json:"resolved_price"`
+	ConfigurationType    string    `json:"configuration_type"`
+	PriceSourceScope     string    `json:"price_source_scope"`
+	SourcePriceVersionID uuid.UUID `json:"source_price_version_id"`
 }
 
 type ManualAdjustment struct {

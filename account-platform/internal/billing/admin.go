@@ -598,7 +598,19 @@ func (r *PostgresRepository) AdminCreatePriceVersion(ctx context.Context, model 
 		return AdminPriceVersion{}, err
 	}
 	item := AdminPriceVersion{ID: uuid.Must(uuid.NewV7()), Model: model, InputPerMillion: input, OutputPerMillion: output, CachedInputPerMillion: cached, EffectiveFrom: now, CreatedAt: now}
-	if _, err := tx.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at) VALUES($1,$2,$3,$4,$5,$6,$6)`, item.ID, model, input, output, cached, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO pricing_versions(id,model,input_per_million,output_per_million,cached_input_per_million,effective_from,created_at,scope_type,scope_id,protocol_code,formula_version_id,credit_unit,lifecycle_status) VALUES($1,$2,$3,$4,$5,$6,$6,'MODEL',$2,'CHAT',$7,'MICROCREDIT','DRAFT')`, item.ID, model, input, output, cached, now, chatFormulaVersionID); err != nil {
+		return AdminPriceVersion{}, err
+	}
+	for unitID, rate := range map[uuid.UUID]int64{
+		uuid.MustParse("00000000-0000-7000-8100-000000000001"): input,
+		uuid.MustParse("00000000-0000-7000-8100-000000000002"): cached,
+		uuid.MustParse("00000000-0000-7000-8100-000000000003"): output,
+	} {
+		if _, err := tx.Exec(ctx, `INSERT INTO pricing_version_unit_configs(price_version_id,unit_definition_id,config_type,fixed_price_per_denominator,created_at) VALUES($1,$2,'FIXED_PRICE',$3,$4)`, item.ID, unitID, rate, now); err != nil {
+			return AdminPriceVersion{}, err
+		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE pricing_versions SET lifecycle_status='PUBLISHED',published_at=$2 WHERE id=$1`, item.ID, now); err != nil {
 		return AdminPriceVersion{}, err
 	}
 	return item, tx.Commit(ctx)
