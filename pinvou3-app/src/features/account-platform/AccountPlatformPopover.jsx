@@ -3,7 +3,7 @@ import { ArrowLeft, CheckCircle2, Plus, RefreshCw, User, X } from '../../compone
 import { formatPoints } from './credit-units.js';
 import { rechargePollDelay } from './context-guard.js';
 
-const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'MANUAL_REVIEW']);
+const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
 const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
 const fallbackChannels = ['ALIPAY'];
 

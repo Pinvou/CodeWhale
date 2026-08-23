@@ -17,4 +17,13 @@ func TestCapabilitiesRequireVersionedQueryableProvider(t *testing.T) {
 	if invalid.Valid() {
 		t.Fatal("duplicate case-insensitive channels were accepted")
 	}
+	invalid = valid
+	invalid.RefundSupported = true
+	if invalid.Valid() {
+		t.Fatal("refund capability without an idempotency guarantee was accepted")
+	}
+	invalid.RefundIdempotencySupported = true
+	if !invalid.Valid() {
+		t.Fatal("idempotent refund capability was rejected")
+	}
 }

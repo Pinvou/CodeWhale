@@ -4,12 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -18,18 +19,22 @@ import (
 var ErrPaymentProvider = errors.New("payment provider request failed")
 
 type Refund struct {
-	ID                 uuid.UUID `json:"refund_id"`
-	PaymentOrderID     uuid.UUID `json:"payment_order_id"`
-	RequesterID        uuid.UUID `json:"requester_id"`
-	MerchantRefundNo   string    `json:"merchant_refund_no"`
-	ChannelRefundID    *string   `json:"channel_refund_id,omitempty"`
-	AmountFen          int64     `json:"amount_fen"`
-	CreditMicrocredits int64     `json:"credit_microcredits"`
-	Status             string    `json:"status"`
-	Reason             string    `json:"reason"`
-	FailureReason      *string   `json:"failure_reason,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                   uuid.UUID `json:"refund_id"`
+	PaymentOrderID       uuid.UUID `json:"payment_order_id"`
+	PaymentTransactionID uuid.UUID `json:"payment_transaction_id"`
+	EntitlementPackageID uuid.UUID `json:"entitlement_package_id"`
+	RequesterID          uuid.UUID `json:"requester_id"`
+	MerchantRefundNo     string    `json:"merchant_refund_no"`
+	ChannelRefundID      *string   `json:"channel_refund_id,omitempty"`
+	AmountFen            int64     `json:"amount_fen"`
+	CreditMicrocredits   int64     `json:"credit_microcredits"`
+	BaseMicrocredits     int64     `json:"base_microcredits"`
+	BonusMicrocredits    int64     `json:"bonus_microcredits"`
+	Status               string    `json:"status"`
+	Reason               string    `json:"reason"`
+	FailureReason        *string   `json:"failure_reason,omitempty"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 func (p *PaymentCoordinator) GetOrder(ctx context.Context, orderID, requesterID uuid.UUID) (PaymentOrder, error) {
@@ -118,34 +123,52 @@ func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterI
 	return order, nil
 }
 
-func (p *PaymentCoordinator) CreateRefund(ctx context.Context, orderID, requesterID uuid.UUID, amountFen int64, idempotencyKey, reason string) (Refund, bool, error) {
+func (p *PaymentCoordinator) CreateRefund(ctx context.Context, orderID, requesterID, transactionID, packageID uuid.UUID, idempotencyKey, reason string) (Refund, bool, error) {
 	if !p.Capabilities().RefundSupported {
 		return Refund{}, false, payment.ErrUnsupported
 	}
 	idempotencyKey = strings.TrimSpace(idempotencyKey)
 	reason = strings.TrimSpace(reason)
-	if orderID == uuid.Nil || requesterID == uuid.Nil || amountFen <= 0 || len(idempotencyKey) < 16 || reason == "" {
+	if orderID == uuid.Nil || requesterID == uuid.Nil || transactionID == uuid.Nil || packageID == uuid.Nil || len(idempotencyKey) < 16 || reason == "" || len(reason) > 500 {
 		return Refund{}, false, ErrConflict
 	}
-	digest := sha256.Sum256([]byte(orderID.String() + "|" + requesterID.String() + "|" + fmt.Sprint(amountFen) + "|" + reason))
+	digest := sha256.Sum256([]byte(orderID.String() + "|" + requesterID.String() + "|" + transactionID.String() + "|" + packageID.String() + "|" + reason))
 	requestHash := hex.EncodeToString(digest[:])
-	refund, created, err := p.reserveRefund(ctx, orderID, requesterID, amountFen, idempotencyKey, requestHash, reason)
-	if err != nil || refund.Status == "SUCCEEDED" || refund.Status == "FAILED" || refund.Status == "MANUAL_REVIEW" {
-		return refund, created, err
-	}
-	merchantOrderNo, err := refundMerchantOrder(ctx, p.repository.pool, orderID)
-	if err != nil {
-		return refund, created, err
-	}
-	providerRefund, providerErr := p.provider.Refund(ctx, merchantOrderNo, refund.MerchantRefundNo, amountFen)
-	if providerErr != nil {
-		return refund, created, fmt.Errorf("%w: %v", ErrPaymentProvider, providerErr)
-	}
-	return p.finishRefund(ctx, refund, providerRefund, created)
+	refund, created, err := p.reserveRefund(ctx, orderID, requesterID, transactionID, packageID, idempotencyKey, requestHash, reason)
+	return refund, created, err
 }
 
-func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, requesterID uuid.UUID, amountFen int64, idempotencyKey, requestHash, reason string) (Refund, bool, error) {
-	tx, err := p.repository.pool.Begin(ctx)
+func (p *PaymentCoordinator) ProcessRefund(ctx context.Context, refundID uuid.UUID) error {
+	if !p.Capabilities().RefundSupported || !p.Capabilities().RefundIdempotencySupported {
+		return payment.ErrUnsupported
+	}
+	if refundID == uuid.Nil {
+		return ErrConflict
+	}
+	refund, err := getRefundByID(ctx, p.repository.pool, refundID, false)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil || refund.Status != "REQUESTED" {
+		return err
+	}
+	merchantOrderNo, err := refundMerchantOrder(ctx, p.repository.pool, refund.PaymentOrderID)
+	if err != nil {
+		return err
+	}
+	providerRefund, providerErr := p.provider.Refund(ctx, merchantOrderNo, refund.MerchantRefundNo, refund.AmountFen)
+	if providerErr != nil {
+		// JetStream may redeliver this event. The stable merchant refund number
+		// makes that safe only because the selected Provider explicitly declared
+		// refund idempotency support.
+		return fmt.Errorf("%w: %v", ErrPaymentProvider, providerErr)
+	}
+	_, _, err = p.finishRefund(ctx, refund, providerRefund, false)
+	return err
+}
+
+func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, requesterID, transactionID, packageID uuid.UUID, idempotencyKey, requestHash, reason string) (Refund, bool, error) {
+	tx, err := p.repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return Refund{}, false, err
 	}
@@ -155,7 +178,7 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 	}
 	refund, err := getRefundByIdempotency(ctx, tx, idempotencyKey, true)
 	if err == nil {
-		if refund.PaymentOrderID != orderID || refund.RequesterID != requesterID || refund.AmountFen != amountFen {
+		if refund.PaymentOrderID != orderID || refund.RequesterID != requesterID || refund.PaymentTransactionID != transactionID || refund.EntitlementPackageID != packageID {
 			return Refund{}, false, ErrConflict
 		}
 		var storedHash string
@@ -171,40 +194,137 @@ func (p *PaymentCoordinator) reserveRefund(ctx context.Context, orderID, request
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && order.RequesterID != requesterID) {
 		return Refund{}, false, ErrNotFound
 	}
-	if err != nil || order.FulfillmentStatus != "CREDITED" || (order.Status != "PAID" && order.Status != "PAID_LATE" && order.Status != "PARTIALLY_REFUNDED") {
-		return Refund{}, false, ErrConflict
-	}
-	credits, ok := proportionalCredits(order.AmountFen, order.CreditMicrocredits, amountFen)
-	if !ok {
+	if err != nil || order.FulfillmentStatus != "CREDITED" || (order.Status != "PAID" && order.Status != "PAID_LATE") {
 		return Refund{}, false, ErrConflict
 	}
 	wallet, err := getWallet(ctx, tx, order.WalletID, true)
-	if err != nil || wallet.Status != "ACTIVE" {
+	if err != nil || wallet.Status != "ACTIVE" || wallet.ReceivableMicrocredits != 0 {
 		return Refund{}, false, ErrWalletUnavailable
 	}
-	var lotRemaining int64
-	err = tx.QueryRow(ctx, `SELECT remaining_microcredits FROM credit_lots WHERE wallet_id=$1 AND source_reference=$2 AND refundable FOR UPDATE`, order.WalletID, "recharge:"+order.ID.String()).Scan(&lotRemaining)
-	if errors.Is(err, pgx.ErrNoRows) || credits > lotRemaining || credits > wallet.AvailableMicrocredits {
-		return Refund{}, false, ErrInsufficientBalance
+	var amountFen int64
+	err = tx.QueryRow(ctx, `SELECT transaction.amount_fen
+		FROM payment_transactions transaction
+		JOIN entitlement_packages package
+		  ON package.source_payment_transaction_id=transaction.id
+		 AND package.payment_order_id=transaction.payment_order_id
+		WHERE transaction.id=$1 AND transaction.payment_order_id=$2 AND package.id=$3
+		  AND transaction.status IN ('PAID','LATE_PAID')
+		  AND transaction.fulfillment_status='CREDITED'
+		  AND package.wallet_id=$4 AND package.status='ACTIVE'
+		FOR UPDATE OF transaction,package`, transactionID, orderID, packageID, order.WalletID).Scan(&amountFen)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Refund{}, false, ErrConflict
 	}
 	if err != nil {
 		return Refund{}, false, err
 	}
-	now := p.now()
-	refund = Refund{ID: uuid.Must(uuid.NewV7()), PaymentOrderID: orderID, RequesterID: requesterID, MerchantRefundNo: "pvr-" + uuid.Must(uuid.NewV7()).String(), AmountFen: amountFen, CreditMicrocredits: credits, Status: "REQUESTED", Reason: reason, CreatedAt: now, UpdatedAt: now}
-	command, err := tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits+$2,version=version+1,updated_at=$3 WHERE id=$1 AND receivable_microcredits=0 AND posted_microcredits-reserved_microcredits >= $2`, order.WalletID, credits, now)
-	if err != nil || command.RowsAffected() != 1 {
-		return Refund{}, false, ErrInsufficientBalance
+	var abnormal bool
+	if err := tx.QueryRow(ctx, `SELECT
+		EXISTS(SELECT 1 FROM chargeback_cases WHERE payment_transaction_id=$1 AND status='CONFIRMED')
+		OR EXISTS(SELECT 1 FROM forced_refund_cases WHERE payment_transaction_id=$1 AND status='REVIEW_REQUIRED')
+		OR EXISTS(SELECT 1 FROM refunds WHERE payment_transaction_id=$1 AND entitlement_package_id=$3 AND status IN ('REQUESTED','SUCCEEDED','MANUAL_REVIEW'))
+		OR EXISTS(SELECT 1 FROM receivables WHERE payment_order_id=$2 AND outstanding_microcredits>0)
+		OR EXISTS(SELECT 1 FROM payment_orders WHERE id=$2 AND attention_summary<>'NORMAL')
+		OR EXISTS(
+			SELECT 1 FROM usage_hold_allocations allocation
+			JOIN usage_holds hold ON hold.id=allocation.hold_id
+			WHERE allocation.package_id=$3 AND hold.status IN ('ACTIVE','REVIEW')
+			  AND allocation.reserved_microcredits>allocation.settled_microcredits+allocation.released_microcredits
+		)`, transactionID, orderID, packageID).Scan(&abnormal); err != nil {
+		return Refund{}, false, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO refunds(id,payment_order_id,requester_id,merchant_refund_no,amount_fen,credit_microcredits,status,idempotency_key,request_hash,reason,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,'REQUESTED',$7,$8,$9,$10,$10)`, refund.ID, orderID, requesterID, refund.MerchantRefundNo, amountFen, credits, idempotencyKey, requestHash, reason, now)
+	if abnormal {
+		return Refund{}, false, ErrConflict
+	}
+	type componentReservation struct {
+		id, lotID                    uuid.UUID
+		kind, status                 string
+		available, active, suspended int64
+	}
+	rows, err := tx.Query(ctx, `SELECT id,credit_lot_id,component_type,status,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM entitlement_components WHERE package_id=$1 AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0 AND revoked_microcredits=0 ORDER BY id FOR UPDATE`, packageID)
 	if err != nil {
+		return Refund{}, false, err
+	}
+	components := []componentReservation{}
+	var base, bonus int64
+	for rows.Next() {
+		var item componentReservation
+		if err := rows.Scan(&item.id, &item.lotID, &item.kind, &item.status, &item.available, &item.active, &item.suspended); err != nil {
+			rows.Close()
+			return Refund{}, false, err
+		}
+		total := item.available + item.active + item.suspended
+		if total <= 0 || (item.kind != "BASE" && item.kind != "BONUS") {
+			rows.Close()
+			return Refund{}, false, ErrConflict
+		}
+		if item.kind == "BASE" {
+			base += total
+		} else {
+			bonus += total
+		}
+		components = append(components, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return Refund{}, false, err
+	}
+	if len(components) == 0 || base == 0 {
+		return Refund{}, false, ErrConflict
+	}
+	var componentCount int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM entitlement_components WHERE package_id=$1`, packageID).Scan(&componentCount); err != nil {
+		return Refund{}, false, err
+	}
+	if componentCount != len(components) {
+		return Refund{}, false, ErrConflict
+	}
+	var invalidGrant bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM member_quota_grants WHERE package_id=$1 AND (used_microcredits>0 OR reserved_microcredits>0 OR expired_microcredits>0 OR revoked_microcredits>0))`, packageID).Scan(&invalidGrant); err != nil {
+		return Refund{}, false, err
+	}
+	if invalidGrant {
+		return Refund{}, false, ErrConflict
+	}
+	now := p.now()
+	refund = Refund{ID: uuid.Must(uuid.NewV7()), PaymentOrderID: orderID, PaymentTransactionID: transactionID, EntitlementPackageID: packageID, RequesterID: requesterID, MerchantRefundNo: "pvr-" + uuid.Must(uuid.NewV7()).String(), AmountFen: amountFen, CreditMicrocredits: base + bonus, BaseMicrocredits: base, BonusMicrocredits: bonus, Status: "REQUESTED", Reason: reason, CreatedAt: now, UpdatedAt: now}
+	snapshot, err := json.Marshal(map[string]any{"payment_transaction_id": transactionID, "entitlement_package_id": packageID, "base_microcredits": base, "bonus_microcredits": bonus, "amount_fen": amountFen})
+	if err != nil {
+		return Refund{}, false, err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO refunds(id,payment_order_id,payment_transaction_id,entitlement_package_id,requester_id,merchant_refund_no,amount_fen,credit_microcredits,base_microcredits,bonus_microcredits,status,idempotency_key,request_hash,reason,entitlement_snapshot,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'REQUESTED',$11,$12,$13,$14,$15,$15)`, refund.ID, orderID, transactionID, packageID, requesterID, refund.MerchantRefundNo, amountFen, base+bonus, base, bonus, idempotencyKey, requestHash, reason, snapshot, now)
+	if err != nil {
+		return Refund{}, false, err
+	}
+	for _, component := range components {
+		if _, err := tx.Exec(ctx, `INSERT INTO refund_component_reservations(refund_id,component_id,package_id,component_type,credit_lot_id,available_microcredits,active_grant_microcredits,suspended_grant_microcredits,prior_status,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, refund.ID, component.id, packageID, component.kind, component.lotID, component.available, component.active, component.suspended, component.status, now); err != nil {
+			return Refund{}, false, err
+		}
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO refund_grant_reservations(refund_id,grant_id,component_id,available_microcredits,prior_status,prior_suspension_reason,created_at) SELECT $1,id,component_id,available_microcredits,status,suspension_reason,$2 FROM member_quota_grants WHERE package_id=$3`, refund.ID, now, packageID); err != nil {
+		return Refund{}, false, err
+	}
+	command, err := tx.Exec(ctx, `UPDATE entitlement_packages SET status='FROZEN',updated_at=$2 WHERE id=$1 AND status='ACTIVE'`, packageID, now)
+	if err != nil || command.RowsAffected() != 1 {
+		if err == nil {
+			err = ErrConflict
+		}
+		return Refund{}, false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE entitlement_components SET status='FROZEN',updated_at=$2 WHERE package_id=$1`, packageID, now); err != nil {
+		return Refund{}, false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE member_quota_grants SET status='SUSPENDED',suspension_reason='REFUND_PENDING',allocation_version=allocation_version+1,updated_at=$2 WHERE package_id=$1 AND status='ACTIVE'`, packageID, now); err != nil {
+		return Refund{}, false, err
+	}
+	if err := events.AppendOutbox(ctx, tx, "billing.refund.requested.v1", refund.ID, 1, map[string]any{"refund_id": refund.ID, "payment_order_id": orderID, "payment_transaction_id": transactionID, "entitlement_package_id": packageID, "amount_fen": amountFen}); err != nil {
 		return Refund{}, false, err
 	}
 	return refund, true, tx.Commit(ctx)
 }
 
 func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund, provider ProviderRefund, created bool) (Refund, bool, error) {
-	tx, err := p.repository.pool.Begin(ctx)
+	tx, err := p.repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return Refund{}, created, err
 	}
@@ -225,11 +345,28 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		return Refund{}, created, err
 	}
 	now := p.now()
-	if provider.Status != "SUCCESS" || provider.MerchantRefundNo != refund.MerchantRefundNo || provider.AmountFen != refund.AmountFen || strings.TrimSpace(provider.ChannelRefundID) == "" {
+	if provider.MerchantRefundNo != refund.MerchantRefundNo || provider.AmountFen != refund.AmountFen || (provider.Status == "SUCCESS" && strings.TrimSpace(provider.ChannelRefundID) == "") {
+		failure := "payment provider returned conflicting refund evidence"
+		if _, err = tx.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',failure_reason=$2,channel_refund_id=NULLIF($3,''),intent_version=intent_version+1,updated_at=$4 WHERE id=$1`, refund.ID, failure, provider.ChannelRefundID, now); err != nil {
+			return Refund{}, created, err
+		}
+		if err = events.AppendOutbox(ctx, tx, "billing.refund.review-required.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID, "failure_reason": failure}); err != nil {
+			return Refund{}, created, err
+		}
+		refund.Status, refund.FailureReason, refund.UpdatedAt = "MANUAL_REVIEW", &failure, now
+		if strings.TrimSpace(provider.ChannelRefundID) != "" {
+			refund.ChannelRefundID = &provider.ChannelRefundID
+		}
+		return refund, created, tx.Commit(ctx)
+	}
+	if provider.Status != "SUCCESS" {
 		failure := "payment provider rejected the refund"
-		_, err = tx.Exec(ctx, `UPDATE wallets SET reserved_microcredits=reserved_microcredits-$2,version=version+1,updated_at=$3 WHERE id=$1 AND reserved_microcredits >= $2`, order.WalletID, refund.CreditMicrocredits, now)
+		err = restoreRefundEntitlements(ctx, tx, refund.ID, refund.EntitlementPackageID, now)
 		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE refunds SET status='FAILED',failure_reason=$2,updated_at=$3 WHERE id=$1`, refund.ID, failure, now)
+			_, err = tx.Exec(ctx, `UPDATE refunds SET status='FAILED',failure_reason=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, failure, now)
+		}
+		if err == nil {
+			err = events.AppendOutbox(ctx, tx, "billing.refund.failed.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID, "failure_reason": failure})
 		}
 		if err != nil {
 			return Refund{}, created, err
@@ -237,15 +374,36 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		refund.Status, refund.FailureReason, refund.UpdatedAt = "FAILED", &failure, now
 		return refund, created, tx.Commit(ctx)
 	}
-	var lotID uuid.UUID
-	var lotRemaining int64
-	err = tx.QueryRow(ctx, `SELECT id,remaining_microcredits FROM credit_lots WHERE wallet_id=$1 AND source_reference=$2 AND refundable FOR UPDATE`, order.WalletID, "recharge:"+order.ID.String()).Scan(&lotID, &lotRemaining)
+	rows, err := tx.Query(ctx, `SELECT component_id,credit_lot_id,component_type,available_microcredits,active_grant_microcredits,suspended_grant_microcredits FROM refund_component_reservations WHERE refund_id=$1 ORDER BY component_id FOR UPDATE`, refund.ID)
 	if err != nil {
 		return Refund{}, created, err
 	}
-	if lotRemaining < refund.CreditMicrocredits || wallet.ReservedMicrocredits < refund.CreditMicrocredits || wallet.PostedMicrocredits < refund.CreditMicrocredits {
-		_, updateErr := tx.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',failure_reason='local refundable balance changed after provider refund',channel_refund_id=$2,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
+	type reservedComponent struct {
+		id, lotID                    uuid.UUID
+		kind                         string
+		available, active, suspended int64
+	}
+	components := []reservedComponent{}
+	var total int64
+	for rows.Next() {
+		var item reservedComponent
+		if err := rows.Scan(&item.id, &item.lotID, &item.kind, &item.available, &item.active, &item.suspended); err != nil {
+			rows.Close()
+			return Refund{}, created, err
+		}
+		total += item.available + item.active + item.suspended
+		components = append(components, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return Refund{}, created, err
+	}
+	if len(components) == 0 || total != refund.CreditMicrocredits || wallet.PostedMicrocredits < total {
+		_, updateErr := tx.Exec(ctx, `UPDATE refunds SET status='MANUAL_REVIEW',failure_reason='local refundable balance changed after provider refund',channel_refund_id=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
 		if updateErr != nil {
+			return Refund{}, created, updateErr
+		}
+		if updateErr = events.AppendOutbox(ctx, tx, "billing.refund.review-required.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID}); updateErr != nil {
 			return Refund{}, created, updateErr
 		}
 		refund.Status = "MANUAL_REVIEW"
@@ -257,20 +415,84 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 		return Refund{}, created, err
 	}
 	walletAccount, err := walletLedgerAccount(ctx, tx, order.WalletID)
-	if err == nil {
-		err = insertPosting(ctx, tx, entryID, walletAccount, -refund.CreditMicrocredits, &lotID, now)
+	for _, component := range components {
+		amount := component.available + component.active + component.suspended
+		if err == nil {
+			err = insertPosting(ctx, tx, entryID, walletAccount, -amount, &component.lotID, now)
+		}
+		if err == nil {
+			command, updateErr := tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits>=$2`, component.lotID, amount)
+			err = updateErr
+			if err == nil && command.RowsAffected() != 1 {
+				err = ErrConflict
+			}
+		}
+		if err == nil {
+			command, updateErr := tx.Exec(ctx, `UPDATE entitlement_components SET available_microcredits=0,active_grant_microcredits=0,suspended_grant_microcredits=0,revoked_microcredits=revoked_microcredits+$2,status='REVOKED',updated_at=$3 WHERE id=$1 AND status='FROZEN' AND available_microcredits=$4 AND active_grant_microcredits=$5 AND suspended_grant_microcredits=$6 AND used_microcredits=0 AND reserved_microcredits=0 AND expired_microcredits=0`, component.id, amount, now, component.available, component.active, component.suspended)
+			err = updateErr
+			if err == nil && command.RowsAffected() != 1 {
+				err = ErrConflict
+			}
+		}
 	}
 	if err == nil {
-		err = insertPosting(ctx, tx, entryID, refundClearingAccount, refund.CreditMicrocredits, nil, now)
+		var expectedGrants int64
+		if err = tx.QueryRow(ctx, `SELECT count(*) FROM refund_grant_reservations WHERE refund_id=$1`, refund.ID).Scan(&expectedGrants); err == nil {
+			command, updateErr := tx.Exec(ctx, `UPDATE member_quota_grants grant SET revoked_microcredits=revoked_microcredits+reservation.available_microcredits,available_microcredits=0,status='REVOKED',suspension_reason=NULL,allocation_version=allocation_version+1,updated_at=$2 FROM refund_grant_reservations reservation WHERE reservation.refund_id=$1 AND reservation.grant_id=grant.id AND grant.available_microcredits=reservation.available_microcredits AND grant.used_microcredits=0 AND grant.reserved_microcredits=0 AND grant.expired_microcredits=0 AND grant.revoked_microcredits=0 AND grant.status='SUSPENDED' AND grant.suspension_reason='REFUND_PENDING'`, refund.ID, now)
+			err = updateErr
+			if err == nil && command.RowsAffected() != expectedGrants {
+				err = ErrConflict
+			}
+		}
 	}
 	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE credit_lots SET remaining_microcredits=remaining_microcredits-$2 WHERE id=$1 AND remaining_microcredits >= $2`, lotID, refund.CreditMicrocredits)
+		grantRows, queryErr := tx.Query(ctx, `SELECT grant.id,grant.organization_id,grant.member_user_id,grant.package_id,grant.component_id,grant.component_type,grant.original_microcredits,grant.available_microcredits,grant.reserved_microcredits,grant.used_microcredits,grant.expired_microcredits,grant.revoked_microcredits,grant.status,grant.suspension_reason,grant.membership_version,grant.allocation_version,grant.created_by,grant.expires_at,grant.created_at,grant.updated_at,reservation.available_microcredits FROM refund_grant_reservations reservation JOIN member_quota_grants grant ON grant.id=reservation.grant_id WHERE reservation.refund_id=$1 ORDER BY grant.id`, refund.ID)
+		err = queryErr
+		if err == nil {
+			for grantRows.Next() {
+				var grant MemberQuotaGrant
+				var amount int64
+				if scanErr := scanMemberQuotaGrantWithAmount(grantRows, &grant, &amount); scanErr != nil {
+					err = scanErr
+					break
+				}
+				if auditErr := appendMemberQuotaAudit(ctx, tx, grant, "REVOKED", nil, amount, now); auditErr != nil {
+					err = auditErr
+					break
+				}
+				if outboxErr := appendMemberQuotaOutbox(ctx, tx, grant, "billing.member-quota.revoked.v1", now); outboxErr != nil {
+					err = outboxErr
+					break
+				}
+			}
+			if rowsErr := grantRows.Err(); err == nil && rowsErr != nil {
+				err = rowsErr
+			}
+			grantRows.Close()
+		}
 	}
 	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits-$2,reserved_microcredits=reserved_microcredits-$2,version=version+1,updated_at=$3 WHERE id=$1`, order.WalletID, refund.CreditMicrocredits, now)
+		err = insertPosting(ctx, tx, entryID, refundClearingAccount, total, nil, now)
 	}
 	if err == nil {
-		_, err = tx.Exec(ctx, `UPDATE refunds SET status='SUCCEEDED',channel_refund_id=$2,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
+		command, updateErr := tx.Exec(ctx, `UPDATE wallets SET posted_microcredits=posted_microcredits-$2,version=version+1,updated_at=$3 WHERE id=$1 AND posted_microcredits>=$2`, order.WalletID, total, now)
+		err = updateErr
+		if err == nil && command.RowsAffected() != 1 {
+			err = ErrConflict
+		}
+	}
+	if err == nil {
+		command, updateErr := tx.Exec(ctx, `UPDATE entitlement_packages SET points_remaining=0,points_revoked=points_revoked+$2,status='REVOKED',updated_at=$3 WHERE id=$1 AND status='FROZEN' AND points_used=0 AND points_reserved=0 AND points_expired=0`, refund.EntitlementPackageID, total, now)
+		err = updateErr
+		if err == nil && command.RowsAffected() != 1 {
+			err = ErrConflict
+		}
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE refunds SET status='SUCCEEDED',channel_refund_id=$2,intent_version=intent_version+1,updated_at=$3 WHERE id=$1`, refund.ID, provider.ChannelRefundID, now)
+	}
+	if err == nil {
+		err = events.AppendOutbox(ctx, tx, "billing.refund.succeeded.v1", refund.ID, 2, map[string]any{"refund_id": refund.ID, "payment_order_id": refund.PaymentOrderID, "payment_transaction_id": refund.PaymentTransactionID, "entitlement_package_id": refund.EntitlementPackageID, "amount_fen": refund.AmountFen, "base_microcredits": refund.BaseMicrocredits, "bonus_microcredits": refund.BonusMicrocredits})
 	}
 	if err != nil {
 		return Refund{}, created, err
@@ -282,16 +504,15 @@ func (p *PaymentCoordinator) finishRefund(ctx context.Context, requested Refund,
 	return refund, created, tx.Commit(ctx)
 }
 
-func proportionalCredits(orderAmountFen, orderCredits, refundAmountFen int64) (int64, bool) {
-	if orderAmountFen <= 0 || orderCredits <= 0 || refundAmountFen <= 0 || refundAmountFen > orderAmountFen || refundAmountFen > math.MaxInt64/orderCredits {
-		return 0, false
+func restoreRefundEntitlements(ctx context.Context, tx pgx.Tx, refundID, packageID uuid.UUID, now time.Time) error {
+	if _, err := tx.Exec(ctx, `UPDATE member_quota_grants grant SET status=reservation.prior_status,suspension_reason=reservation.prior_suspension_reason,allocation_version=allocation_version+1,updated_at=$3 FROM refund_grant_reservations reservation WHERE reservation.refund_id=$1 AND reservation.grant_id=grant.id AND grant.package_id=$2 AND grant.status='SUSPENDED' AND (grant.suspension_reason='REFUND_PENDING' OR reservation.prior_status='SUSPENDED')`, refundID, packageID, now); err != nil {
+		return err
 	}
-	product := refundAmountFen * orderCredits
-	if product%orderAmountFen != 0 {
-		return 0, false
+	if _, err := tx.Exec(ctx, `UPDATE entitlement_components component SET status=reservation.prior_status,updated_at=$3 FROM refund_component_reservations reservation WHERE reservation.refund_id=$1 AND reservation.component_id=component.id AND component.package_id=$2 AND component.status='FROZEN'`, refundID, packageID, now); err != nil {
+		return err
 	}
-	credits := product / orderAmountFen
-	return credits, credits > 0
+	_, err := tx.Exec(ctx, `UPDATE entitlement_packages SET status='ACTIVE',updated_at=$2 WHERE id=$1 AND status='FROZEN'`, packageID, now)
+	return err
 }
 
 func refundMerchantOrder(ctx context.Context, database queryable, orderID uuid.UUID) (string, error) {
@@ -311,7 +532,7 @@ func getPaymentOrderByID(ctx context.Context, database queryable, orderID uuid.U
 }
 
 func getRefundByIdempotency(ctx context.Context, database queryable, key string, lock bool) (Refund, error) {
-	query := `SELECT id,payment_order_id,requester_id,merchant_refund_no,channel_refund_id,amount_fen,credit_microcredits,status,reason,failure_reason,created_at,updated_at FROM refunds WHERE idempotency_key=$1`
+	query := `SELECT id,payment_order_id,payment_transaction_id,entitlement_package_id,requester_id,merchant_refund_no,channel_refund_id,amount_fen,credit_microcredits,base_microcredits,bonus_microcredits,status,reason,failure_reason,created_at,updated_at FROM refunds WHERE idempotency_key=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
@@ -319,7 +540,7 @@ func getRefundByIdempotency(ctx context.Context, database queryable, key string,
 }
 
 func getRefundByID(ctx context.Context, database queryable, id uuid.UUID, lock bool) (Refund, error) {
-	query := `SELECT id,payment_order_id,requester_id,merchant_refund_no,channel_refund_id,amount_fen,credit_microcredits,status,reason,failure_reason,created_at,updated_at FROM refunds WHERE id=$1`
+	query := `SELECT id,payment_order_id,payment_transaction_id,entitlement_package_id,requester_id,merchant_refund_no,channel_refund_id,amount_fen,credit_microcredits,base_microcredits,bonus_microcredits,status,reason,failure_reason,created_at,updated_at FROM refunds WHERE id=$1`
 	if lock {
 		query += ` FOR UPDATE`
 	}
@@ -328,6 +549,6 @@ func getRefundByID(ctx context.Context, database queryable, id uuid.UUID, lock b
 
 func scanRefund(row pgx.Row) (Refund, error) {
 	var refund Refund
-	err := row.Scan(&refund.ID, &refund.PaymentOrderID, &refund.RequesterID, &refund.MerchantRefundNo, &refund.ChannelRefundID, &refund.AmountFen, &refund.CreditMicrocredits, &refund.Status, &refund.Reason, &refund.FailureReason, &refund.CreatedAt, &refund.UpdatedAt)
+	err := row.Scan(&refund.ID, &refund.PaymentOrderID, &refund.PaymentTransactionID, &refund.EntitlementPackageID, &refund.RequesterID, &refund.MerchantRefundNo, &refund.ChannelRefundID, &refund.AmountFen, &refund.CreditMicrocredits, &refund.BaseMicrocredits, &refund.BonusMicrocredits, &refund.Status, &refund.Reason, &refund.FailureReason, &refund.CreatedAt, &refund.UpdatedAt)
 	return refund, err
 }

@@ -3,7 +3,7 @@ import { createContextRequestGuard, rechargePollDelay } from './context-guard.js
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import './account-platform.css';
 
-const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'PARTIALLY_REFUNDED', 'REFUNDED', 'MANUAL_REVIEW']);
+const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'MANUAL_REVIEW']);
 const idempotencyKey = prefix => `${prefix}-${globalThis.crypto.randomUUID()}`;
 
 function Field({ label, children }) {

@@ -60,6 +60,7 @@ type Capabilities struct {
 	MaximumLateConfirmationSeconds int64    `json:"maximum_late_confirmation_seconds"`
 	AuthoritativeUnpaidTerminal    bool     `json:"authoritative_unpaid_terminal"`
 	RefundSupported                bool     `json:"refund_supported"`
+	RefundIdempotencySupported     bool     `json:"refund_idempotency_supported"`
 	CloseSupported                 bool     `json:"close_supported"`
 	NotificationSupported          bool     `json:"notification_supported"`
 	BillSupported                  bool     `json:"bill_supported"`
@@ -82,7 +83,7 @@ func (c Capabilities) Valid() bool {
 		}
 		seen[channel] = true
 	}
-	return !c.OrderQuerySupported || c.MinimumQueryIntervalSeconds > 0
+	return (!c.OrderQuerySupported || c.MinimumQueryIntervalSeconds > 0) && (!c.RefundSupported || c.RefundIdempotencySupported)
 }
 
 func (c Capabilities) SupportsChannel(channel string) bool {

@@ -230,10 +230,7 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 		return PaymentOrder{}, err
 	}
 	if providerOrder.Status == "PARTIALLY_REFUNDED" || providerOrder.Status == "REFUNDED" {
-		if order.FulfillmentStatus == "PENDING" {
-			return p.applyProviderReviewStatus(ctx, order)
-		}
-		return order, nil
+		return p.applyProviderReviewStatus(ctx, order)
 	}
 	if providerOrder.Status == "CLOSED" || providerOrder.Status == "FAILED" {
 		if !p.Capabilities().AuthoritativeUnpaidTerminal {
@@ -276,8 +273,10 @@ func (p *PaymentCoordinator) SyncOrder(ctx context.Context, orderID uuid.UUID) (
 
 func (p *PaymentCoordinator) applyProviderReviewStatus(ctx context.Context, order PaymentOrder) (PaymentOrder, error) {
 	_, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders
-SET status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',attention_summary='REVIEW_REQUIRED',summary_version=summary_version+1,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$2
-WHERE id=$1 AND status IN ('CREATED','PENDING') AND fulfillment_status='PENDING'`, order.ID, p.now())
+SET status=CASE WHEN status IN ('CREATED','PENDING') AND fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE status END,
+    fulfillment_status=CASE WHEN status IN ('CREATED','PENDING') AND fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE fulfillment_status END,
+    attention_summary='REVIEW_REQUIRED',summary_version=summary_version+1,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$2
+WHERE id=$1`, order.ID, p.now())
 	if err != nil {
 		return PaymentOrder{}, err
 	}

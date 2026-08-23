@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 187`、`部分实现 43`、`未实现 98`、`降级实现 1`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 199`、`部分实现 41`、`未实现 88`、`降级实现 1`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -50,8 +50,9 @@
 | `PAYMENT-EVIDENCE-LIFECYCLE` | 一单多流水、不可变回调/查询/修复证据、逐流水权益包、付款人与受益方冻结、订单派生摘要及运营明细 | Go 单测、OpenAPI lint、69 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移及真实 Provider 乱序/重复证据故障注入待部署；账单证据和完整关单中间态仍待后续任务 |
 | `RECEIVABLE-LIFECYCLE` | 用量超额双记、独立应收、钱包上下文冻结、现金 BASE 清偿分配、单支付权益包拒付冲销及三语运营查询 | Go 单测、OpenAPI lint、75 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、并发结算与真实 Provider 拒付故障注入待部署；PAY-33 人工案件队列仍由 APT-025 实现 |
 | `HOLD-OPERATIONS-EVIDENCE` | 钱包 Posting 至权益组成来源、Hold 组成/成员分配、租约历史、异常分类及幂等安全释放证据 | Go 单测、OpenAPI lint、80 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实并发幂等和生产授权隔离待部署 |
+| `TARGETED-REFUND` | 支付流水+权益包精确目标、整笔剩余现金退款、BASE/关联 BONUS 冻结撤销、幂等 Outbox Consumer 恢复和渠道强制退款独立证据 | Go 单测、OpenAPI lint、87 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Provider 幂等/不确定性、并发和故障注入待部署 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 40 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/80 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/87 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -71,7 +72,7 @@
 | CORE-04 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 平衡不可变账本及组成级守恒事实已实现；后续应收和支付流水任务必须继续通过同一账本扩展，数据库运行级验证待部署 |
 | CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
 | CORE-06 | 部分实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 支付回调/查询/修复已有不可变证据归并；账单支付证据、模型派发不确定、加密流事件和结果重放仍未统一收敛 |
-| CORE-07 | 部分实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | 三服务具备 Outbox/Inbox/Relay，注册 Saga 已闭环；注销、退款和托管路由 Provisioning 等流程仍待收敛 |
+| CORE-07 | 部分实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; TARGETED-REFUND | NOT_DEPLOYED | 三服务具备 Outbox/Inbox/Relay，注册和目标退款 Saga 已闭环；注销与托管路由 Provisioning 等流程仍待收敛 |
 | SCOPE-01 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 本地独立模型仍受保护，账号平台迁移不删除用户自建模型 |
 | SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人中心已移除自管 Token Account 页面；Gateway 仍保留受限普通用户 API，不影响当前 UI 范围结论 |
 | SCOPE-03 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 普通用户接口过滤 PLATFORM 账号并拒绝修改；组织业务策略与平台路由的完整隔离矩阵未建立 |
@@ -186,14 +187,14 @@
 | PAY-19 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少72小时边界最后查询、停止高频查询及转人工审核的确定性任务 |
 | PAY-20 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 本地关闭或超时后可创建新订单；不同 Provider 成功流水分别幂等履约或复核，同一流水重复证据只归并一次并保留 LATE_PAID |
 | PAY-23 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; COMMERCE-MAPPING | NOT_DEPLOYED | 组织订单冻结实际付款管理员、受益组织及付款人的 Provider Commerce Mapping 快照；组织级 Mapping 只由 Provider 能力选择 |
-| PAY-24 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 退款目标同时绑定支付流水和权益包并校验来源关系待实现 |
-| PAY-25 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 现有退款按订单聚合剩余量与比例计算，无法检查 BASE/关联 BONUS 累计消费和资金异常 |
-| PAY-26 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 只按目标全部未消费 BASE 计算现金退款、关联 BONUS 零折现及无普通部分退款状态待实现 |
-| PAY-27 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 退款意图锁定、BASE/关联 BONUS 消费复查与冻结、仅按 BASE 预约现金金额、冲销快照、请求与 Outbox 原子提交待实现 |
-| PAY-28 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 现有退款没有目标权益包组成冻结和 Outbox 恢复 |
-| PAY-29 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 通用接口调用原 Provider 退款；新华三明确不支持，且目标绑定/幂等恢复未实现 |
-| PAY-31 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider capabilities 可拒绝不支持动作；UI 仍显示禁用按钮，未按需求完全隐藏入口 |
-| PAY-32 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 渠道部分强制退款作为既成外部事实、不受普通退款资格预检拒绝的独立异常、权益冻结、复核和订单应收待实现 |
+| PAY-24 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 普通退款同时绑定并校验支付流水、权益包和订单归属；订单 ID 不能单独执行退款 |
+| PAY-25 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 任一组成/授予已消费、预占、到期、撤销，或存在 Hold、拒付、强制退款、应收及资金异常时在 Provider 调用前拒绝 |
+| PAY-26 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 不接受金额输入；现金金额派生自目标支付流水并整笔退款，关联 BONUS 零折现且成功时一并撤销，普通退款无部分状态 |
+| PAY-27 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 串行事务锁定目标并原子保存组成/授予快照、冻结和 Outbox；显式幂等能力门禁后的 Worker 使用稳定退款号恢复 REQUESTED 意图 |
+| PAY-28 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 退款意图冻结权益包、组成和活动授予；明确失败恢复，不确定结果继续冻结，成功或受审计复核后才终结 |
+| PAY-29 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 退款沿目标支付流水所属订单调用原 Provider，稳定商户退款号受显式幂等能力保护，不借用其他流水或钱包 |
+| PAY-31 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | Provider 不支持退款或未声明退款幂等保证时领域入口拒绝；用户及运营页面按 capabilities 隐藏退款动作 |
+| PAY-32 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 渠道强制退款保存不可变独立证据和案件并立即冻结目标权益包/授予，不覆盖支付成功或伪装普通退款；统一案件结案由 PAY-33 延续 |
 | PAY-35 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 无账单降级尚未与无回调 Provider 的正式收款准入和72小时人工审核闭合 |
 | PAY-37 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少72小时未收敛订单的唯一人工审核案件、责任人、复核 SLA、next_review_at 和逾期升级 |
 | PAY-38 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少对无回调无账单 Provider 的历史查询、有限晚到窗口、权威终态和正式收款准入校验 |
@@ -212,7 +213,7 @@
 | ADM-17 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 人工调整冻结目标、钱包、金额和调整版本；独立审批后由 Billing 执行端使用稳定幂等键写一次平衡账本，旧直接批准入口失败关闭 |
 | ADM-18 | 已实现 | DOC_CURRENT | GO-UNIT; HOLD-OPERATIONS-EVIDENCE | NOT_DEPLOYED | 运营 API 和三语页面查询 Hold、组成/成员分配、当前租约及不可变租约历史；异常释放只允许 REVIEW 或租约已过期 ACTIVE，要求权限、原因和幂等键并保存操作前后及分配快照 |
 | ADM-19 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 后台支持订单搜索、同步、修复及单订单明细，展示实际付款人、受益方、全部支付流水、不可变证据和派生摘要 |
-| ADM-20 | 未实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 只有旧订单级部分退款，不满足目标普通退款运营模型 |
+| ADM-20 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 运营端可查询普通/强制退款，订单明细展示支付流水和权益包，并仅按精确目标发起无金额输入的整笔剩余退款 |
 | ADM-21 | 部分实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 有模拟器账单对账基础；新华三无账单且四方证据模型未完成 |
 | ADM-22 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 当前 Billing 修复命令均登记稳定类型、目标、原因、脱敏证据、前后快照和幂等键；改变财务事实的修复统一进入审批执行框架，证据收敛类修复固定为仅审计 |
 | ADM-23 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 后台可查看和创建版本化模型协议定义 |
@@ -339,7 +340,7 @@
 | BILL-22 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 全局默认和模型覆盖均支持立即或未来时间区间，发布拒绝重叠并可预览请求时间的逐单位结果。 |
 | BILL-26 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 申请、批准、拒绝和账本入账可审计。 |
 | BILL-27 | 已实现 | DOC_CURRENT | CODE-AUDIT; GO-UNIT; HOLD-OPERATIONS-EVIDENCE | NOT_DEPLOYED | 受权运营查询覆盖钱包投影、Journal/Posting、账本科目、lot/权益包/BASE-BONUS 组成来源、Hold、调整、应收和对账；接口只读且不提供余额覆盖或未受审计导出 |
-| BILL-28 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 普通退款成功时撤销目标支付全部未消费 BASE 与关联 BONUS、BONUS 零现金退款及平衡账本待实现 |
+| BILL-28 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | Provider 确认后同一事务撤销目标支付流水权益包全部 BASE 与关联 BONUS、减少来源 Credit Lot 和钱包负债并写平衡退款分录；BONUS 不计现金 |
 | PAY-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | Billing 只依赖供应商中立 `payment.Provider`；H3C 状态映射和开发 Simulator HTTP 协议分别位于独立平台 Adapter |
 | PAY-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 版本化能力声明覆盖渠道、查询/保留/间隔、支付与晚到窗口、权威终态、关闭、退款、通知、账单和修复；API、UI、后台轮询与领域动作统一消费该声明，订单冻结能力快照 |
 | PAY-03 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 可售渠道取通用商品、Provider 映射及当前能力交集；测试 Provider 标记 `test_only`，生产启动拒绝且 Helm 不部署，不能扩张正式能力 |
@@ -356,7 +357,7 @@
 | PAY-18 | 降级实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 当前 H3C 不支持外部关单，只能停止本地展示并继续查询 |
 | PAY-21 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 每笔确认成功支付流水至多幂等创建一个独立权益包和一组平衡账本入账；重复回调、查询或修复不重复增加额度 |
 | PAY-22 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 具备 `org.entitlements.purchase` 权限的管理员可在线购买组织权益；订单冻结付款用户和受益组织，到账只进入受益组织钱包 |
-| PAY-30 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 确认普通退款后的 BASE/关联 BONUS 原子冲销、退款预约消费及平衡账本待实现 |
+| PAY-30 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | Provider 成功证据校验后同一事务消费退款预约、撤销目标全部 BASE/关联 BONUS、更新权益/退款终态并写平衡账本；其他来源不受影响 |
 | PAY-33 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 拒付、渠道部分强制退款、重复支付、晚到支付、退款失败和状态冲突进入统一复核队列，同时保持各领域状态独立；拒付绑定原支付流水、订单和权益包，按 BILL-33 撤销关联权益并为不足现金本金登记订单级应收，保留证据、责任人、结论和审计。 |
 | PAY-34 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 每日获取 Provider 账单，对订单、支付流水、退款和 Billing 账本入账进行四方核对，生成可追踪差异。 |
 | PAY-36 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 每条差异必须包含分类、严重度、状态、责任人、修复动作、复核结果和审计；修复通过幂等命令写入，不允许直接改表。 |
@@ -370,7 +371,7 @@
 | UI-09 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 登录后的账号 Popover 增加入口按钮；使用专用 Tauri 命令打开受信 Portal URL，不复用任意外链接口。 |
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | Web 组织页按 `org.entitlements.purchase` 显示购买入口，并按独立读取、授予和撤回权限展示精确成员/权益包/BASE-BONUS 组成操作；组织资源不回退个人权益。 |
-| UI-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 当前能力不足时显示禁用按钮；目标要求完全隐藏不可执行退款入口 |
+| UI-12 | 已实现 | DOC_CURRENT | TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 用户和运营退款动作统一按 Provider capabilities 隐藏；不支持退款时不展示不可执行按钮，服务端同步失败关闭 |
 | ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 离线 CLI 已幂等创建禁用 Identity 与 `BOOTSTRAP_PENDING` admin，支持终端无回显/受控 FD 直接设密及默认256 bit、43字符 Base64URL 一次性凭据；用途/代次校验值不可逆，默认15分钟/最长60分钟、5次锁定、恒定时间校验、重新签发淘汰旧代次、正式密码 Identity 边界、高权限策略、会话撤销、安全审计及失败补偿已实现。仍缺生产等价并发兑换、Keycloak/数据库故障和告警投递证据。 |
 | ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有仅主机/集群运行且无 HTTP 路由的 Break-glass CLI，强制全部管理员失联确认、事故证据、工作负载身份、20字符以上原因和5–60分钟有效期，恢复 Identity/短时授权后写不可变审计并产生 CRITICAL 告警；最后管理员数据库门禁不可绕过。仍缺生产等价事故授权、告警接收和到期恢复演练。 |
 | ADM-03 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 服务账号、后台任务和 Event Relay 使用独立工作负载身份、短期凭据和最小权限，不继承人类平台角色；审计记录 `actor_type=SERVICE`、服务名和任务运行 ID。 |
@@ -442,7 +443,7 @@
 | CR-22 | ACC-29 | 每个有效组织恰好一个所有者 | 已实现 | 所有权只能通过带稳定幂等指纹的专用原子转让命令变更；旧绑定只撤销不删除，延迟数据库约束在提交时强制每个有效组织恰有一个 OWNER，普通角色接口不能增删所有者 |
 | CR-23 | TOK-19, TOK-21, TOK-23, BILL-30 | 动态预占采用已确认的边界策略 | 已实现（现行口径以 CR-36 为准） | 无 Tokenizer 时使用版本化确定性估算器且安全裕量为 0；Hold 续租和追加预占已实现，历史固定缺省输出规则不再使用 |
 | CR-24 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 只展示符合可用条件的模型 | 已由 CR-35 取代 | 原记录要求把上下文和路由资格作为目录展示前提；现行规则允许 CATALOG_VISIBLE 独立展示，并分别计算 CONTEXT_ELIGIBLE 与请求级 RESERVABLE |
-| CR-25 | BILL-16–BILL-17, BILL-19, BILL-28, PAY-24–PAY-31 | 权益退款、消费顺序和过期 Hold 采用确定规则 | 部分实现 | 已完成确定消费顺序、30 天人工 BONUS、过期 Hold 释放及迟到用量平台损失复核；普通/强制退款的目标支付流水锁定与组成撤销仍由 APT-021 实现 |
+| CR-25 | BILL-16–BILL-17, BILL-19, BILL-28, PAY-24–PAY-31 | 权益退款、消费顺序和过期 Hold 采用确定规则 | 已实现 | 已完成确定消费顺序、30 天人工 BONUS、过期 Hold 释放、迟到用量平台损失复核，以及目标支付流水/权益包锁定和整包 BASE/关联 BONUS 撤销 |
 | CR-26 | BILL-05, BILL-08–BILL-13 | 组织额度按权益包分配并保留成员占用 | 已实现 | 组织授予绑定精确权益包及 BASE/BONUS 组成，支持独立批量结果、成员移除暂停/高版本恢复、普通全额撤回重建和组织调用占用；注销专用隔离与回收继续由 BILL-39/BILL-40 独立追踪 |
 | CR-27 | ACC-34, ACC-35–ACC-39, UI-07 | 桌面与 Web 共享一个用户级活动上下文 | 已实现 | 用户级唯一聚合和 CAS 切换已替代 Session 所有权；跨端按版本/聚焦刷新，失效自动回个人，认证响应传播上下文及授权版本；进行中调用继续按既有请求开始快照结算 |
 | CR-28 | ADM-01–ADM-03, ADM-06 | 超级管理员初始化、恢复和授权生命周期 | 未实现、ADM-01 初始化凭据由 CR-58 取代 | 原记录使用一次性8位随机初始密码；现行首个管理员初始化改用交互式直接设密或高熵一次性引导凭据；Break-glass 仅处理全部管理员异常失联，不绕过最后一个有效超级管理员主动注销保护，临时授权和自动回收部分保持有效 |
@@ -455,9 +456,9 @@
 | CR-36 | TOK-04, TOK-17–TOK-20, BILL-20–BILL-21, BILL-23–BILL-25 | 模型协议和计价抽象为版本化计量单位及协议预占公式 | 已实现（当前 CHAT 协议） | 版本化单位、协议公式、缺省量为 0、输入互斥计量和零价语义均已落地；新增 Provider 协议由 APT-026 按同一扩展契约接入 |
 | CR-37 | ID-14, ID-15, ACC-02–ACC-04, BILL-04, UI-02 | 注册采用持久 PROVISIONING，钱包初始化异步重试 | 已实现 | Identity 与 Account 成功即账号存在；钱包完成前允许登录和资料管理但禁止平台模型及充值；超过快照化 SLA 才进入 REPAIR_REQUIRED，Billing 暂时不可用不删除已验证身份 |
 | CR-38 | SCOPE-01, SCOPE-04, SCOPE-05, TOK-35, TOK-36, TOK-37, NFR-20 | 补齐品悟客户端旧模型路径的数据迁移和切换验收 | 未实现、由 CR-44 细化门禁 | 只改品悟客户端代码及相关文件；一次性幂等迁移旧客户端状态并保护本地独立模型，按三层门禁和升级矩阵完成失败行为、请求目的端及版本级回滚验收，不保留运行时兼容分支；TOK-37 作为独立前置能力，不进入客户端迁移提交 |
-| CR-39 | PAY-33, PAY-14, PAY-12, PAY-32, PAY-13, PAY-26 | 删除主动部分退款状态并拆分支付领域状态机 | 部分实现 | 支付流水成功事实、退款记录和订单派生摘要已分离；账单证据、完整关单中间态、拒付/渠道强制退款独立事实及移除普通部分退款仍待后续任务 |
+| CR-39 | PAY-33, PAY-14, PAY-12, PAY-32, PAY-13, PAY-26 | 删除主动部分退款状态并拆分支付领域状态机 | 部分实现 | 支付流水成功事实、退款记录和订单派生摘要已分离，普通部分退款已移除，渠道强制退款已独立留证冻结；账单证据、完整关单中间态和统一异常案件结案仍待后续任务 |
 | CR-40 | TOK-07–TOK-10, TOK-12, TOK-16, TOK-20, ADM-25, ADM-28–ADM-30 | 闭合默认托管路由创建与模型资格判断顺序 | 未实现 | 目录可见后先完成托管 Token Account/路由 Provisioning，只有 READY 路由参与 CONTEXT_ELIGIBLE；状态查询和修复分别由 ADM-29、ADM-30 验收，再执行请求级 RESERVABLE、原子 Hold 和上游调用 |
-| CR-41 | BILL-28, PAY-11, PAY-20, PAY-24–PAY-31, PAY-33 | 支付履约隔离并按实际流水和权益包原子创建退款意图 | 部分实现 | 订单已支持多笔支付流水，每个支付权益包只绑定一笔成功流水并独立履约或复核；普通退款的流水+权益包目标、消费预检、原子冻结/预约、Outbox 和全 BASE/关联 BONUS 撤销仍待 APT-021 |
+| CR-41 | BILL-28, PAY-11, PAY-20, PAY-24–PAY-31, PAY-33 | 支付履约隔离并按实际流水和权益包原子创建退款意图 | 部分实现 | 多流水独立履约和目标普通退款已经闭环：消费预检、原子冻结/预约、Outbox Consumer 及全 BASE/关联 BONUS 撤销均已实现；PAY-33 统一支付异常人工案件仍待 APT-025 |
 | CR-42 | BILL-20, BILL-23–BILL-25, ADM-12–ADM-13 | 闭合公式单位、输入缓存计量和零价语义 | 已实现 | 公式引用单位必须完整配置，输入与缓存输入规范化互斥；固定零价、显式继承和缺价已有独立数据与运行时语义 |
 | CR-43 | SCOPE-03, ADM-11, ADM-25–ADM-30 | 隔离组织模型业务策略与平台 Token Gateway 运营权限 | 未实现 | 组织模型管理员只能管理模型允许/拒绝策略、目录范围等业务策略；任何组织角色都不能读取或管理真实 Token Account、路由、凭据和 Provisioning，相关平台原子权限只授予 PLATFORM_MODEL_ADMIN |
 | CR-44 | SCOPE-04, SCOPE-05, TOK-35, TOK-36, TOK-37, NFR-20 | 将客户端切换拆分为发布、安装和运行三层门禁并移除计费准入请求 | 未实现 | 服务端未就绪时不发布；迁移预检或暂存提交失败时不替换旧版本并原子恢复旧二进制/配置；新版本运行时只显示不可用和修复动作，不回退旧模型路径；准入使用无 Hold readiness 或隔离合成身份，不使用真实用户付费请求 |
@@ -670,7 +671,7 @@
 | BILL-25 | 零价、显式继承与缺失分离 | 已实现 | 固定零价被保存并阻止回退，模型继承显式配置，缺失稳定返回 PRICE_MISSING。 |
 | BILL-26 | 人工积分调整需审批 | 已实现 | 申请、批准、拒绝和账本入账可审计。 |
 | BILL-27 | 管理员查看钱包账本详情 | 已实现 | 钱包账本查询展示 Posting、科目、业务引用、lot、权益包及 BASE/BONUS 组成，并返回每个 Journal 的零和校验；钱包、Hold、调整、应收和对账均由独立权限保护且无直接余额覆盖。 |
-| BILL-28 | 退款权益与账本冲销 | 未实现 | 普通退款成功时冲销目标支付流水与权益包组合的全部未消费 BASE、该支付产生的全部未消费关联 BONUS 及对应账本负债；现金退款只按 BASE 计算，BONUS 零折现；人工赠送和其他支付来源权益不受影响。 |
+| BILL-28 | 退款权益与账本冲销 | 已实现 | Provider 确认后同一事务冲销目标支付流水与权益包组合的全部 BASE、该支付产生的全部关联 BONUS 及对应账本负债；BONUS 零折现，人工赠送和其他支付来源不受影响。 |
 | BILL-33 | 订单级拒付冲销隔离 | 已实现 | 已确认拒付证据只冲销原支付流水唯一权益包的可撤销 BASE 和关联 BONUS；不足现金本金形成订单级应收，不冲销其他权益包，应收未清时冻结对应钱包上下文。 |
 | BILL-34 | 模型计费使用可信实际生成量 | 未实现 | 当前未区分 Provider 实际生成量、Gateway 持久化序号和客户端确认序号，也没有平台不可恢复交付故障转损失复核的计费边界。 |
 | BILL-35 | 取消期间 Hold 生命周期 | 未实现 | 缺少派发前取消全释放、派发后继续续租、Provider 不支持取消时自然收敛、版本化核对期限及晚到用量不得重新扣用户的规则。 |
@@ -708,11 +709,11 @@
 | PAY-19 | 主动查询退避与72小时边界 | 未实现 | 当前查询和过期处理尚未证明在72小时执行最后查询、停止高频任务并幂等转入 REVIEW_REQUIRED_LATE_PAYMENT。 |
 | PAY-21 | 支付后自动更新额度 | 已实现 | 每个确认支付流水至多创建一个独立权益包、BASE/BONUS 组成和账本入账，重复证据不重复更新额度。 |
 | PAY-22 | 企业管理员在线购买组织权益 | 已实现 | 有 `org.entitlements.purchase` 权限的企业管理员可在组织上下文购买；订单保存付款用户与受益组织，到账后只增加组织权益。 |
-| PAY-24 | 退款目标绑定支付流水和权益包 | 未实现 | 退款请求和执行命令需同时保存并校验 payment_transaction_id、entitlement_package_id；payment_order_id 仅作归属和审计，不能独立执行退款。 |
-| PAY-26 | 退还目标全部剩余可退金额 | 未实现 | 不接受退款金额输入；现金退款只按目标支付流水实收、退款预约/确认、权益包全部未消费 BASE 和 Provider 事实核对全部剩余金额，关联 BONUS 零折现但在成功时全部撤销，主动退款状态机无 PARTIALLY_REFUNDED。 |
-| PAY-27 | 退款意图原子事务 | 未实现 | 需增加稳定锁顺序、权益冻结竞争控制、退款金额预约、refund_request 与 Outbox 原子提交，以及提交后 Provider 幂等调用和崩溃恢复；Provider 不保证幂等时不确定结果不得自动重发。 |
-| PAY-30 | 退款同步冲销 | 未实现 | Provider 确认普通退款后，在同一 Billing 事务中消费现金退款预约、冲销目标支付流水与权益包组合的全部未消费 BASE 及该支付产生的全部未消费关联 BONUS、更新退款状态并写平衡账本；人工赠送、其他支付流水和无来源关系 BONUS 不受影响。 |
-| PAY-32 | 渠道部分强制退款异常 | 未实现 | Provider 主动产生部分强制退款时将既成外部资金事实建立为独立异常并进入人工复核；不适用 PAY-25 普通退款资格预检、不复用普通退款且不覆盖支付成功，复核前冻结原权益包，无法撤销的已退本金形成原订单应收。 |
+| PAY-24 | 退款目标绑定支付流水和权益包 | 已实现 | 请求和执行均保存并校验 payment_transaction_id、entitlement_package_id 与订单归属；payment_order_id 只作归属和审计。 |
+| PAY-26 | 退还目标全部剩余可退金额 | 已实现 | 不接受退款金额输入；现金退款按目标流水整笔金额执行，关联 BONUS 零折现但成功时全部撤销，主动退款状态机无 PARTIALLY_REFUNDED。 |
+| PAY-27 | 退款意图原子事务 | 已实现 | 串行事务完成锁定、资格复查、组成/授予冻结、金额与快照预约、请求和 Outbox；提交后由仅允许显式幂等 Provider 的 Consumer 使用稳定退款号执行并按 JetStream 退避恢复。 |
+| PAY-30 | 退款同步冲销 | 已实现 | Provider 确认后同一 Billing 事务冲销目标 BASE/关联 BONUS、来源批次与钱包负债，写平衡账本并更新退款和权益终态；其他来源不受影响。 |
+| PAY-32 | 渠道部分强制退款异常 | 已实现 | 已发生外部强制退款先保存独立证据和案件、绑定原流水/订单/权益包并冻结，不经过普通退款预检且不覆盖支付成功；后续统一案件结案由 PAY-33 承担。 |
 | PAY-33 | 支付异常人工复核 | 未实现 | 拒付、渠道部分强制退款、重复支付、晚到支付、退款失败和状态冲突进入统一复核队列，同时保持各领域状态独立；拒付绑定原支付流水、订单和权益包，按 BILL-33 撤销关联权益并为不足现金本金登记订单级应收，保留证据、责任人、结论和审计。 |
 | PAY-34 | 每日四方账单对账 | 未实现 | 每日获取 Provider 账单，对订单、支付流水、退款和 Billing 账本入账进行四方核对，生成可追踪差异。 |
 | PAY-35 | 账单能力降级 | 未实现 | 当前缺少无账单 Provider 的受控文件/查询降级证据，也未对同时无回调的 Provider 执行 PAY-38 准入和 PAY-37 人工审核。 |
@@ -736,7 +737,7 @@
 | UI-09 | 桌面跳转 Web 个人中心 | 未实现 | 登录后的账号 Popover 增加入口按钮；使用专用 Tauri 命令打开受信 Portal URL，不复用任意外链接口。 |
 | UI-10 | Web 个人充值入口 | 已实现 | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | Web 组织购买入口 | 已实现 | 具有组织采购权限的管理员可在显式活动组织页面购买组织权益；读取、授予与撤回入口分别按对应原子权限显示。 |
-| UI-12 | 支付能力降级展示 | 未实现 | 关单、退款、回调状态和账单能力按 Provider capabilities 展示；不支持退款时完全隐藏入口，不展示不可执行按钮诱导用户。 |
+| UI-12 | 支付能力降级展示 | 已实现 | 退款动作按 Provider capabilities 展示，不支持时用户及运营界面完全隐藏入口；其他能力继续按各自声明降级。 |
 | UI-13 | 模型停止与结算状态反馈 | 未实现 | 当前缺少停止接收、取消请求已受理、Provider 不支持取消、后台结束处理中、待核对和已结算的区分，也未提示取消生效前按实际用量计费。 |
 | UI-14 | 注销进度与阻断原因展示 | 未实现 | 当前没有持久注销状态页、脱敏阻断分类、用户恢复动作或“自动处理中”与“需要本人处理”的区分。 |
 | UI-15 | 未完成注册恢复状态展示 | 已实现 | 桌面优先在系统凭据库保存操作查询凭据，重启后按 `next_retry_at` 轮询，区分 Identity、Account、钱包、修复与补偿状态并阻止重复注册。 |
@@ -760,7 +761,7 @@
 | ADM-17 | 人工积分调整 | 已实现 | 调整目标、钱包、金额和版本被冻结；独立审批后由 Billing 以稳定执行键写一次平衡账本，直接批准路径失败关闭。 |
 | ADM-18 | Hold 运营 | 已实现 | 可查询 Hold 的价格/请求/用量快照、组成与成员授予分配、当前租约和不可变租约历史；异常释放限 REVIEW 或已过期 ACTIVE，要求原因和幂等键并保存操作证据。 |
 | ADM-19 | 支付订单运营 | 已实现 | 支持订单查询、同步、受审计修复和明细查看；明细包含付款人、受益方、多笔支付流水、不可变证据及订单派生摘要。 |
-| ADM-20 | 退款运营 | 未实现 | 普通退款意图、BASE/关联 BONUS 累计消费资格预检、只按全部未消费 BASE 计算整笔现金退款、成功后同步撤销关联 BONUS 及 Provider 能力降级待实现。 |
+| ADM-20 | 退款运营 | 已实现 | 后台查询普通/强制退款和目标订单明细，只允许选择精确支付流水+权益包发起无金额输入的整笔剩余退款，并按 Provider 能力隐藏入口。 |
 | ADM-21 | Billing 对账管理 | 部分实现 | 已有内部对账基础；四方对账、责任人和 Provider 账单降级待实现。 |
 | ADM-22 | Billing 修复执行 | 已实现 | 当前修复动作均绑定稳定命令类型、异常目标、原因、脱敏证据、快照和幂等键；财务事实修复进入审批，证据收敛修复只审计。 |
 | ADM-23 | 模型协议定义管理 | 已实现 | 后台提供独立版本化协议定义管理。 |

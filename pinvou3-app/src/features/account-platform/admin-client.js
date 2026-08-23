@@ -91,9 +91,10 @@ export class AdminPlatformClient {
     return this.request('billing', `/admin/v1/payment-orders?${query}`, signal);
   }
   paymentOrder(orderID, signal) { return this.request('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}`, signal); }
+  refunds(signal) { return this.request('billing', '/admin/v1/refunds?limit=100', signal); }
   syncPaymentOrder(orderID) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {}); }
   repairPaymentOrder(orderID, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason }); }
-  refundPaymentOrder(orderID, amountFen, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { amount_fen:amountFen, reason }); }
+  refundPaymentOrder(orderID, transactionID, packageID, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { payment_transaction_id:transactionID, entitlement_package_id:packageID, reason }, `target-refund-${crypto.randomUUID()}`); }
   adjustments(signal) { return this.request('billing', '/admin/v1/adjustments?limit=100', signal); }
   decideAdjustment(adjustmentID, decision, reason) { return this.mutate('billing', `/admin/v1/adjustments/${encodeURIComponent(adjustmentID)}/${decision}`, 'POST', { reason }); }
   holds(signal) { return this.request('billing', '/admin/v1/usage-holds?limit=100', signal); }

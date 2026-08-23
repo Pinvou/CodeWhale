@@ -35,7 +35,7 @@ func (p *Provider) Capabilities() payment.Capabilities {
 		ProviderID: "development_simulator", Version: "development-simulator-v1", Channels: []string{"UNIONPAY", "ALIPAY", "WECHAT"},
 		OrderQuerySupported: true, OrderHistoryRetentionSeconds: 90 * 24 * 60 * 60, MinimumQueryIntervalSeconds: 1,
 		MaximumPayableWindowSeconds: 15 * 60, MaximumLateConfirmationSeconds: 60,
-		AuthoritativeUnpaidTerminal: true, RefundSupported: true, CloseSupported: true,
+		AuthoritativeUnpaidTerminal: true, RefundSupported: true, RefundIdempotencySupported: true, CloseSupported: true,
 		NotificationSupported: true, BillSupported: true, ManualRepairSupported: true, TestOnly: true,
 	}
 }

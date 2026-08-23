@@ -635,7 +635,7 @@ paths:
           schema: { type: string, maxLength: 160 }
         - name: status
           in: query
-          schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, PARTIALLY_REFUNDED, REFUNDED, MANUAL_REVIEW] }
+          schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, MANUAL_REVIEW] }
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "400": { $ref: "#/components/responses/Error" }
@@ -680,8 +680,8 @@ paths:
   /billing/admin/v1/payment-orders/{order_id}/refunds:
     post:
       operationId: createAdminPaymentRefund
-      summary: Refund a settled payment order subject to refundable balance
-      parameters: [{ $ref: "#/components/parameters/OrderID" }]
+      summary: Refund the whole unconsumed remainder of a selected payment transaction entitlement package
+      parameters: [{ $ref: "#/components/parameters/OrderID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
         content:
@@ -693,6 +693,14 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/refunds:
+    get:
+      operationId: listAdminRefundOperations
+      summary: List targeted ordinary refund requests and isolated forced-refund review cases
+      parameters: [{ $ref: "#/components/parameters/Limit" }]
+      responses:
+        "200": { $ref: "#/components/responses/Collection" }
+        "403": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/adjustments:
     get:
       operationId: listAdminAdjustments
@@ -1654,9 +1662,10 @@ components:
     RefundCreate:
       type: object
       additionalProperties: false
-      required: [amount_fen, reason]
+      required: [payment_transaction_id, entitlement_package_id, reason]
       properties:
-        amount_fen: { type: integer, format: int64, minimum: 1 }
+        payment_transaction_id: { type: string, format: uuid }
+        entitlement_package_id: { type: string, format: uuid }
         reason: { type: string, minLength: 1, maxLength: 500 }
     PaymentTransaction:
       type: object
@@ -1685,7 +1694,7 @@ components:
         payment_evidence_id: { type: string, format: uuid }
         payment_order_id: { type: string, format: uuid }
         payment_transaction_id: { type: string, format: uuid }
-        evidence_type: { type: string, enum: [CALLBACK, QUERY, BILL, MANUAL_REPAIR, CHARGEBACK] }
+        evidence_type: { type: string, enum: [CALLBACK, QUERY, BILL, MANUAL_REPAIR, CHARGEBACK, FORCED_REFUND] }
         provider_id: { type: string, minLength: 1 }
         provider_version: { type: string, minLength: 1 }
         evidence_key: { type: string, minLength: 1 }
@@ -1701,7 +1710,7 @@ components:
     PaymentOrderDetail:
       type: object
       additionalProperties: true
-      required: [order_id, merchant_order_no, provider_id, provider_version, payer_user_id, wallet_id, payment_summary, refund_summary, chargeback_summary, attention_summary, summary_version, transactions, evidence]
+      required: [order_id, merchant_order_no, provider_id, provider_version, payer_user_id, wallet_id, payment_summary, refund_summary, chargeback_summary, attention_summary, summary_version, transactions, entitlement_packages, evidence]
       properties:
         order_id: { type: string, format: uuid }
         merchant_order_no: { type: string }
@@ -1716,6 +1725,34 @@ components:
         attention_summary: { type: string, enum: [NORMAL, PROCESSING, REVIEW_REQUIRED, RECEIVABLE_OPEN] }
         summary_version: { type: integer, format: int64, minimum: 1 }
         transactions: { type: array, items: { $ref: "#/components/schemas/PaymentTransaction" } }
+        entitlement_packages:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            required: [package_id, source_payment_transaction_id, status, points_remaining_microcredits, components]
+            properties:
+              package_id: { type: string, format: uuid }
+              source_payment_transaction_id: { type: string, format: uuid }
+              status: { type: string, enum: [ACTIVE, CONSUMED, EXPIRED, CREDIT_FAILED, REPAIRED, FROZEN, REVOKED] }
+              points_remaining_microcredits: { type: integer, format: int64, minimum: 0 }
+              components:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+                  required: [component_id, component_type, available_microcredits, reserved_microcredits, used_microcredits, active_grant_microcredits, suspended_grant_microcredits, expired_microcredits, revoked_microcredits, status]
+                  properties:
+                    component_id: { type: string, format: uuid }
+                    component_type: { type: string, enum: [BASE, BONUS] }
+                    available_microcredits: { type: integer, format: int64, minimum: 0 }
+                    reserved_microcredits: { type: integer, format: int64, minimum: 0 }
+                    used_microcredits: { type: integer, format: int64, minimum: 0 }
+                    active_grant_microcredits: { type: integer, format: int64, minimum: 0 }
+                    suspended_grant_microcredits: { type: integer, format: int64, minimum: 0 }
+                    expired_microcredits: { type: integer, format: int64, minimum: 0 }
+                    revoked_microcredits: { type: integer, format: int64, minimum: 0 }
+                    status: { type: string }
         evidence: { type: array, items: { $ref: "#/components/schemas/PaymentEvidence" } }
     AdjustmentRequestCreate:
       type: object

@@ -6,7 +6,7 @@
 >
 > 说明：本文描述业务调用顺序和失败收敛方式；具体字段以 `contracts/openapi/` 和事件 Schema 为准。
 >
-> 目标变更提示：本文已按用户级全局上下文、异步钱包 bootstrap 和版本化计量/定价链路更新。注册在 Identity 与 Account 成功后持久进入 `PROVISIONING`，钱包通过 Outbox 异步初始化；钱包完成前可登录和管理资料但不能调用平台模型或充值，超过 SLA 才进入 `REPAIR_REQUIRED`，Billing 短暂不可用不得删除已验证身份。尚未实现的支付回调主收敛、完整退款/四方对账等能力以 `requirements.md` 和 `role-system-design.md` 为准。
+> 目标变更提示：本文已按用户级全局上下文、异步钱包 bootstrap 和版本化计量/定价链路更新。注册在 Identity 与 Account 成功后持久进入 `PROVISIONING`，钱包通过 Outbox 异步初始化；钱包完成前可登录和管理资料但不能调用平台模型或充值，超过 SLA 才进入 `REPAIR_REQUIRED`，Billing 短暂不可用不得删除已验证身份。支付回调/查询证据和目标支付流水+权益包的整笔剩余退款已在仓库闭环；尚未实现的完整关单、统一支付异常案件和四方对账等能力以 `requirements.md` 和 `role-system-design.md` 为准。
 
 ## 1. 入口与凭据
 

@@ -74,6 +74,13 @@ func main() {
 		log.Fatal(err)
 	}
 	defer stopApprovalConsumer()
+	if payments.Capabilities().RefundSupported && payments.Capabilities().RefundIdempotencySupported {
+		stopRefundConsumer, consumeErr := broker.Consume(workerContext, "billing-refund-executor-v1", "billing.refund.requested.v1", billing.NewRefundCommandConsumer(payments).Handle)
+		if consumeErr != nil {
+			log.Fatal(consumeErr)
+		}
+		defer stopRefundConsumer()
+	}
 	if payments.Capabilities().OrderQuerySupported {
 		minimumQueryInterval := time.Duration(payments.Capabilities().MinimumQueryIntervalSeconds) * time.Second
 		if reconciliationInterval < minimumQueryInterval {

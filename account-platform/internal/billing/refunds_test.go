@@ -7,29 +7,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestProportionalCreditsRejectsInvalidOrFractionalValues(t *testing.T) {
-	tests := []struct {
-		name                    string
-		orderFen, credits, part int64
-		want                    int64
-		ok                      bool
-	}{
-		{name: "full", orderFen: 100, credits: 1_000_000, part: 100, want: 1_000_000, ok: true},
-		{name: "partial", orderFen: 100, credits: 1_000_000, part: 25, want: 250_000, ok: true},
-		{name: "fractional", orderFen: 3, credits: 10, part: 1, ok: false},
-		{name: "too much", orderFen: 100, credits: 1_000_000, part: 101, ok: false},
-		{name: "zero", orderFen: 100, credits: 1_000_000, part: 0, ok: false},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			got, ok := proportionalCredits(test.orderFen, test.credits, test.part)
-			if got != test.want || ok != test.ok {
-				t.Fatalf("proportionalCredits() = (%d, %v), want (%d, %v)", got, ok, test.want, test.ok)
-			}
-		})
-	}
-}
-
 func TestCompareReconciliationFindsRequiredDifferenceClasses(t *testing.T) {
 	paidAt := time.Date(2026, 8, 12, 1, 0, 0, 0, time.UTC)
 	internalA := PaymentOrder{ID: uuid.Must(uuid.NewV7()), MerchantOrderNo: "internal-only", AmountFen: 100, Currency: "CNY"}

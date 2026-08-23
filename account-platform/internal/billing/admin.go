@@ -57,8 +57,25 @@ type AdminPaymentOrder struct {
 	SummaryVersion             int64                `json:"summary_version"`
 	Transactions               []PaymentTransaction `json:"transactions,omitempty"`
 	Evidence                   []PaymentEvidence    `json:"evidence,omitempty"`
+	Packages                   []EntitlementPackage `json:"entitlement_packages,omitempty"`
 	CreatedAt                  time.Time            `json:"created_at"`
 	UpdatedAt                  time.Time            `json:"updated_at"`
+}
+
+type AdminRefundOperation struct {
+	ID                   uuid.UUID `json:"operation_id"`
+	OperationType        string    `json:"operation_type"`
+	PaymentOrderID       uuid.UUID `json:"payment_order_id"`
+	PaymentTransactionID uuid.UUID `json:"payment_transaction_id"`
+	EntitlementPackageID uuid.UUID `json:"entitlement_package_id"`
+	ProviderRefundID     *string   `json:"provider_refund_id,omitempty"`
+	AmountFen            int64     `json:"amount_fen"`
+	BaseMicrocredits     int64     `json:"base_microcredits"`
+	BonusMicrocredits    int64     `json:"bonus_microcredits"`
+	Status               string    `json:"status"`
+	Reason               string    `json:"reason"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type AdminPaymentOrderFilter struct {
@@ -195,6 +212,7 @@ type adminRepository interface {
 	AdminOverview(context.Context) (AdminOverview, error)
 	AdminWallets(context.Context, int) ([]Wallet, error)
 	AdminPaymentOrders(context.Context, AdminPaymentOrderFilter, int) ([]AdminPaymentOrder, error)
+	AdminRefunds(context.Context, int) ([]AdminRefundOperation, error)
 	AdminAdjustments(context.Context, int) ([]ManualAdjustment, error)
 	AdminUsageHolds(context.Context, int) ([]AdminHold, error)
 	AdminUsageHold(context.Context, uuid.UUID) (AdminHoldDetail, error)
@@ -331,6 +349,12 @@ func (s *Service) adminPaymentOrders(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Service) adminRefunds(w http.ResponseWriter, r *http.Request) {
+	s.writeAdminCollection(w, r, func(repository adminRepository, limit int) (any, error) {
+		return repository.AdminRefunds(r.Context(), limit)
+	})
+}
+
 func (s *Service) adminPaymentOrderDetail(w http.ResponseWriter, r *http.Request) {
 	repository, ok := s.requireAdminRepository(w, r)
 	if !ok {
@@ -351,7 +375,7 @@ func (s *Service) adminPaymentOrderDetail(w http.ResponseWriter, r *http.Request
 
 func validAdminPaymentStatus(status string) bool {
 	switch status {
-	case "CREATED", "PENDING", "PAID", "PAID_LATE", "FAILED", "CLOSED", "PARTIALLY_REFUNDED", "REFUNDED", "MANUAL_REVIEW":
+	case "CREATED", "PENDING", "PAID", "PAID_LATE", "FAILED", "CLOSED", "MANUAL_REVIEW":
 		return true
 	default:
 		return false
@@ -547,11 +571,13 @@ func (s *Service) adminRefundPaymentOrder(w http.ResponseWriter, r *http.Request
 	}
 	orderID, err := uuid.Parse(r.PathValue("order_id"))
 	var body struct {
-		AmountFen int64  `json:"amount_fen"`
-		Reason    string `json:"reason"`
+		PaymentTransactionID uuid.UUID `json:"payment_transaction_id"`
+		EntitlementPackageID uuid.UUID `json:"entitlement_package_id"`
+		Reason               string    `json:"reason"`
 	}
-	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.AmountFen <= 0 || strings.TrimSpace(body.Reason) == "" || s.payments == nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "refund amount and reason are required", httpserver.RequestID(r.Context()))
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.PaymentTransactionID == uuid.Nil || body.EntitlementPackageID == uuid.Nil || strings.TrimSpace(body.Reason) == "" || len(idempotencyKey) < 16 || s.payments == nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "refund target, reason and idempotency key are required", httpserver.RequestID(r.Context()))
 		return
 	}
 	order, err := repository.AdminPaymentOrder(r.Context(), orderID)
@@ -559,8 +585,7 @@ func (s *Service) adminRefundPaymentOrder(w http.ResponseWriter, r *http.Request
 		s.writeError(w, r, err)
 		return
 	}
-	idempotencyKey := "admin-refund-" + uuid.Must(uuid.NewV7()).String()
-	refund, _, err := s.payments.CreateRefund(r.Context(), orderID, order.RequesterID, body.AmountFen, idempotencyKey, body.Reason)
+	refund, _, err := s.payments.CreateRefund(r.Context(), orderID, order.RequesterID, body.PaymentTransactionID, body.EntitlementPackageID, idempotencyKey, body.Reason)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -690,6 +715,29 @@ func (r *PostgresRepository) AdminPaymentOrders(ctx context.Context, filter Admi
 			return nil, err
 		}
 		item.MobileMasked = maskAdminMobile(mobile)
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (r *PostgresRepository) AdminRefunds(ctx context.Context, limit int) ([]AdminRefundOperation, error) {
+	rows, err := r.pool.Query(ctx, `SELECT operation_id,operation_type,payment_order_id,payment_transaction_id,entitlement_package_id,provider_refund_id,amount_fen,base_microcredits,bonus_microcredits,status,reason,created_at,updated_at FROM (
+		SELECT refund.id operation_id,'NORMAL' operation_type,refund.payment_order_id,refund.payment_transaction_id,refund.entitlement_package_id,refund.channel_refund_id provider_refund_id,refund.amount_fen,refund.base_microcredits,refund.bonus_microcredits,refund.status,refund.reason,refund.created_at,refund.updated_at
+		FROM refunds refund
+		UNION ALL
+		SELECT forced.id,'FORCED',forced.payment_order_id,forced.payment_transaction_id,forced.entitlement_package_id,forced.provider_refund_id,forced.amount_fen,0,0,forced.status,'PROVIDER_INITIATED',forced.created_at,COALESCE(forced.resolved_at,forced.created_at)
+		FROM forced_refund_cases forced
+	) operation ORDER BY updated_at DESC,operation_id LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]AdminRefundOperation, 0)
+	for rows.Next() {
+		var item AdminRefundOperation
+		if err := rows.Scan(&item.ID, &item.OperationType, &item.PaymentOrderID, &item.PaymentTransactionID, &item.EntitlementPackageID, &item.ProviderRefundID, &item.AmountFen, &item.BaseMicrocredits, &item.BonusMicrocredits, &item.Status, &item.Reason, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -967,6 +1015,49 @@ func (r *PostgresRepository) AdminPaymentOrder(ctx context.Context, orderID uuid
 	}
 	if err := transactionRows.Err(); err != nil {
 		return item, err
+	}
+	packageRows, err := r.pool.Query(ctx, `SELECT ep.id,ep.user_id,ep.wallet_id,ep.payment_order_id,ep.source_payment_transaction_id,COALESCE(po.merchant_order_no,''),ep.source_type,ep.source_reference,ep.product_id,ep.plan_name,ep.sku_code,ep.amount_fen,ep.points_total,ep.points_reserved,ep.points_used,ep.points_remaining,ep.points_expired,ep.points_revoked,ep.credited_at,ep.valid_from,ep.valid_until,ep.status FROM entitlement_packages ep LEFT JOIN payment_orders po ON po.id=ep.payment_order_id WHERE ep.payment_order_id=$1 ORDER BY ep.credited_at,ep.id`, orderID)
+	if err != nil {
+		return item, err
+	}
+	item.Packages = []EntitlementPackage{}
+	packageIndex := map[uuid.UUID]int{}
+	packageIDs := []uuid.UUID{}
+	for packageRows.Next() {
+		var entitlement EntitlementPackage
+		if err := packageRows.Scan(&entitlement.ID, &entitlement.UserID, &entitlement.WalletID, &entitlement.PaymentOrderID, &entitlement.PaymentTransactionID, &entitlement.ProviderOrderReference, &entitlement.SourceType, &entitlement.SourceReference, &entitlement.ProductID, &entitlement.PlanName, &entitlement.SKUCode, &entitlement.AmountFen, &entitlement.PointsTotal, &entitlement.PointsReserved, &entitlement.PointsUsed, &entitlement.PointsRemaining, &entitlement.PointsExpired, &entitlement.PointsRevoked, &entitlement.CreditedAt, &entitlement.ValidFrom, &entitlement.ValidUntil, &entitlement.Status); err != nil {
+			packageRows.Close()
+			return item, err
+		}
+		entitlement.Components = []EntitlementComponent{}
+		packageIndex[entitlement.ID] = len(item.Packages)
+		packageIDs = append(packageIDs, entitlement.ID)
+		item.Packages = append(item.Packages, entitlement)
+	}
+	if err := packageRows.Err(); err != nil {
+		packageRows.Close()
+		return item, err
+	}
+	packageRows.Close()
+	if len(packageIDs) > 0 {
+		componentRows, err := r.pool.Query(ctx, `SELECT package_id,id,component_type,original_microcredits,available_microcredits,reserved_microcredits,used_microcredits,active_grant_microcredits,suspended_grant_microcredits,expired_microcredits,revoked_microcredits,credited_at,expires_at,status FROM entitlement_components WHERE package_id=ANY($1) ORDER BY package_id,component_type,id`, packageIDs)
+		if err != nil {
+			return item, err
+		}
+		for componentRows.Next() {
+			var packageID uuid.UUID
+			var component EntitlementComponent
+			if err := componentRows.Scan(&packageID, &component.ID, &component.ComponentType, &component.OriginalMicrocredits, &component.AvailableMicrocredits, &component.ReservedMicrocredits, &component.UsedMicrocredits, &component.ActiveGrantMicrocredits, &component.SuspendedGrantMicrocredits, &component.ExpiredMicrocredits, &component.RevokedMicrocredits, &component.CreditedAt, &component.ExpiresAt, &component.Status); err != nil {
+				componentRows.Close()
+				return item, err
+			}
+			item.Packages[packageIndex[packageID]].Components = append(item.Packages[packageIndex[packageID]].Components, component)
+		}
+		if err := componentRows.Err(); err != nil {
+			componentRows.Close()
+			return item, err
+		}
+		componentRows.Close()
 	}
 	evidenceRows, err := r.pool.Query(ctx, `SELECT id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,evidence_key,provider_transaction_id,amount_fen,COALESCE(currency,''),COALESCE(provider_status,''),provider_event_at,received_at,payload_digest,payload_snapshot,merge_result FROM payment_evidence WHERE payment_order_id=$1 ORDER BY received_at,id`, orderID)
 	if err != nil {

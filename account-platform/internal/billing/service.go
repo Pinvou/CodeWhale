@@ -64,6 +64,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", httpserver.AdaptFunc(s.executeApprovedAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
 	protected.POST("/internal/v1/chargebacks/confirmed", approvalpolicy.Require("BILLING_CONFIRMED_CHARGEBACK_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyConfirmedChargeback))
+	protected.POST("/internal/v1/refunds/forced", approvalpolicy.Require("BILLING_FORCED_REFUND_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordForcedRefund))
 	protected.PUT("/internal/v1/organizations/:organization_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
 	protected.PUT("/internal/v1/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
 	protected.PUT("/internal/v1/organizations/:organization_id/members/:user_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationMemberLifecycle))
@@ -106,6 +107,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/metering-units", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateMeteringUnit))
 		admin.POST("/metering-units/:unit_definition_id/deactivate", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_DEACTIVATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeactivateMeteringUnit))
 		admin.GET("/payment-orders", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrders))
+		admin.GET("/refunds", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminRefunds))
 		admin.GET("/payment-orders/:order_id", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrderDetail))
 		admin.POST("/payment-orders/:order_id/sync", s.authorizer.Require("platform.billing.orders.sync"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_SYNC", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSyncPaymentOrder))
 		admin.POST("/payment-orders/:order_id/repair", s.authorizer.Require("platform.billing.repairs.request"), approvalpolicy.Require("BILLING_PAYMENT_ORDER_EVIDENCE_REPAIR", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRepairPaymentOrder))
@@ -129,6 +131,10 @@ type chargebackRepository interface {
 	RecordAndApplyConfirmedChargeback(context.Context, uuid.UUID, string, json.RawMessage) (ChargebackCase, error)
 }
 
+type forcedRefundRepository interface {
+	RecordAndFreezeForcedRefund(context.Context, uuid.UUID, string, int64, json.RawMessage) (ForcedRefundCase, error)
+}
+
 func (s *Service) applyConfirmedChargeback(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		PaymentEvidenceID    uuid.UUID       `json:"payment_evidence_id"`
@@ -148,6 +154,26 @@ func (s *Service) applyConfirmedChargeback(w http.ResponseWriter, r *http.Reques
 	} else {
 		result, err = repository.RecordAndApplyConfirmedChargeback(r.Context(), body.PaymentTransactionID, body.ProviderChargebackID, body.PayloadSnapshot)
 	}
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
+}
+
+func (s *Service) recordForcedRefund(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PaymentTransactionID uuid.UUID       `json:"payment_transaction_id"`
+		ProviderRefundID     string          `json:"provider_refund_id"`
+		AmountFen            int64           `json:"amount_fen"`
+		PayloadSnapshot      json.RawMessage `json:"payload_snapshot"`
+	}
+	repository, ok := s.repository.(forcedRefundRepository)
+	if err := api.DecodeJSON(w, r, &body); err != nil || !ok || body.PaymentTransactionID == uuid.Nil || strings.TrimSpace(body.ProviderRefundID) == "" || body.AmountFen <= 0 {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid forced refund evidence", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := repository.RecordAndFreezeForcedRefund(r.Context(), body.PaymentTransactionID, body.ProviderRefundID, body.AmountFen, body.PayloadSnapshot)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -331,15 +357,16 @@ func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
 func (s *Service) createRefund(w http.ResponseWriter, r *http.Request) {
 	orderID, err := uuid.Parse(r.PathValue("order_id"))
 	var body struct {
-		RequesterID uuid.UUID `json:"requester_id"`
-		AmountFen   int64     `json:"amount_fen"`
-		Reason      string    `json:"reason"`
+		RequesterID          uuid.UUID `json:"requester_id"`
+		PaymentTransactionID uuid.UUID `json:"payment_transaction_id"`
+		EntitlementPackageID uuid.UUID `json:"entitlement_package_id"`
+		Reason               string    `json:"reason"`
 	}
-	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.RequesterID == uuid.Nil || body.AmountFen <= 0 || strings.TrimSpace(body.Reason) == "" {
+	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || body.RequesterID == uuid.Nil || body.PaymentTransactionID == uuid.Nil || body.EntitlementPackageID == uuid.Nil || strings.TrimSpace(body.Reason) == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid refund request", httpserver.RequestID(r.Context()))
 		return
 	}
-	refund, created, err := s.payments.CreateRefund(r.Context(), orderID, body.RequesterID, body.AmountFen, r.Header.Get("Idempotency-Key"), body.Reason)
+	refund, created, err := s.payments.CreateRefund(r.Context(), orderID, body.RequesterID, body.PaymentTransactionID, body.EntitlementPackageID, r.Header.Get("Idempotency-Key"), body.Reason)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
