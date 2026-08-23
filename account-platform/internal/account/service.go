@@ -445,6 +445,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_CONFLICT", "the account resource changed or conflicts with existing data"
 	case errors.Is(err, ErrLastOwner):
 		status, code, message = http.StatusConflict, "LAST_OWNER_REQUIRED", "the organization must retain at least one owner"
+	case errors.Is(err, ErrLastActiveSuperAdmin):
+		status, code, message = http.StatusConflict, "LAST_ACTIVE_SUPER_ADMIN", "another active user must become super administrator first"
 	case errors.Is(err, ErrInvalidHierarchy):
 		status, code, message = http.StatusUnprocessableEntity, "ORG_UNIT_HIERARCHY_INVALID", "the requested organization hierarchy is invalid"
 	case errors.Is(err, ErrInvitationExpired):
@@ -453,6 +455,8 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusConflict, "ACCOUNT_PROVISIONING", "the account is still provisioning"
 	case errors.Is(err, ErrAccountRepairRequired):
 		status, code, message = http.StatusConflict, "ACCOUNT_REPAIR_REQUIRED", "the account initialization requires repair"
+	case errors.Is(err, ErrBootstrapPending):
+		status, code, message = http.StatusForbidden, "ADMIN_BOOTSTRAP_PENDING", "the first administrator must complete secure activation"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }

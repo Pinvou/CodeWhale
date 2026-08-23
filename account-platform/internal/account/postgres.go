@@ -117,6 +117,9 @@ VALUES ($1, $2, $3, $4, $4)`, principal.Issuer, principal.Subject, user.UserID, 
 		}
 		user.Username = &username
 	}
+	if user.Status == "BOOTSTRAP_PENDING" {
+		return Me{}, false, ErrBootstrapPending
+	}
 
 	now := r.now()
 	_, err = tx.Exec(ctx, `

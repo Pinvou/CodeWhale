@@ -420,6 +420,45 @@ UAT 只使用明确的测试商品和测试商城账号：
 3. **运行门禁**：已经安装的新版本只运行账号平台和 Token Gateway 路径；平台不可用时显示原因与修复动作，不调用旧模型后台。
 4. 三层门禁分别保存构建版本、服务版本、配置 schema、检查结果和脱敏证据。不得以开发机手工调用真实用户付费模型代替任何一层门禁。
 
+### 11.5 首个超级管理员安全激活
+
+数据库迁移和 Identity 管理私网准备完成后，只能从受控主机或集群运维工作负载运行 `account-security`；该命令不是常驻服务，不得配置 Ingress、Service 或公网路由。先提供 `DATABASE_URL`、`OIDC_ISSUER` 及 Keycloak Provisioner 的受控连接配置，再显式选择一种模式：
+
+```text
+# 终端直接设置正式密码；命令无回显读取两次，不接受密码参数或密码环境变量
+account-security bootstrap --mode INTERACTIVE_SET_PASSWORD \
+  --deployment-identity <deployment-workload>
+
+# 一次性引导；凭据只写入受控描述符 3，不写 stdout/stderr
+account-security bootstrap --mode ONE_TIME_BOOTSTRAP \
+  --deployment-identity <deployment-workload> --ttl 15m --delivery-fd 3
+
+# 兑换时，引导凭据由描述符 3 输入，正式密码由终端无回显输入两次
+account-security redeem --deployment-identity <deployment-workload> --credential-fd 3
+```
+
+非终端自动化必须通过 `--password-fd` 传入两行完全一致的正式密码；禁止把正式密码或引导凭据放入参数、环境变量、Compose/Helm values、普通标准输出、日志或部署制品。一次性凭据默认 256 bit、43 字符无填充 Base64URL、15 分钟有效，最长 60 分钟；第 5 次失败锁定并产生 CRITICAL 告警。重新签发会先使同一部署身份的旧代次失效。
+
+激活验收必须确认：`admin` 业务状态从 `BOOTSTRAP_PENDING` 变为 `ACTIVE`；Identity 用户只在正式密码设置成功后启用；只有一个有效 `PLATFORM_SUPER_ADMIN` 绑定；旧 Session 已撤销；服务端校验值已删除；安全审计存在且不能更新、删除或截断。任何一步失败都不得开放后台流量；Identity 已激活但 Account 提交失败时命令会补偿禁用 Identity。
+
+### 11.6 Break-glass 异常失联恢复
+
+Break-glass 只用于凭据丢失、意外停用或 Identity 故障导致全部超级管理员均无法有效登录的事故。计划内交接必须走正常超级管理员授权/审批，不得使用本命令；该命令也不能让最后一个有效超级管理员主动注销。
+
+```text
+account-security break-glass \
+  --workload-identity <incident-workload> \
+  --target-username <existing-user> \
+  --reason "<至少20字符的事故原因>" \
+  --evidence-file <controlled-incident-evidence> \
+  --confirm ALL_SUPER_ADMINS_UNREACHABLE \
+  --duration 30m
+```
+
+命令从终端无回显读取并确认正式密码；非终端场景使用 `--password-fd`。持续时间必须在 5–60 分钟内。执行后必须立即核对 `BREAK_GLASS_ACTIVATED` CRITICAL 告警、`security.break-glass.activated` 不可变审计、工作负载身份、目标、原因、证据 SHA-256 和到期时间，并在 Identity 恢复后通过正常流程完成长期管理员交接。仓库没有 Break-glass HTTP API。
+
+当前仍缺生产等价环境的并发兑换、Keycloak/数据库提交故障补偿、告警投递和完整事故演练证据，因此 ADM-01/ADM-02 保持 `NOT_DEPLOYED`，APT-007 标记 `BLOCKED_EXTERNAL`。
+
 ## 12. 日志与可观测性
 
 ### 12.1 日志位置

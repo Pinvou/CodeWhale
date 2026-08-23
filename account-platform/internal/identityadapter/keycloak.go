@@ -19,6 +19,94 @@ import (
 
 var ErrUsernameAlreadyRegistered = errors.New("username is already registered")
 
+// EnsureBootstrapAdmin idempotently creates the disabled deployment-owned
+// identity used by the secure bootstrap CLI. No credential is assigned here.
+func (p *KeycloakDirectory) EnsureBootstrapAdmin(ctx context.Context, username string) (string, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return "", errors.New("bootstrap username is required")
+	}
+	access, err := p.accessToken(ctx)
+	if err != nil {
+		return "", err
+	}
+	endpoint := *p.adminURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/admin/realms/" + url.PathEscape(p.realm) + "/users"
+	query := endpoint.Query()
+	query.Set("username", username)
+	query.Set("exact", "true")
+	query.Set("max", "2")
+	endpoint.RawQuery = query.Encode()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	request.Header.Set("Authorization", "Bearer "+access)
+	response, err := p.client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	var users []struct {
+		ID         string              `json:"id"`
+		Username   string              `json:"username"`
+		Attributes map[string][]string `json:"attributes"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(response.Body, 128<<10)).Decode(&users) != nil {
+		response.Body.Close()
+		return "", fmt.Errorf("query bootstrap Keycloak user returned HTTP %d", response.StatusCode)
+	}
+	response.Body.Close()
+	if len(users) == 1 && strings.EqualFold(users[0].Username, username) {
+		managed := users[0].Attributes["pinvou_bootstrap_managed"]
+		if len(managed) != 1 || managed[0] != "true" {
+			return "", errors.New("existing bootstrap username is not deployment-managed")
+		}
+		return users[0].ID, nil
+	}
+	if len(users) > 0 {
+		return "", errors.New("bootstrap username is ambiguous")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"username": username,
+		"enabled":  false,
+		"attributes": map[string][]string{
+			"pinvou_bootstrap_managed": {"true"},
+		},
+	})
+	endpoint.RawQuery = ""
+	request, _ = http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+access)
+	request.Header.Set("Content-Type", "application/json")
+	response, err = p.client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+	if response.StatusCode != http.StatusCreated {
+		return "", fmt.Errorf("create bootstrap Keycloak user returned HTTP %d", response.StatusCode)
+	}
+	location := response.Header.Get("Location")
+	subject := location[strings.LastIndex(location, "/")+1:]
+	if subject == "" {
+		return "", errors.New("bootstrap Keycloak user omitted subject")
+	}
+	return subject, nil
+}
+
+// ActivateBootstrapAdmin sets the formal password and only then enables the
+// identity. The caller keeps the Account activation transaction open until
+// this operation and session revocation both succeed.
+func (p *KeycloakDirectory) ActivateBootstrapAdmin(ctx context.Context, subject, username, password string) error {
+	if err := ValidatePrivilegedPassword(password, username); err != nil {
+		return err
+	}
+	if err := p.SetPassword(ctx, subject, password); err != nil {
+		return err
+	}
+	if err := p.updateUser(ctx, subject, func(user map[string]any) { user["enabled"] = true }); err != nil {
+		return err
+	}
+	return p.RevokeSessions(ctx, subject)
+}
+
 type KeycloakDirectory struct {
 	adminURL                      *url.URL
 	tokenURL                      *url.URL

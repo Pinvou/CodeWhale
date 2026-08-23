@@ -14,10 +14,12 @@ var (
 	ErrForbidden             = errors.New("account action forbidden")
 	ErrConflict              = errors.New("account resource conflict")
 	ErrLastOwner             = errors.New("organization must retain an owner")
+	ErrLastActiveSuperAdmin  = errors.New("platform must retain an active super administrator")
 	ErrInvalidHierarchy      = errors.New("invalid organization hierarchy")
 	ErrInvitationExpired     = errors.New("invitation expired")
 	ErrAccountProvisioning   = errors.New("account is provisioning")
 	ErrAccountRepairRequired = errors.New("account provisioning requires repair")
+	ErrBootstrapPending      = errors.New("super administrator bootstrap is pending")
 )
 
 type Context struct {

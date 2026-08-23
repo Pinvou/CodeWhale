@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 103`、`部分实现 74`、`未实现 150`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 103`、`部分实现 77`、`未实现 147`、`降级实现 2`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -37,8 +37,9 @@
 | `COMMERCE-MAPPING` | 供应商中立 Mapping/任务/证据、版本防迟到覆盖、Adapter 合同边界及支付专用准入查询 | Go 单元测试、42 个 OpenAPI/合同测试、迁移与部署模板检查通过；真实 Provider、数据库运行级迁移和故障注入待部署 |
 | `ENTITLEMENT-COMPONENTS` | BASE/BONUS 组成级入账、确定消费顺序、人工赠送、到期释放、迟到用量损失复核、守恒投影及三语展示 | Go Billing/Token 单元测试、OpenAPI lint、44 个合同测试、Portal 构建和桌面 ESLint 通过；数据库运行级迁移、并发和故障注入待部署 |
 | `ROLE-BINDING-LIFECYCLE` | 本人/组织/平台绑定视图、起止时间、幂等授权、单条幂等撤销、自动到期、授权版本刷新、审计/Outbox 和三语 Portal | Account/Portal Go 单元测试、OpenAPI lint、角色生命周期合同和静态资源检查通过；数据库运行级迁移、真实并发授权及 worker 故障恢复待部署 |
+| `SECURITY-RECOVERY` | `BOOTSTRAP_PENDING` 首管安全激活、256 bit 一次性凭据、5 次锁定、代次失效、最后管理员门禁、ACC-48 撤权原语和离线 Break-glass | Go 单元测试、CLI/迁移合同与全量静态验证通过；生产等价 Keycloak/数据库并发、故障补偿、告警投递和事故演练待执行 |
 | `DESKTOP-39` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 39 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/45 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/46 个合同测试、任务覆盖、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -96,7 +97,7 @@
 | ACC-45 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少外部待确认关单、晚到审核和 Provider 事实盲区注销门禁 |
 | ACC-46 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少 Commerce Mapping 任务分类、取消和主体生命周期版本防迟到回写 |
 | ACC-47 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少注销时资料修改 Saga 自动取消或向前收敛规则 |
-| ACC-48 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少最后一个有效超级管理员注销保护，以及其他平台/组织角色与临时授权的自动撤销和缓存失效 |
+| ACC-48 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有所有者/最后有效超级管理员注销门禁、稳定 `LAST_ACTIVE_SUPER_ADMIN`、数据库同类停用/删除保护，以及通过门禁后撤销全部有效/未来角色、递增版本和清除 Account Session 的事务原语；APT-014 尚需把它接入持久注销 Saga 并在 Identity 清理前撤销 Refresh Token |
 | ACC-49 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少未接受邀请自动失效及标识复用隔离 |
 | ACC-50 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少 Identity 不可认证、自动清理完成和生命周期隔离组成的标识释放原子门禁 |
 | ACC-51 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | 正式映射与全部活动预约由数据库唯一约束共同保护，Account 提交时在串行事务内重检 |
@@ -358,8 +359,8 @@
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 具有组织采购权限的企业管理员可在显式目标组织管理页购买组织权益。 |
 | UI-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 当前能力不足时显示禁用按钮；目标要求完全隐藏不可执行退款入口 |
-| ADM-01 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 当前目标已禁止8位初始密码；尚缺 BOOTSTRAP_PENDING 权限门禁、交互式无回显直接设密，以及默认256 bit/最少128 bit的一次性引导凭据、Base64URL字符集、15分钟有效期、5次失败锁定、一次读取销毁、原子兑换和重新签发代次隔离。 |
-| ADM-02 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 仅在凭据丢失、意外停用或身份故障等异常导致全部超级管理员无法登录时，通过主机/集群受控离线命令创建短时紧急授权或恢复账号；禁止公网 API、禁止绕过最后一个有效超级管理员主动注销保护或替代计划内交接，执行必须告警并写不可删除审计。 |
+| ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 离线 CLI 已幂等创建禁用 Identity 与 `BOOTSTRAP_PENDING` admin，支持终端无回显/受控 FD 直接设密及默认256 bit、43字符 Base64URL 一次性凭据；用途/代次校验值不可逆，默认15分钟/最长60分钟、5次锁定、恒定时间校验、重新签发淘汰旧代次、正式密码 Identity 边界、高权限策略、会话撤销、安全审计及失败补偿已实现。仍缺生产等价并发兑换、Keycloak/数据库故障和告警投递证据。 |
+| ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有仅主机/集群运行且无 HTTP 路由的 Break-glass CLI，强制全部管理员失联确认、事故证据、工作负载身份、20字符以上原因和5–60分钟有效期，恢复 Identity/短时授权后写不可变审计并产生 CRITICAL 告警；最后管理员数据库门禁不可绕过。仍缺生产等价事故授权、告警接收和到期恢复演练。 |
 | ADM-03 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 服务账号、后台任务和 Event Relay 使用独立工作负载身份、短期凭据和最小权限，不继承人类平台角色；审计记录 `actor_type=SERVICE`、服务名和任务运行 ID。 |
 | ADM-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 支持列表、搜索、详情和生命周期操作。 |
 | ADM-05 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 运营端可查看角色定义和全部绑定，按用户/组织筛选，并对普通平台/组织/节点角色执行带有效期的幂等授予和单条撤销；SUPER_ADMIN 与 OWNER 保留专用安全流程 |
@@ -582,7 +583,7 @@
 | ACC-45 | 外部待确认关单阻断注销 | 未实现 | 当前未把 CLOSE_REQUESTED、LOCALLY_CLOSED_EXTERNAL_PENDING、晚到审核和 PROVIDER_BLIND 纳入注销预检。 |
 | ACC-46 | 注销处理 Commerce Mapping 任务 | 未实现 | 当前同步任务缺少资金/资料分类和主体生命周期版本，迟到同步可能在 Mapping DETACHED 或标识复用后回写。 |
 | ACC-47 | 注销自动收敛资料修改 Saga | 未实现 | 当前没有区分 Identity 更新前取消与更新后向前收敛，也未证明预约能安全释放且不会产生第二个业务用户。 |
-| ACC-48 | 注销自动撤销角色与临时授权 | 未实现 | 当前没有在组织所有权先转让的前提下，由注销协调器统一撤销平台/普通组织角色、未来授权、临时/紧急授权并递增授权版本和清除缓存。 |
+| ACC-48 | 注销自动撤销角色与临时授权 | 部分实现 | Account 已提供所有者/最后管理员门禁和统一撤销平台、组织、未来、临时/紧急授权的事务原语，并递增授权/用户版本和删除 Account Session；APT-014 仍需接入注销 Saga、Identity Refresh Token 撤销和跨域恢复。 |
 | ACC-49 | 注销自动失效未接受邀请 | 未实现 | 当前邀请没有 ACCOUNT_CLOSURE 终态，也未阻止复用手机号/用户名的新账号接受旧邀请。 |
 | ACC-50 | 注销标识释放门禁 | 未实现 | 当前没有在 Identity 不可认证、自动清理完成、Mapping DETACHED 和生命周期防迟到写之间建立原子门禁。 |
 | ACC-51 | 注册最终唯一约束 | 已实现 | 正式用户名/手机号映射与全部活动预约均有数据库唯一约束，Account 提交在串行事务内重检最终事实。 |
@@ -728,8 +729,8 @@
 | UI-14 | 注销进度与阻断原因展示 | 未实现 | 当前没有持久注销状态页、脱敏阻断分类、用户恢复动作或“自动处理中”与“需要本人处理”的区分。 |
 | UI-15 | 未完成注册恢复状态展示 | 已实现 | 桌面优先在系统凭据库保存操作查询凭据，重启后按 `next_retry_at` 轮询，区分 Identity、Account、钱包、修复与补偿状态并阻止重复注册。 |
 | UI-16 | 桌面与 Web 三语完整性 | 部分实现 | 当前桌面、Portal 和管理后台路由的简中/英文/日文词条测试通过；仍需覆盖全部目标页面、错误码以及发布制品级缺词条、回退和单语硬编码门禁。 |
-| ADM-01 | 首个超级管理员安全初始化 | 未实现 | 当前目标已禁止8位初始密码；尚缺 BOOTSTRAP_PENDING 权限门禁、交互式无回显直接设密，以及默认256 bit/最少128 bit的一次性引导凭据、Base64URL字符集、15分钟有效期、5次失败锁定、一次读取销毁、原子兑换和重新签发代次隔离。 |
-| ADM-02 | Break-glass 恢复 | 未实现 | 仅在凭据丢失、意外停用或身份故障等异常导致全部超级管理员无法登录时，通过主机/集群受控离线命令创建短时紧急授权或恢复账号；禁止公网 API、禁止绕过最后一个有效超级管理员主动注销保护或替代计划内交接，执行必须告警并写不可删除审计。 |
+| ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 仓库已实现 BOOTSTRAP_PENDING/禁用 Identity 门禁、无回显或受控 FD 设密、默认256 bit一次性凭据、15分钟有效、5次锁定、一次交付、不可逆校验值、代次隔离、Identity 高权限密码策略、会话撤销和失败补偿；缺生产等价环境并发及故障演练证据。 |
+| ADM-02 | Break-glass 恢复 | 部分实现 | 离线 CLI 无公网 API，强制全体管理员异常失联确认并记录工作负载、原因、目标、证据摘要和5–60分钟有效期，执行后产生不可变审计和 CRITICAL 告警；缺生产事故演练和真实告警投递证据。 |
 | ADM-03 | 服务身份权限 | 未实现 | 服务账号、后台任务和 Event Relay 使用独立工作负载身份、短期凭据和最小权限，不继承人类平台角色；审计记录 `actor_type=SERVICE`、服务名和任务运行 ID。 |
 | ADM-04 | 用户与组织分为独立页签 | 已实现 | 支持列表、搜索、详情和生命周期操作。 |
 | ADM-05 | 角色与成员权限管理 | 已实现 | 运营端具备绑定查询、有效期、来源、普通平台/组织角色授予与单条撤销；超级管理员和所有者仍走专用安全流程。 |

@@ -23,6 +23,30 @@ var (
 	ErrReferenceConflict = errors.New("password reference is bound to different registration data")
 )
 
+// ValidatePrivilegedPassword applies the stronger policy used by bootstrap and
+// recovery paths. It intentionally lives inside the Identity boundary so a
+// formal administrator password never has to cross Account Service.
+func ValidatePrivilegedPassword(password, username string) error {
+	if err := ValidatePassword(password); err != nil || len(password) < 14 {
+		return ErrPasswordInvalid
+	}
+	normalizedPassword := strings.ToLower(password)
+	normalizedUsername := strings.ToLower(strings.TrimSpace(username))
+	if normalizedUsername != "" && strings.Contains(normalizedPassword, normalizedUsername) {
+		return ErrPasswordInvalid
+	}
+	for _, weak := range []string{
+		"password", "admin123", "qwerty", "letmein", "welcome", "pinvou",
+		"123456", "abc123", "iloveyou", "monkey", "dragon", "sunshine",
+		"princess", "football", "baseball", "trustno1", "passw0rd",
+	} {
+		if strings.Contains(normalizedPassword, weak) {
+			return ErrPasswordInvalid
+		}
+	}
+	return nil
+}
+
 type UserDirectory interface {
 	CreateMobileUser(context.Context, uuid.UUID, string, string, string) (string, error)
 	FindMobileUserByRegistrationOperation(context.Context, uuid.UUID) (string, bool, error)

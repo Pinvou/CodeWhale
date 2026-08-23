@@ -1463,6 +1463,11 @@ func (r *PostgresRepository) AdminSetUserStatus(ctx context.Context, principal i
 	if (status == "ACTIVE" && currentStatus != "DISABLED") || (status == "DISABLED" && currentStatus != "ACTIVE" && currentStatus != "PROVISIONING") {
 		return ErrConflict
 	}
+	if status == "DISABLED" {
+		if err := assertNotLastActiveSuperAdmin(ctx, tx, userID); err != nil {
+			return err
+		}
+	}
 	now := r.now()
 	if _, err := tx.Exec(ctx, `UPDATE users SET status=$2,version=version+1,membership_version=membership_version+1,updated_at=$3 WHERE id=$1`, userID, status, now); err != nil {
 		return err
@@ -1511,6 +1516,9 @@ SELECT EXISTS(
 	}
 	if ownsOrganization {
 		return ErrLastOwner
+	}
+	if err := assertNotLastActiveSuperAdmin(ctx, tx, userID); err != nil {
+		return err
 	}
 	now := r.now()
 	if _, err := tx.Exec(ctx, `UPDATE memberships SET status='REVOKED',version=version+1,updated_at=$2 WHERE user_id=$1 AND status<>'REVOKED'`, userID, now); err != nil {
