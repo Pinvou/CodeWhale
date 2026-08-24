@@ -1131,7 +1131,9 @@ func (r *HTTPWalletResolver) Ensure(ctx context.Context, ownerType string, owner
 	if err != nil {
 		return uuid.Nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+r.serviceToken)
+	if err := serviceauth.SetAuthorization(request, r.serviceToken); err != nil {
+		return uuid.Nil, err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := r.client.Do(request)
 	if err != nil {

@@ -24,13 +24,14 @@ type OutboxStore interface {
 }
 
 type Relay struct {
-	Store       OutboxStore
-	Broker      Broker
-	WorkerID    string
-	BatchSize   int
-	Lease       time.Duration
-	MaxAttempts int
-	Now         func() time.Time
+	Store           OutboxStore
+	Broker          Broker
+	WorkerID        string
+	BatchSize       int
+	Lease           time.Duration
+	MaxAttempts     int
+	AllowedSubjects []string
+	Now             func() time.Time
 }
 
 type RelayResult struct {
@@ -65,6 +66,9 @@ func (relay Relay) RunOnce(ctx context.Context) (RelayResult, error) {
 		eventContext := observability.ContextForTrace(ctx, event.ID.String(), event.TraceID)
 		eventContext, span := observability.StartSpan(eventContext, "event.relay.publish")
 		body, marshalErr := event.Marshal()
+		if marshalErr == nil && !subjectAllowed(relay.AllowedSubjects, event.Type) {
+			marshalErr = errors.New("event subject is not permitted for this relay")
+		}
 		if marshalErr == nil {
 			marshalErr = relay.Broker.Publish(eventContext, event.Type, body, event.ID.String())
 		}
@@ -102,6 +106,19 @@ func (relay Relay) RunOnce(ctx context.Context) (RelayResult, error) {
 		span.End()
 	}
 	return result, nil
+}
+
+func subjectAllowed(patterns []string, subject string) bool {
+	if len(patterns) == 0 {
+		return true
+	}
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == subject || (strings.HasSuffix(pattern, ".>") && strings.HasPrefix(subject, strings.TrimSuffix(pattern, ">"))) {
+			return true
+		}
+	}
+	return false
 }
 
 func retryDelay(attempt int) time.Duration {

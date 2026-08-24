@@ -80,6 +80,12 @@ security:
   rateLimitBurst: 200
   authRiskEnabled: false
 
+workloadIdentity:
+  issuer: https://kubernetes.default.svc
+  jwksUrl: https://kubernetes.default.svc/openid/v1/jwks
+  audience: pinvou-account-platform-internal
+  tokenExpirationSeconds: 600
+
 sms:
   enabled: false
   provider: aliyun-managed

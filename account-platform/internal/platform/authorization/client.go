@@ -15,6 +15,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -87,7 +88,9 @@ func (c *Client) decision(ctx context.Context, principal identity.Principal, per
 	if err != nil {
 		return decision{}, nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return decision{}, nil, err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.httpClient.Do(request)
 	if err != nil {

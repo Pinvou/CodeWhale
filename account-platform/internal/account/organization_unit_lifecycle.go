@@ -8,16 +8,17 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
 type OrganizationUnitDeletionAssessment struct {
-	OrganizationID uuid.UUID                      `json:"organization_id"`
-	UnitID         uuid.UUID                      `json:"unit_id"`
-	Status         string                         `json:"status"`
-	StructureVersion int64                        `json:"structure_version"`
-	Ready          bool                           `json:"ready"`
-	Blockers       []OrganizationLifecycleBlocker `json:"blockers"`
+	OrganizationID   uuid.UUID                      `json:"organization_id"`
+	UnitID           uuid.UUID                      `json:"unit_id"`
+	Status           string                         `json:"status"`
+	StructureVersion int64                          `json:"structure_version"`
+	Ready            bool                           `json:"ready"`
+	Blockers         []OrganizationLifecycleBlocker `json:"blockers"`
 }
 
 type OrganizationUnitLifecycleClient interface {
@@ -35,7 +36,9 @@ func (c *HTTPOrganizationLifecycleClient) ApplyUnitLifecycle(ctx context.Context
 	if err != nil {
 		return OrganizationUnitDeletionAssessment{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return OrganizationUnitDeletionAssessment{}, err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.client.Do(request)
 	if err != nil {

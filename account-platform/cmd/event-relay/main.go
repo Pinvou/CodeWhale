@@ -14,6 +14,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -52,7 +53,7 @@ func main() {
 	}
 	defer broker.Close()
 	hostname, _ := os.Hostname()
-	relay := events.Relay{Store: store, Broker: broker, WorkerID: hostname + ":" + uuid.NewString(), BatchSize: 100, Lease: 30 * time.Second, MaxAttempts: 12}
+	relay := events.Relay{Store: store, Broker: broker, WorkerID: hostname + ":" + uuid.NewString(), BatchSize: 100, Lease: 30 * time.Second, MaxAttempts: 12, AllowedSubjects: []string{source + ".>"}}
 	logger = logger.With("source", source)
 	metrics := newRelayMetrics(source)
 	metricsServer := metrics.server(":9090", func(ctx context.Context) error {
@@ -68,13 +69,18 @@ func main() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
+		jobRunID := uuid.NewString()
+		jobContext, jobIdentityErr := serviceauth.ContextForJob(ctx, source+"-event-relay", "OUTBOX_RELAY", jobRunID)
+		if jobIdentityErr != nil {
+			log.Fatal(jobIdentityErr)
+		}
 		cycleStarted := time.Now()
-		result, err := relay.RunOnce(ctx)
+		result, err := relay.RunOnce(jobContext)
 		metrics.recordCycle(result, err, time.Since(cycleStarted))
 		if err != nil && ctx.Err() == nil {
-			logger.Error("outbox relay cycle failed", "error", err)
+			logger.Error("outbox relay cycle failed", "actor_type", "SERVICE", "service", source+"-event-relay", "job_type", "OUTBOX_RELAY", "job_run_id", jobRunID, "error", err)
 		} else if result.Claimed > 0 {
-			logger.Info("outbox relay cycle completed", "claimed", result.Claimed, "published", result.Published, "failed", result.Failed, "dead_lettered", result.DeadLettered)
+			logger.Info("outbox relay cycle completed", "actor_type", "SERVICE", "service", source+"-event-relay", "job_type", "OUTBOX_RELAY", "job_run_id", jobRunID, "claimed", result.Claimed, "published", result.Published, "failed", result.Failed, "dead_lettered", result.DeadLettered)
 		}
 		stats, statsErr := store.Stats(ctx)
 		if statsErr != nil && ctx.Err() == nil {

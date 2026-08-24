@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -77,7 +78,9 @@ func (c *HTTPOrganizationLifecycleClient) request(ctx context.Context, organizat
 	if err != nil {
 		return OrganizationLifecycleAssessment{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return OrganizationLifecycleAssessment{}, err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.client.Do(request)
 	if err != nil {

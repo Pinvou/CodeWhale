@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -213,7 +214,9 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 	if err != nil {
 		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return nil, err
+	}
 	if source, ok := ctx.Value(paymentSourceContextKey{}).(string); ok && source != "" {
 		request.Header.Set("X-Pinvou-Client-Source", source)
 	}
@@ -424,7 +427,9 @@ func (c *HTTPBillingClient) call(ctx context.Context, method, path string, input
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return err
+	}
 	if input != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

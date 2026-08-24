@@ -648,7 +648,9 @@ func (p *HTTPWalletProvisioner) EnsurePersonalWallet(ctx context.Context, userID
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+p.serviceToken)
+	if err := serviceauth.SetAuthorization(request, p.serviceToken); err != nil {
+		return err
+	}
 	request.Header.Set("Idempotency-Key", "personal-wallet:"+userID.String())
 	response, err := p.client.Do(request)
 	if err != nil {

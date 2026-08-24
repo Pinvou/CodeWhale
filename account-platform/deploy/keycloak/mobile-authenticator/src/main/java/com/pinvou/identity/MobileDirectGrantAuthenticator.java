@@ -8,6 +8,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -86,13 +88,18 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
 
     private Optional<String> verifySMS(AuthenticationFlowContext context, String mobile, String challenge, String code) {
         String endpoint = System.getenv("PINVOU_SMS_VERIFY_URL");
-        String serviceToken = System.getenv("PINVOU_INTERNAL_SERVICE_TOKEN");
-        if (endpoint == null || serviceToken == null || endpoint.isBlank() || serviceToken.length() < 32) {
+        String tokenFile = System.getenv("PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE");
+        String developmentToken = System.getenv("PINVOU_INTERNAL_SERVICE_TOKEN");
+        if (endpoint == null || endpoint.isBlank() || ((tokenFile == null || tokenFile.isBlank()) && (developmentToken == null || developmentToken.isBlank()))) {
             LOG.error("SMS verification endpoint is not configured");
             return Optional.empty();
         }
         String body = "{\"mobile\":\"" + mobile + "\",\"challenge_id\":\"" + challenge + "\",\"code\":\"" + code + "\"}";
         try {
+            String serviceToken = tokenFile != null && !tokenFile.isBlank()
+                ? Files.readString(Path.of(tokenFile), StandardCharsets.UTF_8).trim()
+                : developmentToken.trim();
+            if (serviceToken.isEmpty()) throw new IllegalStateException("projected workload token is empty");
             String source = boundedHeader(context, "X-Pinvou-Client-Source", "source:unknown");
             String device = boundedHeader(context, "X-Device-ID", "device:absent:" + source);
             HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint))

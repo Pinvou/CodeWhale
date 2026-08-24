@@ -62,6 +62,7 @@ spec:
   template:
     metadata: { labels: { app.kubernetes.io/name: {{ include "pinvou.name" . }}, app.kubernetes.io/instance: {{ .Release.Name }}, app.kubernetes.io/component: keycloak } }
     spec:
+      serviceAccountName: {{ $fullname }}-keycloak
       automountServiceAccountToken: false
       {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" "keycloak") | nindent 6 }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
@@ -72,6 +73,8 @@ spec:
           ports: [{ name: http, containerPort: 8080 }]
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
           env:
+            - { name: PINVOU_SMS_VERIFY_URL, value: {{ printf "http://%s-account-service:8080/internal/v1/auth/sms/verify" $fullname | quote }} }
+            - { name: PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE, value: /var/run/secrets/pinvou/workload/token }
             - { name: KC_HOSTNAME, value: {{ .Values.keycloak.hostname | quote }} }
             - { name: KC_HOSTNAME_ADMIN, value: {{ .Values.keycloak.adminHostname | quote }} }
             - { name: KC_PROXY_HEADERS, value: xforwarded }
@@ -82,4 +85,11 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-database-username } }
             - name: KC_DB_PASSWORD
               valueFrom: { secretKeyRef: { name: {{ .Values.global.runtimeSecret }}, key: keycloak-database-password } }
+          volumeMounts:
+            - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
+      volumes:
+        - name: workload-identity
+          projected:
+            sources:
+              - serviceAccountToken: { path: token, audience: {{ .Values.workloadIdentity.audience | quote }}, expirationSeconds: {{ .Values.workloadIdentity.tokenExpirationSeconds }} }
 {{- end }}

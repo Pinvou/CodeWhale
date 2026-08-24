@@ -16,6 +16,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -57,7 +58,9 @@ func (v *HTTPAccountClosureStateVerifier) RequireAnonymized(ctx context.Context,
 	endpoint := *v.baseURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/internal/v1/users/" + userID.String() + "/account-closure-state"
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	request.Header.Set("Authorization", "Bearer "+v.serviceToken)
+	if err := serviceauth.SetAuthorization(request, v.serviceToken); err != nil {
+		return err
+	}
 	response, err := v.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("account closure state request: %w", err)

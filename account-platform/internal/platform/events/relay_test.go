@@ -90,6 +90,18 @@ func TestRelayMovesExhaustedEventToDeadLetterStream(t *testing.T) {
 	}
 }
 
+func TestRelayRejectsSubjectOutsideSourcePermission(t *testing.T) {
+	store := &memoryStore{events: []Event{{ID: uuid.New(), Type: "billing.refund.requested.v1", AggregateID: uuid.New(), AggregateVersion: 1, TraceID: "trace", Payload: []byte(`{}`)}}}
+	broker := &memoryBroker{}
+	result, err := (Relay{Store: store, Broker: broker, WorkerID: "account-relay", AllowedSubjects: []string{"account.>"}}).RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Published != 0 || result.Failed != 1 || len(broker.published) != 0 {
+		t.Fatalf("cross-domain subject escaped relay: %#v %#v", result, broker.published)
+	}
+}
+
 func TestAggregateVersionDecisionRejectsGapsAndIgnoresStaleEvents(t *testing.T) {
 	if DecideVersion(false, 0, 1) != Apply || DecideVersion(true, 7, 6) != Stale || DecideVersion(true, 7, 7) != Stale || DecideVersion(true, 7, 9) != Gap || DecideVersion(true, 7, 8) != Apply {
 		t.Fatal("aggregate version decisions are not deterministic")

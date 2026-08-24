@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -94,7 +95,9 @@ func (gate *HTTPApprovalExecutionGate) request(ctx context.Context, method, path
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+gate.serviceToken)
+	if err := serviceauth.SetAuthorization(request, gate.serviceToken); err != nil {
+		return err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := gate.httpClient.Do(request)
 	if err != nil {

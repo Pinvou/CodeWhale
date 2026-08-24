@@ -36,7 +36,7 @@ spec:
         {{- include "pinvou.selector" $root | nindent 8 }}
         app.kubernetes.io/component: {{ $source }}-event-relay
     spec:
-      serviceAccountName: {{ $fullname }}
+      serviceAccountName: {{ $fullname }}-{{ $source }}-event-relay
       automountServiceAccountToken: false
       {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" (printf "%s-event-relay" $source)) | nindent 6 }}
       securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
@@ -54,8 +54,14 @@ spec:
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "%s-service-database-url" $source }} } }
             - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
+            - { name: NATS_CREDENTIALS_FILE, value: {{ printf "/var/run/secrets/pinvou/nats/%s.creds" $source | quote }} }
           readinessProbe: { httpGet: { path: /health/ready, port: metrics }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: metrics }, periodSeconds: 20, timeoutSeconds: 3 }
-          volumeMounts: [{ name: tmp, mountPath: /tmp }]
-      volumes: [{ name: tmp, emptyDir: { sizeLimit: 16Mi } }]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
+        - name: nats-credentials
+          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: {{ printf "%s-event-relay.creds" $source }}, path: {{ printf "%s.creds" $source }} }] }
 {{- end }}

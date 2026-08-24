@@ -132,7 +132,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 | PostgreSQL 管理 | `ACCOUNT_PLATFORM_POSTGRES_PASSWORD` |
 | 分库密码 | `ACCOUNT_DB_PASSWORD`、`BILLING_DB_PASSWORD`、`TOKEN_DB_PASSWORD`、`KEYCLOAK_DB_PASSWORD` |
 | 开发库密码 | `PAYMENT_SIM_DB_PASSWORD`、`NEWAPI_DB_PASSWORD` |
-| 内部鉴权 | `INTERNAL_SERVICE_TOKEN` |
+| 内部鉴权 | Kubernetes 投射 OIDC 工作负载令牌：`WORKLOAD_IDENTITY_TOKEN_FILE`、`WORKLOAD_IDENTITY_ISSUER`、`WORKLOAD_IDENTITY_JWKS_URL`、`WORKLOAD_IDENTITY_AUDIENCE`、`WORKLOAD_IDENTITY_RULES_JSON`；仅 development/test 可使用 `INTERNAL_SERVICE_TOKEN` 兼容路径 |
 
 每个数据库用户必须使用不同随机密码。生产环境不得沿用 `.env.example` 中的占位值。
 
@@ -183,7 +183,7 @@ Account 启动注册恢复、资料变更恢复、钱包初始化、角色绑定
 
 版本化计量与定价上线按 Billing、Token、Portal 的顺序滚动：先执行 Billing `000022_versioned_metering_pricing` 并启动新版 Billing，确认历史三元组价格已回填为发布版本且同一定价空间不存在重叠；再执行 Token `000010_protocol_formula_versions` 并启动新版 Gateway，确认 CHAT v1 协议公式已发布、Billing 中存在对应不可变公式绑定；最后发布后台管理页面。抽样验证模型覆盖优先、显式全局继承、固定零价和缺价/歧义错误；创建 Hold 后撤销、结束或替代价格，续租、追加预占与结算仍须使用原快照。长流式调用应在租约到期前续租，并在预计成本超过最大预占前追加额度，否则中止可控上游并进入复核。监控价格解析错误、发布冲突、Hold 续租/追加失败和公式同步失败。回滚应用时保留新增迁移和不可变历史；已有新版价格、公式或 Hold 快照后禁止执行 down migration。
 
-财务审批发布后，Billing Service 同时以 durable `billing-command-executor-v1` 消费 `account.approval-command.authorized.v1`。上线顺序必须先完成两库迁移，再启动 Account 与 Account Relay，最后滚动 Billing；Billing 必须能访问内部 NATS 和 Account 内部执行复核端点。监控应覆盖批准后五分钟仍未进入 `EXECUTING`、`EXECUTION_FAILED`、消费者重复投递和 `account-platform.dead-letter.account.approval-command.authorized.v1`。重放只能使用原事件和原指纹，禁止修改消息体、直接调用账本 SQL 或恢复旧 `/adjustments/:id/approve` 路径。当前内部调用仍依赖 `INTERNAL_SERVICE_TOKEN`；切换 APT-047 短期工作负载身份前必须保持令牌仅在 Secret 管理系统中分发且 Billing/Account/NATS 均不公开。
+财务审批发布后，Billing Service 同时以 durable `billing-command-executor-v1` 消费 `account.approval-command.authorized.v1`。上线顺序必须先完成两库迁移，再启动 Account 与 Account Relay，最后滚动 Billing；Billing 必须能访问内部 NATS 和 Account 内部执行复核端点。监控应覆盖批准后五分钟仍未进入 `EXECUTING`、`EXECUTION_FAILED`、消费者重复投递和 `account-platform.dead-letter.account.approval-command.authorized.v1`。重放只能使用原事件和原指纹，禁止修改消息体、直接调用账本 SQL 或恢复旧 `/adjustments/:id/approve` 路径。正式 Helm 必须为每个 HTTP 服务、Keycloak 和三个 Relay 保留独立 ServiceAccount；OIDC 投射令牌最长 15 分钟并按次重读，接收服务按 subject、method、path 白名单失败关闭。三个 Relay 及 `billing-command-executor` 分别挂载外部 NATS operator 签发的 `.creds`，只授予所需 JetStream API、消费/确认 Subject 及本域发布 Subject；不得复用 Relay 凭据或授予 `>` 全局发布。实际集群上线前必须验证 issuer/JWKS 可达、audience 匹配、轮换不中断、跨服务/跨 Subject 拒绝和凭据撤销，因此当前仍为 `NOT_DEPLOYED`。
 
 Keycloak provisioner 服务账号还必须具备读取/更新用户、重置密码和撤销用户会话的最小管理权限；缺少任一权限会使资料或密码操作进入稳定失败/修复状态，不得临时扩大为 realm-admin。轮换查询密钥会使尚未完成注册的旧查询令牌失效，必须采用覆盖最长 48 小时令牌窗口的双读或维护窗口方案；当前实现不提供双密钥读取，因此不得无计划直接轮换。运维应监控 `REPAIR_REQUIRED`、`COMPENSATION_PENDING`、钱包 SLA 超时和 `next_retry_at` 积压；人工补偿只能通过受权限保护的命令执行，禁止直接改表或直接删除 Identity。
 

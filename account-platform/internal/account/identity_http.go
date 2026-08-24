@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -119,7 +120,9 @@ func (p *HTTPIdentityProvisioner) request(ctx context.Context, method, path stri
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+p.serviceToken)
+	if err := serviceauth.SetAuthorization(request, p.serviceToken); err != nil {
+		return err
+	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

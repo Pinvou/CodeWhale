@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -64,7 +65,9 @@ func (c *HTTPAccountClosureClient) Assess(ctx context.Context, userID uuid.UUID)
 	if err != nil {
 		return AccountClosureAssessment{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return AccountClosureAssessment{}, err
+	}
 	response, err := c.client.Do(request)
 	if err != nil {
 		return AccountClosureAssessment{}, err
@@ -99,7 +102,9 @@ func (c *HTTPAccountClosureClient) IsolateGrants(ctx context.Context, userID, cl
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", "Bearer "+c.serviceToken)
+	if err := serviceauth.SetAuthorization(request, c.serviceToken); err != nil {
+		return err
+	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.client.Do(request)
 	if err != nil {

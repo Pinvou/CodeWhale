@@ -20,6 +20,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -272,7 +273,9 @@ func (s *ClientReadinessService) accountCompatibility(ctx context.Context) (clie
 	endpoint := *s.accountURL
 	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/internal/v1/client-compatibility"
 	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	request.Header.Set("Authorization", "Bearer "+s.config.ServiceToken)
+	if err := serviceauth.SetAuthorization(request, s.config.ServiceToken); err != nil {
+		return clientCompatibilityResponse{}, err
+	}
 	response, err := s.client.Do(request)
 	if err != nil {
 		return clientCompatibilityResponse{}, err

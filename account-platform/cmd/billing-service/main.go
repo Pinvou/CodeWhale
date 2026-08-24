@@ -23,6 +23,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
 
 func main() {
@@ -46,15 +47,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	serviceCredential := serviceauth.CredentialFromEnvironment()
+	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
 	}
-	approvalGate, err := billing.NewHTTPApprovalExecutionGate(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	approvalGate, err := billing.NewHTTPApprovalExecutionGate(os.Getenv("ACCOUNT_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
 	}
-	closureStates, err := billing.NewHTTPAccountClosureStateVerifier(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	closureStates, err := billing.NewHTTPAccountClosureStateVerifier(os.Getenv("ACCOUNT_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
 	}

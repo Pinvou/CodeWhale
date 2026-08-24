@@ -37,7 +37,7 @@ spec:
         app.kubernetes.io/component: {{ $app.name }}
         {{- with $root.Values.global.podLabels }}{{ toYaml . | nindent 8 }}{{- end }}
     spec:
-      serviceAccountName: {{ $fullname }}
+      serviceAccountName: {{ $fullname }}-{{ $app.name }}
       automountServiceAccountToken: false
       {{- include "pinvou.availabilityPodSpec" (dict "root" $root "component" $app.name) | nindent 6 }}
       {{- with $root.Values.global.imagePullSecrets }}
@@ -74,11 +74,29 @@ spec:
             - { name: OIDC_AUDIENCE, value: {{ $root.Values.oidc.audience | quote }} }
             {{- end }}
             {{- if ne $app.name "token-portal" }}
-            - name: INTERNAL_SERVICE_TOKEN
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: internal-service-token } }
+            - { name: WORKLOAD_IDENTITY_TOKEN_FILE, value: /var/run/secrets/pinvou/workload/token }
+            - { name: WORKLOAD_IDENTITY_ISSUER, value: {{ $root.Values.workloadIdentity.issuer | quote }} }
+            - { name: WORKLOAD_IDENTITY_JWKS_URL, value: {{ $root.Values.workloadIdentity.jwksUrl | quote }} }
+            - { name: WORKLOAD_IDENTITY_AUDIENCE, value: {{ $root.Values.workloadIdentity.audience | quote }} }
+            {{- if eq $app.name "account-service" }}
+            - name: WORKLOAD_IDENTITY_RULES_JSON
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-billing-service" $root.Release.Namespace $fullname) "service" "billing-service" "methods" (list "GET" "POST") "paths" (list "/internal/v1/authorization/*" "/internal/v1/approval-requests/*" "/internal/v1/users/*")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "methods" (list "GET" "POST") "paths" (list "/internal/v1/authorization/*" "/internal/v1/client-compatibility")) (dict "subject" (printf "system:serviceaccount:%s:%s-keycloak" $root.Release.Namespace $fullname) "service" "keycloak-mobile-authenticator" "methods" (list "POST") "paths" (list "/internal/v1/auth/sms/verify"))) | quote }}
+            {{- else if eq $app.name "identity-service" }}
+            - name: WORKLOAD_IDENTITY_RULES_JSON
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "methods" (list "GET" "POST" "PUT" "DELETE") "paths" (list "/internal/v1/registration/*" "/internal/v1/users/*"))) | quote }}
+            {{- else if eq $app.name "billing-service" }}
+            - name: WORKLOAD_IDENTITY_RULES_JSON
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "methods" (list "GET" "POST" "PUT") "paths" (list "/internal/v1/wallets/*" "/internal/v1/organizations/*" "/internal/v1/users/*")) (dict "subject" (printf "system:serviceaccount:%s:%s-token-gateway" $root.Release.Namespace $fullname) "service" "token-gateway" "methods" (list "GET" "POST" "PUT") "paths" (list "/internal/v1/wallets/*" "/internal/v1/entitlement-packages" "/internal/v1/holds/*" "/internal/v1/pricing/*"))) | quote }}
+            {{- else if eq $app.name "token-gateway" }}
+            - name: WORKLOAD_IDENTITY_RULES_JSON
+              value: {{ toJson (list (dict "subject" (printf "system:serviceaccount:%s:%s-account-service" $root.Release.Namespace $fullname) "service" "account-service" "methods" (list "GET" "POST" "PUT" "DELETE") "paths" (list "/internal/v1/organizations/*" "/internal/v1/users/*"))) | quote }}
+            {{- end }}
             {{- end }}
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - { name: NATS_URL, value: {{ include "pinvou.natsUrl" $root | quote }} }
+            {{- end }}
+            {{- if eq $app.name "billing-service" }}
+            - { name: NATS_CREDENTIALS_FILE, value: /var/run/secrets/pinvou/nats/billing-command-executor.creds }
             {{- end }}
             {{- if eq $app.name "account-service" }}
             - { name: ACCOUNT_SERVICE_VERSION, value: {{ $root.Chart.AppVersion | quote }} }
@@ -189,6 +207,24 @@ spec:
             {{- end }}
           readinessProbe: { httpGet: { path: /health/ready, port: http }, periodSeconds: 10, timeoutSeconds: 3 }
           livenessProbe: { httpGet: { path: /health/live, port: http }, periodSeconds: 20, timeoutSeconds: 3 }
-          volumeMounts: [{ name: tmp, mountPath: /tmp }]
-      volumes: [{ name: tmp, emptyDir: { sizeLimit: 16Mi } }]
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            {{- if ne $app.name "token-portal" }}
+            - { name: workload-identity, mountPath: /var/run/secrets/pinvou/workload, readOnly: true }
+            {{- end }}
+            {{- if eq $app.name "billing-service" }}
+            - { name: nats-credentials, mountPath: /var/run/secrets/pinvou/nats, readOnly: true }
+            {{- end }}
+      volumes:
+        - { name: tmp, emptyDir: { sizeLimit: 16Mi } }
+        {{- if ne $app.name "token-portal" }}
+        - name: workload-identity
+          projected:
+            sources:
+              - serviceAccountToken: { path: token, audience: {{ $root.Values.workloadIdentity.audience | quote }}, expirationSeconds: {{ $root.Values.workloadIdentity.tokenExpirationSeconds }} }
+        {{- end }}
+        {{- if eq $app.name "billing-service" }}
+        - name: nats-credentials
+          secret: { secretName: {{ $root.Values.global.runtimeSecret }}, items: [{ key: billing-command-executor.creds, path: billing-command-executor.creds }] }
+        {{- end }}
 {{- end }}

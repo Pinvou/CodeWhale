@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 288`、`部分实现 32`、`未实现 9`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 288`、`部分实现 34`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -38,7 +38,8 @@
 | `ENTITLEMENT-COMPONENTS` | BASE/BONUS 组成级入账、确定消费顺序、人工赠送、到期释放、迟到用量损失复核、守恒投影及三语展示 | Go Billing/Token 单元测试、OpenAPI lint、44 个合同测试、Portal 构建和桌面 ESLint 通过；数据库运行级迁移、并发和故障注入待部署 |
 | `ROLE-BINDING-LIFECYCLE` | 本人/组织/平台绑定视图、起止时间、幂等授权、单条幂等撤销、自动到期、授权版本刷新、审计/Outbox 和三语 Portal | Account/Portal Go 单元测试、OpenAPI lint、角色生命周期合同和静态资源检查通过；数据库运行级迁移、真实并发授权及 worker 故障恢复待部署 |
 | `SECURITY-RECOVERY` | `BOOTSTRAP_PENDING` 首管安全激活、256 bit 一次性凭据、5 次锁定、代次失效、最后管理员门禁、ACC-48 撤权原语和离线 Break-glass | Go 单元测试、CLI/迁移合同与全量静态验证通过；生产等价 Keycloak/数据库并发、故障补偿、告警投递和事故演练待执行 |
-| `APPROVAL-COMMANDS` | 版本化命令分类、不可逆审批状态机、不可变快照、独立审批、强一致授权复核、Outbox 授权和 Billing 幂等领域执行 | Account/Billing/Portal Go 单元测试、OpenAPI lint、47 个合同测试与全量静态验证通过；生产工作负载身份由 APT-047 继续替换共享服务令牌 |
+| `APPROVAL-COMMANDS` | 版本化命令分类、不可逆审批状态机、不可变快照、独立审批、强一致授权复核、Outbox 授权和 Billing 幂等领域执行 | Account/Billing/Portal Go 单元测试、OpenAPI lint、47 个合同测试与全量静态验证通过；正式服务调用已接入 APT-047 短期工作负载身份边界 |
+| `WORKLOAD-IDENTITY` | 独立 ServiceAccount、按次轮换 OIDC 令牌、Subject/Method/Path 默认拒绝、Relay 本域 Subject 与独立 NATS 凭据、服务任务审计身份 | Go 单元测试、Helm Schema、工作负载身份合同及全量静态验证通过；真实 issuer/JWKS、NATS operator 权限和撤销/轮换演练待部署 |
 | `ORGANIZATION-LIFECYCLE` | 顶层组织创建幂等、状态/游标搜索、启停投影、组织钱包冻结以及 Account/Billing/Token 删除阻断事实强校验 | Account/Billing/Token Go 单元测试、OpenAPI lint、组织生命周期合同测试与全量静态验证通过；数据库运行级迁移和生产故障注入待部署 |
 | `ORGANIZATION-UNIT-LIFECYCLE` | 节点命令指纹幂等、组织结构版本、闭包树移动以及 Account/Billing/Token 限制态预检和逻辑删除 | Account/Billing/Token Go 单元测试、OpenAPI lint、节点生命周期合同测试与全量静态验证通过；数据库运行级迁移、真实并发和跨服务故障注入待部署 |
 | `MEMBERSHIP-GOVERNANCE` | 多目标邀请反枚举、成员命令幂等、即时撤权/上下文回退、Billing 限制投影和单 OWNER 数据库约束 | Account/Billing Go 单元测试、OpenAPI lint、成员治理合同测试与全量静态验证通过；数据库运行级迁移、真实并发、通知通道和跨服务故障注入待部署 |
@@ -397,7 +398,7 @@
 | UI-12 | 已实现 | DOC_CURRENT | TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 用户和运营退款动作统一按 Provider capabilities 隐藏；不支持退款时不展示不可执行按钮，服务端同步失败关闭 |
 | ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 离线 CLI 已幂等创建禁用 Identity 与 `BOOTSTRAP_PENDING` admin，支持终端无回显/受控 FD 直接设密及默认256 bit、43字符 Base64URL 一次性凭据；用途/代次校验值不可逆，默认15分钟/最长60分钟、5次锁定、恒定时间校验、重新签发淘汰旧代次、正式密码 Identity 边界、高权限策略、会话撤销、安全审计及失败补偿已实现。仍缺生产等价并发兑换、Keycloak/数据库故障和告警投递证据。 |
 | ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有仅主机/集群运行且无 HTTP 路由的 Break-glass CLI，强制全部管理员失联确认、事故证据、工作负载身份、20字符以上原因和5–60分钟有效期，恢复 Identity/短时授权后写不可变审计并产生 CRITICAL 告警；最后管理员数据库门禁不可绕过。仍缺生产等价事故授权、告警接收和到期恢复演练。 |
-| ADM-03 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 服务账号、后台任务和 Event Relay 使用独立工作负载身份、短期凭据和最小权限，不继承人类平台角色；审计记录 `actor_type=SERVICE`、服务名和任务运行 ID。 |
+| ADM-03 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY | NOT_DEPLOYED | 正式 Helm 为服务、Keycloak 和三个 Relay 配置独立 ServiceAccount；HTTP OIDC 令牌最长15分钟、按请求重读并按 Subject/Method/Path 默认拒绝，Relay 审计记录 `actor_type=SERVICE`、服务、任务类型和 `job_run_id`。缺真实集群 issuer/JWKS、轮换/撤销和跨身份故障注入证据。 |
 | ADM-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 支持列表、搜索、详情和生命周期操作。 |
 | ADM-05 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 运营端可查看角色定义和全部绑定，按用户/组织筛选，并对普通平台/组织/节点角色执行带有效期的幂等授予和单条撤销；SUPER_ADMIN 与 OWNER 保留专用安全流程 |
 | ADM-06 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | Account worker 扫描组织写模型及直接平台授权，到期时原子失效绑定、更新授权/上下文缓存版本并写审计和 Outbox；鉴权查询在 worker 延迟时也按可信数据库时间即时拒绝过期授权 |
@@ -415,7 +416,7 @@
 | NFR-09 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 仓库清单拒绝历史迁移改名/删除/改写且仅追加更高版本，目标库再次校验已执行SHA；生产迁移强制24小时内快照并输出迁移后摘要，缺真实环境证据 |
 | NFR-10 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 版本目录、恢复/回滚runbook、只读核验SQL及生产证据门禁已闭环；缺实际备份恢复和周期演练报告 |
 | NFR-11 | 部分实现 | DOC_CURRENT | HA-RELEASE-GATE | NOT_DEPLOYED | Compose明确非HA；production-new强制核心双副本、跨故障域、PDB、零不可用滚动及外部HA Redis/NATS，故障证据门禁要求无已提交事实丢失/重复；缺真实集群容量与切换报告 |
-| NFR-12 | 未实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 内部服务主要共享长期 INTERNAL_SERVICE_TOKEN，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权 |
+| NFR-12 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY | NOT_DEPLOYED | staging/production 禁止共享静态令牌；正式模板投射逐工作负载短期 OIDC 身份，Relay 与 Billing 消费者挂载独立 NATS 凭据并在代码侧限制本域 Subject。缺外部 NATS operator 实际权限、issuer/JWKS 可达性和轮换/撤销演练证据。 |
 | NFR-13 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 注销在 Identity 不可认证证明后立即随机去标识化直接资料并释放用户名/手机号，法律记录只按永久内部主体引用保留；三年分类记录支持法律保全并由 worker 到期标记清除完成。 |
 | NFR-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 启动工厂按配置注入 `aliyun-managed` 或 `http-generated`；核心挑战状态机没有厂商条件，历史挑战保存 Provider ID 与 Adapter 版本 |
 | NFR-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | OIDC 仅证明 issuer、subject 和会话；Account 是平台/组织业务授权事实源，三业务服务均不再读取 Realm Role 决定后台权限 |
@@ -767,7 +768,7 @@
 | UI-16 | 桌面与 Web 三语完整性 | 已实现 | 桌面账号弹层、Portal 个人中心和管理后台的简中/英文/日文词条执行双向精确键集、类型和非空检查；稳定错误映射不再回显 Provider/后端原文，源码单语硬编码和 Portal 构建制品缺失均阻断发布。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 仓库已实现 BOOTSTRAP_PENDING/禁用 Identity 门禁、无回显或受控 FD 设密、默认256 bit一次性凭据、15分钟有效、5次锁定、一次交付、不可逆校验值、代次隔离、Identity 高权限密码策略、会话撤销和失败补偿；缺生产等价环境并发及故障演练证据。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 离线 CLI 无公网 API，强制全体管理员异常失联确认并记录工作负载、原因、目标、证据摘要和5–60分钟有效期，执行后产生不可变审计和 CRITICAL 告警；缺生产事故演练和真实告警投递证据。 |
-| ADM-03 | 服务身份权限 | 未实现 | 服务账号、后台任务和 Event Relay 使用独立工作负载身份、短期凭据和最小权限，不继承人类平台角色；审计记录 `actor_type=SERVICE`、服务名和任务运行 ID。 |
+| ADM-03 | 服务身份权限 | 部分实现 | 独立 ServiceAccount、短期 OIDC 投射令牌、HTTP 路由白名单、Relay 本域 Subject 和服务任务审计已实现；真实集群轮换、撤销与权限故障演练未完成。 |
 | ADM-04 | 用户与组织分为独立页签 | 已实现 | 支持列表、搜索、详情和生命周期操作。 |
 | ADM-05 | 角色与成员权限管理 | 已实现 | 运营端具备绑定查询、有效期、来源、普通平台/组织角色授予与单条撤销；超级管理员和所有者仍走专用安全流程。 |
 | ADM-06 | 角色授权自动回收 | 已实现 | 临时授权按数据库时间即时停止参与鉴权，worker 原子固化到期、刷新缓存版本并记录审计/Outbox。 |
@@ -825,7 +826,7 @@
 | NFR-09 | 数据迁移 | 历史迁移清单只允许追加更高版本，运行时复核数据库校验和；生产迁移强制快照凭证与迁移后实际摘要，待真实环境验收。 |
 | NFR-10 | 可恢复性 | 版本目录、恢复/回滚步骤、只读核验和生产证据门禁已建立；实际备份恢复和周期演练仍为外部阻塞。 |
 | NFR-11 | 高可用 | 部分实现：生产Chart已强制独立故障域、多副本、PDB、零不可用滚动和外部HA依赖，并有无损切换证据门禁；真实集群验收仍为外部阻塞。 |
-| NFR-12 | 工作负载身份 | 内部服务主要共享长期 `INTERNAL_SERVICE_TOKEN`，未使用逐工作负载短期身份、mTLS/OIDC 和 Subject 级授权。 |
+| NFR-12 | 工作负载身份 | 正式模板已移除共享 `INTERNAL_SERVICE_TOKEN`，使用逐工作负载短期 OIDC 身份和独立 NATS 凭据；真实 issuer/JWKS、Subject 授权与轮换撤销证据待部署。 |
 | NFR-13 | 个人信息去标识化与保留 | 已实现 Identity 删除证明后的随机墓碑和标识释放；用户 ID/编码与法定内部引用保留，三年分类记录、法律保全开关及到期自动清除状态独立持久化。 |
 | NFR-14 | 短信供应商可替换性 | `SMSProvider` 由启动工厂按配置注入，核心状态机无厂商分支；支持 `aliyun-managed` 与 `http-generated`，并保存 Provider ID 和 Adapter 版本。 |
 | NFR-15 | 身份与授权分离 | OIDC 只证明主体与会话；Account 决定平台和组织业务权限，业务路由不再依赖 Identity Provider 角色 Claim。 |

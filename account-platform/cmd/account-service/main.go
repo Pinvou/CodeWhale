@@ -17,6 +17,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
 
 func main() {
@@ -63,32 +64,33 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	wallets, err := account.NewHTTPWalletProvisioner(os.Getenv("BILLING_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	serviceCredential := serviceauth.CredentialFromEnvironment()
+	wallets, err := account.NewHTTPWalletProvisioner(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
 	}
-	tokenOrganizationLifecycle, err := account.NewHTTPOrganizationLifecycleClient(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "TOKEN")
+	tokenOrganizationLifecycle, err := account.NewHTTPOrganizationLifecycleClient(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential, "TOKEN")
 	if err != nil {
 		log.Fatal(err)
 	}
-	billingOrganizationLifecycle, err := account.NewHTTPOrganizationLifecycleClient(os.Getenv("BILLING_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "BILLING")
+	billingOrganizationLifecycle, err := account.NewHTTPOrganizationLifecycleClient(os.Getenv("BILLING_HTTP_URL"), serviceCredential, "BILLING")
 	if err != nil {
 		log.Fatal(err)
 	}
-	billingAccountClosure, err := account.NewHTTPAccountClosureClient(os.Getenv("BILLING_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "BILLING")
+	billingAccountClosure, err := account.NewHTTPAccountClosureClient(os.Getenv("BILLING_HTTP_URL"), serviceCredential, "BILLING")
 	if err != nil {
 		log.Fatal(err)
 	}
-	tokenAccountClosure, err := account.NewHTTPAccountClosureClient(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"), "TOKEN")
+	tokenAccountClosure, err := account.NewHTTPAccountClosureClient(os.Getenv("TOKEN_GATEWAY_HTTP_URL"), serviceCredential, "TOKEN")
 	if err != nil {
 		log.Fatal(err)
 	}
-	identities, err := account.NewHTTPIdentityProvisioner(os.Getenv("IDENTITY_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	identities, err := account.NewHTTPIdentityProvisioner(os.Getenv("IDENTITY_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
 	}
 	service := account.NewService(repository, wallets).
-		WithServiceToken(os.Getenv("INTERNAL_SERVICE_TOKEN")).
+		WithServiceToken(serviceCredential).
 		WithClientCompatibility(valueOrDefault("ACCOUNT_SERVICE_VERSION", "development"), valueOrDefault("ACCOUNT_CLIENT_CONTRACT_VERSION", "account-client-v1")).
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
@@ -126,7 +128,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		service.WithMobileAuth(auth, os.Getenv("INTERNAL_SERVICE_TOKEN"))
+		service.WithMobileAuth(auth, serviceCredential)
 		profiles, err := account.NewProfileChangeService(repository, auth, identities)
 		if err != nil {
 			log.Fatal(err)

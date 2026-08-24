@@ -65,6 +65,12 @@ observability:
 security:
   authRiskEnabled: true
 
+workloadIdentity:
+  issuer: https://workload-identity.example.com
+  jwksUrl: https://workload-identity.example.com/openid/v1/jwks
+  audience: pinvou-account-platform-internal
+  tokenExpirationSeconds: 600
+
 sms:
   enabled: true
 

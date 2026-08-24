@@ -18,6 +18,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
 )
 
@@ -61,15 +62,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	serviceCredential := serviceauth.CredentialFromEnvironment()
+	authorizer, err := authorization.NewClient(os.Getenv("ACCOUNT_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
 	}
-	wallets, err := token.NewHTTPWalletResolver(os.Getenv("BILLING_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	wallets, err := token.NewHTTPWalletResolver(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
 	}
-	billingClient, err := token.NewHTTPBillingClient(os.Getenv("BILLING_HTTP_URL"), os.Getenv("INTERNAL_SERVICE_TOKEN"))
+	billingClient, err := token.NewHTTPBillingClient(os.Getenv("BILLING_HTTP_URL"), serviceCredential)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -122,7 +124,7 @@ func main() {
 	readiness, err := token.NewClientReadinessService(token.ClientReadinessConfig{
 		Environment: cfg.Environment, ServiceVersion: valueOrDefault("TOKEN_SERVICE_VERSION", "development"), ContractVersion: valueOrDefault("TOKEN_CLIENT_CONTRACT_VERSION", "client-readiness-v1"),
 		MinimumClient: valueOrDefault("TOKEN_MINIMUM_CLIENT_VERSION", "0.8.0"), MaximumClient: valueOrDefault("TOKEN_MAXIMUM_CLIENT_VERSION", "0.8.0"),
-		AccountURL: os.Getenv("ACCOUNT_HTTP_URL"), OIDCIssuer: os.Getenv("OIDC_ISSUER"), ServiceToken: os.Getenv("INTERNAL_SERVICE_TOKEN"),
+		AccountURL: os.Getenv("ACCOUNT_HTTP_URL"), OIDCIssuer: os.Getenv("OIDC_ISSUER"), ServiceToken: serviceCredential,
 		SigningKeyID: strings.TrimSpace(os.Getenv("CLIENT_READINESS_ATTESTATION_KEY_ID")), SigningKey: readinessSigningKey, AttestationTTL: readinessTTL,
 		Compatibility: compatibility.Manifest(),
 	}, repository, defaultRoutes, billingClient, repository)

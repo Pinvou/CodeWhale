@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["global", "compatibility", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy"],
+  "required": ["global", "compatibility", "externalSecrets", "images", "replicas", "availability", "dependencies", "newApi", "oidc", "workloadIdentity", "public", "observability", "security", "sms", "account", "billing", "tokenGateway", "external", "ingress", "keycloak", "redis", "nats", "networkPolicy"],
   "properties": {
     "global": {
       "type": "object",
@@ -73,6 +73,17 @@
         "rateLimitRPS": { "type": "number", "exclusiveMinimum": 0, "maximum": 100000 },
         "rateLimitBurst": { "type": "integer", "minimum": 1, "maximum": 1000000 },
         "authRiskEnabled": { "type": "boolean" }
+      }
+    },
+    "workloadIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "jwksUrl", "audience", "tokenExpirationSeconds"],
+      "properties": {
+        "issuer": { "type": "string", "pattern": "^https://" },
+        "jwksUrl": { "type": "string", "pattern": "^https://" },
+        "audience": { "type": "string", "minLength": 1 },
+        "tokenExpirationSeconds": { "type": "integer", "minimum": 300, "maximum": 900 }
       }
     },
     "compatibility": {

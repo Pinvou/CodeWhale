@@ -3,6 +3,7 @@ package events
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -21,7 +22,11 @@ func NewNATSBroker(ctx context.Context, rawURL, clientName string) (*NATSBroker,
 	if strings.TrimSpace(rawURL) == "" || strings.TrimSpace(clientName) == "" {
 		return nil, errorsNewConfiguration("NATS URL and client name are required")
 	}
-	connection, err := nats.Connect(rawURL, nats.Name(clientName), nats.Timeout(5*time.Second), nats.MaxReconnects(-1), nats.ReconnectWait(time.Second))
+	options := []nats.Option{nats.Name(clientName), nats.Timeout(5 * time.Second), nats.MaxReconnects(-1), nats.ReconnectWait(time.Second)}
+	if credentialsFile := strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE")); credentialsFile != "" {
+		options = append(options, nats.UserCredentials(credentialsFile))
+	}
+	connection, err := nats.Connect(rawURL, options...)
 	if err != nil {
 		return nil, fmt.Errorf("connect NATS: %w", err)
 	}
