@@ -47,7 +47,7 @@ function relayError(copy, error) {
 }
 
 function localDeviceName(fallback) {
-  return String(window.navigator?.userAgentData?.platform || window.navigator?.platform || fallback).slice(0, 120);
+  return String(bridgeState('platformCapabilities', {}).os || fallback).slice(0, 120);
 }
 
 function memberOptionLabel(member, members) {

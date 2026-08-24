@@ -28,7 +28,7 @@
     var avatarCacheEpoch = 0;
 
     function uuid() {
-      if (root.crypto && typeof root.crypto.randomUUID === "function") return root.crypto.randomUUID();
+      if (root.crypto && typeof root.crypto.randomUUID === "function") return root.crypto.randomUUID(); // safari14-ok: guarded above
       throw new Error("This platform cannot generate a secure request identifier");
     }
 
