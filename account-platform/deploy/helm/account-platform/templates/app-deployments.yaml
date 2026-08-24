@@ -124,6 +124,8 @@ spec:
             {{- end }}
             - name: REGISTRATION_QUERY_HMAC_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-query-hmac-key-base64, optional: true } }
+            - name: AUDIT_EXPORT_MASTER_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: audit-export-master-key-base64 } }
             {{- else if eq $app.name "identity-service" }}
             - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
             - { name: KEYCLOAK_ADMIN_API_URL, value: {{ printf "http://%s-keycloak:8080" $fullname | quote }} }

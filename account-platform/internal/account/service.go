@@ -32,6 +32,12 @@ type Service struct {
 	serviceVersion              string
 	clientContractVersion       string
 	now                         func() time.Time
+	auditExports                *AuditExportService
+}
+
+func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
+	s.auditExports = exports
+	return s
 }
 
 func (s *Service) WithOrganizationLifecycle(clients ...OrganizationLifecycleClient) *Service {
@@ -158,6 +164,12 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.DELETE("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_UNIT_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteUnit))
 	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
 	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))
+	if s.auditExports != nil {
+		admin.POST("/audit-exports", s.requirePermission(PermissionPlatformAuditExport), approvalpolicy.Require("ACCOUNT_AUDIT_EXPORT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.createAuditExport))
+		admin.GET("/audit-exports/:export_id", s.requirePermission(PermissionPlatformAuditExport), httpserver.AdaptFunc(s.getAuditExport))
+		admin.POST("/audit-exports/:export_id/download-tickets", s.requirePermission(PermissionPlatformAuditExport), approvalpolicy.Require("ACCOUNT_AUDIT_EXPORT_DOWNLOAD_TICKET", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.issueAuditExportDownloadTicket))
+		admin.GET("/audit-exports/:export_id/download", s.requirePermission(PermissionPlatformAuditExport), httpserver.AdaptFunc(s.downloadAuditExport))
+	}
 	admin.GET("/approval-policies", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminApprovalPolicies))
 	admin.GET("/approval-requests", httpserver.AdaptFunc(s.adminApprovalRequests))
 	admin.POST("/approval-requests", approvalpolicy.Require("APPROVAL_DRAFT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateApprovalDraft))
@@ -250,6 +262,7 @@ type roleBindingGrantBody struct {
 	StartsAt       *time.Time `json:"starts_at"`
 	ExpiresAt      *time.Time `json:"expires_at"`
 	IdempotencyKey string     `json:"idempotency_key"`
+	Reason         string     `json:"reason"`
 }
 
 func (s *Service) grantOrganizationRoleBinding(w http.ResponseWriter, r *http.Request) {
@@ -261,7 +274,7 @@ func (s *Service) grantOrganizationRoleBinding(w http.ResponseWriter, r *http.Re
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	item, err := s.repository.GrantOrganizationRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: &organizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey})
+	item, err := s.repository.GrantOrganizationRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: &organizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey, Reason: body.Reason})
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -579,6 +592,10 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusForbidden, "ACCOUNT_FORBIDDEN", "the account action is not permitted"
 	case errors.Is(err, ErrConflict):
 		status, code, message = http.StatusConflict, "ACCOUNT_CONFLICT", "the account resource changed or conflicts with existing data"
+	case errors.Is(err, ErrRecentAuthenticationRequired):
+		status, code, message = http.StatusUnauthorized, "RECENT_AUTHENTICATION_REQUIRED", "authentication within the last 15 minutes is required"
+	case errors.Is(err, ErrAuditExportQuota):
+		status, code, message = http.StatusTooManyRequests, "AUDIT_EXPORT_QUOTA_EXCEEDED", "the audit export limit was exceeded"
 	case errors.Is(err, ErrLastOwner):
 		status, code, message = http.StatusConflict, "LAST_OWNER_REQUIRED", "the organization must retain at least one owner"
 	case errors.Is(err, ErrLastActiveSuperAdmin):

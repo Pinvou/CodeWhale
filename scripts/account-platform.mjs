@@ -72,6 +72,7 @@ function generatedComposeEnvironment() {
     INTERNAL_SERVICE_TOKEN: secret(48),
     PAYMENT_SIM_PAY_TOKEN_SECRET: secret(48),
     TOKEN_LOCAL_KEK_BASE64: randomBytes(32).toString('base64'),
+    AUDIT_EXPORT_MASTER_KEY_BASE64: randomBytes(32).toString('base64'),
     MOCK_NEWAPI_KEY: secret(48),
     NEWAPI_SESSION_SECRET: secret(48),
     NEWAPI_CRYPTO_SECRET: secret(48),

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 298`、`部分实现 24`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 300`、`部分实现 23`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -78,8 +78,9 @@
 | `TENANT-ISOLATION-MATRIX` | 每次合同发布执行个人、组织、组织节点、角色/作用域、活动上下文、撤权/到期/移除/停用/注销、猜测ID、批量混入、搜索、缓存和伪造事件隔离矩阵；不存在租户导出接口时显式证明无公开导出面 | 15 个拒绝向量、授权行约束、无泄露错误和导出面合同检查通过；真实 PostgreSQL 组合数据与服务间缓存/事件故障注入待部署 |
 | `PROVIDER-CIRCUIT-CLOCK` | Provider/能力/路由独立60秒熔断、20样本50%或连续5失败、三次半开探测、指数重开、业务拒绝排除和高风险不重发；生产三源NTP中位偏差在250ms告警、1秒退出就绪并阻止新写操作 | Go 单测、Helm配置/NetworkPolicy和3个合同测试通过；真实Provider失败注入、告警投递、三独立授时源和生产偏差注入待外部验收 |
 | `CLIENT-COMPATIBILITY-LIFECYCLE` | Account、Billing、Gateway、Portal 共用显式客户端版本策略；N/N-1/N-2 发布时间线强制后继发布后至少90天支持、正常弃用提前60天，安全例外至少7天并要求审批号；桌面普通 API 和平台模型请求均携带精确版本，过期版本远程写操作稳定返回426和可信升级入口，本地读取与本地模型不受影响 | Go 策略/中间件单测、3个版本合同矩阵、OpenAPI、Compose/Helm 和桌面静态合同通过；实际淘汰日期由每次正式发布更新清单 |
+| `AUDIT-EXPORT-PROTECTION` | 服务端审计导出任务、15分钟近期认证、默认脱敏、最长24小时临时PII授权、31天/10万行/500MB及并发/日配额、加密签名水印封装和15分钟一次性下载 | Account/Portal Go 单测、OpenAPI lint、3个审计导出合同测试、三语 Portal 构建和静态门禁通过；真实 PostgreSQL 配额竞争、生产密钥托管和大规模导出待部署验收 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/155 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/158 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -291,7 +292,7 @@
 | NFR-45 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; ACCOUNT-CLOSURE-SAGA; LATE-PAYMENT-REVIEW; PAYMENT-ANOMALY-RECONCILIATION; ROUTE-PROVISIONING-ELIGIBILITY; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | Account、Billing、Token 使用统一冻结时钟和不可变案件/转派/止损证据；注册、资料、注销、支付/退款/拒付、对账、路由 Provisioning、用量及高风险命令修复均接入 P0/P1/P2，生产缺值班链即拒绝启动；任一截止逾期实际转派 owner，P0/P1 止损逾期会停用关联 Provider/商品/路由或暂停高风险命令，而非只通知 |
 | NFR-46 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK | NOT_DEPLOYED | 生产配置强制至少三个独立NTP源，使用中位偏差，超过250ms告警、超过1秒退出就绪并阻止新的写操作；Helm显式放行授时源UDP/123；缺真实三源、100ms目标连续证明、250ms/1s偏差注入与告警投递验收 |
 | NFR-47 | 已实现 | DOC_CURRENT | GO-UNIT; CLIENT-COMPATIBILITY-LIFECYCLE | NOT_DEPLOYED | 四服务共用版本清单与响应头，三版合同矩阵、90天支持、60天通知、受审批安全例外及稳定426已闭环；每次正式发布必须更新真实发布日期与淘汰时间 |
-| NFR-48 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少审计导出脱敏、独立PII权限、水印、加密、短时下载和配额控制 |
+| NFR-48 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-EXPORT-PROTECTION | NOT_DEPLOYED | 服务端任务要求 `platform.audit.export`、15分钟近期认证、明确范围和原因；默认不可逆主体标识及字段脱敏，未脱敏字段另需最长24小时临时 `platform.audit.pii.export`；执行31天/10万行/500MB、每用户2并发/10每日配额，加密签名水印文件只允许15分钟内单次成功下载；缺生产密钥托管、大规模及真实并发验收 |
 | UI-16 | 已实现 | DOC_CURRENT | DESKTOP-39; I18N-RELEASE-GATE | NOT_DEPLOYED | 桌面账号弹层、Web 个人中心和管理后台共用精确中/英/日词条形状，未知服务端错误只显示本地化安全兜底；缺键、空词条、回退、单语硬编码或构建制品缺词条会同时阻断 verify 和客户端发布 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
@@ -407,7 +408,7 @@
 | ADM-06 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | Account worker 扫描组织写模型及直接平台授权，到期时原子失效绑定、更新授权/上下文缓存版本并写审计和 Outbox；鉴权查询在 worker 延迟时也按可信数据库时间即时拒绝过期授权 |
 | ADM-07 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 角色可兼任且不同用户可交叉审批；服务端按稳定用户 ID 禁止自审，所有强制审批命令固定只需一名独立审批人。 |
 | ADM-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 不嵌入普通后台；通过受限网络/隧道访问。 |
-| ADM-09 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 已有筛选和导出基础；需按 NFR-48 增加近期重新认证、默认脱敏、PII临时权限、水印、加密、一次性下载和导出配额。 |
+| ADM-09 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-EXPORT-PROTECTION; DESKTOP-39 | NOT_DEPLOYED | 筛选和详情保留只读查询；导出改为服务端异步任务，浏览器不再拼接当前结果，权限、近期认证、脱敏/临时PII授权、水印、加密、配额和一次性下载均按 NFR-48 执行。 |
 | ADM-10 | 已实现 | DOC_CURRENT | CONFIGURED-SYSTEM-PROBES | NOT_DEPLOYED | `SYSTEM_PROBES_JSON` 配置实际部署组件、通用 HTTP/JSON 断言或 Relay Adapter；页面继续展示健康、积压、核对任务和最近错误，响应不暴露端点或凭据 |
 | NFR-01 | 部分实现 | DOC_CURRENT | PRODUCTION-SECURITY-GATE | NOT_DEPLOYED | Helm production-new 强制启用 Ingress 且绑定非空 TLS Secret，远程 URL 失败关闭为 HTTPS；环境门禁实际连接 Portal/Identity/OIDC、校验受信证书并要求剩余有效期不少于14天。无可访问的生产等价端点与证书证据 |
 | NFR-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 NOT_DEPLOYED |
@@ -499,11 +500,11 @@
 | CR-53 | ID-03, ID-14–ID-15, ID-17–ID-18, ACC-02, ACC-51–ACC-55, UI-15, ADM-35, NFR-04, NFR-06 | 闭合注册预检并发、唯一值预约、幂等、密码边界和孤儿 Identity 补偿 | 已实现 | 数据库唯一预约、稳定操作/密码指纹、脱敏查询、Identity 关联向前恢复及24小时证明门禁补偿已闭环；全域日志字段白名单和自动秘密扫描已完成，剩余全域幂等治理由 APT-045 追踪 |
 | CR-54 | BILL-12, BILL-36, BILL-38–BILL-40 | 允许授权管理员选择性回收注销账号的未消费组织授予 | 未实现 | 注销授予不自动回池；账号完成 `ANONYMIZED` 且不存在消费、Hold、待核对用量或资金冻结时，授权管理员可用专用命令一次性全额回收至原权益包原组成，禁止部分回收、跨组成转换、现金退款或直接授予新账号 |
 | CR-55 | TOK-42–TOK-45 | 补齐模型目录管理生命周期、历史展示、重命名/别名和版本回滚 | 部分实现 | 生命周期、历史墓碑、稳定模型 ID、版本化名称/别名和前向回滚已实现；回滚仍待 APT-028 用当前价格、Provisioning 路由和凭据完成联合发布校验 |
-| CR-56 | TOK-46–TOK-47 | 明确模型关联版本生成边界及下架后的新旧会话和在途请求策略 | 部分实现 | 独立版本、请求快照、截止门禁和桌面显式替代分支已实现；紧急 `force_cancel_inflight` 的实际触发及取消结果证据仍缺 |
+| CR-56 | TOK-46–TOK-47 | 明确模型关联版本生成边界及下架后的新旧会话和在途请求策略 | 已实现 | 独立版本、请求快照、截止门禁和桌面显式替代分支已实现；紧急 `force_cancel_inflight` 与目录变更原子提交，Worker 收敛在途请求并保存 Adapter 能力、本地中止、实际生成量、Hold 和结算证据 |
 | CR-57 | BILL-21–BILL-25, BILL-41–BILL-45, ADM-13 | 明确定价匹配优先级、显式单位继承、时间冲突、生命周期及 Hold 不变性 | 已实现 | 模型覆盖优先、显式继承、固定零价、区间冲突、完整生命周期及既有 Hold 不重算均由数据约束和服务契约实现 |
 | CR-58 | ADM-01, ID-18, NFR-04 | 用交互式设密或高熵一次性引导替代8位超级管理员初始密码 | 已实现 | admin 激活前保持 BOOTSTRAP_PENDING；直接设密使用高权限密码策略；引导凭据默认256 bit、最少128 bit、Base64URL、15分钟有效、最多5次失败、一次读取销毁且成功兑换原子失效；输出和统一日志不记录凭据原文 |
 | CR-59 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | 补齐管理命令审批对象、生命周期、失效和执行契约 | 已实现 | 后台写命令已版本化分类；审批支持独立决定、过期、撤回、新申请重提、快照失效、实时授权复核、Outbox 授权与 Billing 幂等执行 |
-| CR-60 | NFR-26–NFR-48, ADM-09 | 建立性能、容量、灾备、保留、限流、隔离、Provider韧性、时钟、客户端兼容和审计导出的量化验收基线 | 未实现 | 在生产等价环境按固定样本测量P95/P99/TTFT和容量；定义分级RPO/RTO、加密备份与演练、分类保留、多维限流、租户隔离矩阵、熔断/人工SLA、授时偏差、N/N-1/N-2桌面兼容及受控审计导出 |
+| CR-60 | NFR-26–NFR-48, ADM-09 | 建立性能、容量、灾备、保留、限流、隔离、Provider韧性、时钟、客户端兼容和审计导出的量化验收基线 | 部分实现 | 受控审计导出、量化策略和仓库门禁已闭环；仍需在生产等价环境取得性能/容量、分级RPO/RTO、加密备份与演练、分类保留、多维限流、租户隔离、Provider韧性、授时偏差及客户端兼容的真实运行证据 |
 | CR-61 | ACC-02, ACC-11, ACC-56–ACC-58, NFR-50 | 建立永久内部用户 ID 和独立可展示用户编码 | 部分实现 | ACC-56–ACC-58 与 NFR-50 已完成；ACC-11 的完整注销 Saga、资料清理和三年分类保留仍待实现 |
 
 这些需求之间的强制关系：
@@ -777,7 +778,7 @@
 | ADM-06 | 角色授权自动回收 | 已实现 | 临时授权按数据库时间即时停止参与鉴权，worker 原子固化到期、刷新缓存版本并记录审计/Outbox。 |
 | ADM-07 | 审批角色兼任和交叉审批 | 已实现 | 角色可兼任且不同用户可交叉审批；服务端按稳定用户 ID 禁止自审，强制审批命令只需一名独立审批人。 |
 | ADM-08 | Keycloak 安全管理入口 | 已实现 | 不嵌入普通后台；通过受限网络/隧道访问。 |
-| ADM-09 | 审计筛选、详情和导出 | 部分实现 | 已有筛选和导出基础；需按 NFR-48 增加近期重新认证、默认脱敏、PII临时权限、水印、加密、一次性下载和导出配额。 |
+| ADM-09 | 审计筛选、详情和导出 | 已实现 | 筛选和详情继续服务端查询；导出由服务端任务生成，执行近期认证、默认脱敏、PII临时授权、水印、加密、一次性下载和任务配额。 |
 | ADM-10 | 系统运行状态 | 已实现 | 运行时注册表配置实际服务和探针 Adapter，页面展示健康、Relay 积压、核对任务和最近错误。 |
 | ADM-11 | 组织模型业务策略管理边界 | 已实现 | 组织后台仅管理显式目标组织的允许/拒绝模型策略和目录资格提示，不返回或接受真实 Token Account、路由、凭据或 Provisioning 字段；Gateway 将策略与平台 READY 路由共同计算资格。 |
 | ADM-12 | 计量单位定义管理 | 已实现 | 支持版本化定义、停用和不可变历史引用保护。 |
@@ -865,7 +866,7 @@
 | NFR-45 | 人工队列 SLA | 已实现：三领域统一从源案件创建时间冻结 P0/P1 7×24 与 P2 上海工作时 SLA，转派不重置；注册/资料/注销、支付/退款/拒付/对账、路由 Provisioning、用量和高风险命令队列均保存责任人及不可变时间线，逐截止自动升级至配置的下一值班负责人，P0/P1 止损逾期执行 Provider、支付商品、路由或高风险命令暂停评估。 |
 | NFR-46 | 统一可信时钟 | 部分实现：生产三源NTP、中位偏差、250ms告警、1秒readiness/新写入门禁及UDP最小网络出口已实现；缺真实授时源和偏差/告警环境证据。 |
 | NFR-47 | 桌面 API 兼容与淘汰 | 已实现：N/N-1/N-2共用合同矩阵；清单启动校验90天支持和60天通知，四服务返回契约/最小版本/Sunset头，桌面直连与平台模型请求携带精确版本，过期远程写操作稳定返回426及HTTPS升级入口，不影响本地模型和本地读取。 |
-| NFR-48 | 审计导出保护 | 未实现：现有导出需补近期重认证、默认脱敏、PII独立权限、水印、文件加密、一次性下载和任务配额。 |
+| NFR-48 | 审计导出保护 | 已实现：服务端任务要求专用权限、15分钟近期认证、明确范围和原因，执行默认脱敏/临时PII授权、加密签名水印、31天/10万行/500MB、2并发/10每日及15分钟一次性下载。 |
 | NFR-49 | 模型结果重放载荷最小化 | 已实现：在线24小时/30天/90天硬上限、自动清除、主体正文即时删除内部入口、派发正文最小化及独立受限案件迁移/解除后30天清除已建立；生产备份生命周期证据随 APT-037 验收。 |
 | NFR-50 | 用户编码查询保护 | 已实现：编码不是认证/授权凭据；查询要求 `platform.users.read`，只做完整等值匹配，使用统一无泄露响应、多维摘要限流和全结果审计，不提供公开、前缀、模糊、自动补全或批量入口。 |
 

@@ -16,7 +16,10 @@ reconciliation credentials (`token-reconciliation-newapi-admin-token` and
 `token-reconciliation-newapi-admin-user-id`). Mobile registration additionally
 requires `registration-query-hmac-key-base64`, isolated from the Identity password
 and SMS verification HMAC keys. Production authentication risk admission also
-requires an independent `auth-risk-hmac-key-base64`; the exact public OIDC token
+requires an independent `auth-risk-hmac-key-base64`. Controlled audit export
+requires `audit-export-master-key-base64`, the standard Base64 encoding of 32
+independent random bytes; keep it in the external secret store, separate from
+registration, authentication, payment, and model keys. The exact public OIDC token
 path is routed through Identity Adapter and fails closed when its external Redis
 or Keycloak dependency is unavailable. Never place those values in a
 values file or rendered manifest.

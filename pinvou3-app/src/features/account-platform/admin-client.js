@@ -78,6 +78,14 @@ export class AdminPlatformClient {
     return this.request('account', `/admin/v1/audit-logs?${query}`, signal);
   }
   audit(auditID, signal) { return this.request('account', `/admin/v1/audit-logs/${encodeURIComponent(auditID)}`, signal); }
+  createAuditExport(filter, reason, includePII = false) { return this.mutate('account', '/admin/v1/audit-exports', 'POST', { filter, reason, include_pii:includePII, idempotency_key:`audit-export-${crypto.randomUUID()}` }); }
+  auditExport(exportID, signal) { return this.request('account', `/admin/v1/audit-exports/${encodeURIComponent(exportID)}`, signal); }
+  issueAuditExportDownloadTicket(exportID) { return this.mutate('account', `/admin/v1/audit-exports/${encodeURIComponent(exportID)}/download-tickets`, 'POST', {}); }
+  async downloadAuditExport(exportID, token) {
+    const response = await fetch(`${this.baseURL}/api/admin/account/admin/v1/audit-exports/${encodeURIComponent(exportID)}/download`, { headers:{ Accept:'application/vnd.pinvou.audit-envelope+json', 'X-Pinvou-Download-Token':token }, credentials:'same-origin', cache:'no-store' });
+    if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
+    return response.blob();
+  }
   billingOverview(signal) { return this.request('billing', '/admin/v1/overview', signal); }
   wallets(signal) { return this.request('billing', '/admin/v1/wallets?limit=100', signal); }
   walletLedger(walletID, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal); }

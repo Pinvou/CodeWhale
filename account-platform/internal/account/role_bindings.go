@@ -36,6 +36,7 @@ type RoleBindingGrant struct {
 	StartsAt       *time.Time
 	ExpiresAt      *time.Time
 	IdempotencyKey string
+	Reason         string
 }
 
 const effectiveRoleAssignmentSQL = "ra.revoked_at IS NULL AND ra.starts_at <= now() AND (ra.expires_at IS NULL OR ra.expires_at > now())"

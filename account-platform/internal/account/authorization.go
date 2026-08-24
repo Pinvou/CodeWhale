@@ -28,6 +28,8 @@ const (
 	PermissionPlatformOrganizationsDelete        = "platform.organizations.delete"
 	PermissionPlatformOrganizationsOwnerTransfer = "platform.organizations.owner.transfer"
 	PermissionPlatformAuditRead                  = "platform.audit.read"
+	PermissionPlatformAuditExport                = "platform.audit.export"
+	PermissionPlatformAuditPIIExport             = "platform.audit.pii.export"
 	PermissionPlatformSystemStatusRead           = "platform.system.status.read"
 	PermissionPlatformRegistrationsRepair        = "platform.registrations.repair"
 	PermissionPlatformProfileChangesRepair       = "platform.profile-changes.repair"

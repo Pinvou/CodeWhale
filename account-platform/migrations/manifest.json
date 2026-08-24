@@ -312,6 +312,16 @@
         "file": "000031_manual_review_sla.up.sql",
         "version": 31,
         "sha256": "b1bca562d91ac6d18b2b68c4274d5fffbb7d1049b7ad303f0539772685ff2bee"
+      },
+      {
+        "file": "000032_audit_export_protection.down.sql",
+        "version": 32,
+        "sha256": "1d5b61eb28a6b09c8d716dde49ebdff203907331a3d226d878810bb1a8d9557e"
+      },
+      {
+        "file": "000032_audit_export_protection.up.sql",
+        "version": 32,
+        "sha256": "d60a688ed9ee49014725543dbe458ac4386940033f09549877491f8f835be5ad"
       }
     ],
     "billing": [

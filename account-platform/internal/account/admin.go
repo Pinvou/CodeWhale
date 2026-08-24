@@ -268,7 +268,7 @@ func (s *Service) adminGrantRoleBinding(w http.ResponseWriter, r *http.Request) 
 	if err := api.DecodeJSON(w, r, &body); err != nil {
 		return
 	}
-	item, err := repository.AdminGrantRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: body.OrganizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey})
+	item, err := repository.AdminGrantRoleBinding(r.Context(), mustPrincipal(r.Context()), RoleBindingGrant{UserID: body.UserID, RoleCode: body.RoleCode, OrganizationID: body.OrganizationID, UnitID: body.UnitID, StartsAt: body.StartsAt, ExpiresAt: body.ExpiresAt, IdempotencyKey: body.IdempotencyKey, Reason: body.Reason})
 	if err != nil {
 		s.writeError(w, r, err)
 		return

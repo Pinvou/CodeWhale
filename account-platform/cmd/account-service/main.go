@@ -100,6 +100,17 @@ func main() {
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationMemberLifecycle(billingOrganizationLifecycle)
+	auditExportKey, decodeErr := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(os.Getenv("AUDIT_EXPORT_MASTER_KEY_BASE64")))
+	if decodeErr != nil {
+		log.Fatal("AUDIT_EXPORT_MASTER_KEY_BASE64 must be standard Base64")
+	}
+	auditExports, err := account.NewAuditExportService(repository, auditExportKey, cfg.Environment)
+	clear(auditExportKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	service.WithAuditExports(auditExports)
+	go observability.RunBackground(ctx, "audit-export", auditExports.Run)
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "approval-expiry", account.NewApprovalExpiryWorker(repository, time.Minute).Run)

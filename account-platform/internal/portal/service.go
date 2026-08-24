@@ -239,6 +239,9 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	if key := r.Header.Get("Idempotency-Key"); key != "" {
 		request.Header.Set("Idempotency-Key", key)
 	}
+	if token := r.Header.Get("X-Pinvou-Download-Token"); token != "" {
+		request.Header.Set("X-Pinvou-Download-Token", token)
+	}
 	response, err := s.client.Do(request)
 	if err != nil {
 		api.WriteError(w, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "the account platform is unavailable", httpserver.RequestID(r.Context()))
@@ -247,6 +250,9 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	defer response.Body.Close()
 	w.Header().Set("Content-Type", response.Header.Get("Content-Type"))
 	w.Header().Set("Cache-Control", "no-store")
+	if disposition := response.Header.Get("Content-Disposition"); disposition != "" {
+		w.Header().Set("Content-Disposition", disposition)
+	}
 	if contextVersion := response.Header.Get("X-Context-Version"); contextVersion != "" {
 		w.Header().Set("X-Context-Version", contextVersion)
 	}
@@ -483,6 +489,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if resource == "/admin/v1/approval-requests" && method == http.MethodPost {
 		return true
 	}
+	if resource == "/admin/v1/audit-exports" && method == http.MethodPost {
+		return true
+	}
 	if strings.Contains(resource, "..") {
 		return false
 	}
@@ -514,6 +523,18 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "audit-logs" && method == http.MethodGet {
 		_, err := uuid.Parse(parts[3])
 		return err == nil
+	}
+	if len(parts) >= 4 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "audit-exports" {
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		if len(parts) == 4 {
+			return method == http.MethodGet
+		}
+		if len(parts) == 5 && parts[4] == "download-tickets" {
+			return method == http.MethodPost
+		}
+		return len(parts) == 5 && parts[4] == "download" && method == http.MethodGet
 	}
 	if len(parts) < 4 || parts[0] != "admin" || parts[1] != "v1" || (parts[2] != "users" && parts[2] != "organizations") {
 		return false

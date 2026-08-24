@@ -28,6 +28,7 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 	now := r.now()
 	request.RoleCode = strings.ToUpper(strings.TrimSpace(request.RoleCode))
 	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
+	request.Reason = strings.TrimSpace(request.Reason)
 	if request.UserID == uuid.Nil || request.RoleCode == "" || len(request.IdempotencyKey) < 8 || len(request.IdempotencyKey) > 120 {
 		return RoleBinding{}, ErrConflict
 	}
@@ -42,6 +43,14 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 		request.ExpiresAt = &value
 		if !value.After(*request.StartsAt) || !value.After(now) {
 			return RoleBinding{}, ErrConflict
+		}
+	}
+	if request.RoleCode == "PLATFORM_AUDIT_PII_EXPORT" {
+		if request.ExpiresAt == nil || request.ExpiresAt.Sub(*request.StartsAt) > 24*time.Hour || len(request.Reason) < 10 || len(request.Reason) > 500 {
+			return RoleBinding{}, ErrConflict
+		}
+		if !recentlyAuthenticated(principal.AuthenticatedAt, now) {
+			return RoleBinding{}, ErrRecentAuthenticationRequired
 		}
 	}
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -99,7 +108,7 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 		if err != nil {
 			return RoleBinding{}, err
 		}
-		if err := appendAdminAudit(ctx, tx, actorID, principal, nil, "admin.role.binding.grant", "role_binding", bindingID.String(), map[string]any{"user_id": request.UserID, "role_code": request.RoleCode, "scope": scope, "starts_at": request.StartsAt, "expires_at": request.ExpiresAt}); err != nil {
+		if err := appendAdminAudit(ctx, tx, actorID, principal, nil, "admin.role.binding.grant", "role_binding", bindingID.String(), map[string]any{"user_id": request.UserID, "role_code": request.RoleCode, "scope": scope, "starts_at": request.StartsAt, "expires_at": request.ExpiresAt, "reason": request.Reason}); err != nil {
 			return RoleBinding{}, err
 		}
 		if err := appendOutbox(ctx, tx, "account.role-binding.changed.v1", bindingID, version, map[string]any{"user_id": request.UserID, "binding_id": bindingID, "status": "GRANTED", "scope": "PLATFORM", "authorization_cache_invalidated": true}); err != nil {
