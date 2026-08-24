@@ -292,6 +292,16 @@
         "file": "000029_authentication_risk_limits.up.sql",
         "version": 29,
         "sha256": "c6f5ee5c40d7f28e5fae7519e683a792e0fa690f8f0b77685ccb6f8c280ba37d"
+      },
+      {
+        "file": "000030_event_replay_audit.down.sql",
+        "version": 30,
+        "sha256": "c266dec0a7c9ec8750018db70108a3dff568c9f3f80d7df3fe3eb5a1825b8762"
+      },
+      {
+        "file": "000030_event_replay_audit.up.sql",
+        "version": 30,
+        "sha256": "733b1f380b9f4cc848c28fabefa4621e42db67466bcb2fba9b4fbbcf4d677a61"
       }
     ],
     "billing": [
@@ -594,6 +604,16 @@
         "file": "000031_payment_risk_admission.up.sql",
         "version": 31,
         "sha256": "ccac38b5295e7af136bb8f1be014b6389ff5a6277c4d0e612d16985535fed941"
+      },
+      {
+        "file": "000032_event_replay_audit.down.sql",
+        "version": 32,
+        "sha256": "c266dec0a7c9ec8750018db70108a3dff568c9f3f80d7df3fe3eb5a1825b8762"
+      },
+      {
+        "file": "000032_event_replay_audit.up.sql",
+        "version": 32,
+        "sha256": "733b1f380b9f4cc848c28fabefa4621e42db67466bcb2fba9b4fbbcf4d677a61"
       }
     ],
     "payment-simulator": [
@@ -808,6 +828,16 @@
         "file": "000017_usage_admission_indexes.up.sql",
         "version": 17,
         "sha256": "fcd9960bf027d6daa6be4c02b109a520398a9515b142f73abd6b9ef5007d09dd"
+      },
+      {
+        "file": "000018_event_replay_audit.down.sql",
+        "version": 18,
+        "sha256": "c266dec0a7c9ec8750018db70108a3dff568c9f3f80d7df3fe3eb5a1825b8762"
+      },
+      {
+        "file": "000018_event_replay_audit.up.sql",
+        "version": 18,
+        "sha256": "733b1f380b9f4cc848c28fabefa4621e42db67466bcb2fba9b4fbbcf4d677a61"
       }
     ]
   }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
@@ -105,5 +106,36 @@ func TestRelayRejectsSubjectOutsideSourcePermission(t *testing.T) {
 func TestAggregateVersionDecisionRejectsGapsAndIgnoresStaleEvents(t *testing.T) {
 	if DecideVersion(false, 0, 1) != Apply || DecideVersion(true, 7, 6) != Stale || DecideVersion(true, 7, 7) != Stale || DecideVersion(true, 7, 9) != Gap || DecideVersion(true, 7, 8) != Apply {
 		t.Fatal("aggregate version decisions are not deterministic")
+	}
+}
+
+func TestDeadLetterDigestBindsTheImmutableEnvelope(t *testing.T) {
+	event := testEvent(12)
+	first, err := digestEvent(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _ := digestEvent(event)
+	if first != second || len(first) != 64 {
+		t.Fatalf("event digest is not stable: %q %q", first, second)
+	}
+	event.Payload = json.RawMessage(`{"status":"DISABLED"}`)
+	changed, _ := digestEvent(event)
+	if changed == first {
+		t.Fatal("event digest did not bind the payload")
+	}
+}
+
+func TestReplayRequestHashSupportsRetryButRejectsSemanticChange(t *testing.T) {
+	request := ReplayRequest{EventID: uuid.New(), ExpectedDigest: strings.Repeat("a", 64), IdempotencyKey: "stable-replay-key", Reason: "approved recovery after root cause fixed"}
+	identity := serviceauth.Identity{ActorType: "SERVICE", Service: "event-replay", JobType: "EVENT_REPLAY", JobRunID: "first-run"}
+	first := replayRequestHash(request, identity)
+	identity.JobRunID = "retry-run"
+	if replayRequestHash(request, identity) != first {
+		t.Fatal("job retry changed the semantic command fingerprint")
+	}
+	request.Reason = "different audited recovery decision"
+	if replayRequestHash(request, identity) == first {
+		t.Fatal("semantic change reused a replay request fingerprint")
 	}
 }

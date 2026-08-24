@@ -253,6 +253,12 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务
 
 开发态 `npm run dev` 不需要每次生成安装包。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
 
+### 6.1 死信检查与受审计重放
+
+先按目标领域选择只读数据库凭据，执行 `event-replay --event-id <uuid> --inspect` 并留存返回的事件类型、聚合版本和摘要。根因修复后，使用受控 `event-replay` 工作负载及新的稳定幂等键执行 `--event-id <uuid> --expected-digest <sha256> --idempotency-key <key> --reason <不少于20字符> --confirm`；命令会以 `actor_type=SERVICE`、`EVENT_REPLAY`、`job_run_id` 和原因写入不可变审计，再原子重新排队。
+
+不得修改 Payload、跳过摘要、复用其他服务数据库身份或直接更新 `outbox_events`；同一命令重试返回原审计结果，同键异请求拒绝。上线须先完成 Account `000030_event_replay_audit`、Billing `000032_event_replay_audit`、Token `000018_event_replay_audit`。
+
 ## 7. 本地开发
 
 1. 将 `account-platform/deploy/compose/.env.example` 复制为被 Git 忽略的 `.env`。

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 288`、`部分实现 34`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 292`、`部分实现 30`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -40,6 +40,7 @@
 | `SECURITY-RECOVERY` | `BOOTSTRAP_PENDING` 首管安全激活、256 bit 一次性凭据、5 次锁定、代次失效、最后管理员门禁、ACC-48 撤权原语和离线 Break-glass | Go 单元测试、CLI/迁移合同与全量静态验证通过；生产等价 Keycloak/数据库并发、故障补偿、告警投递和事故演练待执行 |
 | `APPROVAL-COMMANDS` | 版本化命令分类、不可逆审批状态机、不可变快照、独立审批、强一致授权复核、Outbox 授权和 Billing 幂等领域执行 | Account/Billing/Portal Go 单元测试、OpenAPI lint、47 个合同测试与全量静态验证通过；正式服务调用已接入 APT-047 短期工作负载身份边界 |
 | `WORKLOAD-IDENTITY` | 独立 ServiceAccount、按次轮换 OIDC 令牌、Subject/Method/Path 默认拒绝、Relay 本域 Subject 与独立 NATS 凭据、服务任务审计身份 | Go 单元测试、Helm Schema、工作负载身份合同及全量静态验证通过；真实 issuer/JWKS、NATS operator 权限和撤销/轮换演练待部署 |
+| `AUDIT-IDEMPOTENCY-EVENTS` | 当前跨域 Saga、管理/资金/授权/路由写审计、稳定请求指纹、事务 Outbox/Inbox、摘要绑定且服务身份化的幂等死信重放 | Go 单元测试、三域迁移、CLI/合同与全量静态验证通过；真实数据库迁移、积压和 Broker 故障恢复演练待部署 |
 | `ORGANIZATION-LIFECYCLE` | 顶层组织创建幂等、状态/游标搜索、启停投影、组织钱包冻结以及 Account/Billing/Token 删除阻断事实强校验 | Account/Billing/Token Go 单元测试、OpenAPI lint、组织生命周期合同测试与全量静态验证通过；数据库运行级迁移和生产故障注入待部署 |
 | `ORGANIZATION-UNIT-LIFECYCLE` | 节点命令指纹幂等、组织结构版本、闭包树移动以及 Account/Billing/Token 限制态预检和逻辑删除 | Account/Billing/Token Go 单元测试、OpenAPI lint、节点生命周期合同测试与全量静态验证通过；数据库运行级迁移、真实并发和跨服务故障注入待部署 |
 | `MEMBERSHIP-GOVERNANCE` | 多目标邀请反枚举、成员命令幂等、即时撤权/上下文回退、Billing 限制投影和单 OWNER 数据库约束 | Account/Billing Go 单元测试、OpenAPI lint、成员治理合同测试与全量静态验证通过；数据库运行级迁移、真实并发、通知通道和跨服务故障注入待部署 |
@@ -96,7 +97,7 @@
 | CORE-04 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 平衡不可变账本及组成级守恒事实已实现；后续应收和支付流水任务必须继续通过同一账本扩展，数据库运行级验证待部署 |
 | CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
 | CORE-06 | 部分实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 支付回调/查询/修复与模型派发不确定、加密流事件/结果重放已有独立证据边界；账单支付证据及取消后的可信用量仍待 APT-049/APT-030 后统一收敛 |
-| CORE-07 | 部分实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; TARGETED-REFUND | NOT_DEPLOYED | 三服务具备 Outbox/Inbox/Relay，注册和目标退款 Saga 已闭环；注销与托管路由 Provisioning 等流程仍待收敛 |
+| CORE-07 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; TARGETED-REFUND; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 当前跨服务变更均使用持久幂等 Saga 或事务 Outbox/Inbox；Relay、死信、摘要绑定服务身份重放和不可变修复审计形成闭环，不宣称跨库原子事务。 |
 | SCOPE-01 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 本地独立模型仍受保护，账号平台迁移不删除用户自建模型 |
 | SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人中心已移除自管 Token Account 页面；Gateway 仍保留受限普通用户 API，不影响当前 UI 范围结论 |
 | SCOPE-03 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 平台运营接口只查询和变更 `management_mode=PLATFORM` 资源并要求 `platform.tokens.*`；组织策略拒绝内部引用字段，普通及全部组织角色无法探测或变更真实账号、路由、凭据和 Provisioning |
@@ -409,9 +410,9 @@
 | NFR-01 | 部分实现 | DOC_CURRENT | PRODUCTION-SECURITY-GATE | NOT_DEPLOYED | Helm production-new 强制启用 Ingress 且绑定非空 TLS Secret，远程 URL 失败关闭为 HTTPS；环境门禁实际连接 Portal/Identity/OIDC、校验受信证书并要求剩余有效期不少于14天。无可访问的生产等价端点与证书证据 |
 | NFR-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 NOT_DEPLOYED |
 | NFR-03 | 部分实现 | DOC_CURRENT | GO-UNIT; PRODUCTION-SECURITY-GATE | NOT_DEPLOYED | production-new 禁止本地 KEK，ExternalSecret 只从 KMS/Vault SecretStore 提取运行时秘密；Gateway 按行持久 Key ID 双读并将凭据、派发包络、流事件与结果分批重加密，旧密文归零前 readiness 失败；环境门禁要求新 Key 可加解密、旧 Key 已停用。缺真实 SecretStore/KMS 和轮换证据 |
-| NFR-05 | 部分实现 | DOC_CURRENT | CODE-AUDIT; GO-UNIT; REGISTRATION-SAGA; APPROVAL-COMMANDS; DESKTOP-39 | NOT_DEPLOYED | 账号、资金、Token、注册修复和审批生命周期已有审计；注销 Saga、Provider 事实修复等目标动作仍缺失 |
-| NFR-06 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约 |
-| NFR-07 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 三服务具备事务 Outbox/Inbox、至少一次 Relay、死信和人工重放；业务最终收敛依赖死信处置且多项 Saga 缺失 |
+| NFR-05 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 当前管理、资金、授权、Token 路由、Break-glass、Saga 修复及死信重放均保存不可变或追加式审计；后台身份不能伪装成人类。 |
+| NFR-06 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 注册、资料、钱包、路由、支付、退款、模型请求、结算、事件消费及人工重放均使用稳定命名空间、请求指纹或事件 ID；同键异请求失败关闭。 |
+| NFR-07 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 三服务使用事务 Outbox/Inbox、版本间隙门禁、至少一次 Relay 和死信；人工重放校验不可变摘要并原子登记审计，不使用分布式事务。 |
 | NFR-08 | 已实现 | DOC_CURRENT | GO-UNIT; GLOBAL-CONTEXT | NOT_DEPLOYED | 用户级 context_version 数据库单调保护，切换要求 expected_context_version；响应头跨 Account、Token、Portal 与桌面桥接传播，客户端只接受更高版本并刷新缓存 |
 | NFR-09 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 仓库清单拒绝历史迁移改名/删除/改写且仅追加更高版本，目标库再次校验已执行SHA；生产迁移强制24小时内快照并输出迁移后摘要，缺真实环境证据 |
 | NFR-10 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 版本目录、恢复/回滚runbook、只读核验SQL及生产证据门禁已闭环；缺实际备份恢复和周期演练报告 |
@@ -819,9 +820,9 @@
 | NFR-02 | 最小暴露 | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 `NOT_DEPLOYED`。 |
 | NFR-03 | 密钥管理 | production-new 使用 ExternalSecret + 远程 KMS/Vault 包络加密；按持久 Key ID 双读、全表分批重加密和 readiness 关闭完成新旧 Key 过渡，真实 SecretStore/KMS 轮换证据待外部环境验收。 |
 | NFR-04 | 日志敏感信息保护 | 共享结构化 Handler 使用稳定事件/字段白名单，未知消息折叠并丢弃原始错误与受保护字段；注入秘密标记和绕过源码扫描已进入全量发布门禁。 |
-| NFR-05 | 审计 | 账号、资金、Token、注册修复和审批生命周期已有审计；注销 Saga、Provider 事实修复等目标动作仍缺失。 |
-| NFR-06 | 幂等 | 钱包、支付入账、Hold、默认路由、结算和事件消费有幂等基础；注册操作、结果重放、注销和多项修复缺完整指纹契约。 |
-| NFR-07 | 最终一致性 | 三服务具备事务 Outbox/Inbox、至少一次 Relay、死信和人工重放；业务最终收敛依赖死信处置且多项 Saga 缺失。 |
+| NFR-05 | 审计 | 已实现：管理、资金、授权、路由、恢复和服务任务写入不可变或追加式审计，死信重放也记录服务身份、任务运行和原因。 |
+| NFR-06 | 幂等 | 已实现：当前目标写路径均使用稳定命名空间、规范请求指纹、事件 ID 或领域唯一键，同键异请求拒绝。 |
+| NFR-07 | 最终一致性 | 已实现：事务 Outbox/Inbox、版本门禁、至少一次 Relay、死信与摘要绑定重放闭环，不宣称跨库原子事务。 |
 | NFR-08 | 全局上下文一致性 | 已实现用户级唯一上下文、数据库单调版本、期望版本 CAS、标准响应头和桌面/Web 缓存失效；生产多端并发仍待部署验证。 |
 | NFR-09 | 数据迁移 | 历史迁移清单只允许追加更高版本，运行时复核数据库校验和；生产迁移强制快照凭证与迁移后实际摘要，待真实环境验收。 |
 | NFR-10 | 可恢复性 | 版本目录、恢复/回滚步骤、只读核验和生产证据门禁已建立；实际备份恢复和周期演练仍为外部阻塞。 |

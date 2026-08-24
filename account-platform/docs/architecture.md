@@ -304,6 +304,8 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 
 本地业务状态与对应 Outbox 写入具备事务原子性；Relay 以至少一次语义重试投递，默认达到 12 次失败后进入死信，需审计后人工重新入队。三个 Relay 分别只接受本域 `account.>`、`billing.>`、`token.>` Subject，并分别挂载 NATS 凭据；跨域 Subject 在进入 Broker 前失败关闭。Relay 周期审计明确记录 `actor_type=SERVICE`、服务、任务类型和 `job_run_id`，不能借用人类角色。因此该机制保留并重试事件，但业务最终收敛仍依赖死信处置，不能无条件宣称最终投递。注册 Account 提交会原子写入 `account.wallet.provisioning.requested.v1`，钱包成功写入 `account.wallet.provisioning.completed.v1`；财务审批成功写入绑定命令指纹、策略、目标和关键版本的 `account.approval-command.authorized.v1`，Billing 重复消费使用同一领域执行键。目标退款意图原子写入 `billing.refund.requested.v1`，明确成功或失败再写对应终态事件；Provider 不确定结果保持冻结并等待证据收敛。托管路由 Provisioning 由 Token 数据库内的聚合、尝试、命令和审计协调；账号注销也由 Account 数据库的持久聚合协调，跨域评估是无副作用强一致读取，不把消息送达误当成门禁结论。
 
+死信恢复不允许直接改表或仅凭事件 ID 清零状态。运维先以只读 `--inspect` 获取原事件不可变包络的 SHA-256，再以稳定幂等键、同一摘要、至少20字符原因和 `EVENT_REPLAY` 服务任务身份执行；Account、Billing、Token 各自在串行事务中登记不可变 `event_replay_requests` 后才重新排队。同键异请求、已发布、非死信或摘要变化均失败关闭。
+
 ## 9. 客户端与 Portal
 
 - Portal 采用 OIDC Authorization Code + PKCE、Redis 服务端 Session、CSRF 和严格代理路径白名单。
