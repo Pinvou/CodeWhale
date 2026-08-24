@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use parking_lot::Mutex;
-use rand::RngCore;
+use rand::Rng;
 use reqwest::{Client, StatusCode};
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, Row};
