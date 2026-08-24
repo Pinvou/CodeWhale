@@ -34,7 +34,7 @@ use crate::core::engine::{
     EngineConfig, EngineHandle, ExtraTools, spawn_engine_with_authoritative_route_config,
 };
 use crate::core::events::{Event as EngineEvent, TurnOutcomeStatus};
-use crate::core::ops::{Op, SteerMessage};
+use crate::core::ops::Op;
 use crate::cost_status::{
     EffectiveRouteEnvelope, EffectiveRouteUsage, RouteBillingMode, RuntimeUsageRecord,
 };
@@ -5352,7 +5352,10 @@ impl RuntimeThreadManager {
                 bail!("Turn {turn_id} is not active on thread {thread_id}");
             }
             active_turn.interrupt_requested = true;
-            active_thread.engine.cancel();
+            active_thread.engine.cancel_with_mode(
+                crate::core::engine::CancelReason::External,
+                crate::core::engine::CancelMode::InterruptKeepInbox,
+            );
             touch_lru(&mut active.lru, thread_id);
         }
 
@@ -5400,7 +5403,7 @@ impl RuntimeThreadManager {
             engine
         };
 
-        let (permit, steer_id) = engine
+        let reserved = engine
             .reserve_steer()
             .await
             .map_err(|error| anyhow!("Failed to steer turn: {error}"))?;
@@ -5464,10 +5467,7 @@ impl RuntimeThreadManager {
             };
             // The reserved send has no await/failure point. From here the
             // engine and durable record agree even if the API caller drops.
-            let _sender = permit.send(SteerMessage {
-                id: steer_id,
-                content: prompt.clone(),
-            });
+            let _ = reserved.send(prompt.clone());
             touch_lru(&mut active.lru, thread_id);
             self.spawn_steer_receipts(turn, item, prompt)
         };

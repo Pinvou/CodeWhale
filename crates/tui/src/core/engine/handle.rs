@@ -15,11 +15,9 @@ use tokio::sync::mpsc;
 
 use super::approval::{ApprovalDecision, UserInputDecision};
 use super::{
-    CancelReason, EngineHandle, LiveRuntimeAuthority, Op, RuntimePermissionAuthority,
-    UserInputResponse,
+    CancelMode, CancelReason, EngineHandle, LiveRuntimeAuthority, Op, ReservedSteer,
+    RuntimePermissionAuthority, UserInputResponse,
 };
-use crate::core::ops::SteerMessage;
-
 impl EngineHandle {
     /// True when the caller must preflight a concrete provider client before
     /// committing UI/runtime turn state. Test and embedding handles with an
@@ -125,13 +123,30 @@ impl EngineHandle {
 
     /// Reserve capacity for a runtime steer before it mutates durable state.
     /// The owned permit lets the caller persist and dispatch synchronously,
-    /// without a cancellation point between those two operations. Returns the
-    /// permit together with the steer id the caller must put into the
-    /// `SteerMessage` it sends, so the reserved path and `steer` share one id
-    /// authority.
-    pub(crate) async fn reserve_steer(&self) -> Result<(mpsc::OwnedPermit<SteerMessage>, String)> {
+    /// without a cancellation point between those two operations. Its target
+    /// is frozen before the channel wait, so a later session switch or stop
+    /// cannot retarget the send.
+    pub(crate) async fn reserve_steer(&self) -> Result<ReservedSteer> {
+        let id = self.next_steer_id();
+        let target = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active_target()
+            .map_err(anyhow::Error::msg)?;
         let permit = self.tx_steer.clone().reserve_owned().await?;
-        Ok((permit, self.next_steer_id()))
+        self.steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register(id.clone(), target)
+            .map_err(anyhow::Error::msg)?;
+        Ok(ReservedSteer {
+            permit: Some(permit),
+            sent: false,
+            id,
+            target,
+            control: self.steer_control.clone(),
+        })
     }
 
     /// Allocate the next opaque steer id. Unique within this engine session;
@@ -141,16 +156,26 @@ impl EngineHandle {
         format!("steer-{seq}")
     }
 
-    /// Cancel the current request (user-initiated path — keeps the
-    /// public `cancel()` signature stable). Equivalent to
-    /// `cancel_with_reason(CancelReason::User)`.
+    /// Stop the current request and discard its uncommitted steer inputs.
+    /// Call `cancel_with_mode` explicitly for interrupt/keep-inbox semantics.
     pub fn cancel(&self) {
-        self.cancel_with_reason(CancelReason::User);
+        self.cancel_with_mode(CancelReason::User, CancelMode::StopDropInbox);
     }
 
     /// Cancel the current request and latch the reason so downstream
     /// "request cancelled" error messages can name a cause.
     pub fn cancel_with_reason(&self, reason: CancelReason) {
+        self.cancel_with_mode(reason, CancelMode::StopDropInbox);
+    }
+
+    /// Atomically publish the steer disposition and cancel the active turn.
+    /// A stop barrier is visible before the token fires, so concurrent or
+    /// already-reserved sends cannot escape into a later turn.
+    pub fn cancel_with_mode(&self, reason: CancelReason, mode: CancelMode) {
+        self.steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .cancel(mode);
         match self.cancel_reason.lock() {
             Ok(mut slot) => *slot = Some(reason),
             Err(poisoned) => *poisoned.into_inner() = Some(reason),
@@ -170,21 +195,6 @@ impl EngineHandle {
             Ok(token) => token.is_cancelled(),
             Err(poisoned) => poisoned.into_inner().is_cancelled(),
         }
-    }
-
-    /// Set the keepInbox disposition for steers when the current turn is
-    /// cancelled (P0-A). Must be called **before** `cancel`/`cancel_with_reason`:
-    /// the turn loop reads it at the cancellation check point.
-    ///
-    /// - `true` (interrupt): unconsumed steers are parked on the engine and
-    ///   re-injected by the next turn's step boundary — the user's queued
-    ///   message survives the interrupt.
-    /// - `false` (stop): unconsumed steers are dropped and each emits
-    ///   `Event::SteerDropped`, so hosts can remove the queued placeholder
-    ///   and tell the user the message was cancelled — nothing hangs
-    ///   invisible.
-    pub fn set_steer_keep_inbox(&self, keep: bool) {
-        self.steer_keep_inbox.store(keep, Ordering::Release);
     }
 
     /// Pause or resume the current pausable command.
@@ -270,11 +280,10 @@ impl EngineHandle {
     /// turns (a parked steer may only surface in a later turn) and is cleared
     /// on session switch and shutdown.
     pub fn withdraw_steer(&self, steer_id: &str) {
-        let mut set = self
-            .withdrawn_steers
+        self.steer_control
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set.insert(steer_id.to_string());
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .withdraw(steer_id);
     }
 
     /// Steer an in-flight turn with additional user input.
@@ -284,14 +293,7 @@ impl EngineHandle {
     /// hosts can correlate those events with the queued input without
     /// re-hashing content.
     pub async fn steer(&self, content: impl Into<String>) -> Result<String> {
-        let id = self.next_steer_id();
-        self.tx_steer
-            .send(SteerMessage {
-                id: id.clone(),
-                content: content.into(),
-            })
-            .await?;
-        Ok(id)
+        Ok(self.reserve_steer().await?.send(content.into()))
     }
 
     /// Request a snapshot of the current session state.

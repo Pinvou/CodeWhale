@@ -173,10 +173,23 @@ pub struct SteerMessage {
     /// Opaque correlation id assigned by `EngineHandle::steer` at enqueue
     /// time (e.g. `steer-7`).
     pub id: String,
+    /// Session/turn identity captured before the channel slot is reserved.
+    /// A late send through an already-owned permit therefore cannot cross a
+    /// session switch or a stop barrier.
+    pub(crate) target: SteerTarget,
     /// Steer text as submitted by the host. The engine trims it at the
     /// injection points; an all-whitespace payload is dropped (with a
     /// `SteerDropped` event) instead of injected.
     pub content: String,
+}
+
+/// Engine-owned destination for a steer. Hosts never construct or compare
+/// this value; it only travels with the message so the lifecycle state can
+/// reject stale reserved sends deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SteerTarget {
+    pub(crate) session_epoch: u64,
+    pub(crate) turn_generation: u64,
 }
 
 /// Provider request runtime state surfaced by `/provider`.

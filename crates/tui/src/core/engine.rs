@@ -11,7 +11,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -79,7 +79,7 @@ use super::authority::{
 };
 use super::events::{Event, TurnOutcomeStatus, TurnRoute};
 use super::ops::{
-    ExactToolDispatchPolicy, Op, ProviderRuntimeStatus, SessionSnapshot, SteerMessage,
+    ExactToolDispatchPolicy, Op, ProviderRuntimeStatus, SessionSnapshot, SteerMessage, SteerTarget,
     TurnToolSecurityPolicy, USER_SHELL_TOOL_ID_PREFIX, UserInputProvenance,
 };
 use super::session::Session;
@@ -566,6 +566,19 @@ pub enum CancelReason {
     Internal,
 }
 
+/// Disposition for steers that have not reached the transcript when a turn
+/// is cancelled. The mode and cancellation token are published by one handle
+/// operation, so hosts cannot accidentally race two independent setters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelMode {
+    /// Interrupt the current work but keep accepted steer inputs for the next
+    /// turn in the same session.
+    InterruptKeepInbox,
+    /// Stop the turn and retire every steer targeted at it, including sends
+    /// that arrive later through an already-reserved channel permit.
+    StopDropInbox,
+}
+
 impl CancelReason {
     fn describe(self) -> &'static str {
         match self {
@@ -573,6 +586,199 @@ impl CancelReason {
             Self::External => "request cancelled by external caller",
             Self::Preempted => "request was preempted by a new turn",
             Self::Internal => "engine torn down before approval resolved",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SteerControlState {
+    session_epoch: u64,
+    next_turn_generation: u64,
+    active_turn_generation: Option<u64>,
+    drop_through_generation: u64,
+    unsettled: HashMap<String, SteerTarget>,
+    withdrawn: HashSet<String>,
+}
+
+impl Default for SteerControlState {
+    fn default() -> Self {
+        Self {
+            session_epoch: 1,
+            next_turn_generation: 0,
+            active_turn_generation: None,
+            drop_through_generation: 0,
+            unsettled: HashMap::new(),
+            withdrawn: HashSet::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerSettlement {
+    Ready,
+    Commit,
+    Drop,
+    Ignore,
+}
+
+impl SteerControlState {
+    fn begin_turn(&mut self) -> SteerTarget {
+        self.next_turn_generation = self.next_turn_generation.saturating_add(1);
+        self.active_turn_generation = Some(self.next_turn_generation);
+        SteerTarget {
+            session_epoch: self.session_epoch,
+            turn_generation: self.next_turn_generation,
+        }
+    }
+
+    fn finish_turn(&mut self, target: SteerTarget) {
+        if target.session_epoch == self.session_epoch
+            && self.active_turn_generation == Some(target.turn_generation)
+        {
+            self.active_turn_generation = None;
+        }
+    }
+
+    fn active_target(&self) -> Result<SteerTarget, &'static str> {
+        let Some(turn_generation) = self.active_turn_generation else {
+            return Err("no active turn can accept steer input");
+        };
+        if turn_generation <= self.drop_through_generation {
+            return Err("active turn is stopping and cannot accept steer input");
+        }
+        Ok(SteerTarget {
+            session_epoch: self.session_epoch,
+            turn_generation,
+        })
+    }
+
+    fn register(&mut self, id: String, target: SteerTarget) -> Result<(), &'static str> {
+        if self.active_target()? != target {
+            return Err("steer target changed while waiting for channel capacity");
+        }
+        self.unsettled.insert(id, target);
+        Ok(())
+    }
+
+    fn abandon(&mut self, id: &str) {
+        self.unsettled.remove(id);
+        self.withdrawn.remove(id);
+    }
+
+    fn withdraw(&mut self, id: &str) {
+        if self.unsettled.contains_key(id) {
+            self.withdrawn.insert(id.to_string());
+        }
+    }
+
+    fn is_deliverable(&self, steer: &SteerMessage) -> bool {
+        self.unsettled.get(&steer.id) == Some(&steer.target)
+            && steer.target.session_epoch == self.session_epoch
+            && steer.target.turn_generation > self.drop_through_generation
+            && !self.withdrawn.contains(&steer.id)
+    }
+
+    fn settle(&mut self, steer: &SteerMessage, content_is_empty: bool) -> SteerSettlement {
+        let Some(registered_target) = self.unsettled.get(&steer.id).copied() else {
+            return SteerSettlement::Ignore;
+        };
+        let should_drop = registered_target != steer.target
+            || steer.target.session_epoch != self.session_epoch
+            || steer.target.turn_generation <= self.drop_through_generation
+            || self.withdrawn.contains(&steer.id)
+            || content_is_empty;
+        self.abandon(&steer.id);
+        if should_drop {
+            SteerSettlement::Drop
+        } else {
+            SteerSettlement::Commit
+        }
+    }
+
+    fn prepare(&mut self, steer: &SteerMessage, content_is_empty: bool) -> SteerSettlement {
+        if !content_is_empty && self.is_deliverable(steer) {
+            return SteerSettlement::Ready;
+        }
+        self.settle(steer, content_is_empty)
+    }
+
+    fn cancel(&mut self, mode: CancelMode) {
+        if mode == CancelMode::StopDropInbox {
+            // Admission closes before TurnComplete is emitted. Include the
+            // highest still-unsettled generation so a stop in that terminal
+            // bookkeeping window cannot carry an accepted steer forward.
+            let generation = self
+                .unsettled
+                .values()
+                .filter(|target| target.session_epoch == self.session_epoch)
+                .map(|target| target.turn_generation)
+                .chain(self.active_turn_generation)
+                .max();
+            let Some(generation) = generation else {
+                return;
+            };
+            self.drop_through_generation = self.drop_through_generation.max(generation);
+        }
+    }
+
+    fn take_stopped(&mut self) -> Vec<String> {
+        let drop_through = self.drop_through_generation;
+        let mut dropped = Vec::new();
+        self.unsettled.retain(|id, target| {
+            let keep =
+                target.session_epoch == self.session_epoch && target.turn_generation > drop_through;
+            if !keep {
+                dropped.push(id.clone());
+            }
+            keep
+        });
+        for id in &dropped {
+            self.withdrawn.remove(id);
+        }
+        dropped
+    }
+
+    fn retire_session(&mut self) -> Vec<String> {
+        self.session_epoch = self.session_epoch.saturating_add(1);
+        self.active_turn_generation = None;
+        self.drop_through_generation = 0;
+        self.withdrawn.clear();
+        self.unsettled.drain().map(|(id, _)| id).collect()
+    }
+}
+
+/// A steer channel slot whose session/turn target was frozen before the
+/// caller performs durable writes. Dropping an unused reservation releases
+/// its lifecycle record; sending cannot fail after persistence succeeds.
+pub(crate) struct ReservedSteer {
+    permit: Option<mpsc::OwnedPermit<SteerMessage>>,
+    sent: bool,
+    id: String,
+    target: SteerTarget,
+    control: Arc<StdMutex<SteerControlState>>,
+}
+
+impl ReservedSteer {
+    pub(crate) fn send(mut self, content: String) -> String {
+        let id = self.id.clone();
+        let permit = self.permit.take().expect("reserved steer permit missing");
+        permit.send(SteerMessage {
+            id: id.clone(),
+            target: self.target,
+            content,
+        });
+        self.sent = true;
+        id
+    }
+}
+
+impl Drop for ReservedSteer {
+    fn drop(&mut self) {
+        if !self.sent {
+            self.control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .abandon(&self.id);
         }
     }
 }
@@ -610,15 +816,9 @@ pub struct EngineHandle {
     /// change publishes here before its mailbox op is queued, so gates never
     /// consult a stale per-turn copy.
     live_runtime_authority: Arc<StdMutex<LiveRuntimeAuthorityState>>,
-    /// keepInbox disposition for unconsumed steers when a turn is cancelled.
-    /// Interrupt (true) parks them for the next turn; stop (false) drops them
-    /// with a `SteerDropped` event each. Set by the host before cancelling.
-    pub steer_keep_inbox: Arc<AtomicBool>,
-    /// Ids of steers withdrawn by the host before the engine injected them.
-    /// Shared with the engine, which checks the set at every collection and
-    /// injection point: a withdrawn steer is never appended to the
-    /// transcript; it is skipped with a `SteerDropped` event instead.
-    withdrawn_steers: Arc<StdMutex<HashSet<String>>>,
+    /// Single lifecycle authority for target binding, withdrawal, session
+    /// retirement, cancellation disposition, and exactly-once settlement.
+    steer_control: Arc<StdMutex<SteerControlState>>,
 }
 
 // `impl EngineHandle { ... }` moved to `engine/handle.rs` so the
@@ -693,17 +893,8 @@ pub struct Engine {
     /// The steer contract is "injected (SteerCommitted) or carried forward,
     /// never silently dropped at a turn boundary".
     pending_steers: Vec<SteerMessage>,
-    /// keepInbox disposition shared with `EngineHandle`: on cancel, true
-    /// (interrupt) parks unconsumed steers for the next turn; false (stop)
-    /// drops them, emitting one `SteerDropped` per steer. The host sets it
-    /// through the handle before cancelling.
-    steer_keep_inbox: Arc<AtomicBool>,
-    /// Ids of steers withdrawn by the host (`EngineHandle::withdraw_steer`)
-    /// before the engine injected them. Checked at every steer collection
-    /// and injection point; the mark survives across turns (a parked steer
-    /// may only be processed by a later turn) and is cleared on session
-    /// switch and shutdown.
-    withdrawn_steers: Arc<StdMutex<HashSet<String>>>,
+    /// Shared lifecycle authority; see `EngineHandle::steer_control`.
+    steer_control: Arc<StdMutex<SteerControlState>>,
     tx_event: mpsc::Sender<Event>,
     /// Wakeup channel for the parent turn loop when a direct child sub-agent
     /// terminates (issue #756). Cloned into `SubAgentRuntime` so the runtime
@@ -1238,11 +1429,7 @@ impl Engine {
         let (tx_subagent_completion, rx_subagent_completion) = mpsc::unbounded_channel();
         let cancel_token = CancellationToken::new();
         let shared_cancel_token = Arc::new(StdMutex::new(cancel_token.clone()));
-        // keepInbox defaults to true (interrupt semantics): unconsumed steers
-        // are kept by default; a host cancelling with stop semantics sets it
-        // to false explicitly.
-        let steer_keep_inbox = Arc::new(AtomicBool::new(true));
-        let withdrawn_steers = Arc::new(StdMutex::new(HashSet::new()));
+        let steer_control = Arc::new(StdMutex::new(SteerControlState::default()));
         let cancel_reason: Arc<StdMutex<Option<CancelReason>>> = Arc::new(StdMutex::new(None));
         let shared_paused = Arc::new(StdMutex::new(false));
         let live_runtime_authority = Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
@@ -1431,8 +1618,7 @@ impl Engine {
             rx_user_input,
             rx_steer,
             pending_steers: Vec::new(),
-            steer_keep_inbox: steer_keep_inbox.clone(),
-            withdrawn_steers: withdrawn_steers.clone(),
+            steer_control: steer_control.clone(),
             tx_event,
             tx_subagent_completion,
             rx_subagent_completion,
@@ -1465,8 +1651,7 @@ impl Engine {
             shared_paused,
             client_preflight_required: true,
             live_runtime_authority,
-            steer_keep_inbox: steer_keep_inbox.clone(),
-            withdrawn_steers,
+            steer_control,
         };
 
         (engine, handle)
@@ -2921,30 +3106,93 @@ impl Engine {
         self.config.runtime_services.active_thread_id.is_some()
     }
 
-    /// Consume the withdraw mark for a steer id. Returns true at most once
-    /// per id — the mark is removed — so the matching `SteerDropped` event
-    /// is emitted exactly once.
-    fn take_steer_withdraw_mark(&self, steer_id: &str) -> bool {
-        self.withdrawn_steers
+    fn begin_steer_turn(&self) -> SteerTarget {
+        self.steer_control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(steer_id)
+            .begin_turn()
     }
 
-    /// Check a steer against the withdraw set before it is collected or
-    /// injected. A withdrawn steer is reported `SteerDropped` (exactly once)
-    /// and filtered out — it must never reach the transcript. Anything else
-    /// passes through unchanged. This is the single withdraw checkpoint every
-    /// steer touch point routes through.
-    async fn filter_withdrawn_steer(&self, steer: SteerMessage) -> Option<SteerMessage> {
-        if !self.take_steer_withdraw_mark(&steer.id) {
-            return Some(steer);
+    fn finish_steer_turn(&self, target: SteerTarget) {
+        self.steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_turn(target);
+    }
+
+    async fn emit_dropped_steers(&self, ids: Vec<String>) {
+        for steer_id in ids {
+            let _ = self.tx_event.send(Event::SteerDropped { steer_id }).await;
         }
-        let _ = self
-            .tx_event
-            .send(Event::SteerDropped { steer_id: steer.id })
-            .await;
-        None
+    }
+
+    /// Normalize and validate a steer while retaining its unsettled record.
+    /// Stream collection uses this path; transcript injection performs the
+    /// terminal settlement later through `inject_steer`.
+    pub(super) async fn queue_steer(&mut self, mut steer: SteerMessage) {
+        steer.content = steer.content.trim().to_string();
+        let settlement = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepare(&steer, steer.content.is_empty());
+        match settlement {
+            SteerSettlement::Ready => {
+                let _ = self
+                    .tx_event
+                    .send(Event::status(format!(
+                        "Steer input queued: {}",
+                        summarize_text(&steer.content, 120)
+                    )))
+                    .await;
+                self.pending_steers.push(steer);
+            }
+            SteerSettlement::Drop => self.emit_dropped_steers(vec![steer.id]).await,
+            SteerSettlement::Ignore => {}
+            SteerSettlement::Commit => unreachable!("prepare cannot commit a steer"),
+        }
+    }
+
+    /// The only transcript injection point for steer messages. Lifecycle
+    /// settlement is decided under the shared lock before the session write:
+    /// a later withdrawal is then a bounded no-op, while a prior withdrawal,
+    /// stop, or session retirement can never reach the transcript.
+    pub(super) async fn inject_steer(&mut self, mut steer: SteerMessage) -> bool {
+        steer.content = steer.content.trim().to_string();
+        let settlement = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .settle(&steer, steer.content.is_empty());
+        match settlement {
+            SteerSettlement::Commit => {
+                self.session
+                    .working_set
+                    .observe_user_message(&steer.content, &self.session.workspace);
+                self.add_session_message(
+                    self.user_text_message_with_turn_metadata(steer.content.clone()),
+                )
+                .await;
+                let _ = self
+                    .tx_event
+                    .send(Event::SteerCommitted { steer_id: steer.id })
+                    .await;
+                let _ = self
+                    .tx_event
+                    .send(Event::status(format!(
+                        "Steer input accepted: {}",
+                        summarize_text(&steer.content, 120)
+                    )))
+                    .await;
+                true
+            }
+            SteerSettlement::Drop => {
+                self.emit_dropped_steers(vec![steer.id]).await;
+                false
+            }
+            SteerSettlement::Ignore => false,
+            SteerSettlement::Ready => unreachable!("settle cannot leave a steer ready"),
+        }
     }
 
     /// Drop every unconsumed steer — parked in `pending_steers` and still
@@ -2956,29 +3204,18 @@ impl Engine {
     /// dropping them silently would strand the host's queued placeholders.
     /// Unlike `settle_steers_on_interrupt`, this ignores the keepInbox
     /// disposition — there is no "next turn of this session" to park for.
-    /// Pending withdraw marks are consumed and the set cleared: they belong
-    /// to the same retired context.
+    /// The epoch advances before the first await. Reserved-but-not-yet-sent
+    /// messages are included in the returned ids and any later channel send
+    /// is ignored without a duplicate terminal event.
     async fn drop_all_steers(&mut self) {
-        let dropped = std::mem::take(&mut self.pending_steers);
-        for steer in dropped {
-            self.take_steer_withdraw_mark(&steer.id);
-            let _ = self
-                .tx_event
-                .send(Event::SteerDropped { steer_id: steer.id })
-                .await;
-        }
-        while let Ok(steer) = self.rx_steer.try_recv() {
-            self.take_steer_withdraw_mark(&steer.id);
-            let _ = self
-                .tx_event
-                .send(Event::SteerDropped { steer_id: steer.id })
-                .await;
-        }
-        // Withdraw marks belong to the retired context as well.
-        self.withdrawn_steers
+        let dropped = self
+            .steer_control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+            .retire_session();
+        self.pending_steers.clear();
+        while self.rx_steer.try_recv().is_ok() {}
+        self.emit_dropped_steers(dropped).await;
     }
 
     async fn emit_session_updated(&self) {
@@ -3848,7 +4085,7 @@ impl Engine {
         let todo_list = self.config.todos.clone();
         let plan_state = self.config.plan_state.clone();
 
-        let tool_context = self.build_tool_context_for_turn(input_policy, &route);
+        let tool_context = self.build_tool_context_for_turn(input_policy, &route, Some(turn_id));
         // Ensure MCP pool is initialized before building the tool registry,
         // so start_mcp_server can be registered when Feature::Mcp is enabled.
         // A passive snapshot must not create the pool: allocating it is engine
@@ -4276,6 +4513,10 @@ impl Engine {
 
         // Create turn context first so start event includes a stable turn id.
         let mut turn = TurnContext::new(self.config.max_steps);
+        // Publish the active steer destination before `TurnStarted`. Hosts
+        // may steer or cancel as soon as they observe that event, and both
+        // operations must resolve against this exact generation.
+        let steer_target = self.begin_steer_turn();
         self.turn_counter = self.turn_counter.saturating_add(1);
         let turn_started_at = chrono::Utc::now();
         // Mint the route receipt from the client that `install_resolved_runtime_route`
@@ -4412,6 +4653,7 @@ impl Engine {
                 .tx_event
                 .send(Event::error(ErrorEnvelope::fatal_auth(message.clone())))
                 .await;
+            self.finish_steer_turn(steer_target);
             let _ = self
                 .tx_event
                 .send(Event::TurnComplete {
@@ -4579,6 +4821,10 @@ impl Engine {
                 )
             }
         };
+        // Close admission before any terminal bookkeeping or event awaits.
+        // Already accepted messages remain session-queued unless stop/session
+        // retirement settled them; new calls cannot target a finished turn.
+        self.finish_steer_turn(steer_target);
 
         // Update session usage
         self.session.total_usage.add(&turn.usage);
@@ -5219,7 +5465,7 @@ impl Engine {
             reasoning_effort: self.session.reasoning_effort.clone(),
             reasoning_effort_auto: self.session.reasoning_effort_auto,
         };
-        self.build_tool_context_for_turn(&authority, &route)
+        self.build_tool_context_for_turn(&authority, &route, None)
     }
 
     /// Project the current engine authority onto an already-built registry.
@@ -5259,6 +5505,7 @@ impl Engine {
         &self,
         authority: &TurnAuthority,
         route: &TurnRouteContext,
+        turn_id: Option<&str>,
     ) -> ToolContext {
         // Load the per-workspace trusted-paths list (#29) on every tool-context
         // build. Cheap (a small JSON file) and always reflects the latest
@@ -5313,6 +5560,9 @@ impl Engine {
         .with_shell_policy(self.effective_turn_shell_policy(authority.shell_policy()))
         .with_trusted_external_paths(trusted_external_paths)
         .with_follow_symlinks(self.config.workspace_follow_symlinks);
+        if let Some(turn_id) = turn_id {
+            ctx = ctx.with_foreground_turn_id(turn_id);
+        }
 
         // Hand the user-memory path to tools so the model-callable
         // `remember` tool can append entries (#489). `None` when the
@@ -6103,23 +6353,16 @@ pub(crate) fn spawn_engine_with_authoritative_route_config(
 /// the events it needs to retire its queued placeholders.
 impl Drop for Engine {
     fn drop(&mut self) {
-        let dropped = std::mem::take(&mut self.pending_steers);
-        for steer in dropped {
-            self.take_steer_withdraw_mark(&steer.id);
-            let _ = self
-                .tx_event
-                .try_send(Event::SteerDropped { steer_id: steer.id });
-        }
-        while let Ok(steer) = self.rx_steer.try_recv() {
-            self.take_steer_withdraw_mark(&steer.id);
-            let _ = self
-                .tx_event
-                .try_send(Event::SteerDropped { steer_id: steer.id });
-        }
-        self.withdrawn_steers
+        let dropped = self
+            .steer_control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+            .retire_session();
+        self.pending_steers.clear();
+        while self.rx_steer.try_recv().is_ok() {}
+        for steer_id in dropped {
+            let _ = self.tx_event.try_send(Event::SteerDropped { steer_id });
+        }
     }
 }
 
@@ -6206,6 +6449,8 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
             None,
         ),
     )));
+    let mut steer_control_state = SteerControlState::default();
+    steer_control_state.begin_turn();
     let handle = EngineHandle {
         tx_op,
         rx_event: Arc::new(RwLock::new(rx_event)),
@@ -6218,8 +6463,7 @@ pub(crate) fn mock_engine_handle() -> MockEngineHandle {
         shared_paused,
         client_preflight_required: false,
         live_runtime_authority,
-        steer_keep_inbox: Arc::new(AtomicBool::new(true)),
-        withdrawn_steers: Arc::new(StdMutex::new(HashSet::new())),
+        steer_control: Arc::new(StdMutex::new(steer_control_state)),
     };
 
     MockEngineHandle {

@@ -540,6 +540,10 @@ pub struct ToolExecutionState {
     /// jobs can be attributed in UI surfaces.
     pub owner_agent_id: Option<String>,
     pub owner_agent_name: Option<String>,
+    /// Engine turn that owns foreground shell waits created from this
+    /// context. Detached/background work clears this identity and survives
+    /// turn cancellation.
+    pub(crate) foreground_turn_id: Option<String>,
     /// Outer process authority cap installed by Fleet/headless dispatch.
     /// `None` for ordinary interactive/root sessions.
     pub(crate) tool_authority: Option<Arc<ToolAuthorityEnvelope>>,
@@ -699,6 +703,7 @@ impl ToolContext {
                 file_read_tracker: new_shared_file_read_tracker(),
                 owner_agent_id: None,
                 owner_agent_name: None,
+                foreground_turn_id: None,
                 tool_authority,
                 trust_mode,
                 sandbox_policy: SandboxPolicy::None,
@@ -758,6 +763,13 @@ impl ToolContext {
     #[must_use]
     pub fn with_runtime_services(mut self, runtime: RuntimeToolServices) -> Self {
         self.runtime = runtime;
+        self
+    }
+
+    /// Bind foreground shell waits to the engine turn that created them.
+    #[must_use]
+    pub(crate) fn with_foreground_turn_id(mut self, turn_id: impl Into<String>) -> Self {
+        self.foreground_turn_id = Some(turn_id.into());
         self
     }
 

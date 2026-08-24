@@ -5,8 +5,6 @@
 //! event handling, tool planning/execution, LSP post-edit hooks, capacity
 //! checkpoints, and loop termination.
 
-use std::sync::atomic::Ordering;
-
 use super::dispatch::{
     ReadRepeatExecutionPlan, normalize_schema_json_containers, plan_read_repeat_execution,
 };
@@ -16,7 +14,7 @@ use super::stuck_guard::{
 };
 use super::*;
 use crate::core::authority::{ToolPermission, resolve_tool_permission};
-use crate::core::ops::{SteerMessage, UserInputProvenance};
+use crate::core::ops::UserInputProvenance;
 use crate::prompt_zones::PinnedPrefix;
 use crate::runtime_handoff::{
     shell_completion_runtime_message, subagent_completion_runtime_message,
@@ -523,43 +521,7 @@ impl Engine {
             }
 
             while let Ok(steer) = self.rx_steer.try_recv() {
-                let Some(SteerMessage { id, content }) = self.filter_withdrawn_steer(steer).await
-                else {
-                    continue;
-                };
-                let content = content.trim().to_string();
-                if content.is_empty() {
-                    // An all-whitespace steer is dropped, not injected — but
-                    // never silently: the host still needs the drop event to
-                    // retire its queued placeholder.
-                    let _ = self
-                        .tx_event
-                        .send(Event::SteerDropped { steer_id: id })
-                        .await;
-                    continue;
-                }
-                self.session
-                    .working_set
-                    .observe_user_message(&content, &self.session.workspace);
-                self.add_session_message(
-                    self.user_text_message_with_turn_metadata(content.clone()),
-                )
-                .await;
-                // Delivery confirmation: emitting the committed event right
-                // after the injection gives hosts an authoritative signal for
-                // when to promote a queued placeholder into a visible bubble,
-                // instead of guessing from transcript events.
-                let _ = self
-                    .tx_event
-                    .send(Event::SteerCommitted { steer_id: id })
-                    .await;
-                let _ = self
-                    .tx_event
-                    .send(Event::status(format!(
-                        "Steer input accepted: {}",
-                        summarize_text(&content, 120)
-                    )))
-                    .await;
+                self.inject_steer(steer).await;
             }
 
             // Child agents can finish while the parent model is still taking
@@ -1066,33 +1028,7 @@ impl Engine {
                     break;
                 };
                 while let Ok(steer) = self.rx_steer.try_recv() {
-                    let Some(SteerMessage { id, content }) =
-                        self.filter_withdrawn_steer(steer).await
-                    else {
-                        continue;
-                    };
-                    let content = content.trim().to_string();
-                    if content.is_empty() {
-                        // Dropped, not queued — but reported, so the host can
-                        // retire its queued placeholder instead of waiting on
-                        // a steer that will never land.
-                        let _ = self
-                            .tx_event
-                            .send(Event::SteerDropped { steer_id: id })
-                            .await;
-                        continue;
-                    }
-                    self.pending_steers.push(SteerMessage {
-                        id,
-                        content: content.clone(),
-                    });
-                    let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Steer input queued: {}",
-                            summarize_text(&content, 120)
-                        )))
-                        .await;
+                    self.queue_steer(steer).await;
                 }
 
                 if self.cancel_token.is_cancelled() {
@@ -1926,27 +1862,7 @@ impl Engine {
                     let pending = std::mem::take(&mut self.pending_steers);
                     let mut injected_any = false;
                     for steer in pending {
-                        let Some(SteerMessage { id, content }) =
-                            self.filter_withdrawn_steer(steer).await
-                        else {
-                            continue;
-                        };
-                        injected_any = true;
-                        self.session
-                            .working_set
-                            .observe_user_message(&content, &self.session.workspace);
-                        self.add_session_message(
-                            self.user_text_message_with_turn_metadata(content),
-                        )
-                        .await;
-                        // Delivery confirmation: steers collected during the
-                        // stream (or parked by a previous interrupted turn)
-                        // are injected here; emit one committed event each so
-                        // the host can promote its queued placeholder.
-                        let _ = self
-                            .tx_event
-                            .send(Event::SteerCommitted { steer_id: id })
-                            .await;
+                        injected_any |= self.inject_steer(steer).await;
                     }
                     if injected_any {
                         let _ = self
@@ -3297,7 +3213,7 @@ impl Engine {
                                 let _ = self
                                     .shell_manager
                                     .lock()
-                                    .map(|mut manager| manager.kill_running_turn_foreground());
+                                    .map(|mut manager| manager.kill_running_turn_foreground(&turn.id));
                                 break;
                             }
                             outcome = tool_tasks.next() => {
@@ -3392,6 +3308,10 @@ impl Engine {
                             let terminal = tokio::select! {
                                 biased;
                                 () = cancel_token.cancelled() => {
+                                    let _ = self
+                                        .shell_manager
+                                        .lock()
+                                        .map(|mut manager| manager.kill_running_turn_foreground(&turn.id));
                                     ToolExecutionOutcome::cancelled(interrupted_tool_result())
                                 },
                                 result = self.execute_parallel_tool(
@@ -3682,7 +3602,7 @@ impl Engine {
                                     let _ = self
                                         .shell_manager
                                         .lock()
-                                        .map(|mut manager| manager.kill_running_turn_foreground());
+                                        .map(|mut manager| manager.kill_running_turn_foreground(&turn.id));
                                     (Ok(interrupted_tool_result()), true)
                                 },
                                 result = Self::execute_tool_with_lock(
@@ -4132,22 +4052,7 @@ impl Engine {
             if !self.pending_steers.is_empty() {
                 let pending = std::mem::take(&mut self.pending_steers);
                 for steer in pending {
-                    let Some(SteerMessage { id, content }) =
-                        self.filter_withdrawn_steer(steer).await
-                    else {
-                        continue;
-                    };
-                    self.session
-                        .working_set
-                        .observe_user_message(&content, &self.session.workspace);
-                    self.add_session_message(self.user_text_message_with_turn_metadata(content))
-                        .await;
-                    // Delivery confirmation: the post-tool injection point
-                    // also emits one committed event per steer.
-                    let _ = self
-                        .tx_event
-                        .send(Event::SteerCommitted { steer_id: id })
-                        .await;
+                    self.inject_steer(steer).await;
                 }
             }
 
@@ -4177,41 +4082,22 @@ impl Engine {
         (TurnOutcomeStatus::Completed, None)
     }
 
-    /// Settle unconsumed steers at a cancellation exit (keepInbox semantics).
-    ///
-    /// - keepInbox = true (interrupt): nothing happens here. Parked steers in
-    ///   `pending_steers` and any still-uncollected messages in the steer
-    ///   channel carry over to the next turn, whose step boundary collects
-    ///   and injects them — the user's queued messages survive the interrupt.
-    /// - keepInbox = false (stop): every unconsumed steer — both the parked
-    ///   `pending_steers` and the ones still sitting in the channel — is
-    ///   dropped with a `SteerDropped` event, so the host can retire each
-    ///   queued placeholder and no message lingers "gone from the UI but
-    ///   alive in the engine" to be silently injected into a later turn.
-    ///
-    /// Called at every `TurnOutcomeStatus::Interrupted` exit of the turn loop.
+    /// Settle steers behind the current stop barrier. Interrupt/keep-inbox
+    /// leaves the set unchanged; stop/drop-inbox atomically retired every id
+    /// when cancellation was requested, including reserved late sends.
     pub(super) async fn settle_steers_on_interrupt(&mut self) {
-        if self.steer_keep_inbox.load(Ordering::Acquire) {
+        let dropped = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_stopped();
+        if dropped.is_empty() {
             return;
         }
-        let dropped = std::mem::take(&mut self.pending_steers);
-        for steer in dropped {
-            // Consume any withdraw mark: the steer is already being reported
-            // dropped here, and a stale mark must not fire a second event
-            // when the id is never seen again.
-            self.take_steer_withdraw_mark(&steer.id);
-            let _ = self
-                .tx_event
-                .send(Event::SteerDropped { steer_id: steer.id })
-                .await;
-        }
-        while let Ok(steer) = self.rx_steer.try_recv() {
-            self.take_steer_withdraw_mark(&steer.id);
-            let _ = self
-                .tx_event
-                .send(Event::SteerDropped { steer_id: steer.id })
-                .await;
-        }
+        self.pending_steers
+            .retain(|steer| !dropped.iter().any(|id| id == &steer.id));
+        while self.rx_steer.try_recv().is_ok() {}
+        self.emit_dropped_steers(dropped).await;
     }
 
     fn goal_snapshot_with_current_turn_usage(

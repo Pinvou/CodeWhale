@@ -414,11 +414,10 @@ pub enum Event {
         steer_id: String,
     },
 
-    /// A steer message was dropped without ever being injected: the turn it
-    /// was destined for was cancelled or ended before a step boundary
-    /// consumed it. Hosts must surface this so a queued message cannot
-    /// silently stall forever — the steer contract is "committed (with an
-    /// event) or dropped (with an event), never silent".
+    /// A steer message was retired without ever being injected: it was
+    /// withdrawn, stopped, empty, or belonged to a retired session. Hosts
+    /// must surface this so a queued message cannot silently stall forever —
+    /// every accepted id eventually commits or drops exactly once.
     SteerDropped {
         /// Opaque id of the dropped steer (`SteerMessage::id`).
         steer_id: String,

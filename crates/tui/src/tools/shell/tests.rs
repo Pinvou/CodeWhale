@@ -2452,7 +2452,7 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         stdout_cursor: 0,
         stderr_cursor: 0,
         completion_reported: false,
-        spawned_as_foreground: false,
+        foreground_turn_id: None,
         stdin: None,
         child: None,
         windows_job: None,
@@ -3062,7 +3062,15 @@ fn kill_running_turn_foreground_scopes_to_this_turns_unowned_foreground_shells()
         .expect("spawn foreground shell")
         .task_id
         .expect("foreground task id");
-    manager.mark_spawned_as_foreground(&foreground);
+    manager.mark_spawned_as_foreground(&foreground, Some("turn-a"));
+
+    // A foreground wait owned by a different turn must not be swept up.
+    let other_turn = manager
+        .execute(&sleep_command(60), None, 5000, true)
+        .expect("spawn other-turn foreground shell")
+        .task_id
+        .expect("other-turn task id");
+    manager.mark_spawned_as_foreground(&other_turn, Some("turn-b"));
 
     // A background task deliberately left running (cross-turn semantics):
     // never touched by turn cancellation.
@@ -3092,10 +3100,10 @@ fn kill_running_turn_foreground_scopes_to_this_turns_unowned_foreground_shells()
         .expect("spawn owned shell")
         .task_id
         .expect("owned task id");
-    manager.mark_spawned_as_foreground(&owned);
+    manager.mark_spawned_as_foreground(&owned, Some("turn-a"));
 
     let killed = manager
-        .kill_running_turn_foreground()
+        .kill_running_turn_foreground("turn-a")
         .expect("scoped foreground kill");
     let killed_ids: Vec<String> = killed.iter().filter_map(|r| r.task_id.clone()).collect();
     assert_eq!(
@@ -3111,6 +3119,7 @@ fn kill_running_turn_foreground_scopes_to_this_turns_unowned_foreground_shells()
             .map(|job| job.status.clone())
     };
     assert_eq!(status_of(&foreground), Some(ShellStatus::Killed));
+    assert_eq!(status_of(&other_turn), Some(ShellStatus::Running));
     assert_eq!(
         status_of(&background),
         Some(ShellStatus::Running),
@@ -3123,6 +3132,6 @@ fn kill_running_turn_foreground_scopes_to_this_turns_unowned_foreground_shells()
     );
 
     // Idempotent on already-finished tasks, and cleanup for the survivors.
-    let _ = manager.kill_running_turn_foreground();
+    let _ = manager.kill_running_turn_foreground("turn-a");
     let _ = manager.kill_running();
 }
