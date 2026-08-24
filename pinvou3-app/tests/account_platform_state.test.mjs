@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
+import { initialPortalSection, portalNavigationSections, successfulPaymentOrders } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
@@ -27,6 +28,28 @@ test('account balances convert internal microcredits to display points', () => {
   assert.equal(formatPoints(1, 'en'), '0.0001');
   assert.equal(formatPoints(0, 'en'), '0');
   assert.equal(formatPoints(null, 'en'), '—');
+});
+
+test('Web personal center uses three consolidated tabs and hides unsuccessful orders', () => {
+  assert.deepEqual(portalNavigationSections, ['creditsUsage', 'ordersInvoices', 'accountSettings']);
+  assert.equal(initialPortalSection(''), 'accountSettings');
+  assert.equal(initialPortalSection('?section=profile'), 'accountSettings');
+  assert.equal(initialPortalSection('?section=usage'), 'creditsUsage');
+  assert.equal(initialPortalSection('?section=invoice'), 'ordersInvoices');
+  assert.deepEqual(successfulPaymentOrders([
+    { order_id:'created', status:'CREATED' },
+    { order_id:'pending', status:'PENDING' },
+    { order_id:'paid', status:'PAID' },
+    { order_id:'late', status:'PAID_LATE' },
+    { order_id:'failed', status:'FAILED' },
+    { order_id:'review', status:'MANUAL_REVIEW' },
+  ]).map(order => order.order_id), ['paid', 'late']);
+  for (const locale of ['zh', 'en', 'ja']) {
+    assert.ok(accountPlatformCopy[locale].sections.creditsUsage);
+    assert.ok(accountPlatformCopy[locale].sections.ordersInvoices);
+    assert.ok(accountPlatformCopy[locale].sections.accountSettings);
+    assert.ok(accountPlatformCopy[locale].noPaidOrders);
+  }
 });
 
 test('admin organization client uses protected organization, member, and unit endpoints', async () => {
@@ -337,6 +360,7 @@ test('desktop retains forgotten password while profile changes are Web-only', as
   assert.match(webView, /client\.createProfileChange\('USERNAME'/);
   assert.match(webView, /client\.sendProfileMobileChallenge/);
   assert.match(webClient, /reauthenticate=1/);
+  assert.match(webClient, /section=accountSettings/);
   assert.match(webClient, /profile-change-requests/);
   assert.match(portal, /query\.Set\("prompt", "login"\)/);
   assert.match(portal, /query\.Set\("max_age", "0"\)/);
@@ -502,20 +526,23 @@ test('personal center keeps context on overview and cannot create organizations'
   assert.match(styles, /\.ap-sidebar-foot select \{[^}]*color: var\(--ap-primary\);[^}]*background: var\(--ap-component\);/);
 });
 
-test('personal center exposes the required resource navigation and hides organization without membership', async () => {
+test('Web personal center consolidates navigation while preserving context-sensitive capabilities', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
   assert.match(view, /organizations\.length > 0 \? \['organization'\] : \[\]/);
   assert.match(view, /'overview',[\s\S]*'credits',[\s\S]*'entitlements',[\s\S]*'usage'/);
   assert.match(view, /personalContext \? \['orders', 'invoice'\] : \[\]/);
-  assert.match(view, /section === 'credits'[\s\S]*name="credits"/);
-  assert.match(view, /section === 'entitlements'[\s\S]*name="entitlements"/);
+  assert.match(view, /portal \? portalNavigationSections/);
+  assert.match(view, /section === 'creditsUsage'[\s\S]*<PortalCreditsUsage/);
+  assert.match(view, /section === 'ordersInvoices'[\s\S]*<PortalOrdersInvoices/);
+  assert.match(view, /section === 'accountSettings'[\s\S]*<PortalAccountSettings/);
   assert.doesNotMatch(view, /section === 'wallet'/);
   assert.match(view, /personalContext \? <Wallet[\s\S]*: <ContextCredits/);
-  assert.match(view, /personalContext \? <Wallet[\s\S]*: <Empty>\{copy\.noEntitlements\}<\/Empty>/);
+  assert.match(view, /activeOrganization && <Organization/);
+  assert.match(view, /successfulOnly \? successfulPaymentOrders\(orders\) : orders/);
   assert.equal((i18n.match(/creditsTitle:/g) || []).length, 3);
   assert.equal((i18n.match(/entitlementsTitle:/g) || []).length, 3);
-  assert.match(view, /!navigationSections\.includes\(section\)[\s\S]*setSection\('overview'\)/);
+  assert.match(view, /!navigationSections\.includes\(section\)[\s\S]*setSection\(portal \? 'accountSettings' : 'overview'\)/);
   assert.match(view, /<nav>\{navigationSections\.map/);
 });
 

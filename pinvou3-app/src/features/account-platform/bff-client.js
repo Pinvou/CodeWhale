@@ -54,7 +54,7 @@ export class AccountPlatformBffClient {
   }
 
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
-  reauthenticate(returnTo = '/account.html?section=profile') {
+  reauthenticate(returnTo = '/account.html?section=accountSettings') {
     globalThis.location.assign(`${this.baseURL}/auth/login?reauthenticate=1&return_to=${encodeURIComponent(returnTo)}`);
   }
   createProfileChange(field, value, signal) { return this.request('account', '/v1/me/profile-change-requests', { method: 'POST', body: { field, value }, signal }); }

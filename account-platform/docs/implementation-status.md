@@ -45,7 +45,7 @@
 | `ORGANIZATION-UNIT-LIFECYCLE` | 节点命令指纹幂等、组织结构版本、闭包树移动以及 Account/Billing/Token 限制态预检和逻辑删除 | Account/Billing/Token Go 单元测试、OpenAPI lint、节点生命周期合同测试与全量静态验证通过；数据库运行级迁移、真实并发和跨服务故障注入待部署 |
 | `MEMBERSHIP-GOVERNANCE` | 多目标邀请反枚举、成员命令幂等、即时撤权/上下文回退、Billing 限制投影和单 OWNER 数据库约束 | Account/Billing Go 单元测试、OpenAPI lint、成员治理合同测试与全量静态验证通过；数据库运行级迁移、真实并发、通知通道和跨服务故障注入待部署 |
 | `GLOBAL-CONTEXT` | 用户级唯一活动上下文、CAS 版本切换、跨端刷新、失效回退及 Account/Token/Portal 版本传播 | Account/Token/Portal Go 单元测试、OpenAPI lint、全局上下文合同、桌面 40 项状态测试和 Portal 构建通过；数据库运行级迁移、真实多端并发和生产缓存传播待部署 |
-| `PERSONAL-CENTER-IA` | 个人中心概览、额度、权益、用量和按成员关系显示的组织导航，以及个人/组织资源显示边界 | 桌面账户状态测试、UI ESLint 和 Portal 构建通过；组织成员权益仅按活动组织及原子权限展示，个人权益不回退到组织视图 |
+| `PERSONAL-CENTER-IA` | Web 个人中心“额度与用量 / 订单与发票 / 账号设置”三 Tab、成功订单白名单、旧深链映射，以及个人/组织资源显示边界 | 42 项账号平台状态测试、UI ESLint 和 Portal 构建通过；订单只展示 `PAID/PAID_LATE`，组织能力嵌入账号设置且个人权益不回退到组织视图 |
 | `ORGANIZATION-MEMBER-QUOTA` | 组织购买、精确 BASE/BONUS 组成授予、逐项批量、成员生命周期、Hold/结算及权限化 UI | Go 单测、OpenAPI、组织额度合同、桌面状态测试及 Portal 构建通过；真实 PostgreSQL 并发竞争和生产迁移仍待部署验证 |
 | `METERING-PRICING-LIFECYCLE` | 版本化计量单位/协议公式、确定性估算、动态 Hold 续租与追加预占、逐单位价格匹配及完整生命周期 | Billing/Token/Portal Go 单测、OpenAPI lint、59 个合同测试和全量静态验证通过；数据库运行级迁移、真实并发发布和长流故障注入待部署 |
 | `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、63 个合同测试、Portal 构建和部署模板检查通过；数据库运行级迁移及真实 H3C 联调待部署，正式目录由 APT-048 等待业务冻结 |
@@ -334,7 +334,7 @@
 | ACC-26 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE | NOT_DEPLOYED | PHONE、USERNAME、LINK 使用统一持久实体并保留 EMAIL 兼容入口；目标只存摘要/提示，创建不探测用户存在，本人列表只按认证身份反向恢复；Token 或目标邀请 ID 均一次消费，接受时再次绑定当前稳定用户 ID，过期/撤销/接受历史永久保留 |
 | ACC-29 | 已实现 | DOC_CURRENT | GO-UNIT; MEMBERSHIP-GOVERNANCE; RBAC-AUTH | NOT_DEPLOYED | 用户入口强制 `org.owner.transfer`、平台入口强制专用平台权限；稳定命令指纹串行撤销旧 OWNER 并保留历史、建立新 OWNER、刷新双方版本/事件，延迟数据库约束保证每个有效组织提交时恰有一个当前所有者 |
 | ACC-30 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 本人接口只按已认证主体返回自己的平台/组织绑定；组织与运营视图展示角色、作用域、起止时间、授权来源和生命周期状态，响应禁止缓存 |
-| ACC-33 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 个人中心按组织列表动态隐藏。 |
+| ACC-33 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; PERSONAL-CENTER-IA | NOT_DEPLOYED | 无有效组织成员关系时，“账号设置”不渲染组织管理区；Web 不再设置独立组织一级 Tab。 |
 | ACC-34 | 已实现 | DOC_CURRENT | GO-UNIT; GLOBAL-CONTEXT | NOT_DEPLOYED | `user_active_contexts` 以 user_id 唯一保存 PERSONAL/ORGANIZATION 与单调 context_version；切换以期望版本串行 CAS，最近有效 Session 仅用于迁移初值，所有端读取同一聚合 |
 | TOK-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 用户在桌面直接配置的本地模型或第三方云模型由本地模型系统管理，不携带账号平台身份、不使用平台钱包和 Token Gateway。 |
 | TOK-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 启用账号平台后，Rust 运行时以当前 Access Token 调用 Gateway。 |
@@ -390,7 +390,7 @@
 | PAY-34 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 按上海自然日由 Worker 每日获取 Provider 账单，并核对内部订单/支付流水、普通及强制退款/拒付和 Billing 账本；API、文件导入及手工重跑均保留独立运行。 |
 | PAY-36 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 差异冻结分类、严重度及 Provider/内部/退款/账本快照，状态、责任人、修复动作和复核结果只经带请求指纹的幂等命令推进，命令与时间线不可变且禁止直接改写证据。 |
 | UI-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | 个人中心独立提供概览、额度、权益、用量和组织导航；无有效组织关系时隐藏组织入口，组织上下文不显示个人购买入口或个人权益，不提供普通用户 Token Account/供应商 Key 管理。 |
+| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | Web 一级导航固定为“额度与用量 / 订单与发票 / 账号设置”；旧页面深链归并映射，订单仅展示 `PAID/PAID_LATE`，组织管理嵌入账号设置并按有效成员关系显示，不提供普通用户 Token Account/供应商 Key 管理。 |
 | UI-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; PERSONAL-CENTER-IA; IDENTITY-SMS; I18N-RELEASE-GATE | NOT_DEPLOYED | Web 个人中心提供三语“资料与安全”、用户名修改及新手机号滑块/短信验证；桌面移除资料修改区域但保留未登录忘记密码。 |
 | UI-06 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 个人中心所有余额、权益、订单和用量请求只按用户级活动上下文加载；个人上下文展示个人权益，组织上下文不混入个人权益明细。 |
@@ -398,7 +398,7 @@
 | UI-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 桌面与 Portal 三语展示总可用、BASE/BONUS、来源、各组成余额、到期提醒及确定消费顺序，并明确 BONUS 零现金退款和普通退款关联撤销规则 |
 | UI-09 | 已实现 | DOC_CURRENT | DESKTOP-CLIENT-SWITCH | NOT_DEPLOYED | 登录后的账号 Popover 提供三语 Web 个人中心入口；专用 Tauri 命令只打开配置的 HTTPS/loopback Portal 固定 `/account.html`，不接受 WebView URL 或在 URL 中携带 Token |
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
-| UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | Web 组织页按 `org.entitlements.purchase` 显示购买入口，并按独立读取、授予和撤回权限展示精确成员/权益包/BASE-BONUS 组成操作；组织资源不回退个人权益。 |
+| UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | Web 切换到目标组织后在“额度与用量”按 `org.entitlements.purchase` 显示购买入口，在“账号设置”嵌入组织管理区；读取、授予和撤回仍按独立原子权限控制，组织资源不回退个人权益。 |
 | UI-12 | 部分实现 | DOC_CURRENT | TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 当前 H3C 的用户和运营退款动作因 Provider capability 为 false 已隐藏；但 UI 尚未消费独立产品级开放状态，退款 Provider capability 变为 true 时可能重新展示，需 APT-056 改为默认无条件屏蔽且保留只读查询 |
 | ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT运行库实测为0个有效超级管理员且无待激活用户；离线安全引导代码已部署，但正式密码必须由用户控制的受控终端设置，尚未执行激活、并发兑换、Keycloak/数据库故障补偿和告警投递验收 |
 | ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 运行库实测为0条Break-glass操作和0条安全告警；首次初始化不得伪装成管理员失联事故，需先正常激活管理员，再验收事故授权、CRITICAL告警接收、5–60分钟到期与正常交接 |
@@ -615,7 +615,7 @@
 | ACC-30 | 查看角色定义和用户关联角色 | 已实现 | 本人只看自身绑定；组织和运营视图完整展示角色作用域、开始/到期、来源和状态。 |
 | ACC-31 | 授予普通组织角色 | 已实现 | 普通组织/节点角色按授权作用域、起止时间和稳定幂等键创建，拒绝 OWNER、平台和基础角色。 |
 | ACC-32 | 撤销普通组织角色 | 已实现 | 支持单绑定幂等撤销，事务内刷新成员、Session 和授权版本并发送变更事件。 |
-| ACC-33 | 无组织用户不显示组织页签 | 已实现 | 个人中心按组织列表动态隐藏。 |
+| ACC-33 | 无组织用户不显示组织入口 | 已实现 | 无有效组织成员关系时，“账号设置”不显示组织管理区或其他组织入口。 |
 | ACC-34 | 当前上下文按用户全局保存并跨端同步 | 已实现 | 每个 user_id 只有一条活动上下文；期望版本 CAS 防止旧端覆盖新端，桌面与 Web 按响应版本和聚焦事件同步。 |
 | ACC-40 | 持久化注销 Saga | 已实现 | `account_closure_requests/commands/audit` 保存唯一请求、命令指纹、阶段版本、租约、重试、SLA 和不可变审计；数据库触发器拒绝阶段回退。 |
 | ACC-41 | 注销静默期业务冻结 | 已实现 | 角色交接未完成时停在静默前且用户仍可自救；通过后原子置为 CLOSING，Account/Token 拒绝新业务，只开放历史读取与既有订单/用量修复动作。 |
@@ -757,7 +757,7 @@
 | target_requirement_id | 需求 | 状态 | 当前实现/边界 |
 |---|---|---|---|
 | UI-01 | 桌面用户入口常显，未登录在弹层内登录 | 已实现 | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | 个人中心提供概览、额度、权益、用量和组织 | 已实现 | 概览、额度、权益、用量为独立导航；组织入口按有效成员关系显示，个人订单/发票和购买入口不会出现在组织上下文，普通用户视图不存在 Token Account 或供应商 Key 管理。 |
+| UI-03 | Web 个人中心固定三个合并 Tab | 已实现 | “额度与用量”合并额度、权益和用量；“订单与发票”仅展示 `PAID/PAID_LATE` 成功订单及发票说明；“账号设置”合并账号状态、身份切换、资料修改、注销和按成员关系显示的组织管理区。普通用户视图不存在 Token Account 或供应商 Key 管理。 |
 | UI-04 | 普通用户界面不暴露内部结算/供应商运维信息 | 已实现 | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | Web 资料修改与桌面密码恢复边界 | 已实现 | Web Portal 提供用户名/手机号修改和强制重新认证；桌面 Popover 无资料修改区域，但保留忘记密码模式及专用 Bridge/Tauri 密码重置命令。 |
 | UI-06 | 个人中心只展示活动上下文额度 | 已实现 | 上下文切换和跨端刷新会先清空旧余额、权益、订单与用量；个人/组织数据按新的服务端活动上下文重新加载。 |
@@ -765,7 +765,7 @@
 | UI-08 | 权益包、到期与退款说明 | 已实现 | 桌面与 Portal 三语展示总可用、BASE/BONUS 分项、来源、消费顺序和到期提醒，并明确 BONUS 零现金退款及普通退款关联撤销。 |
 | UI-09 | 桌面跳转 Web 个人中心 | 已实现 | 登录后的账号 Popover 通过专用命令打开受信 Portal 固定个人中心路径，不接受任意外链且不携带 Token。 |
 | UI-10 | Web 个人充值入口 | 已实现 | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
-| UI-11 | Web 组织购买入口 | 已实现 | 具有组织采购权限的管理员可在显式活动组织页面购买组织权益；读取、授予与撤回入口分别按对应原子权限显示。 |
+| UI-11 | Web 组织购买入口 | 已实现 | 具有组织采购权限的管理员可在活动组织的“额度与用量”购买组织权益；组织设置在“账号设置”中展示，读取、授予与撤回入口分别按对应原子权限显示。 |
 | UI-12 | 退款入口屏蔽与支付能力降级展示 | 部分实现 | 当前 H3C 退款入口已按 capabilities 隐藏；缺少独立产品级默认关闭门禁，尚不能保证未来 Provider 声明退款能力后仍保持用户及运营新建入口屏蔽。 |
 | UI-13 | 模型停止与结算状态反馈 | 已实现 | 三语用量页提供显式停止并同时展示 execution/settlement；不支持取消时明确后台继续和按可信实际用量结算，重开后读取同一请求真实状态。 |
 | UI-14 | 注销进度与阻断原因展示 | 已实现 | 桌面与 Web 个人中心三语展示持久阶段、状态、SLA、稳定阻断原因和用户动作；响应删除内部资源 ID 并自动刷新，未完成前不显示完成。 |

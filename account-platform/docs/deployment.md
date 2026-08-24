@@ -475,7 +475,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 1. Keycloak issuer、JWKS、Token audience 和 HTTPS 正确。
 2. 密码登录及自动登录恢复。
 3. 滑块、注册短信或短信登录的最小路径（不得在日志输出验证码）。
-4. Account bootstrap、个人信息、无组织时隐藏组织页签。
+4. Account bootstrap、个人信息、Web 三个合并 Tab，以及无组织时“账号设置”隐藏组织管理区。
 5. 余额、权益包和用量列表。
 6. 使用 TOK-37 非计费 readiness 验证内置模型路径；如必须验证非流式和流式协议，只使用专用合成验收身份及隔离测试/运营路由，确认其记录和成本不进入任何真实用户或组织钱包、权益、Hold、用量及账单。
 7. 管理后台按 Account 原子平台权限访问，旧 `platform-admin` Claim 不能绕过拒绝；凭据只显示元数据，且只有独立模型运营权限可以访问 Token Account、路由和凭据操作。

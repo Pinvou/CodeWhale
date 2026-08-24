@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
+import { initialPortalSection, portalNavigationSections, successfulPaymentOrders } from './portal-sections.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './account-platform.css';
 
@@ -34,6 +35,9 @@ function NavIcon({ name }) {
     usage: <><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></>,
     profile: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0M18 4l2 2M20 4l-2 2" /></>,
     closure: <><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" /></>,
+    creditsUsage: <><rect x="3" y="5" width="18" height="14" rx="3" /><path d="M3 9h18M7 16v-3M12 16v-5M17 16v-2" /></>,
+    ordersInvoices: <><path d="M5 3h14v18l-3-2-4 2-4-2-3 2z" /><path d="M8 8h8M8 12h8M8 16h5" /></>,
+    accountSettings: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0M18 4l2 2M20 4l-2 2" /></>,
   };
   return <svg className="ap-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
 }
@@ -68,7 +72,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [usageRecords, setUsageRecords] = useState([]);
   const [usageCursor, setUsageCursor] = useState(null);
   const [usageUnavailable, setUsageUnavailable] = useState(false);
-  const [section, setSection] = useState(() => portal && new URLSearchParams(globalThis.location?.search || '').get('section') === 'profile' ? 'profile' : 'overview');
+  const [section, setSection] = useState(() => portal ? initialPortalSection(globalThis.location?.search || '') : 'overview');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -88,14 +92,13 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const activeOrganizationId = me?.active_context?.organization_id || '';
   const activeOrganization = organizations.find(item => item.organization_id === activeOrganizationId);
   const personalContext = !activeOrganizationId;
-  const navigationSections = [
+  const navigationSections = portal ? portalNavigationSections : [
     'overview',
     'credits',
     'entitlements',
     'usage',
     ...(organizations.length > 0 ? ['organization'] : []),
     ...(personalContext ? ['orders', 'invoice'] : []),
-    ...(portal ? ['profile'] : []),
     'closure',
   ];
 
@@ -232,7 +235,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [closure?.closure_request_id, closure?.status]);
 
   useEffect(() => {
-    if (!navigationSections.includes(section)) setSection('overview');
+    if (!navigationSections.includes(section)) setSection(portal ? 'accountSettings' : 'overview');
   }, [activeOrganizationId, organizations.length, section]);
 
   useEffect(() => {
@@ -359,6 +362,10 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     </aside>
     <main className="ap-main">
       {error && <div role="alert" className="ap-alert error">{error}</div>}{notice && <div className="ap-alert success">{notice}</div>}
+      {portal && section === 'creditsUsage' && <PortalCreditsUsage copy={copy} language={language} personalContext={personalContext} organizationId={activeOrganizationId} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} permissions={me?.active_context?.permissions || []} members={quotaMembers} grants={quotaGrants} usageRecords={usageRecords} usageUnavailable={usageUnavailable} usageCursor={usageCursor} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} onPurchase={(productId, channel) => run(async () => setOrder(await client.purchaseOrganizationEntitlements(activeOrganizationId, productId, channel, idempotencyKey('org-recharge'))))} onAllocate={items => run(async () => { await client.allocateOrganizationQuota(activeOrganizationId, items, idempotencyKey('quota-batch')); await loadContext(me); })} onRevoke={(grantId, reason) => run(async () => { await client.revokeOrganizationQuota(activeOrganizationId, grantId, reason, idempotencyKey('quota-revoke')); await loadContext(me); })} onReclaim={(grantId, reason) => run(async () => { await client.reclaimAccountClosedGrant(activeOrganizationId, grantId, reason, idempotencyKey('closed-grant-reclaim')); await loadContext(me); })} onLoadMoreUsage={loadMoreUsage} onCancelUsage={usageRequestID => run(async () => { await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel')); await loadContext(me); setNotice(copy.stopRequested); })} />}
+      {portal && section === 'ordersInvoices' && <PortalOrdersInvoices copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
+      {portal && section === 'accountSettings' && <PortalAccountSettings copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} client={client} onProfileError={reason => setError(localizedError(copy, reason))} onProfileChanged={finishProfileChange} onProfileRecovering={() => setNotice(copy.profileChangeRecovering)} closure={closure} onRequestClosure={requestClosure} units={units} members={members} models={catalogModels} modelPolicy={modelPolicy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} onUpdateModelPolicy={(mode, modelIds, reason) => run(async () => { await client.updateOrganizationModelPolicy(activeOrganizationId, { expected_version:modelPolicy?.version || 0, mode, model_ids:modelIds, reason }, idempotencyKey('model-policy')); await loadContext(me); })} />}
+      {!portal && <>
       {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} />}
       {section === 'credits' && <ResourceSection name="credits" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <ContextCredits copy={copy} language={language} balance={balance} />}</ResourceSection>}
       {section === 'entitlements' && <ResourceSection name="entitlements" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <OrganizationEntitlements copy={copy} language={language} organizationId={activeOrganizationId} permissions={me?.active_context?.permissions || []} products={products} packages={packages} members={quotaMembers} grants={quotaGrants} order={order} busy={busy} onPurchase={(productId, channel) => run(async () => setOrder(await client.purchaseOrganizationEntitlements(activeOrganizationId, productId, channel, idempotencyKey('org-recharge'))))} onAllocate={items => run(async () => { await client.allocateOrganizationQuota(activeOrganizationId, items, idempotencyKey('quota-batch')); await loadContext(me); })} onRevoke={(grantId, reason) => run(async () => { await client.revokeOrganizationQuota(activeOrganizationId, grantId, reason, idempotencyKey('quota-revoke')); await loadContext(me); })} onReclaim={(grantId, reason) => run(async () => { await client.reclaimAccountClosedGrant(activeOrganizationId, grantId, reason, idempotencyKey('closed-grant-reclaim')); await loadContext(me); })} />}</ResourceSection>}
@@ -368,8 +375,29 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={loadMoreUsage} onCancel={usageRequestID => run(async () => { await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel')); await loadContext(me); setNotice(copy.stopRequested); })} />}
       {section === 'profile' && <ProfileSettings copy={copy} client={client} me={me} onError={reason => setError(localizedError(copy, reason))} onChanged={finishProfileChange} onRecovering={() => setNotice(copy.profileChangeRecovering)} />}
       {section === 'closure' && <AccountClosure copy={copy} item={closure} busy={busy} onRequest={requestClosure} />}
+      </>}
     </main>
   </div>;
+}
+
+function PortalCreditsUsage({ copy, language, personalContext, organizationId, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, permissions, members, grants, usageRecords, usageUnavailable, usageCursor, onRecharge, onPurchase, onAllocate, onRevoke, onReclaim, onLoadMoreUsage, onCancelUsage }) {
+  return <section className="ap-combined-tab"><p className="ap-eyebrow">{copy.sections.creditsUsage}</p><h2>{copy.creditsUsageTitle}</h2><p className="ap-lead">{copy.creditsUsageLead}</p>
+    {personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={detailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={onRecharge} embedded /> : <><ContextCredits copy={copy} language={language} balance={balance} /><OrganizationEntitlements copy={copy} language={language} organizationId={organizationId} permissions={permissions} products={products} packages={packages} members={members} grants={grants} order={order} busy={busy} onPurchase={onPurchase} onAllocate={onAllocate} onRevoke={onRevoke} onReclaim={onReclaim} /></>}
+    <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={onLoadMoreUsage} onCancel={onCancelUsage} embedded />
+  </section>;
+}
+
+function PortalOrdersInvoices({ copy, language, orders, unavailable }) {
+  return <section className="ap-combined-tab"><p className="ap-eyebrow">{copy.sections.ordersInvoices}</p><h2>{copy.ordersInvoicesTitle}</h2><p className="ap-lead">{copy.ordersInvoicesLead}</p><Orders copy={copy} language={language} orders={orders} unavailable={unavailable} successfulOnly embedded /><Invoice copy={copy} embedded /></section>;
+}
+
+function PortalAccountSettings({ copy, language, me, organizations, balance, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, closure, onRequestClosure, units, members, models, modelPolicy, onCreateUnit, onInvite, onUpdateModelPolicy }) {
+  return <section className="ap-combined-tab"><p className="ap-eyebrow">{copy.sections.accountSettings}</p><h2>{copy.accountSettingsTitle}</h2><p className="ap-lead">{copy.accountSettingsLead}</p>
+    <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={onSwitchContext} embedded />
+    <ProfileSettings copy={copy} client={client} me={me} onError={onProfileError} onChanged={onProfileChanged} onRecovering={onProfileRecovering} embedded />
+    {activeOrganization && <Organization copy={copy} organization={activeOrganization} units={units} members={members} models={models} modelPolicy={modelPolicy} permissions={me?.active_context?.permissions || []} busy={busy} onCreateUnit={onCreateUnit} onInvite={onInvite} onUpdateModelPolicy={onUpdateModelPolicy} embedded />}
+    <AccountClosure copy={copy} item={closure} busy={busy} onRequest={onRequestClosure} embedded />
+  </section>;
 }
 
 function ProfileCaptcha({ challenge, offset, busy, copy, onOffset, onConfirm, onRefresh, onClose }) {
@@ -386,7 +414,7 @@ function ProfileCaptcha({ challenge, offset, busy, copy, onOffset, onConfirm, on
   </div>;
 }
 
-function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering }) {
+function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, embedded = false }) {
   const [username, setUsername] = useState(me?.username || '');
   const [mobile, setMobile] = useState(me?.mobile || '');
   const [requestId, setRequestId] = useState('');
@@ -430,9 +458,10 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering })
     event.preventDefault();
     void perform(async () => { await finish(await client.completeProfileChange(requestId, smsCode.trim())); });
   };
-  const reauthenticate = () => client.reauthenticate('/account.html?section=profile');
+  const reauthenticate = () => client.reauthenticate('/account.html?section=accountSettings');
 
-  return <section><p className="ap-eyebrow">{copy.sections.profile}</p><h2>{copy.profileSettings}</h2><p className="ap-lead">{copy.profileSettingsLead}</p>
+  const Heading = embedded ? 'h3' : 'h2';
+  return <section className={embedded ? 'ap-combined-section' : undefined}>{!embedded && <p className="ap-eyebrow">{copy.sections.profile}</p>}<Heading>{copy.profileSettings}</Heading><p className="ap-lead">{copy.profileSettingsLead}</p>
     <article className="ap-card ap-profile-reauth"><div><h3>{copy.reauthenticateTitle}</h3><p className="ap-muted">{copy.reauthenticateLead}</p></div><button type="button" className="ap-primary" onClick={reauthenticate}>{copy.reauthenticate}</button></article>
     <div className="ap-grid">
       <article className="ap-card"><h3>{copy.changeUsername}</h3><p className="ap-muted">{copy.currentUsername}: {me?.username || '—'}</p><form className="ap-stack" onSubmit={changeUsername}><Field label={copy.newUsername}><input value={username} onChange={event => setUsername(event.target.value)} disabled={busy} autoComplete="username" /></Field><button disabled={busy || !username.trim() || username.trim() === (me?.username || '')}>{copy.confirmChange}</button></form></article>
@@ -442,18 +471,20 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering })
   </section>;
 }
 
-function AccountClosure({ copy, item, busy, onRequest }) {
-  return <section><p className="ap-eyebrow">{copy.sections.closure}</p><h2>{copy.closure.title}</h2><p className="ap-lead">{copy.closure.lead}</p><article className="ap-card">{item ? <><div className="ap-inline"><span className="ap-status">{item.status}</span><strong>{item.stage}</strong></div><p>{copy.closure.sla}: {new Date(item.sla_expires_at).toLocaleString()}</p><p className="ap-muted">{copy.closure.updated}: {new Date(item.updated_at).toLocaleString()}</p>{item.blockers?.length ? <ul className="ap-list">{item.blockers.map(blocker => <li key={`${blocker.domain}:${blocker.code}`}><span>{copy.closure.blockerCodes[blocker.code] || blocker.code}</span><small>{copy.closure.actionCodes[blocker.user_action] || blocker.user_action || blocker.domain}</small></li>)}</ul> : <p className="ap-muted">{copy.closure.noBlockers}</p>}</> : <><h3>{copy.closure.beforeTitle}</h3><p className="ap-muted">{copy.closure.before}</p><button className="ap-primary" disabled={busy} onClick={onRequest}>{copy.closure.start}</button></>}</article></section>;
+function AccountClosure({ copy, item, busy, onRequest, embedded = false }) {
+  const Heading = embedded ? 'h3' : 'h2';
+  return <section className={embedded ? 'ap-combined-section' : undefined}>{!embedded && <p className="ap-eyebrow">{copy.sections.closure}</p>}<Heading>{copy.closure.title}</Heading><p className="ap-lead">{copy.closure.lead}</p><article className="ap-card">{item ? <><div className="ap-inline"><span className="ap-status">{item.status}</span><strong>{item.stage}</strong></div><p>{copy.closure.sla}: {new Date(item.sla_expires_at).toLocaleString()}</p><p className="ap-muted">{copy.closure.updated}: {new Date(item.updated_at).toLocaleString()}</p>{item.blockers?.length ? <ul className="ap-list">{item.blockers.map(blocker => <li key={`${blocker.domain}:${blocker.code}`}><span>{copy.closure.blockerCodes[blocker.code] || blocker.code}</span><small>{copy.closure.actionCodes[blocker.user_action] || blocker.user_action || blocker.domain}</small></li>)}</ul> : <p className="ap-muted">{copy.closure.noBlockers}</p>}</> : <><h3>{copy.closure.beforeTitle}</h3><p className="ap-muted">{copy.closure.before}</p><button className="ap-primary" disabled={busy} onClick={onRequest}>{copy.closure.start}</button></>}</article></section>;
 }
 
-function Overview({ copy, language, me, organizations, balance, activeOrganization, activeOrganizationId, busy, onSwitchContext }) {
-  return <section><p className="ap-eyebrow">{copy.sections.overview}</p><h2>{copy.welcome(me?.display_name || copy.user)}</h2><p className="ap-lead">{copy.overviewLead}</p><div className="ap-context-card"><div><span>{copy.activeContext}</span><strong>{activeOrganization ? copy.organizationIdentity(activeOrganization.name) : copy.personal}</strong><small>{copy.identityHelp}</small></div><label><span>{copy.switchContext}</span><select value={activeOrganizationId} onChange={event => onSwitchContext(event.target.value)} disabled={busy}><option value="">{copy.personal}</option>{organizations.map(item => <option key={item.organization_id} value={item.organization_id}>{copy.organizationIdentity(item.name)}</option>)}</select></label></div><div className="ap-metrics"><article><span>{copy.userCode}</span><strong>{me?.user_code || '—'}</strong></article><article><span>{copy.organizations}</span><strong>{organizations.length}</strong></article><article><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong></article><article><span>{copy.accountStatus}</span><strong>{me?.status || '—'}</strong></article></div></section>;
+function Overview({ copy, language, me, organizations, balance, activeOrganization, activeOrganizationId, busy, onSwitchContext, embedded = false }) {
+  const Heading = embedded ? 'h3' : 'h2';
+  return <section className={embedded ? 'ap-combined-section' : undefined}>{!embedded && <p className="ap-eyebrow">{copy.sections.overview}</p>}<Heading>{copy.welcome(me?.display_name || copy.user)}</Heading><p className="ap-lead">{copy.overviewLead}</p><div className="ap-context-card"><div><span>{copy.activeContext}</span><strong>{activeOrganization ? copy.organizationIdentity(activeOrganization.name) : copy.personal}</strong><small>{copy.identityHelp}</small></div><label><span>{copy.switchContext}</span><select value={activeOrganizationId} onChange={event => onSwitchContext(event.target.value)} disabled={busy}><option value="">{copy.personal}</option>{organizations.map(item => <option key={item.organization_id} value={item.organization_id}>{copy.organizationIdentity(item.name)}</option>)}</select></label></div><div className="ap-metrics"><article><span>{copy.userCode}</span><strong>{me?.user_code || '—'}</strong></article><article><span>{copy.organizations}</span><strong>{organizations.length}</strong></article><article><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong></article><article><span>{copy.accountStatus}</span><strong>{me?.status || '—'}</strong></article></div></section>;
 }
 
-function Organization({ copy, organization, units, members, models, modelPolicy, permissions, busy, onCreateUnit, onInvite, onUpdateModelPolicy }) {
+function Organization({ copy, organization, units, members, models, modelPolicy, permissions, busy, onCreateUnit, onInvite, onUpdateModelPolicy, embedded = false }) {
   const [unitName, setUnitName] = useState(''); const [parentId, setParentId] = useState(''); const [email, setEmail] = useState('');
   if (!organization) return <Empty>{copy.chooseOrganization}</Empty>;
-  return <section><p className="ap-eyebrow">{copy.sections.organization}</p><h2>{organization.name}</h2><div className="ap-grid"><article className="ap-card"><h3>{copy.organizationTree}</h3>{units.length ? <ul className="ap-list">{units.map(unit => <li key={unit.unit_id}><span>{unit.name}</span><small>{unit.parent_id ? copy.childUnit : copy.rootUnit}</small></li>)}</ul> : <Empty>{copy.noUnits}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (unitName.trim()) onCreateUnit(unitName.trim(), parentId || null).then?.(() => setUnitName('')); }}><Field label={copy.unitName}><input value={unitName} onChange={event => setUnitName(event.target.value)} /></Field><Field label={copy.parentUnit}><select value={parentId} onChange={event => setParentId(event.target.value)}><option value="">{copy.rootUnit}</option>{units.map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select></Field><button disabled={busy || !unitName.trim()}>{copy.createUnit}</button></form></article><article className="ap-card"><h3>{copy.members}</h3>{members.length ? <ul className="ap-list">{members.map(member => <li key={member.user_id}><span>{member.display_name || member.email || member.user_id}</span><small>{member.roles.join(' · ')}</small></li>)}</ul> : <Empty>{copy.noMembers}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (email.trim()) onInvite(email.trim(), ['MEMBER']).then?.(() => setEmail('')); }}><Field label={copy.memberEmail}><input type="email" value={email} onChange={event => setEmail(event.target.value)} /></Field><button disabled={busy || !email.trim()}>{copy.createInvitation}</button></form></article></div>{modelPolicy && <ModelPolicy copy={copy} policy={modelPolicy} models={models} canManage={(permissions || []).includes('org.models.manage')} busy={busy} onSave={onUpdateModelPolicy} />}</section>;
+  return <section className={embedded ? 'ap-combined-section' : undefined}>{!embedded && <p className="ap-eyebrow">{copy.sections.organization}</p>}{embedded ? <h3>{copy.organizationSettings}: {organization.name}</h3> : <h2>{organization.name}</h2>}<div className="ap-grid"><article className="ap-card"><h3>{copy.organizationTree}</h3>{units.length ? <ul className="ap-list">{units.map(unit => <li key={unit.unit_id}><span>{unit.name}</span><small>{unit.parent_id ? copy.childUnit : copy.rootUnit}</small></li>)}</ul> : <Empty>{copy.noUnits}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (unitName.trim()) onCreateUnit(unitName.trim(), parentId || null).then?.(() => setUnitName('')); }}><Field label={copy.unitName}><input value={unitName} onChange={event => setUnitName(event.target.value)} /></Field><Field label={copy.parentUnit}><select value={parentId} onChange={event => setParentId(event.target.value)}><option value="">{copy.rootUnit}</option>{units.map(unit => <option key={unit.unit_id} value={unit.unit_id}>{unit.name}</option>)}</select></Field><button disabled={busy || !unitName.trim()}>{copy.createUnit}</button></form></article><article className="ap-card"><h3>{copy.members}</h3>{members.length ? <ul className="ap-list">{members.map(member => <li key={member.user_id}><span>{member.display_name || member.email || member.user_id}</span><small>{member.roles.join(' · ')}</small></li>)}</ul> : <Empty>{copy.noMembers}</Empty>}<form className="ap-stack" onSubmit={event => { event.preventDefault(); if (email.trim()) onInvite(email.trim(), ['MEMBER']).then?.(() => setEmail('')); }}><Field label={copy.memberEmail}><input type="email" value={email} onChange={event => setEmail(event.target.value)} /></Field><button disabled={busy || !email.trim()}>{copy.createInvitation}</button></form></article></div>{modelPolicy && <ModelPolicy copy={copy} policy={modelPolicy} models={models} canManage={(permissions || []).includes('org.models.manage')} busy={busy} onSave={onUpdateModelPolicy} />}</section>;
 }
 
 function ModelPolicy({ copy, policy, models, canManage, busy, onSave }) {
@@ -498,7 +529,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   </section>;
 }
 
-function Wallet({ copy, language, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, onRecharge }) {
+function Wallet({ copy, language, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, onRecharge, embedded = false }) {
   const [productId, setProductId] = useState(''); const [channel, setChannel] = useState('');
   const [now, setNow] = useState(Date.now());
   useEffect(() => { if (!productId && products[0]) setProductId(products[0].product_id); }, [products, productId]);
@@ -516,7 +547,8 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
   const remainingSeconds = order ? Math.max(0, Math.ceil((new Date(order.expires_at).getTime() - now) / 1000)) : 0;
   const displayStatus = order?.status;
   const countdown = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
-  return <section><p className="ap-eyebrow">{copy.sections.wallet}</p><h2>{copy.walletTitle}</h2><p className="ap-lead">{copy.walletLead}</p>{billingUnavailable && <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div>}<div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong><small>{copy.basePoints}: {formatPoints(packages.summary?.base_available_microcredits, language)} · {copy.bonusPoints}: {formatPoints(packages.summary?.bonus_available_microcredits, language)} · {copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}</small></div><div className="ap-card"><h3>{copy.availablePlans}</h3><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} onClick={() => setProductId(product.product_id)}><strong>{product.plan_name}</strong><span>¥{(product.amount_fen / 100).toFixed(2)} · {product.display_points.toLocaleString()} {copy.points}</span><small>{copy.validityDays(product.validity_days)}{product.price_status !== 'FROZEN' ? ` · ${copy.tentativePrice}` : ''}</small></button>)}</div><div className="ap-inline"><select value={channel} onChange={event => setChannel(event.target.value)}>{availableChannels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}</select><button className="ap-primary" disabled={busy || billingUnavailable || !selected || !channel} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span><h3>¥{(order.amount_fen / 100).toFixed(2)} · {copy.scanToPay}</h3><p>{remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderStatuses.PENDING}</p></div></div>}</div><div className="ap-card ap-entitlements"><h3>{copy.myEntitlements}</h3><p className="ap-muted">{copy.consumptionOrder}</p><p className="ap-muted">{copy.refundCompositionNotice}</p>{detailsUnavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : packages.items?.length ? <div className="ap-order-list">{packages.items.map(item => <article className="ap-trace-card" key={item.package_id}><header><div><strong>{item.plan_name}</strong><small>{item.sku_code}</small></div><div><strong>{formatPoints(item.points_remaining_microcredits, language)} {copy.points}</strong><span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span></div></header><TraceDetails items={[
+  const Heading = embedded ? 'h3' : 'h2';
+  return <section className={embedded ? 'ap-combined-section' : undefined}>{!embedded && <p className="ap-eyebrow">{copy.sections.wallet}</p>}<Heading>{copy.walletTitle}</Heading><p className="ap-lead">{copy.walletLead}</p>{billingUnavailable && <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div>}<div className="ap-balance-hero"><span>{copy.availableCredits}</span><strong>{formatPoints(balance?.available_microcredits, language)}</strong><small>{copy.basePoints}: {formatPoints(packages.summary?.base_available_microcredits, language)} · {copy.bonusPoints}: {formatPoints(packages.summary?.bonus_available_microcredits, language)} · {copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}</small></div><div className="ap-card"><h3>{copy.availablePlans}</h3><div className="ap-product-grid">{products.map(product => <button key={product.product_id} className={productId === product.product_id ? 'selected' : ''} onClick={() => setProductId(product.product_id)}><strong>{product.plan_name}</strong><span>¥{(product.amount_fen / 100).toFixed(2)} · {product.display_points.toLocaleString()} {copy.points}</span><small>{copy.validityDays(product.validity_days)}{product.price_status !== 'FROZEN' ? ` · ${copy.tentativePrice}` : ''}</small></button>)}</div><div className="ap-inline"><select value={channel} onChange={event => setChannel(event.target.value)}>{availableChannels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}</select><button className="ap-primary" disabled={busy || billingUnavailable || !selected || !channel} onClick={() => onRecharge(productId, channel)}>{copy.createRecharge}</button></div>{order && <div className="ap-payment"><div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div><div><span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span><h3>¥{(order.amount_fen / 100).toFixed(2)} · {copy.scanToPay}</h3><p>{remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderStatuses.PENDING}</p></div></div>}</div><div className="ap-card ap-entitlements"><h3>{copy.myEntitlements}</h3><p className="ap-muted">{copy.consumptionOrder}</p><p className="ap-muted">{copy.refundCompositionNotice}</p>{detailsUnavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : packages.items?.length ? <div className="ap-order-list">{packages.items.map(item => <article className="ap-trace-card" key={item.package_id}><header><div><strong>{item.plan_name}</strong><small>{item.sku_code}</small></div><div><strong>{formatPoints(item.points_remaining_microcredits, language)} {copy.points}</strong><span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span></div></header><TraceDetails items={[
     [copy.packageId, item.package_id],
     [copy.entitlementSource, item.source_reference],
     [copy.pinvouOrder, item.pinvou_order_id],
@@ -540,8 +572,10 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
   ]} /></div>)}</article>)}</div> : <Empty>{copy.noEntitlements}</Empty>}</div></section>;
 }
 
-function Orders({ copy, language, orders, unavailable }) {
-  return <section><p className="ap-eyebrow">{copy.sections.orders}</p><h2>{copy.ordersTitle}</h2><p className="ap-lead">{copy.ordersLead}</p>{unavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : orders.length ? <div className="ap-order-list">{orders.map(item => <article className="ap-trace-card" key={item.order_id}><header><div><strong>{item.plan_name}</strong><small>{item.sku_code} · {copy.channels[item.channel] || item.channel}</small></div><div><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{copy.orderStatuses[item.status] || item.status}</span></div></header><TraceDetails items={[
+function Orders({ copy, language, orders, unavailable, successfulOnly = false, embedded = false }) {
+  const visibleOrders = successfulOnly ? successfulPaymentOrders(orders) : orders;
+  const Heading = embedded ? 'h3' : 'h2';
+  return <section className={embedded ? 'ap-combined-section' : undefined}>{!embedded && <p className="ap-eyebrow">{copy.sections.orders}</p>}<Heading>{copy.ordersTitle}</Heading><p className="ap-lead">{successfulOnly ? copy.paidOrdersLead : copy.ordersLead}</p>{unavailable ? <div role="alert" className="ap-alert error">{copy.billingUnavailable}</div> : visibleOrders.length ? <div className="ap-order-list">{visibleOrders.map(item => <article className="ap-trace-card" key={item.order_id}><header><div><strong>{item.plan_name}</strong><small>{item.sku_code} · {copy.channels[item.channel] || item.channel}</small></div><div><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{copy.orderStatuses[item.status] || item.status}</span></div></header><TraceDetails items={[
     [copy.pinvouOrder, item.pinvou_order_id || item.order_id],
     [copy.providerOrderReference, item.provider_order_reference],
     [copy.createdAt, formatUsageTime(item.created_at, language)],
@@ -550,7 +584,7 @@ function Orders({ copy, language, orders, unavailable }) {
     [copy.validUntil, formatUsageTime(item.valid_until, language)],
     [copy.fulfillmentStatus, copy.fulfillmentStatuses?.[item.fulfillment_status] || item.fulfillment_status],
     [copy.invoiceStatus, copy.invoiceStatuses?.[item.invoice_status] || item.invoice_status],
-  ]} /></article>)}</div> : <Empty>{copy.noOrders}</Empty>}</section>;
+  ]} /></article>)}</div> : <Empty>{successfulOnly ? copy.noPaidOrders : copy.noOrders}</Empty>}</section>;
 }
 
 function TraceDetails({ items }) {
@@ -561,8 +595,9 @@ function formatMoney(amountFen) {
   return Number.isFinite(Number(amountFen)) ? `¥${(Number(amountFen) / 100).toFixed(2)}` : '—';
 }
 
-function Invoice({ copy }) {
-  return <section><p className="ap-eyebrow">{copy.sections.invoice}</p><h2>{copy.invoiceTitle}</h2><p className="ap-lead">{copy.invoiceLead}</p><div className="ap-card"><h3>{copy.invoiceUnavailableTitle}</h3><p className="ap-muted">{copy.invoiceUnavailable}</p></div></section>;
+function Invoice({ copy, embedded = false }) {
+  const Heading = embedded ? 'h3' : 'h2';
+  return <section className={embedded ? 'ap-combined-section' : undefined}>{!embedded && <p className="ap-eyebrow">{copy.sections.invoice}</p>}<Heading>{copy.invoiceTitle}</Heading><p className="ap-lead">{copy.invoiceLead}</p><div className="ap-card"><h3>{copy.invoiceUnavailableTitle}</h3><p className="ap-muted">{copy.invoiceUnavailable}</p></div></section>;
 }
 
 function formatUsageTime(value, language) {
@@ -571,9 +606,11 @@ function formatUsageTime(value, language) {
   return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat(locale, { dateStyle: 'medium', timeStyle: 'short' }).format(date);
 }
 
-function Usage({ copy, language, records, unavailable, hasMore, busy, onLoadMore, onCancel }) {
-  if (unavailable) return <section><p className="ap-eyebrow">{copy.sections.usage}</p><h2>{copy.usageTitle}</h2><p className="ap-lead">{copy.usageLead}</p><div role="alert" className="ap-alert error">{copy.usageUnavailable}</div></section>;
-  return <section><p className="ap-eyebrow">{copy.sections.usage}</p><h2>{copy.usageTitle}</h2><p className="ap-lead">{copy.usageLead}</p>{records.length ? <div className="ap-usage-list">{records.map((record, index) => {
+function Usage({ copy, language, records, unavailable, hasMore, busy, onLoadMore, onCancel, embedded = false }) {
+  const Heading = embedded ? 'h3' : 'h2';
+  const header = <>{!embedded && <p className="ap-eyebrow">{copy.sections.usage}</p>}<Heading>{copy.usageTitle}</Heading><p className="ap-lead">{copy.usageLead}</p></>;
+  if (unavailable) return <section className={embedded ? 'ap-combined-section' : undefined}>{header}<div role="alert" className="ap-alert error">{copy.usageUnavailable}</div></section>;
+  return <section className={embedded ? 'ap-combined-section' : undefined}>{header}{records.length ? <div className="ap-usage-list">{records.map((record, index) => {
     const consumed = record.actual_microcredits == null && record.display_status !== 'RELEASED' ? '—' : formatPoints(record.actual_microcredits || 0, language);
     const statusClass = String(record.display_status || '').toLowerCase().replaceAll('_', '-');
     const tokenKnown = record.input_tokens != null && record.output_tokens != null;
