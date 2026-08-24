@@ -400,8 +400,8 @@
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | Web 组织页按 `org.entitlements.purchase` 显示购买入口，并按独立读取、授予和撤回权限展示精确成员/权益包/BASE-BONUS 组成操作；组织资源不回退个人权益。 |
 | UI-12 | 已实现 | DOC_CURRENT | TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 用户和运营退款动作统一按 Provider capabilities 隐藏；不支持退款时不展示不可执行按钮，服务端同步失败关闭 |
-| ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 离线 CLI 已幂等创建禁用 Identity 与 `BOOTSTRAP_PENDING` admin，支持终端无回显/受控 FD 直接设密及默认256 bit、43字符 Base64URL 一次性凭据；用途/代次校验值不可逆，默认15分钟/最长60分钟、5次锁定、恒定时间校验、重新签发淘汰旧代次、正式密码 Identity 边界、高权限策略、会话撤销、安全审计及失败补偿已实现。仍缺生产等价并发兑换、Keycloak/数据库故障和告警投递证据。 |
-| ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有仅主机/集群运行且无 HTTP 路由的 Break-glass CLI，强制全部管理员失联确认、事故证据、工作负载身份、20字符以上原因和5–60分钟有效期，恢复 Identity/短时授权后写不可变审计并产生 CRITICAL 告警；最后管理员数据库门禁不可绕过。仍缺生产等价事故授权、告警接收和到期恢复演练。 |
+| ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT运行库实测为0个有效超级管理员且无待激活用户；离线安全引导代码已部署，但正式密码必须由用户控制的受控终端设置，尚未执行激活、并发兑换、Keycloak/数据库故障补偿和告警投递验收 |
+| ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 运行库实测为0条Break-glass操作和0条安全告警；首次初始化不得伪装成管理员失联事故，需先正常激活管理员，再验收事故授权、CRITICAL告警接收、5–60分钟到期与正常交接 |
 | ADM-03 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT已验证真实OIDC discovery/JWKS及三个独立Relay容器；内部HTTP仍共用一个静态令牌，缺逐工作负载投射身份、轮换/撤销和跨身份故障注入证据 |
 | ADM-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 支持列表、搜索、详情和生命周期操作。 |
 | ADM-05 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 运营端可查看角色定义和全部绑定，按用户/组织筛选，并对普通平台/组织/节点角色执行带有效期的幂等授予和单条撤销；SUPER_ADMIN 与 OWNER 保留专用安全流程 |
@@ -770,8 +770,8 @@
 | UI-14 | 注销进度与阻断原因展示 | 已实现 | 桌面与 Web 个人中心三语展示持久阶段、状态、SLA、稳定阻断原因和用户动作；响应删除内部资源 ID 并自动刷新，未完成前不显示完成。 |
 | UI-15 | 未完成注册恢复状态展示 | 已实现 | 桌面优先在系统凭据库保存操作查询凭据，重启后按 `next_retry_at` 轮询，区分 Identity、Account、钱包、修复与补偿状态并阻止重复注册。 |
 | UI-16 | 桌面与 Web 三语完整性 | 已实现 | 桌面账号弹层、Portal 个人中心和管理后台的简中/英文/日文词条执行双向精确键集、类型和非空检查；稳定错误映射不再回显 Provider/后端原文，源码单语硬编码和 Portal 构建制品缺失均阻断发布。 |
-| ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 仓库已实现 BOOTSTRAP_PENDING/禁用 Identity 门禁、无回显或受控 FD 设密、默认256 bit一次性凭据、15分钟有效、5次锁定、一次交付、不可逆校验值、代次隔离、Identity 高权限密码策略、会话撤销和失败补偿；缺生产等价环境并发及故障演练证据。 |
-| ADM-02 | Break-glass 恢复 | 部分实现 | 离线 CLI 无公网 API，强制全体管理员异常失联确认并记录工作负载、原因、目标、证据摘要和5–60分钟有效期，执行后产生不可变审计和 CRITICAL 告警；缺生产事故演练和真实告警投递证据。 |
+| ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
+| ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
 | ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |
 | ADM-04 | 用户与组织分为独立页签 | 已实现 | 支持列表、搜索、详情和生命周期操作。 |
 | ADM-05 | 角色与成员权限管理 | 已实现 | 运营端具备绑定查询、有效期、来源、普通平台/组织角色授予与单条撤销；超级管理员和所有者仍走专用安全流程。 |

@@ -56,3 +56,11 @@
 - 未通过：NATS 仅以 JetStream、存储目录和监控端口参数启动，没有 Operator/Account/User 凭据；三个 Relay 未取得精确到本域 Subject 的外部授权证据。
 - 未执行：issuer/JWKS 中断、投射令牌轮换/撤销、跨服务身份调用和 Relay 越域发布拒绝的真实环境故障注入。
 - 结论：ADM-03、NFR-12 保持部分实现，APT-047 保持 `BLOCKED_EXTERNAL`；需要正式 Kubernetes、工作负载 issuer 和 NATS Operator 后重新验收。
+
+## APT-007：首个超级管理员与 Break-glass
+
+- 运行库只读核对结果为：0 个有效 `PLATFORM_SUPER_ADMIN`、0 个 `BOOTSTRAP_PENDING` 用户、0 条 Break-glass 操作和 0 条安全告警。
+- 首个管理员必须通过正常 `account-security bootstrap` 由受控终端直接设定正式密码，或签发一次性引导凭据后由受控终端兑换；不得复用部署 Secret、把密码写入环境变量，或用 Break-glass 绕过首次初始化。
+- 因尚无有效超级管理员，本次未声明“全部管理员异常失联”事故，也未执行 Break-glass；否则会把计划内首次初始化错误地伪装成事故恢复。
+- 仍缺并发兑换、Identity 激活后 Account 提交失败补偿、Keycloak/数据库故障、CRITICAL 告警真实投递、5–60 分钟临时授权到期和正常管理员交接演练。
+- 结论：ADM-01、ADM-02 保持部分实现，APT-007 保持 `BLOCKED_EXTERNAL`；先由用户控制正式密码完成首个管理员激活，再在另有正常恢复路径和告警接收方的生产等价环境演练。
