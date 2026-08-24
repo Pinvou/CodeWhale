@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 296`、`部分实现 26`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 297`、`部分实现 25`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -79,7 +79,7 @@
 | `PROVIDER-CIRCUIT-CLOCK` | Provider/能力/路由独立60秒熔断、20样本50%或连续5失败、三次半开探测、指数重开、业务拒绝排除和高风险不重发；生产三源NTP中位偏差在250ms告警、1秒退出就绪并阻止新写操作 | Go 单测、Helm配置/NetworkPolicy和3个合同测试通过；真实Provider失败注入、告警投递、三独立授时源和生产偏差注入待外部验收 |
 | `CLIENT-COMPATIBILITY-LIFECYCLE` | Account、Billing、Gateway、Portal 共用显式客户端版本策略；N/N-1/N-2 发布时间线强制后继发布后至少90天支持、正常弃用提前60天，安全例外至少7天并要求审批号；桌面普通 API 和平台模型请求均携带精确版本，过期版本远程写操作稳定返回426和可信升级入口，本地读取与本地模型不受影响 | Go 策略/中间件单测、3个版本合同矩阵、OpenAPI、Compose/Helm 和桌面静态合同通过；实际淘汰日期由每次正式发布更新清单 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/149 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/152 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -288,7 +288,7 @@
 | NFR-42 | 已实现 | DOC_CURRENT | GO-UNIT; REQUEST-ADMISSION | NOT_DEPLOYED | 新逻辑调用在持久请求和Hold之前按用户60次/分钟与5在途、组织成员5在途、组织600次/分钟与100在途，以及模型、路由、全局速率/并发原子准入；幂等重放先命中原请求而不重复计数，超限返回429和精确Retry-After且不调用上游 |
 | NFR-43 | 已实现 | DOC_CURRENT | GO-UNIT; TENANT-ISOLATION-MATRIX | NOT_DEPLOYED | 发布合同矩阵覆盖个人间、组织间、节点父/兄弟/作用域外后代、角色互换、活动上下文、撤权/到期/移除/组织停用/注销、猜测ID、批量混入、组织搜索、旧授权缓存和伪造事件；拒绝路径使用同形NotFound/PermissionDenied，允许查询按组织/成员过滤；当前没有租户公开导出接口，新增时必须先扩展矩阵 |
 | NFR-44 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK | NOT_DEPLOYED | 通用熔断器及支付创建/查询/关闭/退款/账单和模型派发接入已实现，按Provider+能力+路由隔离，满足60秒/20样本/50%、连续5次、30秒三探针、连续三成功、指数重开至15分钟和业务拒绝排除；高风险不确定操作不得成为半开探针；缺真实Provider错误分类、只读探针、告警与跨副本环境验收 |
-| NFR-45 | 部分实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 已建立不重置时钟的通用案件/时间线表、P2工作时SLA及认领/响应/止损/解决逾期升级 worker，并接入晚到支付；P0/P1及注册、退款/拒付、用量等其余人工队列统一接入与自动止损评估由 APT-051 完成 |
+| NFR-45 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; ACCOUNT-CLOSURE-SAGA; LATE-PAYMENT-REVIEW; PAYMENT-ANOMALY-RECONCILIATION; ROUTE-PROVISIONING-ELIGIBILITY; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | Account、Billing、Token 使用统一冻结时钟和不可变案件/转派/止损证据；注册、资料、注销、支付/退款/拒付、对账、路由 Provisioning、用量及高风险命令修复均接入 P0/P1/P2，生产缺值班链即拒绝启动；任一截止逾期实际转派 owner，P0/P1 止损逾期会停用关联 Provider/商品/路由或暂停高风险命令，而非只通知 |
 | NFR-46 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK | NOT_DEPLOYED | 生产配置强制至少三个独立NTP源，使用中位偏差，超过250ms告警、超过1秒退出就绪并阻止新的写操作；Helm显式放行授时源UDP/123；缺真实三源、100ms目标连续证明、250ms/1s偏差注入与告警投递验收 |
 | NFR-47 | 已实现 | DOC_CURRENT | GO-UNIT; CLIENT-COMPATIBILITY-LIFECYCLE | NOT_DEPLOYED | 四服务共用版本清单与响应头，三版合同矩阵、90天支持、60天通知、受审批安全例外及稳定426已闭环；每次正式发布必须更新真实发布日期与淘汰时间 |
 | NFR-48 | 未实现 | AUDIT_HEAD | CODE-AUDIT | NOT_DEPLOYED | 缺少审计导出脱敏、独立PII权限、水印、加密、短时下载和配额控制 |
@@ -862,7 +862,7 @@
 | NFR-42 | 模型调用多维限流 | 已实现：用户、组织成员、组织、模型、路由和全局速率/在途容量在Hold前原子校验；幂等重放不重复计数，超限返回429与Retry-After且不触达上游。 |
 | NFR-43 | 租户隔离验证矩阵 | 已实现：每次合同发布自动执行15个拒绝向量，并检查直接对象、批量、搜索、缓存、异步事件和无泄露错误；当前无租户公开导出面，未来新增导出路由会先触发门禁失败。 |
 | NFR-44 | Provider 熔断 | 部分实现：通用精确阈值熔断器已接入支付和模型Provider，高风险不确定操作不参与自动半开重发；缺生产Provider分类、只读探针、跨副本和告警验收。 |
-| NFR-45 | 人工队列 SLA | 部分实现：通用案件/不可变时间线、P2工作时认领/响应/止损/解决时钟和逐阶段超时升级已接入晚到支付，且认领/安排不重置创建时钟；P0/P1及其他人工队列接入和自动止损评估仍由 APT-051 完成。 |
+| NFR-45 | 人工队列 SLA | 已实现：三领域统一从源案件创建时间冻结 P0/P1 7×24 与 P2 上海工作时 SLA，转派不重置；注册/资料/注销、支付/退款/拒付/对账、路由 Provisioning、用量和高风险命令队列均保存责任人及不可变时间线，逐截止自动升级至配置的下一值班负责人，P0/P1 止损逾期执行 Provider、支付商品、路由或高风险命令暂停评估。 |
 | NFR-46 | 统一可信时钟 | 部分实现：生产三源NTP、中位偏差、250ms告警、1秒readiness/新写入门禁及UDP最小网络出口已实现；缺真实授时源和偏差/告警环境证据。 |
 | NFR-47 | 桌面 API 兼容与淘汰 | 已实现：N/N-1/N-2共用合同矩阵；清单启动校验90天支持和60天通知，四服务返回契约/最小版本/Sunset头，桌面直连与平台模型请求携带精确版本，过期远程写操作稳定返回426及HTTPS升级入口，不影响本地模型和本地读取。 |
 | NFR-48 | 审计导出保护 | 未实现：现有导出需补近期重认证、默认脱敏、PII独立权限、水印、文件加密、一次性下载和任务配额。 |

@@ -16,6 +16,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
@@ -29,6 +30,10 @@ func main() {
 	}
 	ctx := context.Background()
 	cfg, err := config.Load("account-service")
+	if err != nil {
+		log.Fatal(err)
+	}
+	onCallSchedule, err := manualreview.ParseOnCallSchedule(os.Getenv("MANUAL_REVIEW_ON_CALL_USER_IDS"), strings.HasPrefix(strings.ToLower(cfg.Environment), "production"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -98,6 +103,7 @@ func main() {
 	go observability.RunBackground(ctx, "wallet-provisioning", account.NewWalletProvisioningWorker(repository, wallets, 5*time.Second).Run)
 	go observability.RunBackground(ctx, "role-binding-expiry", account.NewRoleBindingExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(ctx, "approval-expiry", account.NewApprovalExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(ctx, "manual-review-sla", account.NewManualReviewSLAWorker(repository, onCallSchedule, time.Minute).Run)
 	go observability.RunBackground(ctx, "account-closure", account.NewAccountClosureWorker(repository, 5*time.Second, billingAccountClosure, tokenAccountClosure).WithCleanup(identities, billingAccountClosure).Run)
 	if enabled("MOBILE_AUTH_ENABLED") {
 		registrationQueryKey, decodeErr := base64.RawStdEncoding.DecodeString(strings.TrimSpace(os.Getenv("REGISTRATION_QUERY_HMAC_KEY_BASE64")))

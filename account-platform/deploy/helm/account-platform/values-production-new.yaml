@@ -2,6 +2,8 @@ global:
   environment: production-new
   runtimeSecret: pinvou-account-platform-production-new
   trustedTimeSources: [time.cloudflare.com:123, time.google.com:123, time.aws.com:123]
+  # Replace with the ordered stable user IDs of the real on-call escalation chain.
+  manualReviewOnCallUserIds: ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000102"]
 
 externalSecrets:
   enabled: true

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -64,14 +65,8 @@ type paymentAnomalyReference struct {
 }
 
 func paymentAnomalyDeadlines(now time.Time, severity string) (time.Time, time.Time, time.Time, time.Time) {
-	switch severity {
-	case "P0":
-		return now.Add(15 * time.Minute), now.Add(30 * time.Minute), now.Add(time.Hour), now.Add(4 * time.Hour)
-	case "P1":
-		return now.Add(time.Hour), now.Add(2 * time.Hour), now.Add(4 * time.Hour), now.Add(8 * time.Hour)
-	default:
-		return p2ReviewDeadlines(now)
-	}
+	deadlines, _ := manualreview.DeadlinesFor(now, severity)
+	return deadlines.Claim, deadlines.FirstResponse, deadlines.Mitigation, deadlines.Resolution
 }
 
 func createPaymentAnomalyWithinTransaction(ctx context.Context, tx pgx.Tx, anomalyType, severity, dedupeKey string, reference paymentAnomalyReference, snapshot any, now time.Time) (PaymentAnomalyCase, error) {

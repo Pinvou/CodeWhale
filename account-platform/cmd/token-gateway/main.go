@@ -17,6 +17,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/Pinvou/pinvou3/account-platform/internal/token"
@@ -31,6 +32,10 @@ func main() {
 	}
 	ctx := context.Background()
 	cfg, err := config.Load("token-gateway")
+	if err != nil {
+		log.Fatal(err)
+	}
+	onCallSchedule, err := manualreview.ParseOnCallSchedule(os.Getenv("MANUAL_REVIEW_ON_CALL_USER_IDS"), strings.HasPrefix(strings.ToLower(cfg.Environment), "production"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -196,6 +201,7 @@ func main() {
 	workerContext, stopWorker := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopWorker()
 	go observability.RunBackground(workerContext, "usage-reconciliation", token.NewUsageReconciler(repository, billingClient, evidenceClient, reconciliationInterval).Run)
+	go observability.RunBackground(workerContext, "manual-review-sla", token.NewManualReviewSLAWorker(repository, onCallSchedule, time.Minute).Run)
 	go observability.RunBackground(workerContext, "replay-retention", token.NewReplayRetentionWorker(repository, 15*time.Second).Run)
 	secretRotationInterval := 5 * time.Minute
 	if raw := strings.TrimSpace(os.Getenv("TOKEN_SECRET_ROTATION_INTERVAL_SECONDS")); raw != "" {

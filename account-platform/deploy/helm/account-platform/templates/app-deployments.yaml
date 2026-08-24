@@ -67,6 +67,7 @@ spec:
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - name: DATABASE_URL
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ $app.name }}-database-url } }
+            - { name: MANUAL_REVIEW_ON_CALL_USER_IDS, value: {{ join "," $root.Values.global.manualReviewOnCallUserIds | quote }} }
             {{- end }}
             {{- if or (eq $app.name "account-service") (eq $app.name "billing-service") (eq $app.name "token-gateway") }}
             - { name: OIDC_ISSUER, value: {{ $root.Values.oidc.issuer | quote }} }

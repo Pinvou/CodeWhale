@@ -4,6 +4,7 @@ global:
   imagePullSecrets: []
   podLabels: {}
   trustedTimeSources: [time.cloudflare.com:123, time.google.com:123, time.aws.com:123]
+  manualReviewOnCallUserIds: ["00000000-0000-0000-0000-000000000101", "00000000-0000-0000-0000-000000000102"]
 
 compatibility:
   contractVersion: account-platform-v1

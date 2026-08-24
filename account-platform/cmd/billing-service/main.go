@@ -21,6 +21,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cpayment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
@@ -35,6 +36,10 @@ func main() {
 	}
 	ctx := context.Background()
 	cfg, err := config.Load("billing-service")
+	if err != nil {
+		log.Fatal(err)
+	}
+	onCallSchedule, err := manualreview.ParseOnCallSchedule(os.Getenv("MANUAL_REVIEW_ON_CALL_USER_IDS"), strings.HasPrefix(strings.ToLower(cfg.Environment), "production"))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -103,7 +108,7 @@ func main() {
 		go observability.RunBackground(workerContext, "payment-notification-inbox", billing.NewPaymentNotificationWorker(payments, 50*time.Millisecond).Run)
 	}
 	go observability.RunBackground(workerContext, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
-	go observability.RunBackground(workerContext, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute).Run)
+	go observability.RunBackground(workerContext, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute, onCallSchedule).Run)
 	if payments.Capabilities().BillSupported {
 		go observability.RunBackground(workerContext, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
 	}

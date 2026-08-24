@@ -302,6 +302,16 @@
         "file": "000030_event_replay_audit.up.sql",
         "version": 30,
         "sha256": "733b1f380b9f4cc848c28fabefa4621e42db67466bcb2fba9b4fbbcf4d677a61"
+      },
+      {
+        "file": "000031_manual_review_sla.down.sql",
+        "version": 31,
+        "sha256": "3ac87e7af2822bd11779b9a64b2dd77d2db034fccd292758417c81736ba19d2c"
+      },
+      {
+        "file": "000031_manual_review_sla.up.sql",
+        "version": 31,
+        "sha256": "b1bca562d91ac6d18b2b68c4274d5fffbb7d1049b7ad303f0539772685ff2bee"
       }
     ],
     "billing": [
@@ -624,6 +634,16 @@
         "file": "000033_payment_convergence_states.up.sql",
         "version": 33,
         "sha256": "8c90a1820ebf192f9668446434438d05b946436cf1806cadbe540eed6c613245"
+      },
+      {
+        "file": "000034_manual_review_sla.down.sql",
+        "version": 34,
+        "sha256": "cccc8305776d3aa7fe2f94002797af7cd9b27d291b45a5c67e75e6f19d2a91ed"
+      },
+      {
+        "file": "000034_manual_review_sla.up.sql",
+        "version": 34,
+        "sha256": "d9ed06d759e22818265f3d1b22771dfc6b757779740626dcd6d61871de57eba5"
       }
     ],
     "payment-simulator": [
@@ -858,6 +878,16 @@
         "file": "000019_usage_convergence_evidence.up.sql",
         "version": 19,
         "sha256": "3844bfb85919334ce4a5a4ed50c9d6129d28ccccef640bc2ab0cafe0007af02f"
+      },
+      {
+        "file": "000020_manual_review_sla.down.sql",
+        "version": 20,
+        "sha256": "4d489550f7e75cd791f3be53970714d6b1f774d6c120f4fd998b5ac5fb4e9e9e"
+      },
+      {
+        "file": "000020_manual_review_sla.up.sql",
+        "version": 20,
+        "sha256": "fe03a8e88cb8047884f38bc5ebde9aa711c0cd976a0d344041b097d6b66dd773"
       }
     ]
   }

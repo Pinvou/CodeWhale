@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -80,39 +81,12 @@ type LatePaymentReviewDetail struct {
 }
 
 func p2ReviewDeadlines(now time.Time) (time.Time, time.Time, time.Time, time.Time) {
-	return addBusinessHours(now, 4), addBusinessHours(now, 8), addBusinessHours(now, 8), addBusinessHours(now, 16)
+	deadlines, _ := manualreview.DeadlinesFor(now, "P2")
+	return deadlines.Claim, deadlines.FirstResponse, deadlines.Mitigation, deadlines.Resolution
 }
 
 func addBusinessHours(start time.Time, hours int) time.Time {
-	location := time.FixedZone("Asia/Shanghai", 8*60*60)
-	current := start.In(location)
-	remaining := time.Duration(hours) * time.Hour
-	for remaining > 0 {
-		if current.Weekday() == time.Saturday || current.Weekday() == time.Sunday || current.Hour() < 9 || current.Hour() >= 17 {
-			current = nextBusinessHour(current)
-			continue
-		}
-		endOfDay := time.Date(current.Year(), current.Month(), current.Day(), 17, 0, 0, 0, location)
-		available := endOfDay.Sub(current)
-		if remaining <= available {
-			return current.Add(remaining).UTC()
-		}
-		remaining -= available
-		current = nextBusinessHour(endOfDay)
-	}
-	return current.UTC()
-}
-
-func nextBusinessHour(current time.Time) time.Time {
-	location := current.Location()
-	if current.Hour() < 9 && current.Weekday() != time.Saturday && current.Weekday() != time.Sunday {
-		return time.Date(current.Year(), current.Month(), current.Day(), 9, 0, 0, 0, location)
-	}
-	current = time.Date(current.Year(), current.Month(), current.Day(), 9, 0, 0, 0, location).AddDate(0, 0, 1)
-	for current.Weekday() == time.Saturday || current.Weekday() == time.Sunday {
-		current = current.AddDate(0, 0, 1)
-	}
-	return current
+	return manualreview.AddBusinessHours(start, hours)
 }
 
 func (r *PostgresRepository) EscalateLatePaymentReview(ctx context.Context, orderID uuid.UUID, queryResult string) (LatePaymentReviewCase, error) {
@@ -527,22 +501,29 @@ func (r *PostgresRepository) EscalateProviderBlind(ctx context.Context, caseID, 
 	return item, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, limit int) (int, error) {
+func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, limit int, schedules ...manualreview.OnCallSchedule) (int, error) {
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	rows, err := r.pool.Query(ctx, `SELECT id,CASE WHEN claimed_at IS NULL AND claim_due_at<=now() THEN 'CLAIM_OVERDUE' WHEN first_response_at IS NULL AND first_response_due_at<=now() THEN 'FIRST_RESPONSE_OVERDUE' WHEN mitigation_at IS NULL AND mitigation_due_at<=now() THEN 'MITIGATION_OVERDUE' WHEN resolution_due_at<=now() THEN 'RESOLUTION_OVERDUE' END FROM manual_review_cases WHERE status='OPEN' AND ((claimed_at IS NULL AND claim_due_at<=now()) OR (first_response_at IS NULL AND first_response_due_at<=now()) OR (mitigation_at IS NULL AND mitigation_due_at<=now()) OR resolution_due_at<=now()) AND (last_escalated_at IS NULL OR last_escalated_at<now()-interval '1 hour') ORDER BY severity,created_at,id LIMIT $1`, limit)
+	var schedule manualreview.OnCallSchedule
+	if len(schedules) > 0 {
+		schedule = schedules[0]
+	}
+	rows, err := r.pool.Query(ctx, `SELECT id,severity,owner_id,CASE WHEN resolution_due_at<=now() THEN 'RESOLUTION_OVERDUE' WHEN mitigation_at IS NULL AND mitigation_due_at<=now() THEN 'MITIGATION_OVERDUE' WHEN first_response_at IS NULL AND first_response_due_at<=now() THEN 'FIRST_RESPONSE_OVERDUE' WHEN claimed_at IS NULL AND claim_due_at<=now() THEN 'CLAIM_OVERDUE' END,(severity IN ('P0','P1') AND mitigation_at IS NULL AND mitigation_due_at<=now()) FROM manual_review_cases WHERE status='OPEN' AND ((claimed_at IS NULL AND claim_due_at<=now()) OR (first_response_at IS NULL AND first_response_due_at<=now()) OR (mitigation_at IS NULL AND mitigation_due_at<=now()) OR resolution_due_at<=now()) AND (last_escalated_at IS NULL OR last_escalated_at<now()-interval '1 hour') ORDER BY CASE severity WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 ELSE 2 END,created_at,id LIMIT $1`, limit)
 	if err != nil {
 		return 0, err
 	}
 	type overdue struct {
-		id    uuid.UUID
-		stage string
+		id       uuid.UUID
+		severity string
+		ownerID  *uuid.UUID
+		stage    string
+		stopLoss bool
 	}
 	items := []overdue{}
 	for rows.Next() {
 		var item overdue
-		if err := rows.Scan(&item.id, &item.stage); err != nil {
+		if err := rows.Scan(&item.id, &item.severity, &item.ownerID, &item.stage, &item.stopLoss); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -561,11 +542,25 @@ func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, l
 		now := r.now()
 		var escalationLevel int
 		err = tx.QueryRow(ctx, `UPDATE manual_review_cases SET escalation_level=escalation_level+1,last_escalated_at=$2,updated_at=$2 WHERE id=$1 AND status='OPEN' RETURNING escalation_level`, item.id, now).Scan(&escalationLevel)
-		if err == nil {
-			err = appendManualReviewEvent(ctx, tx, item.id, "SLA_ESCALATED", nil, map[string]any{"stage": item.stage}, now)
+		toOwner, hasOwner := schedule.Next(escalationLevel - 1)
+		if err == nil && hasOwner {
+			_, err = tx.Exec(ctx, `UPDATE manual_review_cases SET owner_id=$2,last_assigned_at=$3,assignment_revision=assignment_revision+1,updated_at=$3 WHERE id=$1`, item.id, toOwner, now)
+		}
+		if err == nil && hasOwner {
+			_, err = tx.Exec(ctx, `INSERT INTO manual_review_assignments(id,case_id,from_owner_id,to_owner_id,escalation_level,reason,assigned_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(case_id,escalation_level) DO NOTHING`, uuid.Must(uuid.NewV7()), item.id, item.ownerID, toOwner, escalationLevel, item.stage, now)
 		}
 		if err == nil {
-			err = events.AppendOutbox(ctx, tx, "billing.manual-review.sla-escalated.v1", item.id, int64(escalationLevel), map[string]any{"case_id": item.id, "stage": item.stage})
+			details := map[string]any{"stage": item.stage, "severity": item.severity, "escalation_level": escalationLevel, "assignment_changed": hasOwner}
+			if hasOwner {
+				details["to_owner_id"] = toOwner
+			}
+			err = appendManualReviewEvent(ctx, tx, item.id, "SLA_ESCALATED", nil, details, now)
+		}
+		if err == nil && item.stopLoss {
+			err = r.evaluateManualReviewStopLoss(ctx, tx, item.id, item.severity, now)
+		}
+		if err == nil {
+			err = events.AppendOutbox(ctx, tx, "billing.manual-review.sla-escalated.v1", item.id, int64(escalationLevel), map[string]any{"case_id": item.id, "stage": item.stage, "severity": item.severity, "owner_id": map[bool]any{true: toOwner, false: nil}[hasOwner]})
 		}
 		if err != nil {
 			tx.Rollback(ctx)
@@ -577,6 +572,56 @@ func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, l
 		count++
 	}
 	return count, nil
+}
+
+func (r *PostgresRepository) evaluateManualReviewStopLoss(ctx context.Context, tx pgx.Tx, caseID uuid.UUID, severity string, now time.Time) error {
+	var providerID, providerVersion, productID *string
+	err := tx.QueryRow(ctx, `
+WITH target_order AS (
+    SELECT manual.id AS case_id,late.payment_order_id FROM manual_review_cases manual JOIN late_payment_review_cases late ON late.id=manual.id WHERE manual.id=$1
+    UNION ALL
+    SELECT manual.id,COALESCE(anomaly.payment_order_id,transaction.payment_order_id,refund.payment_order_id,forced.payment_order_id,chargeback.payment_order_id)
+      FROM manual_review_cases manual JOIN payment_anomaly_cases anomaly ON anomaly.id=manual.id
+      LEFT JOIN payment_transactions transaction ON transaction.id=anomaly.payment_transaction_id
+      LEFT JOIN refunds refund ON refund.id=anomaly.refund_id
+      LEFT JOIN forced_refund_cases forced ON forced.id=anomaly.forced_refund_case_id
+      LEFT JOIN chargeback_cases chargeback ON chargeback.id=anomaly.chargeback_case_id
+     WHERE manual.id=$1
+    UNION ALL
+    SELECT manual.id,reconciliation.payment_order_id FROM manual_review_cases manual JOIN reconciliation_cases reconciliation ON reconciliation.manual_review_case_id=manual.id WHERE manual.id=$1
+)
+SELECT payment.provider_id,payment.provider_version,payment.product_id
+  FROM target_order target JOIN payment_orders payment ON payment.id=target.payment_order_id
+ LIMIT 1`, caseID).Scan(&providerID, &providerVersion, &productID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	actions := map[string]any{"automatic": true, "provider_paused": false, "payment_product_paused": false, "route_pause_requested": true, "high_risk_command_pause_requested": true}
+	if providerID != nil && providerVersion != nil {
+		reason := "P0/P1 manual review mitigation SLA exceeded"
+		if _, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,updated_at) VALUES($1,$2,FALSE,$3,$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at`, *providerID, *providerVersion, reason, now); err != nil {
+			return err
+		}
+		actions["provider_paused"] = true
+	}
+	if productID != nil {
+		if _, err = tx.Exec(ctx, `UPDATE recharge_products SET enabled=FALSE WHERE product_id=$1 AND enabled`, *productID); err != nil {
+			return err
+		}
+		actions["payment_product_paused"] = true
+	}
+	payload, _ := json.Marshal(actions)
+	command, err := tx.Exec(ctx, `INSERT INTO manual_review_stop_loss_evaluations(id,case_id,severity,provider_id,provider_version,payment_product_id,route_reference,high_risk_command_type,action_snapshot,evaluated_at) VALUES($1,$2,$3,$4,$5,$6,'RELATED_MODEL_ROUTES','RELATED_HIGH_RISK_COMMANDS',$7,$8) ON CONFLICT(case_id) DO NOTHING`, uuid.Must(uuid.NewV7()), caseID, severity, providerID, providerVersion, productID, payload, now)
+	if err != nil || command.RowsAffected() == 0 {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE manual_review_cases SET mitigation_at=COALESCE(mitigation_at,$2),stop_loss_evaluated_at=COALESCE(stop_loss_evaluated_at,$2),updated_at=$2 WHERE id=$1`, caseID, now); err != nil {
+		return err
+	}
+	if err = appendManualReviewEvent(ctx, tx, caseID, "STOP_LOSS_EVALUATED", nil, actions, now); err != nil {
+		return err
+	}
+	return events.AppendOutbox(ctx, tx, "billing.manual-review.stop-loss-evaluated.v1", caseID, 1, map[string]any{"case_id": caseID, "severity": severity, "provider_id": providerID, "provider_version": providerVersion, "payment_product_id": productID, "route_pause_requested": true, "high_risk_command_pause_requested": true})
 }
 
 func (r *PostgresRepository) EscalateArchiveBlindCases(ctx context.Context, limit int) (int, error) {
@@ -642,17 +687,22 @@ func (r *PostgresRepository) EscalateArchiveBlindCases(ctx context.Context, limi
 type ManualReviewSLAWorker struct {
 	repository *PostgresRepository
 	interval   time.Duration
+	schedule   manualreview.OnCallSchedule
 }
 
-func NewManualReviewSLAWorker(repository *PostgresRepository, interval time.Duration) *ManualReviewSLAWorker {
+func NewManualReviewSLAWorker(repository *PostgresRepository, interval time.Duration, schedules ...manualreview.OnCallSchedule) *ManualReviewSLAWorker {
 	if interval < time.Minute {
 		interval = time.Minute
 	}
-	return &ManualReviewSLAWorker{repository: repository, interval: interval}
+	var schedule manualreview.OnCallSchedule
+	if len(schedules) > 0 {
+		schedule = schedules[0]
+	}
+	return &ManualReviewSLAWorker{repository: repository, interval: interval, schedule: schedule}
 }
 
 func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
-	_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100)
+	_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule)
 	_, _ = worker.repository.EscalateArchiveBlindCases(ctx, 100)
 	ticker := time.NewTicker(worker.interval)
 	defer ticker.Stop()
@@ -661,7 +711,7 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100)
+			_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule)
 			_, _ = worker.repository.EscalateArchiveBlindCases(ctx, 100)
 		}
 	}

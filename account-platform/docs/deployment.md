@@ -29,6 +29,8 @@
 
 性能发布按 `deploy/runbooks/performance-capacity.md` 冻结发布、数据集、资源和负载档位，并运行 `npm --prefix account-platform run check:production-performance -- <evidence.json>`。测试报告必须保留全部慢请求/错误样本并分离平台、Provider、排队和客户端网络，不能用模板值或开发机冒烟替代生产等价容量结论。
 
+人工案件 worker 由 `MANUAL_REVIEW_ON_CALL_USER_IDS` 接收按升级顺序排列的稳定用户 UUID。Compose 示例值只用于开发；正式 Helm 发布前必须把 `global.manualReviewOnCallUserIds` 替换为真实值班负责人链。`production`/`production-new` 缺失该配置时 Account、Billing、Token 均拒绝启动，避免 SLA 超时退化成只有通知而无人接手。更换值班人只影响后续升级，不重算已创建案件的认领、首次响应、止损或解决截止时间。
+
 ## 2. 服务与端口
 
 Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维访问：
