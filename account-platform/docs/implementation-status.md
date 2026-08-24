@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 297`、`部分实现 26`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。
+全量核验汇总：`已实现 296`、`部分实现 27`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10 的二维码边界和商城响应字段适配已完成，真实支付金额仍需商城更新接口并完成联调后才能由预期快照切换为 Provider 事实。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -48,8 +48,9 @@
 | `PERSONAL-CENTER-IA` | Web 个人中心“额度与用量 / 订单与发票 / 账号设置”三 Tab、成功订单白名单、旧深链映射，以及个人/组织资源显示边界 | 42 项账号平台状态测试、UI ESLint 和 Portal 构建通过；订单只展示 `PAID/PAID_LATE`，组织能力嵌入账号设置且个人权益不回退到组织视图 |
 | `ORGANIZATION-MEMBER-QUOTA` | 组织购买、精确 BASE/BONUS 组成授予、逐项批量、成员生命周期、Hold/结算及权限化 UI | Go 单测、OpenAPI、组织额度合同、桌面状态测试及 Portal 构建通过；真实 PostgreSQL 并发竞争和生产迁移仍待部署验证 |
 | `METERING-PRICING-LIFECYCLE` | 版本化计量单位/协议公式、确定性估算、动态 Hold 续租与追加预占、逐单位价格匹配及完整生命周期 | Billing/Token/Portal Go 单测、OpenAPI lint、59 个合同测试和全量静态验证通过；数据库运行级迁移、真实并发发布和长流故障注入待部署 |
-| `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、63 个合同测试、Portal 构建和部署模板检查通过；数据库运行级迁移及真实 H3C 联调待部署，正式目录由 APT-048 等待业务冻结 |
+| `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、64 个合同测试、Portal 构建和部署模板检查通过；数据库运行级迁移及真实 H3C 联调待部署，正式目录由 APT-048 等待业务冻结 |
 | `PAYMENT-EVIDENCE-LIFECYCLE` | 一单多流水、不可变回调/查询/账单/修复证据、逐流水权益包、付款人与受益方冻结、独立状态机、订单派生摘要及运营明细 | Go 单测、OpenAPI lint、合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移及真实 Provider 乱序/重复证据故障注入待部署 |
+| `PAYMENT-CALLBACK-GATEWAY` | Provider 中立 Basic 客户端授权、Token 绑定 Provider/版本/商户、Profile 注册、严格通知适配、先持久化后 `202`、重复/冲突防重及查询补偿 | 通用鉴权/Profile 注册与 H3C 首个 Profile 的 Go 单测、OpenAPI lint、回调合同及 Helm/Compose 静态检查通过；真实商城凭据注入、反向代理发布和回调突发/乱序联调待部署 |
 | `PAYMENT-CONVERGENCE` | Provider 账单逐行进入统一不可变证据归并器，关单状态单调推进，支付/退款/拒付事实独立且订单摘要可重建 | Go 单测、OpenAPI lint、关单/账单/摘要合同及全量静态验证通过；真实 Provider 账单、关单竞态和数据库运行级迁移待部署 |
 | `RECEIVABLE-LIFECYCLE` | 用量超额双记、独立应收、钱包上下文冻结、现金 BASE 清偿分配、单支付权益包拒付冲销及三语运营查询 | Go 单测、OpenAPI lint、75 个合同测试、桌面 ESLint 和 Portal 构建通过；拒付已接入统一异常案件并由受控结论命令执行定向冲销；数据库运行级迁移、并发结算与真实 Provider 拒付故障注入待部署 |
 | `HOLD-OPERATIONS-EVIDENCE` | 钱包 Posting 至权益组成来源、Hold 组成/成员分配、租约历史、异常分类及幂等安全释放证据 | Go 单测、OpenAPI lint、80 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实并发幂等和生产授权隔离待部署 |
@@ -378,8 +379,8 @@
 | PAY-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 充值选择、二维码和结果留在品悟应用/Portal 内 |
 | PAY-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 每次充值从服务端商品选择开始，不恢复旧二维码作为新订单 |
 | PAY-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 服务端按 `product_id` 派生 SKU、金额和权益，拒绝客户端覆盖 |
-| PAY-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | H3C 二维码和实付金额来自 Provider 响应，不由客户端生成 |
-| PAY-15 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 签名回调与服务端主动查询进入同一证据归并器，按通知/流水防重并校验归属、金额和币种；不支持回调的 Provider 按能力声明采用查询补偿 |
+| PAY-10 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-CALLBACK-GATEWAY | NOT_DEPLOYED | H3C 二维码和外部订单引用采用 Provider 响应，且 Adapter 已接受 Provider 返回的真实金额；商城当前接口尚未返回该字段时只能明确标记 `EXPECTED_SNAPSHOT`，不能宣称已取得实付金额事实 |
+| PAY-15 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; PAYMENT-CALLBACK-GATEWAY | NOT_DEPLOYED | 通用回调凭据与 Token 绑定 Provider、版本和商户，Billing 按 Profile 严格解析并先持久化再返回 `202`，与主动查询共用归并器；H3C 是首个 Profile 且固定声明 `notification_supported=true`。Nginx 模板已将 `pinvou.com` 下两个通用精确路径代理到 Billing，真实 DNS/TLS 与商城联调仍未部署验收 |
 | PAY-16 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Billing 后台查询不依赖客户端二维码页面持续打开 |
 | PAY-17 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 普通 PENDING 在订单期限后继续按退避查询，72小时最终查询仍无终态则转换为明确人工审核，不会永久停留普通 PENDING |
 | PAY-18 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | Provider 支持时调用外部关单并核验；不支持时仅隐藏本地支付入口、继续保存/查询外部可能支付事实，最终进入审核而不伪造关单成功 |
@@ -507,6 +508,7 @@
 | CR-60 | NFR-26–NFR-48, ADM-09 | 建立性能、容量、灾备、保留、限流、隔离、Provider韧性、时钟、客户端兼容和审计导出的量化验收基线 | 部分实现 | 受控审计导出、量化策略和仓库门禁已闭环；仍需在生产等价环境取得性能/容量、分级RPO/RTO、加密备份与演练、分类保留、多维限流、租户隔离、Provider韧性、授时偏差及客户端兼容的真实运行证据 |
 | CR-61 | ACC-02, ACC-11, ACC-56–ACC-58, NFR-50 | 建立永久内部用户 ID 和独立可展示用户编码 | 部分实现 | ACC-56–ACC-58 与 NFR-50 已完成；ACC-11 的完整注销 Saga、资料清理和三年分类保留仍待实现 |
 | CR-62 | PAY-31, UI-12, ADM-20 | 普通退款暂不开放，保留既有实现但屏蔽所有新建入口 | 部分实现 | 退款领域模型、迁移、执行器、证据、查询和被动异常处置均保留；当前 H3C 已因 capability 不支持而隐藏入口，但仍需 APT-056 增加独立于 Provider capability 的产品级默认关闭门禁，同时拒绝用户/运营 UI 和服务端创建请求 |
+| CR-63 | PAY-10, PAY-12, PAY-15–PAY-17, NFR-03, NFR-04, NFR-41 | 提供 Provider 中立授权与支付通知接口，新华三作为首个 Profile 且不增加额外能力字段 | 仓库实现完成，环境联调待验收 | 固定使用 `pinvou.com` 根域名且只公开通用短期 Token 与支付回调两个精确路径；凭据和 Token 绑定 Provider、版本及商户，请求体不能自报身份。H3C 直接声明 `notification_supported=true`，通知先入既有 Inbox 再异步归并，查询继续补偿；真实商城金额字段、生产 DNS/TLS、凭据和回调行为仍需外部联调证据 |
 
 这些需求之间的强制关系：
 
@@ -525,7 +527,7 @@
 - 模型调用领域只认识上游模型网关、上游请求关联和用量证据；`X-Oneapi-Request-Id`、`New-Api-User`、New API 日志查询参数及其错误文本必须由 New API Adapter 转换为统一模型。
 - 手机注册成功后的商城账号开通属于外部 Commerce Customer Provisioning，不属于用户授权上下文本身。商城未开通只能影响需要该商城客户身份的支付动作，不能成为模型调用、组织授权或普通账号功能的通用前置条件。
 - 身份 Provider 负责“用户是谁”，Account 权限系统负责“允许做什么”。Keycloak Realm Role 只允许作为迁移期引导或受控运维入口，不能继续散落在 Account、Billing、Token Gateway 的业务路由上。
-- Provider 特殊规则可以存在于对应 Adapter 内，例如新华三只支持支付宝、没有退款/关单/回调接口；通用 Billing 状态机和前端只能消费能力声明及统一错误，不得按 Provider 名称分支。
+- Provider 特殊规则可以存在于对应 Adapter 内，例如新华三只支持支付宝并支持支付回调，但没有退款、主动关单或账单接口；通用 Billing 状态机和前端只能消费能力声明及统一错误，不得按 Provider 名称分支。
 - 本地应用中由用户直接配置、完全不经过账号平台的云端或本地模型不属于 Token Account 管理，也不属于需要删除的旧内置模型路径；个人中心不新增用户供应商 Key 功能。
 - 退款、对账和支付异常以完整产品闭环为目标。Provider 缺少某项能力时只能按 capabilities 执行明确降级，不能反向删除通用领域状态、审计和人工复核要求。
 - 注销资格中的资金阻断与系统自动清理必须分离：待核对用量、拒付、资金性差异、外部待确认关单和资金相关 Commerce 任务未收敛时不能释放身份；组织所有权和最后一个有效超级管理员角色必须先交接，资料 Saga、其他角色、临时授权和邀请不要求用户手工处理，但自动清理未完成同样不能越过标识释放门禁。
@@ -728,10 +730,10 @@
 | PAY-07 | 充值全程留在品悟应用内 | 已实现 | 用户图标旁额度入口进入商品选择、二维码和结果页，不跳商城后台网页。 |
 | PAY-08 | 每次点击充值先进入商品选择 | 已实现 | 不恢复到上次二维码页。 |
 | PAY-09 | 服务端按 product_id 派生 SKU、金额和积分 | 已实现 | 客户端不能覆盖金额、SKU 或权益。 |
-| PAY-10 | 二维码和支付金额完全采用商城返回事实 | 已实现 | H3C Provider 不本地生成二维码。 |
+| PAY-10 | 二维码和支付金额完全采用商城返回事实 | 部分实现 | H3C Provider 不本地生成二维码，且已兼容商城返回的金额和外部订单引用；商城实际接口补充金额字段前仍标记为预期快照，不能冒充 Provider 事实。 |
 | PAY-11 | 支付流水与权益包履约隔离 | 已实现 | payment_order 1:N payment_transaction，支付来源权益包唯一绑定 source_payment_transaction_id；不同成功流水分别独立履约或进入重复/晚到支付复核。 |
 | PAY-13 | 支付领域独立状态机与订单派生摘要 | 已实现 | 支付流水、退款、拒付和关单事实分离；订单四类摘要从底层事实重建，并保持应收与人工复核优先级。 |
-| PAY-15 | 支付回调与主动查询 | 已实现 | 签名回调和主动查询使用同一不可变证据归并器；Provider 不支持回调时按冻结能力采用服务端查询补偿。 |
+| PAY-15 | 支付回调与主动查询 | 已实现 | H3C 以专用 Basic 凭据换取短期 Bearer Token 后投递回调，通知先持久化再返回 `202`；`pinvou.com` 根域名下两个精确入口已在 Nginx 模板代理到 Billing，回调和主动查询使用同一不可变证据归并器，服务端查询继续补偿漏回调。 |
 | PAY-16 | 客户端关闭后订单仍继续收敛 | 已实现 | 查询任务运行在 Billing 服务端。 |
 | PAY-17 | 超时订单不永久停留普通 PENDING | 已实现 | 订单过期后继续服务端退避查询；72小时仍无终态时转入唯一人工审核案件，订单不再表现为普通 PENDING。 |
 | PAY-18 | 主动关闭未支付订单 | 已实现 | Provider 支持时调用并核验外部关单；不支持时只隐藏本地支付展示并继续查询，72小时后进入审核，绝不以本地状态模拟外部关单成功。 |
@@ -975,7 +977,7 @@
 2. Billing 商品目录从暂定状态冻结，生产不再开启“允许暂定价格”开关。
 3. 使用非测试商城账号完成至少一笔小额支付，验证订单金额、商城订单号、二维码、支付查询、单次入账和权益到期时间。
 4. 验证重复创建、重复查询、服务重启、客户端退出、网络超时和晚到支付不会重复入账。
-5. 验证当前 Provider 的关单、回调、退款和账单 capabilities；不支持关单/回调时完成查询降级验收；普通退款无论 capability 如何都确认用户/运营入口隐藏且服务端创建失败关闭，既有请求与被动异常仍可查询和收敛；账单四方对账和差异责任人/修复/审计闭环通过验收。
+5. 验证当前 Provider 的关单、回调、退款和账单 capabilities；H3C 必须验证专用客户端换取短期 Token、重复/冲突回调、乱序状态、持久化后应答、回调丢失时查询补偿及突发限流，且 `notification_supported=true`；普通退款无论 capability 如何都确认用户/运营入口隐藏且服务端创建失败关闭，既有请求与被动异常仍可查询和收敛；账单四方对账和差异责任人/修复/审计闭环通过验收。
 6. 生产 Provider 使用 HTTPS、主机白名单和 Secret 管理；真实密钥不在 Compose 文件、Shell 历史或日志中。
 7. 数据库备份、恢复演练、监控告警、磁盘容量和日志保留策略已由运维环境落实。
 8. 当前 Model Gateway Adapter 能按上游请求引用提供稳定用量证据，Gateway 自动核对、Hold 续租/追加和人工重试通过验收。

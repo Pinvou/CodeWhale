@@ -104,6 +104,8 @@ billing:
   paymentProvider: h3c_mall
   allowTentativePrices: false
   paymentExpiryIntervalSeconds: 15
+  paymentCallbackTokenKeyId: payment-callback-v1
+  paymentCallbackTokenTtlSeconds: 300
 
 tokenGateway:
   gatewayAdapter: NEW_API

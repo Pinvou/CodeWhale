@@ -158,6 +158,18 @@ func (p *PaymentCoordinator) ConfigureNotifications(merchantID, callbackURL stri
 	return nil
 }
 
+func (p *PaymentCoordinator) ConfigureTrustedNotifications(merchantID string) error {
+	if !p.Capabilities().NotificationSupported {
+		return payment.ErrUnsupported
+	}
+	merchantID = strings.TrimSpace(merchantID)
+	if merchantID == "" {
+		return errors.New("payment merchant ID is required for trusted provider notifications")
+	}
+	p.merchantID = merchantID
+	return nil
+}
+
 func (p *PaymentCoordinator) AllowTentativePrices(allowed bool) *PaymentCoordinator {
 	p.allowTentativePrices = allowed
 	return p
@@ -396,16 +408,23 @@ func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, w
 }
 
 type paymentNotification struct {
-	NotificationID     uuid.UUID `json:"notification_id"`
-	MerchantID         string    `json:"merchant_id"`
-	MerchantOrderNo    string    `json:"merchant_order_no"`
-	ChannelTransaction string    `json:"channel_transaction_id"`
-	Channel            string    `json:"channel"`
-	Status             string    `json:"status"`
-	AmountFen          int64     `json:"amount_fen"`
-	Currency           string    `json:"currency"`
-	PaidAt             time.Time `json:"paid_at"`
-	Timestamp          int64     `json:"timestamp"`
+	NotificationID              uuid.UUID       `json:"notification_id"`
+	MerchantID                  string          `json:"merchant_id"`
+	MerchantOrderNo             string          `json:"merchant_order_no"`
+	ChannelTransaction          string          `json:"channel_transaction_id"`
+	Channel                     string          `json:"channel"`
+	Status                      string          `json:"status"`
+	AmountFen                   int64           `json:"amount_fen"`
+	Currency                    string          `json:"currency"`
+	PaidAt                      time.Time       `json:"paid_at"`
+	Timestamp                   int64           `json:"timestamp"`
+	ProviderOrderReference      string          `json:"provider_order_reference,omitempty"`
+	ProviderStatus              string          `json:"provider_status,omitempty"`
+	ProviderTraceID             string          `json:"provider_trace_id,omitempty"`
+	ProviderEventAt             *time.Time      `json:"provider_event_at,omitempty"`
+	ProviderPayableUntil        *time.Time      `json:"provider_payable_until,omitempty"`
+	PaymentInstructionExpiresAt *time.Time      `json:"payment_instruction_expires_at,omitempty"`
+	ProviderPayload             json.RawMessage `json:"provider_payload,omitempty"`
 }
 
 func (p *PaymentCoordinator) PersistNotification(ctx context.Context, channel, signature string, body []byte, source string) (uuid.UUID, bool, error) {
@@ -420,6 +439,39 @@ func (p *PaymentCoordinator) PersistNotification(ctx context.Context, channel, s
 	}
 	var notification paymentNotification
 	if err := json.Unmarshal(body, &notification); err != nil || notification.NotificationID == uuid.Nil || time.Unix(notification.Timestamp, 0).Before(p.now().Add(-5*time.Minute)) || time.Unix(notification.Timestamp, 0).After(p.now().Add(5*time.Minute)) {
+		return uuid.Nil, false, ErrForbiddenPayment
+	}
+	return p.persistNotification(ctx, channel, notification, body, source)
+}
+
+func (p *PaymentCoordinator) PersistProviderNotification(ctx context.Context, providerID, merchantID string, notificationID uuid.UUID, sentAt time.Time, provider ProviderOrder, payload []byte, source string) (uuid.UUID, bool, error) {
+	if !p.Capabilities().NotificationSupported || !strings.EqualFold(strings.TrimSpace(providerID), p.Capabilities().ProviderID) || strings.TrimSpace(merchantID) != p.merchantID || notificationID == uuid.Nil || sentAt.Before(p.now().Add(-5*time.Minute)) || sentAt.After(p.now().Add(5*time.Minute)) || provider.MerchantOrderNo == "" || provider.Channel == "" || provider.AmountFen <= 0 || provider.Currency == "" {
+		return uuid.Nil, false, ErrForbiddenPayment
+	}
+	notification := paymentNotification{
+		NotificationID: notificationID, MerchantID: p.merchantID, MerchantOrderNo: provider.MerchantOrderNo,
+		Channel: provider.Channel, Status: provider.Status, AmountFen: provider.AmountFen, Currency: provider.Currency,
+		Timestamp: sentAt.Unix(), ProviderOrderReference: provider.ProviderOrderReference, ProviderStatus: provider.ProviderStatus,
+		ProviderTraceID: provider.ProviderTraceID, ProviderEventAt: provider.ProviderEventAt,
+		ProviderPayableUntil: provider.ProviderPayableUntil, PaymentInstructionExpiresAt: provider.PaymentInstructionExpiresAt,
+		ProviderPayload: append(json.RawMessage(nil), payload...),
+	}
+	if provider.ChannelTransactionID != nil {
+		notification.ChannelTransaction = *provider.ChannelTransactionID
+	}
+	if provider.PaidAt != nil {
+		notification.PaidAt = *provider.PaidAt
+	}
+	body, err := json.Marshal(notification)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	return p.persistNotification(ctx, provider.Channel, notification, body, source)
+}
+
+func (p *PaymentCoordinator) persistNotification(ctx context.Context, channel string, notification paymentNotification, body []byte, source string) (uuid.UUID, bool, error) {
+	channel = strings.ToUpper(strings.TrimSpace(channel))
+	if notification.NotificationID == uuid.Nil || notification.MerchantID != p.merchantID || notification.Channel != channel || notification.AmountFen <= 0 || notification.Currency == "" || notification.Status == "" {
 		return uuid.Nil, false, ErrForbiddenPayment
 	}
 	tx, err := p.repository.pool.Begin(ctx)
@@ -484,11 +536,33 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	if err != nil {
 		return err
 	}
-	if notification.MerchantID != p.merchantID || notification.Channel != channel || notification.Status != "SUCCESS" || notification.ChannelTransaction == "" || notification.PaidAt.IsZero() {
+	if notification.MerchantID != p.merchantID || notification.Channel != channel {
 		return ErrForbiddenPayment
 	}
-	provider := ProviderOrder{MerchantOrderNo: notification.MerchantOrderNo, Channel: notification.Channel, AmountFen: notification.AmountFen, Currency: notification.Currency, Status: notification.Status, ProviderStatus: notification.Status, ChannelTransactionID: &notification.ChannelTransaction, PaidAt: &notification.PaidAt}
-	merged, evidenceID, mergeErr := p.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "CALLBACK", notification.NotificationID.String(), body, provider, false, p.now())
+	provider := ProviderOrder{MerchantOrderNo: notification.MerchantOrderNo, ProviderOrderReference: notification.ProviderOrderReference, Channel: notification.Channel, AmountFen: notification.AmountFen, Currency: notification.Currency, Status: notification.Status, ProviderStatus: notification.ProviderStatus, ProviderTraceID: notification.ProviderTraceID, ProviderEventAt: notification.ProviderEventAt, ProviderPayableUntil: notification.ProviderPayableUntil, PaymentInstructionExpiresAt: notification.PaymentInstructionExpiresAt, AmountSource: "PROVIDER"}
+	if provider.ProviderStatus == "" {
+		provider.ProviderStatus = notification.Status
+	}
+	if notification.ChannelTransaction != "" {
+		provider.ChannelTransactionID = &notification.ChannelTransaction
+	}
+	if !notification.PaidAt.IsZero() {
+		provider.PaidAt = &notification.PaidAt
+	}
+	var evidenceID uuid.UUID
+	var mergeErr error
+	merged := order
+	if provider.Status == "SUCCESS" {
+		if provider.ChannelTransactionID == nil || provider.PaidAt == nil {
+			return ErrForbiddenPayment
+		}
+		merged, evidenceID, mergeErr = p.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "CALLBACK", notification.NotificationID.String(), body, provider, false, p.now())
+	} else {
+		mergeErr = p.mergeProviderObservationWithinTransaction(ctx, tx, order, "CALLBACK", notification.NotificationID.String(), body, provider, p.now())
+		if lookupErr := tx.QueryRow(ctx, `SELECT id FROM payment_evidence WHERE provider_id=$1 AND provider_version=$2 AND evidence_type='CALLBACK' AND evidence_key=$3 ORDER BY received_at DESC LIMIT 1`, order.ProviderID, order.ProviderVersion, notification.NotificationID.String()).Scan(&evidenceID); lookupErr != nil {
+			return lookupErr
+		}
+	}
 	if mergeErr != nil && !errors.Is(mergeErr, ErrConflict) {
 		return mergeErr
 	}

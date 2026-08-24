@@ -67,24 +67,30 @@ type userSyncItem struct {
 }
 
 type Order struct {
-	OrderKey          string `json:"orderKey"`
-	Mobile            string `json:"mobile"`
-	SKU               string `json:"skuBom"`
-	TradeContractID   *int64 `json:"tradeContractId"`
-	TradeContractCode string `json:"tradeContractCode"`
-	PayUniqueKey      string `json:"payUniqueKey"`
-	PaymentOrderID    *int64 `json:"paymentOrderId"`
-	BuyerID           string `json:"buyerId"`
-	PayChannel        string `json:"payChannel"`
-	AliQRData         string `json:"aliQrData"`
-	WechatQRData      string `json:"wechatQrData"`
-	Status            string `json:"status"`
-	Node              string `json:"node"`
-	PayTime           string `json:"payTime"`
-	ErrorMessage      string `json:"errorMsg"`
-	TraceID           string `json:"traceId"`
-	CreatedAt         any    `json:"createdAt"`
-	UpdatedAt         any    `json:"updatedAt"`
+	OrderKey                    string `json:"orderKey"`
+	ProviderOrderNo             string `json:"providerOrderNo"`
+	Mobile                      string `json:"mobile"`
+	SKU                         string `json:"skuBom"`
+	TradeContractID             *int64 `json:"tradeContractId"`
+	TradeContractCode           string `json:"tradeContractCode"`
+	PayUniqueKey                string `json:"payUniqueKey"`
+	PaymentOrderID              *int64 `json:"paymentOrderId"`
+	BuyerID                     string `json:"buyerId"`
+	PayChannel                  string `json:"payChannel"`
+	AliQRData                   string `json:"aliQrData"`
+	WechatQRData                string `json:"wechatQrData"`
+	Status                      string `json:"status"`
+	AmountFen                   *int64 `json:"amountFen"`
+	Currency                    string `json:"currency"`
+	Node                        string `json:"node"`
+	PayTime                     string `json:"payTime"`
+	StatusOccurredAt            string `json:"statusOccurredAt"`
+	ProviderPayableUntil        string `json:"providerPayableUntil"`
+	PaymentInstructionExpiresAt string `json:"paymentInstructionExpiresAt"`
+	ErrorMessage                string `json:"errorMsg"`
+	TraceID                     string `json:"traceId"`
+	CreatedAt                   any    `json:"createdAt"`
+	UpdatedAt                   any    `json:"updatedAt"`
 }
 
 func New(config Config) (*Client, error) {

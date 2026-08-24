@@ -237,6 +237,46 @@ paths:
           description: The valid callback is durably persisted for asynchronous idempotent processing
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
+  /external/v1/payment-callback/token:
+    post:
+      servers: [{ url: / }]
+      security: [{ paymentCallbackClient: [] }]
+      operationId: issuePaymentCallbackToken
+      summary: Exchange a provider-bound callback client credential for a short-lived callback token
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [grant_type]
+              properties:
+                grant_type: { type: string, const: client_credentials }
+                scope: { type: string, const: payment.callback.write }
+      responses:
+        "200":
+          description: Short-lived token scoped only to payment callback delivery
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentCallbackToken" }
+        "401": { $ref: "#/components/responses/Error" }
+  /external/v1/payment-callbacks:
+    post:
+      servers: [{ url: / }]
+      security: [{ paymentCallbackBearer: [] }]
+      operationId: persistProviderPaymentCallback
+      summary: Authenticate a provider-bound token and durably persist a normalized payment result
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PaymentCallback" }
+      responses:
+        "202":
+          description: Callback durably persisted; duplicate notification IDs return the same acknowledgement
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
   /internal/v1/recharge/orders/{order_id}/payment-claims:
     post:
       operationId: addLatePaymentClaimInternal
@@ -300,6 +340,15 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    paymentCallbackClient:
+      type: http
+      scheme: basic
+      description: Dedicated client credentials bound server-side to one provider, adapter version, and merchant.
+    paymentCallbackBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Short-lived token whose provider identity is derived by the server and cannot be supplied in the callback body.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -337,6 +386,34 @@ components:
           schema:
             $ref: "common.yaml#/components/schemas/Error"
   schemas:
+    PaymentCallbackToken:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_in, scope]
+      properties:
+        access_token: { type: string, minLength: 32, maxLength: 4096 }
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, minimum: 60, maximum: 900 }
+        scope: { type: string, const: payment.callback.write }
+    PaymentCallback:
+      type: object
+      additionalProperties: false
+      required: [notificationId, merchantOrderNo, providerStatus, amountFen, currency, occurredAt, sentAt]
+      properties:
+        notificationId: { type: string, format: uuid }
+        merchantOrderNo: { type: string, minLength: 1, maxLength: 128 }
+        providerOrderNo: { type: string, maxLength: 128 }
+        providerTransactionId: { type: string, maxLength: 128, description: Required when the provider profile maps providerStatus to payment success. }
+        channel: { type: string, minLength: 1, maxLength: 64 }
+        providerStatus: { type: string, minLength: 1, maxLength: 64, description: Original provider status interpreted by the profile bound to the callback token. }
+        amountFen: { type: integer, format: int64, minimum: 1 }
+        currency: { type: string, pattern: "^[A-Z]{3}$" }
+        paidAt: { type: string, description: "Required when the provider profile maps providerStatus to payment success; RFC 3339, with profile-specific legacy formats documented separately." }
+        occurredAt: { type: string, format: date-time }
+        sentAt: { type: string, format: date-time }
+        traceId: { type: string, maxLength: 128 }
+        providerPayableUntil: { type: string, format: date-time }
+        paymentInstructionExpiresAt: { type: string, format: date-time }
     PaymentCapabilities:
       type: object
       additionalProperties: false

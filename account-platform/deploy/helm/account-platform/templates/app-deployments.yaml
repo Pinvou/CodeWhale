@@ -153,8 +153,16 @@ spec:
             {{- end }}
             - { name: BILLING_PAYMENT_CALLBACK_URL, value: {{ $root.Values.public.paymentCallbackUrl | quote }} }
             - { name: BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS, value: {{ $root.Values.billing.paymentExpiryIntervalSeconds | quote }} }
+            - { name: PAYMENT_CALLBACK_TOKEN_KEY_ID, value: {{ $root.Values.billing.paymentCallbackTokenKeyId | quote }} }
+            - { name: PAYMENT_CALLBACK_TOKEN_TTL_SECONDS, value: {{ $root.Values.billing.paymentCallbackTokenTtlSeconds | quote }} }
             - name: PAYMENT_MERCHANT_ID
-              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-merchant-id, optional: true } }
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-merchant-id } }
+            - name: PAYMENT_CALLBACK_CLIENT_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-callback-client-id } }
+            - name: PAYMENT_CALLBACK_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-callback-client-secret } }
+            - name: PAYMENT_CALLBACK_TOKEN_SIGNING_KEY_BASE64
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: payment-callback-token-signing-key-base64 } }
             {{- range $channel := list "UNIONPAY" "ALIPAY" "WECHAT" }}
             - name: PAYMENT_NOTIFICATION_HMAC_{{ $channel }}
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: {{ printf "payment-hmac-%s" ($channel | lower) }}, optional: true } }

@@ -19,17 +19,22 @@ type Order struct {
 }
 
 type ProviderOrder struct {
-	MerchantOrderNo      string     `json:"merchant_order_no"`
-	PaymentURL           string     `json:"payment_url"`
-	QRData               string     `json:"qr_data,omitempty"`
-	Status               string     `json:"status"`
-	Channel              string     `json:"channel"`
-	AmountFen            int64      `json:"amount_fen"`
-	Currency             string     `json:"currency"`
-	ChannelTransactionID *string    `json:"channel_transaction_id,omitempty"`
-	PaidAt               *time.Time `json:"paid_at,omitempty"`
-	ProviderStatus       string     `json:"provider_status,omitempty"`
-	ProviderTraceID      string     `json:"provider_trace_id,omitempty"`
+	MerchantOrderNo             string     `json:"merchant_order_no"`
+	ProviderOrderReference      string     `json:"provider_order_reference,omitempty"`
+	PaymentURL                  string     `json:"payment_url"`
+	QRData                      string     `json:"qr_data,omitempty"`
+	Status                      string     `json:"status"`
+	Channel                     string     `json:"channel"`
+	AmountFen                   int64      `json:"amount_fen"`
+	Currency                    string     `json:"currency"`
+	AmountSource                string     `json:"amount_source,omitempty"`
+	ChannelTransactionID        *string    `json:"channel_transaction_id,omitempty"`
+	PaidAt                      *time.Time `json:"paid_at,omitempty"`
+	ProviderStatus              string     `json:"provider_status,omitempty"`
+	ProviderTraceID             string     `json:"provider_trace_id,omitempty"`
+	ProviderEventAt             *time.Time `json:"provider_event_at,omitempty"`
+	ProviderPayableUntil        *time.Time `json:"provider_payable_until,omitempty"`
+	PaymentInstructionExpiresAt *time.Time `json:"payment_instruction_expires_at,omitempty"`
 }
 
 type Refund struct {
@@ -40,8 +45,8 @@ type Refund struct {
 }
 
 type BillEntry struct {
-	EntryType             string    `json:"entry_type,omitempty"`
-	ProviderReferenceID   string    `json:"provider_reference_id,omitempty"`
+	EntryType            string    `json:"entry_type,omitempty"`
+	ProviderReferenceID  string    `json:"provider_reference_id,omitempty"`
 	MerchantOrderNo      string    `json:"merchant_order_no"`
 	ChannelTransactionID string    `json:"channel_transaction_id"`
 	Channel              string    `json:"channel"`

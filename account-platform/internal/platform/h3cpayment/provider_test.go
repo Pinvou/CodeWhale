@@ -34,7 +34,7 @@ func newTestProvider(t *testing.T, client mallClient) *Provider {
 
 func TestCapabilitiesAreVersionedAndSupplierSpecific(t *testing.T) {
 	capabilities := newTestProvider(t, &mallStub{}).Capabilities()
-	if !capabilities.Valid() || capabilities.ProviderID != "h3c_mall" || capabilities.Version == "" || !capabilities.CommerceCustomerRequired || !capabilities.SupportsChannel("ALIPAY") || capabilities.RefundSupported || capabilities.TestOnly {
+	if !capabilities.Valid() || capabilities.ProviderID != "h3c_mall" || capabilities.Version == "" || !capabilities.CommerceCustomerRequired || !capabilities.SupportsChannel("ALIPAY") || !capabilities.NotificationSupported || capabilities.RefundSupported || capabilities.AuthoritativeUnpaidTerminal || capabilities.TestOnly {
 		t.Fatalf("unexpected capabilities: %#v", capabilities)
 	}
 }
@@ -49,9 +49,18 @@ func TestCreateRecoversAcceptedOrderWithoutInventingQR(t *testing.T) {
 }
 
 func TestMapsPaidOrder(t *testing.T) {
-	client := &mallStub{order: h3cmall.Order{OrderKey: "pv-1", SKU: "sku-100", Status: "PAID", PayUniqueKey: "trade-1", PayTime: "2026-08-19 12:00:00"}}
+	amount := int64(100)
+	client := &mallStub{order: h3cmall.Order{OrderKey: "pv-1", ProviderOrderNo: "mall-1", SKU: "sku-100", Status: "PAID", AmountFen: &amount, Currency: "CNY", PayUniqueKey: "trade-1", PayTime: "2026-08-19 12:00:00", StatusOccurredAt: "2026-08-19T04:00:00Z"}}
 	order, err := newTestProvider(t, client).Get(context.Background(), "pv-1")
-	if err != nil || order.Status != "SUCCESS" || order.ChannelTransactionID == nil || *order.ChannelTransactionID != "trade-1" || order.PaidAt == nil || order.PaidAt.Location() != time.UTC {
+	if err != nil || order.Status != "SUCCESS" || order.ChannelTransactionID == nil || *order.ChannelTransactionID != "trade-1" || order.PaidAt == nil || order.PaidAt.Location() != time.UTC || order.AmountSource != "PROVIDER" || order.ProviderOrderReference != "mall-1" || order.ProviderEventAt == nil {
 		t.Fatalf("unexpected paid mapping: %#v %v", order, err)
+	}
+}
+
+func TestFailedOrderRemainsReviewRequired(t *testing.T) {
+	client := &mallStub{order: h3cmall.Order{OrderKey: "pv-1", SKU: "sku-100", Status: "FAILED"}}
+	order, err := newTestProvider(t, client).Get(context.Background(), "pv-1")
+	if err != nil || order.Status != "REVIEW_REQUIRED" || order.AmountSource != "EXPECTED_SNAPSHOT" {
+		t.Fatalf("FAILED must not become an authoritative unpaid terminal: %#v %v", order, err)
 	}
 }

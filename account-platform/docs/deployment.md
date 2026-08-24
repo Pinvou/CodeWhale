@@ -205,7 +205,7 @@ Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移
 
 支付证据收敛上线执行 Billing `000033_payment_convergence_states`：把历史 `CLOSED/FAILED` 关闭投影迁移为 `PROVIDER_CLOSED/EXPIRED`，增加三个关单时间点，并允许无法匹配本地订单的 Provider 账单先以空订单引用保存不可变证据。发布顺序为先迁移 Billing、再滚动 Billing/Portal；升级后验证回调、查询和账单中的同一流水只履约一次，账单冲突仍保留摘要并产生对账案件，关单请求依次经过 `CLOSE_REQUESTED` 与 `LOCALLY_CLOSED_EXTERNAL_PENDING`，本地关闭后公开响应不再返回支付链接/二维码，晚到成功仍成为 `LATE_PAID`。若已存在空订单引用账单证据，down migration 会失败关闭，必须以前向迁移修复，禁止删除证据或把关单状态直接回写旧值。
 
-晚到支付复核上线继续执行 Billing `000028_late_payment_review_lifecycle`，再滚动 Billing、Token Gateway、Portal 和桌面运营制品。迁移为既有订单补齐支付期限、72小时边界和最终归档期限，并新增人工案件/不可变时间线、晚到证据、账单文件导入及 Provider 版本新单开关。发布前必须核对 Provider 能力的 `reconciliation_mode`、历史查询保留、支付/晚到窗口和权威未支付终态；H3C 当前为 `QUERY_DEGRADED` 且没有回调/账单，因此现有 `TEST_ONLY` 映射不能直接升级为正式映射。发布后抽样验证：72小时最终查询只创建一个 P2 案件；前7天每日、之后每周的复核计划不因认领或安排重置创建时钟；用户申诉只为本人订单追加不可变证据；严格归档要求期限后成功权威查询且无支付/冲突/未复核申诉；无法取得该事实时升级 `PROVIDER_BLIND` 并停用该 Provider 版本新单。恢复收款不得直接改 `payment_provider_controls`，应在修复和验证能力后发布新的 Provider/Adapter 版本与 `FROZEN` 映射。持续监控 `REVIEW_REQUIRED_LATE_PAYMENT`、`PROVIDER_BLIND`、人工 SLA 升级 Outbox、逾期未认领/未响应/未止损/未解决案件以及账单导入失败；文件导入仅对声明 `FILE_IMPORT` 的能力开放，单批最多 100,000 行。已有案件、证据或停单事实后禁止 down migration；故障时保留只读复核和证据，不得把订单直接改成未支付终态。
+晚到支付复核上线继续执行 Billing `000028_late_payment_review_lifecycle`，再滚动 Billing、Token Gateway、Portal 和桌面运营制品。迁移为既有订单补齐支付期限、72小时边界和最终归档期限，并新增人工案件/不可变时间线、晚到证据、账单文件导入及 Provider 版本新单开关。发布前必须核对 Provider 能力的 `reconciliation_mode`、历史查询保留、支付/晚到窗口和权威未支付终态；H3C 当前声明支付回调但仍为 `QUERY_DEGRADED` 且没有账单，因此现有 `TEST_ONLY` 映射不能直接升级为正式映射。发布后抽样验证：72小时最终查询只创建一个 P2 案件；前7天每日、之后每周的复核计划不因认领或安排重置创建时钟；用户申诉只为本人订单追加不可变证据；严格归档要求期限后成功权威查询且无支付/冲突/未复核申诉；无法取得该事实时升级 `PROVIDER_BLIND` 并停用该 Provider 版本新单。恢复收款不得直接改 `payment_provider_controls`，应在修复和验证能力后发布新的 Provider/Adapter 版本与 `FROZEN` 映射。持续监控 `REVIEW_REQUIRED_LATE_PAYMENT`、`PROVIDER_BLIND`、人工 SLA 升级 Outbox、逾期未认领/未响应/未止损/未解决案件以及账单导入失败；文件导入仅对声明 `FILE_IMPORT` 的能力开放，单批最多 100,000 行。已有案件、证据或停单事实后禁止 down migration；故障时保留只读复核和证据，不得把订单直接改成未支付终态。
 
 支付异常与四方对账随后依次执行 Account `000023_payment_anomaly_commands` 和 Billing `000029_payment_anomaly_reconciliation`，再滚动 Billing、Portal 与桌面运营制品。Billing 迁移把既有未结强制退款和历史对账差异补入通用人工案件，新增不可变异常/差异证据、命令审计、Provider/Adapter 版本化独立对账运行，并解除旧的“渠道+日期只能有一次运行”约束；定时任务仍以 Provider、版本、渠道、业务日唯一，只允许手工重跑形成新运行。发布前确认数据库支持 `gen_random_uuid()`，并核对所有开启账单能力的 Provider 将 PAYMENT/REFUND/CHARGEBACK 映射为正金额、稳定外部引用和上海自然日时间；不支持账单的 Provider 不启动日终任务。发布后抽样验证：拒付和强制退款只冻结并冲销原支付流水权益包，异常录入端点不直接记账；明确退款失败、重复/晚到冲突和非法状态进入统一队列；同一结论命令重试不重复记账；定时任务在上海零点边界按前一自然日取数；Provider、订单/流水、退款/拒付和账本任一缺失或金额不一致均生成带严重度的差异；同日手工重跑保留前次证据，认领、修复计划和结论只追加命令/事件。持续监控开放 P0/P1 案件、`financial_action_status=PENDING/FAILED`、未分配对账差异、定时运行缺口和账本缺失差异。产生任何新版异常、命令、独立运行或差异后禁止 down migration；故障时停止新结论与对账调度、保留只读证据并前向修复，禁止直接更新钱包、权益、异常或对账表。
 
@@ -219,8 +219,14 @@ Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移
 - `BILLING_PAYMENT_PROVIDER=h3c_mall`
 - `BILLING_ALLOW_TENTATIVE_PRICES`
 - `BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS`（不得小于 Adapter 声明的最小查询间隔）
+- `PAYMENT_MERCHANT_ID`（商城回调订单归属校验）
+- `PAYMENT_CALLBACK_CLIENT_ID`（当前凭据绑定 H3C Provider Profile）
+- `PAYMENT_CALLBACK_CLIENT_SECRET`（至少32字符，独立 Secret）
+- `PAYMENT_CALLBACK_TOKEN_SIGNING_KEY_BASE64`（至少256 bit 随机密钥的标准 Base64）
+- `PAYMENT_CALLBACK_TOKEN_KEY_ID`
+- `PAYMENT_CALLBACK_TOKEN_TTL_SECONDS`（60至900秒，默认300秒）
 
-UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C 适配层处理，不能通过通用环境变量绕过服务端商品目录。
+UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C Profile 处理，不能通过通用环境变量绕过服务端商品目录。通用 Provider 回调复用现有官网根域名，公网边界只允许把 `POST https://pinvou.com/external/v1/payment-callback/token` 和 `POST https://pinvou.com/external/v1/payment-callbacks` 两个精确路径转发到 Billing；在现有官网 HTTPS `server` 块中 include `deploy/nginx/payment-callback-locations.conf.template` 的站点专用渲染结果，不得用账号平台完整模板覆盖官网，也不要求修改账号平台全局 `PUBLIC_BASE_URL`。客户端凭据由服务端绑定 Provider、版本和商户，回调请求体不得携带 Provider 身份；Token 仅含 `payment.callback.write` 权限，回调收到 `202` 只表示通知已持久化。后端主机变化时只更新 Nginx/网关 upstream，Provider 配置不得改为实例 IP 或临时地址。
 
 ### 6.5 Token Gateway 与 New API
 
@@ -491,7 +497,7 @@ UAT 只使用明确的测试商品和测试商城账号：
 3. 客户端退出后，Billing 继续轮询。
 4. 商城 PAID 后仅入账一次，权益包与平衡账本一致。
 5. 重复查询、服务重启和晚到支付不重复入账。
-6. 普通退款的新建入口无论能力声明如何均保持关闭；H3C 当前同时不支持退款、关单、回调和账单，主动关单、回调和账单文件入口继续按各自能力声明启用，并明确显示 `QUERY_DEGRADED`，不得把查询快照描述为渠道账单。既有退款查询/收敛和强制退款异常处置不因入口关闭而停用。
+6. 普通退款的新建入口无论能力声明如何均保持关闭；H3C 当前支持支付回调但不支持退款、主动关单和账单，回调固定声明 `notification_supported=true`，其他动作继续按各自能力声明启用，并明确显示 `QUERY_DEGRADED`，不得把查询快照描述为渠道账单。既有退款查询/收敛和强制退款异常处置不因入口关闭而停用。
 7. 新订单必须保存 Provider/版本、商品映射 ID、映射快照和能力快照；历史订单不随 Adapter 或映射升级变化。
 8. 订单越过72小时边界后只产生一个晚到支付案件；认领、复核查询、安排、用户申诉、归档和 blind 升级均保留不可变时间线。
 9. 无回调无账单 Provider 只有在有限窗口、长期历史查询、权威未支付终态和证据保留均满足时才允许正式新单；blind 后同版本新单立即失败关闭。

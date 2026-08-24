@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 56 个任务中，45 个仓库内可闭环任务为 `DONE`，10 个 `CODE+ENV` 任务已完成仓库实现但仍等待业务冻结、生产等价环境或正式制品证据并保持 `BLOCKED_EXTERNAL`，1 个新增 `CODE` 任务为 `PENDING`；规范矩阵现有 32 个状态为 `部分实现` 或 `未实现` 的目标编号，每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 57 个任务中，46 个仓库内可闭环任务为 `DONE`，10 个 `CODE+ENV` 任务已完成仓库实现但仍等待业务冻结、生产等价环境或正式制品证据并保持 `BLOCKED_EXTERNAL`，1 个 `CODE` 任务为 `PENDING`；规范矩阵现有 33 个状态为 `部分实现` 或 `未实现` 的目标编号，每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -46,8 +46,8 @@
 | APT-020 | 钱包、组成级账本和 Hold 运营证据查询 | BILL-27, ADM-18 | APT-016, APT-018 | CODE | DONE |
 | APT-021 | 普通退款目标锁定、全 BASE 退款、关联 BONUS 撤销与强制退款隔离 | BILL-28, PAY-24–PAY-30, PAY-32 | APT-016, APT-019, APT-023 | CODE | DONE |
 | APT-022 | Payment Provider/渠道/商品映射中立化及生产测试隔离 | PAY-01–PAY-04, NFR-17 | APT-005 | CODE | DONE |
-| APT-023 | 一单多流水、统一回调/查询证据、逐流水履约和组织付款快照 | PAY-11, PAY-15, PAY-20–PAY-23, ADM-19, NFR-16 | APT-016, APT-022 | CODE | DONE |
-| APT-024 | 晚到支付、无回调/账单降级、人工案件和事实盲区处置 | PAY-17–PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | APT-022, APT-023 | CODE | DONE |
+| APT-023 | 一单多流水、统一支付证据、逐流水履约和组织付款快照 | PAY-11, PAY-20–PAY-23, ADM-19, NFR-16 | APT-016, APT-022 | CODE | DONE |
+| APT-024 | 晚到支付、无回调/账单降级、人工案件和事实盲区处置 | PAY-18, PAY-19, PAY-35, PAY-37–PAY-40, ADM-33 | APT-022, APT-023, APT-057 | CODE | DONE |
 | APT-025 | 拒付/异常复核、四方对账和受审计修复 | PAY-33, PAY-34, PAY-36, ADM-21 | APT-019, APT-023, APT-024 | CODE | DONE |
 | APT-026 | 供应商中立模型网关协议和用量证据 Adapter | TOK-04, TOK-05, NFR-18 | 无 | CODE | DONE |
 | APT-027 | 独立模型目录、稳定模型身份及不可变目录生命周期 | TOK-07, TOK-42–TOK-44, TOK-46 | APT-026 | CODE | DONE |
@@ -71,7 +71,7 @@
 | APT-045 | 全域审计、幂等指纹、Outbox/Inbox 收敛和死信恢复闭环 | CORE-07, NFR-05–NFR-07 | APT-003–APT-034, APT-046, APT-047 | CODE | DONE |
 | APT-046 | 普通组织角色绑定的展示、有效期、授权撤销和缓存失效 | ACC-30–ACC-32, ADM-05, ADM-06 | APT-006 | CODE | DONE |
 | APT-047 | 服务账号、后台任务和 Event Relay 的短期工作负载身份与最小 Subject 权限 | ADM-03, NFR-12 | APT-006 | CODE+ENV | BLOCKED_EXTERNAL |
-| APT-048 | 正式充值商品 SKU、金额、权益及 Provider 映射的业务冻结与生产准入 | PAY-05 | APT-022 | CODE+ENV | BLOCKED_EXTERNAL |
+| APT-048 | 正式充值商品 SKU、商城金额事实、权益及 Provider 映射的业务冻结与生产准入 | PAY-05, PAY-10 | APT-022 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-049 | 账单支付证据、完整关单状态、拒付事实与订单派生摘要收敛 | PAY-12–PAY-14 | APT-019, APT-023, APT-024 | CODE | DONE |
 | APT-050 | 模型派发不确定、流式结果与支付证据统一收敛边界 | CORE-06 | APT-029, APT-030, APT-049 | CODE | DONE |
 | APT-051 | 全域人工案件 P0/P1/P2 统一 SLA、转派时钟与自动止损评估 | NFR-45 | APT-003, APT-019, APT-021, APT-024, APT-025, APT-030 | CODE | DONE |
@@ -80,6 +80,7 @@
 | APT-054 | 紧急模型下架触发在途取消并保存实际取消、生成量、Hold 与结算证据 | TOK-47 | APT-030, APT-032 | CODE | DONE |
 | APT-055 | 服务端受控审计导出、重认证、PII临时授权、加密水印和一次性下载配额 | ADM-09, NFR-48 | APT-006, APT-008 | CODE | DONE |
 | APT-056 | 普通退款产品级默认关闭门禁、用户/运营入口屏蔽及服务端创建拒绝 | PAY-31, UI-12, ADM-20 | APT-021, APT-022, APT-034 | CODE | PENDING |
+| APT-057 | Provider 中立短期回调授权、Profile 化通知适配、统一证据归并与查询补偿；新华三作为首个 Profile | PAY-15–PAY-17 | APT-022, APT-023, APT-036, APT-041 | CODE | DONE |
 
 ## 3. 独立提交验收模板
 

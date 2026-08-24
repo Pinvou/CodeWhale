@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"log"
 	"os"
@@ -17,12 +18,15 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/events"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3ccallback"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cpayment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcallback"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentsimulator"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 )
@@ -66,6 +70,13 @@ func main() {
 		log.Fatal(err)
 	}
 	service := billing.NewService(repository).WithPayments(payments).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate).WithAccountClosureStateVerifier(closureStates)
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("BILLING_PAYMENT_PROVIDER")), "h3c_mall") {
+		authenticator, profiles, callbackErr := paymentCallbackConfiguration(payments.Capabilities())
+		if callbackErr != nil {
+			log.Fatal(callbackErr)
+		}
+		service.WithPaymentCallbacks(authenticator, profiles)
+	}
 	verify, err := identity.NewOIDCVerifyFuncWithJWKS(ctx, os.Getenv("OIDC_ISSUER"), os.Getenv("OIDC_JWKS_URL"), os.Getenv("OIDC_AUDIENCE"), cfg.Environment)
 	if err != nil {
 		log.Fatal(err)
@@ -166,10 +177,42 @@ func paymentCoordinator(ctx context.Context, repository *billing.PostgresReposit
 		return nil, err
 	}
 	coordinator.AllowTentativePrices(allowTestOnly)
-	if capabilities.NotificationSupported {
+	if capabilities.NotificationSupported && capabilities.ProviderID == "h3c_mall" {
+		err = coordinator.ConfigureTrustedNotifications(os.Getenv("PAYMENT_MERCHANT_ID"))
+	} else if capabilities.NotificationSupported {
 		err = coordinator.ConfigureNotifications(os.Getenv("PAYMENT_MERCHANT_ID"), os.Getenv("BILLING_PAYMENT_CALLBACK_URL"), map[string]string{
 			"UNIONPAY": os.Getenv("PAYMENT_NOTIFICATION_HMAC_UNIONPAY"), "ALIPAY": os.Getenv("PAYMENT_NOTIFICATION_HMAC_ALIPAY"), "WECHAT": os.Getenv("PAYMENT_NOTIFICATION_HMAC_WECHAT"),
 		})
 	}
 	return coordinator, err
+}
+
+func paymentCallbackConfiguration(capabilities payment.Capabilities) (*paymentcallback.Authenticator, *paymentcallback.Profiles, error) {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(os.Getenv("PAYMENT_CALLBACK_TOKEN_SIGNING_KEY_BASE64")))
+	if err != nil {
+		return nil, nil, errors.New("PAYMENT_CALLBACK_TOKEN_SIGNING_KEY_BASE64 must be valid standard Base64")
+	}
+	ttl := 5 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("PAYMENT_CALLBACK_TOKEN_TTL_SECONDS")); raw != "" {
+		seconds, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || seconds < 60 || seconds > 900 {
+			return nil, nil, errors.New("PAYMENT_CALLBACK_TOKEN_TTL_SECONDS must be between 60 and 900")
+		}
+		ttl = time.Duration(seconds) * time.Second
+	}
+	authenticator, err := paymentcallback.NewAuthenticator(paymentcallback.AuthConfig{
+		Clients: []paymentcallback.ClientConfig{{
+			ClientID: os.Getenv("PAYMENT_CALLBACK_CLIENT_ID"), ClientSecret: os.Getenv("PAYMENT_CALLBACK_CLIENT_SECRET"),
+			ProviderID: capabilities.ProviderID, ProviderVersion: capabilities.Version, MerchantID: os.Getenv("PAYMENT_MERCHANT_ID"),
+		}},
+		SigningKey: key, KeyID: os.Getenv("PAYMENT_CALLBACK_TOKEN_KEY_ID"), TokenTTL: ttl,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	profiles, err := paymentcallback.NewProfiles(h3ccallback.NewProfile())
+	if err != nil {
+		return nil, nil, err
+	}
+	return authenticator, profiles, nil
 }

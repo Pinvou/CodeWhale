@@ -733,7 +733,7 @@ USAGE_PENDING -> SETTLED | REVIEW
 | PAY-12 | 支付证据不可变留存 | 回调、查询和账单先保存 Provider、版本、流水、金额、时间和摘要，再归并状态。 |
 | PAY-13 | 支付领域独立状态机与订单派生摘要 | 订单关闭流程、支付流水、退款和拒付分别维护状态；订单资金摘要只从这些事实派生，不作为入账、冲销或状态迁移的事实源。 |
 | PAY-14 | 订单与资金状态单调收敛 | 本地状态不能覆盖更强资金事实，非法或冲突证据进入复核。 |
-| PAY-15 | 回调主收敛、查询补偿 | 回调和查询进入同一证据归并器，具备签名、防重、乱序和金额校验。 |
+| PAY-15 | 回调主收敛、查询补偿 | Provider 先通过专用客户端凭据换取短期最小权限 Token，再投递支付回调；回调和查询进入同一证据归并器，具备鉴权、防重、乱序和金额校验。新华三明确声明 `notification_supported=true`。 |
 | PAY-16 | 客户端退出后订单继续收敛 | 查询、回调和对账任务运行在服务端。 |
 | PAY-17 | 超时订单不永久停留普通 PENDING | 按订单有效期和主动查询规则进入资金终态或明确的人工审核状态。 |
 | PAY-18 | 用户或系统主动关闭未支付订单 | 支持外部关单；Provider 不支持时进入本地关闭、外部待确认状态。 |
@@ -812,7 +812,7 @@ RECEIVABLE_OPEN -> RESOLVED
 
 ### 7.3 支付证据优先级
 
-所有回调、主动查询和账单记录先写入不可变 `payment_evidence`，至少保存 Provider、Adapter 版本、外部订单号、支付/退款流水号、金额、币种、Provider 事件时间、接收时间、序列号或版本及证据摘要。
+所有回调、主动查询和账单记录先写入不可变 `payment_evidence`，至少保存 Provider、Adapter 版本、外部订单号、支付/退款流水号、金额、币种、Provider 事件时间、接收时间和证据摘要；Provider 提供序列号或版本时一并保存，不得要求新华三为本项目额外增加状态版本字段。
 
 以下均为 `PAY-12` 的验收条件，证据只能推进其所绑定领域对象的状态，不得跨对象覆盖事实：
 
@@ -822,6 +822,24 @@ RECEIVABLE_OPEN -> RESOLVED
 4. 渠道本身不决定优先级；签名回调、主动查询和账单只要达到同一证据等级，都按 Provider 序列号、版本或事件时间排序。
 5. 同等级证据无法排序、同一流水关联多个订单、金额/币种不一致或出现非法状态跃迁时，不覆盖既有强事实，只把对应对象转为 `REVIEW_REQUIRED` 并重算订单关注摘要。
 6. 回调是主要实时收敛入口；主动查询补偿漏回调和不确定状态；每日账单用于独立对账，三者共用同一个证据归并入口，但支付、退款和拒付使用各自的幂等键与状态机。
+
+#### 7.3.1 通用支付 Provider 回调合同
+
+本项目提供且只公开以下两个 Provider 中立接口，Billing 原有内部通知入口不得直接暴露给商城或渠道：
+
+固定公网基础地址为 `https://pinvou.com`；调用方不得使用部署实例 IP、临时域名或客户端提交的回调 URL。服务器迁移只允许在品悟网关内部调整 upstream，不得改变 Provider 侧接口契约。
+
+1. 回调授权接口：`POST https://pinvou.com/external/v1/payment-callback/token`。每个 Provider 使用独立 HTTP Basic 客户端凭据按 `client_credentials` 换取短期 Bearer Token；服务端把客户端绑定到唯一 `provider_id`、Adapter 版本和商户，Token 只含 `payment.callback.write`，有效期必须在 1–15 分钟内。响应和日志不得泄露客户端密钥或 Token。
+2. 支付结果回调接口：`POST https://pinvou.com/external/v1/payment-callbacks`。接口只接受上述 Bearer Token，从 Token 派生 Provider 身份并选择对应 Profile；请求体不得提交或覆盖 `provider_id`、Adapter 版本或商户。完成严格校验并持久化通知后返回 `202 Accepted`，履约在异步 Inbox 中完成。
+
+通用回调报文至少包括：全局唯一 `notificationId`、品悟商户订单号 `merchantOrderNo`、Provider 订单号、Provider 支付流水号 `providerTransactionId`、渠道 `channel`、Provider 原始状态 `providerStatus`、实际金额分、币种、支付时间 `paidAt`、状态发生时间 `occurredAt`、发送时间 `sentAt` 和 Trace ID。具体状态、渠道、币种及兼容时间格式由与 Token 身份绑定的 Provider Profile 解释；Profile 确认支付成功时必须同时具有稳定支付流水号、正金额和有效支付时间，缺少任一字段不得入账。
+
+- 同一 `notificationId`、同一内容重复投递返回相同受理结果；同一 ID 携带不同内容必须拒绝并告警。
+- 回调原文作为受限证据嵌入规范化通知，和查询证据使用相同支付流水归并与权益履约函数；回调/查询并发、重复和乱序均不得重复创建流水、权益包或账本分录。
+- Profile 映射后的成功、处理中、关闭和复核状态遵循相同证据优先级；未知新状态必须保存原文并进入复核，不得静默丢弃或猜测终态。
+- 回调不替代服务端主动查询。回调缺失、认证失败、处理延迟或状态不确定时继续按 PAY-19 查询；查询先收敛后到达的回调只补充证据，不能重复履约。
+- 新华三是首个 Provider Profile，固定声明 `notification_supported=true`：`PAID` 映射为成功，`PENDING/PROCESSING/WAIT_PAY` 只追加处理中证据，`PAY_CLOSED` 只有在权威终态能力允许时才能关闭，`FAILED` 及未知状态进入人工复核；当前只接受 `ALIPAY` 和 `CNY`，`paidAt` 额外兼容 Asia/Shanghai 的 `yyyy-MM-dd HH:mm:ss`。
+- 商城账单、主动关单和退款接口仍不属于当前新华三 Profile；普通退款继续按 PAY-31 关闭。
 
 ### 7.4 主动关闭和查询退避
 

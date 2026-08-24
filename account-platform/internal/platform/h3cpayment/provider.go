@@ -36,8 +36,8 @@ func New(client mallClient, products map[string]Product) (*Provider, error) {
 func (p *Provider) Capabilities() payment.Capabilities {
 	return payment.Capabilities{
 		ProviderID: "h3c_mall", Version: "h3c-mall-v1", Channels: []string{"ALIPAY"},
-		OrderQuerySupported: true, MinimumQueryIntervalSeconds: 15, MaximumPayableWindowSeconds: 15 * 60,
-		AuthoritativeUnpaidTerminal: true, ManualRepairSupported: true,
+		OrderQuerySupported: true, MinimumQueryIntervalSeconds: 15, NotificationSupported: true,
+		AuthoritativeUnpaidTerminal: false, ManualRepairSupported: true,
 		CommerceCustomerRequired: true, ReusePendingOrderAfterExpiry: true, ReviewLatePayment: true,
 	}
 }
@@ -53,7 +53,7 @@ func (p *Provider) Create(ctx context.Context, order payment.Order, _ string) (p
 		}
 		return p.mapOrder(existing)
 	}
-	return payment.ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "PENDING", ProviderStatus: "PENDING", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency}, nil
+	return payment.ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "PENDING", ProviderStatus: "PENDING", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, AmountSource: "EXPECTED_SNAPSHOT"}, nil
 }
 
 func (p *Provider) Get(ctx context.Context, merchantOrderNo string) (payment.ProviderOrder, error) {
@@ -88,7 +88,30 @@ func (p *Provider) mapOrder(order h3cmall.Order) (payment.ProviderOrder, error) 
 	if !found || strings.TrimSpace(order.OrderKey) == "" {
 		return payment.ProviderOrder{}, errors.New("H3C Mall returned an unknown product or order")
 	}
-	result := payment.ProviderOrder{MerchantOrderNo: order.OrderKey, QRData: order.AliQRData, ProviderStatus: order.Status, ProviderTraceID: order.TraceID, Channel: "ALIPAY", AmountFen: product.AmountFen, Currency: "CNY"}
+	amountFen, amountSource := product.AmountFen, "EXPECTED_SNAPSHOT"
+	if order.AmountFen != nil && *order.AmountFen > 0 {
+		amountFen, amountSource = *order.AmountFen, "PROVIDER"
+	}
+	currency := strings.ToUpper(strings.TrimSpace(order.Currency))
+	if currency == "" {
+		currency = "CNY"
+	}
+	result := payment.ProviderOrder{MerchantOrderNo: order.OrderKey, ProviderOrderReference: strings.TrimSpace(order.ProviderOrderNo), QRData: order.AliQRData, ProviderStatus: order.Status, ProviderTraceID: order.TraceID, Channel: "ALIPAY", AmountFen: amountFen, Currency: currency, AmountSource: amountSource}
+	if parsed, err := parseOptionalTime(order.StatusOccurredAt); err != nil {
+		return payment.ProviderOrder{}, err
+	} else {
+		result.ProviderEventAt = parsed
+	}
+	if parsed, err := parseOptionalTime(order.ProviderPayableUntil); err != nil {
+		return payment.ProviderOrder{}, err
+	} else {
+		result.ProviderPayableUntil = parsed
+	}
+	if parsed, err := parseOptionalTime(order.PaymentInstructionExpiresAt); err != nil {
+		return payment.ProviderOrder{}, err
+	} else {
+		result.PaymentInstructionExpiresAt = parsed
+	}
 	switch strings.ToUpper(order.Status) {
 	case "PENDING", "PROCESSING", "WAIT_PAY":
 		result.Status = "PENDING"
@@ -109,11 +132,22 @@ func (p *Provider) mapOrder(order h3cmall.Order) (payment.ProviderOrder, error) 
 	case "PAY_CLOSED":
 		result.Status = "CLOSED"
 	case "FAILED":
-		result.Status = "FAILED"
+		result.Status = "REVIEW_REQUIRED"
 	default:
 		return payment.ProviderOrder{}, errors.New("H3C Mall returned an unknown payment status")
 	}
 	return result, nil
+}
+
+func parseOptionalTime(value string) (*time.Time, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	parsed, err := parseTime(value)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
 func parseTime(value string) (time.Time, error) {

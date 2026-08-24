@@ -111,31 +111,52 @@ func (p *PaymentCoordinator) recordProviderObservation(ctx context.Context, orde
 	if err != nil {
 		return err
 	}
-	valid := provider.MerchantOrderNo == order.MerchantOrderNo && provider.Channel == order.Channel && provider.AmountFen == order.AmountFen && provider.Currency == order.Currency
-	mergeResult := "RECORDED"
-	if !valid {
-		mergeResult = "REVIEW_REQUIRED"
-	}
 	now := p.now()
-	evidenceID, err := p.insertPaymentEvidence(ctx, tx, order, nil, evidenceType, providerEvidenceKey(evidenceType, provider), mergeResult, provider, nil, now)
-	if err != nil {
-		return err
-	}
-	if !valid {
-		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
-			return err
-		}
-		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "PAYMENT_FACT_CONFLICT", "P1", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentEvidenceID: &evidenceID}, map[string]any{"evidence_type": evidenceType, "merchant_order_no": provider.MerchantOrderNo, "amount_fen": provider.AmountFen, "currency": provider.Currency}, now); err != nil {
-			return err
-		}
+	mergeErr := p.mergeProviderObservationWithinTransaction(ctx, tx, order, evidenceType, providerEvidenceKey(evidenceType, provider), nil, provider, now)
+	if mergeErr != nil && !errors.Is(mergeErr, ErrConflict) {
+		return mergeErr
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	if !valid {
+	return mergeErr
+}
+
+func (p *PaymentCoordinator) mergeProviderObservationWithinTransaction(ctx context.Context, tx pgx.Tx, order PaymentOrder, evidenceType, evidenceKey string, payload []byte, provider ProviderOrder, now time.Time) error {
+	valid := provider.MerchantOrderNo == order.MerchantOrderNo && provider.Channel == order.Channel && provider.AmountFen == order.AmountFen && provider.Currency == order.Currency
+	reviewRequired := !valid || provider.Status == "REVIEW_REQUIRED" || provider.Status != "PENDING" && provider.Status != "CREATED" && provider.Status != "CLOSED" && provider.Status != "FAILED"
+	mergeResult := "RECORDED"
+	if reviewRequired {
+		mergeResult = "REVIEW_REQUIRED"
+	}
+	evidenceID, err := p.insertPaymentEvidence(ctx, tx, order, nil, evidenceType, evidenceKey, mergeResult, provider, payload, now)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE payment_orders SET provider_status=NULLIF($2,''),provider_trace_id=NULLIF($3,''),updated_at=$4 WHERE id=$1`, order.ID, provider.ProviderStatus, provider.ProviderTraceID, now); err != nil {
+		return err
+	}
+	if reviewRequired {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status=CASE WHEN status IN ('CREATED','PENDING') THEN 'MANUAL_REVIEW' ELSE status END,fulfillment_status=CASE WHEN fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE fulfillment_status END,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
+			return err
+		}
+		anomalyType := "ILLEGAL_TRANSITION"
+		if !valid {
+			anomalyType = "PAYMENT_FACT_CONFLICT"
+		}
+		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, anomalyType, "P1", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentEvidenceID: &evidenceID}, map[string]any{"evidence_type": evidenceType, "merchant_order_no": provider.MerchantOrderNo, "provider_status": provider.ProviderStatus, "amount_fen": provider.AmountFen, "currency": provider.Currency}, now); err != nil {
+			return err
+		}
 		return ErrConflict
 	}
-	return nil
+	if (provider.Status == "CLOSED" || provider.Status == "FAILED") && p.Capabilities().AuthoritativeUnpaidTerminal {
+		if provider.Status == "FAILED" {
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='FAILED',close_status='EXPIRED',payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, now)
+		} else {
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='CLOSED',close_status='PROVIDER_CLOSED',provider_closed_at=COALESCE(provider_closed_at,$2),payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,attention_summary='NORMAL',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, now)
+		}
+	}
+	return err
 }
 
 // mergeSuccessfulPaymentWithinTransaction is the single convergence path used

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,18 +17,21 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcallback"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/resilience"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
 )
 
 type Service struct {
-	repository    Repository
-	payments      *PaymentCoordinator
-	authorizer    *authorization.Client
-	approvalGate  ApprovalExecutionGate
-	closureStates AccountClosureStateVerifier
-	now           func() time.Time
+	repository       Repository
+	payments         *PaymentCoordinator
+	authorizer       *authorization.Client
+	approvalGate     ApprovalExecutionGate
+	closureStates    AccountClosureStateVerifier
+	callbackAuth     *paymentcallback.Authenticator
+	callbackProfiles *paymentcallback.Profiles
+	now              func() time.Time
 }
 
 func NewService(repository Repository) *Service {
@@ -51,6 +55,12 @@ func (s *Service) WithApprovalExecutionGate(gate ApprovalExecutionGate) *Service
 
 func (s *Service) WithAccountClosureStateVerifier(verifier AccountClosureStateVerifier) *Service {
 	s.closureStates = verifier
+	return s
+}
+
+func (s *Service) WithPaymentCallbacks(authenticator *paymentcallback.Authenticator, profiles *paymentcallback.Profiles) *Service {
+	s.callbackAuth = authenticator
+	s.callbackProfiles = profiles
 	return s
 }
 
@@ -98,6 +108,10 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		protected.POST("/internal/v1/recharge/orders/:order_id/sync", httpserver.AdaptFunc(s.syncRechargeOrder))
 		protected.POST("/internal/v1/reconciliation/runs", httpserver.AdaptFunc(s.runReconciliation))
 		router.POST("/internal/payment/notifications", httpserver.AdaptFunc(s.paymentNotification))
+		if s.callbackAuth != nil && s.callbackProfiles != nil {
+			router.POST("/external/v1/payment-callback/token", httpserver.AdaptFunc(s.paymentCallbackToken))
+			router.POST("/external/v1/payment-callbacks", httpserver.AdaptFunc(s.providerPaymentCallback))
+		}
 	}
 	if len(adminVerify) > 0 && adminVerify[0] != nil && s.authorizer != nil {
 		admin := router.Group("/admin/v1")
@@ -149,6 +163,82 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.POST("/reconciliation-cases/:case_id/commands", s.authorizer.Require("platform.usage.reconcile.retry"), approvalpolicy.Require("BILLING_RECONCILIATION_CASE_UPDATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUpdateReconciliationCase))
 	}
 	return router
+}
+
+func (s *Service) paymentCallbackToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	clientID, clientSecret, ok := r.BasicAuth()
+	if !ok || r.URL.RawQuery != "" || !hasMediaType(r, "application/x-www-form-urlencoded") || r.ParseForm() != nil || r.PostForm.Get("grant_type") != "client_credentials" || hasUnexpectedFormField(r.PostForm, "grant_type", "scope") {
+		w.Header().Set("WWW-Authenticate", `Basic realm="payment-callback"`)
+		api.WriteError(w, http.StatusUnauthorized, "INVALID_CLIENT", "callback client authentication failed", httpserver.RequestID(r.Context()))
+		return
+	}
+	token, err := s.callbackAuth.Issue(clientID, clientSecret, r.PostForm.Get("scope"))
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", `Basic realm="payment-callback"`)
+		api.WriteError(w, http.StatusUnauthorized, "INVALID_CLIENT", "callback client authentication failed", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, token)
+}
+
+func (s *Service) providerPaymentCallback(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	principal, err := s.callbackAuth.VerifyBearer(r.Header.Get("Authorization"))
+	if err != nil {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="payment-callback"`)
+		api.WriteError(w, http.StatusUnauthorized, "PAYMENT_CALLBACK_UNAUTHORIZED", "payment callback authentication failed", httpserver.RequestID(r.Context()))
+		return
+	}
+	capabilities := s.payments.Capabilities()
+	if principal.ProviderID != capabilities.ProviderID || principal.ProviderVersion != capabilities.Version {
+		api.WriteError(w, http.StatusUnauthorized, "PAYMENT_CALLBACK_REJECTED", "payment callback rejected", httpserver.RequestID(r.Context()))
+		return
+	}
+	if !hasMediaType(r, "application/json") {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_PAYMENT_CALLBACK", "invalid payment callback", httpserver.RequestID(r.Context()))
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_PAYMENT_CALLBACK", "invalid payment callback", httpserver.RequestID(r.Context()))
+		return
+	}
+	notification, err := s.callbackProfiles.Parse(principal, body, s.now())
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_PAYMENT_CALLBACK", "invalid payment callback", httpserver.RequestID(r.Context()))
+		return
+	}
+	notificationID, _, err := s.payments.PersistProviderNotification(r.Context(), principal.ProviderID, principal.MerchantID, notification.ID, notification.SentAt, notification.Provider, body, paymentRequestSource(r))
+	if err != nil {
+		if errors.Is(err, ErrForbiddenPayment) {
+			api.WriteError(w, http.StatusUnauthorized, "PAYMENT_CALLBACK_REJECTED", "payment callback rejected", httpserver.RequestID(r.Context()))
+			return
+		}
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "accepted", "notification_id": notificationID.String()})
+}
+
+func hasMediaType(r *http.Request, expected string) bool {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(r.Header.Get("Content-Type")))
+	return err == nil && strings.EqualFold(mediaType, expected)
+}
+
+func hasUnexpectedFormField(values map[string][]string, allowed ...string) bool {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowedSet[key] = struct{}{}
+	}
+	for key := range values {
+		if _, ok := allowedSet[key]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 type chargebackRepository interface {

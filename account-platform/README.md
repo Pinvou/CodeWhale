@@ -23,7 +23,7 @@
 - `token-portal`：OIDC Authorization Code + PKCE、Redis 服务端会话和同源 CSRF 保护的 Web BFF；OIDC Token 不进入浏览器 JavaScript。
 - `payment-simulator`：仅开发/测试使用的三渠道支付模拟器。
 
-当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单与支付查询、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、Helm 目标模板和恢复 Runbook。当前实际环境使用单机 Compose，尚不具备 Helm 目标形态所代表的高可用能力。新华三待支付订单由 Billing 在服务端持续查询，客户端关闭二维码页面后仍可按商城事实完成入账。普通退款领域实现和既有请求收敛能力保留，但当前不对用户或运营开放任何新建入口；新华三商城合同暂未提供的退款、关闭、支付回调与账单对账接口也保持关闭，不以本地模拟冒充真实能力。
+当前已实现账号/组织与会话授权、钱包与平衡账本、预占结算、三渠道支付模拟、新华三商城支付宝下单、支付查询与支付回调、Token 凭据加密轮换、确定性路由、OpenAI 兼容 JSON/SSE 代理、独立 Web Portal、桌面端 OIDC、可靠领域事件、OpenTelemetry/Prometheus 可观测性、Helm 目标模板和恢复 Runbook。当前实际环境使用单机 Compose，尚不具备 Helm 目标形态所代表的高可用能力。新华三回调与 Billing 服务端持续查询进入同一证据归并器，客户端关闭二维码页面后仍可按商城事实完成入账。普通退款领域实现和既有请求收敛能力保留，但当前不对用户或运营开放任何新建入口；新华三商城合同暂未提供的退款、主动关单与账单对账接口保持关闭，不以本地模拟冒充真实能力。
 
 ## 桌面端 OIDC
 
@@ -46,7 +46,7 @@
 - Gateway 不重试模型调用。上游结果不确定、流式断开或缺失 usage 时保留 Hold 并进入 `REVIEW`。
 - 每个模型逻辑请求必须显式发送16至128字符的 `Idempotency-Key`。Gateway 只保存稳定用户级 `model-inference` 命名空间内的键摘要；同键同指纹恢复既有流、结果或核对状态，同键异请求返回409，不按 OIDC Session、活动上下文、模型或协议拆分防重域。
 - 流式事件会先以连续序号加密持久化再交付；重连可携带原幂等键和 `Last-Event-ID`。客户端断线不取消上游执行，结果不确定时禁止盲目重发模型调用。
-- 支付回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置，客户端不能提交回调 URL。
+- 通用测试 Provider 的回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置；外部 Provider 统一调用 `pinvou.com` 根域名下固定公开的 Token 与支付回调精确路径，Provider 身份由客户端凭据和短期 Token 绑定，请求体及客户端均不能提交回调 URL 或冒充 Provider。
 
 `mock-newapi` 只属于开发 Compose 后端网络，不发布宿主机端口；可用于验证正常、限流、断流和缺失 usage 场景。
 
