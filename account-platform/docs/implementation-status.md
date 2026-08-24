@@ -410,9 +410,9 @@
 | ADM-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 不嵌入普通后台；通过受限网络/隧道访问。 |
 | ADM-09 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-EXPORT-PROTECTION; DESKTOP-39 | NOT_DEPLOYED | 筛选和详情保留只读查询；导出改为服务端异步任务，浏览器不再拼接当前结果，权限、近期认证、脱敏/临时PII授权、水印、加密、配额和一次性下载均按 NFR-48 执行。 |
 | ADM-10 | 已实现 | DOC_CURRENT | CONFIGURED-SYSTEM-PROBES | NOT_DEPLOYED | `SYSTEM_PROBES_JSON` 配置实际部署组件、通用 HTTP/JSON 断言或 Relay Adapter；页面继续展示健康、积压、核对任务和最近错误，响应不暴露端点或凭据 |
-| NFR-01 | 部分实现 | DOC_CURRENT | PRODUCTION-SECURITY-GATE | NOT_DEPLOYED | Helm production-new 强制启用 Ingress 且绑定非空 TLS Secret，远程 URL 失败关闭为 HTTPS；环境门禁实际连接 Portal/Identity/OIDC、校验受信证书并要求剩余有效期不少于14天。无可访问的生产等价端点与证书证据 |
+| NFR-01 | 部分实现 | DOC_CURRENT | PRODUCTION-SECURITY-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端 UAT 的 Portal、Account/Identity 边界和 OIDC discovery 已通过 HTTPS、受信证书及不少于14天有效期验收；当前仍非 production-new，缺正式入口续期和生产等价发布门禁证据 |
 | NFR-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 NOT_DEPLOYED |
-| NFR-03 | 部分实现 | DOC_CURRENT | GO-UNIT; PRODUCTION-SECURITY-GATE | NOT_DEPLOYED | production-new 禁止本地 KEK，ExternalSecret 只从 KMS/Vault SecretStore 提取运行时秘密；Gateway 按行持久 Key ID 双读并将凭据、派发包络、流事件与结果分批重加密，旧密文归零前 readiness 失败；环境门禁要求新 Key 可加解密、旧 Key 已停用。缺真实 SecretStore/KMS 和轮换证据 |
+| NFR-03 | 部分实现 | DOC_CURRENT | GO-UNIT; PRODUCTION-SECURITY-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | production-new 的 ExternalSecret、KMS/Vault 双读重加密和 readiness 门禁已实现；云端 UAT 实测仍为本地 KEK，缺真实 SecretStore、新 Key 加解密、旧密文归零及旧 Key 停用证据 |
 | NFR-05 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 当前管理、资金、授权、Token 路由、Break-glass、Saga 修复及死信重放均保存不可变或追加式审计；后台身份不能伪装成人类。 |
 | NFR-06 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 注册、资料、钱包、路由、支付、退款、模型请求、结算、事件消费及人工重放均使用稳定命名空间、请求指纹或事件 ID；同键异请求失败关闭。 |
 | NFR-07 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 三服务使用事务 Outbox/Inbox、版本间隙门禁、至少一次 Relay 和死信；人工重放校验不可变摘要并原子登记审计，不使用分布式事务。 |
@@ -819,9 +819,9 @@
 
 | target_requirement_id | 需求 | 当前实现/边界 |
 |---|---|---|
-| NFR-01 | 安全传输 | production-new 强制 Ingress TLS Secret 和 HTTPS URL；环境门禁校验三个公开边界的受信证书、状态及14天续期窗口，仍缺真实部署证据。 |
+| NFR-01 | 安全传输 | 云端 UAT 已验证三个公开边界的 HTTPS、受信证书、状态及14天续期窗口；正式 production-new 入口和续期演练仍未完成。 |
 | NFR-02 | 最小暴露 | Compose/Helm/反向代理模板将数据库、Redis、NATS、Relay、内部 API、New API 管理面和 Keycloak Admin 保持非公开；部署证据仍为 `NOT_DEPLOYED`。 |
-| NFR-03 | 密钥管理 | production-new 使用 ExternalSecret + 远程 KMS/Vault 包络加密；按持久 Key ID 双读、全表分批重加密和 readiness 关闭完成新旧 Key 过渡，真实 SecretStore/KMS 轮换证据待外部环境验收。 |
+| NFR-03 | 密钥管理 | production-new 使用 ExternalSecret + 远程 KMS/Vault 包络加密；本次云端 UAT 仍为本地 KEK，真实 SecretStore、全表重加密、旧密文归零和旧 Key 停用仍待外部环境验收。 |
 | NFR-04 | 日志敏感信息保护 | 共享结构化 Handler 使用稳定事件/字段白名单，未知消息折叠并丢弃原始错误与受保护字段；注入秘密标记和绕过源码扫描已进入全量发布门禁。 |
 | NFR-05 | 审计 | 已实现：管理、资金、授权、路由、恢复和服务任务写入不可变或追加式审计，死信重放也记录服务身份、任务运行和原因。 |
 | NFR-06 | 幂等 | 已实现：当前目标写路径均使用稳定命名空间、规范请求指纹、事件 ID 或领域唯一键，同键异请求拒绝。 |
