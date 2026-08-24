@@ -18,7 +18,10 @@ test('E2E runner generates secrets and exercises financial idempotency', async (
   assert.match(acceptance, /length: 100/);
   assert.match(acceptance, /concurrent reserves must create one hold/);
   assert.match(acceptance, /concurrent commits must debit once/);
-  assert.match(acceptance, /partial-refund acceptance/);
+  assert.match(acceptance, /payment_transaction_id: refundablePackage\.source_payment_transaction_id/);
+  assert.match(acceptance, /entitlement_package_id: refundablePackage\.package_id/);
+  assert.doesNotMatch(acceptance, /amount_fen:\s*1/);
+  assert.match(acceptance, /targeted whole-remainder refund acceptance/);
   assert.match(acceptance, /reconciliation must close without mismatches/);
   assert.doesNotMatch(acceptance, /replace-with-|Bearer [A-Za-z0-9_-]{20,}/);
   assert.match(fault, /stop', 'billing-service/);

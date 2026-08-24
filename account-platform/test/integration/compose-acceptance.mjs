@@ -150,13 +150,24 @@ assert.equal(settled.reserved_microcredits, 0, 'terminal holds must release the 
 assert.ok(settled.available_microcredits >= 0, 'wallet balance must never be negative');
 
 const refundableOrder = paidOrders.at(-1);
+const packageList = await requestJSON(`/internal/v1/entitlement-packages?user_id=${requesterID}&wallet_id=${wallet.wallet_id}`);
+const refundablePackage = packageList.items.find((item) => item.pinvou_order_id === refundableOrder.order_id);
+assert.ok(refundablePackage?.source_payment_transaction_id, 'the refund target must resolve to one payment transaction and entitlement package');
 const refund = await requestJSON(`/internal/v1/recharge/orders/${refundableOrder.order_id}/refunds`, {
   method: 'POST',
-  body: { requester_id: requesterID, amount_fen: 1, reason: 'automated partial-refund acceptance' },
+  body: {
+    requester_id: requesterID,
+    payment_transaction_id: refundablePackage.source_payment_transaction_id,
+    entitlement_package_id: refundablePackage.package_id,
+    reason: 'automated targeted whole-remainder refund acceptance',
+  },
   headers: { 'idempotency-key': `e2e-refund-${randomUUID()}` },
   statuses: [200, 201],
 });
-assert.equal(refund.status, 'SUCCEEDED', 'an unconsumed portion of a recharge lot must be refundable');
+assert.equal(refund.status, 'SUCCEEDED', 'an entirely unconsumed targeted payment package must be refundable');
+assert.equal(refund.amount_fen, refundableOrder.amount_fen, 'the provider refund must cover the targeted payment transaction in full');
+assert.equal(refund.payment_transaction_id, refundablePackage.source_payment_transaction_id);
+assert.equal(refund.entitlement_package_id, refundablePackage.package_id);
 
 const businessDate = new Date().toISOString().slice(0, 10);
 for (const channel of ['UNIONPAY', 'ALIPAY', 'WECHAT']) {
@@ -168,4 +179,4 @@ for (const channel of ['UNIONPAY', 'ALIPAY', 'WECHAT']) {
   assert.equal(reconciliation.case_count, 0, `${channel} reconciliation must close without mismatches`);
 }
 
-console.log('compose acceptance passed: three channels, idempotent recharge, settlement, partial refund and reconciliation');
+console.log('compose acceptance passed: three channels, idempotent recharge, settlement, targeted whole-remainder refund and reconciliation');
