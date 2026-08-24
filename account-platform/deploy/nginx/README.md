@@ -18,7 +18,10 @@ Billing 与官网入口同机时可替换为 `http://127.0.0.1:18102`；不同�
 替换为受控内网、VPN 或固定网关地址。Provider 侧地址保持不变。代理必须保留
 `Authorization`、`Content-Type` 和请求体，不得缓存、重定向或改写这两个请求。
 两个回调入口不依赖把账号平台全局 `PUBLIC_BASE_URL` 改为 `pinvou.com`；Web 个人中心通过独立的 `PORTAL_PUBLIC_URL=https://pinvou.com` 发布，桌面端固定使用 `https://pinvou.com/account`。官网 HTTPS 入口同时把 `/account`、`/assets/`、`/api/` 和 `/auth/` 转发到只监听 loopback 的 Token Portal，并在 Keycloak 中登记 `https://pinvou.com/auth/callback`。只有
-整个账号平台原本就通过该根域名发布时才同步修改全局地址。
+整个账号平台原本就通过该根域名发布时才同步修改全局地址。官网的 `/assets/*`
+仍由官网提供；个人中心仅接管 `account.js`、`account.css` 和
+`account-platform-i18n.js` 三个具名资源，以及个人中心实际使用的
+`/api/session`、`/api/logout`、`/api/account/*`、`/api/token/*`。
 
 远程 Compose 同时加载 `deploy/compose/compose.remote.yaml`，并通过
 `PUBLIC_BASE_URL` 配置 Keycloak、Portal、Account、Token 和支付模拟器的一致

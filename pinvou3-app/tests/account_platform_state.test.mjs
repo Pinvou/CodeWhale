@@ -579,6 +579,8 @@ test('personal center uses the canonical pinvou.com account route end to end', a
   assert.match(portal, /r\.URL\.Path == "\/account" \|\| r\.URL\.Path == "\/account\/"/);
   assert.match(nginx, /location = \/account \{/);
   assert.match(nginx, /location = \/account\/ \{\s*return 308 \/account;\s*\}/);
+  assert.match(nginx, /account\\\.js\|account\\\.css\|account-platform-i18n\\\.js/);
+  assert.doesNotMatch(nginx, /location \^~ \/assets\//);
 });
 
 test('personal center follows the restrained neutral visual system', async () => {
