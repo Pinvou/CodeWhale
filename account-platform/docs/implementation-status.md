@@ -270,14 +270,14 @@
 | NFR-23 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | HTTP 使用 W3C Trace Context；Outbox 固化 Trace ID，Relay 发布和 NATS Consumer 从事件恢复远端 Trace 并建立子 Span，后台任务建立任务 Span，日志和 Prometheus Exemplar 可按 Trace ID 关联 |
 | NFR-24 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 业务服务独立 live/ready，readiness 只检查安全处理请求所需依赖；Identity 检查 Keycloak，Relay 分别检查 PostgreSQL/NATS，liveness 不因依赖断开失败，且不调用计费/切换准入业务 |
 | NFR-25 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 独立9090监听输出 HTTP 请求/错误状态/延迟/并发/readiness 与 Relay 周期/结果/积压/死信指标；标签仅使用有界 service/method/route/status/source/outcome，Trace ID 只进入 Exemplar |
-| NFR-26 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 30分钟、每类一万/流式一千样本、≤70%声明容量、发布/数据/报告摘要和四段计时已失败关闭；缺真实生产等价报告 |
-| NFR-27 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 关键读写P95/P99及0.1%错误率已进入门禁；缺真实接口压测指标 |
-| NFR-28 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 外部端到端3s/8s和平台附加500ms/1.5s已分离校验；缺健康Provider实测 |
-| NFR-29 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 流式派发500ms/1.5s、首内容5s/15s及千样本门禁已建立；缺真实模型路由报告 |
-| NFR-30 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; REQUEST-ADMISSION | NOT_DEPLOYED | 200并发及0.5%错误率为强制证据，入口已有全局、模型和路由速率/在途容量原子守卫并在Hold前拒绝；缺生产等价并发报告与容量调参证明 |
-| NFR-31 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 十万Hold、200稳态/500突发60秒、锁等待P99和守恒/幂等证据已进入门禁；缺真实数据库压测 |
-| NFR-32 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 百万订单、三百万流水、50下单/200归并及零重复资金效果已进入门禁；缺真实规模数据报告 |
-| NFR-33 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 每流百万保留、十万积压15分钟排空、50%新流量及高水位停止写入已进入门禁；缺真实NATS积压演练 |
+| NFR-26 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT仅完成健康烟测，单节点development环境不满足生产等价前置条件；未执行30分钟、规定样本量、≤70%声明容量、三类摘要和四段计时 |
+| NFR-27 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 关键读写P95/P99及0.1%错误率门禁已实现；本次没有规定样本量的真实接口压测指标 |
+| NFR-28 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | Provider端到端3s/8s和平台附加500ms/1.5s已分离校验；本次未冻结健康Provider和资源档位做分段实测 |
+| NFR-29 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 流式派发500ms/1.5s、首内容5s/15s及千样本门禁已建立；本次没有真实模型路由负载报告 |
+| NFR-30 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; REQUEST-ADMISSION; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 原子准入和200并发门禁已实现；单节点UAT未执行200流式并发、0.5%错误率、公平性和容量调参验收 |
+| NFR-31 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | UAT实测仅0个Hold；未达到十万Hold、200稳态/500突发、锁等待P99和守恒/幂等容量证据规模 |
+| NFR-32 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | UAT实测仅4个订单、0个支付流水；未达到百万订单、三百万流水、50下单/200归并和零重复资金效果规模 |
+| NFR-33 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | UAT实测NATS为1个流、0条消息；未执行每流百万保留、十万积压15分钟排空、50%新流量和高水位停止写入验收 |
 | NFR-34 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 资金60秒、账号配置300秒门禁已实现；本次只有迁移前同机快照，没有四库连续WAL时效或隔离恢复后的实测RPO |
 | NFR-35 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 核心3600秒、非关键14400秒目标已机器化；本次未执行隔离恢复、故障计时和安全降级能力验收 |
 | NFR-36 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 本次五类迁移前备份的SHA-256与最小可读性检查通过，但仍是同机快照；缺连续WAL、日增量、周全量、TLS/AES-256、独立KMS和异地不可变副本 |
@@ -844,14 +844,14 @@
 | NFR-23 | 分布式 Trace | HTTP、Outbox、Relay、NATS Consumer 和后台任务形成 W3C/等价 Trace 上下文，日志与指标 Exemplar 可关联。 |
 | NFR-24 | 健康检查 | 服务与 Relay 均区分进程 liveness 和关键依赖 readiness；普通健康不执行计费或客户端切换准入。 |
 | NFR-25 | 独立指标 | 独立受限监听输出 HTTP 和 Relay 请求/错误/延迟/任务/领域积压指标，标签有界且 Trace 仅进入 Exemplar。 |
-| NFR-26 | 性能与容量验收基线 | 部分实现：资源/数据/样本/负载比例/分段计时证据格式已机器化，缺真实生产等价报告。 |
-| NFR-27 | 关键内部 API 延迟 | 部分实现：读写P95/P99和错误率门禁已建立，缺实测。 |
-| NFR-28 | 外部依赖接口延迟 | 部分实现：Provider端到端与平台附加耗时独立门禁已建立，缺实测。 |
-| NFR-29 | 流式首个内容事件 | 部分实现：派发与首内容目标及样本门禁已建立，缺真实路由实测。 |
-| NFR-30 | 模型并发容量 | 部分实现：200并发证据门禁与全局/模型/路由原子准入已经实现；缺生产等价容量、错误率和公平性环境报告。 |
-| NFR-31 | Hold 容量 | 部分实现：十万Hold、稳态/突发、锁等待与守恒门禁已建立，缺环境报告。 |
-| NFR-32 | 订单容量 | 部分实现：百万订单/三百万流水与吞吐门禁已建立，缺环境报告。 |
-| NFR-33 | 事件积压容量 | 部分实现：百万保留、十万排空和高水位证据门禁已建立，缺环境报告。 |
+| NFR-26 | 性能与容量验收基线 | 资源/数据/样本/负载比例/分段计时证据格式已机器化；云端 UAT 仅做健康烟测，不构成生产等价报告。 |
+| NFR-27 | 关键内部 API 延迟 | 读写P95/P99和错误率门禁已建立；云端 UAT 未按规定样本量实测。 |
+| NFR-28 | 外部依赖接口延迟 | Provider端到端与平台附加耗时独立门禁已建立；云端 UAT 未冻结健康 Provider 做分段实测。 |
+| NFR-29 | 流式首个内容事件 | 派发与首内容目标及样本门禁已建立；云端 UAT 没有真实路由负载报告。 |
+| NFR-30 | 模型并发容量 | 200并发证据门禁与全局/模型/路由原子准入已经实现；单节点 UAT 未执行容量、错误率和公平性验收。 |
+| NFR-31 | Hold 容量 | 十万Hold、稳态/突发、锁等待与守恒门禁已建立；云端 UAT 只有0个Hold，缺环境报告。 |
+| NFR-32 | 订单容量 | 百万订单/三百万流水与吞吐门禁已建立；云端 UAT 只有4个订单、0个支付流水，缺环境报告。 |
+| NFR-33 | 事件积压容量 | 百万保留、十万排空和高水位证据门禁已建立；云端 UAT 为1个流、0条消息，缺环境报告。 |
 | NFR-34 | 分级 RPO | 云端 UAT 已完成迁移快照，但没有连续 WAL 或隔离恢复实测；60秒资金域/300秒配置域生产事实仍缺失。 |
 | NFR-35 | 分级 RTO | 核心60分钟/非关键4小时计时及安全降级门禁已完成；云端 UAT 未执行实际恢复计时。 |
 | NFR-36 | 备份频率与加密 | 云端 UAT 的同机迁移快照校验通过；持续WAL、日增量、周全量、加密、KMS分离和异地不可变副本仍未验收。 |
