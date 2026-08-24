@@ -27,3 +27,10 @@
 - 未通过：本次仅有同机迁移快照，没有连续 WAL、日增量/周全量计划、TLS/AES-256 备份链、独立 KMS、异地不可变副本或隔离恢复计时。
 - 未通过：没有月度、季度、年度演练历史，也没有三年财务证据、90 天普通日志、法律保全和到期清除扫描收据。
 - 结论：NFR-09 获得云端 UAT 迁移与快照证据；NFR-10、NFR-34–NFR-38 的生产恢复事实仍缺失，APT-037 保持 `BLOCKED_EXTERNAL`。
+
+## APT-038：高可用与故障切换
+
+- 实测拓扑只有一台 Docker 主机；Identity、Account、Billing、Token Gateway、Portal、三个 Relay、PostgreSQL、Redis、NATS 和 Keycloak 均各运行一个实例。
+- 当前 Compose 发布验证了单节点滚动替换与健康恢复，但不存在第二故障域、故障后 30% 容量余量、PDB、跨区数据复制或依赖主节点自动切换。
+- 未执行 Pod、节点、区域、滚动升级中断和 PostgreSQL/Redis/NATS 主节点丢失场景，不能生成同一候选版本的 HA 门禁证据。
+- 结论：NFR-11 保持部分实现，APT-038 保持 `BLOCKED_EXTERNAL`；需要真实多故障域 Kubernetes 与外部 HA 数据依赖后重新验收。

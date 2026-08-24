@@ -419,7 +419,7 @@
 | NFR-08 | 已实现 | DOC_CURRENT | GO-UNIT; GLOBAL-CONTEXT | NOT_DEPLOYED | 用户级 context_version 数据库单调保护，切换要求 expected_context_version；响应头跨 Account、Token、Portal 与桌面桥接传播，客户端只接受更高版本并刷新缓存 |
 | NFR-09 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT已在迁移前创建并校验五类快照，按Account、Billing、Token顺序迁移并复核运行库版本32/34/21；仍缺production-new快照凭证和生产迁移摘要 |
 | NFR-10 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 独立版本目录、稳定链接和实际备份已运行；本次未从备份恢复到隔离环境，也没有周期演练报告 |
-| NFR-11 | 部分实现 | DOC_CURRENT | HA-RELEASE-GATE | NOT_DEPLOYED | Compose明确非HA；production-new强制核心双副本、跨故障域、PDB、零不可用滚动及外部HA Redis/NATS，故障证据门禁要求无已提交事实丢失/重复；缺真实集群容量与切换报告 |
+| NFR-11 | 部分实现 | DOC_CURRENT | HA-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT实测为单Docker节点，核心服务、PostgreSQL、Redis、NATS和Keycloak均为单实例；未执行节点/区域/依赖主节点切换，缺真实多故障域容量与无损故障报告 |
 | NFR-12 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY | NOT_DEPLOYED | staging/production 禁止共享静态令牌；正式模板投射逐工作负载短期 OIDC 身份，Relay 与 Billing 消费者挂载独立 NATS 凭据并在代码侧限制本域 Subject。缺外部 NATS operator 实际权限、issuer/JWKS 可达性和轮换/撤销演练证据。 |
 | NFR-13 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 注销在 Identity 不可认证证明后立即随机去标识化直接资料并释放用户名/手机号，法律记录只按永久内部主体引用保留；三年分类记录支持法律保全并由 worker 到期标记清除完成。 |
 | NFR-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 启动工厂按配置注入 `aliyun-managed` 或 `http-generated`；核心挑战状态机没有厂商条件，历史挑战保存 Provider ID 与 Adapter 版本 |
@@ -829,7 +829,7 @@
 | NFR-08 | 全局上下文一致性 | 已实现用户级唯一上下文、数据库单调版本、期望版本 CAS、标准响应头和桌面/Web 缓存失效；生产多端并发仍待部署验证。 |
 | NFR-09 | 数据迁移 | 云端 UAT 已在五类快照校验后按域迁移并复核运行库版本；production-new 快照凭证和生产迁移摘要仍待验收。 |
 | NFR-10 | 可恢复性 | 云端 UAT 已使用独立版本目录、稳定链接和受限备份；隔离恢复、RPO/RTO 计时与周期演练仍为外部阻塞。 |
-| NFR-11 | 高可用 | 部分实现：生产Chart已强制独立故障域、多副本、PDB、零不可用滚动和外部HA依赖，并有无损切换证据门禁；真实集群验收仍为外部阻塞。 |
+| NFR-11 | 高可用 | 生产 Chart 已强制独立故障域、多副本、PDB、零不可用滚动和外部 HA 依赖；本次云端 UAT 为全组件单实例，真实集群容量与无损切换仍为外部阻塞。 |
 | NFR-12 | 工作负载身份 | 正式模板已移除共享 `INTERNAL_SERVICE_TOKEN`，使用逐工作负载短期 OIDC 身份和独立 NATS 凭据；真实 issuer/JWKS、Subject 授权与轮换撤销证据待部署。 |
 | NFR-13 | 个人信息去标识化与保留 | 已实现 Identity 删除证明后的随机墓碑和标识释放；用户 ID/编码与法定内部引用保留，三年分类记录、法律保全开关及到期自动清除状态独立持久化。 |
 | NFR-14 | 短信供应商可替换性 | `SMSProvider` 由启动工厂按配置注入，核心状态机无厂商分支；支持 `aliyun-managed` 与 `http-generated`，并保存 Provider ID 和 Adapter 版本。 |
