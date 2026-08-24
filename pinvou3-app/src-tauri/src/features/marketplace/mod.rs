@@ -15,6 +15,7 @@
 
 mod connectors;
 mod migration;
+mod python_dependencies;
 mod secrets;
 mod types;
 mod validation;
@@ -37,7 +38,8 @@ use crate::platform::paths;
 // 对外 pub 面保持不变:类型从 types 子模块 re-export。
 pub use types::{
     ConfigField, MarketplaceToolInfo, MarketplaceToolValidation, McpSecretMigrationResult,
-    RemoteOAuthConfig, RemoteServer, SecretEnv, SecretHeader, ToolManifest,
+    PythonWheel, RemoteOAuthConfig, RemoteServer, SecretEnv, SecretHeader, ToolManifest,
+    WindowsPythonDependencyLock,
 };
 
 // PR #302 拆分后,这些函数已搬到 scope.rs;为保持 mod.rs 兼容面,在此 re-export。
@@ -361,20 +363,27 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         source: store::BundleSource,
     ) -> Result<(), String> {
         self.migrate_mcp_plaintext_secrets()?;
-        let manifest = self
-            .load_manifest(tool_id)
+        // 预置包的安装与联网依赖只能信任编译进应用的 manifest；磁盘副本可能来自
+        // 旧版本或被修改。上传包没有内嵌快照，仍从自身包目录读取。
+        let builtin_manifest = mcp_catalog::embedded_manifest(tool_id)?;
+        let manifest = builtin_manifest
+            .clone()
+            .or_else(|| self.load_manifest(tool_id))
             .ok_or_else(|| format!("工具 '{tool_id}' 不存在"))?;
 
         // 先装 Python 依赖（跨平台 pip）；失败就不注册，让用户可重试。零依赖工具会直接跳过。
         // 上传/导入包禁用 pip 自动安装（供应链安全）：非空依赖只提示，不执行。
-        if pip_auto_install {
-            self.pip_install_deps(&manifest)?;
+        let python_dependencies = if pip_auto_install {
+            self.pip_install_deps(&manifest, builtin_manifest.as_ref())?
         } else if !manifest.pip_dependencies.is_empty() {
             log::warn!(
                 "[marketplace] 上传包 '{tool_id}' 声明 pip 依赖 {:?}：已跳过自动安装（供应链安全），请自行执行 pip install 后再使用该工具",
                 manifest.pip_dependencies
             );
-        }
+            None
+        } else {
+            None
+        };
 
         // 按需释放包资源到 bundles/<id>/mcp/（§4：安装时释放，非启动全量）。
         // 自定义工具（无内嵌 spec）已由强制迁移 `migrate_custom_mcp_layout` 搬到
@@ -384,7 +393,12 @@ impl<S: CredentialStore> MarketplaceManager<S> {
 
         // 先写 mcp.json(含 resolve_secret_placeholder,缺密钥会失败);成功后才落
         // installed.json —— 避免「installed 已写、mcp 没注册」的半安装状态。
-        self.add_to_mcp_json(&manifest, user_config, &server_dir)?;
+        self.add_to_mcp_json(
+            &manifest,
+            user_config,
+            &server_dir,
+            python_dependencies.as_ref(),
+        )?;
 
         let mut installed = self.installed_ids();
         if !installed.contains(&tool_id.to_string()) {
@@ -421,6 +435,9 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             source
         };
         let mut record = store::BundleRecord::installed_now(tool_id, source);
+        if let Some(dependencies) = python_dependencies {
+            record.assets.push(dependencies.asset);
+        }
         record.credential_keys = bundle::tool_credentials(&manifest)
             .into_iter()
             .map(|c| c.key)
@@ -431,6 +448,59 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         }
 
         Ok(())
+    }
+
+    /// Windows 升级迁移：旧版本已登记的 Python MCP 不会再次经过 install，需在
+    /// bundle 升级时补装锁定依赖并把旧的直启 server.py 条目换成隔离 bootstrap。
+    /// 单个包失败不阻塞应用启动；失败原因写入 degraded，用户可在市场重装重试。
+    pub fn repair_installed_builtin_python_dependencies(&self) -> Vec<String> {
+        if !crate::platform::capabilities::is_windows() {
+            return Vec::new();
+        }
+        let mut errors = Vec::new();
+        for tool_id in self.installed_ids() {
+            let manifest = match mcp_catalog::embedded_manifest(&tool_id) {
+                Ok(Some(manifest)) => manifest,
+                Ok(None) => continue,
+                Err(error) => {
+                    errors.push(format!("{tool_id}: {error}"));
+                    continue;
+                }
+            };
+            if manifest.windows_python_dependencies.is_none() {
+                continue;
+            }
+            let result = (|| -> Result<store::AssetRef, String> {
+                mcp_catalog::ensure_package_released(&tool_id)?;
+                let dependencies = python_dependencies::ensure_for_builtin_manifest(&manifest)?
+                    .ok_or_else(|| format!("工具 '{tool_id}' 缺少 Python 依赖结果"))?;
+                self.repair_python_dependency_entry(
+                    &manifest,
+                    &mcp_catalog::package_mcp_dir(&tool_id),
+                    &dependencies,
+                )?;
+                Ok(dependencies.asset)
+            })();
+            match result {
+                Ok(asset) => {
+                    let store = store::BundleStore::new();
+                    if let Ok(Some(mut record)) = store.get(&tool_id) {
+                        record.assets.retain(|item| item.kind != "python-packages");
+                        record.assets.push(asset);
+                        record.degraded = None;
+                        if let Err(error) = store.upsert_preserving(record) {
+                            errors.push(format!("{tool_id}: 更新依赖登记失败: {error}"));
+                        }
+                    }
+                }
+                Err(error) => {
+                    let reason = format!("Python 依赖修复失败: {error}");
+                    let _ = store::BundleStore::new().mark_degraded(&tool_id, &reason);
+                    errors.push(format!("{tool_id}: {error}"));
+                }
+            }
+        }
+        errors
     }
 
     /// 卸载工具：从 installed.json + mcp.json 中移除

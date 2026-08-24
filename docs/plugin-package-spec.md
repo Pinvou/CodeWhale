@@ -152,7 +152,10 @@ MCP server 的启动真相源。本地 stdio server 的必填与常用字段：
   （安装时会被重写为 `bundles/<id>/mcp/server.py` 绝对路径）。
 - 依赖 pip 包 → 声明 `"pip_dependencies": ["requests"]`。注意：上传/导入路径
   **不会自动安装**（供应链安全，仅日志提示需用户自行 `pip install`）；只有内置
-  商店工具的安装管线才会自动装。
+  商店工具的安装管线才会自动装。Windows 内置工具还必须由产品清单提供
+  `windows_python_dependencies`（目标 Python ABI、依赖锁 hash、import 探针及逐个
+  wheel 的 Python.org HTTPS 地址与 SHA-256）；安装时下载到用户目录并先校验、
+  原子落盘、实际导入成功，之后才注册 MCP。上传包声明该字段不会触发自动下载。
 - 敏感项走 `secret_env` / `secret_headers` / `config_fields`（`secret: true`），
   值只进 keyring，落盘占位符。
 
@@ -170,6 +173,7 @@ MCP server 的启动真相源。本地 stdio server 的必填与常用字段：
 
 可选字段全量：`env`、`secret_env`、`secret_headers`、`validate_on_install`、
 `config_fields`、`routing_rules`、`tool_table_entries`、`pip_dependencies`、
+`windows_python_dependencies`（仅受信任内置包消费）、
 `servers`、`companion_skills`。
 
 ---

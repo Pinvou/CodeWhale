@@ -165,7 +165,7 @@ install_bundle(id):
               含脚本的上传包 → 显式告知确认
   3. 凭据   —— 按 credentials[].target 统一入 keyring；
               需授权的包插入统一授权子流程（request_id 协调器，五态分类）
-  4. 依赖   —— pip_dependencies / AssetManager.ensure(CLI 二进制@lock版本)
+  4. 依赖   —— pip_dependencies / Windows Python wheel lock / AssetManager.ensure(CLI 二进制@lock版本)
   5. 登记   —— 写 BundleStore（原子写；两路资源都成功才算装成，否则回滚到无投影）
   6. 供给   —— 过渡期：重算 mcp.json + 物化；终态：RegistrySource 直接供给
   7. 热刷   —— tooling_changed / refresh_live_sessions / execpolicy ruleset

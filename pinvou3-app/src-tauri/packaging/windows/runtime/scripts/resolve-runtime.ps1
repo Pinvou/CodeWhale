@@ -21,7 +21,7 @@ $onnxDevDescriptorPath = Join-Path $tauriRoot "target\windows-runtime\onnx-dev-d
 $stagingParent = Join-Path $tauriRoot "target\windows-runtime"
 $sourceVerificationMarkerPath = Join-Path $stagingParent ".verified-lock"
 $resolverLockPath = Join-Path $stagingParent ".resolver.lock"
-$verificationSchemaVersion = 4
+$verificationSchemaVersion = 5
 $stageManifestSchemaVersion = 2
 
 if ([string]::IsNullOrWhiteSpace($LockFile)) {
@@ -656,6 +656,39 @@ function Get-TauriOverlayContent {
   return (($config | ConvertTo-Json -Depth 8) + "`n")
 }
 
+function Test-PythonDependencyTargets {
+  param([string]$PythonRoot)
+
+  $pythonExe = Join-Path $PythonRoot "python.exe"
+  if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+    Write-Warning "Python dependency ABI probe could not find python.exe: $pythonExe"
+    return $false
+  }
+  $manifestPaths = @(
+    (Join-Path $appRoot "resources\mcp-servers\gongwen\manifest.json"),
+    (Join-Path $appRoot "resources\mcp-servers\pptx\manifest.json")
+  )
+  foreach ($manifestPath in $manifestPaths) {
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+      Write-Warning "Python MCP manifest is missing: $manifestPath"
+      return $false
+    }
+    $tool = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $target = [string]$tool.windows_python_dependencies.target
+    if ([string]::IsNullOrWhiteSpace($target)) {
+      Write-Warning "Python MCP manifest has no Windows dependency target: $manifestPath"
+      return $false
+    }
+    $probe = "import platform,sys;m=platform.machine().lower();p='win_amd64' if m in ('amd64','x86_64') else 'win_'+m;a=f'cp{sys.version_info.major}{sys.version_info.minor}-{p}';raise SystemExit(0 if a==sys.argv[1] else 17)"
+    & $pythonExe -I -c $probe $target
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "Bundled Python ABI does not match MCP dependency target '$target' in $manifestPath"
+      return $false
+    }
+  }
+  return $true
+}
+
 function Write-TauriOverlay {
   param([string]$StageId)
   Write-Utf8Atomically -Path $generatedConfigPath -Content (Get-TauriOverlayContent -StageId $StageId)
@@ -676,6 +709,10 @@ function Test-VerifiedStageReusable {
     return $false
   }
   if (-not (Test-StageManifest -ManifestPath $stageManifestPath -TrustedEntries $Manifest.stagedFiles)) {
+    return $false
+  }
+
+  if (-not (Test-PythonDependencyTargets -PythonRoot (Join-Path $stagingRoot "expanded\python"))) {
     return $false
   }
 
@@ -751,6 +788,9 @@ function Stage-Submodule {
       }
 
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "python-*-embed-amd64.zip" -Label "Python") -Destination (Join-Path $expandedRoot "python") -RequiredFile "pythonw.exe"
+      if (-not (Test-PythonDependencyTargets -PythonRoot (Join-Path $expandedRoot "python"))) {
+        throw "Bundled Python ABI is incompatible with the locked Windows MCP dependency wheels."
+      }
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "node-*-win-x64.zip" -Label "Node.js") -Destination (Join-Path $expandedRoot "node") -RequiredFile "node.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "pandoc-*-windows-x86_64.zip" -Label "Pandoc") -Destination (Join-Path $expandedRoot "pandoc") -RequiredFile "pandoc.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "onnxruntime-win-x64-*-runtime.zip" -Label "ONNX Runtime") -Destination (Join-Path $expandedRoot "onnxruntime") -RequiredFile "onnxruntime.dll" -OnnxOnly
