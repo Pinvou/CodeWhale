@@ -33,6 +33,7 @@ type ReconciliationStore interface {
 	StopReconciliation(context.Context, uuid.UUID, string) error
 	MarkCommitted(context.Context, uuid.UUID, int64, map[string]any) error
 	MarkReleased(context.Context, uuid.UUID, string) error
+	RecordConvergenceEvidence(context.Context, uuid.UUID, string, string, string, string, map[string]any) error
 }
 
 func (r *PostgresRepository) ClaimReconciliation(ctx context.Context, limit int, lease time.Duration) ([]ReconciliationItem, error) {
@@ -120,6 +121,9 @@ WHERE id=$1 AND status IN ('SETTLEMENT_PENDING','REVIEW')`, usageID, truncateRec
 		if _, err := tx.Exec(ctx, `INSERT INTO usage_platform_loss_reviews(id,usage_request_id,cause_code,provider_cost_evidence,created_at) VALUES($1,$2,'TRUSTED_USAGE_DEADLINE_EXCEEDED',jsonb_build_object('customer_hold_released',true,'late_usage_customer_debit_prohibited',true),$3) ON CONFLICT(usage_request_id) DO NOTHING`, uuid.Must(uuid.NewV7()), usageID, now); err != nil {
 			return err
 		}
+	}
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RECONCILIATION_STOPPED", "RECONCILER", "REVIEW", truncateReconciliationError(reason), map[string]any{"reason_code": truncateReconciliationError(reason), "automatic_high_risk_retry": false}, now); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -392,6 +396,16 @@ func (r *UsageReconciler) reconcile(ctx context.Context, item ReconciliationItem
 	}
 	evidence, err := r.evidence.Lookup(ctx, *item.UpstreamRequestID)
 	if err != nil {
+		if recordErr := r.store.RecordConvergenceEvidence(ctx, item.ID, "PROVIDER_LOOKUP", "PROVIDER_QUERY", "REVIEW", digestString([]byte(*item.UpstreamRequestID)), map[string]any{"lookup_succeeded": false, "usage_present": false, "rejected": false}); recordErr != nil {
+			return recordErr
+		}
+		return err
+	}
+	decision := "RECORDED"
+	if evidence.Usage == nil && !evidence.Rejected {
+		decision = "REVIEW"
+	}
+	if err := r.store.RecordConvergenceEvidence(ctx, item.ID, "PROVIDER_LOOKUP", "PROVIDER_QUERY", decision, digestString([]byte(*item.UpstreamRequestID)), map[string]any{"lookup_succeeded": true, "usage_present": evidence.Usage != nil, "rejected": evidence.Rejected, "usage": evidence.Usage}); err != nil {
 		return err
 	}
 	if evidence.Usage != nil {

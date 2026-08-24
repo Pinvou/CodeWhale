@@ -73,7 +73,7 @@
 | APT-047 | 服务账号、后台任务和 Event Relay 的短期工作负载身份与最小 Subject 权限 | ADM-03, NFR-12 | APT-006 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-048 | 正式充值商品 SKU、金额、权益及 Provider 映射的业务冻结与生产准入 | PAY-05 | APT-022 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-049 | 账单支付证据、完整关单状态、拒付事实与订单派生摘要收敛 | PAY-12–PAY-14 | APT-019, APT-023, APT-024 | CODE | DONE |
-| APT-050 | 模型派发不确定、流式结果与支付证据统一收敛边界 | CORE-06 | APT-029, APT-030, APT-049 | CODE | PENDING |
+| APT-050 | 模型派发不确定、流式结果与支付证据统一收敛边界 | CORE-06 | APT-029, APT-030, APT-049 | CODE | DONE |
 | APT-051 | 全域人工案件 P0/P1/P2 统一 SLA、转派时钟与自动止损评估 | NFR-45 | APT-003, APT-019, APT-021, APT-024, APT-025, APT-030 | CODE | PENDING |
 | APT-052 | 非计费客户端切换 Readiness、短时签名准入证明及发布系统前置能力 | TOK-37 | APT-018, APT-027, APT-028 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-053 | 客户端幂等迁移及发布/安装/运行三层门禁的正式制品验收 | TOK-35, TOK-36, NFR-20 | APT-032, APT-052 | CODE+ENV | BLOCKED_EXTERNAL |

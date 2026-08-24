@@ -848,6 +848,16 @@
         "file": "000018_event_replay_audit.up.sql",
         "version": 18,
         "sha256": "733b1f380b9f4cc848c28fabefa4621e42db67466bcb2fba9b4fbbcf4d677a61"
+      },
+      {
+        "file": "000019_usage_convergence_evidence.down.sql",
+        "version": 19,
+        "sha256": "6b3714b510e0aa9266b8aa50a80ef8d7ebff53197021de3d98a9b0ddae5ad9d9"
+      },
+      {
+        "file": "000019_usage_convergence_evidence.up.sql",
+        "version": 19,
+        "sha256": "3844bfb85919334ce4a5a4ed50c9d6129d28ccccef640bc2ab0cafe0007af02f"
       }
     ]
   }

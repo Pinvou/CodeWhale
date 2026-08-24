@@ -98,6 +98,10 @@ type reconciliationStoreFake struct {
 	releasedReason  string
 }
 
+func (s *reconciliationStoreFake) RecordConvergenceEvidence(_ context.Context, _ uuid.UUID, _, _, _, _ string, _ map[string]any) error {
+	return nil
+}
+
 func (*reconciliationStoreFake) ClaimReconciliation(context.Context, int, time.Duration) ([]ReconciliationItem, error) {
 	return nil, nil
 }

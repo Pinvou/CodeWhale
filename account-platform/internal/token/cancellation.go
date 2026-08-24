@@ -79,6 +79,9 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 	if _, err := tx.Exec(ctx, `INSERT INTO usage_cancellation_evidence(id,usage_request_id,evidence_type,adapter_version,sanitized_evidence,occurred_at) VALUES($1,$2,$3,$4,$5,$6)`, uuid.Must(uuid.NewV7()), usageID, cancelStatus, strings.TrimSpace(adapterVersion), evidence, now); err != nil {
 		return CancellationResult{}, false, err
 	}
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "CANCELLATION", "GATEWAY", "RECORDED", "requested:"+cancelStatus, map[string]any{"cancel_status": cancelStatus, "capability": evidence["capability"], "pre_dispatch": preDispatch, "provider_success_inferred": false}, now); err != nil {
+		return CancellationResult{}, false, err
+	}
 	usage.CancelStatus, usage.DeliveryStatus, usage.CancelRequestedAt, usage.UserStoppedAt = cancelStatus, "USER_STOPPED", &now, &now
 	if err := tx.Commit(ctx); err != nil {
 		return CancellationResult{}, false, err
@@ -118,6 +121,9 @@ func (r *PostgresRepository) ConfirmPreDispatchCancellation(ctx context.Context,
 		return CancellationResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO usage_cancellation_evidence(id,usage_request_id,evidence_type,adapter_version,sanitized_evidence,occurred_at) VALUES($1,$2,'LOCAL_CONFIRMED','local',jsonb_build_object('provider_called',false,'hold_released',$3),$4)`, uuid.Must(uuid.NewV7()), usageID, usage.HoldID != nil, now); err != nil {
+		return CancellationResult{}, err
+	}
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "CANCELLATION", "GATEWAY", "RELEASE", "local-confirmed", map[string]any{"cancel_status": "LOCAL_CONFIRMED", "provider_called": false, "hold_released": usage.HoldID != nil}, now); err != nil {
 		return CancellationResult{}, err
 	}
 	usage.Status, usage.ExecutionStatus, usage.CancelStatus, usage.SettlementStatus, usage.UpdatedAt = "RELEASED", "CANCELLED_BEFORE_DISPATCH", "LOCAL_CONFIRMED", "RELEASED", now

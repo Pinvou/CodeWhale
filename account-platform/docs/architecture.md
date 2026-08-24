@@ -166,7 +166,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 - `protocol_formula_bindings`：Billing 保存 Token 已发布协议公式与所引用计量单位的不可变绑定，价格解析只接受绑定集合完整覆盖的单位。
 - `pricing_publish_commands`、`pricing_lifecycle_commands`、`pricing_version_audits`、`pricing_blocks`：发布与撤销/结束的幂等命令、不可变审计和显式阻断窗口。
 - `usage_holds`、`idempotency_records`：预占/结算和通用幂等记录；Hold 冻结请求上下文、协议/公式、估算器、逐单位价格及来源，后续续租、追加预占和结算不重新定价。
-- `payment_orders`、`payment_transactions`、`payment_evidence`、`refunds`、`refund_component_reservations`、`refund_grant_reservations`、`forced_refund_cases`、`payment_notifications`：当前支付和退款模型；订单冻结 Provider ID/版本、商品映射 ID、完整映射、能力声明、实际付款人及受益主体，后续不以新版本重新解释历史订单。一个订单可关联多笔不可变 Provider 支付流水；回调、查询、关单观察和人工修复先保存原始载荷摘要与快照，再归并流水状态。普通退款以支付流水和权益包为唯一目标，退款预约保存 BASE/BONUS 组成及授予快照；渠道强制退款保存独立外部资金事实并冻结目标权益包，不能覆盖支付成功事实。订单还冻结支付期限、晚到复核边界和最终归档期限。
+- `payment_orders`、`payment_transactions`、`payment_evidence`、`refunds`、`refund_component_reservations`、`refund_grant_reservations`、`forced_refund_cases`、`payment_notifications`：当前支付和退款模型；订单冻结 Provider ID/版本、商品映射 ID、完整映射、能力声明、实际付款人及受益主体，后续不以新版本重新解释历史订单。一个订单可关联多笔不可变 Provider 支付流水；回调、查询、Provider 账单、关单观察和人工修复先保存原始载荷摘要与快照，再归并流水状态。普通退款以支付流水和权益包为唯一目标，退款预约保存 BASE/BONUS 组成及授予快照；渠道强制退款保存独立外部资金事实并冻结目标权益包，不能覆盖支付成功事实。订单还冻结支付期限、晚到复核边界和最终归档期限。
 - `manual_review_cases`、`manual_review_case_events`、`late_payment_review_cases`、`late_payment_review_evidence`：Billing 人工案件基础、不可变时间线和晚到支付复核事实；当前只接入 P2 晚到支付，P0/P1 及其他领域队列由 APT-051 统一接入。
 - `provider_bill_imports`、`provider_bill_rows`、`payment_provider_controls`：不可变账单文件批次/逐行记录以及 Provider 版本新单开关；事实盲区可原子停用新单，修复后通过新 Provider/Adapter 版本重新准入，不能直接改写历史能力快照。
 - `manual_adjustments`、`payment_order_repairs`：运营调整和支付修复。
@@ -176,7 +176,7 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 
 权益入账按冻结商品快照把总 `microcredit` 拆为且仅拆为 BASE/BONUS 组成，舍入余数归 BONUS。组织购买订单另外冻结实际付款用户及其 Commerce Mapping 快照和受益组织，履约再次校验组织钱包归属并只向该钱包创建组织权益包。每个支付来源权益包同时保存 `payment_order_id` 和唯一 `source_payment_transaction_id`；同一流水重复证据只归并一次，不同成功流水分别进入独立履约或复核，不能追加到既有权益包。`entitlement_components` 保存可用、Hold、已用、有效/暂停授予、过期与撤销互斥桶并由数据库强制守恒；成员授予从同包同组成可用桶转入活动/暂停授予桶，成员调用再同时占用授予和组织组成。分配、撤回、成员 Hold、结算、释放和到期均锁定精确组成/授予行，不允许跨钱包、跨包或跨组成补足。`entitlement_packages` 的合计字段只是触发器维护的兼容投影。
 
-Token 域已经以 `usage_requests` 保存独立执行状态、交付状态和账务状态，并通过持久派发准备/意图、执行跃迁审计、加密流事件、加密聚合结果及防重墓碑表达模型执行事实；这些表不保存原始幂等键。Billing 已有目标化 `refunds`、组成/授予预约、独立 `forced_refund_cases`、`receivables`、不可变 `receivable_allocations` 和绑定证据/支付流水/订单/权益包的 `chargeback_cases`；用量超额与拒付缺口都通过账本和应收原子双记。Provider 账单可通过 API 或受控文件导入形成独立运行，并与订单/支付流水、退款/拒付和账本分录执行四方核对；账单行尚未逐条进入支付事实的统一证据归并器。强制退款与拒付先冻结确定权益包并进入 `payment_anomaly_cases`，只有匹配异常类型的受控结论才能幂等执行冲销或转入财务修复计划；因此 PAY-33/PAY-34/PAY-36 已闭环，而 PAY-12～PAY-14 仍因账单证据归并和完整关单状态而部分实现。
+Token 域以 `usage_requests` 保存独立执行、交付、取消和账务状态，并通过持久派发准备/意图、执行跃迁审计、加密流事件、加密聚合结果、防重墓碑及只追加 `usage_convergence_evidence` 表达模型执行事实；证据时间线只保存 Provider/Adapter/上游引用摘要、载荷摘要和脱敏决策快照，不保存模型正文。派发取得租约、上游引用、完整结果、只读 Provider 查询、不确定复核以及最终结算/客户 Hold 释放均先留证；同一请求出现不同完整结果时首个结果不被覆盖并转复核，已取得非幂等派发租约的未知结果不自动重发。Billing 以同样原则用 `payment_evidence` 收敛回调、查询、账单和修复。两域共用“先证据、后决策；不猜测成功；高风险不自动重发”的外部收敛边界，但各自保留独立领域状态机和数据库事务。
 
 价格解析先在请求时间选择唯一模型覆盖版本；没有模型覆盖时才选择唯一全局版本。同一作用域缺失或歧义分别稳定返回 `PRICE_MISSING`、`PRICE_AMBIGUOUS`，不可用版本返回 `PRICE_UNAVAILABLE`。模型单位必须是 `FIXED_PRICE` 或 `INHERIT_GLOBAL`；固定零价是有效价格并阻止回退，缺少配置不能表达继承。发布在定价空间串行锁内校验 ETag、幂等指纹和未来时间区间，ACTIVE 版本只能通过显式阻断、全局继承接续或替代版本提前结束。既有 Hold 始终使用创建时冻结的价格事实。
 
@@ -265,9 +265,9 @@ Token 域已经以 `usage_requests` 保存独立执行状态、交付状态和�
 - Hold 在上游调用前创建，并按组成到期时间、同日 BONUS→BASE、入账时间和稳定组件 ID 分配及结算；续租和追加预占复用原价格快照，失败时中止可控上游并进入复核。持久派发、断线恢复、取消期续租和期限释放已形成独立状态机。组成到期或用量核对期限 Worker 会先释放相关不确定 Hold，再把迟到确认的真实用量写入平台损失复核，禁止改扣其他权益。
 - Model Gateway 通过配置注入 Adapter；Adapter 独占请求路径/认证头、上游请求引用提取、Provider 日志查询和用量归一化。通用领域、迁移、API 与三语运营界面只使用 `provider_id`、`adapter_version`、`upstream_request_id` 和摘要，历史核对按创建时 Adapter 版本匹配，不用当前 Provider 解释旧记录。
 - `/v1/model-protocols` 暴露版本化协议能力；路由以 `model + protocol_code` 显式声明可调用协议，当前仅发布 `CHAT v1`（JSON/SSE）。协议/公式框架已覆盖 CHAT 及输入、缓存输入、输出单位；图片、请求和文档单位已有定义，但在 Adapter 与模型目录同时显式声明前不可推断可用。
-- 幂等键可显式传入或稳定派生，但重复请求返回 `USAGE_REPLAY_BLOCKED`，不会回放既有结果；也没有版本化规范请求指纹、同键异请求 `409`、流事件存储、结果/墓碑分层保留或 `410` 语义。
-- 流式响应直接转发给客户端，未先持久化；请求上下文取消可能中止上游，不具备断线继续执行和按序重放。
-- 没有持久派发租约/意图状态机，也没有模型请求取消命令及 Provider 取消能力契约。
+- 用户级幂等键只保存摘要；同键同指纹恢复既有状态/事件/结果，同键异指纹在 Hold 前返回 `409`。流事件先加密持久化取得连续序号再交付，结果与零正文墓碑按24小时/30天/90天分层保留，过期结果返回 `410`。
+- HTTP 断线只改变交付状态，不取消后台上游读取、证据持久化和结算；`Last-Event-ID` 只重放更大序号，不创建第二次调用。
+- 持久派发准备、正式意图和一次性租约区分“可证明未派发”与“结果未知”；取消命令、Adapter 取消能力和可信用量期限独立推进，未知结果只查询证据或进入人工复核。
 
 ## 7. 当前支付、权益与退款
 

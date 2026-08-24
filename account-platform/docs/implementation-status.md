@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 331 个目标编号全部完成代码审计并使用下列共享证据编号；未取得任何实际部署环境、制品版本或验证时间证据，因此代码相关项目的 `deployment_version` 均为 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 295`、`部分实现 27`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
+全量核验汇总：`已实现 296`、`部分实现 26`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `331` 项。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -60,6 +60,7 @@
 | `MODEL-CATALOG-LIFECYCLE` | Adapter 目录发现、稳定 UUID、不可变能力/目录版本、草稿 CAS、发布/弃用/移除、连续缺失核验、前向回滚、历史墓碑和请求版本快照 | Go 单测、OpenAPI lint、94 个合同测试、三语运营页面和 Helm/Compose 配置检查通过；桌面目录消费、回滚联合依赖校验、数据库运行级迁移和真实 Adapter 同步待后续任务/部署 |
 | `ROUTE-PROVISIONING-ELIGIBILITY` | 按作用域/模型/协议/代次唯一的托管路由状态机、租约认领、退避/SLA、组织模型策略、READY 资格门禁、回滚联合依赖校验和运营修复 | Go 单元测试、Rust 桌面代理测试、OpenAPI lint、95 个合同测试和三语 Portal 构建通过；数据库运行级迁移、真实 Adapter/凭据和 Worker 故障注入待部署 |
 | `USAGE-EXECUTION-REPLAY` | 稳定用户级键摘要、版本化规范指纹、Hold/派发持久状态、一次性派发租约、加密流事件/结果、Last-Event-ID 重放及24小时/30天/90天分层清理 | Go 全量单元测试、OpenAPI lint、重放结构合同和静态验证通过；数据库运行级崩溃/断线/KMS故障注入待部署，注销调用与备份清除分别由 APT-015/APT-037 接入 |
+| `EXTERNAL-CONVERGENCE` | 支付与模型外部事实统一遵循先留不可变证据、再复核/结算/释放且不猜测成功或自动重发高风险请求的边界 | Go 单元测试、支付/模型收敛合同与全量静态验证通过；真实 Provider 乱序结果、断线和数据库运行级迁移待部署 |
 | `USAGE-CANCELLATION-CONVERGENCE` | 原稳定用户幂等取消、派发前 Hold 全释放、派发后交付隔离、Adapter 取消能力、可信实际用量、版本化核对期限、损失复核及幂等人工重试 | Go 全量单元测试、OpenAPI lint、取消结构合同、桌面/Portal 构建和静态验证通过；真实 PostgreSQL 竞态、Provider 用量延迟、断线和故障注入待部署 |
 | `TOKEN-OPERATIONS-ISOLATION` | 平台 Token Account 创建/启停、PLATFORM 资源过滤、组织角色默认拒绝、凭据元数据最小化及统一脱敏检查结果 | Go 单元测试、OpenAPI lint、平台 Token 运营隔离合同、三语 Portal 构建和静态验证通过；数据库运行级迁移及真实 Provider 凭据检查待部署 |
 | `ACCOUNT-CLOSURE-CLEANUP` | 主体生命周期隔离、资料/Commerce/邀请自动收敛、Identity 删除、原标识释放、永久 ID/编码墓碑、三年保留策略，以及组织授予隔离与合规整笔回收 | Account/Billing/Token/Portal Go 单元测试、OpenAPI lint、注销清理合同、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Identity/Commerce 故障注入和三年时钟推进待部署 |
@@ -78,7 +79,7 @@
 | `PROVIDER-CIRCUIT-CLOCK` | Provider/能力/路由独立60秒熔断、20样本50%或连续5失败、三次半开探测、指数重开、业务拒绝排除和高风险不重发；生产三源NTP中位偏差在250ms告警、1秒退出就绪并阻止新写操作 | Go 单测、Helm配置/NetworkPolicy和3个合同测试通过；真实Provider失败注入、告警投递、三独立授时源和生产偏差注入待外部验收 |
 | `CLIENT-COMPATIBILITY-LIFECYCLE` | Account、Billing、Gateway、Portal 共用显式客户端版本策略；N/N-1/N-2 发布时间线强制后继发布后至少90天支持、正常弃用提前60天，安全例外至少7天并要求审批号；桌面普通 API 和平台模型请求均携带精确版本，过期版本远程写操作稳定返回426和可信升级入口，本地读取与本地模型不受影响 | Go 策略/中间件单测、3个版本合同矩阵、OpenAPI、Compose/Helm 和桌面静态合同通过；实际淘汰日期由每次正式发布更新清单 |
 | `DESKTOP-41` | 在 `pinvou3-app/` 执行账号平台状态、三语覆盖、计划任务定向测试 | 41 个测试通过 |
-| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/145 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
+| `VERIFY-ALL` | `node scripts/account-platform.mjs verify` | Go 单测与 Vet、OpenAPI/149 个合同测试、任务覆盖、迁移/恢复/HA/性能/i18n/可观测发布门禁、架构守卫和差异检查全部通过 |
 
 ### 0.1 target_requirement_id 规则
 
@@ -97,7 +98,7 @@
 | CORE-03 | 已实现 | AUDIT_HEAD | GO-UNIT; COMMERCE-MAPPING | NOT_DEPLOYED | Commerce Mapping 只维护用户/组织与外部客户的 Provider、Adapter 版本、脱敏引用及状态；授权上下文不读取 Mapping，生产部署待验证 |
 | CORE-04 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 平衡不可变账本及组成级守恒事实已实现；后续应收和支付流水任务必须继续通过同一账本扩展，数据库运行级验证待部署 |
 | CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
-| CORE-06 | 部分实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE; USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 支付回调/查询/账单/修复已统一收敛，模型派发不确定、加密流事件/结果重放和取消后可信用量各自已有证据边界；跨域统一收敛约束仍待 APT-050 完成 |
+| CORE-06 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE; USAGE-EXECUTION-REPLAY; EXTERNAL-CONVERGENCE | NOT_DEPLOYED | 支付回调/查询/账单/修复与模型派发、上游引用、完整结果、只读证据查询、取消及结算/释放均先追加不可变摘要证据；冲突结果不覆盖首个完整事实，不确定结果进入复核且禁止自动重发高风险请求 |
 | CORE-07 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; TARGETED-REFUND; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 当前跨服务变更均使用持久幂等 Saga 或事务 Outbox/Inbox；Relay、死信、摘要绑定服务身份重放和不可变修复审计形成闭环，不宣称跨库原子事务。 |
 | SCOPE-01 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 本地独立模型仍受保护，账号平台迁移不删除用户自建模型 |
 | SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人中心已移除自管 Token Account 页面；Gateway 仍保留受限普通用户 API，不影响当前 UI 范围结论 |

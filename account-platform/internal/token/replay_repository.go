@@ -255,6 +255,9 @@ func (r *PostgresRepository) AcquireDispatch(ctx context.Context, usageID uuid.U
 	if err := transitionExecutionTx(ctx, tx, usageID, []string{"DISPATCH_INTENT_PERSISTED"}, "UPSTREAM_DISPATCHING", "dispatch worker acquired immutable intent", now); err != nil {
 		return DispatchEnvelope{}, false, err
 	}
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "DISPATCH_STARTED", "GATEWAY", "RECORDED", integrity, map[string]any{"dispatch_intent_integrity": integrity, "worker_lease_owner": owner, "automatic_redispatch": false}, now); err != nil {
+		return DispatchEnvelope{}, false, err
+	}
 	if _, err := tx.Exec(ctx, `UPDATE usage_dispatch_intents SET worker_lease_owner=$2,worker_lease_until=$3,worker_acquired_at=$4,encrypted_envelope=NULL,key_id=NULL,envelope_integrity=NULL WHERE usage_request_id=$1 AND worker_acquired_at IS NULL`, usageID, owner, now.Add(lease), now); err != nil {
 		return DispatchEnvelope{}, false, err
 	}
@@ -333,14 +336,33 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 		finalUsage = result.FinalUsage
 	}
 	now := r.now()
+	responseDigest := replayDigest(result.Payload)
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `INSERT INTO usage_replay_results(usage_request_id,response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,final_usage,last_sequence,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NULL) ON CONFLICT(usage_request_id) DO NOTHING`, usageID, result.Kind, result.HTTPStatus, result.ContentType, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), finalUsage, result.LastSequence, now)
+	command, err := tx.Exec(ctx, `INSERT INTO usage_replay_results(usage_request_id,response_kind,http_status,content_type,encrypted_payload,key_id,payload_integrity,evidence_payload_digest,final_usage,last_sequence,created_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL) ON CONFLICT(usage_request_id) DO NOTHING`, usageID, result.Kind, result.HTTPStatus, result.ContentType, ciphertext, r.secrets.KeyID(), replayDigest(ciphertext), responseDigest, finalUsage, result.LastSequence, now)
 	if err != nil {
 		return err
+	}
+	if command.RowsAffected() == 0 {
+		var storedKind string
+		var storedStatus int
+		var storedSequence int64
+		var storedDigest *string
+		if err := tx.QueryRow(ctx, `SELECT response_kind,http_status,last_sequence,evidence_payload_digest FROM usage_replay_results WHERE usage_request_id=$1`, usageID).Scan(&storedKind, &storedStatus, &storedSequence, &storedDigest); err != nil {
+			return err
+		}
+		if storedKind != result.Kind || storedStatus != result.HTTPStatus || storedSequence != result.LastSequence || (storedDigest != nil && *storedDigest != responseDigest) {
+			if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "REVIEW", fmt.Sprintf("%s:%d:%d", result.Kind, result.HTTPStatus, result.LastSequence), map[string]any{"response_kind": result.Kind, "http_status": result.HTTPStatus, "response_payload_digest": responseDigest, "last_sequence": result.LastSequence, "conflicts_with_first_complete_result": true}, now); err != nil {
+				return err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return err
+			}
+			return ErrIdempotencyConflict
+		}
 	}
 	if result.FinalUsage != nil {
 		encodedUsage, marshalErr := json.Marshal(result.FinalUsage)
@@ -350,6 +372,9 @@ func (r *PostgresRepository) SaveReplayResult(ctx context.Context, usageID uuid.
 		if _, err = tx.Exec(ctx, `UPDATE usage_requests SET trusted_usage_snapshot=$2,trusted_usage_source='PROVIDER_FINAL_USAGE',final_usage_observed_at=COALESCE(final_usage_observed_at,$3),provider_terminal_at=COALESCE(provider_terminal_at,$3),settlement_status='USAGE_PENDING',updated_at=$3 WHERE id=$1`, usageID, encodedUsage, now); err != nil {
 			return err
 		}
+	}
+	if err == nil {
+		err = appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "RESULT_OBSERVED", "GATEWAY", "RECORDED", fmt.Sprintf("%s:%d:%d", result.Kind, result.HTTPStatus, result.LastSequence), map[string]any{"response_kind": result.Kind, "http_status": result.HTTPStatus, "content_type": result.ContentType, "response_payload_digest": responseDigest, "final_usage_present": result.FinalUsage != nil, "last_sequence": result.LastSequence}, now)
 	}
 	if err == nil {
 		err = tx.Commit(ctx)

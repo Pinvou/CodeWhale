@@ -110,6 +110,7 @@ type AdminUsageRequest struct {
 	LastPersistedSequence       int64           `json:"last_persisted_sequence"`
 	LastClientConfirmedSequence int64           `json:"last_client_confirmed_sequence"`
 	CancellationEvidence        json.RawMessage `json:"cancellation_evidence"`
+	ConvergenceEvidence         json.RawMessage `json:"convergence_evidence"`
 	StartedAt                   time.Time       `json:"started_at"`
 	UpdatedAt                   time.Time       `json:"updated_at"`
 }
@@ -608,6 +609,7 @@ attempt.adapter_version,attempt.upstream_request_id,attempt.status,attempt.input
 request.reconciliation_attempts,request.reconciliation_last_error,request.reconciliation_stopped_at,
 request.cancel_requested_at,request.provider_terminal_at,request.final_usage_observed_at,request.last_persisted_sequence,request.last_client_confirmed_sequence,
 COALESCE((SELECT jsonb_agg(jsonb_build_object('evidence_type',evidence.evidence_type,'provider_id',evidence.provider_id,'adapter_version',evidence.adapter_version,'upstream_reference_digest',evidence.upstream_reference_digest,'evidence',evidence.sanitized_evidence,'occurred_at',evidence.occurred_at) ORDER BY evidence.occurred_at) FROM usage_cancellation_evidence evidence WHERE evidence.usage_request_id=request.id),'[]'::jsonb),
+COALESCE((SELECT jsonb_agg(jsonb_build_object('evidence_type',evidence.evidence_type,'source_type',evidence.source_type,'decision',evidence.decision,'provider_id',evidence.provider_id,'adapter_version',evidence.adapter_version,'upstream_reference_digest',evidence.upstream_reference_digest,'payload_digest',evidence.payload_digest,'evidence',evidence.sanitized_snapshot,'observed_at',evidence.observed_at) ORDER BY evidence.observed_at,evidence.id) FROM usage_convergence_evidence evidence WHERE evidence.usage_request_id=request.id),'[]'::jsonb),
 request.started_at,request.updated_at FROM usage_requests request
 LEFT JOIN usage_attempts attempt ON attempt.usage_request_id=request.id`
 }
@@ -620,7 +622,7 @@ func scanAdminUsage(row interface{ Scan(...any) error }) (AdminUsageRequest, err
 		&item.MaximumMicrocredits, &item.ActualMicrocredits, &item.ErrorClass, &item.ProviderID,
 		&item.AdapterVersion, &item.UpstreamRequestID, &item.AttemptStatus, &item.InputTokens, &item.OutputTokens, &item.CachedInputTokens,
 		&item.ReconciliationAttempts, &item.ReconciliationLastError, &item.ReconciliationStoppedAt,
-		&item.CancelRequestedAt, &item.ProviderTerminalAt, &item.FinalUsageObservedAt, &item.LastPersistedSequence, &item.LastClientConfirmedSequence, &item.CancellationEvidence, &item.StartedAt, &item.UpdatedAt)
+		&item.CancelRequestedAt, &item.ProviderTerminalAt, &item.FinalUsageObservedAt, &item.LastPersistedSequence, &item.LastClientConfirmedSequence, &item.CancellationEvidence, &item.ConvergenceEvidence, &item.StartedAt, &item.UpdatedAt)
 	return item, err
 }
 

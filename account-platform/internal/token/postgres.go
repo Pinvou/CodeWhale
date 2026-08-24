@@ -274,17 +274,26 @@ func (r *PostgresRepository) RecordUpstreamRequest(ctx context.Context, usageID 
 		return ErrForbidden
 	}
 	digest := sha256.Sum256([]byte(evidence.RequestID))
-	command, err := r.pool.Exec(ctx, `INSERT INTO usage_attempts(id,usage_request_id,provider_id,adapter_version,upstream_request_id,upstream_reference_digest,status,started_at)
+	now := r.now()
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	command, err := tx.Exec(ctx, `INSERT INTO usage_attempts(id,usage_request_id,provider_id,adapter_version,upstream_request_id,upstream_reference_digest,status,started_at)
 VALUES($1,$2,$3,$4,$5,$6,'STARTED',$7)
 ON CONFLICT(usage_request_id) DO UPDATE SET provider_id=EXCLUDED.provider_id,adapter_version=EXCLUDED.adapter_version,upstream_request_id=EXCLUDED.upstream_request_id,upstream_reference_digest=EXCLUDED.upstream_reference_digest
-WHERE usage_attempts.provider_id=EXCLUDED.provider_id AND usage_attempts.adapter_version=EXCLUDED.adapter_version AND usage_attempts.upstream_reference_digest=EXCLUDED.upstream_reference_digest`, uuid.Must(uuid.NewV7()), usageID, evidence.ProviderID, evidence.AdapterVersion, evidence.RequestID, hex.EncodeToString(digest[:]), r.now())
+WHERE usage_attempts.provider_id=EXCLUDED.provider_id AND usage_attempts.adapter_version=EXCLUDED.adapter_version AND usage_attempts.upstream_reference_digest=EXCLUDED.upstream_reference_digest`, uuid.Must(uuid.NewV7()), usageID, evidence.ProviderID, evidence.AdapterVersion, evidence.RequestID, hex.EncodeToString(digest[:]), now)
 	if err != nil {
 		return err
 	}
 	if command.RowsAffected() == 0 {
 		return ErrForbidden
 	}
-	return nil
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "UPSTREAM_REFERENCE", "GATEWAY", "RECORDED", hex.EncodeToString(digest[:]), map[string]any{"provider_id": evidence.ProviderID, "adapter_version": evidence.AdapterVersion, "upstream_reference_digest": hex.EncodeToString(digest[:])}, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUID, actual int64, snapshot map[string]any) error {
@@ -311,6 +320,9 @@ func (r *PostgresRepository) MarkCommitted(ctx context.Context, usageID uuid.UUI
 	}
 	if err == nil {
 		err = addReplayTombstone(ctx, tx, usageID, "SUCCEEDED", now)
+	}
+	if err == nil {
+		err = appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "SETTLEMENT", "BILLING", "COMMIT", fmt.Sprintf("actual:%d", actual), map[string]any{"actual_microcredits": actual, "snapshot": snapshot}, now)
 	}
 	if err == nil {
 		if err := events.AppendOutbox(ctx, tx, "token.usage.settled.v1", usageID, 1, map[string]any{"usage_request_id": usageID, "wallet_id": walletID, "token_account_id": tokenAccountID, "actual_microcredits": actual}); err != nil {
@@ -358,6 +370,9 @@ func (r *PostgresRepository) MarkReleased(ctx context.Context, usageID uuid.UUID
 	if err := addReplayTombstone(ctx, tx, usageID, "FAILED", now); err != nil {
 		return err
 	}
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "CUSTOMER_HOLD_RELEASE", "BILLING", "RELEASE", strings.TrimSpace(reason), map[string]any{"reason": strings.TrimSpace(reason), "external_success_inferred": false}, now); err != nil {
+		return err
+	}
 	return tx.Commit(ctx)
 }
 
@@ -393,6 +408,9 @@ func (r *PostgresRepository) MarkReview(ctx context.Context, usageID uuid.UUID, 
 		executionStatus = "SETTLEMENT_PENDING"
 	}
 	if err := transitionExecutionTx(ctx, tx, usageID, []string{"RECEIVED", "HOLD_RESERVING", "HOLD_RESERVED", "DISPATCH_INTENT_PERSISTED", "UPSTREAM_DISPATCHING", "STREAMING", "SETTLEMENT_PENDING", "REVIEW"}, executionStatus, reason, now); err != nil {
+		return err
+	}
+	if err := appendUsageConvergenceEvidenceTx(ctx, tx, usageID, "UNCERTAINTY", "GATEWAY", "REVIEW", reason, map[string]any{"reason": reason, "sanitized_observation": snapshot, "automatic_high_risk_retry": false}, now); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
