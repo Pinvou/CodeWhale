@@ -289,6 +289,143 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /v1/me/avatar:
+    put:
+      tags: [Enrollment]
+      operationId: uploadCurrentPrincipalAvatar
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: >-
+                    PNG, JPEG, WebP, or GIF content, at most 1.5 MiB. The Hub
+                    fully decodes and re-encodes the image, strips metadata,
+                    limits static sources to 8,000,000 pixels, emits static
+                    images with an edge of at most 512 px, and emits GIFs with
+                    an edge of at most 384 px, at most 60 frames, and at most
+                    4,000,000 total animated pixels.
+      responses:
+        "200":
+          description: The Hub-wide Principal avatar was replaced.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AvatarMutationResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+        "409":
+          description: Another avatar upload for this Principal is already being processed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "413":
+          description: The source or safely re-encoded avatar exceeds the 1.5 MiB maximum.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "415":
+          description: Avatar content or extension is not allowed, or they do not match.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: The image is damaged or exceeds the safe dimension, pixel, or frame limits.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: The bounded avatar processor is busy or this Principal exceeded the upload window; clients should honor Retry-After.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [Enrollment]
+      operationId: deleteCurrentPrincipalAvatar
+      responses:
+        "204":
+          description: Custom avatar removed; clients fall back to the Principal name.
+        "401":
+          $ref: "#/components/responses/AuthenticationRequired"
+
+  /v1/principals/{principal_id}/avatar:
+    parameters:
+      - $ref: "#/components/parameters/PrincipalId"
+    get:
+      tags: [Enrollment]
+      operationId: downloadPrincipalAvatar
+      parameters:
+        - $ref: "#/components/parameters/TeamIdQuery"
+        - name: size
+          in: query
+          required: false
+          description: Return a sanitized display variant; omit to return the main processed avatar.
+          schema:
+            type: integer
+            enum: [48, 96]
+        - name: reduced_motion
+          in: query
+          required: false
+          description: >-
+            When true, return the static first-frame PNG for an animated GIF.
+            Requires size; static source images keep their normal display variant.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: >-
+            Verified processed avatar bytes for a Principal sharing the requested
+            active team. Animated GIF variants retain their bounded animation;
+            reduced-motion variants contain only a sanitized static first frame.
+          headers:
+            Digest:
+              description: SHA-256 digest of the response bytes, encoded as base64.
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Avatar-Source-SHA256:
+              description: Hex SHA-256 digest of the main processed avatar represented in Principal metadata.
+              schema:
+                type: string
+                pattern: "^[0-9a-f]{64}$"
+          content:
+            image/png:
+              schema: { type: string, format: binary }
+            image/jpeg:
+              schema: { type: string, format: binary }
+            image/webp:
+              schema: { type: string, format: binary }
+            image/gif:
+              schema: { type: string, format: binary }
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+
   /v1/teams/{team_id}/members:
     parameters:
       - $ref: "#/components/parameters/TeamId"
@@ -1187,6 +1324,32 @@ components:
         principal:
           $ref: "#/components/schemas/Principal"
 
+    AvatarMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [avatar]
+      properties:
+        avatar:
+          $ref: "#/components/schemas/Avatar"
+
+    Avatar:
+      type: object
+      additionalProperties: false
+      required: [content_type, byte_size, sha256, updated_at]
+      properties:
+        content_type:
+          type: string
+          enum: [image/png, image/jpeg, image/webp, image/gif]
+        byte_size:
+          type: integer
+          minimum: 1
+          maximum: 1572864
+        sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        updated_at:
+          $ref: "#/components/schemas/Timestamp"
+
     Principal:
       type: object
       additionalProperties: false
@@ -1204,6 +1367,10 @@ components:
           type: string
         created_at:
           $ref: "#/components/schemas/Timestamp"
+        avatar:
+          oneOf:
+            - $ref: "#/components/schemas/Avatar"
+            - type: "null"
 
     Device:
       type: object
@@ -1279,6 +1446,10 @@ components:
         confirmed_transfers_supported:
           type: boolean
           description: True when at least one active device declared protocol 0.2 within the last 30 days.
+        avatar:
+          oneOf:
+            - $ref: "#/components/schemas/Avatar"
+            - type: "null"
 
     CreateInviteRequest:
       type: object
@@ -1707,6 +1878,19 @@ components:
             - attachment_type_not_allowed
             - attachment_not_ready
             - rate_limited
+            - beta_access_invalid
+            - email_already_registered
+            - email_change_not_supported
+            - join_code_storage_unavailable
+            - join_password_invalid
+            - avatar_upload_in_progress
+            - avatar_too_large
+            - avatar_processed_too_large
+            - avatar_type_not_allowed
+            - avatar_image_invalid
+            - avatar_image_limits_exceeded
+            - avatar_processing_busy
+            - avatar_upload_rate_limited
             - service_unavailable
         message:
           type: string

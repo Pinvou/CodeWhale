@@ -79,6 +79,41 @@ pub async fn team_relay_update_profile(
 }
 
 #[tauri::command]
+pub async fn team_relay_upload_avatar(
+    path: PathBuf,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    manager.upload_avatar(&path).await
+}
+
+#[tauri::command]
+pub async fn team_relay_remove_avatar(
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelaySnapshot, String> {
+    manager.remove_avatar().await
+}
+
+#[tauri::command]
+pub async fn team_relay_avatar_data_url(
+    team_id: Option<String>,
+    principal_id: String,
+    expected_sha256: String,
+    display_size: Option<u16>,
+    reduced_motion: Option<bool>,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<Option<String>, String> {
+    manager
+        .avatar_data_url(
+            team_id.as_deref(),
+            &principal_id,
+            &expected_sha256,
+            display_size,
+            reduced_motion.unwrap_or(false),
+        )
+        .await
+}
+
+#[tauri::command]
 pub async fn team_relay_create_team(
     app: AppHandle,
     name: String,

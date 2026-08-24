@@ -88,9 +88,11 @@ export function teamRelayHasUnread(snapshot) {
 }
 
 function projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors) {
-  const names = new Map(bootstrap.members.map(member => [member.id, member.display_name]));
-  names.set(bootstrap.me.id, bootstrap.me.display_name);
+  const people = new Map(bootstrap.members.map(member => [member.id, member]));
+  people.set(bootstrap.me.id, { ...(people.get(bootstrap.me.id) || {}), ...bootstrap.me });
+  const names = new Map(Array.from(people, ([id, principal]) => [id, principal.display_name]));
   const nameOf = id => id ? (names.get(id) || id.slice(0, 8)) : copy.dash;
+  const avatarOf = id => people.get(id)?.avatar || null;
   return bootstrap.threads.map(detail => {
     const thread = detail.thread;
     const preference = detail.preference || {};
@@ -120,6 +122,7 @@ function projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors) {
       actor: nameOf(action.actor_id),
       avatar: nameOf(action.actor_id),
       kindLabel: actionKindLabel(action, copy),
+      avatarMetadata: avatarOf(action.actor_id),
       title: copy.live.actionTitle(actionKindLabel(action, copy), nameOf(action.actor_id), nameOf(action.recipient_id)),
       message: action.message,
       time: action.created_at,
@@ -154,12 +157,16 @@ function projectTeamSnapshot(bootstrap, attachments, copy, legacyReadCursors) {
       teamName: bootstrap.team.name,
       initiator: nameOf(thread.initiator_id),
       owner: nameOf(thread.owner_id),
+      ownerAvatar: avatarOf(thread.owner_id),
       current,
       currentActorId: thread.current_actor_id,
       pendingSender,
       pendingSenderId: thread.pending_sender_id,
+      pendingSenderAvatar: avatarOf(thread.pending_sender_id),
       pendingRecipient,
       pendingRecipientId: thread.pending_recipient_id,
+      pendingRecipientAvatar: avatarOf(thread.pending_recipient_id),
+      currentAvatar: avatarOf(thread.current_actor_id),
       finalRecipient: nameOf(thread.final_recipient_id),
       status: thread.phase === 'cancelled'
         ? copy.cancelledStatus

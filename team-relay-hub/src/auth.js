@@ -1,5 +1,6 @@
 import { AppError } from "./errors.js";
 import { sha256 } from "./crypto.js";
+import { principalFromRow } from "./serializers.js";
 
 export const CONFIRMED_TRANSFER_CAPABILITY_DAYS = 30;
 
@@ -11,9 +12,16 @@ export async function authenticate(pool, token) {
     `SELECT d.id AS device_id, d.principal_id, d.name AS device_name,
             d.revoked_at, d.created_at AS device_created_at,
             d.relay_protocol_version, d.relay_protocol_seen_at,
-            p.email, p.display_name, p.created_at AS principal_created_at, p.disabled_at
+            p.id AS principal_id, p.email AS principal_email,
+            p.display_name AS principal_display_name,
+            p.created_at AS principal_created_at, p.disabled_at,
+            avatar.content_type AS principal_avatar_content_type,
+            avatar.byte_size AS principal_avatar_byte_size,
+            avatar.sha256 AS principal_avatar_sha256,
+            avatar.updated_at AS principal_avatar_updated_at
        FROM devices d
        JOIN principals p ON p.id = d.principal_id
+       LEFT JOIN principal_avatars avatar ON avatar.principal_id = p.id
       WHERE d.token_hash = $1`,
     [sha256(token)],
   );
@@ -28,12 +36,7 @@ export async function authenticate(pool, token) {
   return {
     deviceId: row.device_id,
     principalId: row.principal_id,
-    principal: {
-      id: row.principal_id,
-      email: row.email || null,
-      display_name: row.display_name,
-      created_at: row.principal_created_at,
-    },
+    principal: principalFromRow(row, "principal_"),
     device: {
       id: row.device_id,
       principal_id: row.principal_id,

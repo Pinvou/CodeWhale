@@ -33,6 +33,7 @@ team owner 和 WorkThread owner 是两个独立概念。例如演示链路中 A 
 11. `POST /v1/enrollments/create-team` 和 `POST /v1/enrollments/join` 继续服务旧客户端；新客户端不得在账号登录表单中要求团队名或加入码。
 12. 迁移前已有 Principal 保持原 ID、Membership 和历史记录，邮箱暂为空；用户可在认证后通过 `PATCH /v1/me` 一次性绑定邮箱。当前版本不支持更换已绑定邮箱。
 13. 桌面端“退出账号”只退出当前设备：停止 SSE 同步，删除系统 credential store 中的 device token 和本机接力连接配置，并清空当前进程中的账号缓存。它不删除 Principal、Membership、接力记录或本机任务材料，也不影响其他设备；用户再次登录后可恢复仍有效的团队。
+14. Principal 可以通过 `PUT /v1/me/avatar` 上传独立接力头像，或通过 `DELETE /v1/me/avatar` 恢复名字首字头像。头像跨该 Principal 加入的所有团队生效，不复用专家池头像。未上传时，中文名显示第一个有效汉字，英文名显示大写首字母；客户端按 Principal ID 从连续色域派生稳定的个性化底色，同一成员在不同电脑上保持一致，不使用每台电脑独立的随机色。
 
 桌面端的日常邀请入口由 team owner 生成或轮换可重复使用的团队加入码；一次性成员邀请码接口保留为协议兼容能力，不作为当前界面的默认入口。
 
@@ -42,7 +43,9 @@ team owner 和 WorkThread owner 是两个独立概念。例如演示链路中 A 
 
 短加入码必须和服务端防猜测同时启用：未登记用户按客户端地址、已登记用户按设备凭据计数，10 分钟内连续 5 次提交错误加入码后暂停 15 分钟，Hub 返回 `429 rate_limited` 和 `Retry-After`。反向代理部署只有在代理覆盖可信 `X-Real-IP` 且 Hub 不直接暴露公网时才可启用 `TEAM_RELAY_TRUST_PROXY=true`。旧版长加入码继续按原值校验，以便滚动升级。演示版限流状态保存在单个 Hub 进程内且有容量上限；扩展到多副本前必须改为所有副本共享的限流存储。
 
-一次性邀请码只能成功消费一次。团队列表、线程、附件和 SSE 始终按 `team_id` 授权隔离；设备被撤销或成员被移除后，旧 token 不得继续读取该团队数据或提交动作，但不影响该 Principal 的其他有效团队。
+一次性邀请码只能成功消费一次。团队列表、线程、附件、头像内容和 SSE 始终按 `team_id` 授权隔离；头像元数据可出现在成员快照中，但 `GET /v1/principals/{principal_id}/avatar?team_id=...` 只有双方都是该团队有效成员时才返回内容。设备被撤销或成员被移除后，旧 token 不得继续读取该团队数据、头像或提交动作，但不影响该 Principal 的其他有效团队。
+
+头像输入与处理后的主图均不得超过 1.5 MiB，只接受经文件内容识别并与扩展名一致的 PNG、JPEG、WebP 和 GIF；SVG 与其他可执行格式不接受。Hub 必须完整解码后重新编码，剥离 EXIF、GPS、文本和注释等元数据；静态图输入最多 800 万像素并缩放到最长边 512 px，GIF 缩放到最长边 384 px，最多 60 帧且总动画像素不超过 400 万。Hub 另外生成 48 px 和 96 px 的同格式显示变体；GIF 主图和变体均保留受限动画，成员列表按显示密度读取小变体并持续播放，资料预览读取主图。响应中的 `X-Avatar-Source-SHA256` 绑定当前 Principal 元数据摘要，`Digest` 校验实际返回的主图或变体字节。头像处理按 Principal 单并发且受全局并发上限保护，默认每个 Principal 每 60 秒最多尝试上传 6 次；中断请求、事务失败、超时临时文件和数据库未引用文件均须可清理。头像字节保存在仅服务账号可读的持久化目录，HTTP 响应使用 `nosniff`、私有且不缓存的策略。
 
 ## 3. 线程建立
 
@@ -266,13 +269,19 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 | 409 | `email_change_not_supported` | 尝试更换已绑定邮箱 | 当前版本不支持 |
 | 409 | `last_team_owner` | 试图移除最后一位 team owner | 先增加 owner |
 | 409 | `member_has_open_work` | 成员仍承担未结束线程的关键角色 | 先结束工作 |
+| 409 | `avatar_upload_in_progress` | 同一 Principal 已有头像正在处理 | 等待当前上传完成 |
 | 410 | `invite_expired` | 邀请过期或已撤销 | 重新邀请 |
 | 410 | `attachment_expired` | 已结束线程的文件超过保留期 | 否 |
 | 413 | `attachment_too_large` | 文件超过限制 | 否 |
+| 413 | `avatar_too_large` / `avatar_processed_too_large` | 头像输入或安全重编码产物超过 1.5 MiB | 缩小或压缩后重试 |
 | 413 | `team_attachment_capacity_exceeded` | 团队文件总量超过限制 | 清理后 |
 | 415 | `attachment_type_not_allowed` | 类型不允许或 MIME 冲突 | 否 |
+| 415 | `avatar_type_not_allowed` | 头像格式不受支持或内容与扩展名不符 | 重新导出后重试 |
 | 422 | `attachment_not_ready` | 附件不属于提交者、已绑定或不可用 | 修正后 |
+| 422 | `avatar_image_invalid` / `avatar_image_limits_exceeded` | 头像损坏，或尺寸、帧数、总动画像素超过安全限制 | 重新导出或缩小后重试 |
 | 429 | `rate_limited` | 请求频率过高 | 按 Retry-After |
+| 429 | `avatar_processing_busy` | 有界头像处理器已满载 | 按 Retry-After |
+| 429 | `avatar_upload_rate_limited` | 同一 Principal 在上传窗口内尝试过多 | 按 Retry-After |
 | 503 | `service_unavailable` | 数据库或必要存储不可用 | 稍后重试 |
 
 Hub 不得在数据库写入失败时返回业务成功。

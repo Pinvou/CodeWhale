@@ -1,9 +1,21 @@
+export function avatarFromRow(row, prefix = "avatar_") {
+  const sha256 = row[`${prefix}sha256`];
+  if (!sha256) return null;
+  return {
+    content_type: row[`${prefix}content_type`],
+    byte_size: Number(row[`${prefix}byte_size`]),
+    sha256,
+    updated_at: row[`${prefix}updated_at`],
+  };
+}
+
 export function principalFromRow(row, prefix = "") {
   return {
     id: row[`${prefix}id`],
     email: row[`${prefix}email`] || null,
     display_name: row[`${prefix}display_name`],
     created_at: row[`${prefix}created_at`],
+    avatar: avatarFromRow(row, `${prefix}avatar_`),
   };
 }
 
@@ -30,6 +42,19 @@ export function membershipFromRow(row) {
     principal_id: row.principal_id,
     role: row.role,
     joined_at: row.joined_at,
+  };
+}
+
+export function teamMemberFromRow(row) {
+  return {
+    id: row.id,
+    display_name: row.display_name,
+    email_hint: emailHint(row.email),
+    created_at: row.created_at,
+    role: row.role,
+    last_seen_at: row.last_seen_at,
+    confirmed_transfers_supported: Boolean(row.confirmed_transfers_supported),
+    avatar: avatarFromRow(row),
   };
 }
 

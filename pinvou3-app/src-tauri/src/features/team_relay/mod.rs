@@ -5,10 +5,11 @@ pub use types::*;
 use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::Utc;
 use futures_util::{future::join_all, StreamExt};
 use reqwest::{
-    header::{HeaderMap, HeaderValue},
+    header::{HeaderMap, HeaderValue, CONTENT_TYPE},
     multipart, Client, Response, StatusCode, Url,
 };
 use serde::de::DeserializeOwned;
@@ -23,6 +24,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
 const MAX_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_AVATAR_BYTES: u64 = 1536 * 1024;
 const DEFAULT_TEAM_RELAY_HUB_URL: &str = "https://pinvou.com/pinvou3/team-relay";
 
 #[derive(Debug, serde::Deserialize)]
@@ -285,6 +287,176 @@ impl TeamRelayManager {
             .map_err(network_error)?;
         let _: UpdateProfileResponse = decode(response).await?;
         self.bootstrap_for(&settings, &token).await
+    }
+
+    pub async fn upload_avatar(&self, path: &Path) -> Result<TeamRelaySnapshot, String> {
+        let metadata =
+            std::fs::metadata(path).map_err(|error| format!("avatar_unreadable: {error}"))?;
+        if !metadata.is_file() {
+            return Err("avatar_unreadable: selected path is not a file".to_string());
+        }
+        if metadata.len() == 0 {
+            return Err("avatar_unreadable: selected file is empty".to_string());
+        }
+        if metadata.len() > MAX_AVATAR_BYTES {
+            return Err("avatar_too_large: avatar exceeds 1.5 MiB".to_string());
+        }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "avatar_invalid_name: filename is not valid UTF-8".to_string())?;
+        if !avatar_extension_allowed(path) {
+            return Err(
+                "avatar_type_not_allowed: select a PNG, JPEG, WebP or GIF image".to_string(),
+            );
+        }
+        let file = tokio::fs::File::open(path)
+            .await
+            .map_err(|error| format!("avatar_unreadable: {error}"))?;
+        let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+        let (settings, token) = self.configured()?;
+        let form = multipart::Form::new().part(
+            "file",
+            multipart::Part::stream_with_length(body, metadata.len())
+                .file_name(file_name.to_string()),
+        );
+        let response = self
+            .client
+            .put(endpoint(&settings.hub_url, "v1/me/avatar"))
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let _: AvatarMutationResponse = decode(response).await?;
+        self.bootstrap_for(&settings, &token).await
+    }
+
+    pub async fn remove_avatar(&self) -> Result<TeamRelaySnapshot, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .delete(endpoint(&settings.hub_url, "v1/me/avatar"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        self.bootstrap_for(&settings, &token).await
+    }
+
+    pub async fn avatar_data_url(
+        &self,
+        requested_team_id: Option<&str>,
+        principal_id: &str,
+        expected_sha256: &str,
+        display_size: Option<u16>,
+        reduced_motion: bool,
+    ) -> Result<Option<String>, String> {
+        validate_local_identifier("principal_id", principal_id)?;
+        let display_size = validate_avatar_display_size(display_size)?;
+        let expected_sha256 = expected_sha256.trim().to_ascii_lowercase();
+        if expected_sha256.len() != 64
+            || !expected_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("avatar_digest_invalid: expected SHA-256 digest is invalid".to_string());
+        }
+        let (settings, token) = self.configured()?;
+        let team_id = resolve_avatar_team_id(&settings.team_id, requested_team_id)?;
+        let mut query = vec![("team_id", team_id.to_string())];
+        if let Some(size) = display_size {
+            query.push(("size", size.to_string()));
+        }
+        if reduced_motion {
+            let Some(_) = display_size else {
+                return Err(
+                    "avatar_size_invalid: reduced motion requires a display variant".to_string(),
+                );
+            };
+            query.push(("reduced_motion", "true".to_string()));
+        }
+        let response = self
+            .client
+            .get(endpoint(
+                &settings.hub_url,
+                &format!("v1/principals/{principal_id}/avatar"),
+            ))
+            .bearer_auth(&token)
+            .query(&query)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        let source_sha256 = response
+            .headers()
+            .get("x-avatar-source-sha256")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_ascii_lowercase());
+        if source_sha256
+            .as_deref()
+            .is_some_and(|value| value != expected_sha256)
+        {
+            return Err(
+                "avatar_digest_mismatch: Hub avatar version changed during download".to_string(),
+            );
+        }
+        let content_digest = response
+            .headers()
+            .get("digest")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("sha-256="))
+            .map(str::to_string);
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .filter(|value| avatar_content_type_allowed(value))
+            .ok_or_else(|| {
+                "avatar_type_not_allowed: Hub returned an unsupported image".to_string()
+            })?;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_AVATAR_BYTES)
+        {
+            return Err("avatar_too_large: Hub returned more than 1.5 MiB".to_string());
+        }
+        let mut bytes = Vec::new();
+        let mut digest = Sha256::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(network_error)?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_AVATAR_BYTES as usize {
+                return Err("avatar_too_large: Hub returned more than 1.5 MiB".to_string());
+            }
+            digest.update(&chunk);
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.is_empty() {
+            return Err("hub_response_invalid: Hub returned an empty avatar".to_string());
+        }
+        let actual_digest = digest.finalize();
+        if !avatar_integrity_verified(
+            &expected_sha256,
+            source_sha256.as_deref(),
+            content_digest.as_deref(),
+            &actual_digest,
+        ) {
+            return Err(
+                "avatar_digest_mismatch: Hub avatar failed integrity validation".to_string(),
+            );
+        }
+        Ok(Some(format!(
+            "data:{content_type};base64,{}",
+            BASE64_STANDARD.encode(bytes)
+        )))
     }
 
     async fn bootstrap_for(
@@ -1222,6 +1394,46 @@ where
     }
 }
 
+fn validate_avatar_display_size(size: Option<u16>) -> Result<Option<u16>, String> {
+    match size {
+        None | Some(48) | Some(96) => Ok(size),
+        Some(_) => Err("avatar_size_invalid: supported avatar sizes are 48 and 96".to_string()),
+    }
+}
+
+fn resolve_avatar_team_id<'a>(
+    configured_team_id: &'a str,
+    requested_team_id: Option<&'a str>,
+) -> Result<&'a str, String> {
+    let team_id = requested_team_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| configured_team_id.trim());
+    if team_id.is_empty() {
+        return Err("team_relay_team_required: select a team first".to_string());
+    }
+    validate_local_identifier("team_id", team_id)?;
+    Ok(team_id)
+}
+
+fn avatar_integrity_verified(
+    expected_source_sha256: &str,
+    source_sha256: Option<&str>,
+    content_digest: Option<&str>,
+    actual_digest: &[u8],
+) -> bool {
+    let digest_matches =
+        content_digest.is_some_and(|value| value == BASE64_STANDARD.encode(actual_digest));
+    if let Some(source_sha256) = source_sha256 {
+        return source_sha256 == expected_source_sha256 && digest_matches;
+    }
+    let actual_sha256 = actual_digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    actual_sha256 == expected_source_sha256 && content_digest.is_none_or(|_| digest_matches)
+}
+
 fn validate_local_identifier(label: &str, value: &str) -> Result<(), String> {
     if value.is_empty()
         || value.len() > 160
@@ -1373,6 +1585,24 @@ async fn sha256_file(path: &Path) -> Result<String, String> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect())
+}
+
+fn avatar_extension_allowed(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif"
+            )
+        })
+}
+
+fn avatar_content_type_allowed(value: &str) -> bool {
+    matches!(
+        value,
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    )
 }
 
 fn endpoint(hub_url: &str, path: &str) -> String {
@@ -1610,6 +1840,67 @@ mod tests {
     }
 
     #[test]
+    fn avatar_display_sizes_are_limited_to_generated_variants() {
+        assert_eq!(validate_avatar_display_size(None).unwrap(), None);
+        assert_eq!(validate_avatar_display_size(Some(48)).unwrap(), Some(48));
+        assert_eq!(validate_avatar_display_size(Some(96)).unwrap(), Some(96));
+        for size in [0, 24, 384, u16::MAX] {
+            assert!(validate_avatar_display_size(Some(size)).is_err(), "{size}");
+        }
+    }
+
+    #[test]
+    fn avatar_download_prefers_the_rendered_team_scope() {
+        assert_eq!(
+            resolve_avatar_team_id("team-one", Some(" team-two ")).unwrap(),
+            "team-two"
+        );
+        assert_eq!(
+            resolve_avatar_team_id("team-one", None).unwrap(),
+            "team-one"
+        );
+        assert!(resolve_avatar_team_id("", None).is_err());
+        assert!(resolve_avatar_team_id("team-one", Some("../team-two")).is_err());
+    }
+
+    #[test]
+    fn avatar_variant_integrity_binds_thumbnail_to_current_source() {
+        let source_digest = Sha256::digest(b"source avatar");
+        let source_sha256 = source_digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let variant_digest = Sha256::digest(b"48px variant");
+        let variant_header = BASE64_STANDARD.encode(variant_digest);
+        let source_header = BASE64_STANDARD.encode(source_digest);
+
+        assert!(avatar_integrity_verified(
+            &source_sha256,
+            Some(&source_sha256),
+            Some(&variant_header),
+            &variant_digest,
+        ));
+        assert!(!avatar_integrity_verified(
+            &source_sha256,
+            Some(&"0".repeat(64)),
+            Some(&variant_header),
+            &variant_digest,
+        ));
+        assert!(!avatar_integrity_verified(
+            &source_sha256,
+            Some(&source_sha256),
+            None,
+            &variant_digest,
+        ));
+        assert!(avatar_integrity_verified(
+            &source_sha256,
+            None,
+            Some(&source_header),
+            &source_digest,
+        ));
+    }
+
+    #[test]
     fn older_agent_links_gain_safe_context_tracking_defaults() {
         let link: TeamRelayAgentSessionLink = serde_json::from_value(json!({
             "kind": "coding",
@@ -1621,5 +1912,23 @@ mod tests {
         assert_eq!(link.agent_id, None);
         assert!(link.material_ids.is_empty());
         assert_eq!(link.last_synced_sequence, 0);
+    }
+
+    #[test]
+    fn avatar_allowlist_supports_static_images_and_gif_only() {
+        for name in [
+            "avatar.png",
+            "avatar.JPG",
+            "avatar.jpeg",
+            "avatar.webp",
+            "avatar.gif",
+        ] {
+            assert!(avatar_extension_allowed(Path::new(name)), "{name}");
+        }
+        for name in ["avatar.svg", "avatar.html", "avatar.gif.exe", "avatar"] {
+            assert!(!avatar_extension_allowed(Path::new(name)), "{name}");
+        }
+        assert!(avatar_content_type_allowed("image/gif"));
+        assert!(!avatar_content_type_allowed("image/svg+xml"));
     }
 }

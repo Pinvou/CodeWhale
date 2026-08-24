@@ -17,9 +17,14 @@
 - [`migrations/0007_principal_email.sql`](migrations/0007_principal_email.sql)：加入服务内唯一邮箱账户，并允许旧成员后续绑定；
 - [`migrations/0008_thread_read_states.sql`](migrations/0008_thread_read_states.sql)：持久化跨设备已读游标，并提供任务未读更新计数；
 - [`migrations/0009_confirmed_transfers.sql`](migrations/0009_confirmed_transfers.sql)：加入接单确认、拒绝、撤回、改派、接受后材料授权，以及设备协议能力和实际转交模式；
+- [`migrations/0010_principal_avatars.sql`](migrations/0010_principal_avatars.sql)：加入独立的 Principal 头像元数据与私有文件存储；
+- [`migrations/0011_avatar_hardening.sql`](migrations/0011_avatar_hardening.sql)：收紧头像大小并登记经消毒的 48/96 px 显示变体；
+- [`migrations/0012_avatar_reduced_motion.sql`](migrations/0012_avatar_reduced_motion.sql)：为 GIF 显示变体增加首帧静态版本，供减少动态效果模式使用；
 - [`../team-relay-demo-implementation-plan.md`](../team-relay-demo-implementation-plan.md)：范围、部署、批次与验收计划。
 
 发生冲突时，以 `protocol.md` 的业务不变量为准；实现修改契约时必须在同一变更中同步 OpenAPI、数据库迁移草案和契约测试。
+
+`0011_avatar_hardening` 是 Draft 阶段的安全边界迁移：它会使 `0010` 期间上传、但未经完整解码重编码的头像失效，用户升级后需重新上传；原文件随后按孤儿文件宽限期清理。
 
 ## 演示基线
 
