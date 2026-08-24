@@ -617,6 +617,11 @@ SELECT $1,model_id,display_name,normalized_name,description,aliases,$2,model_cap
 	if err := appendCatalogAudit(ctx, tx, actor, "MODEL_LIFECYCLE_CHANGED", &modelID, &item.LifecycleStatus, &input.TargetStatus, version, input.Reason, input); err != nil {
 		return CatalogModel{}, err
 	}
+	if input.TargetStatus == "REMOVED" && input.ForceCancelInflight {
+		if _, err := tx.Exec(ctx, `INSERT INTO model_emergency_cancellation_policies(id,catalog_version,model_id,effective_at,requested_by,reason,created_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(catalog_version,model_id) DO NOTHING`, uuid.Must(uuid.NewV7()), version, modelID, effective, actor, input.Reason, now); err != nil {
+			return CatalogModel{}, err
+		}
+	}
 	result, err := scanCatalogModel(tx.QueryRow(ctx, catalogSelect+` WHERE e.catalog_version=$1 AND e.model_id=$2`, version, modelID))
 	if err != nil {
 		return CatalogModel{}, err

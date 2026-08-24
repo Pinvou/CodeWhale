@@ -888,6 +888,16 @@
         "file": "000020_manual_review_sla.up.sql",
         "version": 20,
         "sha256": "fe03a8e88cb8047884f38bc5ebde9aa711c0cd976a0d344041b097d6b66dd773"
+      },
+      {
+        "file": "000021_model_emergency_cancellation.down.sql",
+        "version": 21,
+        "sha256": "d0633e0ed04950dc8752d5951f9e73b2d93b4227c0072d876b12d6bde6355fa6"
+      },
+      {
+        "file": "000021_model_emergency_cancellation.up.sql",
+        "version": 21,
+        "sha256": "a6db7a849a5621d9c4b87caab044e8351a03a62240f6e5fc22f5d4c4a8e922f4"
       }
     ]
   }

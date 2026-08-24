@@ -209,6 +209,8 @@ Token 域以 `usage_requests` 保存独立执行、交付、取消和账务状�
 
 取消命令只按请求冻结的稳定 `user_id` 授权，不重新要求原 Session、活动上下文或组织成员关系。用量行锁统一裁决 Hold 建立、派发意图提升和取消：意图尚未形成时，取消先阻止提升，再幂等释放整个 Hold，并原子写入 `LOCAL_CONFIRMED + CANCELLED_BEFORE_DISPATCH + RELEASED`；意图已经或可能形成后，不因用户停止或断线提前释放 Hold。Adapter 必须声明 `EXPLICIT_CANCEL`、`STREAM_ABORT_CONFIRMED_CANCEL` 或 `UNSUPPORTED`，当前 OpenAI-compatible 与 New API 均明确为 `UNSUPPORTED`，所以 Gateway 只停止该客户端交付并继续受控消费原响应/查询原上游引用。`execution_status`、`cancel_status`、`delivery_status` 与 `settlement_status` 互不冒充，完成事实优先于较晚取消。
 
+安全、合规或供应商紧急 REMOVED 设置 `force_cancel_inflight` 时，目录版本与不可变紧急取消策略在同一发布事务提交。后台 Worker 按模型和生效时间持续补捉生效前已受理但仍在派发链的请求，以租约认领并标记 `MODEL_EMERGENCY` 来源：派发意图前复用正常取消链释放原 Hold；派发后中止本实例持有的上游传输，并把 Adapter 声明能力、本地是否实际中止和供应商取消结果分别留证。当前 Adapter 不支持供应商取消时明确记录 `UNSUPPORTED`，不把关闭连接推断为供应商停止生成。任务只有在原请求取得可信实际用量且 Hold 已 `SETTLED/RELEASED`，或复核期限终止并形成平台损失边界后才写 `CONVERGED`，最终证据冻结生成量、Hold、执行/取消/结算状态；紧急下架本身不产生免费、失败或取消成功语义。
+
 结算只消费 Adapter 归一化且达到可信等级的 Provider 最终或累计用量。Provider 用量、最后持久化事件序号、各客户端最后确认序号、用户停止时间和最终用量时间分别保存；最大 Hold、已发送字节和客户端已显示量只用于授权或展示，不能成为结算事实。请求冻结核对策略版本、最大执行时长、最终用量延迟和取消核对期限；期限内沿原 Hold 续租并退避查询，期限最后一次仍无可信用量时释放未结算 Hold、转 `REVIEW` 并建立 `customer_debit_prohibited` 平台损失案件。之后到达的用量只能补充平台成本证据，不得重新冻结、扣其他权益或形成用户应收。
 
 个人中心已移除自管 Token Account 页面；Gateway 仍保留普通用户 Token Account API，但会过滤平台托管账号，并禁止普通用户修改 `PLATFORM` 账号。平台后台的列表、详情、启停、路由和凭据检查反向限定 `management_mode=PLATFORM`，不会借运营权限读取或改写兼容 USER 账号；平台模型运营员可为个人、组织或节点作用域创建 PLATFORM 账号，组织模型策略始终不接受内部资源引用。`platform.tokens.read`、`platform.tokens.manage` 和 `platform.tokens.credentials.validate` 只授予平台模型运营角色，超级管理员及任何组织角色均不隐式获得。供应商密钥只在 Gateway 内存中解密，检查结果只返回 `VALID/INVALID`、稳定脱敏错误码和最小元数据，普通用户及后台接口均不返回明文、密文、Key ID、Provider 地址或原始错误。

@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
@@ -59,6 +60,24 @@ type Service struct {
 	authorizer             *authorization.Client
 	clientReadiness        *ClientReadinessService
 	breaker                *resilience.Breaker
+	activeUpstreamCancels  sync.Map
+}
+
+func (s *Service) registerActiveUpstream(usageID uuid.UUID, cancel context.CancelFunc) func() {
+	s.activeUpstreamCancels.Store(usageID, cancel)
+	return func() { s.activeUpstreamCancels.Delete(usageID) }
+}
+
+func (s *Service) abortActiveUpstream(usageID uuid.UUID) bool {
+	value, ok := s.activeUpstreamCancels.Load(usageID)
+	if !ok {
+		return false
+	}
+	cancel, ok := value.(context.CancelFunc)
+	if ok {
+		cancel()
+	}
+	return ok
 }
 
 func (s *Service) WithDefaultRoutes(provisioner DefaultRouteProvisioner) *Service {

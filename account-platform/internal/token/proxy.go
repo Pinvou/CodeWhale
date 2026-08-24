@@ -272,6 +272,7 @@ func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageReq
 	}
 	upstreamContext, cancelUpstream := context.WithTimeout(context.WithoutCancel(r.Context()), 2*time.Hour)
 	defer cancelUpstream()
+	defer s.registerActiveUpstream(usageRequest.ID, cancelUpstream)()
 	renewalFailed := s.renewHold(upstreamContext, cancelUpstream, usageRequest.ID, holdID)
 	response, err := s.upstream.Do(upstreamContext, envelope.BaseURL, envelope.Credential, envelope.RequestBody, usageRequest.ID)
 	if err != nil {

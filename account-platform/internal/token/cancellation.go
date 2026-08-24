@@ -69,7 +69,7 @@ func (r *PostgresRepository) RequestCancellation(ctx context.Context, usageID, u
 	if preDispatch {
 		cancelStatus = "CANCEL_REQUESTED"
 	}
-	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status=$2,delivery_status='USER_STOPPED',cancel_requested_at=$3,user_stopped_at=$3,cancel_reconciliation_deadline=$3 + make_interval(secs=>cancel_reconciliation_seconds),updated_at=$3 WHERE id=$1`, usageID, cancelStatus, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET cancel_status=$2,delivery_status='USER_STOPPED',cancellation_origin='USER',cancel_requested_at=$3,user_stopped_at=$3,cancel_reconciliation_deadline=$3 + make_interval(secs=>cancel_reconciliation_seconds),updated_at=$3 WHERE id=$1`, usageID, cancelStatus, now); err != nil {
 		return CancellationResult{}, false, err
 	}
 	evidence := map[string]any{"capability": "UNSUPPORTED", "pre_dispatch": preDispatch}
@@ -108,7 +108,7 @@ func (r *PostgresRepository) ConfirmPreDispatchCancellation(ctx context.Context,
 		return CancellationResult{}, ErrForbidden
 	}
 	now := r.now()
-	if err := transitionExecutionTx(ctx, tx, usageID, []string{"RECEIVED", "HOLD_RESERVING", "HOLD_RESERVED"}, "CANCELLED_BEFORE_DISPATCH", "user cancellation confirmed before dispatch intent", now); err != nil {
+	if err := transitionExecutionTx(ctx, tx, usageID, []string{"RECEIVED", "HOLD_RESERVING", "HOLD_RESERVED"}, "CANCELLED_BEFORE_DISPATCH", "cancellation confirmed before dispatch intent", now); err != nil {
 		return CancellationResult{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE usage_requests SET status='RELEASED',settlement_status='RELEASED',cancel_status='LOCAL_CONFIRMED',terminal_at=$2,updated_at=$2,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_stopped_at=NULL WHERE id=$1`, usageID, now); err != nil {
