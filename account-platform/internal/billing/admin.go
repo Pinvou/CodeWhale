@@ -49,6 +49,7 @@ type AdminPaymentOrder struct {
 	CreditMicrocredits         int64                `json:"credit_microcredits"`
 	Status                     string               `json:"status"`
 	FulfillmentStatus          string               `json:"fulfillment_status"`
+	CloseStatus                string               `json:"close_status"`
 	PaidAt                     *time.Time           `json:"paid_at,omitempty"`
 	PaymentSummary             json.RawMessage      `json:"payment_summary"`
 	RefundSummary              json.RawMessage      `json:"refund_summary"`
@@ -217,13 +218,13 @@ type AdminReconciliationCase struct {
 }
 
 type ReconciliationCaseCommand struct {
-	Action       string
-	OwnerID      *uuid.UUID
-	RepairAction string
-	ReviewResult string
-	Reason       string
+	Action         string
+	OwnerID        *uuid.UUID
+	RepairAction   string
+	ReviewResult   string
+	Reason         string
 	IdempotencyKey string
-	ActorID      uuid.UUID
+	ActorID        uuid.UUID
 }
 
 type adminRepository interface {
@@ -1062,7 +1063,7 @@ func (r *PostgresRepository) AdminWallets(ctx context.Context, limit int) ([]Wal
 }
 
 func (r *PostgresRepository) AdminPaymentOrders(ctx context.Context, filter AdminPaymentOrderFilter, limit int) ([]AdminPaymentOrder, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,merchant_order_no,provider_id,provider_version,product_id,COALESCE(provider_sku,''),COALESCE(primary_provider_transaction_id,''),COALESCE(mobile_e164,''),requester_id,payer_user_id,beneficiary_organization_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,payment_summary,refund_summary,chargeback_summary,attention_summary,summary_version,created_at,updated_at
+	rows, err := r.pool.Query(ctx, `SELECT id,merchant_order_no,provider_id,provider_version,product_id,COALESCE(provider_sku,''),COALESCE(primary_provider_transaction_id,''),COALESCE(mobile_e164,''),requester_id,payer_user_id,beneficiary_organization_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,close_status,paid_at,payment_summary,refund_summary,chargeback_summary,attention_summary,summary_version,created_at,updated_at
 		FROM payment_orders
 		WHERE ($1='' OR id::text ILIKE '%'||$1||'%' OR merchant_order_no ILIKE '%'||$1||'%' OR COALESCE(primary_provider_transaction_id,'') ILIKE '%'||$1||'%' OR EXISTS(SELECT 1 FROM payment_transactions transaction WHERE transaction.payment_order_id=payment_orders.id AND transaction.provider_transaction_id ILIKE '%'||$1||'%') OR COALESCE(mobile_e164,'') ILIKE '%'||$1||'%' OR COALESCE(provider_sku,'') ILIKE '%'||$1||'%')
 		AND ($2='' OR status=$2)
@@ -1075,7 +1076,7 @@ func (r *PostgresRepository) AdminPaymentOrders(ctx context.Context, filter Admi
 	for rows.Next() {
 		var item AdminPaymentOrder
 		var mobile string
-		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.ProviderID, &item.ProviderVersion, &item.ProductID, &item.ProviderSKU, &item.PrimaryProviderTransaction, &mobile, &item.RequesterID, &item.PayerUserID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.PaymentSummary, &item.RefundSummary, &item.ChargebackSummary, &item.AttentionSummary, &item.SummaryVersion, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.MerchantOrderNo, &item.ProviderID, &item.ProviderVersion, &item.ProductID, &item.ProviderSKU, &item.PrimaryProviderTransaction, &mobile, &item.RequesterID, &item.PayerUserID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.CloseStatus, &item.PaidAt, &item.PaymentSummary, &item.RefundSummary, &item.ChargebackSummary, &item.AttentionSummary, &item.SummaryVersion, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.MobileMasked = maskAdminMobile(mobile)
@@ -1356,7 +1357,7 @@ WHERE la.wallet_id=$1 ORDER BY lp.created_at DESC,lp.id LIMIT $2`, walletID, lim
 func (r *PostgresRepository) AdminPaymentOrder(ctx context.Context, orderID uuid.UUID) (AdminPaymentOrder, error) {
 	var item AdminPaymentOrder
 	var mobile string
-	err := r.pool.QueryRow(ctx, `SELECT id,merchant_order_no,provider_id,provider_version,product_id,COALESCE(provider_sku,''),COALESCE(primary_provider_transaction_id,''),COALESCE(mobile_e164,''),requester_id,payer_user_id,beneficiary_organization_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,paid_at,payment_summary,refund_summary,chargeback_summary,attention_summary,summary_version,created_at,updated_at FROM payment_orders WHERE id=$1`, orderID).Scan(&item.ID, &item.MerchantOrderNo, &item.ProviderID, &item.ProviderVersion, &item.ProductID, &item.ProviderSKU, &item.PrimaryProviderTransaction, &mobile, &item.RequesterID, &item.PayerUserID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.PaidAt, &item.PaymentSummary, &item.RefundSummary, &item.ChargebackSummary, &item.AttentionSummary, &item.SummaryVersion, &item.CreatedAt, &item.UpdatedAt)
+	err := r.pool.QueryRow(ctx, `SELECT id,merchant_order_no,provider_id,provider_version,product_id,COALESCE(provider_sku,''),COALESCE(primary_provider_transaction_id,''),COALESCE(mobile_e164,''),requester_id,payer_user_id,beneficiary_organization_id,wallet_id,channel,amount_fen,credit_microcredits,status,fulfillment_status,close_status,paid_at,payment_summary,refund_summary,chargeback_summary,attention_summary,summary_version,created_at,updated_at FROM payment_orders WHERE id=$1`, orderID).Scan(&item.ID, &item.MerchantOrderNo, &item.ProviderID, &item.ProviderVersion, &item.ProductID, &item.ProviderSKU, &item.PrimaryProviderTransaction, &mobile, &item.RequesterID, &item.PayerUserID, &item.BeneficiaryOrganizationID, &item.WalletID, &item.Channel, &item.AmountFen, &item.CreditMicrocredits, &item.Status, &item.FulfillmentStatus, &item.CloseStatus, &item.PaidAt, &item.PaymentSummary, &item.RefundSummary, &item.ChargebackSummary, &item.AttentionSummary, &item.SummaryVersion, &item.CreatedAt, &item.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AdminPaymentOrder{}, ErrNotFound
 	}

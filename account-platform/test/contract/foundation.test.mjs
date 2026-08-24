@@ -214,7 +214,7 @@ test('late provider payments require audited operator repair before fulfillment'
   assert.match(migration, /CREATE TABLE payment_order_repairs/);
   assert.match(migration, /payment_order_id UUID NOT NULL UNIQUE/);
   assert.match(lifecycleMigration, /payment_order_repairs_payment_transaction_id_key UNIQUE/);
-  assert.match(merger, /classifyPaymentTransaction\(order\.ExpiresAt, \*provider\.PaidAt, p\.Policy\(\), priorTransactions, repair\)/);
+  assert.match(merger, /classifyPaymentTransactionAfterClose\(order\.ExpiresAt, \*provider\.PaidAt, order\.CloseStatus, p\.Policy\(\), priorTransactions, repair\)/);
   assert.match(merger, /policy\.RequiresReview\(expiresAt, paidAt\)/);
   assert.match(reconciliation, /provider\.Status != "SUCCESS"/);
   assert.match(reconciliation, /INSERT INTO payment_order_repairs/);

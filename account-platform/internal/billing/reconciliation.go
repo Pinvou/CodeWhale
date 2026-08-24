@@ -257,7 +257,7 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET last_successful_query_at=$2,last_authoritative_unpaid_at=CASE WHEN $3 AND $4 IN ('CLOSED','FAILED') THEN $2 ELSE last_authoritative_unpaid_at END,updated_at=$2 WHERE id=$1`, order.ID, p.now(), p.Capabilities().AuthoritativeUnpaidTerminal, providerOrder.Status); err != nil {
 		return PaymentOrder{}, err
 	}
-	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET payment_url=NULLIF($2,''),qr_data=NULLIF($3,''),provider_status=NULLIF($4,''),provider_trace_id=NULLIF($5,''),updated_at=$6 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, providerOrder.ProviderStatus, providerOrder.ProviderTraceID, p.now()); err != nil {
+	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET payment_url=CASE WHEN close_status='OPEN' THEN NULLIF($2,'') END,qr_data=CASE WHEN close_status='OPEN' THEN NULLIF($3,'') END,provider_status=NULLIF($4,''),provider_trace_id=NULLIF($5,''),updated_at=$6 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, providerOrder.ProviderStatus, providerOrder.ProviderTraceID, p.now()); err != nil {
 		return PaymentOrder{}, err
 	}
 	order.PaymentURL, order.QRData = providerOrder.PaymentURL, providerOrder.QRData
@@ -351,13 +351,39 @@ func (p *PaymentCoordinator) applyProviderTerminalStatus(ctx context.Context, or
 	if status != "CLOSED" && status != "FAILED" {
 		return PaymentOrder{}, fmt.Errorf("unsupported provider terminal status %q", status)
 	}
-	_, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders
-SET status=$2,close_status=$2,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$3
-WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, status, p.now())
+	tx, err := p.repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return PaymentOrder{}, err
 	}
-	return getPaymentOrderByID(ctx, p.repository.pool, order.ID, false)
+	defer tx.Rollback(ctx)
+	current, err := getPaymentOrderByID(ctx, tx, order.ID, true)
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	now := p.now()
+	if status == "FAILED" {
+		if current.CloseStatus != "EXPIRED" {
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='FAILED',close_status='EXPIRED',payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND close_status IN ('OPEN','CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING')`, order.ID, now)
+		}
+	} else if current.CloseStatus != "PROVIDER_CLOSED" {
+		if current.CloseStatus == "OPEN" {
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET close_status='CLOSE_REQUESTED',close_requested_at=COALESCE(close_requested_at,$2),updated_at=$2 WHERE id=$1 AND close_status='OPEN'`, order.ID, now)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET close_status='LOCALLY_CLOSED_EXTERNAL_PENDING',locally_closed_at=COALESCE(locally_closed_at,$2),updated_at=$2 WHERE id=$1 AND close_status='CLOSE_REQUESTED'`, order.ID, now)
+		}
+		if err == nil {
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='CLOSED',close_status='PROVIDER_CLOSED',provider_closed_at=COALESCE(provider_closed_at,$2),payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,attention_summary='NORMAL',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND close_status='LOCALLY_CLOSED_EXTERNAL_PENDING'`, order.ID, now)
+		}
+	}
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	updated, err := getPaymentOrderByID(ctx, tx, order.ID, false)
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	return updated, tx.Commit(ctx)
 }
 
 func (p *PaymentCoordinator) applyQueriedPayment(ctx context.Context, orderID uuid.UUID, provider ProviderOrder, reviewed bool) (PaymentOrder, error) {
@@ -583,13 +609,18 @@ func (p *PaymentCoordinator) persistReconciliation(ctx context.Context, channel 
 			return ReconciliationRun{}, err
 		}
 	}
+	now := p.now()
+	for _, row := range providerRows {
+		if err := p.mergeProviderBillEvidenceWithinTransaction(ctx, tx, row, now); err != nil {
+			return ReconciliationRun{}, err
+		}
+	}
 	start, end := reconciliationBusinessDateRange(date)
 	internalFacts, err := p.listFourWayReconciliationFacts(ctx, tx, channel, start, end)
 	if err != nil {
 		return ReconciliationRun{}, err
 	}
 	differences := CompareFourWayReconciliation(providerRows, internalFacts)
-	now := p.now()
 	run := ReconciliationRun{ID: uuid.Must(uuid.NewV7()), ProviderID: p.Capabilities().ProviderID, ProviderVersion: p.Capabilities().Version, Channel: channel, BusinessDate: date.Format("2006-01-02"), SourceMode: sourceMode, RequestedBy: importActorID, Status: "COMPLETED", ProviderRowCount: len(providerRows), CaseCount: len(differences), StartedAt: now, CompletedAt: now}
 	if importDigest != "" {
 		run.InputDigest = &importDigest
@@ -655,6 +686,66 @@ func (p *PaymentCoordinator) persistReconciliation(ctx context.Context, channel 
 		}
 	}
 	return run, tx.Commit(ctx)
+}
+
+func (p *PaymentCoordinator) mergeProviderBillEvidenceWithinTransaction(ctx context.Context, tx pgx.Tx, row ProviderBillEntry, receivedAt time.Time) error {
+	payload, err := json.Marshal(row)
+	if err != nil {
+		return err
+	}
+	entryType := normalizedBillEntryType(row)
+	reference := billReference(row)
+	evidenceKey := fmt.Sprintf("%s|%s|%s|%s", entryType, reference, strings.TrimSpace(row.MerchantOrderNo), row.PaidAt.UTC().Format(time.RFC3339Nano))
+	order, orderErr := getPaymentOrderForUpdate(ctx, tx, strings.TrimSpace(row.MerchantOrderNo))
+	matchedOrder := orderErr == nil && order.ProviderID == p.Capabilities().ProviderID && order.ProviderVersion == p.Capabilities().Version
+	if orderErr != nil && !errors.Is(orderErr, pgx.ErrNoRows) {
+		return orderErr
+	}
+	status := strings.ToUpper(strings.TrimSpace(row.Status))
+	isSuccessfulPayment := entryType == "PAYMENT" && (status == "SUCCESS" || status == "PAID" || status == "COMPLETED") && strings.TrimSpace(row.ChannelTransactionID) != ""
+	if matchedOrder && isSuccessfulPayment {
+		transactionID := strings.TrimSpace(row.ChannelTransactionID)
+		paidAt := row.PaidAt.UTC()
+		providerOrder := ProviderOrder{
+			MerchantOrderNo:      row.MerchantOrderNo,
+			Status:               "SUCCESS",
+			Channel:              row.Channel,
+			AmountFen:            row.AmountFen,
+			Currency:             row.Currency,
+			ChannelTransactionID: &transactionID,
+			PaidAt:               &paidAt,
+			ProviderStatus:       row.Status,
+		}
+		_, _, mergeErr := p.mergeSuccessfulPaymentWithinTransaction(ctx, tx, order, "BILL", evidenceKey, payload, providerOrder, false, receivedAt)
+		if mergeErr == nil || errors.Is(mergeErr, ErrConflict) {
+			return nil
+		}
+		return mergeErr
+	}
+
+	var orderID *uuid.UUID
+	var transactionID *uuid.UUID
+	if matchedOrder {
+		orderID = &order.ID
+		var found uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT id FROM payment_transactions WHERE payment_order_id=$1 AND provider_transaction_id=$2`, order.ID, strings.TrimSpace(row.ChannelTransactionID)).Scan(&found); err == nil {
+			transactionID = &found
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
+	digest := sha256.Sum256(payload)
+	evidenceID := uuid.Must(uuid.NewV7())
+	_, err = tx.Exec(ctx, `INSERT INTO payment_evidence(
+id,payment_order_id,payment_transaction_id,evidence_type,provider_id,provider_version,evidence_key,
+merchant_order_no,provider_transaction_id,amount_fen,currency,provider_status,provider_event_at,
+received_at,payload_digest,payload_snapshot,merge_result)
+VALUES($1,$2,$3,'BILL',$4,$5,$6,$7,NULLIF($8,''),$9,$10,NULLIF($11,''),$12,$13,$14,$15,'REVIEW_REQUIRED')
+ON CONFLICT(provider_id,provider_version,evidence_type,evidence_key,payload_digest) DO NOTHING`,
+		evidenceID, orderID, transactionID, p.Capabilities().ProviderID, p.Capabilities().Version, evidenceKey,
+		row.MerchantOrderNo, strings.TrimSpace(row.ChannelTransactionID), row.AmountFen, row.Currency, row.Status,
+		row.PaidAt.UTC(), receivedAt, hex.EncodeToString(digest[:]), json.RawMessage(payload))
+	return err
 }
 
 type ReconciliationInternalFact struct {

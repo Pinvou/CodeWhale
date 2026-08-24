@@ -440,7 +440,7 @@ components:
     RechargeOrder:
       type: object
       additionalProperties: false
-      required: [order_id, status, fulfillment_status, product_id, amount_fen, credit_microcredits, channel, expires_at]
+      required: [order_id, status, fulfillment_status, close_status, product_id, amount_fen, credit_microcredits, channel, expires_at]
       properties:
         order_id:
           type: string
@@ -451,6 +451,9 @@ components:
         fulfillment_status:
           type: string
           enum: [PENDING, CREDITED, MANUAL_REVIEW]
+        close_status:
+          type: string
+          enum: [OPEN, CLOSE_REQUESTED, LOCALLY_CLOSED_EXTERNAL_PENDING, PROVIDER_CLOSED, EXPIRED]
         product_id:
           type: string
         amount_fen:
@@ -482,7 +485,7 @@ components:
     RechargeOrderHistoryItem:
       type: object
       additionalProperties: false
-      required: [order_id, pinvou_order_id, provider_order_reference, product_id, plan_name, sku_code, order_type, amount_fen, display_points, channel, status, fulfillment_status, invoice_status, expires_at, created_at]
+      required: [order_id, pinvou_order_id, provider_order_reference, product_id, plan_name, sku_code, order_type, amount_fen, display_points, channel, status, fulfillment_status, close_status, invoice_status, expires_at, created_at]
       properties:
         order_id:
           type: string
@@ -519,6 +522,9 @@ components:
         fulfillment_status:
           type: string
           enum: [PENDING, CREDITED, MANUAL_REVIEW]
+        close_status:
+          type: string
+          enum: [OPEN, CLOSE_REQUESTED, LOCALLY_CLOSED_EXTERNAL_PENDING, PROVIDER_CLOSED, EXPIRED]
         expires_at:
           type: string
           format: date-time

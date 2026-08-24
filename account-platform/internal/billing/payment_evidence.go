@@ -192,7 +192,7 @@ FROM payment_transactions WHERE provider_transaction_id=$1 FOR UPDATE`, *provide
 				return order, evidenceID, err
 			}
 			resolvedStatus := "PAID"
-			if transaction.PaidAt != nil && !order.ExpiresAt.After(*transaction.PaidAt) {
+			if transaction.PaidAt != nil && (!order.ExpiresAt.After(*transaction.PaidAt) || (order.CloseStatus != "" && order.CloseStatus != "OPEN")) {
 				resolvedStatus = "LATE_PAID"
 			}
 			if _, err := tx.Exec(ctx, `UPDATE payment_transactions SET status=$2,fulfillment_status='CREDITED',fulfilled_at=$3,updated_at=$3,evidence_version=evidence_version+1 WHERE id=$1 AND fulfillment_status='REVIEW_REQUIRED'`, transaction.ID, resolvedStatus, now); err != nil {
@@ -219,7 +219,7 @@ FROM payment_transactions WHERE provider_transaction_id=$1 FOR UPDATE`, *provide
 		return order, uuid.Nil, err
 	}
 	transaction.ID = uuid.Must(uuid.NewV7())
-	transactionStatus, fulfillmentStatus, requiresReview := classifyPaymentTransaction(order.ExpiresAt, *provider.PaidAt, p.Policy(), priorTransactions, repair)
+	transactionStatus, fulfillmentStatus, requiresReview := classifyPaymentTransactionAfterClose(order.ExpiresAt, *provider.PaidAt, order.CloseStatus, p.Policy(), priorTransactions, repair)
 	_, err = tx.Exec(ctx, `INSERT INTO payment_transactions(
 id,payment_order_id,provider_id,provider_version,channel,provider_transaction_id,status,fulfillment_status,
 amount_fen,currency,source,provider_status,provider_paid_at,verified_at,created_at,updated_at)
@@ -290,8 +290,12 @@ func reopenArchivedLatePaymentCase(ctx context.Context, tx pgx.Tx, orderID uuid.
 }
 
 func classifyPaymentTransaction(expiresAt, paidAt time.Time, policy PaymentPolicy, priorTransactions int, repair bool) (string, string, bool) {
+	return classifyPaymentTransactionAfterClose(expiresAt, paidAt, "OPEN", policy, priorTransactions, repair)
+}
+
+func classifyPaymentTransactionAfterClose(expiresAt, paidAt time.Time, closeStatus string, policy PaymentPolicy, priorTransactions int, repair bool) (string, string, bool) {
 	status := "PAID"
-	if !expiresAt.After(paidAt) {
+	if !expiresAt.After(paidAt) || (closeStatus != "" && closeStatus != "OPEN") {
 		status = "LATE_PAID"
 	}
 	requiresReview := (policy.RequiresReview(expiresAt, paidAt) || priorTransactions > 0) && !repair
@@ -314,16 +318,33 @@ FROM payment_transactions WHERE payment_order_id=$1), refunds AS (
 SELECT COALESCE(sum(amount_fen) FILTER (WHERE status='SUCCEEDED'),0) succeeded_amount_fen,
        count(*) FILTER (WHERE status='REQUESTED') pending_count,
        count(*) FILTER (WHERE status='MANUAL_REVIEW') review_count
-FROM refunds WHERE payment_order_id=$1)
+FROM refunds WHERE payment_order_id=$1), forced_refunds AS (
+SELECT count(*) FILTER (WHERE status='REVIEW_REQUIRED') review_count
+FROM forced_refund_cases WHERE payment_order_id=$1), chargebacks AS (
+SELECT count(*) FILTER (WHERE status='REVIEW_REQUIRED') review_count,
+       count(*) FILTER (WHERE status='CONFIRMED') open_count,
+       COALESCE(sum(transaction.amount_fen) FILTER (WHERE chargeback.status='CONFIRMED'),0) lost_amount_fen
+FROM chargeback_cases chargeback
+JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id
+WHERE chargeback.payment_order_id=$1), receivables AS (
+SELECT count(*) FILTER (WHERE outstanding_microcredits>0) open_count
+FROM receivables WHERE payment_order_id=$1), anomalies AS (
+SELECT count(*) FILTER (WHERE status='OPEN') open_count
+FROM payment_anomaly_cases WHERE payment_order_id=$1)
 UPDATE payment_orders payment SET
  payment_summary=jsonb_build_object('paid_count',facts.paid_count,'paid_amount_fen',facts.paid_amount_fen,'late_paid_count',facts.late_paid_count,'review_count',facts.review_count),
- refund_summary=jsonb_build_object('succeeded_amount_fen',refunds.succeeded_amount_fen,'pending_count',refunds.pending_count,'review_count',refunds.review_count),
- attention_summary=CASE WHEN facts.review_count>0 OR refunds.review_count>0 THEN 'REVIEW_REQUIRED' WHEN refunds.pending_count>0 THEN 'PROCESSING' ELSE 'NORMAL' END,
+ refund_summary=jsonb_build_object('succeeded_amount_fen',refunds.succeeded_amount_fen,'pending_count',refunds.pending_count,'review_count',refunds.review_count,'forced_review_count',forced_refunds.review_count),
+ chargeback_summary=jsonb_build_object('review_count',chargebacks.review_count,'open_count',chargebacks.open_count,'lost_amount_fen',chargebacks.lost_amount_fen),
+ attention_summary=CASE
+   WHEN receivables.open_count>0 THEN 'RECEIVABLE_OPEN'
+   WHEN facts.review_count>0 OR refunds.review_count>0 OR forced_refunds.review_count>0 OR chargebacks.review_count>0 OR anomalies.open_count>0 THEN 'REVIEW_REQUIRED'
+   WHEN refunds.pending_count>0 OR payment.close_status IN ('CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING') THEN 'PROCESSING'
+   ELSE 'NORMAL' END,
  status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.late_paid_count>0 THEN 'PAID_LATE' WHEN facts.paid_count>0 THEN 'PAID' ELSE payment.status END,
  fulfillment_status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.paid_count>0 AND facts.credited_count=facts.paid_count THEN 'CREDITED' ELSE payment.fulfillment_status END,
  primary_provider_transaction_id=COALESCE(payment.primary_provider_transaction_id,facts.primary_transaction),
  paid_at=COALESCE(payment.paid_at,facts.first_paid_at),summary_version=summary_version+1,updated_at=$2
-FROM facts,refunds WHERE payment.id=$1`, orderID, now)
+FROM facts,refunds,forced_refunds,chargebacks,receivables,anomalies WHERE payment.id=$1`, orderID, now)
 	if err != nil {
 		return PaymentOrder{}, err
 	}

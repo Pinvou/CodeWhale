@@ -35,3 +35,18 @@ func TestClassifyPaymentTransaction(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyPaymentTransactionAfterLocalClose(t *testing.T) {
+	expiresAt := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC)
+	status, fulfillment, review := classifyPaymentTransactionAfterClose(
+		expiresAt,
+		expiresAt.Add(-time.Minute),
+		"LOCALLY_CLOSED_EXTERNAL_PENDING",
+		PaymentPolicy{MaximumLateConfirmation: time.Hour},
+		0,
+		false,
+	)
+	if status != "LATE_PAID" || fulfillment != "PENDING" || review {
+		t.Fatalf("closed payment classification = (%q, %q, %t), want LATE_PAID, PENDING, false", status, fulfillment, review)
+	}
+}

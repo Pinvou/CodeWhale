@@ -2163,7 +2163,7 @@ components:
     PaymentOrderDetail:
       type: object
       additionalProperties: true
-      required: [order_id, merchant_order_no, provider_id, provider_version, payer_user_id, wallet_id, payment_summary, refund_summary, chargeback_summary, attention_summary, summary_version, transactions, entitlement_packages, evidence]
+      required: [order_id, merchant_order_no, provider_id, provider_version, payer_user_id, wallet_id, close_status, payment_summary, refund_summary, chargeback_summary, attention_summary, summary_version, transactions, entitlement_packages, evidence]
       properties:
         order_id: { type: string, format: uuid }
         merchant_order_no: { type: string }
@@ -2172,6 +2172,7 @@ components:
         payer_user_id: { type: string, format: uuid }
         beneficiary_organization_id: { type: string, format: uuid }
         wallet_id: { type: string, format: uuid }
+        close_status: { type: string, enum: [OPEN, CLOSE_REQUESTED, LOCALLY_CLOSED_EXTERNAL_PENDING, PROVIDER_CLOSED, EXPIRED] }
         payment_summary: { type: object, additionalProperties: true }
         refund_summary: { type: object, additionalProperties: true }
         chargeback_summary: { type: object, additionalProperties: true }

@@ -614,6 +614,16 @@
         "file": "000032_event_replay_audit.up.sql",
         "version": 32,
         "sha256": "733b1f380b9f4cc848c28fabefa4621e42db67466bcb2fba9b4fbbcf4d677a61"
+      },
+      {
+        "file": "000033_payment_convergence_states.down.sql",
+        "version": 33,
+        "sha256": "46348486c6d963d83e1775e13cec93c200957717206e9170e4112f7f19d76706"
+      },
+      {
+        "file": "000033_payment_convergence_states.up.sql",
+        "version": 33,
+        "sha256": "8c90a1820ebf192f9668446434438d05b946436cf1806cadbe540eed6c613245"
       }
     ],
     "payment-simulator": [

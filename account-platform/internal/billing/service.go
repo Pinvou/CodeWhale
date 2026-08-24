@@ -364,6 +364,7 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
+	maskClosedPaymentInstructions(&order)
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, order)
 }
