@@ -288,9 +288,9 @@
 | NFR-41 | 已实现 | DOC_CURRENT | GO-UNIT; REQUEST-ADMISSION | NOT_DEPLOYED | 下单按付款人分钟/日、受益组织小时、来源IP分钟和Provider安全容量原子计数；订单查询限12次/分钟并以客户端5秒与Provider最小间隔中的较慢值合并真实查询；退款按付款人3次/小时，同流水/权益包未终结唯一性由目标退款状态机保证；合法签名回调不受用户限流影响，先持久化再异步幂等归并 |
 | NFR-42 | 已实现 | DOC_CURRENT | GO-UNIT; REQUEST-ADMISSION | NOT_DEPLOYED | 新逻辑调用在持久请求和Hold之前按用户60次/分钟与5在途、组织成员5在途、组织600次/分钟与100在途，以及模型、路由、全局速率/并发原子准入；幂等重放先命中原请求而不重复计数，超限返回429和精确Retry-After且不调用上游 |
 | NFR-43 | 已实现 | DOC_CURRENT | GO-UNIT; TENANT-ISOLATION-MATRIX | NOT_DEPLOYED | 发布合同矩阵覆盖个人间、组织间、节点父/兄弟/作用域外后代、角色互换、活动上下文、撤权/到期/移除/组织停用/注销、猜测ID、批量混入、组织搜索、旧授权缓存和伪造事件；拒绝路径使用同形NotFound/PermissionDenied，允许查询按组织/成员过滤；当前没有租户公开导出接口，新增时必须先扩展矩阵 |
-| NFR-44 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK | NOT_DEPLOYED | 通用熔断器及支付创建/查询/关闭/退款/账单和模型派发接入已实现，按Provider+能力+路由隔离，满足60秒/20样本/50%、连续5次、30秒三探针、连续三成功、指数重开至15分钟和业务拒绝排除；高风险不确定操作不得成为半开探针；缺真实Provider错误分类、只读探针、告警与跨副本环境验收 |
+| NFR-44 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 熔断器及支付/模型接入已实现；云端UAT没有支付流水和真实Provider错误样本，未覆盖业务拒绝排除、只读半开探针、指数重开、跨副本一致性与告警投递 |
 | NFR-45 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; ACCOUNT-CLOSURE-SAGA; LATE-PAYMENT-REVIEW; PAYMENT-ANOMALY-RECONCILIATION; ROUTE-PROVISIONING-ELIGIBILITY; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | Account、Billing、Token 使用统一冻结时钟和不可变案件/转派/止损证据；注册、资料、注销、支付/退款/拒付、对账、路由 Provisioning、用量及高风险命令修复均接入 P0/P1/P2，生产缺值班链即拒绝启动；任一截止逾期实际转派 owner，P0/P1 止损逾期会停用关联 Provider/商品/路由或暂停高风险命令，而非只通知 |
-| NFR-46 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK | NOT_DEPLOYED | 生产配置强制至少三个独立NTP源，使用中位偏差，超过250ms告警、超过1秒退出就绪并阻止新的写操作；Helm显式放行授时源UDP/123；缺真实三源、100ms目标连续证明、250ms/1s偏差注入与告警投递验收 |
+| NFR-46 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT宿主机Chrony已同步并可见9源，当前样本偏差约-2.3ms至+2.9ms；应用仍为development Compose，缺三源中位配置、100ms连续证明、250ms/1s注入、readiness/写拒绝与告警投递验收 |
 | NFR-47 | 已实现 | DOC_CURRENT | GO-UNIT; CLIENT-COMPATIBILITY-LIFECYCLE | NOT_DEPLOYED | 四服务共用版本清单与响应头，三版合同矩阵、90天支持、60天通知、受审批安全例外及稳定426已闭环；每次正式发布必须更新真实发布日期与淘汰时间 |
 | NFR-48 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-EXPORT-PROTECTION | NOT_DEPLOYED | 服务端任务要求 `platform.audit.export`、15分钟近期认证、明确范围和原因；默认不可逆主体标识及字段脱敏，未脱敏字段另需最长24小时临时 `platform.audit.pii.export`；执行31天/10万行/500MB、每用户2并发/10每日配额，加密签名水印文件只允许15分钟内单次成功下载；缺生产密钥托管、大规模及真实并发验收 |
 | UI-16 | 已实现 | DOC_CURRENT | DESKTOP-39; I18N-RELEASE-GATE | NOT_DEPLOYED | 桌面账号弹层、Web 个人中心和管理后台共用精确中/英/日词条形状，未知服务端错误只显示本地化安全兜底；缺键、空词条、回退、单语硬编码或构建制品缺词条会同时阻断 verify 和客户端发布 |
@@ -862,9 +862,9 @@
 | NFR-41 | 支付多维限流 | 已实现：付款人、受益组织、来源IP、订单查询、退款动作和Provider均采用原子准入；真实查询按较慢能力间隔合并，合法回调先持久化后异步处理且不受用户限流影响。 |
 | NFR-42 | 模型调用多维限流 | 已实现：用户、组织成员、组织、模型、路由和全局速率/在途容量在Hold前原子校验；幂等重放不重复计数，超限返回429与Retry-After且不触达上游。 |
 | NFR-43 | 租户隔离验证矩阵 | 已实现：每次合同发布自动执行15个拒绝向量，并检查直接对象、批量、搜索、缓存、异步事件和无泄露错误；当前无租户公开导出面，未来新增导出路由会先触发门禁失败。 |
-| NFR-44 | Provider 熔断 | 部分实现：通用精确阈值熔断器已接入支付和模型Provider，高风险不确定操作不参与自动半开重发；缺生产Provider分类、只读探针、跨副本和告警验收。 |
+| NFR-44 | Provider 熔断 | 通用精确阈值熔断器已接入支付和模型 Provider；云端 UAT 没有真实错误样本，仍缺业务分类、只读探针、跨副本和告警验收。 |
 | NFR-45 | 人工队列 SLA | 已实现：三领域统一从源案件创建时间冻结 P0/P1 7×24 与 P2 上海工作时 SLA，转派不重置；注册/资料/注销、支付/退款/拒付/对账、路由 Provisioning、用量和高风险命令队列均保存责任人及不可变时间线，逐截止自动升级至配置的下一值班负责人，P0/P1 止损逾期执行 Provider、支付商品、路由或高风险命令暂停评估。 |
-| NFR-46 | 统一可信时钟 | 部分实现：生产三源NTP、中位偏差、250ms告警、1秒readiness/新写入门禁及UDP最小网络出口已实现；缺真实授时源和偏差/告警环境证据。 |
+| NFR-46 | 统一可信时钟 | 云端 UAT 宿主机 Chrony 已同步9源且当前偏差为毫秒级；生产三源中位配置、100ms连续证明、250ms/1s注入和告警/readiness/写拒绝证据仍缺失。 |
 | NFR-47 | 桌面 API 兼容与淘汰 | 已实现：N/N-1/N-2共用合同矩阵；清单启动校验90天支持和60天通知，四服务返回契约/最小版本/Sunset头，桌面直连与平台模型请求携带精确版本，过期远程写操作稳定返回426及HTTPS升级入口，不影响本地模型和本地读取。 |
 | NFR-48 | 审计导出保护 | 已实现：服务端任务要求专用权限、15分钟近期认证、明确范围和原因，执行默认脱敏/临时PII授权、加密签名水印、31天/10万行/500MB、2并发/10每日及15分钟一次性下载。 |
 | NFR-49 | 模型结果重放载荷最小化 | 已实现：在线24小时/30天/90天硬上限、自动清除、主体正文即时删除内部入口、派发正文最小化及独立受限案件迁移/解除后30天清除已建立；生产备份生命周期证据随 APT-037 验收。 |
