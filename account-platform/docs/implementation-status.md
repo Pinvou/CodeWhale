@@ -278,11 +278,11 @@
 | NFR-31 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 十万Hold、200稳态/500突发60秒、锁等待P99和守恒/幂等证据已进入门禁；缺真实数据库压测 |
 | NFR-32 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 百万订单、三百万流水、50下单/200归并及零重复资金效果已进入门禁；缺真实规模数据报告 |
 | NFR-33 | 部分实现 | DOC_CURRENT | PERFORMANCE-RELEASE-GATE | NOT_DEPLOYED | 每流百万保留、十万积压15分钟排空、50%新流量及高水位停止写入已进入门禁；缺真实NATS积压演练 |
-| NFR-34 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 资金60秒、账号配置300秒目标已进入机器策略并以四库WAL时效和实测恢复事实失败关闭；缺真实生产等价恢复报告 |
-| NFR-35 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 核心3600秒、非关键14400秒目标及安全降级口径已进入证据门禁；缺真实故障计时和能力验收 |
-| NFR-36 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 连续WAL、日增量、周全量、迁移前快照、TLS/AES-256、KMS分离和异地不可变副本均为强制证据；缺真实备份系统配置与可恢复证明 |
-| NFR-37 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 月度35天、季度100天、年度400天新鲜度以及失败整改复测已进入门禁和演练模板；缺真实月季年演练记录 |
-| NFR-38 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 支付证据/账本/审计/计费用量1095天、普通日志90天及30天清除SLA已机器化，并强制逐类扫描收据；缺真实归档、法律保全和删除运行证据 |
+| NFR-34 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 资金60秒、账号配置300秒门禁已实现；本次只有迁移前同机快照，没有四库连续WAL时效或隔离恢复后的实测RPO |
+| NFR-35 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 核心3600秒、非关键14400秒目标已机器化；本次未执行隔离恢复、故障计时和安全降级能力验收 |
+| NFR-36 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 本次五类迁移前备份的SHA-256与最小可读性检查通过，但仍是同机快照；缺连续WAL、日增量、周全量、TLS/AES-256、独立KMS和异地不可变副本 |
+| NFR-37 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 月度35天、季度100天、年度400天门禁与模板已实现；当前云端UAT没有实际月季年演练、失败整改和复测历史 |
+| NFR-38 | 部分实现 | DOC_CURRENT | RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 1095天财务证据、90天普通日志及30天清除SLA已机器化；本次没有归档、法律保全、到期扫描与删除收据 |
 | NFR-39 | 已实现 | DOC_CURRENT | GO-UNIT; AUTH-RISK | NOT_DEPLOYED | 公网密码/短信 Direct Grant 与 Refresh 精确路由到 Identity Redis 原子门禁，覆盖来源IP分钟/日、设备、标识失败、已学习稳定用户、Session和Provider；失败采用1～30秒渐进延迟、15分钟锁定和750ms统一耗时桶，成功不清空风险计数，未知/已知账号统一为 `invalid_grant` |
 | NFR-40 | 已实现 | DOC_CURRENT | GO-UNIT; AUTH-RISK | NOT_DEPLOYED | 短信发送保留60秒/5次小时限制并增加手机号日、IP小时/日、设备、用途和Provider 80%配额；核验使用独立单向摘要计数，图形挑战一次性消费，所有限流返回按最早窗口释放计算的统一 `retry_after` |
 | NFR-41 | 已实现 | DOC_CURRENT | GO-UNIT; REQUEST-ADMISSION | NOT_DEPLOYED | 下单按付款人分钟/日、受益组织小时、来源IP分钟和Provider安全容量原子计数；订单查询限12次/分钟并以客户端5秒与Provider最小间隔中的较慢值合并真实查询；退款按付款人3次/小时，同流水/权益包未终结唯一性由目标退款状态机保证；合法签名回调不受用户限流影响，先持久化再异步幂等归并 |
@@ -417,8 +417,8 @@
 | NFR-06 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 注册、资料、钱包、路由、支付、退款、模型请求、结算、事件消费及人工重放均使用稳定命名空间、请求指纹或事件 ID；同键异请求失败关闭。 |
 | NFR-07 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 三服务使用事务 Outbox/Inbox、版本间隙门禁、至少一次 Relay 和死信；人工重放校验不可变摘要并原子登记审计，不使用分布式事务。 |
 | NFR-08 | 已实现 | DOC_CURRENT | GO-UNIT; GLOBAL-CONTEXT | NOT_DEPLOYED | 用户级 context_version 数据库单调保护，切换要求 expected_context_version；响应头跨 Account、Token、Portal 与桌面桥接传播，客户端只接受更高版本并刷新缓存 |
-| NFR-09 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 仓库清单拒绝历史迁移改名/删除/改写且仅追加更高版本，目标库再次校验已执行SHA；生产迁移强制24小时内快照并输出迁移后摘要，缺真实环境证据 |
-| NFR-10 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE | NOT_DEPLOYED | 版本目录、恢复/回滚runbook、只读核验SQL及生产证据门禁已闭环；缺实际备份恢复和周期演练报告 |
+| NFR-09 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT已在迁移前创建并校验五类快照，按Account、Billing、Token顺序迁移并复核运行库版本32/34/21；仍缺production-new快照凭证和生产迁移摘要 |
+| NFR-10 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 独立版本目录、稳定链接和实际备份已运行；本次未从备份恢复到隔离环境，也没有周期演练报告 |
 | NFR-11 | 部分实现 | DOC_CURRENT | HA-RELEASE-GATE | NOT_DEPLOYED | Compose明确非HA；production-new强制核心双副本、跨故障域、PDB、零不可用滚动及外部HA Redis/NATS，故障证据门禁要求无已提交事实丢失/重复；缺真实集群容量与切换报告 |
 | NFR-12 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY | NOT_DEPLOYED | staging/production 禁止共享静态令牌；正式模板投射逐工作负载短期 OIDC 身份，Relay 与 Billing 消费者挂载独立 NATS 凭据并在代码侧限制本域 Subject。缺外部 NATS operator 实际权限、issuer/JWKS 可达性和轮换/撤销演练证据。 |
 | NFR-13 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 注销在 Identity 不可认证证明后立即随机去标识化直接资料并释放用户名/手机号，法律记录只按永久内部主体引用保留；三年分类记录支持法律保全并由 worker 到期标记清除完成。 |
@@ -827,8 +827,8 @@
 | NFR-06 | 幂等 | 已实现：当前目标写路径均使用稳定命名空间、规范请求指纹、事件 ID 或领域唯一键，同键异请求拒绝。 |
 | NFR-07 | 最终一致性 | 已实现：事务 Outbox/Inbox、版本门禁、至少一次 Relay、死信与摘要绑定重放闭环，不宣称跨库原子事务。 |
 | NFR-08 | 全局上下文一致性 | 已实现用户级唯一上下文、数据库单调版本、期望版本 CAS、标准响应头和桌面/Web 缓存失效；生产多端并发仍待部署验证。 |
-| NFR-09 | 数据迁移 | 历史迁移清单只允许追加更高版本，运行时复核数据库校验和；生产迁移强制快照凭证与迁移后实际摘要，待真实环境验收。 |
-| NFR-10 | 可恢复性 | 版本目录、恢复/回滚步骤、只读核验和生产证据门禁已建立；实际备份恢复和周期演练仍为外部阻塞。 |
+| NFR-09 | 数据迁移 | 云端 UAT 已在五类快照校验后按域迁移并复核运行库版本；production-new 快照凭证和生产迁移摘要仍待验收。 |
+| NFR-10 | 可恢复性 | 云端 UAT 已使用独立版本目录、稳定链接和受限备份；隔离恢复、RPO/RTO 计时与周期演练仍为外部阻塞。 |
 | NFR-11 | 高可用 | 部分实现：生产Chart已强制独立故障域、多副本、PDB、零不可用滚动和外部HA依赖，并有无损切换证据门禁；真实集群验收仍为外部阻塞。 |
 | NFR-12 | 工作负载身份 | 正式模板已移除共享 `INTERNAL_SERVICE_TOKEN`，使用逐工作负载短期 OIDC 身份和独立 NATS 凭据；真实 issuer/JWKS、Subject 授权与轮换撤销证据待部署。 |
 | NFR-13 | 个人信息去标识化与保留 | 已实现 Identity 删除证明后的随机墓碑和标识释放；用户 ID/编码与法定内部引用保留，三年分类记录、法律保全开关及到期自动清除状态独立持久化。 |
@@ -852,11 +852,11 @@
 | NFR-31 | Hold 容量 | 部分实现：十万Hold、稳态/突发、锁等待与守恒门禁已建立，缺环境报告。 |
 | NFR-32 | 订单容量 | 部分实现：百万订单/三百万流水与吞吐门禁已建立，缺环境报告。 |
 | NFR-33 | 事件积压容量 | 部分实现：百万保留、十万排空和高水位证据门禁已建立，缺环境报告。 |
-| NFR-34 | 分级 RPO | 部分实现：60秒资金域/300秒配置域策略和失败关闭证据校验已完成，缺真实生产等价恢复事实。 |
-| NFR-35 | 分级 RTO | 部分实现：核心60分钟/非关键4小时计时及安全降级门禁已完成，缺实际演练计时。 |
-| NFR-36 | 备份频率与加密 | 部分实现：持续WAL、日增量、周全量、迁移快照、加密、KMS分离和异地不可变副本已纳入发布证据，缺外部备份系统验收。 |
-| NFR-37 | 恢复演练 | 部分实现：月/季/年时效、整改和复测模板及门禁已完成，缺实际连续演练记录。 |
-| NFR-38 | 分类保留与清除 | 部分实现：统一机器策略和逐类删除收据门禁已完成，缺真实三年归档、90天日志与法律保全清除证据。 |
+| NFR-34 | 分级 RPO | 云端 UAT 已完成迁移快照，但没有连续 WAL 或隔离恢复实测；60秒资金域/300秒配置域生产事实仍缺失。 |
+| NFR-35 | 分级 RTO | 核心60分钟/非关键4小时计时及安全降级门禁已完成；云端 UAT 未执行实际恢复计时。 |
+| NFR-36 | 备份频率与加密 | 云端 UAT 的同机迁移快照校验通过；持续WAL、日增量、周全量、加密、KMS分离和异地不可变副本仍未验收。 |
+| NFR-37 | 恢复演练 | 月/季/年时效、整改和复测模板及门禁已完成；当前没有实际连续演练记录。 |
+| NFR-38 | 分类保留与清除 | 统一机器策略和逐类删除收据门禁已完成；当前没有真实三年归档、90天日志、法律保全与清除收据。 |
 | NFR-39 | 登录多维限流 | 已实现：公网密码/短信 Direct Grant 和 Refresh 统一经 Redis 原子准入，覆盖来源IP分钟/日、设备、标识、已学习稳定用户、Session和Provider；失败渐进延迟并临时锁定，成功不立即清零，已知/未知账号同形响应和统一耗时桶。 |
 | NFR-40 | 短信多维限流 | 已实现：发送与核验分别按手机号、来源IP、设备、用途和Provider计数，Provider固定在安全容量80%，服务端返回窗口实际剩余 `retry_after`，一次性图形挑战与服务端判断不可由前端绕过。 |
 | NFR-41 | 支付多维限流 | 已实现：付款人、受益组织、来源IP、订单查询、退款动作和Provider均采用原子准入；真实查询按较慢能力间隔合并，合法回调先持久化后异步处理且不受用户限流影响。 |

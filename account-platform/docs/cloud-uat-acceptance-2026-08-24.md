@@ -20,3 +20,10 @@
 - 未通过：环境仍为 `APP_ENV=development`，Token Gateway 使用 `TOKEN_SECRET_PROVIDER=local`；没有生产 KMS/Vault SecretStore、新旧 Key 双读重加密、旧密文归零和旧 Key 停用证据。
 - 结论：NFR-01 已取得本次云端 UAT 运行证据，NFR-03 未满足生产验收；APT-035 保持 `BLOCKED_EXTERNAL`，不得据此开放正式生产流量。
 
+## APT-037：迁移、备份与恢复
+
+- 通过：迁移前在候选版本和稳定链接均未切换时创建受限备份目录，分别保存 PostgreSQL globals、Account、Billing、Token 和 Keycloak；目录权限为 `0700`，五个文件的 SHA-256 校验与 `pg_restore --list`/gzip 最小可读性检查通过。
+- 通过：迁移按 Account、Billing、Token 顺序执行且退出码均为 0；运行库再次校验已执行迁移，最终版本分别为 32、34、21。
+- 未通过：本次仅有同机迁移快照，没有连续 WAL、日增量/周全量计划、TLS/AES-256 备份链、独立 KMS、异地不可变副本或隔离恢复计时。
+- 未通过：没有月度、季度、年度演练历史，也没有三年财务证据、90 天普通日志、法律保全和到期清除扫描收据。
+- 结论：NFR-09 获得云端 UAT 迁移与快照证据；NFR-10、NFR-34–NFR-38 的生产恢复事实仍缺失，APT-037 保持 `BLOCKED_EXTERNAL`。
