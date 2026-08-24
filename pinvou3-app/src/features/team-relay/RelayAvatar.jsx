@@ -75,7 +75,7 @@ function observeAvatarSize(element, measure) {
   };
 }
 
-export function RelayAvatar({ name, seed, avatar = null, loadSource = null, className = 'team-relay-avatar', displaySize }) {
+export function RelayAvatar({ name, seed, avatar = null, loadSource = null, className = 'team-relay-avatar', displaySize, teamId = null }) {
   const rootRef = useRef(null);
   const useOriginal = displaySize === null;
   const reducedMotion = useReducedMotion();
@@ -132,11 +132,12 @@ export function RelayAvatar({ name, seed, avatar = null, loadSource = null, clas
         digest ? { sha256: digest } : null,
         sourceRequest.displaySize,
         sourceRequest.reducedMotion,
+        teamId,
       ) : null)
       .then(value => { if (active) setSource(value || null); })
       .catch(() => { if (active) setSource(null); });
     return () => { active = false; };
-  }, [digest, loadSource, name, ready, seed, sourceRequest]);
+  }, [digest, loadSource, name, ready, seed, sourceRequest, teamId]);
 
   return <span
     ref={rootRef}

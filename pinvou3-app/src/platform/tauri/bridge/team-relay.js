@@ -208,10 +208,11 @@
       return size === 48 || size === 96 ? size : null;
     }
 
-    function avatarCacheKey(principalId, digest, displaySize, reducedMotion) {
+    function avatarCacheKey(teamId, principalId, digest, displaySize, reducedMotion) {
+      var scope = String(teamId || "").trim() || "current";
       var id = String(principalId || "").trim();
       if (!id || !digest) return "";
-      return id + ":" + digest + ":" + (displaySize || "original")
+      return scope + ":" + id + ":" + digest + ":" + (displaySize || "original")
         + ":" + (reducedMotion ? "static" : "animated");
     }
 
@@ -282,7 +283,8 @@
       }
     }
 
-    async function avatarSource(principalId, avatar, requestedDisplaySize, requestedReducedMotion) {
+    async function avatarSource(principalId, avatar, requestedDisplaySize, requestedReducedMotion, requestedTeamId) {
+      var teamId = String(requestedTeamId || "").trim();
       var id = String(principalId || "").trim();
       var digest = avatarDigest(avatar);
       if (!id || !digest) {
@@ -292,7 +294,7 @@
       var displaySize = avatarDisplaySize(requestedDisplaySize);
       var reducedMotion = requestedReducedMotion === true;
       var version = currentAvatarVersion(id, digest);
-      var key = avatarCacheKey(id, digest, displaySize, reducedMotion);
+      var key = avatarCacheKey(teamId, id, digest, displaySize, reducedMotion);
       var cached = avatarSources.get(key);
       if (cached) {
         // Map insertion order doubles as an O(1) LRU queue.
@@ -315,6 +317,7 @@
         principalId: id,
         expectedSha256: digest,
       };
+      if (teamId) args.teamId = teamId;
       if (displaySize) args.displaySize = displaySize;
       if (reducedMotion) args.reducedMotion = true;
       requestEntry.promise = invoke("team_relay_avatar_data_url", args).then(function (source) {

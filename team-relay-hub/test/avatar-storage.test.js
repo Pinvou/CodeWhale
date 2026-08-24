@@ -19,6 +19,7 @@ import sharp from "sharp";
 import { removeAvatarOrphans } from "../src/attachment-cleanup.js";
 import { teamMemberFromRow } from "../src/serializers.js";
 import {
+  MAX_AVATAR_ASPECT_RATIO,
   MAX_AVATAR_BYTES,
   MAX_GIF_FRAMES,
   MAX_GIF_PIXELS,
@@ -257,6 +258,24 @@ test("metadata policy rejects excessive frames and decoded pixels before full de
     error => error?.code === "avatar_image_limits_exceeded"
       && 384 * 384 * 28 > MAX_GIF_PIXELS,
   );
+});
+
+test("metadata policy bounds extreme avatar aspect ratios", () => {
+  assert.doesNotThrow(() => validateAvatarMetadata({
+    format: "png",
+    width: MAX_AVATAR_ASPECT_RATIO * 100,
+    height: 100,
+    pages: 1,
+  }, "image/png"));
+  for (const [width, height] of [
+    [(MAX_AVATAR_ASPECT_RATIO * 100) + 1, 100],
+    [100, (MAX_AVATAR_ASPECT_RATIO * 100) + 1],
+  ]) {
+    assert.throws(
+      () => validateAvatarMetadata({ format: "png", width, height, pages: 1 }, "image/png"),
+      error => error?.code === "avatar_image_limits_exceeded",
+    );
+  }
 });
 
 test("oversized static sources are rejected before full bitmap decode", async (t) => {

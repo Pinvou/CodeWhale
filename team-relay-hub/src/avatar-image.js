@@ -10,6 +10,7 @@ export const MAX_GIF_EDGE = 384;
 export const MAX_GIF_FRAMES = 60;
 export const MAX_GIF_PIXELS = 4_000_000;
 export const MAX_STATIC_SOURCE_PIXELS = 8_000_000;
+export const MAX_AVATAR_ASPECT_RATIO = 20;
 export const AVATAR_VARIANT_SIZES = Object.freeze([48, 96]);
 
 const ALLOWED_AVATAR_EXTENSIONS = new Map([
@@ -72,6 +73,10 @@ export function validateAvatarMetadata(metadata, expectedContentType) {
   const frameHeight = metadata.pageHeight ?? metadata.height;
   if (!positiveInteger(width) || !positiveInteger(frameHeight) || !positiveInteger(frames)) {
     throw invalidImage("The avatar has invalid image dimensions.");
+  }
+  const aspectRatio = Math.max(width, frameHeight) / Math.min(width, frameHeight);
+  if (aspectRatio > MAX_AVATAR_ASPECT_RATIO) {
+    throw limitExceeded(`Avatar aspect ratio cannot exceed ${MAX_AVATAR_ASPECT_RATIO}:1.`);
   }
 
   if (metadata.format !== "gif" && frames !== 1) {

@@ -349,6 +349,7 @@ impl TeamRelayManager {
 
     pub async fn avatar_data_url(
         &self,
+        requested_team_id: Option<&str>,
         principal_id: &str,
         expected_sha256: &str,
         display_size: Option<u16>,
@@ -363,10 +364,8 @@ impl TeamRelayManager {
             return Err("avatar_digest_invalid: expected SHA-256 digest is invalid".to_string());
         }
         let (settings, token) = self.configured()?;
-        if settings.team_id.is_empty() {
-            return Err("team_relay_team_required: select a team first".to_string());
-        }
-        let mut query = vec![("team_id", settings.team_id.clone())];
+        let team_id = resolve_avatar_team_id(&settings.team_id, requested_team_id)?;
+        let mut query = vec![("team_id", team_id.to_string())];
         if let Some(size) = display_size {
             query.push(("size", size.to_string()));
         }
@@ -1402,6 +1401,21 @@ fn validate_avatar_display_size(size: Option<u16>) -> Result<Option<u16>, String
     }
 }
 
+fn resolve_avatar_team_id<'a>(
+    configured_team_id: &'a str,
+    requested_team_id: Option<&'a str>,
+) -> Result<&'a str, String> {
+    let team_id = requested_team_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| configured_team_id.trim());
+    if team_id.is_empty() {
+        return Err("team_relay_team_required: select a team first".to_string());
+    }
+    validate_local_identifier("team_id", team_id)?;
+    Ok(team_id)
+}
+
 fn avatar_integrity_verified(
     expected_source_sha256: &str,
     source_sha256: Option<&str>,
@@ -1833,6 +1847,20 @@ mod tests {
         for size in [0, 24, 384, u16::MAX] {
             assert!(validate_avatar_display_size(Some(size)).is_err(), "{size}");
         }
+    }
+
+    #[test]
+    fn avatar_download_prefers_the_rendered_team_scope() {
+        assert_eq!(
+            resolve_avatar_team_id("team-one", Some(" team-two ")).unwrap(),
+            "team-two"
+        );
+        assert_eq!(
+            resolve_avatar_team_id("team-one", None).unwrap(),
+            "team-one"
+        );
+        assert!(resolve_avatar_team_id("", None).is_err());
+        assert!(resolve_avatar_team_id("team-one", Some("../team-two")).is_err());
     }
 
     #[test]

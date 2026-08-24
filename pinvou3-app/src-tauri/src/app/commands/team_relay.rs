@@ -95,6 +95,7 @@ pub async fn team_relay_remove_avatar(
 
 #[tauri::command]
 pub async fn team_relay_avatar_data_url(
+    team_id: Option<String>,
     principal_id: String,
     expected_sha256: String,
     display_size: Option<u16>,
@@ -103,6 +104,7 @@ pub async fn team_relay_avatar_data_url(
 ) -> Result<Option<String>, String> {
     manager
         .avatar_data_url(
+            team_id.as_deref(),
             &principal_id,
             &expected_sha256,
             display_size,

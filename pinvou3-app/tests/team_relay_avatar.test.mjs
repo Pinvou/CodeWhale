@@ -78,6 +78,10 @@ test('Team Relay requests compact animated avatar variants for rendered density'
     new URL('../src/features/team-relay/TeamRelayView.jsx', import.meta.url),
     'utf8',
   );
+  const board = fs.readFileSync(
+    new URL('../src/features/team-relay/TeamBoard.jsx', import.meta.url),
+    'utf8',
+  );
   assert.match(component, /sourceRequest/);
   assert.match(component, /getBoundingClientRect/);
   assert.match(component, /typeof window === 'undefined'/);
@@ -94,6 +98,9 @@ test('Team Relay requests compact animated avatar variants for rendered density'
   assert.match(component, /Promise\.resolve\(\)\s*\.then\(\(\) => active \? loadSource/);
   assert.match(component, /if \(active\) setSource/);
   assert.match(component, /return \(\) => \{ active = false; \}/);
+  assert.match(component, /sourceRequest\.reducedMotion,\s*teamId,/);
+  assert.match(view, /teamId=\{task\.teamId\}/, 'aggregated task avatars must retain their originating team');
+  assert.match(board, /teamId=\{teamId\}/, 'team board avatars must use the opened team');
   assert.doesNotMatch(component, /animationPlayState|\.pause\(/);
 });
 
@@ -119,6 +126,6 @@ test('Team Relay switches GIF sources at runtime when reduced-motion changes', (
   );
   assert.match(component, /useReducedMotion\(\)/);
   assert.match(component, /sourceRequest\.reducedMotion/);
-  assert.match(component, /\[digest, loadSource, name, ready, seed, sourceRequest\]/);
+  assert.match(component, /\[digest, loadSource, name, ready, seed, sourceRequest, teamId\]/);
   assert.match(hook, /addEventListener\?\.\('change', onChange\)/);
 });

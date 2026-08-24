@@ -155,6 +155,15 @@ assert.equal(calls.filter(call => call.command === 'team_relay_avatar_data_url')
 await feature.avatarSource('member-original', avatarMetadata, null);
 const originalAvatarCall = calls.find(call => call.command === 'team_relay_avatar_data_url' && call.args.principalId === 'member-original');
 assert.equal(Object.hasOwn(originalAvatarCall.args, 'displaySize'), false, 'the profile preview must be able to request the processed original');
+await feature.avatarSource('shared-member', avatarMetadata, 48, false, 'team-one');
+await feature.avatarSource('shared-member', avatarMetadata, 48, false, 'team-two');
+const scopedAvatarCalls = calls.filter(call => call.command === 'team_relay_avatar_data_url' && call.args.principalId === 'shared-member');
+assert.deepEqual(
+  scopedAvatarCalls.map(call => call.args.teamId),
+  ['team-one', 'team-two'],
+  'each avatar read must use the team that authorized the rendered member',
+);
+assert.equal(scopedAvatarCalls.length, 2, 'avatar cache entries must not cross team authorization scopes');
 await feature.uploadAvatar();
 assert.ok(calls.some(call => call.command === 'team_relay_upload_avatar' && call.args.path === '/private/avatar/liu.gif'));
 await feature.removeAvatar();
