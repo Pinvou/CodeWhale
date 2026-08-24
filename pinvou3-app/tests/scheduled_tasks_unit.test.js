@@ -23,7 +23,7 @@ const tauriBridgeFeatureNames = [
   'multiagent', 'team-relay'
 ];
 const modelOptionsSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'shared', 'model-options.js'), 'utf8');
-const settingsViewSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'settings', 'SettingsView.jsx'), 'utf8');
+const composerSharedSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'settings', 'composer-shared.jsx'), 'utf8');
 const bridgeMessages = fs.readFileSync(
   path.join(__dirname, '..', 'src', 'shared', 'bridge-messages.js'),
   'utf8'
@@ -93,7 +93,7 @@ assert.ok(
   'App should render the scheduled view'
 );
 assert.ok(
-  /currentView === 'scheduled'\s*&&\s*\([\s\S]{0,1200}scheduledRunContext[\s\S]{0,800}<ChatView[\s\S]{0,1600}<ScheduledTasksView/.test(indexHtml),
+  /currentView === 'scheduled'\s*&&\s*\(\s*[\s\S]{0,1200}scheduledRunContext[\s\S]{0,800}<ChatView[\s\S]{0,1600}<LazyScheduledTasksView/.test(indexHtml),
   'a scheduled run should reuse the full ChatView inside the scheduled route'
 );
 assert.ok(
@@ -452,7 +452,7 @@ for (const unavailableStatus of [
 }
 assert.ok(
   /selectableModels\(appState\.savedModels \|\| \[\], appState\.llmApiStatus\)/.test(indexHtml) &&
-    /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\], bs && bs\.llmApiStatus\)/.test(settingsViewSource),
+    /selectableModels\(\(bs && bs\.savedModels\) \|\| \[\], bs && bs\.llmApiStatus\)/.test(composerSharedSource),
   'chat, settings, and scheduled tasks should share availability-based model selection without the old hiding rules'
 );
 assert.ok(

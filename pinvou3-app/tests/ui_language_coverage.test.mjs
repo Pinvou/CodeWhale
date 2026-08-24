@@ -140,7 +140,9 @@ for (const language of ['zh', 'en', 'ja']) {
 
 const main = source('app/main.jsx');
 assert.match(main, /emit\(['"]ui:language_changed['"], \{ language: lang \}\)/);
-assert.match(main, /<ToolStoreView[^>]*t=\{t\}/);
+const viewLoaders = source('app/view-loaders.js');
+assert.match(viewLoaders, new RegExp("toolStore: \\(\\) => import\\('\\.\\./features/tools/ToolStoreView\\.jsx'\\)"));
+assert.match(main, /<LazyToolStoreView[^>]*t=\{t\}/);
 assert.match(main, /<WebConnectionStatus[^>]*t=\{t\}/);
 assert.match(main, /<AccountPopover[\s\S]{0,300}t=\{t\}/);
 assert.match(main, /const accountCopy = t\.uiAccount/);
@@ -158,7 +160,8 @@ assert.match(main, /formatQuotaTokens\(limit, t\.langTag\)/);
 assert.match(main, /t\.uiAccount\.viewQuota/);
 assert.doesNotMatch(main, />查看可用额度</);
 assert.match(main, /<SettingsErrorBoundary[^>]*t=\{t\}/);
-assert.match(main, /<CodexAcpView[^>]*t=\{t\}/);
+assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features/codex/CodexAcpView\\.jsx'\\)"));
+assert.match(main, /<LazyCodexAcpView[^>]*t=\{t\}/);
 const settingsErrorBoundary = source('features/settings/SettingsErrorBoundary.jsx');
 assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailed/);
 assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailedDetail/);
