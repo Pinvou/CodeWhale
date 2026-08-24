@@ -570,18 +570,34 @@ test('account portal uses stable asset names with revalidated caching', async ()
   assert.match(portalService, /Header\(\)\.Set\("Cache-Control", "no-cache"\)/);
 });
 
-test('personal center follows the restrained WorkBuddy-inspired visual system', async () => {
+test('personal center uses the canonical pinvou.com account route end to end', async () => {
+  const desktop = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  const portal = await readFile(new URL('../../account-platform/internal/portal/static.go', import.meta.url), 'utf8');
+  const nginx = await readFile(new URL('../../deploy/nginx-pinvou-domain.conf', import.meta.url), 'utf8');
+  assert.match(desktop, /DEFAULT_PORTAL_URL: &str = "https:\/\/pinvou\.com\/account"/);
+  assert.doesNotMatch(desktop, /join\("account\.html"\)/);
+  assert.match(portal, /r\.URL\.Path == "\/account" \|\| r\.URL\.Path == "\/account\/"/);
+  assert.match(nginx, /location = \/account \{/);
+  assert.match(nginx, /location = \/account\/ \{\s*return 308 \/account;\s*\}/);
+});
+
+test('personal center follows the restrained neutral visual system', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
   assert.match(view, /className="ap-sidebar-brand"/);
   assert.match(view, /className="ap-user-summary"/);
   assert.match(view, /<NavIcon name=\{key\}/);
-  assert.match(styles, /--ap-page: #f5f7fa/);
-  assert.match(styles, /--ap-primary: #1b1a24/);
-  assert.match(styles, /--ap-accent: #4ecba0/);
+  assert.match(view, /<AccountProfileCard/);
+  assert.match(view, /<IdentityDialog/);
+  assert.match(view, /<ProfileChangeDialog/);
+  assert.match(styles, /--ap-page: #f7f8fa/);
+  assert.match(styles, /--ap-primary: #202124/);
+  assert.match(styles, /--ap-accent: #1e8e3e/);
   assert.match(styles, /grid-template-columns: 250px minmax\(0, 1fr\)/);
   assert.match(styles, /max-width: 1000px/);
-  assert.match(styles, /border-radius: 24px/);
+  assert.match(styles, /\.ap-profile-card \{[\s\S]*border-radius: 12px/);
+  assert.match(styles, /\.ap-dialog-backdrop[\s\S]*rgba\(0, 0, 0, \.45\)/);
+  assert.match(styles, /\.ap-product-grid button\.selected \{ color: var\(--ap-primary\);[\s\S]*background: #ececec/);
   assert.match(styles, /\.ap-sidebar nav button \{ color: rgba\(27, 26, 36, \.42\); \}/);
   assert.match(styles, /\.ap-sidebar nav button\.active \{ color: var\(--ap-primary\);/);
 });

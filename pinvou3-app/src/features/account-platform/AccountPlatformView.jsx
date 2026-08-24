@@ -266,7 +266,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
 
   const run = async action => {
     setBusy(true); setError(''); setNotice('');
-    try { await action(); } catch (reason) { if (reason?.name !== 'AbortError') setError(localizedError(copy, reason)); }
+    try { await action(); return true; } catch (reason) { if (reason?.name !== 'AbortError') setError(localizedError(copy, reason)); return false; }
     finally { setBusy(false); }
   };
 
@@ -340,7 +340,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       return;
     }
     await client.logout();
-    globalThis.location.assign('/auth/login?return_to=%2Faccount.html');
+    globalThis.location.assign('/auth/login?return_to=%2Faccount');
   };
 
   if (auth === 'loading') return <div className={`ap-shell ap-centered ${portal ? 'ap-portal' : 'ap-desktop'}`}><div className="ap-spinner" />{copy.loading}</div>;
@@ -364,7 +364,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {error && <div role="alert" className="ap-alert error">{error}</div>}{notice && <div className="ap-alert success">{notice}</div>}
       {portal && section === 'creditsUsage' && <PortalCreditsUsage copy={copy} language={language} personalContext={personalContext} organizationId={activeOrganizationId} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} permissions={me?.active_context?.permissions || []} members={quotaMembers} grants={quotaGrants} usageRecords={usageRecords} usageUnavailable={usageUnavailable} usageCursor={usageCursor} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} onPurchase={(productId, channel) => run(async () => setOrder(await client.purchaseOrganizationEntitlements(activeOrganizationId, productId, channel, idempotencyKey('org-recharge'))))} onAllocate={items => run(async () => { await client.allocateOrganizationQuota(activeOrganizationId, items, idempotencyKey('quota-batch')); await loadContext(me); })} onRevoke={(grantId, reason) => run(async () => { await client.revokeOrganizationQuota(activeOrganizationId, grantId, reason, idempotencyKey('quota-revoke')); await loadContext(me); })} onReclaim={(grantId, reason) => run(async () => { await client.reclaimAccountClosedGrant(activeOrganizationId, grantId, reason, idempotencyKey('closed-grant-reclaim')); await loadContext(me); })} onLoadMoreUsage={loadMoreUsage} onCancelUsage={usageRequestID => run(async () => { await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel')); await loadContext(me); setNotice(copy.stopRequested); })} />}
       {portal && section === 'ordersInvoices' && <PortalOrdersInvoices copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
-      {portal && section === 'accountSettings' && <PortalAccountSettings copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} client={client} onProfileError={reason => setError(localizedError(copy, reason))} onProfileChanged={finishProfileChange} onProfileRecovering={() => setNotice(copy.profileChangeRecovering)} closure={closure} onRequestClosure={requestClosure} units={units} members={members} models={catalogModels} modelPolicy={modelPolicy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} onUpdateModelPolicy={(mode, modelIds, reason) => run(async () => { await client.updateOrganizationModelPolicy(activeOrganizationId, { expected_version:modelPolicy?.version || 0, mode, model_ids:modelIds, reason }, idempotencyKey('model-policy')); await loadContext(me); })} />}
+      {portal && section === 'accountSettings' && <PortalAccountSettings copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} client={client} onProfileError={reason => localizedError(copy, reason)} onProfileChanged={finishProfileChange} onProfileRecovering={() => setNotice(copy.profileChangeRecovering)} closure={closure} onRequestClosure={requestClosure} units={units} members={members} models={catalogModels} modelPolicy={modelPolicy} onCreateUnit={(name, parentId) => run(async () => { await client.createUnit(activeOrganizationId, name, parentId); await loadContext(me); })} onInvite={(email, roles) => run(async () => { const invite = await client.invite(activeOrganizationId, email, roles); setNotice(`${copy.invitationCreated} ${invite.token}`); })} onUpdateModelPolicy={(mode, modelIds, reason) => run(async () => { await client.updateOrganizationModelPolicy(activeOrganizationId, { expected_version:modelPolicy?.version || 0, mode, model_ids:modelIds, reason }, idempotencyKey('model-policy')); await loadContext(me); })} />}
       {!portal && <>
       {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={switchContext} />}
       {section === 'credits' && <ResourceSection name="credits" personalContext={personalContext} copy={copy}>{personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <ContextCredits copy={copy} language={language} balance={balance} />}</ResourceSection>}
@@ -392,12 +392,139 @@ function PortalOrdersInvoices({ copy, language, orders, unavailable }) {
 }
 
 function PortalAccountSettings({ copy, language, me, organizations, balance, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, closure, onRequestClosure, units, members, models, modelPolicy, onCreateUnit, onInvite, onUpdateModelPolicy }) {
+  const requestedProfile = new URLSearchParams(globalThis.location?.search || '').get('profile');
+  const initialProfile = requestedProfile === 'username' || requestedProfile === 'mobile' ? requestedProfile : '';
+  const [profileDialog, setProfileDialog] = useState(initialProfile);
+  const [identityDialog, setIdentityDialog] = useState(false);
+  const closeProfileDialog = () => {
+    setProfileDialog('');
+    if (requestedProfile) globalThis.history?.replaceState?.({}, '', '/account?section=accountSettings');
+  };
   return <section className="ap-combined-tab"><p className="ap-eyebrow">{copy.sections.accountSettings}</p><h2>{copy.accountSettingsTitle}</h2><p className="ap-lead">{copy.accountSettingsLead}</p>
-    <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} onSwitchContext={onSwitchContext} embedded />
-    <ProfileSettings copy={copy} client={client} me={me} onError={onProfileError} onChanged={onProfileChanged} onRecovering={onProfileRecovering} embedded />
+    <AccountProfileCard copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} onSwitchIdentity={() => setIdentityDialog(true)} onEditUsername={() => setProfileDialog('username')} onEditMobile={() => setProfileDialog('mobile')} />
     {activeOrganization && <Organization copy={copy} organization={activeOrganization} units={units} members={members} models={models} modelPolicy={modelPolicy} permissions={me?.active_context?.permissions || []} busy={busy} onCreateUnit={onCreateUnit} onInvite={onInvite} onUpdateModelPolicy={onUpdateModelPolicy} embedded />}
     <AccountClosure copy={copy} item={closure} busy={busy} onRequest={onRequestClosure} embedded />
+    {identityDialog && <IdentityDialog copy={copy} organizations={organizations} activeOrganizationId={activeOrganizationId} busy={busy} onClose={() => setIdentityDialog(false)} onConfirm={async value => { if (await onSwitchContext(value)) setIdentityDialog(false); }} />}
+    {profileDialog && <ProfileChangeDialog copy={copy} field={profileDialog} me={me} client={client} reauthenticated={requestedProfile === profileDialog} onClose={closeProfileDialog} onError={onProfileError} onChanged={onProfileChanged} onRecovering={onProfileRecovering} />}
   </section>;
+}
+
+function Dialog({ title, closeLabel, onClose, children, className = '' }) {
+  useEffect(() => {
+    const closeOnEscape = event => { if (event.key === 'Escape') onClose(); };
+    globalThis.addEventListener?.('keydown', closeOnEscape);
+    return () => globalThis.removeEventListener?.('keydown', closeOnEscape);
+  }, [onClose]);
+  return <div className="ap-dialog-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <section className={`ap-dialog ${className}`} role="dialog" aria-modal="true" aria-labelledby="ap-dialog-title">
+      <header><h3 id="ap-dialog-title">{title}</h3><button type="button" className="ap-icon-button" onClick={onClose} aria-label={closeLabel}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg></button></header>
+      {children}
+    </section>
+  </div>;
+}
+
+function maskMobile(value) {
+  const digits = String(value || '').replace(/\D/g, '').replace(/^86(?=1\d{10}$)/, '');
+  return /^1\d{10}$/.test(digits) ? `${digits.slice(0, 3)}****${digits.slice(-4)}` : '—';
+}
+
+function AccountProfileCard({ copy, language, me, organizations, balance, activeOrganization, onSwitchIdentity, onEditUsername, onEditMobile }) {
+  const displayName = me?.display_name || me?.username || copy.user;
+  const identity = activeOrganization ? copy.organizationIdentity(activeOrganization.name) : copy.personal;
+  return <article className="ap-profile-card">
+    <header className="ap-profile-card-header">
+      <span className="ap-profile-avatar">{displayName.trim().slice(0, 1).toUpperCase()}</span>
+      <div><h3>{displayName}</h3><button type="button" className="ap-identity-trigger" onClick={onSwitchIdentity}><span>{identity}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg></button></div>
+    </header>
+    <dl className="ap-profile-facts">
+      <div><dt>{copy.userCode}</dt><dd>{me?.user_code || '—'}</dd></div>
+      <div><dt>{copy.organizations}</dt><dd>{organizations.length}</dd></div>
+      <div><dt>{copy.availableCredits}</dt><dd>{formatPoints(balance?.available_microcredits, language)}</dd></div>
+      <div><dt>{copy.accountStatus}</dt><dd><span className={`ap-account-state ap-account-state-${String(me?.status || '').toLowerCase()}`}>{me?.status || '—'}</span></dd></div>
+    </dl>
+    <div className="ap-profile-rows">
+      <div><span><small>{copy.currentUsername}</small><strong>{me?.username || '—'}</strong></span><button type="button" onClick={onEditUsername}>{copy.modify}</button></div>
+      <div><span><small>{copy.currentMobile}</small><strong>{maskMobile(me?.mobile)}</strong></span><button type="button" onClick={onEditMobile}>{copy.modify}</button></div>
+    </div>
+  </article>;
+}
+
+function IdentityDialog({ copy, organizations, activeOrganizationId, busy, onClose, onConfirm }) {
+  const [selected, setSelected] = useState(activeOrganizationId || '');
+  return <Dialog title={copy.identitySwitcherTitle} closeLabel={copy.closeDialog} onClose={onClose} className="ap-identity-dialog">
+    <p className="ap-dialog-lead">{copy.identitySwitcherLead}</p>
+    <div className="ap-identity-options">
+      <button type="button" className={selected === '' ? 'selected' : ''} onClick={() => setSelected('')}><span className="ap-radio-dot" /><span><strong>{copy.personal}</strong><small>{copy.personalIdentityLead}</small></span></button>
+      {organizations.length ? organizations.map(item => <button type="button" key={item.organization_id} className={selected === item.organization_id ? 'selected' : ''} onClick={() => setSelected(item.organization_id)}><span className="ap-radio-dot" /><span><strong>{copy.organizationIdentity(item.name)}</strong><small>{copy.organizationIdentityLead}</small></span></button>) : <button type="button" disabled><span className="ap-radio-dot" /><span><strong>{copy.organizationIdentityUnavailable}</strong><small>{copy.noOrganizationIdentity}</small></span></button>}
+    </div>
+    <footer className="ap-dialog-actions"><button type="button" onClick={onClose}>{copy.cancel}</button><button type="button" className="ap-dialog-primary" disabled={busy} onClick={() => onConfirm(selected)}>{copy.confirmIdentity}</button></footer>
+  </Dialog>;
+}
+
+function ProfileChangeDialog({ copy, field, me, client, reauthenticated, onClose, onError, onChanged, onRecovering }) {
+  const [username, setUsername] = useState(me?.username || '');
+  const [mobile, setMobile] = useState('');
+  const [requestId, setRequestId] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [captcha, setCaptcha] = useState(null);
+  const [captchaOffset, setCaptchaOffset] = useState(0);
+  const [challengeSent, setChallengeSent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const usernameValid = /^[a-z][a-z0-9._-]{2,31}$/i.test(username.trim());
+  const mobileValid = /^(?:\+?86)?1[3-9]\d{9}$/.test(mobile.trim());
+  const title = field === 'username' ? copy.changeUsername : copy.changeMobile;
+  const perform = async action => {
+    setBusy(true); setError('');
+    try { await action(); }
+    catch (reason) { setError(onError(reason) || copy.requestFailed); }
+    finally { setBusy(false); }
+  };
+  const finish = result => result?.status === 'COMPLETED' ? onChanged(result) : onRecovering();
+  const reauthenticate = () => client.reauthenticate(`/account?section=accountSettings&profile=${field}`);
+  const submitUsername = event => {
+    event.preventDefault();
+    void perform(async () => {
+      const created = await client.createProfileChange('USERNAME', username.trim().toLowerCase());
+      await finish(await client.completeProfileChange(created.profile_change_request_id));
+    });
+  };
+  const openMobileCaptcha = () => void perform(async () => {
+    let id = requestId;
+    if (!id) {
+      const created = await client.createProfileChange('MOBILE', mobile.trim());
+      id = created.profile_change_request_id;
+      setRequestId(id);
+    }
+    setCaptcha(await client.createProfileSliderCaptcha(mobile.trim()));
+    setCaptchaOffset(0);
+  });
+  const sendMobileCode = () => void perform(async () => {
+    await client.sendProfileMobileChallenge(requestId, captcha.captcha_id, captchaOffset);
+    setCaptcha(null); setCaptchaOffset(0); setChallengeSent(true);
+  });
+  const completeMobile = event => {
+    event.preventDefault();
+    void perform(async () => { await finish(await client.completeProfileChange(requestId, smsCode.trim())); });
+  };
+  return <Dialog title={title} closeLabel={copy.closeDialog} onClose={() => { if (!busy) onClose(); }} className="ap-profile-dialog">
+    {error && <div role="alert" className="ap-alert error">{error}</div>}
+    {!reauthenticated ? <>
+      <p className="ap-dialog-lead">{copy.reauthenticateLead}</p>
+      <div className="ap-security-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.7 7 10 4.2-1.3 7-5.4 7-10V6l-7-3Z" /><path d="m9 12 2 2 4-4" /></svg><span>{copy.portalNeverReceivesPassword}</span></div>
+      <footer className="ap-dialog-actions"><button type="button" onClick={onClose}>{copy.cancel}</button><button type="button" className="ap-dialog-primary" onClick={reauthenticate}>{copy.verifyAndContinue}</button></footer>
+    </> : field === 'username' ? <form onSubmit={submitUsername}>
+      <Field label={copy.newUsername}><input value={username} onChange={event => setUsername(event.target.value)} disabled={busy} autoComplete="username" placeholder={copy.newUsernamePlaceholder} /></Field>
+      <p className={`ap-field-hint ${username && !usernameValid ? 'error' : ''}`}>{copy.usernameRules}</p>
+      <footer className="ap-dialog-actions"><button type="button" onClick={onClose}>{copy.cancel}</button><button className="ap-dialog-primary" disabled={busy || !usernameValid || username.trim().toLowerCase() === String(me?.username || '').toLowerCase()}>{copy.confirmChange}</button></footer>
+    </form> : <form onSubmit={completeMobile}>
+      <Field label={copy.newMobile}><input value={mobile} onChange={event => { setMobile(event.target.value); setRequestId(''); setChallengeSent(false); setSmsCode(''); setCaptcha(null); }} disabled={busy || challengeSent} inputMode="tel" autoComplete="tel-national" placeholder={copy.newMobilePlaceholder} /></Field>
+      <p className={`ap-field-hint ${mobile && !mobileValid ? 'error' : ''}`}>{copy.mobileRules}</p>
+      {challengeSent && <><Field label={copy.smsCode}><div className="ap-code-field"><input value={smsCode} onChange={event => setSmsCode(event.target.value.replace(/\D/g, '').slice(0, 6))} disabled={busy} inputMode="numeric" autoComplete="one-time-code" /><button type="button" disabled>{copy.codeSent}</button></div></Field><p className="ap-field-hint">{copy.smsValidity}</p></>}
+      <footer className="ap-dialog-actions"><button type="button" onClick={onClose}>{copy.cancel}</button>{challengeSent ? <button className="ap-dialog-primary" disabled={busy || smsCode.length !== 6}>{copy.confirmChange}</button> : <button type="button" className="ap-dialog-primary" disabled={busy || !mobileValid || maskMobile(mobile) === maskMobile(me?.mobile)} onClick={openMobileCaptcha}>{copy.sendCode}</button>}</footer>
+    </form>}
+    {captcha && <div className="ap-captcha-backdrop" role="dialog" aria-modal="true" aria-label={copy.captchaTitle}><ProfileCaptcha challenge={captcha} offset={captchaOffset} busy={busy} copy={copy} onOffset={setCaptchaOffset} onConfirm={sendMobileCode} onRefresh={openMobileCaptcha} onClose={() => { if (!busy) setCaptcha(null); }} /></div>}
+  </Dialog>;
 }
 
 function ProfileCaptcha({ challenge, offset, busy, copy, onOffset, onConfirm, onRefresh, onClose }) {
@@ -458,7 +585,7 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
     event.preventDefault();
     void perform(async () => { await finish(await client.completeProfileChange(requestId, smsCode.trim())); });
   };
-  const reauthenticate = () => client.reauthenticate('/account.html?section=accountSettings');
+  const reauthenticate = () => client.reauthenticate('/account?section=accountSettings');
 
   const Heading = embedded ? 'h3' : 'h2';
   return <section className={embedded ? 'ap-combined-section' : undefined}>{!embedded && <p className="ap-eyebrow">{copy.sections.profile}</p>}<Heading>{copy.profileSettings}</Heading><p className="ap-lead">{copy.profileSettingsLead}</p>

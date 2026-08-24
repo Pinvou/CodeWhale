@@ -130,7 +130,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 | 类别 | 配置名 |
 |---|---|
-| Compose | `COMPOSE_PROJECT_NAME`、`PUBLIC_BASE_URL` |
+| Compose | `COMPOSE_PROJECT_NAME`、`PUBLIC_BASE_URL`、`PORTAL_PUBLIC_URL=https://pinvou.com` |
 | PostgreSQL 管理 | `ACCOUNT_PLATFORM_POSTGRES_PASSWORD` |
 | 分库密码 | `ACCOUNT_DB_PASSWORD`、`BILLING_DB_PASSWORD`、`TOKEN_DB_PASSWORD`、`KEYCLOAK_DB_PASSWORD` |
 | 开发库密码 | `PAYMENT_SIM_DB_PASSWORD`、`NEWAPI_DB_PASSWORD` |
@@ -509,7 +509,7 @@ UAT 只使用明确的测试商品和测试商城账号：
 1. **发布门禁**：发布流水线设置 `PINVOU_RELEASE_ARTIFACT`、`PINVOU_RELEASE_ATTESTATION`、`PINVOU_CLIENT_COMPATIBILITY_URL`、`PINVOU_RELEASE_CLIENT_VERSION`、目标环境、公钥和 key ID，执行 `npm run release:account-platform-gate`。命令先执行三语源码/制品门禁，缺键、多键、空词条、单语硬编码、原始后端错误回退或 Portal 制品缺少任一静态词条均直接失败；随后核验 HTTPS 公开兼容范围、OIDC discovery、制品 SHA-256、版本区间以及 TOK-37 Ed25519 证明，才能把新客户端提升到正式更新渠道；它不接收内部 readiness 工作负载凭据，失败时渠道继续指向上一版本。
 2. **安装门禁**：更新清单或 Windows OTA `UpdatePackInfo.json` 必须携带 `readinessAttestation`。更新器使用 `PINVOU_ACCOUNT_ENVIRONMENT`、`PINVOU_CLIENT_READINESS_KEY_ID`、`PINVOU_CLIENT_READINESS_PUBLIC_KEY` 验证证明绑定的环境、制品、目标版本、CHAT 目录、六项 PASS 检查和 15 分钟有效期，再用 `PINVOU_UPDATE_SIGNER_IDENTITY` 验证 Windows Authenticode、macOS codesign 或 Linux dpkg-sig 身份，并执行只读迁移预检。通过后才写入安装门禁事务证据并调用平台安装器；旧清单、缺字段、签名不符或预检失败一律不进入安装。平台安装器对二进制/配置的原子替换与失败回滚仍须用正式制品做环境验收，桌面端不得持有内部 readiness 工作负载凭据。
 3. **运行门禁**：已经安装的新版本只运行账号平台和 Token Gateway 路径；平台不可用时显示原因与修复动作，不调用旧模型后台。
-4. Portal 入口另配置 `PINVOU_ACCOUNT_PORTAL_URL`，只允许 HTTPS（或 loopback HTTP），客户端固定打开 `/account.html`，不得把 Token、查询串或任意 WebView URL 传给系统浏览器。
+4. Portal 入口另配置 `PINVOU_ACCOUNT_PORTAL_URL=https://pinvou.com/account`，只允许 HTTPS（或 loopback HTTP）。客户端打开该完整固定地址，不得把 Token、查询串或任意 WebView URL 传给系统浏览器。Compose 的 `PORTAL_PUBLIC_URL` 配置为 `https://pinvou.com`，Keycloak 客户端必须允许 `https://pinvou.com/auth/callback`；Nginx 仅把 `/account`、`/assets/`、`/api/`、`/auth/` 转发到 loopback Portal。
 5. 三层门禁分别保存构建版本、服务版本、配置 schema、检查结果和脱敏证据。客户端范围门禁执行 `npm run check:account-platform-client-scope`；不得以开发机手工调用真实用户付费模型代替任何一层门禁。生产签名身份、正式安装包原子提交/回滚及真实环境连续无副作用证据完成前，APT-053 保持 `BLOCKED_EXTERNAL`。
 
 ### 11.5 首个超级管理员安全激活

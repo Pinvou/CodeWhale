@@ -30,6 +30,7 @@ const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
 const IDENTITY_URL_ENV: &str = "PINVOU_IDENTITY_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
 const PORTAL_URL_ENV: &str = "PINVOU_ACCOUNT_PORTAL_URL";
+const DEFAULT_PORTAL_URL: &str = "https://pinvou.com/account";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHAT_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -143,14 +144,15 @@ pub fn open_account_portal() -> Result<(), String> {
 }
 
 fn account_portal_url() -> Result<Url, String> {
-    account_portal_url_from(&required_env(PORTAL_URL_ENV)?)
+    account_portal_url_from(
+        optional_env(PORTAL_URL_ENV)
+            .as_deref()
+            .unwrap_or(DEFAULT_PORTAL_URL),
+    )
 }
 
 fn account_portal_url_from(value: &str) -> Result<Url, String> {
-    let base = parse_service_base(PORTAL_URL_ENV, value)?;
-    let target = base.join("account.html").map_err(|_| {
-        "account_platform_configuration_invalid: cannot resolve account portal URL".to_string()
-    })?;
+    let target = parse_endpoint(PORTAL_URL_ENV, value)?;
     if target.query().is_some() || target.fragment().is_some() {
         return Err("account_platform_configuration_invalid: account portal URL must not contain query or fragment".to_string());
     }
@@ -1580,10 +1582,10 @@ mod tests {
     #[test]
     fn account_portal_is_fixed_and_never_carries_credentials() {
         assert_eq!(
-            account_portal_url_from("https://portal.example.test/tenant/")
+            account_portal_url_from("https://pinvou.com/account")
                 .unwrap()
                 .as_str(),
-            "https://portal.example.test/tenant/account.html"
+            "https://pinvou.com/account"
         );
         assert!(account_portal_url_from("https://portal.example.test/?token=secret").is_err());
         assert!(account_portal_url_from("https://user:secret@portal.example.test/").is_err());
