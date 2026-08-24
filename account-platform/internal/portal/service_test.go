@@ -101,6 +101,38 @@ func TestLoginCreatesServerSidePKCEFlow(t *testing.T) {
 	}
 }
 
+func TestReauthenticationForcesIdentityLoginAndTracksPreviousSession(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	now := time.Now().UTC()
+	session := Session{ID: "existing-session", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour), CSRFToken: strings.Repeat("r", 32)}
+	_ = store.SaveSession(context.Background(), session)
+	request := httptest.NewRequest(http.MethodGet, "/auth/login?reauthenticate=1&return_to=/account.html%3Fsection%3Dprofile", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, request)
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d", response.Code)
+	}
+	location, _ := url.Parse(response.Header().Get("Location"))
+	if location.Query().Get("prompt") != "login" || location.Query().Get("max_age") != "0" {
+		t.Fatalf("reauthentication must force a fresh identity login: %s", location)
+	}
+	flow := store.flows[location.Query().Get("state")]
+	if flow.PreviousSession != session.ID || flow.ReturnTo != "/account.html?section=profile" {
+		t.Fatalf("unexpected reauthentication flow: %+v", flow)
+	}
+}
+
+func TestReauthenticationRequiresExistingPortalSession(t *testing.T) {
+	service := testService(t, newMemoryStore())
+	response := httptest.NewRecorder()
+	service.Handler(nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/auth/login?reauthenticate=1", nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d", response.Code)
+	}
+}
+
 func TestMutationRequiresExactOriginAndCSRF(t *testing.T) {
 	service := testService(t, newMemoryStore())
 	session := Session{CSRFToken: strings.Repeat("a", 32)}

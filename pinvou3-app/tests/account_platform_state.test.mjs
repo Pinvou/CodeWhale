@@ -299,7 +299,8 @@ test('desktop sign-in renders inside the popover and never opens a browser', asy
   assert.match(popover, /setError\(copy\.registrationCompletedLoginFailed\)/);
   assert.match(popover, /setLoginMode\('password'\)/);
   assert.match(bridge, /invoke\("account_platform_login", \{ credentials: credentials \}\)/);
-  assert.doesNotMatch(backend, /open_target|authorization_request|TcpListener/);
+  const loginImplementation = backend.match(/pub async fn login\([sS]*?pub async fn send_sms/)?.[0] || '';
+  assert.doesNotMatch(loginImplementation, /open_target|authorization_request|TcpListener/);
 });
 
 test('desktop mobile registration confirms matching passwords before network requests', async () => {
@@ -315,21 +316,38 @@ test('desktop mobile registration confirms matching passwords before network req
   assert.equal(accountPlatformCopy.zh.passwordMismatch, '两次输入的密码不一致。');
 });
 
-test('desktop profile changes and forgotten password keep secrets behind the Identity boundary', async () => {
+test('desktop retains forgotten password while profile changes are Web-only', async () => {
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
   const client = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
   const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
+  const webView = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const webClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
+  const portal = await readFile(new URL('../../account-platform/internal/portal/service.go', import.meta.url), 'utf8');
+  const accountRoutes = await readFile(new URL('../../account-platform/internal/account/service.go', import.meta.url), 'utf8');
+  const accountProfile = await readFile(new URL('../../account-platform/internal/account/profile_changes.go', import.meta.url), 'utf8');
   assert.match(popover, /'password', 'sms', 'register', 'forgot'/);
   assert.match(popover, /await client\.resetPassword\(mobile\.trim\(\), smsChallenge, smsCode\.trim\(\), password\)/);
-  assert.match(popover, /await client\.login\(me\?\.username \|\| me\?\.mobile \|\| '', profilePassword\)/);
-  assert.match(popover, /client\.createProfileChange\(profileField, profileValue\.trim\(\)\)/);
-  assert.match(popover, /client\.sendProfileMobileChallenge/);
+  assert.doesNotMatch(popover, /profileSettings|profileChange|PROFILE_MOBILE/);
   assert.match(client, /resetPassword\(mobile, challengeId, code, password/);
-  assert.match(backend, /public_identity_request[\s\S]*password-prechecks[\s\S]*public_account_request[\s\S]*password-resets/);
+  assert.doesNotMatch(client, /ProfileChange|profile-change-requests/);
+  assert.match(backend, /PasswordReset|reset_password|password-resets|PASSWORD_RESET/);
+  assert.doesNotMatch(backend, /profile-change-requests|PROFILE_MOBILE/);
   assert.doesNotMatch(client, /password-resets/);
+  assert.match(webView, /section === 'profile'/);
+  assert.match(webView, /client\.createProfileChange\('USERNAME'/);
+  assert.match(webView, /client\.sendProfileMobileChallenge/);
+  assert.match(webClient, /reauthenticate=1/);
+  assert.match(webClient, /profile-change-requests/);
+  assert.match(portal, /query\.Set\("prompt", "login"\)/);
+  assert.match(portal, /query\.Set\("max_age", "0"\)/);
+  assert.match(accountRoutes, /POST\("\/v1\/auth\/password-resets"/);
+  assert.match(accountRoutes, /POST\("\/v1\/me\/profile-change-requests"/);
+  assert.match(accountProfile, /case "USERNAME":/);
   for (const language of ['zh', 'en', 'ja']) {
     assert.ok(accountPlatformCopy[language].authModes.forgot);
     assert.ok(accountPlatformCopy[language].profileSettings);
+    assert.ok(accountPlatformCopy[language].changeUsername);
+    assert.ok(accountPlatformCopy[language].changeMobile);
   }
 });
 
@@ -373,7 +391,7 @@ test('desktop recharge completes inside the account popover without opening a we
   assert.doesNotMatch(popover, /target=["']_blank["']|window\.open|open_target|href=\{order\.(?:payment_url|qr_content)\}/);
   assert.match(backend, /\("token", &Method::GET, \["v1", "recharge", "products"\], None\)/);
   assert.match(backend, /\("token", &Method::POST, \["v1", "recharge", "orders"\], None\)/);
-  assert.match(backend, /\("token", &Method::GET, \["v1", "recharge", "orders", id\], None\) => safe_id\(id\)/);
+  assert.match(backend, /\("token", &Method::GET, \["v1", "recharge", "orders", id\], None\)[\s\S]{0,500}?=> safe_id\(id\)/);
 });
 
 test('desktop account persists only refresh credentials and clears them on logout or auth failure', async () => {
@@ -401,7 +419,7 @@ test('built-in desktop chat uses the in-memory OIDC session and Token Gateway ro
   assert.match(runtimeProvider, /RuntimeModelCredential::api_key\([\s\S]*authorization\.access_token/);
 });
 
-test('personal center and desktop chat share one account identity lifecycle', async () => {
+test('personal center and desktop chat refresh the built-in runtime after account or catalog changes', async () => {
   const accountBackend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   const commands = await readFile(new URL('../src-tauri/src/app/commands/account_platform.rs', import.meta.url), 'utf8');
   assert.match(accountBackend, /bootstrap_account_identity/);
@@ -409,7 +427,7 @@ test('personal center and desktop chat share one account identity lifecycle', as
   assert.match(accountBackend, /oidc-user-\{account_user_id\}-session-\{generation\}/);
   assert.equal(
     (commands.match(/pool\.mark_model_updated\(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID\)/g) || []).length,
-    3,
+    4,
   );
 });
 

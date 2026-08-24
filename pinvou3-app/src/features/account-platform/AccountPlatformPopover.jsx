@@ -27,10 +27,6 @@ function localizedError(copy, reason) {
   if (code === 'REGISTRATION_IDEMPOTENCY_CONFLICT') return copy.registrationConflict;
   if (code === 'REGISTRATION_RESTART_REQUIRED') return copy.registrationRestartRequired;
   if (code === 'registration_recovery_unavailable') return copy.registrationRecoveryUnavailable;
-  if (code === 'RECENT_AUTHENTICATION_REQUIRED') return copy.recentAuthenticationRequired;
-  if (code === 'PROFILE_CHANGE_CONFLICT') return copy.profileChangeConflict;
-  if (code === 'MOBILE_VERIFICATION_REQUIRED') return copy.mobileVerificationRequired;
-  if (code === 'PROFILE_CHANGE_NOT_FOUND') return copy.profileChangeNotFound;
   return copy.errors?.[code] || copy.requestFailed;
 }
 
@@ -239,11 +235,6 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [profileOpen, setProfileOpen] = useState(false);
-  const [profileField, setProfileField] = useState('USERNAME');
-  const [profileValue, setProfileValue] = useState('');
-  const [profilePassword, setProfilePassword] = useState('');
-  const [profileRequest, setProfileRequest] = useState(null);
   const [view, setView] = useState('account');
   const [products, setProducts] = useState([]);
   const [order, setOrder] = useState(null);
@@ -543,7 +534,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     setError('');
     try {
       if (loginMode === 'register' && registrationCheck !== 'ready' && !(await precheckRegistration())) return;
-      const purpose = profileRequest ? 'PROFILE_MOBILE' : loginMode === 'register' ? 'REGISTER' : loginMode === 'forgot' ? 'PASSWORD_RESET' : 'LOGIN';
+      const purpose = loginMode === 'register' ? 'REGISTER' : loginMode === 'forgot' ? 'PASSWORD_RESET' : 'LOGIN';
       const result = await client.createSliderCaptcha(mobile.trim(), purpose);
       setCaptcha(result);
       setCaptchaOffset(0);
@@ -645,66 +636,6 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     } finally {
       setBusy(false);
     }
-  };
-
-  const beginProfileChange = async event => {
-    event.preventDefault();
-    if (busy) return;
-    setBusy(true); setError(''); setNotice('');
-    try {
-      await client.login(me?.username || me?.mobile || '', profilePassword);
-      const change = await client.createProfileChange(profileField, profileValue.trim());
-      if (profileField === 'USERNAME') {
-        const result = await client.completeProfileChange(change.profile_change_request_id);
-        if (result.status === 'COMPLETED') {
-          await client.logout().catch(() => {});
-          setAuth('guest'); setMe(null); setProfileOpen(false); setNotice(copy.profileChangeComplete);
-        } else { setProfileRequest(result); setNotice(copy.profileChangeRecovering); }
-      } else {
-        setProfileRequest(change); setMobile(profileValue.trim()); setSmsCode('');
-        setCaptcha(await client.createSliderCaptcha(profileValue.trim(), 'PROFILE_MOBILE'));
-        setCaptchaOffset(0);
-      }
-      setProfilePassword('');
-    } catch (reason) { setError(localizedError(copy, reason)); }
-    finally { setBusy(false); }
-  };
-
-  const sendProfileSms = async () => {
-    if (!profileRequest || !captcha?.captcha_id || busy) return;
-    setBusy(true); setError('');
-    try {
-      const result = await client.sendProfileMobileChallenge(profileRequest.profile_change_request_id, captcha.captcha_id, captchaOffset);
-      setSmsChallenge(result.challenge_id || ''); setCaptcha(null); setSmsCooldown(Math.max(1, Number(result.retry_after_seconds || 60)));
-    } catch (reason) { setCaptcha(null); setError(localizedError(copy, reason)); }
-    finally { setBusy(false); }
-  };
-
-  const completeProfileMobile = async () => {
-    if (!profileRequest || !smsCode.trim() || busy) return;
-    setBusy(true); setError('');
-    try {
-      const result = await client.completeProfileChange(profileRequest.profile_change_request_id, smsCode.trim());
-      if (result.status === 'COMPLETED') {
-        await client.logout().catch(() => {});
-        setAuth('guest'); setMe(null); setProfileRequest(null); setProfileOpen(false); setNotice(copy.profileChangeComplete);
-      } else { setProfileRequest(result); setNotice(copy.profileChangeRecovering); }
-    } catch (reason) { setError(localizedError(copy, reason)); }
-    finally { setBusy(false); }
-  };
-
-  const refreshProfileChange = async () => {
-    if (!profileRequest || busy) return;
-    setBusy(true); setError('');
-    try {
-      const result = await client.profileChangeStatus(profileRequest.profile_change_request_id);
-      setProfileRequest(result);
-      if (result.status === 'COMPLETED') {
-        await client.logout().catch(() => {});
-        setAuth('guest'); setMe(null); setProfileOpen(false); setNotice(copy.profileChangeComplete);
-      }
-    } catch (reason) { setError(localizedError(copy, reason)); }
-    finally { setBusy(false); }
   };
 
   const logout = async () => {
@@ -819,7 +750,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
 
       {captcha && (
         <div role="dialog" aria-modal="true" aria-label={copy.captchaTitle} className={`absolute inset-0 z-20 flex items-center justify-center rounded-[22px] p-3 backdrop-blur-xl ${isDark ? 'bg-[#202124]/95' : 'bg-white/95'}`}>
-          <SliderCaptcha challenge={captcha} offset={captchaOffset} busy={busy} copy={copy} cardTheme={cardTheme} mutedText={mutedText} onOffset={setCaptchaOffset} onConfirm={() => void (profileRequest ? sendProfileSms() : sendSms())} onRefresh={() => void openSliderCaptcha()} onClose={() => { if (busy) return; setCaptcha(null); setCaptchaOffset(0); }} />
+          <SliderCaptcha challenge={captcha} offset={captchaOffset} busy={busy} copy={copy} cardTheme={cardTheme} mutedText={mutedText} onOffset={setCaptchaOffset} onConfirm={() => void sendSms()} onRefresh={() => void openSliderCaptcha()} onClose={() => { if (busy) return; setCaptcha(null); setCaptchaOffset(0); }} />
         </div>
       )}
 
@@ -851,18 +782,6 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
             {(catalog.items || []).find(item => item.model_id === catalog.selected_model_id)?.lifecycle_status === 'DEPRECATED' && <div className={`mt-2 text-[11px] leading-relaxed ${mutedText}`}>{copy.modelDeprecationWarning}</div>}
           </div>
           </>}
-          <div className={`rounded-2xl border p-3 ${cardTheme}`}>
-            <button type="button" onClick={() => { setProfileOpen(value => !value); setError(''); }} className="flex w-full items-center justify-between text-left text-[12px] font-semibold"><span>{copy.profileSettings}</span><span className={mutedText}>{profileOpen ? '−' : '+'}</span></button>
-            {profileOpen && <form onSubmit={event => void beginProfileChange(event)} className="mt-3 space-y-2">
-              <div className="grid grid-cols-2 gap-1 rounded-xl bg-black/5 p-1">{['USERNAME','MOBILE'].map(field => <button key={field} type="button" disabled={Boolean(profileRequest)} onClick={() => { setProfileField(field); setSmsChallenge(''); }} className={`h-7 rounded-lg text-[11px] disabled:opacity-50 ${profileField === field ? 'bg-white shadow-sm' : mutedText}`}>{field === 'USERNAME' ? copy.changeUsername : copy.changeMobile}</button>)}</div>
-              {!profileRequest && <input value={profileValue} onChange={event => setProfileValue(event.target.value)} placeholder={profileField === 'USERNAME' ? copy.registrationUsername : copy.mobile} className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
-              {!profileRequest && <input value={profilePassword} onChange={event => setProfilePassword(event.target.value)} placeholder={copy.currentPassword} type="password" autoComplete="current-password" className={`h-9 w-full rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} />}
-              {profileRequest && profileRequest.field === 'MOBILE' && profileRequest.status === 'PENDING' && !smsChallenge && <button type="button" onClick={() => void openSliderCaptcha()} disabled={busy || smsCooldown > 0} className="h-9 w-full rounded-xl bg-[#10B981]/10 text-[12px] font-semibold text-[#07966F] disabled:opacity-40">{smsCooldown > 0 ? copy.resendCountdown(smsCooldown) : copy.sendCode}</button>}
-              {profileRequest && profileRequest.field === 'MOBILE' && !['RETRY','REPAIR_REQUIRED','IDENTITY_UPDATED','ACCOUNT_COMMITTED'].includes(profileRequest.status) && <div className="flex gap-2"><input value={smsCode} onChange={event => setSmsCode(event.target.value)} placeholder={copy.smsCode} inputMode="numeric" className={`h-9 min-w-0 flex-1 rounded-xl border px-3 text-[13px] outline-none ${controlTheme}`} /><button type="button" onClick={() => void completeProfileMobile()} disabled={busy || !smsChallenge || !smsCode.trim()} className="rounded-xl bg-[#10B981] px-3 text-[11px] font-semibold text-white disabled:opacity-40">{copy.confirmChange}</button></div>}
-              {profileRequest && ['RETRY','REPAIR_REQUIRED','IDENTITY_UPDATED','ACCOUNT_COMMITTED'].includes(profileRequest.status) && <div className={`rounded-xl px-3 py-2 text-[11px] ${mutedText}`}><div>{copy.profileChangeRecovering}</div><button type="button" onClick={() => void refreshProfileChange()} className="mt-2 font-semibold text-[#07966F]">{copy.refresh}</button></div>}
-              {!profileRequest && <button type="submit" disabled={busy || !profileValue.trim() || !profilePassword} className="h-9 w-full rounded-xl bg-[#10B981]/10 text-[12px] font-semibold text-[#07966F] disabled:opacity-40">{copy.continueChange}</button>}
-            </form>}
-          </div>
           <button type="button" onClick={() => void client.openPortal().catch(reason => setError(localizedError(copy, reason)))} disabled={busy} className="h-9 w-full rounded-xl bg-[#10B981]/10 text-[12px] font-semibold text-[#07966F] transition-colors hover:bg-[#10B981]/20 disabled:opacity-40">{copy.openWebAccount}</button>
           <button type="button" onClick={() => void logout()} disabled={busy} className={`h-9 w-full rounded-xl text-[12px] font-medium transition-colors disabled:opacity-40 ${isDark ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'}`}>{copy.logout}</button>
         </div>

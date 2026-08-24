@@ -94,6 +94,16 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 }
 
 func (s *Service) login(w http.ResponseWriter, r *http.Request) {
+	reauthenticate := r.URL.Query().Get("reauthenticate") == "1"
+	previousSession := ""
+	if reauthenticate {
+		session, sessionErr := s.authenticatedSession(r.Context(), r)
+		if sessionErr != nil {
+			api.WriteError(w, http.StatusUnauthorized, "LOGIN_REQUIRED", "login is required before reauthentication", httpserver.RequestID(r.Context()))
+			return
+		}
+		previousSession = session.ID
+	}
 	state, err := randomToken(32)
 	verifier, verifierErr := randomToken(48)
 	nonce, nonceErr := randomToken(32)
@@ -103,7 +113,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
-	flow := LoginFlow{Verifier: verifier, Nonce: nonce, ReturnTo: returnTo, ExpiresAt: s.now().Add(10 * time.Minute)}
+	flow := LoginFlow{Verifier: verifier, Nonce: nonce, ReturnTo: returnTo, PreviousSession: previousSession, ExpiresAt: s.now().Add(10 * time.Minute)}
 	if err := s.store.SaveFlow(r.Context(), state, flow); err != nil {
 		api.WriteError(w, http.StatusServiceUnavailable, "LOGIN_UNAVAILABLE", "login could not be started", httpserver.RequestID(r.Context()))
 		return
@@ -119,6 +129,10 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	query.Set("nonce", nonce)
 	query.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	query.Set("code_challenge_method", "S256")
+	if reauthenticate {
+		query.Set("prompt", "login")
+		query.Set("max_age", "0")
+	}
 	redirect := *s.config.AuthorizationURL
 	redirect.RawQuery = query.Encode()
 	http.Redirect(w, r, redirect.String(), http.StatusFound)
@@ -155,6 +169,13 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 	if sessionIDErr != nil || csrfErr != nil || session.AccessToken == "" || session.RefreshToken == "" || tokens.ExpiresIn <= 0 || !strings.EqualFold(tokens.TokenType, "Bearer") || s.store.SaveSession(r.Context(), session) != nil {
 		api.WriteError(w, http.StatusBadGateway, "LOGIN_SESSION_FAILED", "login session could not be created", httpserver.RequestID(r.Context()))
 		return
+	}
+	if flow.PreviousSession != "" && flow.PreviousSession != session.ID {
+		if err := s.store.DeleteSession(r.Context(), flow.PreviousSession); err != nil {
+			_ = s.store.DeleteSession(r.Context(), session.ID)
+			api.WriteError(w, http.StatusServiceUnavailable, "LOGIN_SESSION_FAILED", "previous login session could not be replaced", httpserver.RequestID(r.Context()))
+			return
+		}
 	}
 	s.expireCookie(w, s.flowCookieName(), true)
 	s.setCookie(w, s.sessionCookieName(), session.ID, session.RefreshExpiresAt, true)

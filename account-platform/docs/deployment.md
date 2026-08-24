@@ -256,8 +256,11 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务
 - `PINVOU_ACCOUNT_SERVICE_URL`
 - `PINVOU_IDENTITY_SERVICE_URL`
 - `PINVOU_TOKEN_GATEWAY_URL`
+- `PINVOU_ACCOUNT_PORTAL_URL`
 
 开发态 `npm run dev` 不需要每次生成安装包。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
+
+Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Code + PKCE 重新认证；Identity Client 必须接受 `prompt=login` 与 `max_age=0`，回调地址仍为 Portal 固定 `/auth/callback`。桌面端只保留未登录忘记密码，不承载资料修改。
 
 ### 6.1 死信检查与受审计重放
 

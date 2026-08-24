@@ -113,6 +113,19 @@
 .ap-alert { max-width: 1000px; margin: 0 auto 20px; padding: 12px 16px; border-radius: 12px; font-size: 13px; }
 .ap-alert.error { color: #a33a34; background: #fcecec; }
 .ap-alert.success { color: #14802f; background: #e7f8ee; }
+.ap-profile-reauth { display: flex; align-items: center; justify-content: space-between; gap: 24px; margin-top: 36px; }
+.ap-profile-reauth h3 { margin-bottom: 6px; }
+.ap-profile-reauth p { margin: 0; }
+.ap-profile-reauth .ap-primary { flex: 0 0 auto; }
+.ap-captcha-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 20px; background: rgba(15, 18, 22, .48); backdrop-filter: blur(8px); }
+.ap-captcha { width: min(400px, 100%); display: grid; gap: 14px; padding: 20px; border: 1px solid var(--ap-border); border-radius: 20px; background: var(--ap-card); box-shadow: 0 20px 60px rgba(0, 0, 0, .18); }
+.ap-captcha header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.ap-captcha header > div { display: flex; gap: 6px; }
+.ap-captcha header button { min-height: 32px; padding: 4px 9px; border: 0; background: var(--ap-component); }
+.ap-captcha-image { position: relative; width: 100%; overflow: hidden; border-radius: 12px; }
+.ap-captcha-image img { position: absolute; inset: 0; width: 100%; height: 100%; user-select: none; }
+.ap-captcha-image .ap-captcha-piece { inset: auto; pointer-events: none; filter: drop-shadow(0 2px 4px rgba(0,0,0,.35)); }
+.ap-captcha input[type="range"] { width: 100%; padding: 0; accent-color: var(--ap-accent-hover); }
 .ap-empty { padding: 36px; border: 1px dashed var(--ap-border); border-radius: 18px; color: var(--ap-tertiary); text-align: center; background: rgba(255, 255, 255, .55); }
 .ap-balance-hero { margin: 36px auto 24px; border-radius: 24px; padding: 40px; color: var(--ap-primary); }
 .ap-balance-hero span, .ap-balance-hero small { color: rgba(0, 0, 0, .44); }
@@ -183,6 +196,7 @@
   .ap-shell h2 { font-size: 28px; line-height: 36px; }
   .ap-lead { margin-bottom: 32px; font-size: 15px; }
   .ap-context-card, .ap-grid, .ap-metrics { grid-template-columns: 1fr; }
+  .ap-profile-reauth { align-items: stretch; flex-direction: column; }
   .ap-context-card, .ap-card, .ap-balance-hero { padding: 24px; }
   .ap-context-card { gap: 20px; }
   .ap-product-grid { grid-template-columns: repeat(2, 1fr); }

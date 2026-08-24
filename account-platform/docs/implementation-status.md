@@ -320,10 +320,10 @@
 | ID-16 | 非当前范围 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | Keycloak 具备扩展基础，但当前产品闭环未实现；短信找回密码已纳入 ACC-09。 |
 | ACC-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Account 仅依赖服务鉴权的 Identity HTTP 端口及不透明密码引用；Keycloak Token、管理 URL、客户端密钥、用户创建/删除协议均只存在于独立 Identity Adapter |
 | ACC-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; COMMERCE-MAPPING | NOT_DEPLOYED | 注册和手机号变更异步创建供应商中立 Mapping/版本化同步任务；失败退避或进入修复状态，且只影响依赖 Mapping 的支付 |
-| ACC-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; CONTRACT-41; DESKTOP-UI | NOT_DEPLOYED | 持久变更请求预约规范化新值并保存独立资料版本，按 Identity 更新、Account CAS、会话撤销顺序向前收敛；30 分钟 SLA 后转 `REPAIR_REQUIRED`。 |
-| ACC-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; DESKTOP-UI | NOT_DEPLOYED | 桌面个人中心先以密码 Direct Grant 获得五分钟内的 `auth_time`，再预约用户名；Account 与 Keycloak 都执行唯一性门禁，成功后撤销会话。 |
-| ACC-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; COMMERCE-MAPPING; DESKTOP-UI | NOT_DEPLOYED | 新手机号绑定滑块和专用短信用途；Identity/Account 提交后递增当前 Commerce Mapping 版本并创建资料同步任务，旧版本迟到结果不能覆盖新映射。 |
-| ACC-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; DESKTOP-UI | NOT_DEPLOYED | 未登录入口对已知/未知手机号保持同形响应；短信成功后只向 Identity 传递不透明密码引用，Keycloak 重置密码并撤销全部会话，Account 同步清除 Session 投影。 |
+| ACC-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; PERSONAL-CENTER-IA | NOT_DEPLOYED | 持久变更请求预约规范化新值并保存独立资料版本，按 Identity 更新、Account CAS、会话撤销顺序向前收敛；Web 个人中心接入该 Saga，桌面客户端不封装资料变更。 |
+| ACC-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; PERSONAL-CENTER-IA | NOT_DEPLOYED | Web Portal 通过 `prompt=login`/`max_age=0` 强制重新认证，再执行用户名预约、唯一性门禁、CAS 提交和会话撤销；桌面无用户名修改入口。 |
+| ACC-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; COMMERCE-MAPPING; PERSONAL-CENTER-IA | NOT_DEPLOYED | Web 个人中心提供新手机号滑块/短信验证、资料提交和 Commerce Mapping 版本同步；桌面无手机号修改入口。 |
+| ACC-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PROFILE-SAGA; IDENTITY-SMS | NOT_DEPLOYED | 桌面未登录 Popover 保留忘记密码；反枚举短信、短期密码引用、Keycloak 重置和全会话撤销完整接通。 |
 | ACC-10 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-SAGA; UI-LINT | NOT_DEPLOYED | 最近5分钟认证、精确确认和幂等键可创建唯一注销请求；所有权/最后有效超级管理员在静默前阻断，进入静默后由账务和 Token 强一致评估推进到自动清理边界，后续资料及标识清理由 ACC-46–ACC-50 独立约束。 |
 | ACC-11 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | Identity 删除确认后随机覆盖用户、资料请求、注册/短信和邀请直接标识，永久保留不可变 user_id/user_code；分类保留记录固定三年期限、法律保全例外及到期自动 PURGED 状态。 |
 | ACC-12 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
@@ -392,7 +392,7 @@
 | UI-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 不跳外部浏览器；个人信息也在弹层中展示。 |
 | UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | 个人中心独立提供概览、额度、权益、用量和组织导航；无有效组织关系时隐藏组织入口，组织上下文不显示个人购买入口或个人权益，不提供普通用户 Token Account/供应商 Key 管理。 |
 | UI-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
-| UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-UI; UI-I18N; CONTRACT-41 | NOT_DEPLOYED | 桌面个人中心提供用户名/手机号修改及未登录忘记密码入口，复用集中三语词条；资料提交要求重新认证，手机号和密码恢复要求专用短信挑战。 |
+| UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; PERSONAL-CENTER-IA; IDENTITY-SMS; I18N-RELEASE-GATE | NOT_DEPLOYED | Web 个人中心提供三语“资料与安全”、用户名修改及新手机号滑块/短信验证；桌面移除资料修改区域但保留未登录忘记密码。 |
 | UI-06 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 个人中心所有余额、权益、订单和用量请求只按用户级活动上下文加载；个人上下文展示个人权益，组织上下文不混入个人权益明细。 |
 | UI-07 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT | NOT_DEPLOYED | 桌面与 Web 共用服务端活动上下文；客户端只接受递增版本，收到更高版本、窗口聚焦或切换成功即中止旧请求、清空上下文资源并重新读取。 |
 | UI-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 桌面与 Portal 三语展示总可用、BASE/BONUS、来源、各组成余额、到期提醒及确定消费顺序，并明确 BONUS 零现金退款和普通退款关联撤销规则 |
@@ -451,7 +451,7 @@
 | CR-02 | BILL-21–BILL-25 | 系统管理后台设置模型价格，支持统一价格或按时间段分段计价 | 已实现 | 已支持全局默认、模型覆盖、未来生效、显式继承、冲突预览、完整生命周期和 Hold 价格快照 |
 | CR-03 | TOK-19, TOK-21, TOK-23, BILL-30 | 预占按照具体模型上下文动态计算 | 已实现 | 当前 CHAT 协议按请求输入估算、请求/模型输出边界、公式和价格快照计算，并支持续租及追加预占 |
 | CR-04 | ACC-34, UI-06 | 只能使用当前活动个人/组织上下文授予的额度，个人中心只展示该上下文额度 | 部分实现 | Gateway 已按活动上下文找钱包；需让所有额度/权益 API 和 UI 严格按活动上下文返回，组织场景只显示该成员被授予额度 |
-| CR-05 | ACC-06–ACC-09, UI-05 | 个人中心支持修改手机号、用户名和忘记密码 | 已实现 | Account 只编排不透明 Identity 端口；Keycloak 更新/重置/会话撤销和新华三重同步协议分别留在 Adapter/Worker。供应商中立 Mapping 由 APT-005 替换现有专用任务。 |
+| CR-05 | ACC-06–ACC-09, UI-05 | Web 个人中心修改用户名/手机号，桌面保留忘记密码 | 已实现 | Portal 通过 OIDC 强制重新认证后调用 Account Saga；桌面仅保留未登录密码恢复，不封装资料修改。 |
 | CR-06 | ACC-19 | 组织删除为逻辑删除；有余额、有效权益包或未结算 Hold 时禁止删除 | 已实现 | 组织必须先停用并冻结钱包；Account/Billing 预检任一阻断事实存在即返回结构化冲突，清零后仅写 DELETED、关闭钱包且保留账本、订单和审计 |
 | CR-07 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 符合可用条件的模型都可供用户选择 | 已由 CR-35 细化状态语义 | 原记录把目录展示、上下文资格和请求预占混为一个可用条件；模型目录同步要求继续有效，状态划分以 CR-35 为准 |
 | CR-08 | BILL-14, BILL-17, BILL-16, UI-08 | 分别展示基础积分、赠送积分、到期顺序、即将到期提醒和多个权益包，同时展示可用总积分 | 已实现 | 组成级 API 与三语 UI 已展示 BASE/BONUS、总可用、来源、确定消费顺序和到期提醒；人工赠送为独立 30 天 BONUS |
@@ -589,9 +589,9 @@
 | ACC-01 | 身份 Provider 管理适配 | 已实现 | Account 仅调用 Identity HTTP 端口并传递不透明引用；Keycloak 管理协议、Token 和客户端密钥全部位于独立 Adapter。 |
 | ACC-05 | 外部 Commerce Customer 开通 | 已实现 | Mapping、任务和证据使用供应商中立模型，冻结 Provider/Adapter 版本并异步退避收敛；外部原始错误和客户标识不进入公开接口。 |
 | ACC-06 | 资料变更 Saga | 已实现 | 唯一请求、字段预约、资料 CAS、Identity 更新、会话撤销、退避恢复和人工修复状态均已落地。 |
-| ACC-07 | 修改用户名 | 已实现 | 个人中心重新认证后规范化并预约唯一用户名，经 Identity Adapter 和 Account CAS 提交。 |
-| ACC-08 | 修改手机号 | 已实现 | 新手机号短信验证、重新认证、Identity/Account 提交和现有 Commerce 同步任务重置均已落地。 |
-| ACC-09 | 忘记密码 | 已实现 | 未登录手机号短信验证后由 Identity Adapter 重置密码并撤销会话；Account 不接触密码原文。 |
+| ACC-07 | Web 用户名修改 | 已实现 | Portal OIDC 重新认证、规范化预约、Identity Adapter 和 Account CAS 已落地；桌面入口已移除。 |
+| ACC-08 | Web 手机号修改 | 已实现 | Web 新手机号滑块/短信验证、重新认证、Identity/Account 提交和 Commerce 同步任务重置已落地；桌面入口已移除。 |
+| ACC-09 | 桌面忘记密码 | 已实现 | 未登录手机号短信验证后由 Identity Adapter 重置密码并撤销会话；Account 不接触密码原文。 |
 | ACC-10 | 用户主动注销 | 已实现 | 最近5分钟认证、`CLOSE_MY_ACCOUNT` 明确确认和幂等键创建唯一持久请求；本地角色门禁、静默期和跨 Billing/Token 阻断已接通，资料/标识/组织授予的后续自动清理由 ACC-46–ACC-50 与 BILL-39/BILL-40 继续约束。 |
 | ACC-11 | 注销记录保留 | 已实现 | 外部 Identity 删除后，Account 随机覆盖全部直接标识并释放用户名/手机号；user_id、user_code 和内部主体引用永久保留，三年分类保留及法律保全状态由独立记录和到期 worker 管理。 |
 | ACC-12 | 一个用户可属于多个组织 | 已实现 | 成员关系独立存储；个人中心只显示当前用户关联组织。 |
@@ -759,7 +759,7 @@
 | UI-01 | 桌面用户入口常显，未登录在弹层内登录 | 已实现 | 不跳外部浏览器；个人信息也在弹层中展示。 |
 | UI-03 | 个人中心提供概览、额度、权益、用量和组织 | 已实现 | 概览、额度、权益、用量为独立导航；组织入口按有效成员关系显示，个人订单/发票和购买入口不会出现在组织上下文，普通用户视图不存在 Token Account 或供应商 Key 管理。 |
 | UI-04 | 普通用户界面不暴露内部结算/供应商运维信息 | 已实现 | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
-| UI-05 | 账号资料与密码恢复 | 已实现 | 桌面 Popover 提供三语资料修改和密码恢复入口，并完成重新认证、短信、密码确认和稳定错误映射。 |
+| UI-05 | Web 资料修改与桌面密码恢复边界 | 已实现 | Web Portal 提供用户名/手机号修改和强制重新认证；桌面 Popover 无资料修改区域，但保留忘记密码模式及专用 Bridge/Tauri 密码重置命令。 |
 | UI-06 | 个人中心只展示活动上下文额度 | 已实现 | 上下文切换和跨端刷新会先清空旧余额、权益、订单与用量；个人/组织数据按新的服务端活动上下文重新加载。 |
 | UI-07 | 跨端活动上下文同步 | 已实现 | Web 响应头和桌面 Tauri 响应都传递 context_version；更高版本、聚焦及切换成功都会终止旧请求并刷新。 |
 | UI-08 | 权益包、到期与退款说明 | 已实现 | 桌面与 Portal 三语展示总可用、BASE/BONUS 分项、来源、消费顺序和到期提醒，并明确 BONUS 零现金退款及普通退款关联撤销。 |

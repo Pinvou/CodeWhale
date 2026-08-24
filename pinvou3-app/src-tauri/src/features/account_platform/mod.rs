@@ -471,11 +471,7 @@ impl AccountPlatformState {
     ) -> Result<Value, String> {
         let config = AccountPlatformConfig::from_env()?;
         let purpose = input.purpose.trim().to_ascii_uppercase();
-        if purpose != "REGISTER"
-            && purpose != "LOGIN"
-            && purpose != "PASSWORD_RESET"
-            && purpose != "PROFILE_MOBILE"
-        {
+        if purpose != "REGISTER" && purpose != "LOGIN" && purpose != "PASSWORD_RESET" {
             return Err("mobile_auth_request_invalid: invalid captcha purpose".to_string());
         }
         self.public_account_request(
@@ -1294,7 +1290,6 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
     };
     match (area, method, segments.as_slice(), query) {
         ("account", &Method::POST, ["v1", "account", "bootstrap"], None)
-        | ("account", &Method::POST, ["v1", "me", "profile-change-requests"], None)
         | ("account", &Method::GET, ["v1", "me", "organizations"], None)
         | ("account", &Method::POST, ["v1", "sessions", "current", "active-context"], None)
         | ("token", &Method::GET, ["v1", "recharge", "products"], None)
@@ -1304,19 +1299,6 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("token", &Method::GET, ["v1", "recharge", "orders", "recent"], None)
         | ("token", &Method::GET, ["v1", "me", "entitlement-packages"], None)
         | ("token", &Method::POST, ["v1", "chat", "completions"], None) => true,
-        ("account", &Method::GET, ["v1", "me", "profile-change-requests", id], None)
-        | (
-            "account",
-            &Method::POST,
-            ["v1", "me", "profile-change-requests", id, "mobile-challenges"],
-            None,
-        )
-        | (
-            "account",
-            &Method::POST,
-            ["v1", "me", "profile-change-requests", id, "actions", "complete"],
-            None,
-        ) => safe_id(id),
         ("account", &Method::GET, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::POST, ["v1", "organizations", id, "units"], None)
         | ("account", &Method::GET, ["v1", "organizations", id, "members"], None)

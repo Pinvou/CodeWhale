@@ -3,10 +3,11 @@ package portal
 import "time"
 
 type LoginFlow struct {
-	Verifier  string    `json:"verifier"`
-	Nonce     string    `json:"nonce"`
-	ReturnTo  string    `json:"return_to"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Verifier        string    `json:"verifier"`
+	Nonce           string    `json:"nonce"`
+	ReturnTo        string    `json:"return_to"`
+	PreviousSession string    `json:"previous_session,omitempty"`
+	ExpiresAt       time.Time `json:"expires_at"`
 }
 
 type Session struct {

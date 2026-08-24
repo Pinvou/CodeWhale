@@ -76,10 +76,6 @@ export class AccountPlatformDesktopClient {
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
   accountClosure(signal) { return this.request('account', '/v1/me/account-closure-request', { signal }); }
   createAccountClosure(confirmation, key) { return this.request('account', '/v1/me/account-closure-requests', { method: 'POST', idempotencyKey: key, body: { confirmation } }); }
-  createProfileChange(field, value, signal) { return this.request('account', '/v1/me/profile-change-requests', { method: 'POST', body: { field, value }, signal }); }
-  sendProfileMobileChallenge(requestId, captchaId, captchaOffset, signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}/mobile-challenges`, { method: 'POST', body: { captcha_id: captchaId, captcha_offset: captchaOffset }, signal }); }
-  completeProfileChange(requestId, code = '', signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}/actions/complete`, { method: 'POST', body: { code }, signal }); }
-  profileChangeStatus(requestId, signal) { return this.request('account', `/v1/me/profile-change-requests/${requestId}`, { signal }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }
   switchContext(contextType, organizationId, expectedContextVersion, signal) { return this.request('account', '/v1/sessions/current/active-context', { method: 'POST', body: { context_type: contextType, organization_id: organizationId || null, expected_context_version: expectedContextVersion }, signal }); }
   units(organizationId, signal) { return this.request('account', `/v1/organizations/${organizationId}/units`, { signal }); }

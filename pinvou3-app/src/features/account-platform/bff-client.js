@@ -54,6 +54,13 @@ export class AccountPlatformBffClient {
   }
 
   bootstrap(signal) { return this.request('account', '/v1/account/bootstrap', { method: 'POST', body: {}, signal }); }
+  reauthenticate(returnTo = '/account.html?section=profile') {
+    globalThis.location.assign(`${this.baseURL}/auth/login?reauthenticate=1&return_to=${encodeURIComponent(returnTo)}`);
+  }
+  createProfileChange(field, value, signal) { return this.request('account', '/v1/me/profile-change-requests', { method: 'POST', body: { field, value }, signal }); }
+  createProfileSliderCaptcha(mobile, signal) { return this.request('account', '/v1/auth/captcha/challenges', { method: 'POST', body: { mobile, purpose: 'PROFILE_MOBILE' }, signal }); }
+  sendProfileMobileChallenge(requestId, captchaId, captchaOffset, signal) { return this.request('account', `/v1/me/profile-change-requests/${encodeURIComponent(requestId)}/mobile-challenges`, { method: 'POST', body: { captcha_id: captchaId, captcha_offset: captchaOffset }, signal }); }
+  completeProfileChange(requestId, code = '', signal) { return this.request('account', `/v1/me/profile-change-requests/${encodeURIComponent(requestId)}/actions/complete`, { method: 'POST', body: { code }, signal }); }
   accountClosure(signal) { return this.request('account', '/v1/me/account-closure-request', { signal }); }
   createAccountClosure(confirmation, key) { return this.request('account', '/v1/me/account-closure-requests', { method: 'POST', headers: { 'Idempotency-Key': key }, body: { confirmation } }); }
   organizations(signal) { return this.request('account', '/v1/me/organizations', { signal }); }

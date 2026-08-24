@@ -32,6 +32,7 @@ function NavIcon({ name }) {
     orders: <><path d="M6 3h12v18H6z" /><path d="M9 8h6M9 12h6M9 16h4" /></>,
     invoice: <><path d="M5 3h14v18l-3-2-4 2-4-2-3 2z" /><path d="M8 8h8M8 12h8" /></>,
     usage: <><path d="M4 19V9M10 19V5M16 19v-7M22 19H2" /></>,
+    profile: <><circle cx="12" cy="8" r="4" /><path d="M4 21a8 8 0 0 1 16 0M18 4l2 2M20 4l-2 2" /></>,
     closure: <><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5" /></>,
   };
   return <svg className="ap-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
@@ -40,6 +41,17 @@ function NavIcon({ name }) {
 function localizedError(copy, reason) {
   const raw = String(reason?.code || reason?.message || reason || '');
   const code = raw.split(':', 1)[0].trim();
+  if (code === 'RECENT_AUTHENTICATION_REQUIRED') return copy.recentAuthenticationRequired;
+  if (code === 'USERNAME_INVALID') return copy.usernameInvalid;
+  if (code === 'USERNAME_ALREADY_REGISTERED') return copy.usernameAlreadyRegistered;
+  if (code === 'MOBILE_INVALID') return copy.mobileInvalid;
+  if (code === 'MOBILE_ALREADY_REGISTERED') return copy.mobileAlreadyRegistered;
+  if (code === 'CAPTCHA_INVALID') return copy.captchaInvalid;
+  if (code === 'SMS_RATE_LIMITED') return copy.smsRateLimited;
+  if (code === 'SMS_CODE_INVALID') return copy.mobileAuthFailed;
+  if (code === 'PROFILE_CHANGE_CONFLICT') return copy.profileChangeConflict;
+  if (code === 'MOBILE_VERIFICATION_REQUIRED') return copy.mobileVerificationRequired;
+  if (code === 'PROFILE_CHANGE_NOT_FOUND') return copy.profileChangeNotFound;
   return copy.errors?.[code] || copy.requestFailed;
 }
 
@@ -56,7 +68,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [usageRecords, setUsageRecords] = useState([]);
   const [usageCursor, setUsageCursor] = useState(null);
   const [usageUnavailable, setUsageUnavailable] = useState(false);
-  const [section, setSection] = useState('overview');
+  const [section, setSection] = useState(() => portal && new URLSearchParams(globalThis.location?.search || '').get('section') === 'profile' ? 'profile' : 'overview');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -83,6 +95,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     'usage',
     ...(organizations.length > 0 ? ['organization'] : []),
     ...(personalContext ? ['orders', 'invoice'] : []),
+    ...(portal ? ['profile'] : []),
     'closure',
   ];
 
@@ -318,6 +331,15 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     setClosure(created); setNotice(copy.closure.requested);
   });
 
+  const finishProfileChange = async result => {
+    if (result?.status !== 'COMPLETED') {
+      setNotice(copy.profileChangeRecovering);
+      return;
+    }
+    await client.logout();
+    globalThis.location.assign('/auth/login?return_to=%2Faccount.html');
+  };
+
   if (auth === 'loading') return <div className={`ap-shell ap-centered ${portal ? 'ap-portal' : 'ap-desktop'}`}><div className="ap-spinner" />{copy.loading}</div>;
   if (auth === 'guest' || auth === 'error') return <div className={`ap-shell ap-login ${portal ? 'ap-portal' : 'ap-desktop'}`}><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{portal ? copy.loginIntro : copy.desktopLoginIntro}</p>{error && <div role="alert" className="ap-alert error">{error}</div>}{portal ? <a className="ap-primary" href="/auth/login">{copy.login}</a> : <button className="ap-primary" disabled={busy} onClick={login}>{busy ? copy.signingIn : copy.login}</button>}{onClose && <button className="ap-close" onClick={onClose}>{copy.close}</button>}</div></div>;
 
@@ -344,9 +366,80 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       {section === 'orders' && <Orders copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
       {section === 'invoice' && <Invoice copy={copy} />}
       {section === 'usage' && <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} onLoadMore={loadMoreUsage} onCancel={usageRequestID => run(async () => { await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel')); await loadContext(me); setNotice(copy.stopRequested); })} />}
+      {section === 'profile' && <ProfileSettings copy={copy} client={client} me={me} onError={reason => setError(localizedError(copy, reason))} onChanged={finishProfileChange} onRecovering={() => setNotice(copy.profileChangeRecovering)} />}
       {section === 'closure' && <AccountClosure copy={copy} item={closure} busy={busy} onRequest={requestClosure} />}
     </main>
   </div>;
+}
+
+function ProfileCaptcha({ challenge, offset, busy, copy, onOffset, onConfirm, onRefresh, onClose }) {
+  const width = Number(challenge?.width || 280);
+  const height = Number(challenge?.height || 120);
+  const pieceWidth = Number(challenge?.piece_width || 44);
+  const pieceHeight = Number(challenge?.piece_height || 44);
+  const maximum = Math.max(1, width - pieceWidth);
+  return <div className="ap-captcha">
+    <header><strong>{copy.captchaTitle}</strong><div><button type="button" disabled={busy} onClick={onRefresh}>{copy.captchaRefresh}</button><button type="button" disabled={busy} onClick={onClose} aria-label={copy.captchaClose}>×</button></div></header>
+    <div className="ap-captcha-image" style={{ aspectRatio:`${width}/${height}` }}><img src={challenge.background_image} alt="" draggable="false" /><img src={challenge.piece_image} alt="" draggable="false" className="ap-captcha-piece" style={{ left:`${Number(offset || 0) / width * 100}%`, top:`${Number(challenge.piece_y || 0) / height * 100}%`, width:`${pieceWidth / width * 100}%`, height:`${pieceHeight / height * 100}%` }} /></div>
+    <input type="range" min="0" max={maximum} step="1" value={offset} disabled={busy} onChange={event => onOffset(Number(event.target.value))} aria-label={copy.captchaSlider} />
+    <button type="button" className="ap-primary" disabled={busy} onClick={onConfirm}>{busy ? copy.sendingCode : copy.captchaConfirm}</button>
+  </div>;
+}
+
+function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering }) {
+  const [username, setUsername] = useState(me?.username || '');
+  const [mobile, setMobile] = useState(me?.mobile || '');
+  const [requestId, setRequestId] = useState('');
+  const [smsCode, setSmsCode] = useState('');
+  const [captcha, setCaptcha] = useState(null);
+  const [captchaOffset, setCaptchaOffset] = useState(0);
+  const [challengeSent, setChallengeSent] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const perform = async action => {
+    setBusy(true);
+    try { await action(); }
+    catch (reason) { onError(reason); }
+    finally { setBusy(false); }
+  };
+  const finish = result => result?.status === 'COMPLETED' ? onChanged(result) : onRecovering();
+  const changeUsername = event => {
+    event.preventDefault();
+    void perform(async () => {
+      const created = await client.createProfileChange('USERNAME', username.trim());
+      await finish(await client.completeProfileChange(created.profile_change_request_id));
+    });
+  };
+  const openMobileCaptcha = () => void perform(async () => {
+    let id = requestId;
+    if (!id) {
+      const created = await client.createProfileChange('MOBILE', mobile.trim());
+      id = created.profile_change_request_id;
+      setRequestId(id);
+    }
+    setCaptcha(await client.createProfileSliderCaptcha(mobile.trim()));
+    setCaptchaOffset(0);
+  });
+  const sendMobileCode = () => void perform(async () => {
+    await client.sendProfileMobileChallenge(requestId, captcha.captcha_id, captchaOffset);
+    setCaptcha(null);
+    setCaptchaOffset(0);
+    setChallengeSent(true);
+  });
+  const completeMobile = event => {
+    event.preventDefault();
+    void perform(async () => { await finish(await client.completeProfileChange(requestId, smsCode.trim())); });
+  };
+  const reauthenticate = () => client.reauthenticate('/account.html?section=profile');
+
+  return <section><p className="ap-eyebrow">{copy.sections.profile}</p><h2>{copy.profileSettings}</h2><p className="ap-lead">{copy.profileSettingsLead}</p>
+    <article className="ap-card ap-profile-reauth"><div><h3>{copy.reauthenticateTitle}</h3><p className="ap-muted">{copy.reauthenticateLead}</p></div><button type="button" className="ap-primary" onClick={reauthenticate}>{copy.reauthenticate}</button></article>
+    <div className="ap-grid">
+      <article className="ap-card"><h3>{copy.changeUsername}</h3><p className="ap-muted">{copy.currentUsername}: {me?.username || '—'}</p><form className="ap-stack" onSubmit={changeUsername}><Field label={copy.newUsername}><input value={username} onChange={event => setUsername(event.target.value)} disabled={busy} autoComplete="username" /></Field><button disabled={busy || !username.trim() || username.trim() === (me?.username || '')}>{copy.confirmChange}</button></form></article>
+      <article className="ap-card"><h3>{copy.changeMobile}</h3><p className="ap-muted">{copy.currentMobile}: {me?.mobile || '—'}</p><form className="ap-stack" onSubmit={completeMobile}><Field label={copy.newMobile}><input value={mobile} onChange={event => { setMobile(event.target.value); setRequestId(''); setChallengeSent(false); setSmsCode(''); setCaptcha(null); }} disabled={busy || challengeSent} inputMode="tel" autoComplete="tel-national" /></Field>{challengeSent && <Field label={copy.smsCode}><input value={smsCode} onChange={event => setSmsCode(event.target.value)} disabled={busy} inputMode="numeric" autoComplete="one-time-code" /></Field>}{challengeSent ? <button disabled={busy || !smsCode.trim()}>{copy.confirmChange}</button> : <button type="button" disabled={busy || !mobile.trim() || mobile.trim() === (me?.mobile || '')} onClick={openMobileCaptcha}>{copy.sendCode}</button>}</form></article>
+    </div>
+    {captcha && <div className="ap-captcha-backdrop" role="dialog" aria-modal="true" aria-label={copy.captchaTitle}><ProfileCaptcha challenge={captcha} offset={captchaOffset} busy={busy} copy={copy} onOffset={setCaptchaOffset} onConfirm={sendMobileCode} onRefresh={openMobileCaptcha} onClose={() => { if (!busy) setCaptcha(null); }} /></div>}
+  </section>;
 }
 
 function AccountClosure({ copy, item, busy, onRequest }) {
