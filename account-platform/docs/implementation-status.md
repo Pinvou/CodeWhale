@@ -402,7 +402,7 @@
 | UI-12 | 已实现 | DOC_CURRENT | TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 用户和运营退款动作统一按 Provider capabilities 隐藏；不支持退款时不展示不可执行按钮，服务端同步失败关闭 |
 | ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 离线 CLI 已幂等创建禁用 Identity 与 `BOOTSTRAP_PENDING` admin，支持终端无回显/受控 FD 直接设密及默认256 bit、43字符 Base64URL 一次性凭据；用途/代次校验值不可逆，默认15分钟/最长60分钟、5次锁定、恒定时间校验、重新签发淘汰旧代次、正式密码 Identity 边界、高权限策略、会话撤销、安全审计及失败补偿已实现。仍缺生产等价并发兑换、Keycloak/数据库故障和告警投递证据。 |
 | ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | 已有仅主机/集群运行且无 HTTP 路由的 Break-glass CLI，强制全部管理员失联确认、事故证据、工作负载身份、20字符以上原因和5–60分钟有效期，恢复 Identity/短时授权后写不可变审计并产生 CRITICAL 告警；最后管理员数据库门禁不可绕过。仍缺生产等价事故授权、告警接收和到期恢复演练。 |
-| ADM-03 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY | NOT_DEPLOYED | 正式 Helm 为服务、Keycloak 和三个 Relay 配置独立 ServiceAccount；HTTP OIDC 令牌最长15分钟、按请求重读并按 Subject/Method/Path 默认拒绝，Relay 审计记录 `actor_type=SERVICE`、服务、任务类型和 `job_run_id`。缺真实集群 issuer/JWKS、轮换/撤销和跨身份故障注入证据。 |
+| ADM-03 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT已验证真实OIDC discovery/JWKS及三个独立Relay容器；内部HTTP仍共用一个静态令牌，缺逐工作负载投射身份、轮换/撤销和跨身份故障注入证据 |
 | ADM-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39 | NOT_DEPLOYED | 支持列表、搜索、详情和生命周期操作。 |
 | ADM-05 | 已实现 | DOC_CURRENT | GO-UNIT; RBAC-AUTH; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | 运营端可查看角色定义和全部绑定，按用户/组织筛选，并对普通平台/组织/节点角色执行带有效期的幂等授予和单条撤销；SUPER_ADMIN 与 OWNER 保留专用安全流程 |
 | ADM-06 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-BINDING-LIFECYCLE | NOT_DEPLOYED | Account worker 扫描组织写模型及直接平台授权，到期时原子失效绑定、更新授权/上下文缓存版本并写审计和 Outbox；鉴权查询在 worker 延迟时也按可信数据库时间即时拒绝过期授权 |
@@ -420,7 +420,7 @@
 | NFR-09 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT已在迁移前创建并校验五类快照，按Account、Billing、Token顺序迁移并复核运行库版本32/34/21；仍缺production-new快照凭证和生产迁移摘要 |
 | NFR-10 | 部分实现 | DOC_CURRENT | GO-UNIT; RECOVERY-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 独立版本目录、稳定链接和实际备份已运行；本次未从备份恢复到隔离环境，也没有周期演练报告 |
 | NFR-11 | 部分实现 | DOC_CURRENT | HA-RELEASE-GATE; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT实测为单Docker节点，核心服务、PostgreSQL、Redis、NATS和Keycloak均为单实例；未执行节点/区域/依赖主节点切换，缺真实多故障域容量与无损故障报告 |
-| NFR-12 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY | NOT_DEPLOYED | staging/production 禁止共享静态令牌；正式模板投射逐工作负载短期 OIDC 身份，Relay 与 Billing 消费者挂载独立 NATS 凭据并在代码侧限制本域 Subject。缺外部 NATS operator 实际权限、issuer/JWKS 可达性和轮换/撤销演练证据。 |
+| NFR-12 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | OIDC issuer/JWKS可达性已在云端UAT通过；运行环境仍共用静态HTTP令牌，NATS无Operator凭据，缺独立Subject权限及投射令牌轮换/撤销演练 |
 | NFR-13 | 已实现 | DOC_CURRENT | GO-UNIT; ACCOUNT-CLOSURE-CLEANUP | NOT_DEPLOYED | 注销在 Identity 不可认证证明后立即随机去标识化直接资料并释放用户名/手机号，法律记录只按永久内部主体引用保留；三年分类记录支持法律保全并由 worker 到期标记清除完成。 |
 | NFR-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 启动工厂按配置注入 `aliyun-managed` 或 `http-generated`；核心挑战状态机没有厂商条件，历史挑战保存 Provider ID 与 Adapter 版本 |
 | NFR-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | OIDC 仅证明 issuer、subject 和会话；Account 是平台/组织业务授权事实源，三业务服务均不再读取 Realm Role 决定后台权限 |
@@ -772,7 +772,7 @@
 | UI-16 | 桌面与 Web 三语完整性 | 已实现 | 桌面账号弹层、Portal 个人中心和管理后台的简中/英文/日文词条执行双向精确键集、类型和非空检查；稳定错误映射不再回显 Provider/后端原文，源码单语硬编码和 Portal 构建制品缺失均阻断发布。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 仓库已实现 BOOTSTRAP_PENDING/禁用 Identity 门禁、无回显或受控 FD 设密、默认256 bit一次性凭据、15分钟有效、5次锁定、一次交付、不可逆校验值、代次隔离、Identity 高权限密码策略、会话撤销和失败补偿；缺生产等价环境并发及故障演练证据。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 离线 CLI 无公网 API，强制全体管理员异常失联确认并记录工作负载、原因、目标、证据摘要和5–60分钟有效期，执行后产生不可变审计和 CRITICAL 告警；缺生产事故演练和真实告警投递证据。 |
-| ADM-03 | 服务身份权限 | 部分实现 | 独立 ServiceAccount、短期 OIDC 投射令牌、HTTP 路由白名单、Relay 本域 Subject 和服务任务审计已实现；真实集群轮换、撤销与权限故障演练未完成。 |
+| ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |
 | ADM-04 | 用户与组织分为独立页签 | 已实现 | 支持列表、搜索、详情和生命周期操作。 |
 | ADM-05 | 角色与成员权限管理 | 已实现 | 运营端具备绑定查询、有效期、来源、普通平台/组织角色授予与单条撤销；超级管理员和所有者仍走专用安全流程。 |
 | ADM-06 | 角色授权自动回收 | 已实现 | 临时授权按数据库时间即时停止参与鉴权，worker 原子固化到期、刷新缓存版本并记录审计/Outbox。 |
@@ -830,7 +830,7 @@
 | NFR-09 | 数据迁移 | 云端 UAT 已在五类快照校验后按域迁移并复核运行库版本；production-new 快照凭证和生产迁移摘要仍待验收。 |
 | NFR-10 | 可恢复性 | 云端 UAT 已使用独立版本目录、稳定链接和受限备份；隔离恢复、RPO/RTO 计时与周期演练仍为外部阻塞。 |
 | NFR-11 | 高可用 | 生产 Chart 已强制独立故障域、多副本、PDB、零不可用滚动和外部 HA 依赖；本次云端 UAT 为全组件单实例，真实集群容量与无损切换仍为外部阻塞。 |
-| NFR-12 | 工作负载身份 | 正式模板已移除共享 `INTERNAL_SERVICE_TOKEN`，使用逐工作负载短期 OIDC 身份和独立 NATS 凭据；真实 issuer/JWKS、Subject 授权与轮换撤销证据待部署。 |
+| NFR-12 | 工作负载身份 | 正式模板已移除共享 `INTERNAL_SERVICE_TOKEN`；云端 UAT 的 issuer/JWKS 可达，但运行时仍为共享静态令牌且 NATS 无 Operator 权限，Subject 授权与轮换撤销证据待正式集群部署。 |
 | NFR-13 | 个人信息去标识化与保留 | 已实现 Identity 删除证明后的随机墓碑和标识释放；用户 ID/编码与法定内部引用保留，三年分类记录、法律保全开关及到期自动清除状态独立持久化。 |
 | NFR-14 | 短信供应商可替换性 | `SMSProvider` 由启动工厂按配置注入，核心状态机无厂商分支；支持 `aliyun-managed` 与 `http-generated`，并保存 Provider ID 和 Adapter 版本。 |
 | NFR-15 | 身份与授权分离 | OIDC 只证明主体与会话；Account 决定平台和组织业务权限，业务路由不再依赖 Identity Provider 角色 Claim。 |

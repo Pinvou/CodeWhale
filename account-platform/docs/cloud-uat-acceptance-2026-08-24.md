@@ -48,3 +48,11 @@
 - 应用仍运行在 `development` Compose，没有 production-new 的三源中位偏差配置，也未注入 100ms、250ms 和大于 1 秒偏差；没有对应告警投递、readiness 失败和写请求 `CLOCK_UNSAFE` 拒绝证据。
 - 当前没有支付流水和真实 Provider 错误样本，未覆盖支付/模型各能力与路由的业务拒绝排除、连续失败、滚动窗口、只读半开探针、指数重开、跨副本一致性和告警。
 - 结论：NFR-44、NFR-46 保持部分实现，APT-043 保持 `BLOCKED_EXTERNAL`；宿主机 NTP 正常不能替代应用层故障注入和 Provider 验收。
+
+## APT-047：工作负载身份与 NATS Subject
+
+- 通过：真实 OIDC discovery/JWKS 可通过公网 HTTPS 访问；Account、Billing、Token 三个 Relay 为独立容器，代码版本和健康状态均可独立核对。
+- 未通过：Account、Billing 与 Token Gateway 的内部 HTTP 身份摘要相同，确认当前 Compose 仍共用一个静态 `INTERNAL_SERVICE_TOKEN`，不是逐工作负载最长 15 分钟 OIDC 投射令牌。
+- 未通过：NATS 仅以 JetStream、存储目录和监控端口参数启动，没有 Operator/Account/User 凭据；三个 Relay 未取得精确到本域 Subject 的外部授权证据。
+- 未执行：issuer/JWKS 中断、投射令牌轮换/撤销、跨服务身份调用和 Relay 越域发布拒绝的真实环境故障注入。
+- 结论：ADM-03、NFR-12 保持部分实现，APT-047 保持 `BLOCKED_EXTERNAL`；需要正式 Kubernetes、工作负载 issuer 和 NATS Operator 后重新验收。
