@@ -5419,6 +5419,42 @@ async fn steer_lifecycle_withdrawal_is_bounded_and_prevents_commit() {
 }
 
 #[tokio::test]
+async fn engine_drop_reports_unconsumed_steers_best_effort() {
+    let workspace = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    let _turn = engine.begin_steer_turn();
+    let first = handle
+        .steer("left in the channel")
+        .await
+        .expect("first steer");
+    let second = handle.steer("also unconsumed").await.expect("second steer");
+
+    // Host evicts the engine without Op::Shutdown: Drop must still report
+    // every unconsumed steer (best-effort try_send).
+    drop(engine);
+
+    let mut dropped: Vec<String> = {
+        let mut rx = handle.rx_event.write().await;
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::SteerDropped { steer_id } => Some(steer_id),
+                _ => None,
+            })
+            .collect()
+    };
+    dropped.sort();
+    let mut expected = vec![first, second];
+    expected.sort();
+    assert_eq!(
+        dropped, expected,
+        "engine drop must emit SteerDropped for every unconsumed steer"
+    );
+}
+
+#[tokio::test]
 async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
     use crate::llm_client::mock::{MockLlmClient, canned};
 
