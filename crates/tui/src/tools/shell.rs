@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -58,7 +59,10 @@ use crate::work_graph::{
     SharedWorkRuntime,
 };
 use crate::worker_profile::ShellPolicy;
-use output::{tail_from_buffer, take_delta_from_buffer};
+use output::{
+    ShellStreamDecoder, decode_shell_bytes, tail_from_buffer, tail_from_bytes,
+    take_delta_from_buffer,
+};
 
 const READONLY_ENV_MARKER: &str = "CODEWHALE_INTERNAL_READONLY_ARGV";
 
@@ -233,17 +237,17 @@ impl ShellCompletionEvidence {
 // artifact carries the exact bytes beyond these diagnostic tails.
 const SHELL_COMPLETION_TAIL_BYTES: usize = 1_024;
 
-fn bounded_completion_tail(buffer: &Arc<Mutex<Vec<u8>>>, max_bytes: usize) -> (usize, String) {
-    let (total, candidate) = tail_from_buffer(buffer, max_bytes);
+fn bounded_completion_tail(bytes: &[u8], max_bytes: usize, last: bool) -> String {
+    let candidate = tail_from_bytes(bytes, max_bytes, last);
     if candidate.len() <= max_bytes {
-        return (total, candidate);
+        return candidate;
     }
     let content_budget = max_bytes.saturating_sub(3);
     let mut start = candidate.len().saturating_sub(content_budget);
     while start < candidate.len() && !candidate.is_char_boundary(start) {
         start += 1;
     }
-    (total, format!("...{}", &candidate[start..]))
+    format!("...{}", &candidate[start..])
 }
 
 /// Optional owner attribution for background shell work.
@@ -651,8 +655,10 @@ impl StdinWriter {
 fn spawn_reader_thread<R: Read + Send + 'static>(
     mut reader: R,
     buffer: Arc<Mutex<Vec<u8>>>,
-) -> std::thread::JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> (std::thread::JoinHandle<()>, Arc<AtomicBool>) {
+    let completed = Arc::new(AtomicBool::new(false));
+    let thread_completed = Arc::clone(&completed);
+    let handle = std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
         loop {
             match reader.read(&mut chunk) {
@@ -665,7 +671,11 @@ fn spawn_reader_thread<R: Read + Send + 'static>(
                 Err(_) => break,
             }
         }
-    })
+        // Release pairs with snapshot/delta Acquire loads so all buffer writes
+        // are visible before a decoder flushes an incomplete final sequence.
+        thread_completed.store(true, Ordering::Release);
+    });
+    (handle, completed)
 }
 
 const SYNC_READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -704,6 +714,27 @@ fn recv_sync_reader_output(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+fn snapshot_stream_bytes(
+    buffer: &Arc<Mutex<Vec<u8>>>,
+    reader_completed: &Arc<AtomicBool>,
+) -> (Vec<u8>, bool) {
+    snapshot_stream_bytes_with_hook(buffer, reader_completed, || {})
+}
+
+fn snapshot_stream_bytes_with_hook(
+    buffer: &Arc<Mutex<Vec<u8>>>,
+    reader_completed: &Arc<AtomicBool>,
+    after_completion_load: impl FnOnce(),
+) -> (Vec<u8>, bool) {
+    // Load completion before copying. If it is true, Acquire observes every
+    // preceding reader write; if it is false, this snapshot must stay
+    // non-final even when EOF races with the subsequent buffer copy.
+    let last = reader_completed.load(Ordering::Acquire);
+    after_completion_load();
+    let bytes = buffer.lock().map(|data| data.clone()).unwrap_or_default();
+    (bytes, last)
+}
+
 /// A background shell process being tracked
 pub struct BackgroundShell {
     pub id: String,
@@ -722,6 +753,8 @@ pub struct BackgroundShell {
     heavy_permit: Option<HeavyCommandPermit>,
     stdout_cursor: usize,
     stderr_cursor: usize,
+    stdout_decoder: ShellStreamDecoder,
+    stderr_decoder: ShellStreamDecoder,
     completion_reported: bool,
     /// Engine turn that owns this still-waiting foreground tool call. Cleared
     /// when the wait is deliberately moved to the background; cancellation
@@ -733,6 +766,8 @@ pub struct BackgroundShell {
     windows_job: Option<WindowsJob>,
     stdout_thread: Option<std::thread::JoinHandle<()>>,
     stderr_thread: Option<std::thread::JoinHandle<()>>,
+    stdout_reader_completed: Arc<AtomicBool>,
+    stderr_reader_completed: Option<Arc<AtomicBool>>,
     work_lifecycle: Option<ShellWorkLifecycle>,
     lifecycle_seq: u64,
     last_lifecycle_status: Option<ShellStatus>,
@@ -835,6 +870,16 @@ impl Drop for ShellSpawnIntentGuard {
 }
 
 impl BackgroundShell {
+    fn stdout_reader_completed(&self) -> bool {
+        self.stdout_reader_completed.load(Ordering::Acquire)
+    }
+
+    fn stderr_reader_completed(&self) -> bool {
+        self.stderr_reader_completed
+            .as_ref()
+            .is_none_or(|completed| completed.load(Ordering::Acquire))
+    }
+
     /// Check if the process has completed and update status
     fn poll(&mut self) -> bool {
         self.refresh_output_activity();
@@ -970,43 +1015,45 @@ impl BackgroundShell {
     }
 
     fn full_output(&self) -> (String, String, usize, usize) {
-        let (stdout_bytes, stderr_bytes) = self.full_output_bytes();
+        let (stdout_bytes, stdout_last) =
+            snapshot_stream_bytes(&self.stdout_buffer, &self.stdout_reader_completed);
+        let (stderr_bytes, stderr_last) = self
+            .stderr_buffer
+            .as_ref()
+            .zip(self.stderr_reader_completed.as_ref())
+            .map(|(buffer, completed)| snapshot_stream_bytes(buffer, completed))
+            .unwrap_or_else(|| (Vec::new(), true));
         let stdout_len = stdout_bytes.len();
         let stderr_len = stderr_bytes.len();
 
         (
-            String::from_utf8_lossy(&stdout_bytes).to_string(),
-            String::from_utf8_lossy(&stderr_bytes).to_string(),
+            decode_shell_bytes(&stdout_bytes, stdout_last),
+            decode_shell_bytes(&stderr_bytes, stderr_last),
             stdout_len,
             stderr_len,
         )
     }
 
-    fn full_output_bytes(&self) -> (Vec<u8>, Vec<u8>) {
-        let stdout_bytes = self
-            .stdout_buffer
-            .lock()
-            .map(|data| data.clone())
-            .unwrap_or_default();
-        let stderr_bytes = self
-            .stderr_buffer
-            .as_ref()
-            .and_then(|buffer| buffer.lock().ok().map(|data| data.clone()))
-            .unwrap_or_default();
-        (stdout_bytes, stderr_bytes)
-    }
-
     fn take_delta(&mut self) -> (String, String, usize, usize, usize, usize) {
-        let (stdout_delta, stdout_total) =
-            take_delta_from_buffer(&self.stdout_buffer, &mut self.stdout_cursor);
-        let (stderr_delta, stderr_total) = if let Some(buffer) = self.stderr_buffer.as_ref() {
-            take_delta_from_buffer(buffer, &mut self.stderr_cursor)
-        } else {
-            (Vec::new(), 0)
-        };
-
-        let stdout_delta_len = stdout_delta.len();
-        let stderr_delta_len = stderr_delta.len();
+        let stdout_last = self.stdout_reader_completed();
+        let stderr_last = self.stderr_reader_completed();
+        let (stdout_delta, stdout_delta_len, stdout_total) = take_delta_from_buffer(
+            &self.stdout_buffer,
+            &mut self.stdout_cursor,
+            &mut self.stdout_decoder,
+            stdout_last,
+        );
+        let (stderr_delta, stderr_delta_len, stderr_total) =
+            if let Some(buffer) = self.stderr_buffer.as_ref() {
+                take_delta_from_buffer(
+                    buffer,
+                    &mut self.stderr_cursor,
+                    &mut self.stderr_decoder,
+                    stderr_last,
+                )
+            } else {
+                (String::new(), 0, 0)
+            };
 
         if stdout_delta_len > 0 || stderr_delta_len > 0 {
             self.last_output_at = Instant::now();
@@ -1014,8 +1061,8 @@ impl BackgroundShell {
         }
 
         (
-            String::from_utf8_lossy(&stdout_delta).to_string(),
-            String::from_utf8_lossy(&stderr_delta).to_string(),
+            stdout_delta,
+            stderr_delta,
             stdout_delta_len,
             stderr_delta_len,
             stdout_total,
@@ -1111,11 +1158,12 @@ impl BackgroundShell {
         // is O(total_bytes_written), which caused the ShellManager mutex to be
         // held for an arbitrarily long time during list_jobs() calls from the
         // TUI event loop — freezing input handling on long automation runs.
-        let (stdout_len, stdout_tail) = tail_from_buffer(&self.stdout_buffer, 1200);
+        let (stdout_len, stdout_tail) =
+            tail_from_buffer(&self.stdout_buffer, 1200, self.stdout_reader_completed());
         let (stderr_len, stderr_tail) = self
             .stderr_buffer
             .as_ref()
-            .map(|buf| tail_from_buffer(buf, 1200))
+            .map(|buf| tail_from_buffer(buf, 1200, self.stderr_reader_completed()))
             .unwrap_or((0, String::new()));
         let elapsed_since_output_ms = (self.status == ShellStatus::Running)
             .then(|| u64::try_from(self.last_output_at.elapsed().as_millis()).unwrap_or(u64::MAX));
@@ -1149,35 +1197,54 @@ impl BackgroundShell {
         }
     }
 
-    fn completion_event(&self) -> ShellCompletionEvent {
-        let snapshot = self.job_snapshot();
-        let (stdout_len, stdout_tail) =
-            bounded_completion_tail(&self.stdout_buffer, SHELL_COMPLETION_TAIL_BYTES);
-        let (stderr_len, stderr_tail) = self
-            .stderr_buffer
-            .as_ref()
-            .map(|buffer| bounded_completion_tail(buffer, SHELL_COMPLETION_TAIL_BYTES))
-            .unwrap_or((0, String::new()));
+    fn completion_event_from_cutoff(
+        &self,
+        stdout: &[u8],
+        stdout_last: bool,
+        stderr: &[u8],
+        stderr_last: bool,
+    ) -> ShellCompletionEvent {
         ShellCompletionEvent {
-            task_id: snapshot.id,
-            command: snapshot.command,
-            status: snapshot.status,
-            exit_code: snapshot.exit_code,
-            duration_ms: snapshot.elapsed_ms,
-            stdout_tail,
-            stderr_tail,
-            stdout_len,
-            stderr_len,
+            task_id: self.id.clone(),
+            command: self.command.clone(),
+            status: self.status.clone(),
+            exit_code: self.exit_code,
+            duration_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            stdout_tail: bounded_completion_tail(stdout, SHELL_COMPLETION_TAIL_BYTES, stdout_last),
+            stderr_tail: bounded_completion_tail(stderr, SHELL_COMPLETION_TAIL_BYTES, stderr_last),
+            stdout_len: stdout.len(),
+            stderr_len: stderr.len(),
             evidence_ref: None,
-            linked_task_id: snapshot.linked_task_id,
-            owner_agent_id: snapshot.owner_agent_id,
-            owner_agent_name: snapshot.owner_agent_name,
+            linked_task_id: self.linked_task_id.clone(),
+            owner_agent_id: self
+                .owner_agent
+                .as_ref()
+                .map(|owner| owner.agent_id.clone()),
+            owner_agent_name: self
+                .owner_agent
+                .as_ref()
+                .map(|owner| owner.agent_name.clone()),
         }
     }
 
     fn completion_evidence(&self) -> ShellCompletionEvidence {
-        let event = self.completion_event();
-        let (stdout, stderr) = self.full_output_bytes();
+        self.completion_evidence_with_hook(|| {})
+    }
+
+    fn completion_evidence_with_hook(
+        &self,
+        after_cutoff: impl FnOnce(),
+    ) -> ShellCompletionEvidence {
+        let (stdout, stdout_last) =
+            snapshot_stream_bytes(&self.stdout_buffer, &self.stdout_reader_completed);
+        let (stderr, stderr_last) = self
+            .stderr_buffer
+            .as_ref()
+            .zip(self.stderr_reader_completed.as_ref())
+            .map(|(buffer, completed)| snapshot_stream_bytes(buffer, completed))
+            .unwrap_or_else(|| (Vec::new(), true));
+        after_cutoff();
+        let event = self.completion_event_from_cutoff(&stdout, stdout_last, &stderr, stderr_last);
         ShellCompletionEvidence {
             event,
             stdout,
@@ -1698,8 +1765,8 @@ impl ShellManager {
             terminate_and_close_windows_job(windows_job);
             let stdout = recv_sync_reader_output(&stdout_rx);
             let stderr = recv_sync_reader_output(&stderr_rx);
-            let stdout_str = String::from_utf8_lossy(&stdout).to_string();
-            let stderr_str = String::from_utf8_lossy(&stderr).to_string();
+            let stdout_str = decode_shell_bytes(&stdout, true);
+            let stderr_str = decode_shell_bytes(&stderr, true);
             let exit_code = status
                 .code
                 .and_then(|code| i32::try_from(code).ok())
@@ -1746,8 +1813,8 @@ impl ShellManager {
             let status = child.wait().ok();
             let stdout = recv_sync_reader_output(&stdout_rx);
             let stderr = recv_sync_reader_output(&stderr_rx);
-            let stdout_str = String::from_utf8_lossy(&stdout).to_string();
-            let stderr_str = String::from_utf8_lossy(&stderr).to_string();
+            let stdout_str = decode_shell_bytes(&stdout, true);
+            let stderr_str = decode_shell_bytes(&stderr, true);
             let (stdout, stdout_meta) = truncate_with_meta(&stdout_str);
             let (stderr, stderr_meta) = truncate_with_meta(&stderr_str);
 
@@ -1941,7 +2008,14 @@ impl ShellManager {
         #[cfg(windows)]
         let mut windows_job = None;
 
-        let (child, stdin, stdout_thread, stderr_thread) = if tty {
+        let (
+            child,
+            stdin,
+            stdout_thread,
+            stderr_thread,
+            stdout_reader_completed,
+            stderr_reader_completed,
+        ) = if tty {
             #[cfg(target_env = "ohos")]
             unreachable!("OHOS TTY mode returns before PTY setup");
 
@@ -1986,12 +2060,15 @@ impl ShellManager {
                         return Err(err).context("Failed to take PTY writer");
                     }
                 };
-                let stdout_thread = Some(spawn_reader_thread(reader, Arc::clone(&stdout_buffer)));
+                let (stdout_thread, stdout_reader_completed) =
+                    spawn_reader_thread(reader, Arc::clone(&stdout_buffer));
 
                 (
                     ShellChild::Pty(child),
                     Some(StdinWriter::Pty(writer)),
-                    stdout_thread,
+                    Some(stdout_thread),
+                    None,
+                    stdout_reader_completed,
                     None,
                 )
             }
@@ -2041,19 +2118,20 @@ impl ShellManager {
             };
             let stdin_handle = child.stdin.take().map(StdinWriter::Pipe);
 
-            let stdout_thread = Some(spawn_reader_thread(
-                stdout_handle,
-                Arc::clone(&stdout_buffer),
-            ));
-            let stderr_thread = stderr_buffer
+            let (stdout_thread, stdout_reader_completed) =
+                spawn_reader_thread(stdout_handle, Arc::clone(&stdout_buffer));
+            let (stderr_thread, stderr_reader_completed) = stderr_buffer
                 .as_ref()
-                .map(|buffer| spawn_reader_thread(stderr_handle, Arc::clone(buffer)));
+                .map(|buffer| spawn_reader_thread(stderr_handle, Arc::clone(buffer)))
+                .expect("non-TTY shells always capture stderr");
 
             (
                 ShellChild::Process(child),
                 stdin_handle,
-                stdout_thread,
-                stderr_thread,
+                Some(stdout_thread),
+                Some(stderr_thread),
+                stdout_reader_completed,
+                Some(stderr_reader_completed),
             )
         };
 
@@ -2074,6 +2152,8 @@ impl ShellManager {
             heavy_permit,
             stdout_cursor: 0,
             stderr_cursor: 0,
+            stdout_decoder: ShellStreamDecoder::default(),
+            stderr_decoder: ShellStreamDecoder::default(),
             completion_reported: false,
             foreground_turn_id: None,
             stdin,
@@ -2082,6 +2162,8 @@ impl ShellManager {
             windows_job,
             stdout_thread,
             stderr_thread,
+            stdout_reader_completed,
+            stderr_reader_completed,
             work_lifecycle,
             lifecycle_seq: 0,
             last_lifecycle_status: None,
