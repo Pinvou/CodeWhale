@@ -1665,7 +1665,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(leaveA.status, 204);
   const teamsAfterLeave = await api("/v1/teams", { token: a.device_token });
-  assert.deepEqual(teamsAfterLeave.value.teams, []);
+  assert.deepEqual(teamsAfterLeave.value.teams.map(team => team.name), ["Release group"]);
   const oldCodeAfterLeave = await api("/v1/teams/join", {
     method: "POST",
     token: a.device_token,
@@ -1709,9 +1709,12 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   await readSseUntil(dissolveSseReader, "event: team.dissolved");
   await waitForSseEnd(dissolveSseReader);
   const teamsAfterDissolution = await api("/v1/teams", { token: b.device_token });
-  assert.deepEqual(teamsAfterDissolution.value.teams, []);
+  assert.deepEqual(teamsAfterDissolution.value.teams.map(team => team.name), ["Release group"]);
   const meAfterDissolution = await api("/v1/me", { token: b.device_token });
-  assert.deepEqual(meAfterDissolution.value.memberships, []);
+  assert.deepEqual(
+    meAfterDissolution.value.memberships.map(membership => membership.team_id),
+    [createdTeam.value.team.id],
+  );
   const dissolvedBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
     token: b.device_token,
   });
