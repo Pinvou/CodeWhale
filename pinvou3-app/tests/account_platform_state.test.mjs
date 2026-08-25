@@ -684,3 +684,11 @@ test('billing order readers tolerate provider fields that are null before the fi
   assert.equal((refunds.match(/COALESCE\(payment_url,''\),COALESCE\(qr_data,''\)/g) || []).length, 2);
   assert.match(reconciliation, /COALESCE\(payment_url,''\),primary_provider_transaction_id/);
 });
+
+test('desktop account popover does not own platform model selection', async () => {
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(popover, /client\.modelCatalog|client\.selectCatalogModel/);
+  assert.doesNotMatch(popover, /copy\.platformModel|copy\.selectPlatformModel/);
+  assert.match(popover, /client\.balance/);
+  assert.match(popover, /client\.openPortal/);
+});

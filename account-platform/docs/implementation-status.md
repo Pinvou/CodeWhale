@@ -297,7 +297,7 @@
 | NFR-47 | 已实现 | DOC_CURRENT | GO-UNIT; CLIENT-COMPATIBILITY-LIFECYCLE | NOT_DEPLOYED | 四服务共用版本清单与响应头，三版合同矩阵、90天支持、60天通知、受审批安全例外及稳定426已闭环；每次正式发布必须更新真实发布日期与淘汰时间 |
 | NFR-48 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-EXPORT-PROTECTION | NOT_DEPLOYED | 服务端任务要求 `platform.audit.export`、15分钟近期认证、明确范围和原因；默认不可逆主体标识及字段脱敏，未脱敏字段另需最长24小时临时 `platform.audit.pii.export`；执行31天/10万行/500MB、每用户2并发/10每日配额，加密签名水印文件只允许15分钟内单次成功下载；缺生产密钥托管、大规模及真实并发验收 |
 | UI-16 | 已实现 | DOC_CURRENT | DESKTOP-39; I18N-RELEASE-GATE | NOT_DEPLOYED | 桌面账号弹层、Web 个人中心和管理后台共用精确中/英/日词条形状，未知服务端错误只显示本地化安全兜底；缺键、空词条、回退、单语硬编码或构建制品缺词条会同时阻断 verify 和客户端发布 |
-| UI-17 | 未实现 | DOC_CURRENT | NOT_RUN | NOT_DEPLOYED | 桌面账号 Popover 当前仍展示并修改平台模型；由 APT-059 移除 |
+| UI-17 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LINT; ARCHITECTURE-GUARD | NOT_DEPLOYED | 桌面账号 Popover 已移除目录读取、平台模型状态和选择入口；登录、余额、充值、Web 个人中心和退出登录保持不变 |
 | UI-18 | 未实现 | DOC_CURRENT | NOT_RUN | NOT_DEPLOYED | 设置页尚无独立的品悟平台模型目录组和仅作用于新会话的默认选择；由 APT-061 实现 |
 | UI-19 | 未实现 | DOC_CURRENT | NOT_RUN | NOT_DEPLOYED | 对话输入区当前只展示一个通用内置 SavedModel，尚不能直接选择具体平台目录模型并冻结到当前会话；由 APT-062 实现 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
@@ -515,7 +515,7 @@
 | CR-62 | PAY-31, UI-12, ADM-20 | 普通退款暂不开放，保留既有实现但屏蔽所有新建入口 | 部分实现 | 退款领域模型、迁移、执行器、证据、查询和被动异常处置均保留；当前 H3C 已因 capability 不支持而隐藏入口，但仍需 APT-056 增加独立于 Provider capability 的产品级默认关闭门禁，同时拒绝用户/运营 UI 和服务端创建请求 |
 | CR-63 | PAY-10, PAY-12, PAY-15–PAY-17, NFR-03, NFR-04, NFR-41 | 提供 Provider 中立授权与支付通知接口，新华三作为首个 Profile 且不增加额外能力字段 | 云端接口已部署，商城联调待验收 | 凭据和 Token 绑定 Provider、版本及商户，请求体不能自报身份。H3C 直接声明 `notification_supported=true`，通知先入既有 Inbox 再异步归并，查询继续补偿；云端受控客户端 Token 签发已通过，真实商城金额字段、通知报文、重复/乱序和履约行为仍需外部联调证据 |
 | CR-64 | UI-09, PAY-15–PAY-17, NFR-03, NFR-04 | Web 个人中心与公开支付回调统一迁移到账号独立 HTTPS 子域名和 `/api/v1` 命名空间 | 云端 UAT 已部署 | 桌面默认入口、Portal 根路径、Billing 路由、OpenAPI、Helm、Compose、Nginx 与文档已统一为 `https://account.pinvou.com/`；受信 TLS、HTTP `308`、Portal `200`、回调未授权 `401` 与受控 Token 签发 `200` 均已验证。旧官网个人中心代理与旧回调契约未保留兼容代码；真实商城回调仍由 CR-63 跟踪 |
-| CR-65 | TOK-48, UI-17–UI-19 | 平台模型入口从账号 Popover 迁移到设置和对话区，并隔离全局默认与当前会话选择 | 未实现 | 已完成需求、架构边界和 APT-059–APT-063 独立任务拆分；代码尚未实现 |
+| CR-65 | TOK-48, UI-17–UI-19 | 平台模型入口从账号 Popover 迁移到设置和对话区，并隔离全局默认与当前会话选择 | 部分实现 | APT-059 已从账号 Popover 移除平台模型入口；类型化引用、设置默认项、对话入口和完整回归仍待 APT-060–APT-063 |
 
 这些需求之间的强制关系：
 
@@ -781,7 +781,7 @@
 | UI-14 | 注销进度与阻断原因展示 | 已实现 | 桌面与 Web 个人中心三语展示持久阶段、状态、SLA、稳定阻断原因和用户动作；响应删除内部资源 ID 并自动刷新，未完成前不显示完成。 |
 | UI-15 | 未完成注册恢复状态展示 | 已实现 | 桌面优先在系统凭据库保存操作查询凭据，重启后按 `next_retry_at` 轮询，区分 Identity、Account、钱包、修复与补偿状态并阻止重复注册。 |
 | UI-16 | 桌面与 Web 三语完整性 | 已实现 | 桌面账号弹层、Portal 个人中心和管理后台的简中/英文/日文词条执行双向精确键集、类型和非空检查；稳定错误映射不再回显 Provider/后端原文，源码单语硬编码和 Portal 构建制品缺失均阻断发布。 |
-| UI-17 | 账号 Popover 职责收敛 | 未实现 | 当前仍包含平台模型下拉和默认值写入；待 APT-059。 |
+| UI-17 | 账号 Popover 职责收敛 | 已实现 | 已移除平台模型目录请求、下拉和默认值写入，同时保留账号、额度、充值、Web 个人中心和退出登录。 |
 | UI-18 | 设置中的平台模型默认项 | 未实现 | 当前仅显示通用内置 SavedModel，尚无具体平台目录组和“应用于新会话”语义；待 APT-061。 |
 | UI-19 | 对话内直接选择平台模型 | 未实现 | 当前对话选择器不能展开具体平台目录模型，也未冻结类型化会话引用；待 APT-062。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
