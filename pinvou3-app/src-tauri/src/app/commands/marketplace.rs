@@ -455,7 +455,12 @@ pub async fn uninstall_marketplace_tool(
     tool_id: String,
     pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
 ) -> Result<(), String> {
-    uninstall_marketplace_tool_sync(&tool_id)?;
+    let uninstall_tool_id = tool_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        uninstall_marketplace_tool_sync(&uninstall_tool_id)
+    })
+    .await
+    .map_err(|error| format!("卸载工具后台任务失败: {error}"))??;
     // 联动卸载的 companion 技能影响两个 scope 的启用集：重写在线会话组合目录
     // （async 命令必须用 async 版：blocking 版的 blocking_lock 在 tokio runtime
     // 线程上必 panic）。

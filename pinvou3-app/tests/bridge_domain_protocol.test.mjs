@@ -218,4 +218,21 @@ try {
   if (previousTauri === undefined) delete globalThis.__TAURI__;
   else globalThis.__TAURI__ = previousTauri;
 }
+
+const marketplaceCommands = fs.readFileSync(
+  path.join(root, 'src-tauri', 'src', 'app', 'commands', 'marketplace.rs'),
+  'utf8',
+);
+const uninstallStart = marketplaceCommands.indexOf('pub async fn uninstall_marketplace_tool(');
+const uninstallEnd = marketplaceCommands.indexOf(
+  'pub(super) fn uninstall_marketplace_tool_sync(',
+  uninstallStart,
+);
+assert.ok(uninstallStart >= 0 && uninstallEnd > uninstallStart, 'marketplace uninstall command boundary must exist');
+const uninstallCommand = marketplaceCommands.slice(uninstallStart, uninstallEnd);
+assert.match(
+  uninstallCommand,
+  /tauri::async_runtime::spawn_blocking\s*\([\s\S]*uninstall_marketplace_tool_sync/u,
+  'desktop marketplace uninstall must not wait for the synchronous tool lock on the async runtime',
+);
 console.log('bridge domain API and protocol contracts passed');

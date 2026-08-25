@@ -184,9 +184,25 @@ fn parse_target(target: &str) -> Result<(&str, &str), String> {
     Ok((python, platform))
 }
 
+fn interpreter_version(tag: &str, prefix: &str) -> Option<(u32, u32)> {
+    let digits = tag.strip_prefix(prefix)?;
+    if digits.len() < 2 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let (major, minor) = digits.split_at(1);
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn compatible_pure_python_tag(tag: &str, target: (u32, u32)) -> bool {
+    tag == format!("py{}", target.0)
+        || interpreter_version(tag, "py")
+            .is_some_and(|version| version.0 == target.0 && version.1 <= target.1)
+}
+
 /// 校验 wheel 文件名末尾的 PEP 425 `python-abi-platform` 三元组。
-/// 纯 Python 的 `py3-none-any` 跨 CPython 小版本复用；其余 wheel 必须明确匹配
-/// target，或使用与目标版本兼容的稳定 ABI（abi3）。
+/// 兼容集合与 `packaging.tags` 的 CPython supported tags 对齐：目标解释器及不高于
+/// 目标版本的 `py3x-none-{platform,any}`、目标 `cp3x-none-{platform,any}`，以及
+/// CPython 3.2 起不高于目标版本的同平台稳定 ABI（abi3）。
 fn validate_wheel_target(filename: &str, target: &str) -> Result<(), String> {
     let (target_python, target_platform) = parse_target(target)?;
     let stem = filename
@@ -199,7 +215,8 @@ fn validate_wheel_target(filename: &str, target: &str) -> Result<(), String> {
     if tags.next().is_none() || pythons.is_empty() || abis.is_empty() || platforms.is_empty() {
         return Err(format!("wheel 缺少 PEP 425 标签: {filename}"));
     }
-    let target_version = target_python[2..].parse::<u32>().unwrap_or_default();
+    let target_version = interpreter_version(target_python, "cp")
+        .ok_or_else(|| format!("无效的 Windows Python target: {target}"))?;
     let valid_tag = |tag: &str| {
         !tag.is_empty()
             && tag
@@ -220,17 +237,24 @@ fn validate_wheel_target(filename: &str, target: &str) -> Result<(), String> {
     for python in &python_tags {
         for abi in &abi_tags {
             for platform in &platform_tags {
-                let universal = *python == "py3" && *abi == "none" && *platform == "any";
-                let platform_specific = *platform == target_platform
-                    && ((*python == target_python
-                        && (*abi == target_python || *abi == "abi3" || *abi == "none"))
-                        || (*python == "py3" && *abi == "none")
-                        || (*abi == "abi3"
-                            && python
-                                .strip_prefix("cp")
-                                .and_then(|digits| digits.parse::<u32>().ok())
-                                .is_some_and(|version| version <= target_version)));
-                if universal || platform_specific {
+                let pure_python = *abi == "none"
+                    && (compatible_pure_python_tag(python, target_version)
+                        || *python == target_python);
+                let exact_cpython = *python == target_python && *abi == target_python;
+                let stable_abi = *abi == "abi3"
+                    && interpreter_version(python, "cp").is_some_and(|version| {
+                        version.0 == target_version.0
+                            && version >= (3, 2)
+                            && version <= target_version
+                    });
+                let compatible = if *platform == target_platform {
+                    exact_cpython || stable_abi || pure_python
+                } else if *platform == "any" {
+                    pure_python
+                } else {
+                    false
+                };
+                if compatible {
                     return Ok(());
                 }
             }
@@ -536,14 +560,23 @@ mod tests {
         let target = "cp313-win_amd64";
         for compatible in [
             "demo-1-cp313-cp313-win_amd64.whl",
+            "demo-1-cp313-abi3-win_amd64.whl",
             "demo-1-cp312-abi3-win_amd64.whl",
+            "demo-1-cp32-abi3-win_amd64.whl",
+            "demo-1-cp313-none-any.whl",
+            "demo-1-py313-none-any.whl",
+            "demo-1-py312-none-any.whl",
+            "demo-1-py313-none-win_amd64.whl",
             "demo-1-py3-none-any.whl",
         ] {
             validate_wheel_target(compatible, target)
                 .unwrap_or_else(|error| panic!("{compatible}: {error}"));
         }
         for incompatible in [
+            "demo-1-cp27-abi3-win_amd64.whl",
+            "demo-1-cp31-abi3-win_amd64.whl",
             "demo-1-cp314-abi3-win_amd64.whl",
+            "demo-1-py314-none-any.whl",
             "demo-1-cp313-cp313-win_arm64.whl",
             "demo-1-CP313-cp313-win_amd64.whl",
             "demo-1-cp313-cp313-any.whl",

@@ -481,60 +481,80 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         }
         let mut errors = Vec::new();
         for tool_id in self.installed_ids() {
-            let operation_lock = tool_operation_lock(&tool_id);
-            let _operation = operation_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !self.installed_ids().contains(&tool_id) {
-                continue;
-            }
-            let manifest = match mcp_catalog::embedded_manifest(&tool_id) {
-                Ok(Some(manifest)) => manifest,
-                Ok(None) => continue,
-                Err(error) => {
-                    errors.push(format!("{tool_id}: {error}"));
-                    continue;
-                }
-            };
-            if manifest.windows_python_dependencies.is_none() {
-                continue;
-            }
-            let fingerprint = (|| -> Result<String, String> {
-                mcp_catalog::ensure_package_released(&tool_id)?;
-                skill_marketplace::dir_fingerprint(&mcp_catalog::package_mcp_dir(&tool_id))
-            })();
-            let result = (|| -> Result<store::AssetRef, String> {
-                fingerprint.as_ref().map_err(Clone::clone)?;
-                let dependencies = python_dependencies::ensure_for_builtin_manifest(&manifest)?
-                    .ok_or_else(|| format!("工具 '{tool_id}' 缺少 Python 依赖结果"))?;
-                if !self.installed_ids().contains(&tool_id) {
-                    return Err("工具已在依赖下载期间卸载，跳过迁移提交".to_string());
-                }
-                self.repair_python_dependency_entry(
-                    &manifest,
-                    &mcp_catalog::package_mcp_dir(&tool_id),
-                    &dependencies,
-                )?;
-                Ok(dependencies.asset)
-            })();
-            if !self.installed_ids().contains(&tool_id) {
-                continue;
-            }
-            let store = store::BundleStore::new();
-            if let Err(store_error) = record_python_dependency_repair(
-                &store,
-                &manifest,
-                result.as_ref().ok().cloned(),
-                fingerprint.ok(),
-                result.as_ref().err().map(String::as_str),
+            if let Err(error) = self.repair_installed_builtin_python_dependency_with(
+                &tool_id,
+                python_dependencies::ensure_for_builtin_manifest,
             ) {
-                errors.push(format!("{tool_id}: 更新依赖登记失败: {store_error}"));
-            }
-            if let Err(error) = result {
                 errors.push(format!("{tool_id}: {error}"));
             }
         }
         errors
+    }
+
+    /// 单工具修复的生产事务边界。依赖获取作为窄接口传入，使并发测试可以用本地
+    /// fixture 精确停在“下载中”，而锁、安装态复核、mcp.json 与 BundleStore 提交
+    /// 全部继续走真实生产路径。
+    fn repair_installed_builtin_python_dependency_with<F>(
+        &self,
+        tool_id: &str,
+        ensure_dependencies: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce(
+            &ToolManifest,
+        )
+            -> Result<Option<python_dependencies::InstalledPythonDependencies>, String>,
+    {
+        let operation_lock = tool_operation_lock(tool_id);
+        let _operation = operation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.installed_ids().contains(&tool_id.to_string()) {
+            return Ok(());
+        }
+        let Some(manifest) = mcp_catalog::embedded_manifest(tool_id)? else {
+            return Ok(());
+        };
+        if manifest.windows_python_dependencies.is_none() {
+            return Ok(());
+        }
+
+        let fingerprint = (|| -> Result<String, String> {
+            mcp_catalog::ensure_package_released(tool_id)?;
+            skill_marketplace::dir_fingerprint(&mcp_catalog::package_mcp_dir(tool_id))
+        })();
+        let result = (|| -> Result<store::AssetRef, String> {
+            fingerprint.as_ref().map_err(Clone::clone)?;
+            let dependencies = ensure_dependencies(&manifest)?
+                .ok_or_else(|| format!("工具 '{tool_id}' 缺少 Python 依赖结果"))?;
+            if !self.installed_ids().contains(&tool_id.to_string()) {
+                return Err("工具已在依赖下载期间卸载，跳过迁移提交".to_string());
+            }
+            self.repair_python_dependency_entry(
+                &manifest,
+                &mcp_catalog::package_mcp_dir(tool_id),
+                &dependencies,
+            )?;
+            Ok(dependencies.asset)
+        })();
+        if !self.installed_ids().contains(&tool_id.to_string()) {
+            return Ok(());
+        }
+        let store_result = record_python_dependency_repair(
+            &store::BundleStore::new(),
+            &manifest,
+            result.as_ref().ok().cloned(),
+            fingerprint.ok(),
+            result.as_ref().err().map(String::as_str),
+        );
+        match (result, store_result) {
+            (Ok(_), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(store_error)) => Err(format!("更新依赖登记失败: {store_error}")),
+            (Err(error), Err(store_error)) => {
+                Err(format!("{error}; 更新依赖登记失败: {store_error}"))
+            }
+        }
     }
 
     /// 卸载工具：从 installed.json + mcp.json 中移除
@@ -920,40 +940,47 @@ mod tests {
     #[test]
     fn uninstall_waiting_for_repair_cannot_leave_ghost_record() {
         with_temp_home(|| {
-            MarketplaceManager::with_store(MemoryCredentialStore::default())
-                .install("obsidian", &std::collections::HashMap::new())
-                .unwrap();
-            assert!(store::BundleStore::new().get("obsidian").unwrap().is_some());
+            let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
+            manager.save_installed(&["gongwen".to_string()]).unwrap();
+            let mcp_path = crate::platform::paths::mcp_config_path();
+            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &mcp_path,
+                r#"{"servers":{"gongwen":{"command":"python","args":["server.py"]}}}"#,
+            )
+            .unwrap();
+            assert_eq!(store::BundleStore::new().get("gongwen").unwrap(), None);
+
+            let dependencies_dir = crate::platform::paths::python_packages_dir("test-repair-lock");
+            std::fs::create_dir_all(&dependencies_dir).unwrap();
 
             let (repair_locked_tx, repair_locked_rx) = std::sync::mpsc::channel();
             let (finish_repair_tx, finish_repair_rx) = std::sync::mpsc::channel();
             let repair = std::thread::spawn(move || {
-                let operation_lock = tool_operation_lock("obsidian");
-                let _operation = operation_lock
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                repair_locked_tx.send(()).unwrap();
-                finish_repair_rx.recv().unwrap();
-
                 let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
-                assert!(manager.installed_ids().contains(&"obsidian".to_string()));
-                let manifest = mcp_catalog::embedded_manifest("obsidian").unwrap().unwrap();
-                record_python_dependency_repair(
-                    &store::BundleStore::new(),
-                    &manifest,
-                    None,
-                    Some("repair-fingerprint".into()),
-                    None,
-                )
-                .unwrap();
+                manager
+                    .repair_installed_builtin_python_dependency_with("gongwen", move |_| {
+                        repair_locked_tx.send(()).unwrap();
+                        finish_repair_rx.recv().unwrap();
+                        Ok(Some(python_dependencies::InstalledPythonDependencies {
+                            dir: dependencies_dir,
+                            asset: python_asset_for_repair_test(),
+                        }))
+                    })
+                    .unwrap();
             });
             repair_locked_rx.recv().unwrap();
+            let operation_lock = tool_operation_lock("gongwen");
+            assert!(
+                operation_lock.try_lock().is_err(),
+                "production repair must hold the tool operation lock while dependencies are fetched"
+            );
 
             let (uninstall_started_tx, uninstall_started_rx) = std::sync::mpsc::channel();
             let uninstall = std::thread::spawn(move || {
                 uninstall_started_tx.send(()).unwrap();
                 MarketplaceManager::with_store(MemoryCredentialStore::default())
-                    .uninstall("obsidian")
+                    .uninstall("gongwen")
             });
             uninstall_started_rx.recv().unwrap();
             finish_repair_tx.send(()).unwrap();
@@ -961,8 +988,8 @@ mod tests {
             uninstall.join().unwrap().unwrap();
 
             let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
-            assert!(!manager.installed_ids().contains(&"obsidian".to_string()));
-            assert_eq!(store::BundleStore::new().get("obsidian").unwrap(), None);
+            assert!(!manager.installed_ids().contains(&"gongwen".to_string()));
+            assert_eq!(store::BundleStore::new().get("gongwen").unwrap(), None);
         });
     }
 

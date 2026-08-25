@@ -56,14 +56,23 @@ try {
   New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
   foreach ($filename in @(
     "demo-1-cp313-cp313-win_amd64.whl",
+    "demo-1-cp313-abi3-win_amd64.whl",
     "demo-1-cp312-abi3-win_amd64.whl",
+    "demo-1-cp32-abi3-win_amd64.whl",
+    "demo-1-cp313-none-any.whl",
+    "demo-1-py313-none-any.whl",
+    "demo-1-py312-none-any.whl",
+    "demo-1-py313-none-win_amd64.whl",
     "demo-1-py3-none-any.whl"
   )) {
     Assert-True -Condition (Test-PythonWheelTarget -Filename $filename -Target "cp313-win_amd64") -Message "compatible PEP 425 tag should pass: $filename"
     Assert-True -Condition (Test-PythonDependencyLock -Spec (New-PythonDependencySpec -Target "cp313-win_amd64" -Filename $filename)) -Message "valid target-bound dependency lock should pass: $filename"
   }
   foreach ($filename in @(
+    "demo-1-cp27-abi3-win_amd64.whl",
+    "demo-1-cp31-abi3-win_amd64.whl",
     "demo-1-cp314-abi3-win_amd64.whl",
+    "demo-1-py314-none-any.whl",
     "demo-1-cp313-cp313-win_arm64.whl",
     "demo-1-CP313-cp313-win_amd64.whl",
     "demo-1-cp313-cp313-any.whl",

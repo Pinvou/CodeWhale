@@ -273,6 +273,21 @@ command_protocol!(
         "export_plugin_spec"
     ]
 );
+
+#[test]
+fn marketplace_uninstall_protocol_keeps_blocking_work_off_async_runtime() {
+    let source = include_str!("marketplace.rs");
+    let start = source
+        .find("pub async fn uninstall_marketplace_tool(")
+        .expect("uninstall command");
+    let end = source[start..]
+        .find("pub(super) fn uninstall_marketplace_tool_sync(")
+        .map(|offset| start + offset)
+        .expect("uninstall sync boundary");
+    let command = &source[start..end];
+    assert!(command.contains("tauri::async_runtime::spawn_blocking"));
+    assert!(command.contains("uninstall_marketplace_tool_sync(&uninstall_tool_id)"));
+}
 command_protocol!(
     memory_protocol,
     "memory.rs",

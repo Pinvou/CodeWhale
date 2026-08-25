@@ -667,6 +667,30 @@ function Get-TauriOverlayContent {
   return (($config | ConvertTo-Json -Depth 8) + "`n")
 }
 
+function Get-PythonInterpreterTagVersion {
+  param([string]$Tag, [string]$Prefix)
+
+  if ($Tag -cnotmatch "^${Prefix}(?<major>\d)(?<minor>\d+)$") {
+    return $null
+  }
+  return [pscustomobject]@{
+    Major = [int]$Matches['major']
+    Minor = [int]$Matches['minor']
+  }
+}
+
+function Test-CompatiblePurePythonTag {
+  param([string]$Tag, $TargetVersion)
+
+  if ($Tag -ceq "py$($TargetVersion.Major)") {
+    return $true
+  }
+  $version = Get-PythonInterpreterTagVersion -Tag $Tag -Prefix 'py'
+  return $null -ne $version -and
+    $version.Major -eq $TargetVersion.Major -and
+    $version.Minor -le $TargetVersion.Minor
+}
+
 function Test-PythonWheelTarget {
   param([string]$Filename, [string]$Target)
 
@@ -674,8 +698,11 @@ function Test-PythonWheelTarget {
     return $false
   }
   $targetPython = $Matches[1]
-  $targetDigits = [int]$Matches['targetDigits']
   $targetPlatform = $Matches['targetPlatform']
+  $targetVersion = Get-PythonInterpreterTagVersion -Tag $targetPython -Prefix 'cp'
+  if ($null -eq $targetVersion) {
+    return $false
+  }
   if ($Filename -cnotmatch '-(?<python>[^-]+)-(?<abi>[^-]+)-(?<platform>[^-]+)\.whl$') {
     return $false
   }
@@ -690,17 +717,25 @@ function Test-PythonWheelTarget {
   foreach ($pythonTag in $pythonTags) {
     foreach ($abiTag in $abiTags) {
       foreach ($platformTag in $platformTags) {
-        if ($pythonTag -ceq 'py3' -and $abiTag -ceq 'none' -and $platformTag -ceq 'any') {
-          return $true
+        $purePython = $abiTag -ceq 'none' -and (
+          $pythonTag -ceq $targetPython -or
+          (Test-CompatiblePurePythonTag -Tag $pythonTag -TargetVersion $targetVersion)
+        )
+        $exactCpython = $pythonTag -ceq $targetPython -and $abiTag -ceq $targetPython
+        $pythonVersion = Get-PythonInterpreterTagVersion -Tag $pythonTag -Prefix 'cp'
+        $stableAbi = $abiTag -ceq 'abi3' -and
+          $null -ne $pythonVersion -and
+          $pythonVersion.Major -eq $targetVersion.Major -and
+          ($pythonVersion.Major -gt 3 -or ($pythonVersion.Major -eq 3 -and $pythonVersion.Minor -ge 2)) -and
+          $pythonVersion.Minor -le $targetVersion.Minor
+        $compatible = if ($platformTag -ceq $targetPlatform) {
+          $exactCpython -or $stableAbi -or $purePython
+        } elseif ($platformTag -ceq 'any') {
+          $purePython
+        } else {
+          $false
         }
-        if ($platformTag -cne $targetPlatform) {
-          continue
-        }
-        if (
-          ($pythonTag -ceq $targetPython -and @($targetPython, 'abi3', 'none') -ccontains $abiTag) -or
-          ($pythonTag -ceq 'py3' -and $abiTag -ceq 'none') -or
-          ($abiTag -ceq 'abi3' -and $pythonTag -cmatch '^cp(?<digits>\d+)$' -and [int]$Matches['digits'] -le $targetDigits)
-        ) {
+        if ($compatible) {
           return $true
         }
       }
