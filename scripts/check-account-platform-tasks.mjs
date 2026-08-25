@@ -31,6 +31,26 @@ function expandTargets(field) {
   return targets;
 }
 
+function expandTaskDependencies(field) {
+  if (field === '无') return [];
+  const dependencies = [];
+  for (const token of field.split(/,\s*/)) {
+    const range = token.match(/^APT-(\d{3})–APT-(\d{3})$/);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      assert.ok(start <= end, `invalid task dependency range ${token}`);
+      for (let value = start; value <= end; value += 1) {
+        dependencies.push(`APT-${String(value).padStart(3, '0')}`);
+      }
+      continue;
+    }
+    assert.match(token, /^APT-\d{3}$/, `invalid task dependency ${token}`);
+    dependencies.push(token);
+  }
+  return dependencies;
+}
+
 function canonicalStatuses(markdown) {
   const statuses = new Map();
   for (const line of markdown.slice(0, markdown.indexOf('\n## 1.')).split(/\r?\n/)) {
@@ -53,6 +73,7 @@ const expectedIncomplete = new Set(
 const owners = new Map();
 const activeOwners = new Map();
 const taskNumbers = [];
+const tasks = new Map();
 
 for (const line of taskMarkdown.split(/\r?\n/)) {
   const columns = line.split('|').map((value) => value.trim());
@@ -61,6 +82,11 @@ for (const line of taskMarkdown.split(/\r?\n/)) {
   const taskStatus = columns[6];
   taskNumbers.push(Number(taskID.slice(4)));
   assert.ok(taskStatuses.has(taskStatus), `${taskID} has invalid status ${taskStatus}`);
+  assert.equal(tasks.has(taskID), false, `duplicate task ${taskID}`);
+  tasks.set(taskID, {
+    status: taskStatus,
+    dependencies: expandTaskDependencies(columns[4]),
+  });
   for (const target of expandTargets(columns[3])) {
     assert.ok(canonical.has(target), `${taskID} references unknown target ${target}`);
     assert.equal(owners.has(target), false, `${target} owned by ${owners.get(target)} and ${taskID}`);
@@ -75,6 +101,38 @@ for (const line of taskMarkdown.split(/\r?\n/)) {
 }
 
 assert.deepEqual(taskNumbers, Array.from({ length: taskNumbers.length }, (_, index) => index + 1));
+
+for (const [taskID, task] of tasks) {
+  for (const dependency of task.dependencies) {
+    assert.ok(tasks.has(dependency), `${taskID} references unknown dependency ${dependency}`);
+    assert.notEqual(dependency, taskID, `${taskID} depends on itself`);
+    const dependencyStatus = tasks.get(dependency).status;
+    if (task.status === 'DONE' || task.status === 'BLOCKED_EXTERNAL') {
+      assert.ok(
+        dependencyStatus === 'DONE' || dependencyStatus === 'BLOCKED_EXTERNAL',
+        `${taskID} is ${task.status} but depends on unfinished ${dependency} (${dependencyStatus})`,
+      );
+    }
+  }
+}
+
+const visiting = new Set();
+const visited = new Set();
+function visitTask(taskID, path = []) {
+  if (visiting.has(taskID)) {
+    const cycleStart = path.indexOf(taskID);
+    assert.fail(`task dependency cycle: ${[...path.slice(cycleStart), taskID].join(' -> ')}`);
+  }
+  if (visited.has(taskID)) return;
+  visiting.add(taskID);
+  for (const dependency of tasks.get(taskID).dependencies) {
+    visitTask(dependency, [...path, taskID]);
+  }
+  visiting.delete(taskID);
+  visited.add(taskID);
+}
+for (const taskID of tasks.keys()) visitTask(taskID);
+
 assert.equal(activeOwners.size, expectedIncomplete.size);
 assert.deepEqual([...activeOwners.keys()].sort(), [...expectedIncomplete].sort());
 console.log(`implementation task coverage passed: ${taskNumbers.length} tasks own ${activeOwners.size} incomplete targets; ${owners.size - activeOwners.size} completed targets retained for traceability`);

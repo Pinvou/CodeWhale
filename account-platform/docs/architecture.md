@@ -16,7 +16,7 @@
 
 - Keycloak 是登录身份、密码和 OIDC 会话的事实源；OIDC Claim 只证明主体，不决定业务权限。迁移期保留的 `platform-admin` Realm Role 不再参与业务授权。
 - Identity Adapter 是注册密码预检、策略版本、短期密码材料和 Keycloak 管理协议的唯一边界；Account 只接收不透明密码引用。
-- Account Service 是永久内部用户 ID、独立用户编码、平台/组织角色、权限码、组织树、成员、管理命令审批策略/请求和用户级全局活动上下文的事实源；OIDC Session 只证明当前登录，不拥有独立计费上下文。
+- Account Service 是永久内部用户 ID、独立用户编码、个人/平台/组织角色、权限码、对象作用域、组织树、成员、管理命令审批策略/请求和用户级全局活动上下文的事实源；OIDC Session 只证明当前登录，不拥有独立计费上下文。
 - Billing Service 是钱包、平衡账本、充值订单、BASE/BONUS 组成级权益、版本化计量单位、确定性价格生命周期、Hold 和已批准财务命令领域执行结果的事实源。
 - Token Gateway 是 Token Account、加密凭据、共享/路由策略、版本化协议/安全公式和模型用量请求的事实源；当前已接入的数据面协议仍仅支持 `/v1/chat/completions`。
 - New API 是模型数据面和上游用量证据源，不承载品悟用户、组织或钱包真相。
@@ -94,7 +94,7 @@ flowchart LR
 |---|---|---|---|
 | Keycloak | 用户认证、密码、OIDC Token/Session；迁移期 Realm Role 不参与业务授权 | Keycloak 数据库 | 生产部署和后续密码重置/资料同步/会话撤销端口仍待环境及任务验证 |
 | Identity Adapter | 密码原始字符校验、策略版本、短期引用/HMAC、注册操作关联查询、Keycloak 用户创建/资料更新/密码重置/会话撤销及受控停用协议 | 进程内 15 分钟短期密码记录；Keycloak 持久身份与操作关联 | MFA 和账号申诉仍不在当前闭环 |
-| Account Service | 永久用户 ID/编码、用户/身份映射、平台/组织 RBAC、绑定有效期/撤销/自动回收、权限解析、持久注册及完整注销 Saga、短信挑战、异步钱包初始化、商城账号同步、组织/节点、成员/角色、用户级全局上下文、邀请、审计及受控审计导出 | Account 数据库 | 超级管理员与大规模审计导出的生产等价演练 |
+| Account Service | 永久用户 ID/编码、用户/身份映射、个人/平台/组织 RBAC、对象级绑定有效期/撤销/自动回收、权限解析、持久注册及完整注销 Saga、短信挑战、异步钱包初始化、商城账号同步、组织/节点、成员/角色、用户级全局上下文、邀请、审计及受控审计导出 | Account 数据库 | 三类权限代码迁移、超级管理员与大规模审计导出的生产等价演练 |
 | Billing Service | 钱包、账本、BASE/BONUS 组成级权益、组织购买与成员授予、版本化计量单位、全局/模型价格解析、价格生命周期、Hold/组成分配/租约及异常处理证据、独立应收与清偿分配、单流水拒付冲销、供应商中立支付能力/商品映射、目标退款、晚到支付复核、人工调整、到期/损失复核、支付修复和对账 | Billing 数据库 | 正式商品业务冻结、普通退款产品级默认关闭门禁、统一拒付/强制退款复核结案及账单证据归并 |
 | Token Gateway | Token Account、加密凭据、共享策略、路由、协议/公式版本、独立模型目录与稳定身份、能力/目录版本、托管 Provisioning、组织模型策略、资格管线、非计费客户端 Readiness/准入证明、安全参数映射、动态预占、持久派发/重放、执行/交付隔离、取消意图、可信用量和 Model Gateway Adapter 核对 | Token 数据库 | 更多数据面协议及其显式 Provider 取消 Adapter；客户端准入生产联调 |
 | Token Portal | OIDC PKCE、Redis Session、CSRF、个人中心、运营后台、路径白名单代理和制品级三语门禁 | Redis Session | 目标后台权限模型和尚未实现的业务页面 |
@@ -123,7 +123,7 @@ flowchart LR
 - `organizations`、`organization_creation_requests`、`organization_units`、`organization_unit_closure`、`organization_unit_commands`：顶层组织、独立单调结构版本、按操作者隔离且不可变的创建/节点命令幂等请求，以及组织树形闭包；活动同级节点名称按不区分大小写唯一，节点和组织删除都只写终态与时间戳。
 - `organization_unit_governance_blockers`：Account 域尚未收敛的节点审批或扩展任务登记；成员、节点角色和受保护子节点直接从各自权威表判断，不以缓存替代。
 - `invitations`、`membership_commands`：邀请只保存手机号/用户名/兼容邮箱目标摘要和脱敏提示，目标查询由当前认证身份反向匹配；一次性链接只保存 Token 摘要。成员新增、移除和所有权转让保存操作者隔离的稳定命令指纹与原结果，角色和邀请历史禁止物理删除。
-- `permissions`、`roles`、`role_permissions`、`role_assignments`、`authorization_versions`：平台/组织原子权限、内置角色、带起止/撤销/来源的授权投影、作用域和单调授权版本。
+- `permissions`、`roles`、`role_permissions`、`role_assignments`、`authorization_versions`：个人/平台/组织原子权限、内置角色、带起止/撤销/来源与对象作用域的授权投影，以及按个人、平台、组织/节点独立失效的单调授权版本。
 - `memberships`、`membership_units`、`role_bindings`：成员和节点范围；`role_bindings` 是组织成员角色生命周期写模型，通过数据库触发器投影到 `role_assignments`，授权查询不直接读取写模型。
 - `user_active_contexts`：以 `user_id` 唯一保存 PERSONAL/ORGANIZATION、目标组织和单调 `context_version`；最近有效 Session 只用于迁移初值，切换使用期望版本 CAS。
 - `user_sessions`：按 issuer + OIDC Session 保存登录观察和兼容投影，不再作为聊天或计费上下文事实源。
@@ -218,30 +218,31 @@ Token 域以 `usage_requests` 保存独立执行、交付、取消和账务状�
 
 结算只消费 Adapter 归一化且达到可信等级的 Provider 最终或累计用量。Provider 用量、最后持久化事件序号、各客户端最后确认序号、用户停止时间和最终用量时间分别保存；最大 Hold、已发送字节和客户端已显示量只用于授权或展示，不能成为结算事实。请求冻结核对策略版本、最大执行时长、最终用量延迟和取消核对期限；期限内沿原 Hold 续租并退避查询，期限最后一次仍无可信用量时释放未结算 Hold、转 `REVIEW` 并建立 `customer_debit_prohibited` 平台损失案件。之后到达的用量只能补充平台成本证据，不得重新冻结、扣其他权益或形成用户应收。
 
-个人中心已移除自管 Token Account 页面；Gateway 仍保留普通用户 Token Account API，但会过滤平台托管账号，并禁止普通用户修改 `PLATFORM` 账号。平台后台的列表、详情、启停、路由和凭据检查反向限定 `management_mode=PLATFORM`，不会借运营权限读取或改写兼容 USER 账号；平台模型运营员可为个人、组织或节点作用域创建 PLATFORM 账号，组织模型策略始终不接受内部资源引用。`platform.tokens.read`、`platform.tokens.manage` 和 `platform.tokens.credentials.validate` 只授予平台模型运营角色，超级管理员及任何组织角色均不隐式获得。供应商密钥只在 Gateway 内存中解密，检查结果只返回 `VALID/INVALID`、稳定脱敏错误码和最小元数据，普通用户及后台接口均不返回明文、密文、Key ID、Provider 地址或原始错误。
+个人中心不承载自管 Token Account。普通认证命名空间中的 `/v1/token-accounts*`、真实路由及凭据管理接口必须删除或永久无泄露拒绝；存量非平台凭据隔离后不得被个人或组织角色重新启用。平台后台的列表、详情、启停、路由和凭据检查反向限定 `management_mode=PLATFORM`；平台模型运营员可为个人、组织或节点作用域创建 PLATFORM 账号，组织模型策略始终不接受内部资源引用。`platform.tokens.read`、`platform.tokens.manage` 和 `platform.tokens.credentials.validate` 只授予平台模型运营角色，超级管理员及任何组织角色均不隐式获得。供应商密钥只在 Gateway 内存中解密，检查结果只返回 `VALID/INVALID`、稳定脱敏错误码和最小元数据，普通用户及后台接口均不返回明文、密文、Key ID、Provider 地址或原始错误。
 
 Web 个人中心的信息架构固定为三个一级 Tab：“额度与用量”合并当前活动上下文的额度、权益包和用量记录；“订单与发票”合并个人成功订单和发票能力说明，订单渲染前以支付事实白名单只保留 `PAID`/`PAID_LATE`；“账号设置”合并原概览的账号状态/身份切换、用户名与手机号修改、注销流程，并在活动上下文为有效成员组织时嵌入组织管理区。旧页面深链在客户端映射到这三个稳定 Tab，不创建兼容性隐藏页面。个人上下文可以购买套餐，组织上下文不复用个人订单或个人权益；组织上下文按 Account 返回的原子权限分别显示购买、读取、授予和撤回能力。额度分配只通过 `org.quota.allocate` 保护的最小成员目录读取用户 ID、展示名和成员版本，不借此暴露邮箱、角色或节点范围。成员没有自领入口，缺少权限或组织数据时展示组织空态，不得以个人权益回退填充。普通用户导航不承载 Token Account、供应商凭据、共享策略或路由管理。
 
 ## 5. 身份、上下文和权限
 
-### 5.1 当前权限模型
+### 5.1 目标权限模型
 
-- 平台运营后台使用 Account 平台角色和原子权限码；Account、Billing、Token Gateway 都默认拒绝，并分别按接口所需权限调用 Account 授权解析。Keycloak `platform-admin` Realm Role 不能绕过拒绝。
+- 人类业务权限严格分为 `personal.*`、`platform.*`、`org.*` 三类；角色只是不带隐式特权的权限集合。非人类工作负载使用独立 `internal.*` 权限，不进入人类角色。Account、Identity、Billing、Token Gateway 都默认拒绝，并按入口要求向 Account 解析稳定权限和精确对象作用域；Keycloak Realm Role 不能绕过业务授权。
+- 每个有效普通用户拥有 `PERSONAL_USER`，但实际可用权限仍由账号生命周期约束。密码/短信凭据验证后必须在会话签发前强一致检查 `personal.session.login`；充值、模型调用、用量、本人资料、安全设置、上下文和注销分别检查自己的 `personal.*` 原子权限，不能以“已登录”替代授权。
 - 本人资料接口返回格式化 `user_code`，桌面与 Web 不展示内部 `user_id`。运营端用户列表/详情展示编码；编码查询是单独的完整等值接口，先校验格式和校验码，再检查 `platform.users.read`，并按操作者、来源 IP、设备和目标编码摘要限流。不存在、无权和输入无效对调用方使用不泄露存在性的结果；编码不是登录、找回、会话或授权凭据。
-- `OWNER`、`ORG_ADMIN`、`BILLING_ADMIN`、`UNIT_ADMIN`、`MEMBER`、`AUDITOR` 是 Account 域组织角色，通过 `role_assignments` 解析权限和组织/节点作用域；旧 `role_bindings` 仅作为迁移期写入兼容投影。
-- 平台/组织角色绑定支持开始/到期时间、来源、单绑定幂等撤销和自动回收。所有权限解析都直接按数据库时间过滤未来、过期或已撤销绑定；数据库触发器维护单调 `authorization_versions`，成员与角色变化递增用户/Session 兼容授权版本但不伪造活动上下文切换，worker 将到期事实固化并写审计与 Outbox。组织 `role_bindings` 是写模型，平台直接授权写入 `role_assignments`。
+- `OWNER`、`ORG_ADMIN`、`BILLING_ADMIN`、`ORG_MODEL_ADMIN`、`UNIT_ADMIN`、`MEMBER`、`AUDITOR` 是 Account 域组织角色，通过 `role_assignments` 解析权限及组织/节点对象作用域；旧 `role_bindings` 仅作为迁移期写入兼容投影。`UNIT_ADMIN` 的决定必须始终携带 `organization_id + unit_id + scope`，不得聚合成组织级布尔权限。
+- 个人、平台和组织角色绑定支持开始/到期时间、来源、单绑定幂等撤销和自动回收。授权解析按数据库时间过滤未来、过期或已撤销绑定；数据库触发器维护个人、平台、组织/节点相互独立的单调授权版本，worker 将到期事实固化并写审计与 Outbox。组织管理始终以显式目标组织/节点鉴权，不要求该组织成为用户当前计费上下文。
 - 普通授权接口拒绝 `OWNER`、基础 `MEMBER` 和平台角色；运营通用接口拒绝 `PLATFORM_SUPER_ADMIN` 与 `OWNER`。超级管理员由专用安全生命周期维护：数据库同时保护最后一个有效超级管理员的角色绑定和用户状态，停用、删除及注销预检统一返回 `LAST_ACTIVE_SUPER_ADMIN`。旧管理员仍须按 `deploy/runbooks/account-rbac-migration.md` 明确映射，不能自动全部升级为超级管理员。
 - 首个 `admin` 身份由主机/集群受控的 `account-security` 离线命令幂等创建，业务用户在正式密码安全激活前保持 `BOOTSTRAP_PENDING`，Identity 身份保持禁用且没有超级管理员绑定。正式密码只进入 CLI 与 Identity Adapter；Account 数据库只保存一次性凭据的用途/部署代次绑定 SHA-256 校验值和生命周期事实。
-- Break-glass 与普通角色交接分离：仓库不提供公网恢复 API；离线命令必须记录“全部超级管理员异常失联”的显式确认、运维工作负载身份、事故理由、证据摘要、目标和最长 60 分钟有效期，并立即产生不可变审计与 CRITICAL 告警。它不能绕过最后管理员主动注销门禁。
+- Break-glass 与普通角色交接分离：仓库不提供公网恢复 API；离线命令必须记录“全部超级管理员异常失联”的显式确认，并从受信 OS/集群身份、mTLS 或签名恢复凭据派生操作者，禁止命令行参数或请求体自报身份；事故理由、证据摘要、目标和最长 60 分钟有效期立即进入不可变审计与 CRITICAL 告警。它不能绕过最后管理员主动注销门禁。
 - 注销由 Account 持有唯一 `account_closure_requests` 聚合，并以 `CLOSURE_REQUESTED → QUIESCING → FINANCIAL_CLEARANCE → IDENTITY_CLEANUP → ANONYMIZED → COMPLETED` 表达只前进阶段；命令指纹、不可变审计、版本、租约、退避和 SLA 共同提供崩溃恢复。
 - 所有者或最后有效超级管理员先停在 `CLOSURE_REQUESTED`，用户保持 ACTIVE 以完成交接；门禁通过的同一事务才将用户改为 `CLOSING`。普通 Account 授权和 Token 新业务返回稳定 `ACCOUNT_CLOSING`，历史读取及既有订单关闭、支付申诉、用量取消使用服务端白名单，客户端不能自报修复模式。
 - Account Worker 通过服务身份读取 Billing 与 Token 的强一致评估。Billing 覆盖个人余额/应收、Hold、支付/退款/拒付、资金性对账、晚到支付和支付异常；Token 覆盖执行、结算和核对，只有具有“平台承担且禁止以后向用户追扣”证据的安全终态例外。用户响应删除内部资源 ID，运营接口只允许幂等重试当前阶段。
 - `IDENTITY_CLEANUP` 先在 Account 串行事务中递增主体生命周期与授权版本，撤销当前及未来平台/组织角色、成员关系和 Session；Identity 未更新的资料 Saga 被取消，已经更新 Identity 的资料 Saga 先向前归并到原用户，再统一清理。邀请被取消并随机覆盖目标摘要、提示和令牌；非资金 Commerce 任务被取消，资金任务必须先收敛。Commerce 的认领、完成和重试均校验 `ACTIVE` 主体及原生命周期，迟到结果只能保留为 `STALE` 证据，不能重建 Mapping。
 - Account 随后以服务身份删除该主体的全部 Identity 身份，并让 Billing 将其全部有效或普通暂停的组织授予隔离为 `SUSPENDED/ACCOUNT_CLOSED`。两项外部副作用各自保存幂等完成证明；任一项不可确认时保持在清理阶段重试，不得释放标识或宣称完成。
 - 两项证明齐备后，Account 在单一事务中删除本地身份映射、将 Commerce Mapping 置为 `DETACHED`、随机墓碑化用户名和手机号并把用户置为 `DELETED`。永久 `user_id`、`user_code` 及法律记录的不可逆主体引用保留；三年分类保留记录支持法律保全，到期 worker 仅清除保留状态。事务同时写 `account.user.anonymized.v1` Outbox，只有该事件确认发布后 Saga 才从 `ANONYMIZED` 进入 `COMPLETED`。
-- `ACCOUNT_CLOSED` 授予继续占用原权益包和 BASE/BONUS 组成，不能恢复、消费、创建 Hold 或走普通撤回。具有 `organization.grant.reclaim_closed` 的组织管理员只能在账号已不可逆 `ANONYMIZED` 且无 Hold、核对、退款、拒付、支付异常或资金对账冻结时，对单条授予执行幂等的整笔当前剩余回收；金额原子返回原权益包原组成，授予终态为 `RECLAIMED_ACCOUNT_CLOSED`，批量接口逐项独立返回。
+- `ACCOUNT_CLOSED` 授予继续占用原权益包和 BASE/BONUS 组成，不能恢复、消费、创建 Hold 或走普通撤回。具有 `org.grants.reclaim_closed` 的组织管理员只能在账号已不可逆 `ANONYMIZED` 且无 Hold、核对、退款、拒付、支付异常或资金对账冻结时，对单条授予执行幂等的整笔当前剩余回收；金额原子返回原权益包原组成，授予终态为 `RECLAIMED_ACCOUNT_CLOSED`，批量接口逐项独立返回。
 - 后台写命令必须经 `approvalpolicy` 的版本化 `command_type` 注册表分类；九类直接改写财务事实及 `PAYMENT_PROVIDER_RESUME` 固定为 `APPROVAL_REQUIRED`，普通退款、Provider 失败确认、组织删除、治理配置和确定性任务固定为 `AUDIT_ONLY`，未知命令或分类冲突失败关闭。审批申请、不可变快照、决定、状态事件和执行记录归 Account 所有，禁止申请人按稳定用户 ID 自审；恢复批准人还不得是目标异常的确认人。
-- 批准事务只写 `account.approval-command.authorized.v1` Outbox，不直接改写账本。Billing 的 `billing-command-executor` 先向 Account 强一致复核申请人/审批人的当前绑定、权限、有效期、授权版本、策略和关键资源版本，再以 `approval_request_id + command_type + command_fingerprint` 派生稳定执行键；人工钱包调整的领域事务保存申请 ID/执行键并由数据库触发器拒绝新的直接入账。九类命令先完整占用稳定分类，当前只有已存在领域语义的 `WALLET_ADJUSTMENT` 可创建申请；其他类型在对应资金领域任务交付执行器前拒绝创建，不能进入永远无法执行的批准状态。正式部署为 Account、Identity、Billing、Token、Keycloak 和三个 Relay 分配独立 ServiceAccount；服务调用使用 audience 绑定、最长 15 分钟的 OIDC 投射令牌，并由接收服务按 subject、HTTP method 和路径默认拒绝授权。开发/测试可兼容静态令牌，staging/production 缺少 OIDC 配置时失败关闭，不改变审批/执行所有权边界。
+- 批准事务只写 `account.approval-command.authorized.v1` Outbox，不直接改写账本。审批查询、决定与执行复核都从冻结策略解析所需权限，不能硬编码单一审批权限。Billing 的 `billing-command-executor` 先向 Account 强一致复核申请人/审批人的当前绑定、权限、有效期、授权版本、策略和关键资源版本，再以 `approval_request_id + command_type + command_fingerprint` 派生稳定执行键；人工钱包调整的领域事务保存申请 ID/执行键并由数据库触发器拒绝新的直接入账。涉及人类授权的内部命令只消费 Account 签发、短期、受众/动作/资源/版本绑定且不可篡改的委托，不能信任请求体 `actor_user_id`。正式部署为 Account、Identity、Billing、Token、Keycloak 和三个 Relay 分配独立 ServiceAccount；服务调用使用 audience 绑定、最长 15 分钟的 OIDC 投射令牌，并由接收服务按 subject、HTTP method、路径、任务或事件 Subject 的精确 `internal.*` 权限默认拒绝授权。开发/测试可兼容受限静态凭据，staging/production 缺少 OIDC 配置时失败关闭，不改变审批/执行所有权边界。
 - 顶层组织生命周期由 Account 编排，Billing 对资金事实、Token 对未终态用量事实分别作权威判断。创建请求以操作者、幂等键和规范化请求指纹唯一；搜索使用状态过滤及 `updated_at + organization_id` 复合游标。停用先让 Billing 与 Token 以 Account 下一版本进入限制态，再由 Account 冻结成员、递增授权版本并将命中的用户级活动上下文回退到个人；启用仅在下游投影均可恢复时执行。删除必须已停用：Account 先核验邀请和治理审批，再以两阶段协议先对 Billing/Token 执行无副作用预检并汇总阻断原因；Billing 在提交阶段再次串行核验余额/预留、权益、Hold、支付、退款、对账差异、待核对用量、人工调整和扩展阻断登记，Token 核验所有可能继续结算的用量已收敛，随后按 Billing、Token、Account 的顺序写入不可逆 `DELETED` 终态。停用后禁止产生新的组织资金和用量事实，因此超时重试只会保持或进入更严格状态；任一远端事实不可确认均失败关闭，账本、订单、用量、审计和幂等记录不物理删除。
 - 组织节点命令以操作者、目标组织、命令类型和幂等键唯一，保存版本化规范请求指纹及原结果；同键异请求冲突。组织的 `structure_version` 独立于顶层生命周期版本，创建、重命名、移动和删除在串行事务内递增；移动以调用方读取的结构版本作 CAS，并原子重建受影响闭包路径。节点删除先让 Billing/Token 在同一节点锁命名空间进入 `DELETION_PENDING`，从此拒绝新增授予登记、节点 Token Account 和治理事实；Account 随后在提交事务内重检受保护子节点、成员、角色、审批和任务，Billing/Token 分别权威检查授予登记、Token Account/路由和未终态用量。全部清零后各域按更高结构版本固化 DELETED；超时只留下可重试的更严格状态，节点、闭包、命令及关联历史均不物理删除。
 - 邀请统一使用 PHONE、USERNAME、LINK（并保留 EMAIL 兼容入口）实体：创建不查询或暴露目标是否存在，手机号/用户名只保存规范值摘要和提示；本人待接受列表只用当前认证用户已验证标识反向匹配，接受时再次绑定当前稳定用户 ID。Token/邀请 ID 均在串行事务内一次消费，过期、撤销和接受终态永久保留。成员新增、移除和所有权转让以稳定幂等键及请求指纹提交；移除同事务撤销全部当前/未来角色、递增授权版本、使命中的用户级活动上下文回退个人并发出唯一成员事件，随后同步 Billing REVOKED 投影。有效组织的唯一 OWNER 由延迟数据库约束复核，所有权只能通过专用事务先撤销旧绑定、保留历史再建立新绑定。
@@ -371,7 +372,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 |---|---|---|
 | 部署 | Helm 已具备多故障域调度、PDB、零不可用滚动、外部HA Redis/NATS边界及机器化故障验收；Compose仍是单机 | 未取得真实集群容量、选主及Pod/节点/区域故障证据，不得宣称生产HA或RPO/RTO完成 |
 | 注册 | 唯一值预约、持久恢复、Identity 关联查询、异步钱包任务、SLA、`REPAIR_REQUIRED` 和证明门禁补偿已闭环 | Identity 短期密码材料仍为单副本内存能力；生产运行和故障注入证据待部署补齐 |
-| 权限与审批 | 平台和组织接口使用 Account 原子权限码、显式作用域、绑定有效期、单条撤销、自动回收和默认拒绝；最后超级管理员保护、完整注销 Saga、安全恢复及版本化管理命令审批/幂等执行已有仓库实现 | 补短期工作负载身份和生产等价安全恢复/审批故障演练 |
+| 权限与审批 | 三类人类权限、角色真值表、对象作用域、独立授权版本、策略驱动审批、短期人类委托与精确工作负载权限以 `role-system-design.md` 为约束；最后超级管理员保护、完整注销 Saga 和版本化审批聚合已有仓库实现 | APT-069–APT-082 分批实现三类权限迁移与入口门禁，之后补生产等价安全恢复/审批故障演练 |
 | 模型调用 | 独立目录、稳定身份、不可变能力/目录版本、托管 Provisioning、上下文资格、版本化公式/价格、持久派发/重放/取消，以及用户、组织成员、组织、模型、路由和全局的 Hold 前原子准入均已闭环 | 补更多数据面协议和生产等价并发/故障注入证据 |
 | 权益 | BASE/BONUS 组成、组织购买、精确成员授予、生命周期、确定消费/到期、目标退款与拒付定向撤销、注销隔离/整笔剩余回收和守恒约束已实现；普通退款实现当前保持休眠 | 补普通退款产品级默认关闭门禁和生产等价并发压力证据 |
 | 支付 | 新华三声明下单、查询、支付回调与人工修复并采用查询降级对账；专用短期 Token 授权和回调公网适配层先持久化再异步归并，订单支持多支付流水，回调/查询/修复证据不可变归并，每笔成功流水独立履约或复核；`FAILED` 保守进入复核，当前 H3C 退款入口因 capability 不支持而隐藏 | 补独立于 Provider capability 的退款产品门禁、Provider 账单逐行证据归并和完整关单中间态；在生产等价环境验证真实商城回调突发、并发查询补偿与财务故障恢复 |

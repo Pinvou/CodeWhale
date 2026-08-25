@@ -10,7 +10,7 @@
 
 ## 1. 执行规则
 
-1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 67 个任务中，54 个仓库内可闭环任务为 `DONE`，10 个 `CODE+ENV` 任务已完成仓库实现但仍等待业务冻结、生产等价环境或正式制品证据并保持 `BLOCKED_EXTERNAL`，3 个 `CODE` 任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
+1. 本文为最初 275 个未完成目标及后续需求变更保留可追溯任务。当前 82 个任务中，57 个任务为 `DONE`，8 个 `CODE+ENV` 任务的仓库实现已经完成、仅等待业务冻结、生产等价环境或正式制品证据并保持 `BLOCKED_EXTERNAL`，17 个任务为 `PENDING`；规范矩阵中的每个未完成编号只能有一个主任务。
 2. 任务按稳定服务所有权、事务边界、公开契约和可独立验证能力划分，不按文件数量或代码行数机械拆分。
 3. 每个任务使用独立提交，提交必须同时包含该任务所需的代码、迁移、OpenAPI/事件契约、三语 UI、自动化测试、需求状态和相关架构/部署文档更新。
 4. 开始任务前先检查依赖任务已经完成；实现中发现不能独立交付时，必须先拆分任务并更新本文，不能把无关能力混入当前提交。
@@ -30,7 +30,7 @@
 | APT-004 | Web 用户名/手机号变更 Saga 与重新认证；桌面忘记密码及资料修改边界 | ACC-06–ACC-09, UI-05 | APT-002 | CODE | DONE |
 | APT-005 | 供应商中立 Commerce Customer Mapping 与同步生命周期 | CORE-03, ACC-05, PAY-06 | 无 | CODE | DONE |
 | APT-006 | Account 平台/组织 RBAC、原子权限码和显式授权作用域 | ACC-13, ACC-35, NFR-15 | 无 | CODE | DONE |
-| APT-007 | 超级管理员安全引导与异常失联 Break-glass 的生产等价演练 | ADM-01, ADM-02 | APT-006, APT-046 | CODE+ENV | BLOCKED_EXTERNAL |
+| APT-007 | 超级管理员安全引导与异常失联 Break-glass 的生产等价演练 | ADM-01, ADM-02 | APT-006, APT-046, APT-077 | CODE+ENV | PENDING |
 | APT-008 | 管理命令审批分类、生命周期、失效、授权复核和幂等执行 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | APT-006, APT-046 | CODE | DONE |
 | APT-009 | 顶层组织创建、搜索、启停和跨域安全逻辑删除 | ACC-15–ACC-20 | APT-006, APT-008 | CODE | DONE |
 | APT-010 | 组织节点创建、移动、重命名和受阻逻辑删除 | ACC-21, ACC-23–ACC-25 | APT-006, APT-009 | CODE | DONE |
@@ -54,7 +54,7 @@
 | APT-028 | 平台托管路由 Provisioning、资格管线、目录回滚依赖校验及运营修复 | TOK-09, TOK-10, TOK-12, TOK-16, TOK-45, ADM-11, ADM-28–ADM-30 | APT-006, APT-026, APT-027 | CODE | DONE |
 | APT-029 | 模型请求幂等指纹、持久派发、流事件加密与结果重放保留 | TOK-24–TOK-30, NFR-49 | APT-012, APT-018, APT-026–APT-028 | CODE | DONE |
 | APT-030 | 模型取消、执行/交付分离、可信用量核对和取消期 Hold 收敛 | TOK-31, TOK-33, TOK-38–TOK-41, BILL-34, BILL-35, UI-13, ADM-31, ADM-32 | APT-018, APT-029 | CODE | DONE |
-| APT-031 | Token Account、凭据和检查动作的平台权限隔离 | SCOPE-03, ADM-25–ADM-27 | APT-006, APT-026, APT-028 | CODE | DONE |
+| APT-031 | Token Account、凭据和检查动作的平台权限隔离 | ADM-25–ADM-27 | APT-006, APT-026, APT-028 | CODE | DONE |
 | APT-032 | 桌面动态目录消费、按会话冻结模型、显式替代分支与受信个人中心入口 | SCOPE-05, TOK-06 | APT-003, APT-027–APT-030 | CODE | DONE |
 | APT-033 | 配置驱动系统探针与通用响应判定 Adapter | ADM-10, NFR-19 | APT-006, APT-020, APT-023, APT-031 | CODE | DONE |
 | APT-034 | 桌面、个人中心和后台完整三语发布门禁 | UI-16 | APT-003, APT-004, APT-012, APT-013, APT-017, APT-021, APT-030, APT-032, APT-033 | CODE | DONE |
@@ -68,19 +68,19 @@
 | APT-042 | 跨个人、组织、节点、缓存、批量、导出和事件的租户隔离矩阵 | NFR-43 | APT-006, APT-009–APT-013, APT-017, APT-021, APT-029, APT-033 | CODE | DONE |
 | APT-043 | Provider/路由熔断、半开探测和统一可信时钟门禁 | NFR-44, NFR-46 | APT-022, APT-026, APT-036 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-044 | 当前及前两桌面版本兼容、弃用通知和 426 升级闭环 | NFR-47 | APT-032, APT-034 | CODE | DONE |
-| APT-045 | 全域审计、幂等指纹、Outbox/Inbox 收敛和死信恢复闭环 | CORE-07, NFR-05–NFR-07 | APT-003–APT-034, APT-046, APT-047 | CODE | DONE |
+| APT-045 | 全域审计、幂等指纹、Outbox/Inbox 收敛和死信恢复闭环 | CORE-07, NFR-05–NFR-07 | APT-003–APT-006, APT-008–APT-034, APT-046 | CODE | DONE |
 | APT-046 | 普通组织角色绑定的展示、有效期、授权撤销和缓存失效 | ACC-30–ACC-32, ADM-05, ADM-06 | APT-006 | CODE | DONE |
-| APT-047 | 服务账号、后台任务和 Event Relay 的短期工作负载身份与最小 Subject 权限 | ADM-03, NFR-12 | APT-006 | CODE+ENV | BLOCKED_EXTERNAL |
+| APT-047 | 服务账号、后台任务和 Event Relay 的短期工作负载身份与最小 Subject 权限生产验收 | ADM-03 | APT-006, APT-076 | CODE+ENV | PENDING |
 | APT-048 | `PLAN_TRIAL` 已按业务决策统一为 `8814A1D2`、200 元和 1,000 BASE；继续完成四档商城商品/发票信息、上架状态、真实支付与 Provider 映射验收并冻结生产版本 | PAY-05, PAY-10 | APT-022 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-049 | 账单支付证据、完整关单状态、拒付事实与订单派生摘要收敛 | PAY-12–PAY-14 | APT-019, APT-023, APT-024 | CODE | DONE |
 | APT-050 | 模型派发不确定、流式结果与支付证据统一收敛边界 | CORE-06 | APT-029, APT-030, APT-049 | CODE | DONE |
 | APT-051 | 全域人工案件 P0/P1/P2 统一 SLA、转派时钟与自动止损评估 | NFR-45 | APT-003, APT-019, APT-021, APT-024, APT-025, APT-030 | CODE | DONE |
-| APT-052 | 非计费客户端切换 Readiness、短时签名准入证明及发布系统前置能力 | TOK-37 | APT-018, APT-027, APT-028 | CODE+ENV | BLOCKED_EXTERNAL |
+| APT-052 | 非计费客户端切换 Readiness、短时签名准入证明及发布系统前置能力 | SCOPE-06, TOK-37 | APT-018, APT-027, APT-028 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-053 | 客户端幂等迁移及发布/安装/运行三层门禁的正式制品验收 | TOK-35, TOK-36, NFR-20 | APT-032, APT-052 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-054 | 紧急模型下架触发在途取消并保存实际取消、生成量、Hold 与结算证据 | TOK-47 | APT-030, APT-032 | CODE | DONE |
 | APT-055 | 服务端受控审计导出、重认证、PII临时授权、加密水印和一次性下载配额 | ADM-09, NFR-48 | APT-006, APT-008 | CODE | DONE |
 | APT-056 | 普通退款产品级默认关闭门禁、用户/运营入口屏蔽及服务端创建拒绝 | PAY-31, UI-12, ADM-20 | APT-021, APT-022, APT-034 | CODE | PENDING |
-| APT-057 | Provider 中立短期回调授权、Profile 化通知适配、统一证据归并与查询补偿；新华三作为首个 Profile | PAY-15–PAY-17 | APT-022, APT-023, APT-036, APT-041 | CODE | DONE |
+| APT-057 | Provider 中立短期回调授权、Profile 化通知适配、统一证据归并与查询补偿；新华三作为首个 Profile | PAY-15–PAY-17 | APT-022, APT-023, APT-036 | CODE | DONE |
 | APT-058 | 账号中心独立 HTTPS 子域名、`/api/v1` 支付回调公网命名空间及旧官网入口彻底移除 | UI-09 | APT-032, APT-057 | CODE+ENV | DONE |
 | APT-059 | 从桌面账号 Popover 移除平台模型展示和选择职责 | UI-17 | APT-032 | CODE | DONE |
 | APT-060 | 建立类型化全局/会话模型引用、作用域隔离及兼容迁移 | TOK-48 | APT-032 | CODE | DONE |
@@ -92,6 +92,20 @@
 | APT-066 | 拆分目录上架与 Provider/商品止损控制，并向个人中心提供可见不可选的暂停态 | PAY-45, PAY-47, UI-20 | APT-022, APT-051, APT-064 | CODE | DONE |
 | APT-067 | 支付渠道控制后台及双人恢复审批、快照失效、执行前复核与审计 | PAY-46, ADM-44 | APT-008, APT-065, APT-066 | CODE | DONE |
 | APT-068 | Web 统一身份登录页重设计、短信验证码登录及手机验证码注册 | UI-21 | APT-002, APT-003, APT-034 | CODE | DONE |
+| APT-069 | PERSONAL 作用域、个人默认角色、系统/组织精确真值表及独立授权版本迁移 | ACC-59–ACC-62, ADM-45 | APT-006 | CODE | PENDING |
+| APT-070 | 密码与短信登录在会话签发前强一致校验个人登录权限 | ID-19 | APT-068, APT-069 | CODE | PENDING |
+| APT-071 | Account 本人资料、上下文、注销和邀请接口接入个人原子权限 | ACC-63 | APT-069 | CODE | PENDING |
+| APT-072 | Billing 个人充值、余额与组织额度接口接入个人/组织原子权限 | BILL-46 | APT-069, APT-071 | CODE | PENDING |
+| APT-073 | 删除普通 Token Account/路由/凭据管理入口并隔离存量非平台凭据 | SCOPE-03, ADM-47 | APT-031, APT-069 | CODE | PENDING |
+| APT-074 | 审批列表、详情、决定和执行复核改为按冻结策略权限解析 | ADM-46 | APT-008, APT-069 | CODE | PENDING |
+| APT-075 | 组织管理脱离活动计费上下文并实现节点对象级授权决定 | ACC-64 | APT-011, APT-017, APT-069 | CODE | PENDING |
+| APT-076 | 各内部 HTTP、任务和事件入口接入精确工作负载权限并消费受签人类委托 | NFR-12 | APT-006, APT-045, APT-082 | CODE | PENDING |
+| APT-077 | Break-glass 可信执行身份派生并删除命令行自报操作者 | ADM-48 | APT-006 | CODE | PENDING |
+| APT-078 | 桌面、个人中心及后台按权威权限和版本驱动入口状态 | UI-22 | APT-070–APT-075, APT-080, APT-081 | CODE | PENDING |
+| APT-079 | 全 HTTP/任务/事件/回调/CLI 敏感入口授权覆盖发布门禁 | CORE-08, NFR-52 | APT-069–APT-078, APT-080–APT-082 | CODE | PENDING |
+| APT-080 | 已登录密码修改和匿名忘记密码接入个人安全权限及生命周期矩阵 | ID-20 | APT-069, APT-070 | CODE | PENDING |
+| APT-081 | Token 模型目录、调用、用量和取消接口接入个人/组织原子权限 | TOK-49 | APT-069, APT-071 | CODE | PENDING |
+| APT-082 | Account 签发短期不可篡改人类委托并提供独立验证契约 | ADM-49 | APT-045, APT-069 | CODE | PENDING |
 
 ## 3. 独立提交验收模板
 
