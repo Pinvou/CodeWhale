@@ -396,24 +396,78 @@ components:
         expires_in: { type: integer, minimum: 60, maximum: 900 }
         scope: { type: string, const: payment.callback.write }
     PaymentCallback:
+      description: Provider-profile payload selected exclusively by the callback token. H3C Mall is the first supported profile; future profiles extend this union without changing the endpoint.
+      oneOf:
+        - $ref: "#/components/schemas/H3CMallOrderSnapshotCallback"
+    H3CMallOrderSnapshotCallback:
       type: object
       additionalProperties: false
-      required: [notificationId, merchantOrderNo, providerStatus, amountFen, currency, occurredAt, sentAt]
+      description: The native H3C Mall order snapshot, identical to queryOrder content. Provider identity comes only from the callback token.
+      required: [orderKey, merchantCustomerKey, mobile, skuBom, needPayAmt, skuAmt, status, updatedAt]
       properties:
-        notificationId: { type: string, format: uuid }
-        merchantOrderNo: { type: string, minLength: 1, maxLength: 128 }
-        providerOrderNo: { type: string, maxLength: 128 }
-        providerTransactionId: { type: string, maxLength: 128, description: Required when the provider profile maps providerStatus to payment success. }
-        channel: { type: string, minLength: 1, maxLength: 64 }
-        providerStatus: { type: string, minLength: 1, maxLength: 64, description: Original provider status interpreted by the profile bound to the callback token. }
-        amountFen: { type: integer, format: int64, minimum: 1 }
-        currency: { type: string, pattern: "^[A-Z]{3}$" }
-        paidAt: { type: string, description: "Required when the provider profile maps providerStatus to payment success; RFC 3339, with profile-specific legacy formats documented separately." }
-        occurredAt: { type: string, format: date-time }
-        sentAt: { type: string, format: date-time }
+        id: { type: integer, format: int64 }
+        orderKey: { type: string, minLength: 1, maxLength: 128 }
+        merchantCustomerKey: { type: string, format: uuid, description: Pinvou immutable user_id supplied when the order was created. }
+        mobile: { type: string, pattern: '^(\+86)?1[0-9]{10}$' }
+        skuBom: { type: string, minLength: 1, maxLength: 128 }
+        tradeOrderCode: { type: string, maxLength: 128 }
+        tradeOrderId: { type: integer, format: int64 }
+        skuId: { type: integer, format: int64 }
+        needPayAmt: { $ref: "#/components/schemas/H3CMallDecimalAmount" }
+        paidAmt: { $ref: "#/components/schemas/H3CMallDecimalAmount" }
+        paymentStatus: { type: string, maxLength: 64 }
+        payEndTime: { $ref: "#/components/schemas/H3CMallTimestamp" }
+        skuAmt: { $ref: "#/components/schemas/H3CMallDecimalAmount" }
+        receiveAddressId: { type: integer, format: int64 }
+        shopId: { type: integer, format: int64 }
+        tradeContractId: { type: integer, format: int64 }
+        tradeContractCode: { type: string, maxLength: 128 }
+        payUniqueKey: { type: string, maxLength: 128 }
+        paymentOrderId: { type: integer, format: int64 }
+        buyerId: { type: string, maxLength: 128 }
+        payChannel: { type: string, maxLength: 64 }
+        aliQrData: { type: string, maxLength: 1048576 }
+        wechatQrData: { type: string, maxLength: 1048576 }
+        status: { type: string, minLength: 1, maxLength: 64, description: Native Mall status; unknown future values are retained and routed to review. }
+        node: { type: string, maxLength: 128 }
+        payTime: { $ref: "#/components/schemas/H3CMallTimestamp" }
+        executeCostMs: { type: integer, format: int64, minimum: 0 }
+        errorMsg: { type: string, maxLength: 4096 }
         traceId: { type: string, maxLength: 128 }
-        providerPayableUntil: { type: string, format: date-time }
-        paymentInstructionExpiresAt: { type: string, format: date-time }
+        createdAt: { $ref: "#/components/schemas/H3CMallTimestamp" }
+        updatedAt: { $ref: "#/components/schemas/H3CMallTimestamp" }
+      allOf:
+        - if:
+            properties: { status: { const: PAID } }
+            required: [status]
+          then:
+            properties:
+              paidAmt: {}
+              payTime: {}
+              payUniqueKey: {}
+              paymentOrderId: {}
+            required: [paidAmt, payTime]
+            anyOf:
+              - properties: { payUniqueKey: {} }
+                required: [payUniqueKey]
+              - properties: { paymentOrderId: {} }
+                required: [paymentOrderId]
+    H3CMallDecimalAmount:
+      oneOf:
+        - type: number
+          minimum: 0
+          multipleOf: 0.01
+        - type: string
+          pattern: '^[0-9]+(\.[0-9]{1,2})?$'
+    H3CMallTimestamp:
+      oneOf:
+        - type: string
+          minLength: 1
+          description: RFC 3339 or Asia/Shanghai yyyy-MM-dd HH:mm:ss.
+        - type: integer
+          format: int64
+          minimum: 1
+          description: Unix seconds or milliseconds as returned by H3C Mall.
     PaymentCapabilities:
       type: object
       additionalProperties: false

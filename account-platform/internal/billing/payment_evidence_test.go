@@ -3,7 +3,27 @@ package billing
 import (
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+func TestProviderMatchesFrozenOrderIdentityAndSKU(t *testing.T) {
+	requesterID := uuid.MustParse("019c0000-0000-7000-8000-000000000001")
+	order := PaymentOrder{MerchantOrderNo: "pv-1", RequesterID: requesterID, ProviderSKU: "8814A1D2", Channel: "ALIPAY", AmountFen: 20000, Currency: "CNY"}
+	provider := ProviderOrder{MerchantOrderNo: "pv-1", ExternalCustomerKey: requesterID.String(), ExternalSKU: "8814A1D2", Channel: "ALIPAY", AmountFen: 20000, Currency: "CNY"}
+	if !providerMatchesOrder(provider, order) {
+		t.Fatal("matching Mall customer and SKU were rejected")
+	}
+	provider.ExternalCustomerKey = "019c0000-0000-7000-8000-000000000002"
+	if providerMatchesOrder(provider, order) {
+		t.Fatal("Mall customer mismatch was accepted")
+	}
+	provider.ExternalCustomerKey = requesterID.String()
+	provider.ExternalSKU = "OTHER-SKU"
+	if providerMatchesOrder(provider, order) {
+		t.Fatal("Mall SKU mismatch was accepted")
+	}
+}
 
 func TestClassifyPaymentTransaction(t *testing.T) {
 	expiresAt := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC)

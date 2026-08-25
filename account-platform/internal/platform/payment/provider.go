@@ -10,12 +10,13 @@ import (
 var ErrUnsupported = errors.New("payment provider capability is unsupported")
 
 type Order struct {
-	MerchantOrderNo string
-	Channel         string
-	AmountFen       int64
-	Currency        string
-	Mobile          string
-	ExternalSKU     string
+	MerchantOrderNo     string
+	MerchantCustomerKey string
+	Channel             string
+	AmountFen           int64
+	Currency            string
+	Mobile              string
+	ExternalSKU         string
 }
 
 type ProviderOrder struct {
@@ -32,6 +33,8 @@ type ProviderOrder struct {
 	PaidAt                      *time.Time `json:"paid_at,omitempty"`
 	ProviderStatus              string     `json:"provider_status,omitempty"`
 	ProviderTraceID             string     `json:"provider_trace_id,omitempty"`
+	ExternalCustomerKey         string     `json:"external_customer_key,omitempty"`
+	ExternalSKU                 string     `json:"external_sku,omitempty"`
 	ProviderEventAt             *time.Time `json:"provider_event_at,omitempty"`
 	ProviderPayableUntil        *time.Time `json:"provider_payable_until,omitempty"`
 	PaymentInstructionExpiresAt *time.Time `json:"payment_instruction_expires_at,omitempty"`

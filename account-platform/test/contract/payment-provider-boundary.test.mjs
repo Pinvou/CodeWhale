@@ -44,14 +44,18 @@ test('product mapping and order snapshots are immutable provider facts', async (
   assert.match(payments, /product_mapping_id,product_mapping_snapshot,provider_capability_snapshot/);
 });
 
-test('trial plan uses the temporary H3C UAT SKU without rewriting other products', async () => {
-  const migration = await read('migrations/billing/000036_trial_h3c_sku_override.up.sql');
-  const rollback = await read('migrations/billing/000036_trial_h3c_sku_override.down.sql');
+test('trial plan publishes a versioned 200 yuan catalog and H3C mapping without rewriting other products', async () => {
+  const migration = await read('migrations/billing/000037_trial_price_200_yuan.up.sql');
+  const rollback = await read('migrations/billing/000037_trial_price_200_yuan.down.sql');
   assert.match(migration, /product_id='PLAN_TRIAL'/);
-  assert.match(migration, /'8814A1D2',4900,'CNY'/);
-  assert.doesNotMatch(migration, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP|development_simulator/);
-  assert.match(rollback, /'0502AJON',4900,'CNY'/);
-  assert.doesNotMatch(rollback, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP|development_simulator/);
+  assert.match(migration, /'h3c_mall','h3c-mall-v1','8814A1D2'/);
+  assert.match(migration, /facts\.external_sku, 20000, 'CNY'/);
+  assert.match(migration, /SET amount_fen=20000/);
+  assert.match(migration, /development_simulator/);
+  assert.doesNotMatch(migration, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP/);
+  assert.match(rollback, /facts\.external_sku, 4900, 'CNY'/);
+  assert.match(rollback, /SET amount_fen=4900/);
+  assert.doesNotMatch(rollback, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP/);
 });
 
 test('development simulator is unavailable to production configuration', async () => {

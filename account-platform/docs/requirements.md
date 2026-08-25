@@ -726,7 +726,7 @@ USAGE_PENDING -> SETTLED | REVIEW
 | PAY-02 | 支付能力可发现 | UI、API 和后台任务使用同一 capabilities 决定状态查询、历史保留、晚到窗口、权威终态、关单、退款、回调、账单和渠道行为。 |
 | PAY-03 | 多支付渠道 | 渠道由商品目录和 Provider capabilities 决定；开发/测试 Payment Provider 及其渠道不计入生产渠道能力。 |
 | PAY-04 | 多 Provider 商品映射 | 通用商品与外部 SKU 分表并冻结订单创建时版本。 |
-| PAY-05 | 正式商品目录冻结 | SKU、金额、权益、有效期和 Provider 映射版本化，正式收款前完成冻结。 |
+| PAY-05 | 正式商品目录冻结 | SKU、金额、权益、有效期和 Provider 映射版本化，正式收款前完成冻结；当前 `PLAN_TRIAL` 使用商城 SKU `8814A1D2`、含税金额 200.00 元、1,000 BASE、0 BONUS 和 30 天有效期。 |
 | PAY-06 | Commerce Customer 映射 | 需要外部客户时使用供应商中立映射，映射状态不参与认证和授权。 |
 | PAY-07 | 充值全程留在品悟应用内 | 商品选择、二维码、状态和结果均在桌面/Web 个人中心完成，不跳供应商后台。 |
 | PAY-08 | 每次充值先进入商品选择 | 不自动恢复上次二维码或旧订单。 |
@@ -762,6 +762,9 @@ USAGE_PENDING -> SETTLED | REVIEW
 | PAY-38 | 无回调无账单 Provider 正式收款准入 | 只有具备可长期查询的历史订单、有限晚到窗口和权威终态时才允许正式收款。 |
 | PAY-39 | 未支付订单最终归档 | 超过最晚支付确认期限、完成最终成功查询并取得权威未支付终态后才能归档。 |
 | PAY-40 | Provider 事实盲区处理 | 无法继续查询或无法取得权威终态时进入 PROVIDER_BLIND，不得静默关闭或归档。 |
+| PAY-41 | 商城客户使用永久用户标识 | 新华三下单和按用户分页查询的 `merchantCustomerKey` 固定使用付款人的不可变 `user_id`；不得使用手机号、用户名、可展示 `user_code` 或临时映射值。 |
+| PAY-42 | 新华三查询与回调共用原生订单合同 | 新华三回调直接投递与 `queryOrder` 的 `content` 相同的订单对象；同一 Adapter 映射订单、状态、流水、时间、SKU、客户标识和金额，禁止维护两套含义不同的厂商报文。 |
+| PAY-43 | 商城十进制金额精确校验 | `needPayAmt`、`paidAmt`、`skuAmt` 按十进制元精确转换为分；成功支付必须有稳定流水、实付金额和支付时间，金额、SKU、客户标识或订单归属冲突只能留证并进入复核。 |
 
 ### 7.1 下单主体
 
@@ -770,6 +773,8 @@ USAGE_PENDING -> SETTLED | REVIEW
 3. `[PAY-23]` 组织购买使用实际付款管理员的 Commerce Mapping 下单；组织级 Mapping 仅在 Provider 支持企业客户时启用，不作为通用购买前提。
 4. `[PAY-09]` 服务端按受信 `product_id` 派生 Provider、SKU、金额和权益；客户端不能覆盖任何资金或权益事实。
 5. `[PAY-10]` 二维码、支付金额和外部订单引用只能采用 Provider 实际返回值，不得本地伪造。
+6. `[PAY-41]` 新华三要求的 `merchantCustomerKey` 使用付款人的全局唯一、创建后永久不可变且永不复用的 `user_id`。个人与组织购买均使用实际付款用户 ID；手机号只用于商城既有用户同步和联系方式，不承担资金归属标识。
+7. `[PAY-41]` 创建订单、按用户分页查询及返回/回调快照中的 `merchantCustomerKey` 必须一致。商城返回的客户标识或 `skuBom` 与本地订单冻结快照不一致时不得入账。
 
 ### 7.2 独立状态机、履约隔离与订单派生摘要
 
@@ -835,13 +840,14 @@ RECEIVABLE_OPEN -> RESOLVED
 1. 回调授权接口：`POST https://account.pinvou.com/api/v1/payment-callback/token`。每个 Provider 使用独立 HTTP Basic 客户端凭据按 `client_credentials` 换取短期 Bearer Token；服务端把客户端绑定到唯一 `provider_id`、Adapter 版本和商户，Token 只含 `payment.callback.write`，有效期必须在 1–15 分钟内。响应和日志不得泄露客户端密钥或 Token。
 2. 支付结果回调接口：`POST https://account.pinvou.com/api/v1/payment-callbacks`。接口只接受上述 Bearer Token，从 Token 派生 Provider 身份并选择对应 Profile；请求体不得提交或覆盖 `provider_id`、Adapter 版本或商户。完成严格校验并持久化通知后返回 `202 Accepted`，履约在异步 Inbox 中完成。
 
-通用回调报文至少包括：全局唯一 `notificationId`、品悟商户订单号 `merchantOrderNo`、Provider 订单号、Provider 支付流水号 `providerTransactionId`、渠道 `channel`、Provider 原始状态 `providerStatus`、实际金额分、币种、支付时间 `paidAt`、状态发生时间 `occurredAt`、发送时间 `sentAt` 和 Trace ID。具体状态、渠道、币种及兼容时间格式由与 Token 身份绑定的 Provider Profile 解释；Profile 确认支付成功时必须同时具有稳定支付流水号、正金额和有效支付时间，缺少任一字段不得入账。
+回调传输层保持 Provider 中立，业务报文由 Token 身份绑定的 Profile 定义。新华三 Profile 按 PAY-42 直接接受 `queryOrder.content` 的原生订单对象，至少包含 `orderKey`、`merchantCustomerKey`、`mobile`、`skuBom`、`needPayAmt`、`skuAmt`、`status` 和 `updatedAt`；`PAID` 还必须包含 `paidAmt`、`payTime`，以及 `payUniqueKey` 或 `paymentOrderId` 中至少一个稳定流水标识。请求体不得另加 Provider 身份、品悟派生的金额分、币种、发送时间或通知 ID。
 
-- 同一 `notificationId`、同一内容重复投递返回相同受理结果；同一 ID 携带不同内容必须拒绝并告警。
+- Billing 根据订单号、客户标识、SKU、原始状态、稳定支付流水和 Provider 更新时间确定性派生通知 ID；同一商城快照重复投递返回相同受理结果，同一派生 ID 携带不同原文必须拒绝并告警。
 - 回调原文作为受限证据嵌入规范化通知，和查询证据使用相同支付流水归并与权益履约函数；回调/查询并发、重复和乱序均不得重复创建流水、权益包或账本分录。
 - Profile 映射后的成功、处理中、关闭和复核状态遵循相同证据优先级；未知新状态必须保存原文并进入复核，不得静默丢弃或猜测终态。
 - 回调不替代服务端主动查询。回调缺失、认证失败、处理延迟或状态不确定时继续按 PAY-19 查询；查询先收敛后到达的回调只补充证据，不能重复履约。
-- 新华三是首个 Provider Profile，固定声明 `notification_supported=true`：`PAID` 映射为成功，`PENDING/PROCESSING/WAIT_PAY` 只追加处理中证据，`PAY_CLOSED` 只有在权威终态能力允许时才能关闭，`FAILED` 及未知状态进入人工复核；当前只接受 `ALIPAY` 和 `CNY`，`paidAt` 额外兼容 Asia/Shanghai 的 `yyyy-MM-dd HH:mm:ss`。
+- 新华三是首个 Provider Profile，固定声明 `notification_supported=true`：查询和回调共享同一原生订单映射；`PAID` 映射为成功，`PENDING/PROCESSING/WAIT_PAY` 只追加处理中证据，`PAY_CLOSED` 只有在权威终态能力允许时才能关闭，`FAILED` 及未知状态进入人工复核。对外渠道规范为 `ALIPAY`、币种为 `CNY`；商城内部 `payChannel` 只作为原文证据，不覆盖本地渠道。商城时间同时兼容 RFC 3339、Asia/Shanghai `yyyy-MM-dd HH:mm:ss` 和文档中的 Unix 秒/毫秒。
+- `[PAY-43]` 所有商城金额以十进制元读取并精确换算为分，不经二进制浮点。`PAID` 的 `paidAmt` 必须为正，并与非空 `needPayAmt`、`skuAmt` 一致；再与本地订单冻结金额校验，任一不一致只保留原文并进入人工复核。
 - 商城账单、主动关单和退款接口仍不属于当前新华三 Profile；普通退款继续按 PAY-31 关闭。
 
 ### 7.4 主动关闭和查询退避

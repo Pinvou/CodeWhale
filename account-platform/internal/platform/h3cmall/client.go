@@ -66,33 +66,6 @@ type userSyncItem struct {
 	Message string `json:"message"`
 }
 
-type Order struct {
-	OrderKey                    string `json:"orderKey"`
-	ProviderOrderNo             string `json:"providerOrderNo"`
-	Mobile                      string `json:"mobile"`
-	SKU                         string `json:"skuBom"`
-	TradeContractID             *int64 `json:"tradeContractId"`
-	TradeContractCode           string `json:"tradeContractCode"`
-	PayUniqueKey                string `json:"payUniqueKey"`
-	PaymentOrderID              *int64 `json:"paymentOrderId"`
-	BuyerID                     string `json:"buyerId"`
-	PayChannel                  string `json:"payChannel"`
-	AliQRData                   string `json:"aliQrData"`
-	WechatQRData                string `json:"wechatQrData"`
-	Status                      string `json:"status"`
-	AmountFen                   *int64 `json:"amountFen"`
-	Currency                    string `json:"currency"`
-	Node                        string `json:"node"`
-	PayTime                     string `json:"payTime"`
-	StatusOccurredAt            string `json:"statusOccurredAt"`
-	ProviderPayableUntil        string `json:"providerPayableUntil"`
-	PaymentInstructionExpiresAt string `json:"paymentInstructionExpiresAt"`
-	ErrorMessage                string `json:"errorMsg"`
-	TraceID                     string `json:"traceId"`
-	CreatedAt                   any    `json:"createdAt"`
-	UpdatedAt                   any    `json:"updatedAt"`
-}
-
 func New(config Config) (*Client, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(config.BaseURL), "/"))
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -154,14 +127,18 @@ func (c *Client) EnsureCustomer(ctx context.Context, request commerce.CustomerPr
 	return commerce.CustomerProvisionResult{ExternalReferenceRedacted: "***" + mobile[len(mobile)-4:]}, nil
 }
 
-func (c *Client) CreateOrder(ctx context.Context, orderKey, mobile, sku string) error {
+func (c *Client) CreateOrder(ctx context.Context, orderKey, merchantCustomerKey, mobile, sku string) error {
 	requestMobile, err := mallRequestMobile(mobile)
 	if err != nil {
 		return err
 	}
+	merchantCustomerKey = strings.TrimSpace(merchantCustomerKey)
+	if merchantCustomerKey == "" {
+		return fmt.Errorf("%w: merchant customer key is required", ErrRejected)
+	}
 	var accepted string
 	return c.authorizedJSON(ctx, "/api/trade/external/pinwu/order/createOrder", map[string]string{
-		"orderKey": orderKey, "mobile": requestMobile, "skuBom": sku,
+		"orderKey": orderKey, "merchantCustomerKey": merchantCustomerKey, "mobile": requestMobile, "skuBom": sku,
 	}, &accepted)
 }
 
@@ -174,17 +151,68 @@ func (c *Client) QueryOrder(ctx context.Context, orderKey string) (Order, error)
 	if order.OrderKey != orderKey || strings.TrimSpace(order.Status) == "" {
 		return Order{}, ErrResponseInvalid
 	}
+	if err := normalizeOrderResponse(&order); err != nil {
+		return Order{}, ErrResponseInvalid
+	}
+	return order, nil
+}
+
+func (c *Client) PageQueryOrders(ctx context.Context, request PageQueryRequest) (OrderPage, error) {
+	request.MerchantCustomerKey = strings.TrimSpace(request.MerchantCustomerKey)
+	if request.MerchantCustomerKey == "" || request.Current < 0 || request.PageSize < 0 || request.PageSize > 100 {
+		return OrderPage{}, fmt.Errorf("%w: invalid order page query", ErrRejected)
+	}
+	input := map[string]any{"merchantCustomerKey": request.MerchantCustomerKey}
+	if mobile := strings.TrimSpace(request.Mobile); mobile != "" {
+		requestMobile, err := mallRequestMobile(mobile)
+		if err != nil {
+			return OrderPage{}, err
+		}
+		input["mobile"] = requestMobile
+	}
+	if value := strings.TrimSpace(request.OrderKey); value != "" {
+		input["orderKey"] = value
+	}
+	if value := strings.TrimSpace(request.SKU); value != "" {
+		input["skuBom"] = value
+	}
+	if value := strings.ToUpper(strings.TrimSpace(request.Status)); value != "" {
+		input["status"] = value
+	}
+	if request.Current > 0 {
+		input["current"] = request.Current
+	}
+	if request.PageSize > 0 {
+		input["pageSize"] = request.PageSize
+	}
+	var page OrderPage
+	if err := c.authorizedJSON(ctx, "/api/trade/external/pinwu/order/pageQueryOrder", input, &page); err != nil {
+		return OrderPage{}, err
+	}
+	for index := range page.Records {
+		if strings.TrimSpace(page.Records[index].MerchantCustomerKey) != request.MerchantCustomerKey || normalizeOrderResponse(&page.Records[index]) != nil {
+			return OrderPage{}, ErrResponseInvalid
+		}
+	}
+	return page, nil
+}
+
+func normalizeOrderResponse(order *Order) error {
+	order.OrderKey = strings.TrimSpace(order.OrderKey)
+	order.MerchantCustomerKey = strings.TrimSpace(order.MerchantCustomerKey)
+	order.SKU = strings.TrimSpace(order.SKU)
+	order.Status = strings.ToUpper(strings.TrimSpace(order.Status))
 	if strings.TrimSpace(order.Mobile) != "" {
-		mobile, normalizeErr := canonicalMainlandMobile(order.Mobile)
-		if normalizeErr != nil {
-			return Order{}, ErrResponseInvalid
+		mobile, err := canonicalMainlandMobile(order.Mobile)
+		if err != nil {
+			return err
 		}
 		order.Mobile = mobile
 	}
 	if order.AliQRData != "" && !ValidQRData(order.AliQRData) {
-		return Order{}, ErrResponseInvalid
+		return ErrResponseInvalid
 	}
-	return order, nil
+	return nil
 }
 
 func mallRequestMobile(value string) (string, error) {

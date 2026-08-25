@@ -8,7 +8,7 @@ import YAML from 'yaml';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
-test('public payment callback contract is provider-neutral and identity-bound', async () => {
+test('public payment callback transport is identity-bound and selects the H3C native profile', async () => {
   const contract = YAML.parse(await read('contracts/openapi/billing.yaml'));
   const token = contract.paths['/api/v1/payment-callback/token'].post;
   const callback = contract.paths['/api/v1/payment-callbacks'].post;
@@ -18,9 +18,15 @@ test('public payment callback contract is provider-neutral and identity-bound', 
   assert.equal(contract.paths['/api/v1/h3c-mall/payment-callbacks'], undefined);
   assert.equal(contract.components.schemas.PaymentCallbackToken.properties.scope.const, 'payment.callback.write');
   assert.equal(contract.components.schemas.PaymentCallbackToken.properties.expires_in.maximum, 900);
-  const body = contract.components.schemas.PaymentCallback;
-  assert.ok(body.required.includes('merchantOrderNo'));
-  assert.ok(body.required.includes('providerStatus'));
+  const transportBody = contract.components.schemas.PaymentCallback;
+  assert.deepEqual(transportBody.oneOf, [{ $ref: '#/components/schemas/H3CMallOrderSnapshotCallback' }]);
+  const body = contract.components.schemas.H3CMallOrderSnapshotCallback;
+  assert.ok(body.required.includes('orderKey'));
+  assert.ok(body.required.includes('merchantCustomerKey'));
+  assert.ok(body.required.includes('needPayAmt'));
+  assert.ok(body.required.includes('updatedAt'));
+  assert.equal(body.properties.notificationId, undefined, 'notification identity is derived from the native snapshot');
+  assert.equal(body.properties.amountFen, undefined, 'the Mall reports decimal yuan facts');
   assert.equal(body.properties.providerId, undefined, 'provider identity must come from the callback token');
 });
 
@@ -44,8 +50,24 @@ test('H3C remains the first provider profile without expanding unsupported capab
   assert.match(provider, /NotificationSupported:\s*true/);
   assert.match(provider, /AuthoritativeUnpaidTerminal:\s*false/);
   assert.match(profile, /ProviderID\(\) string \{ return "h3c_mall" \}/);
-  assert.match(profile, /case "FAILED":[\s\S]*return "REVIEW_REQUIRED"/);
+  assert.match(profile, /h3cpayment\.MapMallOrder\(order, nil\)/);
+  assert.match(provider, /case "FAILED":[\s\S]*REVIEW_REQUIRED/);
   assert.match(provider, /ErrUnsupported/);
+});
+
+test('H3C customer identity, native money facts, and callback projection remain fail closed', async () => {
+  const billing = await read('internal/billing/payments.go');
+  const evidence = await read('internal/billing/payment_evidence.go');
+  const mall = await read('internal/platform/h3cmall/client.go');
+  const provider = await read('internal/platform/h3cpayment/provider.go');
+  assert.match(billing, /MerchantCustomerKey:\s*requesterID\.String\(\)/);
+  assert.match(mall, /"merchantCustomerKey": merchantCustomerKey/);
+  assert.match(provider, /NeedPayAmount/);
+  assert.match(provider, /PaidAmount/);
+  assert.match(provider, /SKUAmount/);
+  assert.match(evidence, /provider\.ExternalCustomerKey == "" \|\| provider\.ExternalCustomerKey == order\.RequesterID\.String\(\)/);
+  assert.match(evidence, /chargeback\.status='REVIEW_REQUIRED'/);
+  assert.match(evidence, /chargeback\.status='CONFIRMED'/);
 });
 
 test('deployment exposes only the two generic callback endpoints and sources secrets externally', async () => {

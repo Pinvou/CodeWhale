@@ -74,6 +74,15 @@ func providerEvidenceKey(evidenceType string, provider ProviderOrder) string {
 	return fmt.Sprintf("%s|%s|%s|%s|%s", evidenceType, provider.MerchantOrderNo, transactionID, provider.ProviderStatus, eventAt)
 }
 
+func providerMatchesOrder(provider ProviderOrder, order PaymentOrder) bool {
+	return provider.MerchantOrderNo == order.MerchantOrderNo &&
+		provider.Channel == order.Channel &&
+		provider.AmountFen == order.AmountFen &&
+		provider.Currency == order.Currency &&
+		(provider.ExternalCustomerKey == "" || provider.ExternalCustomerKey == order.RequesterID.String()) &&
+		(provider.ExternalSKU == "" || provider.ExternalSKU == order.ProviderSKU)
+}
+
 func (p *PaymentCoordinator) insertPaymentEvidence(ctx context.Context, tx pgx.Tx, order PaymentOrder, transactionID *uuid.UUID, evidenceType, evidenceKey, mergeResult string, provider ProviderOrder, payload []byte, receivedAt time.Time) (uuid.UUID, error) {
 	payload, digest, err := providerEvidencePayload(provider, payload)
 	if err != nil {
@@ -123,7 +132,7 @@ func (p *PaymentCoordinator) recordProviderObservation(ctx context.Context, orde
 }
 
 func (p *PaymentCoordinator) mergeProviderObservationWithinTransaction(ctx context.Context, tx pgx.Tx, order PaymentOrder, evidenceType, evidenceKey string, payload []byte, provider ProviderOrder, now time.Time) error {
-	valid := provider.MerchantOrderNo == order.MerchantOrderNo && provider.Channel == order.Channel && provider.AmountFen == order.AmountFen && provider.Currency == order.Currency
+	valid := providerMatchesOrder(provider, order)
 	reviewRequired := !valid || provider.Status == "REVIEW_REQUIRED" || provider.Status != "PENDING" && provider.Status != "CREATED" && provider.Status != "CLOSED" && provider.Status != "FAILED"
 	mergeResult := "RECORDED"
 	if reviewRequired {
@@ -166,7 +175,7 @@ func (p *PaymentCoordinator) mergeSuccessfulPaymentWithinTransaction(ctx context
 	if provider.Status != "SUCCESS" || provider.ChannelTransactionID == nil || provider.PaidAt == nil {
 		return order, uuid.Nil, ErrConflict
 	}
-	valid := provider.MerchantOrderNo == order.MerchantOrderNo && provider.Channel == order.Channel && provider.AmountFen == order.AmountFen && provider.Currency == order.Currency
+	valid := providerMatchesOrder(provider, order)
 	if !valid {
 		evidenceID, evidenceErr := p.insertPaymentEvidence(ctx, tx, order, nil, evidenceType, evidenceKey, "REVIEW_REQUIRED", provider, payload, now)
 		if evidenceErr != nil {
@@ -342,8 +351,8 @@ SELECT COALESCE(sum(amount_fen) FILTER (WHERE status='SUCCEEDED'),0) succeeded_a
 FROM refunds WHERE payment_order_id=$1), forced_refunds AS (
 SELECT count(*) FILTER (WHERE status='REVIEW_REQUIRED') review_count
 FROM forced_refund_cases WHERE payment_order_id=$1), chargebacks AS (
-SELECT count(*) FILTER (WHERE status='REVIEW_REQUIRED') review_count,
-       count(*) FILTER (WHERE status='CONFIRMED') open_count,
+SELECT count(*) FILTER (WHERE chargeback.status='REVIEW_REQUIRED') review_count,
+       count(*) FILTER (WHERE chargeback.status='CONFIRMED') open_count,
        COALESCE(sum(transaction.amount_fen) FILTER (WHERE chargeback.status='CONFIRMED'),0) lost_amount_fen
 FROM chargeback_cases chargeback
 JOIN payment_transactions transaction ON transaction.id=chargeback.payment_transaction_id

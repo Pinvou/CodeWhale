@@ -381,7 +381,7 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 	providerOrder, err := providerCall(p, "ORDER_CREATE", order.Channel, true, func() (payment.ProviderOrder, error) {
-		return p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
+		return p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, MerchantCustomerKey: requesterID.String(), Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
 	})
 	if err != nil {
 		return PaymentOrder{}, false, err
@@ -421,6 +421,8 @@ type paymentNotification struct {
 	ProviderOrderReference      string          `json:"provider_order_reference,omitempty"`
 	ProviderStatus              string          `json:"provider_status,omitempty"`
 	ProviderTraceID             string          `json:"provider_trace_id,omitempty"`
+	ExternalCustomerKey         string          `json:"external_customer_key,omitempty"`
+	ExternalSKU                 string          `json:"external_sku,omitempty"`
 	ProviderEventAt             *time.Time      `json:"provider_event_at,omitempty"`
 	ProviderPayableUntil        *time.Time      `json:"provider_payable_until,omitempty"`
 	PaymentInstructionExpiresAt *time.Time      `json:"payment_instruction_expires_at,omitempty"`
@@ -453,6 +455,7 @@ func (p *PaymentCoordinator) PersistProviderNotification(ctx context.Context, pr
 		Channel: provider.Channel, Status: provider.Status, AmountFen: provider.AmountFen, Currency: provider.Currency,
 		Timestamp: sentAt.Unix(), ProviderOrderReference: provider.ProviderOrderReference, ProviderStatus: provider.ProviderStatus,
 		ProviderTraceID: provider.ProviderTraceID, ProviderEventAt: provider.ProviderEventAt,
+		ExternalCustomerKey: provider.ExternalCustomerKey, ExternalSKU: provider.ExternalSKU,
 		ProviderPayableUntil: provider.ProviderPayableUntil, PaymentInstructionExpiresAt: provider.PaymentInstructionExpiresAt,
 		ProviderPayload: append(json.RawMessage(nil), payload...),
 	}
@@ -539,7 +542,7 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	if notification.MerchantID != p.merchantID || notification.Channel != channel {
 		return ErrForbiddenPayment
 	}
-	provider := ProviderOrder{MerchantOrderNo: notification.MerchantOrderNo, ProviderOrderReference: notification.ProviderOrderReference, Channel: notification.Channel, AmountFen: notification.AmountFen, Currency: notification.Currency, Status: notification.Status, ProviderStatus: notification.ProviderStatus, ProviderTraceID: notification.ProviderTraceID, ProviderEventAt: notification.ProviderEventAt, ProviderPayableUntil: notification.ProviderPayableUntil, PaymentInstructionExpiresAt: notification.PaymentInstructionExpiresAt, AmountSource: "PROVIDER"}
+	provider := ProviderOrder{MerchantOrderNo: notification.MerchantOrderNo, ProviderOrderReference: notification.ProviderOrderReference, Channel: notification.Channel, AmountFen: notification.AmountFen, Currency: notification.Currency, Status: notification.Status, ProviderStatus: notification.ProviderStatus, ProviderTraceID: notification.ProviderTraceID, ExternalCustomerKey: notification.ExternalCustomerKey, ExternalSKU: notification.ExternalSKU, ProviderEventAt: notification.ProviderEventAt, ProviderPayableUntil: notification.ProviderPayableUntil, PaymentInstructionExpiresAt: notification.PaymentInstructionExpiresAt, AmountSource: "PROVIDER"}
 	if provider.ProviderStatus == "" {
 		provider.ProviderStatus = notification.Status
 	}

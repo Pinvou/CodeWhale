@@ -228,6 +228,12 @@ Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移
 
 UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C Profile 处理，不能通过通用环境变量绕过服务端商品目录。通用 Provider 回调与 Web 个人中心统一使用独立账号子域名，公网边界只允许把 `POST https://account.pinvou.com/api/v1/payment-callback/token` 和 `POST https://account.pinvou.com/api/v1/payment-callbacks` 两个精确路径转发到 Billing，其余同源流量进入 Portal；`pinvou.com` 不再承载相关接口。客户端凭据由服务端绑定 Provider、版本和商户，回调请求体不得携带 Provider 身份；Token 仅含 `payment.callback.write` 权限，回调收到 `202` 只表示通知已持久化。后端主机变化时只更新 Nginx/网关 upstream，Provider 配置不得改为实例 IP 或临时地址。
 
+新华三应用授权 Token 按供应商建议缓存 1 小时；收到 `401/403` 才强制刷新一次，禁止每单登录或超过每 AppKey 每小时 3 次的授权限流。创建订单必须同时发送 `orderKey`、大陆手机号、`skuBom` 和 `merchantCustomerKey`，最后一项固定为付款人的永久 `user_id`；商城异步受理后由客户端/后台按 `orderKey` 查询，Adapter 声明的最小真实查询间隔为 2 秒。`pageQueryOrder` 以同一 `merchantCustomerKey` 为必填条件，手机号只是可选过滤条件。
+
+新华三回调请求体必须直接使用其 `queryOrder.content` 原生订单对象，不再发送品悟旧版规范字段。至少核验 `orderKey`、`merchantCustomerKey`、`mobile`、`skuBom`、`needPayAmt`、`skuAmt`、`status`、`updatedAt`；支付成功还要核验 `paidAmt`、`payTime` 和 `payUniqueKey/paymentOrderId`。金额按十进制元精确换算为分并与本地订单快照比较；客户、SKU、金额或归属不一致只留证并进入复核。发布后必须使用一笔隔离测试订单验证 `Token 200 → 回调 202 → Inbox PROCESSED → 支付流水/权益各一份`，并确认重复原生快照不重复履约；不能只以 `202` 作为成功证据。
+
+迁移 `000037_trial_price_200_yuan` 已把 `PLAN_TRIAL` 商品目录、H3C `8814A1D2` 映射和开发 Simulator 映射统一调整为 200.00 元；权益保持 1,000 BASE、0 BONUS、30 天。部署后须确认商品列表显示 ¥200.00，创建订单冻结 `amount_fen=20000`，商城查询/回调三项金额均为 200.00 元且能单次履约。金额决策已经收敛，但完整商品名称、类目、发票信息、上架状态和真实支付证据验收前仍保持 `UAT_TENTATIVE` / `TEST_ONLY`，不得直接升级为 `FROZEN`。
+
 ### 6.5 Token Gateway 与 New API
 
 - `TOKEN_SECRET_PROVIDER`

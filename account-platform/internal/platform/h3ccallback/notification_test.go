@@ -6,18 +6,22 @@ import (
 	"time"
 )
 
-func TestParsePaidNotification(t *testing.T) {
-	now := time.Date(2026, 8, 24, 8, 0, 0, 0, time.UTC)
-	body := []byte(fmt.Sprintf(`{"notificationId":"0198d894-fc00-7000-8000-000000000001","merchantOrderNo":"pv-1","providerOrderNo":"mall-1","providerTransactionId":"trade-1","channel":"ALIPAY","providerStatus":"PAID","amountFen":100,"currency":"CNY","paidAt":"2026-08-24 15:59:00","occurredAt":"2026-08-24T07:59:00Z","sentAt":"%s","traceId":"trace-1"}`, now.Format(time.RFC3339)))
+func TestParsePaidNativeOrderSnapshot(t *testing.T) {
+	now := time.Date(2026, 8, 25, 8, 0, 0, 0, time.UTC)
+	body := []byte(fmt.Sprintf(`{"id":1,"orderKey":"pv-1","merchantCustomerKey":"019c0000-0000-7000-8000-000000000001","mobile":"13800138000","skuBom":"8814A1D2","tradeOrderCode":"TRO-1","skuId":2,"needPayAmt":200.00,"paidAmt":200.00,"paymentStatus":"PAY_SUCCESS","payEndTime":"2026-08-25 16:00:00","skuAmt":200.00,"receiveAddressId":3,"shopId":4,"tradeContractId":5,"tradeContractCode":"TRC-1","payUniqueKey":"trade-1","paymentOrderId":6,"buyerId":"buyer-test","payChannel":"CHINAUMS_PAY_ALI_QR","status":"PAID","node":"支付完成","payTime":"2026-08-25 15:59:00","executeCostMs":7,"traceId":"trace-1","createdAt":"2026-08-25 15:58:00","updatedAt":"%s"}`, now.In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02 15:04:05")))
 	notification, err := NewProfile().ParseNotification(body, now)
-	if err != nil || notification.Provider.Status != "SUCCESS" || notification.Provider.ChannelTransactionID == nil || *notification.Provider.ChannelTransactionID != "trade-1" || notification.Provider.AmountSource != "PROVIDER" || notification.Provider.ProviderOrderReference != "mall-1" {
+	if err != nil || notification.Provider.Status != "SUCCESS" || notification.Provider.ChannelTransactionID == nil || *notification.Provider.ChannelTransactionID != "trade-1" || notification.Provider.AmountFen != 20000 || notification.Provider.AmountSource != "PROVIDER" || notification.Provider.ProviderOrderReference != "TRO-1" || notification.Provider.ExternalCustomerKey == "" || notification.Provider.ExternalSKU != "8814A1D2" {
 		t.Fatalf("unexpected notification: %#v %v", notification, err)
+	}
+	repeated, err := NewProfile().ParseNotification(body, now.Add(time.Second))
+	if err != nil || repeated.ID != notification.ID {
+		t.Fatalf("duplicate Mall snapshot did not derive a stable notification ID: %#v %v", repeated, err)
 	}
 }
 
-func TestFailedNotificationRequiresReviewAndUnknownFieldsAreRejected(t *testing.T) {
-	now := time.Date(2026, 8, 24, 8, 0, 0, 0, time.UTC)
-	body := []byte(fmt.Sprintf(`{"notificationId":"0198d894-fc00-7000-8000-000000000002","merchantOrderNo":"pv-2","channel":"ALIPAY","providerStatus":"FAILED","amountFen":100,"currency":"CNY","occurredAt":"%s","sentAt":"%s"}`, now.Format(time.RFC3339), now.Format(time.RFC3339)))
+func TestFailedNativeSnapshotRequiresReviewAndUnknownFieldsAreRejected(t *testing.T) {
+	now := time.Date(2026, 8, 25, 8, 0, 0, 0, time.UTC)
+	body := []byte(`{"orderKey":"pv-2","merchantCustomerKey":"019c0000-0000-7000-8000-000000000002","mobile":"13800138000","skuBom":"8814A1D2","needPayAmt":200.00,"skuAmt":200.00,"status":"FAILED","errorMsg":"order failed","updatedAt":"2026-08-25 16:00:00"}`)
 	profile := NewProfile()
 	notification, err := profile.ParseNotification(body, now)
 	if err != nil || notification.Provider.Status != "REVIEW_REQUIRED" {
@@ -25,5 +29,13 @@ func TestFailedNotificationRequiresReviewAndUnknownFieldsAreRejected(t *testing.
 	}
 	if _, err := profile.ParseNotification(append(body[:len(body)-1], []byte(`,"unexpected":true}`)...), now); err == nil {
 		t.Fatal("unknown callback field was accepted")
+	}
+}
+
+func TestPaidNativeSnapshotRequiresProviderMoneyFacts(t *testing.T) {
+	now := time.Date(2026, 8, 25, 8, 0, 0, 0, time.UTC)
+	body := []byte(`{"orderKey":"pv-3","merchantCustomerKey":"019c0000-0000-7000-8000-000000000003","mobile":"13800138000","skuBom":"8814A1D2","status":"PAID","payUniqueKey":"trade-3","payTime":"2026-08-25 15:59:00","updatedAt":"2026-08-25 16:00:00"}`)
+	if _, err := NewProfile().ParseNotification(body, now); err == nil {
+		t.Fatal("paid callback without Mall amount facts was accepted")
 	}
 }

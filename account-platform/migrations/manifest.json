@@ -674,6 +674,16 @@
         "file": "000036_trial_h3c_sku_override.up.sql",
         "version": 36,
         "sha256": "49b40650f1c72a84a7eef31fb01dc361d933107360bc90352f75fc768f8996dc"
+      },
+      {
+        "file": "000037_trial_price_200_yuan.down.sql",
+        "version": 37,
+        "sha256": "2829e8f772f8ce0f87d1f1bb99f4e157da7428df4fb7b638c1a531b93203ec63"
+      },
+      {
+        "file": "000037_trial_price_200_yuan.up.sql",
+        "version": 37,
+        "sha256": "9f9249baf0fe99e35831da2dbed8c6b84a44d6ae2104591ce6f4bc2368019c3c"
       }
     ],
     "payment-simulator": [
