@@ -280,6 +280,15 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	if authorizationVersion := response.Header.Get("X-Authorization-Version"); authorizationVersion != "" {
 		w.Header().Set("X-Authorization-Version", authorizationVersion)
 	}
+	for _, header := range []string{
+		"X-Personal-Authorization-Version",
+		"X-Platform-Authorization-Version",
+		"X-Organization-Authorization-Version",
+	} {
+		if version := response.Header.Get(header); version != "" {
+			w.Header().Set(header, version)
+		}
+	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
 }

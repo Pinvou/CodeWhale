@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 328`、`部分实现 32`、`未实现 4`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-077、APT-080–APT-082 已收敛登录、Account/Billing/Token 入口原子权限、策略审批、对象授权、可信恢复、短期委托消费及精确工作负载权限，其余入口门禁由 APT-078、APT-079 逐项收敛。
+全量核验汇总：`已实现 329`、`部分实现 32`、`未实现 3`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069–APT-078、APT-080–APT-082 已收敛三类作用域与真值表、登录、Account/Billing/Token 入口原子权限、策略审批、对象授权、可信恢复、短期委托、精确工作负载权限，以及桌面、个人中心和后台的权威权限/独立版本驱动；全入口发布门禁由 APT-079 收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -35,6 +35,7 @@
 | `PASSWORD-SECURITY-AUTHORIZATION` | 已登录改密的近期认证与个人权限门禁、匿名恢复的防枚举权限/生命周期校验、密码隔离和会话撤销 | Account Go 单元测试、OpenAPI lint、密码安全合同及全量静态验证通过；真实短信、Keycloak 改密和数据库串行化待部署验证 |
 | `PERSONAL-ACCOUNT-AUTHORIZATION` | 本人资料、授权上下文、组织列表、资料变更、上下文切换、注销和邀请 Account 路由逐项绑定个人原子权限，并保持 OIDC 主体唯一目标 | Account Go 测试、OpenAPI 403 契约、路由权限矩阵和生命周期失败关闭合同通过；数据库撤权运行级验证待部署 |
 | `BILLING-SCOPE-AUTHORIZATION` | 个人余额、权益包、订单与充值管理按 `personal.*` 权限和个人上下文失败关闭；组织购买、余额、权益及额度授予按显式组织目标与 `org.*` 权限实时决定 | Token/Portal Go 测试、显式组织目标和个人/组织不可互借权限用例、OpenAPI 及全量合同通过；数据库撤权和真实组织钱包联调待部署 |
+| `PERMISSION-DRIVEN-UI` | 桌面账号弹层、Web 个人中心和平台后台直接消费 Account 权威权限集合及个人/平台/组织独立授权版本；入口、只读态和操作按钮按精确权限决定，版本变化触发失效刷新，退出及注销进度保持可达 | 权限 UI 合同、Portal/桌面版本头传播、三语文案、Portal Go 测试、前端 lint/构建及架构守卫通过；真实撤权推送时延和浏览器/桌面交互待部署验证 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
 | `ACCOUNT-DOMAIN-UAT-20260825` | 账号独立域名、Portal 根入口、精确支付回调路由、受信 TLS、HTTP 跳转、服务健康和回调客户端授权 | `account.pinvou.com` 已解析到公网入口；Let's Encrypt 证书有效至 2026-11-23；HTTP 以 `308` 跳转 HTTPS，Portal 根入口返回 `200` 且旧 `/account.html` 返回 `404`，两个未授权回调入口返回 `401`，受控 Basic 凭据换取短期 Bearer Token 返回 `200`；Billing 运行 `1efb79d6`、Portal 运行 `bc5683ee`。真实新华三通知报文、重复/乱序和履约结果仍待商城联合验收 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
@@ -338,7 +339,7 @@
 | UI-19 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; MULTIAGENT-REGRESSION; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 对话选择器按来源展示当前上下文可用的具体平台目录模型及本地/第三方模型；已有会话直接写类型化会话引用，空白草稿延迟到首条消息创建会话后冻结，均不改全局默认 |
 | UI-20 | 已实现 | AUDIT_HEAD | PAYMENT-PRODUCT-CONTROLS; UI-LANGUAGE-COVERAGE | NOT_DEPLOYED | Web 个人中心、组织代购和桌面充值 Popover 均保留暂停商品展示，阻止选择/下单并提供中英日维护提示 |
 | UI-21 | 已实现 | AUDIT_HEAD | WEB-IDENTITY-LOGIN; AUTH-RISK; REGISTRATION-SAGA | NOT_DEPLOYED | Portal 未登录态直接进入 OIDC PKCE；Keycloak Pinvou 主题提供密码/短信/注册表单，短信登录和手机注册均强制一次性滑块与 6 位验证码，注册复用密码不透明引用及持久预约 Saga；密码不经过 Portal，真实短信、注册和 Cookie SSO 待部署联调 |
-| UI-22 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 桌面、个人中心和后台入口仍未统一消费权威权限集合及独立授权版本，禁用态与拒绝原因尚不完整；由 APT-078 收敛。 |
+| UI-22 | 已实现 | DOC_CURRENT | ROLE-PERMISSION-REDESIGN; PERMISSION-DRIVEN-UI; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 桌面账号弹层、Web 个人中心和平台后台均从 Account 权威授权上下文决定入口、只读态和操作可用性，不按角色名推导权限；个人、平台、组织任一授权版本变化均使缓存失效并刷新，退出登录和注销进度保持可达，服务端权限拒绝仍是最终边界。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
@@ -504,7 +505,7 @@
 | CR-07 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 符合可用条件的模型都可供用户选择 | 已由 CR-35 细化状态语义 | 原记录把目录展示、上下文资格和请求预占混为一个可用条件；模型目录同步要求继续有效，状态划分以 CR-35 为准 |
 | CR-08 | BILL-14, BILL-17, BILL-16, UI-08 | 分别展示基础积分、赠送积分、到期顺序、即将到期提醒和多个权益包，同时展示可用总积分 | 已实现 | 组成级 API 与三语 UI 已展示 BASE/BONUS、总可用、来源、确定消费顺序和到期提醒；人工赠送为独立 30 天 BONUS |
 | CR-09 | SCOPE-04–SCOPE-06, TOK-15, TOK-35–TOK-37, NFR-20 | 删除旧模型路径及兼容代码，全量迁移到账号平台 + Token Gateway | 部分实现 | 客户端范围内的旧路径删除、数据/凭据迁移、动态目录、非计费 readiness 和三层门禁已实现；正式签名制品升级矩阵、原子回滚和生产联调待外部验收 |
-| CR-10 | ACC-13, ACC-59–ACC-64, BILL-46, TOK-49, UI-22, ADM-05–ADM-07, ADM-45–ADM-49 | 基于当前全部能力重新设计角色系统 | 双重独立设计审核通过、代码待实现 | 采用个人、系统、组织三类人类权限，角色只由精确权限集合构成；对象作用域、独立版本、策略审批、受信恢复和工作负载委托均默认拒绝，见 `role-system-design.md` 与 APT-069–APT-082。 |
+| CR-10 | ACC-13, ACC-59–ACC-64, BILL-46, TOK-49, UI-22, ADM-05–ADM-07, ADM-45–ADM-49 | 基于当前全部能力重新设计角色系统 | 双重独立设计审核通过、主体代码已实现 | 采用个人、系统、组织三类人类权限，角色只由精确权限集合构成；对象作用域、独立版本、策略审批、受信恢复、工作负载委托及权限驱动界面均默认拒绝并已实现，APT-079 继续补全入口覆盖发布门禁。 |
 | CR-11 | UI-09 | 品悟应用内个人中心提供 Web 个人中心入口 | 已实现 | 桌面账号弹层通过专用命令打开受信配置的 Portal 根地址；WebView 不能注入任意 URL，OIDC Token 不进入 URL |
 | CR-12 | UI-10, PAY-07, PAY-08 | Web 个人中心提供充值入口 | 已实现、需保留 | 当前个人活动上下文的“额度”页已经支持套餐选择、商城二维码和到账查询；后续 UI/角色重构不得删除 |
 | CR-13 | ID-08, NFR-14 | 短信业务流程与供应商实现隔离 | 已实现 | 启动工厂按配置注入供应商托管或平台生成/通用 HTTP 发送 Adapter；业务状态机无厂商条件并持久化 Provider ID、Adapter 版本和不透明校验数据，见 `sms-verification-provider-design.md` |
@@ -846,7 +847,7 @@
 | UI-19 | 对话内直接选择平台模型 | 已实现 | 对话选择器直接列出上下文可用的平台目录模型并与本地/第三方分组；选择只写当前会话，草稿态延迟冻结且不改全局默认。 |
 | UI-20 | 充值商品暂停态 | 已实现 | Web、组织购买和桌面入口展示暂停态及三语维护提示且不可提交。 |
 | UI-21 | Web 统一身份登录页 | 已实现 | Portal 未登录后直接进入 Keycloak 三语 Pinvou 登录主题；密码登录、短信滑块验证码登录及手机滑块验证码注册均在 Identity 边界闭环，Portal 不接收密码或浏览器可读 Token。 |
-| UI-22 | 权限驱动入口状态 | 未实现 | 桌面、个人中心和后台尚未统一消费权威权限集合及独立授权版本；APT-078 待实现。 |
+| UI-22 | 权限驱动入口状态 | 已实现 | 桌面、个人中心和后台直接消费权威权限集合，按个人/平台/组织独立授权版本刷新入口、只读态及操作按钮；退出登录和注销进度始终可达。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
 | ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |

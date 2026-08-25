@@ -1,3 +1,5 @@
+import { mergeObservedVersions } from './authorization-ui.js';
+
 function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
@@ -9,10 +11,33 @@ export class AdminPlatformClient {
   constructor(baseURL = '') {
     this.baseURL = String(baseURL || '').replace(/\/$/, '');
     this.csrfToken = '';
+    this.authorizationVersions = {};
+    this.authorizationVersionListeners = new Set();
+  }
+
+  onAuthorizationVersion(listener) {
+    this.authorizationVersionListeners.add(listener);
+    return () => this.authorizationVersionListeners.delete(listener);
+  }
+
+  observeAuthorizationVersions(headers) {
+    const next = mergeObservedVersions(this.authorizationVersions, {
+      context_version: headers.get('X-Context-Version'),
+      personal_authorization_version: headers.get('X-Personal-Authorization-Version'),
+      platform_authorization_version: headers.get('X-Platform-Authorization-Version'),
+      organization_authorization_version: headers.get('X-Organization-Authorization-Version'),
+    });
+    if (JSON.stringify(next) === JSON.stringify(this.authorizationVersions)) return;
+    this.authorizationVersions = next;
+    for (const listener of this.authorizationVersionListeners) listener({ ...next });
   }
 
   async session(signal) {
-    const response = await fetch(`${this.baseURL}/api/session`, { credentials: 'same-origin', cache: 'no-store', signal });
+    const response = await fetch(`${this.baseURL}/api/session`, {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal,
+    });
     if (!response.ok) return { authenticated: false };
     const payload = await response.json();
     this.csrfToken = payload.csrf_token || '';
@@ -26,18 +51,19 @@ export class AdminPlatformClient {
       cache: 'no-store',
       signal,
     });
+    this.observeAuthorizationVersions(response.headers);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, payload);
     return payload;
   }
 
   async mutate(area, resource, method, body, idempotencyKey = '') {
-	const headers = {
-	  Accept: 'application/json',
-	  'Content-Type': 'application/json',
-	  'X-CSRF-Token': this.csrfToken,
-	};
-	if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
+    const headers = {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-CSRF-Token': this.csrfToken,
+    };
+    if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
     const response = await fetch(`${this.baseURL}/api/admin/${area}${resource}`, {
       method,
       headers,
@@ -45,117 +71,325 @@ export class AdminPlatformClient {
       cache: 'no-store',
       body: body === undefined ? undefined : JSON.stringify(body),
     });
+    this.observeAuthorizationVersions(response.headers);
     const payload = response.status === 204 ? {} : await response.json().catch(() => ({}));
     if (!response.ok) throw errorFromResponse(response, payload);
     return payload;
   }
 
-  accountOverview(signal) { return this.request('account', '/admin/v1/overview', signal); }
-  roles(signal) { return this.request('account', '/admin/v1/roles', signal); }
-  users(search, signal) { return this.request('account', `/admin/v1/users?limit=100&q=${encodeURIComponent(search || '')}`, signal); }
-  userByCode(userCode, signal) { return this.request('account', `/admin/v1/user-code-lookups/${encodeURIComponent(userCode)}`, signal); }
-  userMemberships(userID, signal) { return this.request('account', `/admin/v1/users/${encodeURIComponent(userID)}/memberships`, signal); }
-  setUserStatus(userID, status) { return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}/status`, 'PATCH', { status }); }
-  accountClosures(signal) { return this.request('account', '/admin/v1/account-closure-requests', signal); }
-  retryAccountClosure(closureRequestID, reason) { return this.mutate('account', `/admin/v1/account-closure-requests/${encodeURIComponent(closureRequestID)}/actions/retry`, 'POST', { reason }, `account-closure-retry-${crypto.randomUUID()}`); }
-  organizations(search, signal) { return this.request('account', `/admin/v1/organizations?limit=100&q=${encodeURIComponent(search || '')}`, signal); }
-  createOrganization(name, ownerUserID) { return this.mutate('account', '/admin/v1/organizations', 'POST', { name, owner_user_id: ownerUserID }); }
-  renameOrganization(organizationID, name) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'PATCH', { name }); }
-  setOrganizationStatus(organizationID, status) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/status`, 'PATCH', { status }); }
-  deleteOrganization(organizationID) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'DELETE'); }
-  organizationMembers(organizationID, signal) { return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, signal); }
-  addOrganizationMember(organizationID, userID, roles, unitAdminUnitIDs) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, 'POST', { user_id:userID, roles, unit_admin_unit_ids:unitAdminUnitIDs }); }
-  replaceOrganizationMemberRoles(organizationID, userID, roles, unitAdminUnitIDs) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/roles`, 'PUT', { roles, unit_admin_unit_ids:unitAdminUnitIDs }); }
-  removeOrganizationMember(organizationID, userID) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}`, 'DELETE'); }
-  transferOrganizationOwnership(organizationID, userID) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/ownership`, 'POST', { new_owner_user_id:userID }); }
-  organizationUnits(organizationID, signal) { return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units`, signal); }
-  createOrganizationUnit(organizationID, name, parentID = null) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units`, 'POST', { name, parent_id: parentID }); }
-  renameOrganizationUnit(organizationID, unitID, name) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units/${encodeURIComponent(unitID)}`, 'PATCH', { name }); }
-  deleteOrganizationUnit(organizationID, unitID) { return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units/${encodeURIComponent(unitID)}`, 'DELETE'); }
+  async authorization(signal) {
+    const response = await fetch(`${this.baseURL}/api/account/v1/account/bootstrap`, {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': this.csrfToken,
+      },
+      body: '{}',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal,
+    });
+    this.observeAuthorizationVersions(response.headers);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw errorFromResponse(response, payload);
+    return payload;
+  }
+
+  accountOverview(signal) {
+    return this.request('account', '/admin/v1/overview', signal);
+  }
+  roles(signal) {
+    return this.request('account', '/admin/v1/roles', signal);
+  }
+  users(search, signal) {
+    return this.request('account', `/admin/v1/users?limit=100&q=${encodeURIComponent(search || '')}`, signal);
+  }
+  userByCode(userCode, signal) {
+    return this.request('account', `/admin/v1/user-code-lookups/${encodeURIComponent(userCode)}`, signal);
+  }
+  userMemberships(userID, signal) {
+    return this.request('account', `/admin/v1/users/${encodeURIComponent(userID)}/memberships`, signal);
+  }
+  setUserStatus(userID, status) {
+    return this.mutate('account', `/admin/v1/users/${encodeURIComponent(userID)}/status`, 'PATCH', { status });
+  }
+  accountClosures(signal) {
+    return this.request('account', '/admin/v1/account-closure-requests', signal);
+  }
+  retryAccountClosure(closureRequestID, reason) {
+    return this.mutate('account', `/admin/v1/account-closure-requests/${encodeURIComponent(closureRequestID)}/actions/retry`, 'POST', { reason }, `account-closure-retry-${crypto.randomUUID()}`);
+  }
+  organizations(search, signal) {
+    return this.request('account', `/admin/v1/organizations?limit=100&q=${encodeURIComponent(search || '')}`, signal);
+  }
+  createOrganization(name, ownerUserID) {
+    return this.mutate('account', '/admin/v1/organizations', 'POST', {
+      name,
+      owner_user_id: ownerUserID,
+    });
+  }
+  renameOrganization(organizationID, name) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'PATCH', { name });
+  }
+  setOrganizationStatus(organizationID, status) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/status`, 'PATCH', { status });
+  }
+  deleteOrganization(organizationID) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'DELETE');
+  }
+  organizationMembers(organizationID, signal) {
+    return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, signal);
+  }
+  addOrganizationMember(organizationID, userID, roles, unitAdminUnitIDs) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, 'POST', { user_id: userID, roles, unit_admin_unit_ids: unitAdminUnitIDs });
+  }
+  replaceOrganizationMemberRoles(organizationID, userID, roles, unitAdminUnitIDs) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}/roles`, 'PUT', { roles, unit_admin_unit_ids: unitAdminUnitIDs });
+  }
+  removeOrganizationMember(organizationID, userID) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members/${encodeURIComponent(userID)}`, 'DELETE');
+  }
+  transferOrganizationOwnership(organizationID, userID) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/ownership`, 'POST', { new_owner_user_id: userID });
+  }
+  organizationUnits(organizationID, signal) {
+    return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units`, signal);
+  }
+  createOrganizationUnit(organizationID, name, parentID = null) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units`, 'POST', { name, parent_id: parentID });
+  }
+  renameOrganizationUnit(organizationID, unitID, name) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units/${encodeURIComponent(unitID)}`, 'PATCH', { name });
+  }
+  deleteOrganizationUnit(organizationID, unitID) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units/${encodeURIComponent(unitID)}`, 'DELETE');
+  }
   audits(filters = {}, signal) {
-    const query = new URLSearchParams({ limit:'200' });
-    for (const key of ['actor','action','resource','result','from','to']) if (filters[key]) query.set(key, filters[key]);
+    const query = new URLSearchParams({ limit: '200' });
+    for (const key of ['actor', 'action', 'resource', 'result', 'from', 'to']) if (filters[key]) query.set(key, filters[key]);
     return this.request('account', `/admin/v1/audit-logs?${query}`, signal);
   }
-  audit(auditID, signal) { return this.request('account', `/admin/v1/audit-logs/${encodeURIComponent(auditID)}`, signal); }
-  createAuditExport(filter, reason, includePII = false) { return this.mutate('account', '/admin/v1/audit-exports', 'POST', { filter, reason, include_pii:includePII, idempotency_key:`audit-export-${crypto.randomUUID()}` }); }
-  auditExport(exportID, signal) { return this.request('account', `/admin/v1/audit-exports/${encodeURIComponent(exportID)}`, signal); }
-  issueAuditExportDownloadTicket(exportID) { return this.mutate('account', `/admin/v1/audit-exports/${encodeURIComponent(exportID)}/download-tickets`, 'POST', {}); }
+  audit(auditID, signal) {
+    return this.request('account', `/admin/v1/audit-logs/${encodeURIComponent(auditID)}`, signal);
+  }
+  createAuditExport(filter, reason, includePII = false) {
+    return this.mutate('account', '/admin/v1/audit-exports', 'POST', {
+      filter,
+      reason,
+      include_pii: includePII,
+      idempotency_key: `audit-export-${crypto.randomUUID()}`,
+    });
+  }
+  auditExport(exportID, signal) {
+    return this.request('account', `/admin/v1/audit-exports/${encodeURIComponent(exportID)}`, signal);
+  }
+  issueAuditExportDownloadTicket(exportID) {
+    return this.mutate('account', `/admin/v1/audit-exports/${encodeURIComponent(exportID)}/download-tickets`, 'POST', {});
+  }
   async downloadAuditExport(exportID, token) {
-    const response = await fetch(`${this.baseURL}/api/admin/account/admin/v1/audit-exports/${encodeURIComponent(exportID)}/download`, { headers:{ Accept:'application/vnd.pinvou.audit-envelope+json', 'X-Pinvou-Download-Token':token }, credentials:'same-origin', cache:'no-store' });
+    const response = await fetch(`${this.baseURL}/api/admin/account/admin/v1/audit-exports/${encodeURIComponent(exportID)}/download`, {
+      headers: {
+        Accept: 'application/vnd.pinvou.audit-envelope+json',
+        'X-Pinvou-Download-Token': token,
+      },
+      credentials: 'same-origin',
+      cache: 'no-store',
+    });
     if (!response.ok) throw errorFromResponse(response, await response.json().catch(() => ({})));
     return response.blob();
   }
-  billingOverview(signal) { return this.request('billing', '/admin/v1/overview', signal); }
-  wallets(signal) { return this.request('billing', '/admin/v1/wallets?limit=100', signal); }
-  walletLedger(walletID, signal) { return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal); }
-  receivables(signal) { return this.request('billing', '/admin/v1/receivables?limit=100', signal); }
-  receivableAllocations(receivableID, signal) { return this.request('billing', `/admin/v1/receivables/${encodeURIComponent(receivableID)}/allocations`, signal); }
-  priceVersions(signal) { return this.request('billing', '/admin/v1/pricing-versions?limit=100', signal); }
-  createPriceVersion(input) { return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input); }
+  billingOverview(signal) {
+    return this.request('billing', '/admin/v1/overview', signal);
+  }
+  wallets(signal) {
+    return this.request('billing', '/admin/v1/wallets?limit=100', signal);
+  }
+  walletLedger(walletID, signal) {
+    return this.request('billing', `/admin/v1/wallets/${encodeURIComponent(walletID)}/ledger?limit=200`, signal);
+  }
+  receivables(signal) {
+    return this.request('billing', '/admin/v1/receivables?limit=100', signal);
+  }
+  receivableAllocations(receivableID, signal) {
+    return this.request('billing', `/admin/v1/receivables/${encodeURIComponent(receivableID)}/allocations`, signal);
+  }
+  priceVersions(signal) {
+    return this.request('billing', '/admin/v1/pricing-versions?limit=100', signal);
+  }
+  createPriceVersion(input) {
+    return this.mutate('billing', '/admin/v1/pricing-versions', 'POST', input);
+  }
   paymentOrders(filters = {}, signal) {
-    const query = new URLSearchParams({ limit:'100' });
+    const query = new URLSearchParams({ limit: '100' });
     if (filters.q) query.set('q', filters.q);
     if (filters.status) query.set('status', filters.status);
     return this.request('billing', `/admin/v1/payment-orders?${query}`, signal);
   }
-  paymentOrder(orderID, signal) { return this.request('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}`, signal); }
-  refunds(signal) { return this.request('billing', '/admin/v1/refunds?limit=100', signal); }
-  syncPaymentOrder(orderID) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {}); }
-  repairPaymentOrder(orderID, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason }); }
-  refundPaymentOrder(orderID, transactionID, packageID, reason) { return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`, 'POST', { payment_transaction_id:transactionID, entitlement_package_id:packageID, reason }, `target-refund-${crypto.randomUUID()}`); }
-  adjustments(signal) { return this.request('billing', '/admin/v1/adjustments?limit=100', signal); }
-  decideAdjustment(adjustmentID, decision, reason) { return this.mutate('billing', `/admin/v1/adjustments/${encodeURIComponent(adjustmentID)}/${decision}`, 'POST', { reason }); }
-  holds(signal) { return this.request('billing', '/admin/v1/usage-holds?limit=100', signal); }
-  hold(holdID, signal) { return this.request('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}`, signal); }
-  releaseHold(holdID, reason) { return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }, `hold-release-${crypto.randomUUID()}`); }
-  reconciliationRuns(signal) { return this.request('billing', '/admin/v1/reconciliation-runs?limit=100', signal); }
-  runReconciliation(channel, businessDate) { return this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', { channel, business_date:businessDate }); }
-  importProviderBill(channel, businessDate, items) { return this.mutate('billing', '/admin/v1/reconciliation-imports', 'POST', { channel, business_date:businessDate, items }); }
-  reconciliationCases(runID, signal) { return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal); }
-  updateReconciliationCase(caseID, command) { return this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, 'POST', command, `reconciliation-case-${crypto.randomUUID()}`); }
+  paymentOrder(orderID, signal) {
+    return this.request('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}`, signal);
+  }
+  refunds(signal) {
+    return this.request('billing', '/admin/v1/refunds?limit=100', signal);
+  }
+  syncPaymentOrder(orderID) {
+    return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/sync`, 'POST', {});
+  }
+  repairPaymentOrder(orderID, reason) {
+    return this.mutate('billing', `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/repair`, 'POST', { reason });
+  }
+  refundPaymentOrder(orderID, transactionID, packageID, reason) {
+    return this.mutate(
+      'billing',
+      `/admin/v1/payment-orders/${encodeURIComponent(orderID)}/refunds`,
+      'POST',
+      {
+        payment_transaction_id: transactionID,
+        entitlement_package_id: packageID,
+        reason,
+      },
+      `target-refund-${crypto.randomUUID()}`,
+    );
+  }
+  adjustments(signal) {
+    return this.request('billing', '/admin/v1/adjustments?limit=100', signal);
+  }
+  decideAdjustment(adjustmentID, decision, reason) {
+    return this.mutate('billing', `/admin/v1/adjustments/${encodeURIComponent(adjustmentID)}/${decision}`, 'POST', { reason });
+  }
+  holds(signal) {
+    return this.request('billing', '/admin/v1/usage-holds?limit=100', signal);
+  }
+  hold(holdID, signal) {
+    return this.request('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}`, signal);
+  }
+  releaseHold(holdID, reason) {
+    return this.mutate('billing', `/admin/v1/usage-holds/${encodeURIComponent(holdID)}/release`, 'POST', { reason }, `hold-release-${crypto.randomUUID()}`);
+  }
+  reconciliationRuns(signal) {
+    return this.request('billing', '/admin/v1/reconciliation-runs?limit=100', signal);
+  }
+  runReconciliation(channel, businessDate) {
+    return this.mutate('billing', '/admin/v1/reconciliation-runs', 'POST', {
+      channel,
+      business_date: businessDate,
+    });
+  }
+  importProviderBill(channel, businessDate, items) {
+    return this.mutate('billing', '/admin/v1/reconciliation-imports', 'POST', {
+      channel,
+      business_date: businessDate,
+      items,
+    });
+  }
+  reconciliationCases(runID, signal) {
+    return this.request('billing', `/admin/v1/reconciliation-runs/${encodeURIComponent(runID)}/cases?limit=200`, signal);
+  }
+  updateReconciliationCase(caseID, command) {
+    return this.mutate('billing', `/admin/v1/reconciliation-cases/${encodeURIComponent(caseID)}/commands`, 'POST', command, `reconciliation-case-${crypto.randomUUID()}`);
+  }
   latePaymentReviews(filters = {}, signal) {
-    const query = new URLSearchParams({ limit:'100' });
-    for (const key of ['status','provider_id','owner_id']) if (filters[key]) query.set(key, filters[key]);
-    for (const key of ['entered_from','entered_to','next_review_before']) if (filters[key]) query.set(key, new Date(filters[key]).toISOString());
+    const query = new URLSearchParams({ limit: '100' });
+    for (const key of ['status', 'provider_id', 'owner_id']) if (filters[key]) query.set(key, filters[key]);
+    for (const key of ['entered_from', 'entered_to', 'next_review_before']) if (filters[key]) query.set(key, new Date(filters[key]).toISOString());
     if (filters.overdue) query.set('overdue', 'true');
     return this.request('billing', `/admin/v1/late-payment-reviews?${query}`, signal);
   }
-  latePaymentReview(caseID, signal) { return this.request('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}`, signal); }
-  claimLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/claim`, 'POST', {}); }
-  queryLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/query`, 'POST', {}); }
-  scheduleLatePaymentReview(caseID, nextReviewAt, reason) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/schedule`, 'POST', { next_review_at:new Date(nextReviewAt).toISOString(), reason }); }
-  archiveLatePaymentReview(caseID) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive`, 'POST', {}); }
-  escalateProviderBlind(caseID, reason) { return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason }); }
+  latePaymentReview(caseID, signal) {
+    return this.request('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}`, signal);
+  }
+  claimLatePaymentReview(caseID) {
+    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/claim`, 'POST', {});
+  }
+  queryLatePaymentReview(caseID) {
+    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/query`, 'POST', {});
+  }
+  scheduleLatePaymentReview(caseID, nextReviewAt, reason) {
+    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/schedule`, 'POST', { next_review_at: new Date(nextReviewAt).toISOString(), reason });
+  }
+  archiveLatePaymentReview(caseID) {
+    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/archive`, 'POST', {});
+  }
+  escalateProviderBlind(caseID, reason) {
+    return this.mutate('billing', `/admin/v1/late-payment-reviews/${encodeURIComponent(caseID)}/provider-blind`, 'POST', { reason });
+  }
   paymentAnomalies(filters = {}, signal) {
-    const query = new URLSearchParams({ limit:'100' });
-    for (const key of ['anomaly_type','status','severity','owner_id']) if (filters[key]) query.set(key, filters[key]);
+    const query = new URLSearchParams({ limit: '100' });
+    for (const key of ['anomaly_type', 'status', 'severity', 'owner_id']) if (filters[key]) query.set(key, filters[key]);
     return this.request('billing', `/admin/v1/payment-anomalies?${query}`, signal);
   }
-  paymentAnomaly(caseID, signal) { return this.request('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}`, signal); }
-  claimPaymentAnomaly(caseID) { return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/claim`, 'POST', {}, `payment-anomaly-claim-${crypto.randomUUID()}`); }
-  resolvePaymentAnomaly(caseID, resolution, reason) { return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, `payment-anomaly-resolve-${crypto.randomUUID()}`); }
-  tokenOverview(signal) { return this.request('token', '/admin/v1/overview', signal); }
-  tokenAccounts(signal) { return this.request('token', '/admin/v1/token-accounts?limit=100', signal); }
-  createTokenAccount(input) { return this.mutate('token', '/admin/v1/token-accounts', 'POST', input); }
-  tokenAccount(tokenAccountID, signal) { return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal); }
-  setTokenAccountStatus(tokenAccountID, status, reason) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/status`, 'PATCH', { status, reason }); }
-  upsertTokenRoute(tokenAccountID, route) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route); }
-  deleteTokenRoute(tokenAccountID, model) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'DELETE', { model }); }
-  validateTokenCredential(tokenAccountID, credentialID) { return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credentials/${encodeURIComponent(credentialID)}/validate`, 'POST', {}); }
-  usageRequests(signal) { return this.request('token', '/admin/v1/usage-requests?limit=100', signal); }
-  usageRequest(usageRequestID, signal) { return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal); }
-  retryUsageReconciliation(usageRequestID, reason) { return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }, `usage-reconcile-${crypto.randomUUID()}`); }
-  catalogModels(signal) { return this.request('token', '/admin/v1/models', signal); }
-  saveModelDraft(modelID, input) { return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/draft`, 'PUT', input); }
-  publishModelDraft(modelID, input) { return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/publish`, 'POST', input); }
-  transitionModel(modelID, input) { return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle`, 'POST', input); }
-  syncModelCatalog() { return this.mutate('token', '/admin/v1/models:sync', 'POST'); }
-  rollbackModelCatalog(input) { return this.mutate('token', '/admin/v1/model-catalog:rollback', 'POST', input); }
-  provisionings(signal) { return this.request('token', '/admin/v1/provisionings?limit=100', signal); }
-  provisioning(provisioningID, signal) { return this.request('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}`, signal); }
-  repairProvisioning(provisioningID, reason) { return this.mutate('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/repair`, 'POST', { reason }, `provisioning-repair-${crypto.randomUUID()}`); }
-  systemStatus(signal) { return this.request('system', '/status', signal); }
+  paymentAnomaly(caseID, signal) {
+    return this.request('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}`, signal);
+  }
+  claimPaymentAnomaly(caseID) {
+    return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/claim`, 'POST', {}, `payment-anomaly-claim-${crypto.randomUUID()}`);
+  }
+  resolvePaymentAnomaly(caseID, resolution, reason) {
+    return this.mutate('billing', `/admin/v1/payment-anomalies/${encodeURIComponent(caseID)}/resolve`, 'POST', { resolution, reason }, `payment-anomaly-resolve-${crypto.randomUUID()}`);
+  }
+  tokenOverview(signal) {
+    return this.request('token', '/admin/v1/overview', signal);
+  }
+  tokenAccounts(signal) {
+    return this.request('token', '/admin/v1/token-accounts?limit=100', signal);
+  }
+  createTokenAccount(input) {
+    return this.mutate('token', '/admin/v1/token-accounts', 'POST', input);
+  }
+  tokenAccount(tokenAccountID, signal) {
+    return this.request('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}`, signal);
+  }
+  setTokenAccountStatus(tokenAccountID, status, reason) {
+    return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/status`, 'PATCH', { status, reason });
+  }
+  upsertTokenRoute(tokenAccountID, route) {
+    return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'PUT', route);
+  }
+  deleteTokenRoute(tokenAccountID, model) {
+    return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/routes`, 'DELETE', { model });
+  }
+  validateTokenCredential(tokenAccountID, credentialID) {
+    return this.mutate('token', `/admin/v1/token-accounts/${encodeURIComponent(tokenAccountID)}/credentials/${encodeURIComponent(credentialID)}/validate`, 'POST', {});
+  }
+  usageRequests(signal) {
+    return this.request('token', '/admin/v1/usage-requests?limit=100', signal);
+  }
+  usageRequest(usageRequestID, signal) {
+    return this.request('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}`, signal);
+  }
+  retryUsageReconciliation(usageRequestID, reason) {
+    return this.mutate('token', `/admin/v1/usage-requests/${encodeURIComponent(usageRequestID)}/retry-reconciliation`, 'POST', { reason }, `usage-reconcile-${crypto.randomUUID()}`);
+  }
+  catalogModels(signal) {
+    return this.request('token', '/admin/v1/models', signal);
+  }
+  saveModelDraft(modelID, input) {
+    return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/draft`, 'PUT', input);
+  }
+  publishModelDraft(modelID, input) {
+    return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/publish`, 'POST', input);
+  }
+  transitionModel(modelID, input) {
+    return this.mutate('token', `/admin/v1/models/${encodeURIComponent(modelID)}/lifecycle`, 'POST', input);
+  }
+  syncModelCatalog() {
+    return this.mutate('token', '/admin/v1/models:sync', 'POST');
+  }
+  rollbackModelCatalog(input) {
+    return this.mutate('token', '/admin/v1/model-catalog:rollback', 'POST', input);
+  }
+  provisionings(signal) {
+    return this.request('token', '/admin/v1/provisionings?limit=100', signal);
+  }
+  provisioning(provisioningID, signal) {
+    return this.request('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}`, signal);
+  }
+  repairProvisioning(provisioningID, reason) {
+    return this.mutate('token', `/admin/v1/provisionings/${encodeURIComponent(provisioningID)}/repair`, 'POST', { reason }, `provisioning-repair-${crypto.randomUUID()}`);
+  }
+  systemStatus(signal) {
+    return this.request('system', '/status', signal);
+  }
 
   logout() {
     return fetch(`${this.baseURL}/api/logout`, {

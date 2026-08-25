@@ -299,6 +299,9 @@ pub struct ApiResponse {
     pub body: Value,
     pub context_version: Option<u64>,
     pub authorization_version: Option<u64>,
+    pub personal_authorization_version: Option<u64>,
+    pub platform_authorization_version: Option<u64>,
+    pub organization_authorization_version: Option<u64>,
 }
 
 pub struct AccountPlatformState {
@@ -1364,6 +1367,21 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         .get("X-Authorization-Version")
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
+    let personal_authorization_version = response
+        .headers()
+        .get("X-Personal-Authorization-Version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let platform_authorization_version = response
+        .headers()
+        .get("X-Platform-Authorization-Version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let organization_authorization_version = response
+        .headers()
+        .get("X-Organization-Authorization-Version")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
@@ -1388,6 +1406,9 @@ async fn response_to_api(response: reqwest::Response) -> Result<ApiResponse, Str
         body,
         context_version,
         authorization_version,
+        personal_authorization_version,
+        platform_authorization_version,
+        organization_authorization_version,
     })
 }
 
