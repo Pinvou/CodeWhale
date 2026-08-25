@@ -1961,41 +1961,42 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_patsnap_does_not_remove_other_connector_secrets() {
+    fn uninstall_remote_secret_does_not_remove_other_connector_secrets() {
         // 同时覆盖单连接器卸载契约(原 uninstall_remote_secret_header_removes_
         // credential_and_env):卸载必须删除 server 条目、凭据引用与回灌 env;
         // 并额外断言其他连接器(qcc)的凭据与 env 不受影响。
         with_temp_home(|| {
             write_tool_manifest(
-                "patsnap-search",
+                "test-patsnap-secret",
                 r#"{
-                    "id":"patsnap-search","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
+                    "id":"test-patsnap-secret","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
                     "mcp_tools":[],"command":"","args":[],
                     "secret_headers":[{"header":"Authorization","scheme":"Bearer","source_key":"PATSNAP_API_KEY","provider":"patsnap","required":true}],
-                    "servers":[{"name":"patsnap-search","url":"https://connect.zhihuiya.com/2b0355/logic-mcp"}]
+                    "servers":[{"name":"test-patsnap-secret","url":"https://example.invalid/patsnap-mcp"}]
                 }"#,
             );
             write_tool_manifest(
-                "qcc",
+                "test-qcc-secret",
                 r#"{
-                    "id":"qcc","name":"QCC","description":"d","version":"1","icon":"x","category":"c",
+                    "id":"test-qcc-secret","name":"QCC","description":"d","version":"1","icon":"x","category":"c",
                     "mcp_tools":[],"command":"","args":[],
                     "secret_headers":[{"header":"Authorization","scheme":"Bearer","source_key":"QCC_API_KEY","provider":"qcc","required":true}],
-                    "servers":[{"name":"qcc-company","url":"https://example.invalid/mcp"}]
+                    "servers":[{"name":"test-qcc-secret","url":"https://example.invalid/qcc-mcp"}]
                 }"#,
             );
             let store = MemoryCredentialStore::default();
             let patsnap_secret = secret_value("patsnap-isolated");
             let qcc_secret = secret_value("qcc-isolated");
-            let patsnap_ref = mcp_secret_reference("patsnap-search", "header", "PATSNAP_API_KEY");
-            let qcc_ref = mcp_secret_reference("qcc", "header", "QCC_API_KEY");
+            let patsnap_ref =
+                mcp_secret_reference("test-patsnap-secret", "header", "PATSNAP_API_KEY");
+            let qcc_ref = mcp_secret_reference("test-qcc-secret", "header", "QCC_API_KEY");
             store.set(&patsnap_ref, &patsnap_secret).unwrap();
             store.set(&qcc_ref, &qcc_secret).unwrap();
             let mgr = MarketplaceManager::with_store(store.clone());
 
-            mgr.install("patsnap-search", &std::collections::HashMap::new())
+            mgr.install("test-patsnap-secret", &std::collections::HashMap::new())
                 .unwrap();
-            mgr.install("qcc", &std::collections::HashMap::new())
+            mgr.install("test-qcc-secret", &std::collections::HashMap::new())
                 .unwrap();
             assert_eq!(
                 std::env::var("PINVOU3_MCP_SECRET_QCC_API_KEY")
@@ -2004,11 +2005,11 @@ mod tests {
                 Some(qcc_secret.as_str())
             );
 
-            mgr.uninstall("patsnap-search").unwrap();
+            mgr.uninstall("test-patsnap-secret").unwrap();
 
             let mcp = read_mcp_json();
-            assert!(mcp["servers"].get("patsnap-search").is_none());
-            assert!(mcp["servers"].get("qcc-company").is_some());
+            assert!(mcp["servers"].get("test-patsnap-secret").is_none());
+            assert!(mcp["servers"].get("test-qcc-secret").is_some());
             assert_eq!(store.get(&patsnap_ref).unwrap(), None);
             assert!(std::env::var("PINVOU3_MCP_SECRET_PATSNAP_API_KEY").is_err());
             assert_eq!(store.get(&qcc_ref).unwrap(), Some(qcc_secret.clone()));
@@ -2026,14 +2027,14 @@ mod tests {
         with_temp_home_async(|| async {
             let mock = spawn_mock_mcp_server("valid-token").await;
             write_tool_manifest(
-                "patsnap-search",
+                "test-patsnap-validation",
                 &format!(
                     r#"{{
-                    "id":"patsnap-search","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
+                    "id":"test-patsnap-validation","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
                     "mcp_tools":["patsnap_search","patsnap_fetch"],"command":"","args":[],
                     "validate_on_install":true,
                     "secret_headers":[{{"header":"Authorization","scheme":"Bearer","source_key":"PATSNAP_API_KEY","provider":"patsnap","required":true}}],
-                    "servers":[{{"name":"patsnap-search","url":"{}"}}]
+                    "servers":[{{"name":"test-patsnap-validation","url":"{}"}}]
                 }}"#,
                     mock.url
                 ),
@@ -2043,21 +2044,23 @@ mod tests {
             let mut config = std::collections::HashMap::new();
             config.insert("PATSNAP_API_KEY".to_string(), "wrong-token".to_string());
 
-            mgr.install("patsnap-search", &config).unwrap();
+            mgr.install("test-patsnap-validation", &config).unwrap();
             let err = mgr
-                .validate_remote_connection("patsnap-search")
+                .validate_remote_connection("test-patsnap-validation")
                 .await
                 .unwrap_err();
-            mgr.uninstall("patsnap-search").unwrap();
+            mgr.uninstall("test-patsnap-validation").unwrap();
 
             assert!(err.contains("API Key 无效"), "unexpected error: {err}");
             assert!(!err.contains("无法连接远程 MCP 服务"));
-            assert!(!mgr.installed_ids().contains(&"patsnap-search".to_string()));
+            assert!(!mgr
+                .installed_ids()
+                .contains(&"test-patsnap-validation".to_string()));
             let mcp = read_mcp_json();
-            assert!(mcp["servers"].get("patsnap-search").is_none());
+            assert!(mcp["servers"].get("test-patsnap-validation").is_none());
             assert_eq!(store
                 .get(&mcp_secret_reference(
-                    "patsnap-search",
+                    "test-patsnap-validation",
                     "header",
                     "PATSNAP_API_KEY"
                 ))
@@ -2073,14 +2076,14 @@ mod tests {
         with_temp_home_async(|| async {
             let mock = spawn_mock_mcp_server("valid-token").await;
             write_tool_manifest(
-                "patsnap-search",
+                "test-patsnap-validation",
                 &format!(
                     r#"{{
-                    "id":"patsnap-search","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
+                    "id":"test-patsnap-validation","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
                     "mcp_tools":["patsnap_search","patsnap_fetch"],"command":"","args":[],
                     "validate_on_install":true,
                     "secret_headers":[{{"header":"Authorization","scheme":"Bearer","source_key":"PATSNAP_API_KEY","provider":"patsnap","required":true}}],
-                    "servers":[{{"name":"patsnap-search","url":"{}"}}]
+                    "servers":[{{"name":"test-patsnap-validation","url":"{}"}}]
                 }}"#,
                     mock.url
                 ),
@@ -2090,23 +2093,25 @@ mod tests {
             let mut config = std::collections::HashMap::new();
             config.insert("PATSNAP_API_KEY".to_string(), "valid-token".to_string());
 
-            mgr.install("patsnap-search", &config).unwrap();
+            mgr.install("test-patsnap-validation", &config).unwrap();
             let validation = mgr
-                .validate_remote_connection("patsnap-search")
+                .validate_remote_connection("test-patsnap-validation")
                 .await
                 .unwrap();
 
-            assert!(mgr.installed_ids().contains(&"patsnap-search".to_string()));
+            assert!(mgr
+                .installed_ids()
+                .contains(&"test-patsnap-validation".to_string()));
             let mcp = read_mcp_json();
             assert_eq!(
-                mcp["servers"]["patsnap-search"]["bearer_token_env_var"],
+                mcp["servers"]["test-patsnap-validation"]["bearer_token_env_var"],
                 "PINVOU3_MCP_SECRET_PATSNAP_API_KEY"
             );
             assert!(!mcp.to_string().contains("valid-token"));
             assert_eq!(
                 store
                     .get(&mcp_secret_reference(
-                        "patsnap-search",
+                        "test-patsnap-validation",
                         "header",
                         "PATSNAP_API_KEY"
                     ))

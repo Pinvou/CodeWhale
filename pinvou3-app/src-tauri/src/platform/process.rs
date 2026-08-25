@@ -290,7 +290,10 @@ pub(crate) fn kill_process_tree(pid: u32) -> std::io::Result<Output> {
     } else {
         let group_arg = format!("-{pid_arg}");
         external_command(Path::new("kill"))
-            .args(["-9", group_arg.as_str()])
+            // `--` is required for portability: without it some `kill`
+            // implementations parse a negative process-group id as another
+            // option/signal instead of as the target process group.
+            .args(["-9", "--", group_arg.as_str()])
             .output()
     }
 }
