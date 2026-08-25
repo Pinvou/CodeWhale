@@ -28,6 +28,7 @@ paths:
     get:
       operationId: listCatalogModels
       summary: List the immutable current catalog independently from context eligibility and balance
+      description: Requires personal.models.read in a personal context or org.models.read for the active organization.
       responses:
         "200":
           description: Current CATALOG_VISIBLE models and monotonic catalog version
@@ -45,6 +46,8 @@ paths:
                   authorization_version: { type: integer, format: int64, minimum: 1 }
                   items: { type: array, items: { $ref: "#/components/schemas/CatalogModel" } }
         "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /organizations/{organization_id}/model-policy:
     parameters:
       - name: organization_id
@@ -101,6 +104,7 @@ paths:
     get:
       operationId: getUsageRequestStatus
       summary: Read settlement state for a usage request in the same session and active context
+      description: Requires personal.usage.read in a personal context or org.usage.read.self for the active organization.
       parameters:
         - name: usage_request_id
           in: path
@@ -123,11 +127,13 @@ paths:
                 $ref: "#/components/schemas/UsageRequestStatus"
         "404":
           $ref: "#/components/responses/Error"
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /usage-requests/{usage_request_id}/cancel:
     post:
       operationId: cancelUsageRequest
       summary: Idempotently stop client delivery and request cancellation for the original stable user
-      description: Before a dispatch intent this releases the whole Hold and prevents provider dispatch. After a dispatch intent, unsupported adapters keep provider execution and trusted-usage settlement running in the background.
+      description: Requires personal.usage.cancel and binds ownership to the stable user independently of the current session or active organization. Before a dispatch intent this releases the whole Hold and prevents provider dispatch. After a dispatch intent, unsupported adapters keep provider execution and trusted-usage settlement running in the background.
       parameters:
         - name: usage_request_id
           in: path
@@ -147,10 +153,13 @@ paths:
         "400": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /me/usage-requests:
     get:
       operationId: listMyUsageRequests
       summary: List the current user's model usage in the active personal or organization context
+      description: Requires personal.usage.read in a personal context or org.usage.read.self for the active organization.
       parameters:
         - name: limit
           in: query
@@ -192,10 +201,12 @@ paths:
                     type: [string, "null"]
         "403":
           $ref: "#/components/responses/Error"
+        "503": { $ref: "#/components/responses/Error" }
   /model-protocols:
     get:
       operationId: listModelGatewayProtocols
       summary: List protocols explicitly supported by the active Model Gateway Adapter
+      description: Requires personal.models.read in a personal context or org.models.read for the active organization.
       responses:
         "200":
           description: Provider-neutral protocol capabilities; undeclared protocols must not be inferred
@@ -205,12 +216,15 @@ paths:
                 $ref: "#/components/schemas/GatewayProtocolCapabilities"
         "401":
           $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
   /chat/completions:
     post:
       operationId: createChatCompletion
       summary: Idempotently execute or replay an encrypted, durable model request
+      description: Requires personal.model.invoke in a personal context or org.model.invoke for the active organization before all catalog, route, wallet, Hold, rate, and upstream checks.
       parameters:
         - name: Idempotency-Key
           in: header
@@ -274,6 +288,10 @@ paths:
           $ref: "#/components/responses/UpgradeRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
+        "403":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
   /recharge/products:
     get:
       operationId: listRechargeProducts

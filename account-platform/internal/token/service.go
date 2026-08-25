@@ -202,6 +202,9 @@ func (s *Service) anonymizeUserReplayPayloads(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Service) modelProtocols(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.resolveModelUsagePermission(w, r, "personal.models.read", "org.models.read"); !ok {
+		return
+	}
 	protocols := s.upstream.Protocols()
 	if len(protocols) == 0 {
 		api.WriteError(w, http.StatusServiceUnavailable, "MODEL_PROTOCOLS_UNAVAILABLE", "the model gateway adapter declares no supported protocol", httpserver.RequestID(r.Context()))
@@ -452,7 +455,7 @@ func gatewaySupportsProtocol(capabilities []GatewayProtocolCapability, protocolC
 }
 
 func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolveModelUsagePermission(w, r, "personal.usage.read", "org.usage.read.self")
 	if !ok {
 		return
 	}
@@ -478,7 +481,7 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) cancelUsageRequest(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	userID, ok := s.authorizePersonalUsageUser(w, r, "personal.usage.cancel")
 	if !ok {
 		return
 	}
@@ -492,7 +495,7 @@ func (s *Service) cancelUsageRequest(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key must contain 16 to 128 characters", httpserver.RequestID(r.Context()))
 		return
 	}
-	result, preDispatch, err := s.repository.RequestCancellation(r.Context(), usageID, resolved.UserID, digestString([]byte(key)), cancellationFingerprint(usageID), s.upstream.AdapterVersion())
+	result, preDispatch, err := s.repository.RequestCancellation(r.Context(), usageID, userID, digestString([]byte(key)), cancellationFingerprint(usageID), s.upstream.AdapterVersion())
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -554,7 +557,7 @@ func (s *Service) finishPreDispatchCancellation(ctx context.Context, usageID uui
 }
 
 func (s *Service) listMyUsageRequests(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolveModelUsagePermission(w, r, "personal.usage.read", "org.usage.read.self")
 	if !ok {
 		return
 	}

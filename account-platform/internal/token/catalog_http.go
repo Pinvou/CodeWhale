@@ -20,6 +20,10 @@ func (s *Service) catalogRepository(w http.ResponseWriter, r *http.Request) (Cat
 }
 
 func (s *Service) listCatalogModels(w http.ResponseWriter, r *http.Request) {
+	resolved, ok := s.resolveModelUsagePermission(w, r, "personal.models.read", "org.models.read")
+	if !ok {
+		return
+	}
 	repository, ok := s.catalogRepository(w, r)
 	if !ok {
 		return
@@ -27,10 +31,6 @@ func (s *Service) listCatalogModels(w http.ResponseWriter, r *http.Request) {
 	version, items, err := repository.ListCatalog(r.Context())
 	if err != nil {
 		s.writeError(w, r, err)
-		return
-	}
-	resolved, ok := s.resolveContext(w, r)
-	if !ok {
 		return
 	}
 	publicItems := make([]map[string]any, 0, len(items))

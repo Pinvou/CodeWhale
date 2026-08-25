@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 325`、`部分实现 33`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075、APT-077 与 APT-080 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批、组织对象授权、Break-glass 可信操作者及密码安全矩阵，其余入口门禁由 APT-076、APT-078、APT-079、APT-081、APT-082 逐项收敛。
+全量核验汇总：`已实现 326`、`部分实现 33`、`未实现 5`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075、APT-077、APT-080 与 APT-081 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批、组织对象授权、Break-glass 可信操作者、密码安全矩阵及模型/用量原子权限，其余入口门禁由 APT-076、APT-078、APT-079、APT-082 逐项收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -73,6 +73,7 @@
 | `EXTERNAL-CONVERGENCE` | 支付与模型外部事实统一遵循先留不可变证据、再复核/结算/释放且不猜测成功或自动重发高风险请求的边界 | Go 单元测试、支付/模型收敛合同与全量静态验证通过；真实 Provider 乱序结果、断线和数据库运行级迁移待部署 |
 | `USAGE-CANCELLATION-CONVERGENCE` | 原稳定用户幂等取消、派发前 Hold 全释放、派发后交付隔离、Adapter 取消能力、可信实际用量、版本化核对期限、损失复核及幂等人工重试 | Go 全量单元测试、OpenAPI lint、取消结构合同、桌面/Portal 构建和静态验证通过；真实 PostgreSQL 竞态、Provider 用量延迟、断线和故障注入待部署 |
 | `TOKEN-OPERATIONS-ISOLATION` | 平台 Token Account 创建/启停、PLATFORM 资源过滤、普通管理面移除、存量非平台账号/凭据/路由隔离及用户状态脱敏 | Go 单元测试、OpenAPI lint、普通路由不存在用例、隔离迁移与平台 Token 运营合同通过；数据库运行级迁移及真实 Provider 凭据检查待部署 |
+| `TOKEN-MODEL-USAGE-PERMISSIONS` | 个人/组织上下文模型目录、协议、调用及用量读取的原子权限，以及脱离活动组织的稳定用户取消权限 | Token Go 单元测试、OpenAPI lint、原子权限合同及全量静态验证通过；真实 Account 授权故障、组织撤员后取消和并发版本变更待部署验证 |
 | `ACCOUNT-CLOSURE-CLEANUP` | 主体生命周期隔离、资料/Commerce/邀请自动收敛、Identity 删除、原标识释放、永久 ID/编码墓碑、三年保留策略，以及组织授予隔离与合规整笔回收 | Account/Billing/Token/Portal Go 单元测试、OpenAPI lint、注销清理合同、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Identity/Commerce 故障注入和三年时钟推进待部署 |
 | `CLIENT-SWITCH-READINESS` | 服务身份保护的只读 OIDC/Account/目录/READY 路由/价格公式检查、公开兼容范围、制品/环境/版本绑定的 Ed25519 短时证明和不可变签发审计 | Go 单元测试、OpenAPI lint、合同测试、Compose/Helm 静态门禁通过；生产密钥注入、真实环境连续无副作用核对和发布系统联调待外部验收 |
 | `DESKTOP-CLIENT-SWITCH` | 动态目录、按会话冻结模型、显式替代分支、受信 Portal、客户端范围守卫及发布/安装/运行三层失败关闭门禁 | Rust check、桌面 lint/build、Bridge 协议、发布门禁签名/篡改测试和全仓 verifier 通过；生产签名身份、正式安装制品原子替换/回滚和真实环境联调待验收 |
@@ -200,7 +201,7 @@
 | TOK-46 | 已实现 | DOC_CURRENT | GO-UNIT; METERING-PRICING-LIFECYCLE; GATEWAY-ADAPTER-NEUTRALITY; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 模型身份、目录、能力、协议、价格/公式和路由代次独立版本化；请求在 Hold/派发前冻结全部引用和生命周期显示快照，显示变化不创建新身份 |
 | TOK-47 | 已实现 | AUDIT_HEAD | GO-UNIT; MODEL-CATALOG-LIFECYCLE; MODEL-EMERGENCY-CANCELLATION; DESKTOP-CLIENT-SWITCH; ACCOUNT-PLATFORM-STATE | NOT_DEPLOYED | Gateway 执行新会话/继续截止，桌面选择前校验上下文和目录生命周期并在不可继续时进入显式替代分支；紧急 REMOVED 与取消策略原子提交，Worker 锁定生效前已受理的在途请求并按可信结果收敛 |
 | TOK-48 | 已实现 | AUDIT_HEAD | RUST-CHECK; RUST-TEST-COMPILE; MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; MULTIAGENT-REGRESSION; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 类型化全局/会话引用、兼容迁移、失败关闭、设置页新会话默认项和对话区当前会话选择均已实现；空白草稿只寄存选择并在首条消息物化时冻结，不改全局默认；来源冲突、生命周期、退役入口、三语状态和桥接协议已有自动回归门禁 |
-| TOK-49 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 模型目录、调用、用量查询及取消入口尚未统一校验 `personal.*`/`org.*` 原子权限；由 APT-081 收敛。 |
+| TOK-49 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-MODEL-USAGE-PERMISSIONS | NOT_DEPLOYED | 目录/协议、模型调用与用量读取按个人/组织上下文分别强一致校验精确权限；取消始终以 `personal.usage.cancel` 绑定原稳定用户，不借用当前组织。 |
 | BILL-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | Account 提交原子写入钱包任务与 Outbox，后台使用稳定键调用 Billing、退避重试并在成功后激活账号；bootstrap 不同步调用 Billing |
 | BILL-05 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 权益组成表只允许 BASE/BONUS，商品入账按冻结商品快照拆分且舍入余数归 BONUS，不存在第三种积分类型 |
 | BILL-09 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 组织用量 Hold 同时锁定成员授予与其精确权益包、BASE/BONUS 组成，不跨包或跨组成回退；结算和释放同步维护成员授予及组织组成桶 |
@@ -736,7 +737,7 @@
 | TOK-46 | 模型关联对象版本生成边界 | 已实现 | 目录、协议、能力、价格/公式和路由代次独立演进，请求冻结全部版本与显示/生命周期快照。 |
 | TOK-47 | 模型下架后的会话处理 | 已实现 | 弃用/移除截止和桌面显式替代分支均保持原会话不变；紧急强制下架会锁定生效前在途请求，保存真实取消能力与尝试，并沿原 Hold、可信用量和结算状态收敛。 |
 | TOK-48 | 客户端模型选择引用与作用域 | 已实现 | 类型化引用、兼容迁移、失败关闭、设置页新会话默认项及对话当前会话选择已实现；来源冲突、生命周期、退役入口、三语状态和桥接协议已有自动回归门禁。 |
-| TOK-49 | Token 个人与组织原子授权 | 未实现 | 模型目录、调用、用量和取消入口的逐权限失败关闭由 APT-081 待实现。 |
+| TOK-49 | Token 个人与组织原子授权 | 已实现 | 每个模型与用量入口都在进入目录、路由、Hold 或状态机前调用 Account 原子权限决策，授权不可用失败关闭。 |
 
 ### 3.4 钱包、积分、定价和权益
 

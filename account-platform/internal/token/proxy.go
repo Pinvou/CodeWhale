@@ -22,7 +22,7 @@ import (
 )
 
 func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolveModelUsagePermission(w, r, "personal.model.invoke", "org.model.invoke")
 	if !ok {
 		return
 	}
