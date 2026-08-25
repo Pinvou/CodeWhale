@@ -2212,6 +2212,8 @@ function workspaceDisplayName(path) {
                   searchHasSavedKey={searchHasSavedKey(searchProvider)}
                   savedModels={(bs && bs.savedModels) || []}
                   activeModelId={bs && bs.activeModelId}
+                  defaultModelRef={bs && bs.defaultModelRef}
+                  accountPlatformClient={accountPlatformClient}
                   onSaveModel={(m) => bridge.available && bridge.models.saveModel(m)}
                   onDeleteModel={(m) => { if (bridge.available) bridge.models.deleteModel(m.id); }}
                   onSetActiveModel={(id) => bridge.available && bridge.models.setActiveModel(id)}

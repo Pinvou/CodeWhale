@@ -2637,6 +2637,36 @@ Object.assign(dict.ja.uiSettingsDetail, { settingsLoadFailed:'設定ページの
 Object.assign(dict.zh.uiSettingsDetail, { settingsLoadFailedDetail:'设置页面暂时无法显示，请重新打开后重试。' });
 Object.assign(dict.en.uiSettingsDetail, { settingsLoadFailedDetail:'Settings cannot be displayed right now. Reopen the page and try again.' });
 Object.assign(dict.ja.uiSettingsDetail, { settingsLoadFailedDetail:'設定ページを現在表示できません。ページを開き直して、もう一度お試しください。' });
+Object.assign(dict.zh.uiSettingsDetail, {
+  platformModels:'品悟平台模型',
+  platformModelsDesc:'选择空白新会话的默认模型，不会更改已有会话。',
+  platformModelsLoading:'正在加载平台模型…',
+  platformModelsSignIn:'登录品悟账号后可选择平台模型。',
+  platformModelsUnavailable:'暂时无法加载平台模型，请稍后重试。',
+  appliesToNewSessions:'应用于新会话',
+  modelDeprecated:'即将下架',
+  modelUnavailable:'当前不可用',
+});
+Object.assign(dict.en.uiSettingsDetail, {
+  platformModels:'Pinvou platform models',
+  platformModelsDesc:'Choose the default model for a new blank conversation. Existing conversations are unchanged.',
+  platformModelsLoading:'Loading platform models…',
+  platformModelsSignIn:'Sign in to your Pinvou account to choose a platform model.',
+  platformModelsUnavailable:'Platform models are temporarily unavailable. Try again later.',
+  appliesToNewSessions:'New conversations',
+  modelDeprecated:'Retiring soon',
+  modelUnavailable:'Unavailable',
+});
+Object.assign(dict.ja.uiSettingsDetail, {
+  platformModels:'Pinvou プラットフォームモデル',
+  platformModelsDesc:'新しい空の会話で使うデフォルトモデルを選択します。既存の会話は変更されません。',
+  platformModelsLoading:'プラットフォームモデルを読み込み中…',
+  platformModelsSignIn:'Pinvou アカウントにログインするとプラットフォームモデルを選択できます。',
+  platformModelsUnavailable:'プラットフォームモデルを一時的に読み込めません。後でもう一度お試しください。',
+  appliesToNewSessions:'新しい会話に適用',
+  modelDeprecated:'提供終了予定',
+  modelUnavailable:'利用不可',
+});
 dict.zh.uiTeamRelayAccess = {
   section:'内测功能', title:'团队接力', desc:'开启后将在侧边栏显示团队接力入口。', open:'启动接力',
   dialogTitle:'启动接力', notice:'当前功能内测中，暂未开放，体验请联系客服。', passwordLabel:'体验密码', passwordPlaceholder:'请输入体验密码',

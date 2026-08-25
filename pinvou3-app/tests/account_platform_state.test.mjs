@@ -692,3 +692,18 @@ test('desktop account popover does not own platform model selection', async () =
   assert.match(popover, /client\.balance/);
   assert.match(popover, /client\.openPortal/);
 });
+
+test('settings owns the platform model default for new conversations', async () => {
+  const settings = await readFile(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
+  const main = await readFile(new URL('../src/app/main.jsx', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/i18n.js', import.meta.url), 'utf8');
+  assert.match(main, /defaultModelRef=\{bs && bs\.defaultModelRef\}/);
+  assert.match(main, /accountPlatformClient=\{accountPlatformClient\}/);
+  assert.match(settings, /accountPlatformClient\.modelCatalog/);
+  assert.match(settings, /accountPlatformClient\.selectCatalogModel/);
+  assert.match(settings, /defaultModelRef\?\.source === 'ACCOUNT_PLATFORM'/);
+  assert.match(settings, /filter\(model => !isBuiltInAccountPlatformModel\(model\)\)/);
+  assert.match(settings, /data-testid="settings-platform-models"/);
+  assert.equal((i18n.match(/platformModelsDesc:/g) || []).length, 3);
+  assert.equal((i18n.match(/appliesToNewSessions:/g) || []).length, 3);
+});

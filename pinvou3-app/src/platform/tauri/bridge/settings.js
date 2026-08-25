@@ -207,8 +207,9 @@
       var v = await invoke("list_models");
       state.savedModels = (v && v.models) || [];
       state.activeModelId = (v && v.active_model_id) || null;
+      state.defaultModelRef = (v && v.default_model_ref) || null;
     } catch (e) {
-      state.savedModels = []; state.activeModelId = null;
+      state.savedModels = []; state.activeModelId = null; state.defaultModelRef = null;
     }
     notify();
   }

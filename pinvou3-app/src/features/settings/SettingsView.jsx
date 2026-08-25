@@ -1962,7 +1962,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       );
     };
 
-    const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = ['bing'], onAddSearchProvider, onDeleteSearchProvider, searchApiKey, setSearchApiKey, searchHasSavedKey, savedModels, activeModelId, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart, languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
+    const SettingsView = ({ activeTheme, setActiveTheme, language, setLanguage, superPerm, setSuperPerm, taskCompletedNotif, setTaskCompletedNotif, searchProvider, setSearchProvider, enabledSearchProviders = ['bing'], onAddSearchProvider, onDeleteSearchProvider, searchApiKey, setSearchApiKey, searchHasSavedKey, savedModels, activeModelId, defaultModelRef, accountPlatformClient, onSaveModel, onDeleteModel, onSetActiveModel, onSaveSearchConfig, onConfirmSearchConfig, onMemoryEnabledChange, onPetEnabledChange, teamRelayEnabled = false, onUnlockTeamRelay, onDisableTeamRelay, searchNeedsRestart, languageNeedsRestart, bs, t, onRestoreArchived, onDeleteArchived, sidebarDateGrouping = true, onSidebarDateGroupingChange, updateFocusTick, onCloseSettings, initialSection = 'general' }) => {
       const settingsCopy = t.uiSettingsDetail;
       const platformCapabilities = (bs && bs.platformCapabilities) || {};
       const showSuperPermissionSettings = !!platformCapabilities.showSuperPermissionSettings;
@@ -1978,6 +1978,9 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const canPickHostFiles = can('hostFilePicker');
       const [editingModel, setEditingModel] = useState(null);
       const [modelDeleteConfirm, setModelDeleteConfirm] = useState(null);
+      const [platformCatalog, setPlatformCatalog] = useState({ items: [] });
+      const [platformCatalogState, setPlatformCatalogState] = useState('idle');
+      const [platformDefaultBusy, setPlatformDefaultBusy] = useState('');
       const [editingSearch, setEditingSearch] = useState(null);
       const [pendingSearchProvider, setPendingSearchProvider] = useState(null);
       const [searchDeleteConfirm, setSearchDeleteConfirm] = useState(null);
@@ -2014,6 +2017,26 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       useEffect(() => {
         if (initialSection) setActiveSection(initialSection);
       }, [initialSection]);
+      useEffect(() => {
+        if (activeSection !== 'model' || !accountPlatformClient) return undefined;
+        const controller = new window.AbortController();
+        setPlatformCatalogState('loading');
+        accountPlatformClient.session(controller.signal).then(session => {
+          if (!session?.authenticated) {
+            setPlatformCatalog({ items: [] });
+            setPlatformCatalogState('auth_required');
+            return null;
+          }
+          return accountPlatformClient.modelCatalog(controller.signal);
+        }).then(catalog => {
+          if (!catalog || controller.signal.aborted) return;
+          setPlatformCatalog(catalog);
+          setPlatformCatalogState('ready');
+        }).catch(() => {
+          if (!controller.signal.aborted) setPlatformCatalogState('error');
+        });
+        return () => controller.abort();
+      }, [activeSection, accountPlatformClient]);
       useEffect(() => {
         if (!feedbackNotice) return;
         const timer = window.setTimeout(() => setFeedbackNotice(''), 2600);
@@ -2190,8 +2213,34 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         }`}>{children}</span>
       );
       const userModels = selectableModels(savedModels || [])
-        .slice()
-        .sort((a, b) => Number(isBuiltInAccountPlatformModel(b)) - Number(isBuiltInAccountPlatformModel(a)));
+        .filter(model => !isBuiltInAccountPlatformModel(model));
+      const activeLocalModelId = defaultModelRef?.source === 'LOCAL_CONFIG'
+        ? defaultModelRef.saved_model_id
+        : (defaultModelRef ? null : activeModelId);
+      const activePlatformModelId = defaultModelRef?.source === 'ACCOUNT_PLATFORM'
+        ? defaultModelRef.model_id
+        : null;
+      const platformModelSelectable = item => {
+        if (!item?.context_eligible) return false;
+        if (item.lifecycle_status === 'ACTIVE') return true;
+        if (item.lifecycle_status !== 'DEPRECATED' || !item.new_session_cutoff_at) return false;
+        const cutoff = Date.parse(item.new_session_cutoff_at);
+        return Number.isFinite(cutoff) && cutoff > Date.now();
+      };
+      const selectPlatformDefault = async modelId => {
+        if (!modelId || platformDefaultBusy || !accountPlatformClient) return;
+        setPlatformDefaultBusy(modelId);
+        try {
+          await accountPlatformClient.selectCatalogModel(modelId);
+          setPlatformCatalog(current => ({ ...current, selected_model_id: modelId }));
+          if (bridge.available && bridge.models?.loadModels) await bridge.models.loadModels();
+          setPlatformCatalogState('ready');
+        } catch (_) {
+          setPlatformCatalogState('error');
+        } finally {
+          setPlatformDefaultBusy('');
+        }
+      };
       const searchOptions = [
         { key: 'bing', label: 'Bing', desc: settingsCopy.searchDescriptions.bing },
         { key: 'metaso', label: t.uiSettingsView.searchProviderMetaso, desc: settingsCopy.searchDescriptions.metaso },
@@ -2289,7 +2338,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       };
       const renderModelRows = (models, totalCount) => models.length ? models.map(m => {
         const total = totalCount != null ? totalCount : models.length;
-        const isActive = m.id === activeModelId;
+        const isActive = m.id === activeLocalModelId;
         const isLocal = isLocalModel(m);
         const isReadonly = isReadonlyModel(m);
         const codingPlan = isCodingPlanModel(m);
@@ -2305,7 +2354,6 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
               <div className="flex items-center gap-2 min-w-0">
                 <span className={`text-[15px] leading-5 font-normal truncate text-[#1C1C1E] dark:text-[#F2F2F7]`}>{title}</span>
                 {isLocal && <Tag tone="gray">{settingsCopy.localModel}</Tag>}
-                {isBuiltInAccountPlatformModel(m) && <Tag tone="gray">{settingsCopy.builtinModel}</Tag>}
                 {codingPlan && <Tag tone="gray">Coding Plan</Tag>}
                 {isActive && <Tag>{settingsCopy.defaultTag}</Tag>}
               </div>
@@ -2384,6 +2432,43 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       );
       const renderModels = () => (
         <>
+          <section className="mb-6" data-testid="settings-platform-models">
+            <SectionTitle>{settingsCopy.platformModels}</SectionTitle>
+            <Group>
+              {platformCatalogState === 'loading' && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.platformModelsLoading}</div>}
+              {platformCatalogState === 'auth_required' && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.platformModelsSignIn}</div>}
+              {platformCatalogState === 'error' && <div className="px-4 py-4 text-[14px] text-[#FF3B30]">{settingsCopy.platformModelsUnavailable}</div>}
+              {platformCatalogState === 'ready' && (platformCatalog.items || []).length === 0 && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.noModels}</div>}
+              {platformCatalogState === 'ready' && (platformCatalog.items || []).map(item => {
+                const selectable = platformModelSelectable(item);
+                const selected = item.model_id === activePlatformModelId;
+                return (
+                  <div key={item.model_id} className="min-h-[60px] grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 border-b last:border-b-0 border-black/[0.12] dark:border-white/[0.10]">
+                    <button
+                      type="button"
+                      disabled={!selectable || !!platformDefaultBusy}
+                      onClick={() => !selected && selectPlatformDefault(item.model_id)}
+                      className="shrink-0 disabled:opacity-35"
+                      title={settingsCopy.setDefault}
+                    >
+                      <RadioDot active={selected} />
+                    </button>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-[15px] leading-5 font-normal truncate text-[#1C1C1E] dark:text-[#F2F2F7]">{item.display_name || item.model_id}</span>
+                        {selected && <Tag>{settingsCopy.defaultTag}</Tag>}
+                        {item.lifecycle_status === 'DEPRECATED' && <Tag tone="gray">{settingsCopy.modelDeprecated}</Tag>}
+                        {!selectable && <Tag tone="gray">{settingsCopy.modelUnavailable}</Tag>}
+                      </div>
+                      <div className="mt-0.5 text-[12px] leading-[17px] truncate text-[#8A8A8E] dark:text-[#98989D]">{item.model_id}</div>
+                    </div>
+                    <span className="text-[12px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.appliesToNewSessions}</span>
+                  </div>
+                );
+              })}
+            </Group>
+            <div className="px-3 mt-2 text-[12px] leading-relaxed text-[#8A8A8E] dark:text-[#8E8E93]">{settingsCopy.platformModelsDesc}</div>
+          </section>
           <section className="mb-6">
             <SectionTitle>{settingsCopy.modelSection}</SectionTitle>
             <Group>

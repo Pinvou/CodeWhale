@@ -84,7 +84,7 @@
 | APT-058 | 账号中心独立 HTTPS 子域名、`/api/v1` 支付回调公网命名空间及旧官网入口彻底移除 | UI-09, PAY-15–PAY-17, NFR-03, NFR-04 | APT-032, APT-057 | CODE+ENV | DONE |
 | APT-059 | 从桌面账号 Popover 移除平台模型展示和选择职责 | UI-17 | APT-032 | CODE | DONE |
 | APT-060 | 建立类型化全局/会话模型引用、作用域隔离及兼容迁移 | TOK-48 | APT-032 | CODE | DONE |
-| APT-061 | 在“设置 → 模型”增加品悟平台模型组和新会话默认选择 | UI-18, TOK-48 | APT-060 | CODE | PENDING |
+| APT-061 | 在“设置 → 模型”增加品悟平台模型组和新会话默认选择 | UI-18, TOK-48 | APT-060 | CODE | DONE |
 | APT-062 | 在普通对话输入区直接提供具体平台模型选择并冻结到当前会话 | UI-19, TOK-47, TOK-48 | APT-060, APT-061 | CODE | PENDING |
 | APT-063 | 补齐模型选择三语、异常状态、迁移与跨入口回归门禁 | UI-16–UI-19, TOK-48 | APT-059–APT-062 | CODE | PENDING |
 

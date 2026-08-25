@@ -149,6 +149,7 @@
     // 「添加模型」方案:已保存模型列表 + 全局默认 id + 当前会话绑定的模型 id
     savedModels: [],
     activeModelId: null,
+    defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
     superPermEnabled: false,
     modeState: { mode: "yolo" },
@@ -6181,8 +6182,9 @@
       var v = await invoke("list_models");
       state.savedModels = (v && v.models) || [];
       state.activeModelId = (v && v.active_model_id) || null;
+      state.defaultModelRef = (v && v.default_model_ref) || null;
     } catch (e) {
-      state.savedModels = []; state.activeModelId = null;
+      state.savedModels = []; state.activeModelId = null; state.defaultModelRef = null;
     }
     notify();
   }
