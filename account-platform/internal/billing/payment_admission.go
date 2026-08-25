@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"net"
 	"net/http"
 	"sort"
@@ -48,7 +49,7 @@ func (p *PaymentCoordinator) admitPaymentAction(ctx context.Context, action stri
 		return err
 	}
 	defer tx.Rollback(ctx)
-	locks := []string{"payment:" + action + ":payer:" + payer.String(), "payment:" + action + ":provider:" + p.Capabilities().ProviderID, "payment:" + action + ":source:" + string(sourceHash[:])}
+	locks := []string{"payment:" + action + ":payer:" + payer.String(), "payment:" + action + ":provider:" + p.Capabilities().ProviderID, paymentSourceLockKey(action, sourceHash)}
 	if organization != nil {
 		locks = append(locks, "payment:"+action+":organization:"+organization.String())
 	}
@@ -127,6 +128,10 @@ FROM payment_risk_attempts WHERE action=$6 AND occurred_at>$4-interval '1 day'`,
 		return &PaymentRateLimitError{RetryAfter: max(retryAfter, time.Second)}
 	}
 	return nil
+}
+
+func paymentSourceLockKey(action string, sourceHash [sha256.Size]byte) string {
+	return "payment:" + action + ":source:" + hex.EncodeToString(sourceHash[:])
 }
 
 func (p *PaymentCoordinator) AdmitOrderQuery(ctx context.Context, order PaymentOrder, source string) (bool, error) {
