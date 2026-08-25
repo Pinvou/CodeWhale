@@ -10,6 +10,7 @@ import { supportedLocales } from '../pinvou3-app/src/shared/supported-locales.js
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const portalAssets = path.join(repositoryRoot, 'account-platform', 'internal', 'portal', 'static', 'assets');
+const identityThemeMessages = path.join(repositoryRoot, 'account-platform', 'deploy', 'keycloak', 'themes', 'pinvou', 'login', 'messages');
 const userInterfaceSources = [
   'pinvou3-app/src/features/account-platform/AccountPlatformPopover.jsx',
   'pinvou3-app/src/features/account-platform/AccountPlatformView.jsx',
@@ -110,12 +111,38 @@ export function validateBuiltCatalog(name, strings, artifact) {
   }
 }
 
+function parseProperties(source, label) {
+  const values = new Map();
+  for (const [index, line] of source.split(/\r?\n/).entries()) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) throw new Error(`i18n_properties_invalid:${label}:${index + 1}`);
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (!value) throw new Error(`i18n_empty_translation:${label}.${key}`);
+    if (values.has(key)) throw new Error(`i18n_duplicate_key:${label}.${key}`);
+    values.set(key, value);
+  }
+  return values;
+}
+
+async function validateIdentityTheme() {
+  const files = { zh: 'messages_zh_CN.properties', en: 'messages_en.properties', ja: 'messages_ja.properties' };
+  const catalogs = Object.fromEntries(await Promise.all(Object.entries(files).map(async ([locale, file]) => [locale, parseProperties(await readFile(path.join(identityThemeMessages, file), 'utf8'), `identity.${locale}`)])));
+  const reference = [...catalogs.zh.keys()].sort();
+  for (const [locale, catalog] of Object.entries(catalogs)) {
+    const keys = [...catalog.keys()].sort();
+    if (keys.join('\0') !== reference.join('\0')) throw new Error(`i18n_key_mismatch:identity.${locale}`);
+  }
+}
+
 export async function checkAccountPlatformI18n({ artifacts = true } = {}) {
   const catalogs = [
     ['account', accountPlatformCopy],
     ['admin', adminPlatformCopy],
   ];
   const validated = catalogs.map(([name, catalog]) => [name, validateCatalog(name, catalog)]);
+  await validateIdentityTheme();
   for (const relative of userInterfaceSources) {
     validateUserInterfaceSource(relative, await readFile(path.join(repositoryRoot, relative), 'utf8'));
   }
@@ -123,7 +150,7 @@ export async function checkAccountPlatformI18n({ artifacts = true } = {}) {
     const artifact = await builtJavaScript();
     for (const [name, strings] of validated) validateBuiltCatalog(name, strings, artifact);
   }
-  return { catalogs: validated.length, sources: userInterfaceSources.length };
+  return { catalogs: validated.length + 1, sources: userInterfaceSources.length };
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : '';

@@ -274,6 +274,8 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务
 
 Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Code + PKCE 重新认证；Identity Client 必须接受 `prompt=login` 与 `max_age=0`，回调地址固定为 `https://account.pinvou.com/auth/callback`。桌面端只保留未登录忘记密码，不承载资料修改。
 
+Web 首次登录同样使用该 Authorization Code + PKCE 流程，但登录、短信登录与手机注册表单由 Keycloak 的 `pinvou` 主题和 `pinvou-browser-authenticator` 承载。Keycloak 镜像必须由 `deploy/keycloak/Dockerfile` 构建并包含 Authenticator JAR 与主题，不能把 Helm 的 `images.keycloak` 指向未包含扩展的官方裸镜像。运行时必须配置 `PINVOU_ACCOUNT_AUTH_URL`、`PINVOU_IDENTITY_AUTH_URL`、`PINVOU_SMS_VERIFY_URL` 及既有工作负载身份；缺失时认证失败关闭。发布后需分别验证密码登录、短信滑块与验证码登录、注册滑块与验证码注册、Cookie SSO、三语和手机号/来源/设备限流。
+
 ### 6.1 死信检查与受审计重放
 
 先按目标领域选择只读数据库凭据，执行 `event-replay --event-id <uuid> --inspect` 并留存返回的事件类型、聚合版本和摘要。根因修复后，使用受控 `event-replay` 工作负载及新的稳定幂等键执行 `--event-id <uuid> --expected-digest <sha256> --idempotency-key <key> --reason <不少于20字符> --confirm`；命令会以 `actor_type=SERVICE`、`EVENT_REPLAY`、`job_run_id` 和原因写入不可变审计，再原子重新排队。

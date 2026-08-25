@@ -91,6 +91,7 @@
 | APT-065 | 受控确认 Provider 失败：现场查询、无资金事实门禁、原子结案和不可变证据 | PAY-44, ADM-43 | APT-024, APT-025, APT-064 | CODE | DONE |
 | APT-066 | 拆分目录上架与 Provider/商品止损控制，并向个人中心提供可见不可选的暂停态 | PAY-45, PAY-47, UI-20 | APT-022, APT-051, APT-064 | CODE | DONE |
 | APT-067 | 支付渠道控制后台及双人恢复审批、快照失效、执行前复核与审计 | PAY-46, ADM-44 | APT-008, APT-065, APT-066 | CODE | DONE |
+| APT-068 | Web 统一身份登录页重设计、短信验证码登录及手机验证码注册 | UI-21 | APT-002, APT-003, APT-034 | CODE | DONE |
 
 ## 3. 独立提交验收模板
 

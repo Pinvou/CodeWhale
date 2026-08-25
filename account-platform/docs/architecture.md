@@ -326,7 +326,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 
 ## 9. 客户端与 Portal
 
-- Portal 采用 OIDC Authorization Code + PKCE、Redis 服务端 Session、CSRF 和严格代理路径白名单。
+- Portal 采用 OIDC Authorization Code + PKCE、Redis 服务端 Session、CSRF 和严格代理路径白名单。未登录个人中心不在 Portal 内渲染或处理认证表单，而是直接进入 Keycloak 的 Pinvou 登录主题；Keycloak 浏览器 Authenticator 在 Identity 边界内完成用户名/手机号密码校验、一次性滑块、短信登录和手机注册，短信发送、核验、注册预约和恢复仍调用 Account/Identity 的同一权威服务。密码不经过 Portal，OIDC Token 不进入浏览器业务 JavaScript。
 - 系统运行聚合不拥有固定组件清单：部署通过 `SYSTEM_PROBES_JSON` 注册本地、通用 HTTP（可选 JSON 布尔断言）或 Relay 指标探针；Portal 主流程只按 Adapter 类型并发执行、脱敏汇总和排序，新增 Identity/模型网关/事件组件无需增加厂商判断分支。
 - 桌面 OIDC Access Token 保留在 Rust 进程，Refresh Token 只存系统凭据库，不持久化密码。
 - 旧内置模型迁移具备盘点报告、配置备份、会话/计划任务模型 ID 迁移和旧凭据清理重试；当前测试覆盖迁移幂等以及运行时不再引用旧 `llmapi_hub` 路径。
@@ -343,6 +343,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 
 - 远程用户入口要求 HTTPS；开发态 HTTP 仅限 loopback。
 - Portal 内部服务凭据不下发浏览器或桌面端；桌面 OIDC Token 不进入 WebView JavaScript。
+- Web 身份页只在 Keycloak Authentication Session 中暂存手机号、用户名、设备维度、密码不透明引用、短信挑战和注册恢复令牌；原始密码由 Keycloak 立即送入 Identity Adapter 预检且不写入 Authentication Session、HTML 隐藏字段或日志。滑块与短信挑战沿用 Account 的用途绑定、一次性消费、反枚举和多维限流。
 - 注册原始密码只进入 Identity Adapter 的预检和最终创建边界；Account、短信、Billing、Commerce、事件和普通可观测链路只接收不透明引用或非秘密注册事实。Identity 不 trim、规范化、转换或截断密码，并在创建完成或引用到期后清除短期原文。
 - Provider 地址使用 HTTPS 和主机白名单；production-new 禁止本地 KEK，Helm 通过 ExternalSecret 从 KMS/Vault SecretStore 同步运行时秘密。Gateway 新写入只使用当前 Key，解密使用每行持久的 Key ID；轮换 Worker 对 Provider 凭据、派发准备/意图、流事件和结果使用 `FOR UPDATE SKIP LOCKED` 分批重加密并重算完整性摘要，生产 readiness 在旧 Key 密文归零前保持失败。本地 KEK 只用于开发/测试。
 - Keycloak `/admin/` 应限制在受控网络或隧道内。

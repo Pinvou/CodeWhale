@@ -179,6 +179,8 @@ sequenceDiagram
 6. `/admin.html` 只复用 OIDC 主体；Account、Billing 和 Token Gateway 分别向 Account 权限系统校验当前操作的原子平台权限，迁移期 `platform-admin` Claim 不能授予或绕过权限。
 7. Portal 登出删除 Redis 会话并结束浏览器身份会话。
 
+Web 首次进入未登录态时不再停留在 Portal 的单按钮中转页，而是直接进入 Keycloak `pinvou-browser` Flow。Cookie execution 先恢复既有统一身份会话；没有会话时由 Pinvou 浏览器 Authenticator 渲染密码、短信和注册表单。密码登录在 Keycloak 内校验；短信登录先调用 Account 创建/消费一次性滑块、发送 LOGIN 短信，再通过服务身份调用内部核验并绑定权威 Identity Subject；注册先由 Identity Adapter 生成密码不透明引用，再由 Account 完成注册预检、REGISTER 滑块/短信、唯一值预约和持久注册 Saga。认证成功后才继续原 PKCE 回调，Portal 始终看不到密码、验证码或浏览器可读 Token。
+
 ## 7. 账号 Bootstrap 与活动上下文
 
 ### 7.1 Bootstrap

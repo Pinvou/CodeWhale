@@ -4,13 +4,13 @@
 >
 > 校准日期：2026-08-25
 >
-> 状态定义：`已实现`、`部分实现`、`降级实现`、`未实现`、`移除`、`非当前范围`。本轮 334 个目标编号均已完成代码级核验，不再保留无结论占位。
+> 状态定义：`已实现`、`部分实现`、`降级实现`、`未实现`、`移除`、`非当前范围`。本轮 335 个目标编号均已完成代码级核验，不再保留无结论占位。
 
 > 对应目标需求：`requirements.md`
 
 ## 0. 状态证据规则
 
-本文保留目标重构前的实现判断和差距，供迁移规划使用。本轮已逐项核验 334 个目标编号；代码存在性、静态配置和现有自动化测试只能证明仓库实现状态，不能替代环境部署与生产验收：
+本文保留目标重构前的实现判断和差距，供迁移规划使用。本轮已逐项核验 335 个目标编号；代码存在性、静态配置和现有自动化测试只能证明仓库实现状态，不能替代环境部署与生产验收：
 
 | 字段 | 要求 |
 |---|---|
@@ -19,15 +19,16 @@
 | `deployment_version` | 已验证的部署版本、环境和验证时间；未部署写 `NOT_DEPLOYED` |
 | `known_gaps` | 与目标需求的剩余差异、Provider 降级和未验证风险 |
 
-当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 334 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
+当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 335 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 305`、`部分实现 28`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `341` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环。
+全量核验汇总：`已实现 306`、`部分实现 28`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `342` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
 | `AUDIT_HEAD` | 当前分支代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；连续实施起点 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`，并包含本文件所在提交 | 通过代码审阅；不等同生产部署 |
-| `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 334/334 个唯一目标编号均有结论 |
-| `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 334 个唯一编号一一覆盖，无缺失、无额外编号 |
+| `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 335/335 个唯一目标编号均有结论 |
+| `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 335 个唯一编号一一覆盖，无缺失、无额外编号 |
+| `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
 | `ACCOUNT-DOMAIN-UAT-20260825` | 账号独立域名、Portal 根入口、精确支付回调路由、受信 TLS、HTTP 跳转、服务健康和回调客户端授权 | `account.pinvou.com` 已解析到公网入口；Let's Encrypt 证书有效至 2026-11-23；HTTP 以 `308` 跳转 HTTPS，Portal 根入口返回 `200` 且旧 `/account.html` 返回 `404`，两个未授权回调入口返回 `401`，受控 Basic 凭据换取短期 Bearer Token 返回 `200`；Billing 运行 `1efb79d6`、Portal 运行 `bc5683ee`。真实新华三通知报文、重复/乱序和履约结果仍待商城联合验收 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
 | `CONTRACT-36` | 本轮 RBAC 前基线合同集 | OpenAPI lint 与原 36 个合同测试通过 |
@@ -310,6 +311,7 @@
 | UI-18 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 设置页独立显示服务端品悟平台模型目录、生命周期和不可选状态；选择只写入类型化全局默认并明确标注应用于新会话，本地/第三方列表不再显示平台路由占位模型 |
 | UI-19 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; MULTIAGENT-REGRESSION; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 对话选择器按来源展示当前上下文可用的具体平台目录模型及本地/第三方模型；已有会话直接写类型化会话引用，空白草稿延迟到首条消息创建会话后冻结，均不改全局默认 |
 | UI-20 | 已实现 | AUDIT_HEAD | PAYMENT-PRODUCT-CONTROLS; UI-LANGUAGE-COVERAGE | NOT_DEPLOYED | Web 个人中心、组织代购和桌面充值 Popover 均保留暂停商品展示，阻止选择/下单并提供中英日维护提示 |
+| UI-21 | 已实现 | AUDIT_HEAD | WEB-IDENTITY-LOGIN; AUTH-RISK; REGISTRATION-SAGA | NOT_DEPLOYED | Portal 未登录态直接进入 OIDC PKCE；Keycloak Pinvou 主题提供密码/短信/注册表单，短信登录和手机注册均强制一次性滑块与 6 位验证码，注册复用密码不透明引用及持久预约 Saga；密码不经过 Portal，真实短信、注册和 Cookie SSO 待部署联调 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
@@ -804,6 +806,7 @@
 | UI-18 | 设置中的平台模型默认项 | 已实现 | 已按服务端目录显示具体平台模型、生命周期和不可选状态，选择只改变空白新会话默认值，并与本地/第三方配置分组隔离。 |
 | UI-19 | 对话内直接选择平台模型 | 已实现 | 对话选择器直接列出上下文可用的平台目录模型并与本地/第三方分组；选择只写当前会话，草稿态延迟冻结且不改全局默认。 |
 | UI-20 | 充值商品暂停态 | 已实现 | Web、组织购买和桌面入口展示暂停态及三语维护提示且不可提交。 |
+| UI-21 | Web 统一身份登录页 | 已实现 | Portal 未登录后直接进入 Keycloak 三语 Pinvou 登录主题；密码登录、短信滑块验证码登录及手机滑块验证码注册均在 Identity 边界闭环，Portal 不接收密码或浏览器可读 Token。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
 | ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |

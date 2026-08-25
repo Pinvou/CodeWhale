@@ -239,6 +239,10 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [activeOrganizationId, organizations.length, section]);
 
   useEffect(() => {
+    if (portal && auth === 'guest') globalThis.location.replace('/auth/login');
+  }, [auth, portal]);
+
+  useEffect(() => {
     if (!order?.order_id || terminalOrderStates.has(order.status)) return undefined;
     let stopped = false;
     let timer;
@@ -344,6 +348,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   };
 
   if (auth === 'loading') return <div className={`ap-shell ap-centered ${portal ? 'ap-portal' : 'ap-desktop'}`}><div className="ap-spinner" />{copy.loading}</div>;
+  if (portal && auth === 'guest') return <div className="ap-shell ap-centered ap-portal"><div className="ap-spinner" />{copy.loading}</div>;
   if (auth === 'guest' || auth === 'error') return <div className={`ap-shell ap-login ${portal ? 'ap-portal' : 'ap-desktop'}`}><div><p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p><h1>{copy.title}</h1><p>{portal ? copy.loginIntro : copy.desktopLoginIntro}</p>{error && <div role="alert" className="ap-alert error">{error}</div>}{portal ? <a className="ap-primary" href="/auth/login">{copy.login}</a> : <button className="ap-primary" disabled={busy} onClick={login}>{busy ? copy.signingIn : copy.login}</button>}{onClose && <button className="ap-close" onClick={onClose}>{copy.close}</button>}</div></div>;
 
   const userLabel = me?.display_name || copy.user;

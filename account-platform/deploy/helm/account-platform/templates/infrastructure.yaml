@@ -73,6 +73,8 @@ spec:
           ports: [{ name: http, containerPort: 8080 }]
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ["ALL"] } }
           env:
+            - { name: PINVOU_ACCOUNT_AUTH_URL, value: {{ printf "http://%s-account-service:8080" $fullname | quote }} }
+            - { name: PINVOU_IDENTITY_AUTH_URL, value: {{ printf "http://%s-identity-service:8080" $fullname | quote }} }
             - { name: PINVOU_SMS_VERIFY_URL, value: {{ printf "http://%s-account-service:8080/internal/v1/auth/sms/verify" $fullname | quote }} }
             - { name: PINVOU_WORKLOAD_IDENTITY_TOKEN_FILE, value: /var/run/secrets/pinvou/workload/token }
             - { name: KC_HOSTNAME, value: {{ .Values.keycloak.hostname | quote }} }

@@ -2,9 +2,13 @@
   "realm": "pinvou",
   "enabled": true,
   "displayName": "Pinvou Development",
+  "loginTheme": "pinvou",
+  "internationalizationEnabled": true,
+  "supportedLocales": ["zh-CN", "en", "ja"],
+  "defaultLocale": "zh-CN",
   "registrationAllowed": false,
   "registrationEmailAsUsername": false,
-  "rememberMe": false,
+  "rememberMe": true,
   "verifyEmail": false,
   "resetPasswordAllowed": true,
   "loginWithEmailAllowed": true,
@@ -79,7 +83,31 @@
     }
   ],
   "directGrantFlow": "pinvou-mobile-direct-grant",
+  "browserFlow": "pinvou-browser",
   "authenticationFlows": [
+    {
+      "alias": "pinvou-browser",
+      "description": "Pinvou browser cookie, password, SMS, and verified mobile registration",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        {
+          "authenticator": "auth-cookie",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 10,
+          "userSetupAllowed": false
+        },
+        {
+          "authenticator": "pinvou-browser-authenticator",
+          "authenticatorFlow": false,
+          "requirement": "ALTERNATIVE",
+          "priority": 20,
+          "userSetupAllowed": false
+        }
+      ]
+    },
     {
       "alias": "pinvou-mobile-direct-grant",
       "description": "Pinvou mobile password or SMS direct grant",
