@@ -10,22 +10,123 @@ import (
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
 )
 
 func (s *Service) resolveOrganizationBilling(w http.ResponseWriter, r *http.Request, permission string) (AuthorizationContext, uuid.UUID, OrganizationBillingClient, bool) {
-	resolved, ok := s.resolveContext(w, r)
 	organizationID, err := uuid.Parse(r.PathValue("organization_id"))
 	client, supported := s.billing.(OrganizationBillingClient)
-	if !ok {
-		return AuthorizationContext{}, uuid.Nil, nil, false
-	}
-	if err != nil || !supported || resolved.ContextType != "ORGANIZATION" || resolved.OrganizationID == nil || *resolved.OrganizationID != organizationID || !hasPermission(resolved, permission) {
+	if err != nil || !supported {
 		s.writeError(w, r, ErrForbidden)
 		return AuthorizationContext{}, uuid.Nil, nil, false
 	}
+	resolved, ok := s.resolveOrganizationPermission(w, r, organizationID, permission)
+	if !ok {
+		return AuthorizationContext{}, uuid.Nil, nil, false
+	}
 	return resolved, organizationID, client, true
+}
+
+func (s *Service) resolvePersonalBilling(w http.ResponseWriter, r *http.Request, permission string) (AuthorizationContext, bool) {
+	if s.authorizer == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
+		return AuthorizationContext{}, false
+	}
+	principal, ok := identity.FromContext(r.Context())
+	if !ok {
+		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(r.Context()))
+		return AuthorizationContext{}, false
+	}
+	userID, err := s.authorizer.AuthorizedUserID(r.Context(), principal, permission)
+	if errors.Is(err, authorization.ErrPermissionDenied) {
+		s.writeError(w, r, ErrForbidden)
+		return AuthorizationContext{}, false
+	}
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
+		return AuthorizationContext{}, false
+	}
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return AuthorizationContext{}, false
+	}
+	if resolved.UserID != userID || resolved.ContextType != "PERSONAL" || resolved.OrganizationID != nil {
+		s.writeError(w, r, ErrForbidden)
+		return AuthorizationContext{}, false
+	}
+	return resolved, true
+}
+
+func (s *Service) resolveOrganizationPermission(w http.ResponseWriter, r *http.Request, organizationID uuid.UUID, permission string) (AuthorizationContext, bool) {
+	if s.authorizer == nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
+		return AuthorizationContext{}, false
+	}
+	principal, ok := identity.FromContext(r.Context())
+	if !ok {
+		api.WriteError(w, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(r.Context()))
+		return AuthorizationContext{}, false
+	}
+	userID, authorizationVersion, err := s.authorizer.AuthorizedOrganizationUserID(r.Context(), principal, permission, organizationID)
+	if errors.Is(err, authorization.ErrPermissionDenied) {
+		s.writeError(w, r, ErrForbidden)
+		return AuthorizationContext{}, false
+	}
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
+		return AuthorizationContext{}, false
+	}
+	resolved, ok := s.resolveContext(w, r)
+	if !ok {
+		return AuthorizationContext{}, false
+	}
+	if resolved.UserID != userID {
+		s.writeError(w, r, ErrForbidden)
+		return AuthorizationContext{}, false
+	}
+	resolved.AuthorizationVersion = authorizationVersion
+	w.Header().Set("X-Authorization-Version", fmt.Sprint(authorizationVersion))
+	return resolved, true
+}
+
+func (s *Service) getOrganizationBalance(w http.ResponseWriter, r *http.Request) {
+	_, organizationID, _, ok := s.resolveOrganizationBilling(w, r, "org.wallet.read")
+	if !ok {
+		return
+	}
+	walletID, err := s.wallets.Ensure(r.Context(), "ORGANIZATION", organizationID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the organization balance is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := s.billing.Balance(r.Context(), walletID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the organization balance is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) getOrganizationEntitlementPackages(w http.ResponseWriter, r *http.Request) {
+	resolved, organizationID, _, ok := s.resolveOrganizationBilling(w, r, "org.wallet.read")
+	if !ok {
+		return
+	}
+	client, supported := s.billing.(EntitlementPackageBillingClient)
+	walletID, err := s.wallets.Ensure(r.Context(), "ORGANIZATION", organizationID)
+	if err != nil || !supported {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "organization entitlement packages are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := client.Packages(r.Context(), resolved.UserID, walletID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "organization entitlement packages are unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
 }
 
 func (s *Service) createOrganizationRechargeOrder(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +182,12 @@ func (s *Service) listOrganizationQuotaGrants(w http.ResponseWriter, r *http.Req
 		return
 	}
 	memberUserID := &resolved.UserID
-	if hasPermission(resolved, "org.quota.read.all") {
+	allGranted, err := s.organizationPermissionAllowed(r, organizationID, "org.quota.read.all", resolved.UserID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if allGranted {
 		if raw := strings.TrimSpace(r.URL.Query().Get("member_user_id")); raw == "" {
 			memberUserID = nil
 		} else if parsed, err := uuid.Parse(raw); err == nil {
@@ -97,6 +203,21 @@ func (s *Service) listOrganizationQuotaGrants(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)
+}
+
+func (s *Service) organizationPermissionAllowed(r *http.Request, organizationID uuid.UUID, permission string, expectedUserID uuid.UUID) (bool, error) {
+	principal, ok := identity.FromContext(r.Context())
+	if !ok || s.authorizer == nil {
+		return false, errors.New("authorization is unavailable")
+	}
+	userID, _, err := s.authorizer.AuthorizedOrganizationUserID(r.Context(), principal, permission, organizationID)
+	if errors.Is(err, authorization.ErrPermissionDenied) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return userID == expectedUserID, nil
 }
 
 func (s *Service) allocateOrganizationQuotaBatch(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +261,7 @@ func (s *Service) revokeOrganizationQuotaGrant(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Service) reclaimAccountClosedGrant(w http.ResponseWriter, r *http.Request) {
-	resolved, organizationID, baseClient, ok := s.resolveOrganizationBilling(w, r, "organization.grant.reclaim_closed")
+	resolved, organizationID, baseClient, ok := s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")
 	if !ok {
 		return
 	}
@@ -167,7 +288,7 @@ func (s *Service) reclaimAccountClosedGrant(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Service) reclaimAccountClosedGrantsBatch(w http.ResponseWriter, r *http.Request) {
-	resolved, organizationID, baseClient, ok := s.resolveOrganizationBilling(w, r, "organization.grant.reclaim_closed")
+	resolved, organizationID, baseClient, ok := s.resolveOrganizationBilling(w, r, "org.grants.reclaim_closed")
 	if !ok {
 		return
 	}

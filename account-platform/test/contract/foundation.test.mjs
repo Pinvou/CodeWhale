@@ -147,8 +147,10 @@ test('personal usage history exposes only user-facing fields', async () => {
 
 test('personal plans cannot be purchased into organization wallets', async () => {
   const source = await readFile(path.join(root, 'internal/token/service.go'), 'utf8');
-  assert.match(source, /resolved\.ContextType != "PERSONAL"/);
-  assert.match(source, /PERSONAL_RECHARGE_ONLY/);
+  const authorization = await readFile(path.join(root, 'internal/token/organization_billing.go'), 'utf8');
+  assert.match(source, /resolvePersonalBilling\(w, r, "personal\.recharge\.create"\)/);
+  assert.match(authorization, /resolved\.ContextType != "PERSONAL" \|\| resolved\.OrganizationID != nil/);
+  assert.match(source, /activeWallet\(r\.Context\(\), resolved\)/);
 });
 
 test('paid plan orders create independent thirty-day entitlement packages', async () => {
@@ -200,7 +202,7 @@ test('personal recharge orders expose a normal history list', async () => {
   assert.ok(gateway.paths['/recharge/orders'].get);
   assert.ok(['pinvou_order_id', 'provider_order_reference', 'sku_code', 'credited_at', 'valid_until', 'invoice_status'].every(field => history.properties[field]));
   assert.ok(['package_id', 'pinvou_order_id', 'source_payment_transaction_id', 'provider_order_reference', 'sku_code', 'credited_at', 'valid_until'].every(field => entitlement.properties[field]));
-  assert.match(service, /resolved\.ContextType != "PERSONAL"/);
+  assert.match(service, /resolvePersonalBilling\(w, r, "personal\.billing\.read"\)/);
   assert.match(service, /RechargeOrders\(r\.Context\(\), resolved\.UserID, walletID\)/);
 });
 

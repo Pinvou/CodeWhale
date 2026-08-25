@@ -144,6 +144,8 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.rechargeProducts))
 	protected.GET("/v1/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
 	protected.POST("/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
+	protected.GET("/v1/organizations/:organization_id/balance", httpserver.AdaptFunc(s.getOrganizationBalance))
+	protected.GET("/v1/organizations/:organization_id/entitlement-packages", httpserver.AdaptFunc(s.getOrganizationEntitlementPackages))
 	protected.POST("/v1/organizations/:organization_id/recharge/orders", httpserver.AdaptFunc(s.createOrganizationRechargeOrder))
 	protected.GET("/v1/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listOrganizationQuotaGrants))
 	protected.POST("/v1/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateOrganizationQuotaBatch))
@@ -219,12 +221,8 @@ func (s *Service) modelProtocols(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolvePersonalBilling(w, r, "personal.billing.read")
 	if !ok {
-		return
-	}
-	if resolved.ContextType == "ORGANIZATION" && !hasPermission(resolved, "org.wallet.read") && !hasPermission(resolved, "org.quota.allocate") && !hasPermission(resolved, "org.entitlements.purchase") {
-		s.writeError(w, r, ErrForbidden)
 		return
 	}
 	walletID, err := s.activeWallet(r.Context(), resolved)
@@ -405,12 +403,8 @@ func (s *Service) paymentCapabilities(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
+	resolved, ok := s.resolvePersonalBilling(w, r, "personal.recharge.create")
 	if !ok {
-		return
-	}
-	if resolved.ContextType != "PERSONAL" {
-		api.WriteError(w, http.StatusForbidden, "PERSONAL_RECHARGE_ONLY", "personal plans can only be purchased in the personal context", httpserver.RequestID(r.Context()))
 		return
 	}
 	commerceStatus := "NOT_CONFIGURED"
@@ -457,7 +451,7 @@ func (s *Service) createRechargeOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolvePersonalBilling(w, r, "personal.billing.read")
 	if !ok {
 		return
 	}
@@ -483,7 +477,7 @@ func (s *Service) getRechargeOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getRecentRechargeOrder(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolvePersonalBilling(w, r, "personal.billing.read")
 	if !ok {
 		return
 	}
@@ -501,7 +495,7 @@ func (s *Service) getRecentRechargeOrder(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolvePersonalBilling(w, r, "personal.recharge.manage")
 	if !ok {
 		return
 	}
@@ -519,7 +513,7 @@ func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolvePersonalBilling(w, r, "personal.recharge.manage")
 	if !ok {
 		return
 	}
@@ -540,7 +534,7 @@ func (s *Service) addLatePaymentClaim(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolvePersonalBilling(w, r, "personal.billing.read")
 	if !ok {
 		return
 	}
@@ -558,12 +552,8 @@ func (s *Service) getBalance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) getEntitlementPackages(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
+	resolved, ok := s.resolvePersonalBilling(w, r, "personal.billing.read")
 	if !ok {
-		return
-	}
-	if resolved.ContextType != "PERSONAL" {
-		s.writeError(w, r, ErrForbidden)
 		return
 	}
 	walletID, err := s.wallets.Ensure(r.Context(), "PERSONAL", resolved.UserID)

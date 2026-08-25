@@ -48,7 +48,8 @@ test('allowed list search and batch paths constrain every returned or mutated ro
   assert.match(account, /WHERE m\.organization_id=\$1 AND m\.status<>'REVOKED'/);
   assert.match(account, /WHERE id=\$1 AND organization_id=\$2 AND status='ACTIVE'/);
   assert.match(quota, /WHERE organization_id=\$1 AND \(\$2::uuid IS NULL OR member_user_id=\$2\)/);
-  assert.match(batch, /resolveOrganizationBilling[\s\S]*resolved\.OrganizationID[\s\S]*\*resolved\.OrganizationID != organizationID/);
+  assert.match(batch, /AuthorizedOrganizationUserID\(r\.Context\(\), principal, permission, organizationID\)/);
+  assert.match(batch, /resolved\.UserID != userID/);
   assert.match(batch, /resolveOrganizationBilling\(w, r, "org\.quota\.allocate"\)[\s\S]*AllocateOrganizationQuotaBatch/);
 });
 

@@ -461,6 +461,9 @@ func tokenPathAllowed(method, resource string) bool {
 	if len(parts) == 4 && parts[3] == "quota-grants" {
 		return method == http.MethodGet
 	}
+	if len(parts) == 4 && (parts[3] == "balance" || parts[3] == "entitlement-packages") {
+		return method == http.MethodGet
+	}
 	if len(parts) == 4 && parts[3] == "model-policy" {
 		return method == http.MethodGet || method == http.MethodPut
 	}

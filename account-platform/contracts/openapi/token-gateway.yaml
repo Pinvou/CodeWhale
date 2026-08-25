@@ -717,7 +717,7 @@ paths:
   /me/balance:
     get:
       operationId: getMyBalance
-      summary: Read the active context wallet directly from Billing
+      summary: Read the personal wallet with personal.billing.read
       parameters:
         - name: consistency
           in: query
@@ -726,18 +726,20 @@ paths:
             const: strong
       responses:
         "200":
-          description: Strongly consistent active-context balance
+          description: Strongly consistent personal balance
         "401":
+          $ref: "#/components/responses/Error"
+        "403":
           $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
   /me/entitlement-packages:
     get:
       operationId: listMyEntitlementPackages
-      summary: List entitlement packages for the active personal or authorized organization wallet
+      summary: List personal entitlement packages with personal.billing.read
       responses:
         "200":
-          description: Active-context entitlement packages
+          description: Personal entitlement packages
           headers:
             Cache-Control:
               required: true
@@ -759,12 +761,34 @@ paths:
                       $ref: "#/components/schemas/EntitlementPackage"
         "401":
           $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
         "503":
           $ref: "#/components/responses/Error"
+  /organizations/{organization_id}/balance:
+    get:
+      operationId: getOrganizationBalance
+      summary: Read an explicit organization wallet with org.wallet.read without switching active context
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Strongly consistent organization balance }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /organizations/{organization_id}/entitlement-packages:
+    get:
+      operationId: listOrganizationEntitlementPackages
+      summary: List explicit organization entitlements with org.wallet.read without switching active context
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Organization entitlement packages }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /organizations/{organization_id}/recharge/orders:
     post:
       operationId: createOrganizationRechargeOrder
-      summary: Purchase benefits for an explicit active organization when the caller has org.entitlements.purchase
+      summary: Purchase for an explicit organization with org.entitlements.purchase without switching active context
       parameters:
         - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
         - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 16, maxLength: 128 } }

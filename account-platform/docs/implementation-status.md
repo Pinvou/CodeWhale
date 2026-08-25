@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 318`、`部分实现 34`、`未实现 12`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-071 已收敛登录和 Account 本人入口门禁，其余入口门禁由 APT-072–APT-082 逐项收敛。
+全量核验汇总：`已实现 319`、`部分实现 34`、`未实现 11`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-072 已收敛登录、Account 本人入口和 Billing 个人/组织资金入口门禁，其余入口门禁由 APT-073–APT-082 逐项收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -32,6 +32,7 @@
 | `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
 | `LOGIN-PERMISSION-GATE` | Keycloak 浏览器密码/短信/注册完成路径与 Direct Grant 密码/短信路径在成功前强一致检查 `personal.session.login`，并校验精确 issuer 与最小工作负载路由 | Identity 静态合同、Compose/Helm 配置、Account 生命周期授权测试及全量合同通过；自定义 Keycloak 镜像构建和真实登录待部署验证 |
 | `PERSONAL-ACCOUNT-AUTHORIZATION` | 本人资料、授权上下文、组织列表、资料变更、上下文切换、注销和邀请 Account 路由逐项绑定个人原子权限，并保持 OIDC 主体唯一目标 | Account Go 测试、OpenAPI 403 契约、路由权限矩阵和生命周期失败关闭合同通过；数据库撤权运行级验证待部署 |
+| `BILLING-SCOPE-AUTHORIZATION` | 个人余额、权益包、订单与充值管理按 `personal.*` 权限和个人上下文失败关闭；组织购买、余额、权益及额度授予按显式组织目标与 `org.*` 权限实时决定 | Token/Portal Go 测试、显式组织目标和个人/组织不可互借权限用例、OpenAPI 及全量合同通过；数据库撤权和真实组织钱包联调待部署 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
 | `ACCOUNT-DOMAIN-UAT-20260825` | 账号独立域名、Portal 根入口、精确支付回调路由、受信 TLS、HTTP 跳转、服务健康和回调客户端授权 | `account.pinvou.com` 已解析到公网入口；Let's Encrypt 证书有效至 2026-11-23；HTTP 以 `308` 跳转 HTTPS，Portal 根入口返回 `200` 且旧 `/account.html` 返回 `404`，两个未授权回调入口返回 `401`，受控 Basic 凭据换取短期 Bearer Token 返回 `200`；Billing 运行 `1efb79d6`、Portal 运行 `bc5683ee`。真实新华三通知报文、重复/乱序和履约结果仍待商城联合验收 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
@@ -227,7 +228,7 @@
 | BILL-43 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 发布事务按定价空间串行锁定并执行区间冲突、ETag、幂等键和请求指纹校验；真实数据库并发待部署验证 |
 | BILL-44 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 支持 DRAFT/PUBLISHED/ACTIVE/ENDED/CANCELLED、生效前取消及 ACTIVE 阻断/全局继承/替代三种结束模式 |
 | BILL-45 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | Hold 冻结逐单位价格、来源、分母和舍入；撤销、结束或替代后续租、追加及结算不重算 |
-| BILL-46 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 个人充值、余额和组织额度入口尚未统一按个人/组织原子权限失败关闭；由 APT-072 收敛。 |
+| BILL-46 | 已实现 | DOC_CURRENT | GO-UNIT; BILLING-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 个人余额、权益和订单严格要求个人原子权限且不能在组织上下文借用；组织购买、余额、权益和授予使用 URL 显式目标组织实时鉴权，无需切换活动上下文。 |
 | PAY-11 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 订单允许多笔 Provider 流水；支付来源权益包唯一绑定一笔成功流水，不同成功流水分别独立履约或进入复核 |
 | PAY-12 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; PAYMENT-CONVERGENCE | NOT_DEPLOYED | 回调、主动查询、Provider 账单和人工修复均先保存 Provider/版本/流水/金额/时间/载荷摘要；成功账单行复用统一归并器并按流水防止重复入账，未匹配或冲突账单仍留证并进入对账复核 |
 | PAY-13 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE; RECEIVABLE-LIFECYCLE | NOT_DEPLOYED | 支付流水 `PAID/LATE_PAID` 不被退款、拒付或关单覆盖；退款、拒付、关单分别推进独立状态机，订单支付/退款/拒付/关注摘要由底层事实含应收优先级完整重建 |
@@ -771,7 +772,7 @@
 | BILL-43 | 未来价格区间冲突拒绝 | 已实现 | 同定价空间发布使用事务锁、ETag、幂等指纹和区间冲突校验；真实 PostgreSQL 并发执行待部署验证。 |
 | BILL-44 | 定价版本生命周期与撤销 | 已实现 | 已形成 DRAFT/PUBLISHED/ACTIVE/ENDED/CANCELLED，并支持生效前取消及 ACTIVE 阻断、全局接续和替代接续。 |
 | BILL-45 | 已创建 Hold 价格不可变 | 已实现 | Hold 完整冻结逐单位最终价格、继承来源、分母和舍入，续租、追加预占及核对均复用原快照。 |
-| BILL-46 | Billing 个人与组织原子授权 | 未实现 | 个人充值/余额和组织额度入口的逐权限失败关闭由 APT-072 待实现。 |
+| BILL-46 | Billing 个人与组织原子授权 | 已实现 | 个人充值/余额/订单按 `personal.billing.read`、`personal.recharge.create/manage` 失败关闭；组织购买、钱包与授予按显式目标组织校验 `org.entitlements.purchase`、`org.wallet.read`、`org.quota.*` 和 `org.grants.reclaim_closed`。 |
 
 ### 3.5 充值、支付 Provider 与新华三商城
 
