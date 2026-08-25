@@ -113,6 +113,22 @@ func (s *Service) resetForgottenPassword(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Service) changePassword(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PasswordHandle        string `json:"password_handle"`
+		PasswordPolicyVersion string `json:"password_policy_version"`
+	}
+	if api.DecodeJSON(w, r, &body) != nil {
+		return
+	}
+	if err := s.profiles.ChangePassword(r.Context(), mustPrincipal(r.Context()), body.PasswordHandle, body.PasswordPolicyVersion); err != nil {
+		s.writeProfileError(w, r, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Service) writeProfileError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "PROFILE_CHANGE_FAILED", "the profile change could not be completed"
 	switch {
@@ -142,6 +158,8 @@ func (s *Service) writeProfileError(w http.ResponseWriter, r *http.Request, err 
 		w.Header().Set("Retry-After", fmt.Sprint(retryAfter))
 	case errors.Is(err, ErrPasswordReferenceInvalid):
 		status, code, message = http.StatusGone, "PASSWORD_REFERENCE_INVALID", "the password precheck has expired"
+	case errors.Is(err, ErrForbidden):
+		status, code, message = http.StatusForbidden, "PERMISSION_DENIED", "the requested permission is not granted"
 	case errors.Is(err, ErrNotFound):
 		status, code, message = http.StatusNotFound, "PROFILE_CHANGE_NOT_FOUND", "the profile change was not found"
 	}

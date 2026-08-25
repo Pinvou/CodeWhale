@@ -58,6 +58,8 @@ func TestNormalizeRegistrationUsername(t *testing.T) {
 
 type mobileAuthRepositoryFake struct {
 	mobileExists       bool
+	securityAllowed    bool
+	securityErr        error
 	identitySubject    string
 	identityErr        error
 	usernameExists     bool
@@ -83,6 +85,10 @@ func (f *mobileAuthRepositoryFake) MobileIdentitySubject(context.Context, string
 		return "keycloak-subject", nil
 	}
 	return f.identitySubject, f.identityErr
+}
+
+func (f *mobileAuthRepositoryFake) AuthorizeMobilePersonalSecurity(context.Context, string, string) (bool, error) {
+	return f.securityAllowed, f.securityErr
 }
 
 func (f *mobileAuthRepositoryFake) UsernameExists(context.Context, string) (bool, error) {
@@ -349,6 +355,36 @@ func TestMobileAuthKnownLoginHidesProviderFailureBehindSameResponse(t *testing.T
 	}
 	if !repository.challengeFailed {
 		t.Fatal("asynchronous provider failure must still update challenge state")
+	}
+}
+
+func TestPasswordResetSMSRequiresPersonalSecurityPermission(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		allowed bool
+		authErr error
+		sent    bool
+	}{
+		{name: "allowed", allowed: true, sent: true},
+		{name: "permission denied"},
+		{name: "authorization unavailable", authErr: errors.New("authorization unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repository := &mobileAuthRepositoryFake{mobileExists: true, securityAllowed: test.allowed, securityErr: test.authErr}
+			sms := &smsProviderFake{}
+			service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
+			challenge, err := service.Send(context.Background(), "", "13800138000", "", "", SMSPurposePasswordReset, uuid.New(), 128, "192.0.2.1", "device-1")
+			if err != nil || challenge.ID == uuid.Nil {
+				t.Fatalf("anti-enumeration response changed: challenge=%#v err=%v", challenge, err)
+			}
+			deadline := time.Now().Add(time.Second)
+			for test.sent && !repository.challengeSent && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if repository.challengeSent != test.sent || (sms.sentChallenge != uuid.Nil) != test.sent {
+				t.Fatalf("sent=%v provider=%s", repository.challengeSent, sms.sentChallenge)
+			}
+		})
 	}
 }
 

@@ -63,6 +63,9 @@ func (*profileStoreFake) ClaimProfileChange(context.Context) (*ProfileChange, er
 func (*profileStoreFake) CreatePasswordReset(context.Context, string, string, uuid.UUID) (uuid.UUID, uuid.UUID, error) {
 	return uuid.New(), uuid.New(), nil
 }
+func (*profileStoreFake) CreateAuthenticatedPasswordReset(_ context.Context, principal identity.Principal) (uuid.UUID, string, string, error) {
+	return uuid.New(), principal.Subject, "+8613800138000", nil
+}
 func (*profileStoreFake) CompletePasswordReset(context.Context, uuid.UUID, string) error { return nil }
 func (*profileStoreFake) ListProfileRepairs(context.Context) ([]profileChangeRepairItem, error) {
 	return nil, nil
@@ -91,7 +94,8 @@ func (f *profileIdentityFake) UpdateUsername(context.Context, string, uuid.UUID,
 func (*profileIdentityFake) UpdateMobile(context.Context, string, uuid.UUID, string) error {
 	return nil
 }
-func (*profileIdentityFake) ResetPassword(context.Context, string, uuid.UUID, string, string, string) error {
+func (f *profileIdentityFake) ResetPassword(context.Context, string, uuid.UUID, string, string, string) error {
+	f.calls = append(f.calls, "password")
 	return nil
 }
 func (f *profileIdentityFake) RevokeSessions(context.Context, string) error {
@@ -125,5 +129,23 @@ func TestUsernameChangeRequiresRecentAuthenticationAndConvergesForward(t *testin
 	}
 	if len(store.calls) != 4 || store.calls[0] != "identity" || store.calls[1] != "account" || store.calls[2] != "sessions" || store.calls[3] != "complete" {
 		t.Fatalf("store calls=%v", store.calls)
+	}
+}
+
+func TestAuthenticatedPasswordChangeRequiresRecentAuthentication(t *testing.T) {
+	now := time.Date(2026, time.August, 26, 9, 0, 0, 0, time.UTC)
+	store := &profileStoreFake{}
+	identities := &profileIdentityFake{}
+	service := &ProfileChangeService{store: store, identities: identities, now: func() time.Time { return now }}
+	stale := identity.Principal{Issuer: "issuer", Subject: "subject", AuthenticatedAt: now.Add(-6 * time.Minute)}
+	if err := service.ChangePassword(context.Background(), stale, "password-handle", "user-v1"); !errors.Is(err, ErrRecentAuthenticationRequired) {
+		t.Fatalf("stale authentication error=%v", err)
+	}
+	current := identity.Principal{Issuer: "issuer", Subject: "subject", AuthenticatedAt: now.Add(-time.Minute)}
+	if err := service.ChangePassword(context.Background(), current, "password-handle", "user-v1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(identities.calls) != 1 || identities.calls[0] != "password" {
+		t.Fatalf("identity calls=%v", identities.calls)
 	}
 }

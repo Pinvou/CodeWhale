@@ -352,6 +352,16 @@
         "file": "000035_break_glass_trusted_operator.up.sql",
         "version": 35,
         "sha256": "869336713029646d8fa1e7fbe2d1ced8d5bee76a1ce324b79276c5e89ca74f18"
+      },
+      {
+        "file": "000036_password_security_authorization.down.sql",
+        "version": 36,
+        "sha256": "29e75de08c65614d9054844359ae1ebad11770050ca52cb96cd6941ce68c2426"
+      },
+      {
+        "file": "000036_password_security_authorization.up.sql",
+        "version": 36,
+        "sha256": "f7425c5d861046478377ec62a4faafe0b098579e6ffd4ec9927554ba6773fa35"
       }
     ],
     "billing": [

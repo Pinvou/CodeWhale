@@ -146,7 +146,7 @@ flowchart LR
 
 用户名和手机号修改由 `profile_change_requests` 持久 Saga 编排。Web 个人中心通过 Portal BFF 发起 Authorization Code + PKCE 重新认证，并设置 `prompt=login`、`max_age=0` 取得五分钟内的 `auth_time`；密码只进入 Identity Provider，不经过 Portal 或 Account。Account 保存 `PENDING` 请求并预约规范化新值，手机号再绑定专用滑块/SMS 挑战。Identity Adapter 幂等更新同一 Keycloak subject 后，Account 以独立 `profile_version` CAS 提交；Identity 已更新而 Account 未提交时只向前重试。提交后撤销 Keycloak Refresh Token/会话并清除 Account Session 投影；手机号同时为当前 Commerce Provider 递增 Mapping 版本并创建 `PROFILE_SYNC` 任务。旧版本迟到结果只追加证据，不能覆盖新映射；同步失败不回滚登录或模型能力，但继续阻止依赖该映射的新支付。30 分钟仍未收敛的请求进入 `REPAIR_REQUIRED`。品悟客户端不封装资料变更方法，也不呈现“资料与安全”修改区域。
 
-密码恢复沿用同一密码隔离边界：品悟客户端的未登录“忘记密码”流程只获得 Identity 进程内短期密码引用，Account 的 `PASSWORD_RESET` 短信路径对已知和未知手机号保持同形响应；验证成功后 Account 只把不透明引用和稳定 subject 交给 Identity Adapter，由其重置 Keycloak 密码并撤销全部既有会话。Account 数据库只记录验证和完成事实；客户端保留专用密码重置 Tauri 命令，但不提供登录后的密码修改或资料修改入口。
+密码恢复沿用同一密码隔离边界：品悟客户端的未登录“忘记密码”流程只获得 Identity 进程内短期密码引用，Account 的 `PASSWORD_RESET` 短信路径对已知和未知手机号保持同形响应，只有在 Account 强一致证明 `personal.security.manage` 和允许的生命周期时才发送短信；验证成功后 Account 只把不透明引用和稳定 subject 交给 Identity Adapter，由其重置 Keycloak 密码并撤销全部既有会话。已登录改密使用受保护的 `/v1/me/password-changes`，同时要求五分钟内认证、同一个人安全权限和生命周期矩阵。Account 数据库只记录验证方式与完成事实，不接收原始密码。
 
 Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现位于平台 Adapter；核心任务不识别厂商 Action、响应或错误文本。状态统一为 `PENDING / IN_PROGRESS / READY / RETRY / REPAIR_REQUIRED / DETACHED`，连续失败达到上限后停止自动重试并保留脱敏修复原因。Account 的授权上下文不返回 Mapping；充值入口另行读取 `/v1/me/commerce-customer-mapping`，因此 Mapping 非 `READY` 只关闭依赖外部客户的下单，不影响登录、平台模型、组织管理或其他授权决策。
 

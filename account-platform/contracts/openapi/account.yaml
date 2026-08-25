@@ -172,6 +172,27 @@ paths:
         "204": { description: Password reset and all existing sessions revoked }
         "401": { $ref: "#/components/responses/Error" }
         "410": { $ref: "#/components/responses/Error" }
+  /me/password-changes:
+    post:
+      operationId: changeMyPassword
+      summary: Change the authenticated user's password after recent authentication
+      description: Requires personal.security.manage. ACTIVE, PROVISIONING, and REPAIR_REQUIRED are allowed; all other account states fail closed. A successful change revokes every existing session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [password_handle, password_policy_version]
+              properties:
+                password_handle: { type: string, minLength: 43, maxLength: 43 }
+                password_policy_version: { type: string, const: user-v1 }
+      responses:
+        "204": { description: Password changed and all existing sessions revoked }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
   /account/bootstrap:
     post:
       operationId: bootstrapAccount

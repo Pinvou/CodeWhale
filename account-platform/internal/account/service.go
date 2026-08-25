@@ -114,6 +114,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.GET("/v1/me/account-closure-request", s.requirePermission(PermissionPersonalAccountClosureRead), httpserver.AdaptFunc(s.getAccountClosure))
 	protected.GET("/v1/me/commerce-customer-mapping", s.requirePermission(PermissionPersonalProfileRead), httpserver.AdaptFunc(s.getCommerceCustomerMapping))
 	if s.profiles != nil {
+		protected.POST("/v1/me/password-changes", s.requirePermission(PermissionPersonalSecurityManage), httpserver.AdaptFunc(s.changePassword))
 		protected.POST("/v1/me/profile-change-requests", s.requirePermission(PermissionPersonalProfileUpdate), httpserver.AdaptFunc(s.createProfileChange))
 		protected.POST("/v1/me/profile-change-requests/:request_id/mobile-challenges", s.requirePermission(PermissionPersonalProfileUpdate), httpserver.AdaptFunc(s.sendProfileMobileChallenge))
 		protected.POST("/v1/me/profile-change-requests/:request_id/actions/complete", s.requirePermission(PermissionPersonalProfileUpdate), httpserver.AdaptFunc(s.completeProfileChange))

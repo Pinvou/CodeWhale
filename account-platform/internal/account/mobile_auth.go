@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
@@ -81,6 +82,7 @@ type RegistrationResult struct {
 type MobileAuthRepository interface {
 	MobileExists(context.Context, string) (bool, error)
 	MobileIdentitySubject(context.Context, string, string) (string, error)
+	AuthorizeMobilePersonalSecurity(context.Context, string, string) (bool, error)
 	UsernameExists(context.Context, string) (bool, error)
 	CreateSliderCaptcha(context.Context, SliderCaptcha) error
 	ConsumeSliderCaptcha(context.Context, uuid.UUID, string, SMSPurpose, int) error
@@ -220,6 +222,13 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	if purpose == SMSPurposeRegister && exists {
 		return SMSChallenge{}, ErrMobileAlreadyRegistered
 	}
+	passwordResetAllowed := false
+	if purpose == SMSPurposePasswordReset && exists {
+		// Authorization failures deliberately collapse into the same accepted
+		// response as an unknown mobile. No SMS is sent when Account cannot
+		// strongly prove the personal security permission and lifecycle state.
+		passwordResetAllowed, _ = s.repository.AuthorizeMobilePersonalSecurity(ctx, s.issuer, mobile)
+	}
 	challenge := SMSChallenge{ID: uuid.Must(uuid.NewV7()), Mobile: mobile, Purpose: purpose, ExpiresAt: s.now().Add(5 * time.Minute), Source: strings.TrimSpace(source), Device: strings.TrimSpace(device), Provider: s.sms.Descriptor()}
 	if purpose == SMSPurposeRegister {
 		operationID := uuid.Must(uuid.NewV7())
@@ -250,7 +259,7 @@ func (s *MobileAuthService) Send(ctx context.Context, rawUsername, rawMobile, pa
 	// and unknown mobiles therefore share the same status and minimum timing
 	// bucket even when the provider is slow or unavailable.
 	if purpose == SMSPurposeLogin || purpose == SMSPurposePasswordReset {
-		if exists {
+		if exists && (purpose == SMSPurposeLogin || passwordResetAllowed) {
 			go s.deliverSMS(context.WithoutCancel(ctx), challenge)
 		}
 		if err := waitForResponseFloor(ctx, startedAt, s.loginResponseFloor); err != nil {
@@ -498,6 +507,21 @@ func (r *PostgresRepository) MobileIdentitySubject(ctx context.Context, issuer, 
 	var subject string
 	err := r.pool.QueryRow(ctx, `SELECT i.subject FROM users u JOIN identities i ON i.user_id=u.id WHERE u.status<>'DELETED' AND i.issuer=$2 AND (u.mobile_e164=$1 OR EXISTS(SELECT 1 FROM profile_change_requests p WHERE p.user_id=u.id AND p.identity_issuer=i.issuer AND p.identity_subject=i.subject AND p.field='MOBILE' AND p.new_value=$1 AND p.identity_updated_at IS NOT NULL AND p.status IN ('IDENTITY_UPDATED','ACCOUNT_COMMITTED','RETRY','REPAIR_REQUIRED'))) ORDER BY (u.mobile_e164=$1) DESC,i.last_seen_at DESC LIMIT 1`, mobile, issuer).Scan(&subject)
 	return subject, err
+}
+
+func (r *PostgresRepository) AuthorizeMobilePersonalSecurity(ctx context.Context, issuer, mobile string) (bool, error) {
+	subject, err := r.MobileIdentitySubject(ctx, issuer, mobile)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	decision, err := r.Authorize(ctx, identity.Principal{Issuer: issuer, Subject: subject}, PermissionPersonalSecurityManage, nil, nil)
+	if errors.Is(err, ErrForbidden) {
+		return false, nil
+	}
+	return err == nil && decision.Allowed, err
 }
 
 func (r *PostgresRepository) UsernameExists(ctx context.Context, username string) (bool, error) {

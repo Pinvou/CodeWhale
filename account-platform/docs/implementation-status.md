@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 324`、`部分实现 33`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075 与 APT-077 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批、组织对象授权及 Break-glass 可信操作者，其余入口门禁由 APT-076、APT-078–APT-082 逐项收敛。
+全量核验汇总：`已实现 325`、`部分实现 33`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075、APT-077 与 APT-080 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批、组织对象授权、Break-glass 可信操作者及密码安全矩阵，其余入口门禁由 APT-076、APT-078、APT-079、APT-081、APT-082 逐项收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -32,6 +32,7 @@
 | `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
 | `ORGANIZATION-OBJECT-AUTHORIZATION` | 显式目标组织、节点子树列表、源/目标节点双向移动门禁及成员全部实际节点归属校验 | Account Go 测试、OpenAPI lint、对象作用域合同和全量静态验证通过；数据库多节点绑定与并发移动待部署验证 |
 | `LOGIN-PERMISSION-GATE` | Keycloak 浏览器密码/短信/注册完成路径与 Direct Grant 密码/短信路径在成功前强一致检查 `personal.session.login`，并校验精确 issuer 与最小工作负载路由 | Identity 静态合同、Compose/Helm 配置、Account 生命周期授权测试及全量合同通过；自定义 Keycloak 镜像构建和真实登录待部署验证 |
+| `PASSWORD-SECURITY-AUTHORIZATION` | 已登录改密的近期认证与个人权限门禁、匿名恢复的防枚举权限/生命周期校验、密码隔离和会话撤销 | Account Go 单元测试、OpenAPI lint、密码安全合同及全量静态验证通过；真实短信、Keycloak 改密和数据库串行化待部署验证 |
 | `PERSONAL-ACCOUNT-AUTHORIZATION` | 本人资料、授权上下文、组织列表、资料变更、上下文切换、注销和邀请 Account 路由逐项绑定个人原子权限，并保持 OIDC 主体唯一目标 | Account Go 测试、OpenAPI 403 契约、路由权限矩阵和生命周期失败关闭合同通过；数据库撤权运行级验证待部署 |
 | `BILLING-SCOPE-AUTHORIZATION` | 个人余额、权益包、订单与充值管理按 `personal.*` 权限和个人上下文失败关闭；组织购买、余额、权益及额度授予按显式组织目标与 `org.*` 权限实时决定 | Token/Portal Go 测试、显式组织目标和个人/组织不可互借权限用例、OpenAPI 及全量合同通过；数据库撤权和真实组织钱包联调待部署 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
@@ -121,7 +122,7 @@
 | ID-17 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 原始密码、冻结策略版本、短期带密钥 HMAC 和最终创建只位于 Identity Adapter；Account/短信 API 只接收 15 分钟不透明引用，持久注册 Saga 另由 ACC-51～ACC-55 追踪 |
 | ID-18 | 已实现 | AUDIT_HEAD | GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | Identity 按原始字节执行 8–128 可打印 ASCII、字母和数字规则；允许中间半角空格，首尾空格返回专用错误，客户端精确确认且不 trim 密码 |
 | ID-19 | 已实现 | DOC_CURRENT | THREE-SCOPE-AUTHORIZATION; LOGIN-PERMISSION-GATE | NOT_DEPLOYED | Keycloak 浏览器与 Direct Grant 的密码、手机号密码和短信路径均在凭据成功后、`context.success()` 前用工作负载身份向 Account 强一致校验精确 issuer/subject 的 `personal.session.login`；拒绝、未知主体、状态不允许、响应畸形或 Account 不可用均不签发会话。 |
-| ID-20 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 已登录密码修改与匿名忘记密码尚未在主体解析后校验 `personal.security.manage` 及完整生命周期矩阵；由 APT-080 收敛。 |
+| ID-20 | 已实现 | DOC_CURRENT | GO-UNIT; PASSWORD-SECURITY-AUTHORIZATION | NOT_DEPLOYED | 已登录改密要求近期认证和 `personal.security.manage`；匿名恢复只在强一致权限与生命周期允许时发送短信，未知、无权和授权不可用均同形已受理，完成后撤销全部会话。 |
 | ACC-02 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Identity 与 Account 创建成功后，注册接口返回稳定 `user_id` 和 `PROVISIONING`，不调用 Billing；部署证据待补 |
 | ACC-03 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | `PROVISIONING`/`REPAIR_REQUIRED` 可登录并管理资料；Token Gateway 与充值按稳定状态原因拒绝，本地独立模型不受影响 |
 | ACC-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | 钱包任务快照策略版本与 SLA，SLA 内退避重试，超时进入 `REPAIR_REQUIRED` 并支持受审计人工重试 |
@@ -629,7 +630,7 @@
 | ID-17 | 密码只在 Identity 边界处理 | 已实现 | 独立 Identity Adapter 持有原始密码、冻结策略版本和短期带密钥 HMAC；Account/短信接口仅接收不透明引用，最终创建后清除原文、到期删除记录。 |
 | ID-18 | 密码原始字符策略 | 已实现 | 客户端与 Identity 均按原始序列校验；中间半角空格可用，首尾空格返回 `PASSWORD_EDGE_SPACE_NOT_ALLOWED`，Tab、换行、非 ASCII 和超长输入明确拒绝。 |
 | ID-19 | 登录会话签发权限 | 已实现 | Keycloak 浏览器与 Direct Grant 的密码/短信凭据路径在成功前强一致检查 `personal.session.login`；拒绝或 Account 不可用均失败关闭。 |
-| ID-20 | 密码安全操作权限 | 未实现 | 密码修改与忘记密码尚未统一校验 `personal.security.manage`、生命周期及授权可用性；APT-080 待实现。 |
+| ID-20 | 密码安全操作权限 | 已实现 | 已登录与匿名路径共用 `personal.security.manage` 和 `ACTIVE/PROVISIONING/REPAIR_REQUIRED` 允许矩阵；其他状态不发送恢复短信且不变更密码。 |
 
 验收重点：Identity 与 Account 已成功时必须返回“账号已创建”的 PROVISIONING/ACTIVE 结果；钱包短暂失败不得返回注册失败、密码错误或删除手机号身份。短信前预检不替代数据库唯一约束；Identity 创建后的预约不得按 TTL 释放。密码只进入 Identity 边界，首尾空格明确拒绝且任何层不得 trim；密码、验证码、Access Token 和 Refresh Token 不得出现在日志或前端业务 JSON 中。
 
