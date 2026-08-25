@@ -474,6 +474,11 @@ impl Engine {
         // Scoped to this external user turn: counts survive all model/tool
         // steps below, then reset before the next user prompt.
         let mut read_repeat_guard = ReadRepeatGuard::default();
+        // Note: the steer queue (in-stream collection + cross-turn carryover)
+        // lives in the `self.pending_steers` field — a function-scoped local
+        // would die with every step/return and lose messages; the field keeps
+        // unconsumed steers for the next turn on any return path (keepInbox
+        // semantics, see the field docs).
         let mut turn_error: Option<String> = None;
         let mut context_recovery_attempts = 0u8;
         let mut tool_policy = tool_policy;
@@ -503,6 +508,7 @@ impl Engine {
 
         loop {
             if self.cancel_token.is_cancelled() {
+                self.settle_steers_on_interrupt().await;
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                 return (TurnOutcomeStatus::Interrupted, None);
             }
@@ -515,22 +521,7 @@ impl Engine {
             }
 
             while let Ok(steer) = self.rx_steer.try_recv() {
-                let steer = steer.trim().to_string();
-                if steer.is_empty() {
-                    continue;
-                }
-                self.session
-                    .working_set
-                    .observe_user_message(&steer, &self.session.workspace);
-                self.add_session_message(self.user_text_message_with_turn_metadata(steer.clone()))
-                    .await;
-                let _ = self
-                    .tx_event
-                    .send(Event::status(format!(
-                        "Steer input accepted: {}",
-                        summarize_text(&steer, 120)
-                    )))
-                    .await;
+                self.inject_steer(steer).await;
             }
 
             // Child agents can finish while the parent model is still taking
@@ -899,6 +890,7 @@ impl Engine {
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
+                    self.settle_steers_on_interrupt().await;
                     let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                     return (TurnOutcomeStatus::Interrupted, None);
                 }
@@ -980,7 +972,6 @@ impl Engine {
             // content-block delta delivered to the consumer).
             let mut any_content_received = false;
             let mut transparent_stream_retries = 0u32;
-            let mut pending_steers: Vec<String> = Vec::new();
             // `stream_start` is reset on a transparent retry so the wall-clock
             // budget restarts with the fresh stream.
             let mut stream_start = Instant::now();
@@ -1037,18 +1028,7 @@ impl Engine {
                     break;
                 };
                 while let Ok(steer) = self.rx_steer.try_recv() {
-                    let steer = steer.trim().to_string();
-                    if steer.is_empty() {
-                        continue;
-                    }
-                    pending_steers.push(steer.clone());
-                    let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Steer input queued: {}",
-                            summarize_text(&steer, 120)
-                        )))
-                        .await;
+                    self.queue_steer(steer).await;
                 }
 
                 if self.cancel_token.is_cancelled() {
@@ -1559,6 +1539,7 @@ impl Engine {
             }
 
             if self.cancel_token.is_cancelled() {
+                self.settle_steers_on_interrupt().await;
                 let _ = self.tx_event.send(Event::status("Request cancelled")).await;
                 self.add_interrupted_assistant_text(&current_text_visible)
                     .await;
@@ -1859,6 +1840,9 @@ impl Engine {
                             .elapsed();
                         let status = no_progress_status_message(&reason, elapsed);
                         crate::logging::warn(compact_no_progress_diagnostic(&reason, elapsed));
+                        // keepInbox: a no-progress failure also keeps
+                        // uninjected steers (leftovers in the field carry over
+                        // to the next turn; no explicit park needed).
                         let _ = self.tx_event.send(Event::status(status.clone())).await;
                         return (TurnOutcomeStatus::Failed, Some(status));
                     }
@@ -1874,20 +1858,23 @@ impl Engine {
             // "background children" status if running>0). No status claims
             // "ending" before step 5.
             if tool_uses.is_empty() {
-                if !pending_steers.is_empty() {
-                    for steer in pending_steers.drain(..) {
-                        self.session
-                            .working_set
-                            .observe_user_message(&steer, &self.session.workspace);
-                        self.add_session_message(self.user_text_message_with_turn_metadata(steer))
-                            .await;
+                if !self.pending_steers.is_empty() {
+                    let pending = std::mem::take(&mut self.pending_steers);
+                    let mut injected_any = false;
+                    for steer in pending {
+                        injected_any |= self.inject_steer(steer).await;
                     }
-                    let _ = self
-                        .tx_event
-                        .send(Event::status("Continuing — queued steer input".to_string()))
-                        .await;
-                    turn.next_step();
-                    continue;
+                    if injected_any {
+                        let _ = self
+                            .tx_event
+                            .send(Event::status("Continuing — queued steer input".to_string()))
+                            .await;
+                        turn.next_step();
+                        continue;
+                    }
+                    // Every parked steer was withdrawn; nothing was injected,
+                    // so fall through to the normal end-of-turn ladder
+                    // instead of resuming the turn with no new content.
                 }
 
                 let shell_completions = self.drain_shell_completion_events();
@@ -2236,7 +2223,7 @@ impl Engine {
                         tool_uses.is_empty(),
                         turn_error.is_none(),
                         self.cancel_token.is_cancelled(),
-                        !pending_steers.is_empty(),
+                        !self.pending_steers.is_empty(),
                         false,
                     )
                 {
@@ -2282,6 +2269,7 @@ impl Engine {
 
             // Execute tools
             if self.shared_paused.lock().is_ok_and(|paused| *paused) {
+                self.settle_steers_on_interrupt().await;
                 let _ = self
                     .tx_event
                     .send(Event::status("Request was Paused"))
@@ -3214,6 +3202,18 @@ impl Engine {
                             biased;
                             () = self.cancel_token.cancelled() => {
                                 parallel_cancelled = true;
+                                // Explicitly kill this turn's foreground shell
+                                // process groups. Dropping a tool future does
+                                // not kill the OS process, and the in-tool
+                                // kill races the drop unreliably. Scoped to
+                                // shells spawned by still-waiting foreground
+                                // tool calls of this turn — background tasks
+                                // and sub-agent-owned shells are left alone.
+                                // Idempotent: finished tasks are unaffected.
+                                let _ = self
+                                    .shell_manager
+                                    .lock()
+                                    .map(|mut manager| manager.kill_running_turn_foreground(&turn.id));
                                 break;
                             }
                             outcome = tool_tasks.next() => {
@@ -3308,6 +3308,10 @@ impl Engine {
                             let terminal = tokio::select! {
                                 biased;
                                 () = cancel_token.cancelled() => {
+                                    let _ = self
+                                        .shell_manager
+                                        .lock()
+                                        .map(|mut manager| manager.kill_running_turn_foreground(&turn.id));
                                     ToolExecutionOutcome::cancelled(interrupted_tool_result())
                                 },
                                 result = self.execute_parallel_tool(
@@ -3579,31 +3583,44 @@ impl Engine {
                         }
 
                         let started_at = Instant::now();
-                        let (mut result, cancelled_before_completion) =
-                            if let Some(result_override) = result_override {
-                                (result_override, false)
-                            } else {
-                                tokio::select! {
-                                    biased;
-                                    () = self.cancel_token.cancelled() => {
-                                        (Ok(interrupted_tool_result()), true)
-                                    },
-                                    result = Self::execute_tool_with_lock(
-                                        tool_exec_lock.clone(),
-                                        plan.supports_parallel,
-                                        plan.interactive,
-                                        self.tx_event.clone(),
-                                        Some(self.cancel_token.clone()),
-                                        tool_name.clone(),
-                                        tool_input.clone(),
-                                        self.session.workspace.clone(),
-                                        tool_registry,
-                                        mcp_pool.clone(),
-                                        context_override.or_else(|| batch_tool_context.clone()),
-                                        self.active_turn_tool_security.clone(),
-                                    ) => (result, false),
-                                }
-                            };
+                        let (mut result, cancelled_before_completion) = if let Some(
+                            result_override,
+                        ) = result_override
+                        {
+                            (result_override, false)
+                        } else {
+                            tokio::select! {
+                                biased;
+                                () = self.cancel_token.cancelled() => {
+                                    // Dropping the tool future does not
+                                    // kill the OS process — explicitly
+                                    // kill this turn's foreground shell
+                                    // process groups (idempotent). Scoped
+                                    // to this turn's foreground tool-call
+                                    // shells; background tasks and
+                                    // sub-agent-owned shells survive.
+                                    let _ = self
+                                        .shell_manager
+                                        .lock()
+                                        .map(|mut manager| manager.kill_running_turn_foreground(&turn.id));
+                                    (Ok(interrupted_tool_result()), true)
+                                },
+                                result = Self::execute_tool_with_lock(
+                                    tool_exec_lock.clone(),
+                                    plan.supports_parallel,
+                                    plan.interactive,
+                                    self.tx_event.clone(),
+                                    Some(self.cancel_token.clone()),
+                                    tool_name.clone(),
+                                    tool_input.clone(),
+                                    self.session.workspace.clone(),
+                                    tool_registry,
+                                    mcp_pool.clone(),
+                                    context_override.or_else(|| batch_tool_context.clone()),
+                                    self.active_turn_tool_security.clone(),
+                                ) => (result, false),
+                            }
+                        };
 
                         if let Some(approval_stamp) = approval_stamp
                             && let Ok(tool_result) = result.as_mut()
@@ -4032,13 +4049,10 @@ impl Engine {
                 no_progress_warning_started_at = None;
             }
 
-            if !pending_steers.is_empty() {
-                for steer in pending_steers.drain(..) {
-                    self.session
-                        .working_set
-                        .observe_user_message(&steer, &self.session.workspace);
-                    self.add_session_message(self.user_text_message_with_turn_metadata(steer))
-                        .await;
+            if !self.pending_steers.is_empty() {
+                let pending = std::mem::take(&mut self.pending_steers);
+                for steer in pending {
+                    self.inject_steer(steer).await;
                 }
             }
 
@@ -4059,12 +4073,31 @@ impl Engine {
         }
 
         if self.cancel_token.is_cancelled() {
+            self.settle_steers_on_interrupt().await;
             return (TurnOutcomeStatus::Interrupted, None);
         }
         if let Some(err) = turn_error {
             return (TurnOutcomeStatus::Failed, Some(err));
         }
         (TurnOutcomeStatus::Completed, None)
+    }
+
+    /// Settle steers behind the current stop barrier. Interrupt/keep-inbox
+    /// leaves the set unchanged; stop/drop-inbox atomically retired every id
+    /// when cancellation was requested, including reserved late sends.
+    pub(super) async fn settle_steers_on_interrupt(&mut self) {
+        let dropped = self
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take_stopped();
+        if dropped.is_empty() {
+            return;
+        }
+        self.pending_steers
+            .retain(|steer| !dropped.iter().any(|id| id == &steer.id));
+        while self.rx_steer.try_recv().is_ok() {}
+        self.emit_dropped_steers(dropped).await;
     }
 
     fn goal_snapshot_with_current_turn_usage(

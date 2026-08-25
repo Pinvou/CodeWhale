@@ -7469,7 +7469,12 @@ async fn live_steer_crosses_message_submit_transform_exactly_once() {
     .await;
 
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        engine
+            .rx_steer
+            .recv()
+            .await
+            .map(|steer| steer.content)
+            .as_deref(),
         Some("transformed steer")
     );
     assert_eq!(std::fs::read_to_string(count).expect("hook count"), "x");
@@ -11974,7 +11979,12 @@ async fn steer_user_message_records_prompt_for_cancel_restore() {
         Some("adjust the active turn\nthen continue")
     );
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        engine
+            .rx_steer
+            .recv()
+            .await
+            .map(|steer| steer.content)
+            .as_deref(),
         Some("adjust the active turn\nthen continue")
     );
 }
@@ -12027,7 +12037,12 @@ async fn steer_user_message_backgrounds_foreground_shell_before_dispatch() {
         "foreground shell must receive its detach request"
     );
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        engine
+            .rx_steer
+            .recv()
+            .await
+            .map(|steer| steer.content)
+            .as_deref(),
         Some("use the partial results")
     );
 }
@@ -12051,7 +12066,12 @@ async fn empty_enter_sends_next_queued_message_into_running_turn() {
 
     assert_eq!(app.queued_message_count(), 0);
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        engine
+            .rx_steer
+            .recv()
+            .await
+            .map(|steer| steer.content)
+            .as_deref(),
         Some("please attend to your sub agents")
     );
 }
@@ -12121,7 +12141,12 @@ async fn queue_send_index_sends_selected_message_into_running_turn() {
         Some("first stays queued")
     );
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        engine
+            .rx_steer
+            .recv()
+            .await
+            .map(|steer| steer.content)
+            .as_deref(),
         Some("second sends now")
     );
 }
@@ -12323,7 +12348,12 @@ async fn empty_enter_promotes_the_oldest_queued_message() {
     );
     assert_eq!(app.queued_message_count(), 0);
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        engine
+            .rx_steer
+            .recv()
+            .await
+            .map(|steer| steer.content)
+            .as_deref(),
         Some("coordinate parallel tasks")
     );
 }
@@ -16708,7 +16738,12 @@ async fn steer_send_keeps_local_scroll_context() {
         "a steer is not a composer send and must not flash the tail",
     );
     assert_eq!(
-        engine.rx_steer.recv().await.as_deref(),
+        engine
+            .rx_steer
+            .recv()
+            .await
+            .map(|steer| steer.content)
+            .as_deref(),
         Some("steer into the current turn")
     );
 }

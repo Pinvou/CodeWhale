@@ -5136,6 +5136,324 @@ async fn injected_model_drives_real_engine_navigation_trajectory() {
     task.await.expect("engine task");
 }
 
+// === Steer lifecycle contract tests ===
+
+async fn steer_events_until_turn_complete(
+    handle: &EngineHandle,
+) -> (Vec<String>, Vec<String>, TurnOutcomeStatus) {
+    let mut committed = Vec::new();
+    let mut dropped = Vec::new();
+    let mut rx = handle.rx_event.write().await;
+    loop {
+        let event = tokio::time::timeout(model_turn_event_timeout(), rx.recv())
+            .await
+            .expect("engine event timeout")
+            .expect("engine event stream closed");
+        match event {
+            Event::SteerCommitted { steer_id } => committed.push(steer_id),
+            Event::SteerDropped { steer_id } => dropped.push(steer_id),
+            Event::TurnComplete { status, .. } => return (committed, dropped, status),
+            _ => {}
+        }
+    }
+}
+
+struct PendFirstStreamModelClient {
+    calls: std::sync::atomic::AtomicUsize,
+    first_entered: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::core::model_client::ModelClient for PendFirstStreamModelClient {
+    fn provider_name(&self) -> &str {
+        "deterministic-steer"
+    }
+
+    fn model(&self) -> &str {
+        "deterministic-steer-model"
+    }
+
+    async fn create_message(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::models::MessageResponse> {
+        anyhow::bail!("steer tests use the streaming model boundary")
+    }
+
+    async fn create_message_stream(
+        &self,
+        _request: crate::models::MessageRequest,
+    ) -> anyhow::Result<crate::llm_client::StreamEventBox> {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            .saturating_add(1);
+        if call == 1 {
+            self.first_entered.notify_one();
+            std::future::pending().await
+        }
+        let events = crate::llm_client::mock::canned::simple_text_turn("after the interrupt")
+            .into_iter()
+            .map(Ok);
+        Ok(Box::pin(futures_util::stream::iter(events)))
+    }
+
+    async fn health_check(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+#[tokio::test]
+async fn steer_lifecycle_rejects_idle_and_assigns_unique_ids() {
+    let workspace = tempdir().expect("tempdir");
+    let (engine, idle_handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    let error = idle_handle
+        .steer("no turn")
+        .await
+        .expect_err("idle engine must reject steer");
+    assert!(error.to_string().contains("no active turn"));
+    drop(engine);
+
+    let harness = mock_engine_handle();
+    let handle = harness.handle;
+    let mut rx_steer = harness.rx_steer;
+    let first = handle.steer("first").await.expect("first steer");
+    let second = handle.steer("second").await.expect("second steer");
+    assert_eq!((first.as_str(), second.as_str()), ("steer-1", "steer-2"));
+    assert_eq!(rx_steer.recv().await.expect("first message").id, first);
+    assert_eq!(rx_steer.recv().await.expect("second message").id, second);
+}
+
+#[tokio::test]
+async fn steer_lifecycle_capacity_wait_revalidates_target() {
+    let harness = mock_engine_handle();
+    let handle = harness.handle;
+    let mut rx_steer = harness.rx_steer;
+    for index in 0..64 {
+        handle
+            .steer(format!("fill-{index}"))
+            .await
+            .expect("fill steer channel");
+    }
+
+    let waiting_handle = handle.clone();
+    let waiting = tokio::spawn(async move { waiting_handle.reserve_steer().await });
+    tokio::task::yield_now().await;
+    assert!(
+        !waiting.is_finished(),
+        "reservation must be waiting for capacity"
+    );
+
+    let _ = handle
+        .steer_control
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retire_session();
+    rx_steer.recv().await.expect("release one channel slot");
+    let error = match waiting.await.expect("reservation task") {
+        Ok(_) => panic!("retired target must be rejected"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("no active turn"));
+    assert!(
+        handle
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unsettled
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn steer_lifecycle_interrupt_keeps_input_for_next_turn() {
+    let workspace = tempdir().expect("tempdir");
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let client: crate::core::model_client::SharedModelClient =
+        std::sync::Arc::new(PendFirstStreamModelClient {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            first_entered: std::sync::Arc::clone(&entered),
+        });
+    let (engine, handle) = Engine::new_with_model_client(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+        client,
+    );
+    let task = tokio::spawn(engine.run());
+    handle
+        .send(external_user_message_op(
+            "turn to interrupt",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send first turn");
+    tokio::time::timeout(model_turn_event_timeout(), entered.notified())
+        .await
+        .expect("first request entered");
+
+    let steer_id = handle.steer("carry me").await.expect("queue steer");
+    handle.cancel_with_mode(CancelReason::User, CancelMode::InterruptKeepInbox);
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Interrupted);
+    assert!(committed.is_empty());
+    assert!(dropped.is_empty());
+
+    handle
+        .send(external_user_message_op(
+            "next turn",
+            AppMode::Agent,
+            &Config::default(),
+        ))
+        .await
+        .expect("send next turn");
+    let (committed, dropped, status) = steer_events_until_turn_complete(&handle).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed);
+    assert_eq!(committed, vec![steer_id]);
+    assert!(dropped.is_empty());
+
+    handle.send(Op::Shutdown).await.expect("shutdown");
+    task.await.expect("engine task");
+}
+
+#[tokio::test]
+async fn steer_lifecycle_stop_retires_reserved_late_send_once() {
+    let workspace = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    let first_turn = engine.begin_steer_turn();
+    let reserved = handle.reserve_steer().await.expect("reserve steer");
+
+    // Admission closes before TurnComplete. A stop during that bookkeeping
+    // window must still retire the steer accepted by the closing generation.
+    engine.finish_steer_turn(first_turn);
+    handle.cancel();
+    engine.settle_steers_on_interrupt().await;
+    let _ = reserved.send("late after stop".to_string());
+
+    let second_turn = engine.begin_steer_turn();
+    let late = engine.rx_steer.recv().await.expect("late reserved send");
+    assert!(!engine.inject_steer(late).await);
+    engine.finish_steer_turn(second_turn);
+
+    let mut rx = handle.rx_event.write().await;
+    let dropped = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|event| matches!(event, Event::SteerDropped { steer_id } if steer_id == "steer-1"))
+        .count();
+    assert_eq!(dropped, 1, "stop must emit exactly one terminal drop");
+    assert!(engine.session.messages.is_empty());
+}
+
+#[tokio::test]
+async fn steer_lifecycle_session_rejects_late_reserved_send() {
+    let workspace = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    engine.begin_steer_turn();
+    let reserved = handle
+        .reserve_steer()
+        .await
+        .expect("reserve old-session steer");
+
+    engine.drop_all_steers().await;
+    let _ = reserved.send("old session".to_string());
+    let new_turn = engine.begin_steer_turn();
+    let late = engine.rx_steer.recv().await.expect("late old-session send");
+    assert!(!engine.inject_steer(late).await);
+    engine.finish_steer_turn(new_turn);
+
+    let mut rx = handle.rx_event.write().await;
+    let dropped = std::iter::from_fn(|| rx.try_recv().ok())
+        .filter(|event| matches!(event, Event::SteerDropped { steer_id } if steer_id == "steer-1"))
+        .count();
+    assert_eq!(dropped, 1);
+    assert!(engine.session.messages.is_empty());
+}
+
+#[tokio::test]
+async fn steer_lifecycle_withdrawal_is_bounded_and_prevents_commit() {
+    let workspace = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    let turn = engine.begin_steer_turn();
+    handle.withdraw_steer("never-existed");
+    assert!(
+        engine
+            .steer_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .withdrawn
+            .is_empty(),
+        "unknown ids must not grow the withdrawal set"
+    );
+
+    let steer_id = handle.steer("withdraw this").await.expect("queue steer");
+    handle.withdraw_steer(&steer_id);
+    let steer = engine.rx_steer.recv().await.expect("queued steer");
+    assert!(!engine.inject_steer(steer).await);
+    handle.withdraw_steer(&steer_id);
+    let state = engine
+        .steer_control
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(state.unsettled.is_empty());
+    assert!(state.withdrawn.is_empty());
+    drop(state);
+    engine.finish_steer_turn(turn);
+
+    let mut rx = handle.rx_event.write().await;
+    assert!(matches!(
+        rx.try_recv().expect("drop event"),
+        Event::SteerDropped { steer_id: id } if id == steer_id
+    ));
+    assert!(rx.try_recv().is_err(), "withdrawal settles exactly once");
+}
+
+#[tokio::test]
+async fn engine_drop_reports_unconsumed_steers_best_effort() {
+    let workspace = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    let _turn = engine.begin_steer_turn();
+    let first = handle
+        .steer("left in the channel")
+        .await
+        .expect("first steer");
+    let second = handle.steer("also unconsumed").await.expect("second steer");
+
+    // Host evicts the engine without Op::Shutdown: Drop must still report
+    // every unconsumed steer (best-effort try_send).
+    drop(engine);
+
+    let mut dropped: Vec<String> = {
+        let mut rx = handle.rx_event.write().await;
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::SteerDropped { steer_id } => Some(steer_id),
+                _ => None,
+            })
+            .collect()
+    };
+    dropped.sort();
+    let mut expected = vec![first, second];
+    expected.sort();
+    assert_eq!(
+        dropped, expected,
+        "engine drop must emit SteerDropped for every unconsumed steer"
+    );
+}
+
 #[tokio::test]
 async fn productive_tool_results_do_not_hit_no_user_input_backstop() {
     use crate::llm_client::mock::{MockLlmClient, canned};
@@ -6392,11 +6710,11 @@ fn engine_initial_prompt_includes_configured_goal() {
         ..Default::default()
     };
     let (engine, _handle) = Engine::new(config, &Config::default());
-    let prompt = match engine.session.system_prompt {
-        Some(SystemPrompt::Text(text)) => text,
+    let prompt = match &engine.session.system_prompt {
+        Some(SystemPrompt::Text(text)) => text.clone(),
         Some(SystemPrompt::Blocks(blocks)) => blocks
-            .into_iter()
-            .map(|block| block.text)
+            .iter()
+            .map(|block| block.text.clone())
             .collect::<Vec<_>>()
             .join("\n"),
         None => panic!("expected system prompt"),
@@ -6422,11 +6740,11 @@ fn engine_initial_prompt_omits_paused_goal() {
         ..Default::default()
     };
     let (engine, _handle) = Engine::new(config, &Config::default());
-    let prompt = match engine.session.system_prompt {
-        Some(SystemPrompt::Text(text)) => text,
+    let prompt = match &engine.session.system_prompt {
+        Some(SystemPrompt::Text(text)) => text.clone(),
         Some(SystemPrompt::Blocks(blocks)) => blocks
-            .into_iter()
-            .map(|block| block.text)
+            .iter()
+            .map(|block| block.text.clone())
             .collect::<Vec<_>>()
             .join("\n"),
         None => panic!("expected system prompt"),
@@ -6453,11 +6771,11 @@ fn refresh_system_prompt_uses_runtime_goal_state() {
     }
 
     engine.refresh_system_prompt();
-    let prompt = match engine.session.system_prompt {
-        Some(SystemPrompt::Text(text)) => text,
+    let prompt = match &engine.session.system_prompt {
+        Some(SystemPrompt::Text(text)) => text.clone(),
         Some(SystemPrompt::Blocks(blocks)) => blocks
-            .into_iter()
-            .map(|block| block.text)
+            .iter()
+            .map(|block| block.text.clone())
             .collect::<Vec<_>>()
             .join("\n"),
         None => panic!("expected system prompt"),
@@ -11146,7 +11464,7 @@ fn turn_tool_context_uses_planned_authority_and_route_not_installed_session() {
         reasoning_effort_auto: false,
     };
 
-    let context = engine.build_tool_context_for_turn(&authority, &route);
+    let context = engine.build_tool_context_for_turn(&authority, &route, None);
     assert_eq!(
         context.shell_policy,
         crate::worker_profile::ShellPolicy::Full
@@ -16184,8 +16502,10 @@ fn engine_handle_try_send_does_not_block_when_op_channel_is_full() {
         tx_approval: mpsc::channel(1).0,
         tx_user_input: mpsc::channel(1).0,
         tx_steer: mpsc::channel(1).0,
+        next_steer_id: Arc::new(AtomicU64::new(0)),
         shared_paused: Arc::new(StdMutex::new(false)),
         client_preflight_required: true,
+        steer_control: Arc::new(StdMutex::new(SteerControlState::default())),
         live_runtime_authority: Arc::new(StdMutex::new(LiveRuntimeAuthorityState::new(
             LiveRuntimeAuthority::from_fields(
                 AppMode::Agent,
