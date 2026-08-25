@@ -61,6 +61,32 @@ func TestAuthenticatedRemoteWriteCannotOmitClientVersion(t *testing.T) {
 	}
 }
 
+func TestExactIntegrationPathCanBypassDesktopClientVersionPolicy(t *testing.T) {
+	policy := testPolicy(t)
+	called := false
+	handler := policy.WrapExcept(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}), "/api/v1/payment-callback/token", "/api/v1/payment-callbacks")
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/payment-callback/token", nil)
+	request.Header.Set("Authorization", "Basic bound-provider-credential")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || !called {
+		t.Fatalf("exact integration path was blocked: code=%d called=%v", response.Code, called)
+	}
+
+	called = false
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/payment-callback/token/extra", nil)
+	request.Header.Set("Authorization", "Basic bound-provider-credential")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUpgradeRequired || called {
+		t.Fatalf("non-exact integration path bypassed policy: code=%d called=%v", response.Code, called)
+	}
+}
+
 func TestExpiredClientCanReadLocalIndependentRemoteData(t *testing.T) {
 	policy := testPolicy(t).WithNow(func() time.Time { return time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC) })
 	handler := policy.Wrap(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))

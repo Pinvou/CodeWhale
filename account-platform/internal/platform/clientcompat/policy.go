@@ -171,6 +171,28 @@ func (p Policy) Wrap(next http.Handler) http.Handler {
 	})
 }
 
+// WrapExcept applies desktop client compatibility policy to every request
+// except the listed exact integration paths. Callers must keep authentication
+// and authorization on the underlying handler; this only bypasses desktop
+// version headers for non-desktop clients.
+func (p Policy) WrapExcept(next http.Handler, exactPaths ...string) http.Handler {
+	excluded := make(map[string]struct{}, len(exactPaths))
+	for _, path := range exactPaths {
+		path = strings.TrimSpace(path)
+		if strings.HasPrefix(path, "/") {
+			excluded[path] = struct{}{}
+		}
+	}
+	wrapped := p.Wrap(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := excluded[r.URL.Path]; ok {
+			next.ServeHTTP(w, r)
+			return
+		}
+		wrapped.ServeHTTP(w, r)
+	})
+}
+
 func (p Policy) release(version string) (Release, bool) {
 	for _, release := range p.Releases {
 		if release.Version == version {

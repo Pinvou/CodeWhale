@@ -127,7 +127,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := httpserver.RunWithApplication("billing-service", compatibility.Wrap(service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify)), repository.Ping); err != nil {
+	handler := service.Handler(os.Getenv("INTERNAL_SERVICE_TOKEN"), verify)
+	handler = compatibility.WrapExcept(handler, "/api/v1/payment-callback/token", "/api/v1/payment-callbacks")
+	if err := httpserver.RunWithApplication("billing-service", handler, repository.Ping); err != nil {
 		log.Fatal(err)
 	}
 }
