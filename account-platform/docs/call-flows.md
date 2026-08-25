@@ -171,7 +171,7 @@ sequenceDiagram
 
 ## 6. Portal 登录与页面调用
 
-1. 浏览器访问 `/account.html` 或 `/admin.html`。
+1. 普通用户浏览器访问账号独立域名根路径 `/`；运营人员访问 `/admin.html`。
 2. 未登录时 Portal 发起 Keycloak Authorization Code + PKCE。
 3. 回调由 Portal 服务端交换 Token，并将会话保存在 Redis；浏览器仅持有 HttpOnly 会话 Cookie。
 4. 浏览器调用同源 `/api/*`，写操作携带 CSRF 证明。
@@ -433,7 +433,7 @@ sequenceDiagram
 1. 发布系统先验证公开兼容范围、OIDC discovery、制品摘要和 TOK-37 短时签名证明；失败时不提升更新渠道。
 2. 更新器复核证明、环境固定公钥、系统包签名和只读迁移预检；任一失败都不调用平台安装器。
 3. 安装后的进程要求迁移报告为完成态且配置可解析；失败只显示稳定修复原因，不访问旧 `llmapi_hub` 或产生计费探测请求。
-4. 登录用户打开 Web 个人中心时只经专用 Rust 命令跳转到受信 `/account.html`，不把 OIDC Token 交给浏览器页面。
+4. 登录用户打开 Web 个人中心时只经专用 Rust 命令跳转到受信账号独立域名根路径 `/`，不把 OIDC Token 交给浏览器页面。
 
 ## 14. 故障判断速查
 

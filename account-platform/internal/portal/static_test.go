@@ -21,6 +21,17 @@ func TestStaticHandlerServesBuiltPortalAtRoot(t *testing.T) {
 	}
 }
 
+func TestStaticHandlerDoesNotExposeLegacyAccountDocumentPath(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/account.html", nil)
+	recorder := httptest.NewRecorder()
+
+	StaticHandler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("expected legacy account document path to be unavailable, got HTTP %d", recorder.Code)
+	}
+}
+
 func TestStaticHandlerServesStableAssets(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	recorder := httptest.NewRecorder()

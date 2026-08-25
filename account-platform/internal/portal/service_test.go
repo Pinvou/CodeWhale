@@ -107,7 +107,7 @@ func TestReauthenticationForcesIdentityLoginAndTracksPreviousSession(t *testing.
 	now := time.Now().UTC()
 	session := Session{ID: "existing-session", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour), CSRFToken: strings.Repeat("r", 32)}
 	_ = store.SaveSession(context.Background(), session)
-	request := httptest.NewRequest(http.MethodGet, "/auth/login?reauthenticate=1&return_to=/account.html%3Fsection%3Dprofile", nil)
+	request := httptest.NewRequest(http.MethodGet, "/auth/login?reauthenticate=1&return_to=%2F%3Fsection%3Dprofile", nil)
 	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
 	response := httptest.NewRecorder()
 	service.Handler(nil).ServeHTTP(response, request)
@@ -119,7 +119,7 @@ func TestReauthenticationForcesIdentityLoginAndTracksPreviousSession(t *testing.
 		t.Fatalf("reauthentication must force a fresh identity login: %s", location)
 	}
 	flow := store.flows[location.Query().Get("state")]
-	if flow.PreviousSession != session.ID || flow.ReturnTo != "/account.html?section=profile" {
+	if flow.PreviousSession != session.ID || flow.ReturnTo != "/?section=profile" {
 		t.Fatalf("unexpected reauthentication flow: %+v", flow)
 	}
 }
