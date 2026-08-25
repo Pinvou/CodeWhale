@@ -6585,7 +6585,7 @@ impl RuntimeThreadManager {
                     messages_before,
                     messages_after,
                     summary_prompt,
-                    // 宿主用量展示字段，runtime thread 持久化路径不消费。
+                    // Host usage display only; runtime-thread persistence does not consume it.
                     post_input_tokens: _,
                 } => {
                     // Persist the summary into the thread record so engine

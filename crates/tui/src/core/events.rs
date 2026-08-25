@@ -296,10 +296,10 @@ pub enum Event {
         /// summary lives only in engine memory and is lost on LRU eviction
         /// or restart (SyncSession re-extracts it from the record prompt).
         summary_prompt: Option<String>,
-        /// [pinvou3-fork 2026-08-19] 压缩后新消息列表的输入 token 保守估算
-        /// （`estimate_input_tokens_conservative`，不含 system prompt）。宿主用量
-        /// 展示（代码页上下文 chip）靠它在压缩完成后立即刷新；否则只能等下一轮
-        /// 真实 usage，期间一直显示压缩前的旧值。仅宿主消费，TUI 不读。
+        /// [pinvou3-fork 2026-08-19] Conservative input-token estimate for the
+        /// complete post-compaction request, including its system prompt. Host
+        /// usage surfaces use it until the next provider-reported usage arrives.
+        /// The native TUI does not consume this field.
         #[allow(dead_code)]
         post_input_tokens: Option<u64>,
     },
