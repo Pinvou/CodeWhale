@@ -694,6 +694,16 @@
         "file": "000038_provider_failure_confirmation.up.sql",
         "version": 38,
         "sha256": "8c59937ff1a7ee7f43b429f6a9ca59858274b8854fbef411fbcf8cf7ce0c369e"
+      },
+      {
+        "file": "000039_payment_product_controls.down.sql",
+        "version": 39,
+        "sha256": "b2a8923b92c4e81fd169f1a8dc3d1e53ff6082a6b0f0648ab2b1c55b4b56f83b"
+      },
+      {
+        "file": "000039_payment_product_controls.up.sql",
+        "version": 39,
+        "sha256": "c4e8caeedeeeb97c2da1c836976fe6fd646619011c846a7c745a3700be1417fb"
       }
     ],
     "payment-simulator": [

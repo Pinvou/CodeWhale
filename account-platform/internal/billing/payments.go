@@ -195,6 +195,13 @@ func (p *PaymentCoordinator) FilterProducts(products []Product) []Product {
 	return filtered
 }
 
+func (p *PaymentCoordinator) ApplyProductAvailability(ctx context.Context, products []Product) ([]Product, error) {
+	if p.repository == nil {
+		return products, nil
+	}
+	return p.repository.ApplyProductAvailability(ctx, p.Capabilities().ProviderID, p.Capabilities().Version, products)
+}
+
 func intersectChannels(groups ...[]string) []string {
 	if len(groups) == 0 {
 		return nil
@@ -355,6 +362,13 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 	if !providerOrdersEnabled {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	var productOrdersEnabled bool
+	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT new_orders_enabled FROM payment_product_controls WHERE provider_id=$1 AND provider_version=$2 AND product_id=$3),TRUE)`, p.Capabilities().ProviderID, p.Capabilities().Version, productID).Scan(&productOrdersEnabled); err != nil {
+		return PaymentOrder{}, false, err
+	}
+	if !productOrdersEnabled {
 		return PaymentOrder{}, false, ErrConflict
 	}
 	wallet, walletErr := getWallet(ctx, tx, walletID, false)

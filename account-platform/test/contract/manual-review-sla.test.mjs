@@ -29,7 +29,7 @@ test('registration, closure, payment, usage, route and high-risk command repairs
     read('internal/token/manual_reviews.go'),
   ]);
   for (const source of ['REGISTRATION_REPAIR', 'ACCOUNT_CLOSURE_REPAIR', 'PROFILE_CHANGE_REPAIR', 'HIGH_RISK_COMMAND_REPAIR']) assert.match(account, new RegExp(source));
-  for (const source of ['manual_review_cases', 'payment_provider_controls', 'recharge_products', 'STOP_LOSS_EVALUATED']) assert.match(billing, new RegExp(source));
+  for (const source of ['manual_review_cases', 'payment_provider_controls', 'payment_product_controls', 'STOP_LOSS_EVALUATED']) assert.match(billing, new RegExp(source));
   for (const source of ['USAGE_RECONCILIATION_REVIEW', 'ROUTE_PROVISIONING_REPAIR', "health_status='UNHEALTHY'", 'STOP_LOSS_EVALUATED']) assert.match(token, new RegExp(source));
 });
 

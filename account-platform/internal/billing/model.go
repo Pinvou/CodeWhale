@@ -47,20 +47,22 @@ type Wallet struct {
 }
 
 type Product struct {
-	ProductID          string   `json:"product_id"`
-	PlanName           string   `json:"plan_name"`
-	SKUCode            string   `json:"sku_code,omitempty"`
-	AmountFen          int64    `json:"amount_fen"`
-	CreditMicrocredits int64    `json:"credit_microcredits"`
-	DisplayPoints      int64    `json:"display_points"`
-	BasePoints         int64    `json:"base_points"`
-	BonusPoints        int64    `json:"bonus_points"`
-	ValidityDays       int      `json:"validity_days"`
-	PriceStatus        string   `json:"price_status"`
-	InvoiceProductName string   `json:"invoice_product_name"`
-	Currency           string   `json:"currency"`
-	Channels           []string `json:"channels"`
-	CatalogVersion     int64    `json:"catalog_version"`
+	ProductID              string   `json:"product_id"`
+	PlanName               string   `json:"plan_name"`
+	SKUCode                string   `json:"sku_code,omitempty"`
+	AmountFen              int64    `json:"amount_fen"`
+	CreditMicrocredits     int64    `json:"credit_microcredits"`
+	DisplayPoints          int64    `json:"display_points"`
+	BasePoints             int64    `json:"base_points"`
+	BonusPoints            int64    `json:"bonus_points"`
+	ValidityDays           int      `json:"validity_days"`
+	PriceStatus            string   `json:"price_status"`
+	InvoiceProductName     string   `json:"invoice_product_name"`
+	Currency               string   `json:"currency"`
+	Channels               []string `json:"channels"`
+	CatalogVersion         int64    `json:"catalog_version"`
+	AvailabilityStatus     string   `json:"availability_status"`
+	AvailabilityReasonCode string   `json:"availability_reason_code,omitempty"`
 }
 
 type Hold struct {

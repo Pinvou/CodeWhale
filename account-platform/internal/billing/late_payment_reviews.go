@@ -605,7 +605,10 @@ SELECT payment.provider_id,payment.provider_version,payment.product_id
 		actions["provider_paused"] = true
 	}
 	if productID != nil {
-		if _, err = tx.Exec(ctx, `UPDATE recharge_products SET enabled=FALSE WHERE product_id=$1 AND enabled`, *productID); err != nil {
+		if providerID == nil || providerVersion == nil {
+			return ErrConflict
+		}
+		if _, err = tx.Exec(ctx, `INSERT INTO payment_product_controls(provider_id,provider_version,product_id,new_orders_enabled,reason_code,reason,source_case_id,updated_at) VALUES($1,$2,$3,FALSE,'AUTOMATIC_STOP_LOSS',$4,$5,$6) ON CONFLICT(provider_id,provider_version,product_id) DO UPDATE SET new_orders_enabled=FALSE,reason_code='AUTOMATIC_STOP_LOSS',reason=EXCLUDED.reason,source_case_id=EXCLUDED.source_case_id,version=payment_product_controls.version+1,updated_at=EXCLUDED.updated_at`, *providerID, *providerVersion, *productID, "P0/P1 manual review mitigation SLA exceeded", caseID, now); err != nil {
 			return err
 		}
 		actions["payment_product_paused"] = true

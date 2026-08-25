@@ -635,8 +635,12 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   const [packageId, setPackageId] = useState('');
   const [componentId, setComponentId] = useState('');
   const [amount, setAmount] = useState('');
-  useEffect(() => { if (!productId && products[0]) setProductId(products[0].product_id); }, [productId, products]);
-  const selectedProduct = products.find(item => item.product_id === productId);
+  useEffect(() => {
+    if (!products.some(item => item.product_id === productId && item.availability_status === 'AVAILABLE')) {
+      setProductId(products.find(item => item.availability_status === 'AVAILABLE')?.product_id || '');
+    }
+  }, [productId, products]);
+  const selectedProduct = products.find(item => item.product_id === productId && item.availability_status === 'AVAILABLE');
   const availableChannels = selectedProduct?.channels || [];
   useEffect(() => {
     if (!availableChannels.includes(channel)) setChannel(availableChannels[0] || '');
@@ -650,18 +654,28 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   const selectedMember = members.find(item => item.user_id === memberId);
   const amountMicrocredits = Math.round(Number(amount) * MICROCREDITS_PER_POINT);
   return <section className="ap-stack">
-    {canPurchase && <article className="ap-card"><h3>{copy.organizationPurchase}</h3><p className="ap-muted">{copy.organizationPurchaseLead}</p><div className="ap-inline"><select value={productId} onChange={event => setProductId(event.target.value)}>{products.map(product => <option key={product.product_id} value={product.product_id}>{product.plan_name} · {formatMoney(product.amount_fen)}</option>)}</select><select value={channel} onChange={event => setChannel(event.target.value)}>{availableChannels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}</select><button className="ap-primary" disabled={busy || !productId || !channel} onClick={() => onPurchase(productId, channel)}>{copy.purchaseForOrganization}</button></div>{order?.beneficiary_organization_id && <p className="ap-muted">{copy.organizationOrderCreated}: {order.merchant_order_no}</p>}</article>}
+    {canPurchase && <article className="ap-card"><h3>{copy.organizationPurchase}</h3><p className="ap-muted">{copy.organizationPurchaseLead}</p><div className="ap-inline"><select value={productId} onChange={event => setProductId(event.target.value)}>{products.map(product => <option key={product.product_id} value={product.product_id} disabled={product.availability_status !== 'AVAILABLE'}>{product.plan_name} · {formatMoney(product.amount_fen)}{product.availability_status !== 'AVAILABLE' ? ` · ${copy.paymentChannelMaintenance}` : ''}</option>)}</select><select value={channel} onChange={event => setChannel(event.target.value)}>{availableChannels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}</select><button className="ap-primary" disabled={busy || !selectedProduct || !channel} onClick={() => onPurchase(productId, channel)}>{copy.purchaseForOrganization}</button></div>{order?.beneficiary_organization_id && <p className="ap-muted">{copy.organizationOrderCreated}: {order.merchant_order_no}</p>}</article>}
     {canAllocate && <article className="ap-card"><h3>{copy.allocateMemberQuota}</h3><p className="ap-muted">{copy.allocateMemberQuotaLead}</p><form className="ap-stack" onSubmit={event => { event.preventDefault(); if (selectedMember && selectedComponent && amountMicrocredits > 0) onAllocate([{ member_user_id:selectedMember.user_id, membership_version:selectedMember.version, package_id:packageId, component_id:effectiveComponentId, component_type:selectedComponent.component_type, amount_microcredits:amountMicrocredits }]).then?.(() => setAmount('')); }}><Field label={copy.member}><select value={memberId} onChange={event => setMemberId(event.target.value)}>{members.map(member => <option key={member.user_id} value={member.user_id}>{member.display_name || member.email || member.user_id}</option>)}</select></Field><Field label={copy.entitlementPackage}><select value={packageId} onChange={event => setPackageId(event.target.value)}>{(packages.items || []).map(item => <option key={item.package_id} value={item.package_id}>{item.plan_name} · {String(item.package_id).slice(0, 8)}</option>)}</select></Field><Field label={copy.entitlementComponent}><select value={effectiveComponentId} onChange={event => setComponentId(event.target.value)}>{allocatableComponents.map(component => <option key={component.component_id} value={component.component_id}>{copy.componentTypes[component.component_type] || component.component_type} · {formatPoints(component.available_microcredits, language)}</option>)}</select></Field><Field label={copy.quotaAmount}><input type="number" min="0.0001" step="0.0001" value={amount} onChange={event => setAmount(event.target.value)} /></Field><button disabled={busy || !selectedMember || !selectedComponent || amountMicrocredits <= 0 || amountMicrocredits > Number(selectedComponent?.available_microcredits || 0)}>{copy.allocateQuota}</button></form></article>}
     <article className="ap-card"><h3>{copy.memberQuotaGrants}</h3>{grants.length ? <div className="ap-order-list">{grants.map(grant => <article className="ap-trace-card" key={grant.grant_id}><header><div><strong>{members.find(member => member.user_id === grant.member_user_id)?.display_name || grant.member_user_id}</strong><small>{copy.componentTypes[grant.component_type] || grant.component_type} · {String(grant.package_id).slice(0, 8)}</small></div><div><strong>{formatPoints(grant.available_microcredits, language)} {copy.points}</strong><span className="ap-status">{copy.grantStatuses?.[grant.status] || grant.status}</span></div></header>{canRevoke && (grant.status === 'ACTIVE' || (grant.status === 'SUSPENDED' && grant.suspension_reason !== 'ACCOUNT_CLOSED')) && Number(grant.reserved_microcredits) === 0 && Number(grant.available_microcredits) > 0 && <button disabled={busy} onClick={() => onRevoke(grant.grant_id, 'ADMIN_REVOKE')}>{copy.revokeQuota}</button>}{canReclaimClosed && grant.status === 'SUSPENDED' && grant.suspension_reason === 'ACCOUNT_CLOSED' && Number(grant.reserved_microcredits) === 0 && Number(grant.available_microcredits) > 0 && <button disabled={busy} onClick={() => onReclaim(grant.grant_id, 'ACCOUNT_CLOSED_FULL_RECLAIM')}>{copy.reclaimClosedQuota}</button>}</article>)}</div> : <Empty>{copy.noMemberQuotaGrants}</Empty>}</article>
   </section>;
 }
 
 function Wallet({ copy, language, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, onRecharge, embedded = false }) {
-  const [productId, setProductId] = useState(''); const [channel, setChannel] = useState('');
+  const [productId, setProductIdState] = useState(''); const [channel, setChannel] = useState('');
+  const setProductId = nextProductId => {
+    if (!nextProductId || products.some(item => item.product_id === nextProductId && item.availability_status === 'AVAILABLE')) setProductIdState(nextProductId);
+  };
   const [now, setNow] = useState(Date.now());
-  useEffect(() => { if (!productId && products[0]) setProductId(products[0].product_id); }, [products, productId]);
+  useEffect(() => { if (!products.some(item => item.product_id === productId && item.availability_status === 'AVAILABLE')) setProductId(products.find(item => item.availability_status === 'AVAILABLE')?.product_id || ''); }, [products, productId]);
   const selected = products.find(item => item.product_id === productId);
-  const availableChannels = selected?.channels || [];
+  const selectedAvailable = selected?.availability_status === 'AVAILABLE';
+  const allPaused = products.length > 0 && !products.some(item => item.availability_status === 'AVAILABLE');
+  const availableChannels = selectedAvailable ? selected?.channels || [] : [];
+  if (allPaused) {
+    billingUnavailable = true;
+    copy = { ...copy, billingUnavailable: copy.paymentChannelMaintenance };
+  }
+  products = products.map(product => product.availability_status === 'AVAILABLE' ? product : { ...product, plan_name: `${product.plan_name} · ${copy.paymentChannelMaintenance}` });
   useEffect(() => {
     if (!availableChannels.includes(channel)) setChannel(availableChannels[0] || '');
   }, [channel, productId, availableChannels.join('|')]);

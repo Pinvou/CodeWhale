@@ -45,6 +45,16 @@ Object.assign(accountPlatformCopy.ja, {
 });
 
 Object.assign(accountPlatformCopy.zh, {
+  paymentChannelMaintenance:'支付渠道维护中，请稍后重试。',
+});
+Object.assign(accountPlatformCopy.en, {
+  paymentChannelMaintenance:'The payment channel is under maintenance. Try again later.',
+});
+Object.assign(accountPlatformCopy.ja, {
+  paymentChannelMaintenance:'決済チャネルはメンテナンス中です。後でもう一度お試しください。',
+});
+
+Object.assign(accountPlatformCopy.zh, {
   packageId:'权益包编号', pinvouOrder:'品悟订单号', providerOrderReference:'支付方订单引用', amount:'支付金额', creditedAt:'到账时间', validPeriod:'权益有效期', totalPoints:'总积分', usedPoints:'已用积分', createdAt:'创建时间', paidAt:'支付时间', fulfillmentStatus:'发放状态', invoiceStatus:'发票状态',
   fulfillmentStatuses:{ PENDING:'待发放', CREDITED:'已到账', MANUAL_REVIEW:'人工复核中', REVOKED:'已撤销' }, invoiceStatuses:{ NOT_SUPPORTED:'当前接口不支持' },
   invoiceUnavailable:'当前支付渠道尚未开放发票申请与查询，因此此处仅展示说明，不提供不可用的操作按钮。',

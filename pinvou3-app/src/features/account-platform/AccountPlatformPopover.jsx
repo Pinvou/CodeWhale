@@ -86,7 +86,9 @@ function RechargePanel({
   const [channel, setChannel] = useState('ALIPAY');
   const [now, setNow] = useState(Date.now());
   const selected = products.find(product => product.product_id === productId);
-  const channels = selected?.channels?.length ? selected.channels : fallbackChannels;
+  const selectedAvailable = selected?.availability_status === 'AVAILABLE';
+  const allPaused = products.length > 0 && !products.some(product => product.availability_status === 'AVAILABLE');
+  const channels = selectedAvailable && selected?.channels?.length ? selected.channels : fallbackChannels;
   const remainingSeconds = orderRemainingSeconds(order, now);
   const paid = paidOrderStates.has(order?.status);
   const terminal = terminalOrderStates.has(order?.status);
@@ -95,8 +97,8 @@ function RechargePanel({
   const inactiveHint = copy.orderNoLongerPayable;
 
   useEffect(() => {
-    if (!selected && products[0]) setProductId(products[0].product_id);
-  }, [products, selected]);
+    if (!selectedAvailable) setProductId(products.find(product => product.availability_status === 'AVAILABLE')?.product_id || '');
+  }, [products, selectedAvailable]);
 
   useEffect(() => {
     if (channels.length && !channels.includes(channel)) setChannel(channels[0]);
@@ -173,6 +175,7 @@ function RechargePanel({
   return (
     <div className="space-y-2.5">
       {error && <div role="alert" className="break-words rounded-xl bg-[#EA4335]/10 px-3 py-2 text-[12px] leading-snug text-[#EA4335]">{error}</div>}
+      {allPaused && <div role="status" className="break-words rounded-xl bg-[#F59E0B]/10 px-3 py-2 text-[12px] leading-snug text-[#B45309]">{copy.paymentChannelMaintenance}</div>}
       <div className={`rounded-2xl border p-3 ${cardTheme}`}>
         <div className="flex items-end justify-between gap-3">
           <div><div className={`text-[11px] ${mutedText}`}>{copy.balance}</div><div className="mt-0.5 text-[20px] font-semibold tabular-nums">{formatPoints(balance?.available_microcredits, language)}</div></div>
@@ -186,12 +189,14 @@ function RechargePanel({
             <button
               key={product.product_id}
               type="button"
+              disabled={product.availability_status !== 'AVAILABLE'}
               aria-pressed={product.product_id === productId}
               onClick={() => setProductId(product.product_id)}
-              className={`rounded-xl border px-2 py-2.5 text-left transition-colors ${product.product_id === productId ? 'border-[#10B981] bg-[#10B981]/10' : cardTheme}`}
+              className={`rounded-xl border px-2 py-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55 ${product.product_id === productId ? 'border-[#10B981] bg-[#10B981]/10' : cardTheme}`}
             >
               <strong className="block text-[15px] tabular-nums">¥{(product.amount_fen / 100).toFixed(2)}</strong>
               <span className={`mt-0.5 block text-[11px] ${mutedText}`}>{product.display_points.toLocaleString()} {copy.points}</span>
+              {product.availability_status !== 'AVAILABLE' && <span className="mt-1 block text-[10px] text-[#B45309]">{copy.paymentChannelMaintenance}</span>}
             </button>
           ))}
         </div>
@@ -202,7 +207,7 @@ function RechargePanel({
           {channels.map(item => <option key={item} value={item}>{copy.channels[item] || item}</option>)}
         </select>
       </label>
-      <button type="button" disabled={busy || !selected} onClick={() => onCreate(productId, channel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">{busy && <RefreshCw size={13} className="animate-spin" />}{copy.createRecharge}</button>
+      <button type="button" disabled={busy || !selectedAvailable} onClick={() => onCreate(productId, channel)} className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[#10B981] text-[12px] font-semibold text-white transition-opacity disabled:opacity-40">{busy && <RefreshCw size={13} className="animate-spin" />}{copy.createRecharge}</button>
     </div>
   );
 }

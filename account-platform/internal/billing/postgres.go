@@ -113,9 +113,45 @@ ORDER BY amount_fen`, currency, channel)
 		if err := rows.Scan(&product.ProductID, &product.PlanName, &product.SKUCode, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.PriceStatus, &product.InvoiceProductName, &product.Currency, &product.Channels, &product.CatalogVersion); err != nil {
 			return nil, err
 		}
+		product.AvailabilityStatus = "AVAILABLE"
 		products = append(products, product)
 	}
 	return products, rows.Err()
+}
+
+func (r *PostgresRepository) ApplyProductAvailability(ctx context.Context, providerID, providerVersion string, products []Product) ([]Product, error) {
+	var providerEnabled bool
+	if err := r.pool.QueryRow(ctx, `SELECT COALESCE((SELECT new_orders_enabled FROM payment_provider_controls WHERE provider_id=$1 AND provider_version=$2),TRUE)`, providerID, providerVersion).Scan(&providerEnabled); err != nil {
+		return nil, err
+	}
+	pausedProducts := map[string]bool{}
+	rows, err := r.pool.Query(ctx, `SELECT product_id FROM payment_product_controls WHERE provider_id=$1 AND provider_version=$2 AND NOT new_orders_enabled`, providerID, providerVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var productID string
+		if err := rows.Scan(&productID); err != nil {
+			return nil, err
+		}
+		pausedProducts[productID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range products {
+		products[index].AvailabilityStatus = "AVAILABLE"
+		products[index].AvailabilityReasonCode = ""
+		if !providerEnabled {
+			products[index].AvailabilityStatus = "PROVIDER_PAUSED"
+			products[index].AvailabilityReasonCode = "PAYMENT_PROVIDER_PAUSED"
+		} else if pausedProducts[products[index].ProductID] {
+			products[index].AvailabilityStatus = "PRODUCT_PAUSED"
+			products[index].AvailabilityReasonCode = "PAYMENT_PRODUCT_PAUSED"
+		}
+	}
+	return products, nil
 }
 
 func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context, providerID, providerVersion string, allowTestOnly bool) (map[string]ExternalProduct, error) {

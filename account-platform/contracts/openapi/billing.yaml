@@ -502,7 +502,7 @@ components:
     RechargeProduct:
       type: object
       additionalProperties: false
-      required: [product_id, plan_name, amount_fen, credit_microcredits, display_points, base_points, bonus_points, validity_days, price_status, invoice_product_name, channels]
+      required: [product_id, plan_name, amount_fen, credit_microcredits, display_points, base_points, bonus_points, validity_days, price_status, invoice_product_name, channels, availability_status]
       properties:
         product_id:
           type: string
@@ -542,6 +542,12 @@ components:
           uniqueItems: true
           items:
             $ref: "#/components/schemas/PaymentChannel"
+        availability_status:
+          type: string
+          enum: [AVAILABLE, PROVIDER_PAUSED, PRODUCT_PAUSED]
+        availability_reason_code:
+          type: string
+          enum: [PAYMENT_PROVIDER_PAUSED, PAYMENT_PRODUCT_PAUSED]
     CreateRechargeOrderRequest:
       type: object
       additionalProperties: false

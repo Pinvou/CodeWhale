@@ -623,6 +623,11 @@ func (s *Service) listProducts(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.payments != nil {
 		products = s.payments.FilterProducts(products)
+		products, err = s.payments.ApplyProductAvailability(r.Context(), products)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
 	}
 	var version int64
 	for _, product := range products {
