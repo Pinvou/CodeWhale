@@ -116,7 +116,7 @@
         try {
           var status = await invoke("team_relay_status");
           if (!status.configured) {
-            patchCurrent({ loading: false, status: status, snapshot: null, account: null });
+            patchCurrent({ loading: false, status: status, snapshot: null, account: null, syncPending: false });
             return null;
           }
           if (!status.team_id) {
@@ -124,10 +124,10 @@
             if (account.teams && account.teams.length) {
               var restoredSnapshot = await invoke("team_relay_switch_team", { teamId: account.teams[0].id });
               var restoredStatus = Object.assign({}, status, { team_id: restoredSnapshot.bootstrap.team.id });
-              patchCurrent({ loading: false, status: restoredStatus, snapshot: restoredSnapshot, account: { principal: restoredSnapshot.bootstrap.me, teams: restoredSnapshot.teams || account.teams }, lastSyncedAt: Date.now() });
+              patchCurrent({ loading: false, status: restoredStatus, snapshot: restoredSnapshot, account: { principal: restoredSnapshot.bootstrap.me, teams: restoredSnapshot.teams || account.teams }, lastSyncedAt: Date.now(), syncPending: false });
               return restoredSnapshot;
             }
-            patchCurrent({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now() });
+            patchCurrent({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now(), syncPending: false });
             return account;
           }
           var snapshot;
@@ -142,15 +142,15 @@
             if (recoveredAccount.teams && recoveredAccount.teams.length) {
               var fallbackSnapshot = await invoke("team_relay_switch_team", { teamId: recoveredAccount.teams[0].id });
               var fallbackStatus = Object.assign({}, status, { team_id: fallbackSnapshot.bootstrap.team.id });
-              patchCurrent({ loading: false, status: fallbackStatus, snapshot: fallbackSnapshot, account: { principal: fallbackSnapshot.bootstrap.me, teams: fallbackSnapshot.teams || recoveredAccount.teams }, lastSyncedAt: Date.now() });
+              patchCurrent({ loading: false, status: fallbackStatus, snapshot: fallbackSnapshot, account: { principal: fallbackSnapshot.bootstrap.me, teams: fallbackSnapshot.teams || recoveredAccount.teams }, lastSyncedAt: Date.now(), syncPending: false });
               return fallbackSnapshot;
             }
             var emptyStatus = Object.assign({}, status, { team_id: null });
-            patchCurrent({ loading: false, status: emptyStatus, snapshot: null, account: recoveredAccount, lastSyncedAt: Date.now() });
+            patchCurrent({ loading: false, status: emptyStatus, snapshot: null, account: recoveredAccount, lastSyncedAt: Date.now(), syncPending: false });
             return recoveredAccount;
           }
           var recoveredStatus = Object.assign({}, status, { team_id: snapshot.bootstrap.team.id });
-          patchCurrent({ loading: false, status: recoveredStatus, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
+          patchCurrent({ loading: false, status: recoveredStatus, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now(), syncPending: false });
           return snapshot;
         } catch (error) {
           if (!silent) patchCurrent({ loading: false, error: String(error) });
@@ -399,6 +399,7 @@
           };
           if (result.snapshot || !activeTeamId) lifecyclePatch.snapshot = result.snapshot || null;
           if (result.account) lifecyclePatch.account = result.account;
+          lifecyclePatch.syncPending = Boolean(result.sync_error);
           if (!result.sync_error) lifecyclePatch.lastSyncedAt = Date.now();
           patch(lifecyclePatch);
           if (result.sync_error) load({ silent: true }).catch(function () {});
@@ -689,6 +690,7 @@
           preparingWorkspace: null,
           workspaceError: null,
           error: null,
+          syncPending: false,
         });
       } catch (error) {
         patch({ error: String(error) });

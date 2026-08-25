@@ -350,6 +350,7 @@ assert.match(viewSource, /listDraftSourceSessions/);
 assert.match(viewSource, /bridge\.teamRelay\.transferOwner/);
 assert.match(viewSource, /bridge\.teamRelay\.leaveTeam/);
 assert.match(viewSource, /bridge\.teamRelay\.dissolveTeam/);
+assert.match(viewSource, /relay\.syncPending/);
 assert.match(teamBoardSource, /copy\.board\.transferOwner/);
 assert.match(teamBoardSource, /copy\.board\.dissolveTeam/);
 assert.match(viewSource, /readDraftSourceSession/);

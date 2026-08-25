@@ -390,6 +390,7 @@
       workspaceError: null,
       uploadProgress: null,
       lastSyncedAt: null,
+      syncPending: false,
     },
     // 「通过聊天创建」的引导词:只随该会话首条消息发给模型,永不显示在气泡里。
     scheduledTaskPendingGuide: null,

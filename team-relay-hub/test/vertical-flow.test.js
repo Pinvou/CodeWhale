@@ -297,6 +297,38 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     }
   }
 
+  async function assertInviteOperationLocksTeamFirst(teamId, inviteId, operation, message) {
+    const teamGuard = await pool.connect();
+    const inviteInspector = await pool.connect();
+    let pendingOperation;
+    let inviteLockError = null;
+    try {
+      await teamGuard.query("BEGIN");
+      await teamGuard.query("SELECT id FROM teams WHERE id = $1 FOR UPDATE", [teamId]);
+      pendingOperation = operation();
+      await assertStillPending(pendingOperation, message);
+
+      await inviteInspector.query("BEGIN");
+      try {
+        await inviteInspector.query("SELECT id FROM invites WHERE id = $1 FOR UPDATE NOWAIT", [inviteId]);
+      } catch (error) {
+        inviteLockError = error;
+      } finally {
+        await inviteInspector.query("ROLLBACK").catch(() => {});
+      }
+
+      await teamGuard.query("COMMIT");
+      const result = await pendingOperation;
+      assert.equal(inviteLockError, null, "an invite operation waiting on its team must not lock the invite first");
+      return result;
+    } finally {
+      await teamGuard.query("ROLLBACK").catch(() => {});
+      teamGuard.release();
+      inviteInspector.release();
+      if (pendingOperation) await pendingOperation.catch(() => {});
+    }
+  }
+
   const health = await api("/v1/healthz");
   assert.deepEqual(health, { status: 200, value: { status: "ok", database: "ready" } });
 
@@ -555,6 +587,34 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   const secondBootstrap = await api(`/v1/bootstrap?team_id=${createdTeam.value.team.id}`, { token: b.device_token });
   assert.equal(secondBootstrap.status, 200);
   assert.deepEqual(secondBootstrap.value.members.map(member => member.display_name), ["A", "B", "D"]);
+
+  const lockOrderAccount = await api("/v1/enrollments/account", {
+    method: "POST",
+    body: { email: nextEmail(), display_name: "Lock order member", device_name: "Lock order test device" },
+  });
+  assert.equal(lockOrderAccount.status, 201);
+  const lockOrderInvite = await api(`/v1/teams/${createdTeam.value.team.id}/invites`, {
+    method: "POST",
+    token: a.device_token,
+    body: { expires_in_hours: 24 },
+  });
+  assert.equal(lockOrderInvite.status, 201);
+  const lockOrderedJoin = await assertInviteOperationLocksTeamFirst(
+    createdTeam.value.team.id,
+    lockOrderInvite.value.invite_id,
+    () => api("/v1/teams/join", {
+      method: "POST",
+      token: lockOrderAccount.value.device_token,
+      body: { join_code: lockOrderInvite.value.invite_code },
+    }),
+    "an invite join must wait for the team lock before locking its invite",
+  );
+  assert.equal(lockOrderedJoin.status, 200);
+  const removeLockOrderMember = await api(
+    `/v1/teams/${createdTeam.value.team.id}/members/${lockOrderAccount.value.principal.id}`,
+    { method: "DELETE", token: a.device_token },
+  );
+  assert.equal(removeLockOrderMember.status, 204);
 
   const inviteCountBeforeRemovalRace = await pool.query(
     "SELECT count(*)::integer AS count FROM invites WHERE team_id = $1",

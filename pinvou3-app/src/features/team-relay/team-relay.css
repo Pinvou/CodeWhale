@@ -1030,6 +1030,8 @@
 .team-relay-error-banner { align-items: center; background: color-mix(in srgb, #d95858 12%, var(--relay-panel)); border: 1px solid color-mix(in srgb, #d95858 36%, var(--relay-border)); border-radius: 9px; display: flex; gap: 12px; justify-content: space-between; margin: 0 0 10px; padding: 9px 12px; }
 .team-relay-error-banner span { font-size: 12px; overflow-wrap: anywhere; }
 .team-relay-error-banner button { background: transparent; border: 0; color: var(--relay-blue); cursor: pointer; white-space: nowrap; }
+.team-relay-error-banner.is-sync-warning { background: color-mix(in srgb, #d99032 14%, var(--relay-panel)); border-color: color-mix(in srgb, #d99032 42%, var(--relay-border)); }
+.team-relay-error-banner.is-sync-warning button:disabled { cursor: default; opacity: .65; }
 .team-relay-invite { align-items: center; background: color-mix(in srgb, var(--relay-blue) 9%, var(--relay-panel)); border: 1px solid color-mix(in srgb, var(--relay-blue) 28%, var(--relay-border)); border-radius: 10px; display: flex; gap: 16px; justify-content: space-between; margin-bottom: 10px; padding: 11px 13px; }
 .team-relay-invite-main { flex: 1 1 auto; min-width: 0; }
 .team-relay-invite-heading { align-items: baseline; display: flex; flex-wrap: wrap; gap: 6px 14px; }

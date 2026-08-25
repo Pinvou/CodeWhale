@@ -298,6 +298,7 @@ assert.ok(calls.some(call => call.command === 'team_relay_upload_attachment' && 
 await feature.transferOwner('member-two');
 assert.ok(calls.some(call => call.command === 'team_relay_transfer_owner' && call.args.newOwnerId === 'member-two'));
 assert.equal(state.teamRelay.snapshot.bootstrap.team.id, 'team-two');
+assert.equal(state.teamRelay.syncPending, false);
 await feature.leaveTeam();
 assert.ok(calls.some(call => call.command === 'team_relay_leave_team'));
 assert.equal(state.teamRelay.snapshot.bootstrap.team.id, 'fallback-team');
@@ -332,7 +333,8 @@ function isolatedRelayFeature(invoke) {
   });
 }
 
-const committedState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'team' }, snapshot: teamSnapshot('team'), account: { principal: { id: 'me' }, teams: [] }, error: null } };
+let committedRefreshAvailable = false;
+const committedState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'team' }, snapshot: teamSnapshot('team'), account: { principal: { id: 'me' }, teams: [] }, error: null, syncPending: false } };
 const committedFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
   state: committedState,
   notify() {},
@@ -340,7 +342,11 @@ const committedFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-rel
   async invoke(command) {
     if (command === 'team_relay_transfer_owner') return { committed: true, active_team_id: 'team', snapshot: null, account: null, sync_error: 'hub refresh failed' };
     if (command === 'team_relay_leave_team') return { committed: true, active_team_id: null, snapshot: null, account: null, sync_error: 'hub refresh failed' };
-    if (command === 'team_relay_status') throw new Error('connection lost');
+    if (command === 'team_relay_status') {
+      if (!committedRefreshAvailable) throw new Error('connection lost');
+      return { configured: true, hub_url: 'https://hub.test', team_id: null };
+    }
+    if (command === 'team_relay_account') return { principal: { id: 'me' }, teams: [] };
     return null;
   },
 });
@@ -349,11 +355,16 @@ assert.equal(committedTransfer.committed, true, 'a committed mutation must resol
 assert.equal(committedState.teamRelay.status.team_id, 'team');
 assert.equal(committedState.teamRelay.snapshot.bootstrap.team.id, 'team', 'transfer keeps the cached team until background refresh succeeds');
 assert.equal(committedState.teamRelay.error, null, 'a post-commit refresh failure must not be reported as a mutation failure');
+assert.equal(committedState.teamRelay.syncPending, true, 'a post-commit refresh failure must remain visible');
 const committedLeave = await committedFeature.leaveTeam();
 assert.equal(committedLeave.committed, true);
 assert.equal(committedState.teamRelay.status.team_id, null);
 assert.equal(committedState.teamRelay.snapshot, null, 'leave clears the invalid current team before background recovery');
 assert.equal(committedState.teamRelay.error, null);
+assert.equal(committedState.teamRelay.syncPending, true);
+committedRefreshAvailable = true;
+await committedFeature.refresh();
+assert.equal(committedState.teamRelay.syncPending, false, 'authoritative refresh clears the visible sync warning');
 
 const recoveredState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'removed-team' }, snapshot: null } };
 const recoveredFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({

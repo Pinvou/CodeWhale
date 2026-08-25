@@ -58,6 +58,44 @@ async function lockTeam(client, teamId, mode = "share") {
   }
 }
 
+async function lockInviteAfterTeam(client, tokenHash) {
+  const lookup = await client.query(
+    "SELECT team_id FROM invites WHERE token_hash = $1",
+    [tokenHash],
+  );
+  if (!lookup.rowCount) return null;
+
+  const teamResult = await client.query(
+    `SELECT id, name, created_by, created_at, dissolved_at,
+            (join_password_hash IS NOT NULL) AS join_password_configured
+       FROM teams
+      WHERE id = $1
+      FOR UPDATE`,
+    [lookup.rows[0].team_id],
+  );
+  if (!teamResult.rowCount) return null;
+
+  const inviteResult = await client.query(
+    "SELECT * FROM invites WHERE token_hash = $1 AND team_id = $2 FOR UPDATE",
+    [tokenHash, teamResult.rows[0].id],
+  );
+  if (!inviteResult.rowCount) return null;
+  return { invite: inviteResult.rows[0], team: teamResult.rows[0] };
+}
+
+function requireUsableInvite(lockedInvite) {
+  if (!lockedInvite || lockedInvite.team.dissolved_at || lockedInvite.invite.revoked_at) {
+    throw new AppError(410, "invite_expired", "The invitation is invalid or expired.");
+  }
+  if (lockedInvite.invite.claimed_at) {
+    throw new AppError(409, "invite_already_claimed", "The invitation was already claimed.");
+  }
+  if (new Date(lockedInvite.invite.expires_at).getTime() <= Date.now()) {
+    throw new AppError(410, "invite_expired", "The invitation is invalid or expired.");
+  }
+  return lockedInvite;
+}
+
 export async function createTeamWithOwnerInvite(pool, { name, expiresInHours = 24 }) {
   const teamName = text(name, "name", { minimum: 1, maximum: 120 }).trim();
   const hours = integer(expiresInHours, "expiresInHours", 1, 168);
@@ -165,26 +203,10 @@ export async function claimEnrollment(pool, body) {
   const deviceToken = newSecret();
 
   return inTransaction(pool, async (client) => {
-    const inviteResult = await client.query(
-      `SELECT i.*, t.name AS team_name, t.created_by AS team_created_by,
-              t.created_at AS team_created_at,
-              (t.join_password_hash IS NOT NULL) AS join_password_configured
-         FROM invites i
-         JOIN teams t ON t.id = i.team_id
-        WHERE i.token_hash = $1 AND t.dissolved_at IS NULL
-        FOR UPDATE OF i, t`,
-      [sha256(inviteCode)],
+    const lockedInvite = requireUsableInvite(
+      await lockInviteAfterTeam(client, sha256(inviteCode)),
     );
-    if (inviteResult.rowCount === 0 || inviteResult.rows[0].revoked_at) {
-      throw new AppError(410, "invite_expired", "The invitation is invalid or expired.");
-    }
-    const invite = inviteResult.rows[0];
-    if (invite.claimed_at) {
-      throw new AppError(409, "invite_already_claimed", "The invitation was already claimed.");
-    }
-    if (new Date(invite.expires_at).getTime() <= Date.now()) {
-      throw new AppError(410, "invite_expired", "The invitation is invalid or expired.");
-    }
+    const { invite, team } = lockedInvite;
 
     const principalId = newId();
     const deviceId = newId();
@@ -232,10 +254,10 @@ export async function claimEnrollment(pool, body) {
       device: deviceResult.rows[0],
       team: {
         id: invite.team_id,
-        name: invite.team_name,
-        created_by: invite.role === "owner" ? principalId : invite.team_created_by,
-        created_at: invite.team_created_at,
-        join_password_configured: Boolean(invite.join_password_configured),
+        name: team.name,
+        created_by: invite.role === "owner" ? principalId : team.created_by,
+        created_at: team.created_at,
+        join_password_configured: Boolean(team.join_password_configured),
       },
       membership: membershipFromRow(membershipResult.rows[0]),
     };
@@ -429,28 +451,22 @@ export async function joinTeam(pool, token, body) {
   );
   const auth = await authenticate(pool, token);
   return inTransaction(pool, async client => {
-    const inviteResult = await client.query(
-      `SELECT i.*, t.name, t.created_by AS team_created_by, t.created_at AS team_created_at,
-              (t.join_password_hash IS NOT NULL) AS join_password_configured
-         FROM invites i JOIN teams t ON t.id = i.team_id
-        WHERE i.token_hash = $1 AND i.revoked_at IS NULL AND i.claimed_at IS NULL
-          AND i.expires_at > now() AND t.created_by IS NOT NULL AND t.dissolved_at IS NULL
-        FOR UPDATE OF i`,
-      [sha256(joinCode)],
-    );
+    const tokenHash = sha256(joinCode);
+    const lockedInvite = await lockInviteAfterTeam(client, tokenHash);
     let team;
     let invite = null;
-    if (inviteResult.rowCount) {
-      invite = inviteResult.rows[0];
-      team = { id: invite.team_id, name: invite.name, created_by: invite.team_created_by, created_at: invite.team_created_at, join_password_configured: invite.join_password_configured };
-      await lockTeam(client, team.id);
+    if (lockedInvite) {
+      if (lockedInvite.team.created_by === null) {
+        throw new AppError(401, "join_password_invalid", "The team join code is invalid.");
+      }
+      ({ invite, team } = requireUsableInvite(lockedInvite));
     } else {
       const teamResult = await client.query(
         `SELECT id, name, created_by, created_at, true AS join_password_configured
            FROM teams
           WHERE join_password_hash = $1 AND created_by IS NOT NULL AND dissolved_at IS NULL
           FOR SHARE`,
-        [sha256(joinCode)],
+        [tokenHash],
       );
       if (!teamResult.rowCount) throw new AppError(401, "join_password_invalid", "The team join code is invalid.");
       team = teamResult.rows[0];
