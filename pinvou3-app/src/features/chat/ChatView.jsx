@@ -411,7 +411,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       );
     };
 
-    const ChatView = ({ theme, t, bs, prefill, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode }) => {
+    const ChatView = ({ theme, t, bs, prefill, focusComposerTick = 0, onPrefillConsumed, onOpenEditor, justInstalledTool, setJustInstalledTool, onGotoSettings, onGotoModelSettings, onGotoTools, onBackScheduledRun, codeModeAvailable = false, onSwitchHomeMode, accountPlatformClient }) => {
       const chatCopy = t.uiChat;
       const chatViewCopy = t.uiChatView;
       const sceneCopy = chatCopy.sceneModes;
@@ -1947,7 +1947,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                     <Mic size={18} />
                   </button>
                   <ComposerModeChip t={t} bs={bs} compact={composerCompact} />
-                  <ComposerModelSelector t={t} bs={bs} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} />
+                  <ComposerModelSelector t={t} bs={bs} accountPlatformClient={accountPlatformClient} onGotoSettings={onGotoModelSettings || onGotoSettings} compact={composerCompact} />
                   <ComposerToolMenu t={t} onGotoTools={onGotoTools} sessionId={bs && bs.activeSessionId} compact={composerCompact} activeSkill={bs && bs.activeSkill} />
                   <ComposerKbSelector t={t} bs={bs} compact={composerCompact} />
                 </div>

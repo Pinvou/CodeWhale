@@ -263,6 +263,8 @@
     activeModelId: null,
     defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
+    currentSessionModelRef: null,
+    pendingDraftModelRef: null,
     superPermEnabled: false,
     modeState: { mode: "yolo" },
     // 草稿态寄存的多智能体开关意图：不物化会话，首条消息创建会话时落后端。
@@ -1266,7 +1268,7 @@
     scheduled: ["scheduledRunContext", "scheduledTaskAutoOpenId", "scheduledTaskBusyAction", "scheduledTaskCreationSessionId", "scheduledTaskDetail", "scheduledTaskDraft", "scheduledTaskError", "scheduledTaskErrorKind", "scheduledTaskLoading", "scheduledTaskPendingGuide", "scheduledTaskRecentRuns", "scheduledTaskRuns", "scheduledTasks", "scheduledTaskSelectionGeneration", "selectedScheduledTaskId"],
     monitor: ["monitor", "monitorError"],
     settings: ["settings", "selectedPet"],
-    models: ["activeModelId", "currentSessionModelId", "defaultModelRef", "effectiveModelConfig", "savedModels"],
+    models: ["activeModelId", "currentSessionModelId", "currentSessionModelRef", "pendingDraftModelRef", "defaultModelRef", "effectiveModelConfig", "savedModels"],
     vllm: ["vllmBootstrapDone", "vllmBootstrapError", "vllmBootstrapping", "vllmSetup", "vllmSetupAttempt", "vllmSetupDismissed", "vllmSetupPhase"],
     interaction: ["pinvouModal", "pinvouReviews", "pinvouSummoning", "superPermEnabled"],
     personas: ["activePersona", "personaEvents", "personaPool"],

@@ -243,21 +243,38 @@
       requestedSessionId
         ? invoke("get_session_model_id", { sessionId: requestedSessionId }).catch(function () { return null; })
         : Promise.resolve(null),
+      requestedSessionId
+        ? invoke("get_session_model_ref", { sessionId: requestedSessionId }).catch(function () { return null; })
+        : Promise.resolve(null),
       invoke("get_effective_model_config", { sessionId: requestedSessionId }).catch(function () { return null; }),
     ]);
     if (requestedSessionId !== (state.activeSessionId || null)) return;
     state.currentSessionModelId = results[0];
-    state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : results[1];
+    state.currentSessionModelRef = results[1];
+    state.effectiveModelConfig = modelAvailabilityError(requestedSessionId) ? null : results[2];
     notify();
   }
-  // 切当前会话模型(chip 热切)。无 session(草稿态)时改全局默认。
-  async function switchModel(sessionId, modelId) {
-    if (sessionId) {
-      await invoke("set_session_model", { sessionId: sessionId, modelId: modelId });
-      await loadSessionModel(sessionId);
-    } else {
-      await setActiveModel(modelId);
+  // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
+  async function switchModelRef(sessionId, modelRef) {
+    if (!modelRef || !modelRef.source) throw new Error("model selection is required");
+    if (!sessionId) {
+      state.pendingDraftModelRef = modelRef;
+      notify();
+      return;
     }
+    if (modelRef.source === "ACCOUNT_PLATFORM") {
+      await invoke("account_platform_select_session_model", {
+        input: { sessionId: sessionId, modelId: modelRef.model_id },
+      });
+    } else if (modelRef.source === "LOCAL_CONFIG") {
+      await invoke("set_session_model", { sessionId: sessionId, modelId: modelRef.saved_model_id });
+    } else {
+      throw new Error("unsupported model selection source");
+    }
+    await loadSessionModel(sessionId);
+  }
+  async function switchModel(sessionId, modelId) {
+    return switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
   }
   async function testModelConnection(baseUrl, apiKey, modelId) {
     return await invoke("test_model_connection", { baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null });
@@ -291,6 +308,7 @@
       setActiveModel: setActiveModel,
       loadSessionModel: loadSessionModel,
       switchModel: switchModel,
+      switchModelRef: switchModelRef,
       testModelConnection: testModelConnection,
       testSearchProvider: testSearchProvider
     };

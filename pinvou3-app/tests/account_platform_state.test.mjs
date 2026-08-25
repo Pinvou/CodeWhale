@@ -707,3 +707,21 @@ test('settings owns the platform model default for new conversations', async () 
   assert.equal((i18n.match(/platformModelsDesc:/g) || []).length, 3);
   assert.equal((i18n.match(/appliesToNewSessions:/g) || []).length, 3);
 });
+
+test('chat model selection freezes a typed platform reference without changing the global default', async () => {
+  const settings = await readFile(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
+  const sessions = await readFile(new URL('../src/platform/tauri/bridge/sessions.js', import.meta.url), 'utf8');
+  const bridgeSettings = await readFile(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
+  const command = await readFile(new URL('../src-tauri/src/app/commands/account_platform.rs', import.meta.url), 'utf8');
+  assert.match(settings, /accountPlatformClient\.modelCatalog/);
+  assert.match(settings, /source: 'ACCOUNT_PLATFORM', model_id: item\.model_id/);
+  assert.match(settings, /bridge\.models\.switchModelRef\(activeSessionId, modelRef\)/);
+  assert.match(settings, /filter\(model => !isBuiltInAccountPlatformModel\(model\)\)/);
+  assert.match(bridgeSettings, /state\.pendingDraftModelRef = modelRef/);
+  assert.doesNotMatch(bridgeSettings, /switchModelRef[\s\S]{0,800}setActiveModel\(/);
+  assert.match(sessions, /var pendingModelRef = state\.pendingDraftModelRef/);
+  assert.match(sessions, /account_platform_select_session_model/);
+  assert.match(command, /pub async fn account_platform_select_session_model/);
+  assert.match(command, /switch_session_model_ref/);
+  assert.match(command, /"session:model_changed"/);
+});

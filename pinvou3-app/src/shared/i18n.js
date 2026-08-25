@@ -2646,6 +2646,7 @@ Object.assign(dict.zh.uiSettingsDetail, {
   appliesToNewSessions:'应用于新会话',
   modelDeprecated:'即将下架',
   modelUnavailable:'当前不可用',
+  modelSwitchFailed:'模型切换失败，请重试。',
 });
 Object.assign(dict.en.uiSettingsDetail, {
   platformModels:'Pinvou platform models',
@@ -2656,6 +2657,7 @@ Object.assign(dict.en.uiSettingsDetail, {
   appliesToNewSessions:'New conversations',
   modelDeprecated:'Retiring soon',
   modelUnavailable:'Unavailable',
+  modelSwitchFailed:'Could not switch models. Try again.',
 });
 Object.assign(dict.ja.uiSettingsDetail, {
   platformModels:'Pinvou プラットフォームモデル',
@@ -2666,6 +2668,7 @@ Object.assign(dict.ja.uiSettingsDetail, {
   appliesToNewSessions:'新しい会話に適用',
   modelDeprecated:'提供終了予定',
   modelUnavailable:'利用不可',
+  modelSwitchFailed:'モデルを切り替えられませんでした。もう一度お試しください。',
 });
 dict.zh.uiTeamRelayAccess = {
   section:'内测功能', title:'团队接力', desc:'开启后将在侧边栏显示团队接力入口。', open:'启动接力',

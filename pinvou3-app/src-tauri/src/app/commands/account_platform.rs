@@ -157,6 +157,72 @@ pub async fn account_platform_select_catalog_model(
     select_catalog_model(&input.model_id, &state, &pool).await
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCatalogModelSelection {
+    session_id: String,
+    model_id: String,
+}
+
+#[tauri::command]
+pub async fn account_platform_select_session_model(
+    input: SessionCatalogModelSelection,
+    app: AppHandle,
+    state: State<'_, AccountPlatformState>,
+    pool: State<'_, EnginePool>,
+    store: State<'_, SessionStore>,
+) -> Result<serde_json::Value, String> {
+    let session_id = input.session_id.trim();
+    let model_id = input.model_id.trim();
+    if session_id.is_empty() || session_id.len() > 160 {
+        return Err("model_catalog_selection_invalid: session_id is invalid".to_string());
+    }
+    if model_id.is_empty() || model_id.len() > 128 {
+        return Err("model_catalog_selection_invalid: model_id is invalid".to_string());
+    }
+    store
+        .load(session_id)
+        .map_err(|_| "model_catalog_selection_invalid: session does not exist".to_string())?;
+    let catalog = state
+        .request(ApiRequest {
+            area: "token".to_string(),
+            resource: "/v1/models".to_string(),
+            method: "GET".to_string(),
+            body: None,
+            idempotency_key: None,
+        })
+        .await?;
+    if !(200..300).contains(&catalog.status) {
+        return Err("model_catalog_unavailable: current catalog cannot be loaded".to_string());
+    }
+    let item = catalog
+        .body
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.get("model_id").and_then(serde_json::Value::as_str) == Some(model_id)
+            })
+        })
+        .ok_or_else(|| {
+            "model_catalog_selection_invalid: model is not catalog visible".to_string()
+        })?;
+    ensure_new_session_model_selectable(item)?;
+    pool.switch_session_model_ref(
+        session_id,
+        Some(ModelSelectionRef::account_platform(model_id)),
+    )
+    .await
+    .map_err(|error| format!("set_session_model({session_id}): {error:#}"))?;
+    super::sessions::emit_session_event(&app, "session:model_changed", session_id, "model");
+    Ok(serde_json::json!({
+        "session_id": session_id,
+        "model_id": model_id,
+        "catalog_version": catalog.body.get("catalog_version"),
+        "lifecycle_status": item.get("lifecycle_status"),
+    }))
+}
+
 async fn select_catalog_model(
     requested_model_id: &str,
     state: &AccountPlatformState,

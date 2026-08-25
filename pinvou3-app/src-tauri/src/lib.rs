@@ -687,6 +687,7 @@ pub fn run() {
             commands::account_platform::account_platform_request,
             commands::account_platform::account_platform_model_catalog,
             commands::account_platform::account_platform_select_catalog_model,
+            commands::account_platform::account_platform_select_session_model,
             commands::account_platform::account_platform_branch_replacement_session,
             commands::startup::report_frontend_startup,
             commands::startup::reveal_startup_window,

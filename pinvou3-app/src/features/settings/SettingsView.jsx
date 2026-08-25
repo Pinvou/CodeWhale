@@ -480,8 +480,12 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       multiAgentEnabled: multiAgentEnabledProp,
       multiAgentAvailable: multiAgentAvailableProp,
       onToggleMultiAgent,
+      accountPlatformClient,
     }) => {
       const [open, setOpen] = useState(false);
+      const [platformModels, setPlatformModels] = useState([]);
+      const [platformState, setPlatformState] = useState('idle');
+      const [modelSwitchError, setModelSwitchError] = useState(false);
       const triggerRef = useRef(null);
       const canManageModels = can('modelManagement');
       const canSwitchModels = can('sessionModelSwitch');
@@ -504,6 +508,26 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       useEffect(() => {
         if (!open) setMultiAgentRevealing(false);
       }, [open]);
+      useEffect(() => {
+        if (!open || !accountPlatformClient) return undefined;
+        const controller = new window.AbortController();
+        setPlatformState('loading');
+        accountPlatformClient.session(controller.signal).then(session => {
+          if (!session?.authenticated) {
+            setPlatformModels([]);
+            setPlatformState('auth_required');
+            return null;
+          }
+          return accountPlatformClient.modelCatalog(controller.signal);
+        }).then(catalog => {
+          if (!catalog || controller.signal.aborted) return;
+          setPlatformModels((catalog.items || []).filter(item => item.context_eligible && item.lifecycle_status !== 'REMOVED'));
+          setPlatformState('ready');
+        }).catch(() => {
+          if (!controller.signal.aborted) setPlatformState('error');
+        });
+        return () => controller.abort();
+      }, [open, accountPlatformClient, bs && bs.activeSessionId]);
       async function toggleMultiAgent() {
         if (multiAgentBusy || busy) return;
         if (!onToggleMultiAgent
@@ -517,24 +541,47 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           setMultiAgentBusy(false);
         }
       }
-      const savedModels = selectableModels((bs && bs.savedModels) || []);
+      const savedModels = selectableModels((bs && bs.savedModels) || [])
+        .filter(model => !isBuiltInAccountPlatformModel(model));
       const activeSessionId = sessionIdProp !== undefined ? sessionIdProp : (bs ? bs.activeSessionId : null);
       const activeModelId = bs && bs.activeModelId;
       const currentSessionModelId = sessionModelIdProp !== undefined ? sessionModelIdProp : (bs && bs.currentSessionModelId);
       const busy = busyProp !== undefined ? busyProp : (bs ? bs.busy : false);
-      const effectiveId = currentSessionModelId || activeModelId;
-      const current = savedModels.find(m => m.id === effectiveId);
-      if (!savedModels.length) return null;
-      function pick(id) {
+      const legacyRef = { source: 'LOCAL_CONFIG', saved_model_id: currentSessionModelId || activeModelId };
+      const effectiveRef = (activeSessionId ? bs?.currentSessionModelRef : bs?.pendingDraftModelRef)
+        || bs?.defaultModelRef
+        || legacyRef;
+      const effectiveLocalId = effectiveRef?.source === 'LOCAL_CONFIG' ? effectiveRef.saved_model_id : null;
+      const effectivePlatformId = effectiveRef?.source === 'ACCOUNT_PLATFORM' ? effectiveRef.model_id : null;
+      const current = savedModels.find(m => m.id === effectiveLocalId);
+      const currentPlatform = platformModels.find(item => item.model_id === effectivePlatformId);
+      const currentLabel = currentPlatform?.display_name || effectivePlatformId || (current ? selectorMainLabel(current, t) : t.modelNonePick);
+      const platformSelectable = item => {
+        if (item.lifecycle_status === 'ACTIVE') return true;
+        if (item.lifecycle_status !== 'DEPRECATED' || !item.new_session_cutoff_at) return false;
+        const cutoff = Date.parse(item.new_session_cutoff_at);
+        return Number.isFinite(cutoff) && cutoff > Date.now();
+      };
+      async function pick(modelRef) {
         setOpen(false);
-        if (id === effectiveId) return;
-        if (onSwitchModel) { onSwitchModel(activeSessionId, id); return; }
-        if (bridge.available) bridge.models.switchModel(activeSessionId, id);
+        setModelSwitchError(false);
+        const alreadySelected = modelRef.source === effectiveRef?.source
+          && (modelRef.model_id || modelRef.saved_model_id) === (effectiveRef?.model_id || effectiveRef?.saved_model_id);
+        if (alreadySelected) return;
+        try {
+          if (onSwitchModel && modelRef.source === 'LOCAL_CONFIG') {
+            await onSwitchModel(activeSessionId, modelRef.saved_model_id);
+          } else if (bridge.available) {
+            await bridge.models.switchModelRef(activeSessionId, modelRef);
+          }
+        } catch (_) {
+          setModelSwitchError(true);
+        }
       }
       return (
         <div className="relative min-w-0">
           <button ref={triggerRef} onClick={() => { if (!busy && canSwitchModels) setOpen(o => !o); }} disabled={busy || !canSwitchModels}
-            title={(current ? selectorMainLabel(current, t) : t.modelNonePick) + (busy ? ' · ' + t.modelSwitchBusy : '')}
+            title={currentLabel + (busy ? ' · ' + t.modelSwitchBusy : '')}
             className={`relative shrink-0 flex items-center justify-center ${multiAgentOn ? 'text-[#6d28d9] dark:text-[#c4b5fd]' : 'text-gray-700 dark:text-gray-200'} transition-colors border disabled:opacity-50 ${compact ? 'w-9 h-9 rounded-full bg-transparent hover:bg-black/5 dark:hover:bg-white/10 border-transparent' : 'h-8 gap-1.5 rounded-[12px] px-2.5 text-[12px] font-semibold min-w-0 max-w-full bg-black/[0.045] dark:bg-white/[0.055] hover:bg-black/[0.07] dark:hover:bg-white/[0.09] border-black/[0.045] dark:border-white/[0.06]'}`}>
             {compact ? (
               <>
@@ -544,7 +591,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             ) : (
               <>
                 <span className="w-1.5 h-1.5 shrink-0 rounded-full bg-[#34C759]"></span>
-                <span className="max-w-[116px] truncate">{t.composerModelLabel(current ? selectorMainLabel(current, t) : t.modelNonePick)}</span>
+                <span className="max-w-[116px] truncate">{t.composerModelLabel(currentLabel)}</span>
                 <ChevronDown size={13} className="opacity-50 shrink-0" />
               </>
             )}
@@ -558,7 +605,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                       {withDivider && <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />}
                       <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{label}</div>
                       {items.map(m => (
-                        <button key={m.id} onClick={() => pick(m.id)}
+                        <button key={m.id} onClick={() => pick({ source: 'LOCAL_CONFIG', saved_model_id: m.id })}
                           className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white">
                           <span className="flex items-center gap-2.5 min-w-0">
                             <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
@@ -567,15 +614,40 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                               <span className="block text-[11px] truncate text-gray-400 dark:text-gray-500 group-hover:text-white/80">{selectorSubLabel(m, t)}</span>
                             </span>
                           </span>
-                          {m.id === effectiveId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
+                          {m.id === effectiveLocalId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
                         </button>
                       ))}
                     </>
                   );
                   return (
                     <>
-                      {renderGroup(t.modelGroupPreset, preset, false)}
-                      {renderGroup(t.modelGroupCustom, custom, preset.length > 0)}
+                      {platformModels.length > 0 && (
+                        <>
+                          <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{t.uiSettingsDetail.platformModels}</div>
+                          {platformModels.map(item => {
+                            const selectable = platformSelectable(item);
+                            return (
+                              <button key={item.model_id} disabled={!selectable} onClick={() => pick({ source: 'ACCOUNT_PLATFORM', model_id: item.model_id })}
+                                className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-inherit">
+                                <span className="flex items-center gap-2.5 min-w-0">
+                                  <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
+                                  <span className="min-w-0">
+                                    <span className="block text-[13px] truncate text-gray-700 dark:text-gray-200 group-hover:text-white">{item.display_name || item.model_id}</span>
+                                    <span className="block text-[11px] truncate text-gray-400 dark:text-gray-500 group-hover:text-white/80">{item.model_id}</span>
+                                  </span>
+                                </span>
+                                {item.model_id === effectivePlatformId && <Check size={15} className="shrink-0 text-[#007AFF] group-hover:text-white" />}
+                              </button>
+                            );
+                          })}
+                        </>
+                      )}
+                      {platformState === 'loading' && <div className="px-3 py-2 text-[12px] text-gray-400">{t.uiSettingsDetail.platformModelsLoading}</div>}
+                      {platformState === 'auth_required' && <div className="px-3 py-2 text-[12px] text-gray-400">{t.uiSettingsDetail.platformModelsSignIn}</div>}
+                      {platformState === 'error' && <div className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.platformModelsUnavailable}</div>}
+                      {renderGroup(t.modelGroupPreset, preset, platformModels.length > 0)}
+                      {renderGroup(t.modelGroupCustom, custom, preset.length > 0 || platformModels.length > 0)}
+                      {modelSwitchError && <div className="px-3 py-2 text-[12px] text-[#FF3B30]">{t.uiSettingsDetail.modelSwitchFailed}</div>}
                     </>
                   );
                 })()}

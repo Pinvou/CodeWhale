@@ -151,6 +151,8 @@
     activeModelId: null,
     defaultModelRef: null,
     currentSessionModelId: null, // 当前 active session 显式绑定的模型;null=跟随全局默认
+    currentSessionModelRef: null,
+    pendingDraftModelRef: null,
     superPermEnabled: false,
     modeState: { mode: "yolo" },
     // 最新 plan/todos 快照（用于 mode header 进度 chip，与 plan_ready 卡解耦）
@@ -1181,6 +1183,7 @@
   }
   // 把 active 工作集存好后切到 id 的 buffer(opts.fresh=新建空 buffer)。
   function switchActiveTo(id, opts) {
+    state.pendingDraftModelRef = null;
     if (state.activeSessionId) saveWorkingSetTo(getBuffer(state.activeSessionId));
     state.activeSessionId = id;
     var buf = sessionStates[id];
@@ -2431,6 +2434,9 @@
     state.scheduledRunContext = null;
     state.draftEpoch++; // 每次点击都自增——含下面提前返回的「已在草稿态」分支,让前端能重置 welcomeToolId
     state.scheduledTaskPendingGuide = null; // 换了对话,未发送的定时任务引导词作废
+    state.pendingDraftModelRef = null;
+    state.currentSessionModelId = null;
+    state.currentSessionModelRef = null;
 
     // 已在干净草稿态 → 只 notify(epoch 已自增)。注意要连 chatItems 一起判空:messages 与 chatItems
     // 会背离(persona 气泡 / ensureSession 失败的 system 报错卡只进 chatItems),否则残留卡顶掉「你好」。
@@ -2462,10 +2468,37 @@
       var meta = await invoke(IS_WEB ? "web_access_create_session" : "create_session");
       // create_session 等待期间用户可能已发送/清空输入，迁移当下的最新值。
       var composerDraft = state.composerDraft || "";
+      var pendingModelRef = state.pendingDraftModelRef;
+      state.pendingDraftModelRef = null;
       switchActiveTo(meta.id, { fresh: true });
       state.composerDraft = composerDraft;
       sessionStates[meta.id].composerDraft = composerDraft;
       getBuffer(meta.id).sessionRevision = String(meta.transcript_revision || meta.transcriptRevision || "");
+      if (pendingModelRef) {
+        try {
+          if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
+            await invoke("account_platform_select_session_model", {
+              input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
+            });
+          } else if (pendingModelRef.source === "LOCAL_CONFIG") {
+            await invoke("set_session_model", {
+              sessionId: meta.id,
+              modelId: pendingModelRef.saved_model_id,
+            });
+          } else {
+            throw new Error("unsupported model selection source");
+          }
+          state.currentSessionModelRef = pendingModelRef;
+        } catch (modelError) {
+          try { await invoke("delete_session", { id: meta.id }); } catch (cleanupError) { /* keep primary failure */ }
+          enterDraft();
+          state.pendingDraftModelRef = pendingModelRef;
+          addSystemItem(bt("newChatFailed"));
+          await refreshHistoryList();
+          notify();
+          return null;
+        }
+      }
       await refreshHistoryList();
       await syncModeState();
       await syncActivePersona();
@@ -6212,34 +6245,54 @@
   async function loadSessionModel(sessionId) {
     var requestedSessionId = sessionId || null;
     var modelId = null;
+    var modelRef = null;
     var config = null;
     try {
       var results = await Promise.all([
         requestedSessionId
           ? invoke("get_session_model_id", { sessionId: requestedSessionId }).catch(function () { return null; })
           : Promise.resolve(null),
+        requestedSessionId
+          ? invoke("get_session_model_ref", { sessionId: requestedSessionId }).catch(function () { return null; })
+          : Promise.resolve(null),
         invoke("get_effective_model_config", { sessionId: requestedSessionId }).catch(function () { return null; }),
       ]);
       modelId = results[0];
-      config = results[1];
+      modelRef = results[1];
+      config = results[2];
     } catch (e) {
       modelId = null;
+      modelRef = null;
       config = null;
     }
     // ChatView effect 可能并发加载相邻两个会话；只提交仍为当前会话的结果。
     if ((state.activeSessionId || null) !== requestedSessionId) return;
     state.currentSessionModelId = modelId;
+    state.currentSessionModelRef = modelRef;
     state.effectiveModelConfig = config;
     notify();
   }
-  // 切当前会话模型(chip 热切)。无 session(草稿态)时改全局默认。
-  async function switchModel(sessionId, modelId) {
-    if (sessionId) {
-      await invoke("set_session_model", { sessionId: sessionId, modelId: modelId });
-      await loadSessionModel(sessionId);
-    } else {
-      await setActiveModel(modelId);
+  // 切当前会话模型；草稿态只寄存到首条消息物化，不改全局默认。
+  async function switchModelRef(sessionId, modelRef) {
+    if (!modelRef || !modelRef.source) throw new Error("model selection is required");
+    if (!sessionId) {
+      state.pendingDraftModelRef = modelRef;
+      notify();
+      return;
     }
+    if (modelRef.source === "ACCOUNT_PLATFORM") {
+      await invoke("account_platform_select_session_model", {
+        input: { sessionId: sessionId, modelId: modelRef.model_id },
+      });
+    } else if (modelRef.source === "LOCAL_CONFIG") {
+      await invoke("set_session_model", { sessionId: sessionId, modelId: modelRef.saved_model_id });
+    } else {
+      throw new Error("unsupported model selection source");
+    }
+    await loadSessionModel(sessionId);
+  }
+  async function switchModel(sessionId, modelId) {
+    return switchModelRef(sessionId, { source: "LOCAL_CONFIG", saved_model_id: modelId });
   }
   async function testModelConnection(baseUrl, apiKey, modelId) {
     return await invoke("test_model_connection", { baseUrl: baseUrl, apiKey: apiKey, modelId: modelId || null });
@@ -8543,6 +8596,7 @@
     setActiveModel: setActiveModel,
     loadSessionModel: loadSessionModel,
     switchModel: switchModel,
+    switchModelRef: switchModelRef,
     testModelConnection: testModelConnection,
     testSearchProvider: testSearchProvider,
     toggleSuperPerm: toggleSuperPerm,

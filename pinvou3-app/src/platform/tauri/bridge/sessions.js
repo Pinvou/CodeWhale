@@ -385,6 +385,7 @@
   function switchActiveTo(id, opts) {
     // 离开草稿（无论物化还是切去既有会话），未消费的开关寄存意图作废。
     state.pendingDraftMultiAgent = false;
+    state.pendingDraftModelRef = null;
     if (state.activeSessionId) saveWorkingSetTo(getBuffer(state.activeSessionId));
     state.activeSessionId = id;
     var buf = sessionStates[id];
@@ -421,6 +422,9 @@
     state.scheduledTaskPendingGuide = null; // 换了对话,未发送的定时任务引导词作废
     // 新草稿从关闭状态开始：寄存意图作废，开关行显示同步复位。
     state.pendingDraftMultiAgent = false;
+    state.pendingDraftModelRef = null;
+    state.currentSessionModelId = null;
+    state.currentSessionModelRef = null;
     if (state.modeState && state.modeState.multiAgent) {
       state.modeState = { mode: state.modeState.mode || "yolo", multiAgent: false };
     }
@@ -460,12 +464,50 @@
       // 草稿期开的多智能体开关此刻才落后端（开关本身不物化会话）。先取后
       // 清：switchActiveTo 会把寄存意图当作已消费。
       var pendingMultiAgent = state.pendingDraftMultiAgent === true;
+      var pendingModelRef = state.pendingDraftModelRef;
       state.pendingDraftMultiAgent = false;
+      state.pendingDraftModelRef = null;
       switchActiveTo(meta.id, { fresh: true });
       // 草稿态因首条消息/加卡等实质操作物化为 session 时，输入草稿也要
       // 跟随迁移；这不是用户主动切换到另一个已有会话。
       state.composerDraft = composerDraft;
       sessionStates[meta.id].composerDraft = composerDraft;
+      if (pendingModelRef) {
+        try {
+          if (pendingModelRef.source === "ACCOUNT_PLATFORM") {
+            await invoke("account_platform_select_session_model", {
+              input: { sessionId: meta.id, modelId: pendingModelRef.model_id },
+            });
+          } else if (pendingModelRef.source === "LOCAL_CONFIG") {
+            await invoke("set_session_model", {
+              sessionId: meta.id,
+              modelId: pendingModelRef.saved_model_id,
+            });
+          } else {
+            throw new Error("unsupported model selection source");
+          }
+          state.currentSessionModelRef = pendingModelRef;
+        } catch (modelError) {
+          try {
+            await invoke("delete_session", { id: meta.id });
+          } catch (cleanupError) {
+            // 空会话残留可手动删除，不掩盖模型选择失败。
+          }
+          enterDraft();
+          state.pendingDraftModelRef = pendingModelRef;
+          state.pendingDraftMultiAgent = pendingMultiAgent;
+          if (pendingMultiAgent) {
+            state.modeState = {
+              mode: (state.modeState && state.modeState.mode) || "yolo",
+              multiAgent: true,
+            };
+          }
+          addSystemItem(bt("newChatFailed"));
+          await refreshHistoryList();
+          notify();
+          return null;
+        }
+      }
       if (pendingMultiAgent) {
         try {
           await invoke("set_multi_agent_mode", { sessionId: meta.id, enabled: true });
@@ -480,6 +522,7 @@
             // 空会话残留可手动删除，不掩盖主错误。
           }
           enterDraft();
+          state.pendingDraftModelRef = pendingModelRef;
           state.pendingDraftMultiAgent = true;
           state.modeState = {
             mode: (state.modeState && state.modeState.mode) || "yolo",
