@@ -994,6 +994,17 @@ func (s *Service) adminResolvePaymentAnomaly(w http.ResponseWriter, r *http.Requ
 			_, err = s.payments.RepairReviewedOrder(r.Context(), *detail.Case.PaymentOrderID, adminActor(adminPrincipal(r)), body.Reason)
 			financialStatus = "APPLIED"
 		}
+	case "CONFIRM_PROVIDER_FAILED":
+		if detail.Case.AnomalyType != "ILLEGAL_TRANSITION" || s.payments == nil {
+			err = ErrConflict
+		} else {
+			var item PaymentAnomalyCase
+			item, err = s.payments.ConfirmProviderFailed(r.Context(), caseID, adminActor(adminPrincipal(r)), idempotencyKey, body.Reason)
+			if err == nil {
+				api.WriteJSON(w, http.StatusOK, item)
+				return
+			}
+		}
 	case "DISMISS":
 		if detail.Case.AnomalyType == "DUPLICATE_PAYMENT" || detail.Case.AnomalyType == "LATE_PAYMENT_CONFLICT" || detail.Case.AnomalyType == "ILLEGAL_TRANSITION" {
 			err = ErrConflict

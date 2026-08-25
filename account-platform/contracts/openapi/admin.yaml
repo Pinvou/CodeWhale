@@ -2377,7 +2377,7 @@ components:
       additionalProperties: false
       required: [resolution, reason]
       properties:
-        resolution: { type: string, enum: [CONFIRM_CHARGEBACK, CONFIRM_FORCED_REFUND, CONFIRM_PAYMENT, DISMISS, ESCALATE_FINANCIAL_REPAIR] }
+        resolution: { type: string, enum: [CONFIRM_CHARGEBACK, CONFIRM_FORCED_REFUND, CONFIRM_PAYMENT, CONFIRM_PROVIDER_FAILED, DISMISS, ESCALATE_FINANCIAL_REPAIR] }
         reason: { type: string, minLength: 10, maxLength: 2000 }
     ReconciliationCase:
       type: object

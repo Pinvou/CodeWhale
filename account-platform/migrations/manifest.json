@@ -684,6 +684,16 @@
         "file": "000037_trial_price_200_yuan.up.sql",
         "version": 37,
         "sha256": "9f9249baf0fe99e35831da2dbed8c6b84a44d6ae2104591ce6f4bc2368019c3c"
+      },
+      {
+        "file": "000038_provider_failure_confirmation.down.sql",
+        "version": 38,
+        "sha256": "55e79ef2f393bc5b84045c447ea64395aad0698a33f5789c7e1240cad52cd09e"
+      },
+      {
+        "file": "000038_provider_failure_confirmation.up.sql",
+        "version": 38,
+        "sha256": "8c59937ff1a7ee7f43b429f6a9ca59858274b8854fbef411fbcf8cf7ce0c369e"
       }
     ],
     "payment-simulator": [

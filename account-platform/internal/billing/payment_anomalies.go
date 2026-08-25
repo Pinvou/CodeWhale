@@ -246,6 +246,67 @@ summary_version=summary_version+1,updated_at=$2 WHERE payment.id=$1`, *item.Paym
 	})
 }
 
+func (r *PostgresRepository) ConfirmProviderFailed(ctx context.Context, caseID, actorID uuid.UUID, idempotencyKey, reason string, expectedCaseVersion int64, queriedAt time.Time, provider ProviderOrder) (PaymentAnomalyCase, error) {
+	reason = strings.TrimSpace(reason)
+	payload, digest, err := providerEvidencePayload(provider, nil)
+	if err != nil || expectedCaseVersion < 1 || queriedAt.IsZero() || len([]rune(reason)) < 10 {
+		return PaymentAnomalyCase{}, ErrConflict
+	}
+	return r.updatePaymentAnomaly(ctx, caseID, actorID, idempotencyKey, "CONFIRM_PROVIDER_FAILED", reason, func(ctx context.Context, tx pgx.Tx, item PaymentAnomalyCase, now time.Time) (PaymentAnomalyCase, error) {
+		if item.AnomalyType != "ILLEGAL_TRANSITION" || item.Status != "OPEN" || item.Version != expectedCaseVersion || item.PaymentOrderID == nil || item.PaymentEvidenceID == nil || item.OwnerID == nil || *item.OwnerID != actorID {
+			return item, ErrConflict
+		}
+		order, orderErr := getPaymentOrderByID(ctx, tx, *item.PaymentOrderID, true)
+		if orderErr != nil {
+			return item, orderErr
+		}
+		if order.Status != "MANUAL_REVIEW" || order.FulfillmentStatus != "MANUAL_REVIEW" || !providerFailureMatchesOrder(provider, order) || order.ProviderID == "" || order.ProviderVersion == "" {
+			return item, ErrConflict
+		}
+		var evidenceStatus string
+		if err := tx.QueryRow(ctx, `SELECT COALESCE(provider_status,'') FROM payment_evidence WHERE id=$1 AND payment_order_id=$2 AND provider_id=$3 AND provider_version=$4`, *item.PaymentEvidenceID, order.ID, order.ProviderID, order.ProviderVersion).Scan(&evidenceStatus); err != nil || !strings.EqualFold(strings.TrimSpace(evidenceStatus), "FAILED") {
+			return item, ErrConflict
+		}
+		var blocked bool
+		if err := tx.QueryRow(ctx, `SELECT
+			EXISTS(SELECT 1 FROM payment_evidence WHERE payment_order_id=$1 AND received_at>$2)
+			OR EXISTS(SELECT 1 FROM payment_transactions WHERE payment_order_id=$1)
+			OR EXISTS(SELECT 1 FROM entitlement_packages WHERE payment_order_id=$1)
+			OR EXISTS(SELECT 1 FROM payment_anomaly_cases WHERE payment_order_id=$1 AND id<>$3 AND status='OPEN')
+			OR EXISTS(SELECT 1 FROM late_payment_review_cases review JOIN late_payment_review_evidence evidence ON evidence.case_id=review.id WHERE review.payment_order_id=$1 AND evidence.evidence_type='USER_PAYMENT_CLAIM')
+			OR EXISTS(SELECT 1 FROM payment_evidence WHERE payment_order_id=$1 AND (payment_transaction_id IS NOT NULL OR provider_transaction_id IS NOT NULL OR UPPER(COALESCE(provider_status,'')) IN ('PAID','PAY_SUCCESS','SUCCESS')))`, order.ID, queriedAt, caseID).Scan(&blocked); err != nil {
+			return item, err
+		}
+		if blocked {
+			return item, ErrConflict
+		}
+		confirmationID := uuid.Must(uuid.NewV7())
+		if _, err := tx.Exec(ctx, `INSERT INTO payment_provider_failure_confirmations(id,payment_anomaly_case_id,payment_order_id,provider_id,provider_version,provider_status,provider_payload_digest,provider_snapshot,queried_at,actor_id,reason,created_at) VALUES($1,$2,$3,$4,$5,'FAILED',$6,$7,$8,$9,$10,$11)`, confirmationID, caseID, order.ID, order.ProviderID, order.ProviderVersion, digest, json.RawMessage(payload), queriedAt, actorID, reason, now); err != nil {
+			return item, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET status='FAILED',fulfillment_status='PENDING',close_status='EXPIRED',payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,provider_status='FAILED',last_successful_query_at=$2,last_authoritative_unpaid_at=$2,updated_at=$3 WHERE id=$1 AND status='MANUAL_REVIEW'`, order.ID, queriedAt, now); err != nil {
+			return item, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_anomaly_cases SET status='RESOLVED',resolution_code='CONFIRM_PROVIDER_FAILED',resolution_reason=$2,financial_action_status='NONE',version=version+1,updated_at=$3,resolved_at=$3 WHERE id=$1`, caseID, reason, now); err != nil {
+			return item, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE manual_review_cases SET status='RESOLVED',first_response_at=COALESCE(first_response_at,$2),mitigation_at=COALESCE(mitigation_at,$2),resolved_at=$2,updated_at=$2 WHERE id=$1`, caseID, now); err != nil {
+			return item, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary=CASE WHEN EXISTS(SELECT 1 FROM payment_anomaly_cases WHERE payment_order_id=$1 AND status='OPEN') THEN 'REVIEW_REQUIRED' ELSE 'NORMAL' END,summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
+			return item, err
+		}
+		if err := events.AppendOutbox(ctx, tx, "billing.payment-provider.failure-confirmed.v1", order.ID, item.Version+1, map[string]any{"case_id": caseID, "payment_order_id": order.ID, "confirmation_id": confirmationID, "provider_id": order.ProviderID, "provider_version": order.ProviderVersion}); err != nil {
+			return item, err
+		}
+		resolution := "CONFIRM_PROVIDER_FAILED"
+		item.Status, item.ResolutionCode, item.ResolutionReason, item.FinancialActionStatus = "RESOLVED", &resolution, stringPointer(reason), "NONE"
+		item.Version++
+		item.UpdatedAt, item.ResolvedAt = now, &now
+		return item, nil
+	})
+}
+
 func validPaymentAnomalyResolution(anomalyType, resolution, financialStatus string) bool {
 	if resolution == "ESCALATE_FINANCIAL_REPAIR" {
 		return financialStatus == "PENDING"

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 334 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 298`、`部分实现 28`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `334` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。
+全量核验汇总：`已实现 300`、`部分实现 28`、`未实现 11`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `341` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44、ADM-43 已由 APT-065 在仓库闭环；PAY-45–PAY-47、UI-20、ADM-44 分别等待 APT-066、APT-067。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -234,6 +234,10 @@
 | PAY-41 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CALLBACK-GATEWAY | NOT_DEPLOYED | 新华三创建订单必传付款人的永久不可变 `user_id` 作为 `merchantCustomerKey`；主动查询和回调返回值均与订单冻结的付款人标识再次核对，手机号和展示编码不承担资金归属 |
 | PAY-42 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CALLBACK-GATEWAY | NOT_DEPLOYED | H3C Profile 严格接收与 `queryOrder.content` 相同的原生订单对象，回调和主动查询复用同一 DTO、状态/流水/时间/金额映射及统一证据归并器，未知状态失败关闭为人工复核 |
 | PAY-43 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CALLBACK-GATEWAY | NOT_DEPLOYED | 商城元金额由精确十进制转换为分；PAID 必须具有正实付金额、支付时间和稳定流水，订单号、客户标识、SKU、金额或支付状态冲突均拒绝履约并保留复核证据 |
+| PAY-44 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | `CONFIRM_PROVIDER_FAILED` 仅允许本人已认领的非法跃迁案件；Billing 现场查询并原子复核永久客户标识、SKU、金额、无流水/权益/申诉/并发证据后结案，保存不可变确认和 Outbox |
+| PAY-45 | 未实现 | DOC_CURRENT | NONE | NOT_DEPLOYED | APT-066 待拆分目录上架与 Provider/商品运行时止损控制 |
+| PAY-46 | 未实现 | DOC_CURRENT | NONE | NOT_DEPLOYED | APT-067 待接入 Account 双人审批和 Billing 恢复执行器 |
+| PAY-47 | 未实现 | DOC_CURRENT | NONE | NOT_DEPLOYED | APT-066 待返回可见不可选的暂停商品和稳定原因码 |
 | UI-02 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 桌面区分注册、自动登录与钱包初始化，展示 `PROVISIONING`/`REPAIR_REQUIRED`，初始化期间不请求余额、充值或平台模型 |
 | UI-13 | 已实现 | DOC_CURRENT | DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 三语用量页可停止当前客户端交付，并分别展示执行和结算状态；UNSUPPORTED 明示后台继续结束并按可信实际用量结算，不显示为即时免费 |
 | UI-14 | 已实现 | DOC_CURRENT | ACCOUNT-CLOSURE-SAGA; UI-LINT; ACCOUNT-PORTAL-BUILD | NOT_DEPLOYED | 个人中心提供明确确认、阶段/SLA、脱敏阻断分类和用户动作；轮询持久状态，不展示 Provider 响应、内部资源 ID 或其他用户信息 |
@@ -270,6 +274,8 @@
 | ADM-40 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 申请保存规范化命令 SHA-256 指纹、目标、关键版本、财务/策略/授权快照和预期影响；审批与执行不匹配时写结构化失效原因 |
 | ADM-41 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 申请、审批、执行分别直接读取 Account 用户、平台绑定、有效期和授权版本；撤权、停用、到期、版本变化或授权事实不可确认时失败关闭 |
 | ADM-42 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 批准事务仅发布绑定指纹/策略/快照的 Outbox 授权；Billing 执行端在短窗口内复核并以稳定执行键原子入账，失败可按原命令重试且数据库阻止新调整绕过审批 |
+| ADM-43 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 支付异常接口只接收案件、原因和幂等键，Provider 状态及资金门禁完全由 Billing 现场查询与事务复核决定 |
+| ADM-44 | 未实现 | DOC_CURRENT | NONE | NOT_DEPLOYED | APT-067 待提供支付渠道控制查询、恢复申请和独立审批执行 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
 | NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |
@@ -303,6 +309,7 @@
 | UI-17 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LINT; ARCHITECTURE-GUARD | NOT_DEPLOYED | 桌面账号 Popover 已移除目录读取、平台模型状态和选择入口；登录、余额、充值、Web 个人中心和退出登录保持不变 |
 | UI-18 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 设置页独立显示服务端品悟平台模型目录、生命周期和不可选状态；选择只写入类型化全局默认并明确标注应用于新会话，本地/第三方列表不再显示平台路由占位模型 |
 | UI-19 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; MULTIAGENT-REGRESSION; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 对话选择器按来源展示当前上下文可用的具体平台目录模型及本地/第三方模型；已有会话直接写类型化会话引用，空白草稿延迟到首条消息创建会话后冻结，均不改全局默认 |
+| UI-20 | 未实现 | DOC_CURRENT | NONE | NOT_DEPLOYED | APT-066 待在个人中心展示支付暂停商品、禁用下单并提供三语维护提示 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
@@ -769,6 +776,10 @@
 | PAY-41 | 商城客户使用永久用户标识 | 已实现 | 创建订单和按用户分页查询传付款人的不可变 `user_id` 作为 `merchantCustomerKey`；商城返回值与订单冻结付款人再次核对。 |
 | PAY-42 | 新华三查询与回调共用原生订单合同 | 已实现 | H3C 回调严格接收 `queryOrder.content` 原生对象，主动查询和回调复用 DTO、映射和证据归并器；新增未知状态进入人工复核。 |
 | PAY-43 | 商城十进制金额精确校验 | 已实现 | `needPayAmt`、`paidAmt`、`skuAmt` 不经浮点精确转分；成功状态缺少正实付额、时间、流水或与本地快照冲突时拒绝履约。 |
+| PAY-44 | 受控确认 Provider 失败 | 已实现 | 本人已认领案件经现场查询和无资金事实门禁后原子结案，保存不可变确认、命令和事件；晚到成功事实仍可继续归并。 |
+| PAY-45 | 商品目录与支付止损分离 | 未实现 | APT-066。 |
+| PAY-46 | 支付能力双人恢复 | 未实现 | APT-067。 |
+| PAY-47 | 支付暂停对用户可见 | 未实现 | APT-066。 |
 
 ### 3.6 个人中心与运营后台
 
@@ -792,6 +803,7 @@
 | UI-17 | 账号 Popover 职责收敛 | 已实现 | 已移除平台模型目录请求、下拉和默认值写入，同时保留账号、额度、充值、Web 个人中心和退出登录。 |
 | UI-18 | 设置中的平台模型默认项 | 已实现 | 已按服务端目录显示具体平台模型、生命周期和不可选状态，选择只改变空白新会话默认值，并与本地/第三方配置分组隔离。 |
 | UI-19 | 对话内直接选择平台模型 | 已实现 | 对话选择器直接列出上下文可用的平台目录模型并与本地/第三方分组；选择只写当前会话，草稿态延迟冻结且不改全局默认。 |
+| UI-20 | 充值商品暂停态 | 未实现 | APT-066。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
 | ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |
@@ -834,6 +846,8 @@
 | ADM-40 | 审批快照与资源变更失效 | 已实现 | 命令指纹、关键版本、财务/策略/授权快照不可变，审批或执行发现变化时结构化失效。 |
 | ADM-41 | 执行前权限重新校验 | 已实现 | 执行前绕过缓存复核双方用户、绑定、权限、有效期和授权版本；事实不可确认时失败关闭。 |
 | ADM-42 | 已批准命令安全执行 | 已实现 | 批准只写 Outbox 授权；Billing 受限执行端使用稳定幂等键产生一次领域效果，原命令失败可重试，任何命令变化必须新申请。 |
+| ADM-43 | Provider 失败确认 | 已实现 | 后台命令只提交案件、原因和幂等键，现场 Provider 查询和资金门禁由 Billing 服务端控制。 |
+| ADM-44 | 支付渠道控制与双人恢复 | 未实现 | APT-067。 |
 
 ## 4. 非功能需求
 

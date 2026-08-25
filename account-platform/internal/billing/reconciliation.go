@@ -237,6 +237,50 @@ func (p *PaymentCoordinator) SyncReviewedOrder(ctx context.Context, orderID uuid
 	return p.syncOrder(ctx, orderID, true)
 }
 
+func providerFailureMatchesOrder(provider ProviderOrder, order PaymentOrder) bool {
+	return provider.Status == "REVIEW_REQUIRED" && strings.EqualFold(strings.TrimSpace(provider.ProviderStatus), "FAILED") &&
+		provider.MerchantOrderNo == order.MerchantOrderNo && provider.Channel == order.Channel &&
+		provider.AmountFen == order.AmountFen && provider.Currency == order.Currency &&
+		strings.TrimSpace(provider.ExternalCustomerKey) != "" && provider.ExternalCustomerKey == order.RequesterID.String() &&
+		strings.TrimSpace(provider.ExternalSKU) != "" && provider.ExternalSKU == order.ProviderSKU &&
+		provider.ChannelTransactionID == nil && provider.PaidAt == nil
+}
+
+func (p *PaymentCoordinator) ConfirmProviderFailed(ctx context.Context, caseID, actorID uuid.UUID, idempotencyKey, reason string) (PaymentAnomalyCase, error) {
+	if !p.Capabilities().OrderQuerySupported || caseID == uuid.Nil || actorID == uuid.Nil || len([]rune(strings.TrimSpace(reason))) < 10 {
+		return PaymentAnomalyCase{}, ErrConflict
+	}
+	detail, err := p.repository.PaymentAnomalyDetail(ctx, caseID)
+	if err != nil {
+		return PaymentAnomalyCase{}, err
+	}
+	if detail.Case.AnomalyType != "ILLEGAL_TRANSITION" || detail.Case.Status != "OPEN" || detail.Case.PaymentOrderID == nil || detail.Case.OwnerID == nil || *detail.Case.OwnerID != actorID {
+		return PaymentAnomalyCase{}, ErrConflict
+	}
+	order, err := getPaymentOrderByID(ctx, p.repository.pool, *detail.Case.PaymentOrderID, false)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentAnomalyCase{}, ErrNotFound
+	}
+	if err != nil {
+		return PaymentAnomalyCase{}, err
+	}
+	capabilities := p.Capabilities()
+	if order.ProviderID != capabilities.ProviderID || order.ProviderVersion != capabilities.Version || order.Status != "MANUAL_REVIEW" {
+		return PaymentAnomalyCase{}, ErrConflict
+	}
+	providerOrder, err := providerCall(p, "ORDER_QUERY", order.Channel, false, func() (ProviderOrder, error) {
+		return p.provider.Get(ctx, order.MerchantOrderNo)
+	})
+	if err != nil {
+		return PaymentAnomalyCase{}, errors.Join(ErrPaymentProvider, err)
+	}
+	queriedAt := p.now()
+	if !providerFailureMatchesOrder(providerOrder, order) {
+		return PaymentAnomalyCase{}, ErrConflict
+	}
+	return p.repository.ConfirmProviderFailed(ctx, caseID, actorID, idempotencyKey, reason, detail.Case.Version, queriedAt, providerOrder)
+}
+
 func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, reviewed bool) (PaymentOrder, error) {
 	if !p.Capabilities().OrderQuerySupported {
 		return PaymentOrder{}, payment.ErrUnsupported

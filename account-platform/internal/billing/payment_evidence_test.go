@@ -25,6 +25,24 @@ func TestProviderMatchesFrozenOrderIdentityAndSKU(t *testing.T) {
 	}
 }
 
+func TestProviderFailureMatchesOrderRequiresExactUnpaidIdentity(t *testing.T) {
+	order := PaymentOrder{MerchantOrderNo: "order-1", RequesterID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), ProviderSKU: "sku-1", Channel: "ALIPAY", AmountFen: 20000, Currency: "CNY"}
+	provider := ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, ExternalCustomerKey: order.RequesterID.String(), ExternalSKU: order.ProviderSKU, Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Status: "REVIEW_REQUIRED", ProviderStatus: "FAILED"}
+	if !providerFailureMatchesOrder(provider, order) {
+		t.Fatal("exact FAILED provider fact should be confirmable")
+	}
+	provider.ExternalCustomerKey = ""
+	if providerFailureMatchesOrder(provider, order) {
+		t.Fatal("missing permanent customer identity must fail closed")
+	}
+	provider.ExternalCustomerKey = order.RequesterID.String()
+	transactionID := "provider-payment-1"
+	provider.ChannelTransactionID = &transactionID
+	if providerFailureMatchesOrder(provider, order) {
+		t.Fatal("FAILED fact with a payment transaction must fail closed")
+	}
+}
+
 func TestClassifyPaymentTransaction(t *testing.T) {
 	expiresAt := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC)
 	allowLate := PaymentPolicy{MaximumLateConfirmation: time.Hour}
