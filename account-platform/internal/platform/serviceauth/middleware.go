@@ -23,20 +23,21 @@ import (
 const defaultMaximumLifetime = 15 * time.Minute
 
 type Identity struct {
-	ActorType string
-	Service   string
-	Subject   string
-	JobType   string
-	JobRunID  string
+	ActorType   string
+	Service     string
+	Subject     string
+	JobType     string
+	JobRunID    string
+	Permission  string
+	permissions []string
 }
 
 type identityContextKey struct{}
 
 type rule struct {
-	Subject string   `json:"subject"`
-	Service string   `json:"service"`
-	Methods []string `json:"methods"`
-	Paths   []string `json:"paths"`
+	Subject     string   `json:"subject"`
+	Service     string   `json:"service"`
+	Permissions []string `json:"permissions"`
 }
 
 type authenticator struct {
@@ -56,7 +57,11 @@ func ContextForJob(ctx context.Context, service, jobType, jobRunID string) (cont
 	if service == "" || jobType == "" || jobRunID == "" {
 		return ctx, errors.New("service, job type, and job run ID are required")
 	}
-	identity := Identity{ActorType: "SERVICE", Service: service, Subject: service, JobType: jobType, JobRunID: jobRunID}
+	permission := "internal.job." + strings.ToLower(strings.ReplaceAll(jobType, "_", "-"))
+	if !validPermission(permission) {
+		return ctx, errors.New("job type cannot be mapped to an exact internal permission")
+	}
+	identity := Identity{ActorType: "SERVICE", Service: service, Subject: service, JobType: jobType, JobRunID: jobRunID, Permission: permission, permissions: []string{permission}}
 	return context.WithValue(ctx, identityContextKey{}, identity), nil
 }
 
@@ -133,8 +138,13 @@ func newAuthenticator(expectedToken string) authenticator {
 		return authenticator{invalid: errors.New("workload identity rules must be a non-empty JSON array")}
 	}
 	for _, item := range rules {
-		if strings.TrimSpace(item.Subject) == "" || strings.TrimSpace(item.Service) == "" || len(item.Methods) == 0 || len(item.Paths) == 0 {
-			return authenticator{invalid: errors.New("each workload identity rule requires subject, service, methods, and paths")}
+		if strings.TrimSpace(item.Subject) == "" || strings.TrimSpace(item.Service) == "" || len(item.Permissions) == 0 {
+			return authenticator{invalid: errors.New("each workload identity rule requires subject, service, and exact permissions")}
+		}
+		for _, permission := range item.Permissions {
+			if !validPermission(permission) {
+				return authenticator{invalid: errors.New("workload identity permission must be an exact internal permission")}
+			}
 		}
 	}
 	keySet := oidc.NewRemoteKeySet(context.Background(), jwksURL)
@@ -164,28 +174,38 @@ func (auth authenticator) authenticate(request *http.Request) (Identity, int) {
 		if !valid {
 			return Identity{}, http.StatusUnauthorized
 		}
-		return Identity{ActorType: "SERVICE", Service: "development-static-token", Subject: "development-static-token"}, http.StatusOK
+		return Identity{ActorType: "SERVICE", Service: "development-static-token", Subject: "development-static-token", permissions: []string{"internal.*"}}, http.StatusOK
 	}
 	subject, err := auth.verify(request.Context(), parts[1])
 	if err != nil {
 		return Identity{}, http.StatusUnauthorized
 	}
 	for _, item := range auth.rules {
-		if item.Subject == subject && slices.Contains(item.Methods, request.Method) && pathAllowed(item.Paths, request.URL.Path) {
-			return Identity{ActorType: "SERVICE", Service: item.Service, Subject: subject}, http.StatusOK
+		if item.Subject == subject {
+			return Identity{ActorType: "SERVICE", Service: item.Service, Subject: subject, permissions: append([]string(nil), item.Permissions...)}, http.StatusOK
 		}
 	}
 	return Identity{}, http.StatusForbidden
 }
 
-func pathAllowed(patterns []string, path string) bool {
-	for _, pattern := range patterns {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == path || (strings.HasSuffix(pattern, "*") && strings.HasPrefix(path, strings.TrimSuffix(pattern, "*"))) {
-			return true
+func Require(permission string) gin.HandlerFunc {
+	permission = strings.TrimSpace(permission)
+	return func(c *gin.Context) {
+		workload, ok := FromContext(c.Request.Context())
+		if !ok || !validPermission(permission) || (!slices.Contains(workload.permissions, permission) && !slices.Contains(workload.permissions, "internal.*")) {
+			writeAuthenticationError(c.Writer, c.Request, http.StatusForbidden)
+			c.Abort()
+			return
 		}
+		workload.Permission = permission
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), identityContextKey{}, workload))
+		c.Next()
 	}
-	return false
+}
+
+func validPermission(permission string) bool {
+	permission = strings.TrimSpace(permission)
+	return strings.HasPrefix(permission, "internal.") && permission != "internal.*" && !strings.ContainsAny(permission, "* \\/")
 }
 
 func validateHTTPSURL(raw string) error {

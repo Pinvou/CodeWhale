@@ -254,7 +254,13 @@ func appendMemberQuotaAudit(ctx context.Context, tx pgx.Tx, grant MemberQuotaGra
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO member_quota_grant_audits(id,grant_id,organization_id,member_user_id,action,actor_user_id,amount_microcredits,snapshot,occurred_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, uuid.Must(uuid.NewV7()), grant.ID, grant.OrganizationID, grant.MemberUserID, action, actor, amount, snapshot, now)
+	delegation := delegatedAudit(ctx)
+	var workloadService, workloadSubject, delegatedPermission any
+	var delegationID, authorizationVersion any
+	if delegation != nil {
+		workloadService, workloadSubject, delegationID, delegatedPermission, authorizationVersion = delegation.WorkloadService, delegation.WorkloadSubject, delegation.DelegationID, delegation.Permission, delegation.AuthorizationVersion
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO member_quota_grant_audits(id,grant_id,organization_id,member_user_id,action,actor_user_id,amount_microcredits,snapshot,occurred_at,workload_service,workload_subject,delegation_id,delegated_permission,delegation_authorization_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, uuid.Must(uuid.NewV7()), grant.ID, grant.OrganizationID, grant.MemberUserID, action, actor, amount, snapshot, now, workloadService, workloadSubject, delegationID, delegatedPermission, authorizationVersion)
 	return err
 }
 

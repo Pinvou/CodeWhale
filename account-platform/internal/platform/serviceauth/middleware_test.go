@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
 func TestMiddlewareRequiresExactToken(t *testing.T) {
@@ -49,20 +51,32 @@ func TestProjectedCredentialIsReloadedForEveryRequest(t *testing.T) {
 	}
 }
 
-func TestWorkloadRulesDefaultDenyAndExposeServiceIdentity(t *testing.T) {
+func TestWorkloadRulesExposeOnlyExactPermissions(t *testing.T) {
 	auth := authenticator{verify: func(context.Context, string) (string, error) {
 		return "system:serviceaccount:pinvou:billing-service", nil
-	}, rules: []rule{{Subject: "system:serviceaccount:pinvou:billing-service", Service: "billing-service", Methods: []string{http.MethodPost}, Paths: []string{"/internal/v1/authorization/*"}}}}
+	}, rules: []rule{{Subject: "system:serviceaccount:pinvou:billing-service", Service: "billing-service", Permissions: []string{"internal.authorization.check"}}}}
 	allowed := httptest.NewRequest(http.MethodPost, "/internal/v1/authorization/check", nil)
 	allowed.Header.Set("Authorization", "Bearer signed")
 	identity, status := auth.authenticate(allowed)
-	if status != http.StatusOK || identity.ActorType != "SERVICE" || identity.Service != "billing-service" {
+	if status != http.StatusOK || identity.ActorType != "SERVICE" || identity.Service != "billing-service" || len(identity.permissions) != 1 || identity.permissions[0] != "internal.authorization.check" {
 		t.Fatalf("unexpected decision: %#v %d", identity, status)
 	}
-	denied := httptest.NewRequest(http.MethodDelete, "/internal/v1/authorization/check", nil)
-	denied.Header.Set("Authorization", "Bearer signed")
-	if _, status := auth.authenticate(denied); status != http.StatusForbidden {
-		t.Fatalf("expected forbidden, got %d", status)
+}
+
+func TestRequireRejectsUnassignedInternalPermission(t *testing.T) {
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		workload := Identity{ActorType: "SERVICE", Service: "billing-service", Subject: "billing", permissions: []string{"internal.authorization.check"}}
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), identityContextKey{}, workload))
+	})
+	router.POST("/allowed", Require("internal.authorization.check"), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	router.POST("/denied", Require("internal.authorization.delegate"), func(c *gin.Context) { c.Status(http.StatusNoContent) })
+	for path, expected := range map[string]int{"/allowed": http.StatusNoContent, "/denied": http.StatusForbidden} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, nil))
+		if response.Code != expected {
+			t.Fatalf("%s returned %d, want %d", path, response.Code, expected)
+		}
 	}
 }
 
@@ -82,7 +96,7 @@ func TestBackgroundIdentityCannotMasqueradeAsHuman(t *testing.T) {
 		t.Fatal(err)
 	}
 	identity, ok := FromContext(ctx)
-	if !ok || identity.ActorType != "SERVICE" || identity.JobRunID != "run-1" {
+	if !ok || identity.ActorType != "SERVICE" || identity.JobRunID != "run-1" || identity.Permission != "internal.job.outbox-relay" {
 		t.Fatalf("unexpected background identity: %#v", identity)
 	}
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
@@ -235,7 +236,11 @@ UNION ALL SELECT 1 FROM payment_anomaly_cases anomaly JOIN payment_orders paymen
 	}
 	result := AccountClosedGrantReclaim{Grant: grant, AmountMicrocredits: amount, SubjectLifecycleVersion: lifecycleVersion}
 	snapshot, _ = json.Marshal(result)
-	if _, err := tx.Exec(ctx, `INSERT INTO account_closed_grant_reclaim_commands(organization_id,idempotency_key,request_fingerprint,grant_id,actor_user_id,reason,response_snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, organizationID, idempotencyKey, fingerprint, grant.ID, actorID, reason, snapshot, now); err != nil {
+	delegation := delegatedAudit(ctx)
+	if delegation == nil {
+		return AccountClosedGrantReclaim{}, ErrConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO account_closed_grant_reclaim_commands(organization_id,idempotency_key,request_fingerprint,grant_id,actor_user_id,reason,response_snapshot,created_at,workload_service,workload_subject,delegation_id,delegated_permission,delegation_authorization_version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, organizationID, idempotencyKey, fingerprint, grant.ID, actorID, reason, snapshot, now, delegation.WorkloadService, delegation.WorkloadSubject, delegation.DelegationID, delegation.Permission, delegation.AuthorizationVersion); err != nil {
 		return AccountClosedGrantReclaim{}, err
 	}
 	return result, tx.Commit(ctx)
@@ -281,11 +286,11 @@ func (s *Service) reclaimAccountClosedGrantInternal(w http.ResponseWriter, r *ht
 	organizationID, organizationErr := uuid.Parse(r.PathValue("organization_id"))
 	grantID, grantErr := uuid.Parse(r.PathValue("grant_id"))
 	var body struct {
-		ActorUserID uuid.UUID `json:"actor_user_id"`
-		Reason      string    `json:"reason"`
+		Reason string `json:"reason"`
 	}
+	delegation, delegated := humandelegation.FromContext(r.Context())
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if organizationErr != nil || grantErr != nil || api.DecodeJSON(w, r, &body) != nil || body.ActorUserID == uuid.Nil || len(key) < 16 || len(key) > 128 || strings.TrimSpace(body.Reason) == "" {
+	if organizationErr != nil || grantErr != nil || !delegated || api.DecodeJSON(w, r, &body) != nil || len(key) < 16 || len(key) > 128 || strings.TrimSpace(body.Reason) == "" {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid account-closed grant reclaim", httpserver.RequestID(r.Context()))
 		return
 	}
@@ -310,7 +315,7 @@ func (s *Service) reclaimAccountClosedGrantInternal(w http.ResponseWriter, r *ht
 		s.writeError(w, r, err)
 		return
 	}
-	result, err := repository.ReclaimAccountClosedGrant(r.Context(), organizationID, grantID, body.ActorUserID, lifecycleVersion, body.Reason, key)
+	result, err := repository.ReclaimAccountClosedGrant(r.Context(), organizationID, grantID, delegation.HumanUserID, lifecycleVersion, body.Reason, key)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

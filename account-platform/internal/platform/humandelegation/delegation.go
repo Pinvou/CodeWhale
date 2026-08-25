@@ -1,6 +1,7 @@
 package humandelegation
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -73,6 +74,33 @@ type Expectation struct {
 	HTTPMethod     string
 	HTTPPath       string
 	RequestSHA256  string
+}
+
+type contextKey struct{}
+
+func WithClaims(ctx context.Context, claims Claims) context.Context {
+	return context.WithValue(ctx, contextKey{}, claims)
+}
+
+func FromContext(ctx context.Context) (Claims, bool) {
+	claims, ok := ctx.Value(contextKey{}).(Claims)
+	return claims, ok
+}
+
+func DecodeVerificationKeysJSON(encoded string) (map[string]ed25519.PublicKey, error) {
+	var values map[string]string
+	if json.Unmarshal([]byte(strings.TrimSpace(encoded)), &values) != nil || len(values) == 0 {
+		return nil, errors.New("human delegation verification keys must be a non-empty JSON object")
+	}
+	keys := make(map[string]ed25519.PublicKey, len(values))
+	for keyID, value := range values {
+		key, err := DecodeVerificationKey(value)
+		if err != nil || !codePattern.MatchString(strings.TrimSpace(keyID)) {
+			return nil, errors.New("human delegation verification keys contain an invalid entry")
+		}
+		keys[strings.TrimSpace(keyID)] = key
+	}
+	return keys, nil
 }
 
 func DecodeSigningKey(encoded string) (ed25519.PrivateKey, error) {

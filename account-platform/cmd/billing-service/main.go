@@ -22,6 +22,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cpayment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -70,6 +71,15 @@ func main() {
 		log.Fatal(err)
 	}
 	service := billing.NewService(repository).WithPayments(payments).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate).WithAccountClosureStateVerifier(closureStates)
+	humanDelegationKeys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	humanDelegations, err := humandelegation.NewVerifier(humanDelegationKeys)
+	if err != nil {
+		log.Fatal(err)
+	}
+	service.WithHumanDelegations(humanDelegations)
 	if strings.EqualFold(strings.TrimSpace(os.Getenv("BILLING_PAYMENT_PROVIDER")), "h3c_mall") {
 		authenticator, profiles, callbackErr := paymentCallbackConfiguration(payments.Capabilities())
 		if callbackErr != nil {

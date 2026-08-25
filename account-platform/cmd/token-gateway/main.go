@@ -80,6 +80,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	billingClient.WithHumanDelegations(authorizer)
 	maximumInputTokens := int64(128_000)
 	if raw := os.Getenv("TOKEN_GATEWAY_MAX_INPUT_TOKENS"); raw != "" {
 		parsed, parseErr := strconv.ParseInt(raw, 10, 64)

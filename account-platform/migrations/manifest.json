@@ -754,6 +754,16 @@
         "file": "000040_payment_provider_resume_audit.up.sql",
         "version": 40,
         "sha256": "51689728517c6c69362bde15225c49ac6e9ad4fa5bdc9df082218455c42db0f0"
+      },
+      {
+        "file": "000041_human_delegation_audit.down.sql",
+        "version": 41,
+        "sha256": "869b854de8bb88dee337e86542ebc80354965e00019eaf1915d3933ca5f64d1f"
+      },
+      {
+        "file": "000041_human_delegation_audit.up.sql",
+        "version": 41,
+        "sha256": "970ec8ab9a93c957db00357b13fe8d6d7a8c61b8cadaed78bff2cb9d0797b3f3"
       }
     ],
     "payment-simulator": [

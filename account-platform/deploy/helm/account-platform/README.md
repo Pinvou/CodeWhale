@@ -23,7 +23,8 @@ registration, authentication, payment, and model keys. Account human-operation
 delegations additionally require `human-delegation-signing-key-id` and an isolated
 Ed25519 seed/private key in unpadded Base64URL as
 `human-delegation-signing-key-base64url`; publish only the derived public key to
-authorized consumers and overlap key IDs during rotation. The exact public OIDC token
+authorized consumers as `human-delegation-verification-keys-json` and overlap key IDs
+during rotation. The exact public OIDC token
 path is routed through Identity Adapter and fails closed when its external Redis
 or Keycloak dependency is unavailable. Never place those values in a
 values file or rendered manifest.

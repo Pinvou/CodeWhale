@@ -7,11 +7,15 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('Account human delegation is short lived signed and fully request bound', async () => {
-  const [delegation, handler, service, client, compose, helm] = await Promise.all([
+  const [delegation, handler, service, client, billing, billingQuota, tokenBilling, migration, compose, helm] = await Promise.all([
     read('internal/platform/humandelegation/delegation.go'),
     read('internal/account/human_delegation.go'),
     read('internal/account/service.go'),
     read('internal/platform/authorization/client.go'),
+    read('internal/billing/human_delegation.go'),
+    read('internal/billing/member_quota_http.go'),
+    read('internal/token/billing.go'),
+    read('migrations/billing/000041_human_delegation_audit.up.sql'),
     read('deploy/compose/compose.yaml'),
     read('deploy/helm/account-platform/templates/app-deployments.yaml'),
   ]);
@@ -26,6 +30,15 @@ test('Account human delegation is short lived signed and fully request bound', a
   assert.doesNotMatch(handler, /ActorUserID|CreatedBy/);
   assert.match(service, /internal\.POST\("\/authorization\/human-delegations"/);
   assert.match(client, /\/human-delegations/);
+  assert.match(billing, /X-Pinvou-Human-Delegation/);
+  assert.match(billing, /humanDelegations\.Verify/);
+  assert.doesNotMatch(billingQuota, /json:"(?:actor_user_id|created_by)"/);
+  assert.match(tokenBilling, /rawDelegated/);
+  assert.match(tokenBilling, /RequestSHA256/);
+  assert.match(migration, /workload_service/);
+  assert.match(migration, /workload_subject/);
+  assert.match(migration, /delegation_id/);
+  assert.match(migration, /delegation_authorization_version/);
   assert.match(compose, /HUMAN_DELEGATION_SIGNING_KEY_BASE64URL/);
   assert.match(helm, /human-delegation-signing-key-base64url/);
 });

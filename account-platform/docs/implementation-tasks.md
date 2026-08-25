@@ -99,7 +99,7 @@
 | APT-073 | 删除普通 Token Account/路由/凭据管理入口并隔离存量非平台凭据 | SCOPE-03, ADM-47 | APT-031, APT-069 | CODE | DONE |
 | APT-074 | 审批列表、详情、决定和执行复核改为按冻结策略权限解析 | ADM-46 | APT-008, APT-069 | CODE | DONE |
 | APT-075 | 组织管理脱离活动计费上下文并实现节点对象级授权决定 | ACC-64 | APT-011, APT-017, APT-069 | CODE | DONE |
-| APT-076 | 各内部 HTTP、任务和事件入口接入精确工作负载权限并消费受签人类委托 | NFR-12 | APT-006, APT-045, APT-082 | CODE | PENDING |
+| APT-076 | 各内部 HTTP、任务和事件入口接入精确工作负载权限并消费受签人类委托 | NFR-12 | APT-006, APT-045, APT-082 | CODE | DONE |
 | APT-077 | Break-glass 可信执行身份派生并删除命令行自报操作者 | ADM-48 | APT-006 | CODE | DONE |
 | APT-078 | 桌面、个人中心及后台按权威权限和版本驱动入口状态 | UI-22 | APT-070–APT-075, APT-080, APT-081 | CODE | PENDING |
 | APT-079 | 全 HTTP/任务/事件/回调/CLI 敏感入口授权覆盖发布门禁 | CORE-08, NFR-52 | APT-069–APT-078, APT-080–APT-082 | CODE | PENDING |

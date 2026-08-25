@@ -136,6 +136,8 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 | 开发库密码 | `PAYMENT_SIM_DB_PASSWORD`、`NEWAPI_DB_PASSWORD` |
 | 内部鉴权 | Kubernetes 投射 OIDC 工作负载令牌：`WORKLOAD_IDENTITY_TOKEN_FILE`、`WORKLOAD_IDENTITY_ISSUER`、`WORKLOAD_IDENTITY_JWKS_URL`、`WORKLOAD_IDENTITY_AUDIENCE`、`WORKLOAD_IDENTITY_RULES_JSON`；Account 另从 Secret 读取 `HUMAN_DELEGATION_SIGNING_KEY_ID` 与 `HUMAN_DELEGATION_SIGNING_KEY_BASE64URL` 签发最长 5 分钟的人类操作委托；仅 development/test 可使用 `INTERNAL_SERVICE_TOKEN` 兼容路径 |
 
+`WORKLOAD_IDENTITY_RULES_JSON` 的每个 Subject 只能列出接收路由实际声明的精确 `internal.*` 权限，不接受方法/宽路径前缀或 `internal.*` 通配符。Billing 从独立 Secret `HUMAN_DELEGATION_VERIFICATION_KEYS_JSON` 读取“key ID → Ed25519 公钥”集合；轮换时先发布新公钥并保留旧公钥，待最长 5 分钟旧委托自然失效后切换 Account 签名 key ID，再移除旧公钥。私钥只进入 Account，公钥消费者不能签发委托。
+
 每个数据库用户必须使用不同随机密码。生产环境不得沿用 `.env.example` 中的占位值。
 
 ### 6.2 OIDC 与 Keycloak

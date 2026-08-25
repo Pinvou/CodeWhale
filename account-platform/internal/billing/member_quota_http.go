@@ -12,6 +12,7 @@ import (
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/google/uuid"
 )
 
@@ -68,17 +69,17 @@ func (s *Service) allocateMemberQuotaBatch(w http.ResponseWriter, r *http.Reques
 	repository, ok := s.repository.(memberQuotaRepository)
 	organizationID, err := uuid.Parse(r.PathValue("organization_id"))
 	var body struct {
-		CreatedBy uuid.UUID              `json:"created_by"`
-		Items     []memberQuotaBatchItem `json:"items"`
+		Items []memberQuotaBatchItem `json:"items"`
 	}
+	delegation, delegated := humandelegation.FromContext(r.Context())
 	batchKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if !ok || err != nil || api.DecodeJSON(w, r, &body) != nil || body.CreatedBy == uuid.Nil || len(body.Items) == 0 || len(body.Items) > 200 || len(batchKey) < 16 || len(batchKey) > 128 {
+	if !ok || err != nil || !delegated || api.DecodeJSON(w, r, &body) != nil || len(body.Items) == 0 || len(body.Items) > 200 || len(batchKey) < 16 || len(batchKey) > 128 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid member quota allocation batch", httpserver.RequestID(r.Context()))
 		return
 	}
 	results := make([]memberQuotaBatchResult, 0, len(body.Items))
 	for index, item := range body.Items {
-		grant, created, itemErr := repository.AllocateMemberQuota(r.Context(), MemberQuotaAllocation{OrganizationID: organizationID, MemberUserID: item.MemberUserID, PackageID: item.PackageID, ComponentID: item.ComponentID, ComponentType: item.ComponentType, AmountMicrocredits: item.AmountMicrocredits, MembershipVersion: item.MembershipVersion, CreatedBy: body.CreatedBy, IdempotencyKey: deriveMemberQuotaChildKey(batchKey, index, item)})
+		grant, created, itemErr := repository.AllocateMemberQuota(r.Context(), MemberQuotaAllocation{OrganizationID: organizationID, MemberUserID: item.MemberUserID, PackageID: item.PackageID, ComponentID: item.ComponentID, ComponentType: item.ComponentType, AmountMicrocredits: item.AmountMicrocredits, MembershipVersion: item.MembershipVersion, CreatedBy: delegation.HumanUserID, IdempotencyKey: deriveMemberQuotaChildKey(batchKey, index, item)})
 		result := memberQuotaBatchResult{Index: index}
 		if itemErr == nil {
 			result.Status, result.Created, result.Grant = "SUCCEEDED", created, &grant
@@ -101,15 +102,15 @@ func (s *Service) revokeMemberQuotaGrant(w http.ResponseWriter, r *http.Request)
 	organizationID, organizationErr := uuid.Parse(r.PathValue("organization_id"))
 	grantID, grantErr := uuid.Parse(r.PathValue("grant_id"))
 	var body struct {
-		ActorUserID uuid.UUID `json:"actor_user_id"`
-		Reason      string    `json:"reason"`
+		Reason string `json:"reason"`
 	}
+	delegation, delegated := humandelegation.FromContext(r.Context())
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	if !ok || organizationErr != nil || grantErr != nil || api.DecodeJSON(w, r, &body) != nil || body.ActorUserID == uuid.Nil || strings.TrimSpace(body.Reason) == "" || len(idempotencyKey) < 16 || len(idempotencyKey) > 128 {
+	if !ok || organizationErr != nil || grantErr != nil || !delegated || api.DecodeJSON(w, r, &body) != nil || strings.TrimSpace(body.Reason) == "" || len(idempotencyKey) < 16 || len(idempotencyKey) > 128 {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid member quota revocation", httpserver.RequestID(r.Context()))
 		return
 	}
-	grant, err := repository.RevokeMemberQuota(r.Context(), organizationID, grantID, body.ActorUserID, body.Reason, idempotencyKey)
+	grant, err := repository.RevokeMemberQuota(r.Context(), organizationID, grantID, delegation.HumanUserID, body.Reason, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

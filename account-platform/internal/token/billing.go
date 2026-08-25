@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
 	"github.com/google/uuid"
@@ -154,20 +156,23 @@ func (c *HTTPBillingClient) OrganizationQuotaGrants(ctx context.Context, organiz
 	return c.raw(ctx, http.MethodGet, path, nil, "")
 }
 
-func (c *HTTPBillingClient) AllocateOrganizationQuotaBatch(ctx context.Context, organizationID, actorUserID uuid.UUID, items json.RawMessage, idempotencyKey string) (json.RawMessage, error) {
+func (c *HTTPBillingClient) AllocateOrganizationQuotaBatch(ctx context.Context, organizationID, _ uuid.UUID, items json.RawMessage, idempotencyKey string) (json.RawMessage, error) {
 	var decoded []map[string]any
 	if err := json.Unmarshal(items, &decoded); err != nil {
 		return nil, err
 	}
-	return c.raw(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/quota-grants:batch", map[string]any{"created_by": actorUserID, "items": decoded}, idempotencyKey)
+	path := "/internal/v1/organizations/" + organizationID.String() + "/quota-grants:batch"
+	return c.rawDelegated(ctx, http.MethodPost, path, map[string]any{"items": decoded}, idempotencyKey, authorization.DelegationRequest{Audience: "billing-service", Permission: "org.quota.allocate", OrganizationID: &organizationID, TargetResourceType: "organization", TargetResourceID: organizationID.String(), HTTPMethod: http.MethodPost, HTTPPath: path})
 }
 
-func (c *HTTPBillingClient) RevokeOrganizationQuota(ctx context.Context, organizationID, grantID, actorUserID uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
-	return c.raw(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/quota-grants/"+grantID.String()+"/revoke", map[string]any{"actor_user_id": actorUserID, "reason": reason}, idempotencyKey)
+func (c *HTTPBillingClient) RevokeOrganizationQuota(ctx context.Context, organizationID, grantID, _ uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
+	path := "/internal/v1/organizations/" + organizationID.String() + "/quota-grants/" + grantID.String() + "/revoke"
+	return c.rawDelegated(ctx, http.MethodPost, path, map[string]any{"reason": reason}, idempotencyKey, authorization.DelegationRequest{Audience: "billing-service", Permission: "org.quota.revoke", OrganizationID: &organizationID, TargetResourceType: "member-quota-grant", TargetResourceID: grantID.String(), HTTPMethod: http.MethodPost, HTTPPath: path})
 }
 
-func (c *HTTPBillingClient) ReclaimAccountClosedGrant(ctx context.Context, organizationID, grantID, actorUserID uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
-	return c.raw(ctx, http.MethodPost, "/internal/v1/organizations/"+organizationID.String()+"/account-closed-grants/"+grantID.String()+"/reclaim", map[string]any{"actor_user_id": actorUserID, "reason": reason}, idempotencyKey)
+func (c *HTTPBillingClient) ReclaimAccountClosedGrant(ctx context.Context, organizationID, grantID, _ uuid.UUID, reason, idempotencyKey string) (json.RawMessage, error) {
+	path := "/internal/v1/organizations/" + organizationID.String() + "/account-closed-grants/" + grantID.String() + "/reclaim"
+	return c.rawDelegated(ctx, http.MethodPost, path, map[string]any{"reason": reason}, idempotencyKey, authorization.DelegationRequest{Audience: "billing-service", Permission: "org.grants.reclaim_closed", OrganizationID: &organizationID, TargetResourceType: "member-quota-grant", TargetResourceID: grantID.String(), HTTPMethod: http.MethodPost, HTTPPath: path})
 }
 
 func (c *HTTPBillingClient) RechargeOrders(ctx context.Context, requesterID, walletID uuid.UUID) (json.RawMessage, error) {
@@ -202,9 +207,19 @@ func (c *HTTPBillingClient) Packages(ctx context.Context, userID, walletID uuid.
 }
 
 func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input any, idempotencyKey string) (json.RawMessage, error) {
+	return c.rawWithDelegation(ctx, method, path, input, idempotencyKey, nil)
+}
+
+func (c *HTTPBillingClient) rawDelegated(ctx context.Context, method, path string, input any, idempotencyKey string, delegation authorization.DelegationRequest) (json.RawMessage, error) {
+	return c.rawWithDelegation(ctx, method, path, input, idempotencyKey, &delegation)
+}
+
+func (c *HTTPBillingClient) rawWithDelegation(ctx context.Context, method, path string, input any, idempotencyKey string, delegation *authorization.DelegationRequest) (json.RawMessage, error) {
 	var reader io.Reader
+	var encoded []byte
 	if input != nil {
-		encoded, err := json.Marshal(input)
+		var err error
+		encoded, err = json.Marshal(input)
 		if err != nil {
 			return nil, err
 		}
@@ -222,6 +237,18 @@ func (c *HTTPBillingClient) raw(ctx context.Context, method, path string, input 
 	}
 	if input != nil {
 		request.Header.Set("Content-Type", "application/json")
+		if delegation != nil {
+			principal, ok := identity.FromContext(ctx)
+			if !ok || c.delegator == nil {
+				return nil, errors.New("human delegation is unavailable")
+			}
+			delegation.RequestSHA256 = authorization.RequestSHA256(encoded)
+			token, err := c.delegator.Delegate(ctx, principal, *delegation)
+			if err != nil {
+				return nil, err
+			}
+			request.Header.Set("X-Pinvou-Human-Delegation", token)
+		}
 	}
 	if idempotencyKey != "" {
 		request.Header.Set("Idempotency-Key", idempotencyKey)
@@ -346,6 +373,7 @@ type HTTPBillingClient struct {
 	baseURL      *url.URL
 	serviceToken string
 	client       *http.Client
+	delegator    *authorization.Client
 }
 
 func NewHTTPBillingClient(rawURL, serviceToken string) (*HTTPBillingClient, error) {
@@ -354,6 +382,11 @@ func NewHTTPBillingClient(rawURL, serviceToken string) (*HTTPBillingClient, erro
 		return nil, errors.New("invalid Billing client configuration")
 	}
 	return &HTTPBillingClient{baseURL: parsed, serviceToken: serviceToken, client: observability.NewHTTPClient(10 * time.Second)}, nil
+}
+
+func (c *HTTPBillingClient) WithHumanDelegations(delegator *authorization.Client) *HTTPBillingClient {
+	c.delegator = delegator
+	return c
 }
 
 func (c *HTTPBillingClient) Price(ctx context.Context, model string) (PriceVersion, error) {

@@ -15,6 +15,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/payment"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/paymentcallback"
@@ -31,6 +32,7 @@ type Service struct {
 	closureStates    AccountClosureStateVerifier
 	callbackAuth     *paymentcallback.Authenticator
 	callbackProfiles *paymentcallback.Profiles
+	humanDelegations *humandelegation.Verifier
 	now              func() time.Time
 }
 
@@ -64,49 +66,54 @@ func (s *Service) WithPaymentCallbacks(authenticator *paymentcallback.Authentica
 	return s
 }
 
+func (s *Service) WithHumanDelegations(verifier *humandelegation.Verifier) *Service {
+	s.humanDelegations = verifier
+	return s
+}
+
 func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFunc) http.Handler {
 	router := httpserver.NewRouter()
 	protected := router.Group("")
 	protected.Use(serviceauth.GinMiddleware(serviceToken))
-	protected.POST("/internal/v1/wallets/ensure", httpserver.AdaptFunc(s.ensureWallet))
-	protected.GET("/internal/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
-	protected.GET("/internal/v1/entitlement-packages", httpserver.AdaptFunc(s.listEntitlementPackages))
-	protected.POST("/internal/v1/holds/reserve", httpserver.AdaptFunc(s.reserve))
-	protected.POST("/internal/v1/holds/extend", httpserver.AdaptFunc(s.extendHold))
-	protected.POST("/internal/v1/holds/commit", httpserver.AdaptFunc(s.commit))
-	protected.POST("/internal/v1/holds/release", httpserver.AdaptFunc(s.release))
-	protected.GET("/internal/v1/users/:user_id/account-closure-assessment", httpserver.AdaptFunc(s.accountClosureAssessment))
-	protected.POST("/internal/v1/users/:user_id/account-closure-grants/isolate", httpserver.AdaptFunc(s.isolateAccountClosedGrants))
-	protected.POST("/internal/v1/organizations/:organization_id/account-closed-grants/:grant_id/reclaim", httpserver.AdaptFunc(s.reclaimAccountClosedGrantInternal))
-	protected.GET("/internal/v1/pricing/current", httpserver.AdaptFunc(s.currentPrice))
-	protected.GET("/internal/v1/pricing/:price_version_id", httpserver.AdaptFunc(s.priceByID))
-	protected.PUT("/internal/v1/pricing/formula-bindings/:formula_version_id", httpserver.AdaptFunc(s.putFormulaBinding))
-	protected.POST("/internal/v1/adjustments", httpserver.AdaptFunc(s.requestAdjustment))
-	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", httpserver.AdaptFunc(s.executeApprovedAdjustment))
-	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", httpserver.AdaptFunc(s.rejectAdjustment))
-	protected.POST("/internal/v1/chargebacks/confirmed", approvalpolicy.Require("BILLING_CHARGEBACK_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordConfirmedChargeback))
-	protected.POST("/internal/v1/refunds/forced", approvalpolicy.Require("BILLING_FORCED_REFUND_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordForcedRefund))
-	protected.PUT("/internal/v1/organizations/:organization_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
-	protected.PUT("/internal/v1/organizations/:organization_id/units/:unit_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
-	protected.PUT("/internal/v1/organizations/:organization_id/members/:user_id/lifecycle", approvalpolicy.Require("BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationMemberLifecycle))
-	protected.GET("/internal/v1/organizations/:organization_id/quota-grants", httpserver.AdaptFunc(s.listMemberQuotaGrants))
-	protected.POST("/internal/v1/organizations/:organization_id/quota-grants:batch", httpserver.AdaptFunc(s.allocateMemberQuotaBatch))
-	protected.POST("/internal/v1/organizations/:organization_id/quota-grants/:grant_id/revoke", httpserver.AdaptFunc(s.revokeMemberQuotaGrant))
-	protected.GET("/v1/recharge/products", httpserver.AdaptFunc(s.listProducts))
+	protected.POST("/internal/v1/wallets/ensure", serviceauth.Require("internal.billing.wallet.ensure"), httpserver.AdaptFunc(s.ensureWallet))
+	protected.GET("/internal/v1/wallets/:wallet_id/balance", serviceauth.Require("internal.billing.wallet.read"), httpserver.AdaptFunc(s.getBalance))
+	protected.GET("/internal/v1/entitlement-packages", serviceauth.Require("internal.billing.entitlement.read"), httpserver.AdaptFunc(s.listEntitlementPackages))
+	protected.POST("/internal/v1/holds/reserve", serviceauth.Require("internal.billing.hold.reserve"), httpserver.AdaptFunc(s.reserve))
+	protected.POST("/internal/v1/holds/extend", serviceauth.Require("internal.billing.hold.extend"), httpserver.AdaptFunc(s.extendHold))
+	protected.POST("/internal/v1/holds/commit", serviceauth.Require("internal.billing.hold.commit"), httpserver.AdaptFunc(s.commit))
+	protected.POST("/internal/v1/holds/release", serviceauth.Require("internal.billing.hold.release"), httpserver.AdaptFunc(s.release))
+	protected.GET("/internal/v1/users/:user_id/account-closure-assessment", serviceauth.Require("internal.billing.account-closure-assessment.read"), httpserver.AdaptFunc(s.accountClosureAssessment))
+	protected.POST("/internal/v1/users/:user_id/account-closure-grants/isolate", serviceauth.Require("internal.billing.account-closure-grants.isolate"), httpserver.AdaptFunc(s.isolateAccountClosedGrants))
+	protected.POST("/internal/v1/organizations/:organization_id/account-closed-grants/:grant_id/reclaim", serviceauth.Require("internal.billing.account-closed-grant.reclaim"), s.requireHumanDelegation("org.grants.reclaim_closed", "member-quota-grant", "grant_id"), httpserver.AdaptFunc(s.reclaimAccountClosedGrantInternal))
+	protected.GET("/internal/v1/pricing/current", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.currentPrice))
+	protected.GET("/internal/v1/pricing/:price_version_id", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.priceByID))
+	protected.PUT("/internal/v1/pricing/formula-bindings/:formula_version_id", serviceauth.Require("internal.billing.pricing.bind"), httpserver.AdaptFunc(s.putFormulaBinding))
+	protected.POST("/internal/v1/adjustments", serviceauth.Require("internal.billing.adjustment.request"), httpserver.AdaptFunc(s.requestAdjustment))
+	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", serviceauth.Require("internal.billing.adjustment.execute"), httpserver.AdaptFunc(s.executeApprovedAdjustment))
+	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", serviceauth.Require("internal.billing.adjustment.reject"), httpserver.AdaptFunc(s.rejectAdjustment))
+	protected.POST("/internal/v1/chargebacks/confirmed", serviceauth.Require("internal.billing.chargeback.record"), approvalpolicy.Require("BILLING_CHARGEBACK_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordConfirmedChargeback))
+	protected.POST("/internal/v1/refunds/forced", serviceauth.Require("internal.billing.forced-refund.record"), approvalpolicy.Require("BILLING_FORCED_REFUND_RECORD", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.recordForcedRefund))
+	protected.PUT("/internal/v1/organizations/:organization_id/lifecycle", serviceauth.Require("internal.billing.organization.lifecycle"), approvalpolicy.Require("BILLING_ORGANIZATION_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationLifecycle))
+	protected.PUT("/internal/v1/organizations/:organization_id/units/:unit_id/lifecycle", serviceauth.Require("internal.billing.organization-unit.lifecycle"), approvalpolicy.Require("BILLING_ORGANIZATION_UNIT_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.organizationUnitDeletionBlockers))
+	protected.PUT("/internal/v1/organizations/:organization_id/members/:user_id/lifecycle", serviceauth.Require("internal.billing.organization-member.lifecycle"), approvalpolicy.Require("BILLING_ORGANIZATION_MEMBER_LIFECYCLE_APPLY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.applyOrganizationMemberLifecycle))
+	protected.GET("/internal/v1/organizations/:organization_id/quota-grants", serviceauth.Require("internal.billing.quota.read"), httpserver.AdaptFunc(s.listMemberQuotaGrants))
+	protected.POST("/internal/v1/organizations/:organization_id/quota-grants:batch", serviceauth.Require("internal.billing.quota.allocate"), s.requireHumanDelegation("org.quota.allocate", "organization", "organization_id"), httpserver.AdaptFunc(s.allocateMemberQuotaBatch))
+	protected.POST("/internal/v1/organizations/:organization_id/quota-grants/:grant_id/revoke", serviceauth.Require("internal.billing.quota.revoke"), s.requireHumanDelegation("org.quota.revoke", "member-quota-grant", "grant_id"), httpserver.AdaptFunc(s.revokeMemberQuotaGrant))
+	protected.GET("/v1/recharge/products", serviceauth.Require("internal.billing.product.read"), httpserver.AdaptFunc(s.listProducts))
 	if s.payments != nil {
-		protected.GET("/v1/payment-capabilities", httpserver.AdaptFunc(s.paymentCapabilities))
+		protected.GET("/v1/payment-capabilities", serviceauth.Require("internal.billing.payment-capability.read"), httpserver.AdaptFunc(s.paymentCapabilities))
 	}
-	protected.GET("/v1/wallets/:wallet_id/balance", httpserver.AdaptFunc(s.getBalance))
+	protected.GET("/v1/wallets/:wallet_id/balance", serviceauth.Require("internal.billing.wallet.read"), httpserver.AdaptFunc(s.getBalance))
 	if s.payments != nil {
-		protected.POST("/internal/v1/recharge/orders", httpserver.AdaptFunc(s.createRechargeOrder))
-		protected.GET("/internal/v1/recharge/orders", httpserver.AdaptFunc(s.listRechargeOrders))
-		protected.GET("/internal/v1/recharge/orders/recent", httpserver.AdaptFunc(s.getRecentRechargeOrder))
-		protected.GET("/internal/v1/recharge/orders/:order_id", httpserver.AdaptFunc(s.getRechargeOrder))
-		protected.POST("/internal/v1/recharge/orders/:order_id/close", httpserver.AdaptFunc(s.closeRechargeOrder))
-		protected.POST("/internal/v1/recharge/orders/:order_id/refunds", httpserver.AdaptFunc(s.createRefund))
-		protected.POST("/internal/v1/recharge/orders/:order_id/payment-claims", httpserver.AdaptFunc(s.addLatePaymentClaim))
-		protected.POST("/internal/v1/recharge/orders/:order_id/sync", httpserver.AdaptFunc(s.syncRechargeOrder))
-		protected.POST("/internal/v1/reconciliation/runs", httpserver.AdaptFunc(s.runReconciliation))
+		protected.POST("/internal/v1/recharge/orders", serviceauth.Require("internal.billing.recharge-order.create"), httpserver.AdaptFunc(s.createRechargeOrder))
+		protected.GET("/internal/v1/recharge/orders", serviceauth.Require("internal.billing.recharge-order.read"), httpserver.AdaptFunc(s.listRechargeOrders))
+		protected.GET("/internal/v1/recharge/orders/recent", serviceauth.Require("internal.billing.recharge-order.read"), httpserver.AdaptFunc(s.getRecentRechargeOrder))
+		protected.GET("/internal/v1/recharge/orders/:order_id", serviceauth.Require("internal.billing.recharge-order.read"), httpserver.AdaptFunc(s.getRechargeOrder))
+		protected.POST("/internal/v1/recharge/orders/:order_id/close", serviceauth.Require("internal.billing.recharge-order.close"), httpserver.AdaptFunc(s.closeRechargeOrder))
+		protected.POST("/internal/v1/recharge/orders/:order_id/refunds", serviceauth.Require("internal.billing.refund.create"), httpserver.AdaptFunc(s.createRefund))
+		protected.POST("/internal/v1/recharge/orders/:order_id/payment-claims", serviceauth.Require("internal.billing.payment-claim.create"), httpserver.AdaptFunc(s.addLatePaymentClaim))
+		protected.POST("/internal/v1/recharge/orders/:order_id/sync", serviceauth.Require("internal.billing.recharge-order.sync"), httpserver.AdaptFunc(s.syncRechargeOrder))
+		protected.POST("/internal/v1/reconciliation/runs", serviceauth.Require("internal.billing.reconciliation.run"), httpserver.AdaptFunc(s.runReconciliation))
 		router.POST("/internal/payment/notifications", httpserver.AdaptFunc(s.paymentNotification))
 		if s.callbackAuth != nil && s.callbackProfiles != nil {
 			router.POST("/api/v1/payment-callback/token", httpserver.AdaptFunc(s.paymentCallbackToken))
