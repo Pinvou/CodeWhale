@@ -162,7 +162,7 @@ func (r *PostgresRepository) GrantOrganizationRoleBinding(ctx context.Context, p
 	} else if err != nil {
 		return RoleBinding{}, err
 	}
-	if !assignable || scope == "PLATFORM" || request.RoleCode == "OWNER" || (scope == "UNIT") != (request.UnitID != nil) {
+	if !assignable || scope == "PLATFORM" || scope == "PERSONAL" || request.RoleCode == "OWNER" || (scope == "UNIT") != (request.UnitID != nil) {
 		return RoleBinding{}, ErrConflict
 	}
 	if request.UnitID != nil {

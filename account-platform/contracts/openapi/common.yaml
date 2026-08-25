@@ -47,7 +47,7 @@ components:
     Context:
       type: object
       additionalProperties: false
-      required: [context_type, membership_version, context_version, authorization_version, permissions]
+      required: [context_type, membership_version, context_version, authorization_version, personal_authorization_version, platform_authorization_version, organization_authorization_version, permissions]
       properties:
         context_type:
           type: string
@@ -62,6 +62,16 @@ components:
           type: integer
           minimum: 1
         authorization_version:
+          type: integer
+          minimum: 1
+          description: Compatibility projection for the current personal or organization context.
+        personal_authorization_version:
+          type: integer
+          minimum: 1
+        platform_authorization_version:
+          type: integer
+          minimum: 1
+        organization_authorization_version:
           type: integer
           minimum: 1
         permissions:

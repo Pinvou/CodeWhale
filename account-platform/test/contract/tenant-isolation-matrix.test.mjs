@@ -17,7 +17,7 @@ const denialMatrix = [
   ['revoked-or-expired-role', 'internal/account/authorization.go', /ra\.revoked_at IS NULL AND ra\.starts_at<=now\(\) AND \(ra\.expires_at IS NULL OR ra\.expires_at>now\(\)\)/],
   ['removed-member', 'internal/account/authorization.go', /m\.status='ACTIVE'/],
   ['disabled-organization', 'internal/account/postgres.go', /active\.organization_id IS NULL OR o\.status='ACTIVE'/],
-  ['closed-user', 'internal/account/authorization.go', /JOIN users u ON u\.id=i\.user_id AND u\.status='ACTIVE'/],
+  ['closed-user', 'internal/account/authorization.go', /SELECT u\.id,u\.status[\s\S]*decision\.Allowed = roleGranted && permissionAllowedForUserStatus\(decision\.UserStatus, permission\)[\s\S]*case "CLOSING":[\s\S]*return false/],
   ['guessed-uuid', 'internal/billing/service.go', /Authorize against the local order[\s\S]*guessed order IDs/],
   ['mixed-batch-package', 'internal/billing/member_quota_grants.go', /walletOwnerType != "ORGANIZATION" \|\| walletOwnerID != request\.OrganizationID/],
   ['search-outside-scope', 'internal/account/admin.go', /FROM memberships m JOIN users u ON u\.id=m\.user_id[\s\S]*WHERE m\.organization_id=\$1/],

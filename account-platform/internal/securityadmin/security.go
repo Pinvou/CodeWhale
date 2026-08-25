@@ -384,6 +384,9 @@ func ensureBootstrapUser(ctx context.Context, tx pgx.Tx, issuer, subject string,
 		if err != nil {
 			return uuid.Nil, false, err
 		}
+		if _, err = tx.Exec(ctx, `INSERT INTO role_assignments(id,user_id,role_code,source,grant_source,starts_at,created_at,idempotency_key) VALUES($1,$2,'PERSONAL_USER','ACCOUNT_LIFECYCLE','ACCOUNT_LIFECYCLE',$3,$3,'personal-user-default') ON CONFLICT DO NOTHING`, uuid.Must(uuid.NewV7()), userID, now); err != nil {
+			return uuid.Nil, false, err
+		}
 	} else if err != nil {
 		return uuid.Nil, false, err
 	}

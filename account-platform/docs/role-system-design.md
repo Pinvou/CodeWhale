@@ -96,6 +96,12 @@ flowchart LR
 | 查看、取消本人模型调用及用量 | `personal.usage.read`、`personal.usage.cancel` | ✓ |
 | 查看并接受指向本人的组织邀请 | `personal.invitations.read`、`personal.invitations.accept` | ✓ |
 
+`PERSONAL_USER` 的精确权限真值表如下；迁移和运行时不得在此集合外追加隐式权限：
+
+| 角色 | 精确权限集合 |
+|---|---|
+| `PERSONAL_USER` | `personal.session.login`、`personal.profile.read`、`personal.profile.update`、`personal.security.manage`、`personal.context.switch`、`personal.account.close.request`、`personal.account.close.read`、`personal.billing.read`、`personal.recharge.create`、`personal.recharge.manage`、`personal.models.read`、`personal.model.invoke`、`personal.usage.read`、`personal.usage.cancel`、`personal.invitations.read`、`personal.invitations.accept` |
+
 个人权限只解决“本人能否执行该类动作”，不能绕过登录认证、近期重新认证、验证码、账号状态、钱包状态、余额、产品开关、支付能力、模型资格、幂等、限流或领域状态机。组织上下文中的购买、额度和模型调用必须同时满足相应组织权限，不能用个人权限代替。
 
 ### 4.3 作用域规则

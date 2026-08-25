@@ -331,7 +331,17 @@
       {
         "file": "000033_payment_provider_resume_policy.up.sql",
         "version": 33,
-        "sha256": "760c79205a4832d3c1b750d328a05389f5d8ded47b166c923dc4bf0d09c5807f"
+        "sha256": "7c7e8d6e507d22b28e63ffabec95fd3ae375f9f686207d17af3b7bd24b624bf6"
+      },
+      {
+        "file": "000034_three_scope_authorization.down.sql",
+        "version": 34,
+        "sha256": "2c431af91fd697f08754f4a783c800f6b4f30326d1c121cfb5c2c7f8d76edabc"
+      },
+      {
+        "file": "000034_three_scope_authorization.up.sql",
+        "version": 34,
+        "sha256": "658324df04b4e19fb98531c192f409fb68b82f5d0f027fe6b65527ebddca8637"
       }
     ],
     "billing": [

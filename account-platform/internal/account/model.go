@@ -24,12 +24,15 @@ var (
 )
 
 type Context struct {
-	Type                 string     `json:"context_type"`
-	OrganizationID       *uuid.UUID `json:"organization_id,omitempty"`
-	MembershipVersion    int64      `json:"membership_version"`
-	ContextVersion       int64      `json:"context_version"`
-	AuthorizationVersion int64      `json:"authorization_version"`
-	Permissions          []string   `json:"permissions"`
+	Type                             string     `json:"context_type"`
+	OrganizationID                   *uuid.UUID `json:"organization_id,omitempty"`
+	MembershipVersion                int64      `json:"membership_version"`
+	ContextVersion                   int64      `json:"context_version"`
+	AuthorizationVersion             int64      `json:"authorization_version"`
+	PersonalAuthorizationVersion     int64      `json:"personal_authorization_version"`
+	PlatformAuthorizationVersion     int64      `json:"platform_authorization_version"`
+	OrganizationAuthorizationVersion int64      `json:"organization_authorization_version"`
+	Permissions                      []string   `json:"permissions"`
 }
 
 type Me struct {
@@ -44,22 +47,34 @@ type Me struct {
 	ActiveContext          Context   `json:"active_context"`
 }
 
+type UnitAuthorizationBinding struct {
+	UnitID      uuid.UUID `json:"unit_id"`
+	Role        string    `json:"role"`
+	Permissions []string  `json:"permissions"`
+}
+
 type AuthorizationContext struct {
-	UserID               uuid.UUID   `json:"user_id"`
-	SessionID            string      `json:"session_id"`
-	ContextType          string      `json:"context_type"`
-	OrganizationID       *uuid.UUID  `json:"organization_id,omitempty"`
-	MembershipVersion    int64       `json:"membership_version"`
-	ContextVersion       int64       `json:"context_version"`
-	AuthorizationVersion int64       `json:"authorization_version"`
-	UnitIDs              []uuid.UUID `json:"unit_ids"`
-	AncestorUnitIDs      []uuid.UUID `json:"ancestor_unit_ids"`
-	Roles                []string    `json:"roles"`
-	Permissions          []string    `json:"permissions"`
-	PlatformRoles        []string    `json:"platform_roles"`
-	PlatformPermissions  []string    `json:"platform_permissions"`
-	Mobile               *string     `json:"mobile,omitempty"`
-	MobileVerified       bool        `json:"mobile_verified"`
+	UserID                           uuid.UUID                  `json:"user_id"`
+	SessionID                        string                     `json:"session_id"`
+	ContextType                      string                     `json:"context_type"`
+	OrganizationID                   *uuid.UUID                 `json:"organization_id,omitempty"`
+	MembershipVersion                int64                      `json:"membership_version"`
+	ContextVersion                   int64                      `json:"context_version"`
+	AuthorizationVersion             int64                      `json:"authorization_version"`
+	PersonalAuthorizationVersion     int64                      `json:"personal_authorization_version"`
+	PlatformAuthorizationVersion     int64                      `json:"platform_authorization_version"`
+	OrganizationAuthorizationVersion int64                      `json:"organization_authorization_version"`
+	UnitIDs                          []uuid.UUID                `json:"unit_ids"`
+	AncestorUnitIDs                  []uuid.UUID                `json:"ancestor_unit_ids"`
+	Roles                            []string                   `json:"roles"`
+	Permissions                      []string                   `json:"permissions"`
+	UnitAuthorizationBindings        []UnitAuthorizationBinding `json:"unit_authorization_bindings"`
+	PersonalRoles                    []string                   `json:"personal_roles"`
+	PersonalPermissions              []string                   `json:"personal_permissions"`
+	PlatformRoles                    []string                   `json:"platform_roles"`
+	PlatformPermissions              []string                   `json:"platform_permissions"`
+	Mobile                           *string                    `json:"mobile,omitempty"`
+	MobileVerified                   bool                       `json:"mobile_verified"`
 }
 
 type Organization struct {

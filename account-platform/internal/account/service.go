@@ -332,6 +332,9 @@ func (s *Service) bootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Context-Version", stringInt64(me.ActiveContext.ContextVersion))
 	w.Header().Set("X-Authorization-Version", stringInt64(me.ActiveContext.AuthorizationVersion))
+	w.Header().Set("X-Personal-Authorization-Version", stringInt64(me.ActiveContext.PersonalAuthorizationVersion))
+	w.Header().Set("X-Platform-Authorization-Version", stringInt64(me.ActiveContext.PlatformAuthorizationVersion))
+	w.Header().Set("X-Organization-Authorization-Version", stringInt64(me.ActiveContext.OrganizationAuthorizationVersion))
 	api.WriteJSON(w, http.StatusOK, me)
 }
 
@@ -361,6 +364,11 @@ func (s *Service) getAuthorizationContext(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Context-Version", stringInt64(resolved.ContextVersion))
+	w.Header().Set("X-Authorization-Version", stringInt64(resolved.AuthorizationVersion))
+	w.Header().Set("X-Personal-Authorization-Version", stringInt64(resolved.PersonalAuthorizationVersion))
+	w.Header().Set("X-Platform-Authorization-Version", stringInt64(resolved.PlatformAuthorizationVersion))
+	w.Header().Set("X-Organization-Authorization-Version", stringInt64(resolved.OrganizationAuthorizationVersion))
 	api.WriteJSON(w, http.StatusOK, resolved)
 }
 
@@ -390,6 +398,9 @@ func (s *Service) setActiveContext(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Context-Version", stringInt64(context.ContextVersion))
 	w.Header().Set("X-Authorization-Version", stringInt64(context.AuthorizationVersion))
+	w.Header().Set("X-Personal-Authorization-Version", stringInt64(context.PersonalAuthorizationVersion))
+	w.Header().Set("X-Platform-Authorization-Version", stringInt64(context.PlatformAuthorizationVersion))
+	w.Header().Set("X-Organization-Authorization-Version", stringInt64(context.OrganizationAuthorizationVersion))
 	api.WriteJSON(w, http.StatusOK, context)
 }
 

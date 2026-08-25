@@ -731,6 +731,9 @@ func (r *PostgresRepository) RegisterMobileIdentity(ctx context.Context, issuer,
 		}
 		return uuid.Nil, "", err
 	}
+	if err = ensureDefaultPersonalRole(ctx, tx, userID, now); err != nil {
+		return uuid.Nil, "", err
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO identities(issuer,subject,user_id,created_at,last_seen_at) VALUES($1,$2,$3,$4,$4)`, issuer, subject, userID, now); err != nil {
 		return uuid.Nil, "", err
 	}

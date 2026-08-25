@@ -331,7 +331,7 @@ paths:
               schema:
                 type: object
                 additionalProperties: false
-                required: [user_id, session_id, context_type, membership_version, context_version, authorization_version, unit_ids, ancestor_unit_ids, roles, permissions, platform_roles, platform_permissions]
+                required: [user_id, session_id, context_type, membership_version, context_version, authorization_version, personal_authorization_version, platform_authorization_version, organization_authorization_version, unit_ids, ancestor_unit_ids, roles, permissions, unit_authorization_bindings, personal_roles, personal_permissions, platform_roles, platform_permissions]
                 properties:
                   user_id:
                     type: string
@@ -356,6 +356,19 @@ paths:
                     type: integer
                     format: int64
                     minimum: 1
+                    description: Compatibility projection for the current personal or organization context.
+                  personal_authorization_version:
+                    type: integer
+                    format: int64
+                    minimum: 1
+                  platform_authorization_version:
+                    type: integer
+                    format: int64
+                    minimum: 1
+                  organization_authorization_version:
+                    type: integer
+                    format: int64
+                    minimum: 1
                   unit_ids:
                     type: array
                     uniqueItems: true
@@ -374,6 +387,35 @@ paths:
                     items:
                       type: string
                   permissions:
+                    type: array
+                    uniqueItems: true
+                    description: Organization-scoped permissions only; unit-scoped grants are never flattened into this collection.
+                    items:
+                      type: string
+                  unit_authorization_bindings:
+                    type: array
+                    description: Exact unit-role bindings retained for object-level subtree authorization.
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [unit_id, role, permissions]
+                      properties:
+                        unit_id:
+                          type: string
+                          format: uuid
+                        role:
+                          type: string
+                        permissions:
+                          type: array
+                          uniqueItems: true
+                          items:
+                            type: string
+                  personal_roles:
+                    type: array
+                    uniqueItems: true
+                    items:
+                      type: string
+                  personal_permissions:
                     type: array
                     uniqueItems: true
                     items:
@@ -952,7 +994,7 @@ components:
         binding_id: { type: string, format: uuid }
         user_id: { type: string, format: uuid }
         role_code: { type: string }
-        scope: { type: string, enum: [PLATFORM, ORGANIZATION, UNIT] }
+        scope: { type: string, enum: [PERSONAL, PLATFORM, ORGANIZATION, UNIT] }
         organization_id: { type: string, format: uuid }
         unit_id: { type: string, format: uuid }
         starts_at: { type: string, format: date-time }
@@ -969,7 +1011,7 @@ components:
       required: [user_id, role_code, idempotency_key]
       properties:
         user_id: { type: string, format: uuid }
-        role_code: { type: string, enum: [ORG_ADMIN, BILLING_ADMIN, AUDITOR, UNIT_ADMIN] }
+        role_code: { type: string, enum: [ORG_ADMIN, BILLING_ADMIN, ORG_MODEL_ADMIN, AUDITOR, UNIT_ADMIN] }
         unit_id: { type: string, format: uuid }
         starts_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
@@ -1052,7 +1094,7 @@ components:
           uniqueItems: true
           items:
             type: string
-            enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
+            enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, ORG_MODEL_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
     OrganizationUnit:
       type: object
       additionalProperties: false
@@ -1114,7 +1156,7 @@ components:
           uniqueItems: true
           items:
             type: string
-            enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
+            enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, ORG_MODEL_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
         unit_ids:
           type: array
           uniqueItems: true

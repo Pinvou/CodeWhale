@@ -1,4 +1,4 @@
-INSERT INTO permissions(code,scope_type,description) VALUES
+INSERT INTO permissions(code,scope,description) VALUES
 ('platform.billing.payment-controls.resume.request','PLATFORM','Request version-frozen payment Provider recovery.'),
 ('platform.billing.payment-controls.resume.approve','PLATFORM','Independently approve payment Provider recovery.');
 

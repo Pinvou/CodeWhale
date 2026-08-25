@@ -81,6 +81,9 @@ func (r *PostgresRepository) AdminGrantRoleBinding(ctx context.Context, principa
 	if !assignable || request.RoleCode == "PLATFORM_SUPER_ADMIN" || request.RoleCode == "OWNER" {
 		return RoleBinding{}, ErrConflict
 	}
+	if scope == "PERSONAL" {
+		return RoleBinding{}, ErrConflict
+	}
 	if scope == "PLATFORM" {
 		if request.OrganizationID != nil || request.UnitID != nil {
 			return RoleBinding{}, ErrConflict

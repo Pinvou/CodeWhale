@@ -287,6 +287,9 @@ func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID
 	if err != nil {
 		return RegistrationOperation{}, mapRegistrationConstraintError(err)
 	}
+	if err = ensureDefaultPersonalRole(ctx, tx, operation.CandidateUserID, now); err != nil {
+		return RegistrationOperation{}, err
+	}
 	if _, err = tx.Exec(ctx, `INSERT INTO identities(issuer,subject,user_id,created_at,last_seen_at) VALUES($1,$2,$3,$4,$4)`, issuer, operation.IdentitySubject, operation.CandidateUserID, now); err != nil {
 		return RegistrationOperation{}, err
 	}

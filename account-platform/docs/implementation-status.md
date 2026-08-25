@@ -21,14 +21,15 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 311`、`部分实现 34`、`未实现 19`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，新增实现差距由 APT-069–APT-082 逐项收敛。
+全量核验汇总：`已实现 316`、`部分实现 34`、`未实现 14`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，其余入口门禁由 APT-070–APT-082 逐项收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
 | `AUDIT_HEAD` | 当前分支代码、数据库迁移、OpenAPI、Compose/Helm 和客户端实现；连续实施起点 `e23005aaf6745d4b8c1ffa5ac73943e0f8f98ca5`，并包含本文件所在提交 | 通过代码审阅；不等同生产部署 |
 | `CODE-AUDIT` | 逐项检查路由、领域实现、迁移、配置、客户端调用和测试覆盖；确认目标能力存在、部分存在或缺失 | 366/366 个唯一目标编号均有结论 |
 | `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 366 个唯一编号一一覆盖，无缺失、无额外编号 |
-| `ROLE-PERMISSION-REDESIGN` | 三类权限、角色真值表、对象作用域、生命周期、审批、工作负载身份、Break-glass 与迁移门禁的安全及业务独立审核 | 2026-08-26 两位独立审核者均确认设计通过；代码实现仍按 APT-069–APT-082 分任务进行 |
+| `ROLE-PERMISSION-REDESIGN` | 三类权限、角色真值表、对象作用域、生命周期、审批、工作负载身份、Break-glass 与迁移门禁的安全及业务独立审核 | 2026-08-26 两位独立审核者均确认设计通过；代码实现按 APT-069–APT-082 分任务进行 |
+| `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
 | `ACCOUNT-DOMAIN-UAT-20260825` | 账号独立域名、Portal 根入口、精确支付回调路由、受信 TLS、HTTP 跳转、服务健康和回调客户端授权 | `account.pinvou.com` 已解析到公网入口；Let's Encrypt 证书有效至 2026-11-23；HTTP 以 `308` 跳转 HTTPS，Portal 根入口返回 `200` 且旧 `/account.html` 返回 `404`，两个未授权回调入口返回 `401`，受控 Basic 凭据换取短期 Bearer Token 返回 `200`；Billing 运行 `1efb79d6`、Portal 运行 `bc5683ee`。真实新华三通知报文、重复/乱序和履约结果仍待商城联合验收 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
@@ -157,10 +158,10 @@
 | ACC-56 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | `users.id` 由 UUIDv7 创建，主键保证全库唯一；数据库触发器拒绝修改和物理删除，注销墓碑保留原值，领域写路径没有复用入口 |
 | ACC-57 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | Account 用密码学安全随机源均匀生成 16 位 Crockford 载荷和 SHA-256 前 10 bit 校验码；具备格式/非空/唯一约束、保存点冲突重试、永久登记及不可变触发器 |
 | ACC-58 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE; DESKTOP-39 | NOT_DEPLOYED | 本人资料、桌面/Web 个人入口及运营列表/详情展示格式化编码；授权运营人员可按完整编码精确识别活动或已注销墓碑主体 |
-| ACC-59 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 数据库权限作用域尚无独立 `PERSONAL` 类型，三类人类权限与 `internal.*` 工作负载权限仍未完成迁移；由 APT-069 收敛。 |
-| ACC-60 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 普通用户尚无独立 `PERSONAL_USER` 默认角色及生命周期权限矩阵；由 APT-069 收敛。 |
-| ACC-61 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 个人、平台、组织与节点授权版本及对象级决定尚未完全独立，缓存失效仍有混用；由 APT-069 收敛。 |
-| ACC-62 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 组织角色真值表、`ORG_MODEL_ADMIN`、规范权限别名及可追溯替换迁移尚未落地；由 APT-069 收敛。 |
+| ACC-59 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 数据库和授权解析器区分 `PERSONAL/PLATFORM/ORGANIZATION/UNIT`；人类角色只组合三类稳定权限码，未知权限失败关闭，`internal.*` 不进入人类角色表。 |
+| ACC-60 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 全部用户创建事务自动绑定不可普通分配或删除的 `PERSONAL_USER`，迁移幂等回填非终态用户；运行时按账号生命周期白名单决定个人权限。 |
+| ACC-61 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 个人、平台、每个组织及节点维护独立单调版本；角色真值表替换主动使存量绑定版本失效，平台权限与节点权限不再扁平合入个人/组织权限数组，节点授权保留绑定节点、角色和精确权限。 |
+| ACC-62 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 全部组织内置角色以替换式迁移对齐审定真值表并新增 `ORG_MODEL_ADMIN`；旧权限码只在 Account 解析边界映射到规范 `org.*`，数据库不保留双重授权。 |
 | ACC-63 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | Account 本人资料、上下文、注销和邀请入口尚未按个人原子权限逐路由失败关闭；由 APT-071 收敛。 |
 | ACC-64 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 组织管理仍与活动计费上下文耦合，节点授权可能丢失 unit scope；由 APT-075 收敛。 |
 | TOK-04 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | `/v1/model-protocols` 暴露 Adapter 版本和显式 `CHAT v1` JSON/SSE 能力；路由持久化 `protocol_code`，未声明的 Embedding/Rerank/Image 等协议不会被推断可用 |
@@ -290,7 +291,7 @@
 | ADM-42 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 批准事务仅发布绑定指纹/策略/快照的 Outbox 授权；Billing 执行端在短窗口内复核并以稳定执行键原子入账，失败可按原命令重试且数据库阻止新调整绕过审批 |
 | ADM-43 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 支付异常接口只接收案件、原因和幂等键，Provider 状态及资金门禁完全由 Billing 现场查询与事务复核决定 |
 | ADM-44 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-RECOVERY | NOT_DEPLOYED | 后台控制查询返回 Provider/商品开关、原因、版本和可直接提交 Account 审批的冻结恢复草稿；申请人与审批人独立，版本变化自动失效 |
-| ADM-45 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 系统角色与平台权限精确真值表尚未以替换式迁移落地，历史多余授权仍可能保留；由 APT-069 收敛。 |
+| ADM-45 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 九类系统角色以审定逐码真值表全量替换历史授权；申请/审批、模型凭据、PII 导出等职责继续分离，迁移显式递增受影响主体的平台授权版本。 |
 | ADM-46 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 审批列表、详情、决定和执行复核仍存在固定权限码路径，未完全使用冻结策略要求的动态权限；由 APT-074 收敛。 |
 | ADM-47 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 普通认证端仍可管理 Token Account、路由和凭据，平台模型运营边界尚未成为唯一管理入口；由 APT-073 收敛。 |
 | ADM-48 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | Break-glass 工具仍允许命令行自报操作者，尚未从受信 OS、集群、mTLS 或签名凭据派生身份；由 APT-077 收敛。 |
@@ -682,10 +683,10 @@
 | ACC-56 | 内部用户 ID 永久稳定 | 已实现 | UUIDv7 主键、数据库不可变/禁止物理删除触发器和逻辑删除墓碑共同保证已创建 ID 永久稳定且不复用。 |
 | ACC-57 | 独立用户编码 | 已实现 | 已实现安全随机 Crockford 载荷、SHA-256 校验码、格式/唯一约束、冲突重试、永久登记和不可变保护。 |
 | ACC-58 | 用户编码展示与精确查询 | 已实现 | 本人资料、桌面/Web 与运营后台展示编码；独立接口按完整规范化编码精确查询并能受控识别已注销主体。 |
-| ACC-59 | 三类权限作用域 | 未实现 | 设计与双重审核已完成；PERSONAL/PLATFORM/ORGANIZATION/UNIT 数据迁移及 `internal.*` 隔离由 APT-069 待实现。 |
-| ACC-60 | 普通用户默认个人角色 | 未实现 | `PERSONAL_USER`、默认个人权限和生命周期矩阵由 APT-069 待实现。 |
-| ACC-61 | 独立授权版本与对象决定 | 未实现 | 个人、平台、组织/节点版本和对象级授权结果尚未独立；APT-069 待实现。 |
-| ACC-62 | 组织角色精确真值表 | 未实现 | `ORG_MODEL_ADMIN`、规范权限别名及替换式角色权限迁移由 APT-069 待实现。 |
+| ACC-59 | 三类权限作用域 | 已实现 | 权限和角色具备 PERSONAL/PLATFORM/ORGANIZATION/UNIT 作用域；未知权限失败关闭，工作负载权限不混入人类角色。 |
+| ACC-60 | 普通用户默认个人角色 | 已实现 | 创建事务和历史迁移保证非终态用户具有 `PERSONAL_USER`，个人能力再受生命周期矩阵限制。 |
+| ACC-61 | 独立授权版本与对象决定 | 已实现 | 个人、平台、组织/节点版本独立；节点授权以精确绑定返回且不扁平扩权，真值表迁移使旧缓存失效。 |
+| ACC-62 | 组织角色精确真值表 | 已实现 | `ORG_MODEL_ADMIN`、规范 `org.*` 权限码和全部组织角色替换式真值表已落地。 |
 | ACC-63 | Account 本人入口原子授权 | 未实现 | 本人资料、上下文、注销和邀请路由尚未全部接入个人权限；APT-071 待实现。 |
 | ACC-64 | 组织对象级授权 | 未实现 | 管理上下文仍与计费上下文耦合且 unit scope 可能被聚合丢失；APT-075 待实现。 |
 
@@ -883,7 +884,7 @@
 | ADM-42 | 已批准命令安全执行 | 已实现 | 批准只写 Outbox 授权；Billing 受限执行端使用稳定幂等键产生一次领域效果，原命令失败可重试，任何命令变化必须新申请。 |
 | ADM-43 | Provider 失败确认 | 已实现 | 后台命令只提交案件、原因和幂等键，现场 Provider 查询和资金门禁由 Billing 服务端控制。 |
 | ADM-44 | 支付渠道控制与双人恢复 | 已实现 | 后台提供控制快照和冻结恢复草稿，既有审批队列负责申请、独立审批、失效与执行状态。 |
-| ADM-45 | 系统角色精确真值表 | 未实现 | 替换式系统角色权限迁移和版本递增由 APT-069 待实现。 |
+| ADM-45 | 系统角色精确真值表 | 已实现 | 九类系统角色按审定权限集合全量替换，存量有效绑定同步递增授权版本。 |
 | ADM-46 | 策略驱动审批权限 | 未实现 | 审批读取、决定和执行复核仍有固定权限路径；APT-074 待实现。 |
 | ADM-47 | Token 管理平台隔离 | 未实现 | 普通认证端 Token Account/路由/凭据入口仍需删除或永久拒绝；APT-073 待实现。 |
 | ADM-48 | Break-glass 可信操作者 | 未实现 | 当前离线工具仍可自报操作者；APT-077 待实现受信身份派生。 |

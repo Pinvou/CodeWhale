@@ -29,21 +29,28 @@ type RateLimitError struct{ RetryAfter time.Duration }
 func (e *RateLimitError) Error() string { return ErrRateLimited.Error() }
 func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
+type UnitAuthorizationBinding struct {
+	UnitID      uuid.UUID `json:"unit_id"`
+	Role        string    `json:"role"`
+	Permissions []string  `json:"permissions"`
+}
+
 type AuthorizationContext struct {
-	UserID               uuid.UUID
-	SessionID            string
-	ContextType          string
-	OrganizationID       *uuid.UUID
-	MembershipVersion    int64
-	ContextVersion       int64
-	AuthorizationVersion int64
-	UnitIDs              []uuid.UUID
-	AncestorUnitIDs      []uuid.UUID
-	Roles                []string
-	Permissions          []string
-	Mobile               *string
-	MobileVerified       bool
-	Closing              bool
+	UserID                    uuid.UUID
+	SessionID                 string
+	ContextType               string
+	OrganizationID            *uuid.UUID
+	MembershipVersion         int64
+	ContextVersion            int64
+	AuthorizationVersion      int64
+	UnitIDs                   []uuid.UUID
+	AncestorUnitIDs           []uuid.UUID
+	Roles                     []string
+	Permissions               []string
+	UnitAuthorizationBindings []UnitAuthorizationBinding
+	Mobile                    *string
+	MobileVerified            bool
+	Closing                   bool
 }
 
 type Candidate struct {
