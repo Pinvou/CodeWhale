@@ -104,6 +104,7 @@ mod route_receipt;
 pub mod route_runtime;
 mod runtime_api;
 mod runtime_handoff;
+pub use runtime_handoff::{EditLastTurnTarget, edit_last_turn_target, is_user_turn_prompt};
 mod runtime_log;
 mod runtime_policy;
 mod runtime_threads;
