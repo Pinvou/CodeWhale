@@ -2163,6 +2163,7 @@
     markRemoteTurn: markRemoteTurn,
     recordAuthoritySyncDiagnostic: recordAuthoritySyncDiagnostic,
     authoritySyncBufferSnapshot: authoritySyncBufferSnapshot,
+    userMessageDisplayText: userMessageDisplayText,
     get currentStreamText() { return currentStreamText; },
     set currentStreamText(value) { currentStreamText = value; },
     get currentStreamId() { return currentStreamId; },
