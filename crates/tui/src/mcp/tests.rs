@@ -378,6 +378,35 @@ fn expand_env_placeholders_reports_missing_variable_without_secret_value() {
 }
 
 #[test]
+fn forkguard_mcp_secret_resolver_supplies_values_without_process_env_writes() {
+    // The resolver OnceLock is process-wide and first-install-wins; this is
+    // the only test that installs it. The resolver answers exclusively for
+    // its own key so every other expansion in this test binary still falls
+    // back to the process environment.
+    super::install_mcp_secret_resolver(Box::new(|name| {
+        (name == "MCP_RESOLVER_GUARD_SECRET").then(|| "from-host-store".to_string())
+    }))
+    .expect("first resolver install succeeds");
+    assert!(
+        super::install_mcp_secret_resolver(Box::new(|_| None)).is_err(),
+        "second resolver install must be rejected"
+    );
+
+    // A resolver-supplied secret expands without any process env write.
+    let _lock = crate::test_support::lock_test_env();
+    let _missing = crate::test_support::EnvVarGuard::remove("MCP_RESOLVER_GUARD_SECRET");
+    let resolved = super::expand_env_placeholders("Bearer ${MCP_RESOLVER_GUARD_SECRET}")
+        .expect("resolver-supplied value expands");
+    assert_eq!(resolved, "Bearer from-host-store");
+
+    // Names the resolver does not know still resolve from the process env.
+    let _fallback = crate::test_support::EnvVarGuard::set("MCP_RESOLVER_FALLBACK", "from-env");
+    let resolved = super::expand_env_placeholders("${MCP_RESOLVER_FALLBACK}")
+        .expect("process env fallback still works");
+    assert_eq!(resolved, "from-env");
+}
+
+#[test]
 fn reviewed_plugin_environment_uses_only_the_pre_dotenv_snapshot() {
     let _lock = crate::test_support::lock_test_env();
     let dir = tempfile::tempdir().unwrap();
