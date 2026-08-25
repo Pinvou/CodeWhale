@@ -654,6 +654,26 @@
         "file": "000034_manual_review_sla.up.sql",
         "version": 34,
         "sha256": "d9ed06d759e22818265f3d1b22771dfc6b757779740626dcd6d61871de57eba5"
+      },
+      {
+        "file": "000035_personal_pricing_v3.down.sql",
+        "version": 35,
+        "sha256": "779d85fe3dc10d4ca423b12979a9fde300f728b55a2e8d2a7477195871ed1acc"
+      },
+      {
+        "file": "000035_personal_pricing_v3.up.sql",
+        "version": 35,
+        "sha256": "cb6adb83b886d39960756f71449f0f036bce151b00939ebcc46cc817baac5ac6"
+      },
+      {
+        "file": "000036_trial_h3c_sku_override.down.sql",
+        "version": 36,
+        "sha256": "f01466a2052ad305f036d36e8305f8d18baa87b537e4874cf2d566509a9ef785"
+      },
+      {
+        "file": "000036_trial_h3c_sku_override.up.sql",
+        "version": 36,
+        "sha256": "49b40650f1c72a84a7eef31fb01dc361d933107360bc90352f75fc768f8996dc"
       }
     ],
     "payment-simulator": [

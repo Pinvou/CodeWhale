@@ -44,6 +44,16 @@ test('product mapping and order snapshots are immutable provider facts', async (
   assert.match(payments, /product_mapping_id,product_mapping_snapshot,provider_capability_snapshot/);
 });
 
+test('trial plan uses the temporary H3C UAT SKU without rewriting other products', async () => {
+  const migration = await read('migrations/billing/000036_trial_h3c_sku_override.up.sql');
+  const rollback = await read('migrations/billing/000036_trial_h3c_sku_override.down.sql');
+  assert.match(migration, /product_id='PLAN_TRIAL'/);
+  assert.match(migration, /'8814A1D2',4900,'CNY'/);
+  assert.doesNotMatch(migration, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP|development_simulator/);
+  assert.match(rollback, /'0502AJON',4900,'CNY'/);
+  assert.doesNotMatch(rollback, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP|development_simulator/);
+});
+
 test('development simulator is unavailable to production configuration', async () => {
   const main = await read('cmd/billing-service/main.go');
   const helm = await read('deploy/helm/account-platform/templates/app-deployments.yaml');
