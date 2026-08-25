@@ -582,6 +582,46 @@ impl TeamRelayManager {
         })
     }
 
+    async fn finish_lifecycle_mutation(
+        &self,
+        mut settings: TeamRelaySettings,
+        token: &str,
+        clear_current_team: bool,
+    ) -> TeamRelayLifecycleResult {
+        let fallback_team_id = if clear_current_team || settings.team_id.is_empty() {
+            None
+        } else {
+            Some(settings.team_id.clone())
+        };
+        let mut result = TeamRelayLifecycleResult {
+            committed: true,
+            active_team_id: fallback_team_id,
+            snapshot: None,
+            account: None,
+            sync_error: None,
+        };
+
+        if clear_current_team {
+            settings.team_id.clear();
+            if let Err(error) = self.save_settings(&settings) {
+                result.record_sync_error(error);
+            }
+        }
+
+        match self.recover_current_team(settings, token).await {
+            Ok(state) => {
+                result.active_team_id = state
+                    .snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.bootstrap.team.id.clone());
+                result.snapshot = state.snapshot;
+                result.account = Some(state.account);
+            }
+            Err(error) => result.record_sync_error(error),
+        }
+        result
+    }
+
     pub async fn create_team(&self, name: &str) -> Result<TeamRelaySnapshot, String> {
         let (mut settings, token) = self.configured()?;
         let response = self
@@ -729,7 +769,7 @@ impl TeamRelayManager {
     pub async fn transfer_owner(
         &self,
         new_owner_id: &str,
-    ) -> Result<TeamRelayLifecycleState, String> {
+    ) -> Result<TeamRelayLifecycleResult, String> {
         let (settings, token) = self.configured()?;
         let response = self
             .client
@@ -745,10 +785,12 @@ impl TeamRelayManager {
         if !response.status().is_success() {
             return Err(decode_error(response).await);
         }
-        self.recover_current_team(settings, &token).await
+        Ok(self
+            .finish_lifecycle_mutation(settings, &token, false)
+            .await)
     }
 
-    pub async fn leave_team(&self) -> Result<TeamRelayLifecycleState, String> {
+    pub async fn leave_team(&self) -> Result<TeamRelayLifecycleResult, String> {
         let (settings, token) = self.configured()?;
         let response = self
             .client
@@ -763,10 +805,10 @@ impl TeamRelayManager {
         if !response.status().is_success() {
             return Err(decode_error(response).await);
         }
-        self.recover_current_team(settings, &token).await
+        Ok(self.finish_lifecycle_mutation(settings, &token, true).await)
     }
 
-    pub async fn dissolve_team(&self) -> Result<TeamRelayLifecycleState, String> {
+    pub async fn dissolve_team(&self) -> Result<TeamRelayLifecycleResult, String> {
         let (settings, token) = self.configured()?;
         let response = self
             .client
@@ -781,7 +823,7 @@ impl TeamRelayManager {
         if !response.status().is_success() {
             return Err(decode_error(response).await);
         }
-        self.recover_current_team(settings, &token).await
+        Ok(self.finish_lifecycle_mutation(settings, &token, true).await)
     }
 
     pub async fn create_thread(

@@ -64,14 +64,14 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
     if (command === 'team_relay_remove_member') return null;
     if (command === 'team_relay_transfer_owner') {
       const snapshot = teamSnapshot('team-two');
-      return { snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams } };
+      return { committed: true, active_team_id: 'team-two', snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams }, sync_error: null };
     }
     if (command === 'team_relay_leave_team') {
       const snapshot = teamSnapshot('fallback-team');
-      return { snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams } };
+      return { committed: true, active_team_id: 'fallback-team', snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams }, sync_error: null };
     }
     if (command === 'team_relay_dissolve_team') {
-      return { snapshot: null, account: { principal: { id: 'me', email: 'me@example.com', display_name: 'Me' }, teams: [] } };
+      return { committed: true, active_team_id: null, snapshot: null, account: { principal: { id: 'me', email: 'me@example.com', display_name: 'Me' }, teams: [] }, sync_error: null };
     }
     if (command === 'team_relay_get_join_password') return { configured: true, visible: true, recoverable: true, visibility: 'members', join_password: 'K7M4-P9Q2', updated_at: '2026-08-10T00:00:00Z' };
     if (command === 'team_relay_rotate_join_password') return { configured: true, visible: true, recoverable: true, visibility: 'members', join_password: 'R8N5-X4C7', updated_at: '2026-08-11T00:00:00Z' };
@@ -331,6 +331,29 @@ function isolatedRelayFeature(invoke) {
     async invoke(command, args) { return invoke(command, args); },
   });
 }
+
+const committedState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'team' }, snapshot: teamSnapshot('team'), account: { principal: { id: 'me' }, teams: [] }, error: null } };
+const committedFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
+  state: committedState,
+  notify() {},
+  listen() { return Promise.resolve(() => {}); },
+  async invoke(command) {
+    if (command === 'team_relay_transfer_owner') return { committed: true, active_team_id: 'team', snapshot: null, account: null, sync_error: 'hub refresh failed' };
+    if (command === 'team_relay_leave_team') return { committed: true, active_team_id: null, snapshot: null, account: null, sync_error: 'hub refresh failed' };
+    if (command === 'team_relay_status') throw new Error('connection lost');
+    return null;
+  },
+});
+const committedTransfer = await committedFeature.transferOwner('member-two');
+assert.equal(committedTransfer.committed, true, 'a committed mutation must resolve even when refresh fails');
+assert.equal(committedState.teamRelay.status.team_id, 'team');
+assert.equal(committedState.teamRelay.snapshot.bootstrap.team.id, 'team', 'transfer keeps the cached team until background refresh succeeds');
+assert.equal(committedState.teamRelay.error, null, 'a post-commit refresh failure must not be reported as a mutation failure');
+const committedLeave = await committedFeature.leaveTeam();
+assert.equal(committedLeave.committed, true);
+assert.equal(committedState.teamRelay.status.team_id, null);
+assert.equal(committedState.teamRelay.snapshot, null, 'leave clears the invalid current team before background recovery');
+assert.equal(committedState.teamRelay.error, null);
 
 const recoveredState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'removed-team' }, snapshot: null } };
 const recoveredFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({

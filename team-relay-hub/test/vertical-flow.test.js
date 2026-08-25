@@ -947,18 +947,27 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     phase: "active",
     responsibilities: ["work_owner", "current_actor"],
   }]);
-  const blockedOwnerTransfer = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+  const ownerTransferWithOpenWork = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
     method: "POST",
     token: a.device_token,
     body: { new_owner_id: c.principal.id },
   });
-  assert.equal(blockedOwnerTransfer.status, 409);
-  assert.equal(blockedOwnerTransfer.value.error.code, "member_has_open_work");
-  assert.deepEqual(blockedOwnerTransfer.value.error.details.blocking_threads[0].responsibilities, [
-    "initiator",
-    "return_to",
-    "final_recipient",
-  ]);
+  assert.equal(ownerTransferWithOpenWork.status, 200, "ownership transfer must not alter or block existing work responsibilities");
+  const restoreOwner = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: c.device_token,
+    body: { new_owner_id: a.principal.id },
+  });
+  assert.equal(restoreOwner.status, 200);
+  await pool.query("UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1", [c.principal.id]);
+  const disabledOwnerTransfer = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: c.principal.id },
+  });
+  assert.equal(disabledOwnerTransfer.status, 404);
+  assert.equal(disabledOwnerTransfer.value.error.code, "resource_not_found");
+  await pool.query("UPDATE principals SET disabled_at = NULL WHERE id = $1", [c.principal.id]);
   const blockedTeamDissolution = await api(`/v1/teams/${initial.team_id}`, {
     method: "DELETE",
     token: a.device_token,
@@ -1527,6 +1536,17 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(removedMemberOldInvite.status, 410);
   assert.equal(removedMemberOldInvite.value.error.code, "invite_expired");
+  const thirdPartyOldInvite = await api("/v1/enrollments/claim", {
+    method: "POST",
+    body: {
+      invite_code: inviteBeforeRemoval.value.invite_code,
+      email: nextEmail(),
+      display_name: "Revoked invite user",
+      device_name: "Revoked invite test device",
+    },
+  });
+  assert.equal(thirdPartyOldInvite.status, 410, "unused invites created by a removed member must be revoked");
+  assert.equal(thirdPartyOldInvite.value.error.code, "invite_expired");
   const removedBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
     token: c.device_token,
   });
@@ -1551,6 +1571,12 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(membersAfterTransfer.value.members.find(member => member.id === b.principal.id).role, "owner");
 
   const joinCodeBeforeLeave = passwordAfterRemoval.value.join_password;
+  const inviteBeforeLeave = await api(`/v1/teams/${initial.team_id}/invites`, {
+    method: "POST",
+    token: a.device_token,
+    body: { expires_in_hours: 24 },
+  });
+  assert.equal(inviteBeforeLeave.status, 201);
   const leaveA = await api(`/v1/teams/${initial.team_id}/members/me`, {
     method: "DELETE",
     token: a.device_token,
@@ -1565,6 +1591,17 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(oldCodeAfterLeave.status, 401);
   assert.equal(oldCodeAfterLeave.value.error.code, "join_password_invalid");
+  const thirdPartyInviteAfterLeave = await api("/v1/enrollments/claim", {
+    method: "POST",
+    body: {
+      invite_code: inviteBeforeLeave.value.invite_code,
+      email: nextEmail(),
+      display_name: "Departed inviter user",
+      device_name: "Departed inviter test device",
+    },
+  });
+  assert.equal(thirdPartyInviteAfterLeave.status, 410, "unused invites created by a departed member must be revoked");
+  assert.equal(thirdPartyInviteAfterLeave.value.error.code, "invite_expired");
 
   const passwordBeforeDissolution = await api(
     `/v1/teams/${initial.team_id}/join-password`,

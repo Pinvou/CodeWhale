@@ -116,6 +116,18 @@ async function rotateJoinCodeAfterMembershipEnds(client, teamId, updatedBy, encr
   );
 }
 
+async function revokeUnusedInvitesCreatedBy(client, teamId, principalId) {
+  await client.query(
+    `UPDATE invites
+        SET revoked_at = clock_timestamp()
+      WHERE team_id = $1
+        AND created_by = $2
+        AND claimed_at IS NULL
+        AND revoked_at IS NULL`,
+    [teamId, principalId],
+  );
+}
+
 export async function transferTeamOwner(pool, token, rawTeamId, body) {
   const teamId = uuid(rawTeamId, "team_id");
   exactKeys(body, ["new_owner_id"]);
@@ -129,16 +141,19 @@ export async function transferTeamOwner(pool, token, rawTeamId, body) {
     await lockActiveTeam(client, teamId);
     await requireMembership(client, teamId, auth.principalId, "owner");
     const target = await client.query(
-      `SELECT role
-         FROM memberships
-        WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL
-        FOR UPDATE`,
+      `SELECT m.role
+         FROM memberships m
+         JOIN principals p ON p.id = m.principal_id
+        WHERE m.team_id = $1
+          AND m.principal_id = $2
+          AND m.removed_at IS NULL
+          AND p.disabled_at IS NULL
+        FOR UPDATE OF m, p`,
       [teamId, newOwnerId],
     );
     if (!target.rowCount || target.rows[0].role !== "member") {
       throw new AppError(404, "resource_not_found", "The new owner must be an active ordinary team member.");
     }
-    await requireNoMemberOpenWork(client, teamId, auth.principalId);
     const demoted = await client.query(
       `UPDATE memberships
           SET role = 'member'
@@ -174,6 +189,7 @@ export async function leaveTeam(pool, token, rawTeamId, encryptionKey) {
         WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL`,
       [teamId, auth.principalId],
     );
+    await revokeUnusedInvitesCreatedBy(client, teamId, auth.principalId);
     if (team.join_password_hash) {
       await rotateJoinCodeAfterMembershipEnds(client, teamId, auth.principalId, encryptionKey);
     }
@@ -217,6 +233,7 @@ export async function removeTeamMember(pool, token, rawTeamId, rawPrincipalId, e
         WHERE team_id = $1 AND principal_id = $2`,
       [teamId, principalId],
     );
+    await revokeUnusedInvitesCreatedBy(client, teamId, principalId);
     if (team.join_password_hash) {
       await rotateJoinCodeAfterMembershipEnds(client, teamId, auth.principalId, encryptionKey);
     }

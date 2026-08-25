@@ -2,7 +2,7 @@ use crate::features::team_relay::{
     AccountEnrollmentInput, Attachment, ClaimEnrollmentInput, CreateActionInput,
     CreateInviteResponse, CreateTeamEnrollmentInput, CreateThreadInput, MarkThreadReadInput,
     SetTeamRelayAgentSessionInput, SetThreadPreferenceInput, TeamJoinCodeState,
-    TeamRelayAccountState, TeamRelayLifecycleState, TeamRelayManager, TeamRelaySnapshot,
+    TeamRelayAccountState, TeamRelayLifecycleResult, TeamRelayManager, TeamRelaySnapshot,
     TeamRelayStatus, TeamRelayTaskWorkspaceStatus, ThreadMutationResponse, ThreadPreference,
     ThreadReadState, UpdateProfileInput,
 };
@@ -217,54 +217,57 @@ pub async fn team_relay_transfer_owner(
     app: AppHandle,
     new_owner_id: String,
     manager: State<'_, TeamRelayManager>,
-) -> Result<TeamRelayLifecycleState, String> {
-    let state = manager.transfer_owner(&new_owner_id).await?;
-    manager.start_events(
-        app,
-        &state
-            .account
+) -> Result<TeamRelayLifecycleResult, String> {
+    let mut result = manager.transfer_owner(&new_owner_id).await?;
+    if let Some(account) = &result.account {
+        let team_ids = account
             .teams
             .iter()
             .map(|team| team.id.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    Ok(state)
+            .collect::<Vec<_>>();
+        if let Err(error) = manager.start_events(app, &team_ids) {
+            result.record_sync_error(error);
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn team_relay_leave_team(
     app: AppHandle,
     manager: State<'_, TeamRelayManager>,
-) -> Result<TeamRelayLifecycleState, String> {
-    let state = manager.leave_team().await?;
-    manager.start_events(
-        app,
-        &state
-            .account
+) -> Result<TeamRelayLifecycleResult, String> {
+    let mut result = manager.leave_team().await?;
+    if let Some(account) = &result.account {
+        let team_ids = account
             .teams
             .iter()
             .map(|team| team.id.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    Ok(state)
+            .collect::<Vec<_>>();
+        if let Err(error) = manager.start_events(app, &team_ids) {
+            result.record_sync_error(error);
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn team_relay_dissolve_team(
     app: AppHandle,
     manager: State<'_, TeamRelayManager>,
-) -> Result<TeamRelayLifecycleState, String> {
-    let state = manager.dissolve_team().await?;
-    manager.start_events(
-        app,
-        &state
-            .account
+) -> Result<TeamRelayLifecycleResult, String> {
+    let mut result = manager.dissolve_team().await?;
+    if let Some(account) = &result.account {
+        let team_ids = account
             .teams
             .iter()
             .map(|team| team.id.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    Ok(state)
+            .collect::<Vec<_>>();
+        if let Err(error) = manager.start_events(app, &team_ids) {
+            result.record_sync_error(error);
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]

@@ -908,7 +908,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
     } catch { /* state */ }
   };
   const resetAfterTeamLifecycle = result => {
-    const nextTeamId = result?.snapshot?.bootstrap?.team?.id || '';
+    const nextTeamId = result?.active_team_id || result?.snapshot?.bootstrap?.team?.id || '';
     setSelectedTeamId(nextTeamId);
     setAssignmentTeamId(nextTeamId);
     setSelectedId(null); setTeamJoinCode(null); setTeamJoinCodeOpen(false); setTeamJoinCodeLoading(false); setMobileDetailOpen(false);

@@ -392,16 +392,16 @@
       patch({ mutating: true, error: null });
       try {
         var result = await invoke(command, args);
-        if (result && Object.prototype.hasOwnProperty.call(result, "snapshot") && result.account) {
-          var lifecycleSnapshot = result.snapshot || null;
-          patch({
-            snapshot: lifecycleSnapshot,
-            account: result.account,
-            status: Object.assign({}, state.teamRelay.status, {
-              team_id: lifecycleSnapshot && lifecycleSnapshot.bootstrap ? lifecycleSnapshot.bootstrap.team.id : null,
-            }),
-            lastSyncedAt: Date.now(),
-          });
+        if (result && result.committed === true) {
+          var activeTeamId = result.active_team_id || null;
+          var lifecyclePatch = {
+            status: Object.assign({}, state.teamRelay.status, { team_id: activeTeamId }),
+          };
+          if (result.snapshot || !activeTeamId) lifecyclePatch.snapshot = result.snapshot || null;
+          if (result.account) lifecyclePatch.account = result.account;
+          if (!result.sync_error) lifecyclePatch.lastSyncedAt = Date.now();
+          patch(lifecyclePatch);
+          if (result.sync_error) load({ silent: true }).catch(function () {});
         }
         else if (result && result.bootstrap && result.attachments) patch({ snapshot: result });
         else load().catch(function () {});

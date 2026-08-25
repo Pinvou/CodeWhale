@@ -275,6 +275,25 @@ pub struct TeamRelayLifecycleState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamRelayLifecycleResult {
+    pub committed: bool,
+    pub active_team_id: Option<String>,
+    pub snapshot: Option<TeamRelaySnapshot>,
+    pub account: Option<TeamRelayAccountState>,
+    pub sync_error: Option<String>,
+}
+
+impl TeamRelayLifecycleResult {
+    pub fn record_sync_error(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        self.sync_error = Some(match self.sync_error.take() {
+            Some(existing) => format!("{existing}; {error}"),
+            None => error,
+        });
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamMembershipResponse {
     pub team: Team,
     pub membership: Membership,

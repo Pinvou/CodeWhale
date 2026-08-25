@@ -225,13 +225,13 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 
 ### 10.2 团队基本生命周期
 
-- 一个有效 Team 始终只有一个 `Membership.role=owner`。`POST /v1/teams/{team_id}/owner-transfer` 只允许当前负责人把角色原子转让给同一团队的有效普通成员；原负责人同时变为普通成员，不改变 `teams.created_by` 或任何 WorkThread 角色。
+- 一个有效 Team 始终只有一个 `Membership.role=owner`。`POST /v1/teams/{team_id}/owner-transfer` 只允许当前负责人把角色原子转让给同一团队未禁用的有效普通成员；原负责人同时变为普通成员，不改变 `teams.created_by`、任何 WorkThread 角色或既有工作责任。
 - 普通成员通过 `DELETE /v1/teams/{team_id}/members/me` 主动离队。负责人不能直接离队，必须先转让负责人或解散团队；离队与退出当前设备账号是两个独立操作。
-- 负责人转让、普通成员离队和负责人移除成员前，Hub 检查该成员在全部未结束线程中的 initiator、owner、current actor、return target、final recipient、pending sender 和 pending recipient 责任。存在阻塞时返回 `member_has_open_work`，`details.blocking_threads` 一次列出全部任务 ID、标题、阶段和责任角色。
-- 普通成员离队或被负责人移除时，如果固定加入码仍启用，Hub 在同一事务中轮换加入码；旧码立即失效。
+- 普通成员离队和负责人移除成员前，Hub 检查该成员在全部未结束线程中的 initiator、owner、current actor、return target、final recipient、pending sender 和 pending recipient 责任。存在阻塞时返回 `member_has_open_work`，`details.blocking_threads` 一次列出全部任务 ID、标题、阶段和责任角色。负责人转让不终止原负责人的 Membership，因此不受该检查阻塞。
+- 普通成员离队或被负责人移除时，Hub 在同一事务中撤销该成员创建的全部未使用邀请；如果固定加入码仍启用，再轮换加入码，旧凭据立即失效。
 - `DELETE /v1/teams/{team_id}` 只允许负责人执行，且团队必须没有任何未结束工作。解散是不可恢复的逻辑终止：在同一事务中记录 `dissolved_at/dissolved_by`、清除加入码并撤销未使用邀请，不物理删除线程、动作或附件关系。
 - 已解散团队不再属于有效 Membership 范围；团队列表、成员校验、bootstrap、线程、附件、头像和 SSE 都拒绝旧 `team_id` 的访问。当前产品不提供已解散团队列表、恢复或只读历史入口。
-- 所有可能改变未结束责任关系的线程写入都先取得 Team 共享锁；成员终止、负责人转让和团队解散取得同一 Team 的排他锁，从而使“无未结束责任”校验与并发派活、回传和 Handoff 串行化。
+- 所有可能改变未结束责任关系的线程写入都先取得 Team 共享锁；成员终止、负责人转让和团队解散取得同一 Team 的排他锁，从而保护单负责人、有效成员和未结束责任校验，并与并发派活、回传和 Handoff 串行化。
 - 客户端保留仍有效的当前团队；当前团队失效时选择 `GET /v1/teams` 返回的最近加入有效团队并立即持久化，列表为空时清除本地 `team_id` 和旧快照。
 
 ### 10.3 未读更新与已读游标

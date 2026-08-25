@@ -2348,6 +2348,9 @@
   var joinTeamRelayTeam = teamRelayFeature.joinTeam;
   var switchTeamRelayTeam = teamRelayFeature.switchTeam;
   var removeTeamRelayMember = teamRelayFeature.removeMember;
+  var transferTeamRelayOwner = teamRelayFeature.transferOwner;
+  var leaveTeamRelayTeam = teamRelayFeature.leaveTeam;
+  var dissolveTeamRelayTeam = teamRelayFeature.dissolveTeam;
   var createTeamRelayInvite = teamRelayFeature.createInvite;
   var getTeamRelayJoinPassword = teamRelayFeature.getJoinPassword;
   var rotateTeamRelayJoinPassword = teamRelayFeature.rotateJoinPassword;
@@ -2687,6 +2690,9 @@
       joinTeam: joinTeamRelayTeam,
       switchTeam: switchTeamRelayTeam,
       removeMember: removeTeamRelayMember,
+      transferOwner: transferTeamRelayOwner,
+      leaveTeam: leaveTeamRelayTeam,
+      dissolveTeam: dissolveTeamRelayTeam,
       createInvite: createTeamRelayInvite,
       getJoinPassword: getTeamRelayJoinPassword,
       rotateJoinPassword: rotateTeamRelayJoinPassword,

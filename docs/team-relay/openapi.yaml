@@ -475,7 +475,7 @@ paths:
     post:
       tags: [Team]
       operationId: transferTeamOwner
-      description: Atomically transfers the single team owner role to an active ordinary member. The current owner must have no open work responsibilities.
+      description: Atomically transfers the single team owner role to an active, non-disabled ordinary member without changing either member's work responsibilities.
       requestBody:
         required: true
         content:
@@ -496,7 +496,7 @@ paths:
         "404":
           $ref: "#/components/responses/ResourceNotFound"
         "409":
-          description: The current owner still has open work responsibilities.
+          description: The owner roles could not be exchanged atomically because membership state changed concurrently.
           content:
             application/json:
               schema:
@@ -608,7 +608,7 @@ paths:
       operationId: removeTeamMember
       responses:
         "204":
-          description: Membership removed. The credential may still belong to other teams. If joining is enabled, its code is atomically rotated.
+          description: Membership removed. The credential may still belong to other teams. Unused invites created by the removed member are revoked and, if joining is enabled, its code is atomically rotated.
         "403":
           $ref: "#/components/responses/ActionNotAllowed"
         "404":
@@ -629,7 +629,7 @@ paths:
       description: Ends the current ordinary member's active Membership. Owners must transfer ownership or dissolve the team instead.
       responses:
         "204":
-          description: Membership ended. If joining was enabled, the old reusable join code is already invalid.
+          description: Membership ended. Unused invites created by the caller are revoked and, if joining was enabled, the old reusable join code is already invalid.
         "403":
           $ref: "#/components/responses/MembershipRequired"
         "404":
