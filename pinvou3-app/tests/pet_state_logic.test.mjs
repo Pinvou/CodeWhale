@@ -17,6 +17,9 @@ mkdirSync(path.join(dir, 'shared'), { recursive: true });
 copyFileSync(src, tmp);
 copyFileSync(i18nSrc, path.join(dir, 'shared', 'i18n.js'));
 copyFileSync(connectorI18nSrc, path.join(dir, 'shared', 'connector-i18n.js'));
+// i18n.js 现按语言拆分（zh 内嵌），临时副本需带上 zh 词典才能解析。
+mkdirSync(path.join(dir, 'shared', 'i18n'), { recursive: true });
+copyFileSync(path.join(here, '..', 'src', 'shared', 'i18n', 'zh.js'), path.join(dir, 'shared', 'i18n', 'zh.js'));
 
 try {
   const {

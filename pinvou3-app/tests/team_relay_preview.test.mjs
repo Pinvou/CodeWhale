@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { dict } from '../src/shared/i18n.js';
+import { dict } from '../src/shared/i18n-all.js';
 import {
   canUpdateRelayProgress, deriveBoardColumn, deriveCategory, matchesRelayView,
   matchesSourceFilter, projectMaterialPackages, projectSnapshot, projectTeamBoard,
