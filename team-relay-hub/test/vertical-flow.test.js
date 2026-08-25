@@ -687,7 +687,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     "join code rotation must wait while team membership changes are locked",
   );
   assert.equal(rejectedRotation.status, 403);
-  assert.equal(rejectedRotation.value.error.code, "membership_required");
+  assert.equal(rejectedRotation.value.error.code, "action_not_allowed");
   const joinPasswordAfterRotationRace = await pool.query(
     "SELECT join_password_hash FROM teams WHERE id = $1",
     [createdTeam.value.team.id],
