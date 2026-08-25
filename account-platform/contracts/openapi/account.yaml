@@ -508,6 +508,11 @@ paths:
       summary: List the active organization tree visible to a member
       parameters:
         - $ref: "#/components/parameters/OrganizationId"
+        - name: root_unit_id
+          in: query
+          required: false
+          description: Explicit subtree root. Required for unit-scoped administrators; organization-scoped readers may omit it.
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Flat organization-unit list linked by parent_id
@@ -771,6 +776,11 @@ paths:
       summary: List active members with roles and unit assignments
       parameters:
         - $ref: "#/components/parameters/OrganizationId"
+        - name: unit_id
+          in: query
+          required: false
+          description: Explicit member-subtree target. Required for unit-scoped administrators; cross-subtree memberships are excluded.
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Active organization members

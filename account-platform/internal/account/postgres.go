@@ -571,6 +571,9 @@ func (r *PostgresRepository) MoveUnit(ctx context.Context, principal identity.Pr
 	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, &unitID, PermissionOrganizationUnitsManage); err != nil {
 		return UnitMutationResult{}, err
 	}
+	if err := requireOrganizationPermission(ctx, tx, userID, organizationID, newParentID, PermissionOrganizationUnitsManage); err != nil {
+		return UnitMutationResult{}, err
+	}
 	requestHash := organizationUnitRequestHash("MOVE", unitID, newParentID, "", expectedStructureVersion)
 	replayed, err := lockOrganizationUnitCommand(ctx, tx, userID, organizationID, "MOVE", idempotencyKey, requestHash)
 	if err != nil {

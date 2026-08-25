@@ -6,6 +6,9 @@ const migration = await readFile(new URL('../../migrations/account/000034_three_
 const recoveryMigration = await readFile(new URL('../../migrations/account/000033_payment_provider_resume_policy.up.sql', import.meta.url), 'utf8');
 const authorization = await readFile(new URL('../../internal/account/authorization.go', import.meta.url), 'utf8');
 const postgres = await readFile(new URL('../../internal/account/postgres.go', import.meta.url), 'utf8');
+const directory = await readFile(new URL('../../internal/account/directory.go', import.meta.url), 'utf8');
+const membership = await readFile(new URL('../../internal/account/membership_governance.go', import.meta.url), 'utf8');
+const service = await readFile(new URL('../../internal/account/service.go', import.meta.url), 'utf8');
 const openapi = await readFile(new URL('../../contracts/openapi/account.yaml', import.meta.url), 'utf8');
 const design = await readFile(new URL('../../docs/role-system-design.md', import.meta.url), 'utf8');
 
@@ -94,6 +97,21 @@ test('authorization context exposes independent versions and personal/platform c
   assert.doesNotMatch(postgres, /ro\.scope IN \('ORGANIZATION','UNIT'\)/);
   assert.match(openapi, /ORG_MODEL_ADMIN/);
   assert.match(openapi, /unit_authorization_bindings/);
+});
+
+test('organization management keeps explicit object scope without switching billing context', () => {
+  assert.match(service, /root_unit_id/);
+  assert.match(service, /optionalQueryUUID/);
+  assert.match(openapi, /name: root_unit_id[\s\S]*Required for unit-scoped administrators/);
+  assert.match(openapi, /name: unit_id[\s\S]*cross-subtree memberships are excluded/);
+  assert.match(authorization, /requireOrganizationMemberPermission/);
+  assert.match(authorization, /organization\.status='ACTIVE'/);
+  assert.match(authorization, /target\.organization_id=\$2 AND target\.id=\$3 AND target\.status='ACTIVE'/);
+  assert.match(directory, /scoped_closure\.ancestor_id=\$2/);
+  assert.match(directory, /outside_closure\.ancestor_id=\$2/);
+  assert.match(membership, /requireOrganizationMemberPermission\(ctx, tx, actorID, organizationID, targetUserID/);
+  assert.match(postgres, /requireOrganizationPermission\(ctx, tx, userID, organizationID, newParentID, PermissionOrganizationUnitsManage\)/);
+  assert.doesNotMatch(service, /SetActiveContext[\s\S]{0,200}(?:listUnits|listMembers|createUnit|moveUnit)/);
 });
 
 test('the unpublished payment recovery migration uses the real permission schema column', () => {

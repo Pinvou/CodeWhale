@@ -177,7 +177,7 @@ func (r *PostgresRepository) removeMembership(ctx context.Context, principal ide
 		if err != nil {
 			return MembershipMutationResult{}, err
 		}
-		if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersManage); err != nil {
+		if err := requireOrganizationMemberPermission(ctx, tx, actorID, organizationID, targetUserID, PermissionOrganizationMembersManage); err != nil {
 			return MembershipMutationResult{}, err
 		}
 	}

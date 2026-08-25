@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) (UnitTree, error) {
+func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, rootUnitID *uuid.UUID) (UnitTree, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return UnitTree{}, err
@@ -21,7 +21,7 @@ func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.P
 	if err != nil {
 		return UnitTree{}, err
 	}
-	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationUnitsRead); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, rootUnitID, PermissionOrganizationUnitsRead); err != nil {
 		return UnitTree{}, err
 	}
 	var structureVersion int64
@@ -30,7 +30,14 @@ func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.P
 	} else if err != nil {
 		return UnitTree{}, err
 	}
-	rows, err := tx.Query(ctx, `SELECT id,organization_id,parent_id,name,status,version FROM organization_units WHERE organization_id=$1 AND status='ACTIVE' ORDER BY parent_id NULLS FIRST,name,id`, organizationID)
+	rows, err := tx.Query(ctx, `SELECT unit.id,unit.organization_id,unit.parent_id,unit.name,unit.status,unit.version
+FROM organization_units unit
+WHERE unit.organization_id=$1 AND unit.status='ACTIVE'
+  AND ($2::uuid IS NULL OR EXISTS(
+    SELECT 1 FROM organization_unit_closure closure
+    WHERE closure.organization_id=$1 AND closure.ancestor_id=$2 AND closure.descendant_id=unit.id
+  ))
+ORDER BY unit.parent_id NULLS FIRST,unit.name,unit.id`, organizationID, rootUnitID)
 	if err != nil {
 		return UnitTree{}, err
 	}
@@ -49,7 +56,7 @@ func (r *PostgresRepository) ListUnits(ctx context.Context, principal identity.P
 	return UnitTree{Items: items, StructureVersion: structureVersion}, tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) ([]Member, error) {
+func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, unitID *uuid.UUID) ([]Member, error) {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return nil, err
@@ -59,7 +66,7 @@ func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity
 	if err != nil {
 		return nil, err
 	}
-	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationMembersRead); err != nil {
+	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, unitID, PermissionOrganizationMembersRead); err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `
@@ -69,7 +76,21 @@ SELECT m.id,u.id,u.display_name,u.email,m.status,m.version,m.joined_at,
        ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.unit_id)
 FROM memberships m JOIN users u ON u.id=m.user_id
 WHERE m.organization_id=$1 AND m.status='ACTIVE'
-ORDER BY COALESCE(u.display_name,u.email,u.id::text),u.id`, organizationID)
+  AND ($2::uuid IS NULL OR (
+    EXISTS(
+      SELECT 1 FROM membership_units scoped_membership
+      JOIN organization_unit_closure scoped_closure ON scoped_closure.organization_id=m.organization_id AND scoped_closure.descendant_id=scoped_membership.unit_id
+      WHERE scoped_membership.membership_id=m.id AND scoped_closure.ancestor_id=$2
+    )
+    AND NOT EXISTS(
+      SELECT 1 FROM membership_units outside_membership
+      WHERE outside_membership.membership_id=m.id AND NOT EXISTS(
+        SELECT 1 FROM organization_unit_closure outside_closure
+        WHERE outside_closure.organization_id=m.organization_id AND outside_closure.ancestor_id=$2 AND outside_closure.descendant_id=outside_membership.unit_id
+      )
+    )
+  ))
+ORDER BY COALESCE(u.display_name,u.email,u.id::text),u.id`, organizationID, unitID)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +158,7 @@ func (r *PostgresRepository) ReplaceMemberRoles(ctx context.Context, principal i
 	if err != nil {
 		return Member{}, err
 	}
-	if err := requireOrganizationPermission(ctx, tx, actorID, organizationID, nil, PermissionOrganizationRolesAssign); err != nil {
+	if err := requireOrganizationMemberPermission(ctx, tx, actorID, organizationID, targetUserID, PermissionOrganizationRolesAssign); err != nil {
 		return Member{}, err
 	}
 	var membershipID uuid.UUID

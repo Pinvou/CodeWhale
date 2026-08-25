@@ -63,10 +63,10 @@ func (f *fakeRepository) SetActiveContext(_ context.Context, _ identity.Principa
 	f.setContext.OrganizationID = organizationID
 	return f.setContext, nil
 }
-func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID) (UnitTree, error) {
+func (*fakeRepository) ListUnits(context.Context, identity.Principal, uuid.UUID, *uuid.UUID) (UnitTree, error) {
 	panic("not used")
 }
-func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID) ([]Member, error) {
+func (*fakeRepository) ListMembers(context.Context, identity.Principal, uuid.UUID, *uuid.UUID) ([]Member, error) {
 	panic("not used")
 }
 func (*fakeRepository) ListQuotaMembers(context.Context, identity.Principal, uuid.UUID) ([]QuotaMember, error) {

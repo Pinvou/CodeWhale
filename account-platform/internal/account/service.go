@@ -195,7 +195,12 @@ func (s *Service) listUnits(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	tree, err := s.repository.ListUnits(r.Context(), mustPrincipal(r.Context()), organizationID)
+	rootUnitID, err := optionalQueryUUID(r, "root_unit_id")
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid resource identifier", httpserver.RequestID(r.Context()))
+		return
+	}
+	tree, err := s.repository.ListUnits(r.Context(), mustPrincipal(r.Context()), organizationID, rootUnitID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
@@ -208,7 +213,12 @@ func (s *Service) listMembers(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	members, err := s.repository.ListMembers(r.Context(), mustPrincipal(r.Context()), organizationID)
+	unitID, err := optionalQueryUUID(r, "unit_id")
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid resource identifier", httpserver.RequestID(r.Context()))
+		return
+	}
+	members, err := s.repository.ListMembers(r.Context(), mustPrincipal(r.Context()), organizationID, unitID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

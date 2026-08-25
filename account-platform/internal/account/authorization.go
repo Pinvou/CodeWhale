@@ -318,14 +318,63 @@ SELECT EXISTS(
   SELECT 1
   FROM role_assignments ra
   JOIN memberships m ON m.user_id=ra.user_id AND m.organization_id=ra.organization_id AND m.status='ACTIVE'
+  JOIN organizations o ON o.id=ra.organization_id AND o.status='ACTIVE'
   JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=$4
   WHERE ra.user_id=$1 AND ra.organization_id=$2
 	AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+    AND ($3::uuid IS NULL OR EXISTS(
+      SELECT 1 FROM organization_units target
+      WHERE target.organization_id=$2 AND target.id=$3 AND target.status='ACTIVE'
+    ))
     AND (ra.unit_id IS NULL OR ($3::uuid IS NOT NULL AND EXISTS(
       SELECT 1 FROM organization_unit_closure c
       WHERE c.organization_id=$2 AND c.ancestor_id=ra.unit_id AND c.descendant_id=$3
     )))
 )`, userID, organizationID, unitID, permission).Scan(&allowed)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func requireOrganizationMemberPermission(ctx context.Context, tx pgx.Tx, userID, organizationID, targetUserID uuid.UUID, permission string) error {
+	permission = canonicalPermissionCode(permission)
+	var allowed bool
+	err := tx.QueryRow(ctx, `
+WITH target_membership AS (
+  SELECT membership.id
+  FROM memberships membership
+  JOIN organizations organization ON organization.id=membership.organization_id AND organization.status='ACTIVE'
+  WHERE membership.organization_id=$2 AND membership.user_id=$3 AND membership.status='ACTIVE'
+), authorized_roots AS (
+  SELECT actor_role.unit_id
+  FROM role_assignments actor_role
+  JOIN memberships actor_membership ON actor_membership.user_id=actor_role.user_id AND actor_membership.organization_id=actor_role.organization_id AND actor_membership.status='ACTIVE'
+  JOIN role_permissions permission ON permission.role_code=actor_role.role_code AND permission.permission_code=$4
+  WHERE actor_role.user_id=$1 AND actor_role.organization_id=$2
+    AND actor_role.revoked_at IS NULL AND actor_role.starts_at<=now() AND (actor_role.expires_at IS NULL OR actor_role.expires_at>now())
+)
+SELECT EXISTS(SELECT 1 FROM target_membership) AND (
+  EXISTS(SELECT 1 FROM authorized_roots WHERE unit_id IS NULL)
+  OR (
+    EXISTS(SELECT 1 FROM authorized_roots WHERE unit_id IS NOT NULL)
+    AND EXISTS(SELECT 1 FROM membership_units target_unit JOIN target_membership target ON target.id=target_unit.membership_id)
+    AND NOT EXISTS(
+      SELECT 1
+      FROM membership_units target_unit
+      JOIN target_membership target ON target.id=target_unit.membership_id
+      WHERE NOT EXISTS(
+        SELECT 1
+        FROM authorized_roots root
+        JOIN organization_unit_closure closure ON closure.organization_id=$2 AND closure.ancestor_id=root.unit_id AND closure.descendant_id=target_unit.unit_id
+        WHERE root.unit_id IS NOT NULL
+      )
+    )
+  )
+)`, userID, organizationID, targetUserID, permission).Scan(&allowed)
 	if err != nil {
 		return err
 	}

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 322`、`部分实现 33`、`未实现 9`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-074 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离及策略驱动审批，其余入口门禁由 APT-075–APT-082 逐项收敛。
+全量核验汇总：`已实现 323`、`部分实现 33`、`未实现 8`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批及组织对象授权，其余入口门禁由 APT-076–APT-082 逐项收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -30,6 +30,7 @@
 | `DOC-COVERAGE` | 对比 `requirements.md` 全部稳定编号与本节规范证据行 | 366 个唯一编号一一覆盖，无缺失、无额外编号 |
 | `ROLE-PERMISSION-REDESIGN` | 三类权限、角色真值表、对象作用域、生命周期、审批、工作负载身份、Break-glass 与迁移门禁的安全及业务独立审核 | 2026-08-26 两位独立审核者均确认设计通过；代码实现按 APT-069–APT-082 分任务进行 |
 | `THREE-SCOPE-AUTHORIZATION` | PERSONAL 作用域、默认个人角色、系统/组织角色精确真值表、规范权限别名、独立授权版本、节点绑定保留及发布前迁移更正 | Account/Token Go 测试、OpenAPI lint、177 个合同测试和迁移摘要门禁通过；数据库运行级迁移待部署验证 |
+| `ORGANIZATION-OBJECT-AUTHORIZATION` | 显式目标组织、节点子树列表、源/目标节点双向移动门禁及成员全部实际节点归属校验 | Account Go 测试、OpenAPI lint、对象作用域合同和全量静态验证通过；数据库多节点绑定与并发移动待部署验证 |
 | `LOGIN-PERMISSION-GATE` | Keycloak 浏览器密码/短信/注册完成路径与 Direct Grant 密码/短信路径在成功前强一致检查 `personal.session.login`，并校验精确 issuer 与最小工作负载路由 | Identity 静态合同、Compose/Helm 配置、Account 生命周期授权测试及全量合同通过；自定义 Keycloak 镜像构建和真实登录待部署验证 |
 | `PERSONAL-ACCOUNT-AUTHORIZATION` | 本人资料、授权上下文、组织列表、资料变更、上下文切换、注销和邀请 Account 路由逐项绑定个人原子权限，并保持 OIDC 主体唯一目标 | Account Go 测试、OpenAPI 403 契约、路由权限矩阵和生命周期失败关闭合同通过；数据库撤权运行级验证待部署 |
 | `BILLING-SCOPE-AUTHORIZATION` | 个人余额、权益包、订单与充值管理按 `personal.*` 权限和个人上下文失败关闭；组织购买、余额、权益及额度授予按显式组织目标与 `org.*` 权限实时决定 | Token/Portal Go 测试、显式组织目标和个人/组织不可互借权限用例、OpenAPI 及全量合同通过；数据库撤权和真实组织钱包联调待部署 |
@@ -166,7 +167,7 @@
 | ACC-61 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 个人、平台、每个组织及节点维护独立单调版本；角色真值表替换主动使存量绑定版本失效，平台权限与节点权限不再扁平合入个人/组织权限数组，节点授权保留绑定节点、角色和精确权限。 |
 | ACC-62 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 全部组织内置角色以替换式迁移对齐审定真值表并新增 `ORG_MODEL_ADMIN`；旧权限码只在 Account 解析边界映射到规范 `org.*`，数据库不保留双重授权。 |
 | ACC-63 | 已实现 | DOC_CURRENT | GO-UNIT; PERSONAL-ACCOUNT-AUTHORIZATION | NOT_DEPLOYED | 本人资料/授权/组织读取、资料修改、上下文切换、注销申请/查询及邀请读取/接受均绑定对应 `personal.*` 中间件并公开 403 契约；领域目标只取 OIDC 主体，生命周期矩阵在权限通过后继续失败关闭。 |
-| ACC-64 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 组织管理仍与活动计费上下文耦合，节点授权可能丢失 unit scope；由 APT-075 收敛。 |
+| ACC-64 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-OBJECT-AUTHORIZATION | NOT_DEPLOYED | 组织管理使用显式组织和可选节点目标，不切换活动计费上下文；节点树、成员、节点移动和成员移除按目标实际归属及完整子树失败关闭。 |
 | TOK-04 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | `/v1/model-protocols` 暴露 Adapter 版本和显式 `CHAT v1` JSON/SSE 能力；路由持久化 `protocol_code`，未声明的 Embedding/Rerank/Image 等协议不会被推断可用 |
 | TOK-07 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 独立版本化目录只把 PUBLISHED 及处于允许宽限期的 DEPRECATED 模型作为 `CATALOG_VISIBLE` 返回；目录展示不读取上下文资格、钱包或请求级预占结果 |
 | TOK-09 | 已实现 | DOC_CURRENT | GO-UNIT; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 按作用域、模型、协议和目标代次持久化 PENDING/READY/FAILED/REPAIR_REQUIRED；Worker 使用租约、SKIP LOCKED、指数退避、SLA 和修复轮次收敛，资源代次验证通过后才进入 READY |
@@ -691,7 +692,7 @@
 | ACC-61 | 独立授权版本与对象决定 | 已实现 | 个人、平台、组织/节点版本独立；节点授权以精确绑定返回且不扁平扩权，真值表迁移使旧缓存失效。 |
 | ACC-62 | 组织角色精确真值表 | 已实现 | `ORG_MODEL_ADMIN`、规范 `org.*` 权限码和全部组织角色替换式真值表已落地。 |
 | ACC-63 | Account 本人入口原子授权 | 已实现 | 本人资料、上下文、注销和邀请路由逐项使用独立个人权限，目标只从认证主体解析，生命周期白名单不扩大普通能力。 |
-| ACC-64 | 组织对象级授权 | 未实现 | 管理上下文仍与计费上下文耦合且 unit scope 可能被聚合丢失；APT-075 待实现。 |
+| ACC-64 | 组织对象级授权 | 已实现 | 组织管理不依赖活动计费上下文；节点管理员必须提交明确节点目标，列表限于子树，移动同时校验源与新父节点，跨节点成员不向单子树管理者暴露或开放移除。 |
 
 ### 3.3 Token Account、路由和模型调用
 
