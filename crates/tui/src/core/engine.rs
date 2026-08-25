@@ -31,7 +31,7 @@ use crate::compaction::{
 };
 use crate::config::{ApiProvider, Config, DEFAULT_MAX_SUBAGENTS, DEFAULT_TEXT_MODEL};
 use crate::core::model_client::SharedModelClient;
-use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, StreamError};
+use crate::error_taxonomy::{ErrorCategory, ErrorEnvelope, ErrorSeverity, StreamError};
 use crate::features::{Feature, Features};
 use crate::mcp::{McpConfig, McpPool};
 #[cfg(test)]
@@ -2993,30 +2993,29 @@ impl Engine {
                         // set; a fresh SendMessage is the only operation that
                         // may install replacement authority.
                         if self.control_plane_restricted {
-                            let _ = self
-                                .tx_event
-                                .send(Event::error(ErrorEnvelope::fatal(
-                                    "Restricted turns cannot edit and replay the last turn"
-                                        .to_string(),
-                                )))
-                                .await;
+                            self.reject_edit_last_turn(ErrorEnvelope::new(
+                                ErrorCategory::Authorization,
+                                ErrorSeverity::Error,
+                                false,
+                                "edit_last_turn_restricted",
+                                "Restricted turns cannot edit and replay the last turn",
+                            ))
+                            .await;
                             continue;
                         }
                         let route = match self.current_runtime_route() {
                             Ok(route) => route,
                             Err(err) => {
-                                let _ = self
-                                    .tx_event
-                                    .send(Event::error(ErrorEnvelope::fatal_auth(format!(
+                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                    ErrorCategory::Authentication,
+                                    ErrorSeverity::Critical,
+                                    false,
+                                    "edit_last_turn_invalid_route",
+                                    format!(
                                         "Cannot edit the last turn because its provider route is no longer valid: {err}"
-                                    ))))
-                                    .await;
-                                let outcome = SendMessageOutcome::NotStarted {
-                                    error: Some(format!(
-                                        "provider route is no longer valid: {err}"
-                                    )),
-                                };
-                                self.reconcile_non_completed_goal_turn(&outcome).await;
+                                    ),
+                                ))
+                                .await;
                                 continue;
                             }
                         };
@@ -3027,28 +3026,32 @@ impl Engine {
                         // point by genuine user prompt — a bare role scan would
                         // land mid-turn on a tool_result and keep the old
                         // prompt plus its tool round-trips in history.
-                        let cut = self
-                            .session
-                            .messages
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .find(|(_, msg)| crate::runtime_handoff::is_user_turn_prompt(msg))
-                            .map(|(idx, _)| idx);
-                        let Some(idx) = cut else {
-                            let _ = self
-                                .tx_event
-                                .send(Event::error(ErrorEnvelope::transient(
-                                    "Cannot edit the last turn because the session history has no user message to replace.",
-                                )))
+                        let idx = match crate::runtime_handoff::edit_last_turn_target(
+                            &self.session.messages,
+                        ) {
+                            crate::runtime_handoff::EditLastTurnTarget::Editable(idx) => idx,
+                            crate::runtime_handoff::EditLastTurnTarget::Unsupported => {
+                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                    ErrorCategory::InvalidInput,
+                                    ErrorSeverity::Error,
+                                    false,
+                                    "edit_last_turn_unsupported_user_content",
+                                    "Cannot edit the last turn because the latest user message has no editable text content.",
+                                ))
                                 .await;
-                            let outcome = SendMessageOutcome::NotStarted {
-                                error: Some(
-                                    "session history has no user message to replace".to_string(),
-                                ),
-                            };
-                            self.reconcile_non_completed_goal_turn(&outcome).await;
-                            continue;
+                                continue;
+                            }
+                            crate::runtime_handoff::EditLastTurnTarget::Missing => {
+                                self.reject_edit_last_turn(ErrorEnvelope::new(
+                                    ErrorCategory::State,
+                                    ErrorSeverity::Error,
+                                    false,
+                                    "edit_last_turn_no_user_prompt",
+                                    "Cannot edit the last turn because the session history has no user message to replace.",
+                                ))
+                                .await;
+                                continue;
+                            }
                         };
                         self.session.messages.truncate_to(idx);
                         self.session.bump_messages_revision();
@@ -3861,6 +3864,29 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Reject an edit operation before model dispatch while still completing
+    /// the submitted host lifecycle. `Event::Error` is advisory to embedded
+    /// hosts; `TurnComplete(Failed)` is the authoritative terminal signal that
+    /// releases their busy state and closes the admitted operation.
+    async fn reject_edit_last_turn(&mut self, envelope: ErrorEnvelope) {
+        let message = envelope.message.clone();
+        let _ = self.tx_event.send(Event::error(envelope)).await;
+        let _ = self
+            .tx_event
+            .send(Event::TurnComplete {
+                usage: Usage::default(),
+                status: TurnOutcomeStatus::Failed,
+                error: Some(message.clone()),
+                tool_catalog: None,
+                base_url: None,
+            })
+            .await;
+        let outcome = SendMessageOutcome::NotStarted {
+            error: Some(message),
+        };
+        self.reconcile_non_completed_goal_turn(&outcome).await;
     }
 
     /// Reconcile a turn that did not complete with the autonomous goal loop.

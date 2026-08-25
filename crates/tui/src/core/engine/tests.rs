@@ -12916,21 +12916,41 @@ async fn forkguard_edit_last_turn_without_user_prompt_errors_and_sends_nothing()
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let mut saw_edit_error = false;
+    let mut saw_failed_terminal = false;
     {
         let mut events = handle.rx_event.write().await;
         while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
-            if let Event::Error { envelope, .. } = &event {
-                assert!(
-                    envelope.message.contains("no user message"),
-                    "unexpected error: {}",
-                    envelope.message
-                );
-                saw_edit_error = true;
-                break;
+            match event {
+                Event::Error { envelope, .. } => {
+                    assert_eq!(envelope.code, "edit_last_turn_no_user_prompt");
+                    assert!(!envelope.recoverable);
+                    assert!(
+                        envelope.message.contains("no user message"),
+                        "unexpected error: {}",
+                        envelope.message
+                    );
+                    saw_edit_error = true;
+                }
+                Event::TurnComplete { status, error, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Failed);
+                    assert!(
+                        error
+                            .as_deref()
+                            .is_some_and(|message| message.contains("no user message")),
+                        "failed edit terminal must carry the rejection: {error:?}"
+                    );
+                    saw_failed_terminal = true;
+                    break;
+                }
+                _ => {}
             }
         }
     }
     assert!(saw_edit_error, "edit without a user prompt must error out");
+    assert!(
+        saw_failed_terminal,
+        "edit rejection must complete the submitted host lifecycle"
+    );
 
     let (tx, rx) = tokio::sync::oneshot::channel();
     handle
@@ -12949,6 +12969,100 @@ async fn forkguard_edit_last_turn_without_user_prompt_errors_and_sends_nothing()
         "failed edit must not append the new message: {:?}",
         snapshot.messages
     );
+
+    // An unsupported latest user turn is still a history boundary. It must
+    // fail in place rather than falling through to the older text prompt and
+    // deleting a larger portion of the conversation.
+    let image_only_history = vec![
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "older editable prompt".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text {
+                text: "older response".to_string(),
+                cache_control: None,
+            }],
+        },
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::ImageUrl {
+                image_url: crate::models::ImageUrlContent {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                },
+            }],
+        },
+    ];
+    handle
+        .send(Op::SyncSession {
+            session_id: Some("edit-unsupported-user-test".to_string()),
+            messages: image_only_history.clone(),
+            system_prompt: None,
+            system_prompt_override: false,
+            model: "deepseek-v4-pro".to_string(),
+            workspace: tmp.path().to_path_buf(),
+            mode: AppMode::Agent,
+        })
+        .await
+        .expect("sync unsupported user session");
+    handle
+        .send(Op::EditLastTurn {
+            new_message: "must not replace the older prompt".to_string(),
+        })
+        .await
+        .expect("send unsupported edit");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_unsupported_error = false;
+    let mut saw_unsupported_terminal = false;
+    {
+        let mut events = handle.rx_event.write().await;
+        while let Ok(Some(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+            match event {
+                Event::Error { envelope, .. } => {
+                    assert_eq!(envelope.code, "edit_last_turn_unsupported_user_content");
+                    assert!(!envelope.recoverable);
+                    saw_unsupported_error = true;
+                }
+                Event::TurnComplete { status, error, .. } => {
+                    assert_eq!(status, TurnOutcomeStatus::Failed);
+                    assert!(
+                        error
+                            .as_deref()
+                            .is_some_and(|message| message
+                                .contains("latest user message has no editable text")),
+                        "unsupported edit terminal must carry the rejection: {error:?}"
+                    );
+                    saw_unsupported_terminal = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(saw_unsupported_error);
+    assert!(saw_unsupported_terminal);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .send(Op::GetSessionSnapshot {
+            tx: std::sync::Arc::new(std::sync::Mutex::new(Some(tx))),
+        })
+        .await
+        .expect("request unsupported snapshot");
+    let unsupported_snapshot = tokio::time::timeout(Duration::from_secs(2), rx)
+        .await
+        .expect("unsupported snapshot response")
+        .expect("unsupported snapshot");
+    assert_eq!(
+        unsupported_snapshot.messages, image_only_history,
+        "unsupported latest user content must leave the entire history unchanged"
+    );
+
     let requests = server.received_requests().await.expect("recorded requests");
     assert!(
         requests.is_empty(),
