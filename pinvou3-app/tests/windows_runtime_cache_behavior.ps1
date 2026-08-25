@@ -26,9 +26,66 @@ function Write-StageCacheMetadata {
   Write-Utf8WithoutBom -Path (Join-Path $Root ".verified-lock") -Content (Get-VerificationMarkerContent -StageManifestSha256 $manifestSha256)
 }
 
+function Test-FixtureStageReusable {
+  param($Manifest)
+  return Test-VerifiedStageReusable -Manifest $Manifest -PythonDependencyProbe { param($PythonRoot) $true }
+}
+
+function New-PythonDependencySpec {
+  param([string]$Target, [string]$Filename)
+  $wheelSha = "a" * 64
+  $spec = [pscustomobject]@{
+    target = $Target
+    lock_id = ""
+    imports = [object[]]@("demo")
+    wheels = [object[]]@(
+      [pscustomobject]@{
+        filename = $Filename
+        url = "https://files.pythonhosted.org/packages/demo.whl"
+        sha256 = $wheelSha
+      }
+    )
+  }
+  $canonical = "target:$Target`n${Filename}:$wheelSha"
+  $spec.lock_id = Get-StringSha256 -Value $canonical
+  return $spec
+}
+
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou3-runtime-cache-test-" + [System.Guid]::NewGuid().ToString("N"))
 try {
   New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
+  foreach ($filename in @(
+    "demo-1-cp313-cp313-win_amd64.whl",
+    "demo-1-cp312-abi3-win_amd64.whl",
+    "demo-1-py3-none-any.whl"
+  )) {
+    Assert-True -Condition (Test-PythonWheelTarget -Filename $filename -Target "cp313-win_amd64") -Message "compatible PEP 425 tag should pass: $filename"
+    Assert-True -Condition (Test-PythonDependencyLock -Spec (New-PythonDependencySpec -Target "cp313-win_amd64" -Filename $filename)) -Message "valid target-bound dependency lock should pass: $filename"
+  }
+  foreach ($filename in @(
+    "demo-1-cp314-abi3-win_amd64.whl",
+    "demo-1-cp313-cp313-win_arm64.whl",
+    "demo-1-CP313-cp313-win_amd64.whl",
+    "demo-1-cp313-cp313-any.whl",
+    "demo-1-cp313-abi3-any.whl"
+  )) {
+    Assert-True -Condition (-not (Test-PythonWheelTarget -Filename $filename -Target "cp313-win_amd64")) -Message "incompatible PEP 425 tag should fail: $filename"
+  }
+  $targetDrift = New-PythonDependencySpec -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
+  $targetDrift.target = "cp314-win_amd64"
+  Assert-True -Condition (-not (Test-PythonDependencyLock -Spec $targetDrift)) -Message "dependency lock must bind target canonically"
+  $uppercaseSha = New-PythonDependencySpec -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
+  $uppercaseSha.wheels[0].sha256 = "A" * 64
+  Assert-True -Condition (-not (Test-PythonDependencyLock -Spec $uppercaseSha)) -Message "wheel SHA must be lowercase hexadecimal"
+  $nonStringTarget = New-PythonDependencySpec -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
+  $nonStringTarget.target = 313
+  Assert-True -Condition (-not (Test-PythonDependencyLock -Spec $nonStringTarget)) -Message "dependency target must remain a JSON string"
+  $emptyImports = New-PythonDependencySpec -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
+  $emptyImports.imports = [object[]]@()
+  Assert-True -Condition (-not (Test-PythonDependencyLock -Spec $emptyImports)) -Message "dependency imports must be a non-empty array"
+  Assert-True -Condition (Test-PythonDependencyTargets -PythonRoot $testRoot -AbiProbe { param($PythonExe, $Target) $Target -ceq "cp313-win_amd64" }) -Message "manifest ABI/canonical gate should accept matching injected runtime ABI"
+  Assert-True -Condition (-not (Test-PythonDependencyTargets -PythonRoot $testRoot -AbiProbe { param($PythonExe, $Target) $false })) -Message "manifest ABI gate should reject a mismatched injected runtime ABI"
+
   $successfulGitCommand = Join-Path $testRoot "git-success.cmd"
   $failingGitCommand = Join-Path $testRoot "git-failure.cmd"
   [System.IO.File]::WriteAllText(
@@ -126,29 +183,29 @@ try {
   }
   Write-RuntimeDescriptor -Manifest $manifest -StageId $stageId
 
-  Assert-True -Condition (Test-VerifiedStageReusable -Manifest $manifest) -Message "fresh verified staging should be reusable"
+  Assert-True -Condition (Test-FixtureStageReusable -Manifest $manifest) -Message "fresh verified staging should be reusable"
 
   Write-TestFile -Path $runtimeDescriptorPath -Content "tampered descriptor"
-  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "tampered runtime descriptor must invalidate the cache"
+  Assert-True -Condition (-not (Test-FixtureStageReusable -Manifest $manifest)) -Message "tampered runtime descriptor must invalidate the cache"
   Write-RuntimeDescriptor -Manifest $manifest -StageId $stageId
-  Assert-True -Condition (Test-VerifiedStageReusable -Manifest $manifest) -Message "restoring the runtime descriptor should restore reuse"
+  Assert-True -Condition (Test-FixtureStageReusable -Manifest $manifest) -Message "restoring the runtime descriptor should restore reuse"
 
   Write-TestFile -Path $runtimeDependencyPath -Content "xyz"
-  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "same-size staged content tampering must invalidate the cache"
+  Assert-True -Condition (-not (Test-FixtureStageReusable -Manifest $manifest)) -Message "same-size staged content tampering must invalidate the cache"
 
   Write-StageCacheMetadata -Root $stagingRoot
-  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "rewriting cached content, stage manifest and verified lock together must not forge trust"
+  Assert-True -Condition (-not (Test-FixtureStageReusable -Manifest $manifest)) -Message "rewriting cached content, stage manifest and verified lock together must not forge trust"
 
   Write-TestFile -Path $runtimeDependencyPath -Content "abc"
   Write-StageCacheMetadata -Root $stagingRoot
-  Assert-True -Condition (Test-VerifiedStageReusable -Manifest $manifest) -Message "restoring the verified staged content should restore reuse"
+  Assert-True -Condition (Test-FixtureStageReusable -Manifest $manifest) -Message "restoring the verified staged content should restore reuse"
 
   Remove-Item -LiteralPath $runtimeDependencyPath -Force
-  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "missing staged dependencies must invalidate the cache"
+  Assert-True -Condition (-not (Test-FixtureStageReusable -Manifest $manifest)) -Message "missing staged dependencies must invalidate the cache"
 
   Write-TestFile -Path $runtimeDependencyPath -Content "abc"
   Write-TestFile -Path (Join-Path $stagingRoot "expanded\poppler\unexpected.dll") -Content "unexpected"
-  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "unexpected staged files must invalidate the cache"
+  Assert-True -Condition (-not (Test-FixtureStageReusable -Manifest $manifest)) -Message "unexpected staged files must invalidate the cache"
   Remove-Item -LiteralPath (Join-Path $stagingRoot "expanded\poppler\unexpected.dll") -Force
 
   $nestedMarkerPath = Join-Path $stagingRoot "expanded\poppler\nested\.verified-lock"
@@ -158,7 +215,7 @@ try {
   $stagedPaths = @(Get-StagedRelativePaths -Root $stagingRoot)
   Assert-True -Condition ($stagedPaths -contains "expanded/poppler/nested/.verified-lock") -Message "nested .verified-lock files must remain in the complete staged-file set"
   Assert-True -Condition ($stagedPaths -contains "expanded/poppler/nested/.stage-manifest.json") -Message "nested .stage-manifest.json files must remain in the complete staged-file set"
-  Assert-True -Condition (-not (Test-VerifiedStageReusable -Manifest $manifest)) -Message "unexpected nested metadata-named files must invalidate the cache"
+  Assert-True -Condition (-not (Test-FixtureStageReusable -Manifest $manifest)) -Message "unexpected nested metadata-named files must invalidate the cache"
   Remove-Item -LiteralPath $nestedMarkerPath -Force
   Remove-Item -LiteralPath $nestedManifestPath -Force
 

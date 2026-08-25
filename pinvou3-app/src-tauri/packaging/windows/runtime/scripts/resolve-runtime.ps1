@@ -670,42 +670,102 @@ function Get-TauriOverlayContent {
 function Test-PythonWheelTarget {
   param([string]$Filename, [string]$Target)
 
-  if ($Target -notmatch '^(cp(?<targetDigits>\d+))-(?<targetPlatform>.+)$') {
+  if ($Target -cnotmatch '^(cp(?<targetDigits>\d+))-(?<targetPlatform>[a-z0-9_]+)$') {
     return $false
   }
   $targetPython = $Matches[1]
   $targetDigits = [int]$Matches['targetDigits']
   $targetPlatform = $Matches['targetPlatform']
-  if ($Filename -notmatch '-(?<python>[^-]+)-(?<abi>[^-]+)-(?<platform>[^-]+)\.whl$') {
+  if ($Filename -cnotmatch '-(?<python>[^-]+)-(?<abi>[^-]+)-(?<platform>[^-]+)\.whl$') {
     return $false
   }
   $pythonTags = @($Matches['python'].Split('.'))
   $abiTags = @($Matches['abi'].Split('.'))
   $platformTags = @($Matches['platform'].Split('.'))
-  if ($pythonTags -contains 'py3' -and $abiTags -contains 'none' -and $platformTags -contains 'any') {
-    return $true
-  }
-  $abiCompatible = ($abiTags -contains $targetPython) -or ($abiTags -contains 'abi3') -or ($abiTags -contains 'none')
-  $platformCompatible = ($platformTags -contains $targetPlatform) -or ($platformTags -contains 'any')
-  $pythonCompatible = $false
-  foreach ($tag in $pythonTags) {
-    if ($tag -eq $targetPython -or ($tag -eq 'py3' -and $abiTags -contains 'none')) {
-      $pythonCompatible = $true
-      break
-    }
-    if ($abiTags -contains 'abi3' -and $tag -match '^cp(?<digits>\d+)$' -and [int]$Matches['digits'] -le $targetDigits) {
-      $pythonCompatible = $true
-      break
+  foreach ($tag in @($pythonTags) + @($abiTags) + @($platformTags)) {
+    if ($tag -cnotmatch '^[a-z0-9_]+$') {
+      return $false
     }
   }
-  return $pythonCompatible -and $abiCompatible -and $platformCompatible
+  foreach ($pythonTag in $pythonTags) {
+    foreach ($abiTag in $abiTags) {
+      foreach ($platformTag in $platformTags) {
+        if ($pythonTag -ceq 'py3' -and $abiTag -ceq 'none' -and $platformTag -ceq 'any') {
+          return $true
+        }
+        if ($platformTag -cne $targetPlatform) {
+          continue
+        }
+        if (
+          ($pythonTag -ceq $targetPython -and @($targetPython, 'abi3', 'none') -ccontains $abiTag) -or
+          ($pythonTag -ceq 'py3' -and $abiTag -ceq 'none') -or
+          ($abiTag -ceq 'abi3' -and $pythonTag -cmatch '^cp(?<digits>\d+)$' -and [int]$Matches['digits'] -le $targetDigits)
+        ) {
+          return $true
+        }
+      }
+    }
+  }
+  return $false
+}
+
+function Test-PythonDependencyLock {
+  param($Spec)
+
+  if (
+    $null -eq $Spec -or
+    $Spec.target -isnot [string] -or
+    $Spec.lock_id -isnot [string] -or
+    $Spec.imports -isnot [System.Array] -or
+    $Spec.wheels -isnot [System.Array] -or
+    @($Spec.imports).Count -eq 0 -or
+    @($Spec.wheels).Count -eq 0 -or
+    $Spec.lock_id -cnotmatch '^[0-9a-f]{64}$'
+  ) {
+    return $false
+  }
+  $target = $Spec.target
+  if ($target -cnotmatch '^cp\d+-[a-z0-9_]+$') {
+    return $false
+  }
+  foreach ($import in @($Spec.imports)) {
+    if ($import -isnot [string] -or $import -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$') {
+      return $false
+    }
+  }
+  $canonicalLines = @("target:$target")
+  foreach ($wheel in @($Spec.wheels)) {
+    if (
+      $wheel.filename -isnot [string] -or
+      $wheel.url -isnot [string] -or
+      $wheel.sha256 -isnot [string] -or
+      $wheel.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+      $wheel.filename.Contains('/') -or
+      $wheel.filename.Contains('\') -or
+      -not $wheel.filename.EndsWith('.whl', [System.StringComparison]::Ordinal) -or
+      -not (Test-PythonWheelTarget -Filename $wheel.filename -Target $target)
+    ) {
+      return $false
+    }
+    try {
+      $uri = [System.Uri]::new($wheel.url)
+    } catch {
+      return $false
+    }
+    if ($uri.Scheme -cne 'https' -or $uri.Host -cne 'files.pythonhosted.org') {
+      return $false
+    }
+    $canonicalLines += "$($wheel.filename):$($wheel.sha256)"
+  }
+  $computedLock = Get-StringSha256 -Value ($canonicalLines -join "`n")
+  return $computedLock -ceq $Spec.lock_id
 }
 
 function Test-PythonDependencyTargets {
-  param([string]$PythonRoot)
+  param([string]$PythonRoot, [scriptblock]$AbiProbe)
 
   $pythonExe = Join-Path $PythonRoot "python.exe"
-  if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
+  if ($null -eq $AbiProbe -and -not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
     Write-Warning "Python dependency ABI probe could not find python.exe: $pythonExe"
     return $false
   }
@@ -717,28 +777,20 @@ function Test-PythonDependencyTargets {
     if ($null -eq $tool.windows_python_dependencies) {
       continue
     }
-    $target = [string]$tool.windows_python_dependencies.target
-    if ([string]::IsNullOrWhiteSpace($target)) {
-      Write-Warning "Python MCP manifest has no Windows dependency target: $manifestPath"
+    $spec = $tool.windows_python_dependencies
+    if (-not (Test-PythonDependencyLock -Spec $spec)) {
+      Write-Warning "Python MCP dependency lock is invalid or incompatible: $manifestPath"
       return $false
     }
-    $canonicalLines = @("target:$target")
-    foreach ($wheel in @($tool.windows_python_dependencies.wheels)) {
-      $filename = [string]$wheel.filename
-      if (-not (Test-PythonWheelTarget -Filename $filename -Target $target)) {
-        Write-Warning "Python wheel '$filename' is incompatible with dependency target '$target' in $manifestPath"
-        return $false
-      }
-      $canonicalLines += "${filename}:$([string]$wheel.sha256)"
+    $target = $spec.target
+    $abiMatches = if ($null -ne $AbiProbe) {
+      & $AbiProbe $pythonExe $target
+    } else {
+      $probe = "import platform,sys;m=platform.machine().lower();p='win_amd64' if m in ('amd64','x86_64') else 'win_'+m;a=f'cp{sys.version_info.major}{sys.version_info.minor}-{p}';raise SystemExit(0 if a==sys.argv[1] else 17)"
+      & $pythonExe -I -c $probe $target
+      $LASTEXITCODE -eq 0
     }
-    $computedLock = Get-StringSha256 -Value ($canonicalLines -join "`n")
-    if ($computedLock -ne ([string]$tool.windows_python_dependencies.lock_id).ToLowerInvariant()) {
-      Write-Warning "Python dependency lock does not bind the declared target and wheels in $manifestPath"
-      return $false
-    }
-    $probe = "import platform,sys;m=platform.machine().lower();p='win_amd64' if m in ('amd64','x86_64') else 'win_'+m;a=f'cp{sys.version_info.major}{sys.version_info.minor}-{p}';raise SystemExit(0 if a==sys.argv[1] else 17)"
-    & $pythonExe -I -c $probe $target
-    if ($LASTEXITCODE -ne 0) {
+    if (-not $abiMatches) {
       Write-Warning "Bundled Python ABI does not match MCP dependency target '$target' in $manifestPath"
       return $false
     }
@@ -752,7 +804,7 @@ function Write-TauriOverlay {
 }
 
 function Test-VerifiedStageReusable {
-  param($Manifest)
+  param($Manifest, [scriptblock]$PythonDependencyProbe)
 
   $stageMarkerPath = Join-Path $stagingRoot ".verified-lock"
   if (-not (Test-Path -LiteralPath $stageManifestPath -PathType Leaf)) {
@@ -769,7 +821,13 @@ function Test-VerifiedStageReusable {
     return $false
   }
 
-  if (-not (Test-PythonDependencyTargets -PythonRoot (Join-Path $stagingRoot "expanded\python"))) {
+  $pythonRoot = Join-Path $stagingRoot "expanded\python"
+  $pythonDependenciesValid = if ($null -eq $PythonDependencyProbe) {
+    Test-PythonDependencyTargets -PythonRoot $pythonRoot
+  } else {
+    & $PythonDependencyProbe $pythonRoot
+  }
+  if (-not $pythonDependenciesValid) {
     return $false
   }
 

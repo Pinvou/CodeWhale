@@ -425,7 +425,7 @@ assert.match(
 );
 assert.match(
   runtimeScript,
-  /Test-PythonWheelTarget -Filename \$filename -Target \$target/u,
+  /Test-PythonWheelTarget -Filename \$wheel\.filename -Target \$target/u,
   "the Python dependency gate must validate locked wheel PEP 425 tags",
 );
 assert.match(
@@ -513,6 +513,7 @@ const windowsRuntimeFilter = prCheckWorkflow.slice(
   fastGateStart,
 );
 for (const requiredPath of [
+  "pinvou3-app/resources/mcp-servers/**/manifest.json",
   "pinvou3-app/src-tauri/packaging/windows/runtime/**",
   "pinvou3-app/src-tauri/config/platforms/windows/runtime/**",
   "pinvou3-app/tests/windows_runtime_*",

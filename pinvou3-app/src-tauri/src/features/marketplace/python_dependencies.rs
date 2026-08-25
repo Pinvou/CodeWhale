@@ -175,6 +175,9 @@ fn parse_target(target: &str) -> Result<(&str, &str), String> {
         || python.len() < 4
         || !python[2..].bytes().all(|byte| byte.is_ascii_digit())
         || platform.is_empty()
+        || !platform
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
     {
         return Err(format!("无效的 Windows Python target: {target}"));
     }
@@ -196,36 +199,46 @@ fn validate_wheel_target(filename: &str, target: &str) -> Result<(), String> {
     if tags.next().is_none() || pythons.is_empty() || abis.is_empty() || platforms.is_empty() {
         return Err(format!("wheel 缺少 PEP 425 标签: {filename}"));
     }
-    if pythons.split('.').any(|tag| tag == "py3")
-        && abis.split('.').any(|tag| tag == "none")
-        && platforms.split('.').any(|tag| tag == "any")
-    {
-        return Ok(());
-    }
-
     let target_version = target_python[2..].parse::<u32>().unwrap_or_default();
-    let python_compatible = pythons.split('.').any(|tag| {
-        tag == target_python
-            || (abis.split('.').any(|abi| abi == "abi3")
-                && tag
-                    .strip_prefix("cp")
-                    .and_then(|digits| digits.parse::<u32>().ok())
-                    .is_some_and(|version| version <= target_version))
-            || (tag == "py3" && abis.split('.').any(|abi| abi == "none"))
-    });
-    let abi_compatible = abis
-        .split('.')
-        .any(|tag| tag == target_python || tag == "abi3" || tag == "none");
-    let platform_compatible = platforms
-        .split('.')
-        .any(|tag| tag == target_platform || tag == "any");
-    if python_compatible && abi_compatible && platform_compatible {
-        Ok(())
-    } else {
-        Err(format!(
-            "wheel {filename} 的 PEP 425 标签与 target {target} 不兼容"
-        ))
+    let valid_tag = |tag: &str| {
+        !tag.is_empty()
+            && tag
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    };
+    let python_tags = pythons.split('.').collect::<Vec<_>>();
+    let abi_tags = abis.split('.').collect::<Vec<_>>();
+    let platform_tags = platforms.split('.').collect::<Vec<_>>();
+    if python_tags
+        .iter()
+        .chain(abi_tags.iter())
+        .chain(platform_tags.iter())
+        .any(|tag| !valid_tag(tag))
+    {
+        return Err(format!("wheel 含非法 PEP 425 标签: {filename}"));
     }
+    for python in &python_tags {
+        for abi in &abi_tags {
+            for platform in &platform_tags {
+                let universal = *python == "py3" && *abi == "none" && *platform == "any";
+                let platform_specific = *platform == target_platform
+                    && ((*python == target_python
+                        && (*abi == target_python || *abi == "abi3" || *abi == "none"))
+                        || (*python == "py3" && *abi == "none")
+                        || (*abi == "abi3"
+                            && python
+                                .strip_prefix("cp")
+                                .and_then(|digits| digits.parse::<u32>().ok())
+                                .is_some_and(|version| version <= target_version)));
+                if universal || platform_specific {
+                    return Ok(());
+                }
+            }
+        }
+    }
+    Err(format!(
+        "wheel {filename} 的 PEP 425 标签与 target {target} 不兼容"
+    ))
 }
 
 fn validate_wheel(wheel: &PythonWheel) -> Result<(), String> {
@@ -519,6 +532,31 @@ mod tests {
     }
 
     #[test]
+    fn wheel_target_checks_compatible_tag_combinations() {
+        let target = "cp313-win_amd64";
+        for compatible in [
+            "demo-1-cp313-cp313-win_amd64.whl",
+            "demo-1-cp312-abi3-win_amd64.whl",
+            "demo-1-py3-none-any.whl",
+        ] {
+            validate_wheel_target(compatible, target)
+                .unwrap_or_else(|error| panic!("{compatible}: {error}"));
+        }
+        for incompatible in [
+            "demo-1-cp314-abi3-win_amd64.whl",
+            "demo-1-cp313-cp313-win_arm64.whl",
+            "demo-1-CP313-cp313-win_amd64.whl",
+            "demo-1-cp313-cp313-any.whl",
+            "demo-1-cp313-abi3-any.whl",
+        ] {
+            assert!(
+                validate_wheel_target(incompatible, target).is_err(),
+                "{incompatible} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn dependency_lock_hash_binds_target() {
         let mut spec = WindowsPythonDependencyLock {
             target: "cp313-win_amd64".into(),
@@ -616,14 +654,17 @@ mod tests {
     }
 
     #[test]
-    fn builtin_document_dependency_locks_are_self_consistent() {
-        for manifest_json in [
-            include_str!("../../../../resources/mcp-servers/gongwen/manifest.json"),
-            include_str!("../../../../resources/mcp-servers/pptx/manifest.json"),
-        ] {
-            let manifest: ToolManifest = serde_json::from_str(manifest_json).unwrap();
+    fn builtin_python_dependency_locks_are_self_consistent() {
+        let mut checked = 0;
+        for package in super::super::mcp_catalog::MCP_PACKAGES {
+            let manifest: ToolManifest = serde_json::from_str(package.manifest_json).unwrap();
+            if manifest.windows_python_dependencies.is_none() {
+                continue;
+            }
             let lock = manifest.windows_python_dependencies.as_ref().unwrap();
             validate_lock(lock).unwrap_or_else(|error| panic!("{}: {error}", manifest.id));
+            checked += 1;
         }
+        assert!(checked > 0, "内置目录至少应声明一个 Windows Python 依赖锁");
     }
 }

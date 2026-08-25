@@ -234,6 +234,20 @@ pub struct MarketplaceManager<S: CredentialStore = SystemCredentialStore> {
     pub(super) credential_store: S,
 }
 
+fn tool_operation_lock(tool_id: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let locks = LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks
+        .entry(tool_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
 impl MarketplaceManager<SystemCredentialStore> {
     pub fn new() -> Self {
         Self::with_store(SystemCredentialStore::new())
@@ -338,6 +352,10 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         tool_id: &str,
         user_config: &std::collections::HashMap<String, String>,
     ) -> Result<(), String> {
+        let operation_lock = tool_operation_lock(tool_id);
+        let _operation = operation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.install_inner(tool_id, user_config, true, store::BundleSource::Preset)
     }
 
@@ -352,6 +370,10 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         tool_id: &str,
         source: store::BundleSource,
     ) -> Result<(), String> {
+        let operation_lock = tool_operation_lock(tool_id);
+        let _operation = operation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.install_inner(tool_id, &std::collections::HashMap::new(), false, source)
     }
 
@@ -459,6 +481,13 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         }
         let mut errors = Vec::new();
         for tool_id in self.installed_ids() {
+            let operation_lock = tool_operation_lock(&tool_id);
+            let _operation = operation_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !self.installed_ids().contains(&tool_id) {
+                continue;
+            }
             let manifest = match mcp_catalog::embedded_manifest(&tool_id) {
                 Ok(Some(manifest)) => manifest,
                 Ok(None) => continue,
@@ -478,6 +507,9 @@ impl<S: CredentialStore> MarketplaceManager<S> {
                 fingerprint.as_ref().map_err(Clone::clone)?;
                 let dependencies = python_dependencies::ensure_for_builtin_manifest(&manifest)?
                     .ok_or_else(|| format!("工具 '{tool_id}' 缺少 Python 依赖结果"))?;
+                if !self.installed_ids().contains(&tool_id) {
+                    return Err("工具已在依赖下载期间卸载，跳过迁移提交".to_string());
+                }
                 self.repair_python_dependency_entry(
                     &manifest,
                     &mcp_catalog::package_mcp_dir(&tool_id),
@@ -485,6 +517,9 @@ impl<S: CredentialStore> MarketplaceManager<S> {
                 )?;
                 Ok(dependencies.asset)
             })();
+            if !self.installed_ids().contains(&tool_id) {
+                continue;
+            }
             let store = store::BundleStore::new();
             if let Err(store_error) = record_python_dependency_repair(
                 &store,
@@ -504,6 +539,10 @@ impl<S: CredentialStore> MarketplaceManager<S> {
 
     /// 卸载工具：从 installed.json + mcp.json 中移除
     pub fn uninstall(&self, tool_id: &str) -> Result<(), String> {
+        let operation_lock = tool_operation_lock(tool_id);
+        let _operation = operation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // 删该工具在 keyring 的 secret(防孤儿;此时 manifest 未删、仍可读声明)。
         // 删不掉不阻断卸载；若用户重新安装并重新填 key，会写入新的系统凭据。
         if let Some(manifest) = self.load_manifest(tool_id) {
@@ -876,6 +915,55 @@ mod tests {
         )
         .unwrap_err();
         assert!(!error.is_empty());
+    }
+
+    #[test]
+    fn uninstall_waiting_for_repair_cannot_leave_ghost_record() {
+        with_temp_home(|| {
+            MarketplaceManager::with_store(MemoryCredentialStore::default())
+                .install("obsidian", &std::collections::HashMap::new())
+                .unwrap();
+            assert!(store::BundleStore::new().get("obsidian").unwrap().is_some());
+
+            let (repair_locked_tx, repair_locked_rx) = std::sync::mpsc::channel();
+            let (finish_repair_tx, finish_repair_rx) = std::sync::mpsc::channel();
+            let repair = std::thread::spawn(move || {
+                let operation_lock = tool_operation_lock("obsidian");
+                let _operation = operation_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                repair_locked_tx.send(()).unwrap();
+                finish_repair_rx.recv().unwrap();
+
+                let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
+                assert!(manager.installed_ids().contains(&"obsidian".to_string()));
+                let manifest = mcp_catalog::embedded_manifest("obsidian").unwrap().unwrap();
+                record_python_dependency_repair(
+                    &store::BundleStore::new(),
+                    &manifest,
+                    None,
+                    Some("repair-fingerprint".into()),
+                    None,
+                )
+                .unwrap();
+            });
+            repair_locked_rx.recv().unwrap();
+
+            let (uninstall_started_tx, uninstall_started_rx) = std::sync::mpsc::channel();
+            let uninstall = std::thread::spawn(move || {
+                uninstall_started_tx.send(()).unwrap();
+                MarketplaceManager::with_store(MemoryCredentialStore::default())
+                    .uninstall("obsidian")
+            });
+            uninstall_started_rx.recv().unwrap();
+            finish_repair_tx.send(()).unwrap();
+            repair.join().unwrap();
+            uninstall.join().unwrap().unwrap();
+
+            let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
+            assert!(!manager.installed_ids().contains(&"obsidian".to_string()));
+            assert_eq!(store::BundleStore::new().get("obsidian").unwrap(), None);
+        });
     }
 
     /// 把 PINVOU3_HOME 指到一个干净临时目录跑闭包,跑完恢复并清理。
