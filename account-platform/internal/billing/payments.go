@@ -493,7 +493,7 @@ func (p *PaymentCoordinator) persistNotification(ctx context.Context, channel st
 	}
 	sourceHash := sha256.Sum256([]byte(strings.TrimSpace(source)))
 	var recent int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM payment_risk_attempts WHERE action='CALLBACK' AND provider_id=$1 AND source_hash=$2 AND occurred_at>$3-interval '1 second'`, p.Capabilities().ProviderID, sourceHash[:], p.now()).Scan(&recent); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM payment_risk_attempts WHERE action='CALLBACK' AND provider_id=$1 AND source_hash=$2 AND occurred_at>$3::timestamptz-interval '1 second'`, p.Capabilities().ProviderID, sourceHash[:], p.now()).Scan(&recent); err != nil {
 		return uuid.Nil, false, err
 	}
 	result := "ACCEPTED"

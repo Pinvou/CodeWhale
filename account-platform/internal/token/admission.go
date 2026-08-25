@@ -25,19 +25,19 @@ func admitUsage(ctx context.Context, tx pgx.Tx, request UsageRequest, now time.T
 	var modelMinute, modelInflight, routeMinute, routeInflight, globalMinute, globalInflight int
 	var userOldest, organizationOldest, modelOldest, routeOldest, globalOldest *time.Time
 	if err := tx.QueryRow(ctx, `SELECT
-count(*) FILTER (WHERE user_id=$1 AND started_at>$5-interval '1 minute'), min(started_at) FILTER (WHERE user_id=$1 AND started_at>$5-interval '1 minute'),
+count(*) FILTER (WHERE user_id=$1 AND started_at>$5::timestamptz-interval '1 minute'), min(started_at) FILTER (WHERE user_id=$1 AND started_at>$5::timestamptz-interval '1 minute'),
 count(*) FILTER (WHERE user_id=$1 AND execution_status=ANY($6)),
 count(*) FILTER (WHERE organization_id=$2 AND user_id=$1 AND execution_status=ANY($6)),
-count(*) FILTER (WHERE organization_id=$2 AND started_at>$5-interval '1 minute'), min(started_at) FILTER (WHERE organization_id=$2 AND started_at>$5-interval '1 minute'),
+count(*) FILTER (WHERE organization_id=$2 AND started_at>$5::timestamptz-interval '1 minute'), min(started_at) FILTER (WHERE organization_id=$2 AND started_at>$5::timestamptz-interval '1 minute'),
 count(*) FILTER (WHERE organization_id=$2 AND execution_status=ANY($6)),
-count(*) FILTER (WHERE model=$3 AND started_at>$5-interval '1 minute'), min(started_at) FILTER (WHERE model=$3 AND started_at>$5-interval '1 minute'),
+count(*) FILTER (WHERE model=$3 AND started_at>$5::timestamptz-interval '1 minute'), min(started_at) FILTER (WHERE model=$3 AND started_at>$5::timestamptz-interval '1 minute'),
 count(*) FILTER (WHERE model=$3 AND execution_status=ANY($6)),
-count(*) FILTER (WHERE token_account_id=$4 AND started_at>$5-interval '1 minute'), min(started_at) FILTER (WHERE token_account_id=$4 AND started_at>$5-interval '1 minute'),
+count(*) FILTER (WHERE token_account_id=$4 AND started_at>$5::timestamptz-interval '1 minute'), min(started_at) FILTER (WHERE token_account_id=$4 AND started_at>$5::timestamptz-interval '1 minute'),
 count(*) FILTER (WHERE token_account_id=$4 AND execution_status=ANY($6)),
-count(*) FILTER (WHERE started_at>$5-interval '1 minute'), min(started_at) FILTER (WHERE started_at>$5-interval '1 minute'),
+count(*) FILTER (WHERE started_at>$5::timestamptz-interval '1 minute'), min(started_at) FILTER (WHERE started_at>$5::timestamptz-interval '1 minute'),
 count(*) FILTER (WHERE execution_status=ANY($6))
 FROM usage_requests
-WHERE started_at>$5-interval '1 minute' OR execution_status=ANY($6)`, request.UserID, request.OrganizationID, request.Model, request.TokenAccountID, now, usageInflightStates).Scan(
+WHERE started_at>$5::timestamptz-interval '1 minute' OR execution_status=ANY($6)`, request.UserID, request.OrganizationID, request.Model, request.TokenAccountID, now, usageInflightStates).Scan(
 		&userMinute, &userOldest, &userInflight, &memberInflight, &organizationMinute, &organizationOldest, &organizationInflight,
 		&modelMinute, &modelOldest, &modelInflight, &routeMinute, &routeOldest, &routeInflight, &globalMinute, &globalOldest, &globalInflight,
 	); err != nil {

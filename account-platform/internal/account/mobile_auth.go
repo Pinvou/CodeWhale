@@ -666,12 +666,12 @@ func (r *PostgresRepository) AdmitSMSVerification(ctx context.Context, challenge
 	var sourceWindow, deviceWindow, mobileWindow, purposeSourceWindow, providerMinute int
 	var sourceOldest, deviceOldest, mobileOldest, purposeOldest, providerOldest *time.Time
 	if err := tx.QueryRow(ctx, `SELECT
-count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$4-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$4-interval '10 minutes'),
-count(*) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$4-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$4-interval '10 minutes'),
-count(*) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$3 AND occurred_at>$4-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$3 AND occurred_at>$4-interval '10 minutes'),
-count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$4-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$4-interval '10 minutes'),
-count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$4-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$4-interval '1 minute')
-FROM sms_verification_attempts WHERE occurred_at>$4-interval '10 minutes'`, sourceHash[:], deviceHash[:], mobileHash[:], now, purpose, providerID).Scan(
+count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$4::timestamptz-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND occurred_at>$4::timestamptz-interval '10 minutes'),
+count(*) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$4::timestamptz-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND device_hash=$2 AND occurred_at>$4::timestamptz-interval '10 minutes'),
+count(*) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$3 AND occurred_at>$4::timestamptz-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND mobile_hash=$3 AND occurred_at>$4::timestamptz-interval '10 minutes'),
+count(*) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$4::timestamptz-interval '10 minutes'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND source_hash=$1 AND purpose=$5 AND occurred_at>$4::timestamptz-interval '10 minutes'),
+count(*) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$4::timestamptz-interval '1 minute'), min(occurred_at) FILTER (WHERE result='ACCEPTED' AND provider_id=$6 AND occurred_at>$4::timestamptz-interval '1 minute')
+FROM sms_verification_attempts WHERE occurred_at>$4::timestamptz-interval '10 minutes'`, sourceHash[:], deviceHash[:], mobileHash[:], now, purpose, providerID).Scan(
 		&sourceWindow, &sourceOldest, &deviceWindow, &deviceOldest, &mobileWindow, &mobileOldest, &purposeSourceWindow, &purposeOldest, &providerMinute, &providerOldest,
 	); err != nil {
 		return err
