@@ -237,7 +237,7 @@ paths:
           description: The valid callback is durably persisted for asynchronous idempotent processing
         "400": { $ref: "#/components/responses/Error" }
         "401": { $ref: "#/components/responses/Error" }
-  /external/v1/payment-callback/token:
+  /api/v1/payment-callback/token:
     post:
       servers: [{ url: / }]
       security: [{ paymentCallbackClient: [] }]
@@ -261,7 +261,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/PaymentCallbackToken" }
         "401": { $ref: "#/components/responses/Error" }
-  /external/v1/payment-callbacks:
+  /api/v1/payment-callbacks:
     post:
       servers: [{ url: / }]
       security: [{ paymentCallbackBearer: [] }]

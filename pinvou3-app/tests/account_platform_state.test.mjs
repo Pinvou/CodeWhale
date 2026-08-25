@@ -570,16 +570,18 @@ test('account portal uses stable asset names with revalidated caching', async ()
   assert.match(portalService, /Header\(\)\.Set\("Cache-Control", "no-cache"\)/);
 });
 
-test('personal center uses the canonical pinvou.com account route end to end', async () => {
+test('personal center uses the canonical account.pinvou.com origin end to end', async () => {
   const desktop = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   const portal = await readFile(new URL('../../account-platform/internal/portal/static.go', import.meta.url), 'utf8');
-  const nginx = await readFile(new URL('../../deploy/nginx-pinvou-domain.conf', import.meta.url), 'utf8');
-  assert.match(desktop, /DEFAULT_PORTAL_URL: &str = "https:\/\/pinvou\.com\/account"/);
+  const nginx = await readFile(new URL('../../deploy/nginx-pinvou-account-domain.conf', import.meta.url), 'utf8');
+  assert.match(desktop, /DEFAULT_PORTAL_URL: &str = "https:\/\/account\.pinvou\.com\/"/);
   assert.doesNotMatch(desktop, /join\("account\.html"\)/);
-  assert.match(portal, /r\.URL\.Path == "\/account" \|\| r\.URL\.Path == "\/account\/"/);
-  assert.match(nginx, /location = \/account \{/);
-  assert.match(nginx, /location = \/account\/ \{\s*return 308 \/account;\s*\}/);
-  assert.match(nginx, /account\\\.js\|account\\\.css\|account-platform-i18n\\\.js/);
+  assert.match(portal, /r\.URL\.Path == "\/"/);
+  assert.doesNotMatch(portal, /r\.URL\.Path == "\/account"/);
+  assert.match(nginx, /server_name account\.pinvou\.com/);
+  assert.match(nginx, /location = \/api\/v1\/payment-callback\/token \{/);
+  assert.match(nginx, /location = \/api\/v1\/payment-callbacks \{/);
+  assert.match(nginx, /location \/ \{[\s\S]*proxy_pass http:\/\/127\.0\.0\.1:18105/);
   assert.doesNotMatch(nginx, /location \^~ \/assets\//);
 });
 

@@ -130,7 +130,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 
 | 类别 | 配置名 |
 |---|---|
-| Compose | `COMPOSE_PROJECT_NAME`、`PUBLIC_BASE_URL`、`PORTAL_PUBLIC_URL=https://pinvou.com` |
+| Compose | `COMPOSE_PROJECT_NAME`、`PUBLIC_BASE_URL`、`PORTAL_PUBLIC_URL=https://account.pinvou.com` |
 | PostgreSQL 管理 | `ACCOUNT_PLATFORM_POSTGRES_PASSWORD` |
 | 分库密码 | `ACCOUNT_DB_PASSWORD`、`BILLING_DB_PASSWORD`、`TOKEN_DB_PASSWORD`、`KEYCLOAK_DB_PASSWORD` |
 | 开发库密码 | `PAYMENT_SIM_DB_PASSWORD`、`NEWAPI_DB_PASSWORD` |
@@ -226,7 +226,7 @@ Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移
 - `PAYMENT_CALLBACK_TOKEN_KEY_ID`
 - `PAYMENT_CALLBACK_TOKEN_TTL_SECONDS`（60至900秒，默认300秒）
 
-UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C Profile 处理，不能通过通用环境变量绕过服务端商品目录。通用 Provider 回调复用现有官网根域名，公网边界只允许把 `POST https://pinvou.com/external/v1/payment-callback/token` 和 `POST https://pinvou.com/external/v1/payment-callbacks` 两个精确路径转发到 Billing；在现有官网 HTTPS `server` 块中 include `deploy/nginx/payment-callback-locations.conf.template` 的站点专用渲染结果，不得用账号平台完整模板覆盖官网，也不要求修改账号平台全局 `PUBLIC_BASE_URL`。客户端凭据由服务端绑定 Provider、版本和商户，回调请求体不得携带 Provider 身份；Token 仅含 `payment.callback.write` 权限，回调收到 `202` 只表示通知已持久化。后端主机变化时只更新 Nginx/网关 upstream，Provider 配置不得改为实例 IP 或临时地址。
+UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C Profile 处理，不能通过通用环境变量绕过服务端商品目录。通用 Provider 回调与 Web 个人中心统一使用独立账号子域名，公网边界只允许把 `POST https://account.pinvou.com/api/v1/payment-callback/token` 和 `POST https://account.pinvou.com/api/v1/payment-callbacks` 两个精确路径转发到 Billing，其余同源流量进入 Portal；`pinvou.com` 不再承载相关接口。客户端凭据由服务端绑定 Provider、版本和商户，回调请求体不得携带 Provider 身份；Token 仅含 `payment.callback.write` 权限，回调收到 `202` 只表示通知已持久化。后端主机变化时只更新 Nginx/网关 upstream，Provider 配置不得改为实例 IP 或临时地址。
 
 ### 6.5 Token Gateway 与 New API
 
@@ -266,7 +266,7 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务
 
 开发态 `npm run dev` 不需要每次生成安装包。远程端点必须 HTTPS，只有 `127.0.0.1`/`localhost` 允许 HTTP。
 
-Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Code + PKCE 重新认证；Identity Client 必须接受 `prompt=login` 与 `max_age=0`，回调地址仍为 Portal 固定 `/auth/callback`。桌面端只保留未登录忘记密码，不承载资料修改。
+Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Code + PKCE 重新认证；Identity Client 必须接受 `prompt=login` 与 `max_age=0`，回调地址固定为 `https://account.pinvou.com/auth/callback`。桌面端只保留未登录忘记密码，不承载资料修改。
 
 ### 6.1 死信检查与受审计重放
 
@@ -509,7 +509,7 @@ UAT 只使用明确的测试商品和测试商城账号：
 1. **发布门禁**：发布流水线设置 `PINVOU_RELEASE_ARTIFACT`、`PINVOU_RELEASE_ATTESTATION`、`PINVOU_CLIENT_COMPATIBILITY_URL`、`PINVOU_RELEASE_CLIENT_VERSION`、目标环境、公钥和 key ID，执行 `npm run release:account-platform-gate`。命令先执行三语源码/制品门禁，缺键、多键、空词条、单语硬编码、原始后端错误回退或 Portal 制品缺少任一静态词条均直接失败；随后核验 HTTPS 公开兼容范围、OIDC discovery、制品 SHA-256、版本区间以及 TOK-37 Ed25519 证明，才能把新客户端提升到正式更新渠道；它不接收内部 readiness 工作负载凭据，失败时渠道继续指向上一版本。
 2. **安装门禁**：更新清单或 Windows OTA `UpdatePackInfo.json` 必须携带 `readinessAttestation`。更新器使用 `PINVOU_ACCOUNT_ENVIRONMENT`、`PINVOU_CLIENT_READINESS_KEY_ID`、`PINVOU_CLIENT_READINESS_PUBLIC_KEY` 验证证明绑定的环境、制品、目标版本、CHAT 目录、六项 PASS 检查和 15 分钟有效期，再用 `PINVOU_UPDATE_SIGNER_IDENTITY` 验证 Windows Authenticode、macOS codesign 或 Linux dpkg-sig 身份，并执行只读迁移预检。通过后才写入安装门禁事务证据并调用平台安装器；旧清单、缺字段、签名不符或预检失败一律不进入安装。平台安装器对二进制/配置的原子替换与失败回滚仍须用正式制品做环境验收，桌面端不得持有内部 readiness 工作负载凭据。
 3. **运行门禁**：已经安装的新版本只运行账号平台和 Token Gateway 路径；平台不可用时显示原因与修复动作，不调用旧模型后台。
-4. Portal 入口另配置 `PINVOU_ACCOUNT_PORTAL_URL=https://pinvou.com/account`，只允许 HTTPS（或 loopback HTTP）。客户端打开该完整固定地址，不得把 Token、查询串或任意 WebView URL 传给系统浏览器。Compose 的 `PORTAL_PUBLIC_URL` 配置为 `https://pinvou.com`，Keycloak 客户端必须允许 `https://pinvou.com/auth/callback`；Nginx 只转发 `/account`、`/auth/*`、个人中心三个具名静态资源，以及 `/api/session`、`/api/logout`、`/api/account/*`、`/api/token/*`，不得接管官网的整个 `/assets/*` 命名空间。
+4. Portal 入口配置 `PINVOU_ACCOUNT_PORTAL_URL=https://account.pinvou.com/`，只允许 HTTPS（或 loopback HTTP）。客户端打开该完整固定地址，不得把 Token、查询串或任意 WebView URL 传给系统浏览器。Compose 的 `PORTAL_PUBLIC_URL` 配置为 `https://account.pinvou.com`，Keycloak 客户端必须允许 `https://account.pinvou.com/auth/callback`。上线前先为 `account.pinvou.com` 配置 DNS，使用 `deploy/nginx-pinvou-account-domain-bootstrap.conf` 完成 ACME 校验和证书签发，再启用 `deploy/nginx-pinvou-account-domain.conf`；HTTP 仅跳转 HTTPS，两个 `/api/v1/payment-callback*` 精确路径进入 Billing，其余同源请求进入 Portal。不得在 `pinvou.com` 保留旧个人中心、回调、BFF 或重定向路由。
 5. 三层门禁分别保存构建版本、服务版本、配置 schema、检查结果和脱敏证据。客户端范围门禁执行 `npm run check:account-platform-client-scope`；不得以开发机手工调用真实用户付费模型代替任何一层门禁。生产签名身份、正式安装包原子提交/回滚及真实环境连续无副作用证据完成前，APT-053 保持 `BLOCKED_EXTERNAL`。
 
 ### 11.5 首个超级管理员安全激活

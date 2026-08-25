@@ -21,17 +21,6 @@ func TestStaticHandlerServesBuiltPortalAtRoot(t *testing.T) {
 	}
 }
 
-func TestStaticHandlerServesPersonalCenterAtCanonicalPath(t *testing.T) {
-	for _, path := range []string{"/account", "/account/"} {
-		request := httptest.NewRequest(http.MethodGet, path, nil)
-		recorder := httptest.NewRecorder()
-		StaticHandler().ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `id="account-root"`) {
-			t.Fatalf("expected built personal center at %s, got HTTP %d", path, recorder.Code)
-		}
-	}
-}
-
 func TestStaticHandlerServesStableAssets(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	recorder := httptest.NewRecorder()

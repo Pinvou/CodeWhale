@@ -5,32 +5,37 @@
 地址，并将渲染结果写到 Nginx 的站点配置目录；不要直接修改模板提交环境专属
 地址。
 
-当前支付 Provider 回调复用现有官网根域名 `pinvou.com`，不新增 DNS 记录。生产
-入口不得用本目录的完整账号平台 `server` 模板覆盖现有官网配置；应把
-`payment-callback-locations.conf.template` 替换 `__BILLING_UPSTREAM__` 后
-include 到现有 `pinvou.com` HTTPS `server` 块。该片段只增加以下两个精确路径，
-官网其他路径保持原配置：
+生产环境使用独立域名 `account.pinvou.com`：
 
-- `POST https://pinvou.com/external/v1/payment-callback/token`
-- `POST https://pinvou.com/external/v1/payment-callbacks`
+- Web 个人中心：`https://account.pinvou.com/`
+- 支付回调 Token：`POST https://account.pinvou.com/api/v1/payment-callback/token`
+- 通用支付回调：`POST https://account.pinvou.com/api/v1/payment-callbacks`
 
-Billing 与官网入口同机时可替换为 `http://127.0.0.1:18102`；不同主机时只能
-替换为受控内网、VPN 或固定网关地址。Provider 侧地址保持不变。代理必须保留
-`Authorization`、`Content-Type` 和请求体，不得缓存、重定向或改写这两个请求。
-两个回调入口不依赖把账号平台全局 `PUBLIC_BASE_URL` 改为 `pinvou.com`；Web 个人中心通过独立的 `PORTAL_PUBLIC_URL=https://pinvou.com` 发布，桌面端固定使用 `https://pinvou.com/account`。官网 HTTPS 入口同时把 `/account`、`/assets/`、`/api/` 和 `/auth/` 转发到只监听 loopback 的 Token Portal，并在 Keycloak 中登记 `https://pinvou.com/auth/callback`。只有
-整个账号平台原本就通过该根域名发布时才同步修改全局地址。官网的 `/assets/*`
-仍由官网提供；个人中心仅接管 `account.js`、`account.css` 和
-`account-platform-i18n.js` 三个具名资源，以及个人中心实际使用的
-`/api/session`、`/api/logout`、`/api/account/*`、`/api/token/*`。
+根目录 `deploy/nginx-pinvou-account-domain-bootstrap.conf` 用于证书签发前的
+ACME 验证；DNS 生效并签发证书后必须替换为
+`deploy/nginx-pinvou-account-domain.conf`。正式站点只允许 HTTP 跳转 HTTPS，
+两个支付回调精确路径代理到 Billing，其余同源页面、静态资源、OIDC 和 BFF
+请求代理到只监听 loopback 的 Token Portal。`pinvou.com` 不再承载个人中心、
+回调接口或兼容重定向。
+
+如由其他网关承载 HTTPS，可把
+`payment-callback-locations.conf.template` 中的 `__BILLING_UPSTREAM__` 替换为
+受控 upstream 后 include 到 `account.pinvou.com` 的 HTTPS `server` 块。Billing
+与入口同机时可使用 `http://127.0.0.1:18102`；不同主机时只能使用受控内网、
+VPN 或固定网关地址。代理必须保留 `Authorization`、`Content-Type` 和请求体，
+不得缓存、重定向或改写这两个 POST 请求。
+
+Web 个人中心配置 `PORTAL_PUBLIC_URL=https://account.pinvou.com`，桌面端固定使用
+`https://account.pinvou.com/`，Keycloak 客户端登记
+`https://account.pinvou.com/auth/callback`。身份服务的 `PUBLIC_BASE_URL` 仍按其
+独立公网边界配置，不得因为 Portal 子域名变化而盲目改写。
 
 远程 Compose 同时加载 `deploy/compose/compose.remote.yaml`，并通过
-`PUBLIC_BASE_URL` 配置 Keycloak、Portal、Account、Token 和支付模拟器的一致
-公开地址。例如：
+`PUBLIC_BASE_URL` 配置 Keycloak、Account、Token 等服务的一致公开身份地址。例如：
 
 ```text
 docker compose --env-file .env -f compose.yaml -f compose.remote.yaml up -d --build --wait
 ```
 
-仓库完整模板只提供 HTTP 开发入口。生产环境必须在 `pinvou.com` 入口配置可信证书、强制 HTTPS，
-并把 `PUBLIC_BASE_URL` 设置为对应的 `https://` 地址。支付模拟器和本地密钥
-Provider 仅用于开发与验收，不得作为生产支付或生产凭据存储。
+仓库完整模板只提供 HTTP 开发入口。生产必须使用可信证书并强制 HTTPS。支付
+模拟器和本地密钥 Provider 仅用于开发与验收，不得作为生产支付或生产凭据存储。

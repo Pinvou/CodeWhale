@@ -109,8 +109,8 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		protected.POST("/internal/v1/reconciliation/runs", httpserver.AdaptFunc(s.runReconciliation))
 		router.POST("/internal/payment/notifications", httpserver.AdaptFunc(s.paymentNotification))
 		if s.callbackAuth != nil && s.callbackProfiles != nil {
-			router.POST("/external/v1/payment-callback/token", httpserver.AdaptFunc(s.paymentCallbackToken))
-			router.POST("/external/v1/payment-callbacks", httpserver.AdaptFunc(s.providerPaymentCallback))
+			router.POST("/api/v1/payment-callback/token", httpserver.AdaptFunc(s.paymentCallbackToken))
+			router.POST("/api/v1/payment-callbacks", httpserver.AdaptFunc(s.providerPaymentCallback))
 		}
 	}
 	if len(adminVerify) > 0 && adminVerify[0] != nil && s.authorizer != nil {

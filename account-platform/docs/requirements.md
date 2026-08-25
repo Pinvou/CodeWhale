@@ -827,10 +827,10 @@ RECEIVABLE_OPEN -> RESOLVED
 
 本项目提供且只公开以下两个 Provider 中立接口，Billing 原有内部通知入口不得直接暴露给商城或渠道：
 
-固定公网基础地址为 `https://pinvou.com`；调用方不得使用部署实例 IP、临时域名或客户端提交的回调 URL。服务器迁移只允许在品悟网关内部调整 upstream，不得改变 Provider 侧接口契约。
+固定公网基础地址为 `https://account.pinvou.com`，公开 API 命名空间为 `/api/v1`；调用方不得使用 HTTP、部署实例 IP、临时域名或客户端提交的回调 URL。服务器迁移只允许在品悟网关内部调整 upstream，不得改变 Provider 侧接口契约。
 
-1. 回调授权接口：`POST https://pinvou.com/external/v1/payment-callback/token`。每个 Provider 使用独立 HTTP Basic 客户端凭据按 `client_credentials` 换取短期 Bearer Token；服务端把客户端绑定到唯一 `provider_id`、Adapter 版本和商户，Token 只含 `payment.callback.write`，有效期必须在 1–15 分钟内。响应和日志不得泄露客户端密钥或 Token。
-2. 支付结果回调接口：`POST https://pinvou.com/external/v1/payment-callbacks`。接口只接受上述 Bearer Token，从 Token 派生 Provider 身份并选择对应 Profile；请求体不得提交或覆盖 `provider_id`、Adapter 版本或商户。完成严格校验并持久化通知后返回 `202 Accepted`，履约在异步 Inbox 中完成。
+1. 回调授权接口：`POST https://account.pinvou.com/api/v1/payment-callback/token`。每个 Provider 使用独立 HTTP Basic 客户端凭据按 `client_credentials` 换取短期 Bearer Token；服务端把客户端绑定到唯一 `provider_id`、Adapter 版本和商户，Token 只含 `payment.callback.write`，有效期必须在 1–15 分钟内。响应和日志不得泄露客户端密钥或 Token。
+2. 支付结果回调接口：`POST https://account.pinvou.com/api/v1/payment-callbacks`。接口只接受上述 Bearer Token，从 Token 派生 Provider 身份并选择对应 Profile；请求体不得提交或覆盖 `provider_id`、Adapter 版本或商户。完成严格校验并持久化通知后返回 `202 Accepted`，履约在异步 Inbox 中完成。
 
 通用回调报文至少包括：全局唯一 `notificationId`、品悟商户订单号 `merchantOrderNo`、Provider 订单号、Provider 支付流水号 `providerTransactionId`、渠道 `channel`、Provider 原始状态 `providerStatus`、实际金额分、币种、支付时间 `paidAt`、状态发生时间 `occurredAt`、发送时间 `sentAt` 和 Trace ID。具体状态、渠道、币种及兼容时间格式由与 Token 身份绑定的 Provider Profile 解释；Profile 确认支付成功时必须同时具有稳定支付流水号、正金额和有效支付时间，缺少任一字段不得入账。
 
@@ -885,7 +885,7 @@ Provider 支持关单时调用外部关单并核验；不支持时进入 `LOCALL
 | UI-06 | 只展示当前聊天和计费上下文额度 | 个人与组织权益不混合展示。 |
 | UI-07 | 跨端上下文同步 | 桌面与 Web 使用同一 context_version 并在版本变化时刷新。 |
 | UI-08 | 权益包和到期提醒 | 展示总可用、BASE/BONUS、来源、消耗顺序、到期日和即将到期提醒。 |
-| UI-09 | 桌面打开 Web 个人中心 | 使用受信 Portal URL，不在 URL 传递任何 OIDC Token。 |
+| UI-09 | 桌面打开 Web 个人中心 | 固定使用 `https://account.pinvou.com/` 受信 Portal URL，不在 URL 传递任何 OIDC Token；HTTP 入口只能跳转 HTTPS。 |
 | UI-10 | Web 个人充值入口 | Web 个人中心提供个人权益充值入口。 |
 | UI-11 | Web 组织购买入口 | 有权限管理员切换到显式目标组织后，可在“额度与用量”购买组织权益；组织管理能力在“账号设置”的当前组织设置区提供。 |
 | UI-12 | 退款入口屏蔽与支付能力降级展示 | 当前用户端和运营端均不展示新建普通退款入口；其他支付能力按统一 capabilities 展示，退款 capability 不得自动解除产品级屏蔽。 |
@@ -944,7 +944,7 @@ Provider 支持关单时调用外部关单并核验；不支持时进入 `LOCALL
 4. `[UI-05]` Web 个人中心提供用户名、手机号修改，必须通过统一身份页面重新认证，浏览器不得把密码交给 Portal/Account；品悟客户端不提供资料修改区域，但未登录 Popover 保留“忘记密码”入口。
 5. `[UI-06]` 个人中心只展示当前聊天和计费上下文的额度。
 6. `[UI-08]` 组织上下文只展示该成员获得的有效授予、权益组成和到期明细。
-7. `[UI-09]` 桌面 Popover 提供打开 Web 个人中心的受信入口；URL 不携带 Access Token、Refresh Token 或其他凭据，浏览器使用自己的 OIDC 会话。
+7. `[UI-09]` 桌面 Popover 提供打开 `https://account.pinvou.com/` Web 个人中心的受信入口；URL 不携带 Access Token、Refresh Token 或其他凭据，浏览器使用自己的 OIDC 会话。账号子域名只通过 HTTPS 提供业务能力，HTTP 仅允许同主机跳转 HTTPS。
 8. `[UI-10]` Web 个人中心提供个人充值入口。
 9. `[UI-11]` 切换到组织上下文后，“额度与用量”中为具有采购权限的管理员提供组织购买入口；“账号设置”按权限提供当前组织管理能力。
 10. `[UI-13]` 用户点击停止后立即停止当前界面继续追加内容，并展示服务端返回的真实取消和结算状态；`CANCEL_REQUESTED` 不得显示为“已取消且停止计费”。Provider 不支持取消时明确提示“已停止显示，模型服务仍在结束处理中，将按实际用量结算”；断线重连后继续展示同一请求的执行与费用状态。

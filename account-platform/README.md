@@ -34,7 +34,7 @@
 - `PINVOU_ACCOUNT_SERVICE_URL`；
 - `PINVOU_IDENTITY_SERVICE_URL`；
 - `PINVOU_TOKEN_GATEWAY_URL`；
-- `PINVOU_ACCOUNT_PORTAL_URL`（填写完整个人中心地址；正式环境固定为 `https://pinvou.com/account`，未配置时桌面端也使用该地址）。
+- `PINVOU_ACCOUNT_PORTAL_URL`（填写完整个人中心地址；正式环境固定为 `https://account.pinvou.com/`，未配置时桌面端也使用该地址）。
 
 远程端点必须使用 HTTPS；仅本机开发允许 `http://127.0.0.1`/`localhost`。桌面端支持原有账号/密码、中国大陆手机号/密码、手机号/短信验证码登录及未登录忘记密码；用户名和手机号修改只在 Web 个人中心提供，Portal 通过 OIDC 强制重新认证且不接收密码。新注册必须填写与原有账号体系共用的唯一用户名，先由 Identity Adapter 完成密码规则预检并取得短期不透明引用，再通过一次性滑块挑战及可配置短信 Provider 验证。Account 和短信 API 不接收原始密码。密码按原始 8 至 128 位可打印 ASCII 序列校验，至少包含一个字母和一个数字，允许中间半角空格但明确拒绝首尾空格；不 trim、不规范化、不转换大小写。密码不持久化、不写日志，Identity 创建完成或短期引用过期后释放。注册操作、唯一值预约和恢复阶段持久保存；桌面把短期查询凭据优先写入系统凭据库，重启后可继续轮询，Identity/Account 成功即返回可登录的 `PROVISIONING`，钱包由后台异步初始化，超过 SLA 转入 `REPAIR_REQUIRED`。Refresh Token 只写入 macOS Keychain、Windows Credential Manager 或 Linux Secret Service；系统凭据存储不可用时会明确拒绝登录，不降级写入设置文件。启用账号平台后，内置模型运行时直接使用同一 OIDC 会话的 Access Token 调用 `PINVOU_TOKEN_GATEWAY_URL/v1/chat/completions`，不会再把 New API 用户 Token 当作聊天身份。WebView 只接收登录状态和经过路由白名单限制的业务 JSON。注册成功后服务异步创建个人钱包和同手机号商城账号，完成前禁止平台模型与充值，本地独立模型不受影响。
 
@@ -46,7 +46,7 @@
 - Gateway 不重试模型调用。上游结果不确定、流式断开或缺失 usage 时保留 Hold 并进入 `REVIEW`。
 - 每个模型逻辑请求必须显式发送16至128字符的 `Idempotency-Key`。Gateway 只保存稳定用户级 `model-inference` 命名空间内的键摘要；同键同指纹恢复既有流、结果或核对状态，同键异请求返回409，不按 OIDC Session、活动上下文、模型或协议拆分防重域。
 - 流式事件会先以连续序号加密持久化再交付；重连可携带原幂等键和 `Last-Event-ID`。客户端断线不取消上游执行，结果不确定时禁止盲目重发模型调用。
-- 通用测试 Provider 的回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置；外部 Provider 统一调用 `pinvou.com` 根域名下固定公开的 Token 与支付回调精确路径，Provider 身份由客户端凭据和短期 Token 绑定，请求体及客户端均不能提交回调 URL 或冒充 Provider。
+- 通用测试 Provider 的回调地址由 Billing 的 `BILLING_PAYMENT_CALLBACK_URL` 固定配置；外部 Provider 统一调用 `account.pinvou.com` 下 `/api/v1` 命名空间内固定公开的 Token 与支付回调精确路径，Provider 身份由客户端凭据和短期 Token 绑定，请求体及客户端均不能提交回调 URL 或冒充 Provider。
 
 `mock-newapi` 只属于开发 Compose 后端网络，不发布宿主机端口；可用于验证正常、限流、断流和缺失 usage 场景。
 

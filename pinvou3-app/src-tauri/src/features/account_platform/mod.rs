@@ -30,7 +30,7 @@ const ACCOUNT_URL_ENV: &str = "PINVOU_ACCOUNT_SERVICE_URL";
 const IDENTITY_URL_ENV: &str = "PINVOU_IDENTITY_SERVICE_URL";
 const TOKEN_GATEWAY_URL_ENV: &str = "PINVOU_TOKEN_GATEWAY_URL";
 const PORTAL_URL_ENV: &str = "PINVOU_ACCOUNT_PORTAL_URL";
-const DEFAULT_PORTAL_URL: &str = "https://pinvou.com/account";
+const DEFAULT_PORTAL_URL: &str = "https://account.pinvou.com/";
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 const MAX_CHAT_REQUEST_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -1582,10 +1582,10 @@ mod tests {
     #[test]
     fn account_portal_is_fixed_and_never_carries_credentials() {
         assert_eq!(
-            account_portal_url_from("https://pinvou.com/account")
+            account_portal_url_from("https://account.pinvou.com/")
                 .unwrap()
                 .as_str(),
-            "https://pinvou.com/account"
+            "https://account.pinvou.com/"
         );
         assert!(account_portal_url_from("https://portal.example.test/?token=secret").is_err());
         assert!(account_portal_url_from("https://user:secret@portal.example.test/").is_err());

@@ -402,8 +402,8 @@ test('remote Keycloak administration is available only through a controlled loca
   const runbook = await readFile(path.join(root, 'deploy/runbooks/keycloak-admin-access.md'), 'utf8');
   assert.match(proxy, /location \/realms\//);
   assert.match(proxy, /location \/resources\//);
-  assert.match(proxy, /location = \/account \{/);
-  assert.ok(proxy.indexOf('location = /account {') < proxy.indexOf('location /account/ {'));
+  assert.doesNotMatch(proxy, /location = \/account \{/);
+  assert.match(proxy, /location \/account\/ \{/);
   assert.doesNotMatch(proxy, /location \/admin\/?/);
   assert.match(remoteCompose, /KC_HOSTNAME_ADMIN: \$\{KEYCLOAK_ADMIN_BASE_URL:-http:\/\/127\.0\.0\.1:18081\}/);
   assert.match(runbook, /127\.0\.0\.1:18081\/admin\//);
