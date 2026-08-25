@@ -110,6 +110,17 @@ function Get-Sha256 {
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-StringSha256 {
+  param([string]$Value)
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+    return ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+  } finally {
+    $sha.Dispose()
+  }
+}
+
 function Get-VerificationMarkerState {
   param([string]$StageManifestSha256 = "")
 
@@ -656,6 +667,40 @@ function Get-TauriOverlayContent {
   return (($config | ConvertTo-Json -Depth 8) + "`n")
 }
 
+function Test-PythonWheelTarget {
+  param([string]$Filename, [string]$Target)
+
+  if ($Target -notmatch '^(cp(?<targetDigits>\d+))-(?<targetPlatform>.+)$') {
+    return $false
+  }
+  $targetPython = $Matches[1]
+  $targetDigits = [int]$Matches['targetDigits']
+  $targetPlatform = $Matches['targetPlatform']
+  if ($Filename -notmatch '-(?<python>[^-]+)-(?<abi>[^-]+)-(?<platform>[^-]+)\.whl$') {
+    return $false
+  }
+  $pythonTags = @($Matches['python'].Split('.'))
+  $abiTags = @($Matches['abi'].Split('.'))
+  $platformTags = @($Matches['platform'].Split('.'))
+  if ($pythonTags -contains 'py3' -and $abiTags -contains 'none' -and $platformTags -contains 'any') {
+    return $true
+  }
+  $abiCompatible = ($abiTags -contains $targetPython) -or ($abiTags -contains 'abi3') -or ($abiTags -contains 'none')
+  $platformCompatible = ($platformTags -contains $targetPlatform) -or ($platformTags -contains 'any')
+  $pythonCompatible = $false
+  foreach ($tag in $pythonTags) {
+    if ($tag -eq $targetPython -or ($tag -eq 'py3' -and $abiTags -contains 'none')) {
+      $pythonCompatible = $true
+      break
+    }
+    if ($abiTags -contains 'abi3' -and $tag -match '^cp(?<digits>\d+)$' -and [int]$Matches['digits'] -le $targetDigits) {
+      $pythonCompatible = $true
+      break
+    }
+  }
+  return $pythonCompatible -and $abiCompatible -and $platformCompatible
+}
+
 function Test-PythonDependencyTargets {
   param([string]$PythonRoot)
 
@@ -664,19 +709,31 @@ function Test-PythonDependencyTargets {
     Write-Warning "Python dependency ABI probe could not find python.exe: $pythonExe"
     return $false
   }
-  $manifestPaths = @(
-    (Join-Path $appRoot "resources\mcp-servers\gongwen\manifest.json"),
-    (Join-Path $appRoot "resources\mcp-servers\pptx\manifest.json")
-  )
-  foreach ($manifestPath in $manifestPaths) {
-    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-      Write-Warning "Python MCP manifest is missing: $manifestPath"
-      return $false
-    }
+  $manifestRoot = Join-Path $appRoot "resources\mcp-servers"
+  $manifestPaths = @(Get-ChildItem -LiteralPath $manifestRoot -Filter manifest.json -File -Recurse)
+  foreach ($manifestItem in $manifestPaths) {
+    $manifestPath = $manifestItem.FullName
     $tool = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($null -eq $tool.windows_python_dependencies) {
+      continue
+    }
     $target = [string]$tool.windows_python_dependencies.target
     if ([string]::IsNullOrWhiteSpace($target)) {
       Write-Warning "Python MCP manifest has no Windows dependency target: $manifestPath"
+      return $false
+    }
+    $canonicalLines = @("target:$target")
+    foreach ($wheel in @($tool.windows_python_dependencies.wheels)) {
+      $filename = [string]$wheel.filename
+      if (-not (Test-PythonWheelTarget -Filename $filename -Target $target)) {
+        Write-Warning "Python wheel '$filename' is incompatible with dependency target '$target' in $manifestPath"
+        return $false
+      }
+      $canonicalLines += "${filename}:$([string]$wheel.sha256)"
+    }
+    $computedLock = Get-StringSha256 -Value ($canonicalLines -join "`n")
+    if ($computedLock -ne ([string]$tool.windows_python_dependencies.lock_id).ToLowerInvariant()) {
+      Write-Warning "Python dependency lock does not bind the declared target and wheels in $manifestPath"
       return $false
     }
     $probe = "import platform,sys;m=platform.machine().lower();p='win_amd64' if m in ('amd64','x86_64') else 'win_'+m;a=f'cp{sys.version_info.major}{sys.version_info.minor}-{p}';raise SystemExit(0 if a==sys.argv[1] else 17)"

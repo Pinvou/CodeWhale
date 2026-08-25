@@ -50,7 +50,7 @@ pub struct ToolManifest {
 pub struct WindowsPythonDependencyLock {
     /// `cp313-win_amd64` 形态；安装时与实际内置解释器核对。
     pub target: String,
-    /// 按 wheels 中 `filename:sha256` 顺序计算的 SHA-256。
+    /// 按 `target:<target>` + wheels 中 `filename:sha256` 顺序计算的 SHA-256。
     pub lock_id: String,
     /// 安装完成后必须能从隔离依赖目录导入的模块名。
     pub imports: Vec<String>,

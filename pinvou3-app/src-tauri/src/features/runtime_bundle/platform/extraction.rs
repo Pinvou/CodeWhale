@@ -171,17 +171,6 @@ impl Pinvou3Bundle {
         if mcp_secret_migration_ok {
             self.write_mcp_servers()?;
         }
-        // 0.24 一次性升级迁移：旧版本已安装的 gongwen/pptx 不会再次经过市场 install，
-        // 因此在 bundle 版本变化时补装受锁定的用户目录依赖并刷新启动参数。后续启动
-        // 直接命中 lock marker + import probe，不重复联网；失败不阻塞启动且记 degraded，
-        // 用户可从市场重装重试。
-        if bundle_changed {
-            for error in crate::features::marketplace::MarketplaceManager::new()
-                .repair_installed_builtin_python_dependencies()
-            {
-                log::warn!("[runtime-bundle] 已安装 Python MCP 依赖迁移失败: {error}");
-            }
-        }
         // mcp.json merge:每次启动 upsert 内置 pinvou server,保留 marketplace 条目。
         // 不受 VERSION gate 限制——marketplace 安装可能在任何时候发生。启动自愈(刷新
         // 陈旧的本地 python server command)也在同一次调用里完成,两者共享一次读盘

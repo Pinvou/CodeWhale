@@ -450,9 +450,9 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         Ok(())
     }
 
-    /// Windows 升级迁移：旧版本已登记的 Python MCP 不会再次经过 install，需在
-    /// bundle 升级时补装锁定依赖并把旧的直启 server.py 条目换成隔离 bootstrap。
-    /// 单个包失败不阻塞应用启动；失败原因写入 degraded，用户可在市场重装重试。
+    /// Windows 后台迁移：旧版本已登记的 Python MCP 不会再次经过 install，需补装
+    /// 锁定依赖并把旧的直启 server.py 条目换成隔离 bootstrap。调用方必须把本同步
+    /// I/O/联网函数放进 blocking 线程；每次启动首帧后重试，不依赖 bundle 版本闸门。
     pub fn repair_installed_builtin_python_dependencies(&self) -> Vec<String> {
         if !crate::platform::capabilities::is_windows() {
             return Vec::new();
@@ -470,8 +470,12 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             if manifest.windows_python_dependencies.is_none() {
                 continue;
             }
-            let result = (|| -> Result<store::AssetRef, String> {
+            let fingerprint = (|| -> Result<String, String> {
                 mcp_catalog::ensure_package_released(&tool_id)?;
+                skill_marketplace::dir_fingerprint(&mcp_catalog::package_mcp_dir(&tool_id))
+            })();
+            let result = (|| -> Result<store::AssetRef, String> {
+                fingerprint.as_ref().map_err(Clone::clone)?;
                 let dependencies = python_dependencies::ensure_for_builtin_manifest(&manifest)?
                     .ok_or_else(|| format!("工具 '{tool_id}' 缺少 Python 依赖结果"))?;
                 self.repair_python_dependency_entry(
@@ -481,23 +485,18 @@ impl<S: CredentialStore> MarketplaceManager<S> {
                 )?;
                 Ok(dependencies.asset)
             })();
-            match result {
-                Ok(asset) => {
-                    let store = store::BundleStore::new();
-                    if let Ok(Some(mut record)) = store.get(&tool_id) {
-                        record.assets.retain(|item| item.kind != "python-packages");
-                        record.assets.push(asset);
-                        record.degraded = None;
-                        if let Err(error) = store.upsert_preserving(record) {
-                            errors.push(format!("{tool_id}: 更新依赖登记失败: {error}"));
-                        }
-                    }
-                }
-                Err(error) => {
-                    let reason = format!("Python 依赖修复失败: {error}");
-                    let _ = store::BundleStore::new().mark_degraded(&tool_id, &reason);
-                    errors.push(format!("{tool_id}: {error}"));
-                }
+            let store = store::BundleStore::new();
+            if let Err(store_error) = record_python_dependency_repair(
+                &store,
+                &manifest,
+                result.as_ref().ok().cloned(),
+                fingerprint.ok(),
+                result.as_ref().err().map(String::as_str),
+            ) {
+                errors.push(format!("{tool_id}: 更新依赖登记失败: {store_error}"));
+            }
+            if let Err(error) = result {
+                errors.push(format!("{tool_id}: {error}"));
             }
         }
         errors
@@ -714,6 +713,52 @@ impl<S: CredentialStore> MarketplaceManager<S> {
     }
 }
 
+const PYTHON_DEPENDENCY_DEGRADED_PREFIX: &str = "Python 依赖修复失败: ";
+
+fn record_python_dependency_repair(
+    store: &store::BundleStore,
+    manifest: &ToolManifest,
+    asset: Option<store::AssetRef>,
+    content_fingerprint: Option<String>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let existing = store.get(&manifest.id)?;
+    let mut record = existing.clone().unwrap_or_else(|| {
+        store::BundleRecord::installed_now(&manifest.id, store::BundleSource::Preset)
+    });
+    record.installed = true;
+    if content_fingerprint.is_some() {
+        record.content_fingerprint = content_fingerprint;
+    }
+    record.credential_keys = bundle::tool_credentials(manifest)
+        .into_iter()
+        .map(|credential| credential.key)
+        .collect();
+    if let Some(asset) = asset {
+        record.assets.retain(|item| item.kind != "python-packages");
+        record.assets.push(asset);
+    }
+    match error {
+        Some(error)
+            if record.degraded.is_none()
+                || record.degraded.as_deref().is_some_and(|reason| {
+                    reason.starts_with(PYTHON_DEPENDENCY_DEGRADED_PREFIX)
+                }) =>
+        {
+            record.degraded = Some(format!("{PYTHON_DEPENDENCY_DEGRADED_PREFIX}{error}"));
+        }
+        None if record
+            .degraded
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with(PYTHON_DEPENDENCY_DEGRADED_PREFIX)) =>
+        {
+            record.degraded = None;
+        }
+        _ => {}
+    }
+    store.upsert_preserving(record)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -725,6 +770,113 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
+
+    fn gongwen_manifest_for_repair_test() -> ToolManifest {
+        serde_json::from_str(mcp_catalog::spec_for("gongwen").unwrap().manifest_json).unwrap()
+    }
+
+    fn python_asset_for_repair_test() -> store::AssetRef {
+        store::AssetRef {
+            kind: "python-packages".into(),
+            name: "cp313-win_amd64".into(),
+            version: "a".repeat(64),
+            sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn python_dependency_repair_creates_complete_missing_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store::BundleStore::with_file(temp.path().join("bundles.json"));
+        let manifest = gongwen_manifest_for_repair_test();
+        record_python_dependency_repair(
+            &store,
+            &manifest,
+            Some(python_asset_for_repair_test()),
+            Some("content-fingerprint".into()),
+            None,
+        )
+        .unwrap();
+
+        let record = store.get("gongwen").unwrap().unwrap();
+        assert!(record.installed);
+        assert_eq!(record.source, store::BundleSource::Preset);
+        assert_eq!(
+            record.content_fingerprint.as_deref(),
+            Some("content-fingerprint")
+        );
+        assert_eq!(record.assets, vec![python_asset_for_repair_test()]);
+        assert_eq!(record.degraded, None);
+    }
+
+    #[test]
+    fn python_dependency_repair_only_clears_its_own_degraded_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store::BundleStore::with_file(temp.path().join("bundles.json"));
+        let manifest = gongwen_manifest_for_repair_test();
+        let mut record = store::BundleRecord::installed_now("gongwen", store::BundleSource::Preset);
+        record.degraded = Some("其他资源损坏".into());
+        store.upsert(record).unwrap();
+        record_python_dependency_repair(
+            &store,
+            &manifest,
+            Some(python_asset_for_repair_test()),
+            Some("fp".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            store.get("gongwen").unwrap().unwrap().degraded.as_deref(),
+            Some("其他资源损坏")
+        );
+
+        let mut record = store.get("gongwen").unwrap().unwrap();
+        record.degraded = Some(format!("{PYTHON_DEPENDENCY_DEGRADED_PREFIX}offline"));
+        store.upsert(record).unwrap();
+        record_python_dependency_repair(
+            &store,
+            &manifest,
+            Some(python_asset_for_repair_test()),
+            Some("fp".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(store.get("gongwen").unwrap().unwrap().degraded, None);
+    }
+
+    #[test]
+    fn python_dependency_repair_reports_store_read_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bundles.json");
+        std::fs::write(&path, "{broken").unwrap();
+        let store = store::BundleStore::with_file(path);
+        let error = record_python_dependency_repair(
+            &store,
+            &gongwen_manifest_for_repair_test(),
+            None,
+            None,
+            Some("offline"),
+        )
+        .unwrap_err();
+        assert!(error.contains("解析"));
+    }
+
+    #[test]
+    fn python_dependency_repair_reports_store_write_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_parent = temp.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "block").unwrap();
+        let store = store::BundleStore::with_file(blocked_parent.join("bundles.json"));
+        let error = record_python_dependency_repair(
+            &store,
+            &gongwen_manifest_for_repair_test(),
+            Some(python_asset_for_repair_test()),
+            Some("fp".into()),
+            None,
+        )
+        .unwrap_err();
+        assert!(!error.is_empty());
+    }
 
     /// 把 PINVOU3_HOME 指到一个干净临时目录跑闭包,跑完恢复并清理。
     /// 借 paths 的 ENV_LOCK 跟其它 mutate PINVOU3_HOME 的测试串行,避免互相覆盖。

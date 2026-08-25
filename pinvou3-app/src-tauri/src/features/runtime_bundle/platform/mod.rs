@@ -123,7 +123,7 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 ///       schedule→calendar，新增 disk/doc-manage/email/media/shared/sheet/smartpage），
 ///       旧目录（wecomcli-msg/wecomcli-schedule）启动门控时清理。
 /// 0.24: Windows Python MCP 第三方依赖改为清单锁定、用户目录按需安装；升级时
-///       迁移已安装的公文/PPT MCP，避免应用运行时覆盖导致依赖再次丢失。
+///       刷新内嵌清单，依赖迁移在每次启动首帧后的后台任务中可重试。
 pub const BUNDLE_VERSION: &str = concat!(
     "0.24-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),

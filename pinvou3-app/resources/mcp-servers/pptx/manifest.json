@@ -13,7 +13,7 @@
   "pip_dependencies": ["python-pptx"],
   "windows_python_dependencies": {
     "target": "cp313-win_amd64",
-    "lock_id": "8d2a47440d5ffc890f05cc8ede0fbd97ee0df5161aeed65d601098552098643f",
+    "lock_id": "30af9975cdc7f45029123ec4efd9d742a1858676b65d4ec75843e493c6a8d64c",
     "imports": ["pptx"],
     "wheels": [
       {

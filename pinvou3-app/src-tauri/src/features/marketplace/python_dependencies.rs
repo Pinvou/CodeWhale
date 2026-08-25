@@ -77,10 +77,7 @@ fn ensure_lock(spec: &WindowsPythonDependencyLock) -> Result<InstalledPythonDepe
         spec.lock_id,
         std::process::id()
     ));
-    let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|e| format!("创建 Python 依赖暂存目录失败: {e}"))?;
-
-    let result = (|| -> Result<(), String> {
+    run_staged(&staging, || -> Result<(), String> {
         let client = dependency_client()?;
         let mut extracted = 0_u64;
         for wheel in &spec.wheels {
@@ -90,11 +87,7 @@ fn ensure_lock(spec: &WindowsPythonDependencyLock) -> Result<InstalledPythonDepe
         write_marker(&staging, &spec.lock_id)?;
         probe_imports(&staging, &spec.imports)?;
         Ok(())
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(error);
-    }
+    })?;
 
     // lock_id 目录是不可变内容地址。已有目录若未通过 marker/import 检查，
     // 只可能是旧版半安装或损坏副本；先清掉再提升完整 staging。
@@ -135,13 +128,9 @@ fn validate_lock(spec: &WindowsPythonDependencyLock) -> Result<(), String> {
     }
     for wheel in &spec.wheels {
         validate_wheel(wheel)?;
+        validate_wheel_target(&wheel.filename, &spec.target)?;
     }
-    let canonical = spec
-        .wheels
-        .iter()
-        .map(|wheel| format!("{}:{}", wheel.filename, wheel.sha256))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let canonical = canonical_lock(spec);
     let computed = hex_lower(&Sha256::digest(canonical.as_bytes()));
     if computed != spec.lock_id {
         return Err(format!(
@@ -150,6 +139,93 @@ fn validate_lock(spec: &WindowsPythonDependencyLock) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn run_staged<F>(staging: &Path, operation: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let _ = fs::remove_dir_all(staging);
+    fs::create_dir_all(staging).map_err(|e| format!("创建 Python 依赖暂存目录失败: {e}"))?;
+    match operation() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_dir_all(staging);
+            Err(error)
+        }
+    }
+}
+
+fn canonical_lock(spec: &WindowsPythonDependencyLock) -> String {
+    std::iter::once(format!("target:{}", spec.target))
+        .chain(
+            spec.wheels
+                .iter()
+                .map(|wheel| format!("{}:{}", wheel.filename, wheel.sha256)),
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_target(target: &str) -> Result<(&str, &str), String> {
+    let (python, platform) = target
+        .split_once('-')
+        .ok_or_else(|| format!("无效的 Windows Python target: {target}"))?;
+    if !python.starts_with("cp")
+        || python.len() < 4
+        || !python[2..].bytes().all(|byte| byte.is_ascii_digit())
+        || platform.is_empty()
+    {
+        return Err(format!("无效的 Windows Python target: {target}"));
+    }
+    Ok((python, platform))
+}
+
+/// 校验 wheel 文件名末尾的 PEP 425 `python-abi-platform` 三元组。
+/// 纯 Python 的 `py3-none-any` 跨 CPython 小版本复用；其余 wheel 必须明确匹配
+/// target，或使用与目标版本兼容的稳定 ABI（abi3）。
+fn validate_wheel_target(filename: &str, target: &str) -> Result<(), String> {
+    let (target_python, target_platform) = parse_target(target)?;
+    let stem = filename
+        .strip_suffix(".whl")
+        .ok_or_else(|| format!("无效的 wheel 文件名: {filename}"))?;
+    let mut tags = stem.rsplitn(4, '-');
+    let platforms = tags.next().unwrap_or_default();
+    let abis = tags.next().unwrap_or_default();
+    let pythons = tags.next().unwrap_or_default();
+    if tags.next().is_none() || pythons.is_empty() || abis.is_empty() || platforms.is_empty() {
+        return Err(format!("wheel 缺少 PEP 425 标签: {filename}"));
+    }
+    if pythons.split('.').any(|tag| tag == "py3")
+        && abis.split('.').any(|tag| tag == "none")
+        && platforms.split('.').any(|tag| tag == "any")
+    {
+        return Ok(());
+    }
+
+    let target_version = target_python[2..].parse::<u32>().unwrap_or_default();
+    let python_compatible = pythons.split('.').any(|tag| {
+        tag == target_python
+            || (abis.split('.').any(|abi| abi == "abi3")
+                && tag
+                    .strip_prefix("cp")
+                    .and_then(|digits| digits.parse::<u32>().ok())
+                    .is_some_and(|version| version <= target_version))
+            || (tag == "py3" && abis.split('.').any(|abi| abi == "none"))
+    });
+    let abi_compatible = abis
+        .split('.')
+        .any(|tag| tag == target_python || tag == "abi3" || tag == "none");
+    let platform_compatible = platforms
+        .split('.')
+        .any(|tag| tag == target_platform || tag == "any");
+    if python_compatible && abi_compatible && platform_compatible {
+        Ok(())
+    } else {
+        Err(format!(
+            "wheel {filename} 的 PEP 425 标签与 target {target} 不兼容"
+        ))
+    }
 }
 
 fn validate_wheel(wheel: &PythonWheel) -> Result<(), String> {
@@ -193,13 +269,8 @@ fn dependency_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(180))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 10 || attempt.url().scheme() != "https" {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }))
+        // 锁中 URL 已固定到可信主机；禁止重定向，避免响应把请求带到未审计主机。
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent("Pinvou-Agent python-dependency-installer")
         .build()
         .map_err(|e| format!("创建 Python 依赖下载客户端失败: {e}"))
@@ -216,12 +287,21 @@ fn ensure_wheel_cached(
     {
         return Ok(destination);
     }
+    if destination.exists() {
+        fs::remove_file(&destination).map_err(|e| format!("清理损坏的 wheel 缓存失败: {e}"))?;
+    }
 
     let response = client
         .get(&wheel.url)
         .send()
-        .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|e| format!("下载 {} 失败: {e}", wheel.filename))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "下载 {} 失败: HTTP {}（不允许重定向）",
+            wheel.filename,
+            response.status()
+        ));
+    }
     if response
         .content_length()
         .is_some_and(|length| length > MAX_WHEEL_BYTES)
@@ -261,6 +341,15 @@ fn extract_wheel(
     destination: &Path,
     extracted_total: &mut u64,
 ) -> Result<(), String> {
+    extract_wheel_with_limit(wheel_path, destination, extracted_total, MAX_ENV_BYTES)
+}
+
+fn extract_wheel_with_limit(
+    wheel_path: &Path,
+    destination: &Path,
+    extracted_total: &mut u64,
+    max_env_bytes: u64,
+) -> Result<(), String> {
     let file = File::open(wheel_path).map_err(|e| format!("打开 wheel 失败: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("读取 wheel 失败: {e}"))?;
     for index in 0..archive.len() {
@@ -285,7 +374,7 @@ fn extract_wheel(
             .parent()
             .ok_or_else(|| "wheel 条目缺少父目录".to_string())?;
         fs::create_dir_all(parent).map_err(|e| format!("创建 wheel 目录失败: {e}"))?;
-        let remaining = MAX_ENV_BYTES.saturating_sub(*extracted_total);
+        let remaining = max_env_bytes.saturating_sub(*extracted_total);
         let mut output_file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -354,6 +443,42 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
+    fn write_test_wheel(path: &Path, entries: &[(&str, &[u8], Option<u32>)]) {
+        let file = File::create(path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        for (name, content, mode) in entries {
+            let mut options = zip::write::SimpleFileOptions::default();
+            if let Some(mode) = mode {
+                options = options.unix_permissions(*mode);
+            }
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(content).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    fn one_response_server(status: &str, headers: &str, body: &[u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_string();
+        let headers = headers.to_string();
+        let body = body.to_vec();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\n{headers}\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(&body).unwrap();
+        });
+        format!("http://{address}/demo.whl")
+    }
 
     #[test]
     fn dependency_lock_rejects_hash_drift() {
@@ -380,6 +505,114 @@ mod tests {
         assert!(validate_wheel(&wheel).is_err());
         assert!(!valid_import_name("docx;import os"));
         assert!(valid_import_name("lxml.etree"));
+    }
+
+    #[test]
+    fn cp314_target_rejects_cp313_non_stable_wheel() {
+        let error =
+            validate_wheel_target("lxml-6.1.2-cp313-cp313-win_amd64.whl", "cp314-win_amd64")
+                .unwrap_err();
+        assert!(error.contains("不兼容"));
+        assert!(
+            validate_wheel_target("python_docx-1.2.0-py3-none-any.whl", "cp314-win_amd64").is_ok()
+        );
+    }
+
+    #[test]
+    fn dependency_lock_hash_binds_target() {
+        let mut spec = WindowsPythonDependencyLock {
+            target: "cp313-win_amd64".into(),
+            lock_id: String::new(),
+            imports: vec!["demo".into()],
+            wheels: vec![PythonWheel {
+                filename: "demo-1.0-py3-none-any.whl".into(),
+                url: "https://files.pythonhosted.org/packages/demo.whl".into(),
+                sha256: "1".repeat(64),
+            }],
+        };
+        spec.lock_id = hex_lower(&Sha256::digest(canonical_lock(&spec).as_bytes()));
+        validate_lock(&spec).unwrap();
+        spec.target = "cp314-win_amd64".into();
+        assert!(validate_lock(&spec).is_err());
+    }
+
+    #[test]
+    fn wheel_extraction_rejects_traversal_symlink_limit_and_collision() {
+        let temp = tempfile::tempdir().unwrap();
+        let destination = temp.path().join("site");
+        fs::create_dir_all(&destination).unwrap();
+
+        let traversal = temp.path().join("traversal.whl");
+        write_test_wheel(&traversal, &[("../escape.py", b"x", None)]);
+        assert!(extract_wheel(&traversal, &destination, &mut 0).is_err());
+        assert!(!temp.path().join("escape.py").exists());
+
+        let symlink = temp.path().join("symlink.whl");
+        let file = File::create(&symlink).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .add_symlink(
+                "link.py",
+                "target.py",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.finish().unwrap();
+        assert!(extract_wheel(&symlink, &destination, &mut 0).is_err());
+
+        let oversized = temp.path().join("oversized.whl");
+        write_test_wheel(&oversized, &[("large.bin", b"12345", None)]);
+        assert!(extract_wheel_with_limit(&oversized, &destination, &mut 0, 4).is_err());
+
+        let first = temp.path().join("first.whl");
+        let second = temp.path().join("second.whl");
+        write_test_wheel(&first, &[("same.py", b"first", None)]);
+        write_test_wheel(&second, &[("same.py", b"second", None)]);
+        let collision_destination = temp.path().join("collision");
+        fs::create_dir_all(&collision_destination).unwrap();
+        let mut total = 0;
+        extract_wheel(&first, &collision_destination, &mut total).unwrap();
+        assert!(extract_wheel(&second, &collision_destination, &mut total).is_err());
+    }
+
+    #[test]
+    fn failed_probe_path_cleans_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let staging = temp.path().join("staging");
+        let error = run_staged(&staging, || {
+            fs::write(staging.join("partial.py"), b"partial").unwrap();
+            Err("probe failed".into())
+        })
+        .unwrap_err();
+        assert_eq!(error, "probe failed");
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn downloader_rejects_redirect_and_removes_bad_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let client = dependency_client().unwrap();
+        let redirect = PythonWheel {
+            filename: "demo-1.0-py3-none-any.whl".into(),
+            url: one_response_server(
+                "302 Found",
+                "Location: https://example.com/evil.whl\r\n",
+                b"",
+            ),
+            sha256: "a".repeat(64),
+        };
+        let error = ensure_wheel_cached(&client, &redirect, temp.path()).unwrap_err();
+        assert!(error.contains("HTTP 302"));
+
+        let bad_cache = temp.path().join(format!("{}.whl", "b".repeat(64)));
+        fs::write(&bad_cache, b"corrupt").unwrap();
+        let unavailable = PythonWheel {
+            filename: "demo-1.0-py3-none-any.whl".into(),
+            url: one_response_server("500 Internal Server Error", "", b""),
+            sha256: "b".repeat(64),
+        };
+        assert!(ensure_wheel_cached(&client, &unavailable, temp.path()).is_err());
+        assert!(!bad_cache.exists());
     }
 
     #[test]

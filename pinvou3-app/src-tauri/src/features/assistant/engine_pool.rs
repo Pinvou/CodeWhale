@@ -589,6 +589,9 @@ struct EngineEntry {
     forwarder: JoinHandle<()>,
     /// 创建该 engine 时实际使用的运行时模型、提供器版本和本地模型修订号。
     runtime_model: PreparedRuntimeState,
+    /// MCP 配置修订号。后台迁移原子更新 mcp.json 后递增；下一轮取 engine 时安全
+    /// 回收旧实例并 lazy 重建，使新增依赖/启动参数无需重启应用即可生效。
+    mcp_config_revision: u64,
     /// 引擎纪元（UNIX ms）：worker ledger 上"仍在跑"的记录只有在本纪元内
     /// 有过活动才算真的活着。底座重启加载只翻内存状态、不回写落盘 running
     /// （subagent/mod.rs 的 load 路径），少了这道甄别，父会话重建引擎后
@@ -662,6 +665,7 @@ pub struct EnginePool {
     model_update_revisions: ModelUpdateRevisions,
     #[cfg(any(feature = "benchmark-hooks", test))]
     eval_model_snapshots: EvalModelSnapshots,
+    mcp_config_revision: Arc<AtomicU64>,
     turn_locks: SessionTurnLocks,
     turn_lifecycles: SessionTurnLifecycles,
     shell_managers: SessionShellManagers,
@@ -727,6 +731,7 @@ impl EnginePool {
             model_update_revisions: ModelUpdateRevisions::default(),
             #[cfg(any(feature = "benchmark-hooks", test))]
             eval_model_snapshots: EvalModelSnapshots::default(),
+            mcp_config_revision: Arc::new(AtomicU64::new(0)),
             turn_locks: SessionTurnLocks::default(),
             turn_lifecycles: SessionTurnLifecycles::default(),
             shell_managers: SessionShellManagers::default(),
@@ -852,6 +857,12 @@ impl EnginePool {
     /// 已在生成的引擎不被立即打断，下次 turn 会在发送前安全回收并重建。
     pub(crate) fn mark_model_updated(&self, model_id: &str) {
         self.model_update_revisions.bump(model_id);
+    }
+
+    /// mcp.json 原子更新成功后调用。不中断正在进行的 turn；下一轮进入
+    /// `get_or_spawn` 时检测修订差异并安全重建引擎，从新配置重新发现工具。
+    pub(crate) fn mark_mcp_config_updated(&self) {
+        self.mcp_config_revision.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn compute_disallowed_tools(&self) -> Vec<String> {
@@ -1039,11 +1050,14 @@ impl EnginePool {
             .await?;
         let model_update_revision = self.model_update_revisions.current(&prepared.model.id);
         let prepared = PreparedRuntimeState::new(prepared, model_update_revision);
+        let mcp_config_revision = self.mcp_config_revision.load(Ordering::Acquire);
 
         let stale = {
             let mut entries = self.entries.lock().await;
             if let Some(entry) = entries.get(session_id) {
-                if !prepared.requires_rebuild_from(&entry.runtime_model) {
+                if !prepared.requires_rebuild_from(&entry.runtime_model)
+                    && entry.mcp_config_revision == mcp_config_revision
+                {
                     return Ok(entry.engine.clone());
                 }
             }
@@ -1140,6 +1154,7 @@ impl EnginePool {
                 engine: engine.clone(),
                 forwarder,
                 runtime_model: prepared,
+                mcp_config_revision,
                 spawned_at_ms: Self::now_epoch_ms(),
                 last_active_epoch_ms: AtomicU64::new(Self::now_epoch_ms()),
             },

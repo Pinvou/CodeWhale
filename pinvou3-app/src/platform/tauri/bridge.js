@@ -122,6 +122,22 @@
     }
   }
 
+  async function repairPythonDependenciesAfterFirstFrame() {
+    startupMark("bridge:python_dependencies_async:start");
+    try {
+      var errors = await invoke("repair_python_dependencies_after_first_frame");
+      startupMark("bridge:python_dependencies_async:done", "errors=" + errors.length);
+      if (window.__PINVOU_STARTUP__) window.__PINVOU_STARTUP__.flush();
+      if (errors.length) console.warn("[marketplace] Python MCP 依赖后台修复未全部成功", errors);
+      return errors;
+    } catch (error) {
+      startupMark("bridge:python_dependencies_async:error", String(error));
+      if (window.__PINVOU_STARTUP__) window.__PINVOU_STARTUP__.flush();
+      console.warn("[marketplace] Python MCP 依赖后台修复失败", error);
+      return [String(error)];
+    }
+  }
+
   // ── Markdown rendering (vendor scripts loaded in index.html) ─────
   // 抹平裸 <script>/<style>/<iframe> 等危险标签:它们一旦被 marked 透传成真 HTML,
   // 浏览器按 HTML 解析时 script 元素会"吞掉"后续兄弟节点直到 </script>(或文档末尾),
@@ -2475,6 +2491,7 @@
     },
     knowledge: {
       loadKnowledgeEmbedderAfterFirstFrame: loadKnowledgeEmbedderAfterFirstFrame,
+      repairPythonDependenciesAfterFirstFrame: repairPythonDependenciesAfterFirstFrame,
       downloadKbModel: downloadKbModel,
       cancelKbModel: cancelKbModel,
       mountCollection: mountCollection,

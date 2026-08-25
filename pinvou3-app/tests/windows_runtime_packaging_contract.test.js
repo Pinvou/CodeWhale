@@ -415,8 +415,23 @@ assert.match(
 );
 assert.ok(
   runtimeInitScript.includes('$cacheSchema = "v5"') &&
-    runtimeScript.includes('$verificationSchemaVersion = 4'),
-  "the external LFS cache layout must invalidate v4 Jenkins caches without changing the trusted staging schema",
+    runtimeScript.includes('$verificationSchemaVersion = 5'),
+  "the external LFS cache and trusted staging marker must invalidate pre Python-dependency-gate caches",
+);
+assert.match(
+  runtimeScript,
+  /Get-ChildItem -LiteralPath \$manifestRoot -Filter manifest\.json -File -Recurse/u,
+  "the Python dependency gate must enumerate every built-in MCP manifest",
+);
+assert.match(
+  runtimeScript,
+  /Test-PythonWheelTarget -Filename \$filename -Target \$target/u,
+  "the Python dependency gate must validate locked wheel PEP 425 tags",
+);
+assert.match(
+  runtimeScript,
+  /"target:\$target"/u,
+  "the Python dependency lock must bind its interpreter target",
 );
 assert.ok(
   runtimeInitScript.includes(

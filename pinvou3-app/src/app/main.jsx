@@ -339,6 +339,9 @@ function workspaceDisplayName(path) {
             if (bridge.available && bridge.knowledge.loadKnowledgeEmbedderAfterFirstFrame) {
               bridge.knowledge.loadKnowledgeEmbedderAfterFirstFrame();
             }
+            if (bridge.available && bridge.knowledge.repairPythonDependenciesAfterFirstFrame) {
+              bridge.knowledge.repairPythonDependenciesAfterFirstFrame();
+            }
             // 首帧已呈现后空闲预取低频视图 chunk:桌宠/定时快捷方式会不经侧栏直接
             // 跳视图(如 scheduledTaskAutoOpenId),悬停预取覆盖不到这些入口。
             if (typeof window.requestIdleCallback === 'function') {

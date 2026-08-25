@@ -13,7 +13,7 @@
   "pip_dependencies": ["python-docx"],
   "windows_python_dependencies": {
     "target": "cp313-win_amd64",
-    "lock_id": "f0cbbb15ed9ca50009f7ba567ec472cc98cca8751631ed86bbf87cf10f9b401e",
+    "lock_id": "902a700346720b237752c05b7628572da4219056544373f82e6728cb50c3d64e",
     "imports": ["docx"],
     "wheels": [
       {
