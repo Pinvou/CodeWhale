@@ -320,7 +320,9 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 - 系统运行聚合不拥有固定组件清单：部署通过 `SYSTEM_PROBES_JSON` 注册本地、通用 HTTP（可选 JSON 布尔断言）或 Relay 指标探针；Portal 主流程只按 Adapter 类型并发执行、脱敏汇总和排序，新增 Identity/模型网关/事件组件无需增加厂商判断分支。
 - 桌面 OIDC Access Token 保留在 Rust 进程，Refresh Token 只存系统凭据库，不持久化密码。
 - 旧内置模型迁移具备盘点报告、配置备份、会话/计划任务模型 ID 迁移和旧凭据清理重试；当前测试覆盖迁移幂等以及运行时不再引用旧 `llmapi_hub` 路径。
-- 桌面模型选择器实时读取 `/v1/models`，只允许当前上下文可用且生命周期允许的新会话模型。会话创建时把实际模型引用写入自身元数据；全局默认变化不会改变旧会话。模型移除或继续截止后，旧会话保持可读，用户必须显式选择替代模型并创建带来源会话、来源轮次、原模型和替代模型证据的新分支。
+- 桌面模型目录只由“设置 → 模型”和普通对话输入区消费，账号 Popover 不拥有模型选择职责。客户端实时读取 `/v1/models`，以 `ACCOUNT_PLATFORM + model_id` 表示平台目录模型，以 `LOCAL_CONFIG + saved_model_id` 表示本地或用户自配模型，禁止再用一个可变的内置 SavedModel 同时代表全部平台模型。
+- `default_model_ref` 是空白新会话的全局默认，`session_model_ref` 是会话创建或会话内选择时冻结的实际引用；修改前者不改变旧会话，修改后者不反向改写全局默认。既有 `active_model_id`、`account_platform_default_model` 和旧会话模型 ID 通过幂等迁移收敛，不能确定原平台模型时要求重新选择。
+- 模型选择器只允许当前上下文可用且生命周期允许的新会话/继续模型。模型移除或继续截止后，旧会话保持可读，用户必须显式选择替代模型并创建带来源会话、来源轮次、原模型和替代模型证据的新分支；禁止静默回退。
 - 客户端切换由三层失败关闭：发布脚本核验公开兼容范围、OIDC 发现、制品摘要和 TOK-37 签名证明；更新器核验环境固定公钥、制品摘要、有效期、检查项、系统包签名并执行只读迁移预检；运行时只接受完成的新 schema，失败时返回修复原因且没有旧模型回退。`check-client-migration-scope.mjs` 把该迁移提交限制在客户端、客户端测试/工具和直接相关文档内。
 - 登录后的账号弹层只调用专用命令打开固定的受信 Portal `https://account.pinvou.com/`；WebView 不能提供目标 URL，OIDC Token 不进入 URL、查询串或 Portal JavaScript。账号子域名是个人中心和公开支付回调的独立 HTTPS 边界，`pinvou.com` 不再承载个人中心、Portal 会话或 BFF。
 - 当前个人中心没有 Token Account 管理入口；管理后台仍提供平台 Token Account、凭据元数据、路由、用量、钱包、订单、调整和修复等能力。
