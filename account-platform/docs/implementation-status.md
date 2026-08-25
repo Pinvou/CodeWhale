@@ -181,7 +181,7 @@
 | TOK-45 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE; ROUTE-PROVISIONING-ELIGIBILITY | NOT_DEPLOYED | 回滚以前向更高版本复制历史内容，保留来源/原因/操作者且不复活 REMOVED 墓碑；发布前逐模型校验当前 Adapter、协议、有效价格及同代 READY Provisioning/账号/凭据/路由，并在事务内重检路由依赖 |
 | TOK-46 | 已实现 | DOC_CURRENT | GO-UNIT; METERING-PRICING-LIFECYCLE; GATEWAY-ADAPTER-NEUTRALITY; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 模型身份、目录、能力、协议、价格/公式和路由代次独立版本化；请求在 Hold/派发前冻结全部引用和生命周期显示快照，显示变化不创建新身份 |
 | TOK-47 | 已实现 | AUDIT_HEAD | GO-UNIT; MODEL-CATALOG-LIFECYCLE; MODEL-EMERGENCY-CANCELLATION; DESKTOP-CLIENT-SWITCH; ACCOUNT-PLATFORM-STATE | NOT_DEPLOYED | Gateway 执行新会话/继续截止，桌面选择前校验上下文和目录生命周期并在不可继续时进入显式替代分支；紧急 REMOVED 与取消策略原子提交，Worker 锁定生效前已受理的在途请求并按可信结果收敛 |
-| TOK-48 | 部分实现 | AUDIT_HEAD | RUST-CHECK; RUST-TEST-COMPILE; ACCOUNT-PLATFORM-STATE; MULTIAGENT-REGRESSION; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 类型化全局/会话引用、兼容迁移、失败关闭、设置页新会话默认项和对话区当前会话选择均已实现；空白草稿只寄存选择并在首条消息物化时冻结，不改全局默认；完整跨入口回归仍待 APT-063 |
+| TOK-48 | 已实现 | AUDIT_HEAD | RUST-CHECK; RUST-TEST-COMPILE; MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; MULTIAGENT-REGRESSION; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 类型化全局/会话引用、兼容迁移、失败关闭、设置页新会话默认项和对话区当前会话选择均已实现；空白草稿只寄存选择并在首条消息物化时冻结，不改全局默认；来源冲突、生命周期、退役入口、三语状态和桥接协议已有自动回归门禁 |
 | BILL-04 | 已实现 | AUDIT_HEAD | GO-UNIT; REGISTRATION-SAGA | NOT_DEPLOYED | Account 提交原子写入钱包任务与 Outbox，后台使用稳定键调用 Billing、退避重试并在成功后激活账号；bootstrap 不同步调用 Billing |
 | BILL-05 | 已实现 | AUDIT_HEAD | GO-UNIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 权益组成表只允许 BASE/BONUS，商品入账按冻结商品快照拆分且舍入余数归 BONUS，不存在第三种积分类型 |
 | BILL-09 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 组织用量 Hold 同时锁定成员授予与其精确权益包、BASE/BONUS 组成，不跨包或跨组成回退；结算和释放同步维护成员授予及组织组成桶 |
@@ -302,6 +302,7 @@
 | UI-19 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; MULTIAGENT-REGRESSION; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 对话选择器按来源展示当前上下文可用的具体平台目录模型及本地/第三方模型；已有会话直接写类型化会话引用，空白草稿延迟到首条消息创建会话后冻结，均不改全局默认 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
+| NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
 
 ### 0.2 既有目标编号证据索引
 
@@ -515,7 +516,7 @@
 | CR-62 | PAY-31, UI-12, ADM-20 | 普通退款暂不开放，保留既有实现但屏蔽所有新建入口 | 部分实现 | 退款领域模型、迁移、执行器、证据、查询和被动异常处置均保留；当前 H3C 已因 capability 不支持而隐藏入口，但仍需 APT-056 增加独立于 Provider capability 的产品级默认关闭门禁，同时拒绝用户/运营 UI 和服务端创建请求 |
 | CR-63 | PAY-10, PAY-12, PAY-15–PAY-17, NFR-03, NFR-04, NFR-41 | 提供 Provider 中立授权与支付通知接口，新华三作为首个 Profile 且不增加额外能力字段 | 云端接口已部署，商城联调待验收 | 凭据和 Token 绑定 Provider、版本及商户，请求体不能自报身份。H3C 直接声明 `notification_supported=true`，通知先入既有 Inbox 再异步归并，查询继续补偿；云端受控客户端 Token 签发已通过，真实商城金额字段、通知报文、重复/乱序和履约行为仍需外部联调证据 |
 | CR-64 | UI-09, PAY-15–PAY-17, NFR-03, NFR-04 | Web 个人中心与公开支付回调统一迁移到账号独立 HTTPS 子域名和 `/api/v1` 命名空间 | 云端 UAT 已部署 | 桌面默认入口、Portal 根路径、Billing 路由、OpenAPI、Helm、Compose、Nginx 与文档已统一为 `https://account.pinvou.com/`；受信 TLS、HTTP `308`、Portal `200`、回调未授权 `401` 与受控 Token 签发 `200` 均已验证。旧官网个人中心代理与旧回调契约未保留兼容代码；真实商城回调仍由 CR-63 跟踪 |
-| CR-65 | TOK-48, UI-17–UI-19 | 平台模型入口从账号 Popover 迁移到设置和对话区，并隔离全局默认与当前会话选择 | 部分实现 | APT-059–APT-062 已完成 Popover 收敛、类型化引用、设置默认项及对话当前会话选择；完整三语、异常和跨入口回归仍待 APT-063 |
+| CR-65 | TOK-48, UI-17–UI-19, NFR-51 | 平台模型入口从账号 Popover 迁移到设置和对话区，并隔离全局默认与当前会话选择 | 已实现 | APT-059–APT-063 已完成 Popover 收敛、类型化引用、设置默认项、对话当前会话选择及三语、异常和跨入口自动回归门禁 |
 
 这些需求之间的强制关系：
 
@@ -686,7 +687,7 @@
 | TOK-45 | 模型目录版本回滚 | 已实现 | 以前向更高版本复制历史内容并保留来源、审计和 REMOVED 墓碑；提交前联合校验当前价格、READY Provisioning、路由代次和有效凭据。 |
 | TOK-46 | 模型关联对象版本生成边界 | 已实现 | 目录、协议、能力、价格/公式和路由代次独立演进，请求冻结全部版本与显示/生命周期快照。 |
 | TOK-47 | 模型下架后的会话处理 | 已实现 | 弃用/移除截止和桌面显式替代分支均保持原会话不变；紧急强制下架会锁定生效前在途请求，保存真实取消能力与尝试，并沿原 Hold、可信用量和结算状态收敛。 |
-| TOK-48 | 客户端模型选择引用与作用域 | 部分实现 | 类型化引用、兼容迁移、失败关闭、设置页新会话默认项及对话当前会话选择已实现；完整回归仍待 APT-063。 |
+| TOK-48 | 客户端模型选择引用与作用域 | 已实现 | 类型化引用、兼容迁移、失败关闭、设置页新会话默认项及对话当前会话选择已实现；来源冲突、生命周期、退役入口、三语状态和桥接协议已有自动回归门禁。 |
 
 ### 3.4 钱包、积分、定价和权益
 
@@ -883,6 +884,7 @@
 | NFR-48 | 审计导出保护 | 已实现：服务端任务要求专用权限、15分钟近期认证、明确范围和原因，执行默认脱敏/临时PII授权、加密签名水印、31天/10万行/500MB、2并发/10每日及15分钟一次性下载。 |
 | NFR-49 | 模型结果重放载荷最小化 | 已实现：在线24小时/30天/90天硬上限、自动清除、主体正文即时删除内部入口、派发正文最小化及独立受限案件迁移/解除后30天清除已建立；生产备份生命周期证据随 APT-037 验收。 |
 | NFR-50 | 用户编码查询保护 | 已实现：编码不是认证/授权凭据；查询要求 `platform.users.read`，只做完整等值匹配，使用统一无泄露响应、多维摘要限流和全结果审计，不提供公开、前缀、模糊、自动补全或批量入口。 |
+| NFR-51 | 模型选择跨入口回归门禁 | 已实现：账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归。 |
 
 ## 5. 已确认领域规则
 

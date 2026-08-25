@@ -12,7 +12,7 @@ export const desktopBridgeApi = {
   feedback: ['submitFeedback'],
   vllm: ['bootstrapLocalVllm', 'declineVllmSetup', 'detectLocalVllmSetup', 'dismissVllmSetup', 'discoverLocalVllm'],
   multiAgent: ['listSubagentTranscripts', 'readSubagentTranscript'],
-  models: ['deleteModel', 'getEffectiveModelConfig', 'loadModels', 'loadSessionModel', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'testModelConnection'],
+  models: ['deleteModel', 'getEffectiveModelConfig', 'loadModels', 'loadSessionModel', 'revealModelApiKey', 'saveModel', 'setActiveModel', 'switchModel', 'switchModelRef', 'testModelConnection'],
   interaction: ['acceptPlan', 'cancelUserInput', 'compactNow', 'discardPlan', 'dismissPinvouReview', 'editLastTurn', 'exitPlanToYolo', 'inspectPinvou', 'planStuckGo', 'planStuckReplan', 'resolvePinvouReview', 'setMultiAgentMode', 'setPlanModeNext', 'submitUserInput', 'summonPinvou', 'toggleSuperPerm'],
   rendering: ['renderMarkdown'],
   remoteControl: ['getWebRelaySettings', 'refreshRemoteControlQr', 'refreshRemoteControlStatus', 'resetWebRelayAddress', 'setWebRelayAddress', 'startRemoteControl', 'stopRemoteControl'],
@@ -25,7 +25,7 @@ export const desktopBridgeApi = {
   memory: ['archiveRecentWorkMemory', 'confirmMemoryCandidate', 'deleteMemoryItem', 'deleteMemoryPreference', 'ignoreMemoryCandidate', 'loadMemoryOverview', 'neverMemoryCandidate', 'saveMemoryProfilePatch', 'updateMemoryItem'],
   updater: ['cancelUpdate', 'checkForUpdate', 'downloadAndInstallUpdate', 'restartApp'],
   dependencies: ['checkDependencies', 'installDependencies'],
-  accountPlatform: ['branchReplacementSession', 'createSliderCaptcha', 'login', 'loginSms', 'logout', 'modelCatalog', 'openPortal', 'precheckMobileRegistration', 'registerMobile', 'registrationStatus', 'request', 'resetPassword', 'selectCatalogModel', 'sendSms', 'session'],
+  accountPlatform: ['branchReplacementSession', 'createSliderCaptcha', 'login', 'loginSms', 'logout', 'modelCatalog', 'openPortal', 'precheckMobileRegistration', 'registerMobile', 'registrationStatus', 'request', 'resetPassword', 'selectCatalogModel', 'selectSessionCatalogModel', 'sendSms', 'session'],
   teamRelay: ['claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'listDraftSourceSessions', 'load', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'updateProfile', 'verifyAccess'],
 };
 

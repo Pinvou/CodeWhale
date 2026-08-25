@@ -86,6 +86,18 @@ for (const language of ['zh', 'en', 'ja']) {
   assert.ok(dict[language].uiScheduled.runHistory, `${language}.uiScheduled.runHistory must exist`);
   assert.ok(dict[language].uiSettingsDetail.restartNow, `${language}.uiSettingsDetail.restartNow must exist`);
   assert.ok(dict[language].uiSettingsDetail.deleteModelTitle, `${language}.uiSettingsDetail.deleteModelTitle must exist`);
+  for (const key of [
+    'platformModels', 'platformModelsDesc', 'platformModelsLoading', 'platformModelsSignIn',
+    'platformModelsUnavailable', 'appliesToNewSessions', 'modelDeprecated',
+    'modelUnavailable', 'modelSwitchFailed',
+  ]) {
+    assert.ok(
+      Object.hasOwn(dict[language].uiSettingsDetail, key)
+        && typeof dict[language].uiSettingsDetail[key] === 'string'
+        && dict[language].uiSettingsDetail[key].trim(),
+      `${language}.uiSettingsDetail.${key} must be a direct non-empty translation`,
+    );
+  }
   assert.ok(dict[language].uiChat.asrDownloadTitle, `${language}.uiChat.asrDownloadTitle must exist`);
   assert.ok(dict[language].uiChat.memoryMeta.preference, `${language}.uiChat.memoryMeta.preference must exist`);
   assert.ok(dict[language].uiChat.sceneModes.personalWorkbench, `${language}.uiChat.sceneModes.personalWorkbench must exist`);
@@ -146,6 +158,18 @@ for (const language of ['zh', 'en', 'ja']) {
   }
 }
 
+for (const key of [
+  'platformModels', 'platformModelsDesc', 'platformModelsLoading', 'platformModelsSignIn',
+  'platformModelsUnavailable', 'appliesToNewSessions', 'modelDeprecated',
+  'modelUnavailable', 'modelSwitchFailed',
+]) {
+  assert.equal(
+    new Set(['zh', 'en', 'ja'].map(language => dict[language].uiSettingsDetail[key])).size,
+    3,
+    `uiSettingsDetail.${key} must not fall back to another language`,
+  );
+}
+
 const main = source('app/main.jsx');
 assert.match(main, /emit\(['"]ui:language_changed['"], \{ language: lang \}\)/);
 assert.match(main, /<ToolStoreView[^>]*t=\{t\}/);
@@ -156,6 +180,7 @@ assert.doesNotMatch(main, /<AccountPopover/);
 const accountPlatformPopover = source('features/account-platform/AccountPlatformPopover.jsx');
 assert.match(accountPlatformPopover, /copy\.balance/);
 assert.match(accountPlatformPopover, /copy\.reservedCredits/);
+assert.doesNotMatch(accountPlatformPopover, /platformModel|selectPlatformModel|modelSelectionSaved/);
 assert.doesNotMatch(accountPlatformPopover, />可用余额</);
 assert.equal(dict.zh.uiAccountPlatform.balance, '可用余额');
 assert.equal(dict.zh.uiAccountPlatform.reservedCredits, '使用中');

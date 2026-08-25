@@ -576,7 +576,7 @@ test('personal center uses the canonical account.pinvou.com origin end to end', 
   const nginx = await readFile(new URL('../../deploy/nginx-pinvou-account-domain.conf', import.meta.url), 'utf8');
   assert.match(desktop, /DEFAULT_PORTAL_URL: &str = "https:\/\/account\.pinvou\.com\/"/);
   assert.doesNotMatch(desktop, /join\("account\.html"\)/);
-  assert.match(portal, /r\.URL\.Path == "\/"/);
+  assert.match(portal, /switch r\.URL\.Path \{[\s\S]*case "\/":/);
   assert.doesNotMatch(portal, /r\.URL\.Path == "\/account"/);
   assert.match(nginx, /server_name account\.pinvou\.com/);
   assert.match(nginx, /location = \/api\/v1\/payment-callback\/token \{/);
@@ -691,6 +691,11 @@ test('desktop account popover does not own platform model selection', async () =
   assert.doesNotMatch(popover, /copy\.platformModel|copy\.selectPlatformModel/);
   assert.match(popover, /client\.balance/);
   assert.match(popover, /client\.openPortal/);
+  for (const language of ['zh', 'en', 'ja']) {
+    for (const key of ['platformModel', 'selectPlatformModel', 'modelSelectionSaved', 'modelDeprecationWarning']) {
+      assert.equal(accountPlatformCopy[language][key], undefined, `${language}.${key} is retired from the account popover copy`);
+    }
+  }
 });
 
 test('settings owns the platform model default for new conversations', async () => {
@@ -701,7 +706,7 @@ test('settings owns the platform model default for new conversations', async () 
   assert.match(main, /accountPlatformClient=\{accountPlatformClient\}/);
   assert.match(settings, /accountPlatformClient\.modelCatalog/);
   assert.match(settings, /accountPlatformClient\.selectCatalogModel/);
-  assert.match(settings, /defaultModelRef\?\.source === 'ACCOUNT_PLATFORM'/);
+  assert.match(settings, /defaultModelRef\?\.source === ACCOUNT_PLATFORM_SOURCE/);
   assert.match(settings, /filter\(model => !isBuiltInAccountPlatformModel\(model\)\)/);
   assert.match(settings, /data-testid="settings-platform-models"/);
   assert.equal((i18n.match(/platformModelsDesc:/g) || []).length, 3);
@@ -714,7 +719,7 @@ test('chat model selection freezes a typed platform reference without changing t
   const bridgeSettings = await readFile(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
   const command = await readFile(new URL('../src-tauri/src/app/commands/account_platform.rs', import.meta.url), 'utf8');
   assert.match(settings, /accountPlatformClient\.modelCatalog/);
-  assert.match(settings, /source: 'ACCOUNT_PLATFORM', model_id: item\.model_id/);
+  assert.match(settings, /source: ACCOUNT_PLATFORM_SOURCE, model_id: item\.model_id/);
   assert.match(settings, /bridge\.models\.switchModelRef\(activeSessionId, modelRef\)/);
   assert.match(settings, /filter\(model => !isBuiltInAccountPlatformModel\(model\)\)/);
   assert.match(bridgeSettings, /state\.pendingDraftModelRef = modelRef/);

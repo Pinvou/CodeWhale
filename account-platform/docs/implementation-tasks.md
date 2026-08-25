@@ -55,7 +55,7 @@
 | APT-029 | 模型请求幂等指纹、持久派发、流事件加密与结果重放保留 | TOK-24–TOK-30, NFR-49 | APT-012, APT-018, APT-026–APT-028 | CODE | DONE |
 | APT-030 | 模型取消、执行/交付分离、可信用量核对和取消期 Hold 收敛 | TOK-31, TOK-33, TOK-38–TOK-41, BILL-34, BILL-35, UI-13, ADM-31, ADM-32 | APT-018, APT-029 | CODE | DONE |
 | APT-031 | Token Account、凭据和检查动作的平台权限隔离 | SCOPE-03, ADM-25–ADM-27 | APT-006, APT-026, APT-028 | CODE | DONE |
-| APT-032 | 桌面动态目录消费、按会话冻结模型、显式替代分支与受信个人中心入口 | SCOPE-05, TOK-06, UI-09 | APT-003, APT-027–APT-030 | CODE | DONE |
+| APT-032 | 桌面动态目录消费、按会话冻结模型、显式替代分支与受信个人中心入口 | SCOPE-05, TOK-06 | APT-003, APT-027–APT-030 | CODE | DONE |
 | APT-033 | 配置驱动系统探针与通用响应判定 Adapter | ADM-10, NFR-19 | APT-006, APT-020, APT-023, APT-031 | CODE | DONE |
 | APT-034 | 桌面、个人中心和后台完整三语发布门禁 | UI-16 | APT-003, APT-004, APT-012, APT-013, APT-017, APT-021, APT-030, APT-032, APT-033 | CODE | DONE |
 | APT-035 | HTTPS、生产 KMS/Vault、密钥轮换和秘密配置验收 | NFR-01, NFR-03 | 无 | CODE+ENV | BLOCKED_EXTERNAL |
@@ -81,12 +81,12 @@
 | APT-055 | 服务端受控审计导出、重认证、PII临时授权、加密水印和一次性下载配额 | ADM-09, NFR-48 | APT-006, APT-008 | CODE | DONE |
 | APT-056 | 普通退款产品级默认关闭门禁、用户/运营入口屏蔽及服务端创建拒绝 | PAY-31, UI-12, ADM-20 | APT-021, APT-022, APT-034 | CODE | PENDING |
 | APT-057 | Provider 中立短期回调授权、Profile 化通知适配、统一证据归并与查询补偿；新华三作为首个 Profile | PAY-15–PAY-17 | APT-022, APT-023, APT-036, APT-041 | CODE | DONE |
-| APT-058 | 账号中心独立 HTTPS 子域名、`/api/v1` 支付回调公网命名空间及旧官网入口彻底移除 | UI-09, PAY-15–PAY-17, NFR-03, NFR-04 | APT-032, APT-057 | CODE+ENV | DONE |
+| APT-058 | 账号中心独立 HTTPS 子域名、`/api/v1` 支付回调公网命名空间及旧官网入口彻底移除 | UI-09 | APT-032, APT-057 | CODE+ENV | DONE |
 | APT-059 | 从桌面账号 Popover 移除平台模型展示和选择职责 | UI-17 | APT-032 | CODE | DONE |
 | APT-060 | 建立类型化全局/会话模型引用、作用域隔离及兼容迁移 | TOK-48 | APT-032 | CODE | DONE |
-| APT-061 | 在“设置 → 模型”增加品悟平台模型组和新会话默认选择 | UI-18, TOK-48 | APT-060 | CODE | DONE |
-| APT-062 | 在普通对话输入区直接提供具体平台模型选择并冻结到当前会话 | UI-19, TOK-47, TOK-48 | APT-060, APT-061 | CODE | DONE |
-| APT-063 | 补齐模型选择三语、异常状态、迁移与跨入口回归门禁 | UI-16–UI-19, TOK-48 | APT-059–APT-062 | CODE | PENDING |
+| APT-061 | 在“设置 → 模型”增加品悟平台模型组和新会话默认选择 | UI-18 | APT-060 | CODE | DONE |
+| APT-062 | 在普通对话输入区直接提供具体平台模型选择并冻结到当前会话 | UI-19 | APT-060, APT-061 | CODE | DONE |
+| APT-063 | 补齐模型选择三语、异常状态、迁移与跨入口回归门禁 | NFR-51 | APT-059–APT-062 | CODE | DONE |
 
 ## 3. 独立提交验收模板
 

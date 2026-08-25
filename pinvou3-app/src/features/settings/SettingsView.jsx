@@ -28,6 +28,13 @@ import {
   buildArtifactPreviewDocument,
 } from '../artifacts/artifact-preview-navigation.js';
 import { ProvidersSection } from './ProvidersSection.jsx';
+import {
+  ACCOUNT_PLATFORM_SOURCE,
+  LOCAL_CONFIG_SOURCE,
+  composerPlatformModels,
+  platformModelSelectableForNewSession,
+  sameModelSelectionRef,
+} from '../account-platform/model-catalog-selection.js';
 
 function isReadonlyModel(model) {
   return !!(model && (model.readonly || model.system));
@@ -521,7 +528,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           return accountPlatformClient.modelCatalog(controller.signal);
         }).then(catalog => {
           if (!catalog || controller.signal.aborted) return;
-          setPlatformModels((catalog.items || []).filter(item => item.context_eligible && item.lifecycle_status !== 'REMOVED'));
+          setPlatformModels(composerPlatformModels(catalog.items));
           setPlatformState('ready');
         }).catch(() => {
           if (!controller.signal.aborted) setPlatformState('error');
@@ -547,29 +554,22 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const activeModelId = bs && bs.activeModelId;
       const currentSessionModelId = sessionModelIdProp !== undefined ? sessionModelIdProp : (bs && bs.currentSessionModelId);
       const busy = busyProp !== undefined ? busyProp : (bs ? bs.busy : false);
-      const legacyRef = { source: 'LOCAL_CONFIG', saved_model_id: currentSessionModelId || activeModelId };
+      const legacyRef = { source: LOCAL_CONFIG_SOURCE, saved_model_id: currentSessionModelId || activeModelId };
       const effectiveRef = (activeSessionId ? bs?.currentSessionModelRef : bs?.pendingDraftModelRef)
         || bs?.defaultModelRef
         || legacyRef;
-      const effectiveLocalId = effectiveRef?.source === 'LOCAL_CONFIG' ? effectiveRef.saved_model_id : null;
-      const effectivePlatformId = effectiveRef?.source === 'ACCOUNT_PLATFORM' ? effectiveRef.model_id : null;
+      const effectiveLocalId = effectiveRef?.source === LOCAL_CONFIG_SOURCE ? effectiveRef.saved_model_id : null;
+      const effectivePlatformId = effectiveRef?.source === ACCOUNT_PLATFORM_SOURCE ? effectiveRef.model_id : null;
       const current = savedModels.find(m => m.id === effectiveLocalId);
       const currentPlatform = platformModels.find(item => item.model_id === effectivePlatformId);
       const currentLabel = currentPlatform?.display_name || effectivePlatformId || (current ? selectorMainLabel(current, t) : t.modelNonePick);
-      const platformSelectable = item => {
-        if (item.lifecycle_status === 'ACTIVE') return true;
-        if (item.lifecycle_status !== 'DEPRECATED' || !item.new_session_cutoff_at) return false;
-        const cutoff = Date.parse(item.new_session_cutoff_at);
-        return Number.isFinite(cutoff) && cutoff > Date.now();
-      };
       async function pick(modelRef) {
         setOpen(false);
         setModelSwitchError(false);
-        const alreadySelected = modelRef.source === effectiveRef?.source
-          && (modelRef.model_id || modelRef.saved_model_id) === (effectiveRef?.model_id || effectiveRef?.saved_model_id);
+        const alreadySelected = sameModelSelectionRef(modelRef, effectiveRef);
         if (alreadySelected) return;
         try {
-          if (onSwitchModel && modelRef.source === 'LOCAL_CONFIG') {
+          if (onSwitchModel && modelRef.source === LOCAL_CONFIG_SOURCE) {
             await onSwitchModel(activeSessionId, modelRef.saved_model_id);
           } else if (bridge.available) {
             await bridge.models.switchModelRef(activeSessionId, modelRef);
@@ -605,7 +605,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                       {withDivider && <div className="h-px bg-black/5 dark:bg-white/10 my-1.5 mx-2" />}
                       <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{label}</div>
                       {items.map(m => (
-                        <button key={m.id} onClick={() => pick({ source: 'LOCAL_CONFIG', saved_model_id: m.id })}
+                        <button key={m.id} onClick={() => pick({ source: LOCAL_CONFIG_SOURCE, saved_model_id: m.id })}
                           className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white">
                           <span className="flex items-center gap-2.5 min-w-0">
                             <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
@@ -625,9 +625,9 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                         <>
                           <div className="px-3 pt-1.5 pb-1 text-[11px] font-semibold text-gray-400 dark:text-gray-500">{t.uiSettingsDetail.platformModels}</div>
                           {platformModels.map(item => {
-                            const selectable = platformSelectable(item);
+                            const selectable = platformModelSelectableForNewSession(item);
                             return (
-                              <button key={item.model_id} disabled={!selectable} onClick={() => pick({ source: 'ACCOUNT_PLATFORM', model_id: item.model_id })}
+                              <button key={item.model_id} disabled={!selectable} onClick={() => pick({ source: ACCOUNT_PLATFORM_SOURCE, model_id: item.model_id })}
                                 className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left rounded-xl transition-colors group hover:bg-[#007AFF] hover:text-white disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-inherit">
                                 <span className="flex items-center gap-2.5 min-w-0">
                                   <Cpu size={15} className="shrink-0 text-gray-400 group-hover:text-white/90" />
@@ -2286,19 +2286,12 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       );
       const userModels = selectableModels(savedModels || [])
         .filter(model => !isBuiltInAccountPlatformModel(model));
-      const activeLocalModelId = defaultModelRef?.source === 'LOCAL_CONFIG'
+      const activeLocalModelId = defaultModelRef?.source === LOCAL_CONFIG_SOURCE
         ? defaultModelRef.saved_model_id
         : (defaultModelRef ? null : activeModelId);
-      const activePlatformModelId = defaultModelRef?.source === 'ACCOUNT_PLATFORM'
+      const activePlatformModelId = defaultModelRef?.source === ACCOUNT_PLATFORM_SOURCE
         ? defaultModelRef.model_id
         : null;
-      const platformModelSelectable = item => {
-        if (!item?.context_eligible) return false;
-        if (item.lifecycle_status === 'ACTIVE') return true;
-        if (item.lifecycle_status !== 'DEPRECATED' || !item.new_session_cutoff_at) return false;
-        const cutoff = Date.parse(item.new_session_cutoff_at);
-        return Number.isFinite(cutoff) && cutoff > Date.now();
-      };
       const selectPlatformDefault = async modelId => {
         if (!modelId || platformDefaultBusy || !accountPlatformClient) return;
         setPlatformDefaultBusy(modelId);
@@ -2512,7 +2505,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
               {platformCatalogState === 'error' && <div className="px-4 py-4 text-[14px] text-[#FF3B30]">{settingsCopy.platformModelsUnavailable}</div>}
               {platformCatalogState === 'ready' && (platformCatalog.items || []).length === 0 && <div className="px-4 py-4 text-[14px] text-[#8A8A8E] dark:text-[#98989D]">{settingsCopy.noModels}</div>}
               {platformCatalogState === 'ready' && (platformCatalog.items || []).map(item => {
-                const selectable = platformModelSelectable(item);
+                const selectable = platformModelSelectableForNewSession(item);
                 const selected = item.model_id === activePlatformModelId;
                 return (
                   <div key={item.model_id} className="min-h-[60px] grid grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 border-b last:border-b-0 border-black/[0.12] dark:border-white/[0.10]">
