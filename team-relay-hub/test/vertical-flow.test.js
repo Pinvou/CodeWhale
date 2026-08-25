@@ -297,6 +297,29 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     }
   }
 
+  async function transferOwnerWhileOperationWaits(teamId, previousOwnerId, newOwnerId, operation, message) {
+    const guard = await pool.connect();
+    try {
+      await guard.query("BEGIN");
+      await guard.query("SELECT id FROM teams WHERE id = $1 FOR UPDATE", [teamId]);
+      const pendingOperation = operation();
+      await assertStillPending(pendingOperation, message);
+      await guard.query(
+        "UPDATE memberships SET role = 'member' WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL",
+        [teamId, previousOwnerId],
+      );
+      await guard.query(
+        "UPDATE memberships SET role = 'owner' WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL",
+        [teamId, newOwnerId],
+      );
+      await guard.query("COMMIT");
+      return await pendingOperation;
+    } finally {
+      await guard.query("ROLLBACK").catch(() => {});
+      guard.release();
+    }
+  }
+
   async function assertInviteOperationLocksTeamFirst(teamId, inviteId, operation, message) {
     const teamGuard = await pool.connect();
     const inviteInspector = await pool.connect();
@@ -642,17 +665,20 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     "UPDATE memberships SET removed_at = NULL, role = 'member' WHERE team_id = $1 AND principal_id = $2",
     [createdTeam.value.team.id, d.principal.id],
   );
-  await pool.query(
-    "UPDATE memberships SET role = 'owner' WHERE team_id = $1 AND principal_id = $2",
-    [createdTeam.value.team.id, b.principal.id],
-  );
+  const rotationOwnerTransfer = await api(`/v1/teams/${createdTeam.value.team.id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: b.principal.id },
+  });
+  assert.equal(rotationOwnerTransfer.status, 200);
   const joinPasswordBeforeRotationRace = await pool.query(
     "SELECT join_password_hash FROM teams WHERE id = $1",
     [createdTeam.value.team.id],
   );
-  const rejectedRotation = await removeMemberWhileOperationWaits(
+  const rejectedRotation = await transferOwnerWhileOperationWaits(
     createdTeam.value.team.id,
     b.principal.id,
+    a.principal.id,
     () => api(`/v1/teams/${createdTeam.value.team.id}/join-password`, {
       method: "POST",
       token: b.device_token,
@@ -669,10 +695,6 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(
     joinPasswordAfterRotationRace.rows[0].join_password_hash,
     joinPasswordBeforeRotationRace.rows[0].join_password_hash,
-  );
-  await pool.query(
-    "UPDATE memberships SET removed_at = NULL, role = 'member' WHERE team_id = $1 AND principal_id = $2",
-    [createdTeam.value.team.id, b.principal.id],
   );
 
   const rejectedJoinPasswordRead = await removeMemberWhileOperationWaits(
