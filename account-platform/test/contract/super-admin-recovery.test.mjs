@@ -7,9 +7,11 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('super administrator bootstrap and break-glass remain offline, one-time, and last-admin safe', async () => {
-  const [migration, manager, cli, password, keycloak, closure, postgres, service, deployment] = await Promise.all([
+  const [migration, trustedOperatorMigration, manager, identity, cli, password, keycloak, closure, postgres, service, deployment] = await Promise.all([
     read('migrations/account/000017_super_admin_recovery.up.sql'),
+    read('migrations/account/000035_break_glass_trusted_operator.up.sql'),
     read('internal/securityadmin/security.go'),
+    read('internal/securityadmin/break_glass_identity.go'),
     read('cmd/account-security/main.go'),
     read('internal/identityadapter/password.go'),
     read('internal/identityadapter/keycloak.go'),
@@ -30,7 +32,17 @@ test('super administrator bootstrap and break-glass remain offline, one-time, an
   assert.match(manager, /SUPER_ADMIN_BOOTSTRAP_LOCKED/);
   assert.match(manager, /ALL_SUPER_ADMINS_UNREACHABLE/);
   assert.match(manager, /BREAK_GLASS_ACTIVATED/);
+  assert.match(identity, /ed25519\.Verify/);
+  assert.match(identity, /pinvou-account-security-break-glass/);
+  assert.match(identity, /15\s*\*\s*time\.Minute/);
+  assert.match(trustedOperatorMigration, /operator_credential_id/);
+  assert.match(trustedOperatorMigration, /UNIQUE \(operator_credential_id\)/);
+  assert.match(manager, /operator_credential_id,incident_ticket/);
+  assert.match(manager, /appendSecurityAudit\(ctx, tx, nil, "security\.break-glass\.activated"/);
   assert.match(cli, /term\.ReadPassword/);
+  assert.match(cli, /operator-credential-fd/);
+  assert.match(cli, /BREAK_GLASS_OPERATOR_PUBLIC_KEY_BASE64URL/);
+  assert.doesNotMatch(cli, /workload-identity|target-username/);
   assert.match(cli, /bootstrap credentials are never written to stdout/);
   assert.doesNotMatch(cli, /String\("password"/);
   assert.match(password, /ValidatePrivilegedPassword/);
@@ -40,5 +52,6 @@ test('super administrator bootstrap and break-glass remain offline, one-time, an
   assert.match(postgres, /user\.Status == "BOOTSTRAP_PENDING"/);
   assert.match(service, /"LAST_ACTIVE_SUPER_ADMIN"/);
   assert.match(deployment, /account-security bootstrap/);
+  assert.match(deployment, /operator-credential-fd/);
   assert.doesNotMatch(service, /break-glass/);
 });

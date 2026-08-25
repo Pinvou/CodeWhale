@@ -38,10 +38,11 @@ type IdentityDirectory interface {
 }
 
 type Manager struct {
-	pool      *pgxpool.Pool
-	directory IdentityDirectory
-	issuer    string
-	now       func() time.Time
+	pool               *pgxpool.Pool
+	directory          IdentityDirectory
+	issuer             string
+	now                func() time.Time
+	breakGlassVerifier *BreakGlassCredentialVerifier
 }
 
 type BootstrapIssue struct {
@@ -53,13 +54,13 @@ type BootstrapIssue struct {
 }
 
 type BreakGlassRequest struct {
-	WorkloadIdentity string
-	TargetUsername   string
-	Reason           string
-	Evidence         []byte
-	Confirmation     string
-	Duration         time.Duration
-	FormalPassword   string
+	OperatorCredential string
+	IncidentTicket     string
+	Reason             string
+	Evidence           []byte
+	Confirmation       string
+	Duration           time.Duration
+	FormalPassword     string
 }
 
 func NewManager(ctx context.Context, databaseURL, issuer string, directory IdentityDirectory) (*Manager, error) {
@@ -78,6 +79,11 @@ func NewManager(ctx context.Context, databaseURL, issuer string, directory Ident
 }
 
 func (m *Manager) Close() { m.pool.Close() }
+
+func (m *Manager) WithBreakGlassVerifier(verifier *BreakGlassCredentialVerifier) *Manager {
+	m.breakGlassVerifier = verifier
+	return m
+}
 
 func GenerateBootstrapCredential() (string, error) {
 	random := make([]byte, 32)
@@ -157,7 +163,7 @@ func (m *Manager) IssueBootstrap(ctx context.Context, deploymentIdentity, mode s
 	if _, err := tx.Exec(ctx, `INSERT INTO super_admin_bootstrap_credentials(id,deployment_identity,deployment_generation,user_id,identity_subject,mode,verifier,status,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,'PENDING',$8,$9,$9)`, id, deploymentIdentity, generation, userID, subject, mode, verifierBytes, expiresAt, now); err != nil {
 		return BootstrapIssue{}, err
 	}
-	if err := appendSecurityAudit(ctx, tx, userID, "security.super-admin.bootstrap.issued", id.String(), map[string]any{"deployment_identity": deploymentIdentity, "generation": generation, "mode": mode, "expires_at": expiresAt}, now); err != nil {
+	if err := appendSecurityAudit(ctx, tx, &userID, "security.super-admin.bootstrap.issued", id.String(), map[string]any{"deployment_identity": deploymentIdentity, "generation": generation, "mode": mode, "expires_at": expiresAt}, now); err != nil {
 		return BootstrapIssue{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -233,7 +239,7 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 				newStatus = "LOCKED"
 			}
 			_, _ = tx.Exec(ctx, `UPDATE super_admin_bootstrap_credentials SET failed_attempts=$2,status=$3,verifier=CASE WHEN $3='LOCKED' THEN NULL ELSE verifier END,updated_at=$4 WHERE id=$1`, id, failures, newStatus, now)
-			_ = appendSecurityAudit(ctx, tx, userID, "security.super-admin.bootstrap.denied", id.String(), map[string]any{"failed_attempts": failures, "locked": newStatus == "LOCKED"}, now)
+			_ = appendSecurityAudit(ctx, tx, &userID, "security.super-admin.bootstrap.denied", id.String(), map[string]any{"failed_attempts": failures, "locked": newStatus == "LOCKED"}, now)
 			if newStatus == "LOCKED" {
 				_ = appendSecurityAlert(ctx, tx, "CRITICAL", "SUPER_ADMIN_BOOTSTRAP_LOCKED", "bootstrap_credential", id.String(), map[string]any{"failed_attempts": failures}, now)
 			}
@@ -273,7 +279,7 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 	if _, err := tx.Exec(ctx, `UPDATE super_admin_bootstrap_credentials SET status='CONSUMED',verifier=NULL,consumed_at=$2,updated_at=$2 WHERE id=$1`, id, now); err != nil {
 		return err
 	}
-	if err := appendSecurityAudit(ctx, tx, userID, "security.super-admin.bootstrap.activated", id.String(), map[string]any{"mode": mode, "sessions_revoked": true}, now); err != nil {
+	if err := appendSecurityAudit(ctx, tx, &userID, "security.super-admin.bootstrap.activated", id.String(), map[string]any{"mode": mode, "sessions_revoked": true}, now); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -284,8 +290,11 @@ func (m *Manager) activate(ctx context.Context, deploymentIdentity, credential, 
 }
 
 func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) error {
-	request.WorkloadIdentity = strings.TrimSpace(request.WorkloadIdentity)
-	request.TargetUsername = strings.TrimSpace(request.TargetUsername)
+	identity, identityErr := m.breakGlassVerifier.Verify(request.OperatorCredential)
+	if identityErr != nil {
+		return identityErr
+	}
+	request.IncidentTicket = strings.TrimSpace(request.IncidentTicket)
 	request.Reason = strings.TrimSpace(request.Reason)
 	if request.Confirmation != "ALL_SUPER_ADMINS_UNREACHABLE" {
 		return ErrBreakGlassNotConfirmed
@@ -293,8 +302,8 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 	if len(request.Reason) < 20 || len(request.Reason) > 2000 {
 		return ErrBreakGlassReasonInvalid
 	}
-	if len(request.WorkloadIdentity) < 3 || len(request.WorkloadIdentity) > 200 || len(request.Evidence) == 0 {
-		return errors.New("workload identity and incident evidence are required")
+	if len(request.IncidentTicket) < 3 || len(request.IncidentTicket) > 200 || len(request.Evidence) == 0 {
+		return errors.New("incident ticket and evidence are required")
 	}
 	if request.Duration == 0 {
 		request.Duration = 30 * time.Minute
@@ -302,7 +311,7 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 	if request.Duration < 5*time.Minute || request.Duration > 60*time.Minute {
 		return errors.New("break-glass duration must be between 5 and 60 minutes")
 	}
-	if err := identityadapter.ValidatePrivilegedPassword(request.FormalPassword, request.TargetUsername); err != nil {
+	if err := identityadapter.ValidatePrivilegedPassword(request.FormalPassword, identity.TargetUsername); err != nil {
 		return err
 	}
 	tx, err := m.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
@@ -315,14 +324,14 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 	}
 	var userID uuid.UUID
 	var subject string
-	err = tx.QueryRow(ctx, `SELECT u.id,i.subject FROM users u JOIN identities i ON i.user_id=u.id AND i.issuer=$2 WHERE lower(u.username)=lower($1) AND u.status<>'DELETED' FOR UPDATE OF u`, request.TargetUsername, m.issuer).Scan(&userID, &subject)
+	err = tx.QueryRow(ctx, `SELECT u.id,i.subject FROM users u JOIN identities i ON i.user_id=u.id AND i.issuer=$2 WHERE lower(u.username)=lower($1) AND u.status<>'DELETED' FOR UPDATE OF u`, identity.TargetUsername, m.issuer).Scan(&userID, &subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errors.New("break-glass target was not found")
 	}
 	if err != nil {
 		return err
 	}
-	if err := m.directory.ActivateBootstrapAdmin(ctx, subject, request.TargetUsername, request.FormalPassword); err != nil {
+	if err := m.directory.ActivateBootstrapAdmin(ctx, subject, identity.TargetUsername, request.FormalPassword); err != nil {
 		return err
 	}
 	identityActivated, committed := true, false
@@ -345,7 +354,7 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 	err = tx.QueryRow(ctx, `SELECT id FROM role_assignments WHERE user_id=$1 AND role_code='PLATFORM_SUPER_ADMIN' AND organization_id IS NULL AND revoked_at IS NULL AND starts_at<=now() AND (expires_at IS NULL OR expires_at>now()) ORDER BY expires_at NULLS LAST LIMIT 1`, userID).Scan(&assignmentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		assignmentID = uuid.Must(uuid.NewV7())
-		if _, err := tx.Exec(ctx, `INSERT INTO role_assignments(id,user_id,role_code,created_by,source,grant_source,starts_at,expires_at,created_at,idempotency_key) VALUES($1,$2,'PLATFORM_SUPER_ADMIN',$2,'BREAK_GLASS','BREAK_GLASS',$3,$4,$3,$5)`, assignmentID, userID, now, expiresAt, "break-glass-"+assignmentID.String()); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO role_assignments(id,user_id,role_code,source,grant_source,starts_at,expires_at,created_at,idempotency_key) VALUES($1,$2,'PLATFORM_SUPER_ADMIN','BREAK_GLASS','BREAK_GLASS',$3,$4,$3,$5)`, assignmentID, userID, now, expiresAt, "break-glass-"+assignmentID.String()); err != nil {
 			return err
 		}
 	} else if err != nil {
@@ -356,14 +365,14 @@ func (m *Manager) BreakGlass(ctx context.Context, request BreakGlassRequest) err
 	}
 	operationID := uuid.Must(uuid.NewV7())
 	evidenceDigest := sha256.Sum256(request.Evidence)
-	if _, err := tx.Exec(ctx, `INSERT INTO break_glass_operations(id,workload_identity,target_user_id,role_assignment_id,reason,unreachable_evidence_sha256,expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, operationID, request.WorkloadIdentity, userID, assignmentID, request.Reason, evidenceDigest[:], expiresAt, now); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO break_glass_operations(id,workload_identity,target_user_id,role_assignment_id,reason,unreachable_evidence_sha256,expires_at,created_at,operator_credential_id,incident_ticket) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, operationID, identity.Subject, userID, assignmentID, request.Reason, evidenceDigest[:], expiresAt, now, identity.CredentialID, request.IncidentTicket); err != nil {
 		return err
 	}
-	details := map[string]any{"workload_identity": request.WorkloadIdentity, "target_user_id": userID, "reason": request.Reason, "expires_at": expiresAt, "role_assignment_id": assignmentID}
+	details := map[string]any{"operator_subject": identity.Subject, "operator_credential_id": identity.CredentialID, "incident_ticket": request.IncidentTicket, "target_user_id": userID, "reason": request.Reason, "expires_at": expiresAt, "role_assignment_id": assignmentID}
 	if err := appendSecurityAlert(ctx, tx, "CRITICAL", "BREAK_GLASS_ACTIVATED", "break_glass_operation", operationID.String(), details, now); err != nil {
 		return err
 	}
-	if err := appendSecurityAudit(ctx, tx, userID, "security.break-glass.activated", operationID.String(), details, now); err != nil {
+	if err := appendSecurityAudit(ctx, tx, nil, "security.break-glass.activated", operationID.String(), details, now); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -413,7 +422,7 @@ func ensureBootstrapUser(ctx context.Context, tx pgx.Tx, issuer, subject string,
 	return userID, activated, err
 }
 
-func appendSecurityAudit(ctx context.Context, tx pgx.Tx, actor uuid.UUID, action, resourceID string, details map[string]any, now time.Time) error {
+func appendSecurityAudit(ctx context.Context, tx pgx.Tx, actor *uuid.UUID, action, resourceID string, details map[string]any, now time.Time) error {
 	payload, _ := json.Marshal(details)
 	_, err := tx.Exec(ctx, `INSERT INTO audit_logs(id,actor_user_id,action,resource_type,resource_id,result,request_id,trace_id,change_summary,occurred_at) VALUES($1,$2,$3,'security_recovery',$4,'SUCCEEDED',$5,$5,$6,$7)`, uuid.Must(uuid.NewV7()), actor, action, resourceID, "offline-cli-"+uuid.NewString(), payload, now)
 	return err

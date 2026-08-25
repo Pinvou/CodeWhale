@@ -549,17 +549,17 @@ Break-glass 只用于凭据丢失、意外停用或 Identity 故障导致全部�
 
 ```text
 account-security break-glass \
-  --workload-identity <incident-workload> \
-  --target-username <existing-user> \
+  --operator-credential-fd 3 \
+  --ticket <incident-ticket> \
   --reason "<至少20字符的事故原因>" \
   --evidence-file <controlled-incident-evidence> \
   --confirm ALL_SUPER_ADMINS_UNREACHABLE \
   --duration 30m
 ```
 
-命令从终端无回显读取并确认正式密码；非终端场景使用 `--password-fd`。持续时间必须在 5–60 分钟内。执行后必须立即核对 `BREAK_GLASS_ACTIVATED` CRITICAL 告警、`security.break-glass.activated` 不可变审计、工作负载身份、目标、原因、证据 SHA-256 和到期时间，并在 Identity 恢复后通过正常流程完成长期管理员交接。仓库没有 Break-glass HTTP API。
+执行环境必须以 `BREAK_GLASS_OPERATOR_PUBLIC_KEY_BASE64URL` 注入受控 Ed25519 公钥；描述符 3 输入签名凭据包，载荷绑定唯一凭据 ID、运维主体、恢复目标、固定受众、签发时间和最长 15 分钟有效期。CLI 不接受操作者或目标身份参数，签名无效、过期、目标被篡改或凭据 ID 重放均失败。命令从终端无回显读取并确认正式密码；非终端场景使用 `--password-fd`。持续时间必须在 5–60 分钟内。执行后必须立即核对 `BREAK_GLASS_ACTIVATED` CRITICAL 告警、`security.break-glass.activated` 不可变审计、受信运维主体、凭据 ID、工单、目标、原因、证据 SHA-256 和到期时间，并在 Identity 恢复后通过正常流程完成长期管理员交接。仓库没有 Break-glass HTTP API。
 
-当前仍缺生产等价环境的并发兑换、Keycloak/数据库提交故障补偿、告警投递和完整事故演练证据，因此 ADM-01/ADM-02 保持 `NOT_DEPLOYED`，APT-007 标记 `BLOCKED_EXTERNAL`。
+当前仍缺生产等价环境的并发兑换、Keycloak/数据库提交故障补偿、告警投递和完整事故演练证据，因此 ADM-01/ADM-02 保持 `NOT_DEPLOYED`，APT-007 继续保持 `PENDING`，待生产等价环境执行。
 
 ## 12. 日志与可观测性
 

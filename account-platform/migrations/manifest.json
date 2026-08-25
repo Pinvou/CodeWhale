@@ -342,6 +342,16 @@
         "file": "000034_three_scope_authorization.up.sql",
         "version": 34,
         "sha256": "658324df04b4e19fb98531c192f409fb68b82f5d0f027fe6b65527ebddca8637"
+      },
+      {
+        "file": "000035_break_glass_trusted_operator.down.sql",
+        "version": 35,
+        "sha256": "eb2bbdfbe6f5753f36a68055679722d57730061d4207db81b7f4257734180534"
+      },
+      {
+        "file": "000035_break_glass_trusted_operator.up.sql",
+        "version": 35,
+        "sha256": "869336713029646d8fa1e7fbe2d1ced8d5bee76a1ce324b79276c5e89ca74f18"
       }
     ],
     "billing": [

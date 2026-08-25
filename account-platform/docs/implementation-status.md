@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 323`、`部分实现 33`、`未实现 8`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批及组织对象授权，其余入口门禁由 APT-076–APT-082 逐项收敛。
+全量核验汇总：`已实现 324`、`部分实现 33`、`未实现 7`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075 与 APT-077 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批、组织对象授权及 Break-glass 可信操作者，其余入口门禁由 APT-076、APT-078–APT-082 逐项收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -45,7 +45,7 @@
 | `COMMERCE-MAPPING` | 供应商中立 Mapping/任务/证据、版本防迟到覆盖、Adapter 合同边界及支付专用准入查询 | Go 单元测试、42 个 OpenAPI/合同测试、迁移与部署模板检查通过；真实 Provider、数据库运行级迁移和故障注入待部署 |
 | `ENTITLEMENT-COMPONENTS` | BASE/BONUS 组成级入账、确定消费顺序、人工赠送、到期释放、迟到用量损失复核、守恒投影及三语展示 | Go Billing/Token 单元测试、OpenAPI lint、44 个合同测试、Portal 构建和桌面 ESLint 通过；数据库运行级迁移、并发和故障注入待部署 |
 | `ROLE-BINDING-LIFECYCLE` | 本人/组织/平台绑定视图、起止时间、幂等授权、单条幂等撤销、自动到期、授权版本刷新、审计/Outbox 和三语 Portal | Account/Portal Go 单元测试、OpenAPI lint、角色生命周期合同和静态资源检查通过；数据库运行级迁移、真实并发授权及 worker 故障恢复待部署 |
-| `SECURITY-RECOVERY` | `BOOTSTRAP_PENDING` 首管安全激活、256 bit 一次性凭据、5 次锁定、代次失效、最后管理员门禁、ACC-48 撤权原语和离线 Break-glass | Go 单元测试、CLI/迁移合同与全量静态验证通过；生产等价 Keycloak/数据库并发、故障补偿、告警投递和事故演练待执行 |
+| `SECURITY-RECOVERY` | `BOOTSTRAP_PENDING` 首管安全激活、256 bit 一次性凭据、5 次锁定、代次失效、最后管理员门禁、ACC-48 撤权原语和 Ed25519 受信运维身份离线 Break-glass | Go 单元测试、签名篡改/过期测试、CLI/迁移合同与全量静态验证通过；生产等价 Keycloak/数据库并发、故障补偿、告警投递和事故演练待执行 |
 | `APPROVAL-COMMANDS` | 版本化命令分类、不可逆审批状态机、不可变快照、独立审批、强一致授权复核、Outbox 授权和 Billing 幂等领域执行 | Account/Billing/Portal Go 单元测试、OpenAPI lint、47 个合同测试与全量静态验证通过；正式服务调用已接入 APT-047 短期工作负载身份边界 |
 | `WORKLOAD-IDENTITY` | 独立 ServiceAccount、按次轮换 OIDC 令牌、Subject/Method/Path 默认拒绝、Relay 本域 Subject 与独立 NATS 凭据、服务任务审计身份 | Go 单元测试、Helm Schema、工作负载身份合同及全量静态验证通过；真实 issuer/JWKS、NATS operator 权限和撤销/轮换演练待部署 |
 | `AUDIT-IDEMPOTENCY-EVENTS` | 当前跨域 Saga、管理/资金/授权/路由写审计、稳定请求指纹、事务 Outbox/Inbox、摘要绑定且服务身份化的幂等死信重放 | Go 单元测试、三域迁移、CLI/合同与全量静态验证通过；真实数据库迁移、积压和 Broker 故障恢复演练待部署 |
@@ -298,7 +298,7 @@
 | ADM-45 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 九类系统角色以审定逐码真值表全量替换历史授权；申请/审批、模型凭据、PII 导出等职责继续分离，迁移显式递增受影响主体的平台授权版本。 |
 | ADM-46 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 审批列表、详情、允许动作、决定及执行前复核均从申请版本冻结的请求/审批权限解析；撤权或策略字段变化失败关闭。 |
 | ADM-47 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 普通 Token 管理路由、处理器和 OpenAPI 资源已移除，存量非平台账号/凭据/路由保存可逆隔离证据后冻结；创建和执行候选均强制 PLATFORM 管理模式。 |
-| ADM-48 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | Break-glass 工具仍允许命令行自报操作者，尚未从受信 OS、集群、mTLS 或签名凭据派生身份；由 APT-077 收敛。 |
+| ADM-48 | 已实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | Break-glass 操作者与目标来自最长 15 分钟 Ed25519 签名凭据，CLI 不接受身份参数；凭据 ID 唯一防重放，审计 actor 不再伪装成恢复目标。 |
 | ADM-49 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | Account 尚未签发短期不可篡改人类委托，内部写入口仍有信任请求体 actor 的路径；由 APT-082 收敛。 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
@@ -891,7 +891,7 @@
 | ADM-45 | 系统角色精确真值表 | 已实现 | 九类系统角色按审定权限集合全量替换，存量有效绑定同步递增授权版本。 |
 | ADM-46 | 策略驱动审批权限 | 已实现 | 可见范围、允许动作、决定和执行前复核逐申请使用冻结策略权限，专用审批权限不再被通用财务权限替代。 |
 | ADM-47 | Token 管理平台隔离 | 已实现 | 普通 Token Account/路由/凭据接口未注册且不在公开合同中；平台资源只由 `/admin/v1/*` 管理，存量非平台凭据由可审计迁移冻结隔离。 |
-| ADM-48 | Break-glass 可信操作者 | 未实现 | 当前离线工具仍可自报操作者；APT-077 待实现受信身份派生。 |
+| ADM-48 | Break-glass 可信操作者 | 已实现 | CLI 只从受控描述符读取签名运维凭据，服务端校验受众、主体、目标、时效和唯一凭据 ID；自报身份参数已删除。 |
 | ADM-49 | 短期人类委托 | 未实现 | Account 签发与验证契约由 APT-082 待实现，工作负载消费由 APT-076 收敛。 |
 
 ## 4. 非功能需求

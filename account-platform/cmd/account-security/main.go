@@ -42,6 +42,12 @@ func main() {
 	case "redeem":
 		err = redeem(ctx, manager, os.Args[2:])
 	case "break-glass":
+		verifier, verifierErr := securityadmin.NewBreakGlassCredentialVerifier(os.Getenv("BREAK_GLASS_OPERATOR_PUBLIC_KEY_BASE64URL"))
+		if verifierErr != nil {
+			err = verifierErr
+			break
+		}
+		manager.WithBreakGlassVerifier(verifier)
 		err = breakGlass(ctx, manager, os.Args[2:])
 	default:
 		err = errors.New("unknown account-security command")
@@ -122,8 +128,8 @@ func redeem(ctx context.Context, manager *securityadmin.Manager, arguments []str
 
 func breakGlass(ctx context.Context, manager *securityadmin.Manager, arguments []string) error {
 	flags := flag.NewFlagSet("break-glass", flag.ContinueOnError)
-	workload := flags.String("workload-identity", "", "controlled host or workload identity")
-	target := flags.String("target-username", "", "existing recovery target")
+	credentialFD := flags.Int("operator-credential-fd", -1, "descriptor containing the signed operator credential")
+	ticket := flags.String("ticket", "", "incident ticket reference")
 	reason := flags.String("reason", "", "incident reason (20-2000 characters)")
 	evidenceFile := flags.String("evidence-file", "", "incident evidence file")
 	confirmation := flags.String("confirm", "", "must equal ALL_SUPER_ADMINS_UNREACHABLE")
@@ -135,6 +141,11 @@ func breakGlass(ctx context.Context, manager *securityadmin.Manager, arguments [
 	if strings.TrimSpace(*evidenceFile) == "" {
 		return errors.New("--evidence-file is required")
 	}
+	operatorCredential, err := readSingleSecret(*credentialFD)
+	if err != nil {
+		return err
+	}
+	defer zeroString(&operatorCredential)
 	evidence, err := os.ReadFile(*evidenceFile)
 	if err != nil {
 		return fmt.Errorf("read incident evidence: %w", err)
@@ -145,7 +156,7 @@ func breakGlass(ctx context.Context, manager *securityadmin.Manager, arguments [
 	}
 	defer zeroString(&password)
 	err = manager.BreakGlass(ctx, securityadmin.BreakGlassRequest{
-		WorkloadIdentity: *workload, TargetUsername: *target, Reason: *reason, Evidence: evidence,
+		OperatorCredential: operatorCredential, IncidentTicket: *ticket, Reason: *reason, Evidence: evidence,
 		Confirmation: *confirmation, Duration: *duration, FormalPassword: password,
 	})
 	for index := range evidence {
@@ -204,7 +215,7 @@ func readSingleSecret(fd int) (string, error) {
 	if file == nil {
 		return "", errors.New("invalid credential descriptor")
 	}
-	value, err := io.ReadAll(io.LimitReader(file, 256))
+	value, err := io.ReadAll(io.LimitReader(file, 4096))
 	if err != nil {
 		return "", err
 	}
