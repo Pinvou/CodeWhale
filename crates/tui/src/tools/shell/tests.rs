@@ -161,6 +161,63 @@ fn echo_stdin_command() -> String {
     }
 }
 
+fn raw_stdout_command(bytes: &[u8], sleep_seconds: Option<u64>) -> String {
+    let dispatcher = crate::shell_dispatcher::global_dispatcher();
+    if dispatcher.kind().is_powershell() {
+        let bytes = bytes
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let sleep = sleep_seconds
+            .map(|seconds| format!("Start-Sleep -Seconds {seconds}"))
+            .unwrap_or_default();
+        return format!(
+            "$bytes = [byte[]]({bytes}); $stdout = [Console]::OpenStandardOutput(); $stdout.Write($bytes, 0, $bytes.Length); $stdout.Flush(); {sleep}"
+        );
+    }
+    #[cfg(windows)]
+    {
+        let bytes = bytes
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let sleep = sleep_seconds
+            .map(|seconds| format!("Start-Sleep -Seconds {seconds}"))
+            .unwrap_or_default();
+        return format!(
+            "powershell.exe -NoProfile -Command \"$bytes = [byte[]]({bytes}); $stdout = [Console]::OpenStandardOutput(); $stdout.Write($bytes, 0, $bytes.Length); $stdout.Flush(); {sleep}\""
+        );
+    }
+    #[cfg(not(windows))]
+    {
+        let bytes = bytes
+            .iter()
+            .map(|byte| format!("\\{:03o}", byte))
+            .collect::<String>();
+        let sleep = sleep_seconds
+            .map(|seconds| format!("; sleep {seconds}"))
+            .unwrap_or_default();
+        format!("printf '{bytes}'{sleep}")
+    }
+}
+
+fn split_utf8_stdout_handshake_command() -> String {
+    let dispatcher = crate::shell_dispatcher::global_dispatcher();
+    if dispatcher.kind().is_powershell() {
+        return "$stdout = [Console]::OpenStandardOutput(); $stdout.Write([byte[]](228), 0, 1); $stdout.Flush(); [void][Console]::In.ReadLine(); $stdout.Write([byte[]](184,173), 0, 2); $stdout.Flush()".to_string();
+    }
+    #[cfg(windows)]
+    {
+        return "powershell.exe -NoProfile -Command \"$stdout = [Console]::OpenStandardOutput(); $stdout.Write([byte[]](228), 0, 1); $stdout.Flush(); [void][Console]::In.ReadLine(); $stdout.Write([byte[]](184,173), 0, 2); $stdout.Flush()\"".to_string();
+    }
+    #[cfg(not(windows))]
+    {
+        "printf '\\344'; IFS= read -r _; printf '\\270\\255'".to_string()
+    }
+}
+
 fn network_restricted_context(tmp: &std::path::Path) -> ToolContext {
     ToolContext::new(tmp)
         .with_elevated_sandbox_policy(ExecutionSandboxPolicy::WorkspaceWrite {
@@ -1089,6 +1146,34 @@ fn test_sync_execution() {
 }
 
 #[test]
+fn sync_completion_decodes_utf8_output() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let utf8 = [0xE4, 0xB8, 0xAD, 0xE6, 0x96, 0x87];
+
+    let result = manager
+        .execute(&raw_stdout_command(&utf8, None), None, 5000, false)
+        .expect("execute UTF-8 output");
+
+    assert_eq!(result.status, ShellStatus::Completed);
+    assert_eq!(result.stdout, "中文");
+}
+
+#[test]
+fn sync_timeout_decodes_output_collected_before_kill() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let utf8 = [0xE4, 0xB8, 0xAD, 0xE6, 0x96, 0x87];
+
+    let result = manager
+        .execute(&raw_stdout_command(&utf8, Some(10)), None, 1000, false)
+        .expect("execute timed UTF-8 output");
+
+    assert_eq!(result.status, ShellStatus::TimedOut);
+    assert_eq!(result.stdout, "中文");
+}
+
+#[test]
 fn test_background_execution() {
     let tmp = tempdir().expect("tempdir");
     let mut manager = ShellManager::new(tmp.path().to_path_buf());
@@ -1108,6 +1193,178 @@ fn test_background_execution() {
 
     assert_eq!(final_result.status, ShellStatus::Completed);
     assert!(final_result.stdout.contains("done"));
+}
+
+#[test]
+fn background_delta_preserves_utf8_character_split_across_polls() {
+    let tmp = tempdir().expect("tempdir");
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    let result = manager
+        .execute(&split_utf8_stdout_handshake_command(), None, 5000, true)
+        .expect("start split UTF-8 background output");
+    let task_id = result.task_id.expect("background task id");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let first = loop {
+        let delta = manager
+            .poll_delta(&task_id, false, 0)
+            .expect("poll first UTF-8 byte");
+        if delta.stdout_total_len >= 1 {
+            break delta;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "first byte was not observed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(first.result.status, ShellStatus::Running);
+    assert_eq!(first.stdout_total_len, 1);
+    assert!(
+        first.result.stdout.is_empty(),
+        "partial UTF-8 must stay buffered"
+    );
+
+    manager
+        .write_stdin(&task_id, "\n", true)
+        .expect("release split UTF-8 writer");
+
+    let completed = manager
+        .poll_delta(&task_id, true, 5000)
+        .expect("poll completed UTF-8 output");
+    assert_eq!(completed.result.status, ShellStatus::Completed);
+    assert_eq!(completed.stdout_total_len, 3);
+    assert_eq!(completed.result.stdout, "中");
+}
+
+fn completed_shell_with_reader(
+    stdout_buffer: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    stdout_reader_completed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> BackgroundShell {
+    let now = std::time::Instant::now();
+    BackgroundShell {
+        id: "late-reader".to_string(),
+        command: "test".to_string(),
+        working_dir: std::path::PathBuf::from("."),
+        status: ShellStatus::Completed,
+        exit_code: Some(0),
+        started_at: now,
+        last_output_at: now,
+        last_observed_output_len: 0,
+        sandbox_type: SandboxType::None,
+        linked_task_id: None,
+        owner_agent: None,
+        stdout_buffer: std::sync::Arc::clone(&stdout_buffer),
+        stderr_buffer: None,
+        heavy_permit: None,
+        stdout_cursor: 0,
+        stderr_cursor: 0,
+        stdout_decoder: ShellStreamDecoder::default(),
+        stderr_decoder: ShellStreamDecoder::default(),
+        completion_reported: false,
+        foreground_turn_id: None,
+        stdin: None,
+        child: None,
+        #[cfg(windows)]
+        windows_job: None,
+        stdout_thread: None,
+        stderr_thread: None,
+        stdout_reader_completed: std::sync::Arc::clone(&stdout_reader_completed),
+        stderr_reader_completed: None,
+        work_lifecycle: None,
+        lifecycle_seq: 0,
+        last_lifecycle_status: None,
+        last_lifecycle_bytes: 0,
+    }
+}
+
+#[test]
+fn stream_snapshot_captures_completion_before_copying_bytes() {
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(b"ready \xE4".to_vec()));
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let (bytes, last) = snapshot_stream_bytes_with_hook(&buffer, &completed, || {
+        buffer
+            .lock()
+            .expect("stdout buffer")
+            .extend_from_slice(&[0xB8, 0xAD]);
+        completed.store(true, std::sync::atomic::Ordering::Release);
+    });
+
+    assert!(!last, "the in-flight snapshot must remain non-final");
+    assert_eq!(decode_shell_bytes(&bytes, last), "ready 中");
+}
+
+#[test]
+fn terminal_process_without_reader_eof_still_publishes_completion_once() {
+    let tmp = tempdir().expect("tempdir");
+    let buffer = std::sync::Arc::new(std::sync::Mutex::new(b"stable \xE4".to_vec()));
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shell = completed_shell_with_reader(
+        std::sync::Arc::clone(&buffer),
+        std::sync::Arc::clone(&completed),
+    );
+    let task_id = shell.id.clone();
+    let mut manager = ShellManager::new(tmp.path().to_path_buf());
+    manager.processes.insert(task_id, shell);
+
+    let inspected = manager.inspect_job("late-reader").expect("inspect job");
+    assert_eq!(inspected.stdout, "stable ");
+    assert!(!inspected.stdout.contains('\u{FFFD}'));
+    assert!(manager.has_finished_unreported_jobs());
+    let first = manager.drain_finished_jobs_with_evidence();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].event.stdout_tail, "stable ");
+    assert!(!manager.has_finished_unreported_jobs());
+    assert!(manager.drain_finished_jobs_with_evidence().is_empty());
+
+    buffer
+        .lock()
+        .expect("stdout buffer")
+        .extend_from_slice(&[0xB8, 0xAD]);
+    completed.store(true, std::sync::atomic::Ordering::Release);
+    let late = manager
+        .poll_delta("late-reader", false, 0)
+        .expect("poll output written after process completion");
+    assert_eq!(late.result.stdout, "stable 中");
+    assert!(manager.drain_finished_jobs_with_evidence().is_empty());
+}
+
+#[test]
+fn completion_event_and_evidence_share_one_output_cutoff() {
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(b"stdout-cut".to_vec()));
+    let stderr = std::sync::Arc::new(std::sync::Mutex::new(b"stderr-cut".to_vec()));
+    let stdout_completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stderr_completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut shell = completed_shell_with_reader(std::sync::Arc::clone(&stdout), stdout_completed);
+    shell.stderr_buffer = Some(std::sync::Arc::clone(&stderr));
+    shell.stderr_reader_completed = Some(stderr_completed);
+    shell.stdout_cursor = b"stdout-cut".len();
+    shell.stderr_cursor = b"stderr-cut".len();
+
+    let evidence = shell.completion_evidence_with_hook(|| {
+        stdout
+            .lock()
+            .expect("stdout buffer")
+            .extend_from_slice(b"-late");
+        stderr
+            .lock()
+            .expect("stderr buffer")
+            .extend_from_slice(b"-late");
+    });
+
+    assert_eq!(evidence.stdout, b"stdout-cut");
+    assert_eq!(evidence.stderr, b"stderr-cut");
+    assert_eq!(evidence.event.stdout_len, evidence.stdout.len());
+    assert_eq!(evidence.event.stderr_len, evidence.stderr.len());
+    assert_eq!(evidence.event.stdout_tail, "stdout-cut");
+    assert_eq!(evidence.event.stderr_tail, "stderr-cut");
+
+    let (stdout_late, stderr_late, _, _, _, _) = shell.take_delta();
+    assert_eq!(stdout_late, "-late");
+    assert_eq!(stderr_late, "-late");
+    assert_eq!(evidence.stdout, b"stdout-cut");
+    assert_eq!(evidence.stderr, b"stderr-cut");
 }
 
 #[test]
@@ -2451,6 +2708,8 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         heavy_permit: None,
         stdout_cursor: 0,
         stderr_cursor: 0,
+        stdout_decoder: ShellStreamDecoder::default(),
+        stderr_decoder: ShellStreamDecoder::default(),
         completion_reported: false,
         foreground_turn_id: None,
         stdin: None,
@@ -2458,6 +2717,8 @@ fn killed_shell_does_not_wait_for_blocked_reader_threads() {
         windows_job: None,
         stdout_thread: Some(stdout_thread),
         stderr_thread: None,
+        stdout_reader_completed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        stderr_reader_completed: None,
         work_lifecycle: None,
         lifecycle_seq: 0,
         last_lifecycle_status: None,
