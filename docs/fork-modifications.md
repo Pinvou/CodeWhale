@@ -158,7 +158,7 @@ CodeWhale 当前已通过：
 cargo fmt --all -- --check
 cargo check -p codewhale-tui --lib --locked
 cargo test -p codewhale-tui --lib --locked forkguard_ -- --test-threads=1
-23 passed / 0 failed
+34 passed / 0 failed
 ```
 
 父仓当前已通过：
@@ -169,7 +169,7 @@ cargo check --locked
 cargo test --locked --lib -- --test-threads=1
 1220 passed / 0 failed / 12 ignored
 ./scripts/fork-guard.sh
-CodeWhale 23 passed；pinvou3-app 19 passed
+CodeWhale 34 passed；pinvou3-app 19 passed
 python3 scripts/architecture-guard.py
 npm test
 npm run lint:ui
