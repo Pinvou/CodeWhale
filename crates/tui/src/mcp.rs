@@ -36,6 +36,43 @@ use self::streamable_http::{StreamableHttpTransport, StreamableSendError};
 use crate::network_policy::{Decision, NetworkPolicyDecider, host_from_url};
 use crate::utils::write_atomic;
 
+// === Host-provided MCP secret resolution ===
+
+/// Process-wide resolver for host-supplied MCP secret values.
+///
+/// Embedded hosts (e.g. a desktop app holding MCP credentials in the system
+/// keyring) register a resolver once at startup instead of writing secrets
+/// into the process environment at runtime. Runtime `set_var` is unsound
+/// under Rust 2024 while uncoordinated readers exist — including this
+/// crate's own `vars_os()` child-env snapshots and WebKit/glib `getenv`
+/// calls — so MCP secret lookups consult the resolver first and fall back
+/// to the process environment only when the resolver has no value.
+///
+/// The resolver maps an environment variable name to a secret value held
+/// outside the process environment.
+pub type McpSecretResolver = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+static MCP_SECRET_RESOLVER: std::sync::OnceLock<McpSecretResolver> = std::sync::OnceLock::new();
+
+/// Install the host MCP secret resolver. First call wins; later calls are
+/// rejected (same `OnceLock` contract as the prompt override hooks).
+pub fn install_mcp_secret_resolver(resolver: McpSecretResolver) -> std::result::Result<(), String> {
+    MCP_SECRET_RESOLVER
+        .set(resolver)
+        .map_err(|_| "MCP secret resolver is already installed".to_string())
+}
+
+/// Resolve an environment value for MCP config expansion: host-registered
+/// secrets win, then fall back to the process environment.
+fn host_env_var(name: &str) -> std::result::Result<String, std::env::VarError> {
+    if let Some(resolver) = MCP_SECRET_RESOLVER.get()
+        && let Some(value) = resolver(name)
+    {
+        return Ok(value);
+    }
+    std::env::var(name)
+}
+
 // === Error diagnostics helpers (#71) ===
 
 /// Bytes of a non-2xx response body to surface in connection errors.
@@ -79,7 +116,7 @@ fn expand_env_placeholders_with(
             anyhow::bail!("invalid environment placeholder in MCP config value");
         }
         let env_value = environment
-            .map_or_else(|| std::env::var(name), |env| env.var(name))
+            .map_or_else(|| host_env_var(name), |env| env.var(name))
             .with_context(|| {
                 format!("environment variable {name} required by MCP config is not set")
             })?;
@@ -1257,7 +1294,7 @@ impl McpHttpAuth {
         let mut headers = self.headers.clone();
         for (name, env_var) in &self.env_headers {
             let value = self.reviewed_plugin.as_ref().map_or_else(
-                || std::env::var(env_var),
+                || host_env_var(env_var),
                 |source| source.host_environment.var(env_var),
             );
             if let Ok(value) = value
@@ -1269,7 +1306,7 @@ impl McpHttpAuth {
         if !mcp_headers_have_authorization(&headers)
             && let Some(env_var) = self.bearer_token_env_var.as_deref()
             && let Ok(token) = self.reviewed_plugin.as_ref().map_or_else(
-                || std::env::var(env_var),
+                || host_env_var(env_var),
                 |source| source.host_environment.var(env_var),
             )
         {
