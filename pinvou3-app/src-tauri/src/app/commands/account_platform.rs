@@ -7,7 +7,7 @@ use crate::features::account_platform::{
 };
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::sessions::SessionStore;
-use crate::platform::prefs::{UserPrefs, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID};
+use crate::platform::prefs::{ModelSelectionRef, UserPrefs, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID};
 
 #[tauri::command]
 pub async fn account_platform_session(
@@ -130,7 +130,11 @@ pub async fn account_platform_model_catalog(
             "selected_model_id".to_string(),
             UserPrefs::load()
                 .advanced
-                .account_platform_default_model
+                .default_model_ref
+                .and_then(|selection| match selection {
+                    ModelSelectionRef::AccountPlatform { model_id } => Some(model_id),
+                    ModelSelectionRef::LocalConfig { .. } => None,
+                })
                 .map(serde_json::Value::String)
                 .unwrap_or(serde_json::Value::Null),
         );
@@ -188,15 +192,7 @@ async fn select_catalog_model(
         })?;
     ensure_new_session_model_selectable(item)?;
     UserPrefs::update_transaction(|prefs| {
-        prefs.advanced.account_platform_default_model = Some(model_id.to_string());
-        let model = prefs
-            .advanced
-            .saved_models
-            .iter_mut()
-            .find(|model| model.id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
-            .ok_or_else(|| "built-in account platform model is unavailable".to_string())?;
-        model.model = model_id.to_string();
-        Ok(())
+        prefs.set_default_model_ref(ModelSelectionRef::account_platform(model_id))
     })?;
     pool.mark_model_updated(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID);
     Ok(serde_json::json!({

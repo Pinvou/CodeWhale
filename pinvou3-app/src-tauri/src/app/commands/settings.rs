@@ -235,6 +235,7 @@ impl From<SavedModel> for ModelListItem {
 pub struct ModelsView {
     pub models: Vec<ModelListItem>,
     pub active_model_id: Option<String>,
+    pub default_model_ref: Option<ModelSelectionRef>,
 }
 
 #[tauri::command]
@@ -249,6 +250,7 @@ pub async fn list_models() -> Result<ModelsView, String> {
             .map(ModelListItem::from)
             .collect(),
         active_model_id: prefs.advanced.active_model_id.clone(),
+        default_model_ref: prefs.advanced.default_model_ref.clone(),
     })
 }
 
@@ -323,11 +325,13 @@ pub async fn delete_model(id: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn set_active_model(id: String) -> Result<(), String> {
     UserPrefs::update_transaction(|prefs| {
-        if prefs.model_by_id(&id).is_none() {
-            return Err(format!("model not found: {id}"));
+        let model = prefs
+            .model_by_id(&id)
+            .ok_or_else(|| format!("model not found: {id}"))?;
+        if model.is_builtin_account_platform() {
+            return Err("select a concrete Account Platform catalog model".to_string());
         }
-        prefs.advanced.active_model_id = Some(id);
-        Ok(())
+        prefs.set_default_model_ref(ModelSelectionRef::local(id))
     })
     .map(|_| ())
     .map_err(|e| sanitize_command_error("set_active_model", e))
@@ -363,6 +367,16 @@ pub async fn get_session_model_id(
     store: State<'_, SessionStore>,
 ) -> Result<Option<String>, String> {
     Ok(store.session_model_id(&session_id))
+}
+
+/// Source-aware selection frozen for this session. Legacy callers can keep
+/// using `get_session_model_id`, which exposes the runtime SavedModel carrier.
+#[tauri::command]
+pub async fn get_session_model_ref(
+    session_id: String,
+    store: State<'_, SessionStore>,
+) -> Result<Option<ModelSelectionRef>, String> {
+    Ok(store.session_model_ref(&session_id))
 }
 
 fn parse_search_provider(raw: &str) -> Result<SearchProvider, String> {
@@ -733,6 +747,9 @@ fn apply_general_settings_patch(current: &mut UserPrefs, patch: GeneralSettingsP
         // 这些字段有各自的专用写命令。即使高级设置来自旧快照，也无权覆盖它们。
         advanced.saved_models = current.advanced.saved_models.clone();
         advanced.active_model_id = current.advanced.active_model_id.clone();
+        advanced.default_model_ref = current.advanced.default_model_ref.clone();
+        advanced.account_platform_default_model =
+            current.advanced.account_platform_default_model.clone();
         advanced.local_vllm_bootstrapped = current.advanced.local_vllm_bootstrapped;
         advanced.local_vllm_setup_declined = current.advanced.local_vllm_setup_declined;
         current.advanced = advanced;

@@ -783,6 +783,7 @@ pub fn run() {
             commands::settings::set_active_model,
             commands::settings::set_session_model,
             commands::settings::get_session_model_id,
+            commands::settings::get_session_model_ref,
             commands::codex::get_codex_acp_status,
             commands::codex::list_acp_agents,
             commands::codex::get_acp_agent_status,

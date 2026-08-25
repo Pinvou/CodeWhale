@@ -37,7 +37,9 @@ use crate::core::mode_state::{
     SessionModeState,
 };
 use crate::platform::paths;
-use crate::platform::prefs::{CodePermissionPrefs, UserPrefs};
+use crate::platform::prefs::{
+    CodePermissionPrefs, ModelSelectionRef, UserPrefs, BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+};
 
 const SCHEDULED_PROFILE_SCHEMA_VERSION: u32 = 1;
 const MAX_SESSIONS_PER_KIND: usize = 50;
@@ -195,10 +197,10 @@ pub struct SessionStore {
     scheduled_mutation: Arc<Mutex<()>>,
     active: Arc<RwLock<Option<String>>>,
     mode_states: Arc<RwLock<HashMap<String, SessionModeState>>>,
-    /// per-session 模型绑定:session_id → SavedModel.id。某 session 显式选过模型
-    /// 才有条目;没选的回退全局 active_model_id。落盘到 `_session_models.json`
-    /// (仿 skill_bindings),底座 SavedSession 不能加字段故独立存。
-    session_models: Arc<RwLock<HashMap<String, String>>>,
+    /// Per-session source-aware model binding. Platform catalog IDs and local
+    /// SavedModel IDs remain distinct; the sidecar avoids changing the engine's
+    /// upstream SavedSession schema.
+    session_models: Arc<RwLock<HashMap<String, ModelSelectionRef>>>,
     /// 历史对话置顶表:session_id -> pinned_at。独立落盘到 `_pinned_sessions.json`,
     /// 不改 SavedSession 结构。
     pinned_sessions: Arc<RwLock<HashMap<String, String>>>,
@@ -1371,7 +1373,12 @@ impl SessionStore {
         // per-session 模型：先落 sidecar 再公开 Session JSON，避免写盘失败后
         // 留下一条看似创建成功、重启却切回其它模型的会话。
         if let Some(mid) = model_id {
-            self.set_session_model_id(&id, Some(mid))?;
+            let selection = if mid == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID {
+                ModelSelectionRef::account_platform(model.clone())
+            } else {
+                ModelSelectionRef::local(mid)
+            };
+            self.set_session_model_ref(&id, Some(selection))?;
         }
         if let Err(error) = self.save(&session) {
             let rollback = self.delete(&id);
@@ -1421,9 +1428,11 @@ impl SessionStore {
         branch.metadata.title = format!("{} · 替代模型分支", source.metadata.title);
         branch.metadata.parent_session_id = Some(source_id.to_string());
         branch.metadata.forked_from_message_count = Some(source_message_count);
-        self.set_session_model_id(
+        self.set_session_model_ref(
             &id,
-            Some(crate::platform::prefs::BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string()),
+            Some(ModelSelectionRef::account_platform(
+                replacement_model_ref.clone(),
+            )),
         )?;
         if let Err(error) = self.save(&branch) {
             let _ = self.delete(&id);
@@ -2369,24 +2378,47 @@ impl SessionStore {
     /// 取该 session 在输入栏应显示的模型 id。普通会话无绑定时返回 None；
     /// 定时会话首次打开时回退创建任务时的模型，用户手动切换后返回交互覆盖值。
     pub fn session_model_id(&self, id: &str) -> Option<String> {
-        self.session_model_override(id).or_else(|| {
-            self.scheduled_profile(id)
-                .and_then(|profile| profile.model_id)
-        })
+        self.session_model_ref(id)
+            .map(|selection| selection.runtime_saved_model_id().to_string())
     }
 
     /// 只读取用户在对话输入栏里选择的模型，不包含定时运行创建时的模型回退。
     pub fn session_model_override(&self, id: &str) -> Option<String> {
+        self.session_model_ref_override(id)
+            .map(|selection| selection.runtime_saved_model_id().to_string())
+    }
+
+    /// Source-aware selection shown by the composer. Scheduled sessions fall
+    /// back to the immutable local model captured by their run profile.
+    pub fn session_model_ref(&self, id: &str) -> Option<ModelSelectionRef> {
+        self.session_model_ref_override(id).or_else(|| {
+            self.scheduled_profile(id)
+                .and_then(|profile| profile.model_id)
+                .map(ModelSelectionRef::local)
+        })
+    }
+
+    pub fn session_model_ref_override(&self, id: &str) -> Option<ModelSelectionRef> {
         self.session_models.read().get(id).cloned()
     }
 
     /// 设/清该 session 的模型 id 并落盘。`None` = 清除(回退全局默认)。
     pub fn set_session_model_id(&self, id: &str, model_id: Option<String>) -> Result<()> {
+        self.set_session_model_ref(id, model_id.map(ModelSelectionRef::local))
+    }
+
+    /// Set/clear a typed session selection transactionally. `None` restores
+    /// the global default for ordinary sessions.
+    pub fn set_session_model_ref(
+        &self,
+        id: &str,
+        model_ref: Option<ModelSelectionRef>,
+    ) -> Result<()> {
         let mut models = self.session_models.write();
         let previous = models.get(id).cloned();
-        match model_id {
-            Some(mid) => {
-                models.insert(id.to_string(), mid);
+        match model_ref {
+            Some(selection) => {
+                models.insert(id.to_string(), selection);
             }
             None => {
                 models.remove(id);
@@ -2407,7 +2439,7 @@ impl SessionStore {
     }
 
     /// 持久化 per-session 模型绑定到 `~/.pinvou3/sessions/_session_models.json`。
-    fn persist_session_models(models: &HashMap<String, String>) -> Result<()> {
+    fn persist_session_models(models: &HashMap<String, ModelSelectionRef>) -> Result<()> {
         let file = crate::platform::paths::sessions_root().join("_session_models.json");
         if models.is_empty() {
             return match std::fs::remove_file(&file) {
@@ -2440,9 +2472,32 @@ impl SessionStore {
             Ok(c) => c,
             Err(_) => return,
         };
-        match serde_json::from_str::<HashMap<String, String>>(&content) {
-            Ok(map) => {
+        match serde_json::from_str::<HashMap<String, ModelSelectionRef>>(&content) {
+            Ok(mut map) => {
+                let legacy_wire_format = serde_json::from_str::<serde_json::Value>(&content)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .is_some_and(|values| values.values().any(serde_json::Value::is_string));
+                let mut dropped_ambiguous_platform_ref = false;
+                for (session_id, selection) in &mut map {
+                    if let ModelSelectionRef::AccountPlatform { model_id } = selection {
+                        if model_id.trim().is_empty() {
+                            if let Ok(session) = self.load(session_id) {
+                                *model_id = session.metadata.model.trim().to_string();
+                            }
+                            if model_id.is_empty() {
+                                dropped_ambiguous_platform_ref = true;
+                            }
+                        }
+                    }
+                }
+                map.retain(|_, selection| {
+                    !matches!(selection, ModelSelectionRef::AccountPlatform { model_id } if model_id.is_empty())
+                });
                 *self.session_models.write() = map;
+                if legacy_wire_format || dropped_ambiguous_platform_ref {
+                    self.save_session_models();
+                }
             }
             Err(e) => eprintln!("[sessions] load_session_models failed: {e}"),
         }
@@ -3224,7 +3279,7 @@ mod tests {
         store
             .session_models
             .write()
-            .insert(id.clone(), "legacy-model-id".to_string());
+            .insert(id.clone(), ModelSelectionRef::local("legacy-model-id"));
 
         assert_eq!(
             store.session_model_id(&id).as_deref(),
@@ -3719,10 +3774,10 @@ mod tests {
                 .mode_states
                 .write()
                 .insert(scheduled.metadata.id.clone(), SessionModeState::default());
-            store
-                .session_models
-                .write()
-                .insert(scheduled.metadata.id.clone(), "stale-model".to_string());
+            store.session_models.write().insert(
+                scheduled.metadata.id.clone(),
+                ModelSelectionRef::local("stale-model"),
+            );
             store
                 .pinned_sessions
                 .write()
@@ -3843,10 +3898,10 @@ mod tests {
                     project_dir: None,
                 },
             );
-            store
-                .session_models
-                .write()
-                .insert(id.clone(), format!("{suffix}-model"));
+            store.session_models.write().insert(
+                id.clone(),
+                ModelSelectionRef::local(format!("{suffix}-model")),
+            );
             store
                 .pinned_sessions
                 .write()
@@ -5212,6 +5267,26 @@ mod tests {
             store.session_model_override("wf-model-test").as_deref(),
             Some("old-model"),
             "failed persistence must not leave a memory-only model choice"
+        );
+    }
+
+    #[test]
+    fn session_model_ref_keeps_platform_catalog_id_distinct_from_runtime_carrier() {
+        let (store, _guard) = isolated_store();
+        store
+            .set_session_model_ref(
+                "typed-model-test",
+                Some(ModelSelectionRef::account_platform("catalog-model-v2")),
+            )
+            .expect("persist typed session model");
+
+        assert_eq!(
+            store.session_model_ref("typed-model-test"),
+            Some(ModelSelectionRef::account_platform("catalog-model-v2"))
+        );
+        assert_eq!(
+            store.session_model_id("typed-model-test").as_deref(),
+            Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
         );
     }
 }

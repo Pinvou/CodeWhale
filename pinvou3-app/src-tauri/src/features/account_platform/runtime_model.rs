@@ -7,7 +7,7 @@ use crate::features::assistant::runtime_model::{
     RuntimeModelRequest,
 };
 use crate::features::sessions::SessionStore;
-use crate::platform::prefs::SavedModel;
+use crate::platform::prefs::{ModelSelectionRef, SavedModel};
 
 /// Runtime provider for the only platform-managed model path.
 ///
@@ -57,10 +57,19 @@ impl RuntimeModelProvider for AccountPlatformRuntimeModelProvider {
             .app
             .try_state::<SessionStore>()
             .context("session store is not initialized")?;
-        let session = store
-            .load(&request.session_id)
-            .with_context(|| format!("load model binding for session {}", request.session_id))?;
-        let session_model_ref = session.metadata.model.trim();
+        let session_model_ref = match store.session_model_ref(&request.session_id) {
+            Some(ModelSelectionRef::AccountPlatform { model_id }) => model_id,
+            _ => {
+                store
+                    .load(&request.session_id)
+                    .with_context(|| {
+                        format!("load model binding for session {}", request.session_id)
+                    })?
+                    .metadata
+                    .model
+            }
+        };
+        let session_model_ref = session_model_ref.trim();
         if session_model_ref.is_empty() {
             return Err(anyhow!("model_catalog_selection_required: refresh the catalog and create a session with an available platform model"));
         }

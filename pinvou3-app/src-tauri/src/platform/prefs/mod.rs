@@ -139,6 +139,78 @@ pub use model::{
     MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM, MODEL_PROVIDER_KIND_OFFICIAL_API,
 };
 
+/// Stable, source-aware model selection used by global defaults and session bindings.
+/// Platform catalog model IDs are deliberately not SavedModel IDs: the built-in
+/// SavedModel is only a runtime route carrier and must never collapse the catalog.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "source", rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ModelSelectionRef {
+    AccountPlatform { model_id: String },
+    LocalConfig { saved_model_id: String },
+}
+
+impl<'de> Deserialize<'de> for ModelSelectionRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "source", rename_all = "SCREAMING_SNAKE_CASE")]
+        enum CurrentRef {
+            AccountPlatform { model_id: String },
+            LocalConfig { saved_model_id: String },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum CompatibleRef {
+            Current(CurrentRef),
+            LegacySavedModelId(String),
+        }
+
+        Ok(match CompatibleRef::deserialize(deserializer)? {
+            CompatibleRef::Current(CurrentRef::AccountPlatform { model_id }) => {
+                Self::AccountPlatform { model_id }
+            }
+            CompatibleRef::Current(CurrentRef::LocalConfig { saved_model_id }) => {
+                Self::LocalConfig { saved_model_id }
+            }
+            CompatibleRef::LegacySavedModelId(saved_model_id)
+                if saved_model_id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
+                    || saved_model_id == LEGACY_BUILTIN_LLMAPI_MODEL_ID =>
+            {
+                Self::AccountPlatform {
+                    model_id: String::new(),
+                }
+            }
+            CompatibleRef::LegacySavedModelId(saved_model_id) => {
+                Self::LocalConfig { saved_model_id }
+            }
+        })
+    }
+}
+
+impl ModelSelectionRef {
+    pub fn account_platform(model_id: impl Into<String>) -> Self {
+        Self::AccountPlatform {
+            model_id: model_id.into(),
+        }
+    }
+
+    pub fn local(saved_model_id: impl Into<String>) -> Self {
+        Self::LocalConfig {
+            saved_model_id: saved_model_id.into(),
+        }
+    }
+
+    pub fn runtime_saved_model_id(&self) -> &str {
+        match self {
+            Self::AccountPlatform { .. } => BUILTIN_ACCOUNT_PLATFORM_MODEL_ID,
+            Self::LocalConfig { saved_model_id } => saved_model_id,
+        }
+    }
+}
+
 /// 一条用户保存的模型配置:GUI「模型列表」的一项,也是热切换的最小单位。
 /// `id` 稳定(前端生成),被 `active_model_id` / session `model_id` 引用。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -471,6 +543,11 @@ pub struct AdvancedPrefs {
     /// 全局默认/当前激活模型 id(新建会话继承它)。None = 回退列表首条。
     #[serde(default)]
     pub active_model_id: Option<String>,
+    /// Source-aware default inherited by blank new sessions. This is the
+    /// authority; `active_model_id` and `account_platform_default_model` remain
+    /// compatibility mirrors for older clients and scheduled-task code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model_ref: Option<ModelSelectionRef>,
     #[serde(
         default,
         alias = "builtin_llmapi_default_model",
@@ -554,6 +631,8 @@ pub struct UserPrefs {
     /// Version of the built-in model path stored in this file. Version 1 is
     /// the Account Platform + Token Gateway-only path.
     pub model_path_schema_version: u32,
+    /// Version 1 stores source-aware global and per-session model references.
+    pub model_selection_schema_version: u32,
     pub theme: Theme,
     pub color_scheme: ColorScheme,
     pub language: Language,
@@ -597,12 +676,14 @@ impl UserPrefs {
         let account_platform_migration_changed = prefs.migrate_account_platform_model_path();
         prefs.migrate_models();
         prefs.ensure_builtin_account_platform_model();
+        let model_selection_migration_changed = prefs.migrate_model_selection_ref();
         prefs.normalize_saved_model_metadata();
         let migration = prefs.migrate_plaintext_api_keys_with_store(&SystemCredentialStore::new());
         let memory_policy_changed = prefs.enforce_memory_locale_policy();
         if persist_normalized
             && (minimax_endpoint_changed
                 || account_platform_migration_changed
+                || model_selection_migration_changed
                 || migration.settings_sanitized
                 || memory_policy_changed)
         {
@@ -777,6 +858,92 @@ impl UserPrefs {
         let mut model = SavedModel::builtin_account_platform();
         model.model = builtin_model;
         self.advanced.saved_models.push(model);
+    }
+
+    /// Migrates the legacy pair (`active_model_id`,
+    /// `account_platform_default_model`) to a source-aware default. Existing
+    /// local and third-party SavedModels are never rewritten or removed.
+    pub(crate) fn migrate_model_selection_ref(&mut self) -> bool {
+        if self.model_selection_schema_version >= 1 {
+            return false;
+        }
+        if self.advanced.default_model_ref.is_none() {
+            self.advanced.default_model_ref =
+                self.advanced.active_model_id.clone().and_then(|active_id| {
+                    if active_id == BUILTIN_ACCOUNT_PLATFORM_MODEL_ID
+                        || active_id == LEGACY_BUILTIN_LLMAPI_MODEL_ID
+                    {
+                        self.advanced
+                            .account_platform_default_model
+                            .clone()
+                            .filter(|value| !value.trim().is_empty())
+                            .or_else(|| {
+                                self.model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                                    .map(|model| model.model.clone())
+                            })
+                            .map(ModelSelectionRef::account_platform)
+                    } else if self.model_by_id(&active_id).is_some() {
+                        Some(ModelSelectionRef::local(active_id))
+                    } else {
+                        None
+                    }
+                });
+        }
+        self.model_selection_schema_version = 1;
+        true
+    }
+
+    /// Resolves a typed selection into the concrete runtime SavedModel without
+    /// mutating the global built-in route carrier.
+    pub fn resolve_model_ref(&self, selection: &ModelSelectionRef) -> Option<SavedModel> {
+        match selection {
+            ModelSelectionRef::LocalConfig { saved_model_id } => {
+                self.model_by_id(saved_model_id).cloned()
+            }
+            ModelSelectionRef::AccountPlatform { model_id } if !model_id.trim().is_empty() => {
+                let mut model = self
+                    .model_by_id(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID)
+                    .cloned()
+                    .unwrap_or_else(SavedModel::builtin_account_platform);
+                model.model = model_id.trim().to_string();
+                Some(model)
+            }
+            ModelSelectionRef::AccountPlatform { .. } => None,
+        }
+    }
+
+    /// Updates the source-aware default and its legacy mirrors atomically in
+    /// the caller's settings transaction.
+    pub fn set_default_model_ref(&mut self, selection: ModelSelectionRef) -> Result<(), String> {
+        let resolved = self
+            .resolve_model_ref(&selection)
+            .ok_or_else(|| "model selection reference is invalid".to_string())?;
+        match &selection {
+            ModelSelectionRef::LocalConfig { saved_model_id } => {
+                if resolved.is_builtin_account_platform() {
+                    return Err(
+                        "Account Platform selections require a concrete catalog model ID"
+                            .to_string(),
+                    );
+                }
+                self.advanced.active_model_id = Some(saved_model_id.clone());
+            }
+            ModelSelectionRef::AccountPlatform { model_id } => {
+                self.advanced.active_model_id = Some(BUILTIN_ACCOUNT_PLATFORM_MODEL_ID.to_string());
+                self.advanced.account_platform_default_model = Some(model_id.clone());
+                if let Some(carrier) = self
+                    .advanced
+                    .saved_models
+                    .iter_mut()
+                    .find(|model| model.is_builtin_account_platform())
+                {
+                    carrier.model = resolved.model;
+                }
+            }
+        }
+        self.advanced.default_model_ref = Some(selection);
+        self.model_selection_schema_version = 1;
+        Ok(())
     }
 
     pub fn migrate_plaintext_api_keys_with_store<S: CredentialStore>(
@@ -1054,6 +1221,15 @@ impl UserPrefs {
     /// 删一条模型;若删的是当前 active,回退到列表首条。
     pub fn remove_model(&mut self, id: &str) {
         self.advanced.saved_models.retain(|m| m.id != id);
+        let removed_default = matches!(
+            self.advanced.default_model_ref.as_ref(),
+            Some(ModelSelectionRef::LocalConfig { saved_model_id }) if saved_model_id == id
+        );
+        if removed_default {
+            self.advanced.default_model_ref = None;
+            self.advanced.active_model_id = None;
+            return;
+        }
         if self.advanced.active_model_id.as_deref() == Some(id) {
             self.advanced.active_model_id =
                 self.advanced.saved_models.first().map(|m| m.id.clone());
@@ -1128,6 +1304,68 @@ mod tests {
         // 再次迁移幂等
         prefs.migrate_models();
         assert_eq!(prefs.advanced.saved_models, snapshot);
+    }
+
+    #[test]
+    fn model_selection_refs_round_trip_with_explicit_sources() {
+        let selections = [
+            ModelSelectionRef::account_platform("deepseek-v4-flash"),
+            ModelSelectionRef::local("third-party-model"),
+        ];
+        for selection in selections {
+            let encoded = serde_json::to_value(&selection).expect("serialize selection");
+            assert!(encoded.get("source").is_some());
+            let decoded: ModelSelectionRef =
+                serde_json::from_value(encoded).expect("deserialize selection");
+            assert_eq!(decoded, selection);
+        }
+        let legacy_local: ModelSelectionRef =
+            serde_json::from_str("\"third-party-model\"").expect("legacy local selection");
+        assert_eq!(legacy_local, ModelSelectionRef::local("third-party-model"));
+        let legacy_platform: ModelSelectionRef =
+            serde_json::from_str(&format!("\"{BUILTIN_ACCOUNT_PLATFORM_MODEL_ID}\""))
+                .expect("legacy platform selection");
+        assert_eq!(legacy_platform, ModelSelectionRef::account_platform(""));
+    }
+
+    #[test]
+    fn model_selection_migration_preserves_local_models_and_is_idempotent() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        let saved_models = prefs.advanced.saved_models.clone();
+
+        assert!(prefs.migrate_model_selection_ref());
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::local("default"))
+        );
+        assert_eq!(prefs.advanced.saved_models, saved_models);
+        assert!(!prefs.migrate_model_selection_ref());
+    }
+
+    #[test]
+    fn account_platform_default_ref_resolves_without_rewriting_local_models() {
+        let mut prefs = UserPrefs::default();
+        prefs.migrate_models();
+        prefs.ensure_builtin_account_platform_model();
+        let local = prefs.model_by_id("default").cloned().expect("local model");
+
+        prefs
+            .set_default_model_ref(ModelSelectionRef::account_platform("catalog-model-v2"))
+            .expect("set platform default");
+
+        assert_eq!(prefs.model_by_id("default"), Some(&local));
+        assert_eq!(
+            prefs.advanced.default_model_ref,
+            Some(ModelSelectionRef::account_platform("catalog-model-v2"))
+        );
+        assert_eq!(
+            prefs
+                .resolve_model_ref(prefs.advanced.default_model_ref.as_ref().unwrap())
+                .map(|model| model.model),
+            Some("catalog-model-v2".to_string())
+        );
     }
 
     #[test]
@@ -1514,6 +1752,7 @@ mod tests {
     fn prefs_roundtrip() {
         let prefs = UserPrefs {
             model_path_schema_version: 1,
+            model_selection_schema_version: 1,
             theme: Theme::LiquidDark,
             color_scheme: ColorScheme::Dark,
             language: Language::En,

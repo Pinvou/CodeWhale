@@ -46,7 +46,7 @@ use crate::features::assistant::runtime_model::{
 };
 use crate::features::assistant::turn_shell_tasks::{SessionShellManagers, SessionTurnShellTasks};
 use crate::features::sessions::{transcript_revision, ScheduledRunProfile, SessionStore};
-use crate::platform::prefs::{SavedModel, UserPrefs};
+use crate::platform::prefs::{ModelSelectionRef, SavedModel, UserPrefs};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScheduledTurnCompletion {
@@ -418,6 +418,13 @@ impl EnginePool {
         bridge.prefs = UserPrefs::load();
         let scheduled_profile = self.store.scheduled_profile(session_id);
         let interactive_model_override = self.store.session_model_override(session_id);
+        if scheduled_profile.is_none()
+            && interactive_model_override.is_none()
+            && bridge.prefs.model_selection_schema_version >= 1
+            && bridge.prefs.advanced.default_model_ref.is_none()
+        {
+            bail!("model_selection_required: choose a model before sending");
+        }
         let pins_scheduled_model = scheduled_profile.is_some()
             && (scheduled_unattended || interactive_model_override.is_none());
         bridge.session_model = resolve_spawn_model(
@@ -817,7 +824,16 @@ impl EnginePool {
     /// (GUI 可能刚改过默认),失败回退 boot 快照。
     pub fn default_model_for_new_session(&self) -> (String, Option<String>) {
         let prefs = UserPrefs::load();
-        match prefs.active_model() {
+        if prefs.model_selection_schema_version >= 1 && prefs.advanced.default_model_ref.is_none() {
+            return (String::new(), None);
+        }
+        let selected = prefs
+            .advanced
+            .default_model_ref
+            .as_ref()
+            .and_then(|selection| prefs.resolve_model_ref(selection))
+            .or_else(|| prefs.active_model().cloned());
+        match selected {
             Some(m) => (m.model.clone(), Some(m.id.clone())),
             None => (self.bridge.model(), None),
         }
@@ -832,6 +848,16 @@ impl EnginePool {
         model_id: Option<String>,
     ) -> Result<()> {
         self.store.set_session_model_id(session_id, model_id)?;
+        self.evict(session_id).await;
+        Ok(())
+    }
+
+    pub async fn switch_session_model_ref(
+        &self,
+        session_id: &str,
+        model_ref: Option<ModelSelectionRef>,
+    ) -> Result<()> {
+        self.store.set_session_model_ref(session_id, model_ref)?;
         self.evict(session_id).await;
         Ok(())
     }
