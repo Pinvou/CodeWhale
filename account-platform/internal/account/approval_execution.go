@@ -27,8 +27,8 @@ func (r *PostgresRepository) BeginApprovalExecution(ctx context.Context, request
 	if err != nil {
 		return ApprovalExecution{}, err
 	}
-	policy, err := approvalpolicy.Lookup(item.CommandType)
-	if err != nil || item.PolicyVersion != approvalpolicy.Version || policy.ExecutorIdentity != executorIdentity {
+	policy, err := approvalPolicyForItem(item)
+	if err != nil || policy.ExecutorIdentity != executorIdentity {
 		return ApprovalExecution{}, ErrForbidden
 	}
 	if err := assertStoredApprovalPolicy(ctx, tx, policy); err != nil {

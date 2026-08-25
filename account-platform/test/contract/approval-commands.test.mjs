@@ -59,6 +59,11 @@ test('every management write is classified and financial facts use the independe
   assert.match(accountMigration, /requester=NEW\.approver_user_id/);
   assert.match(approvals, /account\.approval-command\.authorized\.v1/);
   assert.match(approvals, /ErrApprovalSelfDecision/);
+  assert.match(approvals, /rp\.permission_code=p\.approver_permission/);
+  assert.match(approvals, /item\.RequesterPermission/);
+  assert.match(approvals, /item\.ApproverPermission/);
+  assert.match(approvals, /approvalPolicyForItem/);
+  assert.doesNotMatch(approvals, /platform\.billing\.repairs\.approve/);
   assert.match(execution, /REQUESTER_AUTH_CHANGED/);
   assert.match(execution, /APPROVER_AUTH_CHANGED/);
   assert.match(execution, /RESOURCE_VERSION_CHANGED/);

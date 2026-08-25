@@ -57,6 +57,8 @@ type ApprovalRequest struct {
 	FinancialSnapshot             json.RawMessage `json:"financial_snapshot"`
 	PolicySnapshot                json.RawMessage `json:"policy_snapshot"`
 	AllowedActions                []string        `json:"allowed_actions"`
+	RequesterPermission           string          `json:"-"`
+	ApproverPermission            string          `json:"-"`
 }
 
 type ApprovalDraft struct {
@@ -325,7 +327,7 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 		return ApprovalRequest{}, err
 	}
 	if item.Status != "SUBMITTED" || item.Version != expectedVersion {
-		if policy, lookupErr := approvalpolicy.Lookup(item.CommandType); lookupErr == nil {
+		if policy, lookupErr := approvalPolicyForItem(item); lookupErr == nil {
 			if _, _, _, authErr := strongPlatformAuthorization(ctx, tx, *actorID, policy.ApproverPermission); authErr == nil {
 				now := r.now()
 				if err := appendApprovalStateEvent(ctx, tx, requestID, item.Status, item.Status, "USER", actorID.String(), "DECISION_CONFLICT", map[string]any{"expected_version": expectedVersion, "current_version": item.Version}, now); err != nil {
@@ -352,8 +354,8 @@ func (r *PostgresRepository) DecideApprovalRequest(ctx context.Context, principa
 	if !item.ExpiresAt.After(now) {
 		return r.invalidateApproval(ctx, tx, item, *actorID, "EXPIRED", "REQUEST_EXPIRED", map[string]any{}, now, ErrApprovalExpired)
 	}
-	policy, err := approvalpolicy.Lookup(item.CommandType)
-	if err != nil || item.PolicyVersion != approvalpolicy.Version || policy.Mode != approvalpolicy.ApprovalRequired {
+	policy, err := approvalPolicyForItem(item)
+	if err != nil {
 		return r.invalidateApproval(ctx, tx, item, *actorID, "INVALIDATED", "POLICY_VERSION_CHANGED", map[string]any{}, now, ErrApprovalInvalidated)
 	}
 	if err := assertStoredApprovalPolicy(ctx, tx, policy); err != nil {
@@ -424,19 +426,22 @@ func (r *PostgresRepository) ListApprovalRequests(ctx context.Context, principal
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := r.pool.Query(ctx, approvalSelect+` WHERE ($1='' OR ar.command_type=$1) AND ($2='' OR ar.status=$2) AND ($3='' OR p.risk_class=$3) AND ($4::uuid IS NULL OR ar.requester_user_id=$4) AND ($5='' OR ar.target_resource_id=$5) AND ($6::timestamptz IS NULL OR ar.submitted_at>=$6) AND ($7::timestamptz IS NULL OR ar.submitted_at<$7) AND ($8::timestamptz IS NULL OR ar.expires_at>=$8) AND ($9::timestamptz IS NULL OR ar.expires_at<$9) AND (ar.requester_user_id=$10 OR EXISTS(SELECT 1 FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code='platform.billing.repairs.approve' WHERE ra.user_id=$10 AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now()))) ORDER BY ar.updated_at DESC,ar.id LIMIT $11`, strings.ToUpper(strings.TrimSpace(filter.CommandType)), strings.ToUpper(strings.TrimSpace(filter.Status)), strings.ToUpper(strings.TrimSpace(filter.RiskClass)), filter.Requester, strings.TrimSpace(filter.Target), filter.SubmittedFrom, filter.SubmittedTo, filter.ExpiresFrom, filter.ExpiresTo, actorID, limit)
+	rows, err := r.pool.Query(ctx, approvalSelect+` WHERE ($1='' OR ar.command_type=$1) AND ($2='' OR ar.status=$2) AND ($3='' OR p.risk_class=$3) AND ($4::uuid IS NULL OR ar.requester_user_id=$4) AND ($5='' OR ar.target_resource_id=$5) AND ($6::timestamptz IS NULL OR ar.submitted_at>=$6) AND ($7::timestamptz IS NULL OR ar.submitted_at<$7) AND ($8::timestamptz IS NULL OR ar.expires_at>=$8) AND ($9::timestamptz IS NULL OR ar.expires_at<$9) AND (ar.requester_user_id=$10 OR EXISTS(SELECT 1 FROM role_assignments ra JOIN role_permissions rp ON rp.role_code=ra.role_code AND rp.permission_code=p.approver_permission WHERE ra.user_id=$10 AND ra.organization_id IS NULL AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now()))) ORDER BY ar.updated_at DESC,ar.id LIMIT $11`, strings.ToUpper(strings.TrimSpace(filter.CommandType)), strings.ToUpper(strings.TrimSpace(filter.Status)), strings.ToUpper(strings.TrimSpace(filter.RiskClass)), filter.Requester, strings.TrimSpace(filter.Target), filter.SubmittedFrom, filter.SubmittedTo, filter.ExpiresFrom, filter.ExpiresTo, actorID, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := make([]ApprovalRequest, 0)
-	_, _, _, approverErr := strongPlatformAuthorization(ctx, r.pool, actorID, "platform.billing.repairs.approve")
 	for rows.Next() {
 		item, err := scanApprovalRequest(rows)
 		if err != nil {
 			return nil, err
 		}
-		item.AllowedActions = approvalAllowedActions(item, actorID, approverErr == nil)
+		canRequest, canApprove, err := r.approvalCapabilities(ctx, actorID, item)
+		if err != nil {
+			return nil, err
+		}
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, canApprove)
 		items = append(items, item)
 	}
 	return items, rows.Err()
@@ -452,19 +457,46 @@ func (r *PostgresRepository) ApprovalRequest(ctx context.Context, principal iden
 		return ApprovalRequest{}, err
 	}
 	if item.RequesterUserID == actorID {
-		item.AllowedActions = approvalAllowedActions(item, actorID, false)
+		canRequest, _, err := r.approvalCapabilities(ctx, actorID, item)
+		if err != nil {
+			return ApprovalRequest{}, err
+		}
+		item.AllowedActions = approvalAllowedActions(item, actorID, canRequest, false)
 		return item, nil
 	}
-	if _, _, _, err := strongPlatformAuthorization(ctx, r.pool, actorID, "platform.billing.repairs.approve"); err != nil {
+	_, canApprove, err := r.approvalCapabilities(ctx, actorID, item)
+	if err != nil {
+		return ApprovalRequest{}, err
+	}
+	if !canApprove {
 		return ApprovalRequest{}, ErrForbidden
 	}
-	item.AllowedActions = approvalAllowedActions(item, actorID, true)
+	item.AllowedActions = approvalAllowedActions(item, actorID, false, true)
 	return item, nil
 }
 
-func approvalAllowedActions(item ApprovalRequest, actorID uuid.UUID, canApprove bool) []string {
-	actions := make([]string, 0, 3)
+func (r *PostgresRepository) approvalCapabilities(ctx context.Context, actorID uuid.UUID, item ApprovalRequest) (bool, bool, error) {
+	canRequest, canApprove := false, false
 	if item.RequesterUserID == actorID {
+		if _, _, _, err := strongPlatformAuthorization(ctx, r.pool, actorID, item.RequesterPermission); err == nil {
+			canRequest = true
+		} else if !errors.Is(err, ErrForbidden) {
+			return false, false, err
+		}
+	}
+	if item.RequesterUserID != actorID && item.ApproverPermission != "" {
+		if _, _, _, err := strongPlatformAuthorization(ctx, r.pool, actorID, item.ApproverPermission); err == nil {
+			canApprove = true
+		} else if !errors.Is(err, ErrForbidden) {
+			return false, false, err
+		}
+	}
+	return canRequest, canApprove, nil
+}
+
+func approvalAllowedActions(item ApprovalRequest, actorID uuid.UUID, canRequest, canApprove bool) []string {
+	actions := make([]string, 0, 3)
+	if item.RequesterUserID == actorID && canRequest {
 		if item.Status == "DRAFT" {
 			actions = append(actions, "EDIT", "SUBMIT")
 		}
@@ -489,6 +521,14 @@ func (r *PostgresRepository) userIDByPrincipal(ctx context.Context, principal id
 
 func humanApprovalPrincipal(principal identity.Principal) bool {
 	return strings.TrimSpace(principal.Issuer) != "" && strings.TrimSpace(principal.Subject) != "" && strings.TrimSpace(principal.SessionID) != "" && !principal.AuthenticatedAt.IsZero()
+}
+
+func approvalPolicyForItem(item ApprovalRequest) (approvalpolicy.Policy, error) {
+	policy, err := approvalpolicy.Lookup(item.CommandType)
+	if err != nil || item.PolicyVersion != approvalpolicy.Version || policy.Mode != approvalpolicy.ApprovalRequired || item.RequesterPermission != policy.RequesterPermission || item.ApproverPermission != policy.ApproverPermission {
+		return approvalpolicy.Policy{}, ErrApprovalInvalidated
+	}
+	return policy, nil
 }
 
 func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte, [32]byte, error) {
@@ -623,7 +663,7 @@ func assertStoredApprovalPolicy(ctx context.Context, database queryable, policy 
 	return nil
 }
 
-const approvalSelect = `SELECT ar.id,ar.command_type,ar.policy_version,p.approval_mode,p.risk_class,ar.requester_user_id,ar.requester_binding_id,ar.requester_authorization_version,ar.normalized_command,encode(ar.command_fingerprint,'hex'),ar.target_resource_type,ar.target_resource_id,ar.reason,ar.redacted_evidence,ar.expected_impact,ar.status,ar.version,ar.supersedes_request_id,ar.expires_at,ar.execution_deadline,ar.invalidation_code,ar.invalidation_details,ar.submitted_at,ar.decided_at,ar.created_at,ar.updated_at,s.critical_resource_versions,s.financial_snapshot,s.policy_snapshot FROM approval_requests ar JOIN approval_command_policies p ON p.command_type=ar.command_type AND p.policy_version=ar.policy_version JOIN approval_request_snapshots s ON s.approval_request_id=ar.id`
+const approvalSelect = `SELECT ar.id,ar.command_type,ar.policy_version,p.approval_mode,p.risk_class,ar.requester_user_id,ar.requester_binding_id,ar.requester_authorization_version,ar.normalized_command,encode(ar.command_fingerprint,'hex'),ar.target_resource_type,ar.target_resource_id,ar.reason,ar.redacted_evidence,ar.expected_impact,ar.status,ar.version,ar.supersedes_request_id,ar.expires_at,ar.execution_deadline,ar.invalidation_code,ar.invalidation_details,ar.submitted_at,ar.decided_at,ar.created_at,ar.updated_at,s.critical_resource_versions,s.financial_snapshot,s.policy_snapshot,p.requester_permission,COALESCE(p.approver_permission,'') FROM approval_requests ar JOIN approval_command_policies p ON p.command_type=ar.command_type AND p.policy_version=ar.policy_version JOIN approval_request_snapshots s ON s.approval_request_id=ar.id`
 
 type rowScanner interface{ Scan(...any) error }
 
@@ -633,7 +673,7 @@ type queryable interface {
 
 func scanApprovalRequest(row rowScanner) (ApprovalRequest, error) {
 	var item ApprovalRequest
-	err := row.Scan(&item.ID, &item.CommandType, &item.PolicyVersion, &item.ApprovalMode, &item.RiskClass, &item.RequesterUserID, &item.RequesterBindingID, &item.RequesterAuthorizationVersion, &item.NormalizedCommand, &item.CommandFingerprint, &item.TargetResourceType, &item.TargetResourceID, &item.Reason, &item.RedactedEvidence, &item.ExpectedImpact, &item.Status, &item.Version, &item.SupersedesRequestID, &item.ExpiresAt, &item.ExecutionDeadline, &item.InvalidationCode, &item.InvalidationDetails, &item.SubmittedAt, &item.DecidedAt, &item.CreatedAt, &item.UpdatedAt, &item.CriticalResourceVersions, &item.FinancialSnapshot, &item.PolicySnapshot)
+	err := row.Scan(&item.ID, &item.CommandType, &item.PolicyVersion, &item.ApprovalMode, &item.RiskClass, &item.RequesterUserID, &item.RequesterBindingID, &item.RequesterAuthorizationVersion, &item.NormalizedCommand, &item.CommandFingerprint, &item.TargetResourceType, &item.TargetResourceID, &item.Reason, &item.RedactedEvidence, &item.ExpectedImpact, &item.Status, &item.Version, &item.SupersedesRequestID, &item.ExpiresAt, &item.ExecutionDeadline, &item.InvalidationCode, &item.InvalidationDetails, &item.SubmittedAt, &item.DecidedAt, &item.CreatedAt, &item.UpdatedAt, &item.CriticalResourceVersions, &item.FinancialSnapshot, &item.PolicySnapshot, &item.RequesterPermission, &item.ApproverPermission)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ApprovalRequest{}, ErrNotFound
 	}
