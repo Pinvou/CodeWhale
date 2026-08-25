@@ -21,6 +21,7 @@ services:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
       BILLING_PAYMENT_PROVIDER: h3c_mall
       BILLING_ALLOW_TENTATIVE_PRICES: "true"
+      BILLING_NORMAL_REFUND_CREATION_ENABLED: "false"
 
   token-gateway:
     environment:

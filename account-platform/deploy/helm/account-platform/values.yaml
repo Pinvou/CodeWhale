@@ -103,6 +103,7 @@ account:
 billing:
   paymentProvider: h3c_mall
   allowTentativePrices: false
+  normalRefundCreationEnabled: false
   paymentExpiryIntervalSeconds: 15
   paymentCallbackTokenKeyId: payment-callback-v1
   paymentCallbackTokenTtlSeconds: 300

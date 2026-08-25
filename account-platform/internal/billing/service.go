@@ -321,7 +321,7 @@ func (s *Service) recordForcedRefund(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) paymentCapabilities(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	api.WriteJSON(w, http.StatusOK, s.payments.Capabilities())
+	api.WriteJSON(w, http.StatusOK, s.payments.ProductCapabilities())
 }
 
 func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
@@ -502,6 +502,10 @@ func (s *Service) closeRechargeOrder(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) createRefund(w http.ResponseWriter, r *http.Request) {
+	if !s.payments.NormalRefundCreationEnabled() {
+		s.writeError(w, r, ErrNormalRefundCreationDisabled)
+		return
+	}
 	orderID, err := uuid.Parse(r.PathValue("order_id"))
 	var body struct {
 		RequesterID          uuid.UUID `json:"requester_id"`
@@ -815,6 +819,8 @@ func (s *Service) release(w http.ResponseWriter, r *http.Request) {
 func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status, code, message := http.StatusInternalServerError, "INTERNAL_ERROR", "the billing request could not be completed"
 	switch {
+	case errors.Is(err, ErrNormalRefundCreationDisabled):
+		status, code, message = http.StatusConflict, "NORMAL_REFUND_CREATION_DISABLED", "normal refund creation is currently unavailable"
 	case errors.Is(err, ErrPaymentRateLimited):
 		retryAfter := 1
 		var limited *PaymentRateLimitError

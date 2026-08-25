@@ -1257,7 +1257,9 @@ function Billing({ copy, language, data, client, setData, permissions }) {
     if (!visibleTabs.includes(tab)) setTab(visibleTabs[0] || 'wallets');
   }, [tab, visibleTabs.join('|')]);
   const paymentCapabilities = data.billingOverview?.payment_capabilities || {};
-  const refundSupported = paymentCapabilities.refund_supported === true;
+  const normalRefundCreationEnabled =
+    paymentCapabilities.normal_refund_creation_enabled === true &&
+    paymentCapabilities.refund_supported === true;
   const reconciliationSupported = paymentCapabilities.bill_supported === true;
   const reconciliationImportSupported = paymentCapabilities.bill_file_import_supported === true;
   const repairSupported = paymentCapabilities.manual_repair_supported === true;
@@ -1919,7 +1921,7 @@ function Billing({ copy, language, data, client, setData, permissions }) {
         },
       ],
     }),
-    [busy, client, copy, language, refundSupported, repairSupported],
+    [busy, client, copy, language, normalRefundCreationEnabled, repairSupported],
   );
   if (ledger)
     return (
@@ -2445,7 +2447,7 @@ function Billing({ copy, language, data, client, setData, permissions }) {
               key: 'actions',
               label: copy.accounts.actions,
               render: (item) =>
-                canRequestRepair && refundSupported && item.status === 'ACTIVE' ? (
+                canRequestRepair && normalRefundCreationEnabled && item.status === 'ACTIVE' ? (
                   <button className="danger" disabled={busy} onClick={() => refund(item)}>
                     {copy.billing.refundWholePackage}
                   </button>

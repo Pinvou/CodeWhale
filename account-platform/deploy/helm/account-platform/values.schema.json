@@ -190,11 +190,12 @@
     },
     "billing": {
       "type": "object",
-      "required": ["paymentProvider", "allowTentativePrices", "paymentExpiryIntervalSeconds", "paymentCallbackTokenKeyId", "paymentCallbackTokenTtlSeconds"],
+      "required": ["paymentProvider", "allowTentativePrices", "normalRefundCreationEnabled", "paymentExpiryIntervalSeconds", "paymentCallbackTokenKeyId", "paymentCallbackTokenTtlSeconds"],
       "additionalProperties": false,
       "properties": {
         "paymentProvider": { "type": "string", "minLength": 1 },
         "allowTentativePrices": { "type": "boolean" },
+        "normalRefundCreationEnabled": { "type": "boolean" },
         "paymentExpiryIntervalSeconds": { "type": "integer", "minimum": 1, "maximum": 300 },
         "paymentCallbackTokenKeyId": { "type": "string", "minLength": 1, "maxLength": 128 },
         "paymentCallbackTokenTtlSeconds": { "type": "integer", "minimum": 60, "maximum": 900 }
@@ -325,7 +326,7 @@
           "redis": { "type": "object", "properties": { "enabled": { "const": false } } },
           "nats": { "type": "object", "properties": { "enabled": { "const": false } } },
           "newApi": { "type": "object", "properties": { "enabled": { "const": true }, "replicas": { "type": "integer", "minimum": 2 } } },
-          "billing": { "type": "object", "properties": { "paymentProvider": { "const": "h3c_mall" }, "allowTentativePrices": { "const": false } } },
+          "billing": { "type": "object", "properties": { "paymentProvider": { "const": "h3c_mall" }, "allowTentativePrices": { "const": false }, "normalRefundCreationEnabled": { "const": false } } },
           "images": {
             "type": "object",
             "additionalProperties": {

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 331`、`部分实现 32`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069–APT-082 的全部 CODE 任务现已收敛三类作用域与真值表、登录、Account/Billing/Token 原子权限、策略审批、对象授权、可信恢复、短期委托、精确工作负载权限、权限驱动界面及全敏感入口覆盖发布门禁。
+全量核验汇总：`已实现 334`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环：用户端无入口，运营动作同时要求产品与 Provider 门禁，服务端在领域写入前稳定拒绝新建请求，既有退款收敛、强制退款和只读查询不受影响。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069–APT-082 的全部 CODE 任务现已收敛三类作用域与真值表、登录、Account/Billing/Token 原子权限、策略审批、对象授权、可信恢复、短期委托、精确工作负载权限、权限驱动界面及全敏感入口覆盖发布门禁。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -65,7 +65,8 @@
 | `PAYMENT-CONVERGENCE` | Provider 账单逐行进入统一不可变证据归并器，关单状态单调推进，支付/退款/拒付事实独立且订单摘要可重建 | Go 单测、OpenAPI lint、关单/账单/摘要合同及全量静态验证通过；真实 Provider 账单、关单竞态和数据库运行级迁移待部署 |
 | `RECEIVABLE-LIFECYCLE` | 用量超额双记、独立应收、钱包上下文冻结、现金 BASE 清偿分配、单支付权益包拒付冲销及三语运营查询 | Go 单测、OpenAPI lint、75 个合同测试、桌面 ESLint 和 Portal 构建通过；拒付已接入统一异常案件并由受控结论命令执行定向冲销；数据库运行级迁移、并发结算与真实 Provider 拒付故障注入待部署 |
 | `HOLD-OPERATIONS-EVIDENCE` | 钱包 Posting 至权益组成来源、Hold 组成/成员分配、租约历史、异常分类及幂等安全释放证据 | Go 单测、OpenAPI lint、80 个合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实并发幂等和生产授权隔离待部署 |
-| `TARGETED-REFUND` | 支付流水+权益包精确目标、整笔剩余现金退款、BASE/关联 BONUS 冻结撤销、幂等 Outbox Consumer 恢复和渠道强制退款独立证据 | 退款领域实现、迁移和测试保留；当前 H3C 因不声明退款能力已隐藏入口，但 UI/API 仍以 Provider capability 为主要门禁，尚缺无论 Provider 能力如何都默认关闭的新建普通退款产品门禁；由 APT-056 收敛 |
+| `TARGETED-REFUND` | 支付流水+权益包精确目标、整笔剩余现金退款、BASE/关联 BONUS 冻结撤销、幂等 Outbox Consumer 恢复和渠道强制退款独立证据 | 退款领域实现、迁移和测试保留；新建普通退款由默认关闭的独立产品门禁阻断，既有请求继续按 Provider 能力收敛 |
+| `REFUND-PRODUCT-GATE` | 新建普通退款独立产品门禁、稳定 API 拒绝、Provider 能力隔离、管理入口双门禁和部署默认关闭 | APT-056 已实现；Compose、远端 Compose 与 Helm 均显式默认 `false`，合同测试保护历史收敛和强制退款路径 |
 | `LATE-PAYMENT-REVIEW` | 72小时边界查询、唯一 P2 案件、每日/每周复核、用户申诉证据、无账单降级、正式收款准入、严格未支付归档与 Provider blind 停单 | Go 单测、OpenAPI lint、90 个合同测试、管理页41项状态测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Provider 历史查询/终态和告警投递待部署 |
 | `PAYMENT-ANOMALY-RECONCILIATION` | 拒付、强制退款、重复/晚到冲突、退款失败与非法迁移统一案件；Provider、订单/流水、退款、账本每日四方对账；不可变证据和幂等处置命令 | Go 单测、OpenAPI lint、92 个合同测试、三语运营页面和 Portal 构建通过；数据库运行级迁移、真实 Provider 账单、跨日时区、并发定时任务及财务故障注入待部署 |
 | `GATEWAY-ADAPTER-NEUTRALITY` | 版本化协议能力发现、显式路由协议、Provider/Adapter/上游引用历史证据，以及 New API/通用 OpenAI 兼容 Adapter 隔离 | Go 单测、OpenAPI lint、93 个合同测试、三语运营页面、Portal 构建和 Helm/Compose 配置检查通过；数据库运行级迁移及真实 Adapter 替换/用量证据联调待部署 |
@@ -248,7 +249,7 @@
 | PAY-27 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 串行事务锁定目标并原子保存组成/授予快照、冻结和 Outbox；显式幂等能力门禁后的 Worker 使用稳定退款号恢复 REQUESTED 意图 |
 | PAY-28 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 退款意图冻结权益包、组成和活动授予；明确失败恢复，不确定结果继续冻结，成功或受审计复核后才终结 |
 | PAY-29 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 退款沿目标支付流水所属订单调用原 Provider，稳定商户退款号受显式幂等能力保护，不借用其他流水或钱包 |
-| PAY-31 | 部分实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 现有 H3C 不声明退款能力，因此用户和运营入口当前已隐藏，服务端也拒绝；但退款能力仍直接受 Provider capability 驱动，缺少独立、默认关闭且同时约束 UI/API 的产品级门禁，新增退款 Provider 后存在自动暴露风险；APT-056 待实现 |
+| PAY-31 | 已实现 | AUDIT_HEAD | GO-UNIT; TARGETED-REFUND; REFUND-PRODUCT-GATE; DESKTOP-39 | NOT_DEPLOYED | 默认关闭的独立产品门禁在内部/后台创建端点和运营动作前生效，Provider 支持退款也不会自动开放；既有退款 Consumer、强制退款事实和只读查询继续可用 |
 | PAY-32 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 渠道强制退款保存不可变独立证据和案件并立即冻结原流水权益包/授予；确认后按退款现金比例向上取整定向撤销 BASE/关联 BONUS，BASE 不足形成应收，不覆盖支付成功或伪装普通退款 |
 | PAY-35 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 能力显式区分 API、受控不可变文件导入和 QUERY_DEGRADED；查询快照降级不冒充供应商账单对账，真实文件格式联调待部署 |
 | PAY-37 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 72小时最终查询后唯一创建P2案件，未认领进入运营队列并告警，前7天每日、之后每周复核；用户申诉只追加证据，运营查询发现支付后经统一归并器幂等履约 |
@@ -275,7 +276,7 @@
 | ADM-17 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 人工调整冻结目标、钱包、金额和调整版本；独立审批后由 Billing 执行端使用稳定幂等键写一次平衡账本，旧直接批准入口失败关闭 |
 | ADM-18 | 已实现 | DOC_CURRENT | GO-UNIT; HOLD-OPERATIONS-EVIDENCE | NOT_DEPLOYED | 运营 API 和三语页面查询 Hold、组成/成员分配、当前租约及不可变租约历史；异常释放只允许 REVIEW 或租约已过期 ACTIVE，要求权限、原因和幂等键并保存操作前后及分配快照 |
 | ADM-19 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 后台支持订单搜索、同步、修复及单订单明细，展示实际付款人、受益方、全部支付流水、不可变证据和派生摘要 |
-| ADM-20 | 部分实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 运营端已具备既有普通/强制退款查询、证据和异常处置；当前 H3C 下发起动作因 capability 不支持而隐藏，但尚未由独立产品门禁保证所有 Provider 均不能新建普通退款；APT-056 待实现 |
+| ADM-20 | 已实现 | AUDIT_HEAD | GO-UNIT; TARGETED-REFUND; REFUND-PRODUCT-GATE; DESKTOP-39 | NOT_DEPLOYED | 既有普通/强制退款、证据和异常处置继续只读可见；新建动作只有产品门禁与 Provider capability 同时开放才可能出现，当前所有交付配置均默认关闭且服务端兜底拒绝 |
 | ADM-21 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 三语后台可独立运行、重跑和查看四方对账，保留每次运行及原始差异快照，并以幂等命令认领、分配、登记修复动作、结论和处理状态；真实 Provider 账单待部署验证 |
 | ADM-22 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 当前 Billing 修复命令均登记稳定类型、目标、原因、脱敏证据、前后快照和幂等键；改变财务事实的修复统一进入审批执行框架，证据收敛类修复固定为仅审计 |
 | ADM-23 | 已实现 | AUDIT_HEAD | GO-UNIT; METERING-PRICING-LIFECYCLE | NOT_DEPLOYED | 后台可查看和创建版本化模型协议定义 |
@@ -448,7 +449,7 @@
 | UI-09 | 已实现 | DOC_CURRENT | DESKTOP-CLIENT-SWITCH; ACCOUNT-DOMAIN-UAT-20260825 | NOT_DEPLOYED | 登录后的账号 Popover 提供三语 Web 个人中心入口；专用 Tauri 命令只打开配置的 HTTPS/loopback Portal 根地址，不接受 WebView URL 或在 URL 中携带 Token。`https://account.pinvou.com/` 已发布，但桌面签名制品安装仍待验收 |
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | Web 切换到目标组织后在“额度与用量”按 `org.entitlements.purchase` 显示购买入口，在“账号设置”嵌入组织管理区；读取、授予和撤回仍按独立原子权限控制，组织资源不回退个人权益。 |
-| UI-12 | 部分实现 | DOC_CURRENT | TARGETED-REFUND; DESKTOP-39 | NOT_DEPLOYED | 当前 H3C 的用户和运营退款动作因 Provider capability 为 false 已隐藏；但 UI 尚未消费独立产品级开放状态，退款 Provider capability 变为 true 时可能重新展示，需 APT-056 改为默认无条件屏蔽且保留只读查询 |
+| UI-12 | 已实现 | AUDIT_HEAD | TARGETED-REFUND; REFUND-PRODUCT-GATE; DESKTOP-39 | NOT_DEPLOYED | 用户端不含新建普通退款入口；运营端显式同时消费 `normal_refund_creation_enabled` 与 `refund_supported`，Provider capability 单独变化不能解除产品屏蔽 |
 | ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT运行库实测为0个有效超级管理员且无待激活用户；离线安全引导代码已部署，但正式密码必须由用户控制的受控终端设置，尚未执行激活、并发兑换、Keycloak/数据库故障补偿和告警投递验收 |
 | ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 运行库实测为0条Break-glass操作和0条安全告警；首次初始化不得伪装成管理员失联事故，需先正常激活管理员，再验收事故授权、CRITICAL告警接收、5–60分钟到期与正常交接 |
 | ADM-03 | 部分实现 | DOC_CURRENT | GO-UNIT; WORKLOAD-IDENTITY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT已验证真实OIDC discovery/JWKS及三个独立Relay容器；内部HTTP仍共用一个静态令牌，缺逐工作负载投射身份、轮换/撤销和跨身份故障注入证据 |
@@ -474,7 +475,7 @@
 | NFR-14 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; IDENTITY-SMS | NOT_DEPLOYED | 启动工厂按配置注入 `aliyun-managed` 或 `http-generated`；核心挑战状态机没有厂商条件，历史挑战保存 Provider ID 与 Adapter 版本 |
 | NFR-15 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36; DESKTOP-39; RBAC-AUTH | NOT_DEPLOYED | OIDC 仅证明 issuer、subject 和会话；Account 是平台/组织业务授权事实源，三业务服务均不再读取 Realm Role 决定后台权限 |
 | NFR-16 | 已实现 | DOC_CURRENT | GO-UNIT; COMMERCE-MAPPING; PAYMENT-PROVIDER-BOUNDARY; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | Commerce Mapping、商品映射、订单/流水/证据及公开 API 使用供应商中立字段并冻结 Provider/Adapter 版本；厂商 SKU、签名、状态和协议仅存在于 Adapter |
-| NFR-17 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY; DESKTOP-39 | NOT_DEPLOYED | `/v1/payment-capabilities` 暴露版本化中立能力；商品渠道、用户/组织 UI、查询 Worker、终态、关单、退款、通知、账单和修复均按同一声明门禁，订单保存能力快照 |
+| NFR-17 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY; REFUND-PRODUCT-GATE; DESKTOP-39 | NOT_DEPLOYED | `/v1/payment-capabilities` 暴露版本化中立 Provider 能力；商品渠道、查询 Worker、终态、关单、通知、账单和修复按能力降级，普通退款新建另受独立产品门禁约束，订单保存 Provider 能力快照 |
 | NFR-18 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | 通用数据库、API 和三语 UI 只保存 Provider ID、Adapter 版本、上游引用及摘要；New API 专属请求头、日志接口和字段留在 Adapter，并可配置切换通用 OpenAI 兼容 Adapter |
 | NFR-19 | 已实现 | DOC_CURRENT | CONFIGURED-SYSTEM-PROBES | NOT_DEPLOYED | 聚合器只迭代配置的探针注册表；通用 HTTP、可配置 JSON 布尔断言和 Relay 指标解析按 Adapter 类型分派，新增或替换组件无需修改 Portal 主流程 |
 | NFR-20 | 部分实现 | DOC_CURRENT | CLIENT-SWITCH-READINESS; DESKTOP-CLIENT-SWITCH | NOT_DEPLOYED | 旧 `llmapi_hub` 运行时已删除，幂等迁移、非计费 readiness 和三层失败关闭门禁已有仓库实现；正式签名制品的安装原子性、回滚及生产联调仍待外部验收 |
@@ -556,7 +557,7 @@
 | CR-59 | ADM-07, ADM-17, ADM-22, ADM-36–ADM-42 | 补齐管理命令审批对象、生命周期、失效和执行契约 | 已实现 | 后台写命令已版本化分类；审批支持独立决定、过期、撤回、新申请重提、快照失效、实时授权复核、Outbox 授权与 Billing 幂等执行 |
 | CR-60 | NFR-26–NFR-48, ADM-09 | 建立性能、容量、灾备、保留、限流、隔离、Provider韧性、时钟、客户端兼容和审计导出的量化验收基线 | 部分实现 | 受控审计导出、量化策略和仓库门禁已闭环；仍需在生产等价环境取得性能/容量、分级RPO/RTO、加密备份与演练、分类保留、多维限流、租户隔离、Provider韧性、授时偏差及客户端兼容的真实运行证据 |
 | CR-61 | ACC-02, ACC-11, ACC-56–ACC-58, NFR-50 | 建立永久内部用户 ID 和独立可展示用户编码 | 部分实现 | ACC-56–ACC-58 与 NFR-50 已完成；ACC-11 的完整注销 Saga、资料清理和三年分类保留仍待实现 |
-| CR-62 | PAY-31, UI-12, ADM-20 | 普通退款暂不开放，保留既有实现但屏蔽所有新建入口 | 部分实现 | 退款领域模型、迁移、执行器、证据、查询和被动异常处置均保留；当前 H3C 已因 capability 不支持而隐藏入口，但仍需 APT-056 增加独立于 Provider capability 的产品级默认关闭门禁，同时拒绝用户/运营 UI 和服务端创建请求 |
+| CR-62 | PAY-31, UI-12, ADM-20 | 普通退款暂不开放，保留既有实现但屏蔽所有新建入口 | 已实现 | 独立产品门禁默认关闭并进入公开 capability，用户入口不存在、运营动作采用双门禁、服务端稳定拒绝新建请求；既有退款收敛、只读查询与被动异常处置保持可用 |
 | CR-63 | PAY-10, PAY-12, PAY-15–PAY-17, NFR-03, NFR-04, NFR-41 | 提供 Provider 中立授权与支付通知接口，新华三作为首个 Profile 且不增加额外能力字段 | 旧版云端接口已部署；本轮合同待部署联调 | 凭据和 Token 绑定 Provider、版本及商户，请求体不能自报身份。H3C 固定声明 `notification_supported=true`，最新版原生订单回调与主动查询已复用同一映射并先入 Inbox；异步履约查询中的 `status` 歧义也已修复。真实商城原生通知、重复/乱序和到账结果仍需部署后联合验收 |
 | CR-64 | UI-09, PAY-15–PAY-17, NFR-03, NFR-04 | Web 个人中心与公开支付回调统一迁移到账号独立 HTTPS 子域名和 `/api/v1` 命名空间 | 云端 UAT 已部署 | 桌面默认入口、Portal 根路径、Billing 路由、OpenAPI、Helm、Compose、Nginx 与文档已统一为 `https://account.pinvou.com/`；受信 TLS、HTTP `308`、Portal `200`、回调未授权 `401` 与受控 Token 签发 `200` 均已验证。旧官网个人中心代理与旧回调契约未保留兼容代码；真实商城回调仍由 CR-63 跟踪 |
 | CR-65 | TOK-48, UI-17–UI-19, NFR-51 | 平台模型入口从账号 Popover 迁移到设置和对话区，并隔离全局默认与当前会话选择 | 已实现 | APT-059–APT-063 已完成 Popover 收敛、类型化引用、设置默认项、对话当前会话选择及三语、异常和跨入口自动回归门禁 |
@@ -838,7 +839,7 @@
 | UI-09 | 桌面跳转 Web 个人中心 | 已实现 | 登录后的账号 Popover 通过专用命令打开固定 `https://account.pinvou.com/`，不接受任意外链且不携带 Token；旧官网路径未保留。 |
 | UI-10 | Web 个人充值入口 | 已实现 | Web 个人中心已提供个人权益充值入口；后续重构不得删除。 |
 | UI-11 | Web 组织购买入口 | 已实现 | 具有组织采购权限的管理员可在活动组织的“额度与用量”购买组织权益；组织设置在“账号设置”中展示，读取、授予与撤回入口分别按对应原子权限显示。 |
-| UI-12 | 退款入口屏蔽与支付能力降级展示 | 部分实现 | 当前 H3C 退款入口已按 capabilities 隐藏；缺少独立产品级默认关闭门禁，尚不能保证未来 Provider 声明退款能力后仍保持用户及运营新建入口屏蔽。 |
+| UI-12 | 退款入口屏蔽与支付能力降级展示 | 已实现 | 用户端无新建入口；运营动作同时要求独立产品门禁和 Provider 退款能力，所有交付配置默认关闭，未来 Provider 声明能力也不会自动展示。 |
 | UI-13 | 模型停止与结算状态反馈 | 已实现 | 三语用量页提供显式停止并同时展示 execution/settlement；不支持取消时明确后台继续和按可信实际用量结算，重开后读取同一请求真实状态。 |
 | UI-14 | 注销进度与阻断原因展示 | 已实现 | 桌面与 Web 个人中心三语展示持久阶段、状态、SLA、稳定阻断原因和用户动作；响应删除内部资源 ID 并自动刷新，未完成前不显示完成。 |
 | UI-15 | 未完成注册恢复状态展示 | 已实现 | 桌面优先在系统凭据库保存操作查询凭据，重启后按 `next_retry_at` 轮询，区分 Identity、Account、钱包、修复与补偿状态并阻止重复注册。 |
@@ -868,7 +869,7 @@
 | ADM-17 | 人工积分调整 | 已实现 | 调整目标、钱包、金额和版本被冻结；独立审批后由 Billing 以稳定执行键写一次平衡账本，直接批准路径失败关闭。 |
 | ADM-18 | Hold 运营 | 已实现 | 可查询 Hold 的价格/请求/用量快照、组成与成员授予分配、当前租约和不可变租约历史；异常释放限 REVIEW 或已过期 ACTIVE，要求原因和幂等键并保存操作证据。 |
 | ADM-19 | 支付订单运营 | 已实现 | 支持订单查询、同步、受审计修复和明细查看；明细包含付款人、受益方、多笔支付流水、不可变证据及订单派生摘要。 |
-| ADM-20 | 退款只读与异常运营 | 部分实现 | 后台已可查询普通/强制退款、证据和目标订单明细；当前 H3C 发起入口已隐藏，但仍需独立产品级门禁禁止任何 Provider 下的新建普通退款，同时保留既有请求收敛和被动异常处置。 |
+| ADM-20 | 退款只读与异常运营 | 已实现 | 后台保留普通/强制退款、证据和目标订单明细查询；独立产品门禁在 UI 与 API 双层阻断新建普通退款，不影响既有请求收敛和被动异常处置。 |
 | ADM-21 | Billing 对账管理 | 已实现 | 三语运营页可运行、导入、重跑并查看四方对账，认领或分配差异责任人，登记修复动作及复核结论；不支持账单的 Provider 继续按 capabilities 明确降级。 |
 | ADM-22 | Billing 修复执行 | 已实现 | 当前修复动作均绑定稳定命令类型、异常目标、原因、脱敏证据、快照和幂等键；财务事实修复进入审批，证据收敛修复只审计。 |
 | ADM-23 | 模型协议定义管理 | 已实现 | 后台提供独立版本化协议定义管理。 |

@@ -16,7 +16,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var ErrPaymentProvider = errors.New("payment provider request failed")
+var (
+	ErrPaymentProvider              = errors.New("payment provider request failed")
+	ErrNormalRefundCreationDisabled = errors.New("normal refund creation is disabled")
+)
 
 type Refund struct {
 	ID                   uuid.UUID `json:"refund_id"`
@@ -182,6 +185,9 @@ func maskClosedPaymentInstructions(order *PaymentOrder) {
 }
 
 func (p *PaymentCoordinator) CreateRefund(ctx context.Context, orderID, requesterID, transactionID, packageID uuid.UUID, idempotencyKey, reason string) (Refund, bool, error) {
+	if !p.NormalRefundCreationEnabled() {
+		return Refund{}, false, ErrNormalRefundCreationDisabled
+	}
 	if !p.Capabilities().RefundSupported {
 		return Refund{}, false, payment.ErrUnsupported
 	}

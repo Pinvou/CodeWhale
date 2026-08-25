@@ -152,6 +152,7 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-verification-keys-json } }
             - { name: BILLING_PAYMENT_PROVIDER, value: {{ $root.Values.billing.paymentProvider | quote }} }
             - { name: BILLING_ALLOW_TENTATIVE_PRICES, value: {{ $root.Values.billing.allowTentativePrices | quote }} }
+            - { name: BILLING_NORMAL_REFUND_CREATION_ENABLED, value: {{ $root.Values.billing.normalRefundCreationEnabled | quote }} }
             - { name: H3C_MALL_BASE_URL, value: {{ $root.Values.account.commerceAdapterBaseUrl | quote }} }
             {{- range $item := list (dict "env" "H3C_MALL_APP_KEY" "key" "h3c-mall-app-key") (dict "env" "H3C_MALL_APP_SECRET" "key" "h3c-mall-app-secret") }}
             - name: {{ $item.env }}

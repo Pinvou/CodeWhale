@@ -471,7 +471,7 @@ components:
     PaymentCapabilities:
       type: object
       additionalProperties: false
-      required: [provider_id, version, channels, order_query_supported, order_history_retention_seconds, minimum_query_interval_seconds, maximum_payable_window_seconds, maximum_late_confirmation_seconds, authoritative_unpaid_terminal, refund_supported, refund_idempotency_supported, close_supported, notification_supported, bill_supported, bill_file_import_supported, reconciliation_mode, formal_collection_admitted, manual_repair_supported, commerce_customer_required, reuse_pending_order_after_expiry, review_late_payment, test_only]
+      required: [provider_id, version, channels, order_query_supported, order_history_retention_seconds, minimum_query_interval_seconds, maximum_payable_window_seconds, maximum_late_confirmation_seconds, authoritative_unpaid_terminal, refund_supported, refund_idempotency_supported, normal_refund_creation_enabled, close_supported, notification_supported, bill_supported, bill_file_import_supported, reconciliation_mode, formal_collection_admitted, manual_repair_supported, commerce_customer_required, reuse_pending_order_after_expiry, review_late_payment, test_only]
       properties:
         provider_id: { type: string, minLength: 1 }
         version: { type: string, minLength: 1 }
@@ -484,6 +484,9 @@ components:
         authoritative_unpaid_terminal: { type: boolean }
         refund_supported: { type: boolean }
         refund_idempotency_supported: { type: boolean }
+        normal_refund_creation_enabled:
+          type: boolean
+          description: Independent product gate for creating new normal refunds; defaults to false and never inherits provider capability.
         close_supported: { type: boolean }
         notification_supported: { type: boolean }
         bill_supported: { type: boolean }

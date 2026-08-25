@@ -74,15 +74,16 @@ type PaymentOrderHistoryItem struct {
 }
 
 type PaymentCoordinator struct {
-	repository           *PostgresRepository
-	provider             PaymentProvider
-	secrets              map[string][]byte
-	merchantID           string
-	callbackURL          string
-	now                  func() time.Time
-	productSKUs          map[string]ExternalProduct
-	allowTentativePrices bool
-	breaker              *resilience.Breaker
+	repository                  *PostgresRepository
+	provider                    PaymentProvider
+	secrets                     map[string][]byte
+	merchantID                  string
+	callbackURL                 string
+	now                         func() time.Time
+	productSKUs                 map[string]ExternalProduct
+	allowTentativePrices        bool
+	normalRefundCreationEnabled bool
+	breaker                     *resilience.Breaker
 }
 
 type ProviderOrder = payment.ProviderOrder
@@ -102,6 +103,11 @@ type ExternalProduct struct {
 type ProviderRefund = payment.Refund
 type ProviderBillEntry = payment.BillEntry
 type PaymentCapabilities = payment.Capabilities
+
+type ProductPaymentCapabilities struct {
+	PaymentCapabilities
+	NormalRefundCreationEnabled bool `json:"normal_refund_creation_enabled"`
+}
 
 // PaymentPolicy describes provider-specific behavior that the generic billing
 // workflow must honor. Providers opt in explicitly; future providers keep the
@@ -172,6 +178,11 @@ func (p *PaymentCoordinator) ConfigureTrustedNotifications(merchantID string) er
 
 func (p *PaymentCoordinator) AllowTentativePrices(allowed bool) *PaymentCoordinator {
 	p.allowTentativePrices = allowed
+	return p
+}
+
+func (p *PaymentCoordinator) AllowNormalRefundCreation(allowed bool) *PaymentCoordinator {
+	p.normalRefundCreationEnabled = allowed
 	return p
 }
 
@@ -248,6 +259,17 @@ func (p *PaymentCoordinator) Capabilities() PaymentCapabilities {
 	}
 	capabilities.FormalCollectionAdmitted = capabilities.FormalCollectionEligible(int64(latePaymentReviewGrace.Seconds()))
 	return capabilities
+}
+
+func (p *PaymentCoordinator) ProductCapabilities() ProductPaymentCapabilities {
+	return ProductPaymentCapabilities{
+		PaymentCapabilities:         p.Capabilities(),
+		NormalRefundCreationEnabled: p.normalRefundCreationEnabled,
+	}
+}
+
+func (p *PaymentCoordinator) NormalRefundCreationEnabled() bool {
+	return p.normalRefundCreationEnabled
 }
 
 func (p *PaymentCoordinator) Policy() PaymentPolicy {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -189,6 +190,11 @@ func paymentCoordinator(ctx context.Context, repository *billing.PostgresReposit
 		return nil, err
 	}
 	coordinator.AllowTentativePrices(allowTestOnly)
+	normalRefundCreationEnabled, err := optionalBooleanEnvironment("BILLING_NORMAL_REFUND_CREATION_ENABLED", false)
+	if err != nil {
+		return nil, err
+	}
+	coordinator.AllowNormalRefundCreation(normalRefundCreationEnabled)
 	if capabilities.NotificationSupported && capabilities.ProviderID == "h3c_mall" {
 		err = coordinator.ConfigureTrustedNotifications(os.Getenv("PAYMENT_MERCHANT_ID"))
 	} else if capabilities.NotificationSupported {
@@ -197,6 +203,18 @@ func paymentCoordinator(ctx context.Context, repository *billing.PostgresReposit
 		})
 	}
 	return coordinator, err
+}
+
+func optionalBooleanEnvironment(name string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean: %w", name, err)
+	}
+	return value, nil
 }
 
 func paymentCallbackConfiguration(capabilities payment.Capabilities) (*paymentcallback.Authenticator, *paymentcallback.Profiles, error) {
