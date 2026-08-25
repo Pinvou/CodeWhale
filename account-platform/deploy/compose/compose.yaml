@@ -87,6 +87,7 @@ services:
       KC_HOSTNAME: http://127.0.0.1:18080
       KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       PINVOU_ACCOUNT_AUTH_URL: http://account-service:8080
+      PINVOU_OIDC_ISSUER: http://127.0.0.1:18080/realms/pinvou
       PINVOU_IDENTITY_AUTH_URL: http://identity-service:8080
       PINVOU_SMS_VERIFY_URL: http://account-service:8080/internal/v1/auth/sms/verify
       PINVOU_INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:?set INTERNAL_SERVICE_TOKEN}

@@ -34,6 +34,7 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
     private static final Pattern CODE = Pattern.compile("^[0-9]{6}$");
     private static final Pattern SUBJECT = Pattern.compile("^[A-Za-z0-9._:-]{1,128}$");
     private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+    private static final PinvouAuthClient CLIENT = new PinvouAuthClient();
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
@@ -67,6 +68,16 @@ public final class MobileDirectGrantAuthenticator implements Authenticator {
         }
 
         if (!valid) {
+            fail(context, AuthenticationFlowError.INVALID_CREDENTIALS);
+            return;
+        }
+        try {
+            if (!CLIENT.authorizeLogin(user.getId())) {
+                fail(context, AuthenticationFlowError.INVALID_CREDENTIALS);
+                return;
+            }
+        } catch (PinvouAuthClient.AuthClientException error) {
+            LOG.warnf("Login authorization failed safely: %s", error.code());
             fail(context, AuthenticationFlowError.INVALID_CREDENTIALS);
             return;
         }

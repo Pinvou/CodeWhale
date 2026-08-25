@@ -276,7 +276,7 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务
 
 Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Code + PKCE 重新认证；Identity Client 必须接受 `prompt=login` 与 `max_age=0`，回调地址固定为 `https://account.pinvou.com/auth/callback`。桌面端只保留未登录忘记密码，不承载资料修改。
 
-Web 首次登录同样使用该 Authorization Code + PKCE 流程，但登录、短信登录与手机注册表单由 Keycloak 的 `pinvou` 主题和 `pinvou-browser-authenticator` 承载。Keycloak 镜像必须由 `deploy/keycloak/Dockerfile` 构建并包含 Authenticator JAR 与主题，不能把 Helm 的 `images.keycloak` 指向未包含扩展的官方裸镜像。运行时必须配置 `PINVOU_ACCOUNT_AUTH_URL`、`PINVOU_IDENTITY_AUTH_URL`、`PINVOU_SMS_VERIFY_URL` 及既有工作负载身份；缺失时认证失败关闭。发布后需分别验证密码登录、短信滑块与验证码登录、注册滑块与验证码注册、Cookie SSO、三语和手机号/来源/设备限流。
+Web 首次登录同样使用该 Authorization Code + PKCE 流程，但登录、短信登录与手机注册表单由 Keycloak 的 `pinvou` 主题和 `pinvou-browser-authenticator` 承载。Keycloak 镜像必须由 `deploy/keycloak/Dockerfile` 构建并包含 Authenticator JAR 与主题，不能把 Helm 的 `images.keycloak` 指向未包含扩展的官方裸镜像。运行时必须配置 `PINVOU_ACCOUNT_AUTH_URL`、与 Account `OIDC_ISSUER` 完全一致的 `PINVOU_OIDC_ISSUER`、`PINVOU_IDENTITY_AUTH_URL`、`PINVOU_SMS_VERIFY_URL` 及既有工作负载身份；Account 的工作负载规则只向 Keycloak 开放 `POST /internal/v1/auth/sms/verify` 和 `POST /internal/v1/authorization/check`，缺失或超出路径时认证失败关闭。发布后需分别验证密码登录、手机号密码登录、短信滑块与验证码登录、注册滑块与验证码注册、三语和手机号/来源/设备限流；再撤销 `PERSONAL_USER` 的测试副本、停用测试主体并阻断 Account，逐项确认密码及短信路径都不会签发新客户端/Portal 会话。既有 Cookie SSO 不替代凭据路径的 ID-19 检查，其撤权收敛仍按会话撤销和授权版本失效策略执行。
 
 ### 6.1 死信检查与受审计重放
 

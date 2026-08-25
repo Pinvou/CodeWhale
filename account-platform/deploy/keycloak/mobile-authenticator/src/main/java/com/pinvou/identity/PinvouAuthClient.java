@@ -47,6 +47,19 @@ final class PinvouAuthClient {
         return subject;
     }
 
+    boolean authorizeLogin(String subject) throws AuthClientException {
+        String issuer = requiredValue("PINVOU_OIDC_ISSUER");
+        Response result = post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/internal/v1/authorization/check"), Map.of(
+            "issuer", issuer,
+            "subject", subject,
+            "permission", "personal.session.login"
+        ), Map.of("Authorization", "Bearer " + workloadToken()));
+        return Boolean.TRUE.equals(result.body().get("allowed"))
+            && "personal.session.login".equals(string(result.body().get("permission")))
+            && "PERSONAL".equals(string(result.body().get("permission_scope")))
+            && !string(result.body().get("user_id")).isBlank();
+    }
+
     Map<String, Object> register(Map<String, Object> body, String source, String device) throws AuthClientException {
         return post(publicURL("PINVOU_ACCOUNT_AUTH_URL", "/v1/auth/register"), body,
             Map.of("X-Pinvou-Client-Source", source, "X-Device-ID", device)).body();
@@ -79,9 +92,13 @@ final class PinvouAuthClient {
     }
 
     private static URI requiredURL(String variable) throws AuthClientException {
+        return URI.create(requiredValue(variable));
+    }
+
+    private static String requiredValue(String variable) throws AuthClientException {
         String configured = System.getenv(variable);
         if (configured == null || configured.isBlank()) throw new AuthClientException(503, "AUTH_SERVICE_UNAVAILABLE");
-        return URI.create(configured.trim());
+        return configured.trim();
     }
 
     private static String workloadToken() throws AuthClientException {

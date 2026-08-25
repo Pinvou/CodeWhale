@@ -187,7 +187,8 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         succeed(context, user);
     }
 
-    private void authenticatePassword(AuthenticationFlowContext context, MultivaluedMap<String, String> form) {
+    private void authenticatePassword(AuthenticationFlowContext context, MultivaluedMap<String, String> form)
+        throws PinvouAuthClient.AuthClientException {
         String login = trim(form.getFirst("username"));
         String password = form.getFirst("password");
         UserModel user = findUser(context, login);
@@ -210,7 +211,12 @@ public final class PinvouBrowserAuthenticator implements Authenticator {
         }
     }
 
-    private void succeed(AuthenticationFlowContext context, UserModel user) {
+    private void succeed(AuthenticationFlowContext context, UserModel user) throws PinvouAuthClient.AuthClientException {
+        if (!CLIENT.authorizeLogin(user.getId())) {
+            clearState(context);
+            credentialFailure(context, "password");
+            return;
+        }
         clearState(context);
         context.setUser(user);
         context.getEvent().user(user);
