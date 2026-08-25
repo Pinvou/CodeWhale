@@ -37,7 +37,11 @@ const (
 	PermissionPersonalProfileRead                = "personal.profile.read"
 	PermissionPersonalProfileUpdate              = "personal.profile.update"
 	PermissionPersonalSecurityManage             = "personal.security.manage"
+	PermissionPersonalContextSwitch              = "personal.context.switch"
+	PermissionPersonalAccountClosureRequest      = "personal.account.close.request"
 	PermissionPersonalAccountClosureRead         = "personal.account.close.read"
+	PermissionPersonalInvitationsRead            = "personal.invitations.read"
+	PermissionPersonalInvitationsAccept          = "personal.invitations.accept"
 
 	PermissionOrganizationProfileRead   = "org.profile.read"
 	PermissionOrganizationUnitsRead     = "org.units.read"
