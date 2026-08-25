@@ -60,6 +60,10 @@ pub(crate) fn external_tokio_command(executable: &Path) -> tokio::process::Comma
 }
 
 /// Capture a subprocess without pipe deadlocks and enforce a wall-clock timeout.
+///
+/// Note: if captured stdout/stderr exceeds `MAX_CAPTURE_BYTES`, the whole process
+/// tree is terminated regardless of the kill-tree flag — a runaway writer is never
+/// allowed to outlive the caller.
 pub(crate) fn output_with_timeout(
     mut command: Command,
     timeout: Duration,

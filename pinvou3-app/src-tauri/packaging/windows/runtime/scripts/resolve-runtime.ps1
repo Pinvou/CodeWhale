@@ -770,14 +770,14 @@ function Test-PythonDependencyLock {
   }
   $canonicalLines = @("target:$target")
   foreach ($wheel in @($Spec.wheels)) {
+    # 文件名字符集与 Rust 侧 validate_wheel 一致（仅字母数字与 `._+-`）：
+    # 既挡路径分隔符，也杜绝 canonical lock 拼接歧义（`:`/换行）。
     if (
       $wheel.filename -isnot [string] -or
       $wheel.url -isnot [string] -or
       $wheel.sha256 -isnot [string] -or
       $wheel.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-      $wheel.filename.Contains('/') -or
-      $wheel.filename.Contains('\') -or
-      -not $wheel.filename.EndsWith('.whl', [System.StringComparison]::Ordinal) -or
+      $wheel.filename -cnotmatch '^[A-Za-z0-9._+-]+\.whl$' -or
       -not (Test-PythonWheelTarget -Filename $wheel.filename -Target $target)
     ) {
       return $false
@@ -810,6 +810,14 @@ function Test-PythonDependencyTargets {
     $manifestPath = $manifestItem.FullName
     $tool = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($null -eq $tool.windows_python_dependencies) {
+      # 声明了 pip 依赖的内置 MCP 必须随附 Windows 可验证依赖锁：运行期
+      # ensure_for_builtin_manifest 对无锁条目 fail-closed，构建期在此同步拦截，
+      # 避免漏配锁的 manifest 被打包后在用户机器上才报错。
+      $pipDeps = @($tool.pip_dependencies | Where-Object { $null -ne $_ })
+      if ($pipDeps.Count -gt 0) {
+        Write-Warning "Python MCP declares pip_dependencies without a windows_python_dependencies lock: $manifestPath"
+        return $false
+      }
       continue
     }
     $spec = $tool.windows_python_dependencies

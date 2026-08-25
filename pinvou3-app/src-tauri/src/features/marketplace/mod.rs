@@ -475,30 +475,34 @@ impl<S: CredentialStore> MarketplaceManager<S> {
     /// Windows 后台迁移：旧版本已登记的 Python MCP 不会再次经过 install，需补装
     /// 锁定依赖并把旧的直启 server.py 条目换成隔离 bootstrap。调用方必须把本同步
     /// I/O/联网函数放进 blocking 线程；每次启动首帧后重试，不依赖 bundle 版本闸门。
-    pub fn repair_installed_builtin_python_dependencies(&self) -> Vec<String> {
+    /// 返回（各工具的失败列表, 是否有工具的 mcp.json 条目被实际改写）——后者供
+    /// 调用方决定是否递增 mcp 配置修订号，避免无变化时触发无谓的 engine 重建。
+    pub fn repair_installed_builtin_python_dependencies(&self) -> (Vec<String>, bool) {
         if !crate::platform::capabilities::is_windows() {
-            return Vec::new();
+            return (Vec::new(), false);
         }
         let mut errors = Vec::new();
+        let mut any_changed = false;
         for tool_id in self.installed_ids() {
-            if let Err(error) = self.repair_installed_builtin_python_dependency_with(
+            match self.repair_installed_builtin_python_dependency_with(
                 &tool_id,
                 python_dependencies::ensure_for_builtin_manifest,
             ) {
-                errors.push(format!("{tool_id}: {error}"));
+                Ok(changed) => any_changed |= changed,
+                Err(error) => errors.push(format!("{tool_id}: {error}")),
             }
         }
-        errors
+        (errors, any_changed)
     }
 
     /// 单工具修复的生产事务边界。依赖获取作为窄接口传入，使并发测试可以用本地
     /// fixture 精确停在“下载中”，而锁、安装态复核、mcp.json 与 BundleStore 提交
-    /// 全部继续走真实生产路径。
+    /// 全部继续走真实生产路径。返回该工具的 mcp.json 条目是否被实际改写。
     fn repair_installed_builtin_python_dependency_with<F>(
         &self,
         tool_id: &str,
         ensure_dependencies: F,
-    ) -> Result<(), String>
+    ) -> Result<bool, String>
     where
         F: FnOnce(
             &ToolManifest,
@@ -510,45 +514,45 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !self.installed_ids().contains(&tool_id.to_string()) {
-            return Ok(());
+            return Ok(false);
         }
         let Some(manifest) = mcp_catalog::embedded_manifest(tool_id)? else {
-            return Ok(());
+            return Ok(false);
         };
         if manifest.windows_python_dependencies.is_none() {
-            return Ok(());
+            return Ok(false);
         }
 
         let fingerprint = (|| -> Result<String, String> {
             mcp_catalog::ensure_package_released(tool_id)?;
             skill_marketplace::dir_fingerprint(&mcp_catalog::package_mcp_dir(tool_id))
         })();
-        let result = (|| -> Result<store::AssetRef, String> {
+        let result = (|| -> Result<(store::AssetRef, bool), String> {
             fingerprint.as_ref().map_err(Clone::clone)?;
             let dependencies = ensure_dependencies(&manifest)?
                 .ok_or_else(|| format!("工具 '{tool_id}' 缺少 Python 依赖结果"))?;
             if !self.installed_ids().contains(&tool_id.to_string()) {
                 return Err("工具已在依赖下载期间卸载，跳过迁移提交".to_string());
             }
-            self.repair_python_dependency_entry(
+            let changed = self.repair_python_dependency_entry(
                 &manifest,
                 &mcp_catalog::package_mcp_dir(tool_id),
                 &dependencies,
             )?;
-            Ok(dependencies.asset)
+            Ok((dependencies.asset, changed))
         })();
         if !self.installed_ids().contains(&tool_id.to_string()) {
-            return Ok(());
+            return Ok(false);
         }
         let store_result = record_python_dependency_repair(
             &store::BundleStore::new(),
             &manifest,
-            result.as_ref().ok().cloned(),
+            result.as_ref().ok().map(|(asset, _)| asset.clone()),
             fingerprint.ok(),
             result.as_ref().err().map(String::as_str),
         );
         match (result, store_result) {
-            (Ok(_), Ok(())) => Ok(()),
+            (Ok((_, changed)), Ok(())) => Ok(changed),
             (Err(error), Ok(())) => Err(error),
             (Ok(_), Err(store_error)) => Err(format!("更新依赖登记失败: {store_error}")),
             (Err(error), Err(store_error)) => {

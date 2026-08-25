@@ -3,6 +3,11 @@
 //! 基础 Python 仍随安装包提供；体积较大的第三方包由受信任的内嵌 manifest
 //! 锁定为 wheel + SHA-256，在用户目录按需下载。wheel 缓存按内容 hash 共享，
 //! site-packages 按依赖锁 hash 隔离，因此应用升级不会覆盖已安装依赖。
+//!
+//! GC 策略（与 native_installer 一致，留待后续 PR）：崩溃残留的
+//! `.{lock_id}.installing-{pid}` 暂存目录、`.{sha}.{pid}.part` 部分下载、以及
+//! 依赖锁升级后遗留的旧 `python-packages/<lock_id>` 目录暂无回收路径。因目录
+//! 按内容寻址且锁数量极少，滞留量有界（数十 MB 级），属有意取舍而非遗漏。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -268,11 +273,15 @@ fn validate_wheel_target(filename: &str, target: &str) -> Result<(), String> {
 }
 
 fn validate_wheel(wheel: &PythonWheel) -> Result<(), String> {
-    if wheel.filename.contains('/')
-        || wheel.filename.contains('\\')
-        || !wheel.filename.ends_with(".whl")
-        || !is_sha256(&wheel.sha256)
-    {
+    // 文件名字符集收紧到 wheel 文件名实际可用集合（PEP 427 转义后仅含字母、
+    // 数字与 `._+-`）：既挡路径分隔符，也杜绝 canonical lock（`filename:sha256`
+    // 按行拼接）因 filename 含 `:`/换行而产生拼接歧义。
+    let valid_filename = wheel.filename.ends_with(".whl")
+        && wheel
+            .filename
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'));
+    if !valid_filename || !is_sha256(&wheel.sha256) {
         return Err(format!("无效的 Python wheel 声明: {}", wheel.filename));
     }
     let url = reqwest::Url::parse(&wheel.url)
@@ -556,6 +565,36 @@ mod tests {
     }
 
     #[test]
+    fn wheel_filename_charset_blocks_canonical_lock_ambiguity() {
+        // canonical lock 以 `filename:sha256` 按行拼接；filename 若允许 `:` 或
+        // 换行，可构造两个不同 wheel 列表拼出相同 canonical 串（共享 lock_id
+        // 安装目录）。字符集白名单同时封死路径分隔符与拼接歧义。
+        for bad in [
+            "demo:1.0-py3-none-any.whl",
+            "demo\n-1.0-py3-none-any.whl",
+            "demo/evil-1.0-py3-none-any.whl",
+            "demo\\evil-1.0-py3-none-any.whl",
+            "../demo-1.0-py3-none-any.whl",
+        ] {
+            let wheel = PythonWheel {
+                filename: bad.into(),
+                url: "https://files.pythonhosted.org/packages/demo.whl".into(),
+                sha256: "a".repeat(64),
+            };
+            assert!(
+                validate_wheel(&wheel).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+        let good = PythonWheel {
+            filename: "demo-1.0+local-py3-none-any.whl".into(),
+            url: "https://files.pythonhosted.org/packages/demo.whl".into(),
+            sha256: "a".repeat(64),
+        };
+        assert!(validate_wheel(&good).is_ok());
+    }
+
+    #[test]
     fn cp314_target_rejects_cp313_non_stable_wheel() {
         let error =
             validate_wheel_target("lxml-6.1.2-cp313-cp313-win_amd64.whl", "cp314-win_amd64")
@@ -702,6 +741,14 @@ mod tests {
         let mut checked = 0;
         for package in super::super::mcp_catalog::MCP_PACKAGES {
             let manifest: ToolManifest = serde_json::from_str(package.manifest_json).unwrap();
+            // 与运行期 ensure_for_builtin_manifest 的 fail-closed 对齐：声明了
+            // pip 依赖的内置 MCP 必须随附 Windows 依赖锁，防漏配在构建期被拦截。
+            assert!(
+                manifest.pip_dependencies.is_empty()
+                    || manifest.windows_python_dependencies.is_some(),
+                "{} 声明了 pip_dependencies 但缺少 windows_python_dependencies 锁",
+                manifest.id
+            );
             if manifest.windows_python_dependencies.is_none() {
                 continue;
             }

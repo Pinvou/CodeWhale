@@ -157,7 +157,7 @@ MCP server 的启动真相源。本地 stdio server 的必填与常用字段：
   Python ABI 兼容的依赖并移除该声明。只有内置商店工具的安装管线才会按产品
   清单自动安装；Windows 内置工具还必须由产品清单提供
   `windows_python_dependencies`（目标 Python ABI、依赖锁 hash、import 探针及逐个
-  wheel 的 Python.org HTTPS 地址与 SHA-256）；锁 hash 同时绑定 target 与有序 wheel
+  wheel 的 PyPI 官方（files.pythonhosted.org）HTTPS 地址与 SHA-256）；锁 hash 同时绑定 target 与有序 wheel
   列表，非通用 wheel 的 PEP 425 标签必须与 target 兼容。安装时下载到用户目录并先
   校验、原子落盘、实际导入成功，之后才注册 MCP。存量迁移在每次启动首帧后后台
   重试，不在同步启动解包链路联网。上传包声明该字段不会触发自动下载。

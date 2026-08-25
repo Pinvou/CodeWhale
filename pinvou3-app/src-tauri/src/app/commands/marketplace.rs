@@ -11,20 +11,23 @@ pub fn list_marketplace_tools(
 }
 
 /// React 首帧呈现后触发：在 blocking 线程中修复存量内置 Python MCP 依赖。
-/// 每次启动都会调用，离线/临时失败可在后续启动重试；成功写入 mcp.json 后递增
-/// 配置修订号，在线会话在下一轮安全重建 engine 并重新发现 MCP 工具。
+/// 每次启动都会调用，离线/临时失败可在后续启动重试；仅在实际改写 mcp.json 后
+/// 递增配置修订号（无变化不 bump，避免每次启动都无谓重建在线会话的 engine），
+/// 重建发生在下一轮，安全重新发现 MCP 工具。
 #[tauri::command]
 pub async fn repair_python_dependencies_after_first_frame(
     pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
 ) -> Result<Vec<String>, String> {
-    let errors = tokio::task::spawn_blocking(|| {
+    let (errors, mcp_config_changed) = tokio::task::spawn_blocking(|| {
         crate::features::marketplace::MarketplaceManager::new()
             .repair_installed_builtin_python_dependencies()
     })
     .await
     .map_err(|error| format!("Python MCP 依赖后台修复任务失败: {error}"))?;
-    pool.mark_mcp_config_updated();
-    pool.refresh_disallowed_tools().await;
+    if mcp_config_changed {
+        pool.mark_mcp_config_updated();
+        pool.refresh_disallowed_tools().await;
+    }
     for error in &errors {
         log::warn!("[marketplace] 已安装 Python MCP 依赖后台修复失败: {error}");
     }

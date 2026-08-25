@@ -79,13 +79,13 @@ mod dependency_launch_tests {
                     sha256: "lock".into(),
                 },
             };
-            MarketplaceManager::new()
+            assert!(MarketplaceManager::new()
                 .repair_python_dependency_entry(
                     &manifest,
                     &root.join("bundles/gongwen/mcp"),
                     &dependencies,
                 )
-                .unwrap();
+                .unwrap());
             let repaired: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(mcp_path).unwrap()).unwrap();
             let entry = &repaired["servers"]["gongwen"];
@@ -101,6 +101,101 @@ mod dependency_launch_tests {
         }
         let _ = std::fs::remove_dir_all(root);
         result
+    }
+
+    /// 与 upgrade_repair_preserves_existing_env_fields 相同的 PINVOU3_HOME 隔离
+    /// 脚手架，供修复短路/防卫用例复用。
+    fn with_repair_test_home<F: FnOnce(&std::path::Path) -> R, R>(f: F) -> R {
+        let _guard = crate::bridge::paths::tests::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_home = std::env::var_os("PINVOU3_HOME");
+        let root =
+            std::env::temp_dir().join(format!("pinvou-python-mcp-repair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("PINVOU3_HOME", &root);
+        let result = f(&root);
+        match old_home {
+            Some(value) => std::env::set_var("PINVOU3_HOME", value),
+            None => std::env::remove_var("PINVOU3_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        result
+    }
+
+    fn gongwen_repair_fixture(
+        root: &std::path::Path,
+    ) -> (ToolManifest, InstalledPythonDependencies) {
+        let manifest: ToolManifest = serde_json::from_str(include_str!(
+            "../../../../resources/mcp-servers/gongwen/manifest.json"
+        ))
+        .unwrap();
+        let dependencies = InstalledPythonDependencies {
+            dir: root.join("runtimes/python-packages/lock"),
+            asset: super::super::store::AssetRef {
+                kind: "python-packages".into(),
+                name: "cp313-win_amd64".into(),
+                version: "lock".into(),
+                sha256: "lock".into(),
+            },
+        };
+        (manifest, dependencies)
+    }
+
+    #[test]
+    fn upgrade_repair_skips_write_when_entry_already_bootstrapped() {
+        with_repair_test_home(|root| {
+            let mcp_path = paths::mcp_config_path();
+            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &mcp_path,
+                r#"{"servers":{"gongwen":{"command":"python","args":["old.py"],"env":{"KEEP":"value"}}}}"#,
+            )
+            .unwrap();
+            let (manifest, dependencies) = gongwen_repair_fixture(root);
+            let server_dir = root.join("bundles/gongwen/mcp");
+            let manager = MarketplaceManager::new();
+
+            // 首次：旧直启条目被改写为隔离 bootstrap。
+            assert!(manager
+                .repair_python_dependency_entry(&manifest, &server_dir, &dependencies)
+                .unwrap());
+            // 二次：条目已是目标形态，报告无变化且不再写盘。
+            assert!(!manager
+                .repair_python_dependency_entry(&manifest, &server_dir, &dependencies)
+                .unwrap());
+            let repaired: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(mcp_path).unwrap()).unwrap();
+            assert_eq!(repaired["servers"]["gongwen"]["env"]["KEEP"], "value");
+        });
+    }
+
+    #[test]
+    fn upgrade_repair_rejects_remote_url_entry() {
+        with_repair_test_home(|root| {
+            let mcp_path = paths::mcp_config_path();
+            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &mcp_path,
+                r#"{"servers":{"gongwen":{"url":"https://example.invalid/mcp"}}}"#,
+            )
+            .unwrap();
+            let (manifest, dependencies) = gongwen_repair_fixture(root);
+
+            let error = MarketplaceManager::new()
+                .repair_python_dependency_entry(
+                    &manifest,
+                    &root.join("bundles/gongwen/mcp"),
+                    &dependencies,
+                )
+                .unwrap_err();
+
+            assert!(error.contains("远程 url 配置"), "{error}");
+            // 条目保持原样，未被覆写 command/args。
+            let entry: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(mcp_path).unwrap()).unwrap();
+            assert!(entry["servers"]["gongwen"].get("command").is_none());
+        });
     }
 
     #[test]
@@ -517,12 +612,14 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
 
     /// 升级迁移：为已安装的内置 Python MCP 刷新依赖 bootstrap。只改 command/args，
     /// 保留既有 env/凭据占位及未知字段，避免用空 user_config 重建条目时丢用户配置。
+    /// 返回是否实际改写了 mcp.json：条目已是目标形态时不写盘（Ok(false)），避免每次
+    /// 启动都无谓改写配置并触发 engine 重建。
     pub(super) fn repair_python_dependency_entry(
         &self,
         manifest: &ToolManifest,
         server_dir: &Path,
         dependencies: &InstalledPythonDependencies,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let _guard = mcp_json_lock();
         let mcp_path = paths::mcp_config_path();
         let content =
@@ -536,6 +633,15 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
             .and_then(|entry| entry.as_object_mut())
             .ok_or_else(|| format!("mcp.json 缺少已安装工具 '{}' 的本地条目", manifest.id))?;
 
+        // 远程 url 条目不是本地 bootstrap 的修复对象：引擎在 url 存在时优先走 HTTP
+        // transport，覆写 command/args 不会生效。明确报错以避免“修复成功”假阳性。
+        if entry.get("url").is_some() {
+            return Err(format!(
+                "mcp.json 条目 '{}' 为远程 url 配置，不适用本地 Python bootstrap 修复",
+                manifest.id
+            ));
+        }
+
         let server_args = manifest
             .args
             .iter()
@@ -547,16 +653,16 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
                 }
             })
             .collect();
-        entry.insert(
-            "command".to_string(),
-            serde_json::Value::String(paths::python_command()),
-        );
-        entry.insert(
-            "args".to_string(),
-            serde_json::to_value(python_launch_args(&dependencies.dir, server_args))
-                .map_err(|e| format!("序列化 Python 启动参数失败: {e}"))?,
-        );
-        write_json_pretty(&mcp_path, &mcp)
+        let new_command = serde_json::Value::String(paths::python_command());
+        let new_args = serde_json::to_value(python_launch_args(&dependencies.dir, server_args))
+            .map_err(|e| format!("序列化 Python 启动参数失败: {e}"))?;
+        if entry.get("command") == Some(&new_command) && entry.get("args") == Some(&new_args) {
+            return Ok(false);
+        }
+        entry.insert("command".to_string(), new_command);
+        entry.insert("args".to_string(), new_args);
+        write_json_pretty(&mcp_path, &mcp)?;
+        Ok(true)
     }
 
     pub(super) fn remove_from_mcp_json(&self, tool_id: &str) -> Result<(), String> {
