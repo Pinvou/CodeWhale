@@ -88,6 +88,7 @@ function ensureNodeModules() {
 function verify() {
   ensureNodeModules();
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-tasks.mjs')]);
+  run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-authorization-coverage.mjs')]);
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'account-platform-migration-manifest.mjs')]);
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'account-platform-recovery-gate.mjs')]);
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'account-platform-ha-gate.mjs')]);

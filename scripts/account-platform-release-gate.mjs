@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { runAuthorizationCoverage } from './check-account-platform-authorization-coverage.mjs';
 
 const requiredChecks = new Set([
   'GATEWAY_CONTRACT:PASS', 'ACCOUNT_CONTRACT:PASS', 'OIDC_METADATA:PASS',
   'MODEL_CATALOG:PASS', 'MANAGED_ROUTE:PASS', 'PRICING_FORMULA:PASS',
 ]);
+
+await runAuthorizationCoverage();
 
 function required(name) {
   const value = String(process.env[name] || '').trim();

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 329`、`部分实现 32`、`未实现 3`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069–APT-078、APT-080–APT-082 已收敛三类作用域与真值表、登录、Account/Billing/Token 入口原子权限、策略审批、对象授权、可信恢复、短期委托、精确工作负载权限，以及桌面、个人中心和后台的权威权限/独立版本驱动；全入口发布门禁由 APT-079 收敛。
+全量核验汇总：`已实现 331`、`部分实现 32`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069–APT-082 的全部 CODE 任务现已收敛三类作用域与真值表、登录、Account/Billing/Token 原子权限、策略审批、对象授权、可信恢复、短期委托、精确工作负载权限、权限驱动界面及全敏感入口覆盖发布门禁。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -36,6 +36,7 @@
 | `PERSONAL-ACCOUNT-AUTHORIZATION` | 本人资料、授权上下文、组织列表、资料变更、上下文切换、注销和邀请 Account 路由逐项绑定个人原子权限，并保持 OIDC 主体唯一目标 | Account Go 测试、OpenAPI 403 契约、路由权限矩阵和生命周期失败关闭合同通过；数据库撤权运行级验证待部署 |
 | `BILLING-SCOPE-AUTHORIZATION` | 个人余额、权益包、订单与充值管理按 `personal.*` 权限和个人上下文失败关闭；组织购买、余额、权益及额度授予按显式组织目标与 `org.*` 权限实时决定 | Token/Portal Go 测试、显式组织目标和个人/组织不可互借权限用例、OpenAPI 及全量合同通过；数据库撤权和真实组织钱包联调待部署 |
 | `PERMISSION-DRIVEN-UI` | 桌面账号弹层、Web 个人中心和平台后台直接消费 Account 权威权限集合及个人/平台/组织独立授权版本；入口、只读态和操作按钮按精确权限决定，版本变化触发失效刷新，退出及注销进度保持可达 | 权限 UI 合同、Portal/桌面版本头传播、三语文案、Portal Go 测试、前端 lint/构建及架构守卫通过；真实撤权推送时延和浏览器/桌面交互待部署验证 |
+| `AUTHORIZATION-COVERAGE-GATE` | 自动发现生产 Go 源码中的 HTTP 路由、后台任务、事件 Consumer/Relay 及全部 CLI，并要求稳定个人/平台/组织权限、精确 `internal.*` 权限或专用公开协议策略逐项分类 | 当前 260 个 HTTP 路由、21 个任务、3 个事件入口和 13 个 CLI 全部登记；删除登记、未知权限、作用域错配、陈旧项和新增未分类入口的负向合同通过，统一 verify 与正式客户端发布门禁均执行该检查 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
 | `ACCOUNT-DOMAIN-UAT-20260825` | 账号独立域名、Portal 根入口、精确支付回调路由、受信 TLS、HTTP 跳转、服务健康和回调客户端授权 | `account.pinvou.com` 已解析到公网入口；Let's Encrypt 证书有效至 2026-11-23；HTTP 以 `308` 跳转 HTTPS，Portal 根入口返回 `200` 且旧 `/account.html` 返回 `404`，两个未授权回调入口返回 `401`，受控 Basic 凭据换取短期 Bearer Token 返回 `200`；Billing 运行 `1efb79d6`、Portal 运行 `bc5683ee`。真实新华三通知报文、重复/乱序和履约结果仍待商城联合验收 |
 | `GO-UNIT` | `node scripts/account-platform.mjs test unit` | 所有 Go 包测试通过（项目内置 Go，`nomsgpack`） |
@@ -114,7 +115,7 @@
 | CORE-05 | 已实现 | AUDIT_HEAD | GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Provider 凭据加密持久化且只在 Gateway 使用时解密；生产 KMS/Vault 待部署证明 |
 | CORE-06 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE; USAGE-EXECUTION-REPLAY; EXTERNAL-CONVERGENCE | NOT_DEPLOYED | 支付回调/查询/账单/修复与模型派发、上游引用、完整结果、只读证据查询、取消及结算/释放均先追加不可变摘要证据；冲突结果不覆盖首个完整事实，不确定结果进入复核且禁止自动重发高风险请求 |
 | CORE-07 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; TARGETED-REFUND; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 当前跨服务变更均使用持久幂等 Saga 或事务 Outbox/Inbox；Relay、死信、摘要绑定服务身份重放和不可变修复审计形成闭环，不宣称跨库原子事务。 |
-| CORE-08 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 敏感入口尚未全部建立稳定权限或精确工作负载策略映射，缺少可阻断发布的全入口覆盖门禁；由 APT-079 收敛。 |
+| CORE-08 | 已实现 | DOC_CURRENT | ROLE-PERMISSION-REDESIGN; AUTHORIZATION-COVERAGE-GATE | NOT_DEPLOYED | 生产 HTTP、任务、事件、回调和 CLI 均自动发现并映射到稳定人类权限、精确 `internal.*` 权限或专用协议策略；未知权限、作用域错配、漏登记和授权事实不可用均失败关闭。 |
 | SCOPE-01 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 本地独立模型仍受保护，账号平台迁移不删除用户自建模型 |
 | SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 个人中心、自助 API 与模型调用请求均不再提供 Token Account、路由或凭据的管理和选择入口。 |
 | SCOPE-03 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 普通 `/v1/token-accounts*` 路由及公开合同已删除，用户用量状态不再返回 Token Account/钱包内部 ID；只有 `/admin/v1/*` 可管理 PLATFORM 资源，存量 USER 资源由迁移冻结、退役凭据并停用路由。 |
@@ -343,7 +344,7 @@
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
-| NFR-52 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 尚无覆盖全部 HTTP、任务、事件、回调和 CLI 敏感入口的默认拒绝授权登记与自动发布门禁；由 APT-079 收敛。 |
+| NFR-52 | 已实现 | DOC_CURRENT | AUTHORIZATION-COVERAGE-GATE | NOT_DEPLOYED | 统一验证与正式客户端发布门禁自动扫描生产源码；新增路由文件、任务、事件或 CLI 未分类即失败，公开登录/注册、支付回调、健康检查、模拟器等例外必须登记稳定专用协议策略。 |
 
 ### 0.2 既有目标编号证据索引
 
@@ -505,7 +506,7 @@
 | CR-07 | TOK-06, TOK-07, TOK-12, TOK-16, TOK-20 | 符合可用条件的模型都可供用户选择 | 已由 CR-35 细化状态语义 | 原记录把目录展示、上下文资格和请求预占混为一个可用条件；模型目录同步要求继续有效，状态划分以 CR-35 为准 |
 | CR-08 | BILL-14, BILL-17, BILL-16, UI-08 | 分别展示基础积分、赠送积分、到期顺序、即将到期提醒和多个权益包，同时展示可用总积分 | 已实现 | 组成级 API 与三语 UI 已展示 BASE/BONUS、总可用、来源、确定消费顺序和到期提醒；人工赠送为独立 30 天 BONUS |
 | CR-09 | SCOPE-04–SCOPE-06, TOK-15, TOK-35–TOK-37, NFR-20 | 删除旧模型路径及兼容代码，全量迁移到账号平台 + Token Gateway | 部分实现 | 客户端范围内的旧路径删除、数据/凭据迁移、动态目录、非计费 readiness 和三层门禁已实现；正式签名制品升级矩阵、原子回滚和生产联调待外部验收 |
-| CR-10 | ACC-13, ACC-59–ACC-64, BILL-46, TOK-49, UI-22, ADM-05–ADM-07, ADM-45–ADM-49 | 基于当前全部能力重新设计角色系统 | 双重独立设计审核通过、主体代码已实现 | 采用个人、系统、组织三类人类权限，角色只由精确权限集合构成；对象作用域、独立版本、策略审批、受信恢复、工作负载委托及权限驱动界面均默认拒绝并已实现，APT-079 继续补全入口覆盖发布门禁。 |
+| CR-10 | ACC-13, ACC-59–ACC-64, BILL-46, TOK-49, UI-22, ADM-05–ADM-07, ADM-45–ADM-49 | 基于当前全部能力重新设计角色系统 | 已实现 | 采用个人、系统、组织三类人类权限，角色只由精确权限集合构成；对象作用域、独立版本、策略审批、受信恢复、工作负载委托、权限驱动界面及全敏感入口发布门禁均默认拒绝并已实现。 |
 | CR-11 | UI-09 | 品悟应用内个人中心提供 Web 个人中心入口 | 已实现 | 桌面账号弹层通过专用命令打开受信配置的 Portal 根地址；WebView 不能注入任意 URL，OIDC Token 不进入 URL |
 | CR-12 | UI-10, PAY-07, PAY-08 | Web 个人中心提供充值入口 | 已实现、需保留 | 当前个人活动上下文的“额度”页已经支持套餐选择、商城二维码和到账查询；后续 UI/角色重构不得删除 |
 | CR-13 | ID-08, NFR-14 | 短信业务流程与供应商实现隔离 | 已实现 | 启动工厂按配置注入供应商托管或平台生成/通用 HTTP 发送 Adapter；业务状态机无厂商条件并持久化 Provider ID、Adapter 版本和不透明校验数据，见 `sms-verification-provider-design.md` |

@@ -356,6 +356,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 - 公网 OIDC Token 精确路径先进入 Identity Adapter 的 Redis 原子风险门禁，再由内网调用 Keycloak；密码/短信登录与 Refresh 分别按来源IP、设备、账号标识、已学习稳定用户、Session和Provider限流，凭据失败只返回统一 `invalid_grant` 并进入固定耗时桶和渐进延迟，成功不立即清除风险历史。桌面始终提交持久设备标识。短信发送和核验由 Account 使用独立单向摘要表，按手机号、来源、设备、用途和Provider 80%安全容量计数；Keycloak 短信 Authenticator 只转发 Identity 已固化的来源和设备维度，不能以内部Pod地址合并所有用户。
 - Billing 在下单、订单查询和目标退款的领域操作前，以 PostgreSQL 事务锁按付款人、受益组织、来源、订单、动作和 Provider 原子准入；Provider 回调走独立容量域，模拟 Provider 使用 HMAC 验签，新华三使用专用短期 Bearer Token，二者都先写不可变 Inbox 并返回 `202`，再由后台 Worker 幂等归并，因此用户侧限流不能丢弃合法通知。Token Gateway 在创建新逻辑用量请求前，以同一数据库事务按用户、组织成员、组织、模型、路由和全局速率/在途数准入；幂等重放先返回既有请求，超限在 Hold 和上游派发前返回 `429`/`Retry-After`。
 - 租户隔离不是单一路由约定：发布合同矩阵同时核验个人对象所有权、显式目标组织、组织闭包节点范围、角色有效期、活动上下文、生命周期撤权、批量逐项、搜索行过滤、授权版本缓存和事件聚合目标。外部拒绝统一收敛为不泄露资源存在性的 `NOT_FOUND` 或 `PERMISSION_DENIED`；新增租户导出面必须先在矩阵中声明授权行过滤，否则发布失败。
+- `deploy/authorization-entrypoints.json` 是敏感入口授权分类的机器真相源；发布门禁自动扫描生产 Go 源码中的 HTTP 路由文件、后台任务、事件 Consumer/Relay 和全部 CLI，逐项校验稳定人类权限、精确 `internal.*` 权限或专用登录/注册/支付回调/探针协议策略。新增文件或入口、删除登记、未知权限、作用域错配和陈旧登记均阻断统一验证及正式客户端发布。
 - 支付和模型外部调用共享按Provider、能力/动作和路由隔离的进程内熔断状态；基础设施失败进入滚动窗口，明确业务拒绝排除，高风险不确定支付/退款/模型派发不能成为自动半开探针。生产HTTP服务还强制配置三个独立NTP源，使用中位偏差驱动250ms告警和1秒readiness/新写入门禁；NetworkPolicy只向明确授时CIDR开放UDP/123。跨副本状态聚合、真实只读探针和环境告警属于部署验收，不从仓库代码推断。
 - HTTP 工作负载在业务监听提供独立 liveness/readiness，在受限 `:9090` 提供请求、错误状态、延迟、并发和 readiness 指标；Relay 的 liveness 只代表进程，readiness 同时验证 Outbox PostgreSQL 与 NATS，并输出周期结果、积压和死信指标。普通健康检查不执行收费业务或客户端切换准入。
 
@@ -364,7 +365,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 本次代码级校准使用以下验证：
 
 - `node scripts/account-platform.mjs test unit`：所有 Go 包测试通过（项目内置 Go 工具链，`nomsgpack` 标签）。
-- `npm test`（`account-platform/`）：OpenAPI lint 和 158 个合同测试通过。
+- `npm test`（`account-platform/`）：OpenAPI lint 和 194 个合同测试通过。
 - `node --test tests/account_platform_state.test.mjs tests/ui_language_coverage.test.mjs tests/scheduled_tasks_unit.test.js`（`pinvou3-app/`）：41 个测试通过。
 - `node scripts/account-platform.mjs verify`：Go 单测与 Vet、合同测试、架构守卫和差异检查通过。
 
@@ -372,7 +373,7 @@ Provider 确认支付成功后，Billing 以 Provider 流水为幂等边界创�
 |---|---|---|
 | 部署 | Helm 已具备多故障域调度、PDB、零不可用滚动、外部HA Redis/NATS边界及机器化故障验收；Compose仍是单机 | 未取得真实集群容量、选主及Pod/节点/区域故障证据，不得宣称生产HA或RPO/RTO完成 |
 | 注册 | 唯一值预约、持久恢复、Identity 关联查询、异步钱包任务、SLA、`REPAIR_REQUIRED` 和证明门禁补偿已闭环 | Identity 短期密码材料仍为单副本内存能力；生产运行和故障注入证据待部署补齐 |
-| 权限与审批 | 三类人类权限、角色真值表、对象作用域、独立授权版本、策略驱动审批、短期人类委托与精确工作负载权限以 `role-system-design.md` 为约束；APT-069–APT-078、APT-080–APT-082 已落地三类作用域、入口原子权限、可信恢复、签名委托消费、双主体审计、精确 `internal.*` 路由权限，以及桌面、个人中心和后台按权威权限与独立版本驱动的入口/只读态；最后超级管理员保护、完整注销 Saga 和版本化审批聚合已有仓库实现 | APT-079 继续收敛全 HTTP/任务/事件/回调/CLI 敏感入口覆盖发布门禁，之后补生产等价安全恢复、撤权传播和审批故障演练 |
+| 权限与审批 | 三类人类权限、角色真值表、对象作用域、独立授权版本、策略驱动审批、短期人类委托与精确工作负载权限以 `role-system-design.md` 为约束；APT-069–APT-082 的全部 CODE 任务已落地三类作用域、入口原子权限、可信恢复、签名委托消费、双主体审计、精确 `internal.*` 路由权限、权限/版本驱动界面及全 HTTP/任务/事件/回调/CLI 自动发布门禁；最后超级管理员保护、完整注销 Saga 和版本化审批聚合已有仓库实现 | 补生产等价安全恢复、撤权传播、工作负载轮换和审批故障演练 |
 | 模型调用 | 独立目录、稳定身份、不可变能力/目录版本、托管 Provisioning、上下文资格、版本化公式/价格、持久派发/重放/取消，以及用户、组织成员、组织、模型、路由和全局的 Hold 前原子准入均已闭环 | 补更多数据面协议和生产等价并发/故障注入证据 |
 | 权益 | BASE/BONUS 组成、组织购买、精确成员授予、生命周期、确定消费/到期、目标退款与拒付定向撤销、注销隔离/整笔剩余回收和守恒约束已实现；普通退款实现当前保持休眠 | 补普通退款产品级默认关闭门禁和生产等价并发压力证据 |
 | 支付 | 新华三声明下单、查询、支付回调与人工修复并采用查询降级对账；专用短期 Token 授权和回调公网适配层先持久化再异步归并，订单支持多支付流水，回调/查询/修复证据不可变归并，每笔成功流水独立履约或复核；`FAILED` 保守进入复核，当前 H3C 退款入口因 capability 不支持而隐藏 | 补独立于 Provider capability 的退款产品门禁、Provider 账单逐行证据归并和完整关单中间态；在生产等价环境验证真实商城回调突发、并发查询补偿与财务故障恢复 |
