@@ -2,9 +2,9 @@ use crate::features::team_relay::{
     AccountEnrollmentInput, Attachment, ClaimEnrollmentInput, CreateActionInput,
     CreateInviteResponse, CreateTeamEnrollmentInput, CreateThreadInput, MarkThreadReadInput,
     SetTeamRelayAgentSessionInput, SetThreadPreferenceInput, TeamJoinCodeState,
-    TeamRelayAccountState, TeamRelayManager, TeamRelaySnapshot, TeamRelayStatus,
-    TeamRelayTaskWorkspaceStatus, ThreadMutationResponse, ThreadPreference, ThreadReadState,
-    UpdateProfileInput,
+    TeamRelayAccountState, TeamRelayLifecycleState, TeamRelayManager, TeamRelaySnapshot,
+    TeamRelayStatus, TeamRelayTaskWorkspaceStatus, ThreadMutationResponse, ThreadPreference,
+    ThreadReadState, UpdateProfileInput,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
@@ -210,6 +210,61 @@ pub async fn team_relay_remove_member(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<(), String> {
     manager.remove_member(&principal_id).await
+}
+
+#[tauri::command]
+pub async fn team_relay_transfer_owner(
+    app: AppHandle,
+    new_owner_id: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayLifecycleState, String> {
+    let state = manager.transfer_owner(&new_owner_id).await?;
+    manager.start_events(
+        app,
+        &state
+            .account
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(state)
+}
+
+#[tauri::command]
+pub async fn team_relay_leave_team(
+    app: AppHandle,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayLifecycleState, String> {
+    let state = manager.leave_team().await?;
+    manager.start_events(
+        app,
+        &state
+            .account
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(state)
+}
+
+#[tauri::command]
+pub async fn team_relay_dissolve_team(
+    app: AppHandle,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayLifecycleState, String> {
+    let state = manager.dissolve_team().await?;
+    manager.start_events(
+        app,
+        &state
+            .account
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(state)
 }
 
 #[tauri::command]

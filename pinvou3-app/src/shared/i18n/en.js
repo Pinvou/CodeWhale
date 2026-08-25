@@ -1039,8 +1039,9 @@ dictEn["uiTeamRelay"] = {
     "rate_limited": "Too many join code attempts. Try again later.",
     "invite_expired": "The invite is invalid or expired. Ask for a new one.",
     "invite_already_claimed": "This invite code has already been used.",
-    "member_has_open_work": "This member is still part of open work. Finish or hand it off before removing them.",
-    "last_team_owner": "The final team owner cannot be removed.",
+    "member_has_open_work": "This member still has required responsibilities in open work. Finish or hand them off before retrying.",
+    "last_team_owner": "The team owner cannot leave directly. Transfer ownership or dissolve the team first.",
+    "team_has_open_work": "The team still has open work. Finish all of it before dissolving the team.",
     "revision_conflict": "This work changed moments ago. It has been refreshed; review and retry.",
     "action_not_allowed": "This action is not allowed in the current relay state.",
     "attachment_too_large": "The file exceeds the 20 MiB limit.",
@@ -1207,7 +1208,7 @@ dictEn["uiTeamRelay"] = {
       "completed": "Ended"
     },
     "groups": {
-      "owners": "Team owners",
+      "owners": "Team owner",
       "members": "Team members"
     },
     "memberCount": n => `${n} member${n === 1 ? '' : 's'}`,
@@ -1247,7 +1248,16 @@ dictEn["uiTeamRelay"] = {
     "removeMember": "Remove",
     "removeConfirm": name => `Remove “${name}” from this team?`,
     "removed": name => `Removed “${name}” from the team`,
-    "removedAndCodeRotated": name => `Removed “${name}” and rotated the team join code`
+    "removedAndCodeRotated": name => `Removed “${name}” and rotated the team join code`,
+    "transferOwner": "Transfer owner",
+    "transferConfirm": name => `Transfer team ownership to “${name}”? You will become an ordinary member.`,
+    "transferred": name => `Team ownership transferred to ${name}`,
+    "leaveTeam": "Leave team",
+    "leaveConfirm": name => `Leave “${name}”? You will lose access and the current join code will be rotated immediately.`,
+    "left": name => `Left ${name}`,
+    "dissolveTeam": "Dissolve team",
+    "dissolveConfirm": name => `Permanently dissolve “${name}”? Every member immediately loses access and the join code becomes invalid. Server history is retained but currently has no recovery or viewing entry. This cannot be undone.`,
+    "dissolved": name => `Dissolved ${name}`
   },
   "taskInfo": "Task details",
   "initiator": "Initiator",
@@ -1541,7 +1551,10 @@ dictEn["uiTeamRelay"] = {
     "unpinned": "Unpinned",
     "hidden": "Archived; restore it from Archived",
     "restored": "Restored to the work list"
-  }
+  },
+  "blockingWork": (message, threads) => `${message} Blocking work: ${threads.join('; ')}`,
+  "blockingThread": thread => `${thread.title || thread.thread_id} (${thread.phase || 'open'})`,
+  "lifecycleSyncPending": "The operation is complete, but team data has not synced yet. Sync again to load the latest state."
 };
 dictEn["kbOutWeekdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 dictEn["builtinModelSelect"] = "Backend model";

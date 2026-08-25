@@ -21,7 +21,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.match(database.rows[0].name, /_test$/, "integration test requires an isolated *_test database");
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
   const confirmedTransferMigration = "0009_confirmed_transfers.sql";
-  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", confirmedTransferMigration, "0010_principal_avatars.sql", "0011_avatar_hardening.sql", "0012_avatar_reduced_motion.sql"];
+  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", confirmedTransferMigration, "0010_principal_avatars.sql", "0011_avatar_hardening.sql", "0012_avatar_reduced_motion.sql", "0013_team_lifecycle.sql"];
   async function applyMigration(migrationName) {
     const migration = await readFile(
       new URL(`../../docs/team-relay/migrations/${migrationName}`, import.meta.url),
@@ -941,6 +941,35 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   );
   assert.equal(removeActiveOwner.status, 409);
   assert.equal(removeActiveOwner.value.error.code, "member_has_open_work");
+  assert.deepEqual(removeActiveOwner.value.error.details.blocking_threads, [{
+    thread_id: threadId,
+    title: "Prepare team writing plan",
+    phase: "active",
+    responsibilities: ["work_owner", "current_actor"],
+  }]);
+  const blockedOwnerTransfer = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: c.principal.id },
+  });
+  assert.equal(blockedOwnerTransfer.status, 409);
+  assert.equal(blockedOwnerTransfer.value.error.code, "member_has_open_work");
+  assert.deepEqual(blockedOwnerTransfer.value.error.details.blocking_threads[0].responsibilities, [
+    "initiator",
+    "return_to",
+    "final_recipient",
+  ]);
+  const blockedTeamDissolution = await api(`/v1/teams/${initial.team_id}`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(blockedTeamDissolution.status, 409);
+  assert.equal(blockedTeamDissolution.value.error.code, "team_has_open_work");
+  assert.deepEqual(blockedTeamDissolution.value.error.details.blocking_threads, [{
+    thread_id: threadId,
+    title: "Prepare team writing plan",
+    phase: "active",
+  }]);
 
   const sseController = new AbortController();
   t.after(() => sseController.abort());
@@ -1503,6 +1532,101 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(removedBootstrap.status, 403);
   assert.equal(removedBootstrap.value.error.code, "membership_required");
+
+  const ownerTransfer = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: b.principal.id },
+  });
+  assert.equal(ownerTransfer.status, 200);
+  assert.deepEqual(ownerTransfer.value, {
+    team_id: initial.team_id,
+    previous_owner_id: a.principal.id,
+    owner_id: b.principal.id,
+  });
+  const membersAfterTransfer = await api(`/v1/teams/${initial.team_id}/members`, {
+    token: b.device_token,
+  });
+  assert.equal(membersAfterTransfer.value.members.find(member => member.id === a.principal.id).role, "member");
+  assert.equal(membersAfterTransfer.value.members.find(member => member.id === b.principal.id).role, "owner");
+
+  const joinCodeBeforeLeave = passwordAfterRemoval.value.join_password;
+  const leaveA = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(leaveA.status, 204);
+  const teamsAfterLeave = await api("/v1/teams", { token: a.device_token });
+  assert.deepEqual(teamsAfterLeave.value.teams, []);
+  const oldCodeAfterLeave = await api("/v1/teams/join", {
+    method: "POST",
+    token: a.device_token,
+    body: { join_code: joinCodeBeforeLeave },
+  });
+  assert.equal(oldCodeAfterLeave.status, 401);
+  assert.equal(oldCodeAfterLeave.value.error.code, "join_password_invalid");
+
+  const passwordBeforeDissolution = await api(
+    `/v1/teams/${initial.team_id}/join-password`,
+    { token: b.device_token },
+  );
+  assert.equal(passwordBeforeDissolution.status, 200);
+  const avatarBeforeDissolution = await uploadAvatar(b, animatedGif, "owner-avatar.gif");
+  assert.equal(avatarBeforeDissolution.status, 200);
+  const dissolveSseController = new AbortController();
+  t.after(() => dissolveSseController.abort());
+  const dissolveSse = await fetch(`${origin}/v1/events`, {
+    headers: { Authorization: `Bearer ${b.device_token}` },
+    signal: dissolveSseController.signal,
+  });
+  assert.equal(dissolveSse.status, 200);
+  const dissolveSseReader = dissolveSse.body.getReader();
+  await readSseUntil(dissolveSseReader, "event: ready");
+  const dissolve = await api(`/v1/teams/${initial.team_id}`, {
+    method: "DELETE",
+    token: b.device_token,
+  });
+  assert.equal(dissolve.status, 204);
+  await readSseUntil(dissolveSseReader, "event: team.dissolved");
+  await waitForSseEnd(dissolveSseReader);
+  const teamsAfterDissolution = await api("/v1/teams", { token: b.device_token });
+  assert.deepEqual(teamsAfterDissolution.value.teams, []);
+  const meAfterDissolution = await api("/v1/me", { token: b.device_token });
+  assert.deepEqual(meAfterDissolution.value.memberships, []);
+  const dissolvedBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+  });
+  assert.equal(dissolvedBootstrap.status, 403);
+  assert.equal(dissolvedBootstrap.value.error.code, "membership_required");
+  const dissolvedThread = await api(`/v1/threads/${threadId}`, { token: b.device_token });
+  assert.equal(dissolvedThread.status, 403);
+  assert.equal(dissolvedThread.value.error.code, "membership_required");
+  const dissolvedAttachment = await api(`/v1/attachments/${planUpload.value.id}`, {
+    token: b.device_token,
+  });
+  assert.equal(dissolvedAttachment.status, 404);
+  assert.equal(dissolvedAttachment.value.error.code, "resource_not_found");
+  const dissolvedAvatar = await downloadAvatar(
+    b.device_token,
+    b.principal.id,
+    initial.team_id,
+  );
+  assert.equal(dissolvedAvatar.status, 403);
+  const dissolvedJoinCode = await api("/v1/teams/join", {
+    method: "POST",
+    token: a.device_token,
+    body: { join_code: passwordBeforeDissolution.value.join_password },
+  });
+  assert.equal(dissolvedJoinCode.status, 401);
+  assert.equal(dissolvedJoinCode.value.error.code, "join_password_invalid");
+  const historicalTeam = await pool.query(
+    "SELECT dissolved_at, dissolved_by FROM teams WHERE id = $1",
+    [initial.team_id],
+  );
+  assert.ok(historicalTeam.rows[0].dissolved_at);
+  assert.equal(historicalTeam.rows[0].dissolved_by, b.principal.id);
+  const historicalThread = await pool.query("SELECT phase FROM work_threads WHERE id = $1", [threadId]);
+  assert.equal(historicalThread.rows[0].phase, "closed");
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const invalidJoin = await api("/v1/enrollments/join", {

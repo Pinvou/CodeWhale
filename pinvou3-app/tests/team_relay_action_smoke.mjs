@@ -192,6 +192,20 @@ try {
   assert(calls[0].input.message === '已完成关键路径验证', '发布进展正文错误', calls[0]);
   assert(calls[0].input.delivery.subtype === 'progress', '发布进展缺少 progress subtype', calls[0]);
   assert(calls[0].input.expected_revision === 3, '发布进展 revision 错误', calls[0]);
+  await page.evaluate(() => {
+    [...document.querySelectorAll('button')]
+      .find(candidate => candidate.textContent.trim() === '团队')?.click();
+  });
+  await page.waitForFunction(() => document.body.innerText.includes('我的团队'));
+  await page.evaluate(() => {
+    [...document.querySelectorAll('button')]
+      .find(candidate => candidate.textContent.includes('查看团队'))?.click();
+  });
+  await page.waitForSelector('[data-testid="team-relay-board"]');
+  const boardText = await page.$eval('[data-testid="team-relay-board"]', element => element.innerText);
+  assert(boardText.includes('解散团队'), '负责人团队页应提供解散入口', boardText);
+  assert(boardText.includes('转让负责人'), '普通成员卡片应提供负责人转让入口', boardText);
+  assert(!boardText.includes('退出团队'), '负责人不能直接显示普通成员离队入口', boardText);
   assert(pageErrors.length === 0, '发布进展不应产生页面异常', pageErrors);
   console.log('team relay action smoke: ok');
 } finally {

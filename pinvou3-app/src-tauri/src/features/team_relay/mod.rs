@@ -37,6 +37,8 @@ struct HubError {
     code: String,
     message: String,
     request_id: String,
+    #[serde(default)]
+    details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -266,10 +268,10 @@ impl TeamRelayManager {
 
     pub async fn bootstrap(&self) -> Result<TeamRelaySnapshot, String> {
         let (settings, token) = self.configured()?;
-        if settings.team_id.is_empty() {
-            return Err("team_relay_team_required: create or join a team first".to_string());
-        }
-        self.bootstrap_for(&settings, &token).await
+        self.recover_current_team(settings, &token)
+            .await?
+            .snapshot
+            .ok_or_else(|| "team_relay_team_required: create or join a team first".to_string())
     }
 
     pub async fn update_profile(
@@ -534,6 +536,52 @@ impl TeamRelayManager {
         })
     }
 
+    async fn recover_current_team(
+        &self,
+        mut settings: TeamRelaySettings,
+        token: &str,
+    ) -> Result<TeamRelayLifecycleState, String> {
+        let me_response = self
+            .client
+            .get(endpoint(&settings.hub_url, "v1/me"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let me: GetMeResponse = decode(me_response).await?;
+        let teams_response = self
+            .client
+            .get(endpoint(&settings.hub_url, "v1/teams"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        let teams: ListTeamsResponse = decode(teams_response).await?;
+        let recovered_team_id = teams
+            .teams
+            .iter()
+            .find(|team| team.id == settings.team_id)
+            .or_else(|| teams.teams.first())
+            .map(|team| team.id.clone())
+            .unwrap_or_default();
+        if settings.team_id != recovered_team_id {
+            settings.team_id = recovered_team_id;
+            self.save_settings(&settings)?;
+        }
+        let snapshot = if settings.team_id.is_empty() {
+            None
+        } else {
+            Some(self.bootstrap_for(&settings, token).await?)
+        };
+        Ok(TeamRelayLifecycleState {
+            snapshot,
+            account: TeamRelayAccountState {
+                principal: me.principal,
+                teams: teams.teams,
+            },
+        })
+    }
+
     pub async fn create_team(&self, name: &str) -> Result<TeamRelaySnapshot, String> {
         let (mut settings, token) = self.configured()?;
         let response = self
@@ -676,6 +724,64 @@ impl TeamRelayManager {
             return Err(decode_error(response).await);
         }
         Ok(())
+    }
+
+    pub async fn transfer_owner(
+        &self,
+        new_owner_id: &str,
+    ) -> Result<TeamRelayLifecycleState, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .post(endpoint(
+                &settings.hub_url,
+                &format!("v1/teams/{}/owner-transfer", settings.team_id),
+            ))
+            .bearer_auth(&token)
+            .json(&json!({ "new_owner_id": new_owner_id }))
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        self.recover_current_team(settings, &token).await
+    }
+
+    pub async fn leave_team(&self) -> Result<TeamRelayLifecycleState, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .delete(endpoint(
+                &settings.hub_url,
+                &format!("v1/teams/{}/members/me", settings.team_id),
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        self.recover_current_team(settings, &token).await
+    }
+
+    pub async fn dissolve_team(&self) -> Result<TeamRelayLifecycleState, String> {
+        let (settings, token) = self.configured()?;
+        let response = self
+            .client
+            .delete(endpoint(
+                &settings.hub_url,
+                &format!("v1/teams/{}", settings.team_id),
+            ))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            return Err(decode_error(response).await);
+        }
+        self.recover_current_team(settings, &token).await
     }
 
     pub async fn create_thread(
@@ -1656,10 +1762,18 @@ async fn decode<T: DeserializeOwned>(response: Response) -> Result<T, String> {
 async fn decode_error(response: Response) -> String {
     let status = response.status();
     match response.json::<HubErrorEnvelope>().await {
-        Ok(envelope) => format!(
-            "{}: {} (request {})",
-            envelope.error.code, envelope.error.message, envelope.error.request_id
-        ),
+        Ok(envelope) => {
+            let details = envelope
+                .error
+                .details
+                .and_then(|value| serde_json::to_string(&value).ok())
+                .map(|value| format!(" [details={value}]"))
+                .unwrap_or_default();
+            format!(
+                "{}: {} (request {}){}",
+                envelope.error.code, envelope.error.message, envelope.error.request_id, details
+            )
+        }
         Err(_) => format!("hub_http_error: HTTP {}", status.as_u16()),
     }
 }

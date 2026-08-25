@@ -70,7 +70,10 @@ export async function registerDeviceProtocol(pool, auth, protocolVersion) {
   const row = result.rows[0];
   if (!row || row.previously_supported === row.supported) return [];
   const memberships = await pool.query(
-    "SELECT team_id FROM memberships WHERE principal_id = $1 AND removed_at IS NULL",
+    `SELECT m.team_id
+       FROM memberships m
+       JOIN teams t ON t.id = m.team_id
+      WHERE m.principal_id = $1 AND m.removed_at IS NULL AND t.dissolved_at IS NULL`,
     [row.principal_id],
   );
   return memberships.rows.map(item => item.team_id);
@@ -81,8 +84,9 @@ export async function requireMembership(db, teamId, principalId, requiredRole = 
     `SELECT m.team_id, m.principal_id, m.role, m.joined_at
        FROM memberships m
        JOIN principals p ON p.id = m.principal_id
+       JOIN teams t ON t.id = m.team_id
       WHERE m.team_id = $1 AND m.principal_id = $2
-        AND m.removed_at IS NULL AND p.disabled_at IS NULL`,
+        AND m.removed_at IS NULL AND p.disabled_at IS NULL AND t.dissolved_at IS NULL`,
     [teamId, principalId],
   );
   if (result.rowCount === 0) {

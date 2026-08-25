@@ -1042,8 +1042,9 @@ dictJa["uiTeamRelay"] = {
     "rate_limited": "参加コードの試行回数が多すぎます。しばらくしてから再試行してください。",
     "invite_expired": "招待コードが無効または期限切れです。新しいコードを取得してください。",
     "invite_already_claimed": "この招待コードは既に使用されています。",
-    "member_has_open_work": "このメンバーは未完了の仕事に参加中です。完了または引き継ぎ後に削除してください。",
-    "last_team_owner": "最後のチーム責任者は削除できません。",
+    "member_has_open_work": "このメンバーには未完了の仕事に必要な責任があります。完了または引き継ぎ後に再試行してください。",
+    "last_team_owner": "チーム責任者は直接退出できません。先に責任者を譲渡するか、チームを解散してください。",
+    "team_has_open_work": "チームに未完了の仕事があります。すべて完了してから解散してください。",
     "revision_conflict": "仕事が直前に更新されました。再同期した内容を確認して再試行してください。",
     "action_not_allowed": "現在のリレー状態ではこの操作を実行できません。",
     "attachment_too_large": "ファイルが 20 MiB の上限を超えています。",
@@ -1250,7 +1251,16 @@ dictJa["uiTeamRelay"] = {
     "removeMember": "チームから外す",
     "removeConfirm": name => `「${name}」をチームから外しますか？`,
     "removed": name => `「${name}」をチームから外しました`,
-    "removedAndCodeRotated": name => `「${name}」をチームから外し、参加コードを自動更新しました`
+    "removedAndCodeRotated": name => `「${name}」をチームから外し、参加コードを自動更新しました`,
+    "transferOwner": "責任者を譲渡",
+    "transferConfirm": name => `チーム責任者を「${name}」へ譲渡しますか？譲渡後、あなたは一般メンバーになります。`,
+    "transferred": name => `チーム責任者を ${name} へ譲渡しました`,
+    "leaveTeam": "チームを退出",
+    "leaveConfirm": name => `「${name}」から退出しますか？アクセスできなくなり、現在の参加コードも直ちに更新されます。`,
+    "left": name => `${name} から退出しました`,
+    "dissolveTeam": "チームを解散",
+    "dissolveConfirm": name => `「${name}」を完全に解散しますか？全メンバーのアクセスと参加コードは直ちに無効になります。サーバー上の履歴は保持されますが、現在は復元・閲覧手段がありません。この操作は元に戻せません。`,
+    "dissolved": name => `${name} を解散しました`
   },
   "taskInfo": "タスク情報",
   "initiator": "起案者",
@@ -1544,7 +1554,10 @@ dictJa["uiTeamRelay"] = {
     "unpinned": "固定を解除しました",
     "hidden": "アーカイブしました。「アーカイブ」から戻せます",
     "restored": "仕事一覧へ戻しました"
-  }
+  },
+  "blockingWork": (message, threads) => `${message} ブロック中の仕事：${threads.join('；')}`,
+  "blockingThread": thread => `${thread.title || thread.thread_id}（${thread.phase || '進行中'}）`,
+  "lifecycleSyncPending": "操作は完了しましたが、チームデータはまだ同期されていません。再同期して最新の状態を取得してください。"
 };
 dictJa["kbOutWeekdays"] = ["日", "月", "火", "水", "木", "金", "土"];
 dictJa["builtinModelSelect"] = "バックエンドモデル";

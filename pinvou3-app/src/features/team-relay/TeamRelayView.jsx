@@ -43,7 +43,16 @@ function bridgeState(domain, fallback) {
 function relayError(copy, error) {
   const text = String(error || '');
   const code = text.split(':', 1)[0];
-  return copy.errorMessages?.[code] || text;
+  const localized = copy.errorMessages?.[code] || text.replace(/ \[details=.*\]$/, '');
+  const match = text.match(/ \[details=(\{.*\})\]$/);
+  if (!match) return localized;
+  try {
+    const blockers = JSON.parse(match[1])?.blocking_threads;
+    if (!Array.isArray(blockers) || !blockers.length) return localized;
+    return copy.blockingWork(localized, blockers.map(item => copy.blockingThread(item)));
+  } catch {
+    return localized;
+  }
 }
 
 function localDeviceName(fallback) {
@@ -898,6 +907,38 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
       setToast(activeBootstrap.team.join_password_configured ? copy.board.removedAndCodeRotated(member.display_name) : copy.board.removed(member.display_name));
     } catch { /* state */ }
   };
+  const resetAfterTeamLifecycle = result => {
+    const nextTeamId = result?.snapshot?.bootstrap?.team?.id || '';
+    setSelectedTeamId(nextTeamId);
+    setAssignmentTeamId(nextTeamId);
+    setSelectedId(null); setTeamJoinCode(null); setTeamJoinCodeOpen(false); setTeamJoinCodeLoading(false); setMobileDetailOpen(false);
+    joinCodeRequestGenerationRef.current += 1; joinCodeRequestRef.current = null; joinCodeFetchedAtRef.current = 0;
+    if (nextTeamId) setViewMode('board');
+  };
+  const transferOwner = async member => {
+    if (!window.confirm(copy.board.transferConfirm(member.display_name))) return;
+    try {
+      const result = await bridge.teamRelay.transferOwner(member.id);
+      resetAfterTeamLifecycle(result);
+      setToast(copy.board.transferred(member.display_name));
+    } catch { /* state */ }
+  };
+  const leaveTeam = async () => {
+    if (!window.confirm(copy.board.leaveConfirm(activeBootstrap.team.name))) return;
+    try {
+      const result = await bridge.teamRelay.leaveTeam();
+      resetAfterTeamLifecycle(result);
+      setToast(copy.board.left(activeBootstrap.team.name));
+    } catch { /* state */ }
+  };
+  const dissolveTeam = async () => {
+    if (!window.confirm(copy.board.dissolveConfirm(activeBootstrap.team.name))) return;
+    try {
+      const result = await bridge.teamRelay.dissolveTeam();
+      resetAfterTeamLifecycle(result);
+      setToast(copy.board.dissolved(activeBootstrap.team.name));
+    } catch { /* state */ }
+  };
   const uploadProfileAvatar = async () => {
     try {
       const result = await bridge.teamRelay.uploadAvatar();
@@ -965,7 +1006,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
       </div>
     </header>
     {relay.error && <div className="team-relay-error-banner" role="alert"><span>{relayError(copy, relay.error)}</span><button type="button" onClick={() => bridge.teamRelay.refresh().catch(() => {})}>{copy.retry}</button></div>}
-    {viewMode === 'teams' ? <TeamDirectory copy={copy} teams={teams} busy={relay.mutating} onJoin={() => setTeamDialog('join')} onCreate={() => setTeamDialog('create')} onOpen={openTeam} /> : viewMode === 'board' ? <TeamBoard copy={copy} teamName={activeBootstrap.team.name} teamId={activeBootstrap.team.id} board={board} tasks={teamTasks} canManage={owner} busy={relay.mutating || teamJoinCodeLoading || relay.status?.team_id !== activeBootstrap.team.id} joinCodeOpen={teamJoinCodeOpen} joinCodeBanner={teamJoinCodeOpen && teamJoinCode ? <TeamJoinCodeBanner copy={copy} state={teamJoinCode} owner={owner} busy={relay.mutating} onCopy={() => { navigator.clipboard.writeText(teamJoinCode.join_password); setToast(copy.copiedJoinPassword); }} onRotate={rotateTeamJoinCode} onVisibility={changeTeamJoinCodeVisibility} onDisable={disableTeamJoinCode} onClose={() => setTeamJoinCodeOpen(false)} /> : null} loadAvatarSource={loadAvatarSource} onBack={() => setViewMode('teams')} onInvite={toggleTeamJoinCode} onAssign={() => { setAssignmentTeamId(activeBootstrap.team.id); setDialog('assign'); }} onOpenTask={openBoardTask} onRemove={removeMember} /> : <div className="team-relay-layout"><nav className="team-relay-categories" aria-label={copy.inbox} data-testid="team-relay-categories"><strong>{copy.inbox}</strong><div className="team-relay-team-filter"><small>{copy.teams.filterLabel}</small><RelaySelect value={teamFilter} onChange={value => { setTeamFilter(value); setSelectedId(null); }} ariaLabel={copy.teams.filterLabel} options={[{ value: 'all', label: copy.teams.allTeams }, ...teams.map(team => ({ value: team.id, label: team.name }))]} /></div>{TEAM_RELAY_VIEWS.map(view => <button type="button" key={view} className={activeView === view ? 'is-active' : ''} onClick={() => { setActiveView(view); setSelectedId(null); setMobileDetailOpen(false); }} aria-current={activeView === view ? 'page' : undefined}><RelayCategoryIcon category={view} /><span>{copy.categories[view]}</span>{!!counts[view] && <b>{counts[view]}</b>}</button>)}</nav>
+    {viewMode === 'teams' ? <TeamDirectory copy={copy} teams={teams} busy={relay.mutating} onJoin={() => setTeamDialog('join')} onCreate={() => setTeamDialog('create')} onOpen={openTeam} /> : viewMode === 'board' ? <TeamBoard copy={copy} teamName={activeBootstrap.team.name} teamId={activeBootstrap.team.id} board={board} tasks={teamTasks} canManage={owner} busy={relay.mutating || teamJoinCodeLoading || relay.status?.team_id !== activeBootstrap.team.id} joinCodeOpen={teamJoinCodeOpen} joinCodeBanner={teamJoinCodeOpen && teamJoinCode ? <TeamJoinCodeBanner copy={copy} state={teamJoinCode} owner={owner} busy={relay.mutating} onCopy={() => { navigator.clipboard.writeText(teamJoinCode.join_password); setToast(copy.copiedJoinPassword); }} onRotate={rotateTeamJoinCode} onVisibility={changeTeamJoinCodeVisibility} onDisable={disableTeamJoinCode} onClose={() => setTeamJoinCodeOpen(false)} /> : null} loadAvatarSource={loadAvatarSource} onBack={() => setViewMode('teams')} onInvite={toggleTeamJoinCode} onAssign={() => { setAssignmentTeamId(activeBootstrap.team.id); setDialog('assign'); }} onOpenTask={openBoardTask} onRemove={removeMember} onTransfer={transferOwner} onLeave={leaveTeam} onDissolve={dissolveTeam} /> : <div className="team-relay-layout"><nav className="team-relay-categories" aria-label={copy.inbox} data-testid="team-relay-categories"><strong>{copy.inbox}</strong><div className="team-relay-team-filter"><small>{copy.teams.filterLabel}</small><RelaySelect value={teamFilter} onChange={value => { setTeamFilter(value); setSelectedId(null); }} ariaLabel={copy.teams.filterLabel} options={[{ value: 'all', label: copy.teams.allTeams }, ...teams.map(team => ({ value: team.id, label: team.name }))]} /></div>{TEAM_RELAY_VIEWS.map(view => <button type="button" key={view} className={activeView === view ? 'is-active' : ''} onClick={() => { setActiveView(view); setSelectedId(null); setMobileDetailOpen(false); }} aria-current={activeView === view ? 'page' : undefined}><RelayCategoryIcon category={view} /><span>{copy.categories[view]}</span>{!!counts[view] && <b>{counts[view]}</b>}</button>)}</nav>
       <section className="team-relay-list" data-testid="team-relay-list"><header className={activeView === 'all' ? 'has-source-filters' : ''}><label><Search size={18} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={`${copy.search}${copy.title}…`} aria-label={copy.search} /></label>{activeView === 'all' && <div className="team-relay-source-filters" role="group" aria-label={copy.sourceFilterLabel}>{TEAM_RELAY_SOURCE_FILTERS.map(filter => <button type="button" key={filter} className={sourceFilter === filter ? 'is-active' : ''} aria-pressed={sourceFilter === filter} onClick={() => { setSourceFilter(filter); setSelectedId(null); setMobileDetailOpen(false); }}>{copy.sourceFilters[filter]}</button>)}</div>}</header><div className="team-relay-list-scroll">{visibleTasks.map(task => <WorkCard copy={copy} task={task} selected={task.id === selectedTask?.id} loadAvatarSource={loadAvatarSource} key={task.id} onClick={() => openPersonalTask(task)} />)}{!visibleTasks.length && <div className="team-relay-empty"><Search size={26} /><p>{copy.empty}</p></div>}</div></section>
       <div className="team-relay-workspace">
         {selectedTask ? <WorkThread copy={copy} task={selectedTask} meId={meId} confirmedTransfers={confirmedTransfers} busy={relay.mutating} taskWorkspace={taskWorkspace} loadAvatarSource={loadAvatarSource} onBack={() => setMobileDetailOpen(false)} onDialog={setDialog} onAction={runAction} onPreference={setPreference} /> : <section className="team-relay-detail team-relay-empty"><p>{copy.selectWork}</p></section>}

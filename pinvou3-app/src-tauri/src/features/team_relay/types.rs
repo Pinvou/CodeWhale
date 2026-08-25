@@ -269,6 +269,12 @@ pub struct TeamRelayAccountState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamRelayLifecycleState {
+    pub snapshot: Option<TeamRelaySnapshot>,
+    pub account: TeamRelayAccountState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamMembershipResponse {
     pub team: Team,
     pub membership: Membership,

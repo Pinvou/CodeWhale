@@ -62,6 +62,17 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
       return teamSnapshot(args.teamId);
     }
     if (command === 'team_relay_remove_member') return null;
+    if (command === 'team_relay_transfer_owner') {
+      const snapshot = teamSnapshot('team-two');
+      return { snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams } };
+    }
+    if (command === 'team_relay_leave_team') {
+      const snapshot = teamSnapshot('fallback-team');
+      return { snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams } };
+    }
+    if (command === 'team_relay_dissolve_team') {
+      return { snapshot: null, account: { principal: { id: 'me', email: 'me@example.com', display_name: 'Me' }, teams: [] } };
+    }
     if (command === 'team_relay_get_join_password') return { configured: true, visible: true, recoverable: true, visibility: 'members', join_password: 'K7M4-P9Q2', updated_at: '2026-08-10T00:00:00Z' };
     if (command === 'team_relay_rotate_join_password') return { configured: true, visible: true, recoverable: true, visibility: 'members', join_password: 'R8N5-X4C7', updated_at: '2026-08-11T00:00:00Z' };
     if (command === 'team_relay_set_join_password_visibility') return { configured: true, visible: true, recoverable: true, visibility: args.visibility, join_password: 'R8N5-X4C7', updated_at: '2026-08-11T00:00:00Z' };
@@ -102,7 +113,7 @@ const feature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
   },
 });
 
-assert.deepEqual(Object.keys(feature).sort(), ['avatarSource', 'claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'listDraftSourceSessions', 'load', 'markThreadRead', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeAvatar', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'updateProfile', 'uploadAvatar', 'verifyAccess']);
+assert.deepEqual(Object.keys(feature).sort(), ['avatarSource', 'claim', 'createAction', 'createFirstTeam', 'createInvite', 'createTeam', 'createThread', 'disableJoinPassword', 'disconnect', 'dissolveTeam', 'downloadAttachment', 'getJoinPassword', 'joinTeam', 'leaveTeam', 'listDraftSourceSessions', 'load', 'markThreadRead', 'mountDraftMaterials', 'openPreparedMaterial', 'pickAgentWorkspace', 'pickDraftAttachments', 'prepareTaskWorkspace', 'readDraftSourceSession', 'refresh', 'registerAccount', 'removeAvatar', 'removeMember', 'revealPreparedMaterial', 'rotateJoinPassword', 'setJoinPasswordVisibility', 'setTaskAgentSession', 'setThreadPreference', 'switchTeam', 'taskWorkspaceStatus', 'transferOwner', 'updateProfile', 'uploadAvatar', 'verifyAccess']);
 assert.equal(await feature.verifyAccess('test-only-access-code'), true);
 assert.equal(await feature.verifyAccess('incorrect'), false);
 await feature.load();
@@ -284,6 +295,18 @@ assert.equal(calls.filter(call => call.command === 'team_relay_upload_attachment
 await feature.mountDraftMaterials(picked);
 assert.ok(calls.some(call => call.command === 'team_relay_upload_attachment' && call.args.path === '/private/manual/brief.pdf'));
 
+await feature.transferOwner('member-two');
+assert.ok(calls.some(call => call.command === 'team_relay_transfer_owner' && call.args.newOwnerId === 'member-two'));
+assert.equal(state.teamRelay.snapshot.bootstrap.team.id, 'team-two');
+await feature.leaveTeam();
+assert.ok(calls.some(call => call.command === 'team_relay_leave_team'));
+assert.equal(state.teamRelay.snapshot.bootstrap.team.id, 'fallback-team');
+await feature.dissolveTeam();
+assert.ok(calls.some(call => call.command === 'team_relay_dissolve_team'));
+assert.equal(state.teamRelay.snapshot, null);
+assert.equal(state.teamRelay.status.team_id, null);
+assert.deepEqual(state.teamRelay.account.teams, []);
+
 await feature.disconnect();
 assert.ok(calls.some(call => call.command === 'team_relay_disconnect'));
 assert.deepEqual(JSON.parse(JSON.stringify(state.teamRelay.status)), { configured: false, hub_url: null, team_id: null });
@@ -308,6 +331,36 @@ function isolatedRelayFeature(invoke) {
     async invoke(command, args) { return invoke(command, args); },
   });
 }
+
+const recoveredState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'removed-team' }, snapshot: null } };
+const recoveredFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
+  state: recoveredState,
+  notify() {},
+  listen() { return Promise.resolve(() => {}); },
+  async invoke(command) {
+    if (command === 'team_relay_status') return { configured: true, hub_url: 'https://hub.test', team_id: 'removed-team' };
+    if (command === 'team_relay_bootstrap') return teamSnapshot('newest-active-team');
+    return null;
+  },
+});
+await recoveredFeature.load();
+assert.equal(recoveredState.teamRelay.status.team_id, 'newest-active-team', 'bootstrap recovery must replace a stale saved team id');
+
+const clearedState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'dissolved-team' }, snapshot: teamSnapshot('dissolved-team') } };
+const clearedFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
+  state: clearedState,
+  notify() {},
+  listen() { return Promise.resolve(() => {}); },
+  async invoke(command) {
+    if (command === 'team_relay_status') return { configured: true, hub_url: 'https://hub.test', team_id: 'dissolved-team' };
+    if (command === 'team_relay_bootstrap') throw new Error('team_relay_team_required: create or join a team first');
+    if (command === 'team_relay_account') return { principal: { id: 'me', display_name: 'Me' }, teams: [] };
+    return null;
+  },
+});
+await clearedFeature.load();
+assert.equal(clearedState.teamRelay.status.team_id, null, 'no valid membership must clear the stale team id');
+assert.equal(clearedState.teamRelay.snapshot, null, 'no valid membership must clear the stale snapshot');
 
 const versionCalls = [];
 const versionedFeature = isolatedRelayFeature(async (command, args) => {

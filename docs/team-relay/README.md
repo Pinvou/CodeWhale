@@ -20,6 +20,8 @@
 - [`migrations/0010_principal_avatars.sql`](migrations/0010_principal_avatars.sql)：加入独立的 Principal 头像元数据与私有文件存储；
 - [`migrations/0011_avatar_hardening.sql`](migrations/0011_avatar_hardening.sql)：收紧头像大小并登记经消毒的 48/96 px 显示变体；
 - [`migrations/0012_avatar_reduced_motion.sql`](migrations/0012_avatar_reduced_motion.sql)：为 GIF 显示变体增加首帧静态版本，供减少动态效果模式使用；
+- [`migrations/0013_team_lifecycle.sql`](migrations/0013_team_lifecycle.sql)：加入唯一有效团队负责人约束和不可恢复的团队逻辑解散状态，并保留既有接力历史；
+- [`team-lifecycle-fix-plan.md`](team-lifecycle-fix-plan.md)：团队负责人转让、普通成员主动离队、当前团队恢复和逻辑解散的单 PR 修复范围；
 - [`../team-relay-demo-implementation-plan.md`](../team-relay-demo-implementation-plan.md)：范围、部署、批次与验收计划。
 
 发生冲突时，以 `protocol.md` 的业务不变量为准；实现修改契约时必须在同一变更中同步 OpenAPI、数据库迁移草案和契约测试。

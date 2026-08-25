@@ -273,7 +273,10 @@ async function commitAvatarAssets(
         );
       }
       const memberships = await client.query(
-        "SELECT team_id FROM memberships WHERE principal_id = $1 AND removed_at IS NULL",
+        `SELECT m.team_id
+           FROM memberships m
+           JOIN teams t ON t.id = m.team_id
+          WHERE m.principal_id = $1 AND m.removed_at IS NULL AND t.dissolved_at IS NULL`,
         [principalId],
       );
       return {
@@ -365,7 +368,10 @@ export async function deleteAvatar(pool, token, config) {
       [auth.principalId],
     );
     const memberships = await client.query(
-      "SELECT team_id FROM memberships WHERE principal_id = $1 AND removed_at IS NULL",
+      `SELECT m.team_id
+         FROM memberships m
+         JOIN teams t ON t.id = m.team_id
+        WHERE m.principal_id = $1 AND m.removed_at IS NULL AND t.dissolved_at IS NULL`,
       [auth.principalId],
     );
     return {

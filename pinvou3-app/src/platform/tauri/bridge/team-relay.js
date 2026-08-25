@@ -130,8 +130,27 @@
             patchCurrent({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now() });
             return account;
           }
-          var snapshot = await invoke("team_relay_bootstrap");
-          patchCurrent({ loading: false, status: status, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
+          var snapshot;
+          try {
+            snapshot = await invoke("team_relay_bootstrap");
+          } catch (error) {
+            var bootstrapError = String(error);
+            var invalidCurrentTeam = bootstrapError.indexOf("team_relay_team_required:") !== -1
+              || bootstrapError.indexOf("membership_required:") !== -1;
+            if (!invalidCurrentTeam) throw error;
+            var recoveredAccount = await invoke("team_relay_account");
+            if (recoveredAccount.teams && recoveredAccount.teams.length) {
+              var fallbackSnapshot = await invoke("team_relay_switch_team", { teamId: recoveredAccount.teams[0].id });
+              var fallbackStatus = Object.assign({}, status, { team_id: fallbackSnapshot.bootstrap.team.id });
+              patchCurrent({ loading: false, status: fallbackStatus, snapshot: fallbackSnapshot, account: { principal: fallbackSnapshot.bootstrap.me, teams: fallbackSnapshot.teams || recoveredAccount.teams }, lastSyncedAt: Date.now() });
+              return fallbackSnapshot;
+            }
+            var emptyStatus = Object.assign({}, status, { team_id: null });
+            patchCurrent({ loading: false, status: emptyStatus, snapshot: null, account: recoveredAccount, lastSyncedAt: Date.now() });
+            return recoveredAccount;
+          }
+          var recoveredStatus = Object.assign({}, status, { team_id: snapshot.bootstrap.team.id });
+          patchCurrent({ loading: false, status: recoveredStatus, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
           return snapshot;
         } catch (error) {
           if (!silent) patchCurrent({ loading: false, error: String(error) });
@@ -373,7 +392,18 @@
       patch({ mutating: true, error: null });
       try {
         var result = await invoke(command, args);
-        if (result && result.bootstrap && result.attachments) patch({ snapshot: result });
+        if (result && Object.prototype.hasOwnProperty.call(result, "snapshot") && result.account) {
+          var lifecycleSnapshot = result.snapshot || null;
+          patch({
+            snapshot: lifecycleSnapshot,
+            account: result.account,
+            status: Object.assign({}, state.teamRelay.status, {
+              team_id: lifecycleSnapshot && lifecycleSnapshot.bootstrap ? lifecycleSnapshot.bootstrap.team.id : null,
+            }),
+            lastSyncedAt: Date.now(),
+          });
+        }
+        else if (result && result.bootstrap && result.attachments) patch({ snapshot: result });
         else load().catch(function () {});
         return result;
       } catch (error) {
@@ -427,6 +457,24 @@
 
     function removeMember(principalId) {
       return mutate("team_relay_remove_member", { principalId: principalId });
+    }
+
+    function transferOwner(newOwnerId) {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_transfer_owner", { newOwnerId: newOwnerId });
+      });
+    }
+
+    function leaveTeam() {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_leave_team");
+      });
+    }
+
+    function dissolveTeam() {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_dissolve_team");
+      });
     }
 
     function rotateJoinPassword() {
@@ -878,6 +926,9 @@
       joinTeam: joinTeam,
       switchTeam: switchTeam,
       removeMember: removeMember,
+      transferOwner: transferOwner,
+      leaveTeam: leaveTeam,
+      dissolveTeam: dissolveTeam,
       createInvite: createInvite,
       getJoinPassword: getJoinPassword,
       rotateJoinPassword: rotateJoinPassword,

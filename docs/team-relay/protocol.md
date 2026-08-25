@@ -5,7 +5,7 @@
 - `Principal`：同一团队接力服务内的一个邮箱账户；邮箱唯一，`display_name` 是可修改且允许重名的名字。同一账户加入多个 Team 时复用同一个 Principal。
 - `Device`：一次 Pinvou 安装及其可撤销凭据，只用于底层认证，不参与派活、Handoff 或交付，也不要求用户命名。
 - `Membership`：Principal 在 Team 中的有效成员关系。
-- `Membership.role=owner`：团队管理员，可以管理团队加入码或移除成员；本文称为 team owner。
+- `Membership.role=owner`：唯一的团队负责人，可以管理团队加入码、移除成员、转让负责人或解散团队；本文称为 team owner。
 - `WorkThread`：一次从派活到接收结束的接力线程。
 - `RelayAction`：线程中不可变、只追加的业务动作。
 - `DeliveryPackage`：随 RelayAction 固化的一次交付快照，包含说明、文件角色、可选语义子类型、下一步、未决问题和 Git 引用；动作 ID 与 sequence 就是交付包标识。
@@ -187,7 +187,7 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 - 客户端的“我的工作”依次读取当前 Principal 已加入团队的 bootstrap，在本机按团队标签汇总；团队筛选只改变展示，不改变当前任务状态。
 - `GET /v1/events?team_id=...` 只订阅指定团队；省略 `team_id` 时订阅当前 Principal 所有有效团队。`thread.changed` 供参与者刷新权威快照；`thread.attention` 只定向发送给下一行动人或被撤回、被改派的受影响成员，用于系统通知。
 - 事件只包含资源 ID 和最新 revision，不包含 token、邀请码、文件内容或完整消息。
-- 客户端收到事件后重新读取资源；SSE 重连后必须重新 bootstrap。
+- 客户端收到事件后重新读取资源；SSE 重连后必须重新 bootstrap。团队解散提交后，Hub 发送 `team.dissolved` 提示并关闭该团队的现有 SSE 订阅，客户端随后按有效 Membership 恢复当前团队。
 - 演示阶段不提供 cursor replay，也不承诺发送方离线时自动恢复未确认请求。
 
 ## 10. 工作箱推导
@@ -223,7 +223,18 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 - 只有 closed/cancelled 工作可以隐藏；隐藏是可恢复的个人视图状态，不删除线程、动作或材料。
 - 团队层面没有物理删除。发起人可提交带原因的 `cancel` 动作停止未结束工作；动作进入不可变历史，所有参与者可见。
 
-### 10.2 未读更新与已读游标
+### 10.2 团队基本生命周期
+
+- 一个有效 Team 始终只有一个 `Membership.role=owner`。`POST /v1/teams/{team_id}/owner-transfer` 只允许当前负责人把角色原子转让给同一团队的有效普通成员；原负责人同时变为普通成员，不改变 `teams.created_by` 或任何 WorkThread 角色。
+- 普通成员通过 `DELETE /v1/teams/{team_id}/members/me` 主动离队。负责人不能直接离队，必须先转让负责人或解散团队；离队与退出当前设备账号是两个独立操作。
+- 负责人转让、普通成员离队和负责人移除成员前，Hub 检查该成员在全部未结束线程中的 initiator、owner、current actor、return target、final recipient、pending sender 和 pending recipient 责任。存在阻塞时返回 `member_has_open_work`，`details.blocking_threads` 一次列出全部任务 ID、标题、阶段和责任角色。
+- 普通成员离队或被负责人移除时，如果固定加入码仍启用，Hub 在同一事务中轮换加入码；旧码立即失效。
+- `DELETE /v1/teams/{team_id}` 只允许负责人执行，且团队必须没有任何未结束工作。解散是不可恢复的逻辑终止：在同一事务中记录 `dissolved_at/dissolved_by`、清除加入码并撤销未使用邀请，不物理删除线程、动作或附件关系。
+- 已解散团队不再属于有效 Membership 范围；团队列表、成员校验、bootstrap、线程、附件、头像和 SSE 都拒绝旧 `team_id` 的访问。当前产品不提供已解散团队列表、恢复或只读历史入口。
+- 所有可能改变未结束责任关系的线程写入都先取得 Team 共享锁；成员终止、负责人转让和团队解散取得同一 Team 的排他锁，从而使“无未结束责任”校验与并发派活、回传和 Handoff 串行化。
+- 客户端保留仍有效的当前团队；当前团队失效时选择 `GET /v1/teams` 返回的最近加入有效团队并立即持久化，列表为空时清除本地 `team_id` 和旧快照。
+
+### 10.3 未读更新与已读游标
 
 - Hub 为每个 Principal/线程保存单调递增的 `last_read_sequence`；同一账户的所有设备共享该游标，SSE 只用于提示客户端重新读取权威快照。
 - `ThreadDetail.unread_count` 只统计游标之后、由其他成员产生的动作；本人提交的派活、进度、回传或验收不会形成自提醒。
@@ -256,7 +267,7 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 |---|---|---|---|
 | 400 | `invalid_request` | 字段、格式或组合不合法 | 修正后 |
 | 401 | `authentication_required` | 缺少或无效 token | 否 |
-| 401 | `join_password_invalid` | 团队加入码不正确或已经轮换 | 向管理员确认 |
+| 401 | `join_password_invalid` | 团队加入码不正确或已经轮换 | 向团队负责人确认 |
 | 401 | `device_revoked` | Device 已撤销 | 重新加入 |
 | 403 | `membership_required` | 不是有效团队成员 | 否 |
 | 403 | `thread_access_denied` | 不是线程参与者 | 否 |
@@ -267,8 +278,9 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 | 409 | `invite_already_claimed` | 邀请已被消费 | 否 |
 | 409 | `email_already_registered` | 旧登记接口尝试重复创建已有邮箱账户 | 先通过账号登录入口复用账户，再加入或创建团队 |
 | 409 | `email_change_not_supported` | 尝试更换已绑定邮箱 | 当前版本不支持 |
-| 409 | `last_team_owner` | 试图移除最后一位 team owner | 先增加 owner |
-| 409 | `member_has_open_work` | 成员仍承担未结束线程的关键角色 | 先结束工作 |
+| 409 | `last_team_owner` | 团队负责人试图直接离队或被移除 | 先转让负责人或解散团队 |
+| 409 | `member_has_open_work` | 成员仍承担未结束线程的关键角色 | 按 `blocking_threads` 逐项结束或交接 |
+| 409 | `team_has_open_work` | 团队仍有未结束线程，不能解散 | 按 `blocking_threads` 逐项结束或取消 |
 | 409 | `avatar_upload_in_progress` | 同一 Principal 已有头像正在处理 | 等待当前上传完成 |
 | 410 | `invite_expired` | 邀请过期或已撤销 | 重新邀请 |
 | 410 | `attachment_expired` | 已结束线程的文件超过保留期 | 否 |

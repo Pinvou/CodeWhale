@@ -24,11 +24,16 @@ import {
   listTeams,
   listTeamMembers,
   registerAccount,
-  removeTeamMember,
   rotateTeamJoinPassword,
   setTeamJoinPasswordVisibility,
   updateProfile,
 } from "./identity-service.js";
+import {
+  dissolveTeam,
+  leaveTeam,
+  removeTeamMember,
+  transferTeamOwner,
+} from "./team-lifecycle-service.js";
 import {
   createAction,
   createThread,
@@ -144,6 +149,19 @@ class EventBroker {
       }
     }
     if (responses.size === 0) this.teams.delete(teamId);
+  }
+
+  revokeTeam(teamId) {
+    const responses = this.teams.get(teamId);
+    if (!responses) return;
+    this.teams.delete(teamId);
+    for (const subscription of responses) {
+      try {
+        subscription.response.end();
+      } catch {
+        subscription.response.destroy();
+      }
+    }
   }
 
   closeAll() {
@@ -382,6 +400,28 @@ export function createHubServer({ pool, config }) {
         );
         return;
       }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/owner-transfer$/);
+      if (params && method === "POST") {
+        const teamId = uuid(params[0], "team_id");
+        const result = await transferTeamOwner(
+          pool,
+          token,
+          teamId,
+          await readJson(request, config.maxJsonBytes),
+        );
+        notify(teamId, "membership.changed");
+        sendJson(response, 200, result, requestId);
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/members\/me$/);
+      if (params && method === "DELETE") {
+        const result = await leaveTeam(pool, token, params[0], config.joinCodeEncryptionKey);
+        events.revoke(result.team_id, result.principal_id);
+        notify(result.team_id, "membership.changed");
+        response.writeHead(204, { "X-Request-Id": requestId, "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
       params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)\/members\/([^/]+)$/);
       if (params && method === "DELETE") {
         const teamId = uuid(params[0], "team_id");
@@ -395,6 +435,15 @@ export function createHubServer({ pool, config }) {
         );
         events.revoke(teamId, principalId);
         notify(teamId, "membership.changed");
+        response.writeHead(204, { "X-Request-Id": requestId, "Cache-Control": "no-store" });
+        response.end();
+        return;
+      }
+      params = pathMatch(pathname, /^\/v1\/teams\/([^/]+)$/);
+      if (params && method === "DELETE") {
+        const result = await dissolveTeam(pool, token, params[0]);
+        notify(result.team_id, "team.dissolved");
+        events.revokeTeam(result.team_id);
         response.writeHead(204, { "X-Request-Id": requestId, "Cache-Control": "no-store" });
         response.end();
         return;
