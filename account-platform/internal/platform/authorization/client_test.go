@@ -2,6 +2,7 @@ package authorization
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,6 +28,32 @@ func TestClientUsesServiceAuthenticationAndReturnsVersions(t *testing.T) {
 	allowed, headers, err := client.Allowed(context.Background(), identity.Principal{Issuer: "issuer", Subject: "subject"}, "platform.users.read")
 	if err != nil || !allowed || headers.Get("X-Context-Version") != "7" || headers.Get("X-Authorization-Version") != "11" {
 		t.Fatalf("allowed=%v headers=%v error=%v", allowed, headers, err)
+	}
+}
+
+func TestClientRequestsBoundHumanDelegation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/authorization/human-delegations" || r.Header.Get("Authorization") != "Bearer service-secret" {
+			t.Fatalf("unexpected delegation request: %s %s", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["issuer"] != "issuer" || body["subject"] != "subject" || body["request_sha256"] != RequestSHA256([]byte("request")) {
+			t.Fatalf("delegation binding omitted: %#v", body)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"delegation":"signed-delegation"}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "service-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := client.Delegate(context.Background(), identity.Principal{Issuer: "issuer", Subject: "subject"}, DelegationRequest{Audience: "billing-service", Permission: "org.quota.allocate", TargetResourceType: "member-quota", TargetResourceID: "grant-1", HTTPMethod: http.MethodPost, HTTPPath: "/internal/v1/member-quota-grants", RequestSHA256: RequestSHA256([]byte("request"))})
+	if err != nil || token != "signed-delegation" {
+		t.Fatalf("unexpected result: %q %v", token, err)
 	}
 }
 

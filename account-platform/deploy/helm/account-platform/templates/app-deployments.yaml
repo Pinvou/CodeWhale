@@ -126,6 +126,10 @@ spec:
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: registration-query-hmac-key-base64, optional: true } }
             - name: AUDIT_EXPORT_MASTER_KEY_BASE64
               valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: audit-export-master-key-base64 } }
+            - name: HUMAN_DELEGATION_SIGNING_KEY_ID
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-signing-key-id } }
+            - name: HUMAN_DELEGATION_SIGNING_KEY_BASE64URL
+              valueFrom: { secretKeyRef: { name: {{ $root.Values.global.runtimeSecret }}, key: human-delegation-signing-key-base64url } }
             {{- else if eq $app.name "identity-service" }}
             - { name: MOBILE_AUTH_ENABLED, value: {{ $root.Values.sms.enabled | quote }} }
             - { name: KEYCLOAK_ADMIN_API_URL, value: {{ printf "http://%s-keycloak:8080" $fullname | quote }} }

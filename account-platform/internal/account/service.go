@@ -12,6 +12,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/approvalpolicy"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/serviceauth"
@@ -33,10 +34,16 @@ type Service struct {
 	clientContractVersion       string
 	now                         func() time.Time
 	auditExports                *AuditExportService
+	humanDelegations            *humandelegation.Signer
 }
 
 func (s *Service) WithAuditExports(exports *AuditExportService) *Service {
 	s.auditExports = exports
+	return s
+}
+
+func (s *Service) WithHumanDelegations(signer *humandelegation.Signer) *Service {
+	s.humanDelegations = signer
 	return s
 }
 
@@ -90,6 +97,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	internal := router.Group("/internal/v1")
 	internal.Use(serviceauth.GinMiddleware(s.serviceToken))
 	internal.POST("/authorization/check", httpserver.AdaptFunc(s.checkPermission))
+	internal.POST("/authorization/human-delegations", httpserver.AdaptFunc(s.createHumanDelegation))
 	internal.GET("/client-compatibility", httpserver.AdaptFunc(s.internalClientCompatibility))
 	internal.GET("/users/:user_id/account-closure-state", httpserver.AdaptFunc(s.internalAccountClosureState))
 	internal.POST("/approval-requests/:approval_request_id/executions", approvalpolicy.Require("APPROVAL_EXECUTION_BEGIN", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.beginApprovalExecution))

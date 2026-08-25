@@ -105,7 +105,7 @@
 | APT-079 | 全 HTTP/任务/事件/回调/CLI 敏感入口授权覆盖发布门禁 | CORE-08, NFR-52 | APT-069–APT-078, APT-080–APT-082 | CODE | PENDING |
 | APT-080 | 已登录密码修改和匿名忘记密码接入个人安全权限及生命周期矩阵 | ID-20 | APT-069, APT-070 | CODE | DONE |
 | APT-081 | Token 模型目录、调用、用量和取消接口接入个人/组织原子权限 | TOK-49 | APT-069, APT-071 | CODE | DONE |
-| APT-082 | Account 签发短期不可篡改人类委托并提供独立验证契约 | ADM-49 | APT-045, APT-069 | CODE | PENDING |
+| APT-082 | Account 签发短期不可篡改人类委托并提供独立验证契约 | ADM-49 | APT-045, APT-069 | CODE | DONE |
 
 ## 3. 独立提交验收模板
 

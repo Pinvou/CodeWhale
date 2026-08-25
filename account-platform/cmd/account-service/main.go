@@ -15,6 +15,7 @@ import (
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/config"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/h3cmall"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/humandelegation"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/manualreview"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
@@ -100,6 +101,16 @@ func main() {
 		WithOrganizationLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationUnitLifecycle(billingOrganizationLifecycle, tokenOrganizationLifecycle).
 		WithOrganizationMemberLifecycle(billingOrganizationLifecycle)
+	humanDelegationKey, err := humandelegation.DecodeSigningKey(os.Getenv("HUMAN_DELEGATION_SIGNING_KEY_BASE64URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	humanDelegationSigner, err := humandelegation.NewSigner(os.Getenv("HUMAN_DELEGATION_SIGNING_KEY_ID"), humanDelegationKey)
+	clear(humanDelegationKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	service.WithHumanDelegations(humanDelegationSigner)
 	auditExportKey, decodeErr := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(os.Getenv("AUDIT_EXPORT_MASTER_KEY_BASE64")))
 	if decodeErr != nil {
 		log.Fatal("AUDIT_EXPORT_MASTER_KEY_BASE64 must be standard Base64")

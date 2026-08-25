@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 326`、`部分实现 33`、`未实现 5`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075、APT-077、APT-080 与 APT-081 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批、组织对象授权、Break-glass 可信操作者、密码安全矩阵及模型/用量原子权限，其余入口门禁由 APT-076、APT-078、APT-079、APT-082 逐项收敛。
+全量核验汇总：`已实现 327`、`部分实现 33`、`未实现 4`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-075、APT-077、APT-080–APT-082 已收敛登录、Account 本人入口、Billing 资金入口、Token 运营隔离、策略驱动审批、组织对象授权、Break-glass 可信操作者、密码安全矩阵、模型/用量原子权限及短期人类委托，其余入口门禁由 APT-076、APT-078、APT-079 逐项收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -74,6 +74,7 @@
 | `USAGE-CANCELLATION-CONVERGENCE` | 原稳定用户幂等取消、派发前 Hold 全释放、派发后交付隔离、Adapter 取消能力、可信实际用量、版本化核对期限、损失复核及幂等人工重试 | Go 全量单元测试、OpenAPI lint、取消结构合同、桌面/Portal 构建和静态验证通过；真实 PostgreSQL 竞态、Provider 用量延迟、断线和故障注入待部署 |
 | `TOKEN-OPERATIONS-ISOLATION` | 平台 Token Account 创建/启停、PLATFORM 资源过滤、普通管理面移除、存量非平台账号/凭据/路由隔离及用户状态脱敏 | Go 单元测试、OpenAPI lint、普通路由不存在用例、隔离迁移与平台 Token 运营合同通过；数据库运行级迁移及真实 Provider 凭据检查待部署 |
 | `TOKEN-MODEL-USAGE-PERMISSIONS` | 个人/组织上下文模型目录、协议、调用及用量读取的原子权限，以及脱离活动组织的稳定用户取消权限 | Token Go 单元测试、OpenAPI lint、原子权限合同及全量静态验证通过；真实 Account 授权故障、组织撤员后取消和并发版本变更待部署验证 |
+| `HUMAN-DELEGATION-SIGNING` | Account 强一致复核人类主体原子权限后，以 Ed25519 签发最长 5 分钟且绑定受众、权限、组织/节点、资源、HTTP 方法/路径、请求摘要和授权版本的委托；独立验证器按当前/轮换公钥失败关闭 | 签发/验签 Go 单元测试覆盖目标替换、正文替换、签名篡改、过期、无权和签名器缺失；Compose/Helm Secret 契约与全量静态验证通过，真实密钥轮换和跨服务消费由 APT-076 部署验收 |
 | `ACCOUNT-CLOSURE-CLEANUP` | 主体生命周期隔离、资料/Commerce/邀请自动收敛、Identity 删除、原标识释放、永久 ID/编码墓碑、三年保留策略，以及组织授予隔离与合规整笔回收 | Account/Billing/Token/Portal Go 单元测试、OpenAPI lint、注销清理合同、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Identity/Commerce 故障注入和三年时钟推进待部署 |
 | `CLIENT-SWITCH-READINESS` | 服务身份保护的只读 OIDC/Account/目录/READY 路由/价格公式检查、公开兼容范围、制品/环境/版本绑定的 Ed25519 短时证明和不可变签发审计 | Go 单元测试、OpenAPI lint、合同测试、Compose/Helm 静态门禁通过；生产密钥注入、真实环境连续无副作用核对和发布系统联调待外部验收 |
 | `DESKTOP-CLIENT-SWITCH` | 动态目录、按会话冻结模型、显式替代分支、受信 Portal、客户端范围守卫及发布/安装/运行三层失败关闭门禁 | Rust check、桌面 lint/build、Bridge 协议、发布门禁签名/篡改测试和全仓 verifier 通过；生产签名身份、正式安装制品原子替换/回滚和真实环境联调待验收 |
@@ -301,7 +302,7 @@
 | ADM-46 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 审批列表、详情、允许动作、决定及执行前复核均从申请版本冻结的请求/审批权限解析；撤权或策略字段变化失败关闭。 |
 | ADM-47 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 普通 Token 管理路由、处理器和 OpenAPI 资源已移除，存量非平台账号/凭据/路由保存可逆隔离证据后冻结；创建和执行候选均强制 PLATFORM 管理模式。 |
 | ADM-48 | 已实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | Break-glass 操作者与目标来自最长 15 分钟 Ed25519 签名凭据，CLI 不接受身份参数；凭据 ID 唯一防重放，审计 actor 不再伪装成恢复目标。 |
-| ADM-49 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | Account 尚未签发短期不可篡改人类委托，内部写入口仍有信任请求体 actor 的路径；由 APT-082 收敛。 |
+| ADM-49 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-PERMISSION-REDESIGN; HUMAN-DELEGATION-SIGNING | NOT_DEPLOYED | Account 只在强一致原子权限通过后签发最长 5 分钟 Ed25519 委托，并绑定人类用户、授权版本、受众、权限、组织/节点、资源、HTTP 方法/路径和请求摘要；独立验证契约拒绝篡改、替换、过期及未知密钥。下游入口消费与双主体审计由 APT-076 收敛。 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
 | NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |
@@ -894,7 +895,7 @@
 | ADM-46 | 策略驱动审批权限 | 已实现 | 可见范围、允许动作、决定和执行前复核逐申请使用冻结策略权限，专用审批权限不再被通用财务权限替代。 |
 | ADM-47 | Token 管理平台隔离 | 已实现 | 普通 Token Account/路由/凭据接口未注册且不在公开合同中；平台资源只由 `/admin/v1/*` 管理，存量非平台凭据由可审计迁移冻结隔离。 |
 | ADM-48 | Break-glass 可信操作者 | 已实现 | CLI 只从受控描述符读取签名运维凭据，服务端校验受众、主体、目标、时效和唯一凭据 ID；自报身份参数已删除。 |
-| ADM-49 | 短期人类委托 | 未实现 | Account 签发与验证契约由 APT-082 待实现，工作负载消费由 APT-076 收敛。 |
+| ADM-49 | 短期人类委托 | 已实现 | Account 已签发受众/权限/目标/时效/请求指纹及授权版本绑定的 Ed25519 委托并提供独立验签契约；工作负载消费与双主体审计由 APT-076 收敛。 |
 
 ## 4. 非功能需求
 
