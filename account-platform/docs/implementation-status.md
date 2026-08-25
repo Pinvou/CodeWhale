@@ -49,7 +49,7 @@
 | `PERSONAL-CENTER-IA` | Web 个人中心“额度与用量 / 订单与发票 / 账号设置”三 Tab、成功订单白名单、旧深链映射，以及个人/组织资源显示边界 | 42 项账号平台状态测试、UI ESLint 和 Portal 构建通过；订单只展示 `PAID/PAID_LATE`，组织能力嵌入账号设置且个人权益不回退到组织视图 |
 | `ORGANIZATION-MEMBER-QUOTA` | 组织购买、精确 BASE/BONUS 组成授予、逐项批量、成员生命周期、Hold/结算及权限化 UI | Go 单测、OpenAPI、组织额度合同、桌面状态测试及 Portal 构建通过；真实 PostgreSQL 并发竞争和生产迁移仍待部署验证 |
 | `METERING-PRICING-LIFECYCLE` | 版本化计量单位/协议公式、确定性估算、动态 Hold 续租与追加预占、逐单位价格匹配及完整生命周期 | Billing/Token/Portal Go 单测、OpenAPI lint、59 个合同测试和全量静态验证通过；数据库运行级迁移、真实并发发布和长流故障注入待部署 |
-| `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、64 个合同测试、Portal 构建和部署模板检查通过；数据库运行级迁移及真实 H3C 联调待部署，正式目录由 APT-048 等待业务冻结 |
+| `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、64 个合同测试、Portal 构建和部署模板检查通过；v0.3 正式含税定价已形成待验目录版本，数据库运行级迁移与真实 H3C 商品/金额联调待部署，正式冻结仍由 APT-048 收敛 |
 | `PAYMENT-EVIDENCE-LIFECYCLE` | 一单多流水、不可变回调/查询/账单/修复证据、逐流水权益包、付款人与受益方冻结、独立状态机、订单派生摘要及运营明细 | Go 单测、OpenAPI lint、合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移及真实 Provider 乱序/重复证据故障注入待部署 |
 | `PAYMENT-CALLBACK-GATEWAY` | Provider 中立 Basic 客户端授权、Token 绑定 Provider/版本/商户、Profile 注册、严格通知适配、先持久化后 `202`、重复/冲突防重及查询补偿 | 通用鉴权/Profile 注册与 H3C 首个 Profile 的 Go 单测、OpenAPI lint、回调合同及 Helm/Compose 静态检查通过；`account.pinvou.com` 的受信 TLS、Portal 与两个精确回调入口已发布，受控客户端 Token 签发已通过；真实新华三通知报文、重复/乱序和最终履约仍待商城联合验收 |
 | `PAYMENT-CONVERGENCE` | Provider 账单逐行进入统一不可变证据归并器，关单状态单调推进，支付/退款/拒付事实独立且订单摘要可重建 | Go 单测、OpenAPI lint、关单/账单/摘要合同及全量静态验证通过；真实 Provider 账单、关单竞态和数据库运行级迁移待部署 |
@@ -375,7 +375,7 @@
 | PAY-02 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 版本化能力声明覆盖渠道、查询/保留/间隔、支付与晚到窗口、权威终态、关闭、退款、通知、账单和修复；API、UI、后台轮询与领域动作统一消费该声明，订单冻结能力快照 |
 | PAY-03 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 可售渠道取通用商品、Provider 映射及当前能力交集；测试 Provider 标记 `test_only`，生产启动拒绝且 Helm 不部署，不能扩张正式能力 |
 | PAY-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 通用商品不再拥有外部 SKU；独立不可变映射保存 Provider/版本、外部 SKU、金额、币种、渠道、状态和有效期，订单冻结映射 ID、映射与能力快照 |
-| PAY-05 | 未实现 | AUDIT_HEAD | CODE-AUDIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 代码已以 `TEST_ONLY` 和生产失败关闭阻止 UAT 目录收款；正式 SKU、金额、权益及映射仍须业务确认后由 APT-048 冻结并取得环境验收 |
+| PAY-05 | 未实现 | AUDIT_HEAD | CODE-AUDIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | v0.3 正式含税售价与纯 BASE 权益已形成新目录/映射版本；当前仍以 `TEST_ONLY` 和生产失败关闭阻止未验收收款，APT-048 尚须完成商城实际 BOM/SKU、成交金额、商品/发票信息与上架联调后冻结 |
 | PAY-06 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; COMMERCE-MAPPING | NOT_DEPLOYED | 个人充值从独立 Commerce Mapping 端点读取当前 Provider 的 READY 状态；Mapping 不进入认证/授权上下文，未完成只拒绝依赖它的下单 |
 | PAY-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 充值选择、二维码和结果留在品悟应用/Portal 内 |
 | PAY-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 每次充值从服务端商品选择开始，不恢复旧二维码作为新订单 |
@@ -727,7 +727,7 @@
 | PAY-02 | 渠道和动作由能力声明驱动 | 已实现 | 版本化能力统一驱动公开发现接口、商品渠道、前端、轮询间隔、权威终态、关单、退款、通知、账单和修复，并冻结到订单。 |
 | PAY-03 | 多支付渠道 | 已实现 | 可售渠道取商品、映射和当前 Provider 能力交集；开发测试渠道不进入生产能力或生产部署。 |
 | PAY-04 | 多 Provider 商品映射 | 已实现 | 外部 SKU 已从通用商品分离到不可变版本映射，订单固定创建时映射 ID、映射事实和 Provider 能力。 |
-| PAY-05 | 充值商品正式冻结 | 未实现 | UAT 映射均为 `TEST_ONLY` 且生产失败关闭；正式目录仍由 APT-048 等待业务确认和环境验收。 |
+| PAY-05 | 充值商品正式冻结 | 未实现 | v0.3 定价与权益已进入待验目录，但映射仍为 `TEST_ONLY` 且生产失败关闭；APT-048 继续等待商城实际商品与金额联调验收后发布 `FROZEN` 版本。 |
 | PAY-06 | 个人用户与当前 Commerce Provider 客户一一对应 | 已实现 | 当前 Provider 使用用户级唯一 Mapping；充值单独查询 READY 状态，未完成不影响登录、模型调用或组织授权。 |
 | PAY-07 | 充值全程留在品悟应用内 | 已实现 | 用户图标旁额度入口进入商品选择、二维码和结果页，不跳商城后台网页。 |
 | PAY-08 | 每次点击充值先进入商品选择 | 已实现 | 不恢复到上次二维码页。 |
@@ -960,16 +960,16 @@
 
 ## 6. 当前充值商品需求
 
-正式接口只信任商品 ID，以下是当前 UAT 映射：
+正式接口只信任商品 ID。依据《品悟个人版正式含税定价说明 v0.3》，当前商品事实为：
 
 | Product | SKU | 金额（分） | 基础积分 | 赠送积分 | 总积分 | 有效期 |
 |---|---|---:|---:|---:|---:|---:|
-| `PLAN_TRIAL` | `0502AJON` | 10 | 1,000 | 1,000 | 2,000 | 30 天 |
-| `PLAN_STANDARD` | `0502AJ0Q` | 1,000 | 2,000 | 2,000 | 4,000 | 30 天 |
-| `PLAN_ADVANCED` | `0502AJOR` | 3,000 | 4,000 | 5,000 | 9,000 | 30 天 |
-| `PLAN_FLAGSHIP` | `0502AJOP` | 20,000 | 20,000 | 30,000 | 50,000 | 30 天 |
+| `PLAN_TRIAL` | `0502AJON` | 4,900 | 1,000 | 0 | 1,000 | 30 天 |
+| `PLAN_STANDARD` | `0502AJ0Q` | 9,900 | 2,000 | 0 | 2,000 | 30 天 |
+| `PLAN_ADVANCED` | `0502AJOR` | 19,900 | 4,000 | 0 | 4,000 | 30 天 |
+| `PLAN_FLAGSHIP` | `0502AJOP` | 99,900 | 20,000 | 0 | 20,000 | 30 天 |
 
-当前目录标记为 UAT 暂定。任何金额、SKU、名称或权益调整都必须形成新的目录/迁移变更，不能仅改客户端显示。
+金额与权益已经通过 `000035_personal_pricing_v3` 形成新的目录及 H3C/Simulator 映射版本，没有覆盖历史订单快照。该口径虽为正式含税定价，但商城 BOM 字符、商品名称、类目、发票名称、含税金额与上架状态尚待联调验收，因此运行时仍标记为 `UAT_TENTATIVE` / `TEST_ONLY`；验收完成后必须另行发布 `FROZEN` 版本，不能仅改客户端显示或直接改写既有映射。
 
 ## 7. 正式上线门禁
 

@@ -36,9 +36,9 @@ func testExternalProduct(sku string, amountFen int64) ExternalProduct {
 
 func TestFilterProductsRejectsTentativePricesByDefault(t *testing.T) {
 	coordinator := &PaymentCoordinator{provider: catalogProvider{}, productSKUs: map[string]ExternalProduct{
-		"PLAN_TRIAL": testExternalProduct("0502AJON", 10),
+		"PLAN_TRIAL": testExternalProduct("0502AJON", 4900),
 	}}
-	products := []Product{{ProductID: "PLAN_TRIAL", AmountFen: 10, Currency: "CNY", Channels: []string{"ALIPAY"}, PriceStatus: "UAT_TENTATIVE"}}
+	products := []Product{{ProductID: "PLAN_TRIAL", AmountFen: 4900, Currency: "CNY", Channels: []string{"ALIPAY"}, PriceStatus: "UAT_TENTATIVE"}}
 	if got := coordinator.FilterProducts(products); len(got) != 0 {
 		t.Fatalf("tentative catalog leaked without explicit opt-in: %#v", got)
 	}
@@ -49,9 +49,9 @@ func TestFilterProductsRejectsTentativePricesByDefault(t *testing.T) {
 
 func TestFilterProductsAllowsFrozenPrices(t *testing.T) {
 	coordinator := &PaymentCoordinator{provider: catalogProvider{}, productSKUs: map[string]ExternalProduct{
-		"PLAN_STANDARD": testExternalProduct("0502AJ0Q", 1000),
+		"PLAN_STANDARD": testExternalProduct("0502AJ0Q", 9900),
 	}}
-	products := []Product{{ProductID: "PLAN_STANDARD", AmountFen: 1000, Currency: "CNY", Channels: []string{"ALIPAY"}, PriceStatus: "FROZEN"}}
+	products := []Product{{ProductID: "PLAN_STANDARD", AmountFen: 9900, Currency: "CNY", Channels: []string{"ALIPAY"}, PriceStatus: "FROZEN"}}
 	if got := coordinator.FilterProducts(products); len(got) != 1 {
 		t.Fatalf("frozen catalog was rejected: %#v", got)
 	}

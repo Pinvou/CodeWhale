@@ -71,7 +71,7 @@
 | APT-045 | 全域审计、幂等指纹、Outbox/Inbox 收敛和死信恢复闭环 | CORE-07, NFR-05–NFR-07 | APT-003–APT-034, APT-046, APT-047 | CODE | DONE |
 | APT-046 | 普通组织角色绑定的展示、有效期、授权撤销和缓存失效 | ACC-30–ACC-32, ADM-05, ADM-06 | APT-006 | CODE | DONE |
 | APT-047 | 服务账号、后台任务和 Event Relay 的短期工作负载身份与最小 Subject 权限 | ADM-03, NFR-12 | APT-006 | CODE+ENV | BLOCKED_EXTERNAL |
-| APT-048 | 正式充值商品 SKU、商城金额事实、权益及 Provider 映射的业务冻结与生产准入 | PAY-05, PAY-10 | APT-022 | CODE+ENV | BLOCKED_EXTERNAL |
+| APT-048 | v0.3 定价目录已落位；完成商城实际 BOM/SKU、含税成交金额、商品/发票信息、上架状态与 Provider 映射验收并冻结生产版本 | PAY-05, PAY-10 | APT-022 | CODE+ENV | BLOCKED_EXTERNAL |
 | APT-049 | 账单支付证据、完整关单状态、拒付事实与订单派生摘要收敛 | PAY-12–PAY-14 | APT-019, APT-023, APT-024 | CODE | DONE |
 | APT-050 | 模型派发不确定、流式结果与支付证据统一收敛边界 | CORE-06 | APT-029, APT-030, APT-049 | CODE | DONE |
 | APT-051 | 全域人工案件 P0/P1/P2 统一 SLA、转派时钟与自动止损评估 | NFR-45 | APT-003, APT-019, APT-021, APT-024, APT-025, APT-030 | CODE | DONE |
