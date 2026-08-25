@@ -212,6 +212,9 @@ assert.equal(
 
 if (process.platform === "win32") {
   const smokeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-local-nsis-"));
+  const defaultRoot = path.join(smokeRoot, "default-root");
+  const defaultScriptDir = path.join(defaultRoot, "scripts", "tauri");
+  const defaultScriptPath = path.join(defaultScriptDir, "build-local-nsis.ps1");
   const smokeOutput = path.join(
     smokeRoot,
     "src-tauri",
@@ -236,6 +239,31 @@ if (process.platform === "win32") {
     { encoding: "utf8" },
   );
   try {
+    fs.mkdirSync(defaultScriptDir, { recursive: true });
+    fs.copyFileSync(localNsisBuildScriptPath, defaultScriptPath);
+    const defaultRootResult = spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        defaultScriptPath,
+        "-PrepareOnly",
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(
+      defaultRootResult.status,
+      0,
+      defaultRootResult.stderr || defaultRootResult.stdout,
+    );
+    assert.equal(
+      fs.existsSync(path.join(defaultRoot, "src-tauri", "target", "release", "bundle")),
+      true,
+      "PowerShell 5.1 must resolve the default AppRoot from the script body",
+    );
+
     fs.mkdirSync(smokeOutput, { recursive: true });
     fs.writeFileSync(path.join(smokeOutput, "stale-installer.exe"), "stale");
     fs.writeFileSync(siblingPath, "keep");

@@ -1,7 +1,7 @@
 [CmdletBinding(DefaultParameterSetName = "Build")]
 param(
   [Parameter(DontShow = $true)]
-  [string]$AppRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")),
+  [string]$AppRoot,
 
   [Parameter(ParameterSetName = "Prepare")]
   [switch]$PrepareOnly,
@@ -12,6 +12,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2.0
+
+# Windows PowerShell 5.1 evaluates parameter default expressions before
+# $PSScriptRoot is populated. Resolve the default from the script body so the
+# public npm entry works without callers having to pass the hidden AppRoot.
+if ([string]::IsNullOrWhiteSpace($AppRoot)) {
+  $AppRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
+}
 
 function Resolve-AbsolutePath {
   param([Parameter(Mandatory = $true)][string]$Path)
