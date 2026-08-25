@@ -10,3 +10,4 @@ fbank_lfr_cmvn_feature.json
 # Windows 版 eip-cli.exe 已提交(让公司 Windows 电脑一次 git pull 即可跑,免手动补)。
 # 发布形态 A 提交 / C 下载 待与 IT 定,见《EIP员工门户接入-开发方案》。合规事后补。
 /resources/bundle/eip/bin/eip-cli
+.cargo/config.local.toml

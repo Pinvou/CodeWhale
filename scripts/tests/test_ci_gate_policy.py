@@ -1,3 +1,4 @@
+import re
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PR_WORKFLOW = ROOT / ".github/workflows/pr-check.yml"
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
 MAC_BUILD_WORKFLOW = ROOT / ".github/workflows/mac-build.yml"
+PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
 
 
 def _without_yaml_comments(block):
@@ -18,6 +20,7 @@ class CiGatePolicyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.workflow = PR_WORKFLOW.read_text(encoding="utf-8")
+        cls.pr_workflow = cls.workflow
         cls.release_workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     def test_release_workflow_does_not_reference_retired_web_template(self):
@@ -32,6 +35,18 @@ class CiGatePolicyTests(unittest.TestCase):
                 self.release_workflow,
                 f"发布流程仍引用已退役网页模板: {retired_reference}",
             )
+
+    def test_pr_submodule_verifier_strictly_matches_the_published_tag(self):
+        verifier = PUBLIC_SUBMODULE_VERIFIER.read_text(encoding="utf-8")
+        verifier_gate = self.pr_workflow.split(
+            "- name: 公开底座 gitlink 可达性", maxsplit=1
+        )[1].split("- name: 初始化公共底座 submodule", maxsplit=1)[0]
+        self.assertIn("./scripts/verify-public-submodule.sh", verifier_gate)
+        self.assertNotIn("--allow-registered-candidate", verifier_gate)
+        self.assertNotIn("LOCAL_SECURITY_HEAD", verifier)
+        self.assertIn('[[ "$tag_target" != "$gitlink" ]]', verifier)
+        self.assertIn('PINVOU_CODEWHALE_TAG="pinvou-v0.9.5-r8"', verifier)
+        self.assertIn("unknown argument", verifier)
 
     def test_pr_modes_and_stacked_pr_triggers_are_explicit(self):
         trigger = self.workflow.split("\non:", maxsplit=1)[1].split(
@@ -171,6 +186,90 @@ class CiGatePolicyTests(unittest.TestCase):
         required_gate = self.workflow.split("\n  required-gate:", maxsplit=1)[1]
         self.assertIn("- knowledge-rust", required_gate)
         self.assertIn('"knowledge-rust:$KNOWLEDGE_RUST_RESULT"', required_gate)
+
+    def test_benchmark_jobs_are_hard_disabled_and_cannot_be_enabled_by_label(self):
+        changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+            "\n  fast-gate:", maxsplit=1
+        )[0]
+        self.assertIn("benchmark:", changes)
+        self.assertIn("benchmark_cli:", changes)
+        self.assertIn("benchmark_headless:", changes)
+        self.assertIn("benchmark_codewhale:", changes)
+        self.assertIn("- 'pinvou-cli/**'", changes)
+        self.assertIn(
+            "- 'pinvou3-app/src-tauri/src/features/assistant/product_runtime/headless_bridge.rs'",
+            changes,
+        )
+
+        contract = self.pr_workflow.split("\n  benchmark-contract:", maxsplit=1)[1].split(
+            "\n  benchmark-test:", maxsplit=1
+        )[0]
+        contract_header = contract.split("\n    runs-on:", maxsplit=1)[0]
+        self.assertIn("if: ${{ false }}", contract_header)
+        self.assertNotIn("ci:full-benchmark", contract_header)
+        self.assertNotIn("github.event_name", contract_header)
+        self.assertNotIn("needs.changes.outputs.benchmark == 'true'", contract_header)
+        self.assertIn("runs-on: ubuntu-latest", contract)
+        self.assertIn(
+            "RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper",
+            contract,
+        )
+        self.assertIn(
+            "cargo test --manifest-path pinvou-cli/Cargo.toml --all-features", contract
+        )
+        for package in (
+            "agent-backend-api",
+            "benchmark-core",
+            "adapter-smoke",
+            "adapter-gaia",
+        ):
+            self.assertIn(f"-p {package}", contract)
+        self.assertIn(
+            "-p pinvou-cli --no-default-features", contract
+        )
+        self.assertIn(
+            "cargo check --manifest-path pinvou3-app/src-tauri/Cargo.toml", contract
+        )
+        self.assertIn("--features benchmark-hooks --test headless_bridge_contract", contract)
+        self.assertIn("--features benchmark-hooks --lib", contract)
+        self.assertIn(
+            "features::assistant::product_runtime::headless_bridge::", contract
+        )
+        self.assertIn("-- --test-threads=1", contract)
+        self.assertIn("needs.changes.outputs.benchmark_codewhale == 'true'", contract)
+
+        benchmark = self.pr_workflow.split("\n  benchmark-test:", maxsplit=1)[1].split(
+            "\n  required-gate:", maxsplit=1
+        )[0]
+        benchmark_header = benchmark.split("\n    runs-on:", maxsplit=1)[0]
+        self.assertIn("cargo test --manifest-path pinvou-cli/Cargo.toml --all-features", benchmark)
+        self.assertIn(
+            "cargo test --manifest-path pinvou-cli/Cargo.toml --no-default-features", benchmark
+        )
+        self.assertIn("--features benchmark-hooks", benchmark)
+        self.assertIn("cargo test --manifest-path CodeWhale/Cargo.toml", benchmark)
+        self.assertIn("-p codewhale-tui --lib --locked forkguard_", benchmark)
+        self.assertIn("            CodeWhale", benchmark)
+        self.assertIn("if: ${{ false }}", benchmark_header)
+        self.assertNotIn("ci:full-benchmark", benchmark_header)
+        self.assertNotIn("github.event_name", benchmark_header)
+        self.assertNotIn("github.event_name == 'merge_group'", benchmark)
+        self.assertNotIn("github.event_name == 'push'", benchmark)
+        self.assertNotIn("needs.changes.outputs.benchmark", benchmark_header)
+        self.assertNotIn("\n        if:", benchmark)
+
+        benchmark_filter = changes.split("benchmark:", 1)[1].split(
+            "release_contract:", 1
+        )[0]
+        self.assertNotIn(".github/workflows/pr-check.yml", benchmark_filter)
+
+        required_gate = self.pr_workflow.split("\n  required-gate:", maxsplit=1)[1]
+        self.assertIn("- benchmark-contract", required_gate)
+        self.assertIn("BENCHMARK_CONTRACT_RESULT", required_gate)
+        self.assertIn('"benchmark-contract:$BENCHMARK_CONTRACT_RESULT"', required_gate)
+        self.assertNotIn("- benchmark-test", required_gate)
+        self.assertNotIn("BENCHMARK_TEST_RESULT", required_gate)
+        self.assertNotIn('"benchmark-test:$BENCHMARK_TEST_RESULT"', required_gate)
 
     def test_rust_modes_preserve_fast_drafts_and_queue_validation(self):
         rust_lint = self.workflow.split("\n  rust-lint:", maxsplit=1)[1].split(
