@@ -74,9 +74,8 @@ type Candidate struct {
 }
 
 type RouteRequest struct {
-	Model                  string
-	ProtocolCode           string
-	ExplicitTokenAccountID *uuid.UUID
+	Model        string
+	ProtocolCode string
 }
 
 type UpstreamRequestEvidence struct {

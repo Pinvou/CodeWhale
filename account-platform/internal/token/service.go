@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -124,15 +123,6 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	router.GET("/v1/client-compatibility", httpserver.AdaptFunc(s.clientCompatibility))
 	protected := router.Group("")
 	protected.Use(identity.GinMiddleware(verify))
-	protected.GET("/v1/token-accounts", httpserver.AdaptFunc(s.listManagedTokenAccounts))
-	protected.POST("/v1/token-accounts", httpserver.AdaptFunc(s.createTokenAccount))
-	protected.PATCH("/v1/token-accounts/:token_account_id/status", httpserver.AdaptFunc(s.setTokenAccountStatus))
-	protected.PUT("/v1/token-accounts/:token_account_id/sharing", httpserver.AdaptFunc(s.updateTokenSharing))
-	protected.PUT("/v1/token-accounts/:token_account_id/routes", httpserver.AdaptFunc(s.upsertTokenRoute))
-	protected.POST("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.rotateCredential))
-	protected.GET("/v1/token-accounts/:token_account_id/credentials", httpserver.AdaptFunc(s.listCredentials))
-	protected.POST("/v1/token-accounts/:token_account_id/credentials/:credential_id/revoke", httpserver.AdaptFunc(s.revokeCredential))
-	protected.GET("/v1/token-accounts/eligible", httpserver.AdaptFunc(s.listEligible))
 	protected.GET("/v1/usage-requests/:usage_request_id", httpserver.AdaptFunc(s.getUsageRequest))
 	protected.POST("/v1/usage-requests/:usage_request_id/cancel", httpserver.AdaptFunc(s.cancelUsageRequest))
 	protected.GET("/v1/me/usage-requests", httpserver.AdaptFunc(s.listMyUsageRequests))
@@ -236,141 +226,6 @@ func (s *Service) listRechargeOrders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeRawNoStore(w, http.StatusOK, payload)
-}
-
-func (s *Service) listManagedTokenAccounts(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveReadContext(w, r)
-	if !ok {
-		return
-	}
-	items, err := s.repository.ListManagedAccounts(r.Context(), resolved)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
-}
-
-func (s *Service) listCredentials(w http.ResponseWriter, r *http.Request) {
-	_, account, ok := s.resolveOwnedAccount(w, r)
-	if !ok {
-		return
-	}
-	items, err := s.repository.ListCredentials(r.Context(), account.ID)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
-}
-
-func (s *Service) setTokenAccountStatus(w http.ResponseWriter, r *http.Request) {
-	resolved, account, ok := s.resolveOwnedAccount(w, r)
-	if !ok {
-		return
-	}
-	var body struct {
-		Status string `json:"status"`
-		Reason string `json:"reason"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		return
-	}
-	if strings.TrimSpace(body.Reason) == "" {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "a status change reason is required", httpserver.RequestID(r.Context()))
-		return
-	}
-	updated, err := s.repository.SetAccountStatus(r.Context(), account.ID, body.Status, resolved.UserID, body.Reason)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, updated)
-}
-
-func (s *Service) updateTokenSharing(w http.ResponseWriter, r *http.Request) {
-	resolved, account, ok := s.resolveOwnedAccount(w, r)
-	if !ok {
-		return
-	}
-	var body struct {
-		ShareScope    string      `json:"share_scope"`
-		ExplicitUsers []uuid.UUID `json:"explicit_user_ids"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		return
-	}
-	updated, err := s.repository.UpdateSharePolicy(r.Context(), account.ID, body.ShareScope, body.ExplicitUsers, resolved.UserID)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, updated)
-}
-
-func (s *Service) upsertTokenRoute(w http.ResponseWriter, r *http.Request) {
-	resolved, account, ok := s.resolveOwnedAccount(w, r)
-	if !ok {
-		return
-	}
-	var body struct {
-		Model        string `json:"model"`
-		ProtocolCode string `json:"protocol_code"`
-		Priority     int    `json:"priority"`
-		DefaultScope string `json:"default_scope"`
-		HealthStatus string `json:"health_status"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		return
-	}
-	if strings.TrimSpace(body.ProtocolCode) == "" {
-		body.ProtocolCode = "CHAT"
-	}
-	policy, err := s.repository.UpsertRoute(r.Context(), account.ID, body.Model, body.ProtocolCode, body.Priority, body.DefaultScope, body.HealthStatus, resolved.UserID)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, policy)
-}
-
-func (s *Service) revokeCredential(w http.ResponseWriter, r *http.Request) {
-	resolved, account, ok := s.resolveOwnedAccount(w, r)
-	if !ok {
-		return
-	}
-	credentialID, err := uuid.Parse(r.PathValue("credential_id"))
-	var body struct {
-		Reason string `json:"reason"`
-	}
-	if decodeErr := api.DecodeJSON(w, r, &body); err != nil || decodeErr != nil || strings.TrimSpace(body.Reason) == "" {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid credential revocation", httpserver.RequestID(r.Context()))
-		return
-	}
-	credential, err := s.repository.RevokeCredential(r.Context(), account.ID, credentialID, resolved.UserID, body.Reason)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusOK, credential)
-}
-
-func (s *Service) resolveOwnedAccount(w http.ResponseWriter, r *http.Request) (AuthorizationContext, TokenAccount, bool) {
-	resolved, ok := s.resolveContext(w, r)
-	if !ok {
-		return AuthorizationContext{}, TokenAccount{}, false
-	}
-	accountID, err := uuid.Parse(r.PathValue("token_account_id"))
-	if err != nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid token account", httpserver.RequestID(r.Context()))
-		return AuthorizationContext{}, TokenAccount{}, false
-	}
-	account, err := s.repository.GetAccount(r.Context(), accountID)
-	if err != nil || account.ManagementMode == "PLATFORM" || !authorizeOwner(resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
-		s.writeError(w, r, ErrForbidden)
-		return AuthorizationContext{}, TokenAccount{}, false
-	}
-	return resolved, account, true
 }
 
 func (s *Service) rechargeProducts(w http.ResponseWriter, r *http.Request) {
@@ -587,115 +442,6 @@ func writeRawNoStore(w http.ResponseWriter, status int, payload json.RawMessage)
 	_, _ = w.Write(payload)
 }
 
-func (s *Service) createTokenAccount(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
-	if !ok {
-		return
-	}
-	var body struct {
-		OwnerType         string     `json:"owner_type"`
-		OwnerID           uuid.UUID  `json:"owner_id"`
-		OwnerOrganization *uuid.UUID `json:"owner_organization_id"`
-		OwnerUnit         *uuid.UUID `json:"owner_unit_id"`
-		Name              string     `json:"name"`
-		ShareScope        string     `json:"share_scope"`
-		DefaultPriority   int        `json:"default_priority"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil {
-		return
-	}
-	body.OwnerType = strings.ToUpper(strings.TrimSpace(body.OwnerType))
-	if body.DefaultPriority == 0 {
-		body.DefaultPriority = 100
-	}
-	if !authorizeOwner(resolved, body.OwnerType, body.OwnerID, body.OwnerOrganization, body.OwnerUnit) {
-		s.writeError(w, r, ErrForbidden)
-		return
-	}
-	walletOwnerType := map[string]string{"USER": "PERSONAL", "ORG": "ORGANIZATION", "ORG_UNIT": "ORG_UNIT"}[body.OwnerType]
-	walletID, err := s.wallets.Ensure(r.Context(), walletOwnerType, body.OwnerID)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	account, err := s.repository.CreateAccount(r.Context(), CreateAccountRequest{OwnerType: body.OwnerType, OwnerID: body.OwnerID, OwnerOrganization: body.OwnerOrganization, OwnerUnit: body.OwnerUnit, WalletID: walletID, Name: body.Name, ShareScope: body.ShareScope, DefaultPriority: body.DefaultPriority, CreatedBy: resolved.UserID})
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusCreated, account)
-}
-
-func (s *Service) rotateCredential(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
-	if !ok {
-		return
-	}
-	accountID, err := uuid.Parse(r.PathValue("token_account_id"))
-	if err != nil {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid token account", httpserver.RequestID(r.Context()))
-		return
-	}
-	account, err := s.repository.GetAccount(r.Context(), accountID)
-	if err != nil || account.ManagementMode == "PLATFORM" || !authorizeOwner(resolved, account.OwnerType, account.OwnerID, account.OwnerOrganization, account.OwnerUnit) {
-		s.writeError(w, r, ErrForbidden)
-		return
-	}
-	var body struct {
-		Provider      string   `json:"provider"`
-		BaseURL       string   `json:"base_url"`
-		Secret        string   `json:"secret"`
-		AllowedModels []string `json:"allowed_models"`
-	}
-	if err := api.DecodeJSON(w, r, &body); err != nil || strings.TrimSpace(body.Secret) == "" {
-		return
-	}
-	secret := []byte(body.Secret)
-	defer clear(secret)
-	if err := s.validator.Validate(r.Context(), body.BaseURL, secret, body.AllowedModels); err != nil {
-		api.WriteError(w, http.StatusUnprocessableEntity, "CREDENTIAL_VALIDATION_FAILED", "the new credential could not be validated", httpserver.RequestID(r.Context()))
-		return
-	}
-	credential, err := s.repository.RotateCredential(r.Context(), accountID, resolved.UserID, body.Provider, body.BaseURL, secret, body.AllowedModels)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	api.WriteJSON(w, http.StatusCreated, credential)
-}
-
-func (s *Service) listEligible(w http.ResponseWriter, r *http.Request) {
-	resolved, ok := s.resolveContext(w, r)
-	if !ok {
-		return
-	}
-	model := strings.TrimSpace(r.URL.Query().Get("model"))
-	protocolCode := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("protocol_code")))
-	if protocolCode == "" {
-		protocolCode = "CHAT"
-	}
-	if model == "" {
-		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "model is required", httpserver.RequestID(r.Context()))
-		return
-	}
-	if !gatewaySupportsProtocol(s.upstream.Protocols(), protocolCode) {
-		api.WriteError(w, http.StatusUnprocessableEntity, "PROTOCOL_UNSUPPORTED", "the model gateway adapter does not declare this protocol", httpserver.RequestID(r.Context()))
-		return
-	}
-	candidates, err := s.repository.ListCandidates(r.Context(), model, protocolCode)
-	if err != nil {
-		s.writeError(w, r, err)
-		return
-	}
-	items := make([]map[string]any, 0)
-	for _, candidate := range candidates {
-		if Eligible(resolved, candidate, model) {
-			items = append(items, map[string]any{"token_account_id": candidate.TokenAccountID, "name": candidate.Name, "owner_type": candidate.OwnerType, "allowed_models": candidate.AllowedModels, "protocol_code": candidate.ProtocolCode, "health_status": candidate.HealthStatus})
-		}
-	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items, "membership_version": resolved.MembershipVersion})
-}
-
 func gatewaySupportsProtocol(capabilities []GatewayProtocolCapability, protocolCode string) bool {
 	for _, capability := range capabilities {
 		if capability.ProtocolCode == protocolCode {
@@ -723,7 +469,7 @@ func (s *Service) getUsageRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	api.WriteJSON(w, http.StatusOK, map[string]any{
 		"usage_request_id": usage.ID, "status": usage.Status, "execution_status": usage.ExecutionStatus, "delivery_status": usage.DeliveryStatus, "cancel_status": usage.CancelStatus, "settlement_status": usage.SettlementStatus, "display_status": usageDisplayStatus(usage),
-		"token_account_id": usage.TokenAccountID, "wallet_id": usage.WalletID, "model": usage.Model,
+		"model":                usage.Model,
 		"maximum_microcredits": usage.MaximumMicrocredits, "actual_microcredits": usage.ActualMicrocredits,
 		"cancel_requested_at": usage.CancelRequestedAt, "provider_terminal_at": usage.ProviderTerminalAt, "final_usage_observed_at": usage.FinalUsageObservedAt,
 		"last_persisted_sequence": usage.LastPersistedSequence, "last_client_confirmed_sequence": usage.LastClientConfirmedSequence,
@@ -990,19 +736,6 @@ func (s *Service) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		status, code, message = http.StatusServiceUnavailable, "ROUTE_REPAIR_REQUIRED", "the managed model route requires operator repair"
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
-}
-
-func authorizeOwner(context AuthorizationContext, ownerType string, ownerID uuid.UUID, organizationID, unitID *uuid.UUID) bool {
-	switch ownerType {
-	case "USER":
-		return context.ContextType == "PERSONAL" && ownerID == context.UserID && organizationID == nil && unitID == nil
-	case "ORG":
-		return context.ContextType == "ORGANIZATION" && context.OrganizationID != nil && organizationID != nil && *context.OrganizationID == *organizationID && ownerID == *organizationID && (slices.Contains(context.Roles, "OWNER") || slices.Contains(context.Roles, "ORG_ADMIN"))
-	case "ORG_UNIT":
-		return context.ContextType == "ORGANIZATION" && context.OrganizationID != nil && organizationID != nil && unitID != nil && *context.OrganizationID == *organizationID && ownerID == *unitID && (slices.Contains(context.Roles, "OWNER") || slices.Contains(context.Roles, "ORG_ADMIN"))
-	default:
-		return false
-	}
 }
 
 type HTTPContextResolver struct {

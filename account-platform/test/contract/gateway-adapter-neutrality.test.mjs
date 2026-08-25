@@ -31,6 +31,6 @@ test('model gateway protocols and usage evidence remain provider neutral', async
   }
   assert.match(service, /modelProtocols/);
   assert.match(openapi, /\/model-protocols:[\s\S]*GatewayProtocolCapabilities/);
-  assert.match(openapi, /protocol_code:[\s\S]*enum: \[CHAT\]/);
+  assert.match(openapi, /protocol_code:[\s\S]*enum: \[[^\]]*CHAT[^\]]*\]/);
   assert.match(deployment, /TOKEN_GATEWAY_ADAPTER/);
 });

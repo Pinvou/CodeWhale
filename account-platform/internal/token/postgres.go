@@ -75,13 +75,7 @@ type PostgresRepository struct {
 
 type Repository interface {
 	CreateAccount(context.Context, CreateAccountRequest) (TokenAccount, error)
-	GetAccount(context.Context, uuid.UUID) (TokenAccount, error)
-	ListManagedAccounts(context.Context, AuthorizationContext) ([]TokenAccount, error)
-	ListCredentials(context.Context, uuid.UUID) ([]Credential, error)
-	RotateCredential(context.Context, uuid.UUID, uuid.UUID, string, string, []byte, []string) (Credential, error)
 	SetAccountStatus(context.Context, uuid.UUID, string, uuid.UUID, string) (TokenAccount, error)
-	RevokeCredential(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, string) (Credential, error)
-	UpdateSharePolicy(context.Context, uuid.UUID, string, []uuid.UUID, uuid.UUID) (TokenAccount, error)
 	UpsertRoute(context.Context, uuid.UUID, string, string, int, string, string, uuid.UUID) (RoutingPolicy, error)
 	ListCandidates(context.Context, string, string) ([]Candidate, error)
 	CredentialSecret(context.Context, uuid.UUID, uuid.UUID) (Credential, []byte, error)
@@ -480,11 +474,8 @@ func (r *PostgresRepository) CreateAccount(ctx context.Context, request CreateAc
 	request.OwnerType = strings.ToUpper(strings.TrimSpace(request.OwnerType))
 	request.ShareScope = strings.ToUpper(strings.TrimSpace(request.ShareScope))
 	request.ManagementMode = strings.ToUpper(strings.TrimSpace(request.ManagementMode))
-	if request.ManagementMode == "" {
-		request.ManagementMode = "USER"
-	}
 	request.Name = strings.TrimSpace(request.Name)
-	if !validOwner(request) || !validShareScope(request.ShareScope) || !slices.Contains([]string{"USER", "PLATFORM"}, request.ManagementMode) || request.WalletID == uuid.Nil || request.CreatedBy == uuid.Nil || request.Name == "" || request.DefaultPriority < 0 || request.DefaultPriority > 10000 {
+	if !validOwner(request) || !validShareScope(request.ShareScope) || request.ManagementMode != "PLATFORM" || request.WalletID == uuid.Nil || request.CreatedBy == uuid.Nil || request.Name == "" || request.DefaultPriority < 0 || request.DefaultPriority > 10000 {
 		return TokenAccount{}, ErrForbidden
 	}
 	now := r.now()
@@ -583,7 +574,7 @@ func (r *PostgresRepository) RotateCredential(ctx context.Context, accountID, ac
 	}
 	defer tx.Rollback(ctx)
 	var exists uuid.UUID
-	if err := tx.QueryRow(ctx, `SELECT id FROM token_accounts WHERE id=$1 AND status='ACTIVE' FOR UPDATE`, accountID).Scan(&exists); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT id FROM token_accounts WHERE id=$1 AND status='ACTIVE' AND management_mode='PLATFORM' FOR UPDATE`, accountID).Scan(&exists); errors.Is(err, pgx.ErrNoRows) {
 		return Credential{}, ErrNotFound
 	} else if err != nil {
 		return Credential{}, err
@@ -631,7 +622,7 @@ JOIN token_share_policies sp ON sp.token_account_id=ta.id
 JOIN provider_credentials pc ON pc.token_account_id=ta.id AND pc.status='ACTIVE' AND pc.validation_status='VALID'
 JOIN routing_policies rp ON rp.token_account_id=ta.id AND rp.model=$1 AND rp.protocol_code=$2
 LEFT JOIN route_provisionings provision ON provision.active_token_account_id=ta.id AND provision.active_credential_id=pc.id AND provision.upstream_model_ref=rp.model AND provision.protocol_code=rp.protocol_code AND provision.status='READY' AND provision.actual_generation=rp.route_generation
-WHERE ta.status='ACTIVE' AND (ta.management_mode='USER' OR ta.management_mode='PLATFORM' AND provision.id IS NOT NULL)
+WHERE ta.status='ACTIVE' AND ta.management_mode='PLATFORM' AND provision.id IS NOT NULL
 ORDER BY rp.priority DESC,ta.id`, model, protocolCode)
 	if err != nil {
 		return nil, err

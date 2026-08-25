@@ -988,6 +988,16 @@
         "file": "000021_model_emergency_cancellation.up.sql",
         "version": 21,
         "sha256": "a6db7a849a5621d9c4b87caab044e8351a03a62240f6e5fc22f5d4c4a8e922f4"
+      },
+      {
+        "file": "000022_legacy_token_account_quarantine.down.sql",
+        "version": 22,
+        "sha256": "b49963078b33d64dbdb1a953618fb8c03b2eaa4c38a3a023dcb0cded88180c13"
+      },
+      {
+        "file": "000022_legacy_token_account_quarantine.up.sql",
+        "version": 22,
+        "sha256": "aef0feb65341158062e86c85af27afde85aadc3d614f1e99a2b7862e57c894ef"
       }
     ]
   }

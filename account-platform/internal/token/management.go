@@ -28,7 +28,7 @@ func (r *PostgresRepository) SetAccountStatus(ctx context.Context, accountID uui
 	if err != nil {
 		return TokenAccount{}, err
 	}
-	if account.Status == "FROZEN" {
+	if account.ManagementMode != "PLATFORM" || account.Status == "FROZEN" {
 		return TokenAccount{}, ErrForbidden
 	}
 	if account.Status != status {
@@ -58,6 +58,10 @@ func (r *PostgresRepository) RevokeCredential(ctx context.Context, accountID, cr
 		return Credential{}, err
 	}
 	defer tx.Rollback(ctx)
+	var platformManaged bool
+	if err := tx.QueryRow(ctx, `SELECT management_mode='PLATFORM' FROM token_accounts WHERE id=$1`, accountID).Scan(&platformManaged); err != nil || !platformManaged {
+		return Credential{}, ErrNotFound
+	}
 	credential, err := getCredential(ctx, tx, accountID, credentialID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Credential{}, ErrNotFound
@@ -104,6 +108,9 @@ func (r *PostgresRepository) UpdateSharePolicy(ctx context.Context, accountID uu
 	if err != nil {
 		return TokenAccount{}, err
 	}
+	if account.ManagementMode != "PLATFORM" {
+		return TokenAccount{}, ErrNotFound
+	}
 	if !shareScopeAllowed(account.OwnerType, scope) {
 		return TokenAccount{}, ErrForbidden
 	}
@@ -141,6 +148,9 @@ func (r *PostgresRepository) UpsertRoute(ctx context.Context, accountID uuid.UUI
 	}
 	if err != nil {
 		return RoutingPolicy{}, err
+	}
+	if account.ManagementMode != "PLATFORM" {
+		return RoutingPolicy{}, ErrNotFound
 	}
 	if !defaultScopeAllowed(account.OwnerType, defaultScope) {
 		return RoutingPolicy{}, ErrForbidden

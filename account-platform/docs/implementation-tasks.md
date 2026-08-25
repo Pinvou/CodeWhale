@@ -96,7 +96,7 @@
 | APT-070 | 密码与短信登录在会话签发前强一致校验个人登录权限 | ID-19 | APT-068, APT-069 | CODE | DONE |
 | APT-071 | Account 本人资料、上下文、注销和邀请接口接入个人原子权限 | ACC-63 | APT-069 | CODE | DONE |
 | APT-072 | Billing 个人充值、余额与组织额度接口接入个人/组织原子权限 | BILL-46 | APT-069, APT-071 | CODE | DONE |
-| APT-073 | 删除普通 Token Account/路由/凭据管理入口并隔离存量非平台凭据 | SCOPE-03, ADM-47 | APT-031, APT-069 | CODE | PENDING |
+| APT-073 | 删除普通 Token Account/路由/凭据管理入口并隔离存量非平台凭据 | SCOPE-03, ADM-47 | APT-031, APT-069 | CODE | DONE |
 | APT-074 | 审批列表、详情、决定和执行复核改为按冻结策略权限解析 | ADM-46 | APT-008, APT-069 | CODE | PENDING |
 | APT-075 | 组织管理脱离活动计费上下文并实现节点对象级授权决定 | ACC-64 | APT-011, APT-017, APT-069 | CODE | PENDING |
 | APT-076 | 各内部 HTTP、任务和事件入口接入精确工作负载权限并消费受签人类委托 | NFR-12 | APT-006, APT-045, APT-082 | CODE | PENDING |

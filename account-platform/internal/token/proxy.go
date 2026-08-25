@@ -111,41 +111,30 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid chat completion request", httpserver.RequestID(r.Context()))
 		return
 	}
-	var explicit *uuid.UUID
-	if raw := strings.TrimSpace(r.Header.Get("X-Pinvou-Token-Account-ID")); raw != "" {
-		parsed, parseErr := uuid.Parse(raw)
-		if parseErr != nil {
-			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid explicit token account", httpserver.RequestID(r.Context()))
-			return
-		}
-		explicit = &parsed
+	if s.defaultRoutes == nil {
+		s.writeError(w, r, ErrRouteRepairRequired)
+		return
 	}
-	if explicit == nil {
-		if s.defaultRoutes == nil {
-			s.writeError(w, r, ErrRouteRepairRequired)
-			return
-		}
-		walletID, walletErr := s.activeWallet(r.Context(), resolved)
-		if walletErr != nil {
-			api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
-			return
-		}
-		provisioning, provisioningErr := s.defaultRoutes.Ensure(r.Context(), resolved, walletID, catalogModel)
-		if provisioningErr != nil {
-			s.writeError(w, r, provisioningErr)
-			return
-		}
-		if provisioningErr := provisioningError(provisioning); provisioningErr != nil {
-			s.writeError(w, r, provisioningErr)
-			return
-		}
+	walletID, walletErr := s.activeWallet(r.Context(), resolved)
+	if walletErr != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the active wallet is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	provisioning, provisioningErr := s.defaultRoutes.Ensure(r.Context(), resolved, walletID, catalogModel)
+	if provisioningErr != nil {
+		s.writeError(w, r, provisioningErr)
+		return
+	}
+	if provisioningErr := provisioningError(provisioning); provisioningErr != nil {
+		s.writeError(w, r, provisioningErr)
+		return
 	}
 	candidates, err := s.repository.ListCandidates(r.Context(), catalogModel.UpstreamModelRef, "CHAT")
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	route, err := SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: "CHAT", ExplicitTokenAccountID: explicit}, candidates)
+	route, err := SelectRoute(resolved, RouteRequest{Model: catalogModel.UpstreamModelRef, ProtocolCode: "CHAT"}, candidates)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

@@ -11,6 +11,7 @@ test('platform Token operations are role isolated and resource scoped', () => {
   const service = read('internal/token/service.go');
   const admin = read('internal/token/admin.go');
   const repository = read('internal/token/postgres.go');
+  const quarantine = read('migrations/token/000022_legacy_token_account_quarantine.up.sql');
   const policy = read('internal/platform/approvalpolicy/registry.go');
   const adminAPI = read('contracts/openapi/admin.yaml');
   const organizationAPI = read('contracts/openapi/token-gateway.yaml');
@@ -33,6 +34,8 @@ test('platform Token operations are role isolated and resource scoped', () => {
   assert.match(admin, /AdminTokenAccount[\s\S]*management_mode/);
   assert.match(admin, /ManagementMode: "PLATFORM"/);
   assert.match(repository, /management_mode\) VALUES[\s\S]*account\.ManagementMode/);
+  assert.match(repository, /request\.ManagementMode != "PLATFORM"/);
+  assert.match(repository, /ta\.management_mode='PLATFORM' AND provision\.id IS NOT NULL/);
   assert.match(admin, /CREDENTIAL_CHECK_FAILED/);
   assert.match(admin, /AdminCredentialValidationResult/);
   assert.doesNotMatch(admin.match(/type AdminCredentialMetadata struct \{([\s\S]*?)\n\}/)?.[1] || '', /BaseURL|Secret|Ciphertext|KeyID/);
@@ -45,4 +48,13 @@ test('platform Token operations are role isolated and resource scoped', () => {
   assert.match(client, /createTokenAccount/);
   assert.match(ui, /createTokenAccount/);
   assert.match(ui, /validation_status === 'VALID'/);
+
+  assert.doesNotMatch(organizationAPI, /^  \/token-accounts(?::|\/)/m);
+  assert.doesNotMatch(service, /protected\.(?:GET|POST|PUT|PATCH|DELETE)\("\/v1\/token-accounts/);
+  assert.doesNotMatch(read('internal/token/proxy.go'), /X-Pinvou-Token-Account-ID|ExplicitTokenAccountID/);
+  assert.match(quarantine, /WHERE account\.management_mode='USER'/);
+  assert.match(quarantine, /SET status='FROZEN'/);
+  assert.match(quarantine, /SET status='RETIRED'/);
+  assert.match(quarantine, /SET health_status='UNHEALTHY'/);
+  assert.doesNotMatch(quarantine, /ciphertext|base_url|fingerprint|secret/i);
 });

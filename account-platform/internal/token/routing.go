@@ -45,14 +45,6 @@ func SelectRoute(context AuthorizationContext, request RouteRequest, candidates 
 			eligible = append(eligible, candidate)
 		}
 	}
-	if request.ExplicitTokenAccountID != nil {
-		for _, candidate := range eligible {
-			if candidate.TokenAccountID == *request.ExplicitTokenAccountID {
-				return candidate, nil
-			}
-		}
-		return Candidate{}, ErrForbidden
-	}
 	unitDefaults := make([]Candidate, 0)
 	for _, candidate := range eligible {
 		if candidate.DefaultScope == "UNIT" && candidate.OwnerUnit != nil && slices.Contains(context.UnitIDs, *candidate.OwnerUnit) {

@@ -8,8 +8,7 @@ const oidcTokenURL = process.env.PINVOU_TEST_OIDC_TOKEN_URL;
 const clientID = process.env.PINVOU_TEST_OIDC_CLIENT_ID;
 const username = process.env.PINVOU_TEST_OIDC_USERNAME;
 const password = process.env.PINVOU_TEST_OIDC_PASSWORD;
-const providerSecret = process.env.MOCK_NEWAPI_KEY;
-for (const [name, value] of Object.entries({ oidcTokenURL, clientID, username, password, providerSecret })) {
+for (const [name, value] of Object.entries({ oidcTokenURL, clientID, username, password })) {
   assert.ok(value, `${name} must be provided`);
 }
 
@@ -60,19 +59,6 @@ await requestJSON(accountOrigin, '/v1/sessions/current/active-context', {
   method: 'POST', body: { context_type: 'PERSONAL', organization_id: null },
 });
 
-const { body: tokenAccount } = await requestJSON(tokenOrigin, '/v1/token-accounts', {
-  method: 'POST',
-  body: { owner_type: 'USER', owner_id: me.user_id, name: 'Acceptance Token', share_scope: 'EXPLICIT_MEMBERS', default_priority: 100 },
-  statuses: [201],
-});
-assert.ok(tokenAccount.token_account_id);
-const { body: credential } = await requestJSON(tokenOrigin, `/v1/token-accounts/${tokenAccount.token_account_id}/credentials`, {
-  method: 'POST',
-  body: { provider: 'NEW_API', base_url: 'http://mock-newapi:8080', secret: providerSecret, allowed_models: ['pinvou-mock'] },
-  statuses: [201],
-});
-assert.equal(credential.status, 'ACTIVE');
-
 const { body: order } = await requestJSON(tokenOrigin, '/v1/recharge/orders', {
   method: 'POST', body: { product_id: 'PLAN_TRIAL', channel: 'ALIPAY' },
   headers: { 'idempotency-key': `auth-acceptance-recharge-${randomUUID()}` }, statuses: [201],
@@ -96,7 +82,6 @@ const chatResponse = await fetch(`${tokenOrigin}/v1/chat/completions`, {
     authorization,
     'content-type': 'application/json',
     'idempotency-key': `auth-acceptance-chat-${randomUUID()}`,
-    'x-pinvou-token-account-id': tokenAccount.token_account_id,
   },
   body: JSON.stringify({ model: 'pinvou-mock', messages: [{ role: 'user', content: 'acceptance' }], max_completion_tokens: 16 }),
   signal: AbortSignal.timeout(30_000),
@@ -109,4 +94,4 @@ assert.equal(chat.model, 'pinvou-mock');
 const { body: balanceAfter } = await requestJSON(tokenOrigin, '/v1/me/balance?consistency=strong');
 assert.ok(balanceAfter.available_microcredits < balanceBefore.available_microcredits);
 
-console.log('authenticated business acceptance passed: OIDC, account, organization, token, recharge, model proxy and settlement');
+console.log('authenticated business acceptance passed: OIDC, account, organization, platform route, recharge, model proxy and settlement');

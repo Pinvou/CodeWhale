@@ -1054,7 +1054,7 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/AdminTokenAccountCreate" }
       responses:
-        "201": { description: PLATFORM-managed Token account created, content: { application/json: { schema: { $ref: "token-gateway.yaml#/components/schemas/TokenAccount" } } } }
+        "201": { description: PLATFORM-managed Token account created, content: { application/json: { schema: { $ref: "#/components/schemas/AdminTokenAccount" } } } }
         "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -2129,6 +2129,21 @@ components:
         name: { type: string, minLength: 1, maxLength: 120 }
         share_scope: { type: string, enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS] }
         default_priority: { type: integer, minimum: 0, maximum: 10000, default: 100 }
+    AdminTokenAccount:
+      type: object
+      additionalProperties: false
+      required: [token_account_id, owner_type, owner_id, wallet_id, name, status, share_scope, default_priority]
+      properties:
+        token_account_id: { type: string, format: uuid }
+        owner_type: { type: string, enum: [USER, ORG, ORG_UNIT] }
+        owner_id: { type: string, format: uuid }
+        owner_organization_id: { type: [string, "null"], format: uuid }
+        owner_unit_id: { type: [string, "null"], format: uuid }
+        wallet_id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [ACTIVE, DISABLED, FROZEN] }
+        share_scope: { type: string, enum: [OWNER_UNIT_ONLY, OWNER_SUBTREE, ORG_ALL, EXPLICIT_MEMBERS] }
+        default_priority: { type: integer, minimum: 0, maximum: 10000 }
     CredentialValidationResult:
       type: object
       additionalProperties: false

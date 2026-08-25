@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 319`、`部分实现 34`、`未实现 11`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-072 已收敛登录、Account 本人入口和 Billing 个人/组织资金入口门禁，其余入口门禁由 APT-073–APT-082 逐项收敛。
+全量核验汇总：`已实现 321`、`部分实现 33`、`未实现 10`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069 已落地基础模型与精确真值表，APT-070–APT-073 已收敛登录、Account 本人入口、Billing 资金入口和 Token 运营隔离，其余入口门禁由 APT-074–APT-082 逐项收敛。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -70,7 +70,7 @@
 | `USAGE-EXECUTION-REPLAY` | 稳定用户级键摘要、版本化规范指纹、Hold/派发持久状态、一次性派发租约、加密流事件/结果、Last-Event-ID 重放及24小时/30天/90天分层清理 | Go 全量单元测试、OpenAPI lint、重放结构合同和静态验证通过；数据库运行级崩溃/断线/KMS故障注入待部署，注销调用与备份清除分别由 APT-015/APT-037 接入 |
 | `EXTERNAL-CONVERGENCE` | 支付与模型外部事实统一遵循先留不可变证据、再复核/结算/释放且不猜测成功或自动重发高风险请求的边界 | Go 单元测试、支付/模型收敛合同与全量静态验证通过；真实 Provider 乱序结果、断线和数据库运行级迁移待部署 |
 | `USAGE-CANCELLATION-CONVERGENCE` | 原稳定用户幂等取消、派发前 Hold 全释放、派发后交付隔离、Adapter 取消能力、可信实际用量、版本化核对期限、损失复核及幂等人工重试 | Go 全量单元测试、OpenAPI lint、取消结构合同、桌面/Portal 构建和静态验证通过；真实 PostgreSQL 竞态、Provider 用量延迟、断线和故障注入待部署 |
-| `TOKEN-OPERATIONS-ISOLATION` | 平台 Token Account 创建/启停、PLATFORM 资源过滤、组织角色默认拒绝、凭据元数据最小化及统一脱敏检查结果 | Go 单元测试、OpenAPI lint、平台 Token 运营隔离合同、三语 Portal 构建和静态验证通过；数据库运行级迁移及真实 Provider 凭据检查待部署 |
+| `TOKEN-OPERATIONS-ISOLATION` | 平台 Token Account 创建/启停、PLATFORM 资源过滤、普通管理面移除、存量非平台账号/凭据/路由隔离及用户状态脱敏 | Go 单元测试、OpenAPI lint、普通路由不存在用例、隔离迁移与平台 Token 运营合同通过；数据库运行级迁移及真实 Provider 凭据检查待部署 |
 | `ACCOUNT-CLOSURE-CLEANUP` | 主体生命周期隔离、资料/Commerce/邀请自动收敛、Identity 删除、原标识释放、永久 ID/编码墓碑、三年保留策略，以及组织授予隔离与合规整笔回收 | Account/Billing/Token/Portal Go 单元测试、OpenAPI lint、注销清理合同、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移、真实 Identity/Commerce 故障注入和三年时钟推进待部署 |
 | `CLIENT-SWITCH-READINESS` | 服务身份保护的只读 OIDC/Account/目录/READY 路由/价格公式检查、公开兼容范围、制品/环境/版本绑定的 Ed25519 短时证明和不可变签发审计 | Go 单元测试、OpenAPI lint、合同测试、Compose/Helm 静态门禁通过；生产密钥注入、真实环境连续无副作用核对和发布系统联调待外部验收 |
 | `DESKTOP-CLIENT-SWITCH` | 动态目录、按会话冻结模型、显式替代分支、受信 Portal、客户端范围守卫及发布/安装/运行三层失败关闭门禁 | Rust check、桌面 lint/build、Bridge 协议、发布门禁签名/篡改测试和全仓 verifier 通过；生产签名身份、正式安装制品原子替换/回滚和真实环境联调待验收 |
@@ -111,8 +111,8 @@
 | CORE-07 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; TARGETED-REFUND; AUDIT-IDEMPOTENCY-EVENTS | NOT_DEPLOYED | 当前跨服务变更均使用持久幂等 Saga 或事务 Outbox/Inbox；Relay、死信、摘要绑定服务身份重放和不可变修复审计形成闭环，不宣称跨库原子事务。 |
 | CORE-08 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 敏感入口尚未全部建立稳定权限或精确工作负载策略映射，缺少可阻断发布的全入口覆盖门禁；由 APT-079 收敛。 |
 | SCOPE-01 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 本地独立模型仍受保护，账号平台迁移不删除用户自建模型 |
-| SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 个人中心已移除自管 Token Account 页面；Gateway 仍保留受限普通用户 API，不影响当前 UI 范围结论 |
-| SCOPE-03 | 部分实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | `/admin/v1/*` 已限制平台运营资源，但普通认证端仍保留 `/v1/token-accounts*` 自管账号、路由和凭据能力；需由 APT-073 删除或永久无泄露拒绝并隔离存量数据。 |
+| SCOPE-02 | 已实现 | AUDIT_HEAD | DESKTOP-39; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 个人中心、自助 API 与模型调用请求均不再提供 Token Account、路由或凭据的管理和选择入口。 |
+| SCOPE-03 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 普通 `/v1/token-accounts*` 路由及公开合同已删除，用户用量状态不再返回 Token Account/钱包内部 ID；只有 `/admin/v1/*` 可管理 PLATFORM 资源，存量 USER 资源由迁移冻结、退役凭据并停用路由。 |
 | SCOPE-04 | 已实现 | AUDIT_HEAD | DESKTOP-39 | NOT_DEPLOYED | 桌面运行时不再引用旧 `llmapi_hub`/旧功能开关；仍缺安装与发布制品证明 |
 | SCOPE-05 | 已实现 | DOC_CURRENT | DESKTOP-CLIENT-SWITCH | NOT_DEPLOYED | 客户端迁移提交由基线 SHA 和路径白名单自动限制在品悟客户端、客户端测试/工具及直接相关文档；服务端 readiness 由独立 APT-052 提供，未混入客户端任务 |
 | SCOPE-06 | 部分实现 | DOC_CURRENT | DESKTOP-CLIENT-SWITCH | NOT_DEPLOYED | TOK-37 已作为独立平台/发布能力实现仓库边界，但正式制品和生产等价发布证据仍由 APT-052 收敛。 |
@@ -296,7 +296,7 @@
 | ADM-44 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-RECOVERY | NOT_DEPLOYED | 后台控制查询返回 Provider/商品开关、原因、版本和可直接提交 Account 审批的冻结恢复草稿；申请人与审批人独立，版本变化自动失效 |
 | ADM-45 | 已实现 | DOC_CURRENT | GO-UNIT; THREE-SCOPE-AUTHORIZATION | NOT_DEPLOYED | 九类系统角色以审定逐码真值表全量替换历史授权；申请/审批、模型凭据、PII 导出等职责继续分离，迁移显式递增受影响主体的平台授权版本。 |
 | ADM-46 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 审批列表、详情、决定和执行复核仍存在固定权限码路径，未完全使用冻结策略要求的动态权限；由 APT-074 收敛。 |
-| ADM-47 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | 普通认证端仍可管理 Token Account、路由和凭据，平台模型运营边界尚未成为唯一管理入口；由 APT-073 收敛。 |
+| ADM-47 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 普通 Token 管理路由、处理器和 OpenAPI 资源已移除，存量非平台账号/凭据/路由保存可逆隔离证据后冻结；创建和执行候选均强制 PLATFORM 管理模式。 |
 | ADM-48 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | Break-glass 工具仍允许命令行自报操作者，尚未从受信 OS、集群、mTLS 或签名凭据派生身份；由 APT-077 收敛。 |
 | ADM-49 | 未实现 | DOC_CURRENT | CODE-AUDIT; ROLE-PERMISSION-REDESIGN | NOT_DEPLOYED | Account 尚未签发短期不可篡改人类委托，内部写入口仍有信任请求体 actor 的路径；由 APT-082 收敛。 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
@@ -532,7 +532,7 @@
 | CR-40 | TOK-07–TOK-10, TOK-12, TOK-16, TOK-20, ADM-25, ADM-28–ADM-30 | 闭合默认托管路由创建与模型资格判断顺序 | 已实现 | 目录可见、持久 Provisioning、READY/上下文资格、请求级预占、Hold 和上游调用顺序已闭环；平台账号创建、启停、状态/修复查询均按平台模型运营权限隔离 |
 | CR-41 | BILL-28, PAY-11, PAY-20, PAY-24–PAY-31, PAY-33 | 支付履约隔离并按实际流水和权益包原子创建退款意图 | 已实现 | 多流水独立履约、目标普通退款和异常退款闭环：消费预检、原子冻结/预约、Outbox Consumer、全 BASE/关联 BONUS 撤销，以及拒付/强制退款受审计定向处置均已实现 |
 | CR-42 | BILL-20, BILL-23–BILL-25, ADM-12–ADM-13 | 闭合公式单位、输入缓存计量和零价语义 | 已实现 | 公式引用单位必须完整配置，输入与缓存输入规范化互斥；固定零价、显式继承和缺价已有独立数据与运行时语义 |
-| CR-43 | SCOPE-03, ADM-11, ADM-25–ADM-30, ADM-47 | 隔离组织模型业务策略与平台 Token Gateway 运营权限 | 部分实现 | `/admin/v1/*` 已由 `platform.tokens.*` 独占且组织模型策略只接受业务模型范围；普通 `/v1/token-accounts*` 管理面仍须由 APT-073 删除或永久无泄露拒绝。 |
+| CR-43 | SCOPE-03, ADM-11, ADM-25–ADM-30, ADM-47 | 隔离组织模型业务策略与平台 Token Gateway 运营权限 | 已实现 | `/admin/v1/*` 由 `platform.tokens.*` 独占，普通 Token 管理面和合同已删除，存量非平台凭据隔离；组织模型策略只接受业务模型范围。 |
 | CR-44 | SCOPE-04–SCOPE-06, TOK-35–TOK-37, NFR-20 | 将客户端切换拆分为发布、安装和运行三层门禁并移除计费准入请求 | 部分实现 | 发布、安装和运行门禁均已失败关闭且使用无 Hold readiness；正式平台安装器的二进制/配置原子提交与回滚仍待签名制品环境验收 |
 | CR-46 | TOK-24–TOK-30 | 补齐模型请求幂等、流式重放、断线恢复和 Hold 后派发恢复契约 | 已实现 | 稳定用户级作用域、分层保留、同键异请求冲突、加密流事件重放、断线状态恢复、唯一 Hold 和一次性派发租约均已实现；上游派发不确定时禁止盲重试 |
 | CR-47 | REQ-ID-01–REQ-ID-03, CORE-01–CORE-07, SCOPE-01–SCOPE-05, ID-01–ID-16, ACC-01–ACC-39, TOK-01–TOK-37, BILL-01–BILL-33, PAY-01–PAY-36, UI-01–UI-12, ADM-01–ADM-32, NFR-01–NFR-25 | 删除退休需求并按依赖关系重排、重新编号全部目标能力 | 文档完成、实现状态保持原判断 | 删除编号稳定与禁止重排规则；移除目标基线中的退休能力占位；按基础能力、依赖顺序和领域相关性形成连续新编号，并同步全部文档和实现状态引用 |
@@ -889,7 +889,7 @@
 | ADM-44 | 支付渠道控制与双人恢复 | 已实现 | 后台提供控制快照和冻结恢复草稿，既有审批队列负责申请、独立审批、失效与执行状态。 |
 | ADM-45 | 系统角色精确真值表 | 已实现 | 九类系统角色按审定权限集合全量替换，存量有效绑定同步递增授权版本。 |
 | ADM-46 | 策略驱动审批权限 | 未实现 | 审批读取、决定和执行复核仍有固定权限路径；APT-074 待实现。 |
-| ADM-47 | Token 管理平台隔离 | 未实现 | 普通认证端 Token Account/路由/凭据入口仍需删除或永久拒绝；APT-073 待实现。 |
+| ADM-47 | Token 管理平台隔离 | 已实现 | 普通 Token Account/路由/凭据接口未注册且不在公开合同中；平台资源只由 `/admin/v1/*` 管理，存量非平台凭据由可审计迁移冻结隔离。 |
 | ADM-48 | Break-glass 可信操作者 | 未实现 | 当前离线工具仍可自报操作者；APT-077 待实现受信身份派生。 |
 | ADM-49 | 短期人类委托 | 未实现 | Account 签发与验证契约由 APT-082 待实现，工作负载消费由 APT-076 收敛。 |
 
