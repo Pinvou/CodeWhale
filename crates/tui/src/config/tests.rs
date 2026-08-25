@@ -11833,6 +11833,16 @@ fn k3_and_kimi_k3_never_cross_products_and_fail_visibly() {
         DEFAULT_KIMI_CODE_BASE_URL,
         KIMI_CODE_K3_MODEL
     ));
+    assert!(is_exact_kimi_code_k3_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        KIMI_CODE_K3_256K_MODEL
+    ));
+    assert!(!is_exact_kimi_code_bare_k3_route(
+        ApiProvider::Moonshot,
+        DEFAULT_KIMI_CODE_BASE_URL,
+        KIMI_CODE_K3_256K_MODEL
+    ));
     assert!(!is_exact_direct_moonshot_k3_route(
         ApiProvider::Moonshot,
         DEFAULT_KIMI_CODE_BASE_URL,

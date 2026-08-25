@@ -16,8 +16,9 @@ use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
     TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
-    is_exact_zai_chat_route, is_exact_zai_tiered_effort_route,
-    minimax_m3_route_uses_max_completion_tokens, wire_model_for_provider_route,
+    is_exact_zai_chat_route, is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
+    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
+    wire_model_for_provider_route,
 };
 
 // The bounded response-header wait (`stream_open_timeout`) and its env
@@ -507,6 +508,31 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
+/// [pinvou3-fork 2026-08-25] Kimi Code's four documented membership model
+/// IDs have fixed sampling contracts. Omit generic sampling fields only for
+/// those exact IDs on the exact first-party membership endpoint; custom
+/// gateways and unknown/future IDs retain their own wire contract.
+///
+/// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
+/// (verified 2026-08-25).
+fn apply_kimi_code_coding_plan_fixed_sampling(
+    body: &mut Value,
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) {
+    if provider != ApiProvider::Moonshot
+        || !moonshot_base_url_is_exact_kimi_code(base_url)
+        || !is_kimi_code_membership_model(model)
+    {
+        return;
+    }
+    if let Some(object) = body.as_object_mut() {
+        object.remove("temperature");
+        object.remove("top_p");
+    }
+}
+
 fn openai_compatible_reasoning_effort(
     effort: &str,
     supports_max: bool,
@@ -713,6 +739,7 @@ pub(crate) fn build_chat_wire_body(
         request.reasoning_effort.as_deref(),
     );
     apply_direct_moonshot_k3_fixed_sampling(&mut body, provider, base_url, &model);
+    apply_kimi_code_coding_plan_fixed_sampling(&mut body, provider, base_url, &model);
 
     // Bulletproof final sanitizer: walk the wire payload and force
     // `reasoning_content` onto any assistant message that has tool_calls
@@ -5135,8 +5162,9 @@ mod alias_thinking_detection_tests {
     //! https://api-docs.deepseek.com/guides/thinking_mode
     use super::{
         ReasoningStreamStyle, apply_direct_moonshot_k3_fixed_sampling,
-        apply_inkling_reasoning_effort, apply_kimi_code_k3_reasoning_effort,
-        apply_openai_reasoning_effort, apply_provider_token_limit, apply_route_reasoning_controls,
+        apply_inkling_reasoning_effort, apply_kimi_code_coding_plan_fixed_sampling,
+        apply_kimi_code_k3_reasoning_effort, apply_openai_reasoning_effort,
+        apply_provider_token_limit, apply_route_reasoning_controls, build_chat_wire_body,
         is_reasoning_model_for_stream, is_reasoning_model_for_stream_on_route,
         provider_accepts_reasoning_content, reasoning_stream_style_for_route,
         requires_reasoning_content, should_replay_reasoning_content,
@@ -5144,6 +5172,7 @@ mod alias_thinking_detection_tests {
         should_replay_reasoning_content_for_provider_on_route,
     };
     use crate::config::ApiProvider;
+    use crate::models::{ContentBlock, Message, MessageRequest};
     use serde_json::json;
 
     #[test]
@@ -5816,6 +5845,24 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_code_k3_256k_uses_the_k3_reasoning_contract() {
+        let mut body = json!({ "reasoning_effort": "stale" });
+        apply_kimi_code_k3_reasoning_effort(
+            &mut body,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
+            Some("max"),
+        );
+
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "enabled", "effort": "max" })
+        );
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
     fn direct_moonshot_k3_uses_top_level_effort_and_never_disables_thinking() {
         for (requested, expected) in [
             ("off", "low"),
@@ -5852,6 +5899,122 @@ mod alias_thinking_detection_tests {
         );
         assert!(provider_default.get("thinking").is_none());
         assert!(provider_default.get("reasoning_effort").is_none());
+    }
+
+    /// [pinvou3-fork] Kimi Code membership models have fixed sampling.
+    /// Omit generic sampling fields only for the exact route and documented IDs.
+    #[test]
+    fn forkguard_kimi_code_coding_plan_strips_non_one_temperature() {
+        let kimi_code_url = "https://api.kimi.com/coding/v1";
+
+        let mut compaction_like = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut compaction_like,
+            ApiProvider::Moonshot,
+            kimi_code_url,
+            "kimi-for-coding",
+        );
+        assert!(
+            compaction_like.get("temperature").is_none(),
+            "{compaction_like}"
+        );
+
+        let mut highspeed = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut highspeed,
+            ApiProvider::Moonshot,
+            kimi_code_url,
+            "kimi-for-coding-highspeed",
+        );
+        assert!(highspeed.get("temperature").is_none(), "{highspeed}");
+
+        for model in [
+            crate::config::KIMI_CODE_K3_MODEL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
+        ] {
+            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+            apply_kimi_code_coding_plan_fixed_sampling(
+                &mut body,
+                ApiProvider::Moonshot,
+                kimi_code_url,
+                model,
+            );
+            assert!(body.get("temperature").is_none(), "{model}: {body}");
+            assert!(body.get("top_p").is_none(), "{model}: {body}");
+        }
+
+        // The direct Moonshot platform is outside the membership-route evidence.
+        let mut direct = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut direct,
+            ApiProvider::Moonshot,
+            "https://api.moonshot.ai/v1",
+            "kimi-for-coding",
+        );
+        assert_eq!(direct["temperature"], json!(0.3), "{direct}");
+
+        // Hosted copies owned by another provider keep their wire contract.
+        let mut hosted = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut hosted,
+            ApiProvider::Openrouter,
+            kimi_code_url,
+            "kimi-for-coding",
+        );
+        assert_eq!(hosted["temperature"], json!(0.3), "{hosted}");
+
+        // A future or mistyped model ID must not inherit this constraint.
+        let mut unknown = json!({ "temperature": 0.3 });
+        apply_kimi_code_coding_plan_fixed_sampling(
+            &mut unknown,
+            ApiProvider::Moonshot,
+            kimi_code_url,
+            "k3-256k-preview",
+        );
+        assert_eq!(unknown["temperature"], json!(0.3), "{unknown}");
+    }
+
+    /// [pinvou3-fork] DeepSeek documents temperature 0..=2 for Chat requests.
+    /// Preserve that field for both official and custom routes. In particular,
+    /// a hostname that merely starts with the official hostname stays custom.
+    #[test]
+    fn forkguard_deepseek_v4_chat_preserves_documented_temperature() {
+        let request = MessageRequest {
+            model: "deepseek-v4-flash".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "summarize this context".to_string(),
+                    cache_control: None,
+                }],
+            }],
+            max_tokens: 64,
+            system: None,
+            tools: None,
+            tool_choice: None,
+            metadata: None,
+            thinking: None,
+            reasoning_effort: None,
+            stream: Some(false),
+            temperature: Some(0.3),
+            top_p: None,
+        };
+
+        for base_url in [
+            "https://api.deepseek.com/v1",
+            "https://api.deepseek.com.evil.example/v1",
+        ] {
+            let wire = build_chat_wire_body(&request, ApiProvider::Deepseek, base_url, false)
+                .expect("chat wire body");
+            let temperature = wire.body["temperature"]
+                .as_f64()
+                .expect("temperature number");
+            assert!(
+                (temperature - 0.3).abs() < 1e-6,
+                "{base_url}: {}",
+                wire.body
+            );
+        }
     }
 
     #[test]

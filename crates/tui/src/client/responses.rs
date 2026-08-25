@@ -56,7 +56,15 @@ pub(super) fn build_responses_body_for_provider(
         if request.max_tokens > 0 {
             body["max_output_tokens"] = json!(request.max_tokens);
         }
-        if let Some(temperature) = request.temperature {
+        // [pinvou3-fork 2026-08-19] Live DeepSeek-V4-Flash Responses requests
+        // rejected compaction's explicit 0.3 despite the provider reference
+        // advertising a 0..=2 range. Keep this compatibility shim restricted
+        // to the exact model and dialect that reproduced the failure. Chat
+        // requests continue to preserve the documented temperature field.
+        let requires_default_temperature = model.trim().eq_ignore_ascii_case("deepseek-v4-flash");
+        if let Some(temperature) = request.temperature
+            && !(requires_default_temperature && temperature != 1.0)
+        {
             body["temperature"] = json!(temperature);
         }
         if let Some(top_p) = request.top_p {

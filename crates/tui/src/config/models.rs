@@ -111,6 +111,9 @@ pub const KIMI_CODE_MEMBERSHIP_PLAN_CONSOLE_URL: &str =
 /// Official Kimi Code route model id. It is deliberately distinct from
 /// Moonshot's pay-as-you-go `kimi-k3` catalog id.
 pub const KIMI_CODE_K3_MODEL: &str = "k3";
+/// Official fixed-256K Kimi Code K3 wire model id. This is a distinct
+/// membership-route model, not a client-side context alias for `k3`.
+pub const KIMI_CODE_K3_256K_MODEL: &str = "k3-256k";
 /// Kimi Code membership high-speed wire model id. Membership route only, not
 /// a direct Moonshot platform catalog model.
 pub const KIMI_CODE_HIGHSPEED_MODEL: &str = "kimi-for-coding-highspeed";

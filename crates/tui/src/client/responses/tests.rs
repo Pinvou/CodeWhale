@@ -557,6 +557,52 @@ fn deepseek_flash_responses_body_uses_stateless_0731_contract() {
     );
 }
 
+/// [pinvou3-fork] The live V4-Flash Responses route rejected compaction's
+/// explicit 0.3. Restrict the workaround to that exact model and preserve
+/// explicit 1.0 plus every other model's documented sampling contract.
+#[test]
+fn forkguard_deepseek_v4_flash_responses_drops_non_one_temperature() {
+    let mut compaction_like = minimal_responses_request();
+    compaction_like.model = "deepseek-v4-flash".to_string();
+    compaction_like.temperature = Some(0.3);
+    let body = build_responses_body_for_provider(&compaction_like, ApiProvider::Deepseek);
+    assert!(body.get("temperature").is_none(), "{body}");
+
+    let mut explicit_one = minimal_responses_request();
+    explicit_one.model = "deepseek-v4-flash".to_string();
+    explicit_one.temperature = Some(1.0);
+    let body = build_responses_body_for_provider(&explicit_one, ApiProvider::Deepseek);
+    assert_eq!(body["temperature"], json!(1.0), "{body}");
+
+    let mut unsupported_pro = minimal_responses_request();
+    unsupported_pro.model = "deepseek-v4-pro".to_string();
+    unsupported_pro.temperature = Some(0.3);
+    let body = build_responses_body_for_provider(&unsupported_pro, ApiProvider::Deepseek);
+    assert!(
+        (body["temperature"].as_f64().expect("temperature number") - 0.3).abs() < 1e-6,
+        "{body}"
+    );
+
+    let mut unknown_suffix = minimal_responses_request();
+    unknown_suffix.model = "deepseek-v4-flash-preview".to_string();
+    unknown_suffix.temperature = Some(0.3);
+    let body = build_responses_body_for_provider(&unknown_suffix, ApiProvider::Deepseek);
+    assert!(
+        (body["temperature"].as_f64().expect("temperature number") - 0.3).abs() < 1e-6,
+        "{body}"
+    );
+
+    let mut legacy = minimal_responses_request();
+    legacy.model = "deepseek-v3.2".to_string();
+    legacy.temperature = Some(0.3);
+    let body = build_responses_body_for_provider(&legacy, ApiProvider::Deepseek);
+    // Temperature is f32, so compare with tolerance instead of JSON spelling.
+    assert!(
+        (body["temperature"].as_f64().expect("temperature number") - 0.3).abs() < 1e-6,
+        "{body}"
+    );
+}
+
 #[test]
 fn deepseek_responses_reasoning_effort_uses_documented_labels() {
     assert_eq!(responses_reasoning_effort("low", true), Some("low"));

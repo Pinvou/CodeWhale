@@ -647,6 +647,11 @@ row for is a different fact — absence is not permission, so an uncatalogued id
 keeps a conservative ceiling. The "Max output metadata" column below reads
 `unknown` wherever no documented maximum exists.
 
+The exact Kimi Code membership roster contains `k3`, `k3-256k`,
+`kimi-for-coding`, and `kimi-for-coding-highspeed`. The two K3 IDs share the
+same reasoning and fixed-sampling request contract; `k3-256k` keeps the
+documented 262,144-token window while bare `k3` can use an entitled 1M override.
+
 | Provider/model class | Context window | Max output metadata | Thinking support | Cache telemetry | FIM endpoint |
 | --- | --- | --- | --- | --- | --- |
 | DeepSeek V4 (`deepseek-v4-pro`, `deepseek-v4-flash`) | 1,000,000 | 384,000 | yes | yes | DeepSeek beta only |
@@ -668,6 +673,7 @@ keeps a conservative ceiling. The "Max output metadata" column below reads
 | Direct Arcee API `trinity-large-preview` | 262,144 | unknown (no documented maximum) | no in doctor capability metadata | no | not documented in code |
 | Direct Moonshot `kimi-k3` | 1,048,576 | 1,048,576 documented maximum; 131,072 provider default | yes | no | exact route uses `max_completion_tokens` and omits fixed sampling fields ([K3 quickstart](https://platform.kimi.ai/docs/guide/kimi-k3-quickstart)) |
 | Kimi Code membership `k3` | 262,144 safe baseline; 1,048,576 with an explicit entitled-plan override | 131,072 conservative default ceiling; membership maximum is not published | yes | no | exact `https://api.kimi.com/coding/v1` route |
+| Kimi Code membership `k3-256k` | 262,144 | 131,072 conservative default ceiling; membership maximum is not published | yes | no | exact `https://api.kimi.com/coding/v1` route |
 | Direct Moonshot/Kimi K2.7/K2.6 (`kimi-k2.7-code`, `kimi-k2.6`) | 262,144 | 32,768 | yes | no | provider-reported bundled catalog |
 | Kimi Code membership `kimi-for-coding`, `kimi-for-coding-highspeed` | 262,144 | unknown — the membership catalog owns these limits and no client-side ceiling is claimed | yes | no | exact `https://api.kimi.com/coding/v1` route |
 | Direct Z.AI `GLM-5.2` (default) | 1,000,000 | 131,072 | yes | no | not documented in code |
@@ -757,8 +763,8 @@ disables thinking where the route supports it. Both exact K3 routes map `off`
 to their lowest supported tier, `low`, and the model is never switched to
 satisfy `off` — but they do so for different reasons:
 
-- **Kimi Code membership K3** (exact `https://api.kimi.com/coding/v1` with bare
-  `model = "k3"`) — the membership roster declares K3 always-thinking, so `off`
+- **Kimi Code membership K3** (exact `https://api.kimi.com/coding/v1` with
+  `model = "k3"` or `model = "k3-256k"`) — the membership roster declares K3 always-thinking, so `off`
   cannot be honored without changing what the model is. The clamp preserves the
   fixed K3 identity.
 - **Direct Moonshot K3** (exact `https://api.moonshot.ai/v1` with
@@ -779,7 +785,7 @@ Providers marked "omitted" receive no reasoning fields at all for that tier.
 | `openrouter`, `novita`, other `together` models | `thinking: {type: disabled}` | `reasoning_effort` pass-through + `thinking: {type: enabled}` | `reasoning_effort: "xhigh"` + `thinking: {type: enabled}` |
 | `together` + `thinkingmachines/inkling` | `reasoning_effort: "none"` | exact `minimal`/`low`/`medium`/`high` `reasoning_effort` | `reasoning_effort: "max"` |
 | Direct Moonshot `kimi-k3` at exact `https://api.moonshot.ai/v1` | top-level `reasoning_effort: "low"` (effective normalization) | top-level `reasoning_effort: "low"` / `"high"` (`medium` becomes `high`) | top-level `reasoning_effort: "max"` |
-| Kimi Code membership `k3` at exact `https://api.kimi.com/coding/v1` | `thinking: {type: enabled, effort: "low"}` (effective normalization) | `thinking: {type: enabled, effort: "low" | "high"}` | `thinking: {type: enabled, effort: "max"}` |
+| Kimi Code membership `k3`, `k3-256k` at exact `https://api.kimi.com/coding/v1` | `thinking: {type: enabled, effort: "low"}` (effective normalization) | `thinking: {type: enabled, effort: "low" | "high"}` | `thinking: {type: enabled, effort: "max"}` |
 | Other `moonshot` routes | `thinking: {type: disabled}` | `thinking: {type: enabled}` | `thinking: {type: enabled}` |
 | `ollama` | `think: false` | `think: true` | `think: true` |
 | `xiaomi-mimo` | `thinking: {type: disabled}` | `thinking: {type: enabled}` | `thinking: {type: enabled}` |
