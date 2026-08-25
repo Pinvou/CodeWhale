@@ -15,9 +15,9 @@ use serde_json::{Value, json};
 use tokio::time::timeout as tokio_timeout;
 
 use crate::config::{
-    DEFAULT_KIMI_CODE_MODEL, KIMI_CODE_HIGHSPEED_MODEL, TOGETHER_INKLING_MODEL,
-    is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route, is_exact_zai_chat_route,
-    is_exact_zai_tiered_effort_route, minimax_m3_route_uses_max_completion_tokens,
+    TOGETHER_INKLING_MODEL, is_exact_direct_moonshot_k3_route, is_exact_kimi_code_k3_route,
+    is_exact_zai_chat_route, is_exact_zai_tiered_effort_route, is_kimi_code_membership_model,
+    minimax_m3_route_uses_max_completion_tokens, moonshot_base_url_is_exact_kimi_code,
     wire_model_for_provider_route,
 };
 
@@ -508,33 +508,28 @@ fn apply_direct_moonshot_k3_fixed_sampling(
     }
 }
 
-/// [pinvou3-fork 2026-08-19] Kimi Code's K2.7 membership models reject an
-/// explicit temperature other than 1. Compaction requests use 0.3, so omit
-/// that generic value only for the two documented K2.7 model IDs on the exact
-/// first-party membership route. Explicit 1.0 and custom gateways keep their
-/// own wire contract.
+/// [pinvou3-fork 2026-08-25] Kimi Code's four documented membership model
+/// IDs have fixed sampling contracts. Omit generic sampling fields only for
+/// those exact IDs on the exact first-party membership endpoint; custom
+/// gateways and unknown/future IDs retain their own wire contract.
+///
+/// Source: <https://www.kimi.com/code/docs/en/third-party-tools/codex.html>
+/// (verified 2026-08-25).
 fn apply_kimi_code_coding_plan_fixed_sampling(
     body: &mut Value,
     provider: ApiProvider,
     base_url: &str,
     model: &str,
 ) {
-    let is_k2_7 = model.trim().eq_ignore_ascii_case(DEFAULT_KIMI_CODE_MODEL)
-        || model.trim().eq_ignore_ascii_case(KIMI_CODE_HIGHSPEED_MODEL);
     if provider != ApiProvider::Moonshot
-        || !crate::config::moonshot_base_url_is_exact_kimi_code(base_url)
-        || !is_k2_7
+        || !moonshot_base_url_is_exact_kimi_code(base_url)
+        || !is_kimi_code_membership_model(model)
     {
         return;
     }
     if let Some(object) = body.as_object_mut() {
-        let non_one = object
-            .get("temperature")
-            .and_then(|value| value.as_f64())
-            .is_some_and(|value| value != 1.0);
-        if non_one {
-            object.remove("temperature");
-        }
+        object.remove("temperature");
+        object.remove("top_p");
     }
 }
 
@@ -5850,6 +5845,24 @@ mod alias_thinking_detection_tests {
     }
 
     #[test]
+    fn kimi_code_k3_256k_uses_the_k3_reasoning_contract() {
+        let mut body = json!({ "reasoning_effort": "stale" });
+        apply_kimi_code_k3_reasoning_effort(
+            &mut body,
+            ApiProvider::Moonshot,
+            crate::config::DEFAULT_KIMI_CODE_BASE_URL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
+            Some("max"),
+        );
+
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "enabled", "effort": "max" })
+        );
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
     fn direct_moonshot_k3_uses_top_level_effort_and_never_disables_thinking() {
         for (requested, expected) in [
             ("off", "low"),
@@ -5888,8 +5901,8 @@ mod alias_thinking_detection_tests {
         assert!(provider_default.get("reasoning_effort").is_none());
     }
 
-    /// [pinvou3-fork] Kimi Code K2.7 membership models require temperature 1.
-    /// Omit compaction's explicit 0.3 only for the exact route and model IDs.
+    /// [pinvou3-fork] Kimi Code membership models have fixed sampling.
+    /// Omit generic sampling fields only for the exact route and documented IDs.
     #[test]
     fn forkguard_kimi_code_coding_plan_strips_non_one_temperature() {
         let kimi_code_url = "https://api.kimi.com/coding/v1";
@@ -5915,14 +5928,20 @@ mod alias_thinking_detection_tests {
         );
         assert!(highspeed.get("temperature").is_none(), "{highspeed}");
 
-        let mut explicit_one = json!({ "temperature": 1.0 });
-        apply_kimi_code_coding_plan_fixed_sampling(
-            &mut explicit_one,
-            ApiProvider::Moonshot,
-            kimi_code_url,
-            "kimi-for-coding",
-        );
-        assert_eq!(explicit_one["temperature"], json!(1.0), "{explicit_one}");
+        for model in [
+            crate::config::KIMI_CODE_K3_MODEL,
+            crate::config::KIMI_CODE_K3_256K_MODEL,
+        ] {
+            let mut body = json!({ "temperature": 0.3, "top_p": 0.8 });
+            apply_kimi_code_coding_plan_fixed_sampling(
+                &mut body,
+                ApiProvider::Moonshot,
+                kimi_code_url,
+                model,
+            );
+            assert!(body.get("temperature").is_none(), "{model}: {body}");
+            assert!(body.get("top_p").is_none(), "{model}: {body}");
+        }
 
         // The direct Moonshot platform is outside the membership-route evidence.
         let mut direct = json!({ "temperature": 0.3 });
@@ -5944,13 +5963,13 @@ mod alias_thinking_detection_tests {
         );
         assert_eq!(hosted["temperature"], json!(0.3), "{hosted}");
 
-        // A future or mistyped model ID must not inherit K2.7's constraint.
+        // A future or mistyped model ID must not inherit this constraint.
         let mut unknown = json!({ "temperature": 0.3 });
         apply_kimi_code_coding_plan_fixed_sampling(
             &mut unknown,
             ApiProvider::Moonshot,
             kimi_code_url,
-            "kimi-for-coding-preview",
+            "k3-256k-preview",
         );
         assert_eq!(unknown["temperature"], json!(0.3), "{unknown}");
     }

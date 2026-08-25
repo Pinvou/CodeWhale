@@ -2002,7 +2002,7 @@ impl ProviderPickerView {
         let Some(model) = self.selected_model.as_deref() else {
             return false;
         };
-        crate::config::is_exact_kimi_code_k3_route(
+        crate::config::is_exact_kimi_code_bare_k3_route(
             self.selected_provider(),
             &self.rows[self.selected_idx].base_url,
             model,
