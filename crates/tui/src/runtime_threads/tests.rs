@@ -8005,7 +8005,7 @@ async fn steer_turn_on_active_turn_records_item_and_event() -> Result<()> {
                 })
                 .await;
             if let Some(steer) = rx_steer.recv().await {
-                let _ = steer_seen_tx.send(steer);
+                let _ = steer_seen_tx.send(steer.content);
             }
             let _ = tx_event
                 .send(EngineEvent::MessageStarted { index: 0 })
@@ -8125,7 +8125,9 @@ async fn steer_receipts_outlive_caller_cancellation_after_engine_acceptance() ->
             .await
     });
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), rx_steer.recv()).await?,
+        tokio::time::timeout(Duration::from_secs(2), rx_steer.recv())
+            .await?
+            .map(|steer| steer.content),
         Some("keep the accepted steer".to_string())
     );
     steer_task.abort();

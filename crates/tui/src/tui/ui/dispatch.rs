@@ -735,6 +735,7 @@ pub(crate) async fn spawned_dispatch_inner(
             hook_executor: prepare.hook_executor.clone(),
             verbosity: prepare.verbosity.clone(),
             provenance: prepare.provenance,
+            turn_tool_security: None,
         })
         .await
     {

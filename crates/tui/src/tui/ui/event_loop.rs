@@ -1842,6 +1842,10 @@ pub(crate) async fn run_event_loop(
                     EngineEvent::Status { message } => {
                         app.status_message = Some(message);
                     }
+                    // Steer delivery confirmations: the TUI keeps its
+                    // existing status feedback; the structured events are
+                    // primarily for embedding hosts.
+                    EngineEvent::SteerCommitted { .. } | EngineEvent::SteerDropped { .. } => {}
                     EngineEvent::RequestManifestReady { rendered } => {
                         // Typed manifest text, or the explicitly requested
                         // base-prompt-only disclosure. Rendered as a system cell.

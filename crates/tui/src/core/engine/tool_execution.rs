@@ -183,6 +183,33 @@ pub(super) fn emit_tool_audit(event: serde_json::Value) {
     emit_tool_audit_to_path(&PathBuf::from(path), event);
 }
 
+/// Restricted-turn audit projection: keep the non-private identity fields
+/// (event kind, tool name) so operators can still audit *which* tool ran how
+/// often, and redact everything else — inputs, outputs, paths and any extra
+/// payload keys never reach the audit log.
+pub(super) fn tool_audit_event_for_policy(
+    restricted: bool,
+    event: serde_json::Value,
+) -> serde_json::Value {
+    if !restricted {
+        return event;
+    }
+    let mut projected = serde_json::json!({
+        "restricted": true,
+    });
+    if let Some(event_kind) = event.get("event").and_then(serde_json::Value::as_str) {
+        projected["event"] = serde_json::json!(event_kind);
+    }
+    if let Some(tool_name) = event.get("tool_name").and_then(serde_json::Value::as_str) {
+        projected["tool_name"] = serde_json::json!(tool_name);
+    }
+    projected
+}
+
+pub(super) fn emit_tool_audit_for_policy(restricted: bool, event: serde_json::Value) {
+    emit_tool_audit(tool_audit_event_for_policy(restricted, event));
+}
+
 fn emit_tool_audit_to_path(path: &Path, event: serde_json::Value) {
     let line = match serde_json::to_string(&event) {
         Ok(line) => line,
@@ -294,6 +321,7 @@ impl Engine {
             let workspace = self.session.workspace.clone();
             let context_override = context_override.clone();
             let cancel_token = self.cancel_token.clone();
+            let turn_tool_security = self.active_turn_tool_security.clone();
             tasks.push(async move {
                 let _shell_permit = if tool_name == "exec_shell" {
                     shell_permits.acquire_owned().await.ok()
@@ -312,6 +340,7 @@ impl Engine {
                     Some(registry_ref),
                     mcp_pool,
                     context_override,
+                    turn_tool_security,
                 )
                 .await;
                 (index, tool_name, result)
@@ -365,7 +394,32 @@ impl Engine {
         registry: Option<&crate::tools::ToolRegistry>,
         mcp_pool: Option<Arc<AsyncMutex<McpPool>>>,
         context_override: Option<crate::tools::ToolContext>,
+        turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
     ) -> Result<ToolResult, ToolError> {
+        if let Some(exact) = turn_tool_security
+            .as_ref()
+            .and_then(|policy| policy.exact_dispatch())
+            && !exact.allows(&tool_name)
+        {
+            return Err(ToolError::permission_denied(
+                "Tool blocked by host turn policy".to_string(),
+            ));
+        }
+        if turn_tool_security
+            .as_ref()
+            .is_some_and(|policy| policy.requires_read_only_dispatch())
+        {
+            let Some(spec) = registry.and_then(|registry| registry.get(&tool_name)) else {
+                return Err(ToolError::permission_denied(
+                    "Tool blocked by host read-only turn policy".to_string(),
+                ));
+            };
+            if !spec.is_read_only_for(&tool_input) {
+                return Err(ToolError::permission_denied(
+                    "Tool action blocked by host read-only turn policy".to_string(),
+                ));
+            }
+        }
         if cancel_token
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled)
@@ -393,15 +447,20 @@ impl Engine {
         let input_bytes = serde_json::to_string(&tool_input)
             .map(|s| s.len())
             .unwrap_or(0);
-        tracing::debug!(
-            target: "engine.tool_execution",
-            tool = %tool_name,
-            dispatch,
-            interactive,
-            supports_parallel,
-            input_bytes,
-            "tool.exec.start",
-        );
+        let restricted_log = turn_tool_security.is_some();
+        if restricted_log {
+            tracing::debug!(target: "engine.tool_execution", "restricted_tool.exec.start");
+        } else {
+            tracing::debug!(
+                target: "engine.tool_execution",
+                tool = %tool_name,
+                dispatch,
+                interactive,
+                supports_parallel,
+                input_bytes,
+                "tool.exec.start",
+            );
+        }
 
         let _guard = if supports_parallel {
             ToolExecGuard::Read(lock.read().await)
@@ -482,15 +541,19 @@ impl Engine {
         }
         match &outcome {
             Ok(result) => {
-                tracing::debug!(
-                    target: "engine.tool_execution",
-                    tool = %tool_name,
-                    dispatch,
-                    duration_ms,
-                    success = result.success,
-                    output_bytes = result.content.len(),
-                    "tool.exec.end",
-                );
+                if restricted_log {
+                    tracing::debug!(target: "engine.tool_execution", "restricted_tool.exec.end");
+                } else {
+                    tracing::debug!(
+                        target: "engine.tool_execution",
+                        tool = %tool_name,
+                        dispatch,
+                        duration_ms,
+                        success = result.success,
+                        output_bytes = result.content.len(),
+                        "tool.exec.end",
+                    );
+                }
             }
             Err(err) => {
                 let kind = match err {
@@ -515,15 +578,23 @@ impl Engine {
                     }
                     _ => {}
                 }
-                tracing::warn!(
-                    target: "engine.tool_execution",
-                    tool = %tool_name,
-                    dispatch,
-                    duration_ms,
-                    error_kind = kind,
-                    error = %err,
-                    "tool.exec.end",
-                );
+                if restricted_log {
+                    tracing::warn!(
+                        target: "engine.tool_execution",
+                        error_kind = kind,
+                        "restricted_tool.exec.end",
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "engine.tool_execution",
+                        tool = %tool_name,
+                        dispatch,
+                        duration_ms,
+                        error_kind = kind,
+                        error = %err,
+                        "tool.exec.end",
+                    );
+                }
             }
         }
         outcome
@@ -535,6 +606,80 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn forkguard_dispatch_allowlist_rejects_forged_calls_before_all_dispatch_backends() {
+        let exact =
+            crate::core::ops::ExactToolDispatchPolicy::try_new(vec!["read_file".to_string()])
+                .expect("exact policy");
+        let policy = Arc::new(crate::core::ops::TurnToolSecurityPolicy::new(
+            None,
+            Some(exact),
+        ));
+        let workspace = tempfile::tempdir().expect("workspace");
+        for forged in [
+            "mcp__forged__call",
+            CODE_EXECUTION_TOOL_NAME,
+            JS_EXECUTION_TOOL_NAME,
+            "exec_shell",
+            "agent",
+            "dynamic_forged",
+        ] {
+            let (tx, _rx) = mpsc::channel(1);
+            let error = Engine::execute_tool_with_lock(
+                Arc::new(RwLock::new(())),
+                false,
+                false,
+                tx,
+                None,
+                forged.to_string(),
+                serde_json::json!({}),
+                workspace.path().to_path_buf(),
+                None,
+                None,
+                None,
+                Some(policy.clone()),
+            )
+            .await
+            .expect_err("forged dispatch must fail closed");
+            assert!(matches!(error, ToolError::PermissionDenied { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn forkguard_read_only_turn_rejects_write_action_at_final_dispatch() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let registry = crate::tools::ToolRegistryBuilder::new()
+            .with_file_tools()
+            .build(crate::tools::ToolContext::new(workspace.path()));
+        let exact = crate::core::ops::ExactToolDispatchPolicy::try_new(vec!["File".to_string()])
+            .expect("exact policy");
+        let policy = Arc::new(
+            crate::core::ops::TurnToolSecurityPolicy::new(None, Some(exact))
+                .with_read_only_dispatch(),
+        );
+        let (tx, _rx) = mpsc::channel(1);
+
+        let error = Engine::execute_tool_with_lock(
+            Arc::new(RwLock::new(())),
+            false,
+            false,
+            tx,
+            None,
+            "File".to_string(),
+            json!({"action": "write", "path": "blocked.txt", "content": "blocked"}),
+            workspace.path().to_path_buf(),
+            Some(&registry),
+            None,
+            None,
+            Some(policy),
+        )
+        .await
+        .expect_err("write action must fail closed");
+
+        assert!(matches!(error, ToolError::PermissionDenied { .. }));
+        assert!(!workspace.path().join("blocked.txt").exists());
+    }
 
     const TEST_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -711,5 +856,29 @@ mod tests {
         let nested = tmp.path().join("nested").join("dir").join("audit.log");
         emit_tool_audit_to_path(&nested, json!({"event": "test"}));
         assert!(nested.exists(), "writer should mkdir -p the parent chain");
+    }
+
+    #[test]
+    fn forkguard_restricted_tool_audit_redacts_private_sentinel() {
+        let private = "PRIVATE_SENTINEL_C_MUST_NOT_REACH_AUDIT";
+        let event = tool_audit_event_for_policy(
+            true,
+            json!({
+                "event": "tool.error",
+                "tool_name": "File",
+                "tool_input": private,
+                "error": format!("failed at C:/private/{private}"),
+            }),
+        );
+        let encoded = serde_json::to_string(&event).expect("audit json");
+        assert!(!encoded.contains(private));
+        // 非私有身份字段保留:受限轮仍可审计"哪个工具在运行"。
+        assert_eq!(event["event"], "tool.error");
+        assert_eq!(event["tool_name"], "File");
+        assert_eq!(event["restricted"], true);
+        // 输入/输出/路径类载荷不落审计。
+        assert!(event.get("tool_input").is_none());
+        assert!(event.get("error").is_none());
+        assert!(event.get("details").is_none());
     }
 }

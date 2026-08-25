@@ -11084,6 +11084,7 @@ async fn run_exec_agent(
         goal_status: crate::tools::goal::GoalStatus::Active,
         goal_max_continuations: execution_config.goal_max_continuations(),
         allowed_tools: allowed_tools.clone(),
+        turn_tool_security: None,
         disallowed_tools: disallowed_tools.clone(),
         max_tool_calls: None,
         hook_executor: None,
@@ -11188,6 +11189,7 @@ async fn run_exec_agent(
             },
             verbosity: execution_config.verbosity.clone(),
             provenance: crate::core::ops::UserInputProvenance::ExternalUser,
+            turn_tool_security: None,
         })
         .await?;
 

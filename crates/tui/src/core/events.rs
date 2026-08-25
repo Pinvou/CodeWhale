@@ -402,6 +402,27 @@ pub enum Event {
     /// Status message for UI display
     Status { message: String },
 
+    // === Steer (mid-turn injection) Events ===
+    /// A steer message was committed into the session transcript (injected at
+    /// a step boundary or after the stream ended). Hosts correlate the event
+    /// back to the original steer input via the opaque `steer_id` handed out
+    /// by `EngineHandle::steer` — never by order or content — so a queued
+    /// message placeholder in the host UI can be promoted to a visible bubble
+    /// exactly when the engine actually appended the message.
+    SteerCommitted {
+        /// Opaque id of the committed steer (`SteerMessage::id`).
+        steer_id: String,
+    },
+
+    /// A steer message was retired without ever being injected: it was
+    /// withdrawn, stopped, empty, or belonged to a retired session. Hosts
+    /// must surface this so a queued message cannot silently stall forever —
+    /// every accepted id eventually commits or drops exactly once.
+    SteerDropped {
+        /// Opaque id of the dropped steer (`SteerMessage::id`).
+        steer_id: String,
+    },
+
     /// Rendered `/preview-request` manifest (#1004).
     ///
     /// The engine is the only authority that can rebuild the exact next-turn

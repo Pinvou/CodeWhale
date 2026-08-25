@@ -12,9 +12,138 @@ use crate::tui::app::AppMode;
 use crate::tui::approval::ApprovalMode;
 use codewhale_protocol::runtime::DynamicToolSpec;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Prefix used for tool-call ids created by local composer shell shortcuts.
 pub const USER_SHELL_TOOL_ID_PREFIX: &str = "user_shell_";
+
+/// Process-local, exact tool-dispatch authority for an embedded turn.
+///
+/// This deliberately does not implement serde traits: a host must install the
+/// authority in-process for each turn rather than accepting it from a saved
+/// transcript or another untrusted serialization boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactToolDispatchPolicy {
+    allowed: Arc<[String]>,
+}
+
+impl ExactToolDispatchPolicy {
+    pub fn try_new(names: impl IntoIterator<Item = String>) -> Result<Self, String> {
+        let mut allowed = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for name in names {
+            if name.is_empty() || name.trim() != name || name.contains('*') || name.contains('?') {
+                return Err("invalid exact tool name".to_string());
+            }
+            if name == "agent"
+                || name == "start_mcp_server"
+                || crate::mcp::McpPool::is_mcp_tool(&name)
+            {
+                return Err(
+                    "control-plane and MCP tools are not valid exact dispatch names".into(),
+                );
+            }
+            if !seen.insert(name.clone()) {
+                return Err("duplicate exact tool name".to_string());
+            }
+            allowed.push(name);
+        }
+        Ok(Self {
+            allowed: allowed.into(),
+        })
+    }
+
+    pub fn allowed_tools(&self) -> &[String] {
+        &self.allowed
+    }
+
+    pub fn allows(&self, canonical_name: &str) -> bool {
+        self.allowed.iter().any(|allowed| allowed == canonical_name)
+    }
+}
+
+/// Optional turn-scoped hardening supplied by an embedding host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnToolSecurityPolicy {
+    trusted_external_paths_override: Option<Arc<[PathBuf]>>,
+    exact_dispatch: Option<ExactToolDispatchPolicy>,
+    require_read_only_dispatch: bool,
+    allow_hooks: bool,
+}
+
+impl TurnToolSecurityPolicy {
+    pub fn new(
+        // Trusted roots must be canonical absolute paths. The host owns
+        // canonicalization because this process-local policy never performs
+        // filesystem I/O during construction.
+        trusted_external_paths_override: Option<Vec<PathBuf>>,
+        exact_dispatch: Option<ExactToolDispatchPolicy>,
+    ) -> Self {
+        Self {
+            trusted_external_paths_override: trusted_external_paths_override.map(Into::into),
+            exact_dispatch,
+            require_read_only_dispatch: false,
+            allow_hooks: false,
+        }
+    }
+
+    pub fn trusted_external_paths_override(&self) -> Option<&[PathBuf]> {
+        self.trusted_external_paths_override.as_deref()
+    }
+
+    pub fn exact_dispatch(&self) -> Option<&ExactToolDispatchPolicy> {
+        self.exact_dispatch.as_ref()
+    }
+
+    /// Require every model-visible and dispatched tool action to be read-only.
+    ///
+    /// Hosts use this for untrusted benchmark or inspection turns. The engine
+    /// projects a read-only catalog and repeats the check at final dispatch so
+    /// a forged call cannot rely on schema filtering alone.
+    pub fn with_read_only_dispatch(mut self) -> Self {
+        self.require_read_only_dispatch = true;
+        self
+    }
+
+    pub fn requires_read_only_dispatch(&self) -> bool {
+        self.require_read_only_dispatch
+    }
+
+    /// Explicitly permit the embedding host's hooks for this restricted turn.
+    /// Restricted policies default to no hooks because hook executors may
+    /// launch external processes and receive the full tool input.
+    pub fn with_trusted_hooks(mut self) -> Self {
+        self.allow_hooks = true;
+        self
+    }
+
+    pub fn allows_hooks(&self) -> bool {
+        self.allow_hooks
+    }
+}
+
+#[cfg(test)]
+mod turn_security_tests {
+    use super::*;
+
+    #[test]
+    fn forkguard_restricted_turn_hooks_require_explicit_host_opt_in() {
+        let default_policy = TurnToolSecurityPolicy::new(Some(Vec::new()), None);
+        assert!(!default_policy.allows_hooks());
+
+        let trusted = default_policy.with_trusted_hooks();
+        assert!(trusted.allows_hooks());
+    }
+
+    #[test]
+    fn restricted_turn_read_only_dispatch_requires_explicit_opt_in() {
+        let default_policy = TurnToolSecurityPolicy::new(Some(Vec::new()), None);
+        assert!(!default_policy.requires_read_only_dispatch());
+
+        let read_only = default_policy.with_read_only_dispatch();
+        assert!(read_only.requires_read_only_dispatch());
+    }
+}
 
 /// Snapshot of session state for saving to disk.
 /// Returned by `Op::GetSessionSnapshot` via a oneshot channel.
@@ -30,6 +159,37 @@ pub struct SessionSnapshot {
     pub workspace: PathBuf,
     pub system_prompt: Option<SystemPrompt>,
     pub mode: String,
+}
+
+/// A mid-turn steer message travelling on the engine's steer channel.
+///
+/// The id is an opaque, engine-assigned correlation token (unique within the
+/// engine session). Hosts use it to match `Event::SteerCommitted` /
+/// `Event::SteerDropped` back to the queued input they originated — never a
+/// content hash, so correlation cannot break on non-ASCII content or depend
+/// on both sides re-implementing the same hash over the same encoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SteerMessage {
+    /// Opaque correlation id assigned by `EngineHandle::steer` at enqueue
+    /// time (e.g. `steer-7`).
+    pub id: String,
+    /// Session/turn identity captured before the channel slot is reserved.
+    /// A late send through an already-owned permit therefore cannot cross a
+    /// session switch or a stop barrier.
+    pub(crate) target: SteerTarget,
+    /// Steer text as submitted by the host. The engine trims it at the
+    /// injection points; an all-whitespace payload is dropped (with a
+    /// `SteerDropped` event) instead of injected.
+    pub content: String,
+}
+
+/// Engine-owned destination for a steer. Hosts never construct or compare
+/// this value; it only travels with the message so the lifecycle state can
+/// reject stale reserved sends deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SteerTarget {
+    pub(crate) session_epoch: u64,
+    pub(crate) turn_generation: u64,
 }
 
 /// Provider request runtime state surfaced by `/provider`.
@@ -124,6 +284,9 @@ pub enum Op {
         /// Structural input origin. This gates whether the turn may inherit
         /// YOLO/auto-approval authority; user-shaped text is not enough.
         provenance: UserInputProvenance,
+        /// Optional process-local hardening for this turn. `None` preserves
+        /// the configured engine default and all legacy behavior.
+        turn_tool_security: Option<Arc<TurnToolSecurityPolicy>>,
     },
 
     /// Re-check and dispatch an interactive goal continuation when this
@@ -311,4 +474,41 @@ pub enum Op {
 
     /// Shutdown the engine
     Shutdown,
+}
+
+#[cfg(test)]
+mod turn_tool_security_tests {
+    use super::{ExactToolDispatchPolicy, TurnToolSecurityPolicy};
+    use std::path::PathBuf;
+
+    #[test]
+    fn exact_tool_dispatch_policy_rejects_ambiguous_names_and_accepts_empty() {
+        assert!(ExactToolDispatchPolicy::try_new(Vec::<String>::new()).is_ok());
+        for names in [
+            vec!["".to_string()],
+            vec![" read_file".to_string()],
+            vec!["read_file ".to_string()],
+            vec!["read_*".to_string()],
+            vec!["read?file".to_string()],
+            vec!["read_file".to_string(), "read_file".to_string()],
+            vec!["agent".to_string()],
+            vec!["start_mcp_server".to_string()],
+            vec!["mcp__server__tool".to_string()],
+        ] {
+            assert!(ExactToolDispatchPolicy::try_new(names).is_err());
+        }
+    }
+
+    #[test]
+    fn turn_tool_security_policy_keeps_trusted_path_override_tristate() {
+        let legacy = TurnToolSecurityPolicy::new(None, None);
+        assert!(legacy.trusted_external_paths_override().is_none());
+        let empty = TurnToolSecurityPolicy::new(Some(Vec::new()), None);
+        assert_eq!(empty.trusted_external_paths_override(), Some(&[][..]));
+        let explicit = TurnToolSecurityPolicy::new(Some(vec![PathBuf::from("/explicit")]), None);
+        assert_eq!(
+            explicit.trusted_external_paths_override(),
+            Some(&[PathBuf::from("/explicit")][..])
+        );
+    }
 }
