@@ -7,6 +7,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use super::types::{PythonWheel, ToolManifest, WindowsPythonDependencyLock};
 
 const MAX_WHEEL_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ENV_BYTES: u64 = 192 * 1024 * 1024;
+const PYTHON_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const COMPLETE_MARKER: &str = ".pinvou-dependency-lock";
 
 static PYTHON_DEPENDENCY_LOCK: Mutex<()> = Mutex::new(());
@@ -439,12 +441,20 @@ fn completed_lock_matches(directory: &Path, lock_id: &str) -> bool {
     fs::read_to_string(directory.join(COMPLETE_MARKER)).is_ok_and(|value| value == lock_id)
 }
 
+fn run_command_with_timeout(
+    command: Command,
+    operation: &str,
+    timeout: Duration,
+) -> Result<Output, String> {
+    crate::platform::process::output_with_timeout_and_kill_tree(command, timeout)
+        .map_err(|error| format!("{operation}失败: {error}"))
+}
+
 fn verify_python_target(expected: &str) -> Result<(), String> {
     let script = "import platform,sys; m=platform.machine().lower(); p='win_amd64' if m in ('amd64','x86_64') else 'win_'+m; a=f'cp{sys.version_info.major}{sys.version_info.minor}-{p}'; raise SystemExit(0 if a==sys.argv[1] else 17)";
-    let output = std::process::Command::new(paths::python_command())
-        .args(["-I", "-c", script, expected])
-        .output()
-        .map_err(|e| format!("无法运行内置 Python: {e}"))?;
+    let mut command = Command::new(paths::python_command());
+    command.args(["-I", "-c", script, expected]);
+    let output = run_command_with_timeout(command, "内置 Python ABI 验证", PYTHON_PROBE_TIMEOUT)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -456,12 +466,13 @@ fn verify_python_target(expected: &str) -> Result<(), String> {
 
 fn probe_imports(directory: &Path, imports: &[String]) -> Result<(), String> {
     let script = "import importlib,sys; sys.path.insert(0,sys.argv[1]); [importlib.import_module(n) for n in sys.argv[2:]]";
-    let output = std::process::Command::new(paths::python_command())
+    let mut command = Command::new(paths::python_command());
+    command
         .args(["-I", "-B", "-c", script])
         .arg(directory)
-        .args(imports)
-        .output()
-        .map_err(|e| format!("无法运行内置 Python 依赖验证: {e}"))?;
+        .args(imports);
+    let output =
+        run_command_with_timeout(command, "内置 Python 依赖导入验证", PYTHON_PROBE_TIMEOUT)?;
     if output.status.success() {
         return Ok(());
     }

@@ -2445,6 +2445,42 @@ mod tests {
         });
     }
 
+    /// Windows 内置解释器使用隔离环境，普通商店重装不能把上传 manifest 的任意
+    /// `pip_dependencies` 当作可信下载指令。首次上传仍只告警并完成供给；卸载后从
+    /// 卡片普通重装时必须明确拒绝，避免再次产生“安装成功但 import 必然失败”。
+    #[test]
+    fn reinstall_upload_with_unlocked_pip_dependencies_is_rejected() {
+        if std::env::consts::OS != "windows" {
+            return;
+        }
+        with_temp_home(|| {
+            write_tool_manifest(
+                "up-pip-reinstall",
+                r#"{
+                    "id":"up-pip-reinstall","name":"Up","description":"d","version":"1","icon":"x","category":"c",
+                    "mcp_tools":[],"command":"python","args":["server.py"],
+                    "pip_dependencies":["pinvou3-nonexistent-pkg-xyz"]
+                }"#,
+            );
+            let mgr = MarketplaceManager::new();
+            mgr.install_upload(
+                "up-pip-reinstall",
+                store::BundleSource::Upload("up-pip.zip".to_string()),
+            )
+            .unwrap();
+            mgr.uninstall("up-pip-reinstall").unwrap();
+
+            let error = mgr
+                .install("up-pip-reinstall", &std::collections::HashMap::new())
+                .unwrap_err();
+
+            assert!(error.contains("未经过 Windows 可验证依赖锁"), "{error}");
+            assert!(!mgr
+                .installed_ids()
+                .contains(&"up-pip-reinstall".to_string()));
+        });
+    }
+
     /// 回归（六轮评审 R1）：手写自定义 MCP（migrate_custom_mcp_layout 从旧布局
     /// 强迁、无 plugin.json、install 镜像登记为 Preset）卸载必须保留
     /// `bundles/<id>/` 目录 —— 内嵌目录无对应 spec，删除即丢失用户唯一副本。

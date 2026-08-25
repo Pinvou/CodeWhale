@@ -102,6 +102,22 @@ mod dependency_launch_tests {
         let _ = std::fs::remove_dir_all(root);
         result
     }
+
+    #[test]
+    fn unlocked_custom_python_dependencies_are_rejected_only_on_windows() {
+        assert!(should_reject_unlocked_python_dependencies(
+            true, false, false
+        ));
+        assert!(!should_reject_unlocked_python_dependencies(
+            false, false, false
+        ));
+        assert!(!should_reject_unlocked_python_dependencies(
+            true, true, false
+        ));
+        assert!(!should_reject_unlocked_python_dependencies(
+            true, false, true
+        ));
+    }
 }
 
 /// 把 JSON 值以 pretty 形式写盘(迁移与 connector 注册共用)。
@@ -139,6 +155,14 @@ fn python_launch_args(dependency_dir: &Path, server_args: Vec<String>) -> Vec<St
     args
 }
 
+fn should_reject_unlocked_python_dependencies(
+    is_windows: bool,
+    has_trusted_builtin_manifest: bool,
+    pip_dependencies_empty: bool,
+) -> bool {
+    is_windows && !has_trusted_builtin_manifest && !pip_dependencies_empty
+}
+
 impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S> {
     /// 装 `manifest.pip_dependencies` 里的 Python 依赖（跨平台）。
     /// 用 `python -m pip install`（保证装进跑 MCP server 的同一个 python，不裸 `pip`）。
@@ -153,13 +177,18 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
         // Windows 基础解释器随安装包提供，第三方包由受信任的内嵌 manifest 以
         // wheel + SHA-256 锁定，按需装到用户目录。上传/自定义 manifest 不得借此
         // 触发联网代码下载。
-        if crate::platform::capabilities::is_windows() {
+        let is_windows = crate::platform::capabilities::is_windows();
+        if is_windows {
             if let Some(builtin) = trusted_builtin_manifest {
                 return super::python_dependencies::ensure_for_builtin_manifest(builtin);
             }
-            if !manifest.pip_dependencies.is_empty() {
+            if should_reject_unlocked_python_dependencies(
+                is_windows,
+                trusted_builtin_manifest.is_some(),
+                manifest.pip_dependencies.is_empty(),
+            ) {
                 return Err(format!(
-                    "自定义 MCP '{}' 的 Python 依赖不会自动下载，请手动安装后再使用",
+                    "自定义 MCP '{}' 的 Python 依赖未经过 Windows 可验证依赖锁，无法自动安装；请将兼容依赖随附在上传包内，并移除 pip_dependencies 后重试",
                     manifest.id
                 ));
             }

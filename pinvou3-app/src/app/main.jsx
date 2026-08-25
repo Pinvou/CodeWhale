@@ -120,6 +120,31 @@ function defaultModelPresetForCapabilities(capabilities) {
   return capabilities && capabilities.localVllmSupported ? 'local_vllm' : 'deepseek';
 }
 
+async function repairPythonDependenciesAfterFirstFrame() {
+  window.__PINVOU_STARTUP__.mark('marketplace:python_dependencies_async:start');
+  try {
+    const result = await invokeTauri('repair_python_dependencies_after_first_frame');
+    const errors = Array.isArray(result) ? result : [];
+    window.__PINVOU_STARTUP__.mark(
+      'marketplace:python_dependencies_async:done',
+      `errors=${errors.length}`,
+    );
+    window.__PINVOU_STARTUP__.flush();
+    if (errors.length) {
+      console.warn('[marketplace] Python MCP 依赖后台修复未全部成功', errors);
+    }
+    return errors;
+  } catch (error) {
+    window.__PINVOU_STARTUP__.mark(
+      'marketplace:python_dependencies_async:error',
+      String(error),
+    );
+    window.__PINVOU_STARTUP__.flush();
+    console.warn('[marketplace] Python MCP 依赖后台修复失败', error);
+    return [String(error)];
+  }
+}
+
 function workspaceDisplayName(path) {
   const parts = String(path || '').split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || String(path || '');
@@ -339,8 +364,8 @@ function workspaceDisplayName(path) {
             if (bridge.available && bridge.knowledge.loadKnowledgeEmbedderAfterFirstFrame) {
               bridge.knowledge.loadKnowledgeEmbedderAfterFirstFrame();
             }
-            if (bridge.available && bridge.knowledge.repairPythonDependenciesAfterFirstFrame) {
-              bridge.knowledge.repairPythonDependenciesAfterFirstFrame();
+            if (isTauriAvailable()) {
+              void repairPythonDependenciesAfterFirstFrame();
             }
             // 首帧已呈现后空闲预取低频视图 chunk:桌宠/定时快捷方式会不经侧栏直接
             // 跳视图(如 scheduledTaskAutoOpenId),悬停预取覆盖不到这些入口。
