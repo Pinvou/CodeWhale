@@ -322,6 +322,16 @@
         "file": "000032_audit_export_protection.up.sql",
         "version": 32,
         "sha256": "d60a688ed9ee49014725543dbe458ac4386940033f09549877491f8f835be5ad"
+      },
+      {
+        "file": "000033_payment_provider_resume_policy.down.sql",
+        "version": 33,
+        "sha256": "d52057b5df65db77ee6f2420fda661502175e33c98a77c07b5f8ef5925b1e025"
+      },
+      {
+        "file": "000033_payment_provider_resume_policy.up.sql",
+        "version": 33,
+        "sha256": "760c79205a4832d3c1b750d328a05389f5d8ded47b166c923dc4bf0d09c5807f"
       }
     ],
     "billing": [
@@ -704,6 +714,16 @@
         "file": "000039_payment_product_controls.up.sql",
         "version": 39,
         "sha256": "c4e8caeedeeeb97c2da1c836976fe6fd646619011c846a7c745a3700be1417fb"
+      },
+      {
+        "file": "000040_payment_provider_resume_audit.down.sql",
+        "version": 40,
+        "sha256": "cc7dbd800cb00d5f8aed38702bc16d8969c5628bc7a249e9dffc2905e2b25431"
+      },
+      {
+        "file": "000040_payment_provider_resume_audit.up.sql",
+        "version": 40,
+        "sha256": "51689728517c6c69362bde15225c49ac6e9ad4fa5bdc9df082218455c42db0f0"
       }
     ],
     "payment-simulator": [

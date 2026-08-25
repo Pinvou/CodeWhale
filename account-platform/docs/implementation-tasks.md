@@ -90,7 +90,7 @@
 | APT-064 | 新华三永久客户标识、原生订单查询/回调合同、十进制金额与异步履约修复 | PAY-41–PAY-43 | APT-001, APT-022, APT-023, APT-057 | CODE | DONE |
 | APT-065 | 受控确认 Provider 失败：现场查询、无资金事实门禁、原子结案和不可变证据 | PAY-44, ADM-43 | APT-024, APT-025, APT-064 | CODE | DONE |
 | APT-066 | 拆分目录上架与 Provider/商品止损控制，并向个人中心提供可见不可选的暂停态 | PAY-45, PAY-47, UI-20 | APT-022, APT-051, APT-064 | CODE | DONE |
-| APT-067 | 支付渠道控制后台及双人恢复审批、快照失效、执行前复核与审计 | PAY-46, ADM-44 | APT-008, APT-065, APT-066 | CODE | PENDING |
+| APT-067 | 支付渠道控制后台及双人恢复审批、快照失效、执行前复核与审计 | PAY-46, ADM-44 | APT-008, APT-065, APT-066 | CODE | DONE |
 
 ## 3. 独立提交验收模板
 

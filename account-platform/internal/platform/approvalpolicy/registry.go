@@ -37,7 +37,7 @@ type Policy struct {
 var ErrPolicyNotRegistered = errors.New("management command policy is not registered")
 
 var policies = buildPolicies()
-var executableApprovalCommands = map[string]struct{}{"WALLET_ADJUSTMENT": {}}
+var executableApprovalCommands = map[string]struct{}{"WALLET_ADJUSTMENT": {}, "PAYMENT_PROVIDER_RESUME": {}}
 
 func buildPolicies() map[string]Policy {
 	result := map[string]Policy{}
@@ -54,6 +54,13 @@ func buildPolicies() map[string]Policy {
 			SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"target_id", "resource_version", "financial_snapshot", "policy_version"},
 			ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 		}
+	}
+	result["PAYMENT_PROVIDER_RESUME"] = Policy{
+		CommandType: "PAYMENT_PROVIDER_RESUME", Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.payment-controls.resume.request", ApproverPermission: "platform.billing.payment-controls.resume.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "provider_control_version", "product_control_versions", "probe_order_id", "policy_version"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
 	auditCommands := map[string]string{
 		"ACCOUNT_ROLE_BINDING_GRANT": "platform.roles.assign", "ACCOUNT_ROLE_BINDING_REVOKE": "platform.roles.assign",

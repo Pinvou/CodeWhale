@@ -693,6 +693,16 @@ paths:
         "200": { description: Price lifecycle transitioned }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /billing/admin/v1/payment-provider-controls:
+    get:
+      operationId: getPaymentProviderControls
+      summary: Inspect Provider and product new-order controls and obtain a version-frozen recovery draft
+      responses:
+        "200":
+          description: Current payment control state; resume_draft is present only when a controlled recovery can be requested
+          content: { application/json: { schema: { type: object, additionalProperties: true } } }
+        "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/payment-orders:
     get:
       operationId: listAdminPaymentOrders

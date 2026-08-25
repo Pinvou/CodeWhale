@@ -30,7 +30,17 @@ func (consumer *ApprovalCommandConsumer) Handle(ctx context.Context, event event
 		CriticalResourceVersions json.RawMessage `json:"critical_resource_versions"`
 		ExecutorIdentity         string          `json:"executor_identity"`
 	}
-	if json.Unmarshal(event.Payload, &payload) != nil || payload.ApprovalRequestID == uuid.Nil || payload.CommandType != "WALLET_ADJUSTMENT" || payload.TargetResourceType != "MANUAL_ADJUSTMENT" || payload.ExecutorIdentity != billingApprovalExecutorIdentity {
+	if json.Unmarshal(event.Payload, &payload) != nil || payload.ApprovalRequestID == uuid.Nil || payload.ExecutorIdentity != billingApprovalExecutorIdentity {
+		return errors.New("unsupported or invalid approved command")
+	}
+	if payload.CommandType == "PAYMENT_PROVIDER_RESUME" && payload.TargetResourceType == "PAYMENT_PROVIDER_CONTROL" {
+		_, err := consumer.service.executeApprovedProviderResumeCommand(ctx, payload.ApprovalRequestID, event.ID.String(), payload.TargetResourceID, payload.CriticalResourceVersions)
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrApprovalNotExecutable) {
+			return nil
+		}
+		return err
+	}
+	if payload.CommandType != "WALLET_ADJUSTMENT" || payload.TargetResourceType != "MANUAL_ADJUSTMENT" {
 		return errors.New("unsupported or invalid approved command")
 	}
 	adjustmentID, err := uuid.Parse(strings.TrimSpace(payload.TargetResourceID))

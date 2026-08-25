@@ -30,6 +30,9 @@ func TestOnlyImplementedFinancialExecutorsAcceptRequests(t *testing.T) {
 	if Executable("LEDGER_REPAIR") {
 		t.Fatal("unimplemented domain repair must remain non-executable")
 	}
+	if !Executable("PAYMENT_PROVIDER_RESUME") {
+		t.Fatal("payment provider resume executor must be available")
+	}
 }
 
 func TestNormalRefundAndOrganizationDeleteAreAuditOnly(t *testing.T) {

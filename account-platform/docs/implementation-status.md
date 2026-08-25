@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 334 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 303`、`部分实现 28`、`未实现 8`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `341` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44、PAY-45、PAY-47、UI-20、ADM-43 已由 APT-065、APT-066 在仓库闭环；PAY-46、ADM-44 等待 APT-067。
+全量核验汇总：`已实现 305`、`部分实现 28`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `341` 项。PAY-31、UI-12、ADM-20 因“普通退款暂不开放”变更为部分实现：当前 H3C 依靠 capability 已隐藏入口，但仓库尚缺独立于 Provider capability 的产品级默认关闭门禁。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -236,7 +236,7 @@
 | PAY-43 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CALLBACK-GATEWAY | NOT_DEPLOYED | 商城元金额由精确十进制转换为分；PAID 必须具有正实付金额、支付时间和稳定流水，订单号、客户标识、SKU、金额或支付状态冲突均拒绝履约并保留复核证据 |
 | PAY-44 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | `CONFIRM_PROVIDER_FAILED` 仅允许本人已认领的非法跃迁案件；Billing 现场查询并原子复核永久客户标识、SKU、金额、无流水/权益/申诉/并发证据后结案，保存不可变确认和 Outbox |
 | PAY-45 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PRODUCT-CONTROLS | NOT_DEPLOYED | 目录上架事实保持独立；Provider 与商品级 `new_orders_enabled` 运行时控制共同拦截创建订单，自动止损只更新控制表并保留来源案件和版本 |
-| PAY-46 | 未实现 | DOC_CURRENT | NONE | NOT_DEPLOYED | APT-067 待接入 Account 双人审批和 Billing 恢复执行器 |
+| PAY-46 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-RECOVERY | NOT_DEPLOYED | `PAYMENT_PROVIDER_RESUME` 复用 Account 双人审批，冻结 Provider/商品控制版本与探测订单；Billing 执行前现场查询 Provider、复核 P0/P1 案件、映射及人员隔离后原子恢复并写不可变审计 |
 | PAY-47 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PRODUCT-CONTROLS | NOT_DEPLOYED | 商品目录继续返回暂停商品，并以 `PROVIDER_PAUSED`/`PRODUCT_PAUSED` 和稳定原因码说明运行时不可售性；服务端创建订单同步失败关闭 |
 | UI-02 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 桌面区分注册、自动登录与钱包初始化，展示 `PROVISIONING`/`REPAIR_REQUIRED`，初始化期间不请求余额、充值或平台模型 |
 | UI-13 | 已实现 | DOC_CURRENT | DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 三语用量页可停止当前客户端交付，并分别展示执行和结算状态；UNSUPPORTED 明示后台继续结束并按可信实际用量结算，不显示为即时免费 |
@@ -275,7 +275,7 @@
 | ADM-41 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 申请、审批、执行分别直接读取 Account 用户、平台绑定、有效期和授权版本；撤权、停用、到期、版本变化或授权事实不可确认时失败关闭 |
 | ADM-42 | 已实现 | DOC_CURRENT | GO-UNIT; APPROVAL-COMMANDS | NOT_DEPLOYED | 批准事务仅发布绑定指纹/策略/快照的 Outbox 授权；Billing 执行端在短窗口内复核并以稳定执行键原子入账，失败可按原命令重试且数据库阻止新调整绕过审批 |
 | ADM-43 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 支付异常接口只接收案件、原因和幂等键，Provider 状态及资金门禁完全由 Billing 现场查询与事务复核决定 |
-| ADM-44 | 未实现 | DOC_CURRENT | NONE | NOT_DEPLOYED | APT-067 待提供支付渠道控制查询、恢复申请和独立审批执行 |
+| ADM-44 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-RECOVERY | NOT_DEPLOYED | 后台控制查询返回 Provider/商品开关、原因、版本和可直接提交 Account 审批的冻结恢复草稿；申请人与审批人独立，版本变化自动失效 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
 | NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |
@@ -778,7 +778,7 @@
 | PAY-43 | 商城十进制金额精确校验 | 已实现 | `needPayAmt`、`paidAmt`、`skuAmt` 不经浮点精确转分；成功状态缺少正实付额、时间、流水或与本地快照冲突时拒绝履约。 |
 | PAY-44 | 受控确认 Provider 失败 | 已实现 | 本人已认领案件经现场查询和无资金事实门禁后原子结案，保存不可变确认、命令和事件；晚到成功事实仍可继续归并。 |
 | PAY-45 | 商品目录与支付止损分离 | 已实现 | 自动止损写独立 Provider/商品控制事实，不再篡改目录上架状态；创建订单按两层控制失败关闭。 |
-| PAY-46 | 支付能力双人恢复 | 未实现 | APT-067。 |
+| PAY-46 | 支付能力双人恢复 | 已实现 | Account 双人审批与 Billing 执行门禁共同校验版本、Provider 现场查询、案件、映射和人员隔离，成功后原子恢复并保留不可变证据。 |
 | PAY-47 | 支付暂停对用户可见 | 已实现 | 商品列表保留暂停项并返回稳定暂停层级与原因码。 |
 
 ### 3.6 个人中心与运营后台
@@ -847,7 +847,7 @@
 | ADM-41 | 执行前权限重新校验 | 已实现 | 执行前绕过缓存复核双方用户、绑定、权限、有效期和授权版本；事实不可确认时失败关闭。 |
 | ADM-42 | 已批准命令安全执行 | 已实现 | 批准只写 Outbox 授权；Billing 受限执行端使用稳定幂等键产生一次领域效果，原命令失败可重试，任何命令变化必须新申请。 |
 | ADM-43 | Provider 失败确认 | 已实现 | 后台命令只提交案件、原因和幂等键，现场 Provider 查询和资金门禁由 Billing 服务端控制。 |
-| ADM-44 | 支付渠道控制与双人恢复 | 未实现 | APT-067。 |
+| ADM-44 | 支付渠道控制与双人恢复 | 已实现 | 后台提供控制快照和冻结恢复草稿，既有审批队列负责申请、独立审批、失效与执行状态。 |
 
 ## 4. 非功能需求
 
