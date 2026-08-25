@@ -1728,11 +1728,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(dissolvedAttachment.status, 404);
   assert.equal(dissolvedAttachment.value.error.code, "resource_not_found");
-  const dissolvedAvatar = await downloadAvatar(
-    b.device_token,
-    b.principal.id,
-    initial.team_id,
-  );
+  const dissolvedAvatar = await readAvatar(b, b.principal.id, initial.team_id);
   assert.equal(dissolvedAvatar.status, 403);
   const dissolvedJoinCode = await api("/v1/teams/join", {
     method: "POST",
