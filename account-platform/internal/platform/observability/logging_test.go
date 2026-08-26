@@ -46,3 +46,24 @@ func TestLoggerCollapsesUnknownDynamicMessages(t *testing.T) {
 		t.Fatalf("dynamic message was not safely collapsed: %s", output.String())
 	}
 }
+
+func TestLoggerKeepsRedactedRegistrationConflictEvidence(t *testing.T) {
+	var output bytes.Buffer
+	logger := NewLogger(&output, Config{Service: "account-service", Environment: "test", Version: "dev", Commit: "test"})
+	logger.Warn("registration operation conflict",
+		"stage", "fingerprint_check",
+		"operation_id", "01a03da2-2ef6-780b-9de2-f388e0109b38",
+		"stored_fingerprint", "21d478669dde6e5bdffd51115f2a1c9588a71f68ff20c34fc841b81548c0505a",
+		"calculated_fingerprint", "21d478669dde6e5bdffd51115f2a1c9588a71f68ff20c34fc841b81548c0505a",
+		"mobile", "+8619919890802",
+	)
+	logged := output.String()
+	for _, expected := range []string{"registration_operation_conflict", "fingerprint_check", "01a03da2-2ef6-780b-9de2-f388e0109b38", "stored_fingerprint", "calculated_fingerprint"} {
+		if !strings.Contains(logged, expected) {
+			t.Fatalf("missing %q from registration conflict log: %s", expected, logged)
+		}
+	}
+	if strings.Contains(logged, "+8619919890802") || strings.Contains(logged, `"mobile"`) {
+		t.Fatalf("sensitive mobile field leaked: %s", logged)
+	}
+}
