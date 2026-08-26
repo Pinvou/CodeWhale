@@ -235,8 +235,10 @@ fn default_mcp_json() -> serde_json::Value {
 
 /// Embeddable Python 的 `._pth` 会忽略 PYTHONPATH，因此不能靠环境变量暴露
 /// 用户目录依赖。用隔离模式启动一段固定 bootstrap，显式把已验证的锁目录插到
-/// sys.path，再以原始 argv 执行 MCP server。
-const WINDOWS_PYTHON_BOOTSTRAP: &str = "import runpy,sys; d=sys.argv.pop(1); p=sys.argv.pop(1); sys.path.insert(0,d); sys.argv[0]=p; runpy.run_path(p,run_name='__main__')";
+/// sys.path，再以原始 argv 执行 MCP server。`-I` 同时隔离了 server 所在目录，
+/// bootstrap 一并补入（锁目录保持最高优先级），避免未来含 sibling 模块的
+/// MCP 只在 Windows 上 import 失败。
+const WINDOWS_PYTHON_BOOTSTRAP: &str = "import os,runpy,sys; d=sys.argv.pop(1); p=sys.argv.pop(1); sys.path.insert(0,os.path.dirname(p)); sys.path.insert(0,d); sys.argv[0]=p; runpy.run_path(p,run_name='__main__')";
 
 fn python_launch_args(dependency_dir: &Path, server_args: Vec<String>) -> Vec<String> {
     let mut args = vec![

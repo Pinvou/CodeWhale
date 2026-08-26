@@ -484,12 +484,13 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         let mut errors = Vec::new();
         let mut any_changed = false;
         for tool_id in self.installed_ids() {
-            match self.repair_installed_builtin_python_dependency_with(
+            let (changed, outcome) = self.repair_installed_builtin_python_dependency_with(
                 &tool_id,
                 python_dependencies::ensure_for_builtin_manifest,
-            ) {
-                Ok(changed) => any_changed |= changed,
-                Err(error) => errors.push(format!("{tool_id}: {error}")),
+            );
+            any_changed |= changed;
+            if let Err(error) = outcome {
+                errors.push(format!("{tool_id}: {error}"));
             }
         }
         (errors, any_changed)
@@ -497,12 +498,14 @@ impl<S: CredentialStore> MarketplaceManager<S> {
 
     /// 单工具修复的生产事务边界。依赖获取作为窄接口传入，使并发测试可以用本地
     /// fixture 精确停在“下载中”，而锁、安装态复核、mcp.json 与 BundleStore 提交
-    /// 全部继续走真实生产路径。返回该工具的 mcp.json 条目是否被实际改写。
+    /// 全部继续走真实生产路径。返回（mcp.json 条目是否被实际改写, 结果）——即使
+    /// 登记失败，改写标志也必须保留：mcp.json 已落盘时调用方仍需递增 mcp 配置
+    /// 修订号让引擎重建，否则本次修复要等应用重启才生效。
     fn repair_installed_builtin_python_dependency_with<F>(
         &self,
         tool_id: &str,
         ensure_dependencies: F,
-    ) -> Result<bool, String>
+    ) -> (bool, Result<(), String>)
     where
         F: FnOnce(
             &ToolManifest,
@@ -514,13 +517,15 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !self.installed_ids().contains(&tool_id.to_string()) {
-            return Ok(false);
+            return (false, Ok(()));
         }
-        let Some(manifest) = mcp_catalog::embedded_manifest(tool_id)? else {
-            return Ok(false);
+        let manifest = match mcp_catalog::embedded_manifest(tool_id) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return (false, Ok(())),
+            Err(error) => return (false, Err(error)),
         };
         if manifest.windows_python_dependencies.is_none() {
-            return Ok(false);
+            return (false, Ok(()));
         }
 
         let fingerprint = (|| -> Result<String, String> {
@@ -542,7 +547,7 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             Ok((dependencies.asset, changed))
         })();
         if !self.installed_ids().contains(&tool_id.to_string()) {
-            return Ok(false);
+            return (false, Ok(()));
         }
         let store_result = record_python_dependency_repair(
             &store::BundleStore::new(),
@@ -552,12 +557,15 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             result.as_ref().err().map(String::as_str),
         );
         match (result, store_result) {
-            (Ok((_, changed)), Ok(())) => Ok(changed),
-            (Err(error), Ok(())) => Err(error),
-            (Ok(_), Err(store_error)) => Err(format!("更新依赖登记失败: {store_error}")),
-            (Err(error), Err(store_error)) => {
-                Err(format!("{error}; 更新依赖登记失败: {store_error}"))
+            (Ok((_, changed)), Ok(())) => (changed, Ok(())),
+            (Err(error), Ok(())) => (false, Err(error)),
+            (Ok((_, changed)), Err(store_error)) => {
+                (changed, Err(format!("更新依赖登记失败: {store_error}")))
             }
+            (Err(error), Err(store_error)) => (
+                false,
+                Err(format!("{error}; 更新依赖登记失败: {store_error}")),
+            ),
         }
     }
 
@@ -941,6 +949,44 @@ mod tests {
         assert!(!error.is_empty());
     }
 
+    /// mcp.json 已实际改写但 BundleStore 登记失败时，改写标志不得丢失——调用方
+    /// 依赖它递增 mcp 配置修订号触发 engine 重建，丢了修复就要等应用重启才生效。
+    #[test]
+    fn repair_reports_mcp_json_rewrite_even_when_store_registration_fails() {
+        with_temp_home(|| {
+            let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
+            manager.save_installed(&["gongwen".to_string()]).unwrap();
+            let mcp_path = crate::platform::paths::mcp_config_path();
+            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &mcp_path,
+                r#"{"servers":{"gongwen":{"command":"python","args":["server.py"]}}}"#,
+            )
+            .unwrap();
+            let dependencies_dir = crate::platform::paths::python_packages_dir("test-repair-lock");
+            std::fs::create_dir_all(&dependencies_dir).unwrap();
+            // 让 BundleStore 读写失败：bundles.json 被同名目录占用。
+            let blocked_store = crate::platform::paths::pinvou3_home()
+                .join("marketplace")
+                .join("bundles.json");
+            std::fs::create_dir(&blocked_store).unwrap();
+
+            let (changed, outcome) =
+                manager.repair_installed_builtin_python_dependency_with("gongwen", move |_| {
+                    Ok(Some(python_dependencies::InstalledPythonDependencies {
+                        dir: dependencies_dir,
+                        asset: python_asset_for_repair_test(),
+                    }))
+                });
+            let error = outcome.expect_err("store 被占用时登记必须失败");
+            assert!(
+                error.contains("更新依赖登记失败"),
+                "unexpected error: {error}"
+            );
+            assert!(changed, "mcp.json 已改写时即使登记失败也必须上报告改写");
+        });
+    }
+
     #[test]
     fn uninstall_waiting_for_repair_cannot_leave_ghost_record() {
         with_temp_home(|| {
@@ -962,16 +1008,16 @@ mod tests {
             let (finish_repair_tx, finish_repair_rx) = std::sync::mpsc::channel();
             let repair = std::thread::spawn(move || {
                 let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
-                manager
-                    .repair_installed_builtin_python_dependency_with("gongwen", move |_| {
+                let (_changed, outcome) =
+                    manager.repair_installed_builtin_python_dependency_with("gongwen", move |_| {
                         repair_locked_tx.send(()).unwrap();
                         finish_repair_rx.recv().unwrap();
                         Ok(Some(python_dependencies::InstalledPythonDependencies {
                             dir: dependencies_dir,
                             asset: python_asset_for_repair_test(),
                         }))
-                    })
-                    .unwrap();
+                    });
+                outcome.unwrap();
             });
             repair_locked_rx.recv().unwrap();
             let operation_lock = tool_operation_lock("gongwen");
