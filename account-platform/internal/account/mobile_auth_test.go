@@ -195,11 +195,12 @@ func (f *mobileAuthRepositoryFake) RegisterMobileIdentity(_ context.Context, _, 
 }
 
 type smsProviderFake struct {
-	sentChallenge uuid.UUID
-	sendErr       error
-	verifyCalls   int
-	verified      bool
-	verifyErr     error
+	sentChallenge   uuid.UUID
+	verifyChallenge uuid.UUID
+	sendErr         error
+	verifyCalls     int
+	verified        bool
+	verifyErr       error
 }
 
 func (*smsProviderFake) Descriptor() SMSProviderDescriptor {
@@ -211,8 +212,9 @@ func (f *smsProviderFake) SendCode(_ context.Context, _ string, _ SMSPurpose, ch
 	return SMSDelivery{MessageID: "provider-message", VerificationData: []byte("verification")}, f.sendErr
 }
 
-func (f *smsProviderFake) VerifyCode(context.Context, string, uuid.UUID, SMSVerificationData, string) (bool, error) {
+func (f *smsProviderFake) VerifyCode(_ context.Context, _ string, challengeID uuid.UUID, _ SMSVerificationData, _ string) (bool, error) {
 	f.verifyCalls++
+	f.verifyChallenge = challengeID
 	return f.verified, f.verifyErr
 }
 
@@ -465,6 +467,24 @@ func TestMobileAuthRegisterVerifiesWithProviderBeforeProvisioning(t *testing.T) 
 	}
 	if result.UserCode != "USR-0123-4567-89AB-CDEF-MV" || result.Status != "PROVISIONING" {
 		t.Fatalf("registration result=%+v", result)
+	}
+}
+
+func TestMobileAuthRegisterUsesFrozenChallengeInsteadOfDuplicateBrowserValue(t *testing.T) {
+	repository := &mobileAuthRepositoryFake{}
+	sms := &smsProviderFake{verified: true}
+	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
+	challenge, err := service.Send(context.Background(), "pinvou.user", "13800138000", "password-handle", "user-v1", SMSPurposeRegister, uuid.New(), 128, "192.0.2.1", "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateBrowserChallenge := uuid.New()
+	result, err := service.Register(context.Background(), challenge.RegistrationOperationID, challenge.RegistrationQueryToken, "pinvou.user", "13800138000", duplicateBrowserChallenge, "123456", "password-handle", "user-v1")
+	if err != nil || result.UserID == nil {
+		t.Fatalf("register result=%+v err=%v", result, err)
+	}
+	if sms.verifyChallenge != challenge.ID {
+		t.Fatalf("verification used browser challenge %s instead of frozen challenge %s", sms.verifyChallenge, challenge.ID)
 	}
 }
 
