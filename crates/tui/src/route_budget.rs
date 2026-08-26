@@ -148,18 +148,30 @@ pub(crate) fn effective_max_output_tokens_for_route(
     route_limits: Option<RouteLimits>,
 ) -> u32 {
     let requested_cap = effective_max_output_tokens(model);
-    let compatibility_cap = output_ceiling_source(provider, model).clamp_tokens();
+    let compatibility_source = output_ceiling_source(provider, model);
+    let compatibility_cap = compatibility_source.clamp_tokens();
     let route_cap = route_output_limit_tokens(route_limits);
     // Unknown means unknown only where a route *declares* it: membership ids
     // such as the `kimi-for-coding` family, and operator-owned self-hosted
     // engines. For those there is nothing to clamp against and the requested
     // cap stands. A model the catalogue simply has no row for is not the same
     // fact — absence is not permission, so it keeps a conservative ceiling
-    // (see `output_ceiling_source`). Only a concrete route/offering maximum
-    // narrows it further; known compatibility caps stay authoritative and are
+    // (see `output_ceiling_source`). A concrete route/offering maximum is the
+    // missing evidence for that exact route and may replace only the generic
+    // uncatalogued guess; known compatibility caps stay authoritative and are
     // still intersected with any route maximum.
-    let cap = compatibility_cap.map_or(requested_cap, |compat| requested_cap.min(compat));
-    let cap = route_cap.map_or(cap, |route_cap| cap.min(route_cap));
+    let cap = match (compatibility_source, route_cap) {
+        // A concrete route/offering maximum is evidence about this exact
+        // route. It therefore outranks the generic 8K guess that exists only
+        // because the static catalogue has no row for the wire id. With no
+        // route fact the conservative guess still applies, and the route fact
+        // can never raise the caller's requested cap.
+        (OutputCeilingSource::Uncatalogued(_), Some(route_cap)) => requested_cap.min(route_cap),
+        _ => {
+            let cap = compatibility_cap.map_or(requested_cap, |compat| requested_cap.min(compat));
+            route_cap.map_or(cap, |route_cap| cap.min(route_cap))
+        }
+    };
     let Some(window) = route_limits
         .and_then(|limits| limits.context_tokens)
         .and_then(|tokens| u32::try_from(tokens).ok())
@@ -256,6 +268,70 @@ mod tests {
                 "totally-unknown-alias-v9",
                 None
             ) <= UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS
+        );
+    }
+
+    /// #5460: absence is not permission, but a positive output maximum on the
+    /// resolved route is permission for that exact route. The concrete fact
+    /// replaces only the catalogue-absence guess; it never raises the caller's
+    /// requested cap or a documented model ceiling.
+    #[test]
+    fn concrete_route_output_limit_outranks_uncatalogued_guess() {
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let model = "totally-unknown-alias-v9";
+
+        assert_eq!(effective_max_output_tokens(model), 64_000);
+        for provider in [ApiProvider::Openai, ApiProvider::Custom] {
+            assert_eq!(
+                output_ceiling_source(provider, model),
+                OutputCeilingSource::Uncatalogued(UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS)
+            );
+            assert_eq!(
+                effective_max_output_tokens_for_route(provider, model, None),
+                UNCATALOGUED_COMPAT_MAX_OUTPUT_TOKENS,
+                "{provider:?}: no route fact must stay fail-closed"
+            );
+            for route_cap in [24_576, 64_000] {
+                assert_eq!(
+                    effective_max_output_tokens_for_route(
+                        provider,
+                        model,
+                        Some(RouteLimits {
+                            output_tokens: Some(route_cap),
+                            ..RouteLimits::default()
+                        }),
+                    ),
+                    u32::try_from(route_cap).unwrap(),
+                    "{provider:?}: the exact route fact must replace the catalogue-absence guess"
+                );
+            }
+            assert_eq!(
+                effective_max_output_tokens_for_route(
+                    provider,
+                    model,
+                    Some(RouteLimits {
+                        output_tokens: Some(65_536),
+                        ..RouteLimits::default()
+                    }),
+                ),
+                64_000,
+                "{provider:?}: a route fact must not raise the requested cap"
+            );
+        }
+
+        assert_eq!(
+            effective_max_output_tokens_for_route(
+                ApiProvider::Moonshot,
+                "kimi-k2.7-code",
+                Some(RouteLimits {
+                    output_tokens: Some(64_000),
+                    ..RouteLimits::default()
+                }),
+            ),
+            32_768,
+            "a route fact must not raise a documented model ceiling"
         );
     }
 
