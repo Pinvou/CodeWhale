@@ -212,6 +212,32 @@ pub async fn team_relay_remove_member(
     manager.remove_member(&principal_id).await
 }
 
+fn restart_lifecycle_events(
+    app: AppHandle,
+    manager: &TeamRelayManager,
+    result: &mut TeamRelayLifecycleResult,
+) {
+    if let Some(account) = &result.account {
+        let team_ids = account
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>();
+        // start_events errors are deliberately degraded to a sync warning instead of being
+        // propagated with ?, because the server already committed the lifecycle mutation.
+        let outcome = if team_ids.is_empty() {
+            // The last team was left or dissolved: only stop the previous event task instead
+            // of starting an empty-scope SSE loop that would reconnect every 3 seconds.
+            manager.stop_events()
+        } else {
+            manager.start_events(app, &team_ids)
+        };
+        if let Err(error) = outcome {
+            result.record_sync_error(error);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn team_relay_transfer_owner(
     app: AppHandle,
@@ -219,16 +245,7 @@ pub async fn team_relay_transfer_owner(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelayLifecycleResult, String> {
     let mut result = manager.transfer_owner(&new_owner_id).await?;
-    if let Some(account) = &result.account {
-        let team_ids = account
-            .teams
-            .iter()
-            .map(|team| team.id.clone())
-            .collect::<Vec<_>>();
-        if let Err(error) = manager.start_events(app, &team_ids) {
-            result.record_sync_error(error);
-        }
-    }
+    restart_lifecycle_events(app, &manager, &mut result);
     Ok(result)
 }
 
@@ -238,16 +255,7 @@ pub async fn team_relay_leave_team(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelayLifecycleResult, String> {
     let mut result = manager.leave_team().await?;
-    if let Some(account) = &result.account {
-        let team_ids = account
-            .teams
-            .iter()
-            .map(|team| team.id.clone())
-            .collect::<Vec<_>>();
-        if let Err(error) = manager.start_events(app, &team_ids) {
-            result.record_sync_error(error);
-        }
-    }
+    restart_lifecycle_events(app, &manager, &mut result);
     Ok(result)
 }
 
@@ -257,16 +265,7 @@ pub async fn team_relay_dissolve_team(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<TeamRelayLifecycleResult, String> {
     let mut result = manager.dissolve_team().await?;
-    if let Some(account) = &result.account {
-        let team_ids = account
-            .teams
-            .iter()
-            .map(|team| team.id.clone())
-            .collect::<Vec<_>>();
-        if let Err(error) = manager.start_events(app, &team_ids) {
-            result.record_sync_error(error);
-        }
-    }
+    restart_lifecycle_events(app, &manager, &mut result);
     Ok(result)
 }
 

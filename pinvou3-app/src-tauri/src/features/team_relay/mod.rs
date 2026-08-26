@@ -173,10 +173,18 @@ impl TeamRelayManager {
 
     pub async fn account_state(&self) -> Result<TeamRelayAccountState, String> {
         let (settings, token) = self.configured()?;
+        self.fetch_account_state(&settings, &token).await
+    }
+
+    async fn fetch_account_state(
+        &self,
+        settings: &TeamRelaySettings,
+        token: &str,
+    ) -> Result<TeamRelayAccountState, String> {
         let me_response = self
             .client
             .get(endpoint(&settings.hub_url, "v1/me"))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .send()
             .await
             .map_err(network_error)?;
@@ -184,7 +192,7 @@ impl TeamRelayManager {
         let teams_response = self
             .client
             .get(endpoint(&settings.hub_url, "v1/teams"))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .send()
             .await
             .map_err(network_error)?;
@@ -541,27 +549,12 @@ impl TeamRelayManager {
         mut settings: TeamRelaySettings,
         token: &str,
     ) -> Result<TeamRelayLifecycleState, String> {
-        let me_response = self
-            .client
-            .get(endpoint(&settings.hub_url, "v1/me"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(network_error)?;
-        let me: GetMeResponse = decode(me_response).await?;
-        let teams_response = self
-            .client
-            .get(endpoint(&settings.hub_url, "v1/teams"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .map_err(network_error)?;
-        let teams: ListTeamsResponse = decode(teams_response).await?;
-        let recovered_team_id = teams
+        let account = self.fetch_account_state(&settings, token).await?;
+        let recovered_team_id = account
             .teams
             .iter()
             .find(|team| team.id == settings.team_id)
-            .or_else(|| teams.teams.first())
+            .or_else(|| account.teams.first())
             .map(|team| team.id.clone())
             .unwrap_or_default();
         if settings.team_id != recovered_team_id {
@@ -573,13 +566,7 @@ impl TeamRelayManager {
         } else {
             Some(self.bootstrap_for(&settings, token).await?)
         };
-        Ok(TeamRelayLifecycleState {
-            snapshot,
-            account: TeamRelayAccountState {
-                principal: me.principal,
-                teams: teams.teams,
-            },
-        })
+        Ok(TeamRelayLifecycleState { snapshot, account })
     }
 
     async fn finish_lifecycle_mutation(
@@ -1383,6 +1370,18 @@ impl TeamRelayManager {
             }
         });
         *task = Some(TeamRelayEventTask { scope_key, handle });
+        Ok(())
+    }
+
+    pub fn stop_events(&self) -> Result<(), String> {
+        if let Some(task) = self
+            .event_task
+            .lock()
+            .map_err(|_| "team_relay_runtime_unavailable".to_string())?
+            .take()
+        {
+            task.handle.abort();
+        }
         Ok(())
     }
 
