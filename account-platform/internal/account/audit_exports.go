@@ -447,7 +447,7 @@ func (s *AuditExportService) claim(ctx context.Context) (claimedAuditExport, boo
     SELECT id FROM audit_export_jobs WHERE status IN ('PENDING','GENERATING') AND (lease_until IS NULL OR lease_until<$1)
     ORDER BY created_at,id FOR UPDATE SKIP LOCKED LIMIT 1
 ), claimed AS (
-    UPDATE audit_export_jobs job SET status='GENERATING',attempts=attempts+1,lease_until=$1+interval '5 minutes',updated_at=$1
+    UPDATE audit_export_jobs job SET status='GENERATING',attempts=attempts+1,lease_until=$1::timestamptz+interval '5 minutes',updated_at=$1::timestamptz
     FROM candidate WHERE job.id=candidate.id RETURNING job.id,job.actor_user_id,job.filter_snapshot,job.include_pii,job.wrapped_file_key_nonce,job.wrapped_file_key
 )
 SELECT id,actor_user_id,filter_snapshot,include_pii,wrapped_file_key_nonce,wrapped_file_key FROM claimed`, now).Scan(&job.ID, &job.ActorUserID, &filter, &job.IncludePII, &job.WrappedNonce, &job.WrappedFileKey)

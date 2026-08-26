@@ -96,7 +96,7 @@ func (r *PostgresRepository) claimEmergencyCancellations(ctx context.Context, li
     WHERE cancellation.status IN ('PENDING','LEASED') AND (cancellation.lease_until IS NULL OR cancellation.lease_until<$1)
     ORDER BY cancellation.requested_at,cancellation.id FOR UPDATE SKIP LOCKED LIMIT $2
 ), claimed AS (
-    UPDATE model_emergency_cancellations cancellation SET status='LEASED',lease_until=$1+interval '30 seconds',attempts=attempts+1,updated_at=$1
+    UPDATE model_emergency_cancellations cancellation SET status='LEASED',lease_until=$1::timestamptz+interval '30 seconds',attempts=attempts+1,updated_at=$1::timestamptz
     FROM candidates WHERE cancellation.id=candidates.id RETURNING cancellation.id,cancellation.usage_request_id
 )
 SELECT claimed.id,claimed.usage_request_id,request.execution_status FROM claimed JOIN usage_requests request ON request.id=claimed.usage_request_id`, now, limit)

@@ -238,7 +238,7 @@ func (r *PostgresRepository) MarkAccountClosureGrantsIsolated(ctx context.Contex
 
 func (r *PostgresRepository) ScheduleAccountClosureCleanupError(ctx context.Context, closureID uuid.UUID, code string) error {
 	now := r.now()
-	_, err := r.pool.Exec(ctx, `UPDATE account_closure_requests SET status=CASE WHEN sla_expires_at<=$2 THEN 'REPAIR_REQUIRED' ELSE 'RETRY' END,last_error_code=$3,next_attempt_at=$2+interval '30 seconds',lease_until=NULL,version=version+1,updated_at=$2 WHERE id=$1 AND stage IN ('IDENTITY_CLEANUP','ANONYMIZED')`, closureID, now, code)
+	_, err := r.pool.Exec(ctx, `UPDATE account_closure_requests SET status=CASE WHEN sla_expires_at<=$2::timestamptz THEN 'REPAIR_REQUIRED' ELSE 'RETRY' END,last_error_code=$3,next_attempt_at=$2::timestamptz+interval '30 seconds',lease_until=NULL,version=version+1,updated_at=$2::timestamptz WHERE id=$1 AND stage IN ('IDENTITY_CLEANUP','ANONYMIZED')`, closureID, now, code)
 	return err
 }
 

@@ -213,8 +213,8 @@ FOR UPDATE OF ro,sc`, operationID, challengeID, mobile).Scan(&status, &attempts,
 		return err
 	}
 	command, err := tx.Exec(ctx, `
-UPDATE registration_operations SET status='REGISTRATION_IN_PROGRESS',lease_expires_at=$2+interval '30 minutes',next_retry_at=$2,
-version=version+1,last_error_code=NULL,updated_at=$2 WHERE id=$1 AND status='SMS_PENDING'`, operationID, now)
+UPDATE registration_operations SET status='REGISTRATION_IN_PROGRESS',lease_expires_at=$2::timestamptz+interval '30 minutes',next_retry_at=$2::timestamptz,
+version=version+1,last_error_code=NULL,updated_at=$2::timestamptz WHERE id=$1 AND status='SMS_PENDING'`, operationID, now)
 	if err != nil {
 		slog.WarnContext(ctx, "registration operation conflict", "stage", "consume_sms_update_error", "operation_id", operationID.String(), "error_code", registrationTransitionErrorCode(err))
 		return fmt.Errorf("registration transition update: %w", err)
@@ -243,7 +243,7 @@ func registrationTransitionErrorCode(err error) string {
 
 func (r *PostgresRepository) MarkRegistrationIdentityCreating(ctx context.Context, operationID uuid.UUID) error {
 	command, err := r.pool.Exec(ctx, `
-UPDATE registration_operations SET status='IDENTITY_CREATING',next_retry_at=$2+interval '5 seconds',version=version+1,updated_at=$2
+UPDATE registration_operations SET status='IDENTITY_CREATING',next_retry_at=$2::timestamptz+interval '5 seconds',version=version+1,updated_at=$2::timestamptz
 WHERE id=$1 AND status IN ('REGISTRATION_IN_PROGRESS','IDENTITY_CREATING')`, operationID, r.now())
 	if err != nil {
 		return err
@@ -289,7 +289,7 @@ func (r *PostgresRepository) CommitRegistration(ctx context.Context, operationID
 		return RegistrationOperation{}, ErrRegistrationConflict
 	}
 	now := r.now()
-	if _, err := tx.Exec(ctx, `UPDATE registration_operations SET status='ACCOUNT_COMMITTING',next_retry_at=$2+interval '5 seconds',version=version+1,updated_at=$2 WHERE id=$1`, operationID, now); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE registration_operations SET status='ACCOUNT_COMMITTING',next_retry_at=$2::timestamptz+interval '5 seconds',version=version+1,updated_at=$2::timestamptz WHERE id=$1`, operationID, now); err != nil {
 		return RegistrationOperation{}, err
 	}
 	var usernameExists, mobileExists bool

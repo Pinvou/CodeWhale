@@ -468,7 +468,7 @@ func (r *PostgresRepository) ClaimProfileChange(ctx context.Context) (*ProfileCh
 	if err != nil {
 		return nil, err
 	}
-	_, err = tx.Exec(ctx, `UPDATE profile_change_requests SET attempts=attempts+1,next_attempt_at=$2+interval '30 seconds',updated_at=$2 WHERE id=$1`, c.ID, r.now())
+	_, err = tx.Exec(ctx, `UPDATE profile_change_requests SET attempts=attempts+1,next_attempt_at=$2::timestamptz+interval '30 seconds',updated_at=$2::timestamptz WHERE id=$1`, c.ID, r.now())
 	if err != nil {
 		return nil, err
 	}

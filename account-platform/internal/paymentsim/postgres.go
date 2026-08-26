@@ -326,7 +326,7 @@ WITH claimed AS (
   ORDER BY n.next_attempt_at FOR UPDATE SKIP LOCKED LIMIT $2
 )
 UPDATE simulator_notifications n
-SET attempts = attempts + 1, next_attempt_at = $1 + interval '30 seconds'
+SET attempts = attempts + 1, next_attempt_at = $1::timestamptz + interval '30 seconds'
 FROM claimed c, simulator_orders o
 WHERE n.id = c.id AND o.id = n.order_id
 RETURNING n.id, n.order_id, o.callback_url, o.channel, n.payload, n.signature, n.attempts, n.remaining_deliveries`, r.now(), limit)
