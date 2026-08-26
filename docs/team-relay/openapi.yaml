@@ -249,6 +249,27 @@ paths:
         "429":
           $ref: "#/components/responses/RateLimited"
 
+  /v1/teams/{team_id}:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    delete:
+      tags: [Team]
+      operationId: dissolveTeam
+      description: Irreversibly dissolves an active team without physically deleting its history. Owner only; the team must have no open work.
+      responses:
+        "204":
+          description: Team dissolved; join codes and all team-scoped access are already invalid.
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "409":
+          description: Open work must be completed or cancelled before the team can be dissolved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /v1/me:
     get:
       tags: [Enrollment]
@@ -448,6 +469,45 @@ paths:
         "403":
           $ref: "#/components/responses/MembershipRequired"
 
+  /v1/teams/{team_id}/owner-transfer:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    post:
+      tags: [Team]
+      operationId: transferTeamOwner
+      description: Atomically transfers the single team owner role to an active, non-disabled ordinary member without changing either member's work responsibilities.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferTeamOwnerRequest"
+      responses:
+        "200":
+          description: Team ownership transferred without changing work-thread roles.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferTeamOwnerResponse"
+        "400":
+          $ref: "#/components/responses/InvalidRequest"
+        "403":
+          $ref: "#/components/responses/ActionNotAllowed"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "409":
+          description: The selected member's account is disabled (`new_owner_unavailable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: The owner roles could not be exchanged atomically because membership state changed concurrently; retry later.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /v1/teams/{team_id}/invites:
     parameters:
       - $ref: "#/components/parameters/TeamId"
@@ -554,13 +614,34 @@ paths:
       operationId: removeTeamMember
       responses:
         "204":
-          description: Membership removed. The credential may still belong to other teams. If joining is enabled, its code is atomically rotated.
+          description: Membership removed. The credential may still belong to other teams. Unused invites created by the removed member are revoked and, if joining is enabled, its code is atomically rotated.
         "403":
           $ref: "#/components/responses/ActionNotAllowed"
         "404":
           $ref: "#/components/responses/ResourceNotFound"
         "409":
           description: The last team owner or a member with open work cannot be removed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /v1/teams/{team_id}/members/me:
+    parameters:
+      - $ref: "#/components/parameters/TeamId"
+    delete:
+      tags: [Team]
+      operationId: leaveTeam
+      description: Ends the current ordinary member's active Membership. Owners must transfer ownership or dissolve the team instead.
+      responses:
+        "204":
+          description: Membership ended. Unused invites created by the caller are revoked and, if joining was enabled, the old reusable join code is already invalid.
+        "403":
+          $ref: "#/components/responses/MembershipRequired"
+        "404":
+          $ref: "#/components/responses/ResourceNotFound"
+        "409":
+          description: The caller is the team owner or still has open work responsibilities.
           content:
             application/json:
               schema:
@@ -1218,6 +1299,26 @@ components:
           maxLength: 256
           description: An 8-character team join code, with optional hyphen, or a legacy long code.
 
+    TransferTeamOwnerRequest:
+      type: object
+      additionalProperties: false
+      required: [new_owner_id]
+      properties:
+        new_owner_id:
+          $ref: "#/components/schemas/Uuid"
+
+    TransferTeamOwnerResponse:
+      type: object
+      additionalProperties: false
+      required: [team_id, previous_owner_id, owner_id]
+      properties:
+        team_id:
+          $ref: "#/components/schemas/Uuid"
+        previous_owner_id:
+          $ref: "#/components/schemas/Uuid"
+        owner_id:
+          $ref: "#/components/schemas/Uuid"
+
     ClaimEnrollmentResponse:
       type: object
       additionalProperties: false
@@ -1870,7 +1971,9 @@ components:
             - idempotency_key_reused
             - invite_already_claimed
             - last_team_owner
+            - new_owner_unavailable
             - member_has_open_work
+            - team_has_open_work
             - invite_expired
             - attachment_expired
             - attachment_too_large

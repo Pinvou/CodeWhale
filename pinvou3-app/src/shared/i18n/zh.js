@@ -1032,8 +1032,10 @@ dictZh["uiTeamRelay"] = {
     "rate_limited": "加入码尝试次数过多，请稍后再试。",
     "invite_expired": "邀请码无效或已过期，请重新获取。",
     "invite_already_claimed": "该邀请码已被使用。",
-    "member_has_open_work": "该成员仍参与未结束的工作，请先完成或交接后再移除。",
-    "last_team_owner": "最后一名团队负责人不能被移除。",
+    "member_has_open_work": "该成员仍承担未结束工作的必要责任，请先完成或交接后再执行此操作。",
+    "last_team_owner": "团队负责人不能直接退出，请先转让负责人或解散团队。",
+    "new_owner_unavailable": "该成员的账号已被禁用，无法接任负责人。",
+    "team_has_open_work": "团队仍有未结束的工作，全部结束后才能解散。",
     "revision_conflict": "这项工作刚刚发生变化，已刷新，请确认后重试。",
     "action_not_allowed": "当前接力状态不允许执行此操作。",
     "attachment_too_large": "文件超过 20 MiB 限制。",
@@ -1240,7 +1242,16 @@ dictZh["uiTeamRelay"] = {
     "removeMember": "移出团队",
     "removeConfirm": name => `确定将“${name}”移出团队吗？`,
     "removed": name => `已将“${name}”移出团队`,
-    "removedAndCodeRotated": name => `已将“${name}”移出团队，并自动刷新加入码`
+    "removedAndCodeRotated": name => `已将“${name}”移出团队，并自动刷新加入码`,
+    "transferOwner": "转让负责人",
+    "transferConfirm": name => `确定把团队负责人转让给“${name}”吗？转让后你会成为普通成员。`,
+    "transferred": name => `已将团队负责人转让给${name}`,
+    "leaveTeam": "退出团队",
+    "leaveConfirm": name => `确定退出“${name}”吗？退出后将无法再访问该团队，当前加入码也会立即刷新。`,
+    "left": name => `已退出${name}`,
+    "dissolveTeam": "解散团队",
+    "dissolveConfirm": name => `确定永久解散“${name}”吗？所有成员会立即失去访问权限，加入码失效；服务端历史会保留，但当前没有恢复或查看入口。此操作无法撤销。`,
+    "dissolved": name => `已解散${name}`
   },
   "taskInfo": "任务信息",
   "initiator": "发起人",
@@ -1534,7 +1545,13 @@ dictZh["uiTeamRelay"] = {
     "unpinned": "已取消置顶",
     "hidden": "已归档，可在“已归档”中恢复",
     "restored": "已恢复到工作列表"
-  }
+  },
+  "blockingWork": (message, threads) => `${message} 阻塞工作：${threads.join('；')}`,
+  "blockingThread": thread => {
+    const labels = { "active": "进行中", "pending_transfer": "等待确认", "awaiting_reassignment": "待重新派发", "awaiting_acceptance": "待验收" };
+    return labels[thread.phase] ? `${thread.title || thread.thread_id}（${labels[thread.phase]}）` : `${thread.title || thread.thread_id}`;
+  },
+  "lifecycleSyncPending": "操作已完成，但团队数据尚未同步。请重新同步以获取最新状态。"
 };
 dictZh["kbOutWeekdays"] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 dictZh["builtinModelSelect"] = "后台模型";

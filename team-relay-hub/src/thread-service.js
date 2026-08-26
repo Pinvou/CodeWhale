@@ -37,7 +37,7 @@ async function selectThread(db, threadId, lock = false) {
 
 async function lockTeamMembershipChanges(db, teamId) {
   const result = await db.query(
-    `SELECT id FROM teams WHERE id = $1 FOR SHARE`,
+    `SELECT id FROM teams WHERE id = $1 AND dissolved_at IS NULL FOR SHARE`,
     [teamId],
   );
   if (!result.rowCount) {
@@ -355,6 +355,11 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
   const perform = () => inTransaction(pool, async (client) => {
     const replay = await findReplay(client, auth.principalId, input.idempotencyKey, hash);
     if (replay) return replay;
+    // Every state transition can change whether a Principal is responsible for
+    // open work. Serialize it with member exit, owner transfer and dissolution
+    // before taking the thread row lock so lifecycle checks see a stable set.
+    const initial = await selectThread(client, threadId);
+    await lockTeamMembershipChanges(client, initial.team_id);
     const locked = await selectThread(client, threadId, true);
     await requireMembership(client, locked.team_id, auth.principalId);
     await requireParticipant(client, threadId, auth.principalId);
@@ -364,7 +369,6 @@ export async function createAction(pool, token, rawThreadId, body, notify = () =
       });
     }
     if (new Set(["handoff", "reroute_transfer", "accept_transfer"]).has(input.kind)) {
-      await lockTeamMembershipChanges(client, locked.team_id);
       if (input.recipientId) await requireMembership(client, locked.team_id, input.recipientId);
       if (input.kind === "accept_transfer") {
         await requireMembership(client, locked.team_id, auth.principalId);
@@ -525,6 +529,8 @@ export async function setThreadPreference(pool, token, rawThreadId, body, notify
   const hidden = boolean(body.hidden, "hidden");
   const auth = await authenticate(pool, token);
   const result = await inTransaction(pool, async (client) => {
+    const initial = await selectThread(client, threadId);
+    await lockTeamMembershipChanges(client, initial.team_id);
     const thread = await selectThread(client, threadId, true);
     await requireMembership(client, thread.team_id, auth.principalId);
     await requireParticipant(client, threadId, auth.principalId);
@@ -600,7 +606,7 @@ export async function getBootstrap(pool, token, rawTeamId, protocolVersion = "0.
   const teamResult = await pool.query(
     `SELECT id, name, created_by, created_at,
             (join_password_hash IS NOT NULL) AS join_password_configured
-       FROM teams WHERE id = $1`,
+       FROM teams WHERE id = $1 AND dissolved_at IS NULL`,
     [teamId],
   );
   if (teamResult.rowCount === 0) {

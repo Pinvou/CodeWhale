@@ -390,6 +390,7 @@
       workspaceError: null,
       uploadProgress: null,
       lastSyncedAt: null,
+      syncPending: false,
     },
     // 「通过聊天创建」的引导词:只随该会话首条消息发给模型,永不显示在气泡里。
     scheduledTaskPendingGuide: null,
@@ -2351,6 +2352,9 @@
   var joinTeamRelayTeam = teamRelayFeature.joinTeam;
   var switchTeamRelayTeam = teamRelayFeature.switchTeam;
   var removeTeamRelayMember = teamRelayFeature.removeMember;
+  var transferTeamRelayOwner = teamRelayFeature.transferOwner;
+  var leaveTeamRelayTeam = teamRelayFeature.leaveTeam;
+  var dissolveTeamRelayTeam = teamRelayFeature.dissolveTeam;
   var createTeamRelayInvite = teamRelayFeature.createInvite;
   var getTeamRelayJoinPassword = teamRelayFeature.getJoinPassword;
   var rotateTeamRelayJoinPassword = teamRelayFeature.rotateJoinPassword;
@@ -2690,6 +2694,9 @@
       joinTeam: joinTeamRelayTeam,
       switchTeam: switchTeamRelayTeam,
       removeMember: removeTeamRelayMember,
+      transferOwner: transferTeamRelayOwner,
+      leaveTeam: leaveTeamRelayTeam,
+      dissolveTeam: dissolveTeamRelayTeam,
       createInvite: createTeamRelayInvite,
       getJoinPassword: getTeamRelayJoinPassword,
       rotateJoinPassword: rotateTeamRelayJoinPassword,

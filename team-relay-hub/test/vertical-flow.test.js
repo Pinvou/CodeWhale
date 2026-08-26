@@ -21,7 +21,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.match(database.rows[0].name, /_test$/, "integration test requires an isolated *_test database");
   await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
   const confirmedTransferMigration = "0009_confirmed_transfers.sql";
-  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", confirmedTransferMigration, "0010_principal_avatars.sql", "0011_avatar_hardening.sql", "0012_avatar_reduced_motion.sql"];
+  const migrationNames = ["0001_demo.sql", "0002_delivery_packages.sql", "0003_thread_management.sql", "0004_fixed_join_password.sql", "0005_short_join_code.sql", "0006_persistent_join_code.sql", "0007_principal_email.sql", "0008_thread_read_states.sql", confirmedTransferMigration, "0010_principal_avatars.sql", "0011_avatar_hardening.sql", "0012_avatar_reduced_motion.sql", "0013_team_lifecycle.sql"];
   async function applyMigration(migrationName) {
     const migration = await readFile(
       new URL(`../../docs/team-relay/migrations/${migrationName}`, import.meta.url),
@@ -297,6 +297,61 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     }
   }
 
+  async function transferOwnerWhileOperationWaits(teamId, previousOwnerId, newOwnerId, operation, message) {
+    const guard = await pool.connect();
+    try {
+      await guard.query("BEGIN");
+      await guard.query("SELECT id FROM teams WHERE id = $1 FOR UPDATE", [teamId]);
+      const pendingOperation = operation();
+      await assertStillPending(pendingOperation, message);
+      await guard.query(
+        "UPDATE memberships SET role = 'member' WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL",
+        [teamId, previousOwnerId],
+      );
+      await guard.query(
+        "UPDATE memberships SET role = 'owner' WHERE team_id = $1 AND principal_id = $2 AND removed_at IS NULL",
+        [teamId, newOwnerId],
+      );
+      await guard.query("COMMIT");
+      return await pendingOperation;
+    } finally {
+      await guard.query("ROLLBACK").catch(() => {});
+      guard.release();
+    }
+  }
+
+  async function assertInviteOperationLocksTeamFirst(teamId, inviteId, operation, message) {
+    const teamGuard = await pool.connect();
+    const inviteInspector = await pool.connect();
+    let pendingOperation;
+    let inviteLockError = null;
+    try {
+      await teamGuard.query("BEGIN");
+      await teamGuard.query("SELECT id FROM teams WHERE id = $1 FOR UPDATE", [teamId]);
+      pendingOperation = operation();
+      await assertStillPending(pendingOperation, message);
+
+      await inviteInspector.query("BEGIN");
+      try {
+        await inviteInspector.query("SELECT id FROM invites WHERE id = $1 FOR UPDATE NOWAIT", [inviteId]);
+      } catch (error) {
+        inviteLockError = error;
+      } finally {
+        await inviteInspector.query("ROLLBACK").catch(() => {});
+      }
+
+      await teamGuard.query("COMMIT");
+      const result = await pendingOperation;
+      assert.equal(inviteLockError, null, "an invite operation waiting on its team must not lock the invite first");
+      return result;
+    } finally {
+      await teamGuard.query("ROLLBACK").catch(() => {});
+      teamGuard.release();
+      inviteInspector.release();
+      if (pendingOperation) await pendingOperation.catch(() => {});
+    }
+  }
+
   const health = await api("/v1/healthz");
   assert.deepEqual(health, { status: 200, value: { status: "ok", database: "ready" } });
 
@@ -556,6 +611,34 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(secondBootstrap.status, 200);
   assert.deepEqual(secondBootstrap.value.members.map(member => member.display_name), ["A", "B", "D"]);
 
+  const lockOrderAccount = await api("/v1/enrollments/account", {
+    method: "POST",
+    body: { email: nextEmail(), display_name: "Lock order member", device_name: "Lock order test device" },
+  });
+  assert.equal(lockOrderAccount.status, 201);
+  const lockOrderInvite = await api(`/v1/teams/${createdTeam.value.team.id}/invites`, {
+    method: "POST",
+    token: a.device_token,
+    body: { expires_in_hours: 24 },
+  });
+  assert.equal(lockOrderInvite.status, 201);
+  const lockOrderedJoin = await assertInviteOperationLocksTeamFirst(
+    createdTeam.value.team.id,
+    lockOrderInvite.value.invite_id,
+    () => api("/v1/teams/join", {
+      method: "POST",
+      token: lockOrderAccount.value.device_token,
+      body: { join_code: lockOrderInvite.value.invite_code },
+    }),
+    "an invite join must wait for the team lock before locking its invite",
+  );
+  assert.equal(lockOrderedJoin.status, 200);
+  const removeLockOrderMember = await api(
+    `/v1/teams/${createdTeam.value.team.id}/members/${lockOrderAccount.value.principal.id}`,
+    { method: "DELETE", token: a.device_token },
+  );
+  assert.equal(removeLockOrderMember.status, 204);
+
   const inviteCountBeforeRemovalRace = await pool.query(
     "SELECT count(*)::integer AS count FROM invites WHERE team_id = $1",
     [createdTeam.value.team.id],
@@ -582,17 +665,20 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     "UPDATE memberships SET removed_at = NULL, role = 'member' WHERE team_id = $1 AND principal_id = $2",
     [createdTeam.value.team.id, d.principal.id],
   );
-  await pool.query(
-    "UPDATE memberships SET role = 'owner' WHERE team_id = $1 AND principal_id = $2",
-    [createdTeam.value.team.id, b.principal.id],
-  );
+  const rotationOwnerTransfer = await api(`/v1/teams/${createdTeam.value.team.id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: b.principal.id },
+  });
+  assert.equal(rotationOwnerTransfer.status, 200);
   const joinPasswordBeforeRotationRace = await pool.query(
     "SELECT join_password_hash FROM teams WHERE id = $1",
     [createdTeam.value.team.id],
   );
-  const rejectedRotation = await removeMemberWhileOperationWaits(
+  const rejectedRotation = await transferOwnerWhileOperationWaits(
     createdTeam.value.team.id,
     b.principal.id,
+    a.principal.id,
     () => api(`/v1/teams/${createdTeam.value.team.id}/join-password`, {
       method: "POST",
       token: b.device_token,
@@ -601,7 +687,7 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     "join code rotation must wait while team membership changes are locked",
   );
   assert.equal(rejectedRotation.status, 403);
-  assert.equal(rejectedRotation.value.error.code, "membership_required");
+  assert.equal(rejectedRotation.value.error.code, "action_not_allowed");
   const joinPasswordAfterRotationRace = await pool.query(
     "SELECT join_password_hash FROM teams WHERE id = $1",
     [createdTeam.value.team.id],
@@ -609,10 +695,6 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(
     joinPasswordAfterRotationRace.rows[0].join_password_hash,
     joinPasswordBeforeRotationRace.rows[0].join_password_hash,
-  );
-  await pool.query(
-    "UPDATE memberships SET removed_at = NULL, role = 'member' WHERE team_id = $1 AND principal_id = $2",
-    [createdTeam.value.team.id, b.principal.id],
   );
 
   const rejectedJoinPasswordRead = await removeMemberWhileOperationWaits(
@@ -941,6 +1023,50 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   );
   assert.equal(removeActiveOwner.status, 409);
   assert.equal(removeActiveOwner.value.error.code, "member_has_open_work");
+  assert.deepEqual(removeActiveOwner.value.error.details.blocking_threads, [{
+    thread_id: threadId,
+    title: "Prepare team writing plan",
+    phase: "active",
+    responsibilities: ["work_owner", "current_actor"],
+  }]);
+  const ownerTransferWithOpenWork = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: c.principal.id },
+  });
+  assert.equal(ownerTransferWithOpenWork.status, 200, "ownership transfer must not alter or block existing work responsibilities");
+  const threadAfterOwnerTransfer = await api(`/v1/threads/${threadId}`, {
+    token: a.device_token,
+  });
+  assert.equal(threadAfterOwnerTransfer.value.thread.revision, 1, "ownership transfer must not touch open work");
+  assert.equal(threadAfterOwnerTransfer.value.thread.owner_id, b.principal.id, "work responsibility stays with the original owner");
+  assert.equal(threadAfterOwnerTransfer.value.thread.current_actor_id, b.principal.id, "current actor stays unchanged after ownership transfer");
+  const restoreOwner = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: c.device_token,
+    body: { new_owner_id: a.principal.id },
+  });
+  assert.equal(restoreOwner.status, 200);
+  await pool.query("UPDATE principals SET disabled_at = clock_timestamp() WHERE id = $1", [c.principal.id]);
+  const disabledOwnerTransfer = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: c.principal.id },
+  });
+  assert.equal(disabledOwnerTransfer.status, 409);
+  assert.equal(disabledOwnerTransfer.value.error.code, "new_owner_unavailable");
+  await pool.query("UPDATE principals SET disabled_at = NULL WHERE id = $1", [c.principal.id]);
+  const blockedTeamDissolution = await api(`/v1/teams/${initial.team_id}`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(blockedTeamDissolution.status, 409);
+  assert.equal(blockedTeamDissolution.value.error.code, "team_has_open_work");
+  assert.deepEqual(blockedTeamDissolution.value.error.details.blocking_threads, [{
+    thread_id: threadId,
+    title: "Prepare team writing plan",
+    phase: "active",
+  }]);
 
   const sseController = new AbortController();
   t.after(() => sseController.abort());
@@ -1498,11 +1624,170 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   });
   assert.equal(removedMemberOldInvite.status, 410);
   assert.equal(removedMemberOldInvite.value.error.code, "invite_expired");
+  const thirdPartyOldInvite = await api("/v1/enrollments/claim", {
+    method: "POST",
+    body: {
+      invite_code: inviteBeforeRemoval.value.invite_code,
+      email: nextEmail(),
+      display_name: "Revoked invite user",
+      device_name: "Revoked invite test device",
+    },
+  });
+  assert.equal(thirdPartyOldInvite.status, 410, "unused invites created by a removed member must be revoked");
+  assert.equal(thirdPartyOldInvite.value.error.code, "invite_expired");
   const removedBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
     token: c.device_token,
   });
   assert.equal(removedBootstrap.status, 403);
   assert.equal(removedBootstrap.value.error.code, "membership_required");
+
+  const ownerTransfer = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
+    method: "POST",
+    token: a.device_token,
+    body: { new_owner_id: b.principal.id },
+  });
+  assert.equal(ownerTransfer.status, 200);
+  assert.deepEqual(ownerTransfer.value, {
+    team_id: initial.team_id,
+    previous_owner_id: a.principal.id,
+    owner_id: b.principal.id,
+  });
+  const membersAfterTransfer = await api(`/v1/teams/${initial.team_id}/members`, {
+    token: b.device_token,
+  });
+  assert.equal(membersAfterTransfer.value.members.find(member => member.id === a.principal.id).role, "member");
+  assert.equal(membersAfterTransfer.value.members.find(member => member.id === b.principal.id).role, "owner");
+
+  const joinCodeBeforeLeave = passwordAfterRemoval.value.join_password;
+  const ownerLeave = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: b.device_token,
+  });
+  assert.equal(ownerLeave.status, 409);
+  assert.equal(ownerLeave.value.error.code, "last_team_owner");
+  const leaveBlocker = await api("/v1/threads", {
+    method: "POST",
+    token: b.device_token,
+    body: {
+      team_id: initial.team_id,
+      title: "Departure blocking follow-up",
+      assignee_id: a.principal.id,
+      message: "Please finish this before leaving.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(leaveBlocker.status, 201);
+  const busyLeave = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(busyLeave.status, 409);
+  assert.equal(busyLeave.value.error.code, "member_has_open_work");
+  const leaveBlockerEntry = busyLeave.value.error.details.blocking_threads
+    .find(entry => entry.thread_id === leaveBlocker.value.thread.id);
+  assert.deepEqual(leaveBlockerEntry, {
+    thread_id: leaveBlocker.value.thread.id,
+    title: "Departure blocking follow-up",
+    phase: "active",
+    responsibilities: ["work_owner", "current_actor"],
+  });
+  const cancelLeaveBlocker = await action(b, leaveBlocker.value.thread.id, "cancel", 1, {
+    message: "Released before departure.",
+  });
+  assert.equal(cancelLeaveBlocker.status, 201);
+  const inviteBeforeLeave = await api(`/v1/teams/${initial.team_id}/invites`, {
+    method: "POST",
+    token: a.device_token,
+    body: { expires_in_hours: 24 },
+  });
+  assert.equal(inviteBeforeLeave.status, 201);
+  const leaveA = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(leaveA.status, 204);
+  const teamsAfterLeave = await api("/v1/teams", { token: a.device_token });
+  assert.deepEqual(teamsAfterLeave.value.teams.map(team => team.name), ["Release group"]);
+  const oldCodeAfterLeave = await api("/v1/teams/join", {
+    method: "POST",
+    token: a.device_token,
+    body: { join_code: joinCodeBeforeLeave },
+  });
+  assert.equal(oldCodeAfterLeave.status, 401);
+  assert.equal(oldCodeAfterLeave.value.error.code, "join_password_invalid");
+  const thirdPartyInviteAfterLeave = await api("/v1/enrollments/claim", {
+    method: "POST",
+    body: {
+      invite_code: inviteBeforeLeave.value.invite_code,
+      email: nextEmail(),
+      display_name: "Departed inviter user",
+      device_name: "Departed inviter test device",
+    },
+  });
+  assert.equal(thirdPartyInviteAfterLeave.status, 410, "unused invites created by a departed member must be revoked");
+  assert.equal(thirdPartyInviteAfterLeave.value.error.code, "invite_expired");
+
+  const passwordBeforeDissolution = await api(
+    `/v1/teams/${initial.team_id}/join-password`,
+    { token: b.device_token },
+  );
+  assert.equal(passwordBeforeDissolution.status, 200);
+  const avatarBeforeDissolution = await uploadAvatar(b, animatedGif, "owner-avatar.gif");
+  assert.equal(avatarBeforeDissolution.status, 200);
+  const dissolveSseController = new AbortController();
+  t.after(() => dissolveSseController.abort());
+  const dissolveSse = await fetch(`${origin}/v1/events`, {
+    headers: { Authorization: `Bearer ${b.device_token}` },
+    signal: dissolveSseController.signal,
+  });
+  assert.equal(dissolveSse.status, 200);
+  const dissolveSseReader = dissolveSse.body.getReader();
+  await readSseUntil(dissolveSseReader, "event: ready");
+  const dissolve = await api(`/v1/teams/${initial.team_id}`, {
+    method: "DELETE",
+    token: b.device_token,
+  });
+  assert.equal(dissolve.status, 204);
+  await readSseUntil(dissolveSseReader, "event: team.dissolved");
+  await waitForSseEnd(dissolveSseReader);
+  const teamsAfterDissolution = await api("/v1/teams", { token: b.device_token });
+  assert.deepEqual(teamsAfterDissolution.value.teams.map(team => team.name), ["Release group"]);
+  const meAfterDissolution = await api("/v1/me", { token: b.device_token });
+  assert.deepEqual(
+    meAfterDissolution.value.memberships.map(membership => membership.team_id),
+    [createdTeam.value.team.id],
+  );
+  const dissolvedBootstrap = await api(`/v1/bootstrap?team_id=${initial.team_id}`, {
+    token: b.device_token,
+  });
+  assert.equal(dissolvedBootstrap.status, 403);
+  assert.equal(dissolvedBootstrap.value.error.code, "membership_required");
+  const dissolvedThread = await api(`/v1/threads/${threadId}`, { token: b.device_token });
+  assert.equal(dissolvedThread.status, 403);
+  assert.equal(dissolvedThread.value.error.code, "membership_required");
+  const dissolvedAttachment = await api(`/v1/attachments/${planUpload.value.id}`, {
+    token: b.device_token,
+  });
+  assert.equal(dissolvedAttachment.status, 404);
+  assert.equal(dissolvedAttachment.value.error.code, "resource_not_found");
+  const dissolvedAvatar = await readAvatar(b, b.principal.id, initial.team_id);
+  assert.equal(dissolvedAvatar.status, 403);
+  const dissolvedJoinCode = await api("/v1/teams/join", {
+    method: "POST",
+    token: a.device_token,
+    body: { join_code: passwordBeforeDissolution.value.join_password },
+  });
+  assert.equal(dissolvedJoinCode.status, 401);
+  assert.equal(dissolvedJoinCode.value.error.code, "join_password_invalid");
+  const historicalTeam = await pool.query(
+    "SELECT dissolved_at, dissolved_by FROM teams WHERE id = $1",
+    [initial.team_id],
+  );
+  assert.ok(historicalTeam.rows[0].dissolved_at);
+  assert.equal(historicalTeam.rows[0].dissolved_by, b.principal.id);
+  const historicalThread = await pool.query("SELECT phase FROM work_threads WHERE id = $1", [threadId]);
+  assert.equal(historicalThread.rows[0].phase, "closed");
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const invalidJoin = await api("/v1/enrollments/join", {

@@ -116,7 +116,7 @@
         try {
           var status = await invoke("team_relay_status");
           if (!status.configured) {
-            patchCurrent({ loading: false, status: status, snapshot: null, account: null });
+            patchCurrent({ loading: false, status: status, snapshot: null, account: null, syncPending: false });
             return null;
           }
           if (!status.team_id) {
@@ -124,14 +124,33 @@
             if (account.teams && account.teams.length) {
               var restoredSnapshot = await invoke("team_relay_switch_team", { teamId: account.teams[0].id });
               var restoredStatus = Object.assign({}, status, { team_id: restoredSnapshot.bootstrap.team.id });
-              patchCurrent({ loading: false, status: restoredStatus, snapshot: restoredSnapshot, account: { principal: restoredSnapshot.bootstrap.me, teams: restoredSnapshot.teams || account.teams }, lastSyncedAt: Date.now() });
+              patchCurrent({ loading: false, status: restoredStatus, snapshot: restoredSnapshot, account: { principal: restoredSnapshot.bootstrap.me, teams: restoredSnapshot.teams || account.teams }, lastSyncedAt: Date.now(), syncPending: false });
               return restoredSnapshot;
             }
-            patchCurrent({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now() });
+            patchCurrent({ loading: false, status: status, snapshot: null, account: account, lastSyncedAt: Date.now(), syncPending: false });
             return account;
           }
-          var snapshot = await invoke("team_relay_bootstrap");
-          patchCurrent({ loading: false, status: status, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now() });
+          var snapshot;
+          try {
+            snapshot = await invoke("team_relay_bootstrap");
+          } catch (error) {
+            var bootstrapError = String(error);
+            var invalidCurrentTeam = bootstrapError.indexOf("team_relay_team_required:") !== -1
+              || bootstrapError.indexOf("membership_required:") !== -1;
+            if (!invalidCurrentTeam) throw error;
+            var recoveredAccount = await invoke("team_relay_account");
+            if (recoveredAccount.teams && recoveredAccount.teams.length) {
+              var fallbackSnapshot = await invoke("team_relay_switch_team", { teamId: recoveredAccount.teams[0].id });
+              var fallbackStatus = Object.assign({}, status, { team_id: fallbackSnapshot.bootstrap.team.id });
+              patchCurrent({ loading: false, status: fallbackStatus, snapshot: fallbackSnapshot, account: { principal: fallbackSnapshot.bootstrap.me, teams: fallbackSnapshot.teams || recoveredAccount.teams }, lastSyncedAt: Date.now(), syncPending: false });
+              return fallbackSnapshot;
+            }
+            var emptyStatus = Object.assign({}, status, { team_id: null });
+            patchCurrent({ loading: false, status: emptyStatus, snapshot: null, account: recoveredAccount, lastSyncedAt: Date.now(), syncPending: false });
+            return recoveredAccount;
+          }
+          var recoveredStatus = Object.assign({}, status, { team_id: snapshot.bootstrap.team.id });
+          patchCurrent({ loading: false, status: recoveredStatus, snapshot: snapshot, account: { principal: snapshot.bootstrap.me, teams: snapshot.teams || [] }, lastSyncedAt: Date.now(), syncPending: false });
           return snapshot;
         } catch (error) {
           if (!silent) patchCurrent({ loading: false, error: String(error) });
@@ -373,7 +392,19 @@
       patch({ mutating: true, error: null });
       try {
         var result = await invoke(command, args);
-        if (result && result.bootstrap && result.attachments) patch({ snapshot: result });
+        if (result && result.committed === true) {
+          var activeTeamId = result.active_team_id || null;
+          var lifecyclePatch = {
+            status: Object.assign({}, state.teamRelay.status, { team_id: activeTeamId }),
+          };
+          if (result.snapshot || !activeTeamId) lifecyclePatch.snapshot = result.snapshot || null;
+          if (result.account) lifecyclePatch.account = result.account;
+          lifecyclePatch.syncPending = Boolean(result.sync_error);
+          if (!result.sync_error) lifecyclePatch.lastSyncedAt = Date.now();
+          patch(lifecyclePatch);
+          if (result.sync_error) load({ silent: true }).catch(function () {});
+        }
+        else if (result && result.bootstrap && result.attachments) patch({ snapshot: result });
         else load().catch(function () {});
         return result;
       } catch (error) {
@@ -427,6 +458,24 @@
 
     function removeMember(principalId) {
       return mutate("team_relay_remove_member", { principalId: principalId });
+    }
+
+    function transferOwner(newOwnerId) {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_transfer_owner", { newOwnerId: newOwnerId });
+      });
+    }
+
+    function leaveTeam() {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_leave_team");
+      });
+    }
+
+    function dissolveTeam() {
+      return acrossAvatarCacheBoundary(function () {
+        return mutate("team_relay_dissolve_team");
+      });
     }
 
     function rotateJoinPassword() {
@@ -641,6 +690,7 @@
           preparingWorkspace: null,
           workspaceError: null,
           error: null,
+          syncPending: false,
         });
       } catch (error) {
         patch({ error: String(error) });
@@ -878,6 +928,9 @@
       joinTeam: joinTeam,
       switchTeam: switchTeam,
       removeMember: removeMember,
+      transferOwner: transferOwner,
+      leaveTeam: leaveTeam,
+      dissolveTeam: dissolveTeam,
       createInvite: createInvite,
       getJoinPassword: getJoinPassword,
       rotateJoinPassword: rotateJoinPassword,

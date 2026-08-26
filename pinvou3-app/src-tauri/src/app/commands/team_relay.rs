@@ -2,9 +2,9 @@ use crate::features::team_relay::{
     AccountEnrollmentInput, Attachment, ClaimEnrollmentInput, CreateActionInput,
     CreateInviteResponse, CreateTeamEnrollmentInput, CreateThreadInput, MarkThreadReadInput,
     SetTeamRelayAgentSessionInput, SetThreadPreferenceInput, TeamJoinCodeState,
-    TeamRelayAccountState, TeamRelayManager, TeamRelaySnapshot, TeamRelayStatus,
-    TeamRelayTaskWorkspaceStatus, ThreadMutationResponse, ThreadPreference, ThreadReadState,
-    UpdateProfileInput,
+    TeamRelayAccountState, TeamRelayLifecycleResult, TeamRelayManager, TeamRelaySnapshot,
+    TeamRelayStatus, TeamRelayTaskWorkspaceStatus, ThreadMutationResponse, ThreadPreference,
+    ThreadReadState, UpdateProfileInput,
 };
 use std::path::PathBuf;
 use tauri::{AppHandle, State};
@@ -210,6 +210,63 @@ pub async fn team_relay_remove_member(
     manager: State<'_, TeamRelayManager>,
 ) -> Result<(), String> {
     manager.remove_member(&principal_id).await
+}
+
+fn restart_lifecycle_events(
+    app: AppHandle,
+    manager: &TeamRelayManager,
+    result: &mut TeamRelayLifecycleResult,
+) {
+    if let Some(account) = &result.account {
+        let team_ids = account
+            .teams
+            .iter()
+            .map(|team| team.id.clone())
+            .collect::<Vec<_>>();
+        // start_events errors are deliberately degraded to a sync warning instead of being
+        // propagated with ?, because the server already committed the lifecycle mutation.
+        let outcome = if team_ids.is_empty() {
+            // The last team was left or dissolved: only stop the previous event task instead
+            // of starting an empty-scope SSE loop that would reconnect every 3 seconds.
+            manager.stop_events()
+        } else {
+            manager.start_events(app, &team_ids)
+        };
+        if let Err(error) = outcome {
+            result.record_sync_error(error);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn team_relay_transfer_owner(
+    app: AppHandle,
+    new_owner_id: String,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayLifecycleResult, String> {
+    let mut result = manager.transfer_owner(&new_owner_id).await?;
+    restart_lifecycle_events(app, &manager, &mut result);
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn team_relay_leave_team(
+    app: AppHandle,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayLifecycleResult, String> {
+    let mut result = manager.leave_team().await?;
+    restart_lifecycle_events(app, &manager, &mut result);
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn team_relay_dissolve_team(
+    app: AppHandle,
+    manager: State<'_, TeamRelayManager>,
+) -> Result<TeamRelayLifecycleResult, String> {
+    let mut result = manager.dissolve_team().await?;
+    restart_lifecycle_events(app, &manager, &mut result);
+    Ok(result)
 }
 
 #[tauri::command]
