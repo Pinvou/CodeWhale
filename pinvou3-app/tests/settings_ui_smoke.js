@@ -250,7 +250,6 @@ function injectSource() {
             max_model_len: 262144,
           },
         ] });
-        case 'detect_local_vllm_setup': return Promise.resolve({ eligible: false, has_packages: false, vllm_online: false });
         case 'get_selected_pet': return Promise.resolve('lingling');
         case 'get_behavior_telemetry_status': return Promise.resolve(Object.assign({}, behaviorTelemetry));
         case 'set_behavior_telemetry_enabled':

@@ -286,14 +286,6 @@
     depsChecking: false,
     depsInstalling: false,    // 一键安装进行中(pkexec apt)
     depsInstallError: null,   // 安装失败原因(apt stderr 透传/取消/pkexec 不可用)
-    // MegaCube(GB10) 本地大模型一键引导:首屏检测结果 + 引导执行态
-    vllmSetup: null,          // {eligible, may_offer_setup, has_packages, engine_state:ready|starting|stopped|failed, ...}
-    vllmBootstrapping: false, // 引导进行中(pkexec + 拉起 + 轮询就绪)
-    vllmSetupPhase: null,     // 阶段:'authorizing'|'waiting'|'ready'(后端 vllm-setup:phase 事件驱动步骤指示)
-    vllmSetupAttempt: 0,      // waiting 阶段第几次探测(后端报)
-    vllmBootstrapDone: null,  // 成功结果 {base_url, model}, 据此显示「立即重启」
-    vllmBootstrapError: null, // 失败原因(pkexec stderr / 超时透传)
-    vllmSetupDismissed: false,// 本次会话内点了「跳过」,不再弹(不写持久标记)
     voiceInput: {
       status: "idle",         // idle | requesting_permission | recording | transcribing | completed | cancelled | failed
       message: "",
@@ -6811,15 +6803,6 @@
     notify();
   });
 
-  // vllm-setup:phase —— MegaCube 本地大模型引导阶段(authorizing→waiting{attempt}→ready),驱动引导框步骤指示。
-  listen("vllm-setup:phase", function (e) {
-    var p = e.payload || {};
-    if (!p.phase) return;
-    state.vllmSetupPhase = p.phase;
-    if (typeof p.attempt === "number") state.vllmSetupAttempt = p.attempt;
-    notify();
-  });
-
   // 知识库 embedding 模型下载进度（download → verify → prepare → done）
   listen("kb_model:progress", function (e) {
     var p = e && e.payload;
@@ -7300,77 +7283,6 @@
     return await invoke("discover_local_vllm", { request: request || null });
   }
 
-  // ── MegaCube(GB10) 本地大模型一键引导 ────────────────────────────
-  var vllmSetupPollTimer = null;
-  var vllmSetupPollStartedAt = 0;
-  var VLLM_SETUP_POLL_INTERVAL_MS = 3000;
-  var VLLM_SETUP_POLL_TIMEOUT_MS = 12 * 60 * 1000;
-  // 首屏检测「预装但未启用」状态;eligible 时前端弹引导框。
-  // 开机加载中不弹框，每 3 秒静默复查；12 分钟后仍 starting 则恢复可重试入口。
-  // autoPoll 只供内部定时器续接；用户手动检测会重置本轮截止时间。
-  async function detectLocalVllmSetup(options) {
-    var autoPoll = !!(options && options.autoPoll);
-    if (vllmSetupPollTimer) {
-      clearTimeout(vllmSetupPollTimer);
-      vllmSetupPollTimer = null;
-    }
-    if (!autoPoll) vllmSetupPollStartedAt = Date.now();
-    try {
-      state.vllmSetup = await invoke("detect_local_vllm_setup");
-    } catch (e) {
-      state.vllmSetup = null; // 检测失败静默,不打扰(等同不弹)
-      vllmSetupPollStartedAt = 0;
-    }
-    if (state.vllmSetup && state.vllmSetup.engine_state === 'starting' && state.vllmSetup.may_offer_setup !== false) {
-      var elapsed = Date.now() - vllmSetupPollStartedAt;
-      if (vllmSetupPollStartedAt > 0 && elapsed >= VLLM_SETUP_POLL_TIMEOUT_MS) {
-        state.vllmSetup = Object.assign({}, state.vllmSetup, {
-          engine_state: 'failed',
-          eligible: !!state.vllmSetup.may_offer_setup,
-          detection_timed_out: true,
-        });
-        vllmSetupPollStartedAt = 0;
-      } else {
-        vllmSetupPollTimer = setTimeout(function () {
-          vllmSetupPollTimer = null;
-          detectLocalVllmSetup({ autoPoll: true });
-        }, VLLM_SETUP_POLL_INTERVAL_MS);
-      }
-    } else {
-      vllmSetupPollStartedAt = 0;
-    }
-    notify();
-    return state.vllmSetup; // 返回供设置页「检测本机 vLLM」判断 has_packages
-  }
-  // 用户点「启用」:后端一次 pkexec 拉起引擎+装 systemd 服务,轮询就绪后写模型配置。
-  // 引擎首次载模型可能几分钟,全程 vllmBootstrapping 显示 spinner。
-  async function bootstrapLocalVllm() {
-    if (state.vllmBootstrapping) return;
-    state.vllmBootstrapping = true;
-    state.vllmBootstrapError = null;
-    state.vllmBootstrapDone = null;
-    state.vllmSetupPhase = 'authorizing'; // 后端事件到达前先本地置首阶段(pkexec 阻塞期也有步骤显示)
-    state.vllmSetupAttempt = 0;
-    notify();
-    try {
-      state.vllmBootstrapDone = await invoke("bootstrap_local_vllm");
-    } catch (e) {
-      state.vllmBootstrapError = String(e && e.message ? e.message : e);
-    }
-    state.vllmBootstrapping = false;
-    notify();
-  }
-  // 点「跳过」:仅本次会话内不再弹(不写持久标记,下次启动若仍未配好会再次友好提示)。
-  function dismissVllmSetup() {
-    state.vllmSetupDismissed = true;
-    notify();
-  }
-  // 点「不再提醒 → 确认」:持久婉拒,开机引导框不再自动弹(仍可在设置→模型管理手动启用)。
-  async function declineVllmSetup() {
-    try { await invoke("decline_local_vllm_setup"); } catch (e) { /* 持久失败也先隐藏本会话,不阻断 */ }
-    state.vllmSetupDismissed = true;
-    notify();
-  }
   async function getEffectiveModelConfig(sessionId) {
     return await invoke("get_effective_model_config", {
       sessionId: arguments.length ? (sessionId || null) : (state.activeSessionId || null),
@@ -10383,10 +10295,6 @@
     saveSearchSettingsAndRestart: saveSearchSettingsAndRestart,
     submitFeedback: submitFeedback,
     discoverLocalVllm: discoverLocalVllm,
-    detectLocalVllmSetup: detectLocalVllmSetup,
-    bootstrapLocalVllm: bootstrapLocalVllm,
-    dismissVllmSetup: dismissVllmSetup,
-    declineVllmSetup: declineVllmSetup,
     getEffectiveModelConfig: getEffectiveModelConfig,
    loadModels: loadModels,
    saveModel: saveModel,

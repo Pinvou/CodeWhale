@@ -234,15 +234,6 @@ command_protocol!(
     ]
 );
 command_protocol!(
-    local_llm_protocol,
-    "local_llm.rs",
-    [
-        "detect_local_vllm_setup",
-        "decline_local_vllm_setup",
-        "bootstrap_local_vllm"
-    ]
-);
-command_protocol!(
     llmapi_protocol,
     "llmapi.rs",
     [
@@ -257,6 +248,21 @@ command_protocol!(
         "get_llmapi_admin_overview"
     ]
 );
+
+#[test]
+fn preinstalled_model_startup_commands_are_not_registered() {
+    let app_entrypoint = include_str!("../../lib.rs");
+    for removed in [
+        "detect_local_vllm_setup",
+        "bootstrap_local_vllm",
+        "decline_local_vllm_setup",
+    ] {
+        assert!(
+            !app_entrypoint.contains(removed),
+            "removed preinstalled-model startup command is still registered: {removed}"
+        );
+    }
+}
 command_protocol!(
     marketplace_protocol,
     "marketplace.rs",
