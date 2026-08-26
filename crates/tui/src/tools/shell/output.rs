@@ -288,8 +288,14 @@ mod tests {
 
     #[test]
     fn running_full_decoder_keeps_incomplete_utf8_private_until_final() {
-        assert_eq!(decode_shell_bytes(b"ready \xE4", false), "ready ");
-        assert_eq!(decode_shell_bytes(b"ready \xE4", true), "ready \u{FFFD}");
+        assert_eq!(
+            decode_shell_bytes_with_legacy(b"ready \xE4", None, false),
+            "ready "
+        );
+        assert_eq!(
+            decode_shell_bytes_with_legacy(b"ready \xE4", None, true),
+            "ready \u{FFFD}"
+        );
     }
 
     #[test]
