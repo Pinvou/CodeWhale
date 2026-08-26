@@ -92,14 +92,24 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 			return
 		}
 		if r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			portalURL := *r.URL
+			portalQuery := portalURL.Query()
+			if strings.TrimSpace(portalQuery.Get("section")) == "" {
+				portalQuery.Set("section", "creditsUsage")
+				portalURL.RawQuery = portalQuery.Encode()
+			}
 			if _, err := s.authenticatedSession(r.Context(), r); err != nil {
 				loginRequest := r.Clone(r.Context())
 				loginURL := *r.URL
 				query := loginURL.Query()
-				query.Set("return_to", safeReturnTo(r.URL.RequestURI()))
+				query.Set("return_to", safeReturnTo(portalURL.RequestURI()))
 				loginURL.RawQuery = query.Encode()
 				loginRequest.URL = &loginURL
 				s.login(w, loginRequest)
+				return
+			}
+			if portalURL.RawQuery != r.URL.RawQuery {
+				http.Redirect(w, r, portalURL.RequestURI(), http.StatusFound)
 				return
 			}
 		}

@@ -129,7 +129,24 @@ func TestAnonymousPortalRootStartsIdentityLoginImmediately(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedPortalRootStillServesApplication(t *testing.T) {
+func TestAnonymousPortalRootReturnsToCreditsAndUsageByDefault(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	response := httptest.NewRecorder()
+
+	service.Handler(http.NotFoundHandler()).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d", response.Code)
+	}
+	location, _ := url.Parse(response.Header().Get("Location"))
+	flow := store.flows[location.Query().Get("state")]
+	if flow.ReturnTo != "/?section=creditsUsage" {
+		t.Fatalf("default return target = %q", flow.ReturnTo)
+	}
+}
+
+func TestAuthenticatedPortalRootRedirectsToCreditsAndUsageByDefault(t *testing.T) {
 	store := newMemoryStore()
 	service := testService(t, store)
 	now := time.Now().UTC()
@@ -147,11 +164,37 @@ func TestAuthenticatedPortalRootStillServesApplication(t *testing.T) {
 
 	service.Handler(static).ServeHTTP(response, request)
 
-	if response.Code != http.StatusOK || response.Body.String() != "portal application" {
-		t.Fatalf("authenticated root must serve the portal: %d %q", response.Code, response.Body.String())
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/?section=creditsUsage" {
+		t.Fatalf("authenticated root must select the first tab: %d %q", response.Code, response.Header().Get("Location"))
+	}
+	if response.Body.String() == "portal application" {
+		t.Fatal("the portal shell must not render before the default section is canonicalized")
 	}
 	if response.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("authenticated root must not persist a stale portal shell: %q", response.Header().Get("Cache-Control"))
+	}
+}
+
+func TestAuthenticatedPortalRootPreservesExplicitSection(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	now := time.Now().UTC()
+	session := Session{ID: "portal-session", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour), CSRFToken: strings.Repeat("p", 32)}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/?section=accountSettings", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	static := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "portal application")
+	})
+
+	service.Handler(static).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "portal application" {
+		t.Fatalf("explicit section must serve the portal unchanged: %d %q", response.Code, response.Body.String())
 	}
 }
 
