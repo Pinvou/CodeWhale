@@ -764,6 +764,16 @@
         "file": "000041_human_delegation_audit.up.sql",
         "version": 41,
         "sha256": "970ec8ab9a93c957db00357b13fe8d6d7a8c61b8cadaed78bff2cb9d0797b3f3"
+      },
+      {
+        "file": "000042_single_h3c_sku.down.sql",
+        "version": 42,
+        "sha256": "ed623488b323c957db6444ad5e43be6acc016ea46f6862e9349d9928decabebb"
+      },
+      {
+        "file": "000042_single_h3c_sku.up.sql",
+        "version": 42,
+        "sha256": "7059a6a2511fadfa659768c8bd135a1a973bbbdc261fa7da24058e922f142eb5"
       }
     ],
     "payment-simulator": [

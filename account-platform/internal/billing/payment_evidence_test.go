@@ -9,8 +9,8 @@ import (
 
 func TestProviderMatchesFrozenOrderIdentityAndSKU(t *testing.T) {
 	requesterID := uuid.MustParse("019c0000-0000-7000-8000-000000000001")
-	order := PaymentOrder{MerchantOrderNo: "pv-1", RequesterID: requesterID, ProviderSKU: "8814A1D2", Channel: "ALIPAY", AmountFen: 20000, Currency: "CNY"}
-	provider := ProviderOrder{MerchantOrderNo: "pv-1", ExternalCustomerKey: requesterID.String(), ExternalSKU: "8814A1D2", Channel: "ALIPAY", AmountFen: 20000, Currency: "CNY"}
+	order := PaymentOrder{MerchantOrderNo: "pv-1", RequesterID: requesterID, ProviderSKU: "0502AJ0Q", Channel: "ALIPAY", AmountFen: 10, Currency: "CNY"}
+	provider := ProviderOrder{MerchantOrderNo: "pv-1", ExternalCustomerKey: requesterID.String(), ExternalSKU: "0502AJ0Q", Channel: "ALIPAY", AmountFen: 10, Currency: "CNY"}
 	if !providerMatchesOrder(provider, order) {
 		t.Fatal("matching Mall customer and SKU were rejected")
 	}

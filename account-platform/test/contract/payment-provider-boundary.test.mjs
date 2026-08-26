@@ -58,6 +58,18 @@ test('trial plan publishes a versioned 200 yuan catalog and H3C mapping without 
   assert.doesNotMatch(rollback, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP/);
 });
 
+test('current purchase catalog exposes only the ten-fen 0502AJ0Q H3C SKU', async () => {
+  const migration = await read('migrations/billing/000042_single_h3c_sku.up.sql');
+  const rollback = await read('migrations/billing/000042_single_h3c_sku.down.sql');
+  assert.match(migration, /provider_id IN \('h3c_mall','development_simulator'\)/);
+  assert.match(migration, /'h3c_mall','h3c-mall-v1','0502AJ0Q'/);
+  assert.match(migration, /facts\.external_sku, 10, 'CNY'/);
+  assert.match(migration, /SET amount_fen=10/);
+  assert.doesNotMatch(migration, /'PLAN_STANDARD'|'PLAN_ADVANCED'|'PLAN_FLAGSHIP'/);
+  assert.match(rollback, /'PLAN_TRIAL','8814A1D2',20000/);
+  assert.match(rollback, /'PLAN_STANDARD','0502AJ0Q',9900/);
+});
+
 test('development simulator is unavailable to production configuration', async () => {
   const main = await read('cmd/billing-service/main.go');
   const helm = await read('deploy/helm/account-platform/templates/app-deployments.yaml');

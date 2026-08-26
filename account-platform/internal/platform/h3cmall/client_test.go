@@ -45,7 +45,7 @@ func TestCreateAndPageQueryUseMerchantCustomerKey(t *testing.T) {
 	mux.HandleFunc("/api/trade/external/pinwu/order/createOrder", func(w http.ResponseWriter, request *http.Request) {
 		var body map[string]string
 		_ = json.NewDecoder(request.Body).Decode(&body)
-		if request.Header.Get("Authorization") != "mall-token" || body["merchantCustomerKey"] != customer || body["skuBom"] != "8814A1D2" {
+		if request.Header.Get("Authorization") != "mall-token" || body["merchantCustomerKey"] != customer || body["skuBom"] != "0502AJ0Q" {
 			t.Errorf("unexpected create request: %#v", body)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "success": true, "failed": false, "content": "accepted"})
@@ -56,7 +56,7 @@ func TestCreateAndPageQueryUseMerchantCustomerKey(t *testing.T) {
 		if body["merchantCustomerKey"] != customer {
 			t.Errorf("unexpected page query: %#v", body)
 		}
-		order := map[string]any{"orderKey": "pv-1", "merchantCustomerKey": customer, "mobile": "13800138000", "skuBom": "8814A1D2", "needPayAmt": 200.00, "skuAmt": 200.00, "status": "WAIT_PAY", "updatedAt": "2026-08-25 16:00:00"}
+		order := map[string]any{"orderKey": "pv-1", "merchantCustomerKey": customer, "mobile": "13800138000", "skuBom": "0502AJ0Q", "needPayAmt": 0.10, "skuAmt": 0.10, "status": "WAIT_PAY", "updatedAt": "2026-08-25 16:00:00"}
 		_ = json.NewEncoder(w).Encode(map[string]any{"code": 200, "success": true, "failed": false, "content": map[string]any{"records": []any{order}, "total": 1, "size": 10, "current": 1, "pages": 1}})
 	})
 	server := httptest.NewServer(mux)
@@ -65,7 +65,7 @@ func TestCreateAndPageQueryUseMerchantCustomerKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.CreateOrder(context.Background(), "pv-1", customer, "+8613800138000", "8814A1D2"); err != nil {
+	if err := client.CreateOrder(context.Background(), "pv-1", customer, "+8613800138000", "0502AJ0Q"); err != nil {
 		t.Fatal(err)
 	}
 	page, err := client.PageQueryOrders(context.Background(), PageQueryRequest{MerchantCustomerKey: customer, Current: 1, PageSize: 10})

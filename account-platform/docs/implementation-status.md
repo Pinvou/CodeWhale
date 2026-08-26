@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 366 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 334`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环：用户端无入口，运营动作同时要求产品与 Provider 门禁，服务端在领域写入前稳定拒绝新建请求，既有退款收敛、强制退款和只读查询不受影响。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；`PLAN_TRIAL` 的目录与 `8814A1D2` 映射已统一为 200.00 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069–APT-082 的全部 CODE 任务现已收敛三类作用域与真值表、登录、Account/Billing/Token 原子权限、策略审批、对象授权、可信恢复、短期委托、精确工作负载权限、权限驱动界面及全敏感入口覆盖发布门禁。
+全量核验汇总：`已实现 334`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `366` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环：用户端无入口，运营动作同时要求产品与 Provider 门禁，服务端在领域写入前稳定拒绝新建请求，既有退款收敛、强制退款和只读查询不受影响。PAY-10、PAY-41–PAY-43 已按最新版商城合同完成代码适配；当前购买目录只保留 `PLAN_TRIAL`，唯一商城 SKU 为 `0502AJ0Q`、金额 0.10 元，PAY-10 仍等待部署后的真实支付、商品与发票事实联合验收。PAY-44–PAY-47、UI-20、ADM-43、ADM-44 已由 APT-065–APT-067 在仓库闭环；UI-21 由 APT-068 在 Keycloak Identity 边界闭环。三类角色权限设计已完成安全与业务双重独立审核，APT-069–APT-082 的全部 CODE 任务现已收敛三类作用域与真值表、登录、Account/Billing/Token 原子权限、策略审批、对象授权、可信恢复、短期委托、精确工作负载权限、权限驱动界面及全敏感入口覆盖发布门禁。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -59,7 +59,7 @@
 | `PERSONAL-CENTER-IA` | Web 个人中心“额度与用量 / 订单与发票 / 账号设置”三 Tab、成功订单白名单、旧深链映射，以及个人/组织资源显示边界 | 42 项账号平台状态测试、UI ESLint 和 Portal 构建通过；订单只展示 `PAID/PAID_LATE`，组织能力嵌入账号设置且个人权益不回退到组织视图 |
 | `ORGANIZATION-MEMBER-QUOTA` | 组织购买、精确 BASE/BONUS 组成授予、逐项批量、成员生命周期、Hold/结算及权限化 UI | Go 单测、OpenAPI、组织额度合同、桌面状态测试及 Portal 构建通过；真实 PostgreSQL 并发竞争和生产迁移仍待部署验证 |
 | `METERING-PRICING-LIFECYCLE` | 版本化计量单位/协议公式、确定性估算、动态 Hold 续租与追加预占、逐单位价格匹配及完整生命周期 | Billing/Token/Portal Go 单测、OpenAPI lint、59 个合同测试和全量静态验证通过；数据库运行级迁移、真实并发发布和长流故障注入待部署 |
-| `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、合同测试、Portal 构建和部署模板检查通过；H3C 下单已携带永久 user_id 客户标识，查询已适配原生十进制金额和新增订单字段；`PLAN_TRIAL` 已发布 200 元目录/映射迁移，部署联调与正式冻结仍由 APT-048 收敛 |
+| `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、合同测试、Portal 构建和部署模板检查通过；H3C 下单已携带永久 user_id 客户标识，查询已适配原生十进制金额和新增订单字段；当前仅发布 `0502AJ0Q`、0.10 元的 `PLAN_TRIAL` 购买映射，部署联调与正式冻结仍由 APT-048 收敛 |
 | `PAYMENT-EVIDENCE-LIFECYCLE` | 一单多流水、不可变回调/查询/账单/修复证据、逐流水权益包、付款人与受益方冻结、独立状态机、订单派生摘要及运营明细 | Go 单测、OpenAPI lint、合同测试、桌面 ESLint 和 Portal 构建通过；数据库运行级迁移及真实 Provider 乱序/重复证据故障注入待部署 |
 | `PAYMENT-CALLBACK-GATEWAY` | Provider 中立 Basic 客户端授权、Token 绑定 Provider/版本/商户、Profile 注册、严格通知适配、先持久化后 `202`、重复/冲突防重及查询补偿 | H3C Profile 已直接复用 queryOrder 原生订单对象、确定性派生通知 ID、精确校验十进制金额/客户/SKU并修复异步订单投影 SQL；Go 单测、OpenAPI 与回调合同通过。公网旧版本已验证 Token/202，但新版原生报文和最终履约仍待部署联合验收 |
 | `PAYMENT-CONVERGENCE` | Provider 账单逐行进入统一不可变证据归并器，关单状态单调推进，支付/退款/拒付事实独立且订单摘要可重建 | Go 单测、OpenAPI lint、关单/账单/摘要合同及全量静态验证通过；真实 Provider 账单、关单竞态和数据库运行级迁移待部署 |
@@ -428,7 +428,7 @@
 | PAY-07 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 充值选择、二维码和结果留在品悟应用/Portal 内 |
 | PAY-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 每次充值从服务端商品选择开始，不恢复旧二维码作为新订单 |
 | PAY-09 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | 服务端按 `product_id` 派生 SKU、金额和权益，拒绝客户端覆盖 |
-| PAY-10 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-CALLBACK-GATEWAY | NOT_DEPLOYED | H3C 二维码、外部订单引用和金额均读取最新版查询/回调原生订单事实，PAID 必须取得并精确校验 `paidAmt`；`PLAN_TRIAL` 与 `8814A1D2` 已统一为 200 元，但真实支付、商品/发票信息和上架状态尚未联合验收，不能宣称正式冻结完成 |
+| PAY-10 | 部分实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PAYMENT-CALLBACK-GATEWAY | NOT_DEPLOYED | H3C 二维码、外部订单引用和金额均读取最新版查询/回调原生订单事实，PAID 必须取得并精确校验 `paidAmt`；当前唯一 `PLAN_TRIAL` 映射为 `0502AJ0Q`、0.10 元，但真实支付、商品/发票信息和上架状态尚未联合验收，不能宣称正式冻结完成 |
 | PAY-15 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; PAYMENT-CALLBACK-GATEWAY; ACCOUNT-DOMAIN-UAT-20260825 | 0.8.0@1efb79d6 (CLOUD_UAT) | 通用回调凭据与 Token 绑定 Provider、版本和商户，Billing 按 Profile 严格解析并先持久化再返回 `202`，与主动查询共用归并器；H3C 是首个 Profile 且固定声明 `notification_supported=true`。`https://account.pinvou.com/api/v1` 下两个通用精确路径已发布并完成受控客户端 Token 签发；真实新华三通知报文、重复/乱序与履约结果仍待联合验收 |
 | PAY-16 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Billing 后台查询不依赖客户端二维码页面持续打开 |
 | PAY-17 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 普通 PENDING 在订单期限后继续按退避查询，72小时最终查询仍无终态则转换为明确人工审核，不会永久停留普通 PENDING |
@@ -561,7 +561,7 @@
 | CR-63 | PAY-10, PAY-12, PAY-15–PAY-17, NFR-03, NFR-04, NFR-41 | 提供 Provider 中立授权与支付通知接口，新华三作为首个 Profile 且不增加额外能力字段 | 旧版云端接口已部署；本轮合同待部署联调 | 凭据和 Token 绑定 Provider、版本及商户，请求体不能自报身份。H3C 固定声明 `notification_supported=true`，最新版原生订单回调与主动查询已复用同一映射并先入 Inbox；异步履约查询中的 `status` 歧义也已修复。真实商城原生通知、重复/乱序和到账结果仍需部署后联合验收 |
 | CR-64 | UI-09, PAY-15–PAY-17, NFR-03, NFR-04 | Web 个人中心与公开支付回调统一迁移到账号独立 HTTPS 子域名和 `/api/v1` 命名空间 | 云端 UAT 已部署 | 桌面默认入口、Portal 根路径、Billing 路由、OpenAPI、Helm、Compose、Nginx 与文档已统一为 `https://account.pinvou.com/`；受信 TLS、HTTP `308`、Portal `200`、回调未授权 `401` 与受控 Token 签发 `200` 均已验证。旧官网个人中心代理与旧回调契约未保留兼容代码；真实商城回调仍由 CR-63 跟踪 |
 | CR-65 | TOK-48, UI-17–UI-19, NFR-51 | 平台模型入口从账号 Popover 迁移到设置和对话区，并隔离全局默认与当前会话选择 | 已实现 | APT-059–APT-063 已完成 Popover 收敛、类型化引用、设置默认项、对话当前会话选择及三语、异常和跨入口自动回归门禁 |
-| CR-66 | PAY-41–PAY-43 | 按最新版新华三合同统一永久客户标识、订单查询/回调和精确金额事实 | 仓库实现完成，待部署联调 | 创建订单传不可变 `user_id`，分页查询强制按同一客户标识，回调直接采用 `queryOrder.content` 原生对象并复用查询映射；金额精确换算且异常失败关闭。异步 SQL 歧义已修复，`PLAN_TRIAL` 目录与 `8814A1D2` 映射也已统一为 200 元；剩余真实回调和履约证据待部署验收 |
+| CR-66 | PAY-41–PAY-43 | 按最新版新华三合同统一永久客户标识、订单查询/回调和精确金额事实 | 仓库实现完成，待部署联调 | 创建订单传不可变 `user_id`，分页查询强制按同一客户标识，回调直接采用 `queryOrder.content` 原生对象并复用查询映射；金额精确换算且异常失败关闭。异步 SQL 歧义已修复，当前购买目录只保留 `0502AJ0Q`、0.10 元的 `PLAN_TRIAL`；剩余真实回调和履约证据待部署验收 |
 
 这些需求之间的强制关系：
 
@@ -794,7 +794,7 @@
 | PAY-07 | 充值全程留在品悟应用内 | 已实现 | 用户图标旁额度入口进入商品选择、二维码和结果页，不跳商城后台网页。 |
 | PAY-08 | 每次点击充值先进入商品选择 | 已实现 | 不恢复到上次二维码页。 |
 | PAY-09 | 服务端按 product_id 派生 SKU、金额和积分 | 已实现 | 客户端不能覆盖金额、SKU 或权益。 |
-| PAY-10 | 二维码和支付金额完全采用商城返回事实 | 部分实现 | H3C Provider 不本地生成二维码；查询和原生回调共同读取商城二维码、外部订单引用与十进制金额，PAID 缺少真实实付金额会失败关闭。`PLAN_TRIAL` 与 `8814A1D2` 已统一为 200 元，仍需部署后的真实支付和商品事实联合验收。 |
+| PAY-10 | 二维码和支付金额完全采用商城返回事实 | 部分实现 | H3C Provider 不本地生成二维码；查询和原生回调共同读取商城二维码、外部订单引用与十进制金额，PAID 缺少真实实付金额会失败关闭。当前只开放 `0502AJ0Q`、0.10 元的 `PLAN_TRIAL`，仍需部署后的真实支付和商品事实联合验收。 |
 | PAY-11 | 支付流水与权益包履约隔离 | 已实现 | payment_order 1:N payment_transaction，支付来源权益包唯一绑定 source_payment_transaction_id；不同成功流水分别独立履约或进入重复/晚到支付复核。 |
 | PAY-13 | 支付领域独立状态机与订单派生摘要 | 已实现 | 支付流水、退款、拒付和关单事实分离；订单四类摘要从底层事实重建，并保持应收与人工复核优先级。 |
 | PAY-15 | 支付回调与主动查询 | 已实现 | H3C 以专用 Basic 凭据换取短期 Bearer Token 后投递回调，通知先持久化再返回 `202`；`account.pinvou.com/api/v1` 下两个精确入口已在 Nginx 模板代理到 Billing，回调和主动查询使用同一不可变证据归并器，服务端查询继续补偿漏回调。 |
@@ -1048,12 +1048,12 @@
 
 | Product | SKU | 金额（分） | 基础积分 | 赠送积分 | 总积分 | 有效期 |
 |---|---|---:|---:|---:|---:|---:|
-| `PLAN_TRIAL` | `8814A1D2`（UAT） | 20,000 | 1,000 | 0 | 1,000 | 30 天 |
-| `PLAN_STANDARD` | `0502AJ0Q` | 9,900 | 2,000 | 0 | 2,000 | 30 天 |
-| `PLAN_ADVANCED` | `0502AJOR` | 19,900 | 4,000 | 0 | 4,000 | 30 天 |
-| `PLAN_FLAGSHIP` | `0502AJOP` | 99,900 | 20,000 | 0 | 20,000 | 30 天 |
+| `PLAN_TRIAL` | `0502AJ0Q`（唯一 UAT SKU） | 10 | 1,000 | 0 | 1,000 | 30 天 |
+| `PLAN_STANDARD` | 无活动商城映射 | — | 2,000 | 0 | 2,000 | 30 天 |
+| `PLAN_ADVANCED` | 无活动商城映射 | — | 4,000 | 0 | 4,000 | 30 天 |
+| `PLAN_FLAGSHIP` | 无活动商城映射 | — | 20,000 | 0 | 20,000 | 30 天 |
 
-金额与权益最初通过 `000035_personal_pricing_v3` 形成版本化目录及 H3C/Simulator 映射，`000036_trial_h3c_sku_override` 将体验版 H3C SKU 切换为 `8814A1D2`。业务已确认采用商城 200.00 元金额，`000037_trial_price_200_yuan` 因而退休旧的体验版映射，并同时发布 20,000 分商品目录、H3C 映射和开发 Simulator 映射；历史订单快照和旧映射不改写，体验版权益仍为 1,000 BASE、0 BONUS、30 天。商品名称、类目、发票名称、含税金额与上架状态仍待部署联调验收，因此运行时继续标记为 `UAT_TENTATIVE` / `TEST_ONLY`；验收完成后必须另行发布 `FROZEN` 版本。
+金额与权益最初通过 `000035_personal_pricing_v3` 形成版本化目录及 H3C/Simulator 映射，后续变更均保留为历史事实。最新 `000042_single_h3c_sku` 退休全部活动购买映射，只发布 `PLAN_TRIAL` 的 `0502AJ0Q`、10 分 H3C 映射及同额开发 Simulator 映射；历史订单快照和旧映射不改写，体验版权益仍为 1,000 BASE、0 BONUS、30 天。商品名称、类目、发票名称、含税金额与上架状态仍待部署联调验收，因此运行时继续标记为 `UAT_TENTATIVE` / `TEST_ONLY`；验收完成后必须另行发布 `FROZEN` 版本。
 
 ## 7. 正式上线门禁
 
