@@ -495,8 +495,8 @@ paths:
           $ref: "#/components/responses/ActionNotAllowed"
         "404":
           $ref: "#/components/responses/ResourceNotFound"
-        "409":
-          description: The owner roles could not be exchanged atomically because membership state changed concurrently.
+        "503":
+          description: The owner roles could not be exchanged atomically because membership state changed concurrently; retry later.
           content:
             application/json:
               schema:

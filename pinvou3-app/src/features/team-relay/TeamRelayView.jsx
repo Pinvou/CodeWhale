@@ -920,7 +920,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
     setAssignmentTeamId(nextTeamId);
     setSelectedId(null); setTeamJoinCode(null); setTeamJoinCodeOpen(false); setTeamJoinCodeLoading(false); setMobileDetailOpen(false);
     joinCodeRequestGenerationRef.current += 1; joinCodeRequestRef.current = null; joinCodeFetchedAtRef.current = 0;
-    if (nextTeamId) setViewMode('board');
+    if (nextTeamId) setViewMode('board'); else setViewMode('personal');
   };
   const transferOwner = async member => {
     if (!window.confirm(copy.board.transferConfirm(member.display_name))) return;

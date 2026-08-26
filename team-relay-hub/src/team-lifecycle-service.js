@@ -167,7 +167,7 @@ export async function transferTeamOwner(pool, token, rawTeamId, body) {
       [teamId, newOwnerId],
     );
     if (demoted.rowCount !== 1 || promoted.rowCount !== 1) {
-      throw new AppError(409, "service_unavailable", "The team owner could not be transferred atomically.");
+      throw new AppError(503, "service_unavailable", "The team owner could not be transferred atomically.");
     }
     return { team_id: teamId, previous_owner_id: auth.principalId, owner_id: newOwnerId };
   });

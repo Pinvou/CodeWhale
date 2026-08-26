@@ -1035,6 +1035,12 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     body: { new_owner_id: c.principal.id },
   });
   assert.equal(ownerTransferWithOpenWork.status, 200, "ownership transfer must not alter or block existing work responsibilities");
+  const threadAfterOwnerTransfer = await api(`/v1/threads/${threadId}`, {
+    token: a.device_token,
+  });
+  assert.equal(threadAfterOwnerTransfer.value.thread.revision, 1, "ownership transfer must not touch open work");
+  assert.equal(threadAfterOwnerTransfer.value.thread.owner_id, b.principal.id, "work responsibility stays with the original owner");
+  assert.equal(threadAfterOwnerTransfer.value.thread.current_actor_id, b.principal.id, "current actor stays unchanged after ownership transfer");
   const restoreOwner = await api(`/v1/teams/${initial.team_id}/owner-transfer`, {
     method: "POST",
     token: c.device_token,
@@ -1653,6 +1659,43 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
   assert.equal(membersAfterTransfer.value.members.find(member => member.id === b.principal.id).role, "owner");
 
   const joinCodeBeforeLeave = passwordAfterRemoval.value.join_password;
+  const ownerLeave = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: b.device_token,
+  });
+  assert.equal(ownerLeave.status, 409);
+  assert.equal(ownerLeave.value.error.code, "last_team_owner");
+  const leaveBlocker = await api("/v1/threads", {
+    method: "POST",
+    token: b.device_token,
+    body: {
+      team_id: initial.team_id,
+      title: "Departure blocking follow-up",
+      assignee_id: a.principal.id,
+      message: "Please finish this before leaving.",
+      attachment_ids: [],
+      idempotency_key: randomUUID(),
+    },
+  });
+  assert.equal(leaveBlocker.status, 201);
+  const busyLeave = await api(`/v1/teams/${initial.team_id}/members/me`, {
+    method: "DELETE",
+    token: a.device_token,
+  });
+  assert.equal(busyLeave.status, 409);
+  assert.equal(busyLeave.value.error.code, "member_has_open_work");
+  const leaveBlockerEntry = busyLeave.value.error.details.blocking_threads
+    .find(entry => entry.thread_id === leaveBlocker.value.thread.id);
+  assert.deepEqual(leaveBlockerEntry, {
+    thread_id: leaveBlocker.value.thread.id,
+    title: "Departure blocking follow-up",
+    phase: "active",
+    responsibilities: ["work_owner", "current_actor"],
+  });
+  const cancelLeaveBlocker = await action(b, leaveBlocker.value.thread.id, "cancel", 1, {
+    message: "Released before departure.",
+  });
+  assert.equal(cancelLeaveBlocker.status, 201);
   const inviteBeforeLeave = await api(`/v1/teams/${initial.team_id}/invites`, {
     method: "POST",
     token: a.device_token,
