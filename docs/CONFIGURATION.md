@@ -572,7 +572,10 @@ streaming is enabled but an endpoint returns an ordinary JSON response,
 Codewhale parses that response as a compatibility fallback. Omitting
 `retry_on_transient_errors` keeps the existing transient-error retry policy.
 Empty responses fail instead of producing a successful result with no usable
-analysis.
+analysis. A mid-stream read failure or a stalled response fails the tool with
+the underlying cause; only a clean end of stream without a terminal event, a
+malformed SSE frame, or a `finish_reason` of `length` is reported as a
+truncated result.
 
 The example above uses Xiaomi MiMo's pay-as-you-go OpenAI-compatible endpoint.
 If you are using a Token Plan key (`tp-...`) for `[vision_model]`, you must set

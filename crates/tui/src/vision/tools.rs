@@ -77,6 +77,7 @@ fn process_sse_line(line: &str, state: &mut VisionStreamState) -> bool {
     }
 
     let Ok(event) = serde_json::from_str::<Value>(data) else {
+        tracing::warn!("Vision SSE frame is not valid JSON; marking the stream truncated");
         state.truncated = true;
         return false;
     };
@@ -347,9 +348,16 @@ impl ImageAnalyzeTool {
         'response: loop {
             let chunk = match tokio::time::timeout_at(deadline, stream.next()).await {
                 Ok(Some(Ok(chunk))) => chunk,
-                Ok(Some(Err(_))) | Err(_) => {
-                    state.truncated = true;
-                    break;
+                // A mid-stream read failure is not a clean truncation: the
+                // request phase already succeeded, so the shared retry policy
+                // no longer applies and the caller needs the real cause.
+                Ok(Some(Err(error))) => {
+                    return Err(ToolError::execution_failed(format!(
+                        "Vision API stream failed mid-response: {error}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(ToolError::execution_failed("Vision API response timed out"));
                 }
                 Ok(None) => break,
             };
@@ -543,6 +551,63 @@ mod tests {
         format!("http://{address}/v1")
     }
 
+    async fn serve_broken_stream_body() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind broken-stream test server");
+        let address = listener
+            .local_addr()
+            .expect("broken-stream test server address");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test request");
+            let mut buffer = [0_u8; 4096];
+            let _ = socket.read(&mut buffer).await.expect("read test request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 500\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write broken-stream response headers");
+            socket
+                .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+                .await
+                .expect("write partial stream body");
+            // Close before Content-Length is satisfied so the client sees a
+            // mid-stream read error, not a clean EOF.
+        });
+
+        format!("http://{address}/v1")
+    }
+
+    async fn serve_hanging_stream_body() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging-stream test server");
+        let address = listener
+            .local_addr()
+            .expect("hanging-stream test server address");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept test request");
+            let mut buffer = [0_u8; 4096];
+            let _ = socket.read(&mut buffer).await.expect("read test request");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 500\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write hanging-stream response headers");
+            socket
+                .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+                .await
+                .expect("write partial stream body");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        format!("http://{address}/v1")
+    }
+
     async fn execute_against(
         mut config: VisionModelConfig,
         status: u16,
@@ -722,6 +787,68 @@ mod tests {
             result.get("analysis").and_then(Value::as_str),
             Some("partial")
         );
+        assert_eq!(result.get("truncated").and_then(Value::as_bool), Some(true));
+    }
+
+    #[tokio::test]
+    async fn execute_streaming_mid_stream_read_error_fails_with_cause() {
+        let workspace = tempdir().expect("workspace tempdir");
+        std::fs::write(workspace.path().join("image.png"), b"test image")
+            .expect("write test image");
+        let context = ToolContext::new(workspace.path().to_path_buf());
+        let mut config = fake_config();
+        config.stream = Some(true);
+        config.base_url = Some(serve_broken_stream_body().await);
+
+        let error = ImageAnalyzeTool::new(config)
+            .execute(json!({"image_path": "image.png"}), &context)
+            .await
+            .expect_err("a broken stream must fail, not report truncated success");
+
+        assert!(
+            error.to_string().contains("stream failed mid-response"),
+            "error must carry the read failure cause; got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_streaming_mid_stream_timeout_fails() {
+        let workspace = tempdir().expect("workspace tempdir");
+        std::fs::write(workspace.path().join("image.png"), b"test image")
+            .expect("write test image");
+        let context = ToolContext::new(workspace.path().to_path_buf());
+        let mut config = fake_config();
+        config.stream = Some(true);
+        config.base_url = Some(serve_hanging_stream_body().await);
+        config.request_timeout_secs = Some(1);
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            ImageAnalyzeTool::new(config).execute(json!({"image_path": "image.png"}), &context),
+        )
+        .await
+        .expect("the tool must enforce its own deadline")
+        .expect_err("a stalled stream must fail, not report truncated success");
+
+        assert!(
+            error.to_string().contains("timed out"),
+            "error must call out the deadline; got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_streaming_marks_malformed_frame_as_truncated() {
+        let mut config = fake_config();
+        config.stream = Some(true);
+        let body = concat!(
+            "data: {not json}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"kept\"},\"finish_reason\":\"stop\"}]}\n\n"
+        );
+
+        let (result, _) = execute_against(config, 200, "text/event-stream", body).await;
+        let result = result_json(result.expect("valid frames survive a malformed one"));
+
+        assert_eq!(result.get("analysis").and_then(Value::as_str), Some("kept"));
         assert_eq!(result.get("truncated").and_then(Value::as_bool), Some(true));
     }
 
