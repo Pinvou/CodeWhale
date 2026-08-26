@@ -19,7 +19,11 @@ packaging/
 - `platform-config.js`：只负责选择当前平台 overlay。
 - `windows-runtime.js`：触发独立 runtime staging 并读取统一 descriptor，不感知安装器细节。
 - `windows-installer.js`：按 bundle 目标准备 NSIS 专属资源。
+- `codex-bridge.js`：准备应用隔离的 Codex ACP Bridge 运行时。
+- `knowledge-host.js`：准备 pinvou-knowledge-host-helper 运行时资源。
 - `build.js`：组合平台配置、运行时与安装器 staging，并启动 Tauri CLI。
+
+以上清单以 `scripts/tauri/` 目录为准。
 
 Windows NSIS 构建会把第三方预签名运行时收集到 `target/release/nsis-stage/resources`，
 再通过生成的 NSIS hook 直接安装，避免 Tauri 将这些资源当作首方产物重复调用签名工具。
