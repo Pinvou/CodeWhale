@@ -1,8 +1,11 @@
-//! 应用内升级：
+//! 应用内升级（当前未实施）：各平台更新检查与安装均为 unsupported 占位——
+//! `check_for_update_info` 恒返回无更新，下载/安装返回不支持；应用内更新能力规划中。
+//!
+//! 以下为历史设计（未实施，仅作背景保留）：
 //! - Linux：检查 latest.json → 下载 deb（sha256 校验）→ pkexec apt 安装 → 重启。
 //! - Windows：查询 H3C OTA → 下载 zip（MD5 校验）→ 解析 FullPack/OtaInfo → 启动 MSI/NSIS 安装器 → 下次启动反馈。
 //!
-//! 设计要点：
+//! 设计要点（未实施）：
 //! - **更新源是静态 HTTP**：服务器只托管 `latest.json` + deb 文件，零服务端逻辑。
 //!   Tauri 官方 updater plugin 不支持 deb，所以这里自建轻量机制。
 //! - **URL 不进 settings.json**：更新源是基础设施不是用户偏好，可改会成攻击面。
