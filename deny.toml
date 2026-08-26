@@ -31,6 +31,8 @@ ignore = [
 # - sha2 0.10 vs 0.11 — blocked on oauth2 (0.10) vs schemaui 0.12 (0.11)
 # - thiserror 1 vs 2 — blocked on portable-pty 0.9 via filedescriptor 0.8 (v1) vs workspace v2
 # - toml 0.8 vs 1.1 + toml_edit 0.22 vs 0.25 + winnow 0.7 vs 1.0 — blocked on rust-i18n 4.2 (0.8 stack) vs workspace 1.1
+# - strum 0.27 vs 0.28 — ratatui-widgets 0.3.0 (via ratatui 0.30.0) pins 0.27
+#   while ratatui-core 0.1.2 uses 0.28; unifies once widgets moves forward
 multiple-versions = "warn"
 wildcards = "deny"
 # Explicitly allow the surviving duplicates so `cargo deny` does not warn
@@ -52,6 +54,8 @@ skip = [
     { name = "jni-sys", version = "0.3.0" },
     { name = "redox_syscall", version = "0.5.18" },
     { name = "security-framework", version = "2.11.1" },
+    { name = "strum", version = "0.28.0" },
+    { name = "strum_macros", version = "0.28.0" },
     { name = "windows-sys" },
     { name = "windows-targets" },
     { name = "windows_aarch64_gnullvm" },

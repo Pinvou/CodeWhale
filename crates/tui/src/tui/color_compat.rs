@@ -49,6 +49,19 @@ pub(crate) struct ColorCompatBackend<W: Write> {
     /// Used as the primary fallback in `size()` before falling through to
     /// the live crossterm query.
     terminal_size: Option<Size>,
+    /// The last position the cursor was explicitly moved to.
+    ///
+    /// ratatui-core >= 0.1.1 issues a CPR query inside `Terminal::clear()`
+    /// (`backend.get_cursor_position()` → `ESC[6n`) to snapshot and restore
+    /// the cursor. With our input event loop already reading stdin, the
+    /// reply is consumed as input and the query times out —
+    /// ratatui/ratatui#2483, #2640. #2640's workaround for apps with a live
+    /// event loop is to answer from tracked state, which this backend does:
+    /// `get_cursor_position()` never touches the terminal. Only
+    /// `set_cursor_position()` updates the tracker; raw writes that move
+    /// the cursor out-of-band leave it behind, but every such path is
+    /// followed by a full repaint that repositions the cursor itself.
+    tracked_cursor: Position,
     render_debug: Option<RenderDebugLog>,
     ascii_safe: bool,
     /// The terminal's own background, when detection measured one
@@ -73,6 +86,7 @@ impl<W: Write> ColorCompatBackend<W> {
             active_ui_theme: UiTheme::detect(),
             forced_size: None,
             terminal_size: None,
+            tracked_cursor: Position::ORIGIN,
             render_debug: RenderDebugLog::from_env(),
             ascii_safe: ascii_safe_enabled(),
             detected_background: None,
@@ -209,10 +223,14 @@ impl<W: Write> Backend for ColorCompatBackend<W> {
     }
 
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        self.inner.get_cursor_position()
+        // Answer from tracked state instead of issuing a CPR query that
+        // races the input event loop — see `tracked_cursor`.
+        Ok(self.tracked_cursor)
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        let position = position.into();
+        self.tracked_cursor = position;
         self.inner.set_cursor_position(position)
     }
 
@@ -779,6 +797,20 @@ mod tests {
         assert_eq!(backend.palette_mode, PaletteMode::Light);
         backend.set_palette_mode(PaletteMode::Grayscale);
         assert_eq!(backend.palette_mode, PaletteMode::Grayscale);
+    }
+
+    #[test]
+    fn backend_cursor_position_uses_tracked_state_without_querying_terminal() {
+        let writer = SharedWriter::default();
+        let capture = writer.0.clone();
+        let mut backend = ColorCompatBackend::new(writer, ColorDepth::TrueColor, PaletteMode::Dark);
+
+        assert_eq!(backend.get_cursor_position().unwrap(), Position::ORIGIN);
+        backend.set_cursor_position(Position::new(7, 3)).unwrap();
+        let bytes_after_move = capture.borrow().len();
+
+        assert_eq!(backend.get_cursor_position().unwrap(), Position::new(7, 3));
+        assert_eq!(capture.borrow().len(), bytes_after_move);
     }
 
     #[test]
