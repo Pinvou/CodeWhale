@@ -351,7 +351,7 @@
       {
         "file": "000035_break_glass_trusted_operator.up.sql",
         "version": 35,
-        "sha256": "869336713029646d8fa1e7fbe2d1ced8d5bee76a1ce324b79276c5e89ca74f18"
+        "sha256": "2448b6477d0df139baede47e606e9916c933bd1fabcca0fccd3411a18b442102"
       },
       {
         "file": "000036_password_security_authorization.down.sql",

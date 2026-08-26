@@ -37,6 +37,11 @@ test('super administrator bootstrap and break-glass remain offline, one-time, an
   assert.match(identity, /15\s*\*\s*time\.Minute/);
   assert.match(trustedOperatorMigration, /operator_credential_id/);
   assert.match(trustedOperatorMigration, /UNIQUE \(operator_credential_id\)/);
+  const triggerDrop = trustedOperatorMigration.indexOf('DROP TRIGGER break_glass_operations_immutable');
+  const compatibilityBackfill = trustedOperatorMigration.indexOf('UPDATE break_glass_operations');
+  const triggerRestore = trustedOperatorMigration.indexOf('CREATE TRIGGER break_glass_operations_immutable');
+  assert.ok(triggerDrop >= 0 && triggerDrop < compatibilityBackfill);
+  assert.ok(triggerRestore > compatibilityBackfill);
   assert.match(manager, /operator_credential_id,incident_ticket/);
   assert.match(manager, /appendSecurityAudit\(ctx, tx, nil, "security\.break-glass\.activated"/);
   assert.match(cli, /term\.ReadPassword/);
