@@ -141,18 +141,20 @@ export async function transferTeamOwner(pool, token, rawTeamId, body) {
     await lockActiveTeam(client, teamId);
     await requireMembership(client, teamId, auth.principalId, "owner");
     const target = await client.query(
-      `SELECT m.role
+      `SELECT m.role, p.disabled_at
          FROM memberships m
          JOIN principals p ON p.id = m.principal_id
         WHERE m.team_id = $1
           AND m.principal_id = $2
           AND m.removed_at IS NULL
-          AND p.disabled_at IS NULL
         FOR UPDATE OF m, p`,
       [teamId, newOwnerId],
     );
     if (!target.rowCount || target.rows[0].role !== "member") {
       throw new AppError(404, "resource_not_found", "The new owner must be an active ordinary team member.");
+    }
+    if (target.rows[0].disabled_at) {
+      throw new AppError(409, "new_owner_unavailable", "The selected member's account is disabled.");
     }
     const demoted = await client.query(
       `UPDATE memberships

@@ -1053,8 +1053,8 @@ test("A to B to C to B to A survives refresh and preserves idempotency", {
     token: a.device_token,
     body: { new_owner_id: c.principal.id },
   });
-  assert.equal(disabledOwnerTransfer.status, 404);
-  assert.equal(disabledOwnerTransfer.value.error.code, "resource_not_found");
+  assert.equal(disabledOwnerTransfer.status, 409);
+  assert.equal(disabledOwnerTransfer.value.error.code, "new_owner_unavailable");
   await pool.query("UPDATE principals SET disabled_at = NULL WHERE id = $1", [c.principal.id]);
   const blockedTeamDissolution = await api(`/v1/teams/${initial.team_id}`, {
     method: "DELETE",

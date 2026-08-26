@@ -283,6 +283,7 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 | 409 | `email_already_registered` | 旧登记接口尝试重复创建已有邮箱账户 | 先通过账号登录入口复用账户，再加入或创建团队 |
 | 409 | `email_change_not_supported` | 尝试更换已绑定邮箱 | 当前版本不支持 |
 | 409 | `last_team_owner` | 团队负责人试图直接离队或被移除 | 先转让负责人或解散团队 |
+| 409 | `new_owner_unavailable` | 转让目标账号已被禁用 | 选择其他活跃成员 |
 | 409 | `member_has_open_work` | 成员仍承担未结束线程的关键角色 | 按 `blocking_threads` 逐项结束或交接 |
 | 409 | `team_has_open_work` | 团队仍有未结束线程，不能解散 | 按 `blocking_threads` 逐项结束或取消 |
 | 409 | `avatar_upload_in_progress` | 同一 Principal 已有头像正在处理 | 等待当前上传完成 |
