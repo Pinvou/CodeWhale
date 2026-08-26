@@ -396,6 +396,47 @@ await clearedFeature.load();
 assert.equal(clearedState.teamRelay.status.team_id, null, 'no valid membership must clear the stale team id');
 assert.equal(clearedState.teamRelay.snapshot, null, 'no valid membership must clear the stale snapshot');
 
+const fallbackCalls = [];
+const fallbackState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'removed-team' }, snapshot: teamSnapshot('removed-team') } };
+const fallbackFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
+  state: fallbackState,
+  notify() {},
+  listen() { return Promise.resolve(() => {}); },
+  async invoke(command, args) {
+    fallbackCalls.push({ command, args });
+    if (command === 'team_relay_status') return { configured: true, hub_url: 'https://hub.test', team_id: 'removed-team' };
+    if (command === 'team_relay_bootstrap') throw new Error('team_relay_team_required: current team is no longer available');
+    if (command === 'team_relay_account') return { principal: { id: 'me', display_name: 'Me' }, teams: [{ id: 'fallback-team', name: 'Fallback team', role: 'owner', member_count: 1, open_work_count: 0 }] };
+    if (command === 'team_relay_switch_team') return teamSnapshot(args.teamId);
+    return null;
+  },
+});
+await fallbackFeature.load();
+const fallbackSwitchCall = fallbackCalls.find(call => call.command === 'team_relay_switch_team');
+assert.ok(fallbackSwitchCall, 'an invalid current team must recover through team_relay_switch_team');
+assert.equal(fallbackSwitchCall.args.teamId, 'fallback-team', 'recovery must switch to the first remaining team');
+assert.equal(fallbackState.teamRelay.snapshot.bootstrap.team.id, 'fallback-team', 'recovery must adopt the fallback team snapshot');
+assert.equal(fallbackState.teamRelay.status.team_id, 'fallback-team', 'recovery must replace the stale saved team id');
+
+const membershipCalls = [];
+const membershipState = { sessions: [], teamRelay: { status: { configured: true, team_id: 'removed-team' }, snapshot: teamSnapshot('removed-team') } };
+const membershipFeature = windowObject.__PINVOU_TAURI_BRIDGE_FEATURES__['team-relay']({
+  state: membershipState,
+  notify() {},
+  listen() { return Promise.resolve(() => {}); },
+  async invoke(command, args) {
+    membershipCalls.push({ command, args });
+    if (command === 'team_relay_status') return { configured: true, hub_url: 'https://hub.test', team_id: 'removed-team' };
+    if (command === 'team_relay_bootstrap') throw new Error('membership_required: you are no longer a member of this team');
+    if (command === 'team_relay_account') return { principal: { id: 'me', display_name: 'Me' }, teams: [] };
+    return null;
+  },
+});
+await membershipFeature.load();
+assert.ok(membershipCalls.some(call => call.command === 'team_relay_account'), 'membership_required must enter the account recovery branch');
+assert.equal(membershipState.teamRelay.status.team_id, null, 'a revoked membership without remaining teams must clear the stale team id');
+assert.equal(membershipState.teamRelay.snapshot, null, 'a revoked membership without remaining teams must clear the stale snapshot');
+
 const versionCalls = [];
 const versionedFeature = isolatedRelayFeature(async (command, args) => {
   versionCalls.push({ command, args });
