@@ -101,6 +101,54 @@ func TestLoginCreatesServerSidePKCEFlow(t *testing.T) {
 	}
 }
 
+func TestAnonymousPortalRootStartsIdentityLoginImmediately(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	staticCalled := false
+	static := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { staticCalled = true })
+	response := httptest.NewRecorder()
+
+	service.Handler(static).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/?section=orders", nil))
+
+	if response.Code != http.StatusFound {
+		t.Fatalf("status = %d", response.Code)
+	}
+	location, _ := url.Parse(response.Header().Get("Location"))
+	if location.Host != "identity.example" || location.Query().Get("code_challenge_method") != "S256" {
+		t.Fatalf("anonymous root must start the identity flow directly: %s", location)
+	}
+	flow := store.flows[location.Query().Get("state")]
+	if flow.ReturnTo != "/?section=orders" {
+		t.Fatalf("unexpected return target: %q", flow.ReturnTo)
+	}
+	if staticCalled {
+		t.Fatal("anonymous root must not render the portal shell before login")
+	}
+}
+
+func TestAuthenticatedPortalRootStillServesApplication(t *testing.T) {
+	store := newMemoryStore()
+	service := testService(t, store)
+	now := time.Now().UTC()
+	session := Session{ID: "portal-session", AccessToken: "access", RefreshToken: "refresh", AccessExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(2 * time.Hour), CSRFToken: strings.Repeat("p", 32)}
+	if err := store.SaveSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: session.ID})
+	response := httptest.NewRecorder()
+	static := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "portal application")
+	})
+
+	service.Handler(static).ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "portal application" {
+		t.Fatalf("authenticated root must serve the portal: %d %q", response.Code, response.Body.String())
+	}
+}
+
 func TestReauthenticationForcesIdentityLoginAndTracksPreviousSession(t *testing.T) {
 	store := newMemoryStore()
 	service := testService(t, store)

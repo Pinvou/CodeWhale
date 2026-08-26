@@ -89,6 +89,18 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 			router.ServeHTTP(w, r)
 			return
 		}
+		if r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			if _, err := s.authenticatedSession(r.Context(), r); err != nil {
+				loginRequest := r.Clone(r.Context())
+				loginURL := *r.URL
+				query := loginURL.Query()
+				query.Set("return_to", safeReturnTo(r.URL.RequestURI()))
+				loginURL.RawQuery = query.Encode()
+				loginRequest.URL = &loginURL
+				s.login(w, loginRequest)
+				return
+			}
+		}
 		static.ServeHTTP(w, r)
 	})
 }
