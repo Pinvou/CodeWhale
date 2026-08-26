@@ -59,6 +59,18 @@ test('catalog runtime is database-backed and provider create runs after the inte
   assert.ok(commit > 0 && create > commit, 'Provider Create must occur after the local intent transaction commits');
 });
 
+test('runtime product query qualifies identifiers shared by product and catalog tables', async () => {
+  const repository = await read('internal/billing/postgres.go');
+  assert.match(
+    repository,
+    /SELECT product\.product_id, plan_name, sku_code,[\s\S]*FROM recharge_products product[\s\S]*JOIN recharge_product_catalog_items item/,
+  );
+  assert.doesNotMatch(
+    repository,
+    /SELECT product_id, plan_name, sku_code,[\s\S]*FROM recharge_products product[\s\S]*JOIN recharge_product_catalog_items item/,
+  );
+});
+
 test('development simulator is unavailable to production configuration', async () => {
   const main = await read('cmd/billing-service/main.go');
   const helm = await read('deploy/helm/account-platform/templates/app-deployments.yaml');

@@ -97,7 +97,7 @@ func (r *PostgresRepository) ListProducts(ctx context.Context, currency, channel
 	currency = strings.ToUpper(strings.TrimSpace(currency))
 	channel = strings.ToUpper(strings.TrimSpace(channel))
 	rows, err := r.pool.Query(ctx, `
-SELECT product_id, plan_name, sku_code, amount_fen, credit_microcredits, display_points,
+SELECT product.product_id, plan_name, sku_code, amount_fen, credit_microcredits, display_points,
        base_points, bonus_points, validity_days, price_status, invoice_product_name,
        currency, channels, catalog_version
 FROM recharge_products product
