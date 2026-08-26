@@ -51,7 +51,9 @@ function normalizeWebBasePath(value) {
   let raw = String(value || '/pinvou3/remote').trim();
   try {
     if (/^https?:\/\//i.test(raw)) raw = new URL(raw).pathname;
-  } catch {}
+  } catch {
+    // 非 URL 输入按路径继续归一化。
+  }
   const trimmed = raw.replace(/^\/+|\/+$/g, '');
   return trimmed ? `/${trimmed}/` : '/';
 }

@@ -137,7 +137,7 @@ const LAZY_LANGUAGE_LOADERS = {
 // LAZY_LANGUAGE_LOADERS,否则别名围栏永远不会触发加载、永久回落纯文本。
 const LAZY_ALIAS_TO_CANONICAL = {};
 for (const [canonical, aliases] of Object.entries(EXPLICIT_ALIASES)) {
-  if (!Object.hasOwn(LAZY_LANGUAGE_LOADERS, canonical)) continue;
+  if (!Object.prototype.hasOwnProperty.call(LAZY_LANGUAGE_LOADERS, canonical)) continue;
   for (const alias of aliases) LAZY_ALIAS_TO_CANONICAL[alias] = canonical;
 }
 
@@ -170,7 +170,7 @@ const lazyPending = new Map();
 function ensureLazyLanguage(name) {
   // Object.hasOwn 防止 constructor/__proto__ 等与原型链同名的 token 命中
   // 原型属性,把 Object()/Object.prototype 当 loader 调用而抛 TypeError。
-  if (Object.hasOwn(LAZY_LANGUAGE_LOADERS, name)) {
+  if (Object.prototype.hasOwnProperty.call(LAZY_LANGUAGE_LOADERS, name)) {
     let pending = lazyPending.get(name);
     if (!pending) {
       pending = LAZY_LANGUAGE_LOADERS[name]()
@@ -291,10 +291,10 @@ export function normalizeSyntaxLanguage(languageHint) {
   if (!language) {
     // 低频语言未注册:别名先解析回 canonical 再触发后台注册,本次返回原
     // token(调用方按未识别回落纯文本)。查找一律 Object.hasOwn,理由同上。
-    const canonical = Object.hasOwn(LAZY_ALIAS_TO_CANONICAL, token)
+    const canonical = Object.prototype.hasOwnProperty.call(LAZY_ALIAS_TO_CANONICAL, token)
       ? LAZY_ALIAS_TO_CANONICAL[token]
       : token;
-    if (Object.hasOwn(LAZY_LANGUAGE_LOADERS, canonical)) ensureLazyLanguage(canonical);
+    if (Object.prototype.hasOwnProperty.call(LAZY_LANGUAGE_LOADERS, canonical)) ensureLazyLanguage(canonical);
     return token;
   }
   // 注册后把别名归一到 canonical(覆盖核心集与懒加载集),保证 label 稳定。

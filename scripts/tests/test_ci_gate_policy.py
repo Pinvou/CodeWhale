@@ -74,6 +74,31 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("npm run test:browser-smoke", frontend)
         self.assertEqual(frontend.count("npm run test:markdown"), 0)
 
+    def test_static_analysis_gate_configs_route_to_frontend_test(self):
+        # 静态分析门禁只在 frontend-test 内运行，其配置文件必须进入
+        # frontend 路径过滤，否则 config-only PR 会静默跳过消费它的门禁。
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        frontend_paths = changes.split(
+            "            frontend:", maxsplit=1
+        )[1].split("            relay:", maxsplit=1)[0]
+        for path in (
+            "pinvou3-app/.oxlintrc.json",
+            "pinvou3-app/biome.jsonc",
+            "pinvou3-app/knip.json",
+            "pinvou3-app/jsconfig.json",
+            "pinvou3-app/eslint.config.mjs",
+            "pinvou3-app/scripts/audit-compat.mjs",
+        ):
+            self.assertIn(
+                f"- '{path}'",
+                frontend_paths,
+                f"静态门禁配置 {path} 不在 frontend filter 中",
+            )
+
     def test_merge_queue_uses_path_filtering_and_product_gates(self):
         changes = self.workflow.split("\n  changes:", maxsplit=1)[1].split(
             "\n  fast-gate:", maxsplit=1

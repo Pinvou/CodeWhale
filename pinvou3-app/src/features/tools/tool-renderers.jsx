@@ -544,13 +544,7 @@ const ToolOutput = ({ item, t }) => {
       return <OutputPre text={out} />;
     };
 
-    const ToolCard = ({ item, t, variant = 'legacy', sessionId }) => {
-      // 委派实例不走通用工具卡：专家卡是多智能体的第一公民展示（ADR-0006）。
-      // 提前返回发生在本组件任何 Hook 之前，且 item.name 对一个实例终生不变，
-      // 因此每个实例的 Hook 数量恒定，不触犯 Hook 规则。
-      if (EXPERT_CARD_ENABLED && (item.name === 'agent' || isAgentWaitCall(item.name, item.args))) {
-        return <ExpertAgentCard item={item} t={t} sessionId={sessionId} />;
-      }
+    const StandardToolCard = ({ item, t, variant = 'legacy' }) => {
       const isTimeline = variant === 'timeline';
       const isRunning = item.state === 'running';
       const [cancelling, setCancelling] = useState(false);
@@ -721,6 +715,15 @@ const ToolOutput = ({ item, t }) => {
           {detail}
         </div>
       );
+    };
+
+    // 委派实例与通用工具卡是两个独立组件，避免同一组件在提前
+    // return 前后执行不同数量的 Hook。
+    const ToolCard = ({ item, t, variant = 'legacy', sessionId }) => {
+      if (EXPERT_CARD_ENABLED && (item.name === 'agent' || isAgentWaitCall(item.name, item.args))) {
+        return <ExpertAgentCard item={item} t={t} sessionId={sessionId} />;
+      }
+      return <StandardToolCard item={item} t={t} variant={variant} />;
     };
 
     // ==========================================

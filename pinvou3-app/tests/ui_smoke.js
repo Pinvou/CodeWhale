@@ -660,11 +660,12 @@ async function expand(page) {
   await page.keyboard.press('Escape'); await sleep(200);
 
   // ①a-3 对话管理页必须按 Codex 会话类型路由，不能误走普通聊天 switchToSession。
+  // 会话行是「标题 button + 操作按钮并列」结构。
   await clickText(page, '查看全部'); await sleep(500);
   const codexManagedOpen = await page.evaluate(() => {
     const label = [...document.querySelectorAll('span')]
       .find(node => (node.textContent || '').trim() === 'Codex回归会话' && node.getBoundingClientRect().left > 300);
-    const row = label && label.closest('div[class*="cursor-pointer"]');
+    const row = label && label.closest('button');
     if (!row) return { found: false };
     row.click();
     return { found: true };
@@ -866,7 +867,7 @@ async function expand(page) {
   const managedActiveState = await page.evaluate(() => {
     const label = [...document.querySelectorAll('span')]
       .find(node => (node.textContent || '').trim() === 'Codex回归会话' && node.getBoundingClientRect().left > 300);
-    const row = label && label.closest('div[class*="cursor-pointer"]');
+    const row = label && (label.closest('button')?.parentElement || null);
     return {
       found: !!row,
       activeClass: !!(row && (row.classList.contains('bg-[#333537]') || row.classList.contains('bg-[#E1E5EA]'))),
@@ -1786,7 +1787,7 @@ async function expand(page) {
   const archiveMenuOpened = await page.evaluate(() => {
     const label = [...document.querySelectorAll('span')]
       .find(node => (node.textContent || '').trim() === '第三季度财报分析' && node.getBoundingClientRect().left < 330);
-    const row = label && label.closest('div[class*="cursor-pointer"]');
+    const row = label && label.closest('button');
     if (!row) return false;
     const rect = row.getBoundingClientRect();
     row.dispatchEvent(new MouseEvent('contextmenu', {
@@ -2006,6 +2007,61 @@ async function expand(page) {
   rec('⑩b legacy 离屏合不为 reasoning/隐藏项留空 wrapper（防 scrollHeight 污染）',
     legacyReasoningGuard.emptyCount === 0 && !legacyReasoningGuard.reasoningLeaked,
     JSON.stringify(legacyReasoningGuard));
+
+  // ⑩c 侧栏拖拽柄的 WAI-ARIA Window Splitter 键盘交互。
+  await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
+  await sleep(250);
+  const sidebarWidthOf = () => page.evaluate(() => {
+    const sidebar = document.querySelector('[data-testid="app-sidebar"]');
+    return sidebar ? Math.round(sidebar.getBoundingClientRect().width) : -1;
+  });
+  const pressHandle = (key, shift = false) => page.evaluate((k, withShift) => {
+    const handle = document.querySelector('[data-testid="sidebar-resize-handle"]');
+    if (!handle) throw new Error('sidebar-resize-handle not found');
+    handle.dispatchEvent(new KeyboardEvent('keydown', {
+      key: k, bubbles: true, cancelable: true, shiftKey: withShift,
+    }));
+  }, key, shift);
+  const handleState = await page.evaluate(() => {
+    const handle = document.querySelector('[data-testid="sidebar-resize-handle"]');
+    if (!handle) return null;
+    return {
+      focusable: handle.tabIndex === 0,
+      tag: handle.tagName,
+      value: Number(handle.getAttribute('aria-valuenow')),
+      min: Number(handle.getAttribute('aria-valuemin')),
+      max: Number(handle.getAttribute('aria-valuemax')),
+      label: handle.hasAttribute('aria-label'),
+      controls: handle.getAttribute('aria-controls'),
+      controlsExist: !!document.getElementById(handle.getAttribute('aria-controls') || ''),
+    };
+  });
+  const initialWidth = await sidebarWidthOf();
+  const ariaWidth = () => page.evaluate(() => Number(document.querySelector('[data-testid="sidebar-resize-handle"]')?.getAttribute('aria-valuenow') || -1));
+  await pressHandle('ArrowRight'); await sleep(60);
+  const afterGrow = await ariaWidth();
+  await pressHandle('ArrowLeft', true); await sleep(60);
+  const afterShrink = await ariaWidth();
+  await pressHandle('Home'); await sleep(60);
+  const atMin = await ariaWidth();
+  await pressHandle('ArrowLeft'); await sleep(60);
+  const clampedBelow = await ariaWidth();
+  await pressHandle('End'); await sleep(60);
+  const atMax = await ariaWidth();
+  await pressHandle('ArrowRight'); await sleep(60);
+  const clampedAbove = await ariaWidth();
+  const persistedAtMax = await page.evaluate(() => localStorage.getItem('pinvou_sidebar_width'));
+  await sleep(450);
+  const settledWidth = await sidebarWidthOf();
+  rec('⑩c sidebar splitter 支持方向键/Home/End、边界限制与持久化',
+    !!handleState && handleState.focusable && handleState.tag === 'HR'
+      && handleState.min === 220 && handleState.max === 480 && handleState.label
+      && handleState.controls === 'app-sidebar' && handleState.controlsExist
+      && initialWidth === 280 && afterGrow === 304 && afterShrink === 220
+      && atMin === 220 && clampedBelow === 220
+      && atMax === 480 && clampedAbove === 480
+      && persistedAtMax === '480' && settledWidth === 480,
+    JSON.stringify({ handleState, initialWidth, afterGrow, afterShrink, atMin, clampedBelow, atMax, clampedAbove, persistedAtMax, settledWidth }));
 
   if (errs.length) console.log('⚠️ PAGEERRORS:', errs.slice(0, 3).join(' | '));
   await browser.close();

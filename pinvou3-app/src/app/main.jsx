@@ -1287,6 +1287,25 @@ function workspaceDisplayName(path) {
           // Same as above.
         }
       }, []);
+      // WAI-ARIA Window Splitter 键盘交互：方向键步进，Shift 加速，
+      // Home/End 跳到边界，并复用拖拽路径的限制与持久化逻辑。
+      const SIDEBAR_RESIZE_KEY_STEP = 24;
+      const keyboardSidebarResize = useCallback((event) => {
+        const step = SIDEBAR_RESIZE_KEY_STEP * (event.shiftKey ? 4 : 1);
+        let next;
+        if (event.key === 'ArrowLeft') next = sidebarWidthRef.current - step;
+        else if (event.key === 'ArrowRight') next = sidebarWidthRef.current + step;
+        else if (event.key === 'Home') next = SIDEBAR_WIDTH_MIN;
+        else if (event.key === 'End') next = SIDEBAR_WIDTH_MAX;
+        else return;
+        event.preventDefault();
+        applySidebarWidth(clampSidebarWidth(next));
+        try {
+          localStorage.setItem('pinvou_sidebar_width', String(sidebarWidthRef.current));
+        } catch {
+          // 存储不可用时仅对当前会话生效。
+        }
+      }, []);
 
       useEffect(() => {
         if (!taskFilterOpen) return undefined;
@@ -2349,6 +2368,7 @@ function workspaceDisplayName(path) {
 
           {/* ================= Sidebar (Gemini Style) ================= */}
           <div
+            id="app-sidebar"
             data-testid="app-sidebar"
             style={{
               // The compact-shell drawer does not inherit the persisted desktop width:
@@ -2821,17 +2841,22 @@ function workspaceDisplayName(path) {
               </div>
             </div>
 
-            {/* Right-edge drag to resize: only offered on the expanded desktop shell;
-                double-click resets to the default width */}
+            {/* 右侧拖拽柄在展开的桌面布局中可用，同时提供键盘 splitter 语义。 */}
             {isSidebarOpen && !isCompactShell && (
-              <div
+              <hr
                 data-testid="sidebar-resize-handle"
-                role="separator"
                 aria-orientation="vertical"
+                tabIndex={0}
+                aria-valuenow={sidebarWidth}
+                aria-valuemin={SIDEBAR_WIDTH_MIN}
+                aria-valuemax={SIDEBAR_WIDTH_MAX}
+                aria-label={t.sidebarResize}
+                aria-controls="app-sidebar"
                 title={t.sidebarResize}
                 onPointerDown={beginSidebarResize}
                 onDoubleClick={resetSidebarWidth}
-                className={`absolute top-0 bottom-0 right-0 w-[6px] cursor-col-resize z-50 touch-none transition-colors ${
+                onKeyDown={keyboardSidebarResize}
+                className={`absolute top-0 bottom-0 right-0 w-[6px] border-0 cursor-col-resize z-50 touch-none transition-colors focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[#0B57D0] ${
                   sidebarResizing
                     ? 'bg-[#0B57D0]/40'
                     : (activeTheme === 'dark' ? 'hover:bg-[#A8C7FA]/30' : 'hover:bg-[#0B57D0]/25')

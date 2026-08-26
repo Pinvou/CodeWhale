@@ -393,7 +393,6 @@ function RelayDialog({ copy, theme, type, task, teams, teamId, onTeamChange, mem
     return () => { active = false; };
   }, [onLoadSourceSessions, reasonDialog, type]);
 
-  if (!dialogCopy) return null;
   const pick = async () => {
     setMaterialError('');
     try {
@@ -441,6 +440,7 @@ function RelayDialog({ copy, theme, type, task, teams, teamId, onTeamChange, mem
     defaultSourceLoaded.current = true;
     loadSource(key);
   }, [sourceSessions, sourceSessionsStatus, taskWorkspace?.agent_session]);
+  if (!dialogCopy) return null;
   const submit = async event => {
     event.preventDefault();
     setMaterialError('');

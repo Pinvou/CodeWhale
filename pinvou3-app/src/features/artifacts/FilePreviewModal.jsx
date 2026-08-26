@@ -79,10 +79,10 @@ const FilePreviewModal = ({ path, sessionId, onClose, t }) => {
             : preview.missing ? <div className="text-[13px] text-[#757575] dark:text-[#8E8E8E]">{labels.fileMissing}</div>
             : preview.error ? <div className="text-[13px] text-[#F28B82]">{labels.readFailed(preview.error)}</div>
             : preview.kind === 'md' ? <div className="msg-md text-[14px] leading-relaxed light-code dark-code text-[#1F1F1F] dark:text-[#E3E3E3]" dangerouslySetInnerHTML={{ __html: mdHtml }} />
-            : preview.kind === 'html' ? <ScaledHtmlPreview html={preview.text || ''} onOpenExternal={(url) => bridge.artifacts.openUserExternalUrl(url)} />
+            : preview.kind === 'html' ? <ScaledHtmlPreview html={preview.text || ''} title={name} onOpenExternal={(url) => bridge.artifacts.openUserExternalUrl(url)} />
             : ['json', 'text'].includes(preview.kind) ? <pre className="text-[12px] whitespace-pre-wrap break-words font-mono leading-relaxed text-[#444746] dark:text-[#C4C7C5]">{preview.text}</pre>
             : preview.kind === 'image' ? (preview.imageError ? <div className="text-[13px] text-[#F28B82]">{labels.imageReadFailed(preview.imageError)}</div> : <img className="max-w-full max-h-[70vh] object-contain mx-auto rounded-lg" src={preview.dataUrl} alt={name} />)
-            : preview.visual?.mode === 'html' ? <iframe sandbox="allow-same-origin" className="w-full min-h-[68vh] border-0 block bg-[#15171a]" style={{ colorScheme: 'dark' }} srcDoc={(preview.visual.html || '') + OFFICE_HTML_STYLE} />
+            : preview.visual?.mode === 'html' ? <iframe sandbox="allow-same-origin" title={name} className="w-full min-h-[68vh] border-0 block bg-[#15171a]" style={{ colorScheme: 'dark' }} srcDoc={(preview.visual.html || '') + OFFICE_HTML_STYLE} />
             : preview.visual?.mode === 'images' ? <div className="flex flex-col items-center gap-3">{(preview.visual.images || []).map((src, index) => <img key={src} src={src} className="max-w-full h-auto rounded-lg shadow-sm" alt={`page-${index + 1}`} />)}</div>
             : <div><p className="text-[13px] mb-2 text-[#444746] dark:text-[#C4C7C5]">{labels.previewUnsupported}</p>{canOpen && <button onClick={open} className="px-3 py-1.5 rounded-full text-[13px] bg-[#0B57D0] dark:bg-[#A8C7FA] text-white dark:text-[#062E6F]">{isWeb ? labels.downloadArtifact : labels.openExternalArtifact}</button>}</div>}
         </div>

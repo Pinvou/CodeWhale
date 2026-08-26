@@ -258,7 +258,7 @@ export function QuestionChoiceCard({
                         if (locked) return;
                         if (event.target === event.currentTarget.querySelector('input')) return;
                         event.preventDefault();
-                        changeValue(question, !Boolean(selected[question.id]));
+                        changeValue(question, !selected[question.id]);
                       }}
                     >
                       <input

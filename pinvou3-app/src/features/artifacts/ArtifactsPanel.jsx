@@ -602,6 +602,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
           return (
             <ScaledHtmlPreview
               html={pv.text || ''}
+              title={(sel && sel.path) || t.apTabPreview}
               onFrameLoad={handlePreviewFrameLoad}
               onOpenExternal={(url) => bridge.artifacts.openUserExternalUrl(url)}
               zoomMode={showDesignWorkbench ? htmlZoomMode : 'auto-width'}
@@ -621,6 +622,7 @@ const ArtifactTileIcon = ({ name, tileCls = 'w-9 h-9 rounded-[10px]', glyphCls =
             <div className="flex flex-col gap-2 h-full">
               {vis.warning && <div className={`flex items-center gap-2 text-[12px] text-[#E37400] dark:text-[#FDD663]`}><span>⚠️ {vis.warning}</span>{dependencyCheckButton(vis.warning)}</div>}
               <iframe sandbox="allow-same-origin allow-scripts" className="w-full flex-1 min-h-[480px] border-0 block bg-white"
+                title={(sel && sel.path) || t.apTabPreview}
                 data-testid="artifact-html-preview-frame"
                 onLoad={(e) => handlePreviewFrameLoad(e.currentTarget)}
                 srcDoc={(vis.html || '') + OFFICE_HTML_STYLE} />

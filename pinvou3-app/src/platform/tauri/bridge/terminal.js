@@ -460,7 +460,6 @@
       updateToolItem: updateToolItem,
       isShellExecutionTool: isShellExecutionTool,
       utf8Length: utf8Length,
-      normalizeTerminalTail: normalizeTerminalTail,
       formatShellSnapshot: formatShellSnapshot,
       shellCommandForItem: shellCommandForItem,
       shellSnapshotKey: shellSnapshotKey,
