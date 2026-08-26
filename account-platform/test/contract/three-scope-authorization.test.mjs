@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const migration = await readFile(new URL('../../migrations/account/000034_three_scope_authorization.up.sql', import.meta.url), 'utf8');
+const productPermissionMigration = await readFile(new URL('../../migrations/account/000037_recharge_product_permissions.up.sql', import.meta.url), 'utf8');
 const recoveryMigration = await readFile(new URL('../../migrations/account/000033_payment_provider_resume_policy.up.sql', import.meta.url), 'utf8');
 const authorization = await readFile(new URL('../../internal/account/authorization.go', import.meta.url), 'utf8');
 const postgres = await readFile(new URL('../../internal/account/postgres.go', import.meta.url), 'utf8');
@@ -18,6 +19,11 @@ function desiredRoleSegment(role, nextRole) {
   const end = nextRole ? migration.indexOf(`('${nextRole}',ARRAY[`, start) : migration.indexOf('\n)\nINSERT INTO role_permissions', start);
   assert.notEqual(end, -1, `missing end of ${role} truth table`);
   return migration.slice(start, end);
+}
+
+function productRolePermissions(role) {
+  const match = productPermissionMigration.match(new RegExp(`\\('${role}',ARRAY\\[([^\\]]*)\\]::text\\[\\]\\)`));
+  return match ? [...match[1].matchAll(/'((?:personal|platform|org)\.[a-z0-9.-]+)'/g)].map((item) => item[1]) : [];
 }
 
 test('authorization migration creates PERSONAL independently and backfills the lifecycle-owned role', () => {
@@ -72,7 +78,10 @@ test('every built-in human role exactly matches the reviewed design truth table'
     assert.ok(designLine, `missing reviewed design row for ${role}`);
     const expected = [...designLine.matchAll(/`((?:personal|platform|org)\.[a-z0-9.-]+)`/g)].map((match) => match[1]).sort();
     const nextRole = roles[index + 1];
-    const actual = [...desiredRoleSegment(role, nextRole).matchAll(/'((?:personal|platform|org)\.[a-z0-9.-]+)'/g)].map((match) => match[1]).sort();
+    const actual = [...new Set([
+      ...[...desiredRoleSegment(role, nextRole).matchAll(/'((?:personal|platform|org)\.[a-z0-9.-]+)'/g)].map((match) => match[1]),
+      ...productRolePermissions(role),
+    ])].sort();
     assert.deepEqual(actual, expected, `${role} migration permissions diverge from the reviewed design`);
   }
 });

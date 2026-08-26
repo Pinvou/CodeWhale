@@ -33,7 +33,13 @@ type Service struct {
 	callbackAuth     *paymentcallback.Authenticator
 	callbackProfiles *paymentcallback.Profiles
 	humanDelegations *humandelegation.Verifier
+	catalog          RechargeProductCatalogRepository
 	now              func() time.Time
+}
+
+func (s *Service) WithRechargeProductCatalog(catalog RechargeProductCatalogRepository) *Service {
+	s.catalog = catalog
+	return s
 }
 
 func NewService(repository Repository) *Service {
@@ -88,6 +94,10 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	protected.GET("/internal/v1/pricing/current", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.currentPrice))
 	protected.GET("/internal/v1/pricing/:price_version_id", serviceauth.Require("internal.billing.pricing.read"), httpserver.AdaptFunc(s.priceByID))
 	protected.PUT("/internal/v1/pricing/formula-bindings/:formula_version_id", serviceauth.Require("internal.billing.pricing.bind"), httpserver.AdaptFunc(s.putFormulaBinding))
+	if s.catalog != nil {
+		protected.POST("/internal/v1/product-admission-verifications/:verification_id/complete", serviceauth.Require("internal.billing.product-admission.verify"), httpserver.AdaptFunc(s.completeProductAdmissionVerification))
+		protected.POST("/internal/v1/product-admission-evidence/:evidence_id/revoke", serviceauth.Require("internal.billing.product-admission.revoke"), httpserver.AdaptFunc(s.revokeProductAdmissionInternal))
+	}
 	protected.POST("/internal/v1/adjustments", serviceauth.Require("internal.billing.adjustment.request"), httpserver.AdaptFunc(s.requestAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/execute-approved", serviceauth.Require("internal.billing.adjustment.execute"), httpserver.AdaptFunc(s.executeApprovedAdjustment))
 	protected.POST("/internal/v1/adjustments/:adjustment_id/reject", serviceauth.Require("internal.billing.adjustment.reject"), httpserver.AdaptFunc(s.rejectAdjustment))
@@ -139,6 +149,17 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 		admin.GET("/metering-units", s.authorizer.Require("platform.pricing.read"), httpserver.AdaptFunc(s.adminMeteringUnits))
 		admin.POST("/metering-units", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateMeteringUnit))
 		admin.POST("/metering-units/:unit_definition_id/deactivate", s.authorizer.Require("platform.pricing.manage"), approvalpolicy.Require("BILLING_METERING_UNIT_DEACTIVATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeactivateMeteringUnit))
+		if s.catalog != nil {
+			admin.GET("/recharge-products", s.authorizer.Require("platform.products.read"), httpserver.AdaptFunc(s.adminRechargeProducts))
+			admin.POST("/recharge-products", s.authorizer.Require("platform.products.create"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateRechargeProduct))
+			admin.GET("/recharge-products/:catalog_item_id/admission-verifications", s.authorizer.Require("platform.products.read"), httpserver.AdaptFunc(s.adminProductAdmissionVerifications))
+			admin.POST("/recharge-products/:catalog_item_id/admission-verifications", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_ADMISSION_VERIFY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminStartProductAdmissionVerification))
+			admin.POST("/recharge-products/:catalog_item_id/admission-verifications/:verification_id/retry", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_ADMISSION_VERIFY", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRetryProductAdmissionVerification))
+			admin.POST("/recharge-products/:catalog_item_id/admission-verifications/:verification_id/revoke", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_ADMISSION_REVOKE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRevokeProductAdmission))
+			admin.POST("/recharge-products/:catalog_item_id/publish", s.authorizer.Require("platform.products.publish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_PUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminPublishRechargeProduct))
+			admin.POST("/recharge-products/:catalog_item_id/unpublish", s.authorizer.Require("platform.products.unpublish"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_UNPUBLISH", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminUnpublishRechargeProduct))
+			admin.POST("/recharge-products/:catalog_item_id/delete", s.authorizer.Require("platform.products.delete"), s.requireRecentProductAuthentication(), approvalpolicy.Require("BILLING_RECHARGE_PRODUCT_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteRechargeProduct))
+		}
 		admin.GET("/payment-orders", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrders))
 		admin.GET("/refunds", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminRefunds))
 		admin.GET("/payment-orders/:order_id", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminPaymentOrderDetail))

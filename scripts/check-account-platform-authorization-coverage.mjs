@@ -51,6 +51,7 @@ async function productionGoSources(relativeDirectory) {
 async function knownHumanPermissions() {
   const [migration, authorization] = await Promise.all([
     source('account-platform/migrations/account/000034_three_scope_authorization.up.sql'),
+    source('account-platform/migrations/account/000037_recharge_product_permissions.up.sql'),
     source('account-platform/internal/account/authorization.go'),
   ]);
   const result = new Set();

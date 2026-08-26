@@ -621,6 +621,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 }
 
 func billingAdminPathAllowed(method, resource string) bool {
+	if resource == "/admin/v1/recharge-products" && (method == http.MethodGet || method == http.MethodPost) {
+		return true
+	}
 	if adminReadPathAllowed(method, resource, "/admin/v1/overview", "/admin/v1/wallets", "/admin/v1/receivables", "/admin/v1/pricing-versions", "/admin/v1/payment-orders", "/admin/v1/refunds", "/admin/v1/adjustments", "/admin/v1/usage-holds", "/admin/v1/reconciliation-runs", "/admin/v1/late-payment-reviews", "/admin/v1/payment-anomalies") {
 		return true
 	}
@@ -634,6 +637,24 @@ func billingAdminPathAllowed(method, resource string) bool {
 		return false
 	}
 	parts := strings.Split(strings.Trim(resource, "/"), "/")
+	if len(parts) >= 5 && parts[0] == "admin" && parts[1] == "v1" && parts[2] == "recharge-products" {
+		if _, err := uuid.Parse(parts[3]); err != nil {
+			return false
+		}
+		if len(parts) == 5 {
+			if parts[4] == "admission-verifications" {
+				return method == http.MethodGet || method == http.MethodPost
+			}
+			return method == http.MethodPost && (parts[4] == "publish" || parts[4] == "unpublish" || parts[4] == "delete")
+		}
+		if len(parts) == 7 && parts[4] == "admission-verifications" {
+			if _, err := uuid.Parse(parts[5]); err != nil {
+				return false
+			}
+			return method == http.MethodPost && (parts[6] == "retry" || parts[6] == "revoke")
+		}
+		return false
+	}
 	if len(parts) == 4 && parts[0] == "admin" && parts[1] == "v1" && (parts[2] == "usage-holds" || parts[2] == "late-payment-reviews" || parts[2] == "payment-anomalies") {
 		_, err := uuid.Parse(parts[3])
 		return err == nil && method == http.MethodGet
