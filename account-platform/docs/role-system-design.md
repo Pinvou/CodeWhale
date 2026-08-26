@@ -134,7 +134,7 @@ flowchart LR
 | `PLATFORM_ORGANIZATION_ADMIN` | 组织管理员 | 顶层组织创建、状态、逻辑删除、所有者应急转让和组织结构修复 |
 | `PLATFORM_BILLING_OPERATOR` | 计费运营员 | 钱包、账本、订单同步、Hold、人工调整申请和人工财务修复申请 |
 | `PLATFORM_BILLING_APPROVER` | 财务审批员 | 审批人工积分调整和人工财务修复；不能审批自己的申请 |
-| `PLATFORM_PRICING_ADMIN` | 模型定价管理员 | 全局/模型价格、统一/分时策略、未来生效版本和价格发布 |
+| `PLATFORM_PRICING_ADMIN` | 定价与商品管理员 | 全局/模型价格、版本化价格发布，以及充值商品添加、上架、下架和删除 |
 | `PLATFORM_MODEL_ADMIN` | 平台模型运营员 | 模型网关目录同步、上下文元数据、平台/组织作用域的真实 Token Account、路由、Provisioning 和凭据有效性 |
 | `PLATFORM_OPERATIONS_ADMIN` | 系统运维管理员 | 服务状态、事件积压、核对任务、重试和死信处理，不直接改资金事实 |
 | `PLATFORM_AUDITOR` | 平台审计员 | 跨域只读查询、审计详情和导出，不执行业务变更 |
@@ -143,7 +143,7 @@ flowchart LR
 
 符号：`✓` 可执行，`只读` 只能查看，`—` 无权限。
 
-| 能力 | 超级管理员 | 账号管理员 | 组织管理员 | 计费运营员 | 财务审批员 | 定价管理员 | 模型运营员 | 运维管理员 | 审计员 |
+| 能力 | 超级管理员 | 账号管理员 | 组织管理员 | 计费运营员 | 财务审批员 | 定价与商品管理员 | 模型运营员 | 运维管理员 | 审计员 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | 平台角色分配 | ✓ | — | — | — | — | — | — | — | 只读 |
 | 用户查询/启停 | ✓ | ✓ | — | — | — | — | — | — | 只读 |
@@ -154,6 +154,8 @@ flowchart LR
 | 人工调整/财务修复申请 | ✓ | — | — | ✓ | — | — | — | — | 只读 |
 | 人工调整/财务修复审批 | ✓ | — | — | — | ✓ | — | — | — | 只读 |
 | 模型价格读取/发布 | ✓ | — | — | — | — | ✓ | — | — | 只读 |
+| 充值商品目录读取 | ✓ | — | — | 只读 | — | ✓ | — | — | 只读 |
+| 充值商品添加/上架/下架/删除 | ✓ | — | — | — | — | ✓ | — | — | — |
 | 模型网关目录同步 | ✓ | — | — | — | — | — | ✓ | — | — |
 | Token Account/路由/凭据检查 | — | — | — | — | — | — | ✓ | — | — |
 | 用量核对人工重试 | ✓ | — | — | 只读 | — | — | ✓ | ✓ | 只读 |
@@ -170,15 +172,15 @@ flowchart LR
 
 | 角色 | 精确权限码 |
 |---|---|
-| `PLATFORM_SUPER_ADMIN` | `platform.roles.read`、`platform.roles.assign`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.status.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.repairs.approve`、`platform.billing.adjustments.request`、`platform.billing.adjustments.approve`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.billing.payment-controls.resume.approve`、`platform.pricing.read`、`platform.pricing.manage`、`platform.models.read`、`platform.models.sync`、`platform.models.manage`、`platform.usage.read`、`platform.usage.reconcile.retry`、`platform.system.status.read`、`platform.events.retry`、`platform.audit.read`、`platform.audit.export` |
+| `PLATFORM_SUPER_ADMIN` | `platform.roles.read`、`platform.roles.assign`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.status.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.repairs.approve`、`platform.billing.adjustments.request`、`platform.billing.adjustments.approve`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.billing.payment-controls.resume.approve`、`platform.pricing.read`、`platform.pricing.manage`、`platform.products.read`、`platform.products.create`、`platform.products.publish`、`platform.products.unpublish`、`platform.products.delete`、`platform.models.read`、`platform.models.sync`、`platform.models.manage`、`platform.usage.read`、`platform.usage.reconcile.retry`、`platform.system.status.read`、`platform.events.retry`、`platform.audit.read`、`platform.audit.export` |
 | `PLATFORM_IDENTITY_ADMIN` | `platform.roles.read`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair` |
 | `PLATFORM_ORGANIZATION_ADMIN` | `platform.roles.read`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.status.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer` |
-| `PLATFORM_BILLING_OPERATOR` | `platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.adjustments.request`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.usage.read` |
+| `PLATFORM_BILLING_OPERATOR` | `platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.adjustments.request`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.products.read`、`platform.usage.read` |
 | `PLATFORM_BILLING_APPROVER` | `platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.repairs.approve`、`platform.billing.adjustments.approve`、`platform.billing.payment-controls.resume.approve`、`platform.usage.read` |
-| `PLATFORM_PRICING_ADMIN` | `platform.pricing.read`、`platform.pricing.manage` |
+| `PLATFORM_PRICING_ADMIN` | `platform.pricing.read`、`platform.pricing.manage`、`platform.products.read`、`platform.products.create`、`platform.products.publish`、`platform.products.unpublish`、`platform.products.delete` |
 | `PLATFORM_MODEL_ADMIN` | `platform.models.read`、`platform.models.sync`、`platform.models.manage`、`platform.tokens.read`、`platform.tokens.manage`、`platform.tokens.credentials.validate`、`platform.usage.read`、`platform.usage.reconcile.retry` |
 | `PLATFORM_OPERATIONS_ADMIN` | `platform.system.status.read`、`platform.events.retry`、`platform.usage.read`、`platform.usage.reconcile.retry` |
-| `PLATFORM_AUDITOR` | `platform.roles.read`、`platform.users.read`、`platform.organizations.read`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.pricing.read`、`platform.models.read`、`platform.usage.read`、`platform.system.status.read`、`platform.audit.read`、`platform.audit.export` |
+| `PLATFORM_AUDITOR` | `platform.roles.read`、`platform.users.read`、`platform.organizations.read`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.pricing.read`、`platform.products.read`、`platform.models.read`、`platform.usage.read`、`platform.system.status.read`、`platform.audit.read`、`platform.audit.export` |
 
 任何角色都不内置 `platform.audit.pii.export`。审批队列、详情和决定权限必须从对应 `approval_command_policies` 的冻结策略解析，不能硬编码为某一种财务审批权限。
 
@@ -329,6 +331,11 @@ platform.billing.payment-controls.resume.request
 platform.billing.payment-controls.resume.approve
 platform.pricing.read
 platform.pricing.manage
+platform.products.read
+platform.products.create
+platform.products.publish
+platform.products.unpublish
+platform.products.delete
 platform.models.read
 platform.models.sync
 platform.models.manage
@@ -398,6 +405,8 @@ internal.billing.hold.extend
 internal.billing.usage.commit
 internal.billing.usage.release
 internal.billing.payment.reconcile
+internal.billing.product-admission.verify
+internal.billing.product-admission.revoke
 internal.token.usage.reconcile
 internal.events.outbox.read
 internal.events.outbox.ack

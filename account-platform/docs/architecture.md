@@ -278,28 +278,31 @@ Web 个人中心的信息架构固定为三个一级 Tab：“额度与用量”
 - HTTP 断线只改变交付状态，不取消后台上游读取、证据持久化和结算；`Last-Event-ID` 只重放更大序号，不创建第二次调用。
 - 持久派发准备、正式意图和一次性租约区分“可证明未派发”与“结果未知”；取消命令、Adapter 取消能力和可信用量期限独立推进，未知结果只查询证据或进入人工复核。
 
-## 7. 当前支付、权益与退款
+## 7. 支付、权益与退款
 
-充值以 Billing `product_id` 为可信输入。金额与 BASE/BONUS、展示积分、有效期来自通用商品目录；外部 SKU、Provider 金额/币种/渠道来自独立版本映射，两者与当前 Provider 能力取交集后才可售。依据《品悟个人版正式含税定价说明 v0.3》，当前目录为：
+充值以 Billing `product_id` 为可信输入。金额与 BASE/BONUS、展示积分、有效期来自通用商品目录；外部 SKU/BOM、Provider 金额/币种/渠道来自独立版本映射，两者与当前 Provider 能力取交集后才可售。当前在售商品、金额和权益属于环境运行数据，只能通过后台目录与审计查询；需求、架构、任务和实现状态不保存商品清单。
 
-| 商品 | 商城 SKU | 金额 | 总展示积分 | 有效期 | 状态 |
-|---|---|---:|---:|---:|---|
-| 体验版 | `0502AJ0Q`（唯一 UAT SKU） | ¥0.10 | 1,000 | 30 天 | 当前唯一商城购买映射，待完整联调验收 |
-| 标准版 | 无活动商城映射 | — | 2,000 | 30 天 | 保留历史目录事实，当前不可购买 |
-| 高级版 | 无活动商城映射 | — | 4,000 | 30 天 | 保留历史目录事实，当前不可购买 |
-| 旗舰版 | 无活动商城映射 | — | 20,000 | 30 天 | 保留历史目录事实，当前不可购买 |
+### 7.1 运营化充值商品目录
 
-当前仅体验版开放购买并只发放 BASE、不发放 BONUS；每次购买形成独立的 30 天权益包，不合并、不顺延。其余三档只保留历史目录事实且没有活动 Provider 映射；在商城完成 BOM 字符、商品名称、类目、发票名称、含税金额和上架联调前，技术状态继续保持 `UAT_TENTATIVE` / `TEST_ONLY`，不得绕过 APT-048 发布为 `FROZEN`。
+Billing 新增 `recharge_product_catalog_items` 聚合，保存供应商中立的稳定商品 ID、中英日展示名、权益、有效期、发票、展示顺序、替代关系及 `DRAFT / ON_SALE / OFF_SALE / DELETED` 生命周期；独立映射草稿保存 Provider/Adapter、外部 SKU/BOM、金额、币种和渠道，证据引用初始为空，验证完成后以独立追加证据和绑定关联；`payment_product_mappings` 继续保存发布后的不可变 Provider 映射版本。订单继续冻结通用商品、映射及 Provider 能力快照。目录聚合只负责运营生命周期，不承载支付故障止损。
 
-`PLAN_TRIAL` 已根据最新业务决策收敛为唯一商城 SKU `0502AJ0Q`，商品目录与 Provider 映射金额均为 0.10 元；权益仍为 1,000 BASE、0 BONUS、30 天有效期。其余商城映射全部退休，商品列表只返回这一档；历史订单和映射事实不改写，Adapter 仍以商城十进制金额事实与订单冻结的 0.10 元快照比较，任何偏差继续进入支付事实冲突复核。
+后台添加商品只产生不带准入证据、不可购买的 DRAFT。发布权限人员通过独立幂等端点创建验证轮次：DRAFT 冻结当前草稿版本，ON_SALE/OFF_SALE 冻结指定不可变发布映射快照。`billing-admission-verifier` 现场校验 Provider，将 PENDING 收敛为 VERIFIED/FAILED 并在成功时写入追加证据表，失败可创建关联旧轮次的新重试。证据保存签发与到期事实，撤销由独立追加事实派生，并以 canonical publish fingerprint 绑定环境及完整快照。首次发布重新计算草稿指纹；续证只能匹配冻结发布快照。安全定义目录转换函数原子发布新的不可变映射并更新兼容投影；下架和重新上架使用同一函数结束/创建映射版本。删除只接受 DRAFT/OFF_SALE 并写逻辑墓碑。通用商品 ID 永不复用，只有未曾发布 DRAFT 的外部 SKU/BOM 可释放纠错，曾上架映射、订单快照和审计不得复用或删除。商品事实变化通过“添加新商品、上架新商品、下架旧商品”表达，不提供已发布事实原地编辑。
 
-`internal/platform/payment` 定义供应商中立端口和版本化能力；H3C 与开发 Simulator 分别位于 `internal/platform/h3cpayment`、`internal/platform/paymentsimulator`，Billing 不识别厂商状态或客户端。`/v1/payment-capabilities` 公开渠道、查询/保留/最小间隔、支付与晚到窗口、权威终态、关单、退款、通知、账单、对账模式和人工修复能力；用户/组织 UI、后台轮询及领域动作统一消费能力声明，订单同时冻结能力快照。Provider 的 `refund_supported` 只描述技术能力，`normal_refund_creation_enabled` 是独立产品门禁；两者同时为真才可显示或接受新建普通退款，所有交付环境默认后者为 `false`。该门禁只阻断创建意图，不参与既有退款 Consumer、强制退款证据或只读查询。正式 `FROZEN` 映射若没有回调和账单，必须同时具备长期历史查询、有限支付/晚到窗口、权威未支付终态和覆盖归档期的证据保留，否则创建订单失败关闭。
+准入证据持续参与新单门禁。不可变映射保留首次发布证据；`product_admission_bindings` 以追加版本和有效区间选择当前运行时证据。证据本身不更新为 REVOKED：人类发布权限命令或 `internal.billing.product-admission.revoke` 工作负载向 `product_admission_revocations` 追加证据 ID、单调序号、来源、原因与时间，派生撤销状态。续证事务只在指纹匹配且证据无撤销事实时原子结束旧绑定并追加新绑定，唯一约束确保并发最多一个当前版本。撤销、续证和订单按 catalog_item_id 共用串行锁/admission_version；撤销当前证据会结束绑定并关闭控制，续证永不打开控制，因而并发不能短暂恢复新单。到期监控同样关闭 `payment_product_controls`，订单事务以撤销事实反连接现场复核以覆盖监控延迟。目录保持 ON_SALE，用户得到 PRODUCT_PAUSED。失效后取得新 VERIFIED 绑定仍走现有 PAYMENT_PROVIDER_RESUME 双人审批，验证任务不得自动恢复控制。
 
-外部回调入口由 `internal/platform/paymentcallback` 提供 Provider 中立鉴权与 Profile 注册。每个客户端凭据在服务端绑定唯一 Provider、Adapter 版本和商户，短期 Token 携带这些不可由请求体覆盖的身份；Billing HTTP 层只从 Token 选择 Profile 并使用同一身份持久化证据，不识别厂商字段或状态。固定公网契约地址为 `https://account.pinvou.com`，独立账号网关只把 `/api/v1/payment-callback/token` 与 `/api/v1/payment-callbacks` 两个精确路径代理到 Billing，其余同源请求进入 Portal，服务器迁移仅调整 upstream。新华三是首个 Profile，声明支付宝下单、订单查询/同步、支付回调和人工修复，`notification_supported=true`；下单以付款人的永久 `user_id` 作为 `merchantCustomerKey`，手机号只用于商城用户和联系方式。`internal/platform/h3cmall` 定义新版商城原生订单结构和精确十进制金额，`internal/platform/h3cpayment` 由同一映射同时服务主动查询与 H3C 回调 Profile，避免两套厂商 DTO 漂移；按客户分页查询同样只接受该稳定 ID。Profile 把 `PAID`、处理中、`PAY_CLOSED`、`FAILED` 及未知原始状态映射到中立证据，不声明主动退款、关单或账单，对账模式仍为 `QUERY_DEGRADED`。回调不要求商城构造品悟通知字段，而是直接接收 `queryOrder.content` 同形快照，服务端按订单、客户、SKU、状态、流水和更新时间派生幂等通知 ID，校验十进制实付金额、支付时间及本地冻结快照，把受限原文嵌入规范化通知并先提交既有 `payment_notifications` Inbox，再返回 `202`；后台 Worker 与主动查询共用支付证据和流水履约函数。客户端关闭二维码页后，Billing 后台仍按 Adapter 最小查询间隔补偿漏回调；订单在72小时边界执行最后查询并转入唯一 P2 案件，前7天每日、此后每周复核。仓库中的非生产测试 Provider 可声明更多动作，但带 `test_only` 标记且只允许开发/测试环境，不能扩张生产能力。所有当前 H3C 和 Simulator 映射均为 `TEST_ONLY`；正式收款前必须由 APT-048 对 SKU、金额、权益和 Provider 映射取得业务确认并发布满足正式准入条件的 `FROZEN` 新版本，不能直接修改已有映射。
+`recharge_product_catalog_items.lifecycle_status` 是业务上架唯一事实源；`recharge_products.enabled` 仅为旧读路径兼容投影。生产运行身份被撤销对兼容列的直接写权限，只能调用安全定义目录转换函数；约束触发器在提交时拒绝生命周期、活动映射和兼容投影漂移，所有新读路径联结权威生命周期。
+
+`PaymentCoordinator` 不再持有启动时固定商品映射。商品列表按数据库当前有效目录计算；创建订单的第一笔本地事务锁定通用商品、目录聚合和当前有效映射，冻结同一版本、生成稳定商户订单号、写 Provider 调用意图后提交并释放锁。只有此后才以稳定订单号调用供应商中立 `PaymentProvider`，结果由第二笔事务归并。提交后崩溃或网络超时进入 `RESULT_UNKNOWN`，恢复 Worker 先查询外部事实，只有 Provider 明确声明创建幂等才以原键重投；禁止持锁网络调用或生成第二外部订单。因此管理动作提交后无需重启服务，且并发上/下架不会产生混合快照。首次迁移仅用 `INSERT ... SELECT` 导入部署环境当前有效目录，不写任何具体商品值；历史迁移保留为既有部署事实，未来商品变化不再产生代码迁移。
+
+后台管理接口以 `/admin/v1/recharge-products` 为根，读、添加、上架、下架、删除分别要求 `platform.products.read/create/publish/unpublish/delete`；验证查询要求 read，验证发起/重试/撤销要求 publish。生命周期动作使用 `POST /{catalog_item_id}/publish|unpublish|delete`，验证使用 `GET|POST /{catalog_item_id}/admission-verifications` 与 `POST /{catalog_item_id}/admission-verifications/{verification_id}/retry|revoke`；Portal 仅代理精确路径，UI 只按权限码显示动作。列表以游标分页、生命周期过滤和显式墓碑开关提供稳定排序。全部写命令登记为 `AUDIT_ONLY`，统一使用 `Idempotency-Key`、请求体 expected_version/reason。Billing 直接校验终端用户 OIDC Access Token，并只信 IdP 签发的 auth_time；此接口不消费 Account 人类委托或代理转述时间。Portal step-up 属于 UI-23：通过 state/nonce/PKCE 和 `prompt=login&max_age=900` 更新会话并丢弃原写请求，用户刷新版本后重新确认，绝不自动重放。所有动作保存不可抵赖审计，且不得改写任何已确认资金、权益、账本或历史订单事实。
+
+`internal/platform/payment` 定义供应商中立端口和版本化能力；具体 Provider Adapter 位于 `internal/platform/` 对应适配模块，Billing 不识别厂商状态或客户端。`/v1/payment-capabilities` 公开渠道、查询/保留/最小间隔、支付与晚到窗口、权威终态、关单、退款、通知、账单、对账模式和人工修复能力；用户/组织 UI、后台轮询及领域动作统一消费能力声明，订单同时冻结能力快照。Provider 的 `refund_supported` 只描述技术能力，`normal_refund_creation_enabled` 是独立产品门禁；两者同时为真才可显示或接受新建普通退款，所有交付环境默认后者为 `false`。该门禁只阻断创建意图，不参与既有退款 Consumer、强制退款证据或只读查询。正式 `FROZEN` 映射若没有回调和账单，必须同时具备长期历史查询、有限支付/晚到窗口、权威未支付终态和覆盖归档期的证据保留，否则创建订单失败关闭。
+
+外部回调入口由 `internal/platform/paymentcallback` 提供 Provider 中立鉴权与 Profile 注册。每个客户端凭据在服务端绑定唯一 Provider、Adapter 版本和商户，短期 Token 携带这些不可由请求体覆盖的身份；Billing HTTP 层只从 Token 选择 Profile 并使用同一身份持久化证据，不识别厂商字段或状态。固定公网契约地址为 `https://account.pinvou.com`，独立账号网关只把 `/api/v1/payment-callback/token` 与 `/api/v1/payment-callbacks` 两个精确路径代理到 Billing，其余同源请求进入 Portal，服务器迁移仅调整 upstream。具体商城 Profile 可声明下单、订单查询/同步、支付回调和人工修复能力；下单以付款人的永久 `user_id` 作为外部客户稳定标识，手机号只用于商城用户和联系方式。同一 Adapter 映射必须同时服务主动查询和回调 Profile，避免两套厂商 DTO 漂移；回调和查询均校验订单冻结的客户、SKU/BOM、金额和流水证据。客户端关闭二维码页后，Billing 后台仍按 Adapter 最小查询间隔补偿漏回调；仓库中的非生产测试 Provider 只允许开发/测试环境，不能扩张生产能力。正式收款准入由后台上架命令依据当前 Provider 能力和证据决定，不能直接修改已有映射或在文档中固化当前商品。
 
 新华三原始 `FAILED` 由 Adapter 保守映射为 `REVIEW_REQUIRED`，不能在 Adapter 内猜测为权威未支付。运营确认链路由 Billing 编排：异常必须先由当前支付运营认领；处理命令只携带案件、原因和幂等键；Billing 使用订单冻结的 Provider/版本、外部订单号和付款人标识现场调用 `PaymentProvider.Get`，再由领域层校验原始 `FAILED`、订单/客户/SKU/金额/币种一致、无支付流水、无支付权益、无本人付款申诉及无更强证据。外部查询不占用数据库事务；查询完成后事务重新锁定案件、订单和相关证据并再次验证版本，随后原子写入 `payment_provider_failure_confirmations`、`PROVIDER_FAILURE_CONFIRMED` 时间线、订单 `FAILED`、异常/人工案件终态和 Outbox。版本或证据在查询窗口变化时失败关闭并要求重新执行。之后到达的成功证据仍按晚到支付链路处理。
 
-商品可售性由三层事实派生：目录 `recharge_products.enabled`、当前有效 `payment_product_mappings`、Provider/商品运行时控制。列表接口返回目录与 `availability_status=AVAILABLE|PROVIDER_PAUSED|PRODUCT_PAUSED`，并只暴露稳定 `availability_reason_code`；创建订单在数据库事务中重新检查同一控制版本，不能依赖前端禁用。自动止损写 Provider/商品控制和不可变案件关联，不再更新目录。兼容迁移仅将存在 `manual_review_stop_loss_evaluations` 证明的历史误下架商品恢复为业务上架并建立等价商品暂停，无法证明来源的禁用商品保持原状。
+商品可售性由三层事实派生：权威目录 `recharge_product_catalog_items.lifecycle_status='ON_SALE'`、当前有效 `payment_product_mappings`、Provider/商品运行时控制。新列表和下单不得读取兼容 `recharge_products.enabled` 作决定。列表接口返回目录与 `availability_status=AVAILABLE|PROVIDER_PAUSED|PRODUCT_PAUSED`，并只暴露稳定 `availability_reason_code`；创建订单在数据库事务中重新检查同一控制版本，不能依赖前端禁用。自动止损写 Provider/商品控制和不可变案件关联，不更新目录。兼容迁移仅将存在 `manual_review_stop_loss_evaluations` 证明的历史误下架投影恢复为与权威生命周期一致，并建立等价商品暂停，无法证明来源的禁用投影保持原状并进入修复队列。
 
 收款恢复复用 Account 既有审批聚合，不在 Billing 另建审批系统。`PAYMENT_PROVIDER_RESUME` 是 `APPROVAL_REQUIRED` 命令：支付运营以目标 Provider/版本、商品集合、控制版本、开放 P0/P1 案件摘要、映射版本和现场健康摘要创建申请；Account 禁止申请人自审并固化批准人身份。授权事件由 `billing-command-executor` 消费，执行前从 Account 强一致复核双方当前权限，并在 Billing 事务中重新计算全部快照、排除异常确认人与批准人冲突、验证 Provider 查询健康及映射有效性；一致时原子打开目标控制并保存执行审计，变化时把执行标记为失效。单个案件结案绝不隐式恢复新单，超级管理员和 Break-glass 均不绕过该链路。
 
