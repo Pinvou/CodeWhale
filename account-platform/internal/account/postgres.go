@@ -152,7 +152,7 @@ SELECT context.context_type,context.organization_id,context.context_version,u.me
          SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code)
          FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code
          JOIN role_permissions rp ON rp.role_code=ra.role_code
-         WHERE ra.user_id=u.id AND ra.organization_id=context.organization_id
+         WHERE ra.user_id=u.id AND ra.organization_id IS NOT DISTINCT FROM context.organization_id
            AND ((context.organization_id IS NULL AND ro.scope='PERSONAL') OR (context.organization_id IS NOT NULL AND ro.scope='ORGANIZATION'))
            AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
        ),'{}'),
@@ -243,6 +243,14 @@ SELECT u.id, u.user_code, u.status, u.username, u.display_name, u.mobile_e164, u
          SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code)
          FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code
          JOIN role_permissions rp ON rp.role_code=ra.role_code
+         WHERE ra.user_id=u.id AND ra.organization_id IS NOT DISTINCT FROM context.organization_id
+           AND ((context.organization_id IS NULL AND ro.scope='PERSONAL') OR (context.organization_id IS NOT NULL AND ro.scope='ORGANIZATION'))
+           AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+       ),'{}'),
+       COALESCE((
+         SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code)
+         FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code
+         JOIN role_permissions rp ON rp.role_code=ra.role_code
          WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PERSONAL'
            AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
        ),'{}'),
@@ -263,7 +271,8 @@ WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, pr
 		&me.CommerceCustomerStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion,
 		&me.ActiveContext.ContextVersion, &me.ActiveContext.AuthorizationVersion,
 		&me.ActiveContext.PersonalAuthorizationVersion, &me.ActiveContext.PlatformAuthorizationVersion,
-		&me.ActiveContext.OrganizationAuthorizationVersion, &me.PersonalPermissions, &me.PlatformPermissions,
+		&me.ActiveContext.OrganizationAuthorizationVersion, &me.ActiveContext.Permissions,
+		&me.PersonalPermissions, &me.PlatformPermissions,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Me{}, ErrNotFound

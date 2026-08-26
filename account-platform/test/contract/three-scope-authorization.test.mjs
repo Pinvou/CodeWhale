@@ -110,8 +110,9 @@ test('authorization context exposes independent versions and personal/platform c
 
 test('account bootstrap exposes root personal and platform permissions used by permission-driven navigation', () => {
   assert.match(openapi, /Me:[\s\S]*required: \[[^\]]*personal_permissions[^\]]*platform_permissions[^\]]*\]/);
+  assert.match(postgres, /ra\.organization_id IS NOT DISTINCT FROM context\.organization_id/);
   assert.match(postgres, /&user\.ActiveContext\.Permissions,[\s\S]*&user\.PersonalPermissions, &user\.PlatformPermissions/);
-  assert.match(postgres, /&me\.ActiveContext\.OrganizationAuthorizationVersion, &me\.PersonalPermissions, &me\.PlatformPermissions/);
+  assert.match(postgres, /&me\.ActiveContext\.OrganizationAuthorizationVersion, &me\.ActiveContext\.Permissions,[\s\S]*&me\.PersonalPermissions, &me\.PlatformPermissions/);
 });
 
 test('organization management keeps explicit object scope without switching billing context', () => {
