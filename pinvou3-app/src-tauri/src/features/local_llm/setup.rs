@@ -564,6 +564,7 @@ pub async fn bootstrap_local_vllm(app: tauri::AppHandle) -> Result<BootstrapResu
     prefs.upsert_model(SavedModel {
         id: BOOTSTRAP_MODEL_ID.to_string(),
         name: "本地大模型".to_string(),
+        alias: None,
         preset: ModelPreset::LocalVllm,
         context_window_tokens: None,
         max_output_tokens: None,

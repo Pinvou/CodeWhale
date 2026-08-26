@@ -1586,6 +1586,7 @@ where
     Ok(crate::platform::prefs::SavedModel {
         id: crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID.to_string(),
         name: crate::platform::prefs::BUILTIN_LLMAPI_MODEL_NAME.to_string(),
+        alias: None,
         preset: crate::platform::prefs::ModelPreset::OpenaiCompatible,
         model: config.model,
         base_url: config.base_url,
@@ -1710,6 +1711,7 @@ pub fn ready_saved_model_from_local_binding_system(
     Ok(crate::platform::prefs::SavedModel {
         id: crate::platform::prefs::BUILTIN_LLMAPI_MODEL_ID.to_string(),
         name: crate::platform::prefs::BUILTIN_LLMAPI_MODEL_NAME.to_string(),
+        alias: None,
         preset: crate::platform::prefs::ModelPreset::OpenaiCompatible,
         model,
         base_url: crate::features::llmapi_hub::DEFAULT_CHAT_BASE_URL.to_string(),

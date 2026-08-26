@@ -84,7 +84,7 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
 
 ## 模型接入
 
-PINVOU 支持本地 vLLM 和 OpenAI-compatible API。应用内可保存多个模型配置，并在不同会话间快速切换；当前提供本地 vLLM、DeepSeek、Kimi、通义千问、豆包、MiniMax、智谱、MiMo 等配置模板，也可以填写自定义兼容端点。
+PINVOU 支持本地 vLLM 和 OpenAI-compatible API。应用内可保存多个模型配置，为云端配置设置可选的显示别名，并在不同会话间快速切换；显示别名不会改变发送给模型服务商的模型标识。当前提供本地 vLLM、DeepSeek、Kimi、通义千问、豆包、MiniMax、智谱、MiMo 等配置模板，也可以填写自定义兼容端点。
 
 本地 vLLM 示例：
 
