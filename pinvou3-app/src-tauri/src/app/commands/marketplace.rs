@@ -10,6 +10,30 @@ pub fn list_marketplace_tools(
     Ok(tools)
 }
 
+/// React 首帧呈现后触发：在 blocking 线程中修复存量内置 Python MCP 依赖。
+/// 每次启动都会调用，离线/临时失败可在后续启动重试；仅在实际改写 mcp.json 后
+/// 递增配置修订号（无变化不 bump，避免每次启动都无谓重建在线会话的 engine），
+/// 重建发生在下一轮，安全重新发现 MCP 工具。
+#[tauri::command]
+pub async fn repair_python_dependencies_after_first_frame(
+    pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
+) -> Result<Vec<String>, String> {
+    let (errors, mcp_config_changed) = tokio::task::spawn_blocking(|| {
+        crate::features::marketplace::MarketplaceManager::new()
+            .repair_installed_builtin_python_dependencies()
+    })
+    .await
+    .map_err(|error| format!("Python MCP 依赖后台修复任务失败: {error}"))?;
+    if mcp_config_changed {
+        pool.mark_mcp_config_updated();
+        pool.refresh_disallowed_tools().await;
+    }
+    for error in &errors {
+        log::warn!("[marketplace] 已安装 Python MCP 依赖后台修复失败: {error}");
+    }
+    Ok(errors)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketplaceOAuthLoginResult {
     pub status: String,
@@ -434,7 +458,12 @@ pub async fn uninstall_marketplace_tool(
     tool_id: String,
     pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
 ) -> Result<(), String> {
-    uninstall_marketplace_tool_sync(&tool_id)?;
+    let uninstall_tool_id = tool_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        uninstall_marketplace_tool_sync(&uninstall_tool_id)
+    })
+    .await
+    .map_err(|error| format!("卸载工具后台任务失败: {error}"))??;
     // 联动卸载的 companion 技能影响两个 scope 的启用集：重写在线会话组合目录
     // （async 命令必须用 async 版：blocking 版的 blocking_lock 在 tokio runtime
     // 线程上必 panic）。

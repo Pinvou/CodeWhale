@@ -508,6 +508,7 @@ mod tests {
         assert!(!text.contains("<html>"));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn msg_sample_from_env_decodes_when_provided() {
         let Ok(path) = std::env::var("PINVOU3_MSG_SAMPLE") else {

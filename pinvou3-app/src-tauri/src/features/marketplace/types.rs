@@ -35,11 +35,33 @@ pub struct ToolManifest {
     pub tool_table_entries: Vec<String>,
     #[serde(default)]
     pub pip_dependencies: Vec<String>,
+    /// Windows 内置 Python 的可复现依赖锁。仅内嵌、受信任的 MCP 清单会消费；
+    /// 上传包即使声明此字段也不会触发联网下载。
+    #[serde(default)]
+    pub windows_python_dependencies: Option<WindowsPythonDependencyLock>,
     #[serde(default)]
     pub servers: Vec<RemoteServer>,
     /// 配套技能 id:装该 MCP 时一并装、卸时一并删(让"一个能力"=引擎+引导整体装卸)。
     #[serde(default)]
     pub companion_skills: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WindowsPythonDependencyLock {
+    /// `cp313-win_amd64` 形态；安装时与实际内置解释器核对。
+    pub target: String,
+    /// 按 `target:<target>` + wheels 中 `filename:sha256` 顺序计算的 SHA-256。
+    pub lock_id: String,
+    /// 安装完成后必须能从隔离依赖目录导入的模块名。
+    pub imports: Vec<String>,
+    pub wheels: Vec<PythonWheel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PythonWheel {
+    pub filename: String,
+    pub url: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

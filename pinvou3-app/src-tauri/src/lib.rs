@@ -976,6 +976,7 @@ pub fn run() {
             commands::dependencies::check_dependencies,
             commands::dependencies::install_dependencies,
             commands::marketplace::list_marketplace_tools,
+            commands::marketplace::repair_python_dependencies_after_first_frame,
             commands::marketplace::install_marketplace_tool,
             commands::marketplace::get_marketplace_tool_auth_status,
             commands::marketplace::start_marketplace_tool_oauth_login,

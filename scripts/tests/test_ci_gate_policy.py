@@ -147,6 +147,18 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertNotIn("cargo ", portability)
         self.assertNotIn("submodule update", portability)
 
+    def test_windows_runtime_gate_tracks_python_mcp_manifests(self):
+        changes = self.workflow.split("\n  changes:", maxsplit=1)[1].split(
+            "\n  fast-gate:", maxsplit=1
+        )[0]
+        windows_runtime = changes.split("\n            windows_runtime:", maxsplit=1)[
+            1
+        ].split("\n            windows_rustup_repair:", maxsplit=1)[0]
+        self.assertIn(
+            "pinvou3-app/resources/mcp-servers/**/manifest.json",
+            windows_runtime,
+        )
+
     def test_standalone_knowledge_crate_has_its_own_required_gate(self):
         changes = _without_yaml_comments(
             self.workflow.split("\n  changes:", maxsplit=1)[1].split(

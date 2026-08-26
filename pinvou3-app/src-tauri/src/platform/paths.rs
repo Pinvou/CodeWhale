@@ -93,6 +93,20 @@ pub fn assets_staging_dir() -> PathBuf {
     assets_root().join(".staging")
 }
 
+/// Windows 内置 Python 的按需 wheel 下载缓存。文件名使用内容 SHA-256，
+/// 不同 MCP 声明相同 wheel 时只下载一份。
+pub fn python_wheel_cache_dir() -> PathBuf {
+    assets_root().join("python-wheels")
+}
+
+/// 依赖锁对应的隔离 site-packages。目录名是完整 lock hash，应用升级不覆盖。
+pub fn python_packages_dir(lock_id: &str) -> PathBuf {
+    pinvou3_home()
+        .join("runtimes")
+        .join("python-packages")
+        .join(lock_id)
+}
+
 /// 支持按需下载安装连接器 CLI 的平台目录名。目录名同时用于选择编译期锁文件，
 /// 以及运行时落盘到 `~/.pinvou3/connectors/<platform>/bin/`。
 pub fn connector_platform_dir(os: &str, arch: &str) -> Option<&'static str> {

@@ -15,6 +15,7 @@
 
 mod connectors;
 mod migration;
+mod python_dependencies;
 mod secrets;
 mod types;
 mod validation;
@@ -37,7 +38,8 @@ use crate::platform::paths;
 // 对外 pub 面保持不变:类型从 types 子模块 re-export。
 pub use types::{
     ConfigField, MarketplaceToolInfo, MarketplaceToolValidation, McpSecretMigrationResult,
-    RemoteOAuthConfig, RemoteServer, SecretEnv, SecretHeader, ToolManifest,
+    PythonWheel, RemoteOAuthConfig, RemoteServer, SecretEnv, SecretHeader, ToolManifest,
+    WindowsPythonDependencyLock,
 };
 
 // PR #302 拆分后,这些函数已搬到 scope.rs;为保持 mod.rs 兼容面,在此 re-export。
@@ -232,6 +234,20 @@ pub struct MarketplaceManager<S: CredentialStore = SystemCredentialStore> {
     pub(super) credential_store: S,
 }
 
+fn tool_operation_lock(tool_id: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let locks = LOCKS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks
+        .entry(tool_id.to_string())
+        .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
 impl MarketplaceManager<SystemCredentialStore> {
     pub fn new() -> Self {
         Self::with_store(SystemCredentialStore::new())
@@ -336,6 +352,10 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         tool_id: &str,
         user_config: &std::collections::HashMap<String, String>,
     ) -> Result<(), String> {
+        let operation_lock = tool_operation_lock(tool_id);
+        let _operation = operation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.install_inner(tool_id, user_config, true, store::BundleSource::Preset)
     }
 
@@ -350,6 +370,10 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         tool_id: &str,
         source: store::BundleSource,
     ) -> Result<(), String> {
+        let operation_lock = tool_operation_lock(tool_id);
+        let _operation = operation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.install_inner(tool_id, &std::collections::HashMap::new(), false, source)
     }
 
@@ -361,20 +385,27 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         source: store::BundleSource,
     ) -> Result<(), String> {
         self.migrate_mcp_plaintext_secrets()?;
-        let manifest = self
-            .load_manifest(tool_id)
+        // 预置包的安装与联网依赖只能信任编译进应用的 manifest；磁盘副本可能来自
+        // 旧版本或被修改。上传包没有内嵌快照，仍从自身包目录读取。
+        let builtin_manifest = mcp_catalog::embedded_manifest(tool_id)?;
+        let manifest = builtin_manifest
+            .clone()
+            .or_else(|| self.load_manifest(tool_id))
             .ok_or_else(|| format!("工具 '{tool_id}' 不存在"))?;
 
         // 先装 Python 依赖（跨平台 pip）；失败就不注册，让用户可重试。零依赖工具会直接跳过。
         // 上传/导入包禁用 pip 自动安装（供应链安全）：非空依赖只提示，不执行。
-        if pip_auto_install {
-            self.pip_install_deps(&manifest)?;
+        let python_dependencies = if pip_auto_install {
+            self.pip_install_deps(&manifest, builtin_manifest.as_ref())?
         } else if !manifest.pip_dependencies.is_empty() {
             log::warn!(
                 "[marketplace] 上传包 '{tool_id}' 声明 pip 依赖 {:?}：已跳过自动安装（供应链安全），请自行执行 pip install 后再使用该工具",
                 manifest.pip_dependencies
             );
-        }
+            None
+        } else {
+            None
+        };
 
         // 按需释放包资源到 bundles/<id>/mcp/（§4：安装时释放，非启动全量）。
         // 自定义工具（无内嵌 spec）已由强制迁移 `migrate_custom_mcp_layout` 搬到
@@ -384,7 +415,12 @@ impl<S: CredentialStore> MarketplaceManager<S> {
 
         // 先写 mcp.json(含 resolve_secret_placeholder,缺密钥会失败);成功后才落
         // installed.json —— 避免「installed 已写、mcp 没注册」的半安装状态。
-        self.add_to_mcp_json(&manifest, user_config, &server_dir)?;
+        self.add_to_mcp_json(
+            &manifest,
+            user_config,
+            &server_dir,
+            python_dependencies.as_ref(),
+        )?;
 
         let mut installed = self.installed_ids();
         if !installed.contains(&tool_id.to_string()) {
@@ -421,6 +457,9 @@ impl<S: CredentialStore> MarketplaceManager<S> {
             source
         };
         let mut record = store::BundleRecord::installed_now(tool_id, source);
+        if let Some(dependencies) = python_dependencies {
+            record.assets.push(dependencies.asset);
+        }
         record.credential_keys = bundle::tool_credentials(&manifest)
             .into_iter()
             .map(|c| c.key)
@@ -433,8 +472,109 @@ impl<S: CredentialStore> MarketplaceManager<S> {
         Ok(())
     }
 
+    /// Windows 后台迁移：旧版本已登记的 Python MCP 不会再次经过 install，需补装
+    /// 锁定依赖并把旧的直启 server.py 条目换成隔离 bootstrap。调用方必须把本同步
+    /// I/O/联网函数放进 blocking 线程；每次启动首帧后重试，不依赖 bundle 版本闸门。
+    /// 返回（各工具的失败列表, 是否有工具的 mcp.json 条目被实际改写）——后者供
+    /// 调用方决定是否递增 mcp 配置修订号，避免无变化时触发无谓的 engine 重建。
+    pub fn repair_installed_builtin_python_dependencies(&self) -> (Vec<String>, bool) {
+        if !crate::platform::capabilities::is_windows() {
+            return (Vec::new(), false);
+        }
+        let mut errors = Vec::new();
+        let mut any_changed = false;
+        for tool_id in self.installed_ids() {
+            let (changed, outcome) = self.repair_installed_builtin_python_dependency_with(
+                &tool_id,
+                python_dependencies::ensure_for_builtin_manifest,
+            );
+            any_changed |= changed;
+            if let Err(error) = outcome {
+                errors.push(format!("{tool_id}: {error}"));
+            }
+        }
+        (errors, any_changed)
+    }
+
+    /// 单工具修复的生产事务边界。依赖获取作为窄接口传入，使并发测试可以用本地
+    /// fixture 精确停在“下载中”，而锁、安装态复核、mcp.json 与 BundleStore 提交
+    /// 全部继续走真实生产路径。返回（mcp.json 条目是否被实际改写, 结果）——即使
+    /// 登记失败，改写标志也必须保留：mcp.json 已落盘时调用方仍需递增 mcp 配置
+    /// 修订号让引擎重建，否则本次修复要等应用重启才生效。
+    fn repair_installed_builtin_python_dependency_with<F>(
+        &self,
+        tool_id: &str,
+        ensure_dependencies: F,
+    ) -> (bool, Result<(), String>)
+    where
+        F: FnOnce(
+            &ToolManifest,
+        )
+            -> Result<Option<python_dependencies::InstalledPythonDependencies>, String>,
+    {
+        let operation_lock = tool_operation_lock(tool_id);
+        let _operation = operation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.installed_ids().contains(&tool_id.to_string()) {
+            return (false, Ok(()));
+        }
+        let manifest = match mcp_catalog::embedded_manifest(tool_id) {
+            Ok(Some(manifest)) => manifest,
+            Ok(None) => return (false, Ok(())),
+            Err(error) => return (false, Err(error)),
+        };
+        if manifest.windows_python_dependencies.is_none() {
+            return (false, Ok(()));
+        }
+
+        let fingerprint = (|| -> Result<String, String> {
+            mcp_catalog::ensure_package_released(tool_id)?;
+            skill_marketplace::dir_fingerprint(&mcp_catalog::package_mcp_dir(tool_id))
+        })();
+        let result = (|| -> Result<(store::AssetRef, bool), String> {
+            fingerprint.as_ref().map_err(Clone::clone)?;
+            let dependencies = ensure_dependencies(&manifest)?
+                .ok_or_else(|| format!("工具 '{tool_id}' 缺少 Python 依赖结果"))?;
+            if !self.installed_ids().contains(&tool_id.to_string()) {
+                return Err("工具已在依赖下载期间卸载，跳过迁移提交".to_string());
+            }
+            let changed = self.repair_python_dependency_entry(
+                &manifest,
+                &mcp_catalog::package_mcp_dir(tool_id),
+                &dependencies,
+            )?;
+            Ok((dependencies.asset, changed))
+        })();
+        if !self.installed_ids().contains(&tool_id.to_string()) {
+            return (false, Ok(()));
+        }
+        let store_result = record_python_dependency_repair(
+            &store::BundleStore::new(),
+            &manifest,
+            result.as_ref().ok().map(|(asset, _)| asset.clone()),
+            fingerprint.ok(),
+            result.as_ref().err().map(String::as_str),
+        );
+        match (result, store_result) {
+            (Ok((_, changed)), Ok(())) => (changed, Ok(())),
+            (Err(error), Ok(())) => (false, Err(error)),
+            (Ok((_, changed)), Err(store_error)) => {
+                (changed, Err(format!("更新依赖登记失败: {store_error}")))
+            }
+            (Err(error), Err(store_error)) => (
+                false,
+                Err(format!("{error}; 更新依赖登记失败: {store_error}")),
+            ),
+        }
+    }
+
     /// 卸载工具：从 installed.json + mcp.json 中移除
     pub fn uninstall(&self, tool_id: &str) -> Result<(), String> {
+        let operation_lock = tool_operation_lock(tool_id);
+        let _operation = operation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // 删该工具在 keyring 的 secret(防孤儿;此时 manifest 未删、仍可读声明)。
         // 删不掉不阻断卸载；若用户重新安装并重新填 key，会写入新的系统凭据。
         if let Some(manifest) = self.load_manifest(tool_id) {
@@ -644,6 +784,52 @@ impl<S: CredentialStore> MarketplaceManager<S> {
     }
 }
 
+const PYTHON_DEPENDENCY_DEGRADED_PREFIX: &str = "Python 依赖修复失败: ";
+
+fn record_python_dependency_repair(
+    store: &store::BundleStore,
+    manifest: &ToolManifest,
+    asset: Option<store::AssetRef>,
+    content_fingerprint: Option<String>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let existing = store.get(&manifest.id)?;
+    let mut record = existing.clone().unwrap_or_else(|| {
+        store::BundleRecord::installed_now(&manifest.id, store::BundleSource::Preset)
+    });
+    record.installed = true;
+    if content_fingerprint.is_some() {
+        record.content_fingerprint = content_fingerprint;
+    }
+    record.credential_keys = bundle::tool_credentials(manifest)
+        .into_iter()
+        .map(|credential| credential.key)
+        .collect();
+    if let Some(asset) = asset {
+        record.assets.retain(|item| item.kind != "python-packages");
+        record.assets.push(asset);
+    }
+    match error {
+        Some(error)
+            if record.degraded.is_none()
+                || record.degraded.as_deref().is_some_and(|reason| {
+                    reason.starts_with(PYTHON_DEPENDENCY_DEGRADED_PREFIX)
+                }) =>
+        {
+            record.degraded = Some(format!("{PYTHON_DEPENDENCY_DEGRADED_PREFIX}{error}"));
+        }
+        None if record
+            .degraded
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with(PYTHON_DEPENDENCY_DEGRADED_PREFIX)) =>
+        {
+            record.degraded = None;
+        }
+        _ => {}
+    }
+    store.upsert_preserving(record)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +841,207 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
+
+    fn gongwen_manifest_for_repair_test() -> ToolManifest {
+        serde_json::from_str(mcp_catalog::spec_for("gongwen").unwrap().manifest_json).unwrap()
+    }
+
+    fn python_asset_for_repair_test() -> store::AssetRef {
+        store::AssetRef {
+            kind: "python-packages".into(),
+            name: "cp313-win_amd64".into(),
+            version: "a".repeat(64),
+            sha256: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn python_dependency_repair_creates_complete_missing_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store::BundleStore::with_file(temp.path().join("bundles.json"));
+        let manifest = gongwen_manifest_for_repair_test();
+        record_python_dependency_repair(
+            &store,
+            &manifest,
+            Some(python_asset_for_repair_test()),
+            Some("content-fingerprint".into()),
+            None,
+        )
+        .unwrap();
+
+        let record = store.get("gongwen").unwrap().unwrap();
+        assert!(record.installed);
+        assert_eq!(record.source, store::BundleSource::Preset);
+        assert_eq!(
+            record.content_fingerprint.as_deref(),
+            Some("content-fingerprint")
+        );
+        assert_eq!(record.assets, vec![python_asset_for_repair_test()]);
+        assert_eq!(record.degraded, None);
+    }
+
+    #[test]
+    fn python_dependency_repair_only_clears_its_own_degraded_reason() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store::BundleStore::with_file(temp.path().join("bundles.json"));
+        let manifest = gongwen_manifest_for_repair_test();
+        let mut record = store::BundleRecord::installed_now("gongwen", store::BundleSource::Preset);
+        record.degraded = Some("其他资源损坏".into());
+        store.upsert(record).unwrap();
+        record_python_dependency_repair(
+            &store,
+            &manifest,
+            Some(python_asset_for_repair_test()),
+            Some("fp".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            store.get("gongwen").unwrap().unwrap().degraded.as_deref(),
+            Some("其他资源损坏")
+        );
+
+        let mut record = store.get("gongwen").unwrap().unwrap();
+        record.degraded = Some(format!("{PYTHON_DEPENDENCY_DEGRADED_PREFIX}offline"));
+        store.upsert(record).unwrap();
+        record_python_dependency_repair(
+            &store,
+            &manifest,
+            Some(python_asset_for_repair_test()),
+            Some("fp".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(store.get("gongwen").unwrap().unwrap().degraded, None);
+    }
+
+    #[test]
+    fn python_dependency_repair_reports_store_read_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bundles.json");
+        std::fs::write(&path, "{broken").unwrap();
+        let store = store::BundleStore::with_file(path);
+        let error = record_python_dependency_repair(
+            &store,
+            &gongwen_manifest_for_repair_test(),
+            None,
+            None,
+            Some("offline"),
+        )
+        .unwrap_err();
+        assert!(error.contains("解析"));
+    }
+
+    #[test]
+    fn python_dependency_repair_reports_store_write_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_parent = temp.path().join("not-a-directory");
+        std::fs::write(&blocked_parent, "block").unwrap();
+        let store = store::BundleStore::with_file(blocked_parent.join("bundles.json"));
+        let error = record_python_dependency_repair(
+            &store,
+            &gongwen_manifest_for_repair_test(),
+            Some(python_asset_for_repair_test()),
+            Some("fp".into()),
+            None,
+        )
+        .unwrap_err();
+        assert!(!error.is_empty());
+    }
+
+    /// mcp.json 已实际改写但 BundleStore 登记失败时，改写标志不得丢失——调用方
+    /// 依赖它递增 mcp 配置修订号触发 engine 重建，丢了修复就要等应用重启才生效。
+    #[test]
+    fn repair_reports_mcp_json_rewrite_even_when_store_registration_fails() {
+        with_temp_home(|| {
+            let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
+            manager.save_installed(&["gongwen".to_string()]).unwrap();
+            let mcp_path = crate::platform::paths::mcp_config_path();
+            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &mcp_path,
+                r#"{"servers":{"gongwen":{"command":"python","args":["server.py"]}}}"#,
+            )
+            .unwrap();
+            let dependencies_dir = crate::platform::paths::python_packages_dir("test-repair-lock");
+            std::fs::create_dir_all(&dependencies_dir).unwrap();
+            // 让 BundleStore 读写失败：bundles.json 被同名目录占用。
+            let blocked_store = crate::platform::paths::pinvou3_home()
+                .join("marketplace")
+                .join("bundles.json");
+            std::fs::create_dir(&blocked_store).unwrap();
+
+            let (changed, outcome) =
+                manager.repair_installed_builtin_python_dependency_with("gongwen", move |_| {
+                    Ok(Some(python_dependencies::InstalledPythonDependencies {
+                        dir: dependencies_dir,
+                        asset: python_asset_for_repair_test(),
+                    }))
+                });
+            let error = outcome.expect_err("store 被占用时登记必须失败");
+            assert!(
+                error.contains("更新依赖登记失败"),
+                "unexpected error: {error}"
+            );
+            assert!(changed, "mcp.json 已改写时即使登记失败也必须上报告改写");
+        });
+    }
+
+    #[test]
+    fn uninstall_waiting_for_repair_cannot_leave_ghost_record() {
+        with_temp_home(|| {
+            let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
+            manager.save_installed(&["gongwen".to_string()]).unwrap();
+            let mcp_path = crate::platform::paths::mcp_config_path();
+            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &mcp_path,
+                r#"{"servers":{"gongwen":{"command":"python","args":["server.py"]}}}"#,
+            )
+            .unwrap();
+            assert_eq!(store::BundleStore::new().get("gongwen").unwrap(), None);
+
+            let dependencies_dir = crate::platform::paths::python_packages_dir("test-repair-lock");
+            std::fs::create_dir_all(&dependencies_dir).unwrap();
+
+            let (repair_locked_tx, repair_locked_rx) = std::sync::mpsc::channel();
+            let (finish_repair_tx, finish_repair_rx) = std::sync::mpsc::channel();
+            let repair = std::thread::spawn(move || {
+                let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
+                let (_changed, outcome) =
+                    manager.repair_installed_builtin_python_dependency_with("gongwen", move |_| {
+                        repair_locked_tx.send(()).unwrap();
+                        finish_repair_rx.recv().unwrap();
+                        Ok(Some(python_dependencies::InstalledPythonDependencies {
+                            dir: dependencies_dir,
+                            asset: python_asset_for_repair_test(),
+                        }))
+                    });
+                outcome.unwrap();
+            });
+            repair_locked_rx.recv().unwrap();
+            let operation_lock = tool_operation_lock("gongwen");
+            assert!(
+                operation_lock.try_lock().is_err(),
+                "production repair must hold the tool operation lock while dependencies are fetched"
+            );
+
+            let (uninstall_started_tx, uninstall_started_rx) = std::sync::mpsc::channel();
+            let uninstall = std::thread::spawn(move || {
+                uninstall_started_tx.send(()).unwrap();
+                MarketplaceManager::with_store(MemoryCredentialStore::default())
+                    .uninstall("gongwen")
+            });
+            uninstall_started_rx.recv().unwrap();
+            finish_repair_tx.send(()).unwrap();
+            repair.join().unwrap();
+            uninstall.join().unwrap().unwrap();
+
+            let manager = MarketplaceManager::with_store(MemoryCredentialStore::default());
+            assert!(!manager.installed_ids().contains(&"gongwen".to_string()));
+            assert_eq!(store::BundleStore::new().get("gongwen").unwrap(), None);
+        });
+    }
 
     /// 把 PINVOU3_HOME 指到一个干净临时目录跑闭包,跑完恢复并清理。
     /// 借 paths 的 ENV_LOCK 跟其它 mutate PINVOU3_HOME 的测试串行,避免互相覆盖。
@@ -1624,41 +2011,42 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_patsnap_does_not_remove_other_connector_secrets() {
+    fn uninstall_remote_secret_does_not_remove_other_connector_secrets() {
         // 同时覆盖单连接器卸载契约(原 uninstall_remote_secret_header_removes_
         // credential_and_env):卸载必须删除 server 条目、凭据引用与回灌 env;
         // 并额外断言其他连接器(qcc)的凭据与 env 不受影响。
         with_temp_home(|| {
             write_tool_manifest(
-                "patsnap-search",
+                "test-patsnap-secret",
                 r#"{
-                    "id":"patsnap-search","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
+                    "id":"test-patsnap-secret","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
                     "mcp_tools":[],"command":"","args":[],
                     "secret_headers":[{"header":"Authorization","scheme":"Bearer","source_key":"PATSNAP_API_KEY","provider":"patsnap","required":true}],
-                    "servers":[{"name":"patsnap-search","url":"https://connect.zhihuiya.com/2b0355/logic-mcp"}]
+                    "servers":[{"name":"test-patsnap-secret","url":"https://example.invalid/patsnap-mcp"}]
                 }"#,
             );
             write_tool_manifest(
-                "qcc",
+                "test-qcc-secret",
                 r#"{
-                    "id":"qcc","name":"QCC","description":"d","version":"1","icon":"x","category":"c",
+                    "id":"test-qcc-secret","name":"QCC","description":"d","version":"1","icon":"x","category":"c",
                     "mcp_tools":[],"command":"","args":[],
                     "secret_headers":[{"header":"Authorization","scheme":"Bearer","source_key":"QCC_API_KEY","provider":"qcc","required":true}],
-                    "servers":[{"name":"qcc-company","url":"https://example.invalid/mcp"}]
+                    "servers":[{"name":"test-qcc-secret","url":"https://example.invalid/qcc-mcp"}]
                 }"#,
             );
             let store = MemoryCredentialStore::default();
             let patsnap_secret = secret_value("patsnap-isolated");
             let qcc_secret = secret_value("qcc-isolated");
-            let patsnap_ref = mcp_secret_reference("patsnap-search", "header", "PATSNAP_API_KEY");
-            let qcc_ref = mcp_secret_reference("qcc", "header", "QCC_API_KEY");
+            let patsnap_ref =
+                mcp_secret_reference("test-patsnap-secret", "header", "PATSNAP_API_KEY");
+            let qcc_ref = mcp_secret_reference("test-qcc-secret", "header", "QCC_API_KEY");
             store.set(&patsnap_ref, &patsnap_secret).unwrap();
             store.set(&qcc_ref, &qcc_secret).unwrap();
             let mgr = MarketplaceManager::with_store(store.clone());
 
-            mgr.install("patsnap-search", &std::collections::HashMap::new())
+            mgr.install("test-patsnap-secret", &std::collections::HashMap::new())
                 .unwrap();
-            mgr.install("qcc", &std::collections::HashMap::new())
+            mgr.install("test-qcc-secret", &std::collections::HashMap::new())
                 .unwrap();
             assert_eq!(
                 std::env::var("PINVOU3_MCP_SECRET_QCC_API_KEY")
@@ -1667,11 +2055,11 @@ mod tests {
                 Some(qcc_secret.as_str())
             );
 
-            mgr.uninstall("patsnap-search").unwrap();
+            mgr.uninstall("test-patsnap-secret").unwrap();
 
             let mcp = read_mcp_json();
-            assert!(mcp["servers"].get("patsnap-search").is_none());
-            assert!(mcp["servers"].get("qcc-company").is_some());
+            assert!(mcp["servers"].get("test-patsnap-secret").is_none());
+            assert!(mcp["servers"].get("test-qcc-secret").is_some());
             assert_eq!(store.get(&patsnap_ref).unwrap(), None);
             assert!(std::env::var("PINVOU3_MCP_SECRET_PATSNAP_API_KEY").is_err());
             assert_eq!(store.get(&qcc_ref).unwrap(), Some(qcc_secret.clone()));
@@ -1689,14 +2077,14 @@ mod tests {
         with_temp_home_async(|| async {
             let mock = spawn_mock_mcp_server("valid-token").await;
             write_tool_manifest(
-                "patsnap-search",
+                "test-patsnap-validation",
                 &format!(
                     r#"{{
-                    "id":"patsnap-search","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
+                    "id":"test-patsnap-validation","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
                     "mcp_tools":["patsnap_search","patsnap_fetch"],"command":"","args":[],
                     "validate_on_install":true,
                     "secret_headers":[{{"header":"Authorization","scheme":"Bearer","source_key":"PATSNAP_API_KEY","provider":"patsnap","required":true}}],
-                    "servers":[{{"name":"patsnap-search","url":"{}"}}]
+                    "servers":[{{"name":"test-patsnap-validation","url":"{}"}}]
                 }}"#,
                     mock.url
                 ),
@@ -1706,21 +2094,23 @@ mod tests {
             let mut config = std::collections::HashMap::new();
             config.insert("PATSNAP_API_KEY".to_string(), "wrong-token".to_string());
 
-            mgr.install("patsnap-search", &config).unwrap();
+            mgr.install("test-patsnap-validation", &config).unwrap();
             let err = mgr
-                .validate_remote_connection("patsnap-search")
+                .validate_remote_connection("test-patsnap-validation")
                 .await
                 .unwrap_err();
-            mgr.uninstall("patsnap-search").unwrap();
+            mgr.uninstall("test-patsnap-validation").unwrap();
 
             assert!(err.contains("API Key 无效"), "unexpected error: {err}");
             assert!(!err.contains("无法连接远程 MCP 服务"));
-            assert!(!mgr.installed_ids().contains(&"patsnap-search".to_string()));
+            assert!(!mgr
+                .installed_ids()
+                .contains(&"test-patsnap-validation".to_string()));
             let mcp = read_mcp_json();
-            assert!(mcp["servers"].get("patsnap-search").is_none());
+            assert!(mcp["servers"].get("test-patsnap-validation").is_none());
             assert_eq!(store
                 .get(&mcp_secret_reference(
-                    "patsnap-search",
+                    "test-patsnap-validation",
                     "header",
                     "PATSNAP_API_KEY"
                 ))
@@ -1736,14 +2126,14 @@ mod tests {
         with_temp_home_async(|| async {
             let mock = spawn_mock_mcp_server("valid-token").await;
             write_tool_manifest(
-                "patsnap-search",
+                "test-patsnap-validation",
                 &format!(
                     r#"{{
-                    "id":"patsnap-search","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
+                    "id":"test-patsnap-validation","name":"Patsnap","description":"d","version":"1","icon":"x","category":"c",
                     "mcp_tools":["patsnap_search","patsnap_fetch"],"command":"","args":[],
                     "validate_on_install":true,
                     "secret_headers":[{{"header":"Authorization","scheme":"Bearer","source_key":"PATSNAP_API_KEY","provider":"patsnap","required":true}}],
-                    "servers":[{{"name":"patsnap-search","url":"{}"}}]
+                    "servers":[{{"name":"test-patsnap-validation","url":"{}"}}]
                 }}"#,
                     mock.url
                 ),
@@ -1753,23 +2143,25 @@ mod tests {
             let mut config = std::collections::HashMap::new();
             config.insert("PATSNAP_API_KEY".to_string(), "valid-token".to_string());
 
-            mgr.install("patsnap-search", &config).unwrap();
+            mgr.install("test-patsnap-validation", &config).unwrap();
             let validation = mgr
-                .validate_remote_connection("patsnap-search")
+                .validate_remote_connection("test-patsnap-validation")
                 .await
                 .unwrap();
 
-            assert!(mgr.installed_ids().contains(&"patsnap-search".to_string()));
+            assert!(mgr
+                .installed_ids()
+                .contains(&"test-patsnap-validation".to_string()));
             let mcp = read_mcp_json();
             assert_eq!(
-                mcp["servers"]["patsnap-search"]["bearer_token_env_var"],
+                mcp["servers"]["test-patsnap-validation"]["bearer_token_env_var"],
                 "PINVOU3_MCP_SECRET_PATSNAP_API_KEY"
             );
             assert!(!mcp.to_string().contains("valid-token"));
             assert_eq!(
                 store
                     .get(&mcp_secret_reference(
-                        "patsnap-search",
+                        "test-patsnap-validation",
                         "header",
                         "PATSNAP_API_KEY"
                     ))
@@ -2105,6 +2497,42 @@ mod tests {
                 "跳过 pip 后供给应照常写入 mcp.json"
             );
             assert!(mgr.installed_ids().contains(&"up-pip".to_string()));
+        });
+    }
+
+    /// Windows 内置解释器使用隔离环境，普通商店重装不能把上传 manifest 的任意
+    /// `pip_dependencies` 当作可信下载指令。首次上传仍只告警并完成供给；卸载后从
+    /// 卡片普通重装时必须明确拒绝，避免再次产生“安装成功但 import 必然失败”。
+    #[test]
+    fn reinstall_upload_with_unlocked_pip_dependencies_is_rejected() {
+        if std::env::consts::OS != "windows" {
+            return;
+        }
+        with_temp_home(|| {
+            write_tool_manifest(
+                "up-pip-reinstall",
+                r#"{
+                    "id":"up-pip-reinstall","name":"Up","description":"d","version":"1","icon":"x","category":"c",
+                    "mcp_tools":[],"command":"python","args":["server.py"],
+                    "pip_dependencies":["pinvou3-nonexistent-pkg-xyz"]
+                }"#,
+            );
+            let mgr = MarketplaceManager::new();
+            mgr.install_upload(
+                "up-pip-reinstall",
+                store::BundleSource::Upload("up-pip.zip".to_string()),
+            )
+            .unwrap();
+            mgr.uninstall("up-pip-reinstall").unwrap();
+
+            let error = mgr
+                .install("up-pip-reinstall", &std::collections::HashMap::new())
+                .unwrap_err();
+
+            assert!(error.contains("未经过 Windows 可验证依赖锁"), "{error}");
+            assert!(!mgr
+                .installed_ids()
+                .contains(&"up-pip-reinstall".to_string()));
         });
     }
 

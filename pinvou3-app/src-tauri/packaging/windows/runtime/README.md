@@ -29,7 +29,7 @@ submodule checkout 会显式禁用 LFS smudge，随后检查受 LFS 管理的实
 `.git/modules/private-runtimes/windows/lfs/objects` 独立恢复到全新 workspace。脚本输出
 `pinvou3-windows-runtime-v5-<commit>-<lock-sha-prefix>` 形式的 Jenkins 缓存键；lock 或缓存 schema 变化时不会复用旧缓存。
 
-校验内容包括 submodule commit、gitlink、origin URL、工作树状态、manifest SHA-256、文件大小与 SHA-256，以及受管理 ZIP 解压后的逐文件清单。
+校验内容包括 submodule commit、gitlink、origin URL、工作树状态、manifest SHA-256、文件大小与 SHA-256，以及受管理 ZIP 解压后的逐文件清单。完整 staging 还会自动枚举所有声明 Windows Python 依赖的内置 MCP，核对暂存基础 Python ABI、target 绑定的锁 hash 及每个 wheel 的 PEP 425 标签（不预装第三方包），避免升级 Python 后沿用不兼容 wheel 锁。
 
 首次完整校验后，脚本会在 `target/windows-runtime/.verified-lock` 记录 runtime commit、manifest SHA-256、lock 文件
 SHA-256、目标平台和 resolver schema。staging 同时生成包含全部暂存文件路径、大小和 SHA-256 的 `.stage-manifest.json`，

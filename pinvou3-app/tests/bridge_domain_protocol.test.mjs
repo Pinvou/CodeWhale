@@ -8,12 +8,13 @@ import { desktopBridgeApi } from './bridge_domain_contract.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const bridgeRoot = path.join(root, 'src', 'platform', 'tauri');
+const appMainSource = fs.readFileSync(path.join(root, 'src', 'app', 'main.jsx'), 'utf8');
 
 function read(relativePath) {
   return fs.readFileSync(path.join(bridgeRoot, relativePath), 'utf8');
 }
 
-function extractCalls(source, callee) {
+function extractCalls(source, callee, normalize = true) {
   const calls = [];
   const needle = `${callee}(`;
   let cursor = 0;
@@ -53,7 +54,8 @@ function extractCalls(source, callee) {
       else if (char === ')') depth -= 1;
     }
     assert.equal(depth, 0, `unclosed ${callee} call near offset ${cursor}`);
-    calls.push(source.slice(cursor, index).replace(/\s+/g, ' ').trim());
+    const call = source.slice(cursor, index);
+    calls.push(normalize ? call.replace(/\s+/g, ' ').trim() : call);
     cursor = index;
   }
   return calls;
@@ -218,4 +220,52 @@ try {
   if (previousTauri === undefined) delete globalThis.__TAURI__;
   else globalThis.__TAURI__ = previousTauri;
 }
+
+assert.doesNotMatch(
+  read('bridge.js'),
+  /repairPythonDependenciesAfterFirstFrame|repair_python_dependencies_after_first_frame/u,
+  'marketplace startup repair must not be exposed through the knowledge bridge domain',
+);
+assert.match(
+  appMainSource,
+  /invokeTauri\('repair_python_dependencies_after_first_frame'\)/u,
+  'marketplace startup repair must invoke its Tauri command directly from the app lifecycle',
+);
+const firstFrameCall = extractCalls(appMainSource, 'window.requestAnimationFrame', false)
+  .find(call => call.includes("mark('react:first_animation_frame')"));
+assert.ok(firstFrameCall, 'first animation frame startup callback must exist');
+const firstFrameBody = firstFrameCall.slice('window.requestAnimationFrame('.length, -1);
+const secondFrameCall = extractCalls(firstFrameBody, 'window.requestAnimationFrame', false)
+  .find(call => call.includes("mark('react:first_frame_presented')"));
+assert.ok(secondFrameCall, 'second animation frame startup callback must exist');
+assert.match(
+  secondFrameCall,
+  /mark\('react:first_frame_presented'\)[\s\S]*void repairPythonDependenciesAfterFirstFrame\(\);/u,
+  'marketplace dependency repair must remain inside the second animation frame after first-frame presentation',
+);
+const dependencyRepairStart = appMainSource.indexOf(
+  'void repairPythonDependenciesAfterFirstFrame();',
+);
+assert.equal(
+  appMainSource.indexOf('void repairPythonDependenciesAfterFirstFrame();', dependencyRepairStart + 1),
+  -1,
+  'marketplace dependency repair must have exactly one startup call site',
+);
+
+const marketplaceCommands = fs.readFileSync(
+  path.join(root, 'src-tauri', 'src', 'app', 'commands', 'marketplace.rs'),
+  'utf8',
+);
+const uninstallStart = marketplaceCommands.indexOf('pub async fn uninstall_marketplace_tool(');
+const uninstallEnd = marketplaceCommands.indexOf(
+  'pub(super) fn uninstall_marketplace_tool_sync(',
+  uninstallStart,
+);
+assert.ok(uninstallStart >= 0 && uninstallEnd > uninstallStart, 'marketplace uninstall command boundary must exist');
+const uninstallCommand = marketplaceCommands.slice(uninstallStart, uninstallEnd);
+assert.match(
+  uninstallCommand,
+  /tauri::async_runtime::spawn_blocking\s*\([\s\S]*uninstall_marketplace_tool_sync/u,
+  'desktop marketplace uninstall must not wait for the synchronous tool lock on the async runtime',
+);
 console.log('bridge domain API and protocol contracts passed');
