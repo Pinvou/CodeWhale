@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 375 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 343`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `375` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。业务与安全两位独立审核者均已确认最终设计通过，APT-069–APT-086 的全部 CODE 任务已收敛。
+全量核验汇总：`已实现 343`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `375` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。业务与安全两位独立审核者均已确认最终设计通过，APT-069–APT-086 的全部 CODE 任务已收敛。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -263,13 +263,13 @@
 | PAY-45 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PRODUCT-CONTROLS | NOT_DEPLOYED | 目录上架事实保持独立；Provider 与商品级 `new_orders_enabled` 运行时控制共同拦截创建订单，自动止损只更新控制表并保留来源案件和版本 |
 | PAY-46 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-RECOVERY | NOT_DEPLOYED | `PAYMENT_PROVIDER_RESUME` 复用 Account 双人审批，冻结 Provider/商品控制版本与探测订单；Billing 执行前现场查询 Provider、复核 P0/P1 案件、映射及人员隔离后原子恢复并写不可变审计 |
 | PAY-47 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PRODUCT-CONTROLS | NOT_DEPLOYED | 商品目录继续返回暂停商品，并以 `PROVIDER_PAUSED`/`PRODUCT_PAUSED` 和稳定原因码说明运行时不可售性；服务端创建订单同步失败关闭 |
-| PAY-48 | 已实现 | AUDIT_HEAD | GO-UNIT; PRODUCT-CATALOG-RUNTIME | NOT_DEPLOYED | Billing 已实现 DRAFT/ON_SALE/OFF_SALE/DELETED 目录聚合及添加、发布、下架、删除领域命令；管理 HTTP 入口由 APT-084 提供。 |
-| PAY-49 | 已实现 | AUDIT_HEAD | GO-UNIT; PRODUCT-ADMISSION-LIFECYCLE | NOT_DEPLOYED | 发布快照、异步验证轮次、完整指纹、追加证据/绑定/撤销、续证与失效止损均已持久化；生产 Provider 准入仍需 APT-048 环境验收。 |
-| PAY-50 | 已实现 | AUDIT_HEAD | GO-UNIT; PRODUCT-CATALOG-RUNTIME | NOT_DEPLOYED | 下架原子结束活动映射和当前准入绑定，新单失败关闭，历史订单继续引用冻结映射快照。 |
-| PAY-51 | 已实现 | AUDIT_HEAD | GO-UNIT; PRODUCT-CATALOG-RUNTIME | NOT_DEPLOYED | 删除使用保留稳定标识与 ever_published 的逻辑墓碑；发布映射、订单和审计事实不删除、不复用。 |
-| PAY-52 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | NOT_DEPLOYED | 列表、下单和 H3C 查询均动态解析数据库目录/映射；下单先提交稳定本地意图并释放锁，再调用 Provider，未知结果保留恢复状态。 |
-| PAY-53 | 已实现 | AUDIT_HEAD | GO-UNIT; RECHARGE-PRODUCT-ADMIN | NOT_DEPLOYED | 商品命令校验 expected_version、16–128 字符幂等键、终端 OIDC auth_time 与不可变命令审计；旧版本、异请求同键和陈旧认证失败关闭。 |
-| PAY-54 | 已实现 | AUDIT_HEAD | PRODUCT-DOCUMENT-BASELINE | NOT_DEPLOYED | 需求、架构、任务和状态基线不再记录运行时商品标识、金额、权益值或商品数量；商品变更只进入目录和审计。 |
+| PAY-48 | 已实现 | AUDIT_HEAD | GO-UNIT; PRODUCT-CATALOG-RUNTIME | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | Billing 已实现 DRAFT/ON_SALE/OFF_SALE/DELETED 目录聚合及添加、发布、下架、删除领域命令；云端迁移、目录聚合和服务健康已验证。 |
+| PAY-49 | 已实现 | AUDIT_HEAD | GO-UNIT; PRODUCT-ADMISSION-LIFECYCLE | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 发布快照、异步验证轮次、完整指纹、追加证据/绑定/撤销、续证与失效止损均已持久化；生产 Provider 准入仍需 APT-048 环境验收。 |
+| PAY-50 | 已实现 | AUDIT_HEAD | GO-UNIT; PRODUCT-CATALOG-RUNTIME | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 下架原子结束活动映射和当前准入绑定，新单失败关闭，历史订单继续引用冻结映射快照。 |
+| PAY-51 | 已实现 | AUDIT_HEAD | GO-UNIT; PRODUCT-CATALOG-RUNTIME | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 删除使用保留稳定标识与 ever_published 的逻辑墓碑；发布映射、订单和审计事实不删除、不复用。 |
+| PAY-52 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 列表、下单和 H3C 查询均动态解析数据库目录/映射；下单先提交稳定本地意图并释放锁，再调用 Provider，未知结果保留恢复状态。 |
+| PAY-53 | 已实现 | AUDIT_HEAD | GO-UNIT; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 商品命令校验 expected_version、16–128 字符幂等键、终端 OIDC auth_time 与不可变命令审计；旧版本、异请求同键和陈旧认证失败关闭。 |
+| PAY-54 | 已实现 | AUDIT_HEAD | PRODUCT-DOCUMENT-BASELINE | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 需求、架构、任务和状态基线不再记录运行时商品标识、金额、权益值或商品数量；商品变更只进入目录和审计。 |
 | UI-02 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 桌面区分注册、自动登录与钱包初始化，展示 `PROVISIONING`/`REPAIR_REQUIRED`，初始化期间不请求余额、充值或平台模型 |
 | UI-13 | 已实现 | DOC_CURRENT | DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 三语用量页可停止当前客户端交付，并分别展示执行和结算状态；UNSUPPORTED 明示后台继续结束并按可信实际用量结算，不显示为即时免费 |
 | UI-14 | 已实现 | DOC_CURRENT | ACCOUNT-CLOSURE-SAGA; UI-LINT; ACCOUNT-PORTAL-BUILD | NOT_DEPLOYED | 个人中心提供明确确认、阶段/SLA、脱敏阻断分类和用户动作；轮询持久状态，不展示 Provider 响应、内部资源 ID 或其他用户信息 |
@@ -313,9 +313,9 @@
 | ADM-47 | 已实现 | DOC_CURRENT | GO-UNIT; TOKEN-OPERATIONS-ISOLATION | NOT_DEPLOYED | 普通 Token 管理路由、处理器和 OpenAPI 资源已移除，存量非平台账号/凭据/路由保存可逆隔离证据后冻结；创建和执行候选均强制 PLATFORM 管理模式。 |
 | ADM-48 | 已实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY | NOT_DEPLOYED | Break-glass 操作者与目标来自最长 15 分钟 Ed25519 签名凭据，CLI 不接受身份参数；凭据 ID 唯一防重放，审计 actor 不再伪装成恢复目标。 |
 | ADM-49 | 已实现 | DOC_CURRENT | GO-UNIT; ROLE-PERMISSION-REDESIGN; HUMAN-DELEGATION-SIGNING | NOT_DEPLOYED | Account 只在强一致原子权限通过后签发最长 5 分钟 Ed25519 委托；Billing 组织额度写入口绑定受众、权限、组织、资源、方法、路径和原始请求摘要验签，DTO 已删除自报 actor，领域审计同时固化工作负载主体、委托 ID、人类 actor 及授权版本。 |
-| ADM-50 | 已实现 | AUDIT_HEAD | AUTHORIZATION-COVERAGE; RECHARGE-PRODUCT-ADMIN | NOT_DEPLOYED | Account 新增五个原子商品权限并按审定角色真值表授予；Billing 路由逐项要求对应权限，角色名和定价宽权限不能替代。 |
-| ADM-51 | 已实现 | AUDIT_HEAD | COMMAND-POLICY; RECHARGE-PRODUCT-ADMIN | NOT_DEPLOYED | 添加、验证/撤销、上架、下架和删除均登记 AUDIT_ONLY 策略，命令记录绑定操作者、原因、幂等指纹和前后版本。 |
-| ADM-52 | 已实现 | AUDIT_HEAD | OPENAPI-LINT; PORTAL-PROXY; RECHARGE-PRODUCT-ADMIN | NOT_DEPLOYED | Billing 提供列表、添加、验证/重试/撤销、上架、下架和删除接口；OpenAPI 与 Portal 只开放精确方法和 UUID 路径。 |
+| ADM-50 | 已实现 | AUDIT_HEAD | AUTHORIZATION-COVERAGE; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | Account 新增五个原子商品权限并按审定角色真值表授予；Billing 路由逐项要求对应权限，角色名和定价宽权限不能替代。 |
+| ADM-51 | 已实现 | AUDIT_HEAD | COMMAND-POLICY; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 添加、验证/撤销、上架、下架和删除均登记 AUDIT_ONLY 策略，命令记录绑定操作者、原因、幂等指纹和前后版本。 |
+| ADM-52 | 已实现 | AUDIT_HEAD | OPENAPI-LINT; PORTAL-PROXY; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | Billing 提供列表、添加、验证/重试/撤销、上架、下架和删除接口；OpenAPI 与 Portal 只开放精确方法和 UUID 路径。 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
 | NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |
@@ -352,12 +352,12 @@
 | UI-20 | 已实现 | AUDIT_HEAD | PAYMENT-PRODUCT-CONTROLS; UI-LANGUAGE-COVERAGE | NOT_DEPLOYED | Web 个人中心、组织代购和桌面充值 Popover 均保留暂停商品展示，阻止选择/下单并提供中英日维护提示 |
 | UI-21 | 已实现 | AUDIT_HEAD | WEB-IDENTITY-LOGIN; AUTH-RISK; REGISTRATION-SAGA | NOT_DEPLOYED | Portal 未登录态直接进入 OIDC PKCE；Keycloak Pinvou 主题提供密码/短信/注册表单，短信登录和手机注册均强制一次性滑块与 6 位验证码，注册复用密码不透明引用及持久预约 Saga；密码不经过 Portal，真实短信、注册和 Cookie SSO 待部署联调 |
 | UI-22 | 已实现 | DOC_CURRENT | ROLE-PERMISSION-REDESIGN; PERMISSION-DRIVEN-UI; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 桌面账号弹层、Web 个人中心和平台后台均从 Account 权威授权上下文决定入口、只读态和操作可用性，不按角色名推导权限；个人、平台、组织任一授权版本变化均使缓存失效并刷新，退出登录和注销进度保持可达，服务端权限拒绝仍是最终边界。 |
-| UI-23 | 已实现 | AUDIT_HEAD | RECHARGE-PRODUCT-ADMIN; PORTAL-STEP-UP | NOT_DEPLOYED | 后台按五项商品原子权限展示三语列表、添加、验证、上架、下架、删除和撤销入口；认证过期时保存只读草稿并完成 OIDC step-up，返回后不自动重放写请求。 |
+| UI-23 | 已实现 | AUDIT_HEAD | RECHARGE-PRODUCT-ADMIN; PORTAL-STEP-UP | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 后台按五项商品原子权限展示三语列表、添加、验证、上架、下架、删除和撤销入口；认证过期时保存只读草稿并完成 OIDC step-up，返回后不自动重放写请求。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
 | NFR-52 | 已实现 | DOC_CURRENT | AUTHORIZATION-COVERAGE-GATE | NOT_DEPLOYED | 统一验证与正式客户端发布门禁自动扫描生产源码；新增路由文件、任务、事件或 CLI 未分类即失败，公开登录/注册、支付回调、健康检查、模拟器等例外必须登记稳定专用协议策略。 |
-| NFR-53 | 已实现 | AUDIT_HEAD | PRODUCT-DOCUMENT-BASELINE | NOT_DEPLOYED | 统一 verify 扫描四份基线文档，并以负向合同验证商品标识、价格、权益值和商品数量重新落文档时发布失败。 |
+| NFR-53 | 已实现 | AUDIT_HEAD | PRODUCT-DOCUMENT-BASELINE | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 统一 verify 扫描四份基线文档，并以负向合同验证商品标识、价格、权益值和商品数量重新落文档时发布失败。 |
 
 ### 0.2 既有目标编号证据索引
 
