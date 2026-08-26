@@ -131,7 +131,7 @@ func (s *Service) login(w http.ResponseWriter, r *http.Request) {
 	query.Set("code_challenge_method", "S256")
 	if reauthenticate {
 		query.Set("prompt", "login")
-		query.Set("max_age", "0")
+		query.Set("max_age", "900")
 	}
 	redirect := *s.config.AuthorizationURL
 	redirect.RawQuery = query.Encode()

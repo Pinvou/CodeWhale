@@ -115,7 +115,7 @@ func TestReauthenticationForcesIdentityLoginAndTracksPreviousSession(t *testing.
 		t.Fatalf("status = %d", response.Code)
 	}
 	location, _ := url.Parse(response.Header().Get("Location"))
-	if location.Query().Get("prompt") != "login" || location.Query().Get("max_age") != "0" {
+	if location.Query().Get("prompt") != "login" || location.Query().Get("max_age") != "900" {
 		t.Fatalf("reauthentication must force a fresh identity login: %s", location)
 	}
 	flow := store.flows[location.Query().Get("state")]
@@ -351,6 +351,9 @@ func TestAdminProxyAllowsOnlyDocumentedManagementEndpoints(t *testing.T) {
 	}
 	if !billingAdminPathAllowed(http.MethodGet, "/admin/v1/metering-units") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/drafts") || !billingAdminPathAllowed(http.MethodPut, "/admin/v1/pricing/"+userID+"/draft") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/pricing/"+userID+"/preview") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/"+userID+"/publish") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/pricing/"+userID+"/transition") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/metering-units/"+userID+"/deactivate") {
 		t.Fatal("admin portal must expose versioned metering and pricing lifecycle operations")
+	}
+	if !billingAdminPathAllowed(http.MethodGet, "/admin/v1/recharge-products") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/publish") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/unpublish") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/delete") || !billingAdminPathAllowed(http.MethodGet, "/admin/v1/recharge-products/"+userID+"/admission-verifications") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/admission-verifications/"+memberID+"/retry") || !billingAdminPathAllowed(http.MethodPost, "/admin/v1/recharge-products/"+userID+"/admission-verifications/"+memberID+"/revoke") {
+		t.Fatal("admin portal must expose only the recharge product catalog lifecycle")
 	}
 	if !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-policies") || !accountAdminPathAllowed(http.MethodGet, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests") || !accountAdminPathAllowed(http.MethodPut, "/admin/v1/approval-requests/"+userID) || !accountAdminPathAllowed(http.MethodPost, "/admin/v1/approval-requests/"+userID+"/actions/decide") {
 		t.Fatal("approval workflow paths must be allowlisted")
