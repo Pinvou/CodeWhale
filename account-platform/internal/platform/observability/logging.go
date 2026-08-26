@@ -54,6 +54,7 @@ var safeLogFields = map[string]struct{}{
 	"stage": {}, "operation_id": {}, "operation_status": {}, "operation_version": {},
 	"stored_fingerprint": {}, "calculated_fingerprint": {}, "stored_fingerprint_length": {},
 	"username_length": {}, "mobile_length": {}, "policy_version": {}, "challenge_id": {},
+	"rows_affected": {},
 }
 
 // NewLogger returns the only logger schema used by Account Platform services.

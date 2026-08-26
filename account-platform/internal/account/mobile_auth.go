@@ -341,7 +341,7 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 	if !hmac.Equal(operation.RequestFingerprint, fingerprint[:]) {
 		slog.WarnContext(ctx, "registration operation conflict",
 			"stage", "fingerprint_check",
-			"operation_id", operation.ID,
+			"operation_id", operation.ID.String(),
 			"operation_status", operation.Status,
 			"operation_version", operation.Version,
 			"stored_fingerprint", hex.EncodeToString(operation.RequestFingerprint),
@@ -350,7 +350,7 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 			"username_length", len(operation.Username),
 			"mobile_length", len(operation.Mobile),
 			"policy_version", operation.PasswordPolicyVersion,
-			"challenge_id", operation.ChallengeID,
+			"challenge_id", operation.ChallengeID.String(),
 		)
 		return RegistrationResult{}, ErrRegistrationConflict
 	}
@@ -375,7 +375,7 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 		}
 		if err := s.repository.ConsumeRegistrationSMS(ctx, operationID, operation.ChallengeID, operation.Mobile, verified); err != nil {
 			if errors.Is(err, ErrRegistrationConflict) {
-				slog.WarnContext(ctx, "registration operation conflict", "stage", "consume_sms", "operation_id", operation.ID, "operation_status", operation.Status, "operation_version", operation.Version)
+				slog.WarnContext(ctx, "registration operation conflict", "stage", "consume_sms", "operation_id", operation.ID.String(), "operation_status", operation.Status, "operation_version", operation.Version)
 			}
 			return RegistrationResult{}, err
 		}
@@ -386,7 +386,7 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 	}
 	result, err := s.resumeRegistration(ctx, operation)
 	if errors.Is(err, ErrRegistrationConflict) {
-		slog.WarnContext(ctx, "registration operation conflict", "stage", "resume_registration", "operation_id", operation.ID, "operation_status", operation.Status, "operation_version", operation.Version)
+		slog.WarnContext(ctx, "registration operation conflict", "stage", "resume_registration", "operation_id", operation.ID.String(), "operation_status", operation.Status, "operation_version", operation.Version)
 	}
 	return result, err
 }

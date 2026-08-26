@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"time"
@@ -213,10 +215,30 @@ FOR UPDATE OF ro,sc`, operationID, challengeID, mobile).Scan(&status, &attempts,
 	command, err := tx.Exec(ctx, `
 UPDATE registration_operations SET status='REGISTRATION_IN_PROGRESS',lease_expires_at=$2+interval '30 minutes',next_retry_at=$2,
 version=version+1,last_error_code=NULL,updated_at=$2 WHERE id=$1 AND status='SMS_PENDING'`, operationID, now)
-	if err != nil || command.RowsAffected() != 1 {
+	if err != nil {
+		slog.WarnContext(ctx, "registration operation conflict", "stage", "consume_sms_update_error", "operation_id", operationID.String(), "error_code", registrationTransitionErrorCode(err))
+		return fmt.Errorf("registration transition update: %w", err)
+	}
+	if command.RowsAffected() != 1 {
+		slog.WarnContext(ctx, "registration operation conflict", "stage", "consume_sms_rows_affected", "operation_id", operationID.String(), "rows_affected", command.RowsAffected())
 		return ErrRegistrationConflict
 	}
 	return tx.Commit(ctx)
+}
+
+func registrationTransitionErrorCode(err error) string {
+	type sqlStateError interface{ SQLState() string }
+	var sqlState sqlStateError
+	if errors.As(err, &sqlState) && sqlState.SQLState() != "" {
+		return "PG_" + sqlState.SQLState()
+	}
+	if errors.Is(err, context.Canceled) {
+		return "CONTEXT_CANCELED"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "CONTEXT_DEADLINE_EXCEEDED"
+	}
+	return "DATABASE_UPDATE_ERROR"
 }
 
 func (r *PostgresRepository) MarkRegistrationIdentityCreating(ctx context.Context, operationID uuid.UUID) error {
