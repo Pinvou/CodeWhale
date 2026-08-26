@@ -470,7 +470,7 @@ func TestMobileAuthRegisterVerifiesWithProviderBeforeProvisioning(t *testing.T) 
 	}
 }
 
-func TestMobileAuthRegisterUsesFrozenChallengeInsteadOfDuplicateBrowserValue(t *testing.T) {
+func TestMobileAuthRegisterUsesFrozenOperationInsteadOfDuplicateBrowserValues(t *testing.T) {
 	repository := &mobileAuthRepositoryFake{}
 	sms := &smsProviderFake{verified: true}
 	service := newMobileAuthForTest(t, repository, sms, &identityProvisionerFake{})
@@ -478,8 +478,7 @@ func TestMobileAuthRegisterUsesFrozenChallengeInsteadOfDuplicateBrowserValue(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	duplicateBrowserChallenge := uuid.New()
-	result, err := service.Register(context.Background(), challenge.RegistrationOperationID, challenge.RegistrationQueryToken, "pinvou.user", "13800138000", duplicateBrowserChallenge, "123456", "password-handle", "user-v1")
+	result, err := service.Register(context.Background(), challenge.RegistrationOperationID, challenge.RegistrationQueryToken, "other.user", "13900139000", uuid.New(), "123456", "password-handle", "stale-policy")
 	if err != nil || result.UserID == nil {
 		t.Fatalf("register result=%+v err=%v", result, err)
 	}

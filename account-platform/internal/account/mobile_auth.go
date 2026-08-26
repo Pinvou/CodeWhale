@@ -320,31 +320,23 @@ func waitForResponseFloor(ctx context.Context, startedAt time.Time, floor time.D
 	}
 }
 
-func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID, queryToken, rawUsername, rawMobile string, _ uuid.UUID, code, passwordHandle, passwordPolicyVersion string) (RegistrationResult, error) {
-	username, err := NormalizeRegistrationUsername(rawUsername)
-	if err != nil {
-		return RegistrationResult{}, err
-	}
-	mobile, err := NormalizeMainlandMobile(rawMobile)
-	if err != nil {
-		return RegistrationResult{}, err
-	}
+func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID, queryToken, _rawUsername, _rawMobile string, _ uuid.UUID, code, passwordHandle, _passwordPolicyVersion string) (RegistrationResult, error) {
 	operation, err := s.authorizeRegistrationQuery(ctx, operationID, queryToken)
 	if err != nil {
 		return RegistrationResult{}, err
 	}
-	if err := s.identities.ValidateMobileUser(ctx, operationID, username, mobile, passwordHandle, passwordPolicyVersion); err != nil {
+	// The query token selects the immutable registration operation. All identity
+	// and SMS bindings are read back from that server-side record; duplicate
+	// browser fields are accepted only for wire compatibility and never become
+	// an independent source of truth.
+	if err := s.identities.ValidateMobileUser(ctx, operationID, operation.Username, operation.Mobile, passwordHandle, operation.PasswordPolicyVersion); err != nil {
 		if operation.UserID != nil && errors.Is(err, ErrPasswordReferenceInvalid) {
 			return registrationResult(operation), nil
 		}
 		return RegistrationResult{}, err
 	}
-	// The query token selects the immutable registration operation. Its frozen
-	// challenge is authoritative; accepting the browser's duplicate challenge
-	// value here can splice independently persisted Keycloak authentication-note
-	// updates and reject an otherwise valid registration retry.
-	fingerprint := registrationFingerprint(username, mobile, operation.ChallengeID, passwordPolicyVersion)
-	if operation.Username != username || operation.Mobile != mobile || operation.PasswordPolicyVersion != passwordPolicyVersion || !hmac.Equal(operation.RequestFingerprint, fingerprint[:]) {
+	fingerprint := registrationFingerprint(operation.Username, operation.Mobile, operation.ChallengeID, operation.PasswordPolicyVersion)
+	if !hmac.Equal(operation.RequestFingerprint, fingerprint[:]) {
 		return RegistrationResult{}, ErrRegistrationConflict
 	}
 	if operation.Status == "COMPENSATED" || operation.Status == "EXPIRED" {
@@ -355,18 +347,18 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 	}
 	if operation.Status == "SMS_PENDING" {
 		risk := authRiskFromContext(ctx)
-		if err := s.repository.AdmitSMSVerification(ctx, operation.ChallengeID, mobile, SMSPurposeRegister, risk.source, risk.device); err != nil {
+		if err := s.repository.AdmitSMSVerification(ctx, operation.ChallengeID, operation.Mobile, SMSPurposeRegister, risk.source, risk.device); err != nil {
 			return RegistrationResult{}, err
 		}
-		verificationData, readyErr := s.repository.SMSChallengeReady(ctx, operation.ChallengeID, mobile, SMSPurposeRegister)
+		verificationData, readyErr := s.repository.SMSChallengeReady(ctx, operation.ChallengeID, operation.Mobile, SMSPurposeRegister)
 		if readyErr != nil {
 			return RegistrationResult{}, readyErr
 		}
-		verified, verifyErr := s.sms.VerifyCode(ctx, mobile, operation.ChallengeID, verificationData, strings.TrimSpace(code))
+		verified, verifyErr := s.sms.VerifyCode(ctx, operation.Mobile, operation.ChallengeID, verificationData, strings.TrimSpace(code))
 		if verifyErr != nil {
 			return RegistrationResult{}, fmt.Errorf("%w: %v", ErrSMSUnavailable, verifyErr)
 		}
-		if err := s.repository.ConsumeRegistrationSMS(ctx, operationID, operation.ChallengeID, mobile, verified); err != nil {
+		if err := s.repository.ConsumeRegistrationSMS(ctx, operationID, operation.ChallengeID, operation.Mobile, verified); err != nil {
 			return RegistrationResult{}, err
 		}
 	}
