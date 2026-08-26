@@ -17,7 +17,7 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
     read('deploy/keycloak/themes/pinvou/login/pinvou-login.ftl'),
     read('../pinvou3-app/src/features/account-platform/AccountPlatformView.jsx'),
   ]);
-  assert.match(portal, /portal && auth === 'guest'[\s\S]*location\.replace\('\/auth\/login'\)/);
+  assert.match(portal, /portal && \(auth === 'guest' \|\| auth === 'error'\)[\s\S]*location\.replace\('\/auth\/login'\)/);
   assert.match(authenticator, /CLIENT\.precheckPassword\(password\)/);
   assert.match(authenticator, /CLIENT\.createCaptcha\(mobile, purpose\(mode\)\)/);
   assert.match(authenticator, /CLIENT\.sendSMS\(/);

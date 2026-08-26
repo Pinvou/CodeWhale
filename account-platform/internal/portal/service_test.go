@@ -124,6 +124,9 @@ func TestAnonymousPortalRootStartsIdentityLoginImmediately(t *testing.T) {
 	if staticCalled {
 		t.Fatal("anonymous root must not render the portal shell before login")
 	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("anonymous root must not cache the removed landing page: %q", response.Header().Get("Cache-Control"))
+	}
 }
 
 func TestAuthenticatedPortalRootStillServesApplication(t *testing.T) {
@@ -146,6 +149,9 @@ func TestAuthenticatedPortalRootStillServesApplication(t *testing.T) {
 
 	if response.Code != http.StatusOK || response.Body.String() != "portal application" {
 		t.Fatalf("authenticated root must serve the portal: %d %q", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("authenticated root must not persist a stale portal shell: %q", response.Header().Get("Cache-Control"))
 	}
 }
 

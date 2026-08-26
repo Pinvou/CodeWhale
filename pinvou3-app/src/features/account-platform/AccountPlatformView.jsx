@@ -339,7 +339,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [activeOrganizationId, organizations.length, section]);
 
   useEffect(() => {
-    if (portal && auth === 'guest') globalThis.location.replace('/auth/login');
+    if (portal && (auth === 'guest' || auth === 'error')) globalThis.location.replace('/auth/login');
   }, [auth, portal]);
 
   useEffect(() => {
@@ -487,7 +487,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         {copy.loading}
       </div>
     );
-  if (portal && auth === 'guest')
+  if (portal && (auth === 'guest' || auth === 'error'))
     return (
       <div className="ap-shell ap-centered ap-portal">
         <div className="ap-spinner" />

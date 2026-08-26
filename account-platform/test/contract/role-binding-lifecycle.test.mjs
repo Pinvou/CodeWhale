@@ -46,4 +46,5 @@ test('role bindings have validity, idempotent revocation, cache invalidation, an
     assert.match(myUI, new RegExp(`${language}:\\{`));
     assert.match(adminUI, new RegExp(`${language}: \\{`));
   }
+  assert.match(myUI, /catch\{return\}if\(!session\.authenticated\)return/, 'the role grant surface must stay absent when the session cannot be established');
 });
