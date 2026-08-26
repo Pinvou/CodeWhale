@@ -45,39 +45,33 @@ impl ShellStreamDecoder {
         self.pending_utf8.extend_from_slice(bytes);
         let mut decoded = String::new();
 
-        loop {
-            match std::str::from_utf8(&self.pending_utf8) {
-                Ok(valid) => {
-                    decoded.push_str(valid);
+        match std::str::from_utf8(&self.pending_utf8) {
+            Ok(valid) => {
+                decoded.push_str(valid);
+                self.pending_utf8.clear();
+                self.finished = last;
+                decoded
+            }
+            Err(error) if error.error_len().is_none() && !last => {
+                let valid_up_to = error.valid_up_to();
+                let valid_prefix = std::str::from_utf8(&self.pending_utf8[..valid_up_to])
+                    .expect("Utf8Error::valid_up_to must delimit valid UTF-8");
+                decoded.push_str(valid_prefix);
+                self.pending_utf8.drain(..valid_up_to);
+                decoded
+            }
+            Err(_) => {
+                if let Some(encoding) = self.legacy_encoding {
+                    let mut decoder = encoding.new_decoder_without_bom_handling();
+                    decoded.push_str(&decode_legacy_chunk(&mut decoder, &self.pending_utf8, last));
                     self.pending_utf8.clear();
-                    self.finished = last;
-                    return decoded;
+                    self.stream_decoder = Some(decoder);
+                } else {
+                    decoded.push_str(&String::from_utf8_lossy(&self.pending_utf8));
+                    self.pending_utf8.clear();
                 }
-                Err(error) if error.error_len().is_none() && !last => {
-                    let valid_up_to = error.valid_up_to();
-                    let valid_prefix = std::str::from_utf8(&self.pending_utf8[..valid_up_to])
-                        .expect("Utf8Error::valid_up_to must delimit valid UTF-8");
-                    decoded.push_str(valid_prefix);
-                    self.pending_utf8.drain(..valid_up_to);
-                    return decoded;
-                }
-                Err(_) => {
-                    if let Some(encoding) = self.legacy_encoding {
-                        let mut decoder = encoding.new_decoder_without_bom_handling();
-                        decoded.push_str(&decode_legacy_chunk(
-                            &mut decoder,
-                            &self.pending_utf8,
-                            last,
-                        ));
-                        self.pending_utf8.clear();
-                        self.stream_decoder = Some(decoder);
-                    } else {
-                        decoded.push_str(&String::from_utf8_lossy(&self.pending_utf8));
-                        self.pending_utf8.clear();
-                    }
-                    self.finished = last;
-                    return decoded;
-                }
+                self.finished = last;
+                decoded
             }
         }
     }
