@@ -101,23 +101,50 @@ async function readJson(request, maximumBytes) {
   }
 }
 
-class EventBroker {
+export class EventBroker {
   constructor() {
     this.teams = new Map();
+    this.authorizationGeneration = 0;
   }
 
-  subscribe(teamId, principalId, response) {
-    let responses = this.teams.get(teamId);
-    if (!responses) {
-      responses = new Set();
-      this.teams.set(teamId, responses);
+  currentAuthorizationGeneration() {
+    return this.authorizationGeneration;
+  }
+
+  subscribeAuthorized(teamIds, principalId, response, expectedGeneration) {
+    if (expectedGeneration !== this.authorizationGeneration) return null;
+    const subscriptions = [];
+    for (const teamId of teamIds) {
+      let responses = this.teams.get(teamId);
+      if (!responses) {
+        responses = new Set();
+        this.teams.set(teamId, responses);
+      }
+      const subscription = { principalId, response };
+      responses.add(subscription);
+      subscriptions.push({ responses, subscription, teamId });
     }
-    const subscription = { principalId, response };
-    responses.add(subscription);
     return () => {
-      responses.delete(subscription);
-      if (responses.size === 0) this.teams.delete(teamId);
+      for (const { responses, subscription, teamId } of subscriptions) {
+        responses.delete(subscription);
+        if (responses.size === 0) this.teams.delete(teamId);
+      }
     };
+  }
+
+  async authorizeAndSubscribe({ authorize, principalId, response, maximumAttempts = 3 }) {
+    for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
+      const authorizationGeneration = this.currentAuthorizationGeneration();
+      const teamIds = await authorize();
+      const unsubscribe = this.subscribeAuthorized(
+        teamIds,
+        principalId,
+        response,
+        authorizationGeneration,
+      );
+      if (unsubscribe) return unsubscribe;
+    }
+    return null;
   }
 
   publish(teamId, event, resource = {}) {
@@ -137,6 +164,7 @@ class EventBroker {
   }
 
   revoke(teamId, principalId) {
+    this.authorizationGeneration += 1;
     const responses = this.teams.get(teamId);
     if (!responses) return;
     for (const subscription of [...responses]) {
@@ -152,6 +180,7 @@ class EventBroker {
   }
 
   revokeTeam(teamId) {
+    this.authorizationGeneration += 1;
     const responses = this.teams.get(teamId);
     if (!responses) return;
     this.teams.delete(teamId);
@@ -568,14 +597,21 @@ export function createHubServer({ pool, config }) {
       if (method === "GET" && pathname === "/v1/events") {
         const auth = await authenticate(pool, token);
         const requestedTeamId = url.searchParams.get("team_id");
-        let teamIds;
-        if (requestedTeamId) {
-          const teamId = uuid(requestedTeamId, "team_id");
-          await requireMembership(pool, teamId, auth.principalId);
-          teamIds = [teamId];
-        } else {
-          const memberships = await listTeams(pool, token);
-          teamIds = memberships.teams.map(team => team.id);
+        const requestedTeam = requestedTeamId ? uuid(requestedTeamId, "team_id") : null;
+        const unsubscribe = await events.authorizeAndSubscribe({
+          authorize: async () => {
+            if (requestedTeam) {
+              await requireMembership(pool, requestedTeam, auth.principalId);
+              return [requestedTeam];
+            }
+            const memberships = await listTeams(pool, token);
+            return memberships.teams.map(team => team.id);
+          },
+          principalId: auth.principalId,
+          response,
+        });
+        if (!unsubscribe) {
+          throw new AppError(503, "service_unavailable", "Event authorization changed while subscribing. Retry the request.");
         }
         response.writeHead(200, {
           "Content-Type": "text/event-stream; charset=utf-8",
@@ -585,12 +621,11 @@ export function createHubServer({ pool, config }) {
           "X-Request-Id": requestId,
         });
         response.write("retry: 3000\nevent: ready\ndata: {}\n\n");
-        const unsubscribes = teamIds.map(teamId => events.subscribe(teamId, auth.principalId, response));
         const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 20_000);
         heartbeat.unref();
         const cleanup = () => {
           clearInterval(heartbeat);
-          for (const unsubscribe of unsubscribes) unsubscribe();
+          unsubscribe();
         };
         request.once("close", cleanup);
         response.once("close", cleanup);

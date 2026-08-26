@@ -186,6 +186,7 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 - `GET /v1/bootstrap?team_id=...` 返回成员、演示保留期内的线程及动作摘要。
 - 客户端的“我的工作”依次读取当前 Principal 已加入团队的 bootstrap，在本机按团队标签汇总；团队筛选只改变展示，不改变当前任务状态。
 - `GET /v1/events?team_id=...` 只订阅指定团队；省略 `team_id` 时订阅当前 Principal 所有有效团队。`thread.changed` 供参与者刷新权威快照；`thread.attention` 只定向发送给下一行动人或被撤回、被改派的受影响成员，用于系统通知。
+- Hub 用授权代际把 Membership 校验、SSE 登记与成员或团队撤权线性化：校验期间发生撤权时不得登记旧订阅，而应重新校验；登记后发生撤权时立即关闭已有订阅。
 - 事件只包含资源 ID 和最新 revision，不包含 token、邀请码、文件内容或完整消息。
 - 客户端收到事件后重新读取资源；SSE 重连后必须重新 bootstrap。团队解散提交后，Hub 发送 `team.dissolved` 提示并关闭该团队的现有 SSE 订阅，客户端随后按有效 Membership 恢复当前团队。
 - 演示阶段不提供 cursor replay，也不承诺发送方离线时自动恢复未确认请求。
@@ -229,6 +230,7 @@ Git 仓库仍以 Git 服务为权威来源。Hub 只保存引用，不克隆仓�
 - 普通成员通过 `DELETE /v1/teams/{team_id}/members/me` 主动离队。负责人不能直接离队，必须先转让负责人或解散团队；离队与退出当前设备账号是两个独立操作。
 - 普通成员离队和负责人移除成员前，Hub 检查该成员在全部未结束线程中的 initiator、owner、current actor、return target、final recipient、pending sender 和 pending recipient 责任。存在阻塞时返回 `member_has_open_work`，`details.blocking_threads` 一次列出全部任务 ID、标题、阶段和责任角色。负责人转让不终止原负责人的 Membership，因此不受该检查阻塞。
 - 普通成员离队或被负责人移除时，Hub 在同一事务中撤销该成员创建的全部未使用邀请；如果固定加入码仍启用，再轮换加入码，旧凭据立即失效。
+- 客户端收到成员或角色变化后的权威快照时，立即关闭并清空当前展示的加入码；用户再次打开邀请面板时重新读取 Hub，不能继续展示变更前缓存的凭据。
 - 一次性邀请的领取先读取 `team_id`，再依次锁定 Team 和 Invite 并重新校验邀请状态；成员终止和团队解散采用相同的 `Team → Invite` 锁序，避免并发加入与权限回收形成死锁。
 - `DELETE /v1/teams/{team_id}` 只允许负责人执行，且团队必须没有任何未结束工作。解散是不可恢复的逻辑终止：在同一事务中记录 `dissolved_at/dissolved_by`、清除加入码并撤销未使用邀请，不物理删除线程、动作或附件关系。
 - 已解散团队不再属于有效 Membership 范围；团队列表、成员校验、bootstrap、线程、附件、头像和 SSE 都拒绝旧 `team_id` 的访问。当前产品不提供已解散团队列表、恢复或只读历史入口。

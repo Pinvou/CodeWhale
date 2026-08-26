@@ -80,7 +80,7 @@ try {
     const { dict } = await import('/shared/i18n.js');
     const now = new Date().toISOString();
     const me = { id: 'member-me', display_name: '测试成员', email: 'member@example.com' };
-    const team = { id: 'team-1', name: '测试团队' };
+    const team = { id: 'team-1', name: '测试团队', join_password_configured: true };
     const bootstrap = {
       protocol_version: '0.2',
       team,
@@ -127,8 +127,28 @@ try {
         unread_count: 0,
       }],
     };
-    const snapshot = { bootstrap, teams: [team], attachments: {} };
+    let snapshot = { bootstrap, teams: [team], attachments: {} };
+    let subscribedStateListener = null;
+    let joinCodeReadCount = 0;
     window.__teamRelayActionCalls = [];
+    window.__teamRelayJoinCodeReads = () => joinCodeReadCount;
+    window.__emitRemoteMemberLeave = () => {
+      const nextBootstrap = {
+        ...bootstrap,
+        members: bootstrap.members.filter(member => member.id !== 'member-other'),
+      };
+      snapshot = { ...snapshot, bootstrap: nextBootstrap };
+      subscribedStateListener?.({
+        platformCapabilities: { loaded: true, teamRelaySupported: true },
+        teamRelay: {
+          status: { configured: true, team_id: team.id },
+          snapshot,
+          loading: false,
+          mutating: false,
+          taskWorkspaces: {},
+        },
+      });
+    };
     window.PinvouPlatform = { kind: 'tauri' };
     window.TauriBridge = {
       state: {
@@ -146,10 +166,25 @@ try {
             },
           };
         },
-        subscribeMany: () => () => {},
+        subscribeMany: (_domains, listener) => {
+          subscribedStateListener = listener;
+          return () => {
+            if (subscribedStateListener === listener) subscribedStateListener = null;
+          };
+        },
       },
       teamRelay: {
         load: async () => {},
+        getJoinPassword: async () => {
+          joinCodeReadCount += 1;
+          return {
+            configured: true,
+            recoverable: true,
+            visible: true,
+            visibility: 'members',
+            join_password: joinCodeReadCount === 1 ? 'OLD1-CODE' : 'NEW2-CODE',
+          };
+        },
         taskWorkspaceStatus: async () => null,
         listDraftSourceSessions: async () => [],
         readDraftSourceSession: async () => null,
@@ -206,6 +241,24 @@ try {
   assert(boardText.includes('解散团队'), '负责人团队页应提供解散入口', boardText);
   assert(boardText.includes('转让负责人'), '普通成员卡片应提供负责人转让入口', boardText);
   assert(!boardText.includes('退出团队'), '负责人不能直接显示普通成员离队入口', boardText);
+  await page.evaluate(() => {
+    [...document.querySelectorAll('button')]
+      .find(candidate => candidate.textContent.includes('邀请成员'))?.click();
+  });
+  await page.waitForFunction(() => document.body.innerText.includes('OLD1-CODE'));
+  await page.evaluate(() => window.__emitRemoteMemberLeave());
+  await page.waitForFunction(() => {
+    const inviteButton = [...document.querySelectorAll('button')]
+      .find(candidate => candidate.textContent.includes('邀请成员'));
+    return !document.body.innerText.includes('OLD1-CODE') && inviteButton?.getAttribute('aria-pressed') === 'false';
+  });
+  await page.evaluate(() => {
+    [...document.querySelectorAll('button')]
+      .find(candidate => candidate.textContent.includes('邀请成员'))?.click();
+  });
+  await page.waitForFunction(() => document.body.innerText.includes('NEW2-CODE'));
+  const joinCodeReads = await page.evaluate(() => window.__teamRelayJoinCodeReads());
+  assert(joinCodeReads === 2, '远端成员变更后应重新读取权威邀请码', joinCodeReads);
   assert(pageErrors.length === 0, '发布进展不应产生页面异常', pageErrors);
   console.log('team relay action smoke: ok');
 } finally {

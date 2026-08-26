@@ -696,6 +696,13 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const teams = snapshot?.teams?.length ? snapshot.teams : snapshot?.bootstrap?.team ? [{ ...snapshot.bootstrap.team, open_work_count: 0 }] : [];
   const activeTeamId = selectedTeamId || snapshot?.bootstrap?.team?.id;
   const activeBootstrap = (snapshot?.team_bootstraps || []).find(item => item.team.id === activeTeamId) || snapshot?.bootstrap;
+  const activeMembershipSignature = useMemo(() => {
+    const membersSignature = (activeBootstrap?.members || [])
+      .map(member => `${member.id}:${member.role || ''}`)
+      .sort()
+      .join('|');
+    return `${activeBootstrap?.team?.id || ''}|${membersSignature}`;
+  }, [activeBootstrap?.members, activeBootstrap?.team?.id]);
   const activeSnapshot = snapshot && activeBootstrap ? { ...snapshot, bootstrap: activeBootstrap } : snapshot;
   const tasks = useMemo(() => projectSnapshot(snapshot, copy, legacyReadCursors), [snapshot, copy, legacyReadCursors]);
   const teamTasks = useMemo(() => tasks.filter(task => task.teamId === activeBootstrap?.team?.id), [activeBootstrap?.team?.id, tasks]);
@@ -723,6 +730,14 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   useEffect(() => { if (!selectedId && visibleTasks.length) setSelectedId(visibleTasks[0].id); }, [selectedId, visibleTasks]);
   useEffect(() => { if (!assignmentTeamId && teams.length) setAssignmentTeamId(snapshot?.bootstrap?.team?.id || teams[0].id); }, [assignmentTeamId, snapshot?.bootstrap?.team?.id, teams]);
   useEffect(() => { if (visibleTasks.length && !visibleTasks.some(task => task.id === selectedId)) setSelectedId(visibleTasks[0].id); }, [selectedId, visibleTasks]);
+  useEffect(() => {
+    joinCodeRequestGenerationRef.current += 1;
+    joinCodeRequestRef.current = null;
+    joinCodeFetchedAtRef.current = 0;
+    setTeamJoinCode(null);
+    setTeamJoinCodeOpen(false);
+    setTeamJoinCodeLoading(false);
+  }, [activeMembershipSignature]);
   useEffect(() => {
     if (!selectedTask?.id || !bridge?.teamRelay?.taskWorkspaceStatus) return undefined;
     let active = true;
