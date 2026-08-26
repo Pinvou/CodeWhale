@@ -2967,6 +2967,19 @@ pub struct VisionModelConfig {
     /// Base URL for the vision model API. Defaults to OpenAI.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Total request budget in seconds, including retries and response body
+    /// consumption. `None` or `0` preserves the 120-second default; larger
+    /// values are capped at one hour.
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+    /// Whether to request an SSE response. `None` preserves the existing
+    /// non-streaming request shape; callers must opt in with `Some(true)`.
+    #[serde(default)]
+    pub stream: Option<bool>,
+    /// Whether the existing transient-error retry policy is enabled. `None`
+    /// preserves the current default; `Some(false)` makes one attempt.
+    #[serde(default)]
+    pub retry_on_transient_errors: Option<bool>,
 }
 
 /// `[runtime_api]` table — knobs for the local HTTP/SSE daemon.

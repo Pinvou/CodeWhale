@@ -555,6 +555,25 @@ api_key = "YOUR_XIAOMI_KEY"
 base_url = "https://api.xiaomimimo.com/v1"
 ```
 
+The vision request also accepts three optional compatibility controls:
+
+```toml
+[vision_model]
+# Opt in only when the endpoint supports OpenAI-compatible SSE responses.
+stream = true
+# Total budget for retries and response consumption (default: 120, maximum: 3600).
+request_timeout_secs = 300
+# Set to false when a local endpoint should receive exactly one attempt.
+retry_on_transient_errors = false
+```
+
+Omitting `stream` preserves the existing non-streaming request shape. When
+streaming is enabled but an endpoint returns an ordinary JSON response,
+Codewhale parses that response as a compatibility fallback. Omitting
+`retry_on_transient_errors` keeps the existing transient-error retry policy.
+Empty responses fail instead of producing a successful result with no usable
+analysis.
+
 The example above uses Xiaomi MiMo's pay-as-you-go OpenAI-compatible endpoint.
 If you are using a Token Plan key (`tp-...`) for `[vision_model]`, you must set
 `base_url` explicitly because this generic OpenAI-compatible block does not
