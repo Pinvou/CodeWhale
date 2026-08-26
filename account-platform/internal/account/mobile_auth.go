@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strings"
@@ -337,6 +339,19 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 	}
 	fingerprint := registrationFingerprint(operation.Username, operation.Mobile, operation.ChallengeID, operation.PasswordPolicyVersion)
 	if !hmac.Equal(operation.RequestFingerprint, fingerprint[:]) {
+		slog.WarnContext(ctx, "registration operation conflict",
+			"stage", "fingerprint_check",
+			"operation_id", operation.ID,
+			"operation_status", operation.Status,
+			"operation_version", operation.Version,
+			"stored_fingerprint", hex.EncodeToString(operation.RequestFingerprint),
+			"calculated_fingerprint", hex.EncodeToString(fingerprint[:]),
+			"stored_fingerprint_length", len(operation.RequestFingerprint),
+			"username_length", len(operation.Username),
+			"mobile_length", len(operation.Mobile),
+			"policy_version", operation.PasswordPolicyVersion,
+			"challenge_id", operation.ChallengeID,
+		)
 		return RegistrationResult{}, ErrRegistrationConflict
 	}
 	if operation.Status == "COMPENSATED" || operation.Status == "EXPIRED" {
@@ -359,6 +374,9 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 			return RegistrationResult{}, fmt.Errorf("%w: %v", ErrSMSUnavailable, verifyErr)
 		}
 		if err := s.repository.ConsumeRegistrationSMS(ctx, operationID, operation.ChallengeID, operation.Mobile, verified); err != nil {
+			if errors.Is(err, ErrRegistrationConflict) {
+				slog.WarnContext(ctx, "registration operation conflict", "stage", "consume_sms", "operation_id", operation.ID, "operation_status", operation.Status, "operation_version", operation.Version)
+			}
 			return RegistrationResult{}, err
 		}
 	}
@@ -366,7 +384,11 @@ func (s *MobileAuthService) Register(ctx context.Context, operationID uuid.UUID,
 	if err != nil {
 		return RegistrationResult{}, err
 	}
-	return s.resumeRegistration(ctx, operation)
+	result, err := s.resumeRegistration(ctx, operation)
+	if errors.Is(err, ErrRegistrationConflict) {
+		slog.WarnContext(ctx, "registration operation conflict", "stage", "resume_registration", "operation_id", operation.ID, "operation_status", operation.Status, "operation_version", operation.Version)
+	}
+	return result, err
 }
 
 func (s *MobileAuthService) RegistrationStatus(ctx context.Context, operationID uuid.UUID, queryToken string) (RegistrationResult, error) {

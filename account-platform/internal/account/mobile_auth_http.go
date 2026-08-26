@@ -196,6 +196,8 @@ func (s *Service) writeMobileAuthError(w http.ResponseWriter, r *http.Request, e
 	}
 	if status >= http.StatusInternalServerError {
 		slog.ErrorContext(r.Context(), "mobile authentication request failed", "error", err, "request_id", httpserver.RequestID(r.Context()))
+	} else if errors.Is(err, ErrRegistrationConflict) {
+		slog.WarnContext(r.Context(), "mobile authentication request rejected by registration conflict", "request_id", httpserver.RequestID(r.Context()))
 	}
 	api.WriteError(w, status, code, message, httpserver.RequestID(r.Context()))
 }
