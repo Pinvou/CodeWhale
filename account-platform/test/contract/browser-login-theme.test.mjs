@@ -34,6 +34,7 @@ test('web login is rendered by the Identity boundary and Portal redirects guests
   assert.match(template, /name="sms_code"/);
   assert.match(template, /name="captcha_offset"/);
   assert.doesNotMatch(template, /type="hidden"[^>]+name="password"/);
+  assert.doesNotMatch(template, /\?html/, 'Keycloak 26 auto-escapes HTML templates and rejects legacy ?html escaping');
 });
 
 test('Keycloak browser flow keeps cookie SSO and requires the custom Identity image assets', async () => {

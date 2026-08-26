@@ -17,7 +17,7 @@
       </header>
 
       <form id="pv-auth-form" action="${url.loginAction}" method="post" novalidate>
-        <input type="hidden" name="mode" value="${pinvouMode?html}">
+        <input type="hidden" name="mode" value="${pinvouMode}">
         <input type="hidden" name="intent" id="pv-intent" value="submit">
         <input type="hidden" name="target_mode" id="pv-target-mode" value="">
         <input type="hidden" name="device_id" id="pv-device-id" value="">
@@ -28,7 +28,7 @@
         </div>
 
         <#if message?has_content>
-          <div class="pv-message ${message.type!'error'}" role="${(message.type == 'error')?then('alert','status')}">${message.summary?html}</div>
+          <div class="pv-message ${message.type!'error'}" role="${(message.type == 'error')?then('alert','status')}">${message.summary}</div>
         </#if>
 
         <div class="pv-form-fields">
@@ -55,8 +55,8 @@
               <span>${msg("pinvouMobileLabel")}</span>
               <span class="pv-inline-control">
                 <span class="pv-country">+86</span>
-                <input name="mobile" type="tel" inputmode="tel" autocomplete="tel-national" pattern="1[3-9][0-9]{9}" maxlength="11" value="${pinvouMobile?html}" placeholder="${msg('pinvouMobilePlaceholder')}" <#if pinvouSmsSent || pinvouCaptchaId?has_content>readonly</#if> required autofocus>
-                <button type="submit" class="pv-code-button" data-request-sms data-cooldown="${pinvouRetryAfter?html}" formnovalidate><#if pinvouSmsSent>${msg("pinvouResendCode")}<#else>${msg("pinvouGetCode")}</#if></button>
+                <input name="mobile" type="tel" inputmode="tel" autocomplete="tel-national" pattern="1[3-9][0-9]{9}" maxlength="11" value="${pinvouMobile}" placeholder="${msg('pinvouMobilePlaceholder')}" <#if pinvouSmsSent || pinvouCaptchaId?has_content>readonly</#if> required autofocus>
+                <button type="submit" class="pv-code-button" data-request-sms data-cooldown="${pinvouRetryAfter}" formnovalidate><#if pinvouSmsSent>${msg("pinvouResendCode")}<#else>${msg("pinvouGetCode")}</#if></button>
               </span>
             </label>
             <label class="pv-field">
@@ -66,14 +66,14 @@
           <#else>
             <label class="pv-field">
               <span>${msg("pinvouUsernameLabel")}</span>
-              <input name="username" type="text" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-z][A-Za-z0-9._-]{2,31}" value="${pinvouUsername?html}" placeholder="${msg('pinvouUsernamePlaceholder')}" <#if pinvouPasswordAccepted>readonly</#if> required autofocus>
+              <input name="username" type="text" autocomplete="username" minlength="3" maxlength="32" pattern="[A-Za-z][A-Za-z0-9._-]{2,31}" value="${pinvouUsername}" placeholder="${msg('pinvouUsernamePlaceholder')}" <#if pinvouPasswordAccepted>readonly</#if> required autofocus>
             </label>
             <label class="pv-field">
               <span>${msg("pinvouMobileLabel")}</span>
               <span class="pv-inline-control">
                 <span class="pv-country">+86</span>
-                <input name="mobile" type="tel" inputmode="tel" autocomplete="tel-national" pattern="1[3-9][0-9]{9}" maxlength="11" value="${pinvouMobile?html}" placeholder="${msg('pinvouMobilePlaceholder')}" <#if pinvouPasswordAccepted>readonly</#if> required>
-                <button type="submit" class="pv-code-button" data-request-sms data-cooldown="${pinvouRetryAfter?html}" formnovalidate><#if pinvouSmsSent>${msg("pinvouResendCode")}<#else>${msg("pinvouGetCode")}</#if></button>
+                <input name="mobile" type="tel" inputmode="tel" autocomplete="tel-national" pattern="1[3-9][0-9]{9}" maxlength="11" value="${pinvouMobile}" placeholder="${msg('pinvouMobilePlaceholder')}" <#if pinvouPasswordAccepted>readonly</#if> required>
+                <button type="submit" class="pv-code-button" data-request-sms data-cooldown="${pinvouRetryAfter}" formnovalidate><#if pinvouSmsSent>${msg("pinvouResendCode")}<#else>${msg("pinvouGetCode")}</#if></button>
               </span>
             </label>
             <#if !pinvouPasswordAccepted>
@@ -112,9 +112,9 @@
             <section class="pv-captcha" role="dialog" aria-modal="true" aria-labelledby="pv-captcha-title">
               <h2 id="pv-captcha-title">${msg("pinvouCaptchaTitle")}</h2>
               <p>${msg("pinvouCaptchaHelp")}</p>
-              <div class="pv-captcha-stage" style="--captcha-width:${pinvouCaptchaWidth?html}px;--captcha-height:${pinvouCaptchaHeight?html}px;--piece-y:${pinvouCaptchaPieceY?html}px">
-                <img src="${pinvouCaptchaBackground?html}" alt="">
-                <img class="pv-captcha-piece" src="${pinvouCaptchaPiece?html}" alt="">
+              <div class="pv-captcha-stage" style="--captcha-width:${pinvouCaptchaWidth}px;--captcha-height:${pinvouCaptchaHeight}px;--piece-y:${pinvouCaptchaPieceY}px">
+                <img src="${pinvouCaptchaBackground}" alt="">
+                <img class="pv-captcha-piece" src="${pinvouCaptchaPiece}" alt="">
               </div>
               <input id="pv-captcha-offset" name="captcha_offset" type="range" min="0" max="${(pinvouCaptchaWidth?number - pinvouCaptchaPieceWidth?number)?c}" value="0" aria-label="${msg('pinvouCaptchaSlider')}">
               <button type="submit" class="pv-submit" data-send-sms formnovalidate>${msg("pinvouCaptchaConfirm")}</button>
