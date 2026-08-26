@@ -362,6 +362,16 @@
         "file": "000036_password_security_authorization.up.sql",
         "version": 36,
         "sha256": "f7425c5d861046478377ec62a4faafe0b098579e6ffd4ec9927554ba6773fa35"
+      },
+      {
+        "file": "000037_recharge_product_permissions.down.sql",
+        "version": 37,
+        "sha256": "542a3277ad460f27a59cf0b714c6997a95eda094f9e38431456f8d3399a2ee27"
+      },
+      {
+        "file": "000037_recharge_product_permissions.up.sql",
+        "version": 37,
+        "sha256": "b4cda6b802a541f292414f0770de3ff781687179e2b766f998ebe1a2a85d4d53"
       }
     ],
     "billing": [
@@ -774,6 +784,26 @@
         "file": "000042_single_h3c_sku.up.sql",
         "version": 42,
         "sha256": "7059a6a2511fadfa659768c8bd135a1a973bbbdc261fa7da24058e922f142eb5"
+      },
+      {
+        "file": "000043_recharge_product_catalog.down.sql",
+        "version": 43,
+        "sha256": "a13b81a1d07dee89b312392fc788abf6bf43bab4380d513690619526bb3ec7d1"
+      },
+      {
+        "file": "000043_recharge_product_catalog.up.sql",
+        "version": 43,
+        "sha256": "52b2f2337885c307a301b293a0110d3d69e7fde282bb1d6a61ddacdc4bbc9b19"
+      },
+      {
+        "file": "000044_recharge_product_commands.down.sql",
+        "version": 44,
+        "sha256": "e19b8c4fec04c7cb5d8da6493c8cb83a5d1c4e97123369380c290225857e6b5f"
+      },
+      {
+        "file": "000044_recharge_product_commands.up.sql",
+        "version": 44,
+        "sha256": "fe531a9fd9da73172517fe9caf2d47302f1137f758b3e9c005d24b2e615a8cde"
       }
     ],
     "payment-simulator": [

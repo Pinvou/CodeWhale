@@ -80,7 +80,6 @@ type PaymentCoordinator struct {
 	merchantID                  string
 	callbackURL                 string
 	now                         func() time.Time
-	productSKUs                 map[string]ExternalProduct
 	allowTentativePrices        bool
 	normalRefundCreationEnabled bool
 	breaker                     *resilience.Breaker
@@ -127,22 +126,14 @@ func (p PaymentPolicy) RequiresReview(expiresAt, paidAt time.Time) bool {
 
 type PaymentProvider = payment.Provider
 
-func NewPaymentCoordinatorWithProvider(repository *PostgresRepository, provider PaymentProvider, products map[string]ExternalProduct) (*PaymentCoordinator, error) {
-	if repository == nil || provider == nil || len(products) == 0 {
-		return nil, errors.New("external payment provider and product mapping are required")
+func NewPaymentCoordinatorWithProvider(repository *PostgresRepository, provider PaymentProvider) (*PaymentCoordinator, error) {
+	if repository == nil || provider == nil {
+		return nil, errors.New("external payment provider is required")
 	}
 	if !provider.Capabilities().Valid() {
 		return nil, errors.New("payment provider capabilities are invalid")
 	}
-	validated := make(map[string]ExternalProduct, len(products))
-	for productID, product := range products {
-		productID, product.SKU = strings.TrimSpace(productID), strings.TrimSpace(product.SKU)
-		if productID == "" || product.MappingID == uuid.Nil || product.MappingVersion < 1 || product.SKU == "" || product.AmountFen <= 0 || product.ProviderID != provider.Capabilities().ProviderID || product.ProviderVersion != provider.Capabilities().Version || len(product.Channels) == 0 || product.Status != "FROZEN" && product.Status != "TEST_ONLY" {
-			return nil, errors.New("external payment product mapping is invalid")
-		}
-		validated[productID] = product
-	}
-	return &PaymentCoordinator{repository: repository, provider: provider, productSKUs: validated, now: func() time.Time { return time.Now().UTC() }, breaker: resilience.NewBreaker()}, nil
+	return &PaymentCoordinator{repository: repository, provider: provider, now: func() time.Time { return time.Now().UTC() }, breaker: resilience.NewBreaker()}, nil
 }
 
 func (p *PaymentCoordinator) ConfigureNotifications(merchantID, callbackURL string, secrets map[string]string) error {
@@ -186,16 +177,21 @@ func (p *PaymentCoordinator) AllowNormalRefundCreation(allowed bool) *PaymentCoo
 	return p
 }
 
-func (p *PaymentCoordinator) FilterProducts(products []Product) []Product {
-	if len(p.productSKUs) == 0 {
-		return products
+func (p *PaymentCoordinator) FilterProducts(ctx context.Context, products []Product) ([]Product, error) {
+	externalProducts, err := p.repository.ActiveExternalProducts(ctx, p.Capabilities().ProviderID, p.Capabilities().Version, p.allowTentativePrices)
+	if err != nil {
+		return nil, err
 	}
+	return p.filterProducts(products, externalProducts), nil
+}
+
+func (p *PaymentCoordinator) filterProducts(products []Product, externalProducts map[string]ExternalProduct) []Product {
 	filtered := make([]Product, 0, len(products))
 	for _, product := range products {
 		if product.PriceStatus != "FROZEN" && !p.allowTentativePrices {
 			continue
 		}
-		if external, ok := p.productSKUs[product.ProductID]; ok && external.AmountFen == product.AmountFen && external.Currency == product.Currency {
+		if external, ok := externalProducts[product.ProductID]; ok && external.AmountFen == product.AmountFen && external.Currency == product.Currency {
 			product.Channels = intersectChannels(product.Channels, external.Channels, p.Capabilities().Channels)
 			if len(product.Channels) == 0 {
 				continue
@@ -339,7 +335,7 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 	var product Product
-	err = tx.QueryRow(ctx, `SELECT product_id,plan_name,sku_code,amount_fen,credit_microcredits,display_points,base_points,bonus_points,validity_days,price_status,invoice_product_name,currency,channels,catalog_version FROM recharge_products WHERE product_id=$1 AND enabled AND $2=ANY(channels)`, productID, channel).Scan(&product.ProductID, &product.PlanName, &product.SKUCode, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.PriceStatus, &product.InvoiceProductName, &product.Currency, &product.Channels, &product.CatalogVersion)
+	err = tx.QueryRow(ctx, `SELECT product.product_id,product.plan_name,product.sku_code,product.amount_fen,product.credit_microcredits,product.display_points,product.base_points,product.bonus_points,product.validity_days,product.price_status,product.invoice_product_name,product.currency,product.channels,product.catalog_version FROM recharge_products product JOIN recharge_product_catalog_items item ON item.product_id=product.product_id WHERE product.product_id=$1 AND item.lifecycle_status='ON_SALE' AND $2=ANY(product.channels) FOR UPDATE OF item,product`, productID, channel).Scan(&product.ProductID, &product.PlanName, &product.SKUCode, &product.AmountFen, &product.CreditMicrocredits, &product.DisplayPoints, &product.BasePoints, &product.BonusPoints, &product.ValidityDays, &product.PriceStatus, &product.InvoiceProductName, &product.Currency, &product.Channels, &product.CatalogVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, ErrConflict
 	}
@@ -372,7 +368,13 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return PaymentOrder{}, false, err
 	}
-	external := p.productSKUs[productID]
+	external, err := activeExternalProductForUpdate(ctx, tx, productID, p.Capabilities().ProviderID, p.Capabilities().Version, channel, p.allowTentativePrices, now)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentOrder{}, false, ErrConflict
+	}
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
 	if external.MappingID == uuid.Nil || external.SKU == "" || external.AmountFen != product.AmountFen || external.Currency != product.Currency || !containsFold(external.Channels, channel) || !p.Capabilities().SupportsChannel(channel) || p.Capabilities().CommerceCustomerRequired && mobile == "" {
 		return PaymentOrder{}, false, ErrConflict
 	}
@@ -416,25 +418,63 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
-	providerOrder, err := providerCall(p, "ORDER_CREATE", order.Channel, true, func() (payment.ProviderOrder, error) {
+	if _, err = tx.Exec(ctx, `UPDATE payment_orders SET provider_call_status='NOT_STARTED' WHERE id=$1`, order.ID); err != nil {
+		return PaymentOrder{}, false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return PaymentOrder{}, false, err
+	}
+
+	providerOrder, providerErr := providerCall(p, "ORDER_CREATE", order.Channel, true, func() (payment.ProviderOrder, error) {
 		return p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, MerchantCustomerKey: requesterID.String(), Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
 	})
-	if err != nil {
-		return PaymentOrder{}, false, err
+	if providerErr != nil {
+		_, _ = p.repository.pool.Exec(ctx, `UPDATE payment_orders SET provider_call_status='RESULT_UNKNOWN',updated_at=$2 WHERE id=$1 AND provider_call_status IN ('NOT_STARTED','IN_PROGRESS')`, order.ID, p.now())
+		return PaymentOrder{}, false, providerErr
 	}
 	order.Status = "PENDING"
 	order.PaymentURL = providerOrder.PaymentURL
 	order.QRData = providerOrder.QRData
-	_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='PENDING',payment_url=NULLIF($2,''),qr_data=NULLIF($3,''),updated_at=$4 WHERE id=$1`, order.ID, order.PaymentURL, order.QRData, p.now())
+	resultTx, err := p.repository.pool.Begin(ctx)
+	if err != nil {
+		return PaymentOrder{}, false, err
+	}
+	defer resultTx.Rollback(ctx)
+	_, err = resultTx.Exec(ctx, `UPDATE payment_orders SET status='PENDING',provider_call_status='COMPLETED',payment_url=NULLIF($2,''),qr_data=NULLIF($3,''),updated_at=$4 WHERE id=$1`, order.ID, order.PaymentURL, order.QRData, p.now())
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
 	responseBody, _ := json.Marshal(order)
-	_, err = tx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES ('payment.create',$1,$2,201,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour))
+	_, err = resultTx.Exec(ctx, `INSERT INTO idempotency_records(scope,idempotency_key,request_hash,response_status,response_body,created_at,expires_at) VALUES ('payment.create',$1,$2,201,$3,$4,$5)`, idempotencyKey, requestHash, responseBody, now, now.Add(24*time.Hour))
 	if err != nil {
 		return PaymentOrder{}, false, err
 	}
-	return order, true, tx.Commit(ctx)
+	return order, true, resultTx.Commit(ctx)
+}
+
+func activeExternalProductForUpdate(ctx context.Context, tx pgx.Tx, productID, providerID, providerVersion, channel string, allowTestOnly bool, now time.Time) (ExternalProduct, error) {
+	var product ExternalProduct
+	err := tx.QueryRow(ctx, `
+SELECT mapping.id,mapping.mapping_version,mapping.provider_id,mapping.provider_version,
+       mapping.external_sku,mapping.amount_fen,mapping.currency,mapping.channels,mapping.status
+  FROM recharge_product_catalog_items item
+  JOIN payment_product_mappings mapping ON mapping.product_id=item.product_id
+  JOIN product_admission_bindings binding ON binding.catalog_item_id=item.catalog_item_id
+       AND binding.mapping_id=mapping.id AND binding.effective_from<=$6
+       AND (binding.effective_to IS NULL OR binding.effective_to>$6)
+  JOIN product_admission_evidence evidence ON evidence.evidence_id=binding.evidence_id
+       AND evidence.expires_at>$6
+ WHERE item.product_id=$1 AND item.lifecycle_status='ON_SALE'
+   AND mapping.provider_id=$2 AND mapping.provider_version=$3
+   AND mapping.effective_from<=$6 AND (mapping.effective_to IS NULL OR mapping.effective_to>$6)
+   AND (mapping.status='FROZEN' OR ($4 AND mapping.status='TEST_ONLY'))
+   AND $5=ANY(mapping.channels)
+   AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation
+                  WHERE revocation.evidence_id=evidence.evidence_id)
+ FOR UPDATE OF item,mapping,binding`, productID, providerID, providerVersion, allowTestOnly, strings.ToUpper(channel), now).Scan(
+		&product.MappingID, &product.MappingVersion, &product.ProviderID, &product.ProviderVersion,
+		&product.SKU, &product.AmountFen, &product.Currency, &product.Channels, &product.Status)
+	return product, err
 }
 
 func getPendingPlanOrderForUpdate(ctx context.Context, tx pgx.Tx, requesterID, walletID uuid.UUID, productID, channel string, now time.Time, includeExpired bool) (PaymentOrder, error) {

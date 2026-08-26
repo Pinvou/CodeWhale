@@ -104,6 +104,8 @@
     { "source": "account-platform/cmd/billing-service/main.go", "name": "expired-payment-reconciliation", "permission": "internal.job.expired-payment-reconciliation" },
     { "source": "account-platform/cmd/billing-service/main.go", "name": "payment-notification-inbox", "permission": "internal.job.payment-notification-inbox" },
     { "source": "account-platform/cmd/billing-service/main.go", "name": "package-expiry", "permission": "internal.job.package-expiry" },
+    { "source": "account-platform/cmd/billing-service/main.go", "name": "product-admission-expiry", "permission": "internal.job.product-admission-expiry" },
+    { "source": "account-platform/cmd/billing-service/main.go", "name": "product-admission-verification", "permission": "internal.job.product-admission-verification" },
     { "source": "account-platform/cmd/billing-service/main.go", "name": "manual-review-sla", "permission": "internal.job.manual-review-sla" },
     { "source": "account-platform/cmd/billing-service/main.go", "name": "daily-payment-reconciliation", "permission": "internal.job.daily-payment-reconciliation" },
     { "source": "account-platform/cmd/token-gateway/main.go", "name": "usage-reconciliation", "permission": "internal.job.usage-reconciliation" },

@@ -35,24 +35,22 @@ func testExternalProduct(sku string, amountFen int64) ExternalProduct {
 }
 
 func TestFilterProductsRejectsTentativePricesByDefault(t *testing.T) {
-	coordinator := &PaymentCoordinator{provider: catalogProvider{}, productSKUs: map[string]ExternalProduct{
-		"PLAN_TRIAL": testExternalProduct("0502AJON", 4900),
-	}}
+	coordinator := &PaymentCoordinator{provider: catalogProvider{}}
+	mappings := map[string]ExternalProduct{"PLAN_TRIAL": testExternalProduct("0502AJON", 4900)}
 	products := []Product{{ProductID: "PLAN_TRIAL", AmountFen: 4900, Currency: "CNY", Channels: []string{"ALIPAY"}, PriceStatus: "UAT_TENTATIVE"}}
-	if got := coordinator.FilterProducts(products); len(got) != 0 {
+	if got := coordinator.filterProducts(products, mappings); len(got) != 0 {
 		t.Fatalf("tentative catalog leaked without explicit opt-in: %#v", got)
 	}
-	if got := coordinator.AllowTentativePrices(true).FilterProducts(products); len(got) != 1 {
+	if got := coordinator.AllowTentativePrices(true).filterProducts(products, mappings); len(got) != 1 {
 		t.Fatalf("UAT opt-in did not expose tentative catalog: %#v", got)
 	}
 }
 
 func TestFilterProductsAllowsFrozenPrices(t *testing.T) {
-	coordinator := &PaymentCoordinator{provider: catalogProvider{}, productSKUs: map[string]ExternalProduct{
-		"PLAN_STANDARD": testExternalProduct("0502AJ0Q", 9900),
-	}}
+	coordinator := &PaymentCoordinator{provider: catalogProvider{}}
+	mappings := map[string]ExternalProduct{"PLAN_STANDARD": testExternalProduct("0502AJ0Q", 9900)}
 	products := []Product{{ProductID: "PLAN_STANDARD", AmountFen: 9900, Currency: "CNY", Channels: []string{"ALIPAY"}, PriceStatus: "FROZEN"}}
-	if got := coordinator.FilterProducts(products); len(got) != 1 {
+	if got := coordinator.filterProducts(products, mappings); len(got) != 1 {
 		t.Fatalf("frozen catalog was rejected: %#v", got)
 	}
 }
@@ -69,5 +67,34 @@ func TestPaymentPolicyReviewsOnlyLateConfirmationsOutsideCapabilityWindow(t *tes
 	policy.ReviewLatePayment = true
 	if !policy.RequiresReview(expiresAt, expiresAt) {
 		t.Fatal("provider policy requiring all late payments to be reviewed was ignored")
+	}
+}
+
+func TestCatalogFingerprintBindsEveryPublishedFact(t *testing.T) {
+	item := RechargeProductCatalogItem{
+		CatalogItemID: uuid.Must(uuid.NewV7()), ProductID: "PRODUCT",
+		DisplayNameZhCN: "zh", DisplayNameEN: "en", DisplayNameJA: "ja",
+		Mapping: RechargeProductMappingDraft{DraftVersion: 1, ProviderID: "provider", ProviderVersion: "v1", ExternalSKUBOM: "sku", AmountFen: 100, Currency: "CNY", Channels: []string{"ALIPAY"}, AdmissionClass: "FORMAL"},
+	}
+	product := Product{ProductID: item.ProductID, BasePoints: 10, BonusPoints: 2, ValidityDays: 30, InvoiceProductName: "invoice"}
+	original := catalogFingerprint(item, product)
+	mutations := []func(){
+		func() { item.DisplayNameEN = "changed" },
+		func() { product.BasePoints++ },
+		func() { product.BonusPoints++ },
+		func() { product.ValidityDays++ },
+		func() { product.InvoiceProductName = "changed" },
+		func() { item.Mapping.ProviderVersion = "v2" },
+		func() { item.Mapping.ExternalSKUBOM = "changed" },
+		func() { item.Mapping.AmountFen++ },
+		func() { item.Mapping.Channels = []string{"WECHAT"} },
+	}
+	for index, mutate := range mutations {
+		beforeItem, beforeProduct := item, product
+		mutate()
+		if catalogFingerprint(item, product) == original {
+			t.Fatalf("mutation %d did not change publish fingerprint", index)
+		}
+		item, product = beforeItem, beforeProduct
 	}
 }

@@ -21,16 +21,18 @@ type Product struct {
 	AmountFen int64
 }
 
+type ProductResolver func(context.Context, string) (Product, error)
+
 type Provider struct {
-	client   mallClient
-	products map[string]Product
+	client         mallClient
+	resolveProduct ProductResolver
 }
 
-func New(client mallClient, products map[string]Product) (*Provider, error) {
-	if client == nil || len(products) == 0 {
-		return nil, errors.New("H3C Mall payment adapter requires a client and product mapping")
+func New(client mallClient, resolver ProductResolver) (*Provider, error) {
+	if client == nil || resolver == nil {
+		return nil, errors.New("H3C Mall payment adapter requires a client and dynamic product resolver")
 	}
-	return &Provider{client: client, products: products}, nil
+	return &Provider{client: client, resolveProduct: resolver}, nil
 }
 
 func (p *Provider) Capabilities() payment.Capabilities {
@@ -51,7 +53,7 @@ func (p *Provider) Create(ctx context.Context, order payment.Order, _ string) (p
 		if queryErr != nil || existing.MerchantCustomerKey != order.MerchantCustomerKey || existing.Mobile != order.Mobile || existing.SKU != order.ExternalSKU {
 			return payment.ProviderOrder{}, err
 		}
-		return p.mapOrder(existing)
+		return p.mapOrder(ctx, existing)
 	}
 	return payment.ProviderOrder{MerchantOrderNo: order.MerchantOrderNo, Status: "PENDING", ProviderStatus: "PENDING", Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, AmountSource: "EXPECTED_SNAPSHOT", ExternalCustomerKey: order.MerchantCustomerKey, ExternalSKU: order.ExternalSKU}, nil
 }
@@ -61,7 +63,7 @@ func (p *Provider) Get(ctx context.Context, merchantOrderNo string) (payment.Pro
 	if err != nil {
 		return payment.ProviderOrder{}, err
 	}
-	return p.mapOrder(order)
+	return p.mapOrder(ctx, order)
 }
 
 func (p *Provider) Close(ctx context.Context, merchantOrderNo string) (payment.ProviderOrder, error) {
@@ -76,16 +78,12 @@ func (p *Provider) Bill(context.Context, string, time.Time) ([]payment.BillEntry
 	return nil, payment.ErrUnsupported
 }
 
-func (p *Provider) mapOrder(order h3cmall.Order) (payment.ProviderOrder, error) {
-	var product Product
-	found := false
-	for _, candidate := range p.products {
-		if candidate.SKU == order.SKU {
-			product, found = candidate, true
-			break
-		}
+func (p *Provider) mapOrder(ctx context.Context, order h3cmall.Order) (payment.ProviderOrder, error) {
+	if strings.TrimSpace(order.OrderKey) == "" {
+		return payment.ProviderOrder{}, errors.New("H3C Mall returned an unknown product or order")
 	}
-	if !found || strings.TrimSpace(order.OrderKey) == "" {
+	product, err := p.resolveProduct(ctx, strings.TrimSpace(order.SKU))
+	if err != nil {
 		return payment.ProviderOrder{}, errors.New("H3C Mall returned an unknown product or order")
 	}
 	return MapMallOrder(order, &product)

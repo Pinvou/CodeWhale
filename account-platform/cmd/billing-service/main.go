@@ -71,7 +71,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	service := billing.NewService(repository).WithPayments(payments).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate).WithAccountClosureStateVerifier(closureStates)
+	service := billing.NewService(repository).WithPayments(payments).WithRechargeProductCatalog(repository).WithAuthorizer(authorizer).WithApprovalExecutionGate(approvalGate).WithAccountClosureStateVerifier(closureStates)
 	humanDelegationKeys, err := humandelegation.DecodeVerificationKeysJSON(os.Getenv("HUMAN_DELEGATION_VERIFICATION_KEYS_JSON"))
 	if err != nil {
 		log.Fatal(err)
@@ -130,6 +130,8 @@ func main() {
 		go observability.RunBackground(workerContext, "payment-notification-inbox", billing.NewPaymentNotificationWorker(payments, 50*time.Millisecond).Run)
 	}
 	go observability.RunBackground(workerContext, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(workerContext, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
+	go observability.RunBackground(workerContext, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second).Run)
 	go observability.RunBackground(workerContext, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute, onCallSchedule).Run)
 	if payments.Capabilities().BillSupported {
 		go observability.RunBackground(workerContext, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
@@ -155,15 +157,10 @@ func paymentCoordinator(ctx context.Context, repository *billing.PostgresReposit
 		if err != nil {
 			return nil, err
 		}
-		products, err := repository.ActiveExternalProducts(ctx, "h3c_mall", "h3c-mall-v1", allowTestOnly)
-		if err != nil {
-			return nil, err
-		}
-		adapterProducts := make(map[string]h3cpayment.Product, len(products))
-		for productID, product := range products {
-			adapterProducts[productID] = h3cpayment.Product{SKU: product.SKU, AmountFen: product.AmountFen}
-		}
-		provider, err = h3cpayment.New(client, adapterProducts)
+		provider, err = h3cpayment.New(client, func(resolveContext context.Context, sku string) (h3cpayment.Product, error) {
+			product, resolveErr := repository.ExternalProductBySKU(resolveContext, "h3c_mall", "h3c-mall-v1", sku)
+			return h3cpayment.Product{SKU: product.SKU, AmountFen: product.AmountFen}, resolveErr
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -181,11 +178,7 @@ func paymentCoordinator(ctx context.Context, repository *billing.PostgresReposit
 		return nil, errors.New("BILLING_PAYMENT_PROVIDER must select an explicit installed payment adapter")
 	}
 	capabilities := provider.Capabilities()
-	products, err := repository.ActiveExternalProducts(ctx, capabilities.ProviderID, capabilities.Version, allowTestOnly)
-	if err != nil {
-		return nil, err
-	}
-	coordinator, err := billing.NewPaymentCoordinatorWithProvider(repository, provider, products)
+	coordinator, err := billing.NewPaymentCoordinatorWithProvider(repository, provider)
 	if err != nil {
 		return nil, err
 	}

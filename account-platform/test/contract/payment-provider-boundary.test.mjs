@@ -44,30 +44,19 @@ test('product mapping and order snapshots are immutable provider facts', async (
   assert.match(payments, /product_mapping_id,product_mapping_snapshot,provider_capability_snapshot/);
 });
 
-test('trial plan publishes a versioned 200 yuan catalog and H3C mapping without rewriting other products', async () => {
-  const migration = await read('migrations/billing/000037_trial_price_200_yuan.up.sql');
-  const rollback = await read('migrations/billing/000037_trial_price_200_yuan.down.sql');
-  assert.match(migration, /product_id='PLAN_TRIAL'/);
-  assert.match(migration, /'h3c_mall','h3c-mall-v1','8814A1D2'/);
-  assert.match(migration, /facts\.external_sku, 20000, 'CNY'/);
-  assert.match(migration, /SET amount_fen=20000/);
-  assert.match(migration, /development_simulator/);
-  assert.doesNotMatch(migration, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP/);
-  assert.match(rollback, /facts\.external_sku, 4900, 'CNY'/);
-  assert.match(rollback, /SET amount_fen=4900/);
-  assert.doesNotMatch(rollback, /PLAN_STANDARD|PLAN_ADVANCED|PLAN_FLAGSHIP/);
-});
-
-test('current purchase catalog exposes only the ten-fen 0502AJ0Q H3C SKU', async () => {
-  const migration = await read('migrations/billing/000042_single_h3c_sku.up.sql');
-  const rollback = await read('migrations/billing/000042_single_h3c_sku.down.sql');
-  assert.match(migration, /provider_id IN \('h3c_mall','development_simulator'\)/);
-  assert.match(migration, /'h3c_mall','h3c-mall-v1','0502AJ0Q'/);
-  assert.match(migration, /facts\.external_sku, 10, 'CNY'/);
-  assert.match(migration, /SET amount_fen=10/);
-  assert.doesNotMatch(migration, /'PLAN_STANDARD'|'PLAN_ADVANCED'|'PLAN_FLAGSHIP'/);
-  assert.match(rollback, /'PLAN_TRIAL','8814A1D2',20000/);
-  assert.match(rollback, /'PLAN_STANDARD','0502AJ0Q',9900/);
+test('catalog runtime is database-backed and provider create runs after the intent transaction commits', async () => {
+  const migration = await read('migrations/billing/000043_recharge_product_catalog.up.sql');
+  const payments = await read('internal/billing/payments.go');
+  const repository = await read('internal/billing/postgres.go');
+  assert.match(migration, /INSERT INTO recharge_product_catalog_items[\s\S]*SELECT gen_random_uuid\(\)/);
+  assert.doesNotMatch(migration, /VALUES\s*\([^)]*(?:SKU|PLAN_|[¥￥])/i);
+  assert.match(migration, /product_admission_revocations/);
+  assert.match(migration, /set_recharge_product_lifecycle/);
+  assert.match(repository, /item\.lifecycle_status='ON_SALE'/);
+  assert.doesNotMatch(payments, /productSKUs/);
+  const commit = payments.indexOf('if err = tx.Commit(ctx)');
+  const create = payments.indexOf('p.provider.Create(ctx');
+  assert.ok(commit > 0 && create > commit, 'Provider Create must occur after the local intent transaction commits');
 });
 
 test('development simulator is unavailable to production configuration', async () => {

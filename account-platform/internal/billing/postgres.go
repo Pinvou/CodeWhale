@@ -100,9 +100,10 @@ func (r *PostgresRepository) ListProducts(ctx context.Context, currency, channel
 SELECT product_id, plan_name, sku_code, amount_fen, credit_microcredits, display_points,
        base_points, bonus_points, validity_days, price_status, invoice_product_name,
        currency, channels, catalog_version
-FROM recharge_products
-WHERE enabled AND currency = $1 AND ($2 = '' OR $2 = ANY(channels))
-ORDER BY amount_fen`, currency, channel)
+FROM recharge_products product
+JOIN recharge_product_catalog_items item ON item.product_id=product.product_id
+WHERE item.lifecycle_status='ON_SALE' AND product.currency = $1 AND ($2 = '' OR $2 = ANY(product.channels))
+ORDER BY item.display_order,product.product_id`, currency, channel)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +156,14 @@ func (r *PostgresRepository) ApplyProductAvailability(ctx context.Context, provi
 }
 
 func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context, providerID, providerVersion string, allowTestOnly bool) (map[string]ExternalProduct, error) {
-	rows, err := r.pool.Query(ctx, `SELECT id,product_id,mapping_version,provider_id,provider_version,external_sku,amount_fen,currency,channels,status FROM payment_product_mappings WHERE provider_id=$1 AND provider_version=$2 AND effective_from<=now() AND (effective_to IS NULL OR effective_to>now()) AND (status='FROZEN' OR ($3 AND status='TEST_ONLY')) ORDER BY product_id,mapping_version DESC`, providerID, providerVersion, allowTestOnly)
+	rows, err := r.pool.Query(ctx, `SELECT mapping.id,mapping.product_id,mapping.mapping_version,mapping.provider_id,mapping.provider_version,mapping.external_sku,mapping.amount_fen,mapping.currency,mapping.channels,mapping.status
+FROM payment_product_mappings mapping
+JOIN recharge_product_catalog_items item ON item.product_id=mapping.product_id AND item.lifecycle_status='ON_SALE'
+JOIN product_admission_bindings binding ON binding.catalog_item_id=item.catalog_item_id AND binding.mapping_id=mapping.id AND binding.effective_from<=now() AND (binding.effective_to IS NULL OR binding.effective_to>now())
+JOIN product_admission_evidence evidence ON evidence.evidence_id=binding.evidence_id AND evidence.expires_at>now()
+WHERE mapping.provider_id=$1 AND mapping.provider_version=$2 AND mapping.effective_from<=now() AND (mapping.effective_to IS NULL OR mapping.effective_to>now()) AND (mapping.status='FROZEN' OR ($3 AND mapping.status='TEST_ONLY'))
+AND NOT EXISTS(SELECT 1 FROM product_admission_revocations revocation WHERE revocation.evidence_id=evidence.evidence_id)
+ORDER BY mapping.product_id,mapping.mapping_version DESC`, providerID, providerVersion, allowTestOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -175,10 +183,18 @@ func (r *PostgresRepository) ActiveExternalProducts(ctx context.Context, provide
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(products) == 0 {
-		return nil, errors.New("no active payment product mappings are configured")
-	}
 	return products, nil
+}
+
+func (r *PostgresRepository) ExternalProductBySKU(ctx context.Context, providerID, providerVersion, sku string) (ExternalProduct, error) {
+	var product ExternalProduct
+	err := r.pool.QueryRow(ctx, `SELECT id,mapping_version,provider_id,provider_version,external_sku,amount_fen,currency,channels,status
+FROM payment_product_mappings
+WHERE provider_id=$1 AND provider_version=$2 AND external_sku=$3
+ORDER BY mapping_version DESC LIMIT 1`, providerID, providerVersion, strings.TrimSpace(sku)).Scan(
+		&product.MappingID, &product.MappingVersion, &product.ProviderID, &product.ProviderVersion,
+		&product.SKU, &product.AmountFen, &product.Currency, &product.Channels, &product.Status)
+	return product, err
 }
 
 func (r *PostgresRepository) CurrentPrice(ctx context.Context, model string) (PriceVersion, error) {

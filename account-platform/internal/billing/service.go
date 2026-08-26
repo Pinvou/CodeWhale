@@ -634,7 +634,11 @@ func (s *Service) listProducts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.payments != nil {
-		products = s.payments.FilterProducts(products)
+		products, err = s.payments.FilterProducts(r.Context(), products)
+		if err != nil {
+			s.writeError(w, r, err)
+			return
+		}
 		products, err = s.payments.ApplyProductAvailability(r.Context(), products)
 		if err != nil {
 			s.writeError(w, r, err)

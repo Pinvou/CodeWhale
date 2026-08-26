@@ -25,7 +25,9 @@ func (s *mallStub) QueryOrder(context.Context, string) (h3cmall.Order, error) { 
 
 func newTestProvider(t *testing.T, client mallClient) *Provider {
 	t.Helper()
-	provider, err := New(client, map[string]Product{"points-100": {SKU: "sku-100", AmountFen: 100}})
+	provider, err := New(client, func(context.Context, string) (Product, error) {
+		return Product{SKU: "sku-100", AmountFen: 100}, nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +59,24 @@ func TestMapsPaidOrder(t *testing.T) {
 	order, err := newTestProvider(t, client).Get(context.Background(), "pv-1")
 	if err != nil || order.Status != "SUCCESS" || order.ChannelTransactionID == nil || *order.ChannelTransactionID != "trade-1" || order.PaidAt == nil || order.PaidAt.Location() != time.UTC || order.AmountSource != "PROVIDER" || order.ProviderOrderReference != "mall-1" || order.ProviderEventAt == nil || order.ExternalSKU != "sku-100" {
 		t.Fatalf("unexpected paid mapping: %#v %v", order, err)
+	}
+}
+
+func TestProductResolutionIsDynamic(t *testing.T) {
+	amount := int64(100)
+	client := &mallStub{order: h3cmall.Order{OrderKey: "pv-1", MerchantCustomerKey: "019c0000-0000-7000-8000-000000000001", SKU: "sku", Status: "FAILED"}}
+	provider, err := New(client, func(context.Context, string) (Product, error) { return Product{SKU: "sku", AmountFen: amount}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := provider.Get(context.Background(), "pv-1")
+	if err != nil || first.AmountFen != 100 {
+		t.Fatalf("first dynamic resolution failed: %#v %v", first, err)
+	}
+	amount = 200
+	second, err := provider.Get(context.Background(), "pv-1")
+	if err != nil || second.AmountFen != 200 {
+		t.Fatalf("updated mapping required a provider restart: %#v %v", second, err)
 	}
 }
 
