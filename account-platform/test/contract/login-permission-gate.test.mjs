@@ -42,6 +42,8 @@ test('Keycloak has an exact issuer and least-privilege Account authorization rou
   const remote = YAML.parse(remoteSource);
   assert.equal(compose.services.keycloak.environment.PINVOU_OIDC_ISSUER, 'http://127.0.0.1:18080/realms/pinvou');
   assert.equal(remote.services.keycloak.environment.PINVOU_OIDC_ISSUER, '${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou');
+  assert.equal(remote.services['account-service'].environment.MOBILE_AUTH_ENABLED, 'true');
+  assert.equal(remote.services['identity-service'].environment.MOBILE_AUTH_ENABLED, 'true');
   assert.match(infrastructure, /PINVOU_OIDC_ISSUER[\s\S]*\.Values\.oidc\.issuer/);
   assert.match(deployments, /keycloak-mobile-authenticator[\s\S]*internal\.auth\.sms\.verify[\s\S]*internal\.authorization\.check/);
 });

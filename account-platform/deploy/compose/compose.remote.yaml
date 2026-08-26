@@ -16,6 +16,10 @@ services:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
       MOBILE_AUTH_ENABLED: "true"
 
+  identity-service:
+    environment:
+      MOBILE_AUTH_ENABLED: "true"
+
   billing-service:
     environment:
       OIDC_ISSUER: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL}/realms/pinvou
