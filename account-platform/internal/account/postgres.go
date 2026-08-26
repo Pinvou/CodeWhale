@@ -155,12 +155,27 @@ SELECT context.context_type,context.organization_id,context.context_version,u.me
          WHERE ra.user_id=u.id AND ra.organization_id=context.organization_id
            AND ((context.organization_id IS NULL AND ro.scope='PERSONAL') OR (context.organization_id IS NOT NULL AND ro.scope='ORGANIZATION'))
            AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+       ),'{}'),
+       COALESCE((
+         SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code)
+         FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code
+         JOIN role_permissions rp ON rp.role_code=ra.role_code
+         WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PERSONAL'
+           AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+       ),'{}'),
+       COALESCE((
+         SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code)
+         FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code
+         JOIN role_permissions rp ON rp.role_code=ra.role_code
+         WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PLATFORM'
+           AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
        ),'{}')
 FROM users u JOIN user_active_contexts context ON context.user_id=u.id WHERE u.id=$1`, user.UserID).Scan(
 		&user.ActiveContext.Type, &user.ActiveContext.OrganizationID, &user.ActiveContext.ContextVersion,
 		&user.ActiveContext.MembershipVersion, &user.ActiveContext.AuthorizationVersion,
 		&user.ActiveContext.PersonalAuthorizationVersion, &user.ActiveContext.PlatformAuthorizationVersion,
 		&user.ActiveContext.OrganizationAuthorizationVersion, &user.ActiveContext.Permissions,
+		&user.PersonalPermissions, &user.PlatformPermissions,
 	); err != nil {
 		return Me{}, false, err
 	}
@@ -223,7 +238,21 @@ SELECT u.id, u.user_code, u.status, u.username, u.display_name, u.mobile_e164, u
        COALESCE((SELECT av.version FROM authorization_versions av WHERE av.user_id=u.id AND av.scope=CASE WHEN context.organization_id IS NULL THEN 'PERSONAL' ELSE 'ORGANIZATION' END AND av.scope_id=COALESCE(context.organization_id,'00000000-0000-0000-0000-000000000000'::uuid)),1),
        COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='PERSONAL' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1),
        COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='PLATFORM' AND scope_id='00000000-0000-0000-0000-000000000000'::uuid),1),
-       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='ORGANIZATION' AND scope_id=context.organization_id),1)
+       COALESCE((SELECT version FROM authorization_versions WHERE user_id=u.id AND scope='ORGANIZATION' AND scope_id=context.organization_id),1),
+       COALESCE((
+         SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code)
+         FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code
+         JOIN role_permissions rp ON rp.role_code=ra.role_code
+         WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PERSONAL'
+           AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+       ),'{}'),
+       COALESCE((
+         SELECT array_agg(DISTINCT rp.permission_code ORDER BY rp.permission_code)
+         FROM role_assignments ra JOIN roles ro ON ro.code=ra.role_code
+         JOIN role_permissions rp ON rp.role_code=ra.role_code
+         WHERE ra.user_id=u.id AND ra.organization_id IS NULL AND ra.unit_id IS NULL AND ro.scope='PLATFORM'
+           AND ra.revoked_at IS NULL AND ra.starts_at<=now() AND (ra.expires_at IS NULL OR ra.expires_at>now())
+       ),'{}')
 FROM identities i
 JOIN users u ON u.id = i.user_id
 JOIN user_sessions s ON s.user_id = u.id AND s.issuer = i.issuer AND s.session_id = $3
@@ -234,7 +263,7 @@ WHERE i.issuer = $1 AND i.subject = $2`, principal.Issuer, principal.Subject, pr
 		&me.CommerceCustomerStatus, &me.ActiveContext.Type, &organizationID, &me.ActiveContext.MembershipVersion,
 		&me.ActiveContext.ContextVersion, &me.ActiveContext.AuthorizationVersion,
 		&me.ActiveContext.PersonalAuthorizationVersion, &me.ActiveContext.PlatformAuthorizationVersion,
-		&me.ActiveContext.OrganizationAuthorizationVersion,
+		&me.ActiveContext.OrganizationAuthorizationVersion, &me.PersonalPermissions, &me.PlatformPermissions,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Me{}, ErrNotFound

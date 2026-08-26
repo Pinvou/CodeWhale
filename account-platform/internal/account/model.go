@@ -45,6 +45,8 @@ type Me struct {
 	MobileVerified         bool      `json:"mobile_verified"`
 	CommerceCustomerStatus string    `json:"commerce_customer_status"`
 	ActiveContext          Context   `json:"active_context"`
+	PersonalPermissions    []string  `json:"personal_permissions"`
+	PlatformPermissions    []string  `json:"platform_permissions"`
 }
 
 type UnitAuthorizationBinding struct {

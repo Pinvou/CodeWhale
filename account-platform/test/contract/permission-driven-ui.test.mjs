@@ -42,6 +42,32 @@ test('personal surfaces use personal permissions independently from the active o
   });
 });
 
+test('personal bootstrap remains usable while an older Account service omits root permission collections', () => {
+  const value = {
+    active_context: {
+      organization_id: null,
+      permissions: [
+        'personal.profile.read',
+        'personal.billing.read',
+        'personal.recharge.create',
+        'personal.usage.read',
+        'personal.usage.cancel',
+      ],
+    },
+  };
+  assert.deepEqual(personalSurfaceAccess(value), {
+    profileRead: true,
+    profileUpdate: false,
+    contextSwitch: false,
+    closureRead: false,
+    closureRequest: false,
+    billingRead: true,
+    rechargeCreate: true,
+    usageRead: true,
+    usageCancel: true,
+  });
+});
+
 test('admin navigation and read-only state are derived from exact platform permissions', () => {
   const value = snapshot({ platform: ['platform.users.read', 'platform.audit.read', 'platform.audit.export'] });
   assert.deepEqual(adminVisibleSections(value), ['users', 'audit']);

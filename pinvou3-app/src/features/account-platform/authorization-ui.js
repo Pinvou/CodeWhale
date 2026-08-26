@@ -23,7 +23,12 @@ export const adminSectionMutationPermissions = Object.freeze({
 });
 
 export function permissionSet(snapshot, scope = 'active') {
-  if (scope === 'personal') return new Set(snapshot?.personal_permissions || []);
+  if (scope === 'personal') {
+    const personal = snapshot?.personal_permissions;
+    if (Array.isArray(personal)) return new Set(personal);
+    if (!snapshot?.active_context?.organization_id) return new Set(snapshot?.active_context?.permissions || []);
+    return new Set();
+  }
   if (scope === 'platform') return new Set(snapshot?.platform_permissions || []);
   return new Set(snapshot?.active_context?.permissions || []);
 }

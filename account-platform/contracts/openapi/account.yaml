@@ -1080,7 +1080,7 @@ components:
     Me:
       type: object
       additionalProperties: false
-      required: [user_id, user_code, status, mobile_verified, commerce_customer_status, active_context]
+      required: [user_id, user_code, status, mobile_verified, commerce_customer_status, active_context, personal_permissions, platform_permissions]
       properties:
         user_id:
           type: string
@@ -1103,6 +1103,16 @@ components:
           enum: [NOT_CONFIGURED, PENDING, IN_PROGRESS, READY, RETRY, REPAIR_REQUIRED, DETACHED]
         active_context:
           $ref: "common.yaml#/components/schemas/Context"
+        personal_permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        platform_permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
     CommerceCustomerMapping:
       type: object
       additionalProperties: false
