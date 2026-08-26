@@ -1044,6 +1044,7 @@ dictJa["uiTeamRelay"] = {
     "invite_already_claimed": "この招待コードは既に使用されています。",
     "member_has_open_work": "このメンバーには未完了の仕事に必要な責任があります。完了または引き継ぎ後に再試行してください。",
     "last_team_owner": "チーム責任者は直接退出できません。先に責任者を譲渡するか、チームを解散してください。",
+    "new_owner_unavailable": "このメンバーのアカウントは無効化されているため、責任者を引き継げません。",
     "team_has_open_work": "チームに未完了の仕事があります。すべて完了してから解散してください。",
     "revision_conflict": "仕事が直前に更新されました。再同期した内容を確認して再試行してください。",
     "action_not_allowed": "現在のリレー状態ではこの操作を実行できません。",
@@ -1556,7 +1557,10 @@ dictJa["uiTeamRelay"] = {
     "restored": "仕事一覧へ戻しました"
   },
   "blockingWork": (message, threads) => `${message} ブロック中の仕事：${threads.join('；')}`,
-  "blockingThread": thread => `${thread.title || thread.thread_id}（${thread.phase || '進行中'}）`,
+  "blockingThread": thread => {
+    const labels = { "active": "進行中", "pending_transfer": "確認待ち", "awaiting_reassignment": "再割当待ち", "awaiting_acceptance": "承認待ち" };
+    return labels[thread.phase] ? `${thread.title || thread.thread_id}（${labels[thread.phase]}）` : `${thread.title || thread.thread_id}`;
+  },
   "lifecycleSyncPending": "操作は完了しましたが、チームデータはまだ同期されていません。再同期して最新の状態を取得してください。"
 };
 dictJa["kbOutWeekdays"] = ["日", "月", "火", "水", "木", "金", "土"];

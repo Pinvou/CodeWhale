@@ -1041,6 +1041,7 @@ dictEn["uiTeamRelay"] = {
     "invite_already_claimed": "This invite code has already been used.",
     "member_has_open_work": "This member still has required responsibilities in open work. Finish or hand them off before retrying.",
     "last_team_owner": "The team owner cannot leave directly. Transfer ownership or dissolve the team first.",
+    "new_owner_unavailable": "This member's account is disabled and cannot take over as team owner.",
     "team_has_open_work": "The team still has open work. Finish all of it before dissolving the team.",
     "revision_conflict": "This work changed moments ago. It has been refreshed; review and retry.",
     "action_not_allowed": "This action is not allowed in the current relay state.",
@@ -1553,7 +1554,10 @@ dictEn["uiTeamRelay"] = {
     "restored": "Restored to the work list"
   },
   "blockingWork": (message, threads) => `${message} Blocking work: ${threads.join('; ')}`,
-  "blockingThread": thread => `${thread.title || thread.thread_id} (${thread.phase || 'open'})`,
+  "blockingThread": thread => {
+    const labels = { "active": "In progress", "pending_transfer": "Waiting for confirmation", "awaiting_reassignment": "Needs reassignment", "awaiting_acceptance": "Awaiting approval" };
+    return labels[thread.phase] ? `${thread.title || thread.thread_id} (${labels[thread.phase]})` : `${thread.title || thread.thread_id}`;
+  },
   "lifecycleSyncPending": "The operation is complete, but team data has not synced yet. Sync again to load the latest state."
 };
 dictEn["kbOutWeekdays"] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];

@@ -1033,6 +1033,7 @@ dictZh["uiTeamRelay"] = {
     "invite_already_claimed": "该邀请码已被使用。",
     "member_has_open_work": "该成员仍承担未结束工作的必要责任，请先完成或交接后再执行此操作。",
     "last_team_owner": "团队负责人不能直接退出，请先转让负责人或解散团队。",
+    "new_owner_unavailable": "该成员的账号已被禁用，无法接任负责人。",
     "team_has_open_work": "团队仍有未结束的工作，全部结束后才能解散。",
     "revision_conflict": "这项工作刚刚发生变化，已刷新，请确认后重试。",
     "action_not_allowed": "当前接力状态不允许执行此操作。",
@@ -1545,7 +1546,10 @@ dictZh["uiTeamRelay"] = {
     "restored": "已恢复到工作列表"
   },
   "blockingWork": (message, threads) => `${message} 阻塞工作：${threads.join('；')}`,
-  "blockingThread": thread => `${thread.title || thread.thread_id}（${thread.phase || '进行中'}）`,
+  "blockingThread": thread => {
+    const labels = { "active": "进行中", "pending_transfer": "等待确认", "awaiting_reassignment": "待重新派发", "awaiting_acceptance": "待验收" };
+    return labels[thread.phase] ? `${thread.title || thread.thread_id}（${labels[thread.phase]}）` : `${thread.title || thread.thread_id}`;
+  },
   "lifecycleSyncPending": "操作已完成，但团队数据尚未同步。请重新同步以获取最新状态。"
 };
 dictZh["kbOutWeekdays"] = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];

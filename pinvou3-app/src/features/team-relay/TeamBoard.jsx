@@ -30,7 +30,7 @@ function MemberRow({ copy, member, duplicateName, canManage, busy, loadAvatarSou
       <small>{copy.board.ownedCount(member.ownedCount)}</small>
       {canManage && !member.isMe && <div className="team-relay-member-actions">
         {member.role === 'member' &&
-        <button type="button" disabled={busy} onClick={() => onTransfer(member)}><User size={13} />{copy.board.transferOwner}</button>
+        <button type="button" className="is-transfer" disabled={busy} onClick={() => onTransfer(member)}><User size={13} />{copy.board.transferOwner}</button>
         }
         <button type="button" disabled={busy} onClick={() => onRemove(member)}><Trash2 size={13} />{copy.board.removeMember}</button>
       </div>}
