@@ -236,7 +236,7 @@ UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务
 
 新华三回调请求体必须直接使用其 `queryOrder.content` 原生订单对象，不再发送品悟旧版规范字段。至少核验 `orderKey`、`merchantCustomerKey`、`mobile`、`skuBom`、`needPayAmt`、`skuAmt`、`status`、`updatedAt`；支付成功还要核验 `paidAmt`、`payTime` 和 `payUniqueKey/paymentOrderId`。金额按十进制元精确换算为分并与本地订单快照比较；客户、SKU、金额或归属不一致只留证并进入复核。发布后必须使用一笔隔离测试订单验证 `Token 200 → 回调 202 → Inbox PROCESSED → 支付流水/权益各一份`，并确认重复原生快照不重复履约；不能只以 `202` 作为成功证据。
 
-迁移 `000042_single_h3c_sku` 将当前购买目录收敛为唯一 `PLAN_TRIAL`：H3C SKU `0502AJ0Q`、金额 0.10 元，并退休其余 H3C/Simulator 活动映射；权益保持 1,000 BASE、0 BONUS、30 天。部署后须确认商品列表只显示这一档、创建订单冻结 `amount_fen=10`，商城查询/回调三项金额均为 0.10 元且能单次履约。完整商品名称、类目、发票信息、上架状态和真实支付证据验收前仍保持 `UAT_TENTATIVE` / `TEST_ONLY`，不得直接升级为 `FROZEN`。
+历史商品迁移仅用于把部署前已有事实导入运行时目录，不再代表当前可售清单。部署后由具备商品权限的运营人员在后台创建草稿、完成准入验证并发布；验收应从运行时目录读取实际商品和映射，核对订单冻结快照、商城查询/回调金额及单次履约，不得在部署文档或发布脚本中固化 SKU/BOM、金额、权益或商品数量。正式准入证据不足时保持测试准入状态，不得直接升级为正式状态。
 
 ### 6.5 Token Gateway 与 New API
 

@@ -87,6 +87,7 @@ function ensureNodeModules() {
 
 function verify() {
   ensureNodeModules();
+  run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-recharge-product-document-baseline.mjs')]);
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-tasks.mjs')]);
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'check-account-platform-authorization-coverage.mjs')]);
   run(process.execPath, [path.join(repositoryRoot, 'scripts', 'account-platform-migration-manifest.mjs')]);
