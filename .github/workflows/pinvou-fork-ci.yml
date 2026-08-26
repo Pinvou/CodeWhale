@@ -46,3 +46,14 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Run Pinvou fork regression tests
         run: cargo test -p codewhale-tui --lib forkguard_ --locked
+
+  windows-shell:
+    name: Windows shell regressions
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run shell regression tests
+        run: cargo test -p codewhale-tui --lib tools::shell --locked
