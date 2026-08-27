@@ -89,7 +89,9 @@ test('Web personal center summarizes active benefit packages before opening full
   assert.match(view, /<section className="ap-entitlements">/);
   assert.doesNotMatch(view, /className="ap-card ap-entitlements"/);
   assert.match(styles, /\.ap-entitlements \{ margin-top: 28px; padding-top: 32px; border-top: 1px solid var\(--ap-border-soft\); \}/);
-  assert.match(styles, /\.ap-entitlement-summary-list \{[^}]*border: 1px solid var\(--ap-border-soft\)/);
+  assert.match(styles, /\.ap-entitlement-summary-list \{ display: grid; gap: 0; \}/);
+  assert.doesNotMatch(styles, /\.ap-entitlement-summary-list \{[^}]*(?:border|border-radius|background)/);
+  assert.match(styles, /\.ap-entitlement-row \{[^}]*padding: 18px 0;[^}]*background: transparent;/);
 });
 
 test('Web personal center renders successful orders as responsive summaries with accessible details', async () => {
