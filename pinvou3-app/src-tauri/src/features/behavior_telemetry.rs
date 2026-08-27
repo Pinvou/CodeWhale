@@ -184,6 +184,7 @@ pub struct BehaviorTelemetry {
     control_gate: Arc<Mutex<()>>,
     collecting: Arc<AtomicBool>,
     authorization_generation: Arc<AtomicU64>,
+    credential_renewal_in_progress: Arc<AtomicBool>,
     collection_period_id: Arc<RwLock<Option<String>>>,
     outbox: Arc<StdMutex<Outbox>>,
     tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
@@ -270,6 +271,7 @@ impl ToolInstallTerminalCoordinator {
         &self,
         terminal: DeferredToolInstallTerminal,
         authorization_generation: &AtomicU64,
+        renewal_in_progress: &AtomicBool,
         mut publish: F,
     ) where
         F: FnMut(&BehaviorEvent, u64) -> bool,
@@ -278,34 +280,72 @@ impl ToolInstallTerminalCoordinator {
         if authorization_generation.load(Ordering::Acquire) != generation {
             return;
         }
+        let renewal_was_in_progress = renewal_in_progress.load(Ordering::Acquire);
         if publish(&terminal.event, generation) {
             return;
         }
+        if !renewal_was_in_progress && !renewal_in_progress.load(Ordering::Acquire) {
+            return;
+        }
+        if !renewal_in_progress.load(Ordering::Acquire) {
+            let _ = publish(&terminal.event, generation);
+            return;
+        }
+        let mut terminal = Some(terminal);
         if let Ok(mut pending) = self.pending.lock() {
-            if authorization_generation.load(Ordering::Acquire) != generation {
+            if authorization_generation.load(Ordering::Acquire) != generation
+                || !renewal_in_progress.load(Ordering::Acquire)
+            {
+                drop(pending);
+                if authorization_generation.load(Ordering::Acquire) == generation {
+                    let terminal = terminal.as_ref().expect("terminal remains available");
+                    let _ = publish(&terminal.event, generation);
+                }
                 return;
             }
+            let terminal = terminal.take().expect("terminal inserted once");
             pending
                 .entry(terminal.operation_id.clone())
                 .or_insert(terminal);
         }
         // Close the race where renewal publishes its new lease after the first
         // attempt but before the terminal is inserted into the deferred queue.
-        self.flush_inner(authorization_generation, generation, &mut publish);
+        self.flush_inner(
+            authorization_generation,
+            renewal_in_progress,
+            generation,
+            &mut publish,
+        );
     }
 
-    fn flush<F>(&self, authorization_generation: &AtomicU64, generation: u64, mut publish: F)
-    where
+    fn flush<F>(
+        &self,
+        authorization_generation: &AtomicU64,
+        renewal_in_progress: &AtomicBool,
+        generation: u64,
+        mut publish: F,
+    ) where
         F: FnMut(&BehaviorEvent, u64) -> bool,
     {
-        self.flush_inner(authorization_generation, generation, &mut publish);
+        self.flush_inner(
+            authorization_generation,
+            renewal_in_progress,
+            generation,
+            &mut publish,
+        );
     }
 
-    fn flush_inner<F>(&self, authorization_generation: &AtomicU64, generation: u64, publish: &mut F)
-    where
+    fn flush_inner<F>(
+        &self,
+        authorization_generation: &AtomicU64,
+        renewal_in_progress: &AtomicBool,
+        generation: u64,
+        publish: &mut F,
+    ) where
         F: FnMut(&BehaviorEvent, u64) -> bool,
     {
         let current_generation = authorization_generation.load(Ordering::Acquire);
+        let renewal_was_in_progress = renewal_in_progress.load(Ordering::Acquire);
         let terminals = match self.pending.lock() {
             Ok(mut pending) => {
                 pending.retain(|_, terminal| terminal.generation == current_generation);
@@ -333,10 +373,14 @@ impl ToolInstallTerminalCoordinator {
             if !publish(&terminal.event, generation)
                 && authorization_generation.load(Ordering::Acquire) == generation
             {
-                if let Ok(mut pending) = self.pending.lock() {
-                    pending
-                        .entry(terminal.operation_id.clone())
-                        .or_insert(terminal);
+                if renewal_in_progress.load(Ordering::Acquire) {
+                    if let Ok(mut pending) = self.pending.lock() {
+                        pending
+                            .entry(terminal.operation_id.clone())
+                            .or_insert(terminal);
+                    }
+                } else if renewal_was_in_progress {
+                    let _ = publish(&terminal.event, generation);
                 }
             }
         }
@@ -348,9 +392,52 @@ impl ToolInstallTerminalCoordinator {
         }
     }
 
+    fn discard_generation(&self, generation: u64) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.retain(|_, terminal| terminal.generation != generation);
+        }
+    }
+
     #[cfg(test)]
     fn pending_len(&self) -> usize {
         self.pending.lock().map_or(0, |pending| pending.len())
+    }
+}
+
+struct CredentialRenewalTransition<'a> {
+    in_progress: &'a AtomicBool,
+    terminals: &'a ToolInstallTerminalCoordinator,
+    generation: u64,
+    completed: bool,
+}
+
+impl<'a> CredentialRenewalTransition<'a> {
+    fn begin(
+        in_progress: &'a AtomicBool,
+        terminals: &'a ToolInstallTerminalCoordinator,
+        generation: u64,
+    ) -> Self {
+        in_progress.store(true, Ordering::Release);
+        Self {
+            in_progress,
+            terminals,
+            generation,
+            completed: false,
+        }
+    }
+
+    fn complete(mut self) {
+        self.in_progress.store(false, Ordering::Release);
+        self.completed = true;
+    }
+}
+
+impl Drop for CredentialRenewalTransition<'_> {
+    fn drop(&mut self) {
+        self.in_progress.store(false, Ordering::Release);
+        if !self.completed {
+            self.terminals.discard_generation(self.generation);
+        }
     }
 }
 
@@ -960,6 +1047,7 @@ impl BehaviorTelemetry {
             control_gate,
             collecting,
             authorization_generation: Arc::new(AtomicU64::new(active_generation)),
+            credential_renewal_in_progress: Arc::new(AtomicBool::new(false)),
             collection_period_id,
             outbox,
             tasks,
@@ -1116,6 +1204,7 @@ impl BehaviorTelemetry {
                 event,
             },
             &self.authorization_generation,
+            &self.credential_renewal_in_progress,
             |event, expected_generation| {
                 let Some(lease) = lease_for_generation(self.current_lease(), expected_generation)
                 else {
@@ -1129,6 +1218,7 @@ impl BehaviorTelemetry {
     fn flush_tool_install_terminals(&self, generation: u64) {
         self.tool_install_terminals.flush(
             &self.authorization_generation,
+            &self.credential_renewal_in_progress,
             generation,
             |event, expected_generation| {
                 let Some(lease) = lease_for_generation(self.current_lease(), expected_generation)
@@ -1236,6 +1326,7 @@ impl BehaviorTelemetry {
             control_gate: self.control_gate.clone(),
             collecting: self.collecting.clone(),
             authorization_generation: self.authorization_generation.clone(),
+            credential_renewal_in_progress: self.credential_renewal_in_progress.clone(),
             collection_period_id: self.collection_period_id.clone(),
             outbox: self.outbox.clone(),
             tasks: self.tasks.clone(),
@@ -1556,8 +1647,13 @@ impl BehaviorTelemetry {
         {
             return Ok(false);
         }
-        self.collecting.store(false, Ordering::Release);
         let generation = self.authorization_generation.load(Ordering::Acquire);
+        let renewal_transition = CredentialRenewalTransition::begin(
+            &self.credential_renewal_in_progress,
+            &self.tool_install_terminals,
+            generation,
+        );
+        self.collecting.store(false, Ordering::Release);
         self.outbox
             .lock()
             .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
@@ -1574,6 +1670,7 @@ impl BehaviorTelemetry {
             *period = Some(started.collection_period_id);
         }
         self.collecting.store(true, Ordering::Release);
+        renewal_transition.complete();
         self.flush_tool_install_terminals(generation);
         Ok(true)
     }
@@ -4281,6 +4378,7 @@ mod tests {
         let coordinator = ToolInstallTerminalCoordinator::default();
         let collecting = Arc::new(AtomicBool::new(true));
         let generation = Arc::new(AtomicU64::new(12));
+        let renewal_in_progress = Arc::new(AtomicBool::new(false));
         let period = Arc::new(RwLock::new(Some("period_old".to_string())));
         let delivered = Arc::new(StdMutex::new(Vec::<(String, String)>::new()));
         let renewal_paused = Arc::new(Barrier::new(2));
@@ -4290,26 +4388,34 @@ mod tests {
             let coordinator = coordinator.clone();
             let collecting = collecting.clone();
             let generation = generation.clone();
+            let renewal_in_progress = renewal_in_progress.clone();
             let period = period.clone();
             let delivered = delivered.clone();
             let renewal_paused = renewal_paused.clone();
             let renewal_resume = renewal_resume.clone();
             thread::spawn(move || {
+                renewal_in_progress.store(true, Ordering::Release);
                 collecting.store(false, Ordering::Release);
                 renewal_paused.wait();
                 renewal_resume.wait();
                 *period.write().unwrap() = Some("period_renewed".to_string());
                 collecting.store(true, Ordering::Release);
-                coordinator.flush(&generation, 12, |event, expected_generation| {
-                    publish(
-                        &collecting,
-                        &generation,
-                        &period,
-                        &delivered,
-                        event,
-                        expected_generation,
-                    )
-                });
+                renewal_in_progress.store(false, Ordering::Release);
+                coordinator.flush(
+                    &generation,
+                    &renewal_in_progress,
+                    12,
+                    |event, expected_generation| {
+                        publish(
+                            &collecting,
+                            &generation,
+                            &period,
+                            &delivered,
+                            event,
+                            expected_generation,
+                        )
+                    },
+                );
             })
         };
 
@@ -4321,16 +4427,21 @@ mod tests {
                 .string("operation_id", "install_during_renewal")
                 .success(true),
         };
-        coordinator.submit(terminal, &generation, |event, expected_generation| {
-            publish(
-                &collecting,
-                &generation,
-                &period,
-                &delivered,
-                event,
-                expected_generation,
-            )
-        });
+        coordinator.submit(
+            terminal,
+            &generation,
+            &renewal_in_progress,
+            |event, expected_generation| {
+                publish(
+                    &collecting,
+                    &generation,
+                    &period,
+                    &delivered,
+                    event,
+                    expected_generation,
+                )
+            },
+        );
         assert_eq!(coordinator.pending_len(), 1);
         assert!(delivered.lock().unwrap().is_empty());
 
@@ -4340,18 +4451,24 @@ mod tests {
         let delivered_after_renewal = delivered.lock().unwrap().clone();
         assert_eq!(delivered_after_renewal.len(), 1);
         assert_eq!(delivered_after_renewal[0].1, "period_renewed");
-        coordinator.flush(&generation, 12, |event, expected_generation| {
-            publish(
-                &collecting,
-                &generation,
-                &period,
-                &delivered,
-                event,
-                expected_generation,
-            )
-        });
+        coordinator.flush(
+            &generation,
+            &renewal_in_progress,
+            12,
+            |event, expected_generation| {
+                publish(
+                    &collecting,
+                    &generation,
+                    &period,
+                    &delivered,
+                    event,
+                    expected_generation,
+                )
+            },
+        );
         assert_eq!(delivered.lock().unwrap().len(), 1);
 
+        renewal_in_progress.store(true, Ordering::Release);
         collecting.store(false, Ordering::Release);
         coordinator.submit(
             DeferredToolInstallTerminal {
@@ -4362,6 +4479,7 @@ mod tests {
                     .success(true),
             },
             &generation,
+            &renewal_in_progress,
             |event, expected_generation| {
                 publish(
                     &collecting,
@@ -4375,21 +4493,98 @@ mod tests {
         );
         assert_eq!(coordinator.pending_len(), 1);
         generation.store(13, Ordering::Release);
+        renewal_in_progress.store(false, Ordering::Release);
         coordinator.discard_stale(13);
         *period.write().unwrap() = Some("period_after_delete".to_string());
         collecting.store(true, Ordering::Release);
-        coordinator.flush(&generation, 13, |event, expected_generation| {
-            publish(
-                &collecting,
-                &generation,
-                &period,
-                &delivered,
-                event,
-                expected_generation,
-            )
-        });
+        coordinator.flush(
+            &generation,
+            &renewal_in_progress,
+            13,
+            |event, expected_generation| {
+                publish(
+                    &collecting,
+                    &generation,
+                    &period,
+                    &delivered,
+                    event,
+                    expected_generation,
+                )
+            },
+        );
         assert_eq!(coordinator.pending_len(), 0);
         assert_eq!(delivered.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tool_install_persistence_failures_do_not_accumulate_and_recovery_converges() {
+        let coordinator = ToolInstallTerminalCoordinator::default();
+        let generation = AtomicU64::new(21);
+        let renewal_in_progress = AtomicBool::new(false);
+        let storage_writable = AtomicBool::new(false);
+        let delivered = StdMutex::new(Vec::<String>::new());
+
+        for index in 0..(OUTBOX_MAX_EVENTS + 1) {
+            let operation_id = format!("failed_install_{index}");
+            coordinator.submit(
+                DeferredToolInstallTerminal {
+                    operation_id: operation_id.clone(),
+                    generation: 21,
+                    event: BehaviorEvent::new("tool_install_completed")
+                        .string("operation_id", operation_id),
+                },
+                &generation,
+                &renewal_in_progress,
+                |event, _| {
+                    if !storage_writable.load(Ordering::Acquire) {
+                        return false;
+                    }
+                    delivered.lock().unwrap().push(event.event_id.clone());
+                    true
+                },
+            );
+        }
+        assert_eq!(coordinator.pending_len(), 0);
+        assert!(delivered.lock().unwrap().is_empty());
+
+        storage_writable.store(true, Ordering::Release);
+        coordinator.submit(
+            DeferredToolInstallTerminal {
+                operation_id: "recovered_install".to_string(),
+                generation: 21,
+                event: BehaviorEvent::new("tool_install_completed")
+                    .string("operation_id", "recovered_install"),
+            },
+            &generation,
+            &renewal_in_progress,
+            |event, _| {
+                if !storage_writable.load(Ordering::Acquire) {
+                    return false;
+                }
+                delivered.lock().unwrap().push(event.event_id.clone());
+                true
+            },
+        );
+        assert_eq!(coordinator.pending_len(), 0);
+        assert_eq!(delivered.lock().unwrap().len(), 1);
+
+        let failed_transition =
+            CredentialRenewalTransition::begin(&renewal_in_progress, &coordinator, 21);
+        coordinator.submit(
+            DeferredToolInstallTerminal {
+                operation_id: "failed_renewal_install".to_string(),
+                generation: 21,
+                event: BehaviorEvent::new("tool_install_completed")
+                    .string("operation_id", "failed_renewal_install"),
+            },
+            &generation,
+            &renewal_in_progress,
+            |_, _| false,
+        );
+        assert_eq!(coordinator.pending_len(), 1);
+        drop(failed_transition);
+        assert!(!renewal_in_progress.load(Ordering::Acquire));
+        assert_eq!(coordinator.pending_len(), 0);
     }
 
     #[test]

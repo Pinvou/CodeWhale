@@ -32,6 +32,9 @@ test('marketplace and connector installs have a guarded terminal event', () => {
   assert.match(telemetry, /ToolInstallGuard[\s\S]*authorization_generation: Option<u64>/);
   assert(telemetry.includes('ToolInstallTerminalCoordinator'));
   assert(telemetry.includes('complete_tool_install_terminal'));
+  assert(telemetry.includes('CredentialRenewalTransition'));
+  assert.match(telemetry, /renewal_was_in_progress[\s\S]*renewal_in_progress\.load\(Ordering::Acquire\)/);
   assert.match(telemetry, /collecting\.store\(true, Ordering::Release\);[\s\S]*flush_tool_install_terminals\(generation\)/);
   assert(telemetry.includes('tool_install_terminal_waits_for_renewal_and_drops_after_reauthorization'));
+  assert(telemetry.includes('tool_install_persistence_failures_do_not_accumulate_and_recovery_converges'));
 });
