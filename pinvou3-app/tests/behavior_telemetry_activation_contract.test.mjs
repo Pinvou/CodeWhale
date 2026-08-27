@@ -62,9 +62,12 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /device_data_deleted[\s\S]*handle_authoritative_deletion/);
   assert.match(rust, /async fn handle_authoritative_deletion_locked[\s\S]*collecting\.store\(false[\s\S]*persist_state\(&fresh\)[\s\S]*outbox\.clear\(\)[\s\S]*tasks\.clear\(\)/);
   assert.match(rust, /fn state_after_authoritative_deletion[\s\S]*PersistedState::fresh/);
+  assert.match(rust, /prepare_disabled_state\(state, generation\)[\s\S]*persist_state\(state\)[\s\S]*outbox\.clear\(\)/);
+  assert.match(rust, /fresh\.retired_endpoints[\s\S]*fresh\.control\.pending_deletions/);
   assert.match(rust, /authorization_generation[\s\S]*fn lease_is_current/);
   assert.match(rust, /fn lease_matches_authorization[\s\S]*generation\.load\(Ordering::Acquire\) == lease\.generation/);
   assert.match(rust, /fn stale_producer_cannot_write_after_delete_and_reauthorization_aba/);
+  assert.match(rust, /fn disabled_state_survives_restart_before_fallible_cleanup/);
   assert.match(settingsBridge, /function scheduleBehaviorTelemetryStatusPoll/);
   assert.match(settingsBridge, /status\.withdrawal_pending \|\| status\.deletion_pending/);
   assert.match(settingsBridge, /status\.enabled \|\| behaviorTelemetryControlPending\(status\)/);

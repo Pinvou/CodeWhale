@@ -258,7 +258,7 @@ pub struct ToolInstallGuard {
     started_at: u64,
     tool_key: &'static str,
     tool_type: &'static str,
-    lease: Option<CollectionLease>,
+    authorization_generation: Option<u64>,
     completed: bool,
 }
 
@@ -281,11 +281,13 @@ impl ToolInstallGuard {
         if let Some(category) = error_category {
             event = event.string("error_category", category);
         }
-        if let (Some(telemetry), Some(lease)) = (
+        if let (Some(telemetry), Some(generation)) = (
             self.app.try_state::<BehaviorTelemetry>(),
-            self.lease.as_ref(),
+            self.authorization_generation,
         ) {
-            telemetry.track_for_lease(event, lease);
+            if let Some(lease) = lease_for_generation(telemetry.current_lease(), generation) {
+                telemetry.track_for_lease(event, &lease);
+            }
         }
         self.completed = true;
     }
@@ -1274,7 +1276,7 @@ impl BehaviorTelemetry {
         if let Ok(mut period) = self.collection_period_id.write() {
             *period = None;
         }
-        let fresh = state_after_authoritative_deletion(state, &self.runtime, generation);
+        let fresh = state_after_authoritative_deletion(state, &self.runtime, deleted, generation);
 
         let mut failures = Vec::new();
         if let Err(error) = persist_state(&fresh) {
@@ -1528,6 +1530,17 @@ impl BehaviorTelemetry {
             if let Ok(mut period) = self.collection_period_id.write() {
                 *period = None;
             }
+            {
+                let mut guard = self.state.lock().await;
+                if let Some(state) = guard.as_mut() {
+                    prepare_disabled_state(state, generation);
+                    if let Err(error) = persist_state(state) {
+                        self.state_healthy.store(false, Ordering::Release);
+                        return Err(error.context("persist disabled behavior telemetry state"));
+                    }
+                }
+            }
+            self.wake_control_worker();
             if let Ok(mut outbox) = self.outbox.lock() {
                 outbox.clear()?;
             }
@@ -1550,22 +1563,6 @@ impl BehaviorTelemetry {
             if let Ok(mut latest_turns) = self.latest_turns.lock() {
                 latest_turns.clear();
             }
-            let mut guard = self.state.lock().await;
-            if let Some(state) = guard.as_mut() {
-                state.control.enabled = false;
-                state.control.generation = generation;
-                if let Some(period_id) = state.control.collection_period_id.clone() {
-                    state.control.pending_request = Some(PendingControlRequest {
-                        kind: PendingControlKind::End,
-                        request_id: token("control_", 18),
-                        collection_period_id: Some(period_id),
-                        behavior_events_url: state.behavior_events_url.clone(),
-                    });
-                }
-                persist_state(state)?;
-            }
-            drop(guard);
-            self.wake_control_worker();
         }
         Ok(self.status().await)
     }
@@ -2079,12 +2076,45 @@ fn deleted_credentials_match(state: &PersistedState, deleted: &Credentials) -> b
 fn state_after_authoritative_deletion(
     state: &PersistedState,
     runtime: &RuntimeConfig,
+    deleted: &Credentials,
     generation: u64,
 ) -> PersistedState {
     debug_assert!(generation > state.control.generation);
     let mut fresh = PersistedState::fresh(runtime);
     fresh.control.generation = generation;
+    fresh.retired_endpoints = state
+        .retired_endpoints
+        .iter()
+        .filter(|retired| !retired_credentials_match(retired, deleted))
+        .cloned()
+        .collect();
+    fresh.control.pending_deletions = state
+        .control
+        .pending_deletions
+        .iter()
+        .filter(|pending| !pending_deletion_matches(pending, deleted))
+        .cloned()
+        .collect();
     fresh
+}
+
+fn retired_credentials_match(retired: &RetiredEndpointCredentials, deleted: &Credentials) -> bool {
+    retired.behavior_events_url == deleted.behavior_events_url
+        && retired.device_id == deleted.device_id
+        && retired.device_token == deleted.device_token
+}
+
+fn pending_deletion_matches(pending: &PendingEndpointDeletion, deleted: &Credentials) -> bool {
+    pending.behavior_events_url == deleted.behavior_events_url
+        && pending.device_id == deleted.device_id
+        && pending.device_token == deleted.device_token
+}
+
+fn lease_for_generation(
+    lease: Option<CollectionLease>,
+    generation: u64,
+) -> Option<CollectionLease> {
+    lease.filter(|current| current.generation == generation)
 }
 
 fn endpoint_matches_runtime(state: &PersistedState, runtime: &RuntimeConfig) -> bool {
@@ -2111,6 +2141,19 @@ fn pending_request_matches(state: &PersistedState, pending: &PendingControlReque
                 && (current.behavior_events_url.is_empty()
                     || current.behavior_events_url == pending.behavior_events_url)
         })
+}
+
+fn prepare_disabled_state(state: &mut PersistedState, generation: u64) {
+    state.control.enabled = false;
+    state.control.generation = generation;
+    if let Some(period_id) = state.control.collection_period_id.clone() {
+        state.control.pending_request = Some(PendingControlRequest {
+            kind: PendingControlKind::End,
+            request_id: token("control_", 18),
+            collection_period_id: Some(period_id),
+            behavior_events_url: state.behavior_events_url.clone(),
+        });
+    }
 }
 
 impl RuntimeConfig {
@@ -3286,7 +3329,7 @@ pub fn begin_tool_install(
         started_at,
         tool_key,
         tool_type,
-        lease,
+        authorization_generation: lease.map(|current| current.generation),
         completed: false,
     }
 }
@@ -3947,6 +3990,84 @@ mod tests {
 
     #[test]
     fn authoritative_deletion_resets_only_the_matching_credential_to_disabled_identity() {
+        let runtime_a = RuntimeConfig {
+            enabled: true,
+            telemetry_base_url: "https://a.example.test/pinvou3/telemetry".to_string(),
+            behavior_events_url: "https://a.example.test/pinvou3/stats/api/behavior/events"
+                .to_string(),
+            enrollment_token: None,
+            app_version: "0.0.0".to_string(),
+            platform: "test".to_string(),
+            arch: "test".to_string(),
+            channel: "dev".to_string(),
+            locale: "en".to_string(),
+        };
+        let mut runtime_b = runtime_a.clone();
+        runtime_b.telemetry_base_url = "https://b.example.test/pinvou3/telemetry".to_string();
+        runtime_b.behavior_events_url =
+            "https://b.example.test/pinvou3/stats/api/behavior/events".to_string();
+
+        let mut state = PersistedState::fresh(&runtime_a);
+        state.device_id = Some("device_a".to_string());
+        state.device_token = Some("token_a".to_string());
+        state = state.rebind_endpoint(&runtime_b);
+        let previous_installation_id = state.installation_id.clone();
+        let previous_registration_secret = state.registration_secret.clone();
+        state.device_id = Some("device_b".to_string());
+        state.device_token = Some("token_b".to_string());
+        state.control.enabled = true;
+        state.control.collection_period_id = Some("period_deleted".to_string());
+        state.control.generation = 7;
+        state.control.pending_deletions = vec![
+            PendingEndpointDeletion {
+                request_id: "delete_a".to_string(),
+                behavior_events_url: runtime_a.behavior_events_url.clone(),
+                device_id: "device_a".to_string(),
+                device_token: "token_a".to_string(),
+            },
+            PendingEndpointDeletion {
+                request_id: "delete_b".to_string(),
+                behavior_events_url: runtime_b.behavior_events_url.clone(),
+                device_id: "device_b".to_string(),
+                device_token: "token_b".to_string(),
+            },
+        ];
+        let deleted = Credentials {
+            device_id: "device_b".to_string(),
+            device_token: "token_b".to_string(),
+            behavior_events_url: runtime_b.behavior_events_url.clone(),
+        };
+
+        assert!(deleted_credentials_match(&state, &deleted));
+        let reset = state_after_authoritative_deletion(&state, &runtime_b, &deleted, 8);
+        assert!(!reset.control.enabled);
+        assert!(reset.control.collection_period_id.is_none());
+        assert!(reset.device_id.is_none());
+        assert!(reset.device_token.is_none());
+        assert_eq!(reset.control.generation, 8);
+        assert_ne!(reset.installation_id, previous_installation_id);
+        assert_ne!(reset.registration_secret, previous_registration_secret);
+        assert_eq!(reset.retired_endpoints.len(), 1);
+        assert_eq!(reset.retired_endpoints[0].device_id, "device_a");
+        assert_eq!(reset.control.pending_deletions.len(), 1);
+        assert_eq!(reset.control.pending_deletions[0].device_id, "device_a");
+        let future_deletion_targets = reset.deletion_targets();
+        assert_eq!(future_deletion_targets.len(), 1);
+        assert_eq!(future_deletion_targets[0].device_id, "device_a");
+        assert_eq!(
+            future_deletion_targets[0].behavior_events_url,
+            runtime_a.behavior_events_url
+        );
+
+        let mut newer = state;
+        newer.device_token = Some("token_newer".to_string());
+        assert!(!deleted_credentials_match(&newer, &deleted));
+    }
+
+    #[test]
+    fn disabled_state_survives_restart_before_fallible_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("behavior-telemetry.json");
         let runtime = RuntimeConfig {
             enabled: true,
             telemetry_base_url: "https://example.test/pinvou3/telemetry".to_string(),
@@ -3960,32 +4081,44 @@ mod tests {
             locale: "en".to_string(),
         };
         let mut state = PersistedState::fresh(&runtime);
-        let previous_installation_id = state.installation_id.clone();
-        let previous_registration_secret = state.registration_secret.clone();
-        state.device_id = Some("device_deleted".to_string());
-        state.device_token = Some("token_deleted".to_string());
+        state.device_id = Some("device_active".to_string());
+        state.device_token = Some("token_active".to_string());
         state.control.enabled = true;
-        state.control.collection_period_id = Some("period_deleted".to_string());
-        state.control.generation = 7;
-        let deleted = Credentials {
-            device_id: "device_deleted".to_string(),
-            device_token: "token_deleted".to_string(),
-            behavior_events_url: runtime.behavior_events_url.clone(),
+        state.control.collection_period_id = Some("period_active".to_string());
+        state.control.generation = 4;
+
+        prepare_disabled_state(&mut state, 5);
+        persist_state_at(&path, &state).unwrap();
+
+        // Simulate termination before any fallible outbox/task cleanup runs.
+        let recovered = load_state_at(&path).unwrap().unwrap();
+        assert!(!recovered.control.enabled);
+        assert_eq!(recovered.control.generation, 5);
+        let pending = recovered.control.pending_request.unwrap();
+        assert_eq!(pending.kind, PendingControlKind::End);
+        assert_eq!(
+            pending.collection_period_id.as_deref(),
+            Some("period_active")
+        );
+        assert_eq!(pending.behavior_events_url, runtime.behavior_events_url);
+    }
+
+    #[test]
+    fn tool_install_terminal_rebinds_across_renewal_but_not_reauthorization() {
+        let renewed = CollectionLease {
+            generation: 12,
+            collection_period_id: "period_renewed".to_string(),
         };
+        assert_eq!(
+            lease_for_generation(Some(renewed.clone()), 12),
+            Some(renewed)
+        );
 
-        assert!(deleted_credentials_match(&state, &deleted));
-        let reset = state_after_authoritative_deletion(&state, &runtime, 8);
-        assert!(!reset.control.enabled);
-        assert!(reset.control.collection_period_id.is_none());
-        assert!(reset.device_id.is_none());
-        assert!(reset.device_token.is_none());
-        assert_eq!(reset.control.generation, 8);
-        assert_ne!(reset.installation_id, previous_installation_id);
-        assert_ne!(reset.registration_secret, previous_registration_secret);
-
-        let mut newer = state;
-        newer.device_token = Some("token_newer".to_string());
-        assert!(!deleted_credentials_match(&newer, &deleted));
+        let reauthorized = CollectionLease {
+            generation: 13,
+            collection_period_id: "period_after_delete".to_string(),
+        };
+        assert!(lease_for_generation(Some(reauthorized), 12).is_none());
     }
 
     #[test]
