@@ -1828,3 +1828,20 @@ dictEn["uiTeamRelayAccess"] = {
   "disabling": "Disabling…",
   "disableUnavailable": "Team Relay could not be disabled. Try again."
 };
+dictEn["uiSettingsDetail"]["behaviorAnalyticsTitle"] = "Privacy and usage analytics";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsLabel"] = "Help improve PINVOU";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDesc"] = "Collect controlled feature outcomes, timing, and error categories only. Conversations, file contents, paths, and credentials are never collected.";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsNotConfigured"] = "Usage analytics is not configured in this build and remains off.";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsRetention"] = days => `Linkable data is retained for at most ${days} days. You can turn this off or delete it at any time.`;
+dictEn["uiSettingsDetail"]["behaviorAnalyticsEnableConfirm"] = "PINVOU will collect controlled feature usage and quality data to improve the product. Conversation text, file contents, paths, tool arguments, and credentials are never collected. Enable analytics?";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDisableConfirm"] = "Collection stops immediately and pending events are cleared. An offline withdrawal will retry when connectivity returns. Turn analytics off?";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDeleteLocal"] = "Delete pending local analytics data";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDeleteRemote"] = "Delete server analytics data";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDeleteLocalConfirm"] = "Delete analytics data waiting on this device? This cannot be undone.";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDeleteRemoteConfirm"] = "Request deletion of server analytics associated with this installation? Collection will also be turned off.";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "On";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "Off";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "Remote withdrawal pending";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsStatusDeletionPending"] = "Remote deletion pending";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsDeletionAccepted"] = "Server deletion request accepted";
+dictEn["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "The operation failed. Try again later.";

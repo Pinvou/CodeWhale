@@ -114,6 +114,38 @@
     }
     notify();
   }
+  async function loadBehaviorTelemetryStatus() {
+    try {
+      state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
+    } catch (e) {
+      state.behaviorTelemetry = {
+        configured: false,
+        enabled: false,
+        collection_period_id: null,
+        withdrawal_pending: false,
+        deletion_pending: false,
+        last_deletion_request_id: null,
+        retention_days: 35,
+      };
+    }
+    notify();
+    return state.behaviorTelemetry;
+  }
+  async function setBehaviorTelemetryEnabled(enabled) {
+    state.behaviorTelemetry = await invoke("set_behavior_telemetry_enabled", { enabled: !!enabled });
+    notify();
+    return state.behaviorTelemetry;
+  }
+  async function deleteLocalBehaviorTelemetryData() {
+    state.behaviorTelemetry = await invoke("delete_local_behavior_telemetry_data");
+    notify();
+    return state.behaviorTelemetry;
+  }
+  async function deleteRemoteBehaviorTelemetryData() {
+    state.behaviorTelemetry = await invoke("delete_remote_behavior_telemetry_data");
+    notify();
+    return state.behaviorTelemetry;
+  }
   async function loadSelectedPet() {
     try {
       state.selectedPet = await invoke("get_selected_pet");
@@ -586,6 +618,10 @@
 
     return {
       loadSettings: loadSettings,
+      loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
+      setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
+      deleteLocalBehaviorTelemetryData: deleteLocalBehaviorTelemetryData,
+      deleteRemoteBehaviorTelemetryData: deleteRemoteBehaviorTelemetryData,
       loadSelectedPet: loadSelectedPet,
       setSelectedPet: setSelectedPet,
       loadEffectiveModelConfig: loadEffectiveModelConfig,

@@ -1712,6 +1712,8 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const [feedbackNotice, setFeedbackNotice] = useState('');
       const [archivedDeleteConfirm, setArchivedDeleteConfirm] = useState(null);
       const [llmApiModelBusy, setLlmApiModelBusy] = useState(false);
+      const [behaviorTelemetryBusy, setBehaviorTelemetryBusy] = useState(false);
+      const [behaviorTelemetryError, setBehaviorTelemetryError] = useState('');
       const llmApiModels = (bs && bs.llmApiModels) || {};
       const builtinAvailableModels = llmApiModels.available_models || [];
       const builtinDefaultModel = llmApiModels.default_model || (((bs && bs.settings && bs.settings.advanced && bs.settings.advanced.builtin_llmapi_default_model) || '') || '');
@@ -1719,6 +1721,14 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
       const hasUpdate = !!(bs && bs.updateInfo && bs.updateInfo.available);
       const archivedSessions = (bs && bs.archivedSessions) || [];
       const memorySettingsVisible = !!(bs && bs.settings && bs.settings.language === 'zh-Hans');
+      const behaviorTelemetry = (bs && bs.behaviorTelemetry) || {
+        configured: false,
+        enabled: false,
+        withdrawal_pending: false,
+        deletion_pending: false,
+        last_deletion_request_id: null,
+        retention_days: 35,
+      };
       const feedbackTypes = [
         { key: 'issue', label: t.feedbackIssue },
         { key: 'suggestion', label: t.feedbackSuggestion },
@@ -1750,6 +1760,38 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         const timer = window.setTimeout(() => setFeedbackNotice(''), 2600);
         return () => window.clearTimeout(timer);
       }, [feedbackNotice]);
+      const toggleBehaviorTelemetry = async enabled => {
+        if (!bridge.available || behaviorTelemetryBusy) return;
+        const confirmation = enabled
+          ? settingsCopy.behaviorAnalyticsEnableConfirm
+          : settingsCopy.behaviorAnalyticsDisableConfirm;
+        if (!window.confirm(confirmation)) return;
+        setBehaviorTelemetryBusy(true);
+        setBehaviorTelemetryError('');
+        try {
+          await bridge.settings.setBehaviorTelemetryEnabled(enabled);
+        } catch (error) {
+          setBehaviorTelemetryError(String(error || settingsCopy.behaviorAnalyticsActionFailed));
+        } finally {
+          setBehaviorTelemetryBusy(false);
+        }
+      };
+      const deleteBehaviorTelemetry = async remote => {
+        if (!bridge.available || behaviorTelemetryBusy) return;
+        if (!window.confirm(remote
+          ? settingsCopy.behaviorAnalyticsDeleteRemoteConfirm
+          : settingsCopy.behaviorAnalyticsDeleteLocalConfirm)) return;
+        setBehaviorTelemetryBusy(true);
+        setBehaviorTelemetryError('');
+        try {
+          if (remote) await bridge.settings.deleteRemoteBehaviorTelemetryData();
+          else await bridge.settings.deleteLocalBehaviorTelemetryData();
+        } catch (error) {
+          setBehaviorTelemetryError(String(error || settingsCopy.behaviorAnalyticsActionFailed));
+        } finally {
+          setBehaviorTelemetryBusy(false);
+        }
+      };
       const resetFeedback = () => {
         setFeedbackDraft({ type: 'issue', title: '', description: '', attachments: [] });
         setFeedbackStatus({ state: 'idle', message: '', receipt: null });
@@ -1881,7 +1923,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         </RowTag>
         );
       };
-      const IOSSwitch = ({ checked, onChange }) => <Toggle checked={checked} onChange={onChange} size="md" />;
+      const IOSSwitch = ({ checked, onChange, disabled = false }) => <Toggle checked={checked} onChange={onChange} disabled={disabled} size="md" />;
       const SectionButton = ({ id, icon, label, dot }) => (
         <button
           type="button"
@@ -2299,16 +2341,50 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           )}
         </>
       );
-      const renderData = () => (
-        <IOSSection title={settingsCopy.hiddenTasks}>
-          {archivedSessions.length ? archivedSessions.map(s => (
-            <IOSRow key={s.id} label={s.title || t.newChat} desc={settingsCopy.archivedAt(formatSessionDate(s.archived_at || s.updated_at || s.created_at, language))}>
-              <button onClick={() => onRestoreArchived && onRestoreArchived(s.id)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('blue')}`}>{settingsCopy.restore}</button>
-              <button onClick={() => setArchivedDeleteConfirm(s)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('red')}`}>{settingsCopy.delete}</button>
-            </IOSRow>
-          )) : <IOSRow label={settingsCopy.noHiddenTasks} desc={settingsCopy.noHiddenTasksDesc} />}
-        </IOSSection>
-      );
+      const renderData = () => {
+        const telemetryStatus = behaviorTelemetry.deletion_pending
+          ? settingsCopy.behaviorAnalyticsStatusDeletionPending
+          : behaviorTelemetry.withdrawal_pending
+            ? settingsCopy.behaviorAnalyticsStatusWithdrawalPending
+            : behaviorTelemetry.enabled
+              ? settingsCopy.behaviorAnalyticsStatusEnabled
+              : settingsCopy.behaviorAnalyticsStatusDisabled;
+        return (
+          <>
+            <IOSSection
+              title={settingsCopy.behaviorAnalyticsTitle}
+              footer={settingsCopy.behaviorAnalyticsRetention(behaviorTelemetry.retention_days || 35)}
+            >
+              <IOSRow
+                label={settingsCopy.behaviorAnalyticsLabel}
+                desc={behaviorTelemetry.configured ? settingsCopy.behaviorAnalyticsDesc : settingsCopy.behaviorAnalyticsNotConfigured}
+                value={telemetryStatus}
+              >
+                <IOSSwitch
+                  checked={!!behaviorTelemetry.enabled}
+                  onChange={toggleBehaviorTelemetry}
+                  disabled={!behaviorTelemetry.configured || behaviorTelemetryBusy}
+                />
+              </IOSRow>
+              <IOSRow label={settingsCopy.behaviorAnalyticsDeleteLocal}>
+                <button disabled={behaviorTelemetryBusy} onClick={() => deleteBehaviorTelemetry(false)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full disabled:opacity-40 ${actionButton('red')}`}>{settingsCopy.delete}</button>
+              </IOSRow>
+              <IOSRow label={settingsCopy.behaviorAnalyticsDeleteRemote} desc={behaviorTelemetry.last_deletion_request_id ? settingsCopy.behaviorAnalyticsDeletionAccepted : ''}>
+                <button disabled={!behaviorTelemetry.configured || behaviorTelemetryBusy} onClick={() => deleteBehaviorTelemetry(true)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full disabled:opacity-40 ${actionButton('red')}`}>{settingsCopy.delete}</button>
+              </IOSRow>
+            </IOSSection>
+            {behaviorTelemetryError && <div role="alert" className="px-3 -mt-3 mb-4 text-[12px] leading-5 text-[#EA4335] break-words">{behaviorTelemetryError}</div>}
+            <IOSSection title={settingsCopy.hiddenTasks}>
+              {archivedSessions.length ? archivedSessions.map(s => (
+                <IOSRow key={s.id} label={s.title || t.newChat} desc={settingsCopy.archivedAt(formatSessionDate(s.archived_at || s.updated_at || s.created_at, language))}>
+                  <button onClick={() => onRestoreArchived && onRestoreArchived(s.id)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('blue')}`}>{settingsCopy.restore}</button>
+                  <button onClick={() => setArchivedDeleteConfirm(s)} className={`shrink-0 text-[14px] px-3 py-1.5 rounded-full ${actionButton('red')}`}>{settingsCopy.delete}</button>
+                </IOSRow>
+              )) : <IOSRow label={settingsCopy.noHiddenTasks} desc={settingsCopy.noHiddenTasksDesc} />}
+            </IOSSection>
+          </>
+        );
+      };
       const renderUpdate = () => {
         const upd = bs && bs.updateInfo;
         const currentVersion = (bs && bs.appVersion) || (upd && upd.current_version) || '—';

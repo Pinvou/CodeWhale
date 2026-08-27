@@ -1008,6 +1008,111 @@ export class TelemetryStore {
     return { accepted: accepted.map((event) => event.event_id), duplicates, rejected };
   }
 
+  rememberBehaviorControlRequest(device, requestId, kind, response) {
+    const requests = Array.isArray(device.behavior_control_requests)
+      ? device.behavior_control_requests.filter((item) => item?.request_id !== requestId)
+      : [];
+    requests.push({ request_id: requestId, kind, response, created_at: Date.now() });
+    device.behavior_control_requests = requests.slice(-64);
+    this.saveNow();
+    return response;
+  }
+
+  priorBehaviorControlResponse(device, requestId, kind) {
+    const request = (device.behavior_control_requests || [])
+      .find((item) => item?.request_id === requestId);
+    if (!request) return null;
+    if (request.kind !== kind) throw new TelemetryHttpError(409, "request_id_conflict");
+    return request.response;
+  }
+
+  startBehaviorCollection(device, input) {
+    const requestId = boundedText(input?.request_id, 128);
+    if (requestId.length < 12) throw new TelemetryHttpError(400, "invalid_request_id");
+    const prior = this.priorBehaviorControlResponse(device, requestId, "start");
+    if (prior) return prior;
+    const now = Date.now();
+    if (device.behavior_collection?.status === "active") {
+      const response = {
+        request_id: requestId,
+        collection_period_id: device.behavior_collection.collection_period_id,
+        status: "active",
+        started_at: device.behavior_collection.started_at,
+      };
+      return this.rememberBehaviorControlRequest(device, requestId, "start", response);
+    }
+    const collection = {
+      collection_period_id: randomId("period_", 18),
+      status: "active",
+      started_at: now,
+      ended_at: null,
+    };
+    device.behavior_collection = collection;
+    return this.rememberBehaviorControlRequest(device, requestId, "start", {
+      request_id: requestId,
+      collection_period_id: collection.collection_period_id,
+      status: "active",
+      started_at: now,
+    });
+  }
+
+  endBehaviorCollection(device, input) {
+    const requestId = boundedText(input?.request_id, 128);
+    const periodId = boundedText(input?.collection_period_id, 128);
+    if (requestId.length < 12 || periodId.length < 12) {
+      throw new TelemetryHttpError(400, "invalid_collection_request");
+    }
+    const prior = this.priorBehaviorControlResponse(device, requestId, "end");
+    if (prior) return prior;
+    const collection = device.behavior_collection;
+    if (!collection || collection.collection_period_id !== periodId) {
+      throw new TelemetryHttpError(409, "collection_period_mismatch");
+    }
+    if (collection.status === "active") {
+      collection.status = "ended";
+      collection.ended_at = Date.now();
+    }
+    return this.rememberBehaviorControlRequest(device, requestId, "end", {
+      request_id: requestId,
+      collection_period_id: periodId,
+      status: "ended",
+      collection_ended_at: collection.ended_at,
+    });
+  }
+
+  deleteBehaviorData(device, input) {
+    const requestId = boundedText(input?.request_id, 128);
+    if (requestId.length < 12) throw new TelemetryHttpError(400, "invalid_request_id");
+    const prior = this.priorBehaviorControlResponse(device, requestId, "delete");
+    if (prior) return prior;
+    const now = Date.now();
+    if (device.behavior_collection?.status === "active") {
+      device.behavior_collection.status = "ended";
+      device.behavior_collection.ended_at = now;
+    }
+    this.behaviorEvents = this.behaviorEvents.filter((event) => event.device_id !== device.device_id);
+    this.behaviorEventIds = new Set(this.behaviorEvents.map((event) => event.event_id));
+    atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
+    const response = {
+      request_id: requestId,
+      deletion_request_id: randomId("delete_", 18),
+      status: "completed",
+      accepted_at: now,
+      completed_at: now,
+    };
+    return this.rememberBehaviorControlRequest(device, requestId, "delete", response);
+  }
+
+  behaviorCollectionStatus(device) {
+    const collection = device.behavior_collection || null;
+    return {
+      status: collection?.status || "inactive",
+      collection_period_id: collection?.collection_period_id || null,
+      started_at: collection?.started_at || null,
+      collection_ended_at: collection?.ended_at || null,
+    };
+  }
+
   overview() {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
     return buildStatsOverview([...this.devices.values()], this.events);
@@ -1187,6 +1292,46 @@ export function createTelemetryService(options = {}) {
           return true;
         }
         json(res, 200, store.appendBehaviorEvents(device, events));
+        return true;
+      }
+      if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/collection/start`) {
+        const input = await readJson(req);
+        const device = store.authenticate(input.device_id, bearer(req));
+        if (!device) {
+          json(res, 401, { error: "invalid_device_token" });
+          return true;
+        }
+        json(res, 200, store.startBehaviorCollection(device, input));
+        return true;
+      }
+      if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/collection/end`) {
+        const input = await readJson(req);
+        const device = store.authenticate(input.device_id, bearer(req));
+        if (!device) {
+          json(res, 401, { error: "invalid_device_token" });
+          return true;
+        }
+        json(res, 200, store.endBehaviorCollection(device, input));
+        return true;
+      }
+      if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/collection`) {
+        const params = new URL(req.url, "http://localhost").searchParams;
+        const device = store.authenticate(params.get("device_id"), bearer(req));
+        if (!device) {
+          json(res, 401, { error: "invalid_device_token" });
+          return true;
+        }
+        json(res, 200, store.behaviorCollectionStatus(device));
+        return true;
+      }
+      if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/deletion`) {
+        const input = await readJson(req);
+        const device = store.authenticate(input.device_id, bearer(req));
+        if (!device) {
+          json(res, 401, { error: "invalid_device_token" });
+          return true;
+        }
+        json(res, 202, store.deleteBehaviorData(device, input));
         return true;
       }
       if (req.method === "GET" && (routePath === STATS_PREFIX || routePath === `${STATS_PREFIX}/`)) {

@@ -1829,3 +1829,20 @@ dictJa["uiTeamRelayAccess"] = {
   "disabling": "無効化中…",
   "disableUnavailable": "チームリレーを無効にできませんでした。もう一度お試しください。"
 };
+dictJa["uiSettingsDetail"]["behaviorAnalyticsTitle"] = "プライバシーと利用状況分析";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsLabel"] = "PINVOU の改善に協力する";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsDesc"] = "管理された機能の結果、所要時間、エラー分類のみを収集します。会話、ファイル内容、パス、認証情報は収集しません。";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsNotConfigured"] = "このビルドでは利用状況分析サービスが設定されていないため、収集は無効です。";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsRetention"] = days => `関連付け可能なデータの保持期間は最大 ${days} 日です。いつでも無効化または削除できます。`;
+dictJa["uiSettingsDetail"]["behaviorAnalyticsEnableConfirm"] = "製品改善のため、管理された機能利用と品質データを収集します。会話本文、ファイル内容、パス、ツール引数、認証情報は収集しません。有効にしますか？";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsDisableConfirm"] = "収集を直ちに停止し、未送信イベントを削除します。オフライン時の撤回は接続復旧後に再試行されます。無効にしますか？";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsDeleteLocal"] = "端末の未送信分析データを削除";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsDeleteRemote"] = "サーバーの分析データを削除";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsDeleteLocalConfirm"] = "この端末で送信待ちの分析データを削除しますか？元に戻せません。";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsDeleteRemoteConfirm"] = "このインストールに関連するサーバーデータの削除を要求しますか？収集も同時に無効になります。";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "有効";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "無効";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "リモート撤回の処理待ち";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsStatusDeletionPending"] = "リモート削除の処理待ち";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsDeletionAccepted"] = "サーバーが削除要求を受理しました";
+dictJa["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "操作に失敗しました。しばらくしてから再試行してください。";

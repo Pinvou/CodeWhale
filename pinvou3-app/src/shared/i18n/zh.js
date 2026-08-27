@@ -1814,3 +1814,20 @@ dictZh["uiTeamRelayAccess"] = {
   "disabling": "关闭中…",
   "disableUnavailable": "暂时无法关闭接力，请重试。"
 };
+dictZh["uiSettingsDetail"]["behaviorAnalyticsTitle"] = "隐私与行为统计";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsLabel"] = "帮助改进 PINVOU";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsDesc"] = "仅收集受控的功能使用结果、耗时和错误分类，不收集对话、文件内容、路径或凭据。";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsNotConfigured"] = "此版本未配置行为统计服务，采集保持关闭。";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsRetention"] = days => `可关联数据最多保留 ${days} 天；可随时关闭或删除。`;
+dictZh["uiSettingsDetail"]["behaviorAnalyticsEnableConfirm"] = "启用后，PINVOU 将收集受控的功能使用与质量数据，用于改进产品。不会收集对话正文、文件内容、路径、工具参数或凭据。是否启用？";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsDisableConfirm"] = "关闭后将立即停止采集并清空待上传事件；离线时撤回请求会在联网后重试。是否关闭？";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsDeleteLocal"] = "删除本机待上传行为数据";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsDeleteRemote"] = "删除服务端行为数据";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsDeleteLocalConfirm"] = "删除本机尚未上传的行为数据？此操作不可撤销。";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsDeleteRemoteConfirm"] = "请求删除与本安装关联的服务端行为数据？采集也会同时关闭。";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusEnabled"] = "已启用";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusDisabled"] = "已关闭";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusWithdrawalPending"] = "远端撤回待处理";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsStatusDeletionPending"] = "远端删除待处理";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsDeletionAccepted"] = "服务端删除请求已受理";
+dictZh["uiSettingsDetail"]["behaviorAnalyticsActionFailed"] = "操作失败，请稍后重试。";

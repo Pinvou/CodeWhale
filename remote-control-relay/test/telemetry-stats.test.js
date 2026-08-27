@@ -217,6 +217,70 @@ test("behavior event store requires authenticated device identity and deduplicat
   }
 });
 
+test("behavior collection control is opt-in, idempotent and deletion removes facts", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-control-"));
+  try {
+    const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    const credential = store.register({
+      hardware_claim: "behavior-control-hardware-0001",
+      registration_secret: "registration-secret-control-00000001",
+      app_version: "0.8.7",
+      platform: "windows",
+      arch: "x86_64",
+    }, null);
+    const device = store.authenticate(credential.device_id, credential.device_token);
+    assert.deepEqual(store.behaviorCollectionStatus(device), {
+      status: "inactive",
+      collection_period_id: null,
+      started_at: null,
+      collection_ended_at: null,
+    });
+
+    const start = store.startBehaviorCollection(device, { request_id: "request_start_0001" });
+    assert.equal(start.status, "active");
+    assert.match(start.collection_period_id, /^period_/);
+    assert.deepEqual(
+      store.startBehaviorCollection(device, { request_id: "request_start_0001" }),
+      start,
+    );
+    const end = store.endBehaviorCollection(device, {
+      request_id: "request_end_0001",
+      collection_period_id: start.collection_period_id,
+    });
+    assert.equal(end.status, "ended");
+    const second = store.startBehaviorCollection(device, { request_id: "request_start_0002" });
+    assert.notEqual(second.collection_period_id, start.collection_period_id);
+
+    store.behaviorEvents.push({
+      event_id: "behavior_delete_test_01",
+      event_name: "voice_started",
+      device_id: device.device_id,
+      occurred_at: Date.now(),
+      received_at: Date.now(),
+    });
+    store.behaviorEventIds.add("behavior_delete_test_01");
+    const deletion = store.deleteBehaviorData(device, { request_id: "request_delete_0001" });
+    assert.equal(deletion.status, "completed");
+    assert.match(deletion.deletion_request_id, /^delete_/);
+    assert.equal(store.behaviorEvents.length, 0);
+    assert.deepEqual(
+      store.deleteBehaviorData(device, { request_id: "request_delete_0001" }),
+      deletion,
+    );
+
+    store.saveNow();
+    const reloaded = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    const reloadedDevice = reloaded.authenticate(credential.device_id, credential.device_token);
+    assert.equal(reloaded.behaviorCollectionStatus(reloadedDevice).status, "ended");
+    assert.deepEqual(
+      reloaded.deleteBehaviorData(reloadedDevice, { request_id: "request_delete_0001" }),
+      deletion,
+    );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("offline IP region data keeps only coarse location fields", () => {
   const region = parseIp2Region("中国|广东省|深圳市|电信|CN");
   assert.deepEqual(region, {

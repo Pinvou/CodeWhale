@@ -1,5 +1,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -12,7 +13,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::platform::{filesystem, paths};
 
-const STATE_VERSION: u8 = 1;
+const STATE_VERSION: u8 = 2;
 const EVENT_QUEUE_CAPACITY: usize = 512;
 const EVENT_FLUSH_MAX: usize = 50;
 const EVENT_FLUSH_DEBOUNCE: Duration = Duration::from_millis(1500);
@@ -23,6 +24,8 @@ pub struct BehaviorTelemetry {
     runtime: Arc<RuntimeConfig>,
     state: Arc<Mutex<Option<PersistedState>>>,
     credential_gate: Arc<Mutex<()>>,
+    control_gate: Arc<Mutex<()>>,
+    collecting: Arc<AtomicBool>,
     event_tx: Option<mpsc::Sender<BehaviorEvent>>,
 }
 
@@ -46,6 +49,43 @@ struct PersistedState {
     registration_secret: String,
     device_id: Option<String>,
     device_token: Option<String>,
+    #[serde(default)]
+    control: CollectionControl,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct CollectionControl {
+    enabled: bool,
+    collection_period_id: Option<String>,
+    cohort_started: bool,
+    pending_request: Option<PendingControlRequest>,
+    last_deletion_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PendingControlKind {
+    End,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingControlRequest {
+    kind: PendingControlKind,
+    request_id: String,
+    collection_period_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BehaviorTelemetryStatus {
+    pub configured: bool,
+    pub enabled: bool,
+    pub collection_period_id: Option<String>,
+    pub withdrawal_pending: bool,
+    pub deletion_pending: bool,
+    pub last_deletion_request_id: Option<String>,
+    pub retention_days: u8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,11 +221,22 @@ impl BehaviorEvent {
 impl BehaviorTelemetry {
     pub fn new() -> Self {
         let runtime = Arc::new(RuntimeConfig::from_env());
-        let event_tx = runtime.enabled.then(|| {
+        let persisted = load_state().ok().flatten();
+        let collecting = Arc::new(AtomicBool::new(
+            runtime.enabled
+                && persisted.as_ref().is_some_and(|state| {
+                    state.control.enabled && state.control.collection_period_id.is_some()
+                }),
+        ));
+        let state = Arc::new(Mutex::new(persisted));
+        let credential_gate = Arc::new(Mutex::new(()));
+        let control_gate = Arc::new(Mutex::new(()));
+        let (event_tx, event_rx) = if runtime.enabled {
             let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
-            tauri::async_runtime::spawn(Self::run_worker(rx, Self::worker_clone(runtime.clone())));
-            tx
-        });
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let telemetry = Self {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
@@ -193,10 +244,21 @@ impl BehaviorTelemetry {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             runtime,
-            state: Arc::new(Mutex::new(load_state().ok().flatten())),
-            credential_gate: Arc::new(Mutex::new(())),
+            state,
+            credential_gate,
+            control_gate,
+            collecting,
             event_tx,
         };
+        if let Some(rx) = event_rx {
+            tauri::async_runtime::spawn(Self::run_worker(rx, telemetry.worker_clone()));
+            let retry = telemetry.worker_clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = retry.retry_pending_control().await {
+                    log::debug!("[pinvou3][behavior] pending control retry deferred: {error:#}");
+                }
+            });
+        }
         if telemetry.runtime.enabled && telemetry.event_tx.is_none() {
             log::debug!("[pinvou3][behavior] telemetry disabled: queue initialization failed");
         }
@@ -204,6 +266,9 @@ impl BehaviorTelemetry {
     }
 
     pub fn track(&self, event: BehaviorEvent) {
+        if !self.collecting.load(Ordering::Acquire) {
+            return;
+        }
         let Some(tx) = &self.event_tx else {
             return;
         };
@@ -212,16 +277,18 @@ impl BehaviorTelemetry {
         }
     }
 
-    fn worker_clone(runtime: Arc<RuntimeConfig>) -> Self {
+    fn worker_clone(&self) -> Self {
         Self {
             client: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(12))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
-            runtime,
-            state: Arc::new(Mutex::new(load_state().ok().flatten())),
-            credential_gate: Arc::new(Mutex::new(())),
+            runtime: self.runtime.clone(),
+            state: self.state.clone(),
+            credential_gate: self.credential_gate.clone(),
+            control_gate: self.control_gate.clone(),
+            collecting: self.collecting.clone(),
             event_tx: None,
         }
     }
@@ -248,11 +315,22 @@ impl BehaviorTelemetry {
             return Ok(());
         }
         let credentials = self.ensure_credentials().await?;
+        let collection_period_id = self
+            .state
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|state| state.control.collection_period_id.clone())
+            .context("behavior collection is inactive")?;
         let events: Vec<Value> = events
             .into_iter()
             .filter_map(|event| {
                 let mut value = serde_json::to_value(event).ok()?;
                 if let Value::Object(ref mut object) = value {
+                    object.insert(
+                        "collection_period_id".to_string(),
+                        Value::String(collection_period_id.clone()),
+                    );
                     object
                         .entry("app_version".to_string())
                         .or_insert_with(|| Value::String(self.runtime.app_version.clone()));
@@ -279,6 +357,229 @@ impl BehaviorTelemetry {
             anyhow::bail!("behavior events endpoint returned {}", response.status());
         }
         Ok(())
+    }
+
+    pub async fn status(&self) -> BehaviorTelemetryStatus {
+        let state = self.state.lock().await;
+        let control = state.as_ref().map(|value| &value.control);
+        BehaviorTelemetryStatus {
+            configured: self.runtime.enabled,
+            enabled: self.collecting.load(Ordering::Acquire),
+            collection_period_id: control.and_then(|value| value.collection_period_id.clone()),
+            withdrawal_pending: control.is_some_and(|value| {
+                matches!(
+                    value.pending_request.as_ref().map(|request| &request.kind),
+                    Some(PendingControlKind::End)
+                )
+            }),
+            deletion_pending: control.is_some_and(|value| {
+                matches!(
+                    value.pending_request.as_ref().map(|request| &request.kind),
+                    Some(PendingControlKind::Delete)
+                )
+            }),
+            last_deletion_request_id: control
+                .and_then(|value| value.last_deletion_request_id.clone()),
+            retention_days: 35,
+        }
+    }
+
+    pub async fn set_collection_enabled(&self, enabled: bool) -> Result<BehaviorTelemetryStatus> {
+        let _control_guard = self.control_gate.lock().await;
+        if enabled {
+            if !self.runtime.enabled {
+                anyhow::bail!("behavior telemetry service is not configured");
+            }
+            if self.collecting.load(Ordering::Acquire) {
+                return Ok(self.status().await);
+            }
+            if self
+                .state
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|state| state.control.pending_request.is_some())
+            {
+                self.retry_pending_control().await?;
+            }
+            let credentials = self.ensure_credentials().await?;
+            let request_id = token("control_", 18);
+            let response: CollectionStartResponse = self
+                .post_control(
+                    &credentials,
+                    "collection/start",
+                    json!({ "request_id": request_id }),
+                )
+                .await?;
+            let mut guard = self.state.lock().await;
+            let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
+            state.control.enabled = true;
+            state.control.collection_period_id = Some(response.collection_period_id);
+            state.control.pending_request = None;
+            persist_state(state)?;
+            self.collecting.store(true, Ordering::Release);
+        } else {
+            self.collecting.store(false, Ordering::Release);
+            let mut guard = self.state.lock().await;
+            if let Some(state) = guard.as_mut() {
+                state.control.enabled = false;
+                if let Some(period_id) = state.control.collection_period_id.clone() {
+                    state.control.pending_request = Some(PendingControlRequest {
+                        kind: PendingControlKind::End,
+                        request_id: token("control_", 18),
+                        collection_period_id: Some(period_id),
+                    });
+                }
+                persist_state(state)?;
+            }
+            drop(guard);
+            if let Err(error) = self.retry_pending_control().await {
+                log::debug!("[pinvou3][behavior] collection withdrawal pending: {error:#}");
+            }
+        }
+        Ok(self.status().await)
+    }
+
+    pub async fn delete_local_data(&self) -> Result<BehaviorTelemetryStatus> {
+        let path = outbox_path();
+        if path.is_file() {
+            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+        }
+        Ok(self.status().await)
+    }
+
+    pub async fn delete_remote_data(&self) -> Result<BehaviorTelemetryStatus> {
+        let _control_guard = self.control_gate.lock().await;
+        self.collecting.store(false, Ordering::Release);
+        let Some(credentials) = self.current_credentials().await else {
+            let mut guard = self.state.lock().await;
+            if let Some(state) = guard.as_mut() {
+                state.control.enabled = false;
+                state.control.collection_period_id = None;
+                state.control.pending_request = None;
+                persist_state(state)?;
+            }
+            drop(guard);
+            return self.delete_local_data().await;
+        };
+        {
+            let mut guard = self.state.lock().await;
+            let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
+            state.control.enabled = false;
+            state.control.pending_request = Some(PendingControlRequest {
+                kind: PendingControlKind::Delete,
+                request_id: token("control_", 18),
+                collection_period_id: state.control.collection_period_id.clone(),
+            });
+            persist_state(state)?;
+        }
+        if let Err(error) = self.send_pending_control(&credentials).await {
+            log::debug!("[pinvou3][behavior] remote deletion pending: {error:#}");
+        }
+        self.delete_local_data().await
+    }
+
+    async fn retry_pending_control(&self) -> Result<()> {
+        let pending = self
+            .state
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|state| state.control.pending_request.clone());
+        if pending.is_none() {
+            return Ok(());
+        }
+        let credentials = self
+            .current_credentials()
+            .await
+            .context("credentials unavailable for pending behavior control")?;
+        self.send_pending_control(&credentials).await
+    }
+
+    async fn send_pending_control(&self, credentials: &Credentials) -> Result<()> {
+        let pending = self
+            .state
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|state| state.control.pending_request.clone())
+            .context("no pending behavior control request")?;
+        match pending.kind {
+            PendingControlKind::End => {
+                let _: CollectionEndResponse = self
+                    .post_control(
+                        credentials,
+                        "collection/end",
+                        json!({
+                            "request_id": pending.request_id,
+                            "collection_period_id": pending.collection_period_id,
+                        }),
+                    )
+                    .await?;
+                let mut guard = self.state.lock().await;
+                if let Some(state) = guard.as_mut() {
+                    state.control.collection_period_id = None;
+                    state.control.pending_request = None;
+                    persist_state(state)?;
+                }
+            }
+            PendingControlKind::Delete => {
+                let response: DeletionResponse = self
+                    .post_control(
+                        credentials,
+                        "deletion",
+                        json!({ "request_id": pending.request_id }),
+                    )
+                    .await?;
+                let fresh = PersistedState::fresh(&self.runtime);
+                let mut guard = self.state.lock().await;
+                *guard = Some(PersistedState {
+                    control: CollectionControl {
+                        last_deletion_request_id: Some(response.deletion_request_id),
+                        ..CollectionControl::default()
+                    },
+                    ..fresh
+                });
+                if let Some(state) = guard.as_ref() {
+                    persist_state(state)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn post_control<T: for<'de> Deserialize<'de>>(
+        &self,
+        credentials: &Credentials,
+        path: &str,
+        mut body: Value,
+    ) -> Result<T> {
+        if let Value::Object(ref mut object) = body {
+            object.insert(
+                "device_id".to_string(),
+                Value::String(credentials.device_id.clone()),
+            );
+        }
+        let base = credentials
+            .behavior_events_url
+            .trim_end_matches('/')
+            .strip_suffix("/events")
+            .unwrap_or(credentials.behavior_events_url.trim_end_matches('/'));
+        let response = self
+            .client
+            .post(format!("{base}/{path}"))
+            .bearer_auth(&credentials.device_token)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("send behavior control {path}"))?;
+        if !response.status().is_success() {
+            anyhow::bail!("behavior control {path} returned {}", response.status());
+        }
+        response
+            .json()
+            .await
+            .with_context(|| format!("parse behavior control {path}"))
     }
 
     async fn ensure_credentials(&self) -> Result<Credentials> {
@@ -364,6 +665,22 @@ struct RegistrationResponse {
     device_token: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct CollectionStartResponse {
+    collection_period_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CollectionEndResponse {
+    #[allow(dead_code)]
+    collection_period_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeletionResponse {
+    deletion_request_id: String,
+}
+
 #[derive(Debug)]
 struct Credentials {
     device_id: String,
@@ -413,6 +730,7 @@ impl PersistedState {
             registration_secret: token("rs_", 32),
             device_id: None,
             device_token: None,
+            control: CollectionControl::default(),
         }
     }
 }
@@ -423,11 +741,12 @@ fn load_state() -> Result<Option<PersistedState>> {
         return Ok(None);
     }
     let data = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    let state: PersistedState =
+    let mut state: PersistedState =
         serde_json::from_slice(&data).with_context(|| format!("parse {}", path.display()))?;
-    if state.version != STATE_VERSION {
+    if state.version > STATE_VERSION {
         return Ok(None);
     }
+    state.version = STATE_VERSION;
     Ok(Some(state))
 }
 
@@ -450,6 +769,10 @@ fn write_private_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
 
 fn state_path() -> PathBuf {
     paths::pinvou3_home().join("behavior-telemetry.json")
+}
+
+fn outbox_path() -> PathBuf {
+    paths::pinvou3_home().join("behavior-telemetry-outbox.jsonl")
 }
 
 fn now_ms() -> u64 {
@@ -584,5 +907,24 @@ mod tests {
         let state = PersistedState::fresh(&runtime);
         assert!(state.registration_secret.len() >= 32);
         assert!(state.installation_id.starts_with("inst_"));
+        assert!(!state.control.enabled);
+    }
+
+    #[test]
+    fn public_builds_do_not_collect_without_explicit_control_state() {
+        let runtime = RuntimeConfig {
+            enabled: true,
+            telemetry_base_url: "https://example.test/pinvou3/telemetry".to_string(),
+            behavior_events_url: "https://example.test/pinvou3/stats/api/behavior/events"
+                .to_string(),
+            enrollment_token: None,
+            app_version: "0.0.0".to_string(),
+            platform: "test".to_string(),
+            arch: "test".to_string(),
+        };
+        let state = PersistedState::fresh(&runtime);
+        assert!(!state.control.enabled);
+        assert!(state.control.collection_period_id.is_none());
+        assert!(state.control.pending_request.is_none());
     }
 }
