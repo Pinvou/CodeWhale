@@ -1094,8 +1094,12 @@ impl BehaviorTelemetry {
             .await
             .context("send behavior events")?;
         if response.status() == reqwest::StatusCode::GONE {
-            let _ = self.recover_expired_credentials(&credentials).await?;
-            anyhow::bail!("behavior telemetry credentials expired and were renewed");
+            let error_code = telemetry_error_code(response).await;
+            if error_code == "device_credentials_expired" {
+                let _ = self.recover_expired_credentials(&credentials).await?;
+                anyhow::bail!("behavior telemetry credentials expired and were renewed");
+            }
+            anyhow::bail!("behavior telemetry credentials unavailable: {error_code}");
         }
         if !response.status().is_success() {
             anyhow::bail!("behavior events endpoint returned {}", response.status());
@@ -1625,19 +1629,23 @@ impl BehaviorTelemetry {
                 json!({ "request_id": request_id }),
             )
             .await?;
-        if response.status() == reqwest::StatusCode::GONE
-            && self.recover_expired_credentials_locked(credentials).await?
-        {
-            let collection_period_id = self
-                .state
-                .lock()
-                .await
-                .as_ref()
-                .and_then(|state| state.control.collection_period_id.clone())
-                .context("renewed behavior collection period is unavailable")?;
-            return Ok(CollectionStartResponse {
-                collection_period_id,
-            });
+        if response.status() == reqwest::StatusCode::GONE {
+            let error_code = telemetry_error_code(response).await;
+            if error_code == "device_credentials_expired"
+                && self.recover_expired_credentials_locked(credentials).await?
+            {
+                let collection_period_id = self
+                    .state
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|state| state.control.collection_period_id.clone())
+                    .context("renewed behavior collection period is unavailable")?;
+                return Ok(CollectionStartResponse {
+                    collection_period_id,
+                });
+            }
+            anyhow::bail!("behavior collection credentials unavailable: {error_code}");
         }
         if !response.status().is_success() {
             anyhow::bail!(
@@ -1792,11 +1800,24 @@ struct DeletionResponse {
     deletion_request_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct TelemetryErrorResponse {
+    error: String,
+}
+
 #[derive(Debug)]
 struct Credentials {
     device_id: String,
     device_token: String,
     behavior_events_url: String,
+}
+
+async fn telemetry_error_code(response: reqwest::Response) -> String {
+    response
+        .json::<TelemetryErrorResponse>()
+        .await
+        .map(|body| body.error)
+        .unwrap_or_else(|_| "unknown_credential_error".to_string())
 }
 
 fn endpoint_matches_runtime(state: &PersistedState, runtime: &RuntimeConfig) -> bool {

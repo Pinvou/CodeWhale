@@ -1450,6 +1450,11 @@ export class TelemetryStore {
     this.behaviorEventIds = new Set();
     this.behaviorPipelineEvents = [];
     this.deletionTombstones = [];
+    this.removedSubjectHashes = new Set();
+    this.removedCredentialReasons = new Map();
+    this.deletedRegistrationIdentities = new Set();
+    this.deletionResultsByRequest = new Map();
+    this.deletionResultsById = new Map();
     this.saveTimer = null;
     this.lastEventCompactionAt = 0;
     this.eventRateBuckets = new Map();
@@ -1478,14 +1483,13 @@ export class TelemetryStore {
     );
 
     this.loadDeletionTombstones();
-    const deletedSubjects = new Set(this.deletionTombstones.map((record) => record.subject_hash));
     const saved = loadJson(this.devicesPath, { devices: [] });
     let restoredDeletedDevice = false;
     let restoredExpiredDevice = false;
     const deviceCutoff = Date.now() - this.eventRetentionMs;
     for (const device of Array.isArray(saved.devices) ? saved.devices : []) {
       if (!device?.device_id || !device?.hardware_hash || !device?.device_token) continue;
-      if (deletedSubjects.has(this.deletionSubjectHash(device.device_id))) {
+      if (this.removedSubjectHashes.has(this.deletionSubjectHash(device.device_id))) {
         restoredDeletedDevice = true;
         continue;
       }
@@ -1494,6 +1498,7 @@ export class TelemetryStore {
         this.deletionTombstones.push({
           subject_hash: this.deletionSubjectHash(device.device_id),
           token_hash: this.deletionTokenHash(device.device_token),
+          removal_reason: "expired",
         });
         continue;
       }
@@ -1507,6 +1512,7 @@ export class TelemetryStore {
       this.devices.set(device.device_id, normalized);
       this.devicesByHardwareHash.set(device.hardware_hash, normalized);
     }
+    this.rebuildDeletionIndexes();
     this.loadEvents();
     this.loadBehaviorEvents();
     this.loadBehaviorPipelineEvents();
@@ -1543,16 +1549,49 @@ export class TelemetryStore {
   loadDeletionTombstones() {
     const saved = loadJson(this.deletionTombstonesPath, { records: [] });
     this.deletionTombstones = (Array.isArray(saved.records) ? saved.records : [])
-      .filter((record) => record?.subject_hash);
+      .filter((record) => record?.subject_hash)
+      .map((record) => ({
+        ...record,
+        removal_reason: record.removal_reason
+          || (record.deletion_request_id || record.request_id ? "deleted" : "expired"),
+      }));
+    this.rebuildDeletionIndexes();
     if (existsSync(this.deletionTombstonesPath)
-      && this.deletionTombstones.length !== (saved.records || []).length) {
+      && JSON.stringify(this.deletionTombstones) !== JSON.stringify(saved.records || [])) {
       this.saveDeletionTombstones();
     }
   }
 
+  rebuildDeletionIndexes() {
+    this.removedSubjectHashes = new Set();
+    this.removedCredentialReasons = new Map();
+    this.deletedRegistrationIdentities = new Set();
+    this.deletionResultsByRequest = new Map();
+    this.deletionResultsById = new Map();
+    for (const record of this.deletionTombstones) {
+      this.removedSubjectHashes.add(record.subject_hash);
+      if (record.token_hash) {
+        this.removedCredentialReasons.set(record.token_hash, record.removal_reason || "deleted");
+      }
+      if (record.removal_reason === "deleted"
+        && record.hardware_hash && record.registration_secret_hash) {
+        this.deletedRegistrationIdentities.add(
+          this.registrationIdentityKey(record.hardware_hash, record.registration_secret_hash),
+        );
+      }
+      if (record.token_hash && record.request_id) {
+        this.deletionResultsByRequest.set(`${record.token_hash}:${record.request_id}`, record);
+      }
+      if (record.token_hash && record.deletion_request_id) {
+        this.deletionResultsById.set(`${record.token_hash}:${record.deletion_request_id}`, record);
+      }
+    }
+  }
+
   saveDeletionTombstones() {
+    this.rebuildDeletionIndexes();
     atomicWriteJson(this.deletionTombstonesPath, {
-      version: 2,
+      version: 3,
       records: this.deletionTombstones,
     });
   }
@@ -1572,14 +1611,26 @@ export class TelemetryStore {
 
   subjectWasDeleted(deviceId) {
     const subjectHash = this.deletionSubjectHash(deviceId);
-    return this.deletionTombstones.some((record) => record.subject_hash === subjectHash);
+    return this.removedSubjectHashes.has(subjectHash);
+  }
+
+  credentialRemovalReason(token) {
+    const tokenHash = this.deletionTokenHash(token);
+    return this.removedCredentialReasons.get(tokenHash) || null;
   }
 
   credentialWasRemoved(token) {
-    const tokenHash = this.deletionTokenHash(token);
-    return this.deletionTombstones.some((record) => (
-      record.token_hash && safeEqual(record.token_hash, tokenHash)
-    ));
+    return this.credentialRemovalReason(token) !== null;
+  }
+
+  registrationIdentityKey(hardwareHash, registrationSecretHash) {
+    return `${hardwareHash}:${registrationSecretHash}`;
+  }
+
+  registrationWasDeleted(hardwareHash, registrationSecretHash) {
+    return this.deletedRegistrationIdentities.has(
+      this.registrationIdentityKey(hardwareHash, registrationSecretHash),
+    );
   }
 
   publicDeletionResponse(record) {
@@ -1594,20 +1645,16 @@ export class TelemetryStore {
 
   priorDeletionResponse(requestId, token, now = Date.now()) {
     const tokenHash = this.deletionTokenHash(token);
-    const record = this.deletionTombstones.find((candidate) => (
-        candidate.request_id === boundedText(requestId, 128)
-        && safeEqual(candidate.token_hash, tokenHash)
-        && Number(candidate.result_expires_at) > now
-    ));
+    const record = this.deletionResultsByRequest
+      .get(`${tokenHash}:${boundedText(requestId, 128)}`);
+    if (record && Number(record.result_expires_at) <= now) return null;
     return record ? this.publicDeletionResponse(record) : null;
   }
 
   deletionStatus(deletionRequestId, token, now = Date.now()) {
     const tokenHash = this.deletionTokenHash(token);
-    const record = this.deletionTombstones.find((candidate) => (
-      candidate.deletion_request_id === boundedText(deletionRequestId, 128)
-        && safeEqual(candidate.token_hash, tokenHash)
-    ));
+    const record = this.deletionResultsById
+      .get(`${tokenHash}:${boundedText(deletionRequestId, 128)}`);
     if (!record) throw new TelemetryHttpError(404, "deletion_request_not_found");
     if (Number(record.result_expires_at) <= now) {
       throw new TelemetryHttpError(410, "deletion_result_expired");
@@ -1716,6 +1763,9 @@ export class TelemetryStore {
     this.compactExpiredData(now);
     const hardwareHash = this.hardwareHash(claim);
     const registrationSecretHash = this.registrationSecretHash(registrationSecret);
+    if (this.registrationWasDeleted(hardwareHash, registrationSecretHash)) {
+      throw new TelemetryHttpError(410, "installation_data_deleted");
+    }
     let device = this.devicesByHardwareHash.get(hardwareHash);
     if (!device) {
       if (this.devices.size >= this.maxDevices) {
@@ -1842,11 +1892,13 @@ export class TelemetryStore {
     for (const [deviceId, device] of this.devices) {
       if (this.deviceRetentionStartedAt(device) >= cutoff) continue;
       const subjectHash = this.deletionSubjectHash(deviceId);
-      if (!this.deletionTombstones.some((record) => record.subject_hash === subjectHash)) {
+      if (!this.removedSubjectHashes.has(subjectHash)) {
         this.deletionTombstones.push({
           subject_hash: subjectHash,
           token_hash: this.deletionTokenHash(device.device_token),
+          removal_reason: "expired",
         });
+        this.removedSubjectHashes.add(subjectHash);
       }
       this.devices.delete(deviceId);
       this.devicesByHardwareHash.delete(device.hardware_hash);
@@ -1880,6 +1932,11 @@ export class TelemetryStore {
         bySubject.set(record.subject_hash, {
           subject_hash: record.subject_hash,
           ...(record.token_hash ? { token_hash: record.token_hash } : {}),
+          removal_reason: record.removal_reason || "deleted",
+          ...(record.hardware_hash ? { hardware_hash: record.hardware_hash } : {}),
+          ...(record.registration_secret_hash
+            ? { registration_secret_hash: record.registration_secret_hash }
+            : {}),
         });
       }
     }
@@ -2218,6 +2275,9 @@ export class TelemetryStore {
       deletion_request_id: randomId("delete_", 18),
       subject_hash: this.deletionSubjectHash(device.device_id),
       token_hash: this.deletionTokenHash(device.device_token),
+      hardware_hash: device.hardware_hash,
+      registration_secret_hash: device.registration_secret_hash,
+      removal_reason: "deleted",
       status: "processing",
       accepted_at: now,
       completed_at: null,
@@ -2233,6 +2293,7 @@ export class TelemetryStore {
     atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
     this.devices.delete(device.device_id);
     this.devicesByHardwareHash.delete(device.hardware_hash);
+    this.eventRateBuckets.delete(device.device_id);
     this.rebuildUsageCounters();
     this.saveNow();
     tombstone.status = "completed";
@@ -2322,6 +2383,7 @@ export function createTelemetryService(options = {}) {
   const loginAttempts = new Map();
   const registrationAttempts = new Map();
   const globalRegistrationAttempts = new Map();
+  const invalidCredentialAttempts = new Map();
   const compactionTimer = store ? setInterval(() => {
     try {
       store.compactExpiredData(Date.now());
@@ -2348,9 +2410,16 @@ export function createTelemetryService(options = {}) {
     return value.startsWith("Bearer ") ? value.slice(7) : "";
   }
 
-  function rejectUnknownDevice(res, token) {
-    if (store.credentialWasRemoved(token)) {
-      json(res, 410, { error: "device_data_absent" });
+  function rejectUnknownDevice(res, token, requestIp) {
+    if (rateLimited(invalidCredentialAttempts, requestIp, 120)) {
+      json(res, 429, { error: "rate_limited" });
+      return;
+    }
+    const removalReason = store.credentialRemovalReason(token);
+    if (removalReason === "expired") {
+      json(res, 410, { error: "device_credentials_expired" });
+    } else if (removalReason === "deleted") {
+      json(res, 410, { error: "device_data_deleted" });
     } else {
       json(res, 401, { error: "invalid_device_token" });
     }
@@ -2419,7 +2488,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          rejectUnknownDevice(res, bearer(req));
+          rejectUnknownDevice(res, bearer(req), requestIp);
           return true;
         }
         const region = store.regionNeedsRefresh(device)
@@ -2433,7 +2502,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          rejectUnknownDevice(res, bearer(req));
+          rejectUnknownDevice(res, bearer(req), requestIp);
           return true;
         }
         const events = Array.isArray(input.events) ? input.events : [];
@@ -2448,7 +2517,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          rejectUnknownDevice(res, bearer(req));
+          rejectUnknownDevice(res, bearer(req), requestIp);
           return true;
         }
         const events = Array.isArray(input.events) ? input.events : [];
@@ -2463,7 +2532,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          rejectUnknownDevice(res, bearer(req));
+          rejectUnknownDevice(res, bearer(req), requestIp);
           return true;
         }
         json(res, 200, store.startBehaviorCollection(device, input));
@@ -2473,7 +2542,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          rejectUnknownDevice(res, bearer(req));
+          rejectUnknownDevice(res, bearer(req), requestIp);
           return true;
         }
         json(res, 200, store.endBehaviorCollection(device, input));
@@ -2483,7 +2552,7 @@ export function createTelemetryService(options = {}) {
         const params = new URL(req.url, "http://localhost").searchParams;
         const device = store.authenticate(params.get("device_id"), bearer(req));
         if (!device) {
-          rejectUnknownDevice(res, bearer(req));
+          rejectUnknownDevice(res, bearer(req), requestIp);
           return true;
         }
         json(res, 200, store.behaviorCollectionStatus(device));
@@ -2499,7 +2568,7 @@ export function createTelemetryService(options = {}) {
         }
         const device = store.authenticate(input.device_id, token);
         if (!device) {
-          rejectUnknownDevice(res, token);
+          rejectUnknownDevice(res, token, requestIp);
           return true;
         }
         json(res, 202, store.deleteBehaviorData(device, input));

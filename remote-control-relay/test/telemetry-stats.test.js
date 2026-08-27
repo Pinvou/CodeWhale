@@ -765,14 +765,20 @@ test("removed credentials return gone while unknown credentials stay unauthorize
     process.env.PINVOU_TELEMETRY_DATA_DIR = dataDir;
     service = createTelemetryService({ regionResolver: { enabled: false, lookup: async () => null } });
 
-    const registration = await serviceRequest(service, "POST", "/pinvou3/telemetry/v1/register", {
+    const registrationBody = {
       enrollment_token: "test-enrollment-token-at-least-24",
       hardware_claim: "removed-credential-hardware-0001",
       registration_secret: "registration-secret-removed-credential-0001",
       app_version: "0.8.7",
       platform: "windows",
       arch: "x86_64",
-    });
+    };
+    const registration = await serviceRequest(
+      service,
+      "POST",
+      "/pinvou3/telemetry/v1/register",
+      registrationBody,
+    );
     assert.equal(registration.status, 200);
     const authorization = { authorization: `Bearer ${registration.body.device_token}` };
     const deletion = await serviceRequest(service, "POST", "/pinvou3/stats/api/behavior/deletion", {
@@ -789,7 +795,15 @@ test("removed credentials return gone while unknown credentials stay unauthorize
       authorization,
     );
     assert.equal(removed.status, 410);
-    assert.deepEqual(removed.body, { error: "device_data_absent" });
+    assert.deepEqual(removed.body, { error: "device_data_deleted" });
+    const resurrect = await serviceRequest(
+      service,
+      "POST",
+      "/pinvou3/telemetry/v1/register",
+      registrationBody,
+    );
+    assert.equal(resurrect.status, 410);
+    assert.deepEqual(resurrect.body, { error: "installation_data_deleted" });
     const unknown = await serviceRequest(
       service,
       "GET",
@@ -799,6 +813,84 @@ test("removed credentials return gone while unknown credentials stay unauthorize
     );
     assert.equal(unknown.status, 401);
     assert.deepEqual(unknown.body, { error: "invalid_device_token" });
+    for (let index = 0; index < 118; index += 1) {
+      const attempt = await serviceRequest(
+        service,
+        "GET",
+        `/pinvou3/stats/api/behavior/collection?device_id=unknown_${index}`,
+        undefined,
+        { authorization: `Bearer unknown-device-token-${index}` },
+      );
+      assert.equal(attempt.status, 401);
+    }
+    const limited = await serviceRequest(
+      service,
+      "GET",
+      "/pinvou3/stats/api/behavior/collection?device_id=unknown_limited",
+      undefined,
+      { authorization: "Bearer unknown-device-token-limited" },
+    );
+    assert.equal(limited.status, 429);
+  } finally {
+    service?.close();
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+    rmSync(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
+test("naturally expired credentials return a renewable gone response", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-expired-credential-status-"));
+  const names = [
+    "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+    "PINVOU_TELEMETRY_DEVICE_PEPPER",
+    "PINVOU_STATS_ADMIN_PASSWORD",
+    "PINVOU_TELEMETRY_DATA_DIR",
+  ];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  let service;
+  try {
+    const pepper = "test-device-pepper-at-least-24";
+    process.env.PINVOU_TELEMETRY_ENROLLMENT_TOKEN = "test-enrollment-token-at-least-24";
+    process.env.PINVOU_TELEMETRY_DEVICE_PEPPER = pepper;
+    process.env.PINVOU_STATS_ADMIN_PASSWORD = "operations-admin-password";
+    process.env.PINVOU_TELEMETRY_DATA_DIR = dataDir;
+    const registrationBody = {
+      enrollment_token: "test-enrollment-token-at-least-24",
+      hardware_claim: "expired-credential-hardware-0001",
+      registration_secret: "registration-secret-expired-credential-0001",
+      app_version: "0.8.7",
+      platform: "windows",
+      arch: "x86_64",
+    };
+    const bootstrap = new TelemetryStore(dataDir, pepper);
+    const original = bootstrap.register(registrationBody, null);
+    const originalDevice = bootstrap.authenticate(original.device_id, original.device_token);
+    originalDevice.first_seen_at = Date.now() - 36 * 24 * 60 * 60_000;
+    bootstrap.saveNow();
+
+    service = createTelemetryService({ regionResolver: { enabled: false, lookup: async () => null } });
+    const expired = await serviceRequest(
+      service,
+      "GET",
+      `/pinvou3/stats/api/behavior/collection?device_id=${original.device_id}`,
+      undefined,
+      { authorization: `Bearer ${original.device_token}` },
+    );
+    assert.equal(expired.status, 410);
+    assert.deepEqual(expired.body, { error: "device_credentials_expired" });
+
+    const renewed = await serviceRequest(
+      service,
+      "POST",
+      "/pinvou3/telemetry/v1/register",
+      registrationBody,
+    );
+    assert.equal(renewed.status, 200);
+    assert.notEqual(renewed.body.device_id, original.device_id);
+    assert.notEqual(renewed.body.device_token, original.device_token);
   } finally {
     service?.close();
     for (const name of names) {
@@ -813,13 +905,14 @@ test("behavior deletion removes identity and facts while tombstones survive back
   const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-control-"));
   try {
     const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
-    const credential = store.register({
+    const registration = {
       hardware_claim: "behavior-control-hardware-0001",
       registration_secret: "registration-secret-control-00000001",
       app_version: "0.8.7",
       platform: "windows",
       arch: "x86_64",
-    }, null);
+    };
+    const credential = store.register(registration, null);
     const device = store.authenticate(credential.device_id, credential.device_token);
     assert.deepEqual(store.behaviorCollectionStatus(device), {
       status: "inactive",
@@ -866,6 +959,10 @@ test("behavior deletion removes identity and facts while tombstones survive back
     assert.equal(store.events.length, 0);
     assert.equal(store.behaviorEvents.length, 0);
     assert.equal(store.authenticate(credential.device_id, credential.device_token), null);
+    assert.throws(
+      () => store.register(registration, null),
+      error => error.status === 410 && error.message === "installation_data_deleted",
+    );
     assert.deepEqual(
       store.priorDeletionResponse("request_delete_0001", credential.device_token),
       deletion,
@@ -902,12 +999,32 @@ test("behavior deletion removes identity and facts while tombstones survive back
       deletion,
     );
     assert.equal(reloaded.deletionTombstones.length, 1);
+    assert.equal(reloaded.removedSubjectHashes.size, 1);
+    assert.equal(reloaded.removedCredentialReasons.size, 1);
+    assert.equal(reloaded.deletedRegistrationIdentities.size, 1);
+    assert.equal(reloaded.deletionResultsByRequest.size, 1);
+    assert.equal(reloaded.deletionResultsById.size, 1);
     reloaded.compactExpiredData(deletion.accepted_at + 36 * 24 * 60 * 60_000);
     assert.deepEqual(reloaded.deletionTombstones, [{
       subject_hash: reloaded.deletionSubjectHash(credential.device_id),
       token_hash: reloaded.deletionTokenHash(credential.device_token),
+      removal_reason: "deleted",
+      hardware_hash: reloaded.hardwareHash(registration.hardware_claim),
+      registration_secret_hash: reloaded.registrationSecretHash(
+        registration.registration_secret,
+      ),
     }]);
     assert.equal(reloaded.credentialWasRemoved(credential.device_token), true);
+    assert.equal(reloaded.credentialRemovalReason(credential.device_token), "deleted");
+    assert.equal(reloaded.removedSubjectHashes.size, 1);
+    assert.equal(reloaded.removedCredentialReasons.size, 1);
+    assert.equal(reloaded.deletedRegistrationIdentities.size, 1);
+    assert.equal(reloaded.deletionResultsByRequest.size, 0);
+    assert.equal(reloaded.deletionResultsById.size, 0);
+    assert.throws(
+      () => reloaded.register(registration, null),
+      error => error.status === 410 && error.message === "installation_data_deleted",
+    );
     writeFileSync(join(dataDir, "devices.json"), backup.devices);
     const restoredAfterResultExpiry = new TelemetryStore(
       dataDir,
@@ -961,6 +1078,7 @@ test("retention compaction removes expired identity mappings and facts without r
     assert.equal(store.devicesByHardwareHash.size, 0);
     assert.equal(store.events.length, 0);
     assert.equal(store.credentialWasRemoved(credential.device_token), true);
+    assert.equal(store.credentialRemovalReason(credential.device_token), "expired");
     assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 0);
     assert.equal(readFileSync(join(dataDir, "usage-events.jsonl"), "utf8"), "");
     const renewed = store.register(registration, null);

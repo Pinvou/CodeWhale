@@ -97,6 +97,11 @@ struct EventsResponse {
     duplicates: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct TelemetryErrorResponse {
+    error: String,
+}
+
 struct TelemetryInner {
     identity_path: PathBuf,
     identity: Mutex<IdentityFile>,
@@ -262,6 +267,14 @@ impl TelemetryState {
             self.clear_credentials()?;
             anyhow::bail!("device credential rejected; will register again");
         }
+        if response.status() == StatusCode::GONE {
+            let error_code = telemetry_error_code(response).await;
+            if credential_has_expired(&error_code) {
+                self.clear_credentials()?;
+                anyhow::bail!("device credential expired; will register again");
+            }
+            anyhow::bail!("device credential unavailable: {error_code}");
+        }
         response.error_for_status()?;
         Ok(())
     }
@@ -324,6 +337,14 @@ impl TelemetryState {
         if response.status() == StatusCode::UNAUTHORIZED {
             self.clear_credentials()?;
             anyhow::bail!("device credential rejected while uploading usage");
+        }
+        if response.status() == StatusCode::GONE {
+            let error_code = telemetry_error_code(response).await;
+            if credential_has_expired(&error_code) {
+                self.clear_credentials()?;
+                anyhow::bail!("device credential expired while uploading usage");
+            }
+            anyhow::bail!("device credential unavailable while uploading usage: {error_code}");
         }
         let ack = response
             .error_for_status()?
@@ -467,6 +488,18 @@ fn nonnegative_sql_integer(row: &Row<'_>, index: usize) -> rusqlite::Result<u64>
     u64::try_from(value).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(error))
     })
+}
+
+fn credential_has_expired(error_code: &str) -> bool {
+    error_code == "device_credentials_expired"
+}
+
+async fn telemetry_error_code(response: reqwest::Response) -> String {
+    response
+        .json::<TelemetryErrorResponse>()
+        .await
+        .map(|body| body.error)
+        .unwrap_or_else(|_| "unknown_credential_error".to_string())
 }
 
 fn save_identity(path: &Path, identity: &IdentityFile) -> Result<()> {
@@ -630,6 +663,13 @@ mod tests {
     #[test]
     fn heartbeat_interval_is_two_minutes() {
         assert_eq!(HEARTBEAT_INTERVAL, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn only_natural_expiry_rotates_device_credentials() {
+        assert!(credential_has_expired("device_credentials_expired"));
+        assert!(!credential_has_expired("device_data_deleted"));
+        assert!(!credential_has_expired("installation_data_deleted"));
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const rust = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry.rs', import.meta.url), 'utf8');
+const usageRust = readFileSync(new URL('../src-tauri/src/platform/telemetry.rs', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
 const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
 const acpProviderForm = readFileSync(new URL('../src/features/settings/ProviderFormModal.jsx', import.meta.url), 'utf8');
@@ -55,13 +56,16 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /pending_request_matches\(state, &pending\)/);
   assert.match(rust, /behavior_events_url: state\.behavior_events_url\.clone\(\)/);
   assert.match(rust, /async fn migrate_endpoint_locked/);
-  assert.match(rust, /StatusCode::GONE[\s\S]*recover_expired_credentials/);
+  assert.match(rust, /StatusCode::GONE[\s\S]*device_credentials_expired[\s\S]*recover_expired_credentials/);
   assert.match(rust, /async fn recover_expired_credentials/);
   assert.match(rust, /rebind_period\(&started\.collection_period_id\)/);
   assert.match(settingsBridge, /function scheduleBehaviorTelemetryStatusPoll/);
   assert.match(settingsBridge, /status\.withdrawal_pending \|\| status\.deletion_pending/);
   assert.match(settingsBridge, /get_behavior_telemetry_status/);
   assert.match(settingsBridge, /scheduleBehaviorTelemetryStatusPoll\(\);[\s\S]*return state\.behaviorTelemetry/);
+  assert.match(usageRust, /StatusCode::GONE[\s\S]*credential_has_expired[\s\S]*clear_credentials/);
+  assert.match(usageRust, /credential_has_expired[\s\S]*device_credentials_expired/);
+  assert.match(usageRust, /credential_has_expired\("device_data_deleted"\)/);
 });
 
 test('credential and pending-control state is atomically replaced', () => {
