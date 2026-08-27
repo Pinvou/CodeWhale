@@ -512,6 +512,44 @@ test("active and feature-adoption denominators use core submissions and successf
   assert.equal(tool.penetration_rate, 0.4);
 });
 
+test("WSTA and feature adoption attribute cross-day tasks to their completion day", () => {
+  const now = at("2026-08-13T12:00:00");
+  const events = [
+    {
+      event_id: "submitted_before_midnight",
+      event_name: "task_submitted",
+      attempt_id: "cross_day_attempt",
+      identity_id: "cross_day_installation",
+      mode: "assistant",
+      initiator_type: "user",
+      occurred_at: at("2026-08-12T23:59:00"),
+    },
+    {
+      event_id: "finished_after_midnight",
+      event_name: "task_finished",
+      attempt_id: "cross_day_attempt",
+      identity_id: "cross_day_installation",
+      mode: "assistant",
+      initiator_type: "user",
+      status: "success",
+      occurred_at: at("2026-08-13T00:01:00"),
+    },
+    {
+      event_id: "voice_after_midnight",
+      event_name: "voice_started",
+      identity_id: "cross_day_installation",
+      occurred_at: at("2026-08-13T00:02:00"),
+    },
+  ];
+  const overview = buildBehaviorOverview([], [], events, "today", now);
+  assert.equal(overview.active_installations, 0);
+  assert.equal(overview.metrics.task_success_count, 1);
+  assert.equal(overview.metrics.wsta_installations, 1);
+  assert.equal(overview.metrics.wsta_rate, null);
+  assert.equal(overview.metrics.voice_started_installations, 1);
+  assert.equal(overview.metrics.voice_observed_installations, 1);
+});
+
 test("activation funnel and model ranking expose complete quality dimensions", () => {
   const now = at("2026-08-12T12:00:00");
   const events = [];

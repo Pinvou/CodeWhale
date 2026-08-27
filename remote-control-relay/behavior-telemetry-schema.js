@@ -1,6 +1,9 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
-const schemaUrl = new URL("../docs/schemas/behavior-telemetry-v1.schema.json", import.meta.url);
+const deployedSchemaUrl = new URL("./docs/schemas/behavior-telemetry-v1.schema.json", import.meta.url);
+const schemaUrl = existsSync(deployedSchemaUrl)
+  ? deployedSchemaUrl
+  : new URL("../docs/schemas/behavior-telemetry-v1.schema.json", import.meta.url);
 
 export const BEHAVIOR_TELEMETRY_SCHEMA = Object.freeze(
   JSON.parse(readFileSync(schemaUrl, "utf8")),

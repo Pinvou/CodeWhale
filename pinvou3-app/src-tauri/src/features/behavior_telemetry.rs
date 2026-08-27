@@ -15,7 +15,8 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::platform::{filesystem, paths};
 
-const STATE_VERSION: u8 = 3;
+const STATE_VERSION: u8 = 4;
+const REMOTE_RETENTION_MS: u64 = 35 * 24 * 60 * 60 * 1000;
 const CONTROLLED_PROVIDER_KEYS: &[&str] = &[
     "openai",
     "anthropic",
@@ -315,7 +316,17 @@ struct PersistedState {
     device_id: Option<String>,
     device_token: Option<String>,
     #[serde(default)]
+    retired_endpoints: Vec<RetiredEndpointCredentials>,
+    #[serde(default)]
     control: CollectionControl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RetiredEndpointCredentials {
+    behavior_events_url: String,
+    device_id: String,
+    device_token: String,
+    retired_at: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -325,7 +336,16 @@ struct CollectionControl {
     collection_period_id: Option<String>,
     cohort_started: bool,
     pending_request: Option<PendingControlRequest>,
+    pending_deletions: Vec<PendingEndpointDeletion>,
     last_deletion_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingEndpointDeletion {
+    request_id: String,
+    behavior_events_url: String,
+    device_id: String,
+    device_token: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -939,12 +959,7 @@ impl BehaviorTelemetry {
         self.state
             .try_lock()
             .ok()
-            .and_then(|state| {
-                state
-                    .as_ref()
-                    .and_then(|value| value.control.pending_request.as_ref())
-                    .map(|_| true)
-            })
+            .and_then(|state| state.as_ref().map(PersistedState::has_pending_control))
             .unwrap_or(false)
     }
 
@@ -953,7 +968,7 @@ impl BehaviorTelemetry {
             .lock()
             .await
             .as_ref()
-            .is_some_and(|state| state.control.pending_request.is_some())
+            .is_some_and(PersistedState::has_pending_control)
     }
 
     fn wake_control_worker(&self) {
@@ -1098,7 +1113,7 @@ impl BehaviorTelemetry {
                 matches!(
                     value.pending_request.as_ref().map(|request| &request.kind),
                     Some(PendingControlKind::Delete)
-                )
+                ) || !value.pending_deletions.is_empty()
             }),
             last_deletion_request_id: control
                 .and_then(|value| value.last_deletion_request_id.clone()),
@@ -1122,12 +1137,12 @@ impl BehaviorTelemetry {
             if self.collecting.load(Ordering::Acquire) {
                 return Ok(self.status().await);
             }
-            if self
+            while self
                 .state
                 .lock()
                 .await
                 .as_ref()
-                .is_some_and(|state| state.control.pending_request.is_some())
+                .is_some_and(PersistedState::has_pending_control)
             {
                 self.retry_pending_control_locked().await?;
             }
@@ -1238,30 +1253,18 @@ impl BehaviorTelemetry {
         if let Ok(mut period) = self.collection_period_id.write() {
             *period = None;
         }
-        let Some(_credentials) = self.persisted_credentials().await else {
-            let mut guard = self.state.lock().await;
-            if let Some(state) = guard.as_mut() {
-                state.control.enabled = false;
-                state.control.collection_period_id = None;
-                state.control.pending_request = None;
-                persist_state(state)?;
-            }
-            drop(guard);
-            return self.delete_local_data().await;
-        };
         {
             let mut guard = self.state.lock().await;
             let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
             state.control.enabled = false;
-            state.control.pending_request = Some(PendingControlRequest {
-                kind: PendingControlKind::Delete,
-                request_id: token("control_", 18),
-                collection_period_id: state.control.collection_period_id.clone(),
-                behavior_events_url: state.behavior_events_url.clone(),
-            });
+            state.control.collection_period_id = None;
+            state.control.pending_request = None;
+            state.control.pending_deletions = state.deletion_targets();
             persist_state(state)?;
         }
-        self.wake_control_worker();
+        if self.has_pending_control().await {
+            self.wake_control_worker();
+        }
         self.delete_local_data().await
     }
 
@@ -1271,21 +1274,72 @@ impl BehaviorTelemetry {
     }
 
     async fn retry_pending_control_locked(&self) -> Result<()> {
-        let pending = self
-            .state
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|state| state.control.pending_request.clone());
-        if pending.is_none() {
+        let snapshot = self.state.lock().await.clone();
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        if let Some(pending) = snapshot.control.pending_request.clone() {
+            let credentials = self
+                .credentials_for_pending(&pending)
+                .await
+                .context("credentials unavailable for pending behavior control")?;
+            return self.send_pending_control(&credentials, pending).await;
+        }
+        let Some(pending) = snapshot.control.pending_deletions.first().cloned() else {
+            return Ok(());
+        };
+        self.send_pending_deletion(pending).await
+    }
+
+    async fn send_pending_deletion(&self, pending: PendingEndpointDeletion) -> Result<()> {
+        let credentials = Credentials {
+            device_id: pending.device_id.clone(),
+            device_token: pending.device_token.clone(),
+            behavior_events_url: pending.behavior_events_url.clone(),
+        };
+        let response: DeletionResponse = self
+            .post_control(
+                &credentials,
+                "deletion",
+                json!({ "request_id": pending.request_id.clone() }),
+            )
+            .await?;
+        let mut guard = self.state.lock().await;
+        let Some(state) = guard.as_mut() else {
+            return Ok(());
+        };
+        if !state
+            .control
+            .pending_deletions
+            .first()
+            .is_some_and(|current| current.same_request(&pending))
+        {
             return Ok(());
         }
-        let pending = pending.expect("pending control checked above");
-        let credentials = self
-            .credentials_for_pending(&pending)
-            .await
-            .context("credentials unavailable for pending behavior control")?;
-        self.send_pending_control(&credentials, pending).await
+        state.control.pending_deletions.remove(0);
+        state.control.last_deletion_request_id = Some(response.deletion_request_id);
+        state.retired_endpoints.retain(|retired| {
+            retired.behavior_events_url != pending.behavior_events_url
+                || retired.device_id != pending.device_id
+        });
+        if state.behavior_events_url == pending.behavior_events_url
+            && state.device_id.as_deref() == Some(pending.device_id.as_str())
+        {
+            state.device_id = None;
+            state.device_token = None;
+        }
+        if state.control.pending_deletions.is_empty() {
+            let last_deletion_request_id = state.control.last_deletion_request_id.clone();
+            *state = PersistedState {
+                control: CollectionControl {
+                    last_deletion_request_id,
+                    ..CollectionControl::default()
+                },
+                ..PersistedState::fresh(&self.runtime)
+            };
+        }
+        persist_state(state)?;
+        Ok(())
     }
 
     async fn send_pending_control(
@@ -1357,7 +1411,7 @@ impl BehaviorTelemetry {
         if endpoint_matches_runtime(&snapshot, &self.runtime) {
             return Ok(());
         }
-        if snapshot.control.pending_request.is_some() {
+        if snapshot.has_pending_control() {
             anyhow::bail!("pending behavior control must finish before endpoint migration");
         }
         let Some(period_id) = snapshot.control.collection_period_id.clone() else {
@@ -1446,14 +1500,12 @@ impl BehaviorTelemetry {
             state.clone()
         };
         if !endpoint_matches_runtime(&state, &self.runtime) {
-            if state.control.pending_request.is_some()
-                || state.control.collection_period_id.is_some()
-            {
+            if state.has_pending_control() || state.control.collection_period_id.is_some() {
                 anyhow::bail!(
                     "previous behavior endpoint control state must be resolved before registration"
                 );
             }
-            state = PersistedState::fresh(&self.runtime);
+            state = state.rebind_endpoint(&self.runtime, now_ms());
         }
         let body = json!({
             "enrollment_token": enrollment_token,
@@ -1498,11 +1550,6 @@ impl BehaviorTelemetry {
         if !endpoint_matches_runtime(&state, &self.runtime) {
             return None;
         }
-        persisted_credentials_from_state(&state)
-    }
-
-    async fn persisted_credentials(&self) -> Option<Credentials> {
-        let state = self.state.lock().await.clone()?;
         persisted_credentials_from_state(&state)
     }
 
@@ -1655,8 +1702,82 @@ impl PersistedState {
             registration_secret: token("rs_", 32),
             device_id: None,
             device_token: None,
+            retired_endpoints: Vec::new(),
             control: CollectionControl::default(),
         }
+    }
+
+    fn has_pending_control(&self) -> bool {
+        self.control.pending_request.is_some() || !self.control.pending_deletions.is_empty()
+    }
+
+    fn rebind_endpoint(mut self, runtime: &RuntimeConfig, retired_at: u64) -> Self {
+        self.retired_endpoints.retain(|retired| {
+            retired.retired_at == 0
+                || retired_at.saturating_sub(retired.retired_at) <= REMOTE_RETENTION_MS
+        });
+        if let (Some(device_id), Some(device_token)) =
+            (self.device_id.take(), self.device_token.take())
+        {
+            let retired = RetiredEndpointCredentials {
+                behavior_events_url: self.behavior_events_url.clone(),
+                device_id,
+                device_token,
+                retired_at,
+            };
+            if !self.retired_endpoints.iter().any(|existing| {
+                existing.behavior_events_url == retired.behavior_events_url
+                    && existing.device_id == retired.device_id
+            }) {
+                self.retired_endpoints.push(retired);
+            }
+        }
+        self.version = STATE_VERSION;
+        self.telemetry_base_url = runtime.telemetry_base_url.clone();
+        self.behavior_events_url = runtime.behavior_events_url.clone();
+        self.control.enabled = false;
+        self.control.collection_period_id = None;
+        self.control.pending_request = None;
+        self.control.pending_deletions.clear();
+        self
+    }
+
+    fn deletion_targets(&self) -> Vec<PendingEndpointDeletion> {
+        let mut targets = Vec::new();
+        if let Some(credentials) = persisted_credentials_from_state(self) {
+            targets.push(PendingEndpointDeletion::from_credentials(credentials));
+        }
+        for retired in &self.retired_endpoints {
+            if !targets.iter().any(|target| {
+                target.behavior_events_url == retired.behavior_events_url
+                    && target.device_id == retired.device_id
+            }) {
+                targets.push(PendingEndpointDeletion {
+                    request_id: token("control_", 18),
+                    behavior_events_url: retired.behavior_events_url.clone(),
+                    device_id: retired.device_id.clone(),
+                    device_token: retired.device_token.clone(),
+                });
+            }
+        }
+        targets
+    }
+}
+
+impl PendingEndpointDeletion {
+    fn from_credentials(credentials: Credentials) -> Self {
+        Self {
+            request_id: token("control_", 18),
+            behavior_events_url: credentials.behavior_events_url,
+            device_id: credentials.device_id,
+            device_token: credentials.device_token,
+        }
+    }
+
+    fn same_request(&self, other: &Self) -> bool {
+        self.request_id == other.request_id
+            && self.behavior_events_url == other.behavior_events_url
+            && self.device_id == other.device_id
     }
 }
 
@@ -3184,13 +3305,40 @@ mod tests {
         assert_eq!(pending.behavior_events_url, runtime_a.behavior_events_url);
         assert!(pending_request_matches(&old_state, &pending));
 
-        let mut new_state = PersistedState::fresh(&runtime_b);
+        old_state.control.pending_request = None;
+        old_state.control.collection_period_id = None;
+        old_state.control.cohort_started = true;
+        let installation_id = old_state.installation_id.clone();
+        let registration_secret = old_state.registration_secret.clone();
+        let mut new_state = old_state.rebind_endpoint(&runtime_b, 42);
         new_state.control.enabled = true;
         new_state.control.collection_period_id = Some("period_b".to_string());
         assert!(!pending_request_matches(&new_state, &pending));
+        assert_eq!(new_state.installation_id, installation_id);
+        assert_eq!(new_state.registration_secret, registration_secret);
+        assert!(new_state.control.cohort_started);
+        assert_eq!(new_state.retired_endpoints.len(), 1);
+        assert_eq!(
+            new_state.retired_endpoints[0].behavior_events_url,
+            runtime_a.behavior_events_url
+        );
+        assert_eq!(new_state.retired_endpoints[0].device_id, "device_a");
         assert_eq!(
             new_state.control.collection_period_id.as_deref(),
             Some("period_b")
         );
+
+        new_state.device_id = Some("device_b".to_string());
+        new_state.device_token = Some("token_b".to_string());
+        let deletion_targets = new_state.deletion_targets();
+        assert_eq!(deletion_targets.len(), 2);
+        assert!(deletion_targets.iter().any(|target| {
+            target.behavior_events_url == runtime_a.behavior_events_url
+                && target.device_id == "device_a"
+        }));
+        assert!(deletion_targets.iter().any(|target| {
+            target.behavior_events_url == runtime_b.behavior_events_url
+                && target.device_id == "device_b"
+        }));
     }
 }

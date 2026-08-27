@@ -388,14 +388,10 @@ function rate(part, total) {
 
 function successfulActiveIdentities(behaviorEvents, window) {
   const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
-  const submitted = new Set(windowEvents
-    .filter((event) => isCoreUserTask(event, "task_submitted"))
-    .map(eventIdentity)
-    .filter(Boolean));
   return new Set(windowEvents
     .filter((event) => isCoreUserTask(event, "task_finished") && event.status === "success")
     .map(eventIdentity)
-    .filter((identity) => identity && submitted.has(identity)));
+    .filter(Boolean));
 }
 
 function intersectionSize(values, eligible) {
@@ -412,8 +408,16 @@ function reliableRate(part, total) {
   return Number(total) >= MIN_RELIABLE_SAMPLE ? rate(part, total) : null;
 }
 
+const deployedRegistryPath = join(
+  __dirname,
+  "docs",
+  "schemas",
+  "behavior-telemetry-registries.json",
+);
 const behaviorRegistries = JSON.parse(readFileSync(
-  join(__dirname, "..", "docs", "schemas", "behavior-telemetry-registries.json"),
+  existsSync(deployedRegistryPath)
+    ? deployedRegistryPath
+    : join(__dirname, "..", "docs", "schemas", "behavior-telemetry-registries.json"),
   "utf8",
 ));
 const CONTROLLED_TOOL_KEYS = new Set(behaviorRegistries.tools);
@@ -843,6 +847,10 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     if (event.status in taskStatus) taskStatus[event.status] += 1;
   }
   const successfulActiveInstallations = successfulActiveIdentities(behaviorEvents, window);
+  const successfulWithinWindowSubmissions = intersectionSize(
+    successfulActiveInstallations,
+    taskInstallations,
+  );
   const voiceAdopters = intersectionSize(voiceUsers, successfulActiveInstallations);
   const firstValueWithin24h = new Set();
   for (const event of taskFinished) {
@@ -939,7 +947,9 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
       first_technical_value_24h_installations: firstValueWithin24h.size,
       first_technical_value_24h_rate: reliableRate(firstValueWithin24h.size, maturedCohorts.size),
       wsta_installations: successfulActiveInstallations.size,
-      wsta_rate: reliableRate(successfulActiveInstallations.size, activeTotal),
+      wsta_rate: successfulWithinWindowSubmissions === successfulActiveInstallations.size
+        ? reliableRate(successfulActiveInstallations.size, activeTotal)
+        : null,
       ...explicitValue,
       task_admission_rate_24h: reliableRate(maturedAdmittedForResolution.length, maturedSubmissionIds.size),
       task_rejection_rate_24h: reliableRate(maturedRejected.length, maturedSubmissionIds.size),

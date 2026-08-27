@@ -244,7 +244,8 @@ echo "── 上传 relay 代码到 $RELAY_SERVER:$TEST_DIR(暂存 + 整体替�
 # 打成单个 tarball 流式上传,.tmp 落盘后原子 mv——scp 逐文件覆盖若中断会留下半新半旧的目录,
 # 服务一旦因故重启就会加载混合版本(与评审「暂存+原子替换」同类的隐患)。
 tar -czf - -C "$RELAY_DIR" \
-  server.js telemetry-service.js package.json package-lock.json web/dist web/stats.html \
+  server.js telemetry-service.js behavior-telemetry-schema.js package.json package-lock.json web/dist web/stats.html \
+  -C "$ROOT" docs/schemas/behavior-telemetry-v1.schema.json docs/schemas/behavior-telemetry-registries.json \
   | relay_ssh "cat > '$TEST_DIR.staging.tar.gz.tmp' && mv '$TEST_DIR.staging.tar.gz.tmp' '$TEST_DIR.staging.tar.gz'"
 
 STAGE="配置并重启测试 relay 实例(端口 $TEST_PORT,含失败回滚)"
@@ -259,6 +260,7 @@ mkdir -p "$test_dir.extract"
 tar -xzf "$test_dir.staging.tar.gz" -C "$test_dir.extract"
 rm -f "$test_dir.staging.tar.gz"
 (cd "$test_dir.extract" && npm ci --omit=dev --no-audit --no-fund > /dev/null)
+(cd "$test_dir.extract" && node --input-type=module -e "await import('./telemetry-service.js')")
 # 整体替换:旧版保留为 .bak 供回滚。
 rm -rf "$test_dir.bak"
 [ ! -d "$test_dir" ] || mv "$test_dir" "$test_dir.bak"
