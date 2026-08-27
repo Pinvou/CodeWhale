@@ -19,9 +19,6 @@ import './team-relay.css';
 const DEFAULT_TEAM_RELAY_SERVICE_URL = 'https://pinvou.com/pinvou3/team-relay';
 
 function teamTelemetryToken(prefix) {
-  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-    return `${prefix}-${window.crypto.randomUUID().replace(/-/g, '')}`;
-  }
   if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
     const bytes = new Uint8Array(12);
     window.crypto.getRandomValues(bytes);

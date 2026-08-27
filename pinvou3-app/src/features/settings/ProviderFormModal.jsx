@@ -4,6 +4,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, X } from '../../components/icons.jsx';
 import { invokeTauri } from '../../platform/tauri/client.js';
+
+function providerTelemetryToken(prefix) {
+  const cryptoApi = globalThis.crypto;
+  if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+    const bytes = new Uint8Array(12);
+    cryptoApi.getRandomValues(bytes);
+    return `${prefix}_${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  }
+  return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
 import {
   ACP_MODEL_1M_VARIANTS, ACP_MODEL_PRESETS, ACP_PROVIDER_PRESETS, CLAUDE_MODEL_SLOT_IDS,
 } from './acp-provider-catalog.js';
@@ -298,7 +308,7 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
   const doSave = async (apiKeyAction, trimmedKey) => {
     setSaving(true);
     setError('');
-    const operationId = `provider_${globalThis.crypto.randomUUID().replaceAll('-', '_')}`;
+    const operationId = providerTelemetryToken('provider');
     const providerKey = String(agent || 'unknown').toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').replace(/^[^a-z0-9]+/, '').slice(0, 64) || 'unknown';
     const startedAt = Date.now();
     const trackSetup = request => invokeTauri('track_behavior_event', { request }).catch(() => {});

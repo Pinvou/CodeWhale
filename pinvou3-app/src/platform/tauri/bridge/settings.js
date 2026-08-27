@@ -561,7 +561,13 @@
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
  function analyticsOperationId(prefix) {
-   return `${prefix}_${globalThis.crypto.randomUUID().replaceAll('-', '_')}`;
+   var cryptoApi = globalThis.crypto;
+   if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
+     var bytes = new Uint8Array(12);
+     cryptoApi.getRandomValues(bytes);
+     return `${prefix}_${Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('')}`;
+   }
+   return `${prefix}_${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
  }
  function analyticsProviderKey(model) {
    const raw = String(model.vendor || model.preset || 'unknown').toLowerCase();

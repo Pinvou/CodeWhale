@@ -17,6 +17,7 @@ use crate::platform::{filesystem, paths};
 
 const STATE_VERSION: u8 = 2;
 const EVENT_WAKE_CAPACITY: usize = 1;
+const CONTROL_WAKE_CAPACITY: usize = 1;
 const EVENT_FLUSH_MAX: usize = 50;
 const EVENT_BATCH_MAX_BYTES: usize = 400 * 1024;
 const EVENT_FLUSH_DEBOUNCE: Duration = Duration::from_millis(1500);
@@ -104,6 +105,7 @@ pub struct BehaviorTelemetry {
     client: reqwest::Client,
     runtime: Arc<RuntimeConfig>,
     state: Arc<Mutex<Option<PersistedState>>>,
+    state_healthy: Arc<AtomicBool>,
     credential_gate: Arc<Mutex<()>>,
     control_gate: Arc<Mutex<()>>,
     collecting: Arc<AtomicBool>,
@@ -116,6 +118,7 @@ pub struct BehaviorTelemetry {
     artifacts: Arc<StdMutex<HashMap<String, ArtifactTelemetryRecord>>>,
     latest_turns: Arc<StdMutex<HashMap<String, String>>>,
     event_tx: Option<mpsc::Sender<()>>,
+    control_tx: Option<mpsc::Sender<()>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,11 +518,12 @@ impl Outbox {
         &mut self,
         batch: &[OutboxRecord],
         results: &HashMap<String, (DeliveryStatus, Option<String>)>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let batch_ids: std::collections::HashSet<&str> = batch
             .iter()
             .map(|record| record.event_id.as_str())
             .collect();
+        let mut retryable_remains = false;
         self.records.retain_mut(|record| {
             if !batch_ids.contains(record.event_id.as_str()) {
                 return true;
@@ -535,12 +539,14 @@ impl Outbox {
                 DeliveryStatus::Retryable => {
                     record.delivery_attempt_count = record.delivery_attempt_count.saturating_add(1);
                     record.last_reason_code = reason;
+                    retryable_remains = true;
                     true
                 }
             }
         });
         self.recalculate_bytes();
-        self.rewrite()
+        self.rewrite()?;
+        Ok(retryable_remains)
     }
 
     fn mark_retry(&mut self, batch: &[OutboxRecord], reason: &str) -> Result<()> {
@@ -635,7 +641,15 @@ fn delivery_results(
 impl BehaviorTelemetry {
     pub fn new() -> Self {
         let runtime = Arc::new(RuntimeConfig::from_env());
-        let persisted = load_state().ok().flatten();
+        let (persisted, state_healthy) = match load_state() {
+            Ok(state) => (state, true),
+            Err(error) => {
+                log::error!(
+                    "[pinvou3][behavior] telemetry state is unreadable; collection is disabled to preserve identity and pending controls: {error:#}"
+                );
+                (None, false)
+            }
+        };
         let active_period = persisted.as_ref().and_then(|state| {
             state
                 .control
@@ -643,7 +657,9 @@ impl BehaviorTelemetry {
                 .then(|| state.control.collection_period_id.clone())
                 .flatten()
         });
-        let collecting = Arc::new(AtomicBool::new(runtime.enabled && active_period.is_some()));
+        let collecting = Arc::new(AtomicBool::new(
+            runtime.enabled && state_healthy && active_period.is_some(),
+        ));
         let collection_period_id = Arc::new(RwLock::new(active_period.clone()));
         let mut loaded_outbox = Outbox::load(outbox_path()).unwrap_or_else(|error| {
             log::debug!("[pinvou3][behavior] failed to load outbox: {error:#}");
@@ -656,10 +672,17 @@ impl BehaviorTelemetry {
         let recovered_tasks = load_task_attempts();
         let tasks = Arc::new(StdMutex::new(recovered_tasks.clone()));
         let state = Arc::new(Mutex::new(persisted));
+        let state_healthy = Arc::new(AtomicBool::new(state_healthy));
         let credential_gate = Arc::new(Mutex::new(()));
         let control_gate = Arc::new(Mutex::new(()));
         let (event_tx, event_rx) = if runtime.enabled {
             let (tx, rx) = mpsc::channel(EVENT_WAKE_CAPACITY);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+        let (control_tx, control_rx) = if runtime.enabled {
+            let (tx, rx) = mpsc::channel(CONTROL_WAKE_CAPACITY);
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -672,6 +695,7 @@ impl BehaviorTelemetry {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             runtime,
             state,
+            state_healthy,
             credential_gate,
             control_gate,
             collecting,
@@ -684,6 +708,7 @@ impl BehaviorTelemetry {
             artifacts: Arc::new(StdMutex::new(HashMap::new())),
             latest_turns: Arc::new(StdMutex::new(HashMap::new())),
             event_tx,
+            control_tx,
         };
         if let Some(rx) = event_rx {
             tauri::async_runtime::spawn(Self::run_worker(rx, telemetry.worker_clone()));
@@ -696,12 +721,12 @@ impl BehaviorTelemetry {
                     let _ = tx.try_send(());
                 }
             }
-            let retry = telemetry.worker_clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(error) = retry.retry_pending_control().await {
-                    log::debug!("[pinvou3][behavior] pending control retry deferred: {error:#}");
-                }
-            });
+        }
+        if let Some(rx) = control_rx {
+            tauri::async_runtime::spawn(Self::run_control_worker(rx, telemetry.worker_clone()));
+            if telemetry.has_pending_control_sync() {
+                telemetry.wake_control_worker();
+            }
         }
         if telemetry.runtime.enabled && telemetry.event_tx.is_none() {
             log::debug!("[pinvou3][behavior] telemetry disabled: queue initialization failed");
@@ -817,6 +842,7 @@ impl BehaviorTelemetry {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             runtime: self.runtime.clone(),
             state: self.state.clone(),
+            state_healthy: self.state_healthy.clone(),
             credential_gate: self.credential_gate.clone(),
             control_gate: self.control_gate.clone(),
             collecting: self.collecting.clone(),
@@ -829,6 +855,61 @@ impl BehaviorTelemetry {
             artifacts: self.artifacts.clone(),
             latest_turns: self.latest_turns.clone(),
             event_tx: None,
+            control_tx: None,
+        }
+    }
+
+    fn has_pending_control_sync(&self) -> bool {
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|state| {
+                state
+                    .as_ref()
+                    .and_then(|value| value.control.pending_request.as_ref())
+                    .map(|_| true)
+            })
+            .unwrap_or(false)
+    }
+
+    async fn has_pending_control(&self) -> bool {
+        self.state
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|state| state.control.pending_request.is_some())
+    }
+
+    fn wake_control_worker(&self) {
+        if let Some(tx) = &self.control_tx {
+            let _ = tx.try_send(());
+        }
+    }
+
+    async fn run_control_worker(mut rx: mpsc::Receiver<()>, telemetry: Self) {
+        while rx.recv().await.is_some() {
+            let mut retry_delay = Duration::from_secs(1);
+            while telemetry.has_pending_control().await {
+                match telemetry.retry_pending_control().await {
+                    Ok(()) => retry_delay = Duration::from_secs(1),
+                    Err(error) => {
+                        log::debug!(
+                            "[pinvou3][behavior] pending control retry deferred: {error:#}"
+                        );
+                        let jitter = Duration::from_millis(now_ms() % 251);
+                        let wait = retry_delay.saturating_add(jitter);
+                        retry_delay = retry_delay.saturating_mul(2).min(RETRY_MAX_DELAY);
+                        tokio::select! {
+                            _ = tokio::time::sleep(wait) => {}
+                            signal = rx.recv() => {
+                                if signal.is_none() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -856,14 +937,23 @@ impl BehaviorTelemetry {
             }
             match telemetry.send_events(&batch).await {
                 Ok(results) => {
-                    if let Ok(mut outbox) = telemetry.outbox.lock() {
-                        if let Err(error) = outbox.apply_results(&batch, &results) {
-                            log::debug!(
+                    let retryable_remains = telemetry.outbox.lock().map_or(true, |mut outbox| {
+                        outbox
+                            .apply_results(&batch, &results)
+                            .unwrap_or_else(|error| {
+                                log::debug!(
                                 "[pinvou3][behavior] persist delivery results failed: {error:#}"
                             );
-                        }
+                                true
+                            })
+                    });
+                    if retryable_remains {
+                        let jitter = Duration::from_millis(now_ms() % 251);
+                        tokio::time::sleep(retry_delay.saturating_add(jitter)).await;
+                        retry_delay = retry_delay.saturating_mul(2).min(RETRY_MAX_DELAY);
+                    } else {
+                        retry_delay = Duration::from_secs(1);
                     }
-                    retry_delay = Duration::from_secs(1);
                 }
                 Err(error) => {
                     log::debug!("[pinvou3][behavior] upload deferred: {error:#}");
@@ -919,7 +1009,7 @@ impl BehaviorTelemetry {
             .map(|outbox| (outbox.records.len(), outbox.dropped_event_count))
             .unwrap_or_default();
         BehaviorTelemetryStatus {
-            configured: self.runtime.enabled,
+            configured: self.runtime.enabled && self.state_healthy.load(Ordering::Acquire),
             enabled: self.collecting.load(Ordering::Acquire),
             collection_period_id: control.and_then(|value| value.collection_period_id.clone()),
             withdrawal_pending: control.is_some_and(|value| {
@@ -944,6 +1034,11 @@ impl BehaviorTelemetry {
 
     pub async fn set_collection_enabled(&self, enabled: bool) -> Result<BehaviorTelemetryStatus> {
         let _control_guard = self.control_gate.lock().await;
+        if !self.state_healthy.load(Ordering::Acquire) {
+            anyhow::bail!(
+                "behavior telemetry state is unreadable; repair or delete the local state file before continuing"
+            );
+        }
         if enabled {
             if !self.runtime.enabled {
                 anyhow::bail!("behavior telemetry service is not configured");
@@ -1033,9 +1128,7 @@ impl BehaviorTelemetry {
                 persist_state(state)?;
             }
             drop(guard);
-            if let Err(error) = self.retry_pending_control().await {
-                log::debug!("[pinvou3][behavior] collection withdrawal pending: {error:#}");
-            }
+            self.wake_control_worker();
         }
         Ok(self.status().await)
     }
@@ -1067,7 +1160,7 @@ impl BehaviorTelemetry {
         if let Ok(mut period) = self.collection_period_id.write() {
             *period = None;
         }
-        let Some(credentials) = self.current_credentials().await else {
+        let Some(_credentials) = self.current_credentials().await else {
             let mut guard = self.state.lock().await;
             if let Some(state) = guard.as_mut() {
                 state.control.enabled = false;
@@ -1089,9 +1182,7 @@ impl BehaviorTelemetry {
             });
             persist_state(state)?;
         }
-        if let Err(error) = self.send_pending_control(&credentials).await {
-            log::debug!("[pinvou3][behavior] remote deletion pending: {error:#}");
-        }
+        self.wake_control_worker();
         self.delete_local_data().await
     }
 
@@ -1202,6 +1293,11 @@ impl BehaviorTelemetry {
     }
 
     async fn ensure_credentials(&self) -> Result<Credentials> {
+        if !self.state_healthy.load(Ordering::Acquire) {
+            anyhow::bail!(
+                "behavior telemetry state is unreadable; refusing to replace the persisted installation identity"
+            );
+        }
         if let Some(credentials) = self.current_credentials().await {
             return Ok(credentials);
         }
@@ -1393,10 +1489,14 @@ impl PersistedState {
 
 fn load_state() -> Result<Option<PersistedState>> {
     let path = state_path();
+    load_state_at(&path)
+}
+
+fn load_state_at(path: &Path) -> Result<Option<PersistedState>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let data = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let data = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let mut state: PersistedState =
         serde_json::from_slice(&data).with_context(|| format!("parse {}", path.display()))?;
     if state.version > STATE_VERSION {
@@ -1408,19 +1508,17 @@ fn load_state() -> Result<Option<PersistedState>> {
 
 fn persist_state(state: &PersistedState) -> Result<()> {
     let path = state_path();
+    persist_state_at(&path, state)
+}
+
+fn persist_state_at(path: &Path, state: &PersistedState) -> Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("invalid behavior telemetry path: {}", path.display()))?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let data = serde_json::to_vec_pretty(state).context("serialize behavior telemetry state")?;
-    write_private_file(&path, &data).with_context(|| format!("write {}", path.display()))?;
+    filesystem::atomic_write(path, &data).with_context(|| format!("write {}", path.display()))?;
     Ok(())
-}
-
-fn write_private_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let mut file = filesystem::create_secret_file(path)?;
-    file.write_all(data)?;
-    file.sync_all()
 }
 
 fn state_path() -> PathBuf {
@@ -2661,7 +2759,7 @@ mod tests {
                 (DeliveryStatus::Rejected, Some("invalid_field".to_string())),
             ),
         ]);
-        recovered.apply_results(&batch, &results).unwrap();
+        assert!(recovered.apply_results(&batch, &results).unwrap());
         assert_eq!(recovered.records.len(), 1);
         assert_eq!(recovered.records[0].event_id, "event_retry");
         assert_eq!(recovered.records[0].delivery_attempt_count, 1);
@@ -2764,5 +2862,77 @@ mod tests {
         );
         assert_eq!(legacy["event_a"].0, DeliveryStatus::Accepted);
         assert_eq!(legacy["event_b"].0, DeliveryStatus::Rejected);
+    }
+
+    #[test]
+    fn accepted_delivery_exits_retry_mode_while_retryable_delivery_keeps_backoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let mut outbox = Outbox::empty(directory.path().join("outbox.jsonl"));
+        outbox
+            .enqueue(outbox_record("event_accept", "period_one", now))
+            .unwrap();
+        let accepted_batch = outbox.batch();
+        assert!(!outbox
+            .apply_results(
+                &accepted_batch,
+                &HashMap::from([("event_accept".to_string(), (DeliveryStatus::Accepted, None),)]),
+            )
+            .unwrap());
+
+        outbox
+            .enqueue(outbox_record("event_retry", "period_one", now))
+            .unwrap();
+        let retry_batch = outbox.batch();
+        assert!(outbox
+            .apply_results(
+                &retry_batch,
+                &HashMap::from([(
+                    "event_retry".to_string(),
+                    (DeliveryStatus::Retryable, Some("rate_limited".to_string())),
+                )]),
+            )
+            .unwrap());
+        assert_eq!(outbox.records[0].delivery_attempt_count, 1);
+    }
+
+    #[test]
+    fn atomic_state_write_preserves_pending_delete_when_a_partial_sibling_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("behavior-telemetry.json");
+        let runtime = RuntimeConfig {
+            enabled: true,
+            telemetry_base_url: "https://example.test/pinvou3/telemetry".to_string(),
+            behavior_events_url: "https://example.test/pinvou3/stats/api/behavior/events"
+                .to_string(),
+            enrollment_token: None,
+            app_version: "0.0.0".to_string(),
+            platform: "test".to_string(),
+            arch: "test".to_string(),
+            channel: "dev".to_string(),
+            locale: "en".to_string(),
+        };
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("device_test".to_string());
+        state.device_token = Some("token_test".to_string());
+        state.control.pending_request = Some(PendingControlRequest {
+            kind: PendingControlKind::Delete,
+            request_id: "control_delete".to_string(),
+            collection_period_id: Some("period_test".to_string()),
+        });
+        persist_state_at(&path, &state).unwrap();
+
+        std::fs::write(
+            directory
+                .path()
+                .join("behavior-telemetry.json.tmp.interrupted"),
+            b"{\"version\":",
+        )
+        .unwrap();
+        let recovered = load_state_at(&path).unwrap().unwrap();
+        assert_eq!(recovered.device_id.as_deref(), Some("device_test"));
+        let pending = recovered.control.pending_request.unwrap();
+        assert!(matches!(pending.kind, PendingControlKind::Delete));
+        assert_eq!(pending.request_id, "control_delete");
     }
 }

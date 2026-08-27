@@ -44,3 +44,19 @@ test('client privacy allowlist stays aligned with schema and excludes server ide
     assert.ok(!actual.includes(forbidden));
   }
 });
+
+test('retryable delivery and pending privacy controls keep bounded background retry loops', () => {
+  assert.match(rust, /let retryable_remains = telemetry\.outbox[\s\S]*if retryable_remains \{[\s\S]*tokio::time::sleep/);
+  assert.match(rust, /retry_delay = retry_delay\.saturating_mul\(2\)\.min\(RETRY_MAX_DELAY\)/);
+  assert.match(rust, /async fn run_control_worker[\s\S]*while telemetry\.has_pending_control\(\)\.await/);
+  assert.match(rust, /pending control retry deferred[\s\S]*tokio::select!/);
+  assert.match(rust, /fn wake_control_worker[\s\S]*tx\.try_send/);
+});
+
+test('credential and pending-control state is atomically replaced', () => {
+  const persistence = rust.match(/fn persist_state_at[\s\S]*?\n}\n\nfn state_path/)?.[0] || '';
+  assert.match(persistence, /filesystem::atomic_write\(path, &data\)/);
+  assert.doesNotMatch(persistence, /create_secret_file|File::create|std::fs::write/);
+  assert.match(rust, /telemetry state is unreadable; collection is disabled/);
+  assert.match(rust, /refusing to replace the persisted installation identity/);
+});

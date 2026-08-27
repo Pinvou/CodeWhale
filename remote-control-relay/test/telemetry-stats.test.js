@@ -196,34 +196,34 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal(overview.metrics.task_submitted_count, 3);
   assert.equal(overview.metrics.task_admitted_count, 2);
   assert.equal(overview.metrics.task_rejected_count, 1);
-  assert.equal(overview.metrics.task_admission_rate_24h, 2 / 3);
-  assert.equal(overview.metrics.task_rejection_rate_24h, 1 / 3);
-  assert.equal(overview.metrics.task_submission_resolution_rate_24h, 1);
+  assert.equal(overview.metrics.task_admission_rate_24h, null);
+  assert.equal(overview.metrics.task_rejection_rate_24h, null);
+  assert.equal(overview.metrics.task_submission_resolution_rate_24h, null);
   assert.equal(overview.metrics.active_installation_days, 6);
   assert.equal(overview.metrics.task_submitted_per_active_installation_day, 0.5);
-  assert.equal(overview.metrics.task_terminal_completeness_rate, 1);
-  assert.equal(overview.metrics.task_compensation_rate, 1 / 3);
+  assert.equal(overview.metrics.task_terminal_completeness_rate, null);
+  assert.equal(overview.metrics.task_compensation_rate, null);
   assert.equal(overview.metrics.wsta_installations, 1);
   assert.equal(overview.metrics.wevta_installations, 1);
-  assert.equal(overview.metrics.wevta_rate, 1);
+  assert.equal(overview.metrics.wevta_rate, null);
   assert.equal(overview.metrics.cohort_matured_installations, 2);
   assert.equal(overview.metrics.first_technical_value_24h_installations, 1);
-  assert.equal(overview.metrics.first_technical_value_24h_rate, 0.5);
-  assert.equal(overview.metrics.tool_call_completion_rate, 1);
-  assert.equal(overview.metrics.tool_call_success_rate, 0.5);
-  assert.equal(overview.metrics.tool_install_completion_rate, 1);
+  assert.equal(overview.metrics.first_technical_value_24h_rate, null);
+  assert.equal(overview.metrics.tool_call_completion_rate, null);
+  assert.equal(overview.metrics.tool_call_success_rate, null);
+  assert.equal(overview.metrics.tool_install_completion_rate, null);
   assert.equal(overview.metrics.pipeline_rejection_rate, 0.03);
   assert.equal(overview.metrics.task_success_count, 1);
   assert.equal(overview.metrics.task_interrupted_count, 1);
   assert.equal(overview.metrics.voice_started_installations, 2);
-  assert.equal(overview.metrics.voice_penetration_rate, 2 / 3);
+  assert.equal(overview.metrics.voice_penetration_rate, null);
 
   const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "call", now, { minimumGroupSubjects: 0 });
     assert.equal(tools.rows[0].tool_key, "search");
     assert.equal(tools.rows[0].call_count, 2);
     assert.equal(tools.rows[0].user_count, 2);
     assert.equal(tools.rows[0].tool_type, "mcp");
-    assert.equal(tools.rows[0].success_rate, 0.5);
+    assert.equal(tools.rows[0].success_rate, null);
 
   const installs = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "install", now, { minimumGroupSubjects: 0 });
   assert.equal(installs.rows[0].install_count, 1);
@@ -355,12 +355,14 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
   assert.deepEqual(buildWeeklyExplicitValueMetric(events, now), {
     wevta_installations: 1,
     weekly_successful_task_installations: 4,
-    wevta_rate: 0.25,
+    explicit_value_sample_size: 4,
+    explicit_value_confidence: "low",
+    wevta_rate: null,
     positive_feedback_installations: 0,
     response_copied_installations: 1,
     artifact_exported_installations: 0,
     negative_feedback_installations: 0,
-    negative_feedback_rate: 0,
+    negative_feedback_rate: null,
   });
 });
 
@@ -368,11 +370,12 @@ test("P1 dashboard metrics cover retention funnels version quality and confidenc
   const now = at("2026-08-12T12:00:00");
   const behaviorEvents = [
     { event_id: "cohort_d1", event_name: "analytics_cohort_started", identity_id: "retained_d1", occurred_at: at("2026-08-10T08:00:00") },
-    { event_id: "active_d1", event_name: "app_opened", identity_id: "retained_d1", occurred_at: at("2026-08-11T08:00:00") },
+    { event_id: "opened_only", event_name: "app_opened", identity_id: "not_retained", occurred_at: at("2026-08-11T08:00:00") },
+    { event_id: "active_d1", event_name: "task_finished", attempt_id: "retention_attempt_d1", mode: "assistant", initiator_type: "user", status: "success", identity_id: "retained_d1", occurred_at: at("2026-08-11T08:00:00") },
     { event_id: "cohort_d7", event_name: "analytics_cohort_started", identity_id: "retained_d7", occurred_at: at("2026-08-04T08:00:00") },
-    { event_id: "active_d7", event_name: "app_opened", identity_id: "retained_d7", occurred_at: at("2026-08-11T08:00:00") },
+    { event_id: "active_d7", event_name: "task_finished", attempt_id: "retention_attempt_d7", mode: "code", initiator_type: "user", status: "success", identity_id: "retained_d7", occurred_at: at("2026-08-11T08:00:00") },
     { event_id: "cohort_d30", event_name: "analytics_cohort_started", identity_id: "retained_d30", occurred_at: at("2026-07-13T08:00:00") },
-    { event_id: "active_d30", event_name: "app_opened", identity_id: "retained_d30", occurred_at: at("2026-08-12T08:00:00") },
+    { event_id: "active_d30", event_name: "task_finished", attempt_id: "retention_attempt_d30", mode: "team", initiator_type: "user", status: "success", identity_id: "retained_d30", occurred_at: at("2026-08-12T08:00:00") },
     { event_id: "voice_entry", event_name: "voice_entry_clicked", operation_id: "voice_op", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:00") },
     { event_id: "voice_permission", event_name: "voice_permission_result", operation_id: "voice_op", voice_permission_status: "granted", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:01") },
     { event_id: "voice_started", event_name: "voice_started", operation_id: "voice_op", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:02") },
@@ -390,7 +393,7 @@ test("P1 dashboard metrics cover retention funnels version quality and confidenc
     );
   }
   const overview = buildBehaviorOverview([], [], behaviorEvents, "30", now);
-  assert.deepEqual(overview.retention.d1, { horizon_days: 1, eligible_installations: 3, retained_installations: 1, retention_rate: 1 / 3, confidence: "low" });
+  assert.deepEqual(overview.retention.d1, { horizon_days: 1, eligible_installations: 3, retained_installations: 1, retention_rate: null, confidence: "low" });
   assert.equal(overview.retention.d7.retained_installations, 1);
   assert.equal(overview.retention.d30.retained_installations, 1);
   assert.equal(overview.funnels.voice.entry_clicked, 1);
@@ -425,19 +428,148 @@ test("P1 tool and scene funnels preserve every stage and value outcome", () => {
     user_count: 1,
     impression_count: 1, detail_count: 1, install_started_count: 1, install_succeeded_count: 1,
     configuration_started_count: 1, configuration_succeeded_count: 1, call_succeeded_count: 1,
-    failed_count: 0, cancelled_count: 0, impression_to_install_rate: 1, install_success_rate: 1,
-    install_to_configuration_rate: 1, configuration_success_rate: 1, configuration_to_call_rate: 1,
+    failed_count: 0, cancelled_count: 0, impression_to_install_rate: null, install_success_rate: null,
+    install_to_configuration_rate: null, configuration_success_rate: null, configuration_to_call_rate: null,
     configuration_to_call_p50_ms: 60_000,
     confidence: "low",
   });
   const scenes = buildBehaviorSceneRanking([], [], events, "today", now, { minimumGroupSubjects: 0 });
-  assert.equal(scenes.rows[0].selection_rate, 1);
-  assert.equal(scenes.rows[0].submission_rate, 1);
-  assert.equal(scenes.rows[0].task_success_rate, 1);
-  assert.equal(scenes.rows[0].explicit_value_rate, 1);
+  assert.equal(scenes.rows[0].selection_rate, null);
+  assert.equal(scenes.rows[0].submission_rate, null);
+  assert.equal(scenes.rows[0].task_success_rate, null);
+  assert.equal(scenes.rows[0].explicit_value_rate, null);
   assert.equal(scenes.rows[0].task_duration_p50_ms, 1200);
   assert.equal(buildBehaviorToolRanking([], [], events, "today", "install", now).funnel_rows.length, 0);
   assert.equal(buildBehaviorSceneRanking([], [], events, "today", now).rows.length, 0);
+});
+
+test("retention ignores opens and failures while terminal completeness excludes tasks still within 24h", () => {
+  const now = at("2026-08-12T12:00:00");
+  const base = [
+    { event_id: "cohort_retention", event_name: "analytics_cohort_started", identity_id: "retention_subject", occurred_at: at("2026-08-10T08:00:00") },
+    { event_id: "retention_open", event_name: "app_opened", identity_id: "retention_subject", occurred_at: at("2026-08-11T08:00:00") },
+    { event_id: "retention_failed", event_name: "task_finished", attempt_id: "failed_retention", mode: "assistant", initiator_type: "user", status: "failed", identity_id: "retention_subject", occurred_at: at("2026-08-11T09:00:00") },
+    { event_id: "admitted_recent", event_name: "task_admitted", attempt_id: "recent_attempt", identity_id: "recent_subject", occurred_at: at("2026-08-12T11:00:00") },
+  ];
+  const recentOnly = buildBehaviorOverview([], [], base, "30", now);
+  assert.equal(recentOnly.retention.d1.retained_installations, 0);
+  assert.equal(recentOnly.metrics.task_terminal_matured_count, 0);
+  assert.equal(recentOnly.metrics.task_terminal_pending_within_24h_count, 1);
+  assert(!recentOnly.data_quality.warnings.includes("task_terminal_incomplete"));
+
+  const matured = buildBehaviorOverview([], [], [...base, {
+    event_id: "admitted_matured", event_name: "task_admitted", attempt_id: "matured_attempt",
+    identity_id: "matured_subject", occurred_at: at("2026-08-10T09:00:00"),
+  }], "30", now);
+  assert.equal(matured.metrics.task_terminal_matured_count, 1);
+  assert.equal(matured.metrics.task_terminal_missing_count, 1);
+  assert(matured.data_quality.warnings.includes("task_terminal_incomplete"));
+});
+
+test("activation funnel and model ranking expose complete quality dimensions", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [];
+  for (let index = 0; index < 30; index += 1) {
+    const identity = `activation_${index}`;
+    const attempt = `activation_attempt_${index}`;
+    const startedAt = at("2026-08-10T08:00:00") + index;
+    events.push({ event_id: `cohort_${index}`, event_name: "analytics_cohort_started", identity_id: identity, occurred_at: startedAt });
+    if (index < 20) {
+      events.push(
+        { event_id: `ready_${index}`, event_name: "task_environment_ready", identity_id: identity, occurred_at: startedAt + 60_000 },
+        { event_id: `submitted_${index}`, event_name: "task_submitted", attempt_id: attempt, identity_id: identity, occurred_at: startedAt + 120_000 },
+        { event_id: `admitted_${index}`, event_name: "task_admitted", attempt_id: attempt, identity_id: identity, occurred_at: startedAt + 180_000 },
+        { event_id: `output_${index}`, event_name: "task_first_output", attempt_id: attempt, identity_id: identity, occurred_at: startedAt + 240_000 },
+      );
+    }
+    if (index < 15) events.push({
+      event_id: `success_${index}`, event_name: "task_finished", attempt_id: attempt,
+      mode: "assistant", initiator_type: "user", status: "success", duration_ms: (index + 1) * 100,
+      identity_id: identity, occurred_at: startedAt + 300_000,
+    });
+    events.push(
+      { event_id: `model_${index}`, event_name: "model_used", attempt_id: attempt, provider_key: "deepseek", model_key: "deepseek", selection_source: index < 10 ? "user_selected" : "app_default", identity_id: identity, occurred_at: at("2026-08-12T09:00:00") + index },
+      { event_id: `model_finish_${index}`, event_name: "task_finished", attempt_id: attempt, status: index < 24 ? "success" : "failed", duration_ms: (index + 1) * 100, identity_id: identity, occurred_at: at("2026-08-12T10:00:00") + index },
+    );
+    if (index < 5) events.push({ event_id: `model_selected_${index}`, event_name: "model_selected", provider_key: "deepseek", model_key: "deepseek", selection_scope: "session", identity_id: identity, occurred_at: at("2026-08-12T08:00:00") + index });
+  }
+  const overview = buildBehaviorOverview([], [], events, "30", now);
+  assert.deepEqual(overview.funnels.activation, {
+    cohort_installations: 30,
+    matured_installations: 30,
+    pending_maturity_installations: 0,
+    environment_ready_installations: 20,
+    task_submitted_installations: 20,
+    task_admitted_installations: 20,
+    task_first_output_installations: 20,
+    task_succeeded_installations: 15,
+    activation_rate_24h: 0.5,
+    first_value_p50_ms: 300_000,
+    first_value_p75_ms: 300_000,
+    first_value_p90_ms: 300_000,
+    confidence: "sufficient",
+  });
+  const model = buildBehaviorModelRanking([], [], events, "30", now).rows[0];
+  assert.equal(model.task_terminal_count, 30);
+  assert.equal(model.task_success_count, 24);
+  assert.equal(model.task_success_rate, 0.8);
+  assert.equal(model.task_duration_p50_ms, 1500);
+  assert.equal(model.task_duration_p90_ms, 2700);
+  assert.deepEqual(model.selection_sources, { app_default: 20, user_selected: 10 });
+  assert.equal(model.explicit_selection_count, 5);
+  assert.deepEqual(model.selection_scopes, { session: 5 });
+  assert.equal(model.confidence, "sufficient");
+});
+
+test("percentage metrics hide 29 samples and appear at 30", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [];
+  for (let index = 0; index < 29; index += 1) events.push({
+    event_id: `low_tool_${index}`, event_name: "tool_call_completed", operation_id: `low_op_${index}`,
+    tool_key: "search", tool_type: "mcp", success: true, identity_id: `low_${index}`,
+    occurred_at: at("2026-08-12T09:00:00") + index,
+  });
+  for (let index = 0; index < 30; index += 1) events.push({
+    event_id: `enough_tool_${index}`, event_name: "tool_call_completed", operation_id: `enough_op_${index}`,
+    tool_key: "shell", tool_type: "cli", success: true, identity_id: `enough_${index}`,
+    occurred_at: at("2026-08-12T10:00:00") + index,
+  });
+  const rows = buildBehaviorToolRanking([], [], events, "today", "call", now).rows;
+  const low = rows.find(row => row.tool_key === "search");
+  const enough = rows.find(row => row.tool_key === "shell");
+  assert.equal(low.success_sample_size, 29);
+  assert.equal(low.success_confidence, "low");
+  assert.equal(low.success_rate, null);
+  assert.equal(enough.success_sample_size, 30);
+  assert.equal(enough.success_confidence, "sufficient");
+  assert.equal(enough.success_rate, 1);
+});
+
+test("legacy behavior files are rewritten without raw tool or model aliases", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-legacy-behavior-"));
+  const privateTool = "customer-private-tool-alias";
+  const privateModel = "customer-private-model-alias";
+  try {
+    writeFileSync(join(dataDir, "behavior-events.jsonl"), [
+      JSON.stringify({ event_id: "legacy_tool_event_0001", event_name: "tool_call_completed", device_id: "legacy_device", tool_name: privateTool, tool_type: "custom", success: true, occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "legacy_model_event_0001", event_name: "model_used", device_id: "legacy_device", provider_name: "private-provider", model_name: privateModel, occurred_at: Date.now(), received_at: Date.now() }),
+    ].join("\n") + "\n");
+    const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    assert.equal(store.behaviorEvents[0].tool_key, "custom");
+    assert.equal(store.behaviorEvents[1].provider_key, "custom");
+    assert.equal(store.behaviorEvents[1].model_key, "custom");
+    const persisted = readFileSync(join(dataDir, "behavior-events.jsonl"), "utf8");
+    assert(!persisted.includes(privateTool));
+    assert(!persisted.includes(privateModel));
+    assert(!persisted.includes("tool_name"));
+    assert(!persisted.includes("model_name"));
+    const tools = buildBehaviorToolRanking([], [], store.behaviorEvents, "today", "call", Date.now(), { minimumGroupSubjects: 0 });
+    const models = buildBehaviorModelRanking([], [], store.behaviorEvents, "today", Date.now(), { minimumGroupSubjects: 0 });
+    assert.equal(tools.rows[0].tool_name, "custom");
+    assert.equal(models.rows[0].model_key, "custom");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("privacy gates suppress small groups and clip per-subject daily contributions", () => {

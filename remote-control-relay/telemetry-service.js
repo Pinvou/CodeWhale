@@ -21,6 +21,7 @@ import {
 } from "ip2region.js";
 import {
   BEHAVIOR_EVENT_NAMES,
+  BEHAVIOR_STORED_FIELDS,
   validateBehaviorEventShape,
 } from "./behavior-telemetry-schema.js";
 
@@ -392,6 +393,93 @@ const EXPLICIT_VALUE_WINDOW_MS = 30 * 60_000;
 const MIN_RELIABLE_SAMPLE = 30;
 const MIN_PRIVACY_GROUP_SUBJECTS = 20;
 
+function reliableRate(part, total) {
+  return Number(total) >= MIN_RELIABLE_SAMPLE ? rate(part, total) : null;
+}
+
+const CONTROLLED_TOOL_KEYS = new Set([
+  "shell", "read_file", "edit_file", "search_files", "search", "web_search",
+  "view_image", "image_generation", "load_skill", "tool_search", "request_user_input",
+  "update_plan", "feishu", "wecom", "dingtalk", "tmeet", "weather", "iwencai",
+  "ima", "tencent_docs", "wecom_bot", "eip", "zhidao", "qcc", "patsnap_search",
+  "canva", "obsidian", "yuandian", "gongwen", "pptx", "mcp_custom", "custom", "unknown",
+]);
+const CONTROLLED_PROVIDER_KEYS = new Set([
+  "openai", "anthropic", "deepseek", "gemini", "qwen", "kimi", "minimax", "glm",
+  "mimo", "doubao", "grok", "ollama", "vllm", "custom", "unknown",
+]);
+const CONTROLLED_MODEL_KEYS = new Set([
+  "claude_opus", "claude_sonnet", "claude_haiku", "deepseek_chat", "deepseek_reasoner",
+  "deepseek", "gpt_5", "gpt_4", "o3", "gemini", "qwen", "kimi", "minimax", "glm",
+  "mimo", "doubao", "grok", "llama", "mistral", "custom", "unknown",
+]);
+
+function controlledKey(value, registry, fallback = "unknown") {
+  const key = boundedText(value, 128).toLowerCase();
+  return registry.has(key) ? key : fallback;
+}
+
+function legacyToolKey(value) {
+  const name = boundedText(value, 128).toLowerCase();
+  if (["bash", "exec_shell", "task_shell_start"].includes(name)) return "shell";
+  if (["read_file"].includes(name)) return "read_file";
+  if (["write_file", "apply_patch"].includes(name)) return "edit_file";
+  if (["glob", "rg", "search_files", "search"].includes(name)) return "search_files";
+  if (name.startsWith("mcp_") || name.includes("-mcp")) return "mcp_custom";
+  return "custom";
+}
+
+function legacyProviderKey(value) {
+  const name = boundedText(value, 128).toLowerCase();
+  for (const key of CONTROLLED_PROVIDER_KEYS) {
+    if (!['custom', 'unknown'].includes(key) && name.includes(key)) return key;
+  }
+  return name ? "custom" : "unknown";
+}
+
+function legacyModelKey(value) {
+  const name = boundedText(value, 128).toLowerCase().replaceAll("-", "_");
+  const checks = [
+    ["claude_opus", ["claude", "opus"]], ["claude_sonnet", ["claude", "sonnet"]],
+    ["claude_haiku", ["claude", "haiku"]], ["deepseek_reasoner", ["deepseek", "reason"]],
+    ["deepseek_chat", ["deepseek", "chat"]], ["gpt_5", ["gpt_5"]], ["gpt_4", ["gpt_4"]],
+  ];
+  for (const [key, parts] of checks) if (parts.every(part => name.includes(part))) return key;
+  for (const key of CONTROLLED_MODEL_KEYS) {
+    if (!['custom', 'unknown'].includes(key) && name.includes(key)) return key;
+  }
+  return name ? "custom" : "unknown";
+}
+
+function sanitizeStoredBehaviorEvent(raw) {
+  const event = {};
+  for (const [field, value] of Object.entries(raw || {})) {
+    if (BEHAVIOR_STORED_FIELDS.has(field)) event[field] = value;
+  }
+  if (raw?.tool_key !== undefined || raw?.tool_name !== undefined) {
+    event.tool_key = raw.tool_key !== undefined
+      ? controlledKey(raw.tool_key, CONTROLLED_TOOL_KEYS, "custom")
+      : legacyToolKey(raw.tool_name);
+  }
+  if (raw?.provider_key !== undefined || raw?.provider_name !== undefined) {
+    event.provider_key = raw.provider_key !== undefined
+      ? controlledKey(raw.provider_key, CONTROLLED_PROVIDER_KEYS, "custom")
+      : legacyProviderKey(raw.provider_name);
+  }
+  if (raw?.model_key !== undefined || raw?.model_id !== undefined || raw?.model_name !== undefined) {
+    event.model_key = raw.model_key !== undefined
+      ? controlledKey(raw.model_key, CONTROLLED_MODEL_KEYS, "custom")
+      : legacyModelKey(raw.model_id || raw.model_name);
+  }
+  if (raw?.from_model_key !== undefined) {
+    event.from_model_key = controlledKey(raw.from_model_key, CONTROLLED_MODEL_KEYS, "custom");
+  }
+  if (raw?.to_model_key !== undefined) {
+    event.to_model_key = controlledKey(raw.to_model_key, CONTROLLED_MODEL_KEYS, "custom");
+  }
+  return event;
+}
+
 function percentile(values, quantile) {
   const sorted = values.map(Number).filter(Number.isFinite).sort((left, right) => left - right);
   if (!sorted.length) return null;
@@ -453,8 +541,13 @@ function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
     bucket.add(statsDay(occurredAt));
     activity.set(identity, bucket);
   };
-  for (const event of usageEvents) addActivity(event.device_id, event.occurred_at);
-  for (const event of behaviorEvents) addActivity(eventIdentity(event), event.occurred_at);
+  for (const event of behaviorEvents) {
+    if (event.event_name !== "task_finished"
+      || event.status !== "success"
+      || event.initiator_type !== "user"
+      || !["assistant", "code", "team"].includes(event.mode)) continue;
+    addActivity(eventIdentity(event), event.occurred_at);
+  }
   let retained = 0;
   for (const [identity, cohortDay] of cohorts) {
     if (activity.get(identity)?.has(cohortDay + horizon)) retained += 1;
@@ -463,7 +556,7 @@ function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
     horizon_days: horizon,
     eligible_installations: cohorts.size,
     retained_installations: retained,
-    retention_rate: rate(retained, cohorts.size),
+    retention_rate: reliableRate(retained, cohorts.size),
     confidence: sampleConfidence(cohorts.size),
   };
 }
@@ -518,9 +611,9 @@ function buildVersionQuality(windowEvents) {
     sample_size: row.submitted.size,
     installation_count: row.identities.size,
     confidence: sampleConfidence(row.submitted.size),
-    admission_rate: rate(row.admitted.size, row.submitted.size),
-    success_rate: rate(row.success.size, row.finished.size),
-    cancellation_rate: rate(row.cancelled.size, row.finished.size),
+    admission_rate: reliableRate(row.admitted.size, row.submitted.size),
+    success_rate: reliableRate(row.success.size, row.finished.size),
+    cancellation_rate: reliableRate(row.cancelled.size, row.finished.size),
     first_output_p50_ms: percentile(row.first_output_ms, 0.5),
     first_output_p90_ms: percentile(row.first_output_ms, 0.9),
     total_duration_p50_ms: percentile(row.total_duration_ms, 0.5),
@@ -561,8 +654,8 @@ function buildVoiceFunnel(windowEvents, taskFinished) {
     task_succeeded: successfulAttempts.size,
     recognition_failed: failed.size,
     cancelled: cancelled.size,
-    entry_to_submit_rate: rate(submittedEvents.length, entries.size),
-    submit_to_success_rate: rate(successfulAttempts.size, submittedEvents.length),
+    entry_to_submit_rate: reliableRate(submittedEvents.length, entries.size),
+    submit_to_success_rate: reliableRate(successfulAttempts.size, submittedEvents.length),
     confidence: sampleConfidence(entries.size),
   };
 }
@@ -635,12 +728,76 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
   return {
     wevta_installations: valuedInstallations.size,
     weekly_successful_task_installations: weeklySuccessfulInstallations.size,
-    wevta_rate: rate(valuedInstallations.size, weeklySuccessfulInstallations.size),
+    explicit_value_sample_size: weeklySuccessfulInstallations.size,
+    explicit_value_confidence: sampleConfidence(weeklySuccessfulInstallations.size),
+    wevta_rate: reliableRate(valuedInstallations.size, weeklySuccessfulInstallations.size),
     positive_feedback_installations: feedbackInstallations.size,
     response_copied_installations: copiedInstallations.size,
     artifact_exported_installations: exportedInstallations.size,
     negative_feedback_installations: negativeFeedbackInstallations.size,
-    negative_feedback_rate: rate(negativeFeedbackInstallations.size, weeklySuccessfulInstallations.size),
+    negative_feedback_rate: reliableRate(negativeFeedbackInstallations.size, weeklySuccessfulInstallations.size),
+  };
+}
+
+function buildActivationFunnel(behaviorEvents, window, now) {
+  const cohorts = new Map();
+  for (const event of filteredBehaviorEvents(behaviorEvents, window, "analytics_cohort_started")) {
+    const identity = eventIdentity(event);
+    if (!identity) continue;
+    const previous = cohorts.get(identity);
+    if (!previous || Number(event.occurred_at) < Number(previous.occurred_at)) cohorts.set(identity, event);
+  }
+  const matured = [...cohorts.entries()]
+    .filter(([, event]) => Number(event.occurred_at) <= now - DAY_MS);
+  const eventsByIdentity = new Map();
+  for (const event of behaviorEvents) {
+    const identity = eventIdentity(event);
+    if (!identity) continue;
+    const entries = eventsByIdentity.get(identity) || [];
+    entries.push(event);
+    eventsByIdentity.set(identity, entries);
+  }
+  const stages = {
+    environment_ready: new Set(),
+    task_submitted: new Set(),
+    task_admitted: new Set(),
+    task_first_output: new Set(),
+    task_succeeded: new Set(),
+  };
+  const firstValueDurations = [];
+  for (const [identity, cohort] of matured) {
+    const startedAt = Number(cohort.occurred_at);
+    const deadline = startedAt + DAY_MS;
+    const events = (eventsByIdentity.get(identity) || [])
+      .filter(event => Number(event.occurred_at) >= startedAt && Number(event.occurred_at) <= deadline)
+      .sort((left, right) => Number(left.occurred_at) - Number(right.occurred_at));
+    if (events.some(event => event.event_name === "task_environment_ready")) stages.environment_ready.add(identity);
+    if (events.some(event => event.event_name === "task_submitted")) stages.task_submitted.add(identity);
+    if (events.some(event => event.event_name === "task_admitted")) stages.task_admitted.add(identity);
+    if (events.some(event => event.event_name === "task_first_output")) stages.task_first_output.add(identity);
+    const success = events.find(event => event.event_name === "task_finished"
+      && event.status === "success"
+      && event.initiator_type === "user"
+      && ["assistant", "code", "team"].includes(event.mode));
+    if (success) {
+      stages.task_succeeded.add(identity);
+      firstValueDurations.push(Number(success.occurred_at) - startedAt);
+    }
+  }
+  return {
+    cohort_installations: cohorts.size,
+    matured_installations: matured.length,
+    pending_maturity_installations: cohorts.size - matured.length,
+    environment_ready_installations: stages.environment_ready.size,
+    task_submitted_installations: stages.task_submitted.size,
+    task_admitted_installations: stages.task_admitted.size,
+    task_first_output_installations: stages.task_first_output.size,
+    task_succeeded_installations: stages.task_succeeded.size,
+    activation_rate_24h: reliableRate(stages.task_succeeded.size, matured.length),
+    first_value_p50_ms: percentile(firstValueDurations, 0.5),
+    first_value_p75_ms: percentile(firstValueDurations, 0.75),
+    first_value_p90_ms: percentile(firstValueDurations, 0.9),
+    confidence: sampleConfidence(matured.length),
   };
 }
 
@@ -683,7 +840,8 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     .map(eventIdentity).filter(Boolean));
   const firstValueWithin24h = new Set();
   for (const event of taskFinished) {
-    if (event.status !== "success" || event.initiator_type !== "user") continue;
+    if (event.status !== "success" || event.initiator_type !== "user"
+      || !["assistant", "code", "team"].includes(event.mode)) continue;
     const identity = eventIdentity(event);
     const cohort = maturedCohorts.get(identity);
     if (cohort && event.occurred_at >= cohort.occurred_at
@@ -693,11 +851,12 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     .filter((event) => Number(event.occurred_at) <= now - DAY_MS)
     .map((event) => event.attempt_id)
     .filter(Boolean));
-  const maturedAdmitted = taskAdmitted.filter((event) => maturedSubmissionIds.has(event.attempt_id));
+  const maturedAdmittedForResolution = taskAdmitted.filter((event) => maturedSubmissionIds.has(event.attempt_id));
   const maturedRejected = taskRejected.filter((event) => maturedSubmissionIds.has(event.attempt_id));
-  const resolvedMatured = maturedAdmitted.length + maturedRejected.length;
+  const resolvedMatured = maturedAdmittedForResolution.length + maturedRejected.length;
   const finishedAttemptIds = new Set(taskFinished.map((event) => event.attempt_id));
-  const admittedTerminalCount = taskAdmitted.filter((event) => finishedAttemptIds.has(event.attempt_id)).length;
+  const maturedAdmitted = taskAdmitted.filter((event) => Number(event.occurred_at) <= now - DAY_MS);
+  const admittedTerminalCount = maturedAdmitted.filter((event) => finishedAttemptIds.has(event.attempt_id)).length;
   const compensatedCount = [...taskRejected, ...taskFinished]
     .filter((event) => event.stage === "shutdown").length;
   const activeDayMetric = perActiveInstallationDay(taskSubmitted, activeByDay);
@@ -739,6 +898,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     d30: retentionMetric(usageEvents, behaviorEvents, 30, now),
   };
   const voiceFunnel = buildVoiceFunnel(windowEvents, taskFinished);
+  const activationFunnel = buildActivationFunnel(behaviorEvents, window, now);
   const versionQuality = buildVersionQuality(windowEvents);
   const latestReceivedAt = Math.max(0, ...behaviorEvents.map(event => Number(event.received_at || event.occurred_at) || 0));
   const activeCollectionPresent = devices.some(device => device.behavior_collection?.status === "active");
@@ -747,7 +907,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     : (activeCollectionPresent && latestReceivedAt < now - DAY_MS ? "delayed" : "ready");
   const qualityWarnings = [];
   if (taskSubmitted.length < MIN_RELIABLE_SAMPLE) qualityWarnings.push("task_sample_low");
-  if (taskAdmitted.length && admittedTerminalCount / taskAdmitted.length < 0.98) qualityWarnings.push("task_terminal_incomplete");
+  if (maturedAdmitted.length && admittedTerminalCount / maturedAdmitted.length < 0.98) qualityWarnings.push("task_terminal_incomplete");
   if (pipelineTotal && pipeline.rejected / pipelineTotal > 0.01) qualityWarnings.push("pipeline_rejection_high");
   if (windowEvents.some(event => event.clock_skew_bucket && event.clock_skew_bucket !== "normal")) qualityWarnings.push("clock_skew_present");
   if (contributionClipping.clipped_subject_count) qualityWarnings.push("subject_contribution_clipped");
@@ -771,48 +931,51 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
       active_installation_days: activeDayMetric.active_installation_days,
       cohort_matured_installations: maturedCohorts.size,
       first_technical_value_24h_installations: firstValueWithin24h.size,
-      first_technical_value_24h_rate: rate(firstValueWithin24h.size, maturedCohorts.size),
+      first_technical_value_24h_rate: reliableRate(firstValueWithin24h.size, maturedCohorts.size),
       wsta_installations: successfulInstallations.size,
-      wsta_rate: rate(successfulInstallations.size, activeTotal),
+      wsta_rate: reliableRate(successfulInstallations.size, activeTotal),
       ...explicitValue,
-      task_admission_rate_24h: rate(maturedAdmitted.length, maturedSubmissionIds.size),
-      task_rejection_rate_24h: rate(maturedRejected.length, maturedSubmissionIds.size),
-      task_submission_resolution_rate_24h: rate(resolvedMatured, maturedSubmissionIds.size),
-      task_terminal_completeness_rate: rate(admittedTerminalCount, taskAdmitted.length),
-      task_compensation_rate: rate(compensatedCount, taskFinished.length + taskRejected.length),
+      task_admission_rate_24h: reliableRate(maturedAdmittedForResolution.length, maturedSubmissionIds.size),
+      task_rejection_rate_24h: reliableRate(maturedRejected.length, maturedSubmissionIds.size),
+      task_submission_resolution_rate_24h: reliableRate(resolvedMatured, maturedSubmissionIds.size),
+      task_terminal_completeness_rate: reliableRate(admittedTerminalCount, maturedAdmitted.length),
+      task_terminal_matured_count: maturedAdmitted.length,
+      task_terminal_missing_count: maturedAdmitted.length - admittedTerminalCount,
+      task_terminal_pending_within_24h_count: taskAdmitted.length - maturedAdmitted.length,
+      task_compensation_rate: reliableRate(compensatedCount, taskFinished.length + taskRejected.length),
       task_success_count: taskStatus.success,
       task_interrupted_count: taskStatus.interrupted,
       task_failed_count: taskStatus.failed,
       task_cancelled_count: taskStatus.cancelled,
-      task_submission_success_rate: rate(taskStatus.success, taskSubmitted.length),
-      admitted_task_success_rate: rate(taskStatus.success, taskFinished.length),
-      task_first_output_rate: rate(taskFirstOutput.length, taskAdmitted.length),
-      task_cancel_rate: rate(taskStatus.cancelled, taskFinished.length),
+      task_submission_success_rate: reliableRate(taskStatus.success, taskSubmitted.length),
+      admitted_task_success_rate: reliableRate(taskStatus.success, taskFinished.length),
+      task_first_output_rate: reliableRate(taskFirstOutput.length, taskAdmitted.length),
+      task_cancel_rate: reliableRate(taskStatus.cancelled, taskFinished.length),
       task_first_output_p50_ms: percentile(taskFirstOutput.map(event => event.duration_ms), 0.5),
       task_first_output_p90_ms: percentile(taskFirstOutput.map(event => event.duration_ms), 0.9),
       task_total_duration_p50_ms: percentile(taskFinished.map(event => event.duration_ms), 0.5),
       task_total_duration_p90_ms: percentile(taskFinished.map(event => event.duration_ms), 0.9),
       tool_call_started_count: toolCallStarted.length,
       tool_call_completed_count: toolCallCompleted.length,
-      tool_call_completion_rate: rate(toolCallCompleted.length, toolCallStarted.length),
-      tool_call_success_rate: rate(
+      tool_call_completion_rate: reliableRate(toolCallCompleted.length, toolCallStarted.length),
+      tool_call_success_rate: reliableRate(
         toolCallCompleted.filter((event) => event.success === true).length,
         toolCallCompleted.length,
       ),
       tool_install_started_count: toolInstallStarted.length,
       tool_install_completed_count: toolInstallCompleted.length,
-      tool_install_completion_rate: rate(toolInstallCompleted.length, toolInstallStarted.length),
-      voice_penetration_rate: rate(voiceUsers.size, activeTotal),
+      tool_install_completion_rate: reliableRate(toolInstallCompleted.length, toolInstallStarted.length),
+      voice_penetration_rate: reliableRate(voiceUsers.size, activeTotal),
       voice_started_installations: voiceUsers.size,
       voice_started_count: voiceStarted.length,
       voice_starts_per_installation: rate(voiceStarted.length, voiceUsers.size),
       pipeline_accepted_count: pipeline.accepted,
-      pipeline_duplicate_rate: rate(pipeline.duplicate, pipelineTotal),
-      pipeline_rejection_rate: rate(pipeline.rejected, pipelineTotal),
-      pipeline_retryable_rate: rate(pipeline.retryable, pipelineTotal),
+      pipeline_duplicate_rate: reliableRate(pipeline.duplicate, pipelineTotal),
+      pipeline_rejection_rate: reliableRate(pipeline.rejected, pipelineTotal),
+      pipeline_retryable_rate: reliableRate(pipeline.retryable, pipelineTotal),
     },
     retention,
-    funnels: { voice: voiceFunnel },
+    funnels: { activation: activationFunnel, voice: voiceFunnel },
     version_quality: versionQuality,
     error_categories: taskErrors,
     data_quality: {
@@ -838,8 +1001,12 @@ function sortedRankingRows(groups, countKey, activeTotal, limit = 50, minimumSub
     .map((row) => ({
       ...row,
       user_count: row.users.size,
-      penetration_rate: rate(row.users.size, activeTotal),
-      success_rate: row.total ? row.success_count / row.total : 0,
+      penetration_rate: reliableRate(row.users.size, activeTotal),
+      success_rate: reliableRate(row.success_count, row.total),
+      penetration_sample_size: activeTotal,
+      success_sample_size: row.total,
+      penetration_confidence: sampleConfidence(activeTotal),
+      success_confidence: sampleConfidence(row.total),
       [countKey]: row.total,
       users: undefined,
       total: undefined,
@@ -861,10 +1028,10 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
   ).events;
   for (const event of clippedWindowEvents.filter(event => event.event_name === eventName)) {
     if (eventName === "tool_install_completed" && event.success !== true) continue;
-    const toolKey = boundedText(event.tool_key || event.tool_name, 128) || "unknown";
+    const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
     const row = groups.get(toolKey) || {
       tool_key: toolKey,
-      tool_name: boundedText(event.tool_name, 128) || toolKey,
+      tool_name: toolKey,
       tool_type: behaviorToolType(event.tool_type),
       total: 0,
       success_count: 0,
@@ -889,10 +1056,10 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
   for (const event of clippedWindowEvents.filter(event => event.event_name.startsWith("tool_"))) {
     const stage = stageNames.get(event.event_name);
     if (!stage) continue;
-    const toolKey = boundedText(event.tool_key || event.tool_name, 128) || "unknown";
+    const toolKey = controlledKey(event.tool_key, CONTROLLED_TOOL_KEYS);
     const row = funnelGroups.get(toolKey) || {
       tool_key: toolKey,
-      tool_name: boundedText(event.tool_name, 128) || toolKey,
+      tool_name: toolKey,
       tool_type: behaviorToolType(event.tool_type),
       impressions: new Set(),
       details: new Set(),
@@ -948,11 +1115,11 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       call_succeeded_count: row.call_succeeded.size,
       failed_count: row.failed.size,
       cancelled_count: row.cancelled.size,
-      impression_to_install_rate: rate(row.install_started.size, row.impressions.size),
-      install_success_rate: rate(row.install_succeeded.size, row.install_started.size),
-      install_to_configuration_rate: rate(row.configuration_started.size, row.install_succeeded.size),
-      configuration_success_rate: rate(row.configuration_succeeded.size, row.configuration_started.size),
-      configuration_to_call_rate: rate(row.call_succeeded.size, row.configuration_succeeded.size),
+      impression_to_install_rate: reliableRate(row.install_started.size, row.impressions.size),
+      install_success_rate: reliableRate(row.install_succeeded.size, row.install_started.size),
+      install_to_configuration_rate: reliableRate(row.configuration_started.size, row.install_succeeded.size),
+      configuration_success_rate: reliableRate(row.configuration_succeeded.size, row.configuration_started.size),
+      configuration_to_call_rate: reliableRate(row.call_succeeded.size, row.configuration_succeeded.size),
       configuration_to_call_p50_ms: percentile(configurationToCall, 0.5),
       confidence: sampleConfidence(row.impressions.size),
     };
@@ -1052,12 +1219,12 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
       selection_count: row.selections.size,
       trigger_count: row.submissions.size,
       user_count: row.users.size,
-      penetration_rate: rate(row.users.size, activeTotal),
-      selection_rate: rate(row.selections.size, row.impressions.size),
-      submission_rate: rate(row.submissions.size, row.selections.size),
-      task_success_rate: rate(row.task_successes.size, row.submissions.size),
-      explicit_value_rate: rate(row.valued_tasks.size, row.task_successes.size),
-      negative_feedback_rate: rate(row.negative_feedback.size, row.submissions.size),
+      penetration_rate: reliableRate(row.users.size, activeTotal),
+      selection_rate: reliableRate(row.selections.size, row.impressions.size),
+      submission_rate: reliableRate(row.submissions.size, row.selections.size),
+      task_success_rate: reliableRate(row.task_successes.size, row.submissions.size),
+      explicit_value_rate: reliableRate(row.valued_tasks.size, row.task_successes.size),
+      negative_feedback_rate: reliableRate(row.negative_feedback.size, row.submissions.size),
       task_duration_p50_ms: percentile(row.durations, 0.5),
       confidence: sampleConfidence(row.impressions.size),
     })).sort((left, right) => right.trigger_count - left.trigger_count
@@ -1076,20 +1243,57 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
   const windowEvents = clipDailySubjectContributions(
     filteredBehaviorEvents(behaviorEvents, window),
   ).events;
+  const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
+    .map(event => [event.attempt_id, event]));
   for (const event of windowEvents.filter(event => event.event_name === "model_used")) {
-    const modelId = boundedText(event.model_key || event.model_id || event.model_name, 128);
-    if (!modelId) continue;
-    const providerKey = boundedText(event.provider_key, 64) || "unknown";
+    const modelId = controlledKey(event.model_key, CONTROLLED_MODEL_KEYS);
+    const providerKey = controlledKey(event.provider_key, CONTROLLED_PROVIDER_KEYS);
     const key = `${providerKey}:${modelId}`;
     const row = groups.get(key) || {
       provider_key: providerKey,
       model_key: modelId,
       total: 0,
-      success_count: 0,
+      finished: new Set(),
+      success: new Set(),
+      durations: [],
+      selection_sources: new Map(),
+      selection_scopes: new Map(),
+      explicit_selection_count: 0,
       users: new Set(),
     };
     row.total += 1;
-    row.success_count += 1;
+    const selectionSource = boundedText(event.selection_source, 32) || "unknown";
+    row.selection_sources.set(selectionSource, (row.selection_sources.get(selectionSource) || 0) + 1);
+    const attemptId = boundedText(event.attempt_id, 128);
+    const finished = finishedByAttempt.get(attemptId);
+    if (attemptId && finished) {
+      row.finished.add(attemptId);
+      if (finished.status === "success") row.success.add(attemptId);
+      if (Number.isFinite(Number(finished.duration_ms))) row.durations.push(Number(finished.duration_ms));
+    }
+    const identity = eventIdentity(event);
+    if (identity) row.users.add(identity);
+    groups.set(key, row);
+  }
+  for (const event of windowEvents.filter(event => event.event_name === "model_selected")) {
+    const modelId = controlledKey(event.model_key, CONTROLLED_MODEL_KEYS);
+    const providerKey = controlledKey(event.provider_key, CONTROLLED_PROVIDER_KEYS);
+    const key = `${providerKey}:${modelId}`;
+    const row = groups.get(key) || {
+      provider_key: providerKey,
+      model_key: modelId,
+      total: 0,
+      finished: new Set(),
+      success: new Set(),
+      durations: [],
+      selection_sources: new Map(),
+      selection_scopes: new Map(),
+      explicit_selection_count: 0,
+      users: new Set(),
+    };
+    row.explicit_selection_count += 1;
+    const scope = boundedText(event.selection_scope, 32) || "unknown";
+    row.selection_scopes.set(scope, (row.selection_scopes.get(scope) || 0) + 1);
     const identity = eventIdentity(event);
     if (identity) row.users.add(identity);
     groups.set(key, row);
@@ -1101,13 +1305,23 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
     rows: [...groups.values()]
       .filter((row) => row.users.size >= minimumSubjects)
       .map((row) => ({
-        ...row,
+        provider_key: row.provider_key,
+        model_key: row.model_key,
         user_count: row.users.size,
-        penetration_rate: rate(row.users.size, activeTotal),
+        penetration_rate: reliableRate(row.users.size, activeTotal),
+        penetration_sample_size: activeTotal,
         use_count: row.total,
-        users: undefined,
-        total: undefined,
-        success_count: undefined,
+        task_terminal_count: row.finished.size,
+        task_success_count: row.success.size,
+        task_success_rate: reliableRate(row.success.size, row.finished.size),
+        task_duration_p50_ms: percentile(row.durations, 0.5),
+        task_duration_p90_ms: percentile(row.durations, 0.9),
+        selection_sources: Object.fromEntries([...row.selection_sources]
+          .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))),
+        explicit_selection_count: row.explicit_selection_count,
+        selection_scopes: Object.fromEntries([...row.selection_scopes]
+          .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))),
+        confidence: sampleConfidence(row.finished.size),
       }))
       .sort((a, b) => b.user_count - a.user_count || b.use_count - a.use_count
         || String(a.model_key).localeCompare(String(b.model_key), "zh-CN"))
@@ -1395,13 +1609,15 @@ export class TelemetryStore {
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        const event = JSON.parse(line);
+        const raw = JSON.parse(line);
+        const event = sanitizeStoredBehaviorEvent(raw);
         if (!event.event_id || this.behaviorEventIds.has(event.event_id)
           || this.subjectWasDeleted(event.device_id)
           || !STORED_BEHAVIOR_EVENT_NAMES.has(event.event_name)) {
           rewriteNeeded = true;
           continue;
         }
+        if (JSON.stringify(event) !== JSON.stringify(raw)) rewriteNeeded = true;
         this.behaviorEventIds.add(event.event_id);
         this.behaviorEvents.push(event);
       } catch (error) {
@@ -1728,13 +1944,13 @@ export class TelemetryStore {
         status: "accepted",
         reason_code: null,
       });
-      accepted.push({
+      accepted.push(sanitizeStoredBehaviorEvent({
         ...raw,
         received_at: now,
         device_id: device.device_id,
         environment: this.environment,
         clock_skew_bucket: clockSkewBucket(raw.occurred_at, now),
-      });
+      }));
     }
     if (accepted.length) {
       try {

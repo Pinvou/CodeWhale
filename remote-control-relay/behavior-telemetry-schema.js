@@ -13,6 +13,7 @@ const CLIENT_FIELDS = new Set([
   ...BEHAVIOR_TELEMETRY_SCHEMA.required,
   ...BEHAVIOR_TELEMETRY_SCHEMA["x-client-optional-fields"],
 ]);
+export const BEHAVIOR_STORED_FIELDS = new Set([...CLIENT_FIELDS, ...SERVER_FIELDS]);
 const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const MAX_EVENT_BYTES = 8 * 1024;
 

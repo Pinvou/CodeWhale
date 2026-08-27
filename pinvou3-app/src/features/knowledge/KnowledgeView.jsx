@@ -19,9 +19,6 @@ const MODEL_PROGRESS_RADIUS = 31;
 const MODEL_PROGRESS_CIRCUMFERENCE = 2 * Math.PI * MODEL_PROGRESS_RADIUS;
 
 function behaviorToken(prefix) {
-  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
-    return `${prefix}${window.crypto.randomUUID().replace(/-/g, '')}`;
-  }
   if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') {
     return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
   }
