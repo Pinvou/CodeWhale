@@ -55,6 +55,13 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /pending_request_matches\(state, &pending\)/);
   assert.match(rust, /behavior_events_url: state\.behavior_events_url\.clone\(\)/);
   assert.match(rust, /async fn migrate_endpoint_locked/);
+  assert.match(rust, /StatusCode::GONE[\s\S]*recover_expired_credentials/);
+  assert.match(rust, /async fn recover_expired_credentials/);
+  assert.match(rust, /rebind_period\(&started\.collection_period_id\)/);
+  assert.match(settingsBridge, /function scheduleBehaviorTelemetryStatusPoll/);
+  assert.match(settingsBridge, /status\.withdrawal_pending \|\| status\.deletion_pending/);
+  assert.match(settingsBridge, /get_behavior_telemetry_status/);
+  assert.match(settingsBridge, /scheduleBehaviorTelemetryStatusPoll\(\);[\s\S]*return state\.behaviorTelemetry/);
 });
 
 test('credential and pending-control state is atomically replaced', () => {

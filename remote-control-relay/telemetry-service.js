@@ -64,7 +64,6 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_RATE_LIMIT_BUCKETS = 20_000;
 const MAX_CLIENT_FUTURE_SKEW_MS = 5 * 60_000;
 const DELETION_RESULT_RETENTION_MS = 30 * DAY_MS;
-const DELETION_TOMBSTONE_RETENTION_MS = 35 * DAY_MS;
 
 function json(res, status, value, headers = {}) {
   res.writeHead(status, {
@@ -1482,10 +1481,20 @@ export class TelemetryStore {
     const deletedSubjects = new Set(this.deletionTombstones.map((record) => record.subject_hash));
     const saved = loadJson(this.devicesPath, { devices: [] });
     let restoredDeletedDevice = false;
+    let restoredExpiredDevice = false;
+    const deviceCutoff = Date.now() - this.eventRetentionMs;
     for (const device of Array.isArray(saved.devices) ? saved.devices : []) {
       if (!device?.device_id || !device?.hardware_hash || !device?.device_token) continue;
       if (deletedSubjects.has(this.deletionSubjectHash(device.device_id))) {
         restoredDeletedDevice = true;
+        continue;
+      }
+      if (this.deviceRetentionStartedAt(device) < deviceCutoff) {
+        restoredExpiredDevice = true;
+        this.deletionTombstones.push({
+          subject_hash: this.deletionSubjectHash(device.device_id),
+          token_hash: this.deletionTokenHash(device.device_token),
+        });
         continue;
       }
       const normalized = {
@@ -1501,18 +1510,21 @@ export class TelemetryStore {
     this.loadEvents();
     this.loadBehaviorEvents();
     this.loadBehaviorPipelineEvents();
-    const recoveredDeletion = this.deletionTombstones.some((record) => record.status !== "completed");
+    const recoveredDeletion = this.deletionTombstones.some((record) => (
+      record.deletion_request_id && record.status !== "completed"
+    ));
     if (recoveredDeletion) {
       const completedAt = Date.now();
       for (const record of this.deletionTombstones) {
-        if (record.status !== "completed") {
+        if (record.deletion_request_id && record.status !== "completed") {
           record.status = "completed";
           record.completed_at = completedAt;
         }
       }
       this.saveDeletionTombstones();
     }
-    if (restoredDeletedDevice) this.saveNow();
+    if (restoredDeletedDevice || restoredExpiredDevice) this.saveNow();
+    if (restoredExpiredDevice) this.saveDeletionTombstones();
     this.enforcePrivateStoragePermissions();
   }
 
@@ -1528,13 +1540,10 @@ export class TelemetryStore {
       .digest("hex");
   }
 
-  loadDeletionTombstones(now = Date.now()) {
+  loadDeletionTombstones() {
     const saved = loadJson(this.deletionTombstonesPath, { records: [] });
     this.deletionTombstones = (Array.isArray(saved.records) ? saved.records : [])
-      .filter((record) => record?.deletion_request_id
-        && record?.subject_hash
-        && record?.token_hash
-        && Number(record.tombstone_expires_at) > now);
+      .filter((record) => record?.subject_hash);
     if (existsSync(this.deletionTombstonesPath)
       && this.deletionTombstones.length !== (saved.records || []).length) {
       this.saveDeletionTombstones();
@@ -1543,7 +1552,7 @@ export class TelemetryStore {
 
   saveDeletionTombstones() {
     atomicWriteJson(this.deletionTombstonesPath, {
-      version: 1,
+      version: 2,
       records: this.deletionTombstones,
     });
   }
@@ -1566,6 +1575,13 @@ export class TelemetryStore {
     return this.deletionTombstones.some((record) => record.subject_hash === subjectHash);
   }
 
+  credentialWasRemoved(token) {
+    const tokenHash = this.deletionTokenHash(token);
+    return this.deletionTombstones.some((record) => (
+      record.token_hash && safeEqual(record.token_hash, tokenHash)
+    ));
+  }
+
   publicDeletionResponse(record) {
     return {
       request_id: record.request_id,
@@ -1579,10 +1595,9 @@ export class TelemetryStore {
   priorDeletionResponse(requestId, token, now = Date.now()) {
     const tokenHash = this.deletionTokenHash(token);
     const record = this.deletionTombstones.find((candidate) => (
-      candidate.request_id === boundedText(requestId, 128)
+        candidate.request_id === boundedText(requestId, 128)
         && safeEqual(candidate.token_hash, tokenHash)
         && Number(candidate.result_expires_at) > now
-        && Number(candidate.tombstone_expires_at) > now
     ));
     return record ? this.publicDeletionResponse(record) : null;
   }
@@ -1592,7 +1607,6 @@ export class TelemetryStore {
     const record = this.deletionTombstones.find((candidate) => (
       candidate.deletion_request_id === boundedText(deletionRequestId, 128)
         && safeEqual(candidate.token_hash, tokenHash)
-        && Number(candidate.tombstone_expires_at) > now
     ));
     if (!record) throw new TelemetryHttpError(404, "deletion_request_not_found");
     if (Number(record.result_expires_at) <= now) {
@@ -1685,6 +1699,10 @@ export class TelemetryStore {
     }
   }
 
+  deviceRetentionStartedAt(device) {
+    return Number(device?.first_seen_at || device?.last_seen_at || 0);
+  }
+
   regionNeedsRefresh(device, now = Date.now()) {
     return now - Number(device.region_updated_at || 0) >= REGION_REFRESH_MS;
   }
@@ -1694,10 +1712,11 @@ export class TelemetryStore {
     if (claim.length < 8) throw new Error("invalid_hardware_claim");
     const registrationSecret = boundedText(input.registration_secret, 256);
     if (registrationSecret.length < 32) throw new Error("invalid_registration_secret");
+    const now = Date.now();
+    this.compactExpiredData(now);
     const hardwareHash = this.hardwareHash(claim);
     const registrationSecretHash = this.registrationSecretHash(registrationSecret);
     let device = this.devicesByHardwareHash.get(hardwareHash);
-    const now = Date.now();
     if (!device) {
       if (this.devices.size >= this.maxDevices) {
         throw new TelemetryHttpError(503, "device_capacity_reached");
@@ -1744,6 +1763,10 @@ export class TelemetryStore {
   authenticate(deviceId, token) {
     const device = this.devices.get(boundedText(deviceId, 96));
     if (!device || !safeEqual(token, device.device_token)) return null;
+    if (this.deviceRetentionStartedAt(device) < Date.now() - this.eventRetentionMs) {
+      this.compactExpiredData(Date.now());
+      return null;
+    }
     return device;
   }
 
@@ -1805,18 +1828,64 @@ export class TelemetryStore {
 
   compactExpiredEventsIfDue(now = Date.now()) {
     if (now - this.lastEventCompactionAt < 60 * 60_000) return false;
+    return this.compactExpiredData(now);
+  }
+
+  compactExpiredData(now = Date.now()) {
     const usageChanged = this.compactEvents(now);
-    this.compactBehaviorEvents(now);
-    this.compactBehaviorPipelineEvents(now);
-    this.compactDeletionTombstones(now);
-    return usageChanged;
+    const behaviorChanged = this.compactBehaviorEvents(now);
+    const pipelineChanged = this.compactBehaviorPipelineEvents(now);
+    const deletionLedgerChanged = this.compactDeletionTombstones(now);
+    const cutoff = now - this.eventRetentionMs;
+    let devicesChanged = false;
+    const expiredDeviceIds = new Set();
+    for (const [deviceId, device] of this.devices) {
+      if (this.deviceRetentionStartedAt(device) >= cutoff) continue;
+      const subjectHash = this.deletionSubjectHash(deviceId);
+      if (!this.deletionTombstones.some((record) => record.subject_hash === subjectHash)) {
+        this.deletionTombstones.push({
+          subject_hash: subjectHash,
+          token_hash: this.deletionTokenHash(device.device_token),
+        });
+      }
+      this.devices.delete(deviceId);
+      this.devicesByHardwareHash.delete(device.hardware_hash);
+      this.eventRateBuckets.delete(deviceId);
+      expiredDeviceIds.add(deviceId);
+      devicesChanged = true;
+    }
+    if (devicesChanged) {
+      this.events = this.events.filter((event) => !expiredDeviceIds.has(event.device_id));
+      this.eventIds = new Set(this.events.map((event) => event.event_id));
+      this.behaviorEvents = this.behaviorEvents
+        .filter((event) => !expiredDeviceIds.has(event.device_id));
+      this.behaviorEventIds = new Set(this.behaviorEvents.map((event) => event.event_id));
+      atomicWriteJsonLines(this.eventsPath, this.events);
+      atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
+      this.saveNow();
+      this.saveDeletionTombstones();
+    }
+    if (usageChanged || devicesChanged) this.rebuildUsageCounters();
+    this.lastEventCompactionAt = now;
+    return usageChanged || behaviorChanged || pipelineChanged || deletionLedgerChanged || devicesChanged;
   }
 
   compactDeletionTombstones(now = Date.now()) {
-    const retained = this.deletionTombstones
-      .filter((record) => Number(record.tombstone_expires_at) > now);
-    if (retained.length === this.deletionTombstones.length) return false;
-    this.deletionTombstones = retained;
+    const bySubject = new Map();
+    for (const record of this.deletionTombstones) {
+      const current = bySubject.get(record.subject_hash);
+      if (Number(record.result_expires_at) > now) {
+        bySubject.set(record.subject_hash, record);
+      } else if (!current || Number(current.result_expires_at) <= now) {
+        bySubject.set(record.subject_hash, {
+          subject_hash: record.subject_hash,
+          ...(record.token_hash ? { token_hash: record.token_hash } : {}),
+        });
+      }
+    }
+    const compacted = [...bySubject.values()];
+    if (JSON.stringify(compacted) === JSON.stringify(this.deletionTombstones)) return false;
+    this.deletionTombstones = compacted;
     this.saveDeletionTombstones();
     return true;
   }
@@ -2153,7 +2222,6 @@ export class TelemetryStore {
       accepted_at: now,
       completed_at: null,
       result_expires_at: now + DELETION_RESULT_RETENTION_MS,
-      tombstone_expires_at: now + DELETION_TOMBSTONE_RETENTION_MS,
     };
     this.deletionTombstones.push(tombstone);
     this.saveDeletionTombstones();
@@ -2254,6 +2322,14 @@ export function createTelemetryService(options = {}) {
   const loginAttempts = new Map();
   const registrationAttempts = new Map();
   const globalRegistrationAttempts = new Map();
+  const compactionTimer = store ? setInterval(() => {
+    try {
+      store.compactExpiredData(Date.now());
+    } catch (error) {
+      console.error("[telemetry] scheduled retention compaction failed:", error);
+    }
+  }, Math.max(60_000, Number(options.compactionIntervalMs) || 60 * 60_000)) : null;
+  compactionTimer?.unref?.();
   const registrationRatePerIp = boundedInteger(
     options.registrationRatePerIp ?? process.env.PINVOU_TELEMETRY_REGISTER_RATE_PER_IP,
     10,
@@ -2270,6 +2346,14 @@ export function createTelemetryService(options = {}) {
   function bearer(req) {
     const value = String(req.headers.authorization || "");
     return value.startsWith("Bearer ") ? value.slice(7) : "";
+  }
+
+  function rejectUnknownDevice(res, token) {
+    if (store.credentialWasRemoved(token)) {
+      json(res, 410, { error: "device_data_absent" });
+    } else {
+      json(res, 401, { error: "invalid_device_token" });
+    }
   }
 
   function adminAuthorized(req) {
@@ -2335,7 +2419,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          json(res, 401, { error: "invalid_device_token" });
+          rejectUnknownDevice(res, bearer(req));
           return true;
         }
         const region = store.regionNeedsRefresh(device)
@@ -2349,7 +2433,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          json(res, 401, { error: "invalid_device_token" });
+          rejectUnknownDevice(res, bearer(req));
           return true;
         }
         const events = Array.isArray(input.events) ? input.events : [];
@@ -2364,7 +2448,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          json(res, 401, { error: "invalid_device_token" });
+          rejectUnknownDevice(res, bearer(req));
           return true;
         }
         const events = Array.isArray(input.events) ? input.events : [];
@@ -2379,7 +2463,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          json(res, 401, { error: "invalid_device_token" });
+          rejectUnknownDevice(res, bearer(req));
           return true;
         }
         json(res, 200, store.startBehaviorCollection(device, input));
@@ -2389,7 +2473,7 @@ export function createTelemetryService(options = {}) {
         const input = await readJson(req);
         const device = store.authenticate(input.device_id, bearer(req));
         if (!device) {
-          json(res, 401, { error: "invalid_device_token" });
+          rejectUnknownDevice(res, bearer(req));
           return true;
         }
         json(res, 200, store.endBehaviorCollection(device, input));
@@ -2399,7 +2483,7 @@ export function createTelemetryService(options = {}) {
         const params = new URL(req.url, "http://localhost").searchParams;
         const device = store.authenticate(params.get("device_id"), bearer(req));
         if (!device) {
-          json(res, 401, { error: "invalid_device_token" });
+          rejectUnknownDevice(res, bearer(req));
           return true;
         }
         json(res, 200, store.behaviorCollectionStatus(device));
@@ -2415,7 +2499,7 @@ export function createTelemetryService(options = {}) {
         }
         const device = store.authenticate(input.device_id, token);
         if (!device) {
-          json(res, 401, { error: "invalid_device_token" });
+          rejectUnknownDevice(res, token);
           return true;
         }
         json(res, 202, store.deleteBehaviorData(device, input));
@@ -2524,5 +2608,11 @@ export function createTelemetryService(options = {}) {
   } else {
     console.log(`[telemetry] ready data_dir=${dataDir} region_lookup=${regionResolver.enabled ? "enabled" : "disabled"}`);
   }
-  return { enabled, handleHttp };
+  return {
+    enabled,
+    handleHttp,
+    close() {
+      if (compactionTimer) clearInterval(compactionTimer);
+    },
+  };
 }

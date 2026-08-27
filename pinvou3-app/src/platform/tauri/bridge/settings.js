@@ -11,6 +11,25 @@
   var invoke = context.invoke;
   var listen = context.listen;
   var authoritativeAccountRevision = 0;
+  var behaviorTelemetryStatusPollTimer = null;
+
+  function behaviorTelemetryControlPending(status) {
+    return !!(status && (status.withdrawal_pending || status.deletion_pending));
+  }
+
+  function scheduleBehaviorTelemetryStatusPoll() {
+    if (behaviorTelemetryStatusPollTimer || !behaviorTelemetryControlPending(state.behaviorTelemetry)) return;
+    behaviorTelemetryStatusPollTimer = setTimeout(async function pollBehaviorTelemetryStatus() {
+      behaviorTelemetryStatusPollTimer = null;
+      try {
+        state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
+        notify();
+      } catch (_) {}
+      if (behaviorTelemetryControlPending(state.behaviorTelemetry)) {
+        scheduleBehaviorTelemetryStatusPoll();
+      }
+    }, 1000);
+  }
 
   function isBuiltinLlmApiModelId(modelId) {
     if (modelId === "builtin_llmapi") return true;
@@ -131,11 +150,13 @@
       };
     }
     notify();
+    scheduleBehaviorTelemetryStatusPoll();
     return state.behaviorTelemetry;
   }
   async function setBehaviorTelemetryEnabled(enabled) {
     state.behaviorTelemetry = await invoke("set_behavior_telemetry_enabled", { enabled: !!enabled });
     notify();
+    scheduleBehaviorTelemetryStatusPoll();
     return state.behaviorTelemetry;
   }
   async function deleteLocalBehaviorTelemetryData() {
@@ -146,6 +167,7 @@
   async function deleteRemoteBehaviorTelemetryData() {
     state.behaviorTelemetry = await invoke("delete_remote_behavior_telemetry_data");
     notify();
+    scheduleBehaviorTelemetryStatusPoll();
     return state.behaviorTelemetry;
   }
   async function loadSelectedPet() {

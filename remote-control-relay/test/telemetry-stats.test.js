@@ -748,6 +748,67 @@ test("stats roles keep behavior analysts away from device-level endpoints", asyn
   }
 });
 
+test("removed credentials return gone while unknown credentials stay unauthorized", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-removed-credential-status-"));
+  const names = [
+    "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+    "PINVOU_TELEMETRY_DEVICE_PEPPER",
+    "PINVOU_STATS_ADMIN_PASSWORD",
+    "PINVOU_TELEMETRY_DATA_DIR",
+  ];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  let service;
+  try {
+    process.env.PINVOU_TELEMETRY_ENROLLMENT_TOKEN = "test-enrollment-token-at-least-24";
+    process.env.PINVOU_TELEMETRY_DEVICE_PEPPER = "test-device-pepper-at-least-24";
+    process.env.PINVOU_STATS_ADMIN_PASSWORD = "operations-admin-password";
+    process.env.PINVOU_TELEMETRY_DATA_DIR = dataDir;
+    service = createTelemetryService({ regionResolver: { enabled: false, lookup: async () => null } });
+
+    const registration = await serviceRequest(service, "POST", "/pinvou3/telemetry/v1/register", {
+      enrollment_token: "test-enrollment-token-at-least-24",
+      hardware_claim: "removed-credential-hardware-0001",
+      registration_secret: "registration-secret-removed-credential-0001",
+      app_version: "0.8.7",
+      platform: "windows",
+      arch: "x86_64",
+    });
+    assert.equal(registration.status, 200);
+    const authorization = { authorization: `Bearer ${registration.body.device_token}` };
+    const deletion = await serviceRequest(service, "POST", "/pinvou3/stats/api/behavior/deletion", {
+      device_id: registration.body.device_id,
+      request_id: "request_removed_credential_0001",
+    }, authorization);
+    assert.equal(deletion.status, 202);
+
+    const removed = await serviceRequest(
+      service,
+      "GET",
+      `/pinvou3/stats/api/behavior/collection?device_id=${registration.body.device_id}`,
+      undefined,
+      authorization,
+    );
+    assert.equal(removed.status, 410);
+    assert.deepEqual(removed.body, { error: "device_data_absent" });
+    const unknown = await serviceRequest(
+      service,
+      "GET",
+      `/pinvou3/stats/api/behavior/collection?device_id=${registration.body.device_id}`,
+      undefined,
+      { authorization: "Bearer unknown-device-token" },
+    );
+    assert.equal(unknown.status, 401);
+    assert.deepEqual(unknown.body, { error: "invalid_device_token" });
+  } finally {
+    service?.close();
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+    rmSync(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+  }
+});
+
 test("behavior deletion removes identity and facts while tombstones survive backup restore", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-control-"));
   try {
@@ -827,6 +888,10 @@ test("behavior deletion removes identity and facts while tombstones survive back
     writeFileSync(join(dataDir, "devices.json"), backup.devices);
     writeFileSync(join(dataDir, "usage-events.jsonl"), backup.usage);
     writeFileSync(join(dataDir, "behavior-events.jsonl"), backup.behavior);
+    const deletionLedgerPath = join(dataDir, "behavior-deletion-tombstones.json");
+    const deletionLedger = JSON.parse(readFileSync(deletionLedgerPath, "utf8"));
+    deletionLedger.records[0].tombstone_expires_at = 1;
+    writeFileSync(deletionLedgerPath, JSON.stringify(deletionLedger));
 
     const reloaded = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
     assert.equal(reloaded.authenticate(credential.device_id, credential.device_token), null);
@@ -836,6 +901,22 @@ test("behavior deletion removes identity and facts while tombstones survive back
       reloaded.priorDeletionResponse("request_delete_0001", credential.device_token),
       deletion,
     );
+    assert.equal(reloaded.deletionTombstones.length, 1);
+    reloaded.compactExpiredData(deletion.accepted_at + 36 * 24 * 60 * 60_000);
+    assert.deepEqual(reloaded.deletionTombstones, [{
+      subject_hash: reloaded.deletionSubjectHash(credential.device_id),
+      token_hash: reloaded.deletionTokenHash(credential.device_token),
+    }]);
+    assert.equal(reloaded.credentialWasRemoved(credential.device_token), true);
+    writeFileSync(join(dataDir, "devices.json"), backup.devices);
+    const restoredAfterResultExpiry = new TelemetryStore(
+      dataDir,
+      "test-device-pepper-at-least-24-chars",
+    );
+    assert.equal(restoredAfterResultExpiry.authenticate(
+      credential.device_id,
+      credential.device_token,
+    ), null);
     assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 0);
     if (process.platform !== "win32") {
       assert.equal(statSync(dataDir).mode & 0o777, 0o700);
@@ -843,6 +924,60 @@ test("behavior deletion removes identity and facts while tombstones survive back
         assert.equal(statSync(join(dataDir, name)).mode & 0o777, 0o600);
       }
     }
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("retention compaction removes expired identity mappings and facts without request traffic", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-retention-control-"));
+  try {
+    const now = Date.now();
+    const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    const registration = {
+      hardware_claim: "retention-control-hardware-0001",
+      registration_secret: "registration-secret-retention-000001",
+      app_version: "0.8.7",
+      platform: "windows",
+      arch: "x86_64",
+    };
+    const credential = store.register(registration, null);
+    const device = store.authenticate(credential.device_id, credential.device_token);
+    device.first_seen_at = now - 36 * 24 * 60 * 60_000;
+    device.last_seen_at = now;
+    device.last_active_at = now;
+    store.appendEvents(device, [{
+      event_id: "usage_retention_test_0001",
+      occurred_at: now,
+      input_tokens: 1,
+      output_tokens: 1,
+      success: true,
+    }]);
+    assert.equal(store.devices.size, 1);
+    assert.equal(store.events.length, 1);
+
+    assert.equal(store.compactExpiredData(now), true);
+    assert.equal(store.devices.size, 0);
+    assert.equal(store.devicesByHardwareHash.size, 0);
+    assert.equal(store.events.length, 0);
+    assert.equal(store.credentialWasRemoved(credential.device_token), true);
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 0);
+    assert.equal(readFileSync(join(dataDir, "usage-events.jsonl"), "utf8"), "");
+    const renewed = store.register(registration, null);
+    assert.notEqual(renewed.device_id, credential.device_id);
+    assert.notEqual(renewed.device_token, credential.device_token);
+
+    const staleBackup = JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8"));
+    staleBackup.devices = [{
+      ...device,
+      first_seen_at: now - 36 * 24 * 60 * 60_000,
+      last_seen_at: now - 36 * 24 * 60 * 60_000,
+      last_active_at: now - 36 * 24 * 60 * 60_000,
+    }];
+    writeFileSync(join(dataDir, "devices.json"), JSON.stringify(staleBackup));
+    const reloaded = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    assert.equal(reloaded.devices.size, 0);
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 0);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

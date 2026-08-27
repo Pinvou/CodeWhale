@@ -15,8 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::platform::{filesystem, paths};
 
-const STATE_VERSION: u8 = 4;
-const REMOTE_RETENTION_MS: u64 = 35 * 24 * 60 * 60 * 1000;
+const STATE_VERSION: u8 = 5;
 const CONTROLLED_PROVIDER_KEYS: &[&str] = &[
     "openai",
     "anthropic",
@@ -326,7 +325,6 @@ struct RetiredEndpointCredentials {
     behavior_events_url: String,
     device_id: String,
     device_token: String,
-    retired_at: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -679,6 +677,20 @@ impl Outbox {
             self.rewrite()?;
         }
         Ok(())
+    }
+
+    fn rebind_period(&mut self, period_id: &str) -> Result<()> {
+        for record in &mut self.records {
+            record.collection_period_id = period_id.to_string();
+            if let Some(event) = record.event.as_object_mut() {
+                event.insert(
+                    "collection_period_id".to_string(),
+                    Value::String(period_id.to_string()),
+                );
+            }
+        }
+        self.recalculate_bytes();
+        self.rewrite()
     }
 
     fn rewrite(&self) -> Result<()> {
@@ -1070,7 +1082,7 @@ impl BehaviorTelemetry {
         let credentials = self.ensure_credentials().await?;
         let body = json!({
             "batch_id": token("batch_", 18),
-            "device_id": credentials.device_id,
+            "device_id": credentials.device_id.clone(),
             "events": events,
         });
         let response = self
@@ -1081,6 +1093,10 @@ impl BehaviorTelemetry {
             .send()
             .await
             .context("send behavior events")?;
+        if response.status() == reqwest::StatusCode::GONE {
+            let _ = self.recover_expired_credentials(&credentials).await?;
+            anyhow::bail!("behavior telemetry credentials expired and were renewed");
+        }
         if !response.status().is_success() {
             anyhow::bail!("behavior events endpoint returned {}", response.status());
         }
@@ -1089,6 +1105,108 @@ impl BehaviorTelemetry {
             .await
             .context("parse behavior event delivery response")?;
         Ok(delivery_results(records, response))
+    }
+
+    async fn recover_expired_credentials(&self, expired: &Credentials) -> Result<bool> {
+        let _control_guard = self.control_gate.lock().await;
+        self.recover_expired_credentials_locked(expired).await
+    }
+
+    async fn recover_expired_credentials_locked(&self, expired: &Credentials) -> Result<bool> {
+        let snapshot = self
+            .state
+            .lock()
+            .await
+            .clone()
+            .context("behavior telemetry state missing during credential renewal")?;
+        if !endpoint_matches_runtime(&snapshot, &self.runtime)
+            || snapshot.has_pending_control()
+            || snapshot.device_id.as_deref() != Some(expired.device_id.as_str())
+            || snapshot.device_token.as_deref() != Some(expired.device_token.as_str())
+        {
+            return Ok(false);
+        }
+        let enrollment_token = self
+            .runtime
+            .enrollment_token
+            .as_deref()
+            .context("PINVOU_TELEMETRY_ENROLLMENT_TOKEN is not configured")?;
+        let response = self
+            .client
+            .post(format!(
+                "{}/v1/register",
+                snapshot.telemetry_base_url.trim_end_matches('/')
+            ))
+            .json(&json!({
+                "enrollment_token": enrollment_token,
+                "hardware_claim": format!("pinvou3-installation:{}", snapshot.installation_id),
+                "registration_secret": snapshot.registration_secret,
+                "hardware_source": "installation_id",
+                "identity_quality": "installation_only",
+                "app_version": self.runtime.app_version,
+                "platform": self.runtime.platform,
+                "arch": self.runtime.arch,
+            }))
+            .send()
+            .await
+            .context("renew expired behavior telemetry registration")?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "telemetry registration renewal returned {}",
+                response.status()
+            );
+        }
+        let registered: RegistrationResponse = response
+            .json()
+            .await
+            .context("parse renewed telemetry registration response")?;
+        let renewed = Credentials {
+            device_id: registered.device_id,
+            device_token: registered.device_token,
+            behavior_events_url: self.runtime.behavior_events_url.clone(),
+        };
+        let request_id = token("control_", 18);
+        let started_response = self
+            .request_control(
+                &renewed,
+                "collection/start",
+                json!({ "request_id": request_id }),
+            )
+            .await?;
+        if !started_response.status().is_success() {
+            anyhow::bail!(
+                "renewed behavior collection start returned {}",
+                started_response.status()
+            );
+        }
+        let started: CollectionStartResponse = started_response
+            .json()
+            .await
+            .context("parse renewed behavior collection response")?;
+
+        let mut guard = self.state.lock().await;
+        let state = guard
+            .as_mut()
+            .context("behavior telemetry state disappeared during credential renewal")?;
+        if state.device_id.as_deref() != Some(expired.device_id.as_str())
+            || state.device_token.as_deref() != Some(expired.device_token.as_str())
+        {
+            return Ok(false);
+        }
+        self.outbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
+            .rebind_period(&started.collection_period_id)?;
+        state.device_id = Some(renewed.device_id);
+        state.device_token = Some(renewed.device_token);
+        state.control.enabled = true;
+        state.control.collection_period_id = Some(started.collection_period_id.clone());
+        state.control.pending_request = None;
+        persist_state(state)?;
+        if let Ok(mut period) = self.collection_period_id.write() {
+            *period = Some(started.collection_period_id);
+        }
+        Ok(true)
     }
 
     pub async fn status(&self) -> BehaviorTelemetryStatus {
@@ -1149,12 +1267,8 @@ impl BehaviorTelemetry {
             self.migrate_endpoint_locked().await?;
             let credentials = self.ensure_credentials().await?;
             let request_id = token("control_", 18);
-            let response: CollectionStartResponse = self
-                .post_control(
-                    &credentials,
-                    "collection/start",
-                    json!({ "request_id": request_id }),
-                )
+            let response = self
+                .start_collection_with_renewal_locked(&credentials, request_id)
                 .await?;
             let mut guard = self.state.lock().await;
             let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
@@ -1297,13 +1411,27 @@ impl BehaviorTelemetry {
             device_token: pending.device_token.clone(),
             behavior_events_url: pending.behavior_events_url.clone(),
         };
-        let response: DeletionResponse = self
-            .post_control(
+        let response = self
+            .request_control(
                 &credentials,
                 "deletion",
                 json!({ "request_id": pending.request_id.clone() }),
             )
             .await?;
+        let deletion_request_id = if response.status() == reqwest::StatusCode::GONE {
+            None
+        } else {
+            if !response.status().is_success() {
+                anyhow::bail!("behavior control deletion returned {}", response.status());
+            }
+            Some(
+                response
+                    .json::<DeletionResponse>()
+                    .await
+                    .context("parse behavior control deletion")?
+                    .deletion_request_id,
+            )
+        };
         let mut guard = self.state.lock().await;
         let Some(state) = guard.as_mut() else {
             return Ok(());
@@ -1317,10 +1445,11 @@ impl BehaviorTelemetry {
             return Ok(());
         }
         state.control.pending_deletions.remove(0);
-        state.control.last_deletion_request_id = Some(response.deletion_request_id);
+        if deletion_request_id.is_some() {
+            state.control.last_deletion_request_id = deletion_request_id;
+        }
         state.retired_endpoints.retain(|retired| {
-            retired.behavior_events_url != pending.behavior_events_url
-                || retired.device_id != pending.device_id
+            retired.device_id != pending.device_id || retired.device_token != pending.device_token
         });
         if state.behavior_events_url == pending.behavior_events_url
             && state.device_id.as_deref() == Some(pending.device_id.as_str())
@@ -1349,8 +1478,8 @@ impl BehaviorTelemetry {
     ) -> Result<()> {
         match pending.kind {
             PendingControlKind::End => {
-                let _: CollectionEndResponse = self
-                    .post_control(
+                let response = self
+                    .request_control(
                         credentials,
                         "collection/end",
                         json!({
@@ -1359,6 +1488,18 @@ impl BehaviorTelemetry {
                         }),
                     )
                     .await?;
+                if response.status() != reqwest::StatusCode::GONE {
+                    if !response.status().is_success() {
+                        anyhow::bail!(
+                            "behavior control collection/end returned {}",
+                            response.status()
+                        );
+                    }
+                    let _: CollectionEndResponse = response
+                        .json()
+                        .await
+                        .context("parse behavior control collection/end")?;
+                }
                 let mut guard = self.state.lock().await;
                 if let Some(state) = guard.as_mut() {
                     if !pending_request_matches(state, &pending) {
@@ -1370,13 +1511,27 @@ impl BehaviorTelemetry {
                 }
             }
             PendingControlKind::Delete => {
-                let response: DeletionResponse = self
-                    .post_control(
+                let response = self
+                    .request_control(
                         credentials,
                         "deletion",
                         json!({ "request_id": pending.request_id.clone() }),
                     )
                     .await?;
+                let deletion_request_id = if response.status() == reqwest::StatusCode::GONE {
+                    None
+                } else {
+                    if !response.status().is_success() {
+                        anyhow::bail!("behavior control deletion returned {}", response.status());
+                    }
+                    Some(
+                        response
+                            .json::<DeletionResponse>()
+                            .await
+                            .context("parse behavior control deletion")?
+                            .deletion_request_id,
+                    )
+                };
                 let fresh = PersistedState::fresh(&self.runtime);
                 let mut guard = self.state.lock().await;
                 if !guard
@@ -1387,7 +1542,7 @@ impl BehaviorTelemetry {
                 }
                 *guard = Some(PersistedState {
                     control: CollectionControl {
-                        last_deletion_request_id: Some(response.deletion_request_id),
+                        last_deletion_request_id: deletion_request_id,
                         ..CollectionControl::default()
                     },
                     ..fresh
@@ -1446,8 +1601,62 @@ impl BehaviorTelemetry {
         &self,
         credentials: &Credentials,
         path: &str,
-        mut body: Value,
+        body: Value,
     ) -> Result<T> {
+        let response = self.request_control(credentials, path, body).await?;
+        if !response.status().is_success() {
+            anyhow::bail!("behavior control {path} returned {}", response.status());
+        }
+        response
+            .json()
+            .await
+            .with_context(|| format!("parse behavior control {path}"))
+    }
+
+    async fn start_collection_with_renewal_locked(
+        &self,
+        credentials: &Credentials,
+        request_id: String,
+    ) -> Result<CollectionStartResponse> {
+        let response = self
+            .request_control(
+                credentials,
+                "collection/start",
+                json!({ "request_id": request_id }),
+            )
+            .await?;
+        if response.status() == reqwest::StatusCode::GONE
+            && self.recover_expired_credentials_locked(credentials).await?
+        {
+            let collection_period_id = self
+                .state
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|state| state.control.collection_period_id.clone())
+                .context("renewed behavior collection period is unavailable")?;
+            return Ok(CollectionStartResponse {
+                collection_period_id,
+            });
+        }
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "behavior control collection/start returned {}",
+                response.status()
+            );
+        }
+        response
+            .json()
+            .await
+            .context("parse behavior control collection/start")
+    }
+
+    async fn request_control(
+        &self,
+        credentials: &Credentials,
+        path: &str,
+        mut body: Value,
+    ) -> Result<reqwest::Response> {
         if let Value::Object(ref mut object) = body {
             object.insert(
                 "device_id".to_string(),
@@ -1459,21 +1668,13 @@ impl BehaviorTelemetry {
             .trim_end_matches('/')
             .strip_suffix("/events")
             .unwrap_or(credentials.behavior_events_url.trim_end_matches('/'));
-        let response = self
-            .client
+        self.client
             .post(format!("{base}/{path}"))
             .bearer_auth(&credentials.device_token)
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("send behavior control {path}"))?;
-        if !response.status().is_success() {
-            anyhow::bail!("behavior control {path} returned {}", response.status());
-        }
-        response
-            .json()
-            .await
-            .with_context(|| format!("parse behavior control {path}"))
+            .with_context(|| format!("send behavior control {path}"))
     }
 
     async fn ensure_credentials(&self) -> Result<Credentials> {
@@ -1505,7 +1706,7 @@ impl BehaviorTelemetry {
                     "previous behavior endpoint control state must be resolved before registration"
                 );
             }
-            state = state.rebind_endpoint(&self.runtime, now_ms());
+            state = state.rebind_endpoint(&self.runtime);
         }
         let body = json!({
             "enrollment_token": enrollment_token,
@@ -1711,11 +1912,7 @@ impl PersistedState {
         self.control.pending_request.is_some() || !self.control.pending_deletions.is_empty()
     }
 
-    fn rebind_endpoint(mut self, runtime: &RuntimeConfig, retired_at: u64) -> Self {
-        self.retired_endpoints.retain(|retired| {
-            retired.retired_at == 0
-                || retired_at.saturating_sub(retired.retired_at) <= REMOTE_RETENTION_MS
-        });
+    fn rebind_endpoint(mut self, runtime: &RuntimeConfig) -> Self {
         if let (Some(device_id), Some(device_token)) =
             (self.device_id.take(), self.device_token.take())
         {
@@ -1723,11 +1920,10 @@ impl PersistedState {
                 behavior_events_url: self.behavior_events_url.clone(),
                 device_id,
                 device_token,
-                retired_at,
             };
             if !self.retired_endpoints.iter().any(|existing| {
-                existing.behavior_events_url == retired.behavior_events_url
-                    && existing.device_id == retired.device_id
+                existing.device_id == retired.device_id
+                    && existing.device_token == retired.device_token
             }) {
                 self.retired_endpoints.push(retired);
             }
@@ -1749,8 +1945,7 @@ impl PersistedState {
         }
         for retired in &self.retired_endpoints {
             if !targets.iter().any(|target| {
-                target.behavior_events_url == retired.behavior_events_url
-                    && target.device_id == retired.device_id
+                target.device_id == retired.device_id && target.device_token == retired.device_token
             }) {
                 targets.push(PendingEndpointDeletion {
                     request_id: token("control_", 18),
@@ -3101,6 +3296,24 @@ mod tests {
     }
 
     #[test]
+    fn outbox_rebinds_pending_events_after_server_identity_expiry() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("outbox.jsonl");
+        let mut outbox = Outbox::empty(path.clone());
+        outbox
+            .enqueue(outbox_record("event_rebind", "period_expired", now_ms()))
+            .unwrap();
+        outbox.rebind_period("period_renewed").unwrap();
+        assert_eq!(outbox.records[0].collection_period_id, "period_renewed");
+        assert_eq!(
+            outbox.records[0].event["collection_period_id"],
+            "period_renewed"
+        );
+        let reloaded = Outbox::load(path).unwrap();
+        assert_eq!(reloaded.records[0].collection_period_id, "period_renewed");
+    }
+
+    #[test]
     fn persistent_outbox_enqueue_meets_latency_and_representative_memory_budget() {
         let directory = tempfile::tempdir().unwrap();
         let mut outbox = Outbox::empty(directory.path().join("outbox.jsonl"));
@@ -3310,7 +3523,7 @@ mod tests {
         old_state.control.cohort_started = true;
         let installation_id = old_state.installation_id.clone();
         let registration_secret = old_state.registration_secret.clone();
-        let mut new_state = old_state.rebind_endpoint(&runtime_b, 42);
+        let mut new_state = old_state.rebind_endpoint(&runtime_b);
         new_state.control.enabled = true;
         new_state.control.collection_period_id = Some("period_b".to_string());
         assert!(!pending_request_matches(&new_state, &pending));
@@ -3340,5 +3553,22 @@ mod tests {
             target.behavior_events_url == runtime_b.behavior_events_url
                 && target.device_id == "device_b"
         }));
+
+        let mut same_backend_state = PersistedState::fresh(&runtime_b);
+        same_backend_state.device_id = Some("shared_device".to_string());
+        same_backend_state.device_token = Some("shared_token".to_string());
+        same_backend_state
+            .retired_endpoints
+            .push(RetiredEndpointCredentials {
+                behavior_events_url: runtime_a.behavior_events_url,
+                device_id: "shared_device".to_string(),
+                device_token: "shared_token".to_string(),
+            });
+        let same_backend_targets = same_backend_state.deletion_targets();
+        assert_eq!(same_backend_targets.len(), 1);
+        assert_eq!(
+            same_backend_targets[0].behavior_events_url,
+            runtime_b.behavior_events_url
+        );
     }
 }
