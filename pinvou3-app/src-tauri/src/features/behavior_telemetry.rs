@@ -25,6 +25,80 @@ const OUTBOX_MAX_EVENTS: usize = 5_000;
 const OUTBOX_MAX_BYTES: usize = 64 * 1024 * 1024;
 const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
+fn client_event_field_allowed(field: &str) -> bool {
+    matches!(
+        field,
+        "session_id"
+            | "attempt_id"
+            | "turn_id"
+            | "operation_id"
+            | "attempt_index"
+            | "view_id"
+            | "entry_point"
+            | "mode"
+            | "initiator_type"
+            | "input_type"
+            | "status"
+            | "duration_ms"
+            | "queue_duration_ms"
+            | "error_category"
+            | "stage"
+            | "success"
+            | "eligibility_source"
+            | "install_source"
+            | "previous_version_present"
+            | "launch_type"
+            | "startup_duration_ms"
+            | "provider_configured"
+            | "provider_key"
+            | "model_key"
+            | "from_model_key"
+            | "to_model_key"
+            | "tool_key"
+            | "step"
+            | "readiness_source"
+            | "has_attachment"
+            | "output_type"
+            | "source_turn_id"
+            | "retry_reason"
+            | "voice_permission_status"
+            | "recognizer_type"
+            | "length_bucket"
+            | "tool_type"
+            | "position_bucket"
+            | "scene_l1"
+            | "scene_l2"
+            | "selection_scope"
+            | "selection_source"
+            | "attachment_id"
+            | "file_type_bucket"
+            | "size_bucket"
+            | "source_type"
+            | "item_count_bucket"
+            | "artifact_id"
+            | "artifact_type"
+            | "export_format"
+            | "scheduled_task_id"
+            | "schedule_type"
+            | "task_type"
+            | "member_count_bucket"
+            | "feedback_id"
+            | "feedback_action"
+            | "rating"
+            | "reason_code"
+            | "content_type"
+    )
+}
+
+fn validate_client_event_fields(event: &BehaviorEvent) -> Result<()> {
+    for field in event.fields.keys() {
+        if !client_event_field_allowed(field) {
+            anyhow::bail!("behavior event field is not allowlisted: {field}");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct BehaviorTelemetry {
     client: reqwest::Client,
@@ -314,12 +388,10 @@ impl BehaviorEvent {
     pub fn tool(
         self,
         key: impl Into<String>,
-        name: impl Into<String>,
+        _name: impl Into<String>,
         tool_type: impl Into<String>,
     ) -> Self {
-        self.string("tool_key", key)
-            .string("tool_name", name)
-            .string("tool_type", tool_type)
+        self.string("tool_key", key).string("tool_type", tool_type)
     }
 
     pub fn success(self, success: bool) -> Self {
@@ -704,6 +776,7 @@ impl BehaviorTelemetry {
     }
 
     fn prepare_record(&self, event: BehaviorEvent, period_id: String) -> Result<OutboxRecord> {
+        validate_client_event_fields(&event)?;
         let event_id = event.event_id.clone();
         let mut value = serde_json::to_value(event).context("serialize behavior event")?;
         let object = value
@@ -2480,6 +2553,33 @@ mod tests {
     }
 
     #[test]
+    fn client_event_fields_reject_payload_paths_arguments_and_raw_errors() {
+        for forbidden in [
+            "message",
+            "content",
+            "file_path",
+            "tool_arguments",
+            "raw_error",
+        ] {
+            let event = BehaviorEvent::new("task_submitted").string(forbidden, "private-marker");
+            assert!(
+                validate_client_event_fields(&event).is_err(),
+                "accepted {forbidden}"
+            );
+        }
+        let allowed = BehaviorEvent::new("task_submitted")
+            .session("session_test")
+            .string("attempt_id", "attempt_test")
+            .string("mode", "assistant")
+            .input_type("text")
+            .boolean("has_attachment", false);
+        validate_client_event_fields(&allowed).unwrap();
+        assert!(!serde_json::to_string(&allowed)
+            .unwrap()
+            .contains("private-marker"));
+    }
+
+    #[test]
     fn model_registry_never_returns_user_supplied_identifiers() {
         assert_eq!(provider_registry_key("openai_compatible"), "custom");
         assert_eq!(
@@ -2569,6 +2669,40 @@ mod tests {
             recovered.records[0].last_reason_code.as_deref(),
             Some("rate_limited")
         );
+    }
+
+    #[test]
+    fn persistent_outbox_enqueue_meets_latency_and_representative_memory_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut outbox = Outbox::empty(directory.path().join("outbox.jsonl"));
+        let mut samples = Vec::with_capacity(200);
+        for index in 0..200 {
+            let started = std::time::Instant::now();
+            outbox
+                .enqueue(outbox_record(
+                    &format!("latency_event_{index:04}"),
+                    "period_performance",
+                    now_ms(),
+                ))
+                .unwrap();
+            samples.push(started.elapsed());
+        }
+        samples.sort_unstable();
+        let p95 = samples[(samples.len() * 95).div_ceil(100) - 1];
+        let p99 = samples[(samples.len() * 99).div_ceil(100) - 1];
+        assert!(p95 <= Duration::from_millis(10), "enqueue P95 {p95:?}");
+        assert!(p99 <= Duration::from_millis(50), "enqueue P99 {p99:?}");
+
+        let representative_bytes: usize = (0..OUTBOX_MAX_EVENTS)
+            .map(|index| {
+                Outbox::record_bytes(&outbox_record(
+                    &format!("memory_event_{index:04}"),
+                    "period_performance",
+                    now_ms(),
+                ))
+            })
+            .sum();
+        assert!(representative_bytes <= 16 * 1024 * 1024);
     }
 
     #[test]

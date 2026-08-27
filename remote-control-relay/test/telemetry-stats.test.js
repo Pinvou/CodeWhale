@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import test from "node:test";
 
 import {
@@ -14,6 +15,7 @@ import {
   buildCommercialMock,
   buildDeviceList,
   buildStatsOverview,
+  createTelemetryService,
   formatDeviceRegion,
   parseIp2Region,
 } from "../telemetry-service.js";
@@ -42,6 +44,34 @@ function behaviorEvent(collectionPeriodId, overrides = {}) {
     input_type: "text",
     has_attachment: false,
     ...overrides,
+  };
+}
+
+async function serviceRequest(service, method, path, body, headers = {}) {
+  const request = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
+  request.method = method;
+  request.url = path;
+  request.headers = headers;
+  request.socket = { remoteAddress: "127.0.0.1" };
+  let status;
+  let responseHeaders;
+  let payload = "";
+  const response = {
+    writeHead(value, values) {
+      status = value;
+      responseHeaders = values;
+    },
+    end(value = "") {
+      payload = String(value);
+    },
+  };
+  await service.handleHttp(request, response, new URL(path, "http://localhost").pathname, {
+    clientIp: "127.0.0.1",
+  });
+  return {
+    status,
+    headers: responseHeaders,
+    body: payload ? JSON.parse(payload) : null,
   };
 }
 
@@ -188,21 +218,21 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal(overview.metrics.voice_started_installations, 2);
   assert.equal(overview.metrics.voice_penetration_rate, 2 / 3);
 
-  const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "call", now);
+  const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "call", now, { minimumGroupSubjects: 0 });
     assert.equal(tools.rows[0].tool_key, "search");
     assert.equal(tools.rows[0].call_count, 2);
     assert.equal(tools.rows[0].user_count, 2);
     assert.equal(tools.rows[0].tool_type, "mcp");
     assert.equal(tools.rows[0].success_rate, 0.5);
 
-  const installs = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "install", now);
+  const installs = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "install", now, { minimumGroupSubjects: 0 });
   assert.equal(installs.rows[0].install_count, 1);
 
-  const scenes = buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, "7", now);
+  const scenes = buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, "7", now, { minimumGroupSubjects: 0 });
   assert.equal(scenes.rows[0].scene_l1, "work");
   assert.equal(scenes.rows[0].trigger_count, 1);
 
-  const models = buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, "7", now);
+  const models = buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, "7", now, { minimumGroupSubjects: 0 });
   assert.equal(models.rows[0].provider_key, "deepseek");
   assert.equal(models.rows[0].model_key, "deepseek");
   assert.equal(models.rows[0].user_count, 2);
@@ -389,9 +419,10 @@ test("P1 tool and scene funnels preserve every stage and value outcome", () => {
     { event_id: "scene_finish", event_name: "task_finished", attempt_id: "scene_attempt", turn_id: "scene_turn", status: "success", duration_ms: 1200, identity_id: "dev_a", occurred_at: at("2026-08-12T10:03:00") },
     { event_id: "scene_copy", event_name: "response_copied", turn_id: "scene_turn", identity_id: "dev_a", occurred_at: at("2026-08-12T10:04:00") },
   ];
-  const tools = buildBehaviorToolRanking([], [], events, "today", "install", now);
+  const tools = buildBehaviorToolRanking([], [], events, "today", "install", now, { minimumGroupSubjects: 0 });
   assert.deepEqual(tools.funnel_rows[0], {
     tool_key: "search", tool_name: "search", tool_type: "mcp",
+    user_count: 1,
     impression_count: 1, detail_count: 1, install_started_count: 1, install_succeeded_count: 1,
     configuration_started_count: 1, configuration_succeeded_count: 1, call_succeeded_count: 1,
     failed_count: 0, cancelled_count: 0, impression_to_install_rate: 1, install_success_rate: 1,
@@ -399,15 +430,105 @@ test("P1 tool and scene funnels preserve every stage and value outcome", () => {
     configuration_to_call_p50_ms: 60_000,
     confidence: "low",
   });
-  const scenes = buildBehaviorSceneRanking([], [], events, "today", now);
+  const scenes = buildBehaviorSceneRanking([], [], events, "today", now, { minimumGroupSubjects: 0 });
   assert.equal(scenes.rows[0].selection_rate, 1);
   assert.equal(scenes.rows[0].submission_rate, 1);
   assert.equal(scenes.rows[0].task_success_rate, 1);
   assert.equal(scenes.rows[0].explicit_value_rate, 1);
   assert.equal(scenes.rows[0].task_duration_p50_ms, 1200);
+  assert.equal(buildBehaviorToolRanking([], [], events, "today", "install", now).funnel_rows.length, 0);
+  assert.equal(buildBehaviorSceneRanking([], [], events, "today", now).rows.length, 0);
 });
 
-test("behavior collection control is opt-in, idempotent and deletion removes facts", () => {
+test("privacy gates suppress small groups and clip per-subject daily contributions", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = Array.from({ length: 101 }, (_, index) => ({
+    event_id: `privacy_task_${String(index).padStart(4, "0")}`,
+    event_name: "task_submitted",
+    attempt_id: `privacy_attempt_${String(index).padStart(4, "0")}`,
+    identity_id: "privacy_installation",
+    occurred_at: at("2026-08-12T09:00:00") + index,
+  }));
+  events.push({
+    event_id: "privacy_model_0001",
+    event_name: "model_used",
+    model_key: "deepseek",
+    provider_key: "deepseek",
+    identity_id: "privacy_installation",
+    occurred_at: at("2026-08-12T10:00:00"),
+  });
+  const overview = buildBehaviorOverview([], [], events, "today", now);
+  assert.equal(overview.metrics.task_submitted_count, 100);
+  assert.deepEqual(overview.data_quality.contribution_clipping, {
+    subject_count: 1,
+    clipped_subject_count: 1,
+    clipped_subject_rate: 1,
+    task_limit_per_event_day: 100,
+    tool_call_limit_per_day: 500,
+  });
+  assert(overview.data_quality.warnings.includes("subject_contribution_clipped"));
+
+  const models = buildBehaviorModelRanking([], [], events, "today", now);
+  assert.equal(models.rows.length, 0);
+  assert.equal(models.suppressed_group_count, 1);
+  assert.equal(models.minimum_group_subjects, 20);
+
+  const forbiddenKeys = new Set(["device_id", "account_subject_id", "session_id", "turn_id", "attempt_id", "operation_id", "event_id"]);
+  const visit = (value) => {
+    if (!value || typeof value !== "object") return;
+    for (const [key, child] of Object.entries(value)) {
+      assert(!forbiddenKeys.has(key), `aggregate response exposed ${key}`);
+      visit(child);
+    }
+  };
+  visit(overview);
+  visit(models);
+});
+
+test("stats roles keep behavior analysts away from device-level endpoints", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-stats-roles-"));
+  const names = [
+    "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+    "PINVOU_TELEMETRY_DEVICE_PEPPER",
+    "PINVOU_STATS_ADMIN_PASSWORD",
+    "PINVOU_BEHAVIOR_ANALYTICS_PASSWORD",
+    "PINVOU_TELEMETRY_DATA_DIR",
+  ];
+  const previous = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  try {
+    process.env.PINVOU_TELEMETRY_ENROLLMENT_TOKEN = "test-enrollment-token-at-least-24";
+    process.env.PINVOU_TELEMETRY_DEVICE_PEPPER = "test-device-pepper-at-least-24";
+    process.env.PINVOU_STATS_ADMIN_PASSWORD = "operations-admin-password";
+    process.env.PINVOU_BEHAVIOR_ANALYTICS_PASSWORD = "behavior-analyst-password";
+    process.env.PINVOU_TELEMETRY_DATA_DIR = dataDir;
+    const service = createTelemetryService({ regionResolver: { enabled: false, lookup: async () => null } });
+
+    const analystLogin = await serviceRequest(service, "POST", "/pinvou3/stats/api/login", {
+      password: "behavior-analyst-password",
+    });
+    assert.equal(analystLogin.status, 200);
+    assert.equal(analystLogin.body.role, "behavior_analyst");
+    const analystCookie = analystLogin.headers["set-cookie"].split(";")[0];
+    assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/session", undefined, { cookie: analystCookie })).body.role, "behavior_analyst");
+    assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/behavior/overview", undefined, { cookie: analystCookie })).status, 200);
+    assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/devices", undefined, { cookie: analystCookie })).status, 403);
+
+    const adminLogin = await serviceRequest(service, "POST", "/pinvou3/stats/api/login", {
+      password: "operations-admin-password",
+    });
+    const adminCookie = adminLogin.headers["set-cookie"].split(";")[0];
+    assert.equal(adminLogin.body.role, "operations_admin");
+    assert.equal((await serviceRequest(service, "GET", "/pinvou3/stats/api/devices", undefined, { cookie: adminCookie })).status, 200);
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("behavior deletion removes identity and facts while tombstones survive backup restore", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-control-"));
   try {
     const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
@@ -441,31 +562,67 @@ test("behavior collection control is opt-in, idempotent and deletion removes fac
     const second = store.startBehaviorCollection(device, { request_id: "request_start_0002" });
     assert.notEqual(second.collection_period_id, start.collection_period_id);
 
-    store.behaviorEvents.push({
-      event_id: "behavior_delete_test_01",
-      event_name: "voice_started",
-      device_id: device.device_id,
+    store.appendEvents(device, [{
+      event_id: "usage_delete_test_0001",
       occurred_at: Date.now(),
-      received_at: Date.now(),
+      input_tokens: 1,
+      output_tokens: 1,
+      success: true,
+    }]);
+    const event = behaviorEvent(second.collection_period_id, {
+      event_id: "behavior_delete_test_01",
     });
-    store.behaviorEventIds.add("behavior_delete_test_01");
+    assert.equal(store.appendBehaviorEvents(device, [event]).results[0].status, "accepted");
+    store.saveNow();
+    const backup = {
+      devices: readFileSync(join(dataDir, "devices.json")),
+      usage: readFileSync(join(dataDir, "usage-events.jsonl")),
+      behavior: readFileSync(join(dataDir, "behavior-events.jsonl")),
+    };
     const deletion = store.deleteBehaviorData(device, { request_id: "request_delete_0001" });
     assert.equal(deletion.status, "completed");
     assert.match(deletion.deletion_request_id, /^delete_/);
+    assert.equal(store.events.length, 0);
     assert.equal(store.behaviorEvents.length, 0);
+    assert.equal(store.authenticate(credential.device_id, credential.device_token), null);
     assert.deepEqual(
-      store.deleteBehaviorData(device, { request_id: "request_delete_0001" }),
+      store.priorDeletionResponse("request_delete_0001", credential.device_token),
       deletion,
+    );
+    assert.deepEqual(
+      store.deletionStatus(deletion.deletion_request_id, credential.device_token),
+      deletion,
+    );
+    const resultExpiredAt = deletion.accepted_at + 30 * 24 * 60 * 60_000;
+    assert.equal(
+      store.priorDeletionResponse("request_delete_0001", credential.device_token, resultExpiredAt),
+      null,
+    );
+    assert.throws(
+      () => store.deletionStatus(deletion.deletion_request_id, credential.device_token, resultExpiredAt),
+      error => error.status === 410 && error.message === "deletion_result_expired",
     );
 
-    store.saveNow();
+    // Simulate restoring a pre-deletion backup while preserving the deletion ledger.
+    writeFileSync(join(dataDir, "devices.json"), backup.devices);
+    writeFileSync(join(dataDir, "usage-events.jsonl"), backup.usage);
+    writeFileSync(join(dataDir, "behavior-events.jsonl"), backup.behavior);
+
     const reloaded = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
-    const reloadedDevice = reloaded.authenticate(credential.device_id, credential.device_token);
-    assert.equal(reloaded.behaviorCollectionStatus(reloadedDevice).status, "ended");
+    assert.equal(reloaded.authenticate(credential.device_id, credential.device_token), null);
+    assert.equal(reloaded.events.length, 0);
+    assert.equal(reloaded.behaviorEvents.length, 0);
     assert.deepEqual(
-      reloaded.deleteBehaviorData(reloadedDevice, { request_id: "request_delete_0001" }),
+      reloaded.priorDeletionResponse("request_delete_0001", credential.device_token),
       deletion,
     );
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "devices.json"), "utf8")).devices.length, 0);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(dataDir).mode & 0o777, 0o700);
+      for (const name of ["devices.json", "usage-events.jsonl", "behavior-events.jsonl", "behavior-deletion-tombstones.json"]) {
+        assert.equal(statSync(join(dataDir, name)).mode & 0o777, 0o600);
+      }
+    }
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -579,12 +736,14 @@ test("event store keeps a bounded recent window on disk and after restart", () =
       maxEvents: 100,
       eventRatePerMinute: 1_000,
       globalEventRatePerMinute: 200,
+      eventRetentionMs: 90 * 24 * 60 * 60_000,
     };
     const store = new TelemetryStore(
       dataDir,
       "test-device-pepper-at-least-24-chars",
       options,
     );
+    assert.equal(store.eventRetentionMs, 35 * 24 * 60 * 60_000);
     const registration = {
       hardware_claim: "bounded-events-hardware",
       registration_secret: "registration-secret-bounded-events-00001",

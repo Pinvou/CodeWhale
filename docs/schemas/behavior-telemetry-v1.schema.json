@@ -123,7 +123,7 @@
     "errorCategory": { "enum": ["permission_denied", "authentication_failed", "configuration_missing", "network_unavailable", "timeout", "rate_limited", "provider_error", "model_error", "tool_error", "unsupported", "user_cancelled", "validation_failed", "internal_error", "unknown"] }
   },
   "x-client-optional-fields": [
-    "account_subject_id", "session_id", "attempt_id", "turn_id", "operation_id", "attempt_index",
+    "session_id", "attempt_id", "turn_id", "operation_id", "attempt_index",
     "view_id", "entry_point", "mode", "initiator_type", "input_type", "status", "duration_ms",
     "queue_duration_ms", "error_category", "stage", "success", "eligibility_source", "install_source",
     "previous_version_present", "launch_type", "startup_duration_ms", "provider_configured", "provider_key",
@@ -135,7 +135,7 @@
     "scheduled_task_id", "schedule_type", "task_type", "member_count_bucket", "feedback_id",
     "feedback_action", "rating", "reason_code", "content_type"
   ],
-  "x-server-injected-fields": ["received_at", "device_id", "environment", "clock_skew_bucket"],
+  "x-server-injected-fields": ["received_at", "device_id", "account_subject_id", "environment", "clock_skew_bucket"],
   "x-event-contracts": {
     "analytics_cohort_started": { "required": ["eligibility_source", "install_source", "previous_version_present"] },
     "app_opened": { "required": ["launch_type", "startup_duration_ms"] },

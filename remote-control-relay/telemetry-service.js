@@ -2,7 +2,9 @@ import crypto from "node:crypto";
 import { isIP } from "node:net";
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -60,6 +62,8 @@ const DEFAULT_GLOBAL_EVENT_RATE_PER_MINUTE = 20_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_RATE_LIMIT_BUCKETS = 20_000;
 const MAX_CLIENT_FUTURE_SKEW_MS = 5 * 60_000;
+const DELETION_RESULT_RETENTION_MS = 30 * DAY_MS;
+const DELETION_TOMBSTONE_RETENTION_MS = 35 * DAY_MS;
 
 function json(res, status, value, headers = {}) {
   res.writeHead(status, {
@@ -386,6 +390,7 @@ function rate(part, total) {
 
 const EXPLICIT_VALUE_WINDOW_MS = 30 * 60_000;
 const MIN_RELIABLE_SAMPLE = 30;
+const MIN_PRIVACY_GROUP_SUBJECTS = 20;
 
 function percentile(values, quantile) {
   const sorted = values.map(Number).filter(Number.isFinite).sort((left, right) => left - right);
@@ -395,6 +400,40 @@ function percentile(values, quantile) {
 
 function sampleConfidence(sampleSize) {
   return Number(sampleSize) >= MIN_RELIABLE_SAMPLE ? "sufficient" : "low";
+}
+
+function contributionLimit(eventName) {
+  if (String(eventName).startsWith("tool_call_")) return 500;
+  return 100;
+}
+
+function clipDailySubjectContributions(events) {
+  const counts = new Map();
+  const subjects = new Set();
+  const clippedSubjects = new Set();
+  const retained = [];
+  for (const event of events) {
+    const identity = eventIdentity(event);
+    if (!identity) {
+      retained.push(event);
+      continue;
+    }
+    subjects.add(identity);
+    const key = `${identity}:${statsDay(event.occurred_at)}:${event.event_name}`;
+    const count = counts.get(key) || 0;
+    if (count >= contributionLimit(event.event_name)) {
+      clippedSubjects.add(identity);
+      continue;
+    }
+    counts.set(key, count + 1);
+    retained.push(event);
+  }
+  return {
+    events: retained,
+    subject_count: subjects.size,
+    clipped_subject_count: clippedSubjects.size,
+    clipped_subject_rate: rate(clippedSubjects.size, subjects.size),
+  };
 }
 
 function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
@@ -449,8 +488,11 @@ function buildVersionQuality(windowEvents) {
       first_output_ms: [],
       total_duration_ms: [],
       errors: new Map(),
+      identities: new Set(),
     };
     const attempt = boundedText(event.attempt_id, 128);
+    const identity = eventIdentity(event);
+    if (identity) row.identities.add(identity);
     if (attempt) {
       if (event.event_name === "task_submitted") row.submitted.add(attempt);
       if (event.event_name === "task_admitted") row.admitted.add(attempt);
@@ -469,11 +511,12 @@ function buildVersionQuality(windowEvents) {
     }
     groups.set(key, row);
   }
-  return [...groups.values()].map((row) => ({
+  return [...groups.values()].filter((row) => row.identities.size >= MIN_PRIVACY_GROUP_SUBJECTS).map((row) => ({
     app_version: row.app_version,
     platform: row.platform,
     arch: row.arch,
     sample_size: row.submitted.size,
+    installation_count: row.identities.size,
     confidence: sampleConfidence(row.submitted.size),
     admission_rate: rate(row.admitted.size, row.submitted.size),
     success_rate: rate(row.success.size, row.finished.size),
@@ -610,7 +653,10 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   const window = rangeWindow(range, now);
   const activeByDay = activeIdentityByDay(devices, usageEvents, behaviorEvents, window);
   const activeTotal = periodActiveCount(activeByDay);
-  const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
+  const contributionClipping = clipDailySubjectContributions(
+    filteredBehaviorEvents(behaviorEvents, window),
+  );
+  const windowEvents = contributionClipping.events;
   const taskSubmitted = uniqueAttempts(windowEvents, "task_submitted");
   const taskAdmitted = uniqueAttempts(windowEvents, "task_admitted");
   const taskRejected = uniqueAttempts(windowEvents, "task_rejected");
@@ -694,15 +740,26 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   };
   const voiceFunnel = buildVoiceFunnel(windowEvents, taskFinished);
   const versionQuality = buildVersionQuality(windowEvents);
+  const latestReceivedAt = Math.max(0, ...behaviorEvents.map(event => Number(event.received_at || event.occurred_at) || 0));
+  const activeCollectionPresent = devices.some(device => device.behavior_collection?.status === "active");
+  const dataStatus = behaviorEvents.length === 0
+    ? (activeCollectionPresent ? "no_data" : "tracking_not_enabled")
+    : (activeCollectionPresent && latestReceivedAt < now - DAY_MS ? "delayed" : "ready");
   const qualityWarnings = [];
   if (taskSubmitted.length < MIN_RELIABLE_SAMPLE) qualityWarnings.push("task_sample_low");
   if (taskAdmitted.length && admittedTerminalCount / taskAdmitted.length < 0.98) qualityWarnings.push("task_terminal_incomplete");
   if (pipelineTotal && pipeline.rejected / pipelineTotal > 0.01) qualityWarnings.push("pipeline_rejection_high");
   if (windowEvents.some(event => event.clock_skew_bucket && event.clock_skew_bucket !== "normal")) qualityWarnings.push("clock_skew_present");
+  if (contributionClipping.clipped_subject_count) qualityWarnings.push("subject_contribution_clipped");
   return {
     generated_at: now,
     range: window.range,
     subject: "installation",
+    timezone: "Asia/Shanghai",
+    metric_version: "behavior-v1.2",
+    metric_version_started_at: Date.parse("2026-08-27T00:00:00+08:00"),
+    data_status: dataStatus,
+    latest_event_received_at: latestReceivedAt || null,
     active_installations: activeTotal,
     metrics: {
       task_submitted_count: taskSubmitted.length,
@@ -760,15 +817,24 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     error_categories: taskErrors,
     data_quality: {
       minimum_reliable_sample: MIN_RELIABLE_SAMPLE,
+      minimum_group_subjects: MIN_PRIVACY_GROUP_SUBJECTS,
       task_sample_size: taskSubmitted.length,
       confidence: sampleConfidence(taskSubmitted.length),
+      contribution_clipping: {
+        subject_count: contributionClipping.subject_count,
+        clipped_subject_count: contributionClipping.clipped_subject_count,
+        clipped_subject_rate: contributionClipping.clipped_subject_rate,
+        task_limit_per_event_day: 100,
+        tool_call_limit_per_day: 500,
+      },
       warnings: qualityWarnings,
     },
   };
 }
 
-function sortedRankingRows(groups, countKey, activeTotal, limit = 50) {
+function sortedRankingRows(groups, countKey, activeTotal, limit = 50, minimumSubjects = MIN_PRIVACY_GROUP_SUBJECTS) {
   return [...groups.values()]
+    .filter((row) => row.users.size >= minimumSubjects)
     .map((row) => ({
       ...row,
       user_count: row.users.size,
@@ -783,13 +849,17 @@ function sortedRankingRows(groups, countKey, activeTotal, limit = 50) {
     .slice(0, limit);
 }
 
-export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, range = "30", type = "call", now = Date.now()) {
+export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, range = "30", type = "call", now = Date.now(), options = {}) {
   const window = rangeWindow(range, now);
+  const minimumSubjects = options.minimumGroupSubjects ?? MIN_PRIVACY_GROUP_SUBJECTS;
   const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
   const eventName = type === "install" ? "tool_install_completed" : "tool_call_completed";
   const countKey = type === "install" ? "install_count" : "call_count";
   const groups = new Map();
-  for (const event of filteredBehaviorEvents(behaviorEvents, window, eventName)) {
+  const clippedWindowEvents = clipDailySubjectContributions(
+    filteredBehaviorEvents(behaviorEvents, window),
+  ).events;
+  for (const event of clippedWindowEvents.filter(event => event.event_name === eventName)) {
     if (eventName === "tool_install_completed" && event.success !== true) continue;
     const toolKey = boundedText(event.tool_key || event.tool_name, 128) || "unknown";
     const row = groups.get(toolKey) || {
@@ -816,7 +886,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     ["tool_configuration_finished", "configuration_succeeded"],
     ["tool_call_completed", "call_succeeded"],
   ]);
-  for (const event of windowEventsForToolFunnel(behaviorEvents, window)) {
+  for (const event of clippedWindowEvents.filter(event => event.event_name.startsWith("tool_"))) {
     const stage = stageNames.get(event.event_name);
     if (!stage) continue;
     const toolKey = boundedText(event.tool_key || event.tool_name, 128) || "unknown";
@@ -835,9 +905,12 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       cancelled: new Set(),
       configuration_completed_events: [],
       successful_call_events: [],
+      users: new Set(),
     };
     const stageId = boundedText(event.operation_id || event.event_id
       || `${event.view_id || "view"}:${toolKey}`, 256);
+    const identity = eventIdentity(event);
+    if (identity) row.users.add(identity);
     const successfulTerminal = !["tool_install_completed", "tool_configuration_finished", "tool_call_completed"].includes(event.event_name)
       || event.success === true;
     if (stageId && successfulTerminal) row[stage].add(stageId);
@@ -853,7 +926,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     }
     funnelGroups.set(toolKey, row);
   }
-  const funnelRows = [...funnelGroups.values()].map(row => {
+  const funnelRows = [...funnelGroups.values()].filter(row => row.users.size >= minimumSubjects).map(row => {
     const configurationToCall = row.configuration_completed_events.flatMap(configuration => {
       const call = row.successful_call_events
         .filter(candidate => candidate.identity && candidate.identity === configuration.identity
@@ -865,6 +938,7 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
       tool_key: row.tool_key,
       tool_name: row.tool_name,
       tool_type: row.tool_type,
+      user_count: row.users.size,
       impression_count: row.impressions.size,
       detail_count: row.details.size,
       install_started_count: row.install_started.size,
@@ -889,20 +963,22 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     generated_at: now,
     range: window.range,
     type,
-    rows: sortedRankingRows(groups, countKey, activeTotal),
+    minimum_group_subjects: minimumSubjects,
+    rows: sortedRankingRows(groups, countKey, activeTotal, 50, minimumSubjects),
     funnel_rows: funnelRows,
+    suppressed_group_count: [...funnelGroups.values()]
+      .filter(row => row.users.size < minimumSubjects).length,
   };
 }
 
-function windowEventsForToolFunnel(behaviorEvents, window) {
-  return filteredBehaviorEvents(behaviorEvents, window).filter(event => event.event_name.startsWith("tool_"));
-}
-
-export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now()) {
+export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), options = {}) {
   const window = rangeWindow(range, now);
+  const minimumSubjects = options.minimumGroupSubjects ?? MIN_PRIVACY_GROUP_SUBJECTS;
   const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
   const groups = new Map();
-  const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
+  const windowEvents = clipDailySubjectContributions(
+    filteredBehaviorEvents(behaviorEvents, window),
+  ).events;
   const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
     .map(event => [event.attempt_id, event]));
   const latestFeedbackByTurn = new Map();
@@ -968,7 +1044,8 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
   return {
     generated_at: now,
     range: window.range,
-    rows: [...groups.values()].map(row => ({
+    minimum_group_subjects: minimumSubjects,
+    rows: [...groups.values()].filter(row => row.users.size >= minimumSubjects).map(row => ({
       scene_l1: row.scene_l1,
       scene_l2: row.scene_l2,
       impression_count: row.impressions.size,
@@ -986,14 +1063,20 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
     })).sort((left, right) => right.trigger_count - left.trigger_count
       || right.impression_count - left.impression_count
       || left.scene_l2.localeCompare(right.scene_l2, "zh-CN")),
+    suppressed_group_count: [...groups.values()]
+      .filter(row => row.users.size < minimumSubjects).length,
   };
 }
 
-export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now()) {
+export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), options = {}) {
   const window = rangeWindow(range, now);
+  const minimumSubjects = options.minimumGroupSubjects ?? MIN_PRIVACY_GROUP_SUBJECTS;
   const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
   const groups = new Map();
-  for (const event of filteredBehaviorEvents(behaviorEvents, window, "model_used")) {
+  const windowEvents = clipDailySubjectContributions(
+    filteredBehaviorEvents(behaviorEvents, window),
+  ).events;
+  for (const event of windowEvents.filter(event => event.event_name === "model_used")) {
     const modelId = boundedText(event.model_key || event.model_id || event.model_name, 128);
     if (!modelId) continue;
     const providerKey = boundedText(event.provider_key, 64) || "unknown";
@@ -1014,7 +1097,9 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
   return {
     generated_at: now,
     range: window.range,
+    minimum_group_subjects: minimumSubjects,
     rows: [...groups.values()]
+      .filter((row) => row.users.size >= minimumSubjects)
       .map((row) => ({
         ...row,
         user_count: row.users.size,
@@ -1027,6 +1112,8 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
       .sort((a, b) => b.user_count - a.user_count || b.use_count - a.use_count
         || String(a.model_key).localeCompare(String(b.model_key), "zh-CN"))
       .slice(0, 50),
+    suppressed_group_count: [...groups.values()]
+      .filter(row => row.users.size < minimumSubjects).length,
   };
 }
 
@@ -1076,18 +1163,28 @@ function loadJson(path, fallback) {
 }
 
 function atomicWriteJson(path, value) {
-  const temporary = `${path}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const temporary = `${path}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: "wx" });
   renameSync(temporary, path);
+  enforcePrivateFile(path);
 }
 
 function atomicWriteJsonLines(path, values) {
-  const temporary = `${path}.tmp`;
+  const temporary = `${path}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
   const content = values.length
     ? `${values.map((value) => JSON.stringify(value)).join("\n")}\n`
     : "";
-  writeFileSync(temporary, content, { mode: 0o600 });
+  writeFileSync(temporary, content, { mode: 0o600, flag: "wx" });
   renameSync(temporary, path);
+  enforcePrivateFile(path);
+}
+
+function enforcePrivateFile(path) {
+  const metadata = lstatSync(path);
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw new Error(`unsafe telemetry storage file: ${path}`);
+  }
+  chmodSync(path, 0o600);
 }
 
 export class TelemetryStore {
@@ -1098,7 +1195,13 @@ export class TelemetryStore {
     this.eventsPath = join(dataDir, "usage-events.jsonl");
     this.behaviorEventsPath = join(dataDir, "behavior-events.jsonl");
     this.behaviorPipelinePath = join(dataDir, "behavior-pipeline.jsonl");
+    this.deletionTombstonesPath = join(dataDir, "behavior-deletion-tombstones.json");
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+    const dataDirectory = lstatSync(dataDir);
+    if (dataDirectory.isSymbolicLink() || !dataDirectory.isDirectory()) {
+      throw new Error(`unsafe telemetry data directory: ${dataDir}`);
+    }
+    chmodSync(dataDir, 0o700);
     this.devices = new Map();
     this.devicesByHardwareHash = new Map();
     this.events = [];
@@ -1106,6 +1209,7 @@ export class TelemetryStore {
     this.behaviorEvents = [];
     this.behaviorEventIds = new Set();
     this.behaviorPipelineEvents = [];
+    this.deletionTombstones = [];
     this.saveTimer = null;
     this.lastEventCompactionAt = 0;
     this.eventRateBuckets = new Map();
@@ -1117,8 +1221,8 @@ export class TelemetryStore {
     this.eventRetentionMs = boundedInteger(
       options.eventRetentionMs,
       DEFAULT_EVENT_RETENTION_MS,
-      30 * DAY_MS,
-      366 * DAY_MS,
+      DAY_MS,
+      DEFAULT_EVENT_RETENTION_MS,
     );
     this.eventRatePerMinute = boundedInteger(
       options.eventRatePerMinute,
@@ -1133,9 +1237,16 @@ export class TelemetryStore {
       1_000_000,
     );
 
+    this.loadDeletionTombstones();
+    const deletedSubjects = new Set(this.deletionTombstones.map((record) => record.subject_hash));
     const saved = loadJson(this.devicesPath, { devices: [] });
+    let restoredDeletedDevice = false;
     for (const device of Array.isArray(saved.devices) ? saved.devices : []) {
       if (!device?.device_id || !device?.hardware_hash || !device?.device_token) continue;
+      if (deletedSubjects.has(this.deletionSubjectHash(device.device_id))) {
+        restoredDeletedDevice = true;
+        continue;
+      }
       const normalized = {
         ...device,
         turns: 0,
@@ -1149,6 +1260,104 @@ export class TelemetryStore {
     this.loadEvents();
     this.loadBehaviorEvents();
     this.loadBehaviorPipelineEvents();
+    const recoveredDeletion = this.deletionTombstones.some((record) => record.status !== "completed");
+    if (recoveredDeletion) {
+      const completedAt = Date.now();
+      for (const record of this.deletionTombstones) {
+        if (record.status !== "completed") {
+          record.status = "completed";
+          record.completed_at = completedAt;
+        }
+      }
+      this.saveDeletionTombstones();
+    }
+    if (restoredDeletedDevice) this.saveNow();
+    this.enforcePrivateStoragePermissions();
+  }
+
+  deletionSubjectHash(deviceId) {
+    return crypto.createHmac("sha256", this.pepper)
+      .update(`deletion-subject:${boundedText(deviceId, 96)}`)
+      .digest("hex");
+  }
+
+  deletionTokenHash(token) {
+    return crypto.createHmac("sha256", this.pepper)
+      .update(`deletion-token:${boundedText(token, 256)}`)
+      .digest("hex");
+  }
+
+  loadDeletionTombstones(now = Date.now()) {
+    const saved = loadJson(this.deletionTombstonesPath, { records: [] });
+    this.deletionTombstones = (Array.isArray(saved.records) ? saved.records : [])
+      .filter((record) => record?.deletion_request_id
+        && record?.subject_hash
+        && record?.token_hash
+        && Number(record.tombstone_expires_at) > now);
+    if (existsSync(this.deletionTombstonesPath)
+      && this.deletionTombstones.length !== (saved.records || []).length) {
+      this.saveDeletionTombstones();
+    }
+  }
+
+  saveDeletionTombstones() {
+    atomicWriteJson(this.deletionTombstonesPath, {
+      version: 1,
+      records: this.deletionTombstones,
+    });
+  }
+
+  enforcePrivateStoragePermissions() {
+    chmodSync(this.dataDir, 0o700);
+    for (const path of [
+      this.devicesPath,
+      this.eventsPath,
+      this.behaviorEventsPath,
+      this.behaviorPipelinePath,
+      this.deletionTombstonesPath,
+    ]) {
+      if (existsSync(path)) enforcePrivateFile(path);
+    }
+  }
+
+  subjectWasDeleted(deviceId) {
+    const subjectHash = this.deletionSubjectHash(deviceId);
+    return this.deletionTombstones.some((record) => record.subject_hash === subjectHash);
+  }
+
+  publicDeletionResponse(record) {
+    return {
+      request_id: record.request_id,
+      deletion_request_id: record.deletion_request_id,
+      status: record.status,
+      accepted_at: record.accepted_at,
+      completed_at: record.completed_at || null,
+    };
+  }
+
+  priorDeletionResponse(requestId, token, now = Date.now()) {
+    const tokenHash = this.deletionTokenHash(token);
+    const record = this.deletionTombstones.find((candidate) => (
+      candidate.request_id === boundedText(requestId, 128)
+        && safeEqual(candidate.token_hash, tokenHash)
+        && Number(candidate.result_expires_at) > now
+        && Number(candidate.tombstone_expires_at) > now
+    ));
+    return record ? this.publicDeletionResponse(record) : null;
+  }
+
+  deletionStatus(deletionRequestId, token, now = Date.now()) {
+    const tokenHash = this.deletionTokenHash(token);
+    const record = this.deletionTombstones.find((candidate) => (
+      candidate.deletion_request_id === boundedText(deletionRequestId, 128)
+        && safeEqual(candidate.token_hash, tokenHash)
+        && Number(candidate.tombstone_expires_at) > now
+    ));
+    if (!record) throw new TelemetryHttpError(404, "deletion_request_not_found");
+    if (Number(record.result_expires_at) <= now) {
+      throw new TelemetryHttpError(410, "deletion_result_expired");
+    }
+    return this.publicDeletionResponse(record);
   }
 
   loadEvents() {
@@ -1164,7 +1373,7 @@ export class TelemetryStore {
           continue;
         }
         const device = this.devices.get(event.device_id);
-        if (!device) {
+        if (!device || this.subjectWasDeleted(event.device_id)) {
           rewriteNeeded = true;
           continue;
         }
@@ -1188,6 +1397,7 @@ export class TelemetryStore {
       try {
         const event = JSON.parse(line);
         if (!event.event_id || this.behaviorEventIds.has(event.event_id)
+          || this.subjectWasDeleted(event.device_id)
           || !STORED_BEHAVIOR_EVENT_NAMES.has(event.event_name)) {
           rewriteNeeded = true;
           continue;
@@ -1355,7 +1565,17 @@ export class TelemetryStore {
     const usageChanged = this.compactEvents(now);
     this.compactBehaviorEvents(now);
     this.compactBehaviorPipelineEvents(now);
+    this.compactDeletionTombstones(now);
     return usageChanged;
+  }
+
+  compactDeletionTombstones(now = Date.now()) {
+    const retained = this.deletionTombstones
+      .filter((record) => Number(record.tombstone_expires_at) > now);
+    if (retained.length === this.deletionTombstones.length) return false;
+    this.deletionTombstones = retained;
+    this.saveDeletionTombstones();
+    return true;
   }
 
   compactBehaviorEvents(now = Date.now(), force = false) {
@@ -1420,7 +1640,9 @@ export class TelemetryStore {
       accepted.push(event);
     }
     if (accepted.length) {
+      if (existsSync(this.eventsPath)) enforcePrivateFile(this.eventsPath);
       appendFileSync(this.eventsPath, accepted.map((event) => JSON.stringify(event)).join("\n") + "\n", { mode: 0o600 });
+      enforcePrivateFile(this.eventsPath);
       for (const event of accepted) {
         this.eventIds.add(event.event_id);
         this.events.push(event);
@@ -1462,6 +1684,14 @@ export class TelemetryStore {
     const batchEventIds = new Set();
     for (const raw of inputEvents.slice(0, MAX_BEHAVIOR_EVENTS_PER_BATCH)) {
       const eventId = boundedText(raw?.event_id, 96);
+      if (raw?.account_subject_id !== undefined) {
+        response.results.push({
+          event_id: eventId,
+          status: "rejected",
+          reason_code: "invalid_identity_claim",
+        });
+        continue;
+      }
       const validation = validateBehaviorEventShape(raw, {
         now,
         retentionMs: this.eventRetentionMs,
@@ -1471,14 +1701,6 @@ export class TelemetryStore {
           event_id: eventId,
           status: "rejected",
           reason_code: validation.reason,
-        });
-        continue;
-      }
-      if (raw.account_subject_id !== undefined) {
-        response.results.push({
-          event_id: eventId,
-          status: "rejected",
-          reason_code: "invalid_identity_claim",
         });
         continue;
       }
@@ -1516,11 +1738,13 @@ export class TelemetryStore {
     }
     if (accepted.length) {
       try {
+        if (existsSync(this.behaviorEventsPath)) enforcePrivateFile(this.behaviorEventsPath);
         appendFileSync(
           this.behaviorEventsPath,
           `${accepted.map((event) => JSON.stringify(event)).join("\n")}\n`,
           { mode: 0o600 },
         );
+        enforcePrivateFile(this.behaviorEventsPath);
       } catch (error) {
         console.error("[telemetry] failed to persist behavior events:", error);
         for (const index of acceptedResultIndexes) {
@@ -1582,7 +1806,9 @@ export class TelemetryStore {
       if (Object.hasOwn(entry, result.status)) entry[result.status] += 1;
     }
     try {
+      if (existsSync(this.behaviorPipelinePath)) enforcePrivateFile(this.behaviorPipelinePath);
       appendFileSync(this.behaviorPipelinePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+      enforcePrivateFile(this.behaviorPipelinePath);
     } catch (error) {
       console.error("[telemetry] failed to persist behavior pipeline counters:", error);
       return;
@@ -1668,24 +1894,40 @@ export class TelemetryStore {
   deleteBehaviorData(device, input) {
     const requestId = boundedText(input?.request_id, 128);
     if (requestId.length < 12) throw new TelemetryHttpError(400, "invalid_request_id");
-    const prior = this.priorBehaviorControlResponse(device, requestId, "delete");
+    const prior = this.priorDeletionResponse(requestId, device.device_token);
     if (prior) return prior;
     const now = Date.now();
     if (device.behavior_collection?.status === "active") {
       device.behavior_collection.status = "ended";
       device.behavior_collection.ended_at = now;
     }
-    this.behaviorEvents = this.behaviorEvents.filter((event) => event.device_id !== device.device_id);
-    this.behaviorEventIds = new Set(this.behaviorEvents.map((event) => event.event_id));
-    atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
-    const response = {
+    const tombstone = {
       request_id: requestId,
       deletion_request_id: randomId("delete_", 18),
-      status: "completed",
+      subject_hash: this.deletionSubjectHash(device.device_id),
+      token_hash: this.deletionTokenHash(device.device_token),
+      status: "processing",
       accepted_at: now,
-      completed_at: now,
+      completed_at: null,
+      result_expires_at: now + DELETION_RESULT_RETENTION_MS,
+      tombstone_expires_at: now + DELETION_TOMBSTONE_RETENTION_MS,
     };
-    return this.rememberBehaviorControlRequest(device, requestId, "delete", response);
+    this.deletionTombstones.push(tombstone);
+    this.saveDeletionTombstones();
+    this.events = this.events.filter((event) => event.device_id !== device.device_id);
+    this.eventIds = new Set(this.events.map((event) => event.event_id));
+    this.behaviorEvents = this.behaviorEvents.filter((event) => event.device_id !== device.device_id);
+    this.behaviorEventIds = new Set(this.behaviorEvents.map((event) => event.event_id));
+    atomicWriteJsonLines(this.eventsPath, this.events);
+    atomicWriteJsonLines(this.behaviorEventsPath, this.behaviorEvents);
+    this.devices.delete(device.device_id);
+    this.devicesByHardwareHash.delete(device.hardware_hash);
+    this.rebuildUsageCounters();
+    this.saveNow();
+    tombstone.status = "completed";
+    tombstone.completed_at = Date.now();
+    this.saveDeletionTombstones();
+    return this.publicDeletionResponse(tombstone);
   }
 
   behaviorCollectionStatus(device) {
@@ -1744,6 +1986,7 @@ export function createTelemetryService(options = {}) {
   const enrollmentToken = String(process.env.PINVOU_TELEMETRY_ENROLLMENT_TOKEN || "");
   const devicePepper = String(process.env.PINVOU_TELEMETRY_DEVICE_PEPPER || "");
   const adminPassword = String(process.env.PINVOU_STATS_ADMIN_PASSWORD || "");
+  const behaviorAnalystPassword = String(process.env.PINVOU_BEHAVIOR_ANALYTICS_PASSWORD || "");
   const dataDir = process.env.PINVOU_TELEMETRY_DATA_DIR || "/var/lib/pinvou-telemetry";
   const enabled = enrollmentToken.length >= 24 && devicePepper.length >= 24 && adminPassword.length >= 12;
   const store = enabled ? new TelemetryStore(dataDir, devicePepper, {
@@ -1788,12 +2031,12 @@ export function createTelemetryService(options = {}) {
 
   function adminAuthorized(req) {
     const token = readCookies(req).pinvou_stats_session;
-    const expiresAt = token ? adminSessions.get(token) : null;
-    if (!expiresAt || expiresAt <= Date.now()) {
+    const session = token ? adminSessions.get(token) : null;
+    if (!session || session.expires_at <= Date.now()) {
       if (token) adminSessions.delete(token);
-      return false;
+      return null;
     }
-    return true;
+    return session;
   }
 
   function rateLimited(buckets, key, limit) {
@@ -1921,12 +2164,23 @@ export function createTelemetryService(options = {}) {
       }
       if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/deletion`) {
         const input = await readJson(req);
-        const device = store.authenticate(input.device_id, bearer(req));
+        const token = bearer(req);
+        const prior = store.priorDeletionResponse(input.request_id, token);
+        if (prior) {
+          json(res, 202, prior);
+          return true;
+        }
+        const device = store.authenticate(input.device_id, token);
         if (!device) {
           json(res, 401, { error: "invalid_device_token" });
           return true;
         }
         json(res, 202, store.deleteBehaviorData(device, input));
+        return true;
+      }
+      if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/behavior/deletion/status`) {
+        const params = new URL(req.url, "http://localhost").searchParams;
+        json(res, 200, store.deletionStatus(params.get("deletion_request_id"), bearer(req)));
         return true;
       }
       if (req.method === "GET" && (routePath === STATS_PREFIX || routePath === `${STATS_PREFIX}/`)) {
@@ -1939,13 +2193,17 @@ export function createTelemetryService(options = {}) {
           return true;
         }
         const input = await readJson(req);
-        if (!safeEqual(input.password, adminPassword)) {
+        const role = safeEqual(input.password, adminPassword)
+          ? "operations_admin"
+          : (behaviorAnalystPassword.length >= 12
+            && safeEqual(input.password, behaviorAnalystPassword) ? "behavior_analyst" : null);
+        if (!role) {
           json(res, 401, { error: "invalid_credentials" });
           return true;
         }
         const session = randomId("as_", 32);
-        adminSessions.set(session, Date.now() + ADMIN_SESSION_MS);
-        json(res, 200, { ok: true }, {
+        adminSessions.set(session, { expires_at: Date.now() + ADMIN_SESSION_MS, role });
+        json(res, 200, { ok: true, role }, {
           "set-cookie": `pinvou_stats_session=${encodeURIComponent(session)}; Path=${STATS_PREFIX}; Max-Age=${ADMIN_SESSION_MS / 1000}; HttpOnly; Secure; SameSite=Strict`,
         });
         return true;
@@ -1958,9 +2216,23 @@ export function createTelemetryService(options = {}) {
         });
         return true;
       }
-      if (routePath.startsWith(`${STATS_PREFIX}/api/`) && !adminAuthorized(req)) {
-        json(res, 401, { error: "unauthorized" });
+      if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/session`) {
+        const session = adminAuthorized(req);
+        json(res, session ? 200 : 401, session ? { role: session.role } : { error: "unauthorized" });
         return true;
+      }
+      if (routePath.startsWith(`${STATS_PREFIX}/api/`)) {
+        const session = adminAuthorized(req);
+        if (!session) {
+          json(res, 401, { error: "unauthorized" });
+          return true;
+        }
+        const behaviorRoute = routePath.startsWith(`${STATS_PREFIX}/api/behavior/`)
+          || routePath === `${STATS_PREFIX}/api/commercial/overview`;
+        if (session.role === "behavior_analyst" && !behaviorRoute) {
+          json(res, 403, { error: "forbidden" });
+          return true;
+        }
       }
       if (req.method === "GET" && routePath === `${STATS_PREFIX}/api/overview`) {
         json(res, 200, store.overview());

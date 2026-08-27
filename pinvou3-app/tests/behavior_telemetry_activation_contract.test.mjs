@@ -6,6 +6,7 @@ const rust = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry.
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
 const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
 const acpProviderForm = readFileSync(new URL('../src/features/settings/ProviderFormModal.jsx', import.meta.url), 'utf8');
+const schema = JSON.parse(readFileSync(new URL('../../docs/schemas/behavior-telemetry-v1.schema.json', import.meta.url), 'utf8'));
 
 test('activation cohort is persisted before its one-time event is enqueued', () => {
   assert.match(rust, /let emit_cohort = !state\.control\.cohort_started/);
@@ -30,4 +31,16 @@ test('provider setup and first task environment use the v1 lifecycle events', ()
   assert(acpProviderForm.includes("eventName: 'provider_setup_completed'"));
   assert(acpProviderForm.includes("eventName: 'provider_setup_failed'"));
   assert(!settingsBridge.includes('apiKey: trimmedKey'));
+});
+
+test('client privacy allowlist stays aligned with schema and excludes server identity', () => {
+  const allowlistBody = rust.match(/fn client_event_field_allowed[\s\S]*?\n}\n\nfn validate_client_event_fields/)?.[0] || '';
+  const actual = Array.from(allowlistBody.matchAll(/\|?\s*"([a-z0-9_]+)"/g), match => match[1])
+    .toSorted((left, right) => left.localeCompare(right));
+  const expected = schema['x-client-optional-fields'].toSorted((left, right) => left.localeCompare(right));
+  assert.deepEqual(actual, expected);
+  assert.ok(schema['x-server-injected-fields'].includes('account_subject_id'));
+  for (const forbidden of ['message', 'content', 'file_path', 'tool_arguments', 'raw_error']) {
+    assert.ok(!actual.includes(forbidden));
+  }
 });

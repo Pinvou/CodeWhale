@@ -340,7 +340,13 @@ pub(crate) fn create_secret_file(path: &Path) -> io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 /// Open a private append-only data file without introducing a world-readable
@@ -354,7 +360,13 @@ pub(crate) fn open_private_append_file(path: &Path) -> io::Result<std::fs::File>
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
 }
 
 #[derive(Clone)]
@@ -2380,6 +2392,38 @@ pub(crate) mod tests {
         assert!(leftover.is_empty(), "leftover files: {leftover:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_writers_create_and_repair_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!(
+            "pinvou3-private-writers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let append = dir.join("outbox.jsonl");
+        std::fs::write(&append, b"existing\n").unwrap();
+        std::fs::set_permissions(&append, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(open_private_append_file(&append).unwrap());
+        assert_eq!(
+            std::fs::metadata(&append).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let atomic = dir.join("state.json");
+        atomic_write_private(&atomic, b"private").unwrap();
+        assert_eq!(
+            std::fs::metadata(&atomic).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
