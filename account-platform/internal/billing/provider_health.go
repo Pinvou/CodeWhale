@@ -19,19 +19,20 @@ import (
 const paymentStopLossPolicyVersion = "payment-stop-loss/v1"
 
 type ProviderCallScope struct {
-	OrderID   uuid.UUID
-	ProductID string
-	SubjectID uuid.UUID
+	OrderID      uuid.UUID
+	ProductID    string
+	SubjectID    uuid.UUID
+	TrustedProbe bool
 }
 
 type providerAttempt struct {
-	ID, OrderID                       uuid.UUID
-	ProviderAttemptID                 string
-	ProviderID, ProviderVersion       string
-	Capability, Channel, Route        string
-	ProductID                         string
-	SubjectHash                       *string
-	CreatedAt                         time.Time
+	ID, OrderID                 uuid.UUID
+	ProviderAttemptID           string
+	ProviderID, ProviderVersion string
+	Capability, Channel, Route  string
+	ProductID                   string
+	SubjectHash                 *string
+	CreatedAt                   time.Time
 }
 
 func providerCallScope(order PaymentOrder) ProviderCallScope {
@@ -56,7 +57,7 @@ func (r *PostgresRepository) beginProviderAttempt(ctx context.Context, providerI
 	}
 	fingerprintSource := strings.Join([]string{providerID, providerVersion, capability, channel, route, scope.OrderID.String(), scope.ProductID, scope.SubjectID.String()}, "|")
 	fingerprint := sha256.Sum256([]byte(fingerprintSource))
-	_, err := r.pool.Exec(ctx, "INSERT INTO payment_provider_attempts(id,provider_attempt_id,request_fingerprint,provider_id,provider_version,capability,channel,route,logical_order_id,product_id,subject_hash,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9::uuid,'00000000-0000-0000-0000-000000000000'::uuid),NULLIF($10,''),$11,$12)", attempt.ID, attempt.ProviderAttemptID, hex.EncodeToString(fingerprint[:]), providerID, providerVersion, capability, channel, route, scope.OrderID, scope.ProductID, attempt.SubjectHash, now)
+	_, err := r.pool.Exec(ctx, "INSERT INTO payment_provider_attempts(id,provider_attempt_id,request_fingerprint,provider_id,provider_version,capability,channel,route,logical_order_id,product_id,subject_hash,trusted_probe,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,NULLIF($9::uuid,'00000000-0000-0000-0000-000000000000'::uuid),NULLIF($10,''),$11,$12,$13)", attempt.ID, attempt.ProviderAttemptID, hex.EncodeToString(fingerprint[:]), providerID, providerVersion, capability, channel, route, scope.OrderID, scope.ProductID, attempt.SubjectHash, scope.TrustedProbe, now)
 	return attempt, err
 }
 
@@ -79,7 +80,7 @@ func (r *PostgresRepository) finishProviderAttempt(ctx context.Context, attempt 
 	if command.RowsAffected() == 0 {
 		return nil
 	}
-	_, err = tx.Exec(ctx, "INSERT INTO payment_provider_health_observations(id,provider_attempt_id,provider_id,provider_version,capability,channel,route,logical_order_id,product_id,subject_hash,outcome,classification_rule_version,evidence_digest,received_at) SELECT $1,provider_attempt_id,provider_id,provider_version,capability,channel,route,logical_order_id,product_id,subject_hash,$2,'payment-adapter-outcome/v1',$3,$4 FROM payment_provider_attempts WHERE provider_attempt_id=$5 ON CONFLICT(provider_attempt_id) DO NOTHING", uuid.Must(uuid.NewV7()), outcome, hex.EncodeToString(digest[:]), now, attempt.ProviderAttemptID)
+	_, err = tx.Exec(ctx, "INSERT INTO payment_provider_health_observations(id,provider_attempt_id,provider_id,provider_version,capability,channel,route,logical_order_id,product_id,subject_hash,trusted_probe,outcome,classification_rule_version,evidence_digest,received_at) SELECT $1,provider_attempt_id,provider_id,provider_version,capability,channel,route,logical_order_id,product_id,subject_hash,trusted_probe,$2,'payment-adapter-outcome/v1',$3,$4 FROM payment_provider_attempts WHERE provider_attempt_id=$5 ON CONFLICT(provider_attempt_id) DO NOTHING", uuid.Must(uuid.NewV7()), outcome, hex.EncodeToString(digest[:]), now, attempt.ProviderAttemptID)
 	if err != nil {
 		return err
 	}

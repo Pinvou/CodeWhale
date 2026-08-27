@@ -6,12 +6,15 @@ import test from 'node:test';
 const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
-test('payment provider recovery is version-frozen and independently approved', async () => {
-  const [policy, accountMigration, billingMigration, recovery, consumer, service, admin, approvalUI] = await Promise.all([
+test('payment provider and product recovery are version-frozen and independently approved', async () => {
+  const [policy, accountMigration, productPolicyMigration, billingMigration, productBillingMigration, recovery, health, consumer, service, admin, approvalUI] = await Promise.all([
     read('internal/platform/approvalpolicy/registry.go'),
     read('migrations/account/000033_payment_provider_resume_policy.up.sql'),
+    read('migrations/account/000038_payment_product_resume_policy.up.sql'),
     read('migrations/billing/000040_payment_provider_resume_audit.up.sql'),
+    read('migrations/billing/000048_payment_product_resume_audit.up.sql'),
     read('internal/billing/provider_recovery.go'),
+    read('internal/billing/provider_health.go'),
     read('internal/billing/approval_consumer.go'),
     read('internal/billing/service.go'),
     read('contracts/openapi/admin.yaml'),
@@ -19,6 +22,7 @@ test('payment provider recovery is version-frozen and independently approved', a
   ]);
 
   assert.match(policy, /PAYMENT_PROVIDER_RESUME/);
+  assert.match(policy, /PAYMENT_PRODUCT_RESUME/);
   assert.match(policy, /SelfApprovalForbidden:\s+true/);
   assert.match(accountMigration, /APPROVAL_REQUIRED/);
   assert.match(accountMigration, /platform\.billing\.payment-controls\.resume\.request/);
@@ -26,16 +30,32 @@ test('payment provider recovery is version-frozen and independently approved', a
   assert.doesNotMatch(accountMigration, /PLATFORM_SUPER_ADMIN/);
   assert.match(billingMigration, /requester_user_id<>approver_user_id/);
   assert.match(billingMigration, /immutable/);
+  assert.match(productPolicyMigration, /PAYMENT_PRODUCT_RESUME/);
+  assert.match(productPolicyMigration, /observation_high_watermark/);
+  assert.match(productPolicyMigration, /evaluation_high_watermark/);
+  assert.match(productBillingMigration, /payment_product_resume_executions/);
+  assert.match(productBillingMigration, /immutable/);
   assert.match(recovery, /providerResumeVersions/);
+  assert.match(recovery, /productResumeVersions/);
   assert.match(recovery, /providerFailureMatchesOrder/);
-  assert.match(recovery, /review\.severity IN \('P0','P1'\)/);
+	assert.match(recovery, /review\.severity IN \('P0','P1'\)/);
   assert.match(recovery, /payment_provider_failure_confirmations/);
-  assert.match(recovery, /status='FROZEN'/);
+	assert.match(recovery, /mapping\.status='FROZEN'/);
+  assert.match(recovery, /payment_observation_gaps/);
+  assert.match(recovery, /trusted_probe/);
+  assert.match(recovery, /executeProductResume/);
+  assert.match(recovery, /UPDATE payment_provider_controls SET new_orders_enabled=TRUE/);
+  assert.match(recovery, /UPDATE payment_product_controls SET new_orders_enabled=TRUE/);
+  assert.doesNotMatch(recovery, /for productID := range expected\.ProductControlVersions/);
+  assert.match(health, /TrustedProbe/);
   assert.match(recovery, /billing\.payment-provider\.resumed\.v1/);
+  assert.match(recovery, /billing\.payment-product\.resumed\.v1/);
   assert.match(consumer, /executeApprovedProviderResumeCommand/);
+  assert.match(consumer, /executeApprovedProductResumeCommand/);
   assert.match(service, /payment-provider-controls/);
   assert.match(admin, /getPaymentProviderControls/);
-  assert.match(approvalUI, /createProviderResume/);
+  assert.match(approvalUI, /createControlResume/);
   assert.match(approvalUI, /resume_draft/);
-  assert.match(approvalUI, /PAYMENT_PROVIDER_RESUME|draftInput/);
+  assert.match(approvalUI, /productResumeForms/);
+  assert.match(approvalUI, /draftInput/);
 });

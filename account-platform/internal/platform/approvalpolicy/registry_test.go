@@ -33,6 +33,18 @@ func TestOnlyImplementedFinancialExecutorsAcceptRequests(t *testing.T) {
 	if !Executable("PAYMENT_PROVIDER_RESUME") {
 		t.Fatal("payment provider resume executor must be available")
 	}
+	if !Executable("PAYMENT_PRODUCT_RESUME") {
+		t.Fatal("payment product resume executor must be available")
+	}
+}
+
+func TestPaymentControlRecoveryPoliciesRequireIndependentApproval(t *testing.T) {
+	for _, commandType := range []string{"PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME"} {
+		policy, err := Lookup(commandType)
+		if err != nil || policy.Mode != ApprovalRequired || policy.ApprovalCount != 1 || !policy.SelfApprovalForbidden || policy.ExecutorIdentity != "billing-command-executor" {
+			t.Fatalf("unsafe payment control recovery policy for %s: %#v %v", commandType, policy, err)
+		}
+	}
 }
 
 func TestNormalRefundAndOrganizationDeleteAreAuditOnly(t *testing.T) {

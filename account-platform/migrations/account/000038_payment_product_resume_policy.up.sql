@@ -1,0 +1,6 @@
+INSERT INTO approval_command_policies(command_type,policy_version,approval_mode,requester_permission,approver_permission,risk_class,approval_count,self_approval_forbidden,snapshot_schema_version,critical_resource_fields,expires_after,execution_window,executor_identity,created_at)
+VALUES('PAYMENT_PRODUCT_RESUME',1,'APPROVAL_REQUIRED','platform.billing.payment-controls.resume.request','platform.billing.payment-controls.resume.approve','FINANCIAL_FACT_CHANGE',1,true,1,'["provider_id","provider_version","product_id","provider_control_version","product_control_version","catalog_item_id","catalog_version","admission_version","mapping_id","mapping_version","probe_order_id","policy_version","observation_high_watermark","evaluation_high_watermark"]',INTERVAL '24 hours',INTERVAL '5 minutes','billing-command-executor',now());
+
+UPDATE approval_command_policies
+   SET critical_resource_fields='["provider_id","provider_version","provider_control_version","probe_order_id","policy_version","observation_high_watermark","evaluation_high_watermark","active_mapping_set_fingerprint"]'
+ WHERE command_type='PAYMENT_PROVIDER_RESUME' AND policy_version=1;

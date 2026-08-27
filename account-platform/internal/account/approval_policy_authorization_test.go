@@ -9,24 +9,26 @@ import (
 )
 
 func TestApprovalPolicyForItemUsesFrozenPermissions(t *testing.T) {
-	policy, err := approvalpolicy.Lookup("PAYMENT_PROVIDER_RESUME")
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := ApprovalRequest{
-		CommandType:         policy.CommandType,
-		PolicyVersion:       approvalpolicy.Version,
-		ApprovalMode:        string(policy.Mode),
-		RequesterPermission: policy.RequesterPermission,
-		ApproverPermission:  policy.ApproverPermission,
-	}
-	resolved, err := approvalPolicyForItem(item)
-	if err != nil || resolved.ApproverPermission != "platform.billing.payment-controls.resume.approve" {
-		t.Fatalf("expected provider-resume policy, got %#v, %v", resolved, err)
-	}
-	item.ApproverPermission = "platform.billing.repairs.approve"
-	if _, err := approvalPolicyForItem(item); !errors.Is(err, ErrApprovalInvalidated) {
-		t.Fatalf("modified frozen permission must invalidate approval, got %v", err)
+	for _, commandType := range []string{"PAYMENT_PROVIDER_RESUME", "PAYMENT_PRODUCT_RESUME"} {
+		policy, err := approvalpolicy.Lookup(commandType)
+		if err != nil {
+			t.Fatal(err)
+		}
+		item := ApprovalRequest{
+			CommandType:         policy.CommandType,
+			PolicyVersion:       approvalpolicy.Version,
+			ApprovalMode:        string(policy.Mode),
+			RequesterPermission: policy.RequesterPermission,
+			ApproverPermission:  policy.ApproverPermission,
+		}
+		resolved, err := approvalPolicyForItem(item)
+		if err != nil || resolved.ApproverPermission != "platform.billing.payment-controls.resume.approve" {
+			t.Fatalf("expected payment-control recovery policy, got %#v, %v", resolved, err)
+		}
+		item.ApproverPermission = "platform.billing.repairs.approve"
+		if _, err := approvalPolicyForItem(item); !errors.Is(err, ErrApprovalInvalidated) {
+			t.Fatalf("modified frozen permission must invalidate approval, got %v", err)
+		}
 	}
 }
 

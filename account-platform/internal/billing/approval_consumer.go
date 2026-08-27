@@ -40,6 +40,13 @@ func (consumer *ApprovalCommandConsumer) Handle(ctx context.Context, event event
 		}
 		return err
 	}
+	if payload.CommandType == "PAYMENT_PRODUCT_RESUME" && payload.TargetResourceType == "PAYMENT_PRODUCT_CONTROL" {
+		_, err := consumer.service.executeApprovedProductResumeCommand(ctx, payload.ApprovalRequestID, event.ID.String(), payload.TargetResourceID, payload.CriticalResourceVersions)
+		if errors.Is(err, ErrApprovalSnapshotMismatch) || errors.Is(err, ErrApprovalNotExecutable) {
+			return nil
+		}
+		return err
+	}
 	if payload.CommandType != "WALLET_ADJUSTMENT" || payload.TargetResourceType != "MANUAL_ADJUSTMENT" {
 		return errors.New("unsupported or invalid approved command")
 	}

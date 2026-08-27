@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 379 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 351`、`部分实现 31`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `385` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55–PAY-57、NFR-54 已由 APT-091–APT-092 收敛；PAY-58、ADM-53 当前由 APT-093 实现。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 353`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `385` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55–PAY-58、ADM-53、NFR-54 已由 APT-091–APT-093 收敛。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -273,7 +273,7 @@
 | PAY-55 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-TIERED-STOP-LOSS | NOT_DEPLOYED | 单案件评估不再写 Provider 控制；只有受信新单异常类型可由逾期 SLA 关闭目标商品，独立分钟评估不受通知节流影响。 |
 | PAY-56 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-HEALTH | NOT_DEPLOYED | 新单关键分区按去重连续失败、失败率、路径多样性和跨商品共同故障持久评估；非关键动作与业务拒绝不触发 Provider 新单控制。 |
 | PAY-57 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-HEALTH | NOT_DEPLOYED | 调用前意图、事务外调用、调用后观察和 Outbox 已分阶段持久化；尝试、gap、窗口成员、策略及阈值穿越均有不可变证据。 |
-| PAY-58 | 部分实现 | AUDIT_HEAD | PAYMENT-PROVIDER-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 现有恢复命令会同时打开 Provider 和商品，历史控制也未分级迁移，待 APT-093 拆分恢复。 |
+| PAY-58 | 已实现 | DOC_CURRENT | PAYMENT-TIERED-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | Provider 与商品使用独立审批命令和执行审计；Provider 恢复不改商品，商品恢复不改 Provider/其他商品，且 Provider 暂停、观察缺口、开放阻断案件、探测失败或冻结版本变化均失败关闭。 |
 | UI-02 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 桌面区分注册、自动登录与钱包初始化，展示 `PROVISIONING`/`REPAIR_REQUIRED`，初始化期间不请求余额、充值或平台模型 |
 | UI-13 | 已实现 | DOC_CURRENT | DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 三语用量页可停止当前客户端交付，并分别展示执行和结算状态；UNSUPPORTED 明示后台继续结束并按可信实际用量结算，不显示为即时免费 |
 | UI-14 | 已实现 | DOC_CURRENT | ACCOUNT-CLOSURE-SAGA; UI-LINT; ACCOUNT-PORTAL-BUILD | NOT_DEPLOYED | 个人中心提供明确确认、阶段/SLA、脱敏阻断分类和用户动作；轮询持久状态，不展示 Provider 响应、内部资源 ID 或其他用户信息 |
@@ -320,7 +320,7 @@
 | ADM-50 | 已实现 | AUDIT_HEAD | AUTHORIZATION-COVERAGE; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | Account 新增五个原子商品权限并按审定角色真值表授予；Billing 路由逐项要求对应权限，角色名和定价宽权限不能替代。 |
 | ADM-51 | 已实现 | AUDIT_HEAD | COMMAND-POLICY; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 添加、验证/撤销、上架、下架和删除均登记 AUDIT_ONLY 策略，命令记录绑定操作者、原因、幂等指纹和前后版本。 |
 | ADM-52 | 已实现 | AUDIT_HEAD | OPENAPI-LINT; PORTAL-PROXY; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | Billing 提供列表、添加、验证/重试/撤销、上架、下架和删除接口；OpenAPI 与 Portal 只开放精确方法和 UUID 路径。 |
-| ADM-53 | 部分实现 | AUDIT_HEAD | PAYMENT-PROVIDER-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 现有后台可读 Provider/商品控制，但缺分层评估证据、观察缺口及相互独立的恢复草稿，待 APT-093。 |
+| ADM-53 | 已实现 | DOC_CURRENT | PAYMENT-TIERED-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 后台控制接口返回 Provider/商品层级、策略与评估窗口指标、观察缺口和控制版本，并只在当前层满足条件时分别生成 Provider 或单商品恢复草稿。 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
 | NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |

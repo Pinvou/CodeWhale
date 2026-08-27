@@ -37,7 +37,7 @@ type Policy struct {
 var ErrPolicyNotRegistered = errors.New("management command policy is not registered")
 
 var policies = buildPolicies()
-var executableApprovalCommands = map[string]struct{}{"WALLET_ADJUSTMENT": {}, "PAYMENT_PROVIDER_RESUME": {}}
+var executableApprovalCommands = map[string]struct{}{"WALLET_ADJUSTMENT": {}, "PAYMENT_PROVIDER_RESUME": {}, "PAYMENT_PRODUCT_RESUME": {}}
 
 func buildPolicies() map[string]Policy {
 	result := map[string]Policy{}
@@ -59,7 +59,14 @@ func buildPolicies() map[string]Policy {
 		CommandType: "PAYMENT_PROVIDER_RESUME", Mode: ApprovalRequired,
 		RequesterPermission: "platform.billing.payment-controls.resume.request", ApproverPermission: "platform.billing.payment-controls.resume.approve",
 		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
-		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "provider_control_version", "product_control_versions", "probe_order_id", "policy_version"},
+		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "provider_control_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark", "active_mapping_set_fingerprint"},
+		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
+	}
+	result["PAYMENT_PRODUCT_RESUME"] = Policy{
+		CommandType: "PAYMENT_PRODUCT_RESUME", Mode: ApprovalRequired,
+		RequesterPermission: "platform.billing.payment-controls.resume.request", ApproverPermission: "platform.billing.payment-controls.resume.approve",
+		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
+		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "product_id", "provider_control_version", "product_control_version", "catalog_item_id", "catalog_version", "admission_version", "mapping_id", "mapping_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
 	auditCommands := map[string]string{

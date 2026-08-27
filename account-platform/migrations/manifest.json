@@ -372,6 +372,16 @@
         "file": "000037_recharge_product_permissions.up.sql",
         "version": 37,
         "sha256": "b4cda6b802a541f292414f0770de3ff781687179e2b766f998ebe1a2a85d4d53"
+      },
+      {
+        "file": "000038_payment_product_resume_policy.down.sql",
+        "version": 38,
+        "sha256": "055a89da5f037fabb18e88f673485da2b7bcb241d64304c0015b452bb005bc7a"
+      },
+      {
+        "file": "000038_payment_product_resume_policy.up.sql",
+        "version": 38,
+        "sha256": "c8d3fb3042c2369fc8b3b911dd15cb5fb1debedb05c26eebd6dd7b98df05ab49"
       }
     ],
     "billing": [
@@ -834,6 +844,16 @@
         "file": "000047_payment_tiered_stop_loss.up.sql",
         "version": 47,
         "sha256": "fae45c3b61cddd7aad9f12abb03d124d8b9278f2b0ac5aec85f5f4f9a36d5aa4"
+      },
+      {
+        "file": "000048_payment_product_resume_audit.down.sql",
+        "version": 48,
+        "sha256": "3836378d5c7adf31ec8778b521a9b0cc5016c69d45aaed45baabf64ca85afa9c"
+      },
+      {
+        "file": "000048_payment_product_resume_audit.up.sql",
+        "version": 48,
+        "sha256": "db18a1f67b85785014828c331a91e0e2f546e2b1f569d61c26a31e3aa0ca9a6c"
       }
     ],
     "payment-simulator": [

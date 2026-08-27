@@ -799,10 +799,10 @@ paths:
   /billing/admin/v1/payment-provider-controls:
     get:
       operationId: getPaymentProviderControls
-      summary: Inspect Provider and product new-order controls and obtain a version-frozen recovery draft
+      summary: Inspect tiered stop-loss evidence and obtain independent, version-frozen Provider or product recovery drafts
       responses:
         "200":
-          description: Current payment control state; resume_draft is present only when a controlled recovery can be requested
+          description: Current Provider/product controls, trigger metrics, policy/evaluation versions and observation gaps. Top-level resume_draft only resumes the Provider; each paused product has its own resume_draft and neither command opens the other layer.
           content: { application/json: { schema: { type: object, additionalProperties: true } } }
         "403": { $ref: "#/components/responses/Error" }
         "503": { $ref: "#/components/responses/Error" }
