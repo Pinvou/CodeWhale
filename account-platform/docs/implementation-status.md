@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 379 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 353`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `385` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55–PAY-58、ADM-53、NFR-54 已由 APT-091–APT-093 收敛。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 353`、`部分实现 29`、`未实现 6`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `390` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55–PAY-58、ADM-53、NFR-54 已由 APT-091–APT-093 收敛。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。UI-28～UI-32 已完成需求独立复审，当前分别由 APT-094～APT-098 排队实施。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -36,6 +36,7 @@
 | `PERSONAL-ACCOUNT-AUTHORIZATION` | 本人资料、授权上下文、组织列表、资料变更、上下文切换、注销和邀请 Account 路由逐项绑定个人原子权限，并保持 OIDC 主体唯一目标 | Account Go 测试、OpenAPI 403 契约、路由权限矩阵和生命周期失败关闭合同通过；数据库撤权运行级验证待部署 |
 | `BILLING-SCOPE-AUTHORIZATION` | 个人余额、权益包、订单与充值管理按 `personal.*` 权限和个人上下文失败关闭；组织购买、余额、权益及额度授予按显式组织目标与 `org.*` 权限实时决定 | Token/Portal Go 测试、显式组织目标和个人/组织不可互借权限用例、OpenAPI 及全量合同通过；数据库撤权和真实组织钱包联调待部署 |
 | `PERMISSION-DRIVEN-UI` | 桌面账号弹层、Web 个人中心和平台后台直接消费 Account 权威权限集合及个人/平台/组织独立授权版本；入口、只读态和操作按钮按精确权限决定，版本变化触发失效刷新，退出及注销进度保持可达 | 权限 UI 合同、Portal/桌面版本头传播、三语文案、Portal Go 测试、前端 lint/构建及架构守卫通过；真实撤权推送时延和浏览器/桌面交互待部署验证 |
+| `ADMIN-PORTAL-UI-REVIEW` | 管理后台改版只调整展示、交互与验收，现有功能需求、API、权限、治理和状态机保持不变；UI-28～UI-32 拥有独立交付边界 | 角色 A 与角色 B 交替完成三轮独立复审，最终无 P0/P1；正式实现与运行验证分别由 APT-094～APT-098 收敛 |
 | `AUTHORIZATION-COVERAGE-GATE` | 自动发现生产 Go 源码中的 HTTP 路由、后台任务、事件 Consumer/Relay 及全部 CLI，并要求稳定个人/平台/组织权限、精确 `internal.*` 权限或专用公开协议策略逐项分类 | 当前 260 个 HTTP 路由、21 个任务、3 个事件入口和 13 个 CLI 全部登记；删除登记、未知权限、作用域错配、陈旧项和新增未分类入口的负向合同通过，统一 verify 与正式客户端发布门禁均执行该检查 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
 | `ACCOUNT-DOMAIN-UAT-20260825` | 账号独立域名、Portal 根入口、精确支付回调路由、受信 TLS、HTTP 跳转、服务健康和回调客户端授权 | `account.pinvou.com` 已解析到公网入口；Let's Encrypt 证书有效至 2026-11-23；HTTP 以 `308` 跳转 HTTPS，Portal 根入口返回 `200` 且旧 `/account.html` 返回 `404`，两个未授权回调入口返回 `401`，受控 Basic 凭据换取短期 Bearer Token 返回 `200`；Billing 运行 `1efb79d6`、Portal 运行 `bc5683ee`。真实新华三通知报文、重复/乱序和履约结果仍待商城联合验收 |
@@ -363,6 +364,11 @@
 | UI-25 | 已实现 | AUDIT_HEAD | ROLE-BINDING-LIFECYCLE; UI-BUILD | NOT_DEPLOYED | 普通个人中心不再挂载角色授权组件、加载对应制品或请求本人角色绑定；后台角色定义、授权与撤销界面及服务端权限边界保持不变。 |
 | UI-26 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 默认按到期时间展示最多五个有效包及安全进度和汇总；主页面采用无整体边框、无圆角、只保留条目分隔线的扁平列表；全量列表包含历史状态，详情弹窗保留组成、来源、订单及退款说明并支持键盘关闭。 |
 | UI-27 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 成功订单按付款时间倒序展示八列桌面摘要，中宽隐藏次要列、移动端使用卡片；组合支付/履约状态、时长推导、完整订单号和详情弹窗均可访问。 |
+| UI-28 | 未实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW | NOT_DEPLOYED | UI/UX 需求已通过独立复审；现有后台仍是八项平铺导航，尚未接入分组路由、统一共享状态组件及完整响应式/无障碍壳层。 |
+| UI-29 | 未实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW | NOT_DEPLOYED | 依赖 UI-28；现有用户、组织、角色绑定和修复模块功能可用，但布局与交互尚未按批准设计统一。 |
+| UI-30 | 未实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW | NOT_DEPLOYED | 依赖 UI-28；现有财务及支付管理功能可用，但独立模块与主后台尚未形成统一页面层级和反馈体系。 |
+| UI-31 | 未实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW | NOT_DEPLOYED | 依赖 UI-28；现有 Token、系统和审计功能可用，但页面视觉、技术字段交互和只读运行手册尚未统一。 |
+| UI-32 | 未实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW | NOT_DEPLOYED | 依赖 UI-28～UI-31；尚未建立覆盖三语、WCAG 2.1 AA、响应式、真实异常状态和源码/制品一致性的无产品代码总验收。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
@@ -880,6 +886,11 @@
 | UI-25 | 普通个人中心角色信息收敛 | 已实现 | 普通个人中心已删除角色授权挂载点、制品和请求，不展示原始角色信息；后台角色治理保持可用。 |
 | UI-26 | 权益包渐进式展示 | 已实现 | 默认最多五条有效包摘要并汇总数量和余额，主页面去除重复资料卡及列表整体边框，只以横向分隔线区分条目；完整列表、历史状态、BASE/BONUS 组成和支付关联进入可访问详情弹窗。 |
 | UI-27 | 成功订单摘要与详情 | 已实现 | 仅成功订单按付款时间倒序展示响应式摘要；桌面八列、中宽精简、移动卡片，复杂支付、履约及发票字段进入可访问详情弹窗。 |
+| UI-28 | 统一管理后台壳层与共享基础组件 | 未实现 | 已完成 UI/UX 需求独立复审；现有后台仍是八项平铺导航，尚未接入分组路由、统一共享状态组件及完整响应式/无障碍壳层。 |
+| UI-29 | 身份、用户、角色与组织后台界面改版 | 未实现 | 依赖 UI-28；现有用户、组织、角色绑定和修复模块功能可用，但布局与交互尚未按批准设计统一。 |
+| UI-30 | 财务、支付、审批、定价与充值商品后台界面改版 | 未实现 | 依赖 UI-28；现有财务及支付管理功能可用，但独立模块与主后台尚未形成统一页面层级和反馈体系。 |
+| UI-31 | 模型、Token、系统与审计后台界面改版 | 未实现 | 依赖 UI-28；现有 Token、系统和审计功能可用，但页面视觉、技术字段交互和只读运行手册尚未统一。 |
+| UI-32 | 管理后台跨页面集成与发布验收 | 未实现 | 依赖 UI-28～UI-31；尚未建立覆盖三语、WCAG 2.1 AA、响应式、真实异常状态和源码/制品一致性的无产品代码总验收。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
 | ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |

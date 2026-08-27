@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>PINVOU Account OS - 管理后台交互原型</title>
+  <style>
+    :root {
+      --bg: #f4f6f9;
+      --surface: #ffffff;
+      --surface-soft: #f8f9fc;
+      --surface-strong: #eef1f6;
+      --text: #171a21;
+      --muted: #687083;
+      --faint: #9299a8;
+      --line: #e3e7ee;
+      --line-strong: #d5dae3;
+      --primary: #3159e8;
+      --primary-strong: #2447c8;
+      --primary-soft: #edf1ff;
+      --success: #16855b;
+      --success-soft: #e7f6ef;
+      --warning: #a86412;
+      --warning-soft: #fff4df;
+      --danger: #c33b46;
+      --danger-soft: #fff0f1;
+      --info: #216d9d;
+      --info-soft: #e9f5fb;
+      --shadow-sm: 0 1px 2px rgba(16, 24, 40, .04), 0 4px 12px rgba(16, 24, 40, .04);
+      --shadow-lg: 0 24px 64px rgba(21, 30, 52, .16);
+      --radius: 16px;
+      --radius-sm: 10px;
+      --sidebar: 272px;
+      --topbar: 72px;
+    }
+
+    [data-theme="dark"] {
+      --bg: #11141a;
+      --surface: #181c24;
+      --surface-soft: #1d222c;
+      --surface-strong: #252b36;
+      --text: #eef1f6;
+      --muted: #a9b0bd;
+      --faint: #7d8594;
+      --line: #2b313c;
+      --line-strong: #39414f;
+      --primary: #7592ff;
+      --primary-strong: #91a7ff;
+      --primary-soft: #242e56;
+      --success: #66d5a3;
+      --success-soft: #17392d;
+      --warning: #f0b65d;
+      --warning-soft: #3e301c;
+      --danger: #ff8992;
+      --danger-soft: #442329;
+      --info: #79c3ef;
+      --info-soft: #1b3342;
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, .2);
+      --shadow-lg: 0 24px 64px rgba(0, 0, 0, .44);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background: var(--bg);
+      font-family: 'PingFang SC', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button, [role="button"] { -webkit-tap-highlight-color: transparent; }
+    :focus-visible { outline: 3px solid color-mix(in srgb, var(--primary) 38%, transparent); outline-offset: 2px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+    .icon { width: 18px; height: 18px; display: inline-block; flex: 0 0 auto; stroke: currentColor; stroke-width: 1.8; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+
+    .app { min-height: 100vh; }
+    .sidebar {
+      position: fixed; inset: 0 auto 0 0; z-index: 40;
+      width: var(--sidebar); padding: 20px 16px 18px;
+      background: var(--surface); border-right: 1px solid var(--line);
+      display: flex; flex-direction: column; overflow: hidden;
+      transition: transform .22s ease;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; padding: 0 8px 18px; border-bottom: 1px solid var(--line); }
+    .brand-mark { width: 38px; height: 38px; border-radius: 12px; background: #11141a; color: white; display: grid; place-items: center; font-weight: 800; letter-spacing: -.04em; }
+    [data-theme="dark"] .brand-mark { background: #f6f7fb; color: #11141a; }
+    .brand-name { font-weight: 780; font-size: 15px; letter-spacing: .08em; }
+    .brand-sub { color: var(--muted); font-size: 11px; letter-spacing: .04em; }
+
+    .prototype-role { margin: 16px 4px 10px; padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
+    .prototype-role label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+    .role-select { width: 100%; border: 0; background: transparent; font-weight: 650; outline: 0; }
+    .role-note { margin-top: 5px; color: var(--faint); font-size: 10px; }
+
+    .nav { flex: 1; overflow-y: auto; padding: 4px; scrollbar-width: thin; }
+    .nav-group { margin: 12px 0 4px; }
+    .nav-label { padding: 7px 10px; color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .nav-item {
+      width: 100%; min-height: 42px; padding: 0 11px; border: 0; border-radius: 10px;
+      display: flex; align-items: center; gap: 10px; color: var(--muted); background: transparent;
+      cursor: pointer; text-align: left; transition: color .15s, background .15s;
+    }
+    .nav-item:hover { color: var(--text); background: var(--surface-soft); }
+    .nav-item.active { color: var(--primary); background: var(--primary-soft); font-weight: 680; }
+    .nav-item .nav-badge { margin-left: auto; min-width: 20px; padding: 1px 6px; border-radius: 999px; background: var(--surface-strong); color: var(--muted); font-size: 10px; text-align: center; }
+    .nav-item.active .nav-badge { background: var(--surface); color: var(--primary); }
+    .sidebar-footer { border-top: 1px solid var(--line); padding: 14px 8px 0; }
+    .session { display: flex; align-items: center; gap: 10px; }
+    .avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--primary-soft); color: var(--primary); font-weight: 760; }
+    .session strong { display: block; font-size: 13px; }
+    .session small { color: var(--muted); }
+
+    .topbar {
+      position: fixed; inset: 0 0 auto var(--sidebar); z-index: 30; height: var(--topbar);
+      padding: 0 clamp(18px, 3vw, 42px); background: color-mix(in srgb, var(--surface) 94%, transparent);
+      border-bottom: 1px solid var(--line); backdrop-filter: blur(18px);
+      display: flex; align-items: center; gap: 14px;
+    }
+    .mobile-menu { display: none; }
+    .crumb { min-width: 0; margin-right: auto; }
+    .crumb-top { color: var(--muted); font-size: 11px; }
+    .crumb-title { font-weight: 760; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .top-actions { display: flex; align-items: center; gap: 8px; }
+    .env-badge { padding: 6px 9px; border-radius: 8px; background: var(--warning-soft); color: var(--warning); font-size: 11px; font-weight: 700; letter-spacing: .05em; }
+
+    .icon-btn, .search-trigger {
+      border: 1px solid var(--line); background: var(--surface); color: var(--muted); cursor: pointer;
+      box-shadow: var(--shadow-sm); transition: border .15s, color .15s, transform .15s;
+    }
+    .icon-btn:hover, .search-trigger:hover { border-color: var(--line-strong); color: var(--text); }
+    .icon-btn:active, .search-trigger:active { transform: translateY(1px); }
+    .icon-btn { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; }
+    .search-trigger { width: min(300px, 25vw); height: 38px; border-radius: 10px; padding: 0 12px; display: flex; align-items: center; gap: 8px; text-align: left; }
+    .search-trigger span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .search-trigger kbd { margin-left: auto; padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--faint); font-size: 10px; background: var(--surface-soft); }
+
+    main { margin-left: var(--sidebar); padding: calc(var(--topbar) + 34px) clamp(20px, 4vw, 58px) 64px; min-height: 100vh; }
+    .page { max-width: 1480px; margin: 0 auto; animation: pageIn .18s ease both; }
+    @keyframes pageIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+    .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 26px; }
+    .eyebrow { color: var(--primary); font-size: 11px; font-weight: 760; letter-spacing: .14em; text-transform: uppercase; margin-bottom: 5px; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(28px, 3vw, 40px); letter-spacing: -.04em; line-height: 1.15; margin-bottom: 8px; }
+    h2 { font-size: 19px; letter-spacing: -.02em; margin-bottom: 5px; }
+    h3 { font-size: 15px; margin-bottom: 5px; }
+    .subtitle { color: var(--muted); margin: 0; max-width: 760px; }
+    .head-actions { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; justify-content: flex-end; }
+    .head-actions > .select { width: auto; min-width: 220px; }
+
+    .btn {
+      min-height: 38px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px;
+      background: var(--surface); color: var(--text); font-weight: 650; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px; transition: .15s;
+    }
+    .btn:hover { border-color: var(--line-strong); background: var(--surface-soft); }
+    .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .btn.primary:hover { background: var(--primary-strong); border-color: var(--primary-strong); }
+    .btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); }
+    .btn.danger:hover { background: var(--danger-soft); }
+    .btn.ghost { border-color: transparent; background: transparent; box-shadow: none; color: var(--muted); }
+    .btn.small { min-height: 31px; padding: 0 10px; border-radius: 8px; font-size: 12px; }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+    .grid { display: grid; gap: 16px; }
+    .grid.kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 18px; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
+    .card-pad { padding: 20px; }
+    .kpi-card { padding: 19px 20px; min-height: 138px; display: flex; flex-direction: column; }
+    .kpi-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .kpi-label { color: var(--muted); font-weight: 650; }
+    .kpi-icon { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--surface-soft); color: var(--primary); }
+    .kpi-value { margin-top: 18px; font-size: 28px; font-weight: 800; letter-spacing: -.04em; }
+    .kpi-foot { margin-top: auto; color: var(--muted); font-size: 12px; }
+    .trend-up { color: var(--success); font-weight: 700; }
+    .trend-warn { color: var(--warning); font-weight: 700; }
+
+    .section { margin-top: 18px; }
+    .section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px 13px; }
+    .section-head p { margin: 0; color: var(--muted); font-size: 12px; }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 14px 18px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: var(--surface-soft); }
+    .field { position: relative; }
+    .field .icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--faint); pointer-events: none; }
+    .input, .select, .textarea {
+      width: 100%; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); outline: 0;
+    }
+    .input, .select { height: 38px; padding: 0 11px; }
+    .field .input { padding-left: 36px; }
+    .textarea { min-height: 96px; padding: 10px 11px; resize: vertical; }
+    .input:focus, .select:focus, .textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent); }
+    .toolbar .field { min-width: 240px; flex: 1; max-width: 420px; }
+
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th { padding: 11px 16px; color: var(--muted); background: var(--surface-soft); font-size: 11px; font-weight: 700; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    td { padding: 14px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr { transition: background .12s; }
+    tbody tr:hover { background: color-mix(in srgb, var(--primary-soft) 40%, transparent); }
+    .row-title { font-weight: 690; }
+    .row-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .copyable { display: inline-flex; align-items: center; gap: 6px; }
+    .copy-btn { border: 0; padding: 2px; background: transparent; color: var(--faint); cursor: pointer; }
+    .copy-btn:hover { color: var(--primary); }
+    .actions { display: flex; gap: 7px; white-space: nowrap; }
+
+    .badge { display: inline-flex; align-items: center; gap: 6px; min-height: 24px; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+    .badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .badge.success { color: var(--success); background: var(--success-soft); }
+    .badge.warning { color: var(--warning); background: var(--warning-soft); }
+    .badge.danger { color: var(--danger); background: var(--danger-soft); }
+    .badge.info { color: var(--info); background: var(--info-soft); }
+    .badge.neutral { color: var(--muted); background: var(--surface-strong); }
+
+    .banner { margin-bottom: 16px; padding: 13px 15px; border-radius: 11px; border: 1px solid; display: flex; align-items: flex-start; gap: 10px; }
+    .banner.info { color: var(--info); border-color: color-mix(in srgb, var(--info) 24%, var(--line)); background: var(--info-soft); }
+    .banner.warning { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 24%, var(--line)); background: var(--warning-soft); }
+    .banner.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 24%, var(--line)); background: var(--danger-soft); }
+    .banner strong { display: block; margin-bottom: 2px; }
+    .banner p { margin: 0; color: inherit; opacity: .9; font-size: 12px; }
+
+    .quick-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 0 20px 20px; }
+    .quick {
+      min-height: 112px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft);
+      text-align: left; cursor: pointer; display: flex; flex-direction: column; transition: .16s;
+    }
+    .quick:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--primary) 38%, var(--line)); background: var(--primary-soft); }
+    .quick .icon { color: var(--primary); margin-bottom: 14px; }
+    .quick strong { font-size: 14px; }
+    .quick small { color: var(--muted); margin-top: 3px; }
+
+    .timeline { list-style: none; padding: 4px 0 0; margin: 0; }
+    .timeline li { position: relative; padding: 0 0 18px 26px; color: var(--muted); }
+    .timeline li::before { content: ''; position: absolute; left: 4px; top: 6px; width: 8px; height: 8px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
+    .timeline li::after { content: ''; position: absolute; left: 7px; top: 19px; bottom: 1px; width: 1px; background: var(--line); }
+    .timeline li:last-child::after { display: none; }
+    .timeline strong { display: block; color: var(--text); }
+    .timeline time { display: block; color: var(--faint); font-size: 11px; margin-top: 2px; }
+
+    .provider-card { padding: 18px; }
+    .provider-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+    .provider-meta { display: flex; gap: 22px; margin-top: 16px; padding-top: 15px; border-top: 1px solid var(--line); }
+    .provider-meta div { min-width: 110px; }
+    .provider-meta span { display: block; color: var(--muted); font-size: 11px; }
+    .provider-meta strong { display: block; margin-top: 4px; }
+
+    .approval-card { padding: 18px; display: flex; gap: 16px; align-items: flex-start; }
+    .risk { width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; background: var(--danger-soft); color: var(--danger); flex: 0 0 auto; }
+    .approval-content { flex: 1; min-width: 0; }
+    .approval-line { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; }
+    .approval-meta { margin-top: 8px; color: var(--muted); font-size: 12px; display: flex; gap: 18px; flex-wrap: wrap; }
+
+    .empty { padding: 48px 24px; text-align: center; color: var(--muted); }
+    .empty-icon { width: 48px; height: 48px; margin: 0 auto 12px; border-radius: 14px; display: grid; place-items: center; background: var(--surface-soft); color: var(--faint); }
+    .pagination { padding: 14px 18px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 12px; }
+    .pagination-controls { display: flex; gap: 6px; }
+
+    dialog { color: var(--text); background: var(--surface); border: 1px solid var(--line); padding: 0; box-shadow: var(--shadow-lg); }
+    dialog::backdrop { background: rgba(15, 20, 31, .48); backdrop-filter: blur(3px); }
+    .modal { width: min(620px, calc(100vw - 28px)); border-radius: 18px; }
+    .drawer { width: min(560px, 100vw); height: 100vh; max-height: none; margin: 0 0 0 auto; border-radius: 0; border-top: 0; border-right: 0; border-bottom: 0; }
+    .dialog-head { padding: 20px 22px 16px; border-bottom: 1px solid var(--line); display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+    .dialog-head h2 { margin: 0; }
+    .dialog-head p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .dialog-body { padding: 20px 22px; max-height: calc(100vh - 160px); overflow-y: auto; }
+    .dialog-foot { padding: 14px 22px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: flex-end; gap: 9px; background: var(--surface-soft); }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .form-row { margin-bottom: 15px; }
+    .form-row label { display: block; font-weight: 650; margin-bottom: 6px; }
+    .form-row small { display: block; color: var(--muted); margin-top: 5px; }
+    .kv { display: grid; grid-template-columns: 130px 1fr; gap: 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+    .kv dt, .kv dd { margin: 0; padding: 11px 13px; border-bottom: 1px solid var(--line); }
+    .kv dt { color: var(--muted); background: var(--surface-soft); }
+    .kv dd { min-width: 0; overflow-wrap: anywhere; }
+    .kv dt:last-of-type, .kv dd:last-of-type { border-bottom: 0; }
+    .check-line { display: flex; align-items: flex-start; gap: 9px; margin-top: 13px; }
+    .check-line input { margin-top: 3px; }
+
+    .palette { width: min(620px, calc(100vw - 28px)); border-radius: 16px; margin-top: 12vh; }
+    .palette-search { padding: 14px; border-bottom: 1px solid var(--line); }
+    .palette-search input { height: 44px; font-size: 15px; }
+    .palette-results { max-height: 410px; overflow: auto; padding: 8px; }
+    .palette-item { width: 100%; padding: 11px 12px; border: 0; border-radius: 9px; background: transparent; display: flex; align-items: center; gap: 10px; cursor: pointer; text-align: left; }
+    .palette-item:hover { background: var(--surface-soft); }
+    .palette-item small { margin-left: auto; color: var(--faint); }
+    .toast-region { position: fixed; right: 20px; bottom: 20px; z-index: 100; display: grid; gap: 8px; }
+    .toast { min-width: 280px; max-width: 420px; padding: 13px 15px; border-radius: 11px; background: #171a21; color: white; box-shadow: var(--shadow-lg); animation: toastIn .18s ease both; }
+    .toast strong { display: block; margin-bottom: 2px; }
+    .toast small { opacity: .72; }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } }
+    .sidebar-overlay { display: none; }
+
+    @media (max-width: 1180px) {
+      .grid.kpi { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .quick-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .search-trigger { width: 190px; }
+    }
+    @media (max-width: 900px) {
+      .sidebar { transform: translateX(-100%); box-shadow: var(--shadow-lg); }
+      .sidebar.open { transform: translateX(0); }
+      .sidebar-overlay { display: block; position: fixed; inset: 0; z-index: 35; background: rgba(15,20,31,.34); opacity: 0; visibility: hidden; transition: .2s; }
+      .sidebar-overlay.show { opacity: 1; visibility: visible; }
+      .topbar { left: 0; padding-inline: 16px; }
+      .mobile-menu { display: grid; }
+      main { margin-left: 0; padding-inline: 18px; }
+      .search-trigger { width: 38px; padding: 0; justify-content: center; }
+      .search-trigger span, .search-trigger kbd { display: none; }
+      .grid.two, .grid.three { grid-template-columns: 1fr; }
+      .page-head { align-items: flex-start; }
+    }
+    @media (max-width: 620px) {
+      main { padding-top: calc(var(--topbar) + 24px); padding-inline: 12px; }
+      .env-badge { display: none; }
+      .grid.kpi { grid-template-columns: 1fr; }
+      .kpi-card { min-height: 120px; }
+      .page-head { display: block; }
+      .head-actions { justify-content: flex-start; margin-top: 16px; }
+      .head-actions > .select { width: 100%; min-width: 0; }
+      .quick-grid { grid-template-columns: 1fr; }
+      .quick { min-height: 92px; }
+      .toolbar { align-items: stretch; }
+      .toolbar .field, .toolbar .select, .toolbar .btn { width: 100%; max-width: none; }
+      .form-grid { grid-template-columns: 1fr; }
+      .provider-top, .approval-card { flex-direction: column; }
+      .provider-meta { flex-direction: column; gap: 10px; }
+      .kv { grid-template-columns: 1fr; }
+      .kv dt { border-bottom: 0; padding-bottom: 3px; }
+      .kv dd { padding-top: 3px; }
+      .drawer { width: 100vw; }
+      .toast-region { left: 12px; right: 12px; bottom: 12px; }
+      .toast { min-width: 0; max-width: none; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" width="0" height="0" style="position:absolute">
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-org" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 21V9h6v12M7 6h.01M12 6h.01M17 6h.01"/></symbol>
+    <symbol id="i-wallet" viewBox="0 0 24 24"><path d="M20 7V5a2 2 0 0 0-2-2H5a3 3 0 0 0 0 6h15v10a2 2 0 0 1-2 2H5a3 3 0 0 1-3-3V6"/><path d="M16 13h2"/></symbol>
+    <symbol id="i-credit" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h2"/></symbol>
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="m21 16-9 5-9-5V8l9-5 9 5z"/><path d="m3.3 7 8.7 5 8.7-5M12 12v9"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M18 5l2 2M15 8l2 2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m20 6-11 11-5-5"/></symbol>
+    <symbol id="i-audit" viewBox="0 0 24 24"><path d="M9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-9 4 18 3-9h4"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.5 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.5a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.5 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.13.38.34.72.6 1 .3.28.69.42 1.1.4h.09v4h-.09c-.41-.02-.8.12-1.1.4-.26.28-.47.62-.6 1z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 2.9 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  </svg>
+
+  <div class="app">
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <div class="brand"><div class="brand-mark">P</div><div><div class="brand-name">PINVOU</div><div class="brand-sub">ACCOUNT OS</div></div></div>
+      <div class="prototype-role">
+        <label for="roleSelect">原型权限视图</label>
+        <select class="role-select" id="roleSelect" aria-describedby="roleHint">
+          <option value="super">平台超级管理员</option>
+          <option value="billing">计费运营员</option>
+          <option value="pricing">定价与商品管理员</option>
+          <option value="model">平台模型运营</option>
+          <option value="auditor">平台审计员</option>
+          <option value="org">组织管理员</option>
+        </select>
+        <div class="role-note" id="roleHint">仅用于演示权限驱动 UI，不是身份切换功能。</div>
+      </div>
+      <nav class="nav" id="nav"></nav>
+      <div class="sidebar-footer"><div class="session"><div class="avatar" id="avatar">A</div><div><strong id="actorName">admin</strong><small id="actorRole">平台超级管理员</small></div></div></div>
+    </aside>
+    <button class="sidebar-overlay" id="sidebarOverlay" aria-label="关闭导航"></button>
+
+    <header class="topbar">
+      <button class="icon-btn mobile-menu" id="mobileMenu" aria-label="打开导航"><svg class="icon"><use href="#i-menu"/></svg></button>
+      <div class="crumb"><div class="crumb-top" id="crumbGroup">总览</div><div class="crumb-title" id="crumbTitle">平台总览</div></div>
+      <div class="top-actions">
+        <span class="env-badge">UAT 环境</span>
+        <button class="search-trigger" id="searchTrigger" aria-label="打开全局搜索"><svg class="icon"><use href="#i-search"/></svg><span>搜索可访问页面与功能</span><kbd>⌘ K</kbd></button>
+        <button class="icon-btn" id="themeToggle" aria-label="切换明暗主题"><svg class="icon"><use href="#i-sun"/></svg></button>
+        <button class="icon-btn" id="notifyBtn" aria-label="查看通知"><svg class="icon"><use href="#i-bell"/></svg></button>
+      </div>
+    </header>
+
+    <main><div class="page" id="page" tabindex="-1"></div></main>
+  </div>
+
+  <dialog class="modal" id="modal"><div id="modalContent"></div></dialog>
+  <dialog class="drawer" id="drawer"><div id="drawerContent"></div></dialog>
+  <dialog class="palette" id="palette">
+    <div class="palette-search"><label class="sr-only" for="paletteInput">搜索可访问页面</label><input class="input" id="paletteInput" placeholder="输入页面名称或功能…" autocomplete="off"></div>
+    <div class="palette-results" id="paletteResults"></div>
+  </dialog>
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+
+  <script>
+    const icon = id => `<svg class="icon" aria-hidden="true"><use href="#i-${id}"/></svg>`;
+    const nav = document.getElementById('nav');
+    const page = document.getElementById('page');
+    const crumbGroup = document.getElementById('crumbGroup');
+    const crumbTitle = document.getElementById('crumbTitle');
+    const roleSelect = document.getElementById('roleSelect');
+    const actorName = document.getElementById('actorName');
+    const actorRole = document.getElementById('actorRole');
+    const avatar = document.getElementById('avatar');
+    const sidebar = document.getElementById('sidebar');
+    const sidebarOverlay = document.getElementById('sidebarOverlay');
+    const mobileMenu = document.getElementById('mobileMenu');
+    const searchTrigger = document.getElementById('searchTrigger');
+    const themeToggle = document.getElementById('themeToggle');
+    const notifyBtn = document.getElementById('notifyBtn');
+    const modal = document.getElementById('modal');
+    const modalContent = document.getElementById('modalContent');
+    const drawer = document.getElementById('drawer');
+    const drawerContent = document.getElementById('drawerContent');
+    const palette = document.getElementById('palette');
+    const paletteInput = document.getElementById('paletteInput');
+    const paletteResults = document.getElementById('paletteResults');
+    const toastRegion = document.getElementById('toastRegion');
+    const state = { role: 'super', page: 'overview', theme: localStorage.getItem('pinvou-admin-theme') || 'light' };
+    const roles = {
+      super: { label: '平台超级管理员', actor: 'admin', avatar: 'A', pages: ['overview','users','roles','organizations','billing','payments','products','approvals','audit','system','settings'] },
+      billing: { label: '计费运营员', actor: 'billing.ops', avatar: 'B', pages: ['overview','billing','payments','approvals','audit','settings'] },
+      pricing: { label: '定价与商品管理员', actor: 'pricing.ops', avatar: 'P', pages: ['overview','products','audit','settings'] },
+      model: { label: '平台模型运营', actor: 'model.ops', avatar: 'M', pages: ['overview','tokens','audit','settings'] },
+      auditor: { label: '平台审计员', actor: 'audit.reader', avatar: 'R', pages: ['overview','audit','system','settings'] },
+      org: { label: '组织管理员', actor: 'org.owner', avatar: 'O', pages: ['overview','myorg','settings'] }
+    };
+    const navGroups = [
+      { label: '工作台', items: [
+        { id:'overview', label:'平台总览', icon:'grid' },
+      ]},
+      { label: '身份与组织', items: [
+        { id:'users', label:'用户管理', icon:'users' },
+        { id:'roles', label:'角色与授权', icon:'shield' },
+        { id:'organizations', label:'组织管理', icon:'org' },
+        { id:'myorg', label:'我的组织', icon:'org' }
+      ]},
+      { label: '财务与支付', items: [
+        { id:'billing', label:'计费运营', icon:'wallet' },
+        { id:'payments', label:'支付与资金', icon:'credit', badge:'3' },
+        { id:'products', label:'定价与商品', icon:'box' }
+      ]},
+      { label: '模型与 Token', items: [
+        { id:'tokens', label:'Token Gateway', icon:'key' }
+      ]},
+      { label: '治理与安全', items: [
+        { id:'approvals', label:'审批中心', icon:'check', badge:'4' },
+        { id:'audit', label:'审计与导出', icon:'audit' },
+        { id:'system', label:'系统与安全', icon:'activity' },
+        { id:'settings', label:'偏好设置', icon:'settings' }
+      ]}
+    ];
+    const meta = {
+      overview:['总览','平台总览'], users:['身份与组织','用户管理'], roles:['身份与组织','角色与授权'], organizations:['身份与组织','组织管理'], myorg:['我的组织','组织工作台'],
+      billing:['财务与支付','计费运营'], payments:['财务与支付','支付与资金'], products:['财务与支付','定价与商品'], tokens:['模型与 Token','Token Gateway 运营'],
+      approvals:['治理与安全','审批中心'], audit:['治理与安全','审计与导出'], system:['治理与安全','系统与安全'], settings:['治理与安全','偏好设置']
+    };
+    const pageHead = (eyebrow,title,subtitle,actions='') => `<div class="page-head"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p class="subtitle">${subtitle}</p></div><div class="head-actions">${actions}</div></div>`;
+    const badge = (label,type='neutral') => `<span class="badge ${type}">${label}</span>`;
+    const copy = value => `<span class="copyable"><span class="mono" title="${value}">${value}</span><button class="copy-btn" data-copy="${value}" aria-label="复制 ${value}">${icon('copy')}</button></span>`;
+    const empty = (title,text) => `<div class="empty"><div class="empty-icon">${icon('search')}</div><strong>${title}</strong><div>${text}</div></div>`;
+
+    function overview() {
+      const role = roles[state.role];
+      const cards = [];
+      if (role.pages.includes('users')) cards.push(['有效用户','12,842','近 7 日新增 184','users']);
+      if (role.pages.includes('organizations') || role.pages.includes('myorg')) cards.push(['活跃组织','126','3 个待处理生命周期任务','org']);
+      if (role.pages.includes('billing')) cards.push(['待处理财务案件','18','其中 4 个接近 SLA','wallet']);
+      if (role.pages.includes('tokens')) cards.push(['READY 路由','24 / 26','2 个需要修复','key']);
+      if (role.pages.includes('audit')) cards.push(['高风险操作','7','过去 24 小时','audit']);
+      while (cards.length < 4) cards.push(['系统可用性','99.98%','最近 30 天','activity']);
+      const quick = navGroups.flatMap(g=>g.items).filter(i=>role.pages.includes(i.id) && i.id!=='overview').slice(0,6);
+      return `${pageHead('Account OS','平台总览','权限上下文决定你能看到的数据、快捷入口和待办；无权资源不会发起请求。',`<button class="btn" data-action="refresh">${icon('activity')}刷新状态</button>`)}
+        <div class="banner info">${icon('shield')}<div><strong>当前视图：${role.label}</strong><p>${state.role==='super'?'超级管理员不隐式拥有 Token 权限，因此 Token 运营入口已隐藏。':'所有卡片均按原子权限独立裁剪，直接访问无权路由也会被服务端拒绝。'}</p></div></div>
+        <div class="grid kpi">${cards.slice(0,4).map((c,i)=>`<article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">${c[0]}</span><span class="kpi-icon">${icon(c[3])}</span></div><div class="kpi-value">${c[1]}</div><div class="kpi-foot"><span class="${i===2?'trend-warn':'trend-up'}">${i===2?'需要关注':'运行正常'}</span> · ${c[2]}</div></article>`).join('')}</div>
+        <section class="card section"><div class="section-head"><div><h2>快捷工作区</h2><p>仅展示当前权限可访问的业务域。</p></div></div><div class="quick-grid">${quick.map(q=>`<button class="quick" data-page="${q.id}">${icon(q.icon)}<strong>${q.label}</strong><small>${quickDesc(q.id)}</small></button>`).join('')}</div></section>
+        <div class="grid two section"><section class="card card-pad"><h2>待办节奏</h2><p class="subtitle">按风险、SLA 与到期时间排序。</p><ul class="timeline"><li><strong>支付渠道恢复申请等待审批</strong>控制版本 v14 · 还剩 38 分钟<time>今天 15:42</time></li><li><strong>注册修复案件接近 SLA</strong>Identity 查询已完成，等待 Account 提交<time>今天 14:18</time></li><li><strong>审计导出将在 12 分钟后过期</strong>一次性下载票据尚未使用<time>今天 13:56</time></li></ul></section><section class="card card-pad"><h2>服务健康</h2><p class="subtitle">聚合卡片局部失败，不影响其他已加载事实。</p><div class="provider-meta"><div><span>Account</span><strong>${badge('正常','success')}</strong></div><div><span>Billing</span><strong>${badge('正常','success')}</strong></div><div><span>Token</span><strong>${badge(state.role==='model'?'正常':'无权','info')}</strong></div></div><div class="banner warning" style="margin:18px 0 0">${icon('alert')}<div><strong>Event Relay 有 2 个死信</strong><p>当前仅展示摘要；重放能力在对应领域 API 正式获批前保持隐藏。</p></div></div></section></div>`;
+    }
+    function quickDesc(id){ return ({users:'查询账号状态与修复队列',roles:'查看内置角色和授权绑定',organizations:'跨组织生命周期治理',myorg:'组织成员、节点和额度',billing:'钱包、账本、应收与 Hold',payments:'案件、渠道控制与恢复审批',products:'版本化定价与充值目录',tokens:'Token、路由与 Provisioning',approvals:'我的申请与待我审批',audit:'脱敏查询与受控导出',system:'健康状态与只读运行手册',settings:'语言、主题和通知偏好'})[id]||''; }
+
+    function users() {
+      const rows=[
+        ['USR-R5MF-TAAT-735X-9CD9-7Q','drawinpay','199****0802','ACTIVE','2026-08-27 14:32'],
+        ['USR-2J8P-N9KA-5W3Q-R6TX-8C','林沐','186****3075','PROVISIONING','2026-08-27 13:08'],
+        ['USR-V7QK-4M2C-X8FA-3NDP-5H','陈可','139****6142','REPAIR_REQUIRED','2026-08-27 11:46'],
+        ['USR-B3EN-7H5P-K2MW-9QXA-4D','顾言','188****2291','DISABLED','2026-08-26 18:20']
+      ];
+      return `${pageHead('Identity','用户管理','以用户可见且永久不可复用的 user_code 为主要标识；后台不提供新建或删除用户。')}
+        <section class="card"><div class="section-head"><div><h2>用户目录</h2><p>手机号默认脱敏，内部 UUID 不作为列表主展示字段。</p></div></div><div class="toolbar"><div class="field">${icon('search')}<input class="input" id="userFilter" placeholder="按用户名搜索，或输入完整 user_code"></div><select class="select" style="width:160px"><option>全部状态</option><option>ACTIVE</option><option>PROVISIONING</option><option>REPAIR_REQUIRED</option><option>DISABLED</option></select><button class="btn" data-action="user-search">查询</button></div>
+        <div class="table-wrap"><table><thead><tr><th>用户编码 / 用户名</th><th>手机号</th><th>账号状态</th><th>最近更新</th><th>操作</th></tr></thead><tbody id="userRows">${rows.map(r=>`<tr data-search="${r[0]} ${r[1]}"><td><div class="row-title">${copy(r[0])}</div><div class="row-sub">${r[1]}</div></td><td>${r[2]}</td><td>${badge(r[3],r[3]==='ACTIVE'?'success':r[3]==='DISABLED'?'neutral':r[3]==='REPAIR_REQUIRED'?'danger':'warning')}</td><td>${r[4]}</td><td><div class="actions"><button class="btn small" data-user="${r[0]}">查看详情</button>${r[3]==='ACTIVE'?'<button class="btn small danger" data-action="disable-user">停用</button>':''}</div></td></tr>`).join('')}</tbody></table></div><div class="pagination"><span>共 4 条 · 当前接口使用 limit，不虚构 cursor</span><div class="pagination-controls"><button class="btn small" disabled>上一页</button><button class="btn small" disabled>下一页</button></div></div></section>`;
+    }
+
+    function rolesPage() {
+      const roleCards=[['PLATFORM_SUPER_ADMIN','平台治理与身份组织等矩阵能力','不隐式包含 platform.tokens.*'],['PLATFORM_IDENTITY_ADMIN','用户状态、修复及角色绑定只读','无 platform.roles.assign'],['PLATFORM_BILLING_OPERATOR','财务读、修复与恢复申请','禁止自审、无 Token 权限'],['PLATFORM_MODEL_ADMIN','Token、路由、凭据验证与用量','无财务审批权限']];
+      return `${pageHead('Authorization','角色与授权','角色定义为内置事实；页面只允许查看定义，并按精确权限管理授权绑定。',state.role==='super'?`<button class="btn primary" data-action="grant-role">${icon('shield')}授予角色</button>`:'')}
+        <div class="banner warning">${icon('alert')}<div><strong>角色名称不是授权依据</strong><p>导航、字段和动作均由原子权限集合决定。账号管理员只能查看角色绑定，不能授予或撤销。</p></div></div>
+        <div class="grid two">${roleCards.map(r=>`<article class="card card-pad"><div class="approval-line"><h2 style="margin:0">${r[0]}</h2>${badge('内置角色','info')}</div><p class="subtitle" style="margin-top:10px">${r[1]}</p><div class="banner ${r[0].includes('SUPER')?'warning':'info'}" style="margin:16px 0 0"><div><strong>边界</strong><p>${r[2]}</p></div></div></article>`).join('')}</div>
+        <section class="card section"><div class="section-head"><div><h2>最近授权绑定</h2><p>展示来源、作用域、有效期和绑定版本。</p></div></div><div class="table-wrap"><table><thead><tr><th>主体</th><th>角色</th><th>作用域</th><th>来源 / 有效期</th><th>操作</th></tr></thead><tbody><tr><td>${copy('USR-R5MF-TAAT-735X-9CD9-7Q')}</td><td class="mono">PLATFORM_BILLING_OPERATOR</td><td>PLATFORM</td><td>MANUAL · 永久</td><td>${state.role==='super'?'<button class="btn small danger" data-action="revoke-role">撤销</button>':'只读'}</td></tr><tr><td>${copy('USR-M4DC-7N2Q-P8KW-3RTA-9F')}</td><td class="mono">PLATFORM_AUDITOR</td><td>PLATFORM</td><td>TEMPORARY · 19:30 到期</td><td>${state.role==='super'?'<button class="btn small danger" data-action="revoke-role">撤销</button>':'只读'}</td></tr></tbody></table></div></section>`;
+    }
+
+    function organizations() {
+      const rows=[['星汉科技','ORG-7F3A-QC12','ACTIVE','128','张明'],['云图数据','ORG-4K8N-BM21','DISABLED','42','许言'],['晨河网络','ORG-9P2D-HX73','DELETED','-','-']];
+      return `${pageHead('Organizations','组织管理','平台视角的跨组织治理；DELETED 为不可恢复逻辑终态。',`<button class="btn primary" data-action="create-org">${icon('org')}创建组织</button>`)}
+        <section class="card"><div class="section-head"><div><h2>组织目录</h2><p>生命周期动作先做跨域预检，非法动作不渲染。</p></div></div><div class="toolbar"><div class="field">${icon('search')}<input class="input" placeholder="搜索组织名称或编码"></div><select class="select" style="width:160px"><option>全部状态</option><option>ACTIVE</option><option>DISABLED</option><option>DELETED</option></select></div><div class="table-wrap"><table><thead><tr><th>组织</th><th>状态</th><th>成员</th><th>所有者</th><th>允许动作</th></tr></thead><tbody>${rows.map(r=>`<tr><td><div class="row-title">${r[0]}</div><div class="row-sub mono">${r[1]}</div></td><td>${badge(r[2],r[2]==='ACTIVE'?'success':r[2]==='DISABLED'?'warning':'neutral')}</td><td>${r[3]}</td><td>${r[4]}</td><td><div class="actions"><button class="btn small" data-org="${r[1]}">详情</button>${r[2]==='ACTIVE'?'<button class="btn small" data-action="disable-org">停用</button>':r[2]==='DISABLED'?'<button class="btn small" data-action="enable-org">恢复</button><button class="btn small danger" data-action="delete-org">删除预检</button>':'<span class="row-sub">历史只读 · 不可恢复</span>'}</div></td></tr>`).join('')}</tbody></table></div></section>`;
+    }
+
+    function billing() {
+      return `${pageHead('Billing','计费运营','钱包、账本、应收、Hold 与修复均保持事实与命令分离。',`<button class="btn" data-action="billing-case">查看修复案件</button>`)}
+        <div class="grid kpi"><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">展示积分余额</span><span class="kpi-icon">${icon('wallet')}</span></div><div class="kpi-value">8,420,000</div><div class="kpi-foot">积分 · 不使用货币符号</div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">未清应收</span><span class="kpi-icon">${icon('credit')}</span></div><div class="kpi-value">CNY ¥12,460.00</div><div class="kpi-foot"><span class="trend-warn">12 笔</span> · 2 笔已冻结上下文</div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">活动 Hold</span><span class="kpi-icon">${icon('activity')}</span></div><div class="kpi-value">286</div><div class="kpi-foot">9 个将在 15 分钟内到期</div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">账本平衡</span><span class="kpi-icon">${icon('check')}</span></div><div class="kpi-value">100%</div><div class="kpi-foot"><span class="trend-up">最近核验通过</span></div></article></div>
+        <section class="card section"><div class="section-head"><div><h2>最近账本流水</h2><p>Journal 与 Posting 历史不可变；修复通过独立命令和审批执行。</p></div><button class="btn small">查看全部</button></div><div class="table-wrap"><table><thead><tr><th>流水</th><th>业务来源</th><th>主体</th><th>变化</th><th>状态</th><th>时间</th></tr></thead><tbody><tr><td>${copy('TXN-8Q2F-91DA')}</td><td>充值履约</td><td class="mono">USR-R5MF…</td><td>+4,000 积分</td><td>${badge('已入账','success')}</td><td>14:32:08</td></tr><tr><td>${copy('TXN-2PK7-40CE')}</td><td>模型用量结算</td><td class="mono">ORG-7F3A…</td><td>-86 积分</td><td>${badge('已结算','success')}</td><td>14:30:41</td></tr><tr><td>${copy('TXN-6MD2-18FA')}</td><td>人工调整申请</td><td class="mono">USR-V7QK…</td><td>+500 积分</td><td>${badge('待审批','warning')}</td><td>14:18:26</td></tr></tbody></table></div></section>`;
+    }
+
+    function payments() {
+      return `${pageHead('Payment controls','支付与资金','单订单隔离、单商品暂停、Provider 关闭分级处置；恢复必须按对象独立申请与审批。')}
+        <div class="banner warning">${icon('alert')}<div><strong>Provider 已关闭新单</strong><p>连续跨商品异常达到阈值。当前页面不能直接改开关；只允许基于合格证据提交恢复申请。</p></div></div>
+        <div class="grid two"><article class="card provider-card"><div class="provider-top"><div><div class="eyebrow">Provider</div><h2>新华三商城</h2><p class="subtitle mono">h3c_mall / h3c-mall-v1</p></div>${badge('新单关闭','danger')}</div><div class="provider-meta"><div><span>控制版本</span><strong>v14</strong></div><div><span>触发原因</span><strong>跨商品失败率</strong></div><div><span>最后更新</span><strong>14:21:08</strong></div></div><div class="head-actions" style="margin-top:18px"><button class="btn" data-action="view-evidence">查看证据</button><button class="btn primary" data-action="resume-provider">申请恢复</button></div></article><article class="card card-pad"><h2>恢复前置</h2><ul class="timeline"><li><strong>观察缺口已清零</strong><time>14:28:12 · 自动核对</time></li><li><strong>已有合格探测证据</strong><time>14:27:48 · 证据版本 ev-203</time></li><li><strong>等待独立审批人</strong><time>申请尚未创建</time></li></ul></article></div>
+        <section class="card section"><div class="section-head"><div><h2>商品控制</h2><p>Provider 恢复不会自动打开任何商品；商品逐项独立恢复。</p></div></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>目录状态</th><th>新单控制</th><th>案件</th><th>允许动作</th></tr></thead><tbody><tr><td><div class="row-title">4000积分充值包</div><div class="row-sub mono">RECHARGE_4000_200</div></td><td>${badge('ON_SALE','success')}</td><td>${badge('暂停','danger')}</td><td class="mono">CASE-PAY-2041</td><td><button class="btn small" disabled title="需先恢复 Provider">申请商品恢复</button></td></tr><tr><td><div class="row-title">体验版</div><div class="row-sub mono">PLAN_TRIAL</div></td><td>${badge('ON_SALE','success')}</td><td>${badge('暂停','warning')}</td><td class="mono">CASE-PAY-2046</td><td><button class="btn small" disabled title="需先恢复 Provider">申请商品恢复</button></td></tr></tbody></table></div></section>`;
+    }
+
+    function products() {
+      return `${pageHead('Catalog & pricing','定价与商品','目录事实由生命周期驱动；已发布映射不可改写，ON_SALE 商品不能删除。',`<button class="btn primary" data-action="create-product">${icon('box')}添加商品草稿</button>`)}
+        <div class="banner info">${icon('shield')}<div><strong>商品命令为精确权限</strong><p>读取、添加、上架、下架、删除分别授权。缺少审批策略注册的写动作在修复前保持隐藏。</p></div></div>
+        <section class="card"><div class="toolbar"><div class="field">${icon('search')}<input class="input" placeholder="搜索商品名称、product_id 或 Provider SKU"></div><select class="select" style="width:160px"><option>全部生命周期</option><option>DRAFT</option><option>ON_SALE</option><option>OFF_SALE</option><option>DELETED</option></select><select class="select" style="width:160px"><option>全部准入状态</option><option>VERIFIED</option><option>PENDING</option><option>REVOKED</option></select></div><div class="table-wrap"><table><thead><tr><th>商品 / 标识</th><th>权益</th><th>价格</th><th>准入证据</th><th>生命周期</th><th>允许动作</th></tr></thead><tbody><tr><td><div class="row-title">4000积分充值包</div><div class="row-sub mono">RECHARGE_4000_200</div></td><td>BASE 4,000 积分 · 30 天</td><td>CNY ¥200.00</td><td>${badge('VERIFIED','success')} <span class="row-sub">ev-203</span></td><td>${badge('ON_SALE','success')}</td><td><div class="actions"><button class="btn small" data-product="RECHARGE_4000_200">详情</button><button class="btn small" data-action="unpublish-product">下架</button></div></td></tr><tr><td><div class="row-title">团队基础包</div><div class="row-sub mono">ORG_BASE_10000</div></td><td>BASE 10,000 积分 · 90 天</td><td>CNY ¥468.00</td><td>${badge('VERIFIED','success')} <span class="row-sub">ev-196</span></td><td>${badge('OFF_SALE','warning')}</td><td><div class="actions"><button class="btn small" data-product="ORG_BASE_10000">详情</button><button class="btn small">上架</button><button class="btn small danger" data-action="delete-product">删除</button></div></td></tr><tr><td><div class="row-title">新客体验草稿</div><div class="row-sub mono">TRIAL_DRAFT_02</div></td><td>BASE 500 积分 · 7 天</td><td>CNY ¥0.10</td><td>${badge('PENDING','warning')}</td><td>${badge('DRAFT','info')}</td><td><div class="actions"><button class="btn small" data-product="TRIAL_DRAFT_02">详情</button><button class="btn small danger" data-action="delete-product">删除</button></div></td></tr></tbody></table></div><div class="pagination"><span>按 OpenAPI：默认 50，最大 200，cursor 分页</span><div class="pagination-controls"><button class="btn small" disabled>上一页</button><button class="btn small">下一页</button></div></div></section>`;
+    }
+
+    function tokens() {
+      return `${pageHead('Restricted operations','Token Gateway 运营','真实 Token Account、路由、凭据验证与 Provisioning 仅向平台模型运营权限开放。',`<button class="btn primary" data-action="create-token">${icon('key')}创建 Token Account</button>`)}
+        <div class="banner danger">${icon('shield')}<div><strong>高敏感运营域</strong><p>密钥、Authorization Header 与可复用凭据永不返回、导出或进入 DOM；超级管理员不会因角色名获得本页面权限。</p></div></div>
+        <div class="grid kpi"><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">Token Account</span><span class="kpi-icon">${icon('key')}</span></div><div class="kpi-value">8</div><div class="kpi-foot">7 ACTIVE · 1 DISABLED</div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">READY 路由</span><span class="kpi-icon">${icon('activity')}</span></div><div class="kpi-value">24</div><div class="kpi-foot"><span class="trend-up">92.3%</span> 当前可用</div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">Provisioning</span><span class="kpi-icon">${icon('settings')}</span></div><div class="kpi-value">2</div><div class="kpi-foot"><span class="trend-warn">需要人工关注</span></div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">凭据验证</span><span class="kpi-icon">${icon('shield')}</span></div><div class="kpi-value">100%</div><div class="kpi-foot">仅返回脱敏结论</div></article></div>
+        <section class="card section"><div class="section-head"><div><h2>Token Account</h2><p>展示元数据与指纹，不展示任何凭据值。</p></div></div><div class="table-wrap"><table><thead><tr><th>账户</th><th>作用域</th><th>路由</th><th>状态</th><th>凭据指纹</th><th>操作</th></tr></thead><tbody><tr><td><div class="row-title">prod-api-account</div><div class="row-sub mono">tokacc-71fa-8803</div></td><td>PLATFORM</td><td class="mono">/api/v1/token</td><td>${badge('ACTIVE','success')}</td><td class="mono">sha256:9f2c…e8a1</td><td><div class="actions"><button class="btn small" data-action="token-detail">详情</button><button class="btn small">验证</button></div></td></tr><tr><td><div class="row-title">staging-test-account</div><div class="row-sub mono">tokacc-42bd-197e</div></td><td>PLATFORM</td><td class="mono">/api/v1/staging</td><td>${badge('DISABLED','neutral')}</td><td class="mono">sha256:44a1…08cb</td><td><button class="btn small" data-action="token-detail">详情</button></td></tr></tbody></table></div></section>`;
+    }
+
+    function approvals() {
+      return `${pageHead('Governance','审批中心','我的申请与待我审批完全分离；按冻结策略解析精确申请/审批权限，任何人不得自审。')}
+        <div class="toolbar card" style="margin-bottom:16px"><button class="btn primary small" data-tab="inbox">待我审批 4</button><button class="btn small" data-tab="mine">我的申请 7</button><button class="btn small" data-tab="history">执行与失败</button></div>
+        <div class="grid two"><article class="card approval-card"><div class="risk">${icon('alert')}</div><div class="approval-content"><div class="approval-line"><h2 style="margin:0">支付 Provider 恢复</h2>${badge('HIGH','danger')}${badge('42 分钟后到期','warning')}</div><div class="approval-meta"><span>申请人 billing.ops</span><span class="mono">APR-20260827-021</span><span>控制版本 v14</span></div><p class="subtitle" style="margin-top:10px">恢复新华三商城 Provider 新单能力；商品仍保持暂停。</p><div class="head-actions" style="justify-content:flex-start;margin-top:14px"><button class="btn small" data-approval="APR-20260827-021">审阅差异</button></div></div></article><article class="card approval-card"><div class="risk" style="background:var(--warning-soft);color:var(--warning)">${icon('wallet')}</div><div class="approval-content"><div class="approval-line"><h2 style="margin:0">钱包异常修复</h2>${badge('MEDIUM','warning')}</div><div class="approval-meta"><span>申请人 finance.ops</span><span class="mono">APR-20260827-019</span><span>资源版本 v38</span></div><p class="subtitle" style="margin-top:10px">修复一次确认支付后未授予权益的账本缺口。</p><div class="head-actions" style="justify-content:flex-start;margin-top:14px"><button class="btn small" data-approval="APR-20260827-019">审阅差异</button></div></div></article></div>
+        <section class="card section"><div class="section-head"><div><h2>审批策略快照</h2><p>策略只读；Portal 不编辑 command_type、权限或执行身份。</p></div></div><div class="table-wrap"><table><thead><tr><th>命令</th><th>申请权限</th><th>审批权限</th><th>执行身份</th><th>策略</th></tr></thead><tbody><tr><td class="mono">PAYMENT_PROVIDER_RESUME</td><td class="mono">…resume.request</td><td class="mono">…resume.approve</td><td class="mono">billing-command-executor</td><td>${badge('APPROVAL_REQUIRED','danger')}</td></tr><tr><td class="mono">BILLING_USAGE_HOLD_SAFE_RELEASE</td><td class="mono">platform.billing.holds.release</td><td>-</td><td class="mono">billing-service</td><td>${badge('AUDIT_ONLY','info')}</td></tr></tbody></table></div></section>`;
+    }
+
+    function audit() {
+      return `${pageHead('Audit','审计与导出','在线查询默认脱敏；导出是带近期认证、配额、一次性密钥和下载票据的异步操作。',`<button class="btn primary" data-action="audit-export">${icon('download')}创建导出</button>`)}
+        <div class="grid three"><article class="card card-pad"><div class="kpi-label">今日导出额度</div><div class="kpi-value">7 / 10</div><div class="kpi-foot">每人每日最多 10 个</div></article><article class="card card-pad"><div class="kpi-label">并发任务</div><div class="kpi-value">1 / 2</div><div class="kpi-foot">1 个 READY，12 分钟后过期</div></article><article class="card card-pad"><div class="kpi-label">默认脱敏</div><div class="kpi-value">开启</div><div class="kpi-foot">PII 需临时权限</div></article></div>
+        <section class="card section"><div class="toolbar"><div class="field">${icon('search')}<input class="input" placeholder="操作者、资源或动作"></div><select class="select" style="width:150px"><option>全部结果</option><option>SUCCESS</option><option>DENIED</option><option>FAILED</option></select><input class="input" style="width:210px" type="date" value="2026-08-27"><button class="btn">查询</button></div><div class="table-wrap"><table><thead><tr><th>时间</th><th>操作者</th><th>主体类型</th><th>资源</th><th>动作</th><th>结果</th><th>详情</th></tr></thead><tbody><tr><td>14:31:44 +08:00</td><td class="mono">billing.ops</td><td>HUMAN</td><td class="mono">payment_provider</td><td class="mono">resume.request</td><td>${badge('SUCCESS','success')}</td><td><button class="btn small" data-action="audit-detail">查看</button></td></tr><tr><td>14:28:09 +08:00</td><td class="mono">svc-billing</td><td>SERVICE</td><td class="mono">wallet_ledger</td><td class="mono">usage.commit</td><td>${badge('SUCCESS','success')}</td><td><button class="btn small" data-action="audit-detail">查看</button></td></tr><tr><td>14:21:18 +08:00</td><td class="mono">identity.ops</td><td>HUMAN</td><td class="mono">role_binding</td><td class="mono">assign</td><td>${badge('DENIED','danger')}</td><td><button class="btn small" data-action="audit-detail">查看</button></td></tr></tbody></table></div><div class="pagination"><span>时间均明确显示时区 · 敏感字段由服务端裁剪</span><div class="pagination-controls"><button class="btn small" disabled>上一页</button><button class="btn small">下一页</button></div></div></section>`;
+    }
+
+    function system() {
+      return `${pageHead('Operations','系统与安全','公网 Portal 只展示健康状态、审计记录和运行手册；不代理 Bootstrap、Break-glass 或 IdP 管理。')}
+        <div class="grid three"><article class="card card-pad"><div class="approval-line"><h2 style="margin:0">Account Service</h2>${badge('健康','success')}</div><p class="subtitle" style="margin-top:8px">P99 84ms · 0 个错误</p></article><article class="card card-pad"><div class="approval-line"><h2 style="margin:0">Billing Service</h2>${badge('降级','warning')}</div><p class="subtitle" style="margin-top:8px">P99 218ms · 2 个待收敛任务</p></article><article class="card card-pad"><div class="approval-line"><h2 style="margin:0">Identity Provider</h2>${badge('健康','success')}</div><p class="subtitle" style="margin-top:8px">P99 126ms · 受限网络管理</p></article></div>
+        <section class="card section"><div class="section-head"><div><h2>受控运行手册</h2><p>以下卡片只提供边界说明和审计入口，不提供执行按钮、命令复制或秘密。</p></div></div><div class="quick-grid"><article class="quick" style="cursor:default"><span>${icon('shield')}</span><strong>首个超级管理员初始化</strong><small>仅受控终端；BOOTSTRAP_PENDING 无后台会话。</small></article><article class="quick" style="cursor:default"><span>${icon('alert')}</span><strong>Break-glass 恢复</strong><small>仅管理员异常失联后的离线恢复；不可绕过最后超管保护。</small></article><article class="quick" style="cursor:default"><span>${icon('key')}</span><strong>Identity Provider</strong><small>仅受限网络、VPN 或 SSH 隧道管理；Portal 不代理。</small></article></div></section>
+        <div class="banner danger section">${icon('alert')}<div><strong>安全边界</strong><p>浏览器网络请求、日志和 DOM 中不得出现密码、引导凭据、恢复凭据、Provider 密钥或工作负载私钥。</p></div></div>`;
+    }
+
+    function myorg() {
+      return `${pageHead('Organization workspace','我的组织','当前组织与节点作用域显式固定；UNIT 管理员仅能访问目标节点及其子树。',`<select class="select"><option>星汉科技 · ORG-7F3A-QC12</option></select><select class="select"><option>全组织</option><option>研发中心 / 模型平台组</option></select>`)}
+        <div class="banner info">${icon('org')}<div><strong>当前作用域：ORGANIZATION</strong><p>切换组织或节点会清空勾选、草稿和分页游标，并重新请求权限上下文。</p></div></div>
+        <div class="grid kpi"><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">成员</span><span class="kpi-icon">${icon('users')}</span></div><div class="kpi-value">128</div><div class="kpi-foot">6 个组织节点</div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">组织额度</span><span class="kpi-icon">${icon('wallet')}</span></div><div class="kpi-value">48,200</div><div class="kpi-foot">积分 · 已分配 31,500</div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">本月用量</span><span class="kpi-icon">${icon('activity')}</span></div><div class="kpi-value">16,740</div><div class="kpi-foot">只展示当前作用域</div></article><article class="card kpi-card"><div class="kpi-top"><span class="kpi-label">模型策略</span><span class="kpi-icon">${icon('settings')}</span></div><div class="kpi-value">12</div><div class="kpi-foot">8 允许 · 4 拒绝</div></article></div>
+        <section class="card section"><div class="section-head"><div><h2>组织节点</h2><p>节点移动、重命名和删除均使用对象级授权与版本检查。</p></div><button class="btn small">新建子节点</button></div><div class="table-wrap"><table><thead><tr><th>节点</th><th>节点标识</th><th>成员</th><th>管理范围</th><th>操作</th></tr></thead><tbody><tr><td><div class="row-title">◆ 星汉科技</div><div class="row-sub">顶层组织</div></td><td class="mono">node:9C2F</td><td>128</td><td>全组织</td><td><button class="btn small">查看</button></td></tr><tr><td><div class="row-title" style="padding-left:18px">└ 研发中心</div></td><td class="mono">node:7702</td><td>52</td><td>节点及子树</td><td><button class="btn small">管理</button></td></tr><tr><td><div class="row-title" style="padding-left:36px">└ 模型平台组</div></td><td class="mono">node:5E1B</td><td>18</td><td>当前节点</td><td><button class="btn small">管理</button></td></tr></tbody></table></div></section>`;
+    }
+
+    function settings() {
+      return `${pageHead('Preferences','偏好设置','只包含个人界面偏好；组织成员管理、2FA 和 IdP 管理不属于本页。')}
+        <div class="grid two"><section class="card card-pad"><h2>语言与地区</h2><p class="subtitle">正式实现需同时提供简体中文、英文和日文完整词条。</p><div class="form-row" style="margin-top:18px"><label for="language">界面语言</label><select class="select" id="language"><option>简体中文 · zh-CN</option><option>English · en-US</option><option>日本語 · ja-JP</option></select></div><div class="form-row"><label for="timezone">时区</label><select class="select" id="timezone"><option>Asia/Shanghai · UTC+08:00</option><option>UTC</option><option>Asia/Tokyo · UTC+09:00</option></select></div></section><section class="card card-pad"><h2>外观</h2><p class="subtitle">状态不只依赖颜色，明暗主题都需满足 WCAG AA。</p><div class="form-row" style="margin-top:18px"><label>主题</label><div class="head-actions" style="justify-content:flex-start"><button class="btn" data-theme-choice="light">浅色</button><button class="btn" data-theme-choice="dark">深色</button><button class="btn" data-theme-choice="system">跟随系统</button></div></div><div class="form-row"><label>减少动态效果</label><div class="check-line"><input type="checkbox" id="reduceMotion"><label for="reduceMotion" style="font-weight:400">降低页面切换和浮层动画</label></div></div></section></div>`;
+    }
+
+    const templates={overview,users,roles:rolesPage,organizations,billing,payments,products,tokens,approvals,audit,system,myorg,settings};
+    function renderNav(){
+      const allowed=roles[state.role].pages;
+      nav.innerHTML=navGroups.map(g=>{const items=g.items.filter(i=>allowed.includes(i.id)); if(!items.length)return''; return `<div class="nav-group"><div class="nav-label">${g.label}</div>${items.map(i=>`<button class="nav-item ${state.page===i.id?'active':''}" data-page="${i.id}" aria-current="${state.page===i.id?'page':'false'}">${icon(i.icon)}<span>${i.label}</span>${i.badge?`<span class="nav-badge">${i.badge}</span>`:''}</button>`).join('')}</div>`}).join('');
+    }
+    function renderPage(){
+      const allowed=roles[state.role].pages;
+      if(!allowed.includes(state.page)) state.page='overview';
+      renderNav();
+      const m=meta[state.page]; crumbGroup.textContent=m[0]; crumbTitle.textContent=m[1];
+      page.innerHTML=templates[state.page]();
+      page.focus({preventScroll:true});
+      closeSidebar();
+    }
+    function setRole(role){ state.role=role; const r=roles[role]; actorName.textContent=r.actor; actorRole.textContent=r.label; avatar.textContent=r.avatar; renderPage(); toast('权限视图已更新',`当前仅展示 ${r.label} 可访问的页面与动作。`); }
+    function go(pageId){ if(!roles[state.role].pages.includes(pageId)){ toast('无权访问','当前权限上下文不会请求该页面资源。'); return; } state.page=pageId; renderPage(); history.replaceState(null,'',`#${pageId}`); }
+    function closeSidebar(){ sidebar.classList.remove('open'); sidebarOverlay.classList.remove('show'); }
+    function toast(title,text=''){ const el=document.createElement('div'); el.className='toast'; el.innerHTML=`<strong>${title}</strong>${text?`<small>${text}</small>`:''}`; toastRegion.appendChild(el); setTimeout(()=>el.remove(),3600); }
+    function closeDialog(el){ if(el.open) el.close(); }
+    function dialogShell(title,sub,body,foot,drawerMode=false){ return `<div class="dialog-head"><div><h2>${title}</h2><p>${sub}</p></div><button class="icon-btn" data-close="${drawerMode?'drawer':'modal'}" aria-label="关闭">${icon('x')}</button></div><div class="dialog-body">${body}</div><div class="dialog-foot">${foot}</div>`; }
+    function openModal(title,sub,body,foot=`<button class="btn" data-close="modal">取消</button>`){ modalContent.innerHTML=dialogShell(title,sub,body,foot,false); modal.showModal(); }
+    function openDrawer(title,sub,body){ drawerContent.innerHTML=dialogShell(title,sub,body,`<button class="btn" data-close="drawer">关闭</button>`,true); drawer.showModal(); }
+    function showUser(code){ openDrawer('用户详情',code,`<div class="banner info">${icon('shield')}<div><strong>字段已按权限裁剪</strong><p>手机号脱敏，内部 UUID 不作为主要展示标识。</p></div></div><dl class="kv"><dt>用户编码</dt><dd>${copy(code)}</dd><dt>用户名</dt><dd>drawinpay</dd><dt>手机号</dt><dd>199****0802</dd><dt>账号状态</dt><dd>${badge('ACTIVE','success')}</dd><dt>关联组织</dt><dd>2 个</dd><dt>授权版本</dt><dd class="mono">authz-v42</dd></dl><h3 style="margin-top:22px">最近状态时间线</h3><ul class="timeline"><li><strong>完成手机验证并激活</strong><time>2026-08-27 09:19 +08:00</time></li><li><strong>个人钱包初始化完成</strong><time>2026-08-27 09:20 +08:00</time></li></ul>`); }
+    function approvalDetail(id){ openDrawer('审批详情',id,`<div class="banner danger">${icon('alert')}<div><strong>高风险命令</strong><p>批准只产生执行授权；最终由最小权限服务身份在短窗口内执行。</p></div></div><dl class="kv"><dt>命令</dt><dd class="mono">PAYMENT_PROVIDER_RESUME</dd><dt>目标资源</dt><dd class="mono">h3c_mall / h3c-mall-v1</dd><dt>申请人</dt><dd>billing.ops</dd><dt>资源版本</dt><dd>v14</dd><dt>策略版本</dt><dd>v6</dd><dt>到期时间</dt><dd>2026-08-27 16:24 +08:00</dd></dl><h3 style="margin-top:22px">冻结影响</h3><p class="subtitle">仅恢复 Provider 新单能力；两个商品仍维持暂停，必须分别重新申请恢复。</p><div class="head-actions" style="justify-content:flex-start;margin-top:18px"><button class="btn danger" data-action="reject-approval">拒绝</button><button class="btn primary" data-action="approve-confirm">批准</button></div>`); }
+    function genericConfirm(kind){
+      const configs={
+        'disable-user':['停用用户','此动作会撤销当前会话，但不会删除账号或历史事实。','USR-R5MF-TAAT-735X-9CD9-7Q','停用'],
+        'delete-org':['删除组织预检','仅 DISABLED 且跨域预检通过的组织可进入不可恢复终态。','ORG-4K8N-BM21','运行预检'],
+        'unpublish-product':['下架商品','下架只影响新单；不改写历史订单、支付或权益事实。','RECHARGE_4000_200','确认下架'],
+        'delete-product':['删除商品','仅 DRAFT / OFF_SALE 可删除；ON_SALE 服务端必须拒绝。','ORG_BASE_10000','确认删除']
+      };
+      const c=configs[kind]||['确认操作','操作将按当前服务端状态和权限重新校验。','resource-id','提交'];
+      openModal(c[0],c[1],`<div class="form-row"><label>目标资源</label><input class="input mono" value="${c[2]}" readonly></div><div class="form-row"><label for="reason">操作原因</label><textarea class="textarea" id="reason" placeholder="请说明业务原因和依据"></textarea></div><div class="banner warning">${icon('alert')}<div><strong>提交前重新读取权威状态</strong><p>若接口定义 expected_version 或幂等合同，将严格携带；版本冲突不会自动重放。</p></div></div>`,`<button class="btn" data-close="modal">取消</button><button class="btn ${kind.includes('delete')?'danger':'primary'}" data-action="demo-submit">${c[3]}</button>`);
+    }
+    function createProduct(){ openModal('添加商品草稿','创建只生成 DRAFT；发布、准入验证和恢复是独立动作。',`<div class="form-grid"><div class="form-row"><label>商品名称</label><input class="input" placeholder="例如：团队基础包"></div><div class="form-row"><label>商品标识</label><input class="input mono" placeholder="PRODUCT_ID"></div><div class="form-row"><label>价格</label><input class="input" placeholder="CNY 0.00"></div><div class="form-row"><label>BASE 积分</label><input class="input" type="number" placeholder="0"></div></div><div class="form-row"><label>创建原因</label><textarea class="textarea" placeholder="必填，说明目录治理原因"></textarea></div><dl class="kv"><dt>expected_version</dt><dd class="mono">0（必填）</dd><dt>Idempotency-Key</dt><dd class="mono">由客户端生成，16-128 字符</dd></dl>`,`<button class="btn" data-close="modal">取消</button><button class="btn primary" data-action="demo-submit">创建草稿</button>`); }
+    function resumeProvider(){ openModal('申请恢复 Provider','此操作只创建审批申请，不会直接打开支付渠道。',`<div class="banner info">${icon('check')}<div><strong>已有合格证据 ev-203</strong><p>观察缺口为 0；证据仍在有效期内。立即探测 API 未批准前不显示探测按钮。</p></div></div><dl class="kv"><dt>Provider</dt><dd class="mono">h3c_mall / h3c-mall-v1</dd><dt>控制版本</dt><dd>v14</dd><dt>当前状态</dt><dd>${badge('新单关闭','danger')}</dd><dt>执行影响</dt><dd>仅恢复 Provider；商品仍暂停</dd></dl><div class="form-row" style="margin-top:18px"><label>申请原因</label><textarea class="textarea" placeholder="请说明故障已收敛的证据和恢复理由"></textarea></div><div class="check-line"><input type="checkbox" id="confirmEvidence"><label for="confirmEvidence">我已核对证据版本、控制版本和影响范围</label></div>`,`<button class="btn" data-close="modal">取消</button><button class="btn primary" data-action="demo-submit">提交审批申请</button>`); }
+    function auditExport(){ openModal('创建审计导出','导出为异步敏感操作；创建成功时一次性展示解密密钥。',`<div class="grid two"><div class="banner info" style="margin:0"><div><strong>今日额度 7 / 10</strong><p>当前并发 1 / 2</p></div></div><div class="banner warning" style="margin:0"><div><strong>近期认证 08:24</strong><p>仍在 15 分钟窗口内</p></div></div></div><div class="form-grid" style="margin-top:16px"><div class="form-row"><label>开始日期</label><input class="input" type="date" value="2026-08-20"></div><div class="form-row"><label>结束日期</label><input class="input" type="date" value="2026-08-27"></div></div><div class="form-row"><label>脱敏级别</label><select class="select"><option>默认脱敏（推荐）</option><option disabled>包含 PII（需要临时权限）</option></select></div><div class="form-row"><label>导出原因</label><textarea class="textarea" placeholder="必填；将写入不可变审计记录"></textarea></div><div class="banner danger">${icon('alert')}<div><strong>一次性解密密钥不会再次返回</strong><p>创建后必须立即保存；刷新或丢失后只能重新创建，并继续计入配额。</p></div></div>`,`<button class="btn" data-close="modal">取消</button><button class="btn primary" data-action="demo-submit">创建异步导出</button>`); }
+    function openPalette(){ palette.showModal(); paletteInput.value=''; renderPalette(''); setTimeout(()=>paletteInput.focus(),0); }
+    function renderPalette(q){ const allowed=roles[state.role].pages; const items=navGroups.flatMap(g=>g.items.map(i=>({...i,group:g.label}))).filter(i=>allowed.includes(i.id)&&(`${i.label}${i.group}`).toLowerCase().includes(q.toLowerCase())); paletteResults.innerHTML=items.length?items.map(i=>`<button class="palette-item" data-page="${i.id}">${icon(i.icon)}<span>${i.label}</span><small>${i.group}</small></button>`).join(''):empty('没有可访问的匹配页面','无权页面不会出现在搜索结果中。'); }
+
+    document.addEventListener('click',e=>{
+      const pageBtn=e.target.closest('[data-page]'); if(pageBtn){ closeDialog(palette); go(pageBtn.dataset.page); return; }
+      const close=e.target.closest('[data-close]'); if(close){ closeDialog(close.dataset.close==='drawer'?drawer:modal); return; }
+      const copyBtn=e.target.closest('[data-copy]'); if(copyBtn){ navigator.clipboard?.writeText(copyBtn.dataset.copy); toast('已复制',copyBtn.dataset.copy); return; }
+      const user=e.target.closest('[data-user]'); if(user){ showUser(user.dataset.user); return; }
+      const approval=e.target.closest('[data-approval]'); if(approval){ approvalDetail(approval.dataset.approval); return; }
+      const theme=e.target.closest('[data-theme-choice]'); if(theme){ state.theme=theme.dataset.themeChoice==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):theme.dataset.themeChoice; applyTheme(); return; }
+      const action=e.target.closest('[data-action]')?.dataset.action; if(!action)return;
+      if(['disable-user','delete-org','unpublish-product','delete-product','revoke-role'].includes(action)) genericConfirm(action);
+      else if(action==='create-product') createProduct();
+      else if(action==='resume-provider') resumeProvider();
+      else if(action==='audit-export') auditExport();
+      else if(action==='demo-submit'){ closeDialog(modal); closeDialog(drawer); toast('原型操作已提交','真实系统仍会执行权限、状态、版本与幂等校验。'); }
+      else if(action==='approve-confirm') openModal('确认批准','批准后由最小权限服务身份执行；你不能直接执行命令。',`<div class="form-row"><label>审批意见</label><textarea class="textarea" placeholder="请输入审批依据"></textarea></div><div class="banner danger">${icon('alert')}<div><strong>禁止自审</strong><p>服务端会重新校验申请人、审批人、当前权限与资源版本。</p></div></div>`,`<button class="btn" data-close="modal">取消</button><button class="btn primary" data-action="demo-submit">确认批准</button>`);
+      else if(action==='refresh'){ toast('状态已刷新','所有卡片按独立权限重新加载。'); }
+      else if(action==='user-search'){ const q=(document.querySelector('#userFilter')?.value||'').toLowerCase(); document.querySelectorAll('#userRows tr').forEach(r=>r.hidden=!r.dataset.search.toLowerCase().includes(q)); }
+      else if(action==='view-evidence') openDrawer('恢复证据','ev-203',`<dl class="kv"><dt>证据状态</dt><dd>${badge('有效','success')}</dd><dt>观察缺口</dt><dd>0</dd><dt>最后查询</dt><dd>2026-08-27 14:27:48 +08:00</dd><dt>Provider 查询</dt><dd>AVAILABLE</dd><dt>证据摘要</dt><dd class="mono">sha256:52bf…9a40</dd></dl>`);
+      else toast('原型交互','该入口用于展示信息架构，未连接真实 API。');
+    });
+    roleSelect.addEventListener('change',e=>setRole(e.target.value));
+    mobileMenu.addEventListener('click',()=>{sidebar.classList.add('open');sidebarOverlay.classList.add('show')});
+    sidebarOverlay.addEventListener('click',closeSidebar);
+    searchTrigger.addEventListener('click',openPalette);
+    paletteInput.addEventListener('input',e=>renderPalette(e.target.value));
+    themeToggle.addEventListener('click',()=>{state.theme=state.theme==='light'?'dark':'light';applyTheme()});
+    notifyBtn.addEventListener('click',()=>toast('3 个待办','1 个审批将在 42 分钟后到期。'));
+    document.addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPalette()} if(e.key==='/'&&!['INPUT','TEXTAREA'].includes(document.activeElement.tagName)){e.preventDefault();openPalette()}});
+    [modal,drawer,palette].forEach(d=>d.addEventListener('click',e=>{if(e.target===d)d.close()}));
+    function applyTheme(){ document.documentElement.dataset.theme=state.theme; localStorage.setItem('pinvou-admin-theme',state.theme); }
+    applyTheme();
+    const hash=location.hash.slice(1); if(hash&&roles[state.role].pages.includes(hash))state.page=hash;
+    renderPage();
+  </script>
+</body>
+</html>
