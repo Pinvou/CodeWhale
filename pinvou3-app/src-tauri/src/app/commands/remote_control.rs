@@ -1524,23 +1524,25 @@ pub async fn web_access_save_session_messages_chunk(
 #[tauri::command]
 pub async fn web_access_transcribe_voice_audio(
     audio_base64: String,
-    session_id: String,
+    session_id: Option<String>,
     store: State<'_, SessionStore>,
 ) -> Result<super::voice::VoiceTranscriptionResponse, super::voice::VoiceCommandError> {
-    crate::features::sessions::validate_session_id(&session_id).map_err(|error| {
-        super::voice::VoiceCommandError::new(
-            "context_mismatch",
-            "transcribing",
-            format!("invalid Session id: {error:#}"),
-        )
-    })?;
-    store.load(&session_id).map_err(|error| {
-        super::voice::VoiceCommandError::new(
-            "context_mismatch",
-            "transcribing",
-            format!("load Session {session_id}: {error:#}"),
-        )
-    })?;
+    if let Some(session_id) = session_id.as_deref() {
+        crate::features::sessions::validate_session_id(session_id).map_err(|error| {
+            super::voice::VoiceCommandError::new(
+                "context_mismatch",
+                "transcribing",
+                format!("invalid Session id: {error:#}"),
+            )
+        })?;
+        store.load(session_id).map_err(|error| {
+            super::voice::VoiceCommandError::new(
+                "context_mismatch",
+                "transcribing",
+                format!("load Session {session_id}: {error:#}"),
+            )
+        })?;
+    }
     let audio_bytes = base64::engine::general_purpose::STANDARD
         .decode(audio_base64)
         .map_err(|error| {
@@ -1559,6 +1561,16 @@ pub async fn web_access_transcribe_voice_audio(
     }
     super::voice::transcribe_voice_audio(super::voice::VoiceTranscriptionRequest { audio_bytes })
         .await
+}
+
+/// Web-safe telemetry projection. The underlying command accepts only the
+/// versioned event whitelist and schema-controlled scalar fields.
+#[tauri::command]
+pub fn web_access_track_behavior_event(
+    request: super::behavior_telemetry::TrackBehaviorEventRequest,
+    app: AppHandle,
+) -> Result<(), String> {
+    super::behavior_telemetry::track_behavior_event(request, app)
 }
 
 /// Read a bounded chunk from a Session-owned artifact. The resolver rejects

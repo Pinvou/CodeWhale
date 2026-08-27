@@ -305,6 +305,23 @@
           });
           trackSceneBehavior(sid, meta.pinvouScene);
         }
+        if (meta && meta.voiceOperationId) {
+          invoke("track_behavior_event", {
+            request: {
+              eventName: "voice_message_submitted",
+              operationId: meta.voiceOperationId,
+              sessionId: sid,
+            },
+          }).catch(function () {});
+          if (state.voiceInput && state.voiceInput.operationId === meta.voiceOperationId) {
+            state.voiceInput = Object.assign({}, state.voiceInput, {
+              status: "idle",
+              operationId: null,
+              telemetryTerminal: true,
+            });
+            notify();
+          }
+        }
         return true;
       })
       .catch(function (err) {
@@ -471,6 +488,9 @@
       }
     }
     var sid = state.activeSessionId;
+    if (state.voiceInput && state.voiceInput.status === "completed" && state.voiceInput.operationId) {
+      meta = Object.assign({}, meta || {}, { voiceOperationId: state.voiceInput.operationId });
+    }
     function abandonPreparedAttachments() {
       state.attachments = state.attachments.filter(function (attachment) {
         return readyAttachments.indexOf(attachment) < 0;

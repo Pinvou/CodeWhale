@@ -69,6 +69,8 @@ pub struct TrackBehaviorEventRequest {
     pub provider_configured: Option<bool>,
     pub step: Option<String>,
     pub readiness_source: Option<String>,
+    pub voice_permission_status: Option<String>,
+    pub recognizer_type: Option<String>,
 }
 
 #[tauri::command]
@@ -77,7 +79,27 @@ pub fn track_behavior_event(
     app: AppHandle,
 ) -> Result<(), String> {
     let event_name = match request.event_name.as_str() {
+        "voice_entry_clicked" => "voice_entry_clicked",
+        "voice_permission_result" => "voice_permission_result",
         "voice_started" => "voice_started",
+        "voice_recognition_completed" => "voice_recognition_completed",
+        "voice_recognition_failed" => "voice_recognition_failed",
+        "voice_cancelled" => "voice_cancelled",
+        "voice_message_submitted" => {
+            let session_id = request
+                .session_id
+                .as_deref()
+                .ok_or_else(|| "voice_message_submitted requires session_id".to_string())?;
+            let operation_id = request
+                .operation_id
+                .as_deref()
+                .ok_or_else(|| "voice_message_submitted requires operation_id".to_string())?;
+            return crate::features::behavior_telemetry::track_voice_message_submitted(
+                &app,
+                session_id,
+                operation_id,
+            );
+        }
         "scene_triggered" => "scene_triggered",
         "onboarding_started" => "onboarding_started",
         "onboarding_completed" => "onboarding_completed",
@@ -146,6 +168,12 @@ pub fn track_behavior_event(
     }
     if let Some(value) = request.readiness_source {
         event = event.string("readiness_source", value);
+    }
+    if let Some(value) = request.voice_permission_status {
+        event = event.string("voice_permission_status", value);
+    }
+    if let Some(value) = request.recognizer_type {
+        event = event.string("recognizer_type", value);
     }
     crate::features::behavior_telemetry::track(&app, event);
     Ok(())

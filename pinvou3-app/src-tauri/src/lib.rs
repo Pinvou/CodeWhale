@@ -1317,6 +1317,7 @@ pub fn run() {
             commands::remote_control::web_access_get_acp_agent_status,
             commands::remote_control::web_access_save_session_messages_chunk,
             commands::remote_control::web_access_transcribe_voice_audio,
+            commands::remote_control::web_access_track_behavior_event,
             commands::remote_control::web_access_read_artifact_chunk,
             commands::remote_control::web_access_update_settings,
             commands::remote_control::web_access_artifact_info,

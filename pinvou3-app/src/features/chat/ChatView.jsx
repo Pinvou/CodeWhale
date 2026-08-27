@@ -868,6 +868,9 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       }, [setInputText]);
       const handleComposerInputChange = useCallback((value) => {
         setInputText(value);
+        if (!String(value || '').trim() && bridge.voice && typeof bridge.voice.abandonVoiceResult === 'function') {
+          bridge.voice.abandonVoiceResult();
+        }
         const currentTemplate = getPersonalWorkbenchTemplateById(personalWorkbenchTemplateIdRef.current);
         if (!currentTemplate) return;
         if (!isPersonalWorkbenchTemplateDraftForTemplate(value, currentTemplate)) {

@@ -37,6 +37,7 @@ pub struct BehaviorTelemetry {
     tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
     team_sessions: Arc<StdMutex<HashSet<String>>>,
     tool_calls: Arc<StdMutex<HashMap<String, ToolOperation>>>,
+    voice_submissions: Arc<StdMutex<HashSet<String>>>,
     event_tx: Option<mpsc::Sender<()>>,
 }
 
@@ -597,6 +598,7 @@ impl BehaviorTelemetry {
             tasks,
             team_sessions: Arc::new(StdMutex::new(HashSet::new())),
             tool_calls: Arc::new(StdMutex::new(HashMap::new())),
+            voice_submissions: Arc::new(StdMutex::new(HashSet::new())),
             event_tx,
         };
         if let Some(rx) = event_rx {
@@ -738,6 +740,7 @@ impl BehaviorTelemetry {
             tasks: self.tasks.clone(),
             team_sessions: self.team_sessions.clone(),
             tool_calls: self.tool_calls.clone(),
+            voice_submissions: self.voice_submissions.clone(),
             event_tx: None,
         }
     }
@@ -921,6 +924,9 @@ impl BehaviorTelemetry {
                 tasks.clear();
                 persist_task_attempts(&tasks)?;
             }
+            if let Ok(mut submissions) = self.voice_submissions.lock() {
+                submissions.clear();
+            }
             let mut guard = self.state.lock().await;
             if let Some(state) = guard.as_mut() {
                 state.control.enabled = false;
@@ -949,6 +955,9 @@ impl BehaviorTelemetry {
         if let Ok(mut tasks) = self.tasks.lock() {
             tasks.clear();
             persist_task_attempts(&tasks)?;
+        }
+        if let Ok(mut submissions) = self.voice_submissions.lock() {
+            submissions.clear();
         }
         Ok(self.status().await)
     }
@@ -1438,6 +1447,47 @@ pub fn begin_task_submission(
         attempt_id: attempt.attempt_id,
         reject_on_drop: true,
     }
+}
+
+/// Associates a voice operation with the task attempt that was actually
+/// admitted by the chat command. The frontend never manufactures attempt IDs.
+pub fn track_voice_message_submitted(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    operation_id: &str,
+) -> Result<(), String> {
+    let telemetry = app
+        .try_state::<BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
+    if !telemetry.collecting.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let attempt = telemetry
+        .tasks
+        .lock()
+        .map_err(|_| "behavior task state is unavailable".to_string())?
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| "no active task attempt for voice submission".to_string())?;
+    let dedup_key = format!("{operation_id}:{}", attempt.attempt_id);
+    let mut submissions = telemetry
+        .voice_submissions
+        .lock()
+        .map_err(|_| "voice submission state is unavailable".to_string())?;
+    if submissions.len() >= OUTBOX_MAX_EVENTS {
+        submissions.clear();
+    }
+    if !submissions.insert(dedup_key) {
+        return Ok(());
+    }
+    drop(submissions);
+    telemetry.track(
+        BehaviorEvent::new("voice_message_submitted")
+            .session(session_id)
+            .string("operation_id", operation_id)
+            .string("attempt_id", attempt.attempt_id),
+    );
+    Ok(())
 }
 
 pub fn reject_task_submission(

@@ -2335,6 +2335,7 @@
   var closeVoiceAsrSetup = voiceFeature.closeVoiceAsrSetup;
   var cancelVoiceInput = voiceFeature.cancelVoiceInput;
   var clearVoiceInput = voiceFeature.clearVoiceInput;
+  var abandonVoiceResult = voiceFeature.abandonVoiceResult;
   var appendVoiceText = voiceFeature.appendVoiceText;
   var runVoiceInputDebugAssertions = voiceFeature.runVoiceInputDebugAssertions;
   var knowledgeModelFeature = installBridgeFeature("knowledge-model", { state: state, notify: notify, invoke: invoke, listen: listen });
@@ -2520,6 +2521,7 @@
       closeVoiceAsrSetup: closeVoiceAsrSetup,
       cancelVoiceInput: cancelVoiceInput,
       clearVoiceInput: clearVoiceInput,
+      abandonVoiceResult: abandonVoiceResult,
       appendVoiceText: appendVoiceText,
       runVoiceInputDebugAssertions: runVoiceInputDebugAssertions,
     },
