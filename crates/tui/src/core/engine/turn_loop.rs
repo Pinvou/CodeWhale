@@ -2407,9 +2407,7 @@ impl Engine {
                 // #3027: deny wins over allow — check the deny-list first so a
                 // tool present in both lists is still blocked.
                 if blocked_error.is_none() && tool_policy.denies_tool(&tool_name) {
-                    blocked_error = Some(ToolError::permission_denied(format!(
-                        "Tool '{tool_name}' is in the disallowed-tools list"
-                    )));
+                    blocked_error = Some(denied_tool_error(&tool_name));
                 }
 
                 if blocked_error.is_none() && !tool_policy.passes_allow_list(&tool_name) {
@@ -4818,6 +4816,22 @@ fn command_denies_tool(disallowed_tools: Option<&[String]>, tool_name: &str) -> 
     tool_denied(disallowed_tools, tool_name)
 }
 
+/// Error a denied tool call reports. An MCP-shaped name reads exactly like
+/// the unknown-tool error `McpPool::call_tool` produces for a nonexistent
+/// server — a distinct "denied" message would be a server-existence oracle.
+/// Non-MCP names keep the explicit deny message (operator-facing CLI UX).
+fn denied_tool_error(tool_name: &str) -> ToolError {
+    if McpPool::is_mcp_tool(tool_name) {
+        ToolError::execution_failed(format!(
+            "MCP tool failed: Unknown MCP tool name: {tool_name}"
+        ))
+    } else {
+        ToolError::permission_denied(format!(
+            "Tool '{tool_name}' is in the disallowed-tools list"
+        ))
+    }
+}
+
 fn resolve_tool_definition<'a>(
     tool_name: &mut String,
     tool_catalog: &'a [Tool],
@@ -5321,6 +5335,24 @@ mod tests {
         assert!(!command_denies_tool(None, "exec_shell"));
         let empty: Vec<String> = Vec::new();
         assert!(!command_denies_tool(Some(&empty), "exec_shell"));
+    }
+
+    #[test]
+    fn forkguard_denied_mcp_tool_error_matches_the_unknown_tool_error() {
+        // Existence-oracle guard: a denied `mcp_*` name must be
+        // indistinguishable from a tool on a server that does not exist
+        // (same `ExecutionFailed` variant and text `call_tool` produces).
+        let denied = denied_tool_error("mcp_acme_get_profile");
+        assert_eq!(
+            denied.to_string(),
+            "Failed to execute tool: MCP tool failed: Unknown MCP tool name: mcp_acme_get_profile"
+        );
+        // Non-MCP names keep the explicit deny message.
+        let plain = denied_tool_error("exec_shell");
+        assert_eq!(
+            plain.to_string(),
+            "Failed to authorize tool execution: Tool 'exec_shell' is in the disallowed-tools list"
+        );
     }
 
     #[test]

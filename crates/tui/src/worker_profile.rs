@@ -159,7 +159,9 @@ pub struct WorkerRuntimeProfile {
     /// the parent's and the child's deny lists, so a descendant can never drop a
     /// restriction an ancestor imposed. The only way to start without the
     /// parent's list is an explicit `inherit_disallowed_tools: false` at spawn,
-    /// which clears the cloned runtime's list before the registry reads it.
+    /// which clears the cloned runtime's list before the registry reads it;
+    /// model-supplied spawn input cannot set that flag (session rules are an
+    /// operator ceiling, not parent taste).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub denied_tools: Vec<String>,
     /// Remaining nested-delegation budget. A worker may spawn children while

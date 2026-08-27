@@ -5231,3 +5231,246 @@ fn removed_runtime_server_config_can_be_retried_with_same_name() {
     pool.add_runtime_server_config("retryable".to_string(), config)
         .expect("rollback must release the deterministic runtime name");
 }
+
+// === Pool-side disallowed-tools filtering ===
+//
+// The session's disallowed-tools rules are pushed into the pool
+// (`set_denied_tool_rules`). A rule matching `mcp_<server>_*` removes the
+// whole server from every pool surface, so a host-disabled connector is not
+// just hidden from the model catalog but unconnectable, unenumerable, and
+// invisible to the MCP meta-tool advertisement gates.
+
+/// Pool with two connected servers: `open` exposes one tool, `secret`
+/// exposes a tool plus the pool's only resources, templates, and prompts.
+fn denied_rules_test_pool() -> McpPool {
+    let mut open = test_connection(Box::new(ScriptedValueTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        responses: VecDeque::new(),
+    }));
+    open.name = "open".to_string();
+    open.tools = vec![McpTool {
+        name: "ping".to_string(),
+        description: None,
+        input_schema: serde_json::json!({}),
+    }];
+
+    let mut secret = test_connection(Box::new(ScriptedValueTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        responses: VecDeque::new(),
+    }));
+    secret.name = "secret".to_string();
+    secret.tools = vec![McpTool {
+        name: "search".to_string(),
+        description: None,
+        input_schema: serde_json::json!({}),
+    }];
+    secret.resources = vec![McpResource {
+        uri: "file:///secret".to_string(),
+        name: "secret".to_string(),
+        description: None,
+        mime_type: None,
+    }];
+    secret.resource_templates = vec![McpResourceTemplate {
+        uri_template: "file:///secret/{id}".to_string(),
+        name: "secret_tpl".to_string(),
+        description: None,
+        mime_type: None,
+    }];
+    secret.prompts = vec![McpPrompt {
+        name: "review".to_string(),
+        description: None,
+        arguments: Vec::new(),
+    }];
+
+    let mut pool = McpPool::new(McpConfig::default());
+    pool.connections.insert("open".to_string(), open);
+    pool.connections.insert("secret".to_string(), secret);
+    pool
+}
+
+#[test]
+fn forkguard_mcp_pool_denied_server_disappears_from_every_surface() {
+    let mut pool = denied_rules_test_pool();
+
+    // Control: before any rule, both servers and all meta tools are visible.
+    assert_eq!(pool.all_tools().len(), 2);
+    assert_eq!(pool.all_resources().len(), 1);
+    assert_eq!(pool.all_resource_templates().len(), 1);
+    assert_eq!(pool.all_prompts().len(), 1);
+    let before: Vec<String> = pool
+        .to_api_tools()
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect();
+    for meta in [
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "mcp_read_resource",
+        "mcp_get_prompt",
+    ] {
+        assert!(
+            before.contains(&meta.to_string()),
+            "{meta} advertised before deny"
+        );
+    }
+
+    pool.set_denied_tool_rules(vec!["mcp_secret_*".to_string()]);
+
+    // The live connection is dropped by the hot update.
+    assert!(
+        !pool.connected_servers().contains(&"secret"),
+        "denied server's connection is dropped"
+    );
+    assert!(pool.connected_servers().contains(&"open"));
+
+    // Enumeration excludes the denied server.
+    assert!(
+        pool.all_tools()
+            .iter()
+            .all(|(name, _)| !name.starts_with("mcp_secret_")),
+        "denied server's tools are not enumerated"
+    );
+    assert_eq!(pool.all_tools().len(), 1);
+    assert!(pool.all_resources().is_empty());
+    assert!(pool.all_resource_templates().is_empty());
+    assert!(pool.all_prompts().is_empty());
+
+    // Only the denied server bore resources/prompts, so every meta tool
+    // falls out of the advertised catalog.
+    let after: Vec<String> = pool
+        .to_api_tools()
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect();
+    assert_eq!(after, vec!["mcp_open_ping".to_string()]);
+}
+
+#[test]
+fn forkguard_mcp_pool_denied_rules_match_like_the_tool_catalog() {
+    let mut pool = McpPool::new(McpConfig::default());
+
+    // Underscores in server names resolve through the synthetic-name matcher.
+    pool.set_denied_tool_rules(vec!["mcp_my_db_*".to_string()]);
+    assert!(pool.server_denied("my_db"));
+    assert!(!pool.server_denied("my"));
+
+    // A global prefix rule denies every server, mirroring catalog filtering.
+    pool.set_denied_tool_rules(vec!["mcp_*".to_string()]);
+    assert!(pool.server_denied("anything"));
+
+    // Rules are case-insensitive, like the catalog matcher.
+    pool.set_denied_tool_rules(vec!["MCP_My_Db_*".to_string()]);
+    assert!(pool.server_denied("my_db"));
+
+    // Unrelated rules and the no-rules case change nothing.
+    pool.set_denied_tool_rules(vec!["exec_shell".to_string()]);
+    assert!(!pool.server_denied("my_db"));
+    pool.set_denied_tool_rules(Vec::new());
+    assert!(!pool.server_denied("my_db"));
+}
+
+#[tokio::test]
+async fn forkguard_mcp_pool_denied_server_is_indistinguishable_from_unknown() {
+    let mut config = McpConfig::default();
+    config
+        .servers
+        .insert("secret".to_string(), test_server_config());
+    let mut pool = McpPool::new(config);
+    pool.set_denied_tool_rules(vec!["mcp_secret_*".to_string()]);
+
+    // Explicit-server access fails with the same error template an unknown
+    // server produces — only the queried name differs, as it would for any
+    // genuinely absent server.
+    let denied = pool.get_or_connect("secret").await.err().expect("denied");
+    let unknown = pool
+        .get_or_connect("nonexistent")
+        .await
+        .err()
+        .expect("unknown");
+    assert_eq!(denied.to_string(), "Failed to find MCP server: secret");
+    assert_eq!(
+        unknown.to_string(),
+        "Failed to find MCP server: nonexistent"
+    );
+
+    // Tool resolution fails with the same error template a nonexistent
+    // server produces.
+    let denied_call = pool
+        .call_tool("mcp_secret_search", serde_json::json!({}))
+        .await
+        .expect_err("denied tool call");
+    let unknown_call = pool
+        .call_tool("mcp_nonexistent_search", serde_json::json!({}))
+        .await
+        .expect_err("unknown tool call");
+    assert_eq!(
+        denied_call.to_string(),
+        "Unknown MCP tool name: mcp_secret_search"
+    );
+    assert_eq!(
+        unknown_call.to_string(),
+        "Unknown MCP tool name: mcp_nonexistent_search"
+    );
+
+    // Explicit-server resource/prompt access is rejected identically.
+    let read = pool
+        .read_resource("secret", "file:///secret")
+        .await
+        .expect_err("denied read_resource");
+    assert_eq!(read.to_string(), denied.to_string());
+    let prompt = pool
+        .get_prompt("secret", "review", serde_json::json!({}))
+        .await
+        .expect_err("denied get_prompt");
+    assert_eq!(prompt.to_string(), denied.to_string());
+    let listed = pool
+        .call_tool(
+            "list_mcp_resources",
+            serde_json::json!({"server": "secret"}),
+        )
+        .await
+        .expect_err("denied list_mcp_resources");
+    assert_eq!(listed.to_string(), denied.to_string());
+}
+
+#[tokio::test]
+async fn forkguard_mcp_pool_connect_all_never_spawns_denied_servers() {
+    let mut config = McpConfig::default();
+    let mut server = test_server_config();
+    server.command = Some("definitely-not-a-real-codewhale-test-binary".to_string());
+    server.required = true;
+    config.servers.insert("secret".to_string(), server);
+
+    // Control: without the rule, a spawn is attempted and fails, and the
+    // `required` marker adds a second error.
+    let mut pool = McpPool::new(config.clone());
+    let errors = pool.connect_all().await;
+    assert!(
+        errors.iter().any(|(name, _)| name == "secret"),
+        "control: the enabled server is connected (and fails): {errors:?}"
+    );
+
+    // With the rule, the server is skipped entirely — no spawn attempt, and
+    // its `required` marker does not fire either.
+    let mut pool = McpPool::new(config);
+    pool.set_denied_tool_rules(vec!["mcp_secret_*".to_string()]);
+    let errors = pool.connect_all().await;
+    assert!(
+        errors.is_empty(),
+        "denied server is skipped, never spawned: {errors:?}"
+    );
+    assert!(pool.connected_servers().is_empty());
+}
+
+#[tokio::test]
+async fn forkguard_mcp_pool_without_denied_rules_is_unchanged() {
+    let mut pool = denied_rules_test_pool();
+    assert!(!pool.server_denied("secret"));
+    assert_eq!(pool.all_tools().len(), 2);
+    assert_eq!(pool.all_resources().len(), 1);
+    assert_eq!(pool.all_prompts().len(), 1);
+    // Explicit-server access still routes through the live connection.
+    pool.get_or_connect("secret")
+        .await
+        .expect("undenied server connects");
+}
