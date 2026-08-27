@@ -166,6 +166,8 @@ Commerce Customer worker 只依赖 `CustomerAdapter` 端口，当前 H3C 实现�
 - `recharge_products`：业务可售目录及冻结的权益组成快照；`enabled` 只表达业务发布/下架，不承载 Provider 故障或自动止损。
 - `payment_product_mappings`：通用商品到 Provider/版本/外部 SKU 的不可变版本映射，保存金额、币种、渠道、状态和有效期；`TEST_ONLY` 映射在正式环境不可用。
 - `payment_provider_controls`、`payment_product_controls`：Provider 版本级和 Provider 商品级的新单安全控制。两层都使用版本化 CAS、触发案件、原因和操作者证据；自动止损只关闭控制，不修改商品目录，创建订单必须同时通过目录、映射和两层控制。
+- `payment_provider_attempts`、`payment_provider_health_observations`、`payment_observation_gaps`：Provider 调用前意图、调用后脱敏健康事实和结果缺口。尝试 ID 全局唯一，观察按 Provider/版本/动作/渠道/路由分区并保存可信接收时间、规则版本和证据摘要；业务拒绝不进入可用性分母。
+- `payment_stop_loss_policies`、`payment_stop_loss_evaluations`、`payment_stop_loss_evaluation_members`：只读版本策略、不可变 L1/L2/L3 评估及冻结成员。评估唯一键绑定作用域、策略、控制前版本和阈值穿越事实，高水位阻止并发 Worker 重复放大样本。
 - `metering_unit_definitions`、`pricing_versions`、`pricing_version_unit_rates`、`pricing_spaces`：版本化计量单位、全局/模型定价空间、逐单位固定价或显式继承，以及价格生命周期和发布冲突控制。
 - `protocol_formula_bindings`：Billing 保存 Token 已发布协议公式与所引用计量单位的不可变绑定，价格解析只接受绑定集合完整覆盖的单位。
 - `pricing_publish_commands`、`pricing_lifecycle_commands`、`pricing_version_audits`、`pricing_blocks`：发布与撤销/结束的幂等命令、不可变审计和显式阻断窗口。
@@ -303,6 +305,12 @@ Billing 新增 `recharge_product_catalog_items` 聚合，保存供应商中立�
 新华三原始 `FAILED` 由 Adapter 保守映射为 `REVIEW_REQUIRED`，不能在 Adapter 内猜测为权威未支付。运营确认链路由 Billing 编排：异常必须先由当前支付运营认领；处理命令只携带案件、原因和幂等键；Billing 使用订单冻结的 Provider/版本、外部订单号和付款人标识现场调用 `PaymentProvider.Get`，再由领域层校验原始 `FAILED`、订单/客户/SKU/金额/币种一致、无支付流水、无支付权益、无本人付款申诉及无更强证据。外部查询不占用数据库事务；查询完成后事务重新锁定案件、订单和相关证据并再次验证版本，随后原子写入 `payment_provider_failure_confirmations`、`PROVIDER_FAILURE_CONFIRMED` 时间线、订单 `FAILED`、异常/人工案件终态和 Outbox。版本或证据在查询窗口变化时失败关闭并要求重新执行。之后到达的成功证据仍按晚到支付链路处理。
 
 商品可售性由三层事实派生：权威目录 `recharge_product_catalog_items.lifecycle_status='ON_SALE'`、当前有效 `payment_product_mappings`、Provider/商品运行时控制。新列表和下单不得读取兼容 `recharge_products.enabled` 作决定。列表接口返回目录与 `availability_status=AVAILABLE|PROVIDER_PAUSED|PRODUCT_PAUSED`，并只暴露稳定 `availability_reason_code`；创建订单在数据库事务中重新检查同一控制版本，不能依赖前端禁用。自动止损写 Provider/商品控制和不可变案件关联，不更新目录。兼容迁移仅将存在 `manual_review_stop_loss_evaluations` 证明的历史误下架投影恢复为与权威生命周期一致，并建立等价商品暂停，无法证明来源的禁用投影保持原状并进入修复队列。
+
+支付止损采用独立升级层级。L1 仅冻结异常订单的自动履约；L2 只消费受信规则标记为影响新单且绑定商品映射/故障签名的案件，单个完整性 P0、同商品多订单阈值、止损 SLA 或准入失效只关闭该商品；L3 才关闭 Provider。L3 只聚合新单关键动作的去重健康观察或具有共同 Provider 故障证据的跨商品 L2；退款、拒付、用户争议、业务拒绝、单用户资料问题、熔断拒绝和非新单动作不参与 Provider 新单聚合。`PROVIDER_BLIND` 保留为可立即关闭 Provider 的权威事实盲区。
+
+短时熔断按 Provider/版本/动作/渠道/路由分区并可自动半开；持久 L3 控制只能双人恢复，两个状态机互不写入。Provider 调用前事务提交 `payment_provider_attempts` 和 Outbox，释放数据库锁后调用外部服务，调用后第二事务归并结果、观察与 Outbox；缺少结果事务时生成/派生 `OBSERVATION_GAP`，恢复器只用原幂等键和只读查询收敛。聚合使用 Billing `received_at`、半开窗口、冻结观察高水位和不可变成员，按 Provider→商品→订单顺序加锁并以控制版本 CAS。案件/观察变化实时触发，分钟 Worker 独立补偿，不受人工通知节流。
+
+Provider 与商品恢复使用不同审批命令。Provider 恢复只修改 Provider 控制；Provider 暂停期间商品恢复直接拒绝，Provider 恢复后必须为商品重新申请双人审批。两类执行都冻结并复核控制版本、案件、策略、观察高水位、缺口、映射/准入和最新受信探测，任何变化失败关闭。历史缺少分级证据的已关闭控制标记 `LEGACY_UNCLASSIFIED` 并保持关闭，生成唯一迁移复核案件；新聚合器从部署冻结高水位后开始消费，旧样本不能重复触发。
 
 收款恢复复用 Account 既有审批聚合，不在 Billing 另建审批系统。`PAYMENT_PROVIDER_RESUME` 是 `APPROVAL_REQUIRED` 命令：支付运营以目标 Provider/版本、商品集合、控制版本、开放 P0/P1 案件摘要、映射版本和现场健康摘要创建申请；Account 禁止申请人自审并固化批准人身份。授权事件由 `billing-command-executor` 消费，执行前从 Account 强一致复核双方当前权限，并在 Billing 事务中重新计算全部快照、排除异常确认人与批准人冲突、验证 Provider 查询健康及映射有效性；一致时原子打开目标控制并保存执行审计，变化时把执行标记为失效。单个案件结案绝不隐式恢复新单，超级管理员和 Break-glass 均不绕过该链路。
 

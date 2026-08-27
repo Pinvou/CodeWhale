@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 379 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 347`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `379` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。业务与安全两位独立审核者均已确认最终设计通过，APT-069–APT-086 的全部 CODE 任务已收敛。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 347`、`部分实现 34`、`未实现 2`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `385` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55–PAY-58、ADM-53、NFR-54 的分级止损设计已经第三轮独立业务与安全审核通过，当前由 APT-091–APT-093 实现。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -270,6 +270,10 @@
 | PAY-52 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 列表、下单和 H3C 查询均动态解析数据库目录/映射；下单先提交稳定本地意图并释放锁，再调用 Provider，未知结果保留恢复状态。 |
 | PAY-53 | 已实现 | AUDIT_HEAD | GO-UNIT; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 商品命令校验 expected_version、16–128 字符幂等键、终端 OIDC auth_time 与不可变命令审计；旧版本、异请求同键和陈旧认证失败关闭。 |
 | PAY-54 | 已实现 | AUDIT_HEAD | PRODUCT-DOCUMENT-BASELINE | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 需求、架构、任务和状态基线不再记录运行时商品标识、金额、权益值或商品数量；商品变更只进入目录和审计。 |
+| PAY-55 | 部分实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 订单人工隔离已存在，但当前 SLA Worker 仍会由单案件同时暂停商品和 Provider，待 APT-091 收敛为商品级准入聚合。 |
+| PAY-56 | 部分实现 | AUDIT_HEAD | PROVIDER-CIRCUIT; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 短时分区熔断已存在，但持久 Provider 控制尚未按关键路径、多样性和跨商品共同故障聚合，待 APT-092。 |
+| PAY-57 | 部分实现 | AUDIT_HEAD | PAYMENT-PROVIDER-BOUNDARY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 下单已有事务外 Provider 调用边界，但全动作健康观察、gap、高水位和不可变窗口成员尚未闭环，待 APT-092。 |
+| PAY-58 | 部分实现 | AUDIT_HEAD | PAYMENT-PROVIDER-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 现有恢复命令会同时打开 Provider 和商品，历史控制也未分级迁移，待 APT-093 拆分恢复。 |
 | UI-02 | 已实现 | AUDIT_HEAD | REGISTRATION-SAGA; DESKTOP-39 | NOT_DEPLOYED | 桌面区分注册、自动登录与钱包初始化，展示 `PROVISIONING`/`REPAIR_REQUIRED`，初始化期间不请求余额、充值或平台模型 |
 | UI-13 | 已实现 | DOC_CURRENT | DESKTOP-39; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | 三语用量页可停止当前客户端交付，并分别展示执行和结算状态；UNSUPPORTED 明示后台继续结束并按可信实际用量结算，不显示为即时免费 |
 | UI-14 | 已实现 | DOC_CURRENT | ACCOUNT-CLOSURE-SAGA; UI-LINT; ACCOUNT-PORTAL-BUILD | NOT_DEPLOYED | 个人中心提供明确确认、阶段/SLA、脱敏阻断分类和用户动作；轮询持久状态，不展示 Provider 响应、内部资源 ID 或其他用户信息 |
@@ -316,6 +320,7 @@
 | ADM-50 | 已实现 | AUDIT_HEAD | AUTHORIZATION-COVERAGE; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | Account 新增五个原子商品权限并按审定角色真值表授予；Billing 路由逐项要求对应权限，角色名和定价宽权限不能替代。 |
 | ADM-51 | 已实现 | AUDIT_HEAD | COMMAND-POLICY; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 添加、验证/撤销、上架、下架和删除均登记 AUDIT_ONLY 策略，命令记录绑定操作者、原因、幂等指纹和前后版本。 |
 | ADM-52 | 已实现 | AUDIT_HEAD | OPENAPI-LINT; PORTAL-PROXY; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | Billing 提供列表、添加、验证/重试/撤销、上架、下架和删除接口；OpenAPI 与 Portal 只开放精确方法和 UUID 路径。 |
+| ADM-53 | 部分实现 | AUDIT_HEAD | PAYMENT-PROVIDER-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 现有后台可读 Provider/商品控制，但缺分层评估证据、观察缺口及相互独立的恢复草稿，待 APT-093。 |
 | NFR-04 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 共享日志 Handler 仅接受稳定事件和字段白名单，未知消息折叠，原始 error、密码、Token、Cookie、正文和 Payload 属性不序列化；标准库日志也经固定事件适配，注入秘密标记与绕过扫描进入全量 verify |
 | NFR-21 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 所有账号平台服务启动即配置统一 JSON schema，必含 time、level、service、environment、version、event、result；HTTP、Relay 和后台任务复用同一 Handler，未知字段失败关闭 |
 | NFR-22 | 已实现 | DOC_CURRENT | GO-UNIT; OBSERVABILITY-RELEASE-GATE | NOT_DEPLOYED | 每个业务/Relay HTTP 入口只接受64字符内安全 Request ID，否则生成128-bit ID；响应、日志和共享 HTTP Client 传播同一受信 ID，事件上下文以 event_id 建立独立请求关联 |
@@ -342,6 +347,7 @@
 | NFR-43 | 已实现 | DOC_CURRENT | GO-UNIT; TENANT-ISOLATION-MATRIX | NOT_DEPLOYED | 发布合同矩阵覆盖个人间、组织间、节点父/兄弟/作用域外后代、角色互换、活动上下文、撤权/到期/移除/组织停用/注销、猜测ID、批量混入、组织搜索、旧授权缓存和伪造事件；拒绝路径使用同形NotFound/PermissionDenied，允许查询按组织/成员过滤；当前没有租户公开导出接口，新增时必须先扩展矩阵 |
 | NFR-44 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 熔断器及支付/模型接入已实现；云端UAT没有支付流水和真实Provider错误样本，未覆盖业务拒绝排除、只读半开探针、指数重开、跨副本一致性与告警投递 |
 | NFR-45 | 已实现 | DOC_CURRENT | GO-UNIT; REGISTRATION-SAGA; ACCOUNT-CLOSURE-SAGA; LATE-PAYMENT-REVIEW; PAYMENT-ANOMALY-RECONCILIATION; ROUTE-PROVISIONING-ELIGIBILITY; USAGE-CANCELLATION-CONVERGENCE | NOT_DEPLOYED | Account、Billing、Token 使用统一冻结时钟和不可变案件/转派/止损证据；注册、资料、注销、支付/退款/拒付、对账、路由 Provisioning、用量及高风险命令修复均接入 P0/P1/P2，生产缺值班链即拒绝启动；任一截止逾期实际转派 owner，P0/P1 止损逾期会停用关联 Provider/商品/路由或暂停高风险命令，而非只通知 |
+| NFR-54 | 未实现 | AUDIT_HEAD | PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 设计已通过审核，持久健康观察、确定性窗口、高水位、gap 与并发唯一阈值穿越由 APT-092 实现。 |
 | NFR-46 | 部分实现 | DOC_CURRENT | GO-UNIT; PROVIDER-CIRCUIT-CLOCK; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT宿主机Chrony已同步并可见9源，当前样本偏差约-2.3ms至+2.9ms；应用仍为development Compose，缺三源中位配置、100ms连续证明、250ms/1s注入、readiness/写拒绝与告警投递验收 |
 | NFR-47 | 已实现 | DOC_CURRENT | GO-UNIT; CLIENT-COMPATIBILITY-LIFECYCLE | NOT_DEPLOYED | 四服务共用版本清单与响应头，三版合同矩阵、90天支持、60天通知、受审批安全例外及稳定426已闭环；每次正式发布必须更新真实发布日期与淘汰时间 |
 | NFR-48 | 已实现 | DOC_CURRENT | GO-UNIT; AUDIT-EXPORT-PROTECTION | NOT_DEPLOYED | 服务端任务要求 `platform.audit.export`、15分钟近期认证、明确范围和原因；默认不可逆主体标识及字段脱敏，未脱敏字段另需最长24小时临时 `platform.audit.pii.export`；执行31天/10万行/500MB、每用户2并发/10每日配额，加密签名水印文件只允许15分钟内单次成功下载；缺生产密钥托管、大规模及真实并发验收 |
@@ -840,6 +846,10 @@
 | PAY-45 | 商品目录与支付止损分离 | 已实现 | 自动止损写独立 Provider/商品控制事实，不再篡改目录上架状态；创建订单按两层控制失败关闭。 |
 | PAY-46 | 支付能力双人恢复 | 已实现 | Account 双人审批与 Billing 执行门禁共同校验版本、Provider 现场查询、案件、映射和人员隔离，成功后原子恢复并保留不可变证据。 |
 | PAY-47 | 支付暂停对用户可见 | 已实现 | 商品列表保留暂停项并返回稳定暂停层级与原因码。 |
+| PAY-55 | 订单与商品分级止损 | 部分实现 | 订单隔离已存在，但案件 SLA 仍会同时关闭 Provider 和商品，待 APT-091。 |
+| PAY-56 | Provider 持久聚合止损 | 部分实现 | 临时熔断已存在，尚无跨副本持久分区聚合和关键路径升级规则。 |
+| PAY-57 | 支付健康观察与确定性评估 | 部分实现 | 下单具备事务外调用，尚无统一尝试、观察、gap、高水位和成员事实。 |
+| PAY-58 | 分层恢复与历史控制迁移 | 部分实现 | 现有恢复命令联动打开两层控制，尚未完成独立恢复和历史控制复核迁移。 |
 
 ### 3.6 个人中心与运营后台
 
@@ -919,6 +929,7 @@
 | ADM-47 | Token 管理平台隔离 | 已实现 | 普通 Token Account/路由/凭据接口未注册且不在公开合同中；平台资源只由 `/admin/v1/*` 管理，存量非平台凭据由可审计迁移冻结隔离。 |
 | ADM-48 | Break-glass 可信操作者 | 已实现 | CLI 只从受控描述符读取签名运维凭据，服务端校验受众、主体、目标、时效和唯一凭据 ID；自报身份参数已删除。 |
 | ADM-49 | 短期人类委托 | 已实现 | Account 签发受众/权限/目标/时效/请求指纹及授权版本绑定的 Ed25519 委托；Billing 验签消费并以服务主体、委托人、委托 ID 和授权版本记录不可变额度审计。 |
+| ADM-53 | 支付分级止损后台治理 | 部分实现 | 后台已有控制读取与 Provider 恢复草稿，待展示分层评估/gap 并拆分商品和 Provider 恢复。 |
 
 ## 4. 非功能需求
 
@@ -971,6 +982,7 @@
 | NFR-43 | 租户隔离验证矩阵 | 已实现：每次合同发布自动执行15个拒绝向量，并检查直接对象、批量、搜索、缓存、异步事件和无泄露错误；当前无租户公开导出面，未来新增导出路由会先触发门禁失败。 |
 | NFR-44 | Provider 熔断 | 通用精确阈值熔断器已接入支付和模型 Provider；云端 UAT 没有真实错误样本，仍缺业务分类、只读探针、跨副本和告警验收。 |
 | NFR-45 | 人工队列 SLA | 已实现：三领域统一从源案件创建时间冻结 P0/P1 7×24 与 P2 上海工作时 SLA，转派不重置；注册/资料/注销、支付/退款/拒付/对账、路由 Provisioning、用量和高风险命令队列均保存责任人及不可变时间线，逐截止自动升级至配置的下一值班负责人，P0/P1 止损逾期执行 Provider、支付商品、路由或高风险命令暂停评估。 |
+| NFR-54 | 支付健康评估可靠性 | 未实现：待 APT-092 建立持久去重观察、冻结窗口成员、高水位、gap 与唯一阈值穿越。 |
 | NFR-46 | 统一可信时钟 | 云端 UAT 宿主机 Chrony 已同步9源且当前偏差为毫秒级；生产三源中位配置、100ms连续证明、250ms/1s注入和告警/readiness/写拒绝证据仍缺失。 |
 | NFR-47 | 桌面 API 兼容与淘汰 | 已实现：N/N-1/N-2共用合同矩阵；清单启动校验90天支持和60天通知，四服务返回契约/最小版本/Sunset头，桌面直连与平台模型请求携带精确版本，过期远程写操作稳定返回426及HTTPS升级入口，不影响本地模型和本地读取。 |
 | NFR-48 | 审计导出保护 | 已实现：服务端任务要求专用权限、15分钟近期认证、明确范围和原因，执行默认脱敏/临时PII授权、加密签名水印、31天/10万行/500MB、2并发/10每日及15分钟一次性下载。 |
