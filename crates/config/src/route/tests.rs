@@ -626,6 +626,81 @@ fn resolver_strict_direct_rejects_clearly_foreign_selector() {
 }
 
 #[test]
+fn resolver_direct_owned_row_match_survives_casing_mismatch() {
+    let r = RouteResolver::new();
+    let out = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("glm-5.2")))
+        .expect("lowercase selector on the owning Z.ai row must resolve");
+    assert_eq!(out.provider_kind(), ProviderKind::Zai);
+    assert_eq!(out.wire_model_id().as_str(), "GLM-5.2");
+    assert!(out.limits().has_known_limit());
+
+    let saved = RouteRequest {
+        saved_provider_model: Some(WireModelId::from("glm-5.2")),
+        ..req(Some(ProviderKind::Zai), None)
+    };
+    let out = r
+        .resolve(&saved)
+        .expect("saved lowercase Z.ai model must resolve");
+    assert_eq!(out.wire_model_id().as_str(), "GLM-5.2");
+
+    let out = r
+        .resolve(&req(Some(ProviderKind::Deepseek), Some("Deepseek-V4-Pro")))
+        .expect("DeepSeek's own casing variant must resolve");
+    assert_eq!(out.provider_kind(), ProviderKind::Deepseek);
+    assert_eq!(out.wire_model_id().as_str(), "deepseek-v4-pro");
+
+    let custom = RouteRequest {
+        explicit_provider: Some(ProviderKind::Zai),
+        model_selector: Some(LogicalModelRef::from("glm-5.2")),
+        saved_provider_model: None,
+        base_url_override: Some("https://compatible.example.test/v1".to_string()),
+        limit_overrides: Vec::new(),
+    };
+    let out = r
+        .resolve(&custom)
+        .expect("custom endpoint keeps model pass-through semantics");
+    assert_eq!(out.wire_model_id().as_str(), "glm-5.2");
+    assert!(!out.limits().has_known_limit());
+}
+
+#[test]
+fn resolver_direct_casefold_match_requires_one_owned_row() {
+    let raw = r#"{
+      "providers": {
+        "zai": {
+          "models": {
+            "CaseModel": {
+              "id": "CaseModel",
+              "modalities": { "input": ["text"], "output": ["text"] },
+              "limit": { "context": 1000 }
+            },
+            "casemodel": {
+              "id": "casemodel",
+              "modalities": { "input": ["text"], "output": ["text"] },
+              "limit": { "context": 2000 }
+            }
+          }
+        }
+      }
+    }"#;
+    let catalog = ModelsDevCatalog::parse_json(raw).expect("Models.dev fixture parses");
+    let offerings = catalog
+        .provider_offerings("zai")
+        .expect("Z.ai provider offerings");
+    let r = RouteResolver::from_offerings(offerings);
+
+    let out = r
+        .resolve(&req(Some(ProviderKind::Zai), Some("CASEMODEL")))
+        .expect("ambiguous casefold stays an unknown direct model");
+    assert_eq!(out.wire_model_id().as_str(), "CASEMODEL");
+    assert!(
+        !out.limits().has_known_limit(),
+        "ambiguous rows must not lend arbitrary catalog metadata"
+    );
+}
+
+#[test]
 fn resolver_strict_direct_rejects_other_provider_known_bare_offering() {
     let r = RouteResolver::new();
     let out = r.resolve(&req(Some(ProviderKind::Zai), Some("deepseek-v4-pro")));

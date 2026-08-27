@@ -335,6 +335,14 @@ impl RouteResolver {
         // Try to match a catalog offering owned by THIS provider, either by
         // canonical model id or by exact wire id. This keeps interpretation
         // inside provider scope; offerings from other providers are ignored.
+        // DeepSeek and Z.ai also publish marketing-cased wire ids while saved
+        // selectors can be lowercase. Defer that fallback until exact matching
+        // is exhausted, and only accept a unique provider-owned match so
+        // catalog order can never choose between case-distinct model ids.
+        let allow_casefold_wire_match = class == ProviderClass::StrictDirect
+            && matches!(provider_kind, ProviderKind::Deepseek | ProviderKind::Zai);
+        let mut casefold_match = None;
+        let mut casefold_ambiguous = false;
         for offering in &self.offerings {
             if offering.provider != *provider_id {
                 continue;
@@ -347,6 +355,18 @@ impl RouteResolver {
             if matches_canonical || matches_wire {
                 return Ok(ResolvedOffering::from_offering(offering));
             }
+            if allow_casefold_wire_match
+                && offering.wire_model_id.as_str().eq_ignore_ascii_case(raw)
+            {
+                if casefold_match.is_some() {
+                    casefold_ambiguous = true;
+                } else {
+                    casefold_match = Some(offering);
+                }
+            }
+        }
+        if !casefold_ambiguous && let Some(offering) = casefold_match {
+            return Ok(ResolvedOffering::from_offering(offering));
         }
 
         // No catalog match. Apply class-specific pass-through rules.
