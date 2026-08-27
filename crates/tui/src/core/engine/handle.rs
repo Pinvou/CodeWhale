@@ -279,9 +279,11 @@ impl EngineHandle {
     /// Returns [`SteerWithdrawal::Retired`] when the id was still pending and
     /// is now guaranteed never to be injected, or
     /// [`SteerWithdrawal::NotPending`] when the id already settled (committed
-    /// or dropped) or was never seen — a no-op with no event. Hosts that
-    /// re-send the same input through another path must check this outcome to
-    /// avoid delivering the message twice.
+    /// or dropped) or was never seen — a no-op with no new event. `NotPending`
+    /// does not by itself prove delivery: hosts must reconcile the matching
+    /// terminal event before deciding whether to re-send, and preserve an
+    /// indeterminate input rather than reporting successful delivery.
+    #[must_use = "reconcile the withdrawal outcome before deciding whether to re-send"]
     pub fn withdraw_steer(&self, steer_id: &str) -> crate::core::engine::SteerWithdrawal {
         self.steer_control
             .lock()

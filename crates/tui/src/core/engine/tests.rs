@@ -5378,7 +5378,7 @@ async fn steer_lifecycle_session_rejects_late_reserved_send() {
 }
 
 #[tokio::test]
-async fn steer_lifecycle_withdrawal_is_bounded_and_prevents_commit() {
+async fn forkguard_steer_lifecycle_withdrawal_is_bounded_and_prevents_commit() {
     let workspace = tempdir().expect("tempdir");
     let (mut engine, handle) = Engine::new(
         deterministic_engine_config(workspace.path()),
@@ -5428,6 +5428,48 @@ async fn steer_lifecycle_withdrawal_is_bounded_and_prevents_commit() {
         Event::SteerDropped { steer_id: id } if id == steer_id
     ));
     assert!(rx.try_recv().is_err(), "withdrawal settles exactly once");
+}
+
+#[tokio::test]
+async fn forkguard_steer_lifecycle_late_withdraw_reconciles_committed_event() {
+    let workspace = tempdir().expect("tempdir");
+    let (mut engine, handle) = Engine::new(
+        deterministic_engine_config(workspace.path()),
+        &Config::default(),
+    );
+    let turn = engine.begin_steer_turn();
+    let steer_id = handle.steer("commit this").await.expect("queue steer");
+    let steer = engine.rx_steer.recv().await.expect("queued steer");
+    assert!(engine.inject_steer(steer).await);
+    assert_eq!(
+        handle.withdraw_steer(&steer_id),
+        crate::core::engine::SteerWithdrawal::NotPending,
+        "a late withdrawal reports only that the id is no longer pending"
+    );
+    engine.finish_steer_turn(turn);
+
+    let mut rx = handle.rx_event.write().await;
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| matches!(event, Event::SteerCommitted { steer_id: id } if id == &steer_id)
+            )
+            .count(),
+        1,
+        "the terminal event is the authority that proves delivery"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| matches!(event, Event::SteerDropped { steer_id: id } if id == &steer_id)
+            )
+            .count(),
+        0,
+        "a committed steer must not also report a drop"
+    );
 }
 
 #[tokio::test]

@@ -583,14 +583,17 @@ pub enum CancelMode {
 /// input through another path (e.g. interrupt-and-send) need to know whether
 /// the engine copy can still be committed, otherwise the same message may be
 /// delivered twice.
+#[must_use = "reconcile the withdrawal outcome before deciding whether to re-send"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SteerWithdrawal {
     /// The steer was still pending and is now marked withdrawn: it will never
     /// be injected and settles with exactly one `Event::SteerDropped`.
     Retired,
-    /// The id was not pending — already committed, already settled, or never
-    /// seen. The withdrawal is a no-op and the engine copy may already be in
-    /// the transcript; hosts must not re-send in that case.
+    /// The id was not pending — already committed, already dropped, or never
+    /// seen. This outcome alone does not prove whether the engine copy reached
+    /// the transcript. Hosts must reconcile the matching `SteerCommitted` or
+    /// `SteerDropped` event before deciding whether to re-send; if no terminal
+    /// outcome is available, delivery remains indeterminate.
     NotPending,
 }
 
