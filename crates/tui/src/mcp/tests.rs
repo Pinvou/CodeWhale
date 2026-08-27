@@ -377,14 +377,19 @@ fn expand_env_placeholders_reports_missing_variable_without_secret_value() {
     assert!(!err.contains("Bearer "));
 }
 
-#[test]
-fn forkguard_mcp_secret_resolver_supplies_values_without_process_env_writes() {
+#[tokio::test]
+async fn forkguard_mcp_secret_resolver_supplies_values_without_process_env_writes() {
     // The resolver OnceLock is process-wide and first-install-wins; this is
     // the only test that installs it. The resolver answers exclusively for
-    // its own key so every other expansion in this test binary still falls
-    // back to the process environment.
-    super::install_mcp_secret_resolver(Box::new(|name| {
-        (name == "MCP_RESOLVER_GUARD_SECRET").then(|| "from-host-store".to_string())
+    // its own test keys so every other expansion in this test binary still
+    // falls back to the process environment.
+    super::install_mcp_secret_resolver(Box::new(|name| match name {
+        "MCP_RESOLVER_GUARD_SECRET" => Some("from-host-store".to_string()),
+        "MCP_RESOLVER_PRIORITY" => Some("resolver-wins".to_string()),
+        "MCP_RESOLVER_ENV_HEADER" => Some("header-from-host-store".to_string()),
+        "MCP_RESOLVER_BEARER" => Some("bearer-from-host-store".to_string()),
+        "MCP_RESOLVER_OAUTH_HEADER" => Some("oauth-header-from-host-store".to_string()),
+        _ => None,
     }))
     .expect("first resolver install succeeds");
     assert!(
@@ -394,16 +399,62 @@ fn forkguard_mcp_secret_resolver_supplies_values_without_process_env_writes() {
 
     // A resolver-supplied secret expands without any process env write.
     let _lock = crate::test_support::lock_test_env();
-    let _missing = crate::test_support::EnvVarGuard::remove("MCP_RESOLVER_GUARD_SECRET");
+    let _missing_secret = crate::test_support::EnvVarGuard::remove("MCP_RESOLVER_GUARD_SECRET");
+    let _missing_header = crate::test_support::EnvVarGuard::remove("MCP_RESOLVER_ENV_HEADER");
+    let _missing_bearer = crate::test_support::EnvVarGuard::remove("MCP_RESOLVER_BEARER");
+    let _missing_oauth = crate::test_support::EnvVarGuard::remove("MCP_RESOLVER_OAUTH_HEADER");
     let resolved = super::expand_env_placeholders("Bearer ${MCP_RESOLVER_GUARD_SECRET}")
         .expect("resolver-supplied value expands");
     assert_eq!(resolved, "Bearer from-host-store");
+
+    // Resolver values take precedence over a same-named process variable.
+    let _priority =
+        crate::test_support::EnvVarGuard::set("MCP_RESOLVER_PRIORITY", "process-env-loses");
+    let resolved = super::expand_env_placeholders("${MCP_RESOLVER_PRIORITY}")
+        .expect("resolver value wins over process environment");
+    assert_eq!(resolved, "resolver-wins");
 
     // Names the resolver does not know still resolve from the process env.
     let _fallback = crate::test_support::EnvVarGuard::set("MCP_RESOLVER_FALLBACK", "from-env");
     let resolved = super::expand_env_placeholders("${MCP_RESOLVER_FALLBACK}")
         .expect("process env fallback still works");
     assert_eq!(resolved, "from-env");
+
+    // Request-time env_headers and bearer tokens use the same resolver.
+    let auth = McpHttpAuth {
+        env_headers: HashMap::from([(
+            "X-Api-Key".to_string(),
+            "MCP_RESOLVER_ENV_HEADER".to_string(),
+        )]),
+        bearer_token_env_var: Some("MCP_RESOLVER_BEARER".to_string()),
+        ..Default::default()
+    };
+    let headers = auth.resolved_headers().await.unwrap();
+    assert_eq!(
+        headers.get("X-Api-Key").map(String::as_str),
+        Some("header-from-host-store")
+    );
+    assert_eq!(
+        headers.get("Authorization").map(String::as_str),
+        Some("Bearer bearer-from-host-store")
+    );
+
+    // OAuth discovery/login/refresh headers must not fall back to a missing
+    // process variable when the embedded host supplies the value.
+    let oauth_headers = super::oauth::build_default_headers(
+        &HashMap::new(),
+        &HashMap::from([(
+            "X-OAuth-Api-Key".to_string(),
+            "MCP_RESOLVER_OAUTH_HEADER".to_string(),
+        )]),
+    )
+    .expect("OAuth default headers resolve host secret");
+    assert_eq!(
+        oauth_headers
+            .get("X-OAuth-Api-Key")
+            .and_then(|value| value.to_str().ok()),
+        Some("oauth-header-from-host-store")
+    );
 }
 
 #[test]

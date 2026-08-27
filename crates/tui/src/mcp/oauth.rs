@@ -578,7 +578,7 @@ pub fn build_default_headers(
         insert_header(&mut headers, name, value)?;
     }
     for (name, env_var) in env_headers {
-        if let Ok(value) = std::env::var(env_var)
+        if let Ok(value) = super::host_env_var(env_var)
             && !value.trim().is_empty()
         {
             insert_header(&mut headers, name, &value)?;
