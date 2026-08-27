@@ -16,7 +16,7 @@ func TestApprovalPolicyForItemUsesFrozenPermissions(t *testing.T) {
 		}
 		item := ApprovalRequest{
 			CommandType:         policy.CommandType,
-			PolicyVersion:       approvalpolicy.Version,
+			PolicyVersion:       policy.PolicyVersion,
 			ApprovalMode:        string(policy.Mode),
 			RequesterPermission: policy.RequesterPermission,
 			ApproverPermission:  policy.ApproverPermission,

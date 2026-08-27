@@ -31,6 +31,8 @@ test('payment provider and product recovery are version-frozen and independently
   assert.match(billingMigration, /requester_user_id<>approver_user_id/);
   assert.match(billingMigration, /immutable/);
   assert.match(productPolicyMigration, /PAYMENT_PRODUCT_RESUME/);
+  assert.match(productPolicyMigration, /PAYMENT_PROVIDER_RESUME',2/);
+  assert.doesNotMatch(productPolicyMigration, /UPDATE approval_command_policies/);
   assert.match(productPolicyMigration, /observation_high_watermark/);
   assert.match(productPolicyMigration, /evaluation_high_watermark/);
   assert.match(productBillingMigration, /payment_product_resume_executions/);

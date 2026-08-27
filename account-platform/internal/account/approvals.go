@@ -168,8 +168,8 @@ func (r *PostgresRepository) CreateApprovalDraft(ctx context.Context, principal 
 	now := r.now()
 	id := uuid.Must(uuid.NewV7())
 	expiresAt := now.Add(policy.ExpiresAfter)
-	policySnapshot, _ := json.Marshal(map[string]any{"policy_version": approvalpolicy.Version, "requester_permission": policy.RequesterPermission, "approver_permission": policy.ApproverPermission, "approval_count": policy.ApprovalCount, "executor_identity": policy.ExecutorIdentity, "valid_until": validUntil})
-	if _, err := tx.Exec(ctx, `INSERT INTO approval_requests(id,command_type,policy_version,requester_user_id,requester_binding_id,requester_authorization_version,idempotency_key,normalized_command,command_fingerprint,target_resource_type,target_resource_id,reason,redacted_evidence,expected_impact,status,version,supersedes_request_id,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'DRAFT',1,$15,$16,$17,$17)`, id, policy.CommandType, approvalpolicy.Version, *actorID, bindingID, authorizationVersion, strings.TrimSpace(draft.IdempotencyKey), normalized, fingerprint[:], strings.TrimSpace(draft.TargetResourceType), strings.TrimSpace(draft.TargetResourceID), strings.TrimSpace(draft.Reason), jsonOrDefault(draft.RedactedEvidence, `[]`), jsonOrDefault(draft.ExpectedImpact, `{}`), draft.SupersedesRequestID, expiresAt, now); err != nil {
+	policySnapshot, _ := json.Marshal(map[string]any{"policy_version": policy.PolicyVersion, "requester_permission": policy.RequesterPermission, "approver_permission": policy.ApproverPermission, "approval_count": policy.ApprovalCount, "executor_identity": policy.ExecutorIdentity, "valid_until": validUntil})
+	if _, err := tx.Exec(ctx, `INSERT INTO approval_requests(id,command_type,policy_version,requester_user_id,requester_binding_id,requester_authorization_version,idempotency_key,normalized_command,command_fingerprint,target_resource_type,target_resource_id,reason,redacted_evidence,expected_impact,status,version,supersedes_request_id,expires_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'DRAFT',1,$15,$16,$17,$17)`, id, policy.CommandType, policy.PolicyVersion, *actorID, bindingID, authorizationVersion, strings.TrimSpace(draft.IdempotencyKey), normalized, fingerprint[:], strings.TrimSpace(draft.TargetResourceType), strings.TrimSpace(draft.TargetResourceID), strings.TrimSpace(draft.Reason), jsonOrDefault(draft.RedactedEvidence, `[]`), jsonOrDefault(draft.ExpectedImpact, `{}`), draft.SupersedesRequestID, expiresAt, now); err != nil {
 		return ApprovalRequest{}, mapConstraintError(err)
 	}
 	requesterSnapshot, _ := json.Marshal(map[string]any{"user_id": actorID, "binding_id": bindingID, "authorization_version": authorizationVersion, "valid_until": validUntil})
@@ -276,7 +276,7 @@ func (r *PostgresRepository) transitionOwnApproval(ctx context.Context, principa
 	submittedExpiresAt := item.ExpiresAt
 	if from == "DRAFT" {
 		policy, lookupErr := approvalpolicy.Lookup(item.CommandType)
-		if lookupErr != nil || int64(approvalpolicy.Version) != item.PolicyVersion {
+		if lookupErr != nil || policy.PolicyVersion != item.PolicyVersion {
 			return ApprovalRequest{}, ErrApprovalInvalidated
 		}
 		if err := assertStoredApprovalPolicy(ctx, tx, policy); err != nil {
@@ -525,7 +525,7 @@ func humanApprovalPrincipal(principal identity.Principal) bool {
 
 func approvalPolicyForItem(item ApprovalRequest) (approvalpolicy.Policy, error) {
 	policy, err := approvalpolicy.Lookup(item.CommandType)
-	if err != nil || item.PolicyVersion != approvalpolicy.Version || policy.Mode != approvalpolicy.ApprovalRequired || item.RequesterPermission != policy.RequesterPermission || item.ApproverPermission != policy.ApproverPermission {
+	if err != nil || item.PolicyVersion != policy.PolicyVersion || policy.Mode != approvalpolicy.ApprovalRequired || item.RequesterPermission != policy.RequesterPermission || item.ApproverPermission != policy.ApproverPermission {
 		return approvalpolicy.Policy{}, ErrApprovalInvalidated
 	}
 	return policy, nil
@@ -560,7 +560,7 @@ func normalizeApprovalDraft(draft ApprovalDraft) (approvalpolicy.Policy, []byte,
 	if _, err := canonicalSafeJSONValue(jsonOrDefault(draft.RedactedEvidence, `[]`), "object", "array"); err != nil {
 		return approvalpolicy.Policy{}, nil, [32]byte{}, err
 	}
-	fingerprint := sha256.Sum256(bytes.Join([][]byte{[]byte(policy.CommandType), []byte(fmt.Sprint(approvalpolicy.Version)), normalized, []byte(strings.TrimSpace(draft.TargetResourceType)), []byte(strings.TrimSpace(draft.TargetResourceID)), criticalVersions, financialSnapshot}, []byte{0}))
+	fingerprint := sha256.Sum256(bytes.Join([][]byte{[]byte(policy.CommandType), []byte(fmt.Sprint(policy.PolicyVersion)), normalized, []byte(strings.TrimSpace(draft.TargetResourceType)), []byte(strings.TrimSpace(draft.TargetResourceID)), criticalVersions, financialSnapshot}, []byte{0}))
 	return policy, normalized, fingerprint, nil
 }
 
@@ -648,7 +648,7 @@ func assertStoredApprovalPolicy(ctx context.Context, database queryable, policy 
 	var selfApprovalForbidden bool
 	var expiresSeconds, executionSeconds float64
 	var criticalFieldsJSON json.RawMessage
-	err := database.QueryRow(ctx, `SELECT approval_mode,requester_permission,approver_permission,risk_class,approval_count,self_approval_forbidden,snapshot_schema_version,critical_resource_fields,executor_identity,EXTRACT(EPOCH FROM expires_after),EXTRACT(EPOCH FROM execution_window) FROM approval_command_policies WHERE command_type=$1 AND policy_version=$2`, policy.CommandType, approvalpolicy.Version).Scan(&mode, &requesterPermission, &approverPermission, &riskClass, &approvalCount, &selfApprovalForbidden, &snapshotSchemaVersion, &criticalFieldsJSON, &executorIdentity, &expiresSeconds, &executionSeconds)
+	err := database.QueryRow(ctx, `SELECT approval_mode,requester_permission,approver_permission,risk_class,approval_count,self_approval_forbidden,snapshot_schema_version,critical_resource_fields,executor_identity,EXTRACT(EPOCH FROM expires_after),EXTRACT(EPOCH FROM execution_window) FROM approval_command_policies WHERE command_type=$1 AND policy_version=$2`, policy.CommandType, policy.PolicyVersion).Scan(&mode, &requesterPermission, &approverPermission, &riskClass, &approvalCount, &selfApprovalForbidden, &snapshotSchemaVersion, &criticalFieldsJSON, &executorIdentity, &expiresSeconds, &executionSeconds)
 	if err != nil {
 		return err
 	}

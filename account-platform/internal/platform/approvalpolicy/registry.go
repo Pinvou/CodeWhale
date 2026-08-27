@@ -2,6 +2,7 @@ package approvalpolicy
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ const (
 
 type Policy struct {
 	CommandType            string        `json:"command_type"`
+	PolicyVersion          int64         `json:"policy_version"`
 	Mode                   Mode          `json:"approval_mode"`
 	RequesterPermission    string        `json:"requester_permission"`
 	ApproverPermission     string        `json:"approver_permission,omitempty"`
@@ -48,7 +50,7 @@ func buildPolicies() map[string]Policy {
 	}
 	for _, commandType := range financial {
 		result[commandType] = Policy{
-			CommandType: commandType, Mode: ApprovalRequired,
+			CommandType: commandType, PolicyVersion: Version, Mode: ApprovalRequired,
 			RequesterPermission: "platform.billing.repairs.request", ApproverPermission: "platform.billing.repairs.approve",
 			RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
 			SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"target_id", "resource_version", "financial_snapshot", "policy_version"},
@@ -56,14 +58,14 @@ func buildPolicies() map[string]Policy {
 		}
 	}
 	result["PAYMENT_PROVIDER_RESUME"] = Policy{
-		CommandType: "PAYMENT_PROVIDER_RESUME", Mode: ApprovalRequired,
+		CommandType: "PAYMENT_PROVIDER_RESUME", PolicyVersion: 2, Mode: ApprovalRequired,
 		RequesterPermission: "platform.billing.payment-controls.resume.request", ApproverPermission: "platform.billing.payment-controls.resume.approve",
 		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
 		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "provider_control_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark", "active_mapping_set_fingerprint"},
 		ExpiresAfter: 24 * time.Hour, ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "billing-command-executor",
 	}
 	result["PAYMENT_PRODUCT_RESUME"] = Policy{
-		CommandType: "PAYMENT_PRODUCT_RESUME", Mode: ApprovalRequired,
+		CommandType: "PAYMENT_PRODUCT_RESUME", PolicyVersion: Version, Mode: ApprovalRequired,
 		RequesterPermission: "platform.billing.payment-controls.resume.request", ApproverPermission: "platform.billing.payment-controls.resume.approve",
 		RiskClass: "FINANCIAL_FACT_CHANGE", ApprovalCount: 1, SelfApprovalForbidden: true,
 		SnapshotSchemaVersion: 1, CriticalResourceFields: []string{"provider_id", "provider_version", "product_id", "provider_control_version", "product_control_version", "catalog_item_id", "catalog_version", "admission_version", "mapping_id", "mapping_version", "probe_order_id", "policy_version", "observation_high_watermark", "evaluation_high_watermark"},
@@ -123,7 +125,7 @@ func buildPolicies() map[string]Policy {
 	}
 	for commandType, permission := range auditCommands {
 		result[commandType] = Policy{
-			CommandType: commandType, Mode: AuditOnly, RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
+			CommandType: commandType, PolicyVersion: Version, Mode: AuditOnly, RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
 			ApprovalCount: 0, SelfApprovalForbidden: false, SnapshotSchemaVersion: 1,
 			CriticalResourceFields: []string{"target_id", "request_fingerprint"}, ExpiresAfter: 24 * time.Hour,
 			ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "requesting-domain-service",
@@ -180,7 +182,7 @@ func Require(commandType string, expected Mode) gin.HandlerFunc {
 			return
 		}
 		ctx.Header("X-Command-Type", policy.CommandType)
-		ctx.Header("X-Command-Policy-Version", "1")
+		ctx.Header("X-Command-Policy-Version", fmt.Sprint(policy.PolicyVersion))
 		ctx.Next()
 	}
 }

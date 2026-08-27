@@ -376,12 +376,12 @@
       {
         "file": "000038_payment_product_resume_policy.down.sql",
         "version": 38,
-        "sha256": "055a89da5f037fabb18e88f673485da2b7bcb241d64304c0015b452bb005bc7a"
+        "sha256": "51fd8ef1214103e87b2fbc28896cc15acbf22e85793bdce6a9a45830df35b2fa"
       },
       {
         "file": "000038_payment_product_resume_policy.up.sql",
         "version": 38,
-        "sha256": "c8d3fb3042c2369fc8b3b911dd15cb5fb1debedb05c26eebd6dd7b98df05ab49"
+        "sha256": "69b77f7346d0da582571eb90d22bed8c08a2c6a74312655dc01d47d64970dd34"
       }
     ],
     "billing": [

@@ -45,6 +45,11 @@ func TestPaymentControlRecoveryPoliciesRequireIndependentApproval(t *testing.T) 
 			t.Fatalf("unsafe payment control recovery policy for %s: %#v %v", commandType, policy, err)
 		}
 	}
+	providerPolicy, _ := Lookup("PAYMENT_PROVIDER_RESUME")
+	productPolicy, _ := Lookup("PAYMENT_PRODUCT_RESUME")
+	if providerPolicy.PolicyVersion != 2 || productPolicy.PolicyVersion != 1 {
+		t.Fatalf("payment recovery policy versions must preserve append-only history: provider=%d product=%d", providerPolicy.PolicyVersion, productPolicy.PolicyVersion)
+	}
 }
 
 func TestNormalRefundAndOrganizationDeleteAreAuditOnly(t *testing.T) {
