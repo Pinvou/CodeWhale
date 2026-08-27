@@ -32,37 +32,55 @@ on:
     paths:
       - 'VERSION'
       - 'scripts/sync-version.mjs'
+      - 'scripts/asr/build-sensevoice-runtime.sh'
+      - 'scripts/asr/sensevoice-source.env'
+      - 'scripts/check-linux-elf-policy.sh'
+      - 'scripts/check-linux-glibc-floor.sh'
       - '.github/workflows/release-packages.yml'
       - '.gitmodules'
       - 'private-runtimes/windows'
       - 'pinvou3-app/package.json'
       - 'pinvou3-app/package-lock.json'
       - 'pinvou3-app/scripts/tauri/build.js'
+      - 'pinvou3-app/scripts/tauri/linux-asr-runtime.js'
+      - 'pinvou3-app/scripts/tauri/platform-config.js'
       - 'pinvou3-app/scripts/tauri/codex-bridge.js'
       - 'pinvou3-app/scripts/tauri/windows-installer.js'
       - 'pinvou3-app/scripts/tauri/windows-runtime.js'
       - 'pinvou3-app/src-tauri/config/platforms/windows/**'
+      - 'pinvou3-app/src-tauri/config/platforms/linux/**'
+      - 'pinvou3-app/src-tauri/resources/platforms/linux/asr/**'
       - 'pinvou3-app/src-tauri/packaging/windows/**'
       - 'pinvou3-app/tests/codex_acp_windows_*'
       - 'pinvou3-app/tests/windows_runtime_packaging_contract.test.js'
+      - 'pinvou3-app/tests/linux_asr_runtime_packaging.test.js'
   pull_request:
     branches: [main]
     paths:
       - 'VERSION'
       - 'scripts/sync-version.mjs'
+      - 'scripts/asr/build-sensevoice-runtime.sh'
+      - 'scripts/asr/sensevoice-source.env'
+      - 'scripts/check-linux-elf-policy.sh'
+      - 'scripts/check-linux-glibc-floor.sh'
       - '.github/workflows/release-packages.yml'
       - '.gitmodules'
       - 'private-runtimes/windows'
       - 'pinvou3-app/package.json'
       - 'pinvou3-app/package-lock.json'
       - 'pinvou3-app/scripts/tauri/build.js'
+      - 'pinvou3-app/scripts/tauri/linux-asr-runtime.js'
+      - 'pinvou3-app/scripts/tauri/platform-config.js'
       - 'pinvou3-app/scripts/tauri/codex-bridge.js'
       - 'pinvou3-app/scripts/tauri/windows-installer.js'
       - 'pinvou3-app/scripts/tauri/windows-runtime.js'
       - 'pinvou3-app/src-tauri/config/platforms/windows/**'
+      - 'pinvou3-app/src-tauri/config/platforms/linux/**'
+      - 'pinvou3-app/src-tauri/resources/platforms/linux/asr/**'
       - 'pinvou3-app/src-tauri/packaging/windows/**'
       - 'pinvou3-app/tests/codex_acp_windows_*'
       - 'pinvou3-app/tests/windows_runtime_packaging_contract.test.js'
+      - 'pinvou3-app/tests/linux_asr_runtime_packaging.test.js'
   workflow_dispatch:
 
 permissions:
@@ -130,7 +148,7 @@ jobs:
             echo "push 变更路径:"
             printf '%s\n' "$CHANGED_FILES"
             if printf '%s\n' "$CHANGED_FILES" | grep -Eq \
-              '^(VERSION|scripts/sync-version\.mjs|\.github/workflows/release-packages\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/tauri/(build|codex-bridge|windows-installer|windows-runtime)\.js|src-tauri/(config/platforms/windows|packaging/windows)/|tests/(codex_acp_windows_|windows_runtime_packaging_contract\.test\.js)))'; then
+              '^(VERSION|scripts/(sync-version\.mjs|asr/(build-sensevoice-runtime\.sh|sensevoice-source\.env)|check-linux-(elf-policy|glibc-floor)\.sh)|\.github/workflows/release-packages\.yml|\.gitmodules|private-runtimes/windows|pinvou3-app/(package(-lock)?\.json|scripts/tauri/(build|codex-bridge|linux-asr-runtime|platform-config|windows-installer|windows-runtime)\.js|src-tauri/(config/platforms/(linux|windows)|packaging/windows)/|src-tauri/resources/platforms/linux/asr/|tests/(codex_acp_windows_|linux_asr_runtime_packaging\.test\.js|windows_runtime_packaging_contract\.test\.js)))'; then
               echo "✓ 发布链路变化,触发构建"
               BUILD_REQUIRED=true
             else
@@ -229,7 +247,8 @@ jobs:
             : > "$d/$f"
           done
 
-      # build.js 自动注入 config/platforms/linux overlay,并自动准备 codex bridge。
+      # build.js 自动构建当前 x86_64 的固定版本 SenseVoice runtime，注入 Linux
+      # 平台与架构 overlay，并准备 codex bridge。
       # 只打 deb(config overlay 的 targets 也只列了 deb)。
       - name: 构建 deb
         working-directory: pinvou3-app
@@ -248,10 +267,10 @@ jobs:
           echo "$SHA  $DST" > "$DST.sha256"
           ls -lh "$DST"
 
-      # 对 deb 内每个 ELF 校验 Ubuntu 22.04 的 glibc/libstdc++ 符号下限，
-      # 防止 runner 或依赖升级静默抬高发布包的运行系统要求。
-      - name: glibc 下限守卫 (Ubuntu 22.04 = glibc 2.35)
-        run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_x64.deb"
+      # 同时锁住包内 ELF 架构和 Ubuntu 22.04 ABI，避免把 ARM runtime 混入
+      # x64 deb，或由 runner/依赖升级静默抬高运行系统要求。
+      - name: ELF 架构 + glibc 下限守卫 (Ubuntu 22.04)
+        run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_x64.deb" amd64
 
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7
@@ -339,7 +358,8 @@ jobs:
       # 连接器 CLI 不在构建期下载或打入安装包；用户首次连接时，应用按
       # connectors.lock.json 在线下载、校验并安装到用户目录。
       # main VERSION bump 和 workflow_dispatch 统一使用已验证的托管 ARM
-      # 发布配置；PR 阶段只跑轻量契约，避免产出与最终 main 不一致的同版本包。
+      # 发布配置；build.js 先在该原生 runner 构建固定版本的 aarch64
+      # SenseVoice runtime。PR 阶段只跑轻量契约。
       - name: 构建 deb（托管 ARM64 发布配置）
         working-directory: pinvou3-app
         run: node scripts/tauri/build.js build --bundles deb
@@ -356,8 +376,8 @@ jobs:
           echo "$SHA  $DEB" > "$DEB.sha256"
           ls -lh "$DEB"
 
-      - name: glibc 下限守卫 (Ubuntu 22.04 = glibc 2.35)
-        run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_arm64.deb"
+      - name: ELF 架构 + glibc 下限守卫 (Ubuntu 22.04)
+        run: ./scripts/check-linux-glibc-floor.sh "pinvou3-app/src-tauri/target/release/bundle/deb/pinvou3_${VERSION}_arm64.deb" arm64
 
       - name: 上传 deb artifact
         uses: actions/upload-artifact@v7

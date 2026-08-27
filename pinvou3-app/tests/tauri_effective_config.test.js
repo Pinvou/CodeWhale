@@ -153,6 +153,7 @@ assert.equal(tauriCommandIndex(buildArgs), 1, "build command may follow global o
 assert.deepEqual(configSpecs(buildArgs), [
   platformConfigPath("linux"),
   linuxStartupOverlay,
+  platformArchitectureConfigPath("linux", "x64"),
 ]);
 const linuxArmArgs = prepareTauriArgs(
   ["build", "--bundles", "deb"],
@@ -161,6 +162,7 @@ const linuxArmArgs = prepareTauriArgs(
 assert.deepEqual(configSpecs(linuxArmArgs), [
   platformConfigPath("linux"),
   linuxStartupOverlay,
+  platformArchitectureConfigPath("linux", "arm64"),
 ]);
 
 const explicitOverlay = "src-tauri/config/platforms/windows/signing.wosign.conf.json";
@@ -271,6 +273,11 @@ assert.match(
   /if \(isDev\)[\s\S]*?prepareWindowsCodexBridge\(\)/,
   "Windows dev must prepare the ACP Bridge without packaging overlays",
 );
+assert.match(
+  buildSource,
+  /if \(hasTauriBuildCommand\) \{\s*prepareLinuxAsrRuntime\(\);/u,
+  "Linux packaging must prepare the architecture-specific SenseVoice runtime before manifest generation",
+);
 let tauriInvocation = null;
 const tauriLogs = [];
 const fakeTauriChild = new EventEmitter();
@@ -341,7 +348,14 @@ assert.doesNotMatch(
   "release build must not rely on a globally installed Vite binary",
 );
 assert.match(linux.build.beforeBundleCommand, /require-wrapper\.js bundle/);
-assert.equal(linux.bundle.resources["resources/platforms/linux/asr/"], "runtime/asr");
+assert.equal(
+  linux.bundle.resources["resources/platforms/linux/asr/pinvou3-asr-shim.py"],
+  "runtime/asr/pinvou3-asr-shim.py",
+);
+assert.equal(
+  linux.bundle.resources["resources/platforms/linux/asr/SenseVoice.LICENSE"],
+  "runtime/asr/SenseVoice.LICENSE",
+);
 assert.equal(
   linux.bundle.resources["resources/platforms/linux/knowledge-host/"],
   "runtime/knowledge-host",
@@ -357,7 +371,14 @@ assert.ok(
   linuxManifest.files.some((file) => file.destination.startsWith("runtime/codex-bridge/")),
 );
 
-assert.equal(platformArchitectureConfigPath("linux", "arm64"), null);
+assert.match(
+  platformArchitectureConfigPath("linux", "x64").replaceAll("\\", "/"),
+  /platforms\/linux\/x86_64\/tauri\.conf\.json$/u,
+);
+assert.match(
+  platformArchitectureConfigPath("linux", "arm64").replaceAll("\\", "/"),
+  /platforms\/linux\/aarch64\/tauri\.conf\.json$/u,
+);
 
 const linuxDev = composeEffectiveConfig([linuxStartupOverlay]).effectiveConfig;
 assert.equal(linuxDev.app.windows[0].visible, false);

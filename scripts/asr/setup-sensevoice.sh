@@ -17,6 +17,8 @@ QUANT="${1:-q4_k}"
 ASR_DIR="$HOME/.pinvou3/asr"
 MODEL_FILE="sense-voice-small-${QUANT}.gguf"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=sensevoice-source.env
+source "$HERE/sensevoice-source.env"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -35,14 +37,19 @@ else
   CMAKE="$WORK/$(ls "$WORK" | grep '^cmake-')/bin/cmake"
 fi
 
-echo "[2/5] 克隆 + 构建 SenseVoice.cpp（CUDA=${GGML_CUDA:-OFF}）…"
-git clone --depth 1 https://github.com/lovemefan/SenseVoice.cpp "$WORK/sv"
+echo "[2/5] 构建 SenseVoice.cpp@$SENSEVOICE_SOURCE_COMMIT（CUDA=${GGML_CUDA:-OFF}）…"
+git init --quiet "$WORK/sv"
+git -C "$WORK/sv" remote add origin "$SENSEVOICE_SOURCE_URL"
+git -C "$WORK/sv" fetch --quiet --depth 1 origin "$SENSEVOICE_SOURCE_COMMIT"
+git -C "$WORK/sv" checkout --quiet --detach FETCH_HEAD
 git -C "$WORK/sv" submodule update --init --recursive
 mkdir -p "$WORK/sv/build"
 ( cd "$WORK/sv/build" \
-  && "$CMAKE" -DCMAKE_BUILD_TYPE=Release -DGGML_KOMPUTE=OFF -DGGML_VULKAN=OFF \
+  && "$CMAKE" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+       -DSENSE_VOICE_BUILD_EXAMPLES=OFF -DSENSE_VOICE_BUILD_TESTS=OFF \
+       -DGGML_NATIVE="${GGML_NATIVE:-ON}" -DGGML_KOMPUTE=OFF -DGGML_VULKAN=OFF \
        -DGGML_CUDA="${GGML_CUDA:-OFF}" .. \
-  && make -j"$(nproc)" sense-voice-main )
+  && "$CMAKE" --build . --target sense-voice-main --parallel "$(nproc)" )
 
 echo "[3/5] 安装引擎 → $ASR_DIR …"
 mkdir -p "$ASR_DIR"
