@@ -688,6 +688,13 @@ Object.assign(accountPlatformCopy.zh, {
   mobileVerificationRequired: '请先验证新手机号。',
   profileChangeNotFound: '该资料修改请求不存在或已失效。',
   profileChangeRecovering: '资料修改正在安全恢复中，请勿重复提交。',
+  orderColumns: { description: '描述', type: '类型', amount: '金额', date: '日期', status: '状态', orderNumber: '订单号', duration: '时长', quantity: '数量' },
+  orderTypeRecharge: '充值',
+  orderDetails: '订单详情',
+  paymentStatus: '支付状态',
+  orderSummaryStatuses: { COMPLETED: '已完成', LATE_COMPLETED: '迟到支付已完成', PROCESSING: '到账处理中' },
+  durationDays: (days) => `${days} 天`,
+  openOrderDetails: (name) => `查看 ${name || '充值订单'} 详情`,
 });
 Object.assign(accountPlatformCopy.en, {
   authModes: { ...accountPlatformCopy.en.authModes, forgot: 'Forgot password' },
@@ -727,6 +734,13 @@ Object.assign(accountPlatformCopy.en, {
   mobileVerificationRequired: 'Verify the new mobile number first.',
   profileChangeNotFound: 'This profile change no longer exists.',
   profileChangeRecovering: 'The profile change is recovering safely. Do not submit another request.',
+  orderColumns: { description: 'Description', type: 'Type', amount: 'Amount', date: 'Date', status: 'Status', orderNumber: 'Order', duration: 'Duration', quantity: 'Quantity' },
+  orderTypeRecharge: 'Recharge',
+  orderDetails: 'Order details',
+  paymentStatus: 'Payment status',
+  orderSummaryStatuses: { COMPLETED: 'Completed', LATE_COMPLETED: 'Late payment completed', PROCESSING: 'Crediting' },
+  durationDays: (days) => `${days} days`,
+  openOrderDetails: (name) => `View details for ${name || 'recharge order'}`,
 });
 Object.assign(accountPlatformCopy.ja, {
   authModes: {
@@ -769,6 +783,13 @@ Object.assign(accountPlatformCopy.ja, {
   mobileVerificationRequired: '先に新しい携帯番号を確認してください。',
   profileChangeNotFound: 'このプロフィール変更は存在しないか、期限切れです。',
   profileChangeRecovering: 'プロフィール変更を安全に復旧しています。重複して送信しないでください。',
+  orderColumns: { description: '内容', type: '種類', amount: '金額', date: '日時', status: '状態', orderNumber: '注文番号', duration: '期間', quantity: '数量' },
+  orderTypeRecharge: 'チャージ',
+  orderDetails: '注文詳細',
+  paymentStatus: '支払い状態',
+  orderSummaryStatuses: { COMPLETED: '完了', LATE_COMPLETED: '遅延支払い完了', PROCESSING: '反映処理中' },
+  durationDays: (days) => `${days} 日`,
+  openOrderDetails: (name) => `${name || 'チャージ注文'}の詳細を表示`,
 });
 
 Object.assign(accountPlatformCopy.zh, {

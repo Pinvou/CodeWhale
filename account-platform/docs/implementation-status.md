@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 379 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 346`、`部分实现 29`、`未实现 2`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `379` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。业务与安全两位独立审核者均已确认最终设计通过，APT-069–APT-086 的全部 CODE 任务已收敛。UI-24–UI-26 已由 APT-087–APT-089 在代码基线闭环，UI-27 仍待 APT-090 实现。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 347`、`部分实现 29`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `379` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。业务与安全两位独立审核者均已确认最终设计通过，APT-069–APT-086 的全部 CODE 任务已收敛。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -356,7 +356,7 @@
 | UI-24 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-BUILD | NOT_DEPLOYED | 无合法 section 默认进入额度与用量；授权加载完成后统一校正 URL、Tab 和内容，点击及浏览器前进/后退同步，权限不足替换为首个可访问 Tab。 |
 | UI-25 | 已实现 | AUDIT_HEAD | ROLE-BINDING-LIFECYCLE; UI-BUILD | NOT_DEPLOYED | 普通个人中心不再挂载角色授权组件、加载对应制品或请求本人角色绑定；后台角色定义、授权与撤销界面及服务端权限边界保持不变。 |
 | UI-26 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 默认按到期时间展示最多五个有效包及安全进度和汇总；全量列表包含历史状态，详情弹窗保留组成、来源、订单及退款说明并支持键盘关闭。 |
-| UI-27 | 未实现 | DOC_CURRENT | REQUIREMENT-REVIEW | NOT_DEPLOYED | 已确认成功订单八列响应式摘要、组合状态和完整详情弹窗；待 APT-090 实现。 |
+| UI-27 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 成功订单按付款时间倒序展示八列桌面摘要，中宽隐藏次要列、移动端使用卡片；组合支付/履约状态、时长推导、完整订单号和详情弹窗均可访问。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
@@ -869,7 +869,7 @@
 | UI-24 | 个人中心 URL 与 Tab 状态一致性 | 已实现 | 无合法 section 默认进入额度与用量；深链、权限加载、Tab 点击和浏览器前进/后退均保持 URL、高亮与内容一致。 |
 | UI-25 | 普通个人中心角色信息收敛 | 已实现 | 普通个人中心已删除角色授权挂载点、制品和请求，不展示原始角色信息；后台角色治理保持可用。 |
 | UI-26 | 权益包渐进式展示 | 已实现 | 默认最多五条有效包摘要并汇总数量和余额；完整列表、历史状态、BASE/BONUS 组成和支付关联进入可访问详情弹窗。 |
-| UI-27 | 成功订单摘要与详情 | 未实现 | 已完成需求审核，待实现响应式摘要、组合状态、时长推导和完整详情弹窗。 |
+| UI-27 | 成功订单摘要与详情 | 已实现 | 仅成功订单按付款时间倒序展示响应式摘要；桌面八列、中宽精简、移动卡片，复杂支付、履约及发票字段进入可访问详情弹窗。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
 | ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |

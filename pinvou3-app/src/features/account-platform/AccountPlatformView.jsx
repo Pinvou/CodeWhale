@@ -2,7 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
-import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from './portal-sections.js';
+import { compactOrderID, orderDurationDays, orderSummaryStatus, summarizedPaymentOrders } from './order-view.js';
+import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './account-platform.css';
@@ -1989,7 +1990,8 @@ function EntitlementPackageDetail({ copy, language, item }) {
 }
 
 function Orders({ copy, language, orders, unavailable, successfulOnly = false, embedded = false }) {
-  const visibleOrders = successfulOnly ? successfulPaymentOrders(orders) : orders;
+  const [selectedOrder, setSelectedOrder] = useState(null);
+  const visibleOrders = successfulOnly ? summarizedPaymentOrders(orders) : orders;
   const Heading = embedded ? 'h3' : 'h2';
   return (
     <section className={embedded ? 'ap-combined-section' : undefined}>
@@ -2000,6 +2002,8 @@ function Orders({ copy, language, orders, unavailable, successfulOnly = false, e
         <div role="alert" className="ap-alert error">
           {copy.billingUnavailable}
         </div>
+      ) : visibleOrders.length && successfulOnly ? (
+        <OrderSummaryList copy={copy} language={language} orders={visibleOrders} onOpen={setSelectedOrder} />
       ) : visibleOrders.length ? (
         <div className="ap-order-list">
           {visibleOrders.map((item) => (
@@ -2034,7 +2038,95 @@ function Orders({ copy, language, orders, unavailable, successfulOnly = false, e
       ) : (
         <Empty>{successfulOnly ? copy.noPaidOrders : copy.noOrders}</Empty>
       )}
+      {selectedOrder && (
+        <Dialog title={copy.orderDetails} closeLabel={copy.closeDialog} onClose={() => setSelectedOrder(null)} className="ap-order-dialog">
+          <OrderDetails copy={copy} language={language} item={selectedOrder} />
+        </Dialog>
+      )}
     </section>
+  );
+}
+
+function OrderSummaryList({ copy, language, orders, onOpen }) {
+  const openWithKeyboard = (event, item) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onOpen(item);
+    }
+  };
+  return (
+    <>
+      <div className="ap-order-summary-table-wrap">
+        <table className="ap-order-summary-table">
+          <thead>
+            <tr>
+              <th>{copy.orderColumns.description}</th>
+              <th>{copy.orderColumns.type}</th>
+              <th>{copy.orderColumns.amount}</th>
+              <th>{copy.orderColumns.date}</th>
+              <th>{copy.orderColumns.status}</th>
+              <th>{copy.orderColumns.orderNumber}</th>
+              <th className="ap-order-optional">{copy.orderColumns.duration}</th>
+              <th className="ap-order-optional">{copy.orderColumns.quantity}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.map((item) => {
+              const orderID = item.pinvou_order_id || item.order_id;
+              const duration = orderDurationDays(item);
+              return (
+                <tr key={item.order_id} tabIndex="0" onClick={() => onOpen(item)} onKeyDown={(event) => openWithKeyboard(event, item)} aria-label={copy.openOrderDetails(item.plan_name)}>
+                  <td><strong>{item.plan_name}</strong></td>
+                  <td>{copy.orderTypeRecharge}</td>
+                  <td>{formatMoney(item.amount_fen)}</td>
+                  <td>{formatUsageTime(item.paid_at, language)}</td>
+                  <td><span className="ap-status">{copy.orderSummaryStatuses[orderSummaryStatus(item)]}</span></td>
+                  <td><span className="ap-order-id" title={orderID}>{compactOrderID(orderID)}</span></td>
+                  <td className="ap-order-optional">{duration == null ? '—' : copy.durationDays(duration)}</td>
+                  <td className="ap-order-optional">1</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="ap-order-summary-cards">
+        {orders.map((item) => (
+          <button type="button" key={item.order_id} onClick={() => onOpen(item)} aria-label={copy.openOrderDetails(item.plan_name)}>
+            <span><strong>{item.plan_name}</strong><small>{formatUsageTime(item.paid_at, language)}</small></span>
+            <span><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{copy.orderSummaryStatuses[orderSummaryStatus(item)]}</span></span>
+          </button>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function OrderDetails({ copy, language, item }) {
+  return (
+    <div className="ap-order-detail">
+      <header>
+        <div>
+          <strong>{item.plan_name}</strong>
+          <small>{item.sku_code}</small>
+        </div>
+        <strong>{formatMoney(item.amount_fen)}</strong>
+      </header>
+      <TraceDetails
+        items={[
+          [copy.paymentMethod, copy.channels[item.channel] || item.channel],
+          [copy.pinvouOrder, item.pinvou_order_id || item.order_id],
+          [copy.providerOrderReference, item.provider_order_reference],
+          [copy.createdAt, formatUsageTime(item.created_at, language)],
+          [copy.paidAt, formatUsageTime(item.paid_at, language)],
+          [copy.creditedAt, formatUsageTime(item.credited_at, language)],
+          [copy.validUntil, formatUsageTime(item.valid_until, language)],
+          [copy.paymentStatus, copy.orderStatuses[item.status] || item.status],
+          [copy.fulfillmentStatus, copy.fulfillmentStatuses?.[item.fulfillment_status] || item.fulfillment_status],
+          [copy.invoiceStatus, copy.invoiceStatuses?.[item.invoice_status] || item.invoice_status],
+        ]}
+      />
+    </div>
   );
 }
 

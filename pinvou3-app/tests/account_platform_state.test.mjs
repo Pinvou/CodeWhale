@@ -4,6 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
+import { compactOrderID, orderDurationDays, orderSummaryStatus, summarizedPaymentOrders } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
@@ -84,6 +85,28 @@ test('Web personal center summarizes active benefit packages before opening full
   assert.match(view, /copy\.entitlementSummary\(activePackages\.length/);
   assert.match(view, /mode: 'all'/);
   assert.match(view, /<EntitlementPackageDetail/);
+});
+
+test('Web personal center renders successful orders as responsive summaries with accessible details', async () => {
+  const orders = [
+    { order_id: 'pending', status: 'PENDING', paid_at: null, fulfillment_status: 'PENDING' },
+    { order_id: 'paid', status: 'PAID', paid_at: '2026-08-26T08:00:00Z', credited_at: '2026-08-26T08:01:00Z', valid_until: '2026-09-25T08:01:00Z', fulfillment_status: 'CREDITED' },
+    { order_id: 'late', status: 'PAID_LATE', paid_at: '2026-08-27T08:00:00Z', fulfillment_status: 'PENDING' },
+  ];
+  assert.deepEqual(summarizedPaymentOrders(orders).map((item) => item.order_id), ['late', 'paid']);
+  assert.equal(orderSummaryStatus(orders[1]), 'COMPLETED');
+  assert.equal(orderSummaryStatus({ status: 'PAID_LATE', fulfillment_status: 'CREDITED' }), 'LATE_COMPLETED');
+  assert.equal(orderSummaryStatus(orders[2]), 'PROCESSING');
+  assert.equal(orderDurationDays(orders[1]), 30);
+  assert.equal(orderDurationDays(orders[2]), null);
+  assert.equal(compactOrderID('1234567890abcdef'), '12345678…');
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
+  assert.match(view, /<table className="ap-order-summary-table">/);
+  assert.match(view, /event\.key === 'Enter' \|\| event\.key === ' '/);
+  assert.match(view, /<OrderDetails/);
+  assert.match(styles, /\.ap-order-summary-cards \{ display: none;/);
+  assert.match(styles, /@media \(max-width: 560px\)[\s\S]*\.ap-order-summary-table-wrap \{ display: none;/);
 });
 
 test('admin organization client uses protected organization, member, and unit endpoints', async () => {
@@ -573,7 +596,7 @@ test('Web personal center consolidates navigation while preserving context-sensi
   assert.doesNotMatch(view, /section === 'wallet'/);
   assert.match(view, /personalContext \? <Wallet[\s\S]*: <ContextCredits/);
   assert.match(view, /activeOrganization && <Organization/);
-  assert.match(view, /successfulOnly \? successfulPaymentOrders\(orders\) : orders/);
+  assert.match(view, /successfulOnly \? summarizedPaymentOrders\(orders\) : orders/);
   assert.equal((i18n.match(/creditsTitle:/g) || []).length, 3);
   assert.equal((i18n.match(/entitlementsTitle:/g) || []).length, 3);
   assert.match(view, /auth !== 'ready'[\s\S]*availablePortalSection\(globalThis\.location\?\.search \|\| '', navigationSections\)/);

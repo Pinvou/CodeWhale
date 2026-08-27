@@ -182,6 +182,19 @@
 .ap-order-list article > div:last-child { justify-items: end; }
 .ap-order-list small, .ap-muted { color: var(--ap-tertiary); font-size: 12px; }
 .ap-order-list .ap-trace-card { display: block; }
+.ap-order-summary-table-wrap { overflow-x: auto; border: 1px solid var(--ap-border-soft); border-radius: 16px; }
+.ap-order-summary-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ap-order-summary-table th, .ap-order-summary-table td { padding: 16px 14px; border-top: 1px solid var(--ap-border-soft); text-align: left; vertical-align: middle; white-space: nowrap; }
+.ap-order-summary-table th { border-top: 0; color: var(--ap-tertiary); background: #f8f9fa; font-size: 11px; font-weight: 500; }
+.ap-order-summary-table tbody tr { cursor: pointer; }
+.ap-order-summary-table tbody tr:hover, .ap-order-summary-table tbody tr:focus-visible { outline: none; background: #f7f8fa; }
+.ap-order-summary-table td:first-child { max-width: 220px; white-space: normal; }
+.ap-order-id { display: inline-block; max-width: 110px; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
+.ap-order-summary-cards { display: none; }
+.ap-order-dialog { width: min(680px, 100%); }
+.ap-order-detail > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.ap-order-detail > header > div { display: grid; gap: 4px; }
+.ap-order-detail > header small { color: var(--ap-tertiary); }
 .ap-trace-card header { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .ap-trace-card header > div { display: grid; gap: 5px; }
 .ap-trace-card header > div:last-child { justify-items: end; }
@@ -304,6 +317,7 @@
   .ap-usage-row > div:last-child { justify-items: start; }
   .ap-profile-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 0; }
   .ap-profile-facts div:nth-child(3) { padding-left: 0; border-left: 0; }
+  .ap-order-summary-table .ap-order-optional { display: none; }
 }
 @media (max-width: 560px) {
   .ap-sidebar nav button { font-size: 12px; }
@@ -314,6 +328,13 @@
   .ap-entitlement-row { grid-template-columns: 1fr; }
   .ap-entitlement-row-meta { justify-items: start; }
   .ap-entitlement-summary > footer { align-items: flex-start; flex-direction: column; }
+  .ap-order-summary-table-wrap { display: none; }
+  .ap-order-summary-cards { display: grid; gap: 10px; }
+  .ap-order-summary-cards > button { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px; text-align: left; background: #fff; }
+  .ap-order-summary-cards > button > span { display: grid; gap: 5px; min-width: 0; }
+  .ap-order-summary-cards > button > span:last-child { justify-items: end; }
+  .ap-order-summary-cards strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ap-order-summary-cards small { color: var(--ap-tertiary); font-size: 11px; }
   .ap-profile-card-header, .ap-profile-rows > div { padding-right: 20px; padding-left: 20px; }
   .ap-profile-facts { grid-template-columns: 1fr; padding-right: 20px; padding-left: 20px; }
   .ap-profile-facts div { padding: 0; border-left: 0; }
