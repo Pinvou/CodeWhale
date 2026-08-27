@@ -131,6 +131,22 @@ import {
 
 const UNIFIED_CONVERSATION_UI_KEY = 'pinvou_conversation_ui_v2';
 const MULTI_AGENT_ENABLED = can('multiAgent');
+const SCENE_REGISTRY = Object.freeze({
+  work: new Set([PERSONAL_WORKBENCH_SCENE_KEY, 'document-writing']),
+  design: new Set(['poster', 'data-visualization', 'ppt']),
+});
+
+function sceneRegistryFields(l1, l2) {
+  const level1 = SCENE_REGISTRY[l1] ? l1 : 'unknown';
+  const level2 = level1 !== 'unknown' && SCENE_REGISTRY[level1].has(l2) ? l2 : 'unknown';
+  return { sceneL1: level1, sceneL2: level2 };
+}
+
+function createSceneViewId() {
+  const bytes = new Uint8Array(12);
+  window.crypto.getRandomValues(bytes);
+  return `scene-view-${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+}
 
 function unifiedConversationUiEnabled() {
   try {
@@ -318,7 +334,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       );
     };
 
-    const SubModePicker = ({ value, onChange, items, icons, testId = 'mode-subtab-picker', comingSoonLabel = '' }) => {
+    const SubModePicker = ({ value, onChange, onImpression, items, icons, testId = 'mode-subtab-picker', comingSoonLabel = '' }) => {
       const trackRef = useRef(null);
       const buttonRefs = useRef({});
       const [indicator, setIndicator] = useState({ left: 0, width: 20, ready: false });
@@ -345,6 +361,27 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         window.addEventListener('resize', updateIndicator);
         return () => window.removeEventListener('resize', updateIndicator);
       }, [items, updateIndicator]);
+
+      useEffect(() => {
+        if (!onImpression) return undefined;
+        const elements = items
+          .map(item => ({ item, element: buttonRefs.current[item.key] }))
+          .filter(entry => entry.element);
+        if (!window.IntersectionObserver) {
+          elements.forEach(({ item }) => onImpression(item));
+          return undefined;
+        }
+        const observer = new window.IntersectionObserver((entries) => {
+          entries.forEach((entry) => {
+            if (!entry.isIntersecting || entry.intersectionRatio < 0.5) return;
+            const item = items.find(candidate => buttonRefs.current[candidate.key] === entry.target);
+            if (item) onImpression(item);
+            observer.unobserve(entry.target);
+          });
+        }, { threshold: 0.5 });
+        elements.forEach(({ element }) => observer.observe(element));
+        return () => observer.disconnect();
+      }, [items, onImpression]);
 
       return (
         <div
@@ -639,6 +676,8 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       const [artifactDockActivation, setArtifactDockActivation] = useState(0);
       const initialPinvouModeScope = createPinvouModeScopeKey(bs && bs.activeSessionId);
       const [pinvouModeState, setPinvouModeState] = useState(() => loadPinvouModeState(undefined, initialPinvouModeScope));
+      const sceneViewIdRef = useRef(createSceneViewId());
+      const sceneImpressionsRef = useRef(new Set());
       const pinvouModeScopeRef = useRef(initialPinvouModeScope);
       const pinvouModeStateRef = useRef(pinvouModeState);
       const pendingModeScopeMigrationRef = useRef(null);
@@ -765,6 +804,31 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
           return next;
         });
       }, []);
+      const trackSceneEntry = useCallback((eventName, l1, l2) => {
+        const fields = sceneRegistryFields(l1, l2);
+        invokeTauri(isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event', {
+          request: {
+            eventName,
+            viewId: sceneViewIdRef.current,
+            ...fields,
+            entryPoint: 'chat_home',
+          },
+        }).catch(() => {});
+      }, []);
+      const trackSceneImpression = useCallback((l1, item) => {
+        const key = `${l1}:${item.key}`;
+        if (sceneImpressionsRef.current.has(key)) return;
+        sceneImpressionsRef.current.add(key);
+        trackSceneEntry('scene_impression', l1, item.key);
+      }, [trackSceneEntry]);
+      const trackWorkSceneImpression = useCallback(
+        item => trackSceneImpression('work', item),
+        [trackSceneImpression],
+      );
+      const trackDesignSceneImpression = useCallback(
+        item => trackSceneImpression('design', item),
+        [trackSceneImpression],
+      );
       useEffect(() => {
         const nextScope = createPinvouModeScopeKey(activeSessionId);
         if (nextScope === pinvouModeScopeRef.current) return;
@@ -830,18 +894,21 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
       }, [handlePinvouModeChange, onSwitchHomeMode]);
       const handleWorkSubtabChange = useCallback((subtab) => {
         const nextSubtab = subtab === pinvouModeStateRef.current.workSubtab ? 'general' : subtab;
+        if (nextSubtab !== 'general') trackSceneEntry('scene_selected', 'work', nextSubtab);
         if (nextSubtab !== PERSONAL_WORKBENCH_SCENE_KEY) clearPersonalWorkbenchTemplateDraft();
         updatePinvouModeState({
           type: 'set-work-subtab',
           subtab: nextSubtab,
         });
-      }, [clearPersonalWorkbenchTemplateDraft, updatePinvouModeState]);
+      }, [clearPersonalWorkbenchTemplateDraft, trackSceneEntry, updatePinvouModeState]);
       const handleDesignSubtabChange = useCallback((subtab) => {
+        const nextSubtab = subtab === pinvouModeStateRef.current.designSubtab ? 'general' : subtab;
+        if (nextSubtab !== 'general') trackSceneEntry('scene_selected', 'design', nextSubtab);
         updatePinvouModeState({
           type: 'set-design-subtab',
-          subtab: subtab === pinvouModeStateRef.current.designSubtab ? 'general' : subtab,
+          subtab: nextSubtab,
         });
-      }, [updatePinvouModeState]);
+      }, [trackSceneEntry, updatePinvouModeState]);
       const handleClearActiveScene = useCallback(() => {
         if (pinvouModeStateRef.current.mode === 'work') {
           clearPersonalWorkbenchTemplateDraft();
@@ -2044,6 +2111,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 <SubModePicker
                   value={workSubtab}
                   onChange={handleWorkSubtabChange}
+                  onImpression={trackWorkSceneImpression}
                   items={workModeSubtabs}
                   testId="work-subtab-picker"
                   comingSoonLabel={chatViewCopy.comingSoon}
@@ -2060,6 +2128,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 <SubModePicker
                   value={designSubtab}
                   onChange={handleDesignSubtabChange}
+                  onImpression={trackDesignSceneImpression}
                   items={designModeSubtabs}
                   testId="design-subtab-picker"
                   comingSoonLabel={chatViewCopy.comingSoon}

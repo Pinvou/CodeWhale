@@ -102,11 +102,24 @@ pub fn track_behavior_event(
                 operation_id,
             );
         }
+        "scene_submitted" => {
+            let session_id = request
+                .session_id
+                .as_deref()
+                .ok_or_else(|| "scene submission requires session_id".to_string())?;
+            return crate::features::behavior_telemetry::track_scene_submitted(
+                &app,
+                session_id,
+                request.scene_l1.as_deref().unwrap_or("unknown"),
+                request.scene_l2.as_deref().unwrap_or("unknown"),
+            );
+        }
         "tool_impression" => "tool_impression",
         "tool_detail_opened" => "tool_detail_opened",
         "tool_configuration_started" => "tool_configuration_started",
         "tool_configuration_finished" => "tool_configuration_finished",
-        "scene_triggered" => "scene_triggered",
+        "scene_impression" => "scene_impression",
+        "scene_selected" => "scene_selected",
         "onboarding_started" => "onboarding_started",
         "onboarding_completed" => "onboarding_completed",
         "onboarding_skipped" => "onboarding_skipped",
@@ -156,10 +169,11 @@ pub fn track_behavior_event(
         event = event.success(value);
     }
     if request.scene_l1.is_some() || request.scene_l2.is_some() {
-        event = event.scene(
-            request.scene_l1.unwrap_or_default(),
-            request.scene_l2.unwrap_or_default(),
+        let (scene_l1, scene_l2) = crate::features::behavior_telemetry::scene_registry_pair(
+            request.scene_l1.as_deref().unwrap_or("unknown"),
+            request.scene_l2.as_deref().unwrap_or("unknown"),
         );
+        event = event.scene(scene_l1, scene_l2);
     }
     if let Some(value) = request.operation_id {
         event = event.string("operation_id", value);

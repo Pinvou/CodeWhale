@@ -4737,6 +4737,20 @@
     return text;
   }
 
+  function trackSceneSubmitted(sid, scene) {
+    var raw = String(scene || "");
+    if (!sid || !raw) return;
+    var parts = raw.split(":");
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", {
+      request: {
+        eventName: "scene_submitted",
+        sessionId: sid,
+        sceneL1: parts[0] || "unknown",
+        sceneL2: parts.slice(1).join(":") || parts[0] || "unknown",
+      },
+    }).catch(function () {});
+  }
+
   // 真正发送:在 sid 的工作集上加 user 气泡 + 流式占位 + busy,然后 invoke chat。
   // active/后台通用(后台走 runSyncOnSession 临时切工作集)。
   function doSendFor(sid, text, displayText, attachmentsPayload, meta, restrictTools, surfaceFailure) {
@@ -4810,6 +4824,7 @@
           runSyncOnSession(sid, function () {
             recordPinvouSceneForMessage(sid, submittedMessagePos, meta.pinvouScene);
           });
+          trackSceneSubmitted(sid, meta.pinvouScene);
         }
         if (meta && meta.voiceOperationId) {
           invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", {
@@ -5133,6 +5148,9 @@
             telemetryTerminal: true,
           });
         }
+      }
+      if (submission.pinvouScene && metadata && metadata.id) {
+        trackSceneSubmitted(metadata.id, submission.pinvouScene);
       }
       acceptFirstTurnSubmission(submission, metadata);
     } catch (error) {

@@ -212,13 +212,13 @@
       if (TAURI && TAURI.event && TAURI.event.emit) TAURI.event.emit(name, { session_id: sid });
     } catch (_) { /* 桌宠是纯装饰,广播失败不影响对话 */ }
   }
-  function trackSceneBehavior(sid, scene) {
+  function trackSceneSubmitted(sid, scene) {
     var raw = String(scene || "");
     if (!sid || !raw) return;
     var parts = raw.split(":");
     invoke("track_behavior_event", {
       request: {
-        eventName: "scene_triggered",
+        eventName: "scene_submitted",
         sessionId: sid,
         sceneL1: parts[0] || "unknown",
         sceneL2: parts.slice(1).join(":") || parts[0] || "unknown",
@@ -303,7 +303,7 @@
           runSyncOnSession(sid, function () {
             recordPinvouSceneForMessage(sid, submittedMessagePos, meta.pinvouScene);
           });
-          trackSceneBehavior(sid, meta.pinvouScene);
+          trackSceneSubmitted(sid, meta.pinvouScene);
         }
         if (meta && meta.voiceOperationId) {
           invoke("track_behavior_event", {

@@ -1490,6 +1490,61 @@ pub fn track_voice_message_submitted(
     Ok(())
 }
 
+pub fn scene_registry_pair(scene_l1: &str, scene_l2: &str) -> (&'static str, &'static str) {
+    match (scene_l1, scene_l2) {
+        ("work", "personal-workbench") => ("work", "personal-workbench"),
+        ("work", "document-writing") => ("work", "document-writing"),
+        ("design", "poster") => ("design", "poster"),
+        ("design", "data-visualization") => ("design", "data-visualization"),
+        ("design", "ppt") => ("design", "ppt"),
+        _ => ("unknown", "unknown"),
+    }
+}
+
+/// Associates the selected scene with the attempt created by the authoritative
+/// chat command. The frontend supplies only controlled scene keys and never an
+/// attempt identifier.
+pub fn track_scene_submitted(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    scene_l1: &str,
+    scene_l2: &str,
+) -> Result<(), String> {
+    let telemetry = app
+        .try_state::<BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
+    if !telemetry.collecting.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let attempt = telemetry
+        .tasks
+        .lock()
+        .map_err(|_| "behavior task state is unavailable".to_string())?
+        .get(session_id)
+        .cloned()
+        .ok_or_else(|| "no active task attempt for scene submission".to_string())?;
+    let dedup_key = format!("scene:{}", attempt.attempt_id);
+    let mut submissions = telemetry
+        .voice_submissions
+        .lock()
+        .map_err(|_| "scene submission state is unavailable".to_string())?;
+    if submissions.len() >= OUTBOX_MAX_EVENTS {
+        submissions.clear();
+    }
+    if !submissions.insert(dedup_key) {
+        return Ok(());
+    }
+    drop(submissions);
+    let (scene_l1, scene_l2) = scene_registry_pair(scene_l1, scene_l2);
+    telemetry.track(
+        BehaviorEvent::new("scene_submitted")
+            .session(session_id)
+            .string("attempt_id", attempt.attempt_id)
+            .scene(scene_l1, scene_l2),
+    );
+    Ok(())
+}
+
 pub fn reject_task_submission(
     app: &tauri::AppHandle,
     session_id: &str,
