@@ -575,7 +575,7 @@ func (r *PostgresRepository) EscalateOverdueManualReviews(ctx context.Context, l
 }
 
 func (r *PostgresRepository) evaluateManualReviewStopLoss(ctx context.Context, tx pgx.Tx, caseID uuid.UUID, severity string, now time.Time) error {
-	var providerID, providerVersion, productID *string
+	var providerID, providerVersion, productID, anomalyType *string
 	err := tx.QueryRow(ctx, `
 WITH target_order AS (
     SELECT manual.id AS case_id,late.payment_order_id FROM manual_review_cases manual JOIN late_payment_review_cases late ON late.id=manual.id WHERE manual.id=$1
@@ -590,21 +590,23 @@ WITH target_order AS (
     UNION ALL
     SELECT manual.id,reconciliation.payment_order_id FROM manual_review_cases manual JOIN reconciliation_cases reconciliation ON reconciliation.manual_review_case_id=manual.id WHERE manual.id=$1
 )
-SELECT payment.provider_id,payment.provider_version,payment.product_id
+SELECT payment.provider_id,payment.provider_version,payment.product_id,anomaly.anomaly_type
   FROM target_order target JOIN payment_orders payment ON payment.id=target.payment_order_id
- LIMIT 1`, caseID).Scan(&providerID, &providerVersion, &productID)
+  LEFT JOIN payment_anomaly_cases anomaly ON anomaly.id=target.case_id
+ LIMIT 1`, caseID).Scan(&providerID, &providerVersion, &productID, &anomalyType)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
-	actions := map[string]any{"automatic": true, "provider_paused": false, "payment_product_paused": false, "route_pause_requested": true, "high_risk_command_pause_requested": true}
-	if providerID != nil && providerVersion != nil {
-		reason := "P0/P1 manual review mitigation SLA exceeded"
-		if _, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,updated_at) VALUES($1,$2,FALSE,$3,$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at`, *providerID, *providerVersion, reason, now); err != nil {
-			return err
-		}
-		actions["provider_paused"] = true
+	eligible := anomalyType != nil && (*anomalyType == "PAYMENT_FACT_CONFLICT" || *anomalyType == "ILLEGAL_TRANSITION")
+	actions := map[string]any{
+		"automatic": true, "level": "L1", "provider_paused": false, "payment_product_paused": false,
+		"stop_loss_scope_candidate": eligible, "affects_new_orders": eligible,
+		"attribution_rule_version": "payment-product-stop-loss/v1",
 	}
-	if productID != nil {
+	if anomalyType != nil {
+		actions["failure_signature"] = *anomalyType
+	}
+	if eligible && productID != nil {
 		if providerID == nil || providerVersion == nil {
 			return ErrConflict
 		}
@@ -612,6 +614,7 @@ SELECT payment.provider_id,payment.provider_version,payment.product_id
 			return err
 		}
 		actions["payment_product_paused"] = true
+		actions["level"] = "L2"
 	}
 	payload, _ := json.Marshal(actions)
 	command, err := tx.Exec(ctx, `INSERT INTO manual_review_stop_loss_evaluations(id,case_id,severity,provider_id,provider_version,payment_product_id,route_reference,high_risk_command_type,action_snapshot,evaluated_at) VALUES($1,$2,$3,$4,$5,$6,'RELATED_MODEL_ROUTES','RELATED_HIGH_RISK_COMMANDS',$7,$8) ON CONFLICT(case_id) DO NOTHING`, uuid.Must(uuid.NewV7()), caseID, severity, providerID, providerVersion, productID, payload, now)
@@ -624,7 +627,53 @@ SELECT payment.provider_id,payment.provider_version,payment.product_id
 	if err = appendManualReviewEvent(ctx, tx, caseID, "STOP_LOSS_EVALUATED", nil, actions, now); err != nil {
 		return err
 	}
-	return events.AppendOutbox(ctx, tx, "billing.manual-review.stop-loss-evaluated.v1", caseID, 1, map[string]any{"case_id": caseID, "severity": severity, "provider_id": providerID, "provider_version": providerVersion, "payment_product_id": productID, "route_pause_requested": true, "high_risk_command_pause_requested": true})
+	return events.AppendOutbox(ctx, tx, "billing.manual-review.stop-loss-evaluated.v1", caseID, 1, map[string]any{"case_id": caseID, "severity": severity, "provider_id": providerID, "provider_version": providerVersion, "payment_product_id": productID, "level": actions["level"], "provider_paused": false, "payment_product_paused": actions["payment_product_paused"]})
+}
+
+// EvaluateOverduePaymentStopLosses is intentionally independent from SLA notification
+// throttling. A delayed notification must never delay the safety decision itself.
+func (r *PostgresRepository) EvaluateOverduePaymentStopLosses(ctx context.Context, limit int) (int, error) {
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	rows, err := r.pool.Query(ctx, `SELECT id,severity FROM manual_review_cases WHERE domain='BILLING' AND status='OPEN' AND severity IN ('P0','P1') AND mitigation_due_at<=now() AND stop_loss_evaluated_at IS NULL ORDER BY mitigation_due_at,id LIMIT $1`, limit)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct {
+		id       uuid.UUID
+		severity string
+	}
+	items := make([]candidate, 0)
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.id, &item.severity); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		items = append(items, item)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, item := range items {
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			return count, err
+		}
+		err = r.evaluateManualReviewStopLoss(ctx, tx, item.id, item.severity, r.now())
+		if err != nil {
+			tx.Rollback(ctx)
+			return count, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return count, err
+		}
+		count++
+	}
+	return count, nil
 }
 
 func (r *PostgresRepository) EscalateArchiveBlindCases(ctx context.Context, limit int) (int, error) {
@@ -705,6 +754,7 @@ func NewManualReviewSLAWorker(repository *PostgresRepository, interval time.Dura
 }
 
 func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
+	_, _ = worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100)
 	_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule)
 	_, _ = worker.repository.EscalateArchiveBlindCases(ctx, 100)
 	ticker := time.NewTicker(worker.interval)
@@ -714,6 +764,7 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			_, _ = worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100)
 			_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule)
 			_, _ = worker.repository.EscalateArchiveBlindCases(ctx, 100)
 		}

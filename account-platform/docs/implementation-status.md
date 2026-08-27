@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 379 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 347`、`部分实现 34`、`未实现 2`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `385` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55–PAY-58、ADM-53、NFR-54 的分级止损设计已经第三轮独立业务与安全审核通过，当前由 APT-091–APT-093 实现。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 348`、`部分实现 33`、`未实现 2`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `385` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55 已由 APT-091 收敛；PAY-56–PAY-58、ADM-53、NFR-54 的分级止损设计已经第三轮独立业务与安全审核通过，当前由 APT-092–APT-093 实现。UI-24–UI-27 已由 APT-087–APT-090 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -270,7 +270,7 @@
 | PAY-52 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-PROVIDER-BOUNDARY | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 列表、下单和 H3C 查询均动态解析数据库目录/映射；下单先提交稳定本地意图并释放锁，再调用 Provider，未知结果保留恢复状态。 |
 | PAY-53 | 已实现 | AUDIT_HEAD | GO-UNIT; RECHARGE-PRODUCT-ADMIN | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 商品命令校验 expected_version、16–128 字符幂等键、终端 OIDC auth_time 与不可变命令审计；旧版本、异请求同键和陈旧认证失败关闭。 |
 | PAY-54 | 已实现 | AUDIT_HEAD | PRODUCT-DOCUMENT-BASELINE | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 需求、架构、任务和状态基线不再记录运行时商品标识、金额、权益值或商品数量；商品变更只进入目录和审计。 |
-| PAY-55 | 部分实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 订单人工隔离已存在，但当前 SLA Worker 仍会由单案件同时暂停商品和 Provider，待 APT-091 收敛为商品级准入聚合。 |
+| PAY-55 | 已实现 | AUDIT_HEAD | GO-UNIT; PAYMENT-TIERED-STOP-LOSS | NOT_DEPLOYED | 单案件评估不再写 Provider 控制；只有受信新单异常类型可由逾期 SLA 关闭目标商品，独立分钟评估不受通知节流影响。 |
 | PAY-56 | 部分实现 | AUDIT_HEAD | PROVIDER-CIRCUIT; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 短时分区熔断已存在，但持久 Provider 控制尚未按关键路径、多样性和跨商品共同故障聚合，待 APT-092。 |
 | PAY-57 | 部分实现 | AUDIT_HEAD | PAYMENT-PROVIDER-BOUNDARY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 下单已有事务外 Provider 调用边界，但全动作健康观察、gap、高水位和不可变窗口成员尚未闭环，待 APT-092。 |
 | PAY-58 | 部分实现 | AUDIT_HEAD | PAYMENT-PROVIDER-RECOVERY; PAYMENT-TIERED-STOP-LOSS-DESIGN | NOT_DEPLOYED | 现有恢复命令会同时打开 Provider 和商品，历史控制也未分级迁移，待 APT-093 拆分恢复。 |
@@ -846,7 +846,7 @@
 | PAY-45 | 商品目录与支付止损分离 | 已实现 | 自动止损写独立 Provider/商品控制事实，不再篡改目录上架状态；创建订单按两层控制失败关闭。 |
 | PAY-46 | 支付能力双人恢复 | 已实现 | Account 双人审批与 Billing 执行门禁共同校验版本、Provider 现场查询、案件、映射和人员隔离，成功后原子恢复并保留不可变证据。 |
 | PAY-47 | 支付暂停对用户可见 | 已实现 | 商品列表保留暂停项并返回稳定暂停层级与原因码。 |
-| PAY-55 | 订单与商品分级止损 | 部分实现 | 订单隔离已存在，但案件 SLA 仍会同时关闭 Provider 和商品，待 APT-091。 |
+| PAY-55 | 订单与商品分级止损 | 已实现 | 单案件保持 L1；仅 PAYMENT_FACT_CONFLICT/ILLEGAL_TRANSITION 受信规则可在止损 SLA 后关闭目标商品，任何单案件均不写 Provider 控制。 |
 | PAY-56 | Provider 持久聚合止损 | 部分实现 | 临时熔断已存在，尚无跨副本持久分区聚合和关键路径升级规则。 |
 | PAY-57 | 支付健康观察与确定性评估 | 部分实现 | 下单具备事务外调用，尚无统一尝试、观察、gap、高水位和成员事实。 |
 | PAY-58 | 分层恢复与历史控制迁移 | 部分实现 | 现有恢复命令联动打开两层控制，尚未完成独立恢复和历史控制复核迁移。 |
