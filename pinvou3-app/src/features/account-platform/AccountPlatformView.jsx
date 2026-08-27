@@ -922,30 +922,22 @@ function maskMobile(value) {
 
 function AccountProfileCard({ copy, me, organizations, activeOrganization, canSwitchIdentity, canEditProfile, onSwitchIdentity, onEditUsername, onEditMobile }) {
   const identity = activeOrganization ? copy.organizationIdentity(activeOrganization.name) : copy.personal;
+  const accountStatus = copy.accountStatuses?.[me?.status] || me?.status || '—';
   return (
     <article className="ap-profile-card">
       <dl className="ap-profile-details">
-        <div className="ap-profile-detail-row">
+        <div className="ap-profile-detail-row ap-profile-identity-row">
           <dt>{copy.activeContext}</dt>
           <dd>
-            <span className="ap-profile-value">{identity}</span>
+            <span className="ap-profile-identity">
+              <span className="ap-profile-value">{identity}</span>
+              <span className={`ap-account-state ap-account-state-${String(me?.status || '').toLowerCase()}`} aria-label={`${copy.accountStatus}: ${accountStatus}`}>
+                {accountStatus}
+              </span>
+            </span>
             <button type="button" disabled={!canSwitchIdentity} title={!canSwitchIdentity ? copy.permissionDenied : undefined} onClick={onSwitchIdentity}>
               {copy.switchContext}
             </button>
-          </dd>
-        </div>
-        <div className="ap-profile-detail-row">
-          <dt>{copy.userCode}</dt>
-          <dd>{me?.user_code || '—'}</dd>
-        </div>
-        <div className="ap-profile-detail-row">
-          <dt>{copy.organizations}</dt>
-          <dd>{organizations.length}</dd>
-        </div>
-        <div className="ap-profile-detail-row">
-          <dt>{copy.accountStatus}</dt>
-          <dd>
-            <span className={`ap-account-state ap-account-state-${String(me?.status || '').toLowerCase()}`}>{me?.status || '—'}</span>
           </dd>
         </div>
         <div className="ap-profile-detail-row">
@@ -965,6 +957,14 @@ function AccountProfileCard({ copy, me, organizations, activeOrganization, canSw
               {copy.modify}
             </button>
           </dd>
+        </div>
+        <div className="ap-profile-detail-row">
+          <dt>{copy.userCode}</dt>
+          <dd>{me?.user_code || '—'}</dd>
+        </div>
+        <div className="ap-profile-detail-row">
+          <dt>{copy.organizations}</dt>
+          <dd>{organizations.length}</dd>
         </div>
       </dl>
     </article>

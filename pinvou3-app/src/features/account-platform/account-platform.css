@@ -229,16 +229,18 @@
   overflow: hidden; border: 1px solid var(--ap-border); border-radius: 12px; background: #fff;
 }
 .ap-profile-details { margin: 0; }
-.ap-profile-detail-row { display: grid; grid-template-columns: 168px minmax(0, 1fr); align-items: center; min-height: 68px; padding: 13px 32px; border-top: 1px solid var(--ap-border-soft); }
+.ap-profile-detail-row { display: grid; grid-template-columns: 168px minmax(0, 1fr); align-items: center; min-height: 56px; padding: 10px 32px; border-top: 1px solid var(--ap-border-soft); }
+.ap-profile-identity-row { min-height: 60px; }
 .ap-profile-detail-row:first-child { border-top: 0; }
 .ap-profile-detail-row dt { color: var(--ap-tertiary); font-size: 13px; }
 .ap-profile-detail-row dd { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-width: 0; margin: 0; overflow-wrap: anywhere; color: var(--ap-primary); font-size: 14px; font-weight: 500; }
 .ap-profile-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-profile-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .ap-profile-detail-row button { flex: 0 0 auto; min-height: 34px; padding: 5px 16px; background: #fff; }
 .ap-profile-detail-row button:hover { background: #f7f8fa; }
-.ap-account-state { display: inline-flex; align-items: center; gap: 6px; color: var(--ap-secondary); }
-.ap-account-state::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #9aa0a6; }
-.ap-account-state-active { color: #1e8e3e; }
+.ap-account-state { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 5px; padding: 2px 8px; border-radius: 999px; color: var(--ap-secondary); background: #f1f3f4; font-size: 12px; font-weight: 500; line-height: 20px; }
+.ap-account-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: #9aa0a6; }
+.ap-account-state-active { color: #1e8e3e; background: #e6f4ea; }
 .ap-account-state-active::before { background: #1e8e3e; }
 .ap-dialog-backdrop {
   position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 20px;
@@ -317,10 +319,10 @@
   .ap-order-summary-cards > button > span:last-child { justify-items: end; }
   .ap-order-summary-cards strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ap-order-summary-cards small { color: var(--ap-tertiary); font-size: 11px; }
-  .ap-profile-detail-row { padding-right: 20px; padding-left: 20px; }
-  .ap-profile-detail-row { grid-template-columns: 1fr; gap: 6px; padding-top: 16px; padding-bottom: 16px; }
+  .ap-profile-detail-row { grid-template-columns: 1fr; gap: 4px; min-height: 56px; padding: 10px 20px; }
+  .ap-profile-identity-row { min-height: 60px; }
   .ap-profile-detail-row dd { align-items: flex-start; gap: 12px; }
-  .ap-profile-detail-row button { margin-top: -5px; }
+  .ap-profile-detail-row button { margin-top: 0; }
   .ap-dialog { padding: 20px; }
   .ap-dialog-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .ap-code-field { grid-template-columns: minmax(0, 1fr) 96px; }
