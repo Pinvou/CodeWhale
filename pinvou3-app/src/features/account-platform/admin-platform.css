@@ -37,16 +37,34 @@
 .adm-table-wrap { border-radius:8px; outline:none; }
 .adm-table-wrap:focus-visible { box-shadow:0 0 0 3px rgba(15,118,110,.18); }
 .adm-extension-stack { display:grid; gap:16px; margin-top:16px; }
+.admin-portal-body > #approval-requests-root,
+.admin-portal-body > #pricing-admin-root,
+.admin-portal-body > #product-admin-root,
+.admin-portal-body > #registration-repair-root,
+.admin-portal-body > #role-bindings-root { display:none; }
 .adm-extension-stack > [hidden] { display:none !important; }
 .adm-extension-stack #role-bindings-root { max-width:none; margin:0; padding:0; }
 .adm-extension-stack .role-binding-panel,
-.adm-extension-stack .registration-repair { max-width:none; margin:0; padding:24px; border:1px solid var(--adm-line); border-radius:12px; background:#fff; box-shadow:0 8px 24px rgba(27,45,52,.035); }
+.adm-extension-stack .registration-repair,
+.adm-extension-stack .approval-panel,
+.adm-extension-stack .pricing-admin,
+.adm-extension-stack .product-admin { max-width:none; margin:0; padding:24px; border:1px solid var(--adm-line); border-radius:12px; background:#fff; box-shadow:0 8px 24px rgba(27,45,52,.035); }
 .adm-extension-stack .role-binding-panel h2,
-.adm-extension-stack .registration-repair h2 { font-size:18px; }
+.adm-extension-stack .registration-repair h2,
+.adm-extension-stack .approval-panel h2,
+.adm-extension-stack .pricing-admin h2,
+.adm-extension-stack .product-admin h2 { font-size:18px; }
 .adm-extension-stack .role-binding-panel form,
-.adm-extension-stack .registration-repair .filters { padding:14px; border:1px solid #e4e9eb; border-radius:9px; background:#f8fafb; }
+.adm-extension-stack .registration-repair .filters,
+.adm-extension-stack .approval-create,
+.adm-extension-stack .approval-filters { padding:14px; border:1px solid #e4e9eb; border-radius:9px; background:#f8fafb; }
 .adm-extension-stack .role-binding-panel form button,
-.adm-extension-stack .registration-repair button { border-color:var(--adm-primary); color:#fff; background:var(--adm-primary); }
+.adm-extension-stack .registration-repair button,
+.adm-extension-stack .approval-panel button,
+.adm-extension-stack .pricing-admin button,
+.adm-extension-stack .product-admin button { border-color:var(--adm-primary); color:#fff; background:var(--adm-primary); }
+.adm-extension-stack .approval-control-snapshot { margin:16px 0; padding:12px 14px; border:1px solid #e4e9eb; border-radius:9px; background:#f8fafb; }
+.adm-extension-stack .approval-control-snapshot summary { cursor:pointer; font-weight:650; }
 .adm-extension-stack table { font-size:12px; }
 .adm-extension-stack th { color:#718088; background:#f5f7f8; font-size:10px; letter-spacing:.04em; text-transform:uppercase; }
 @media (max-width:1100px) { .adm-metrics { grid-template-columns:repeat(3,1fr); }.adm-attention { grid-template-columns:repeat(3,1fr); }.adm-attention div:nth-child(4) { border-left:0; }.adm-overview-grid,.adm-security-grid { grid-template-columns:1fr; } }

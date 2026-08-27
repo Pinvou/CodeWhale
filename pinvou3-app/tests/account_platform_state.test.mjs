@@ -44,6 +44,30 @@ test('admin identity extensions are mounted inside permission-gated pages', asyn
   assert.doesNotMatch(repair, /header\.append\(language\)/);
 });
 
+test('admin finance workspace integrates approvals and products without exposing unsupported pricing drafts', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/features/account-platform/admin-platform.css', import.meta.url), 'utf8');
+  const main = await readFile(new URL('../src/app/admin-main.jsx', import.meta.url), 'utf8');
+  const approvals = await readFile(new URL('../../account-platform/internal/portal/static/assets/approval-requests.js', import.meta.url), 'utf8');
+  const products = await readFile(new URL('../../account-platform/internal/portal/static/assets/product-admin.js', import.meta.url), 'utf8');
+
+  assert.match(view, /function financeSurfaces/);
+  assert.match(view, /platform\.billing\.payment-controls\.resume\.approve/);
+  assert.match(view, /permissions\.has\('platform\.products\.read'\)/);
+  assert.match(view, /'approval-requests-root'.*visibleFinanceSurfaces\.includes\('approvals'\)/);
+  assert.match(view, /'product-admin-root'.*visibleFinanceSurfaces\.includes\('products'\)/);
+  assert.match(view, /'pricing-admin-root': false/);
+  assert.match(view, /sessionStorage\.setItem\('pinvou\.admin\.finance-surface'/);
+  assert.match(authorization, /billing: \['platform\.billing\.wallets\.read', 'platform\.pricing\.read', 'platform\.products\.read', 'platform\.usage\.read'\]/);
+  assert.match(styles, /\.admin-portal-body > #approval-requests-root[\s\S]*display:none/);
+  assert.match(styles, /\.approval-control-snapshot/);
+  assert.match(main, /pinvou-admin-language-change/);
+  assert.match(approvals, /<details class="approval-control-snapshot">/);
+  assert.match(approvals, /pinvou-admin-language-change/);
+  assert.match(products, /pinvou-admin-language-change/);
+});
+
 async function sourceFiles(root) {
   const files = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {

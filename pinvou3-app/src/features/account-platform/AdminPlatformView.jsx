@@ -115,12 +115,32 @@ function Tabs({ items, active, onChange }) {
   );
 }
 
-function AdminExtensionSlot({ section, authorization }) {
+export function financeSurfaces(authorization) {
+  const permissions = new Set(authorization?.platform_permissions || []);
+  const surfaces = [];
+  if (['platform.billing.wallets.read', 'platform.pricing.read', 'platform.usage.read'].some((permission) => permissions.has(permission))) surfaces.push('operations');
+  if ([
+    'platform.billing.adjustments.request',
+    'platform.billing.adjustments.approve',
+    'platform.billing.repairs.request',
+    'platform.billing.repairs.approve',
+    'platform.billing.payment-controls.resume.request',
+    'platform.billing.payment-controls.resume.approve',
+  ].some((permission) => permissions.has(permission))) surfaces.push('approvals');
+  if (permissions.has('platform.products.read')) surfaces.push('products');
+  return surfaces;
+}
+
+function AdminExtensionSlot({ section, authorization, financeSurface = 'operations' }) {
   const hostRef = useRef(null);
   const platformPermissions = new Set(authorization?.platform_permissions || []);
+  const visibleFinanceSurfaces = financeSurfaces(authorization);
   const visible = {
     'role-bindings-root': section === 'users' && platformPermissions.has('platform.roles.read'),
     'registration-repair-root': section === 'identity' && platformPermissions.has('platform.registrations.repair'),
+    'approval-requests-root': section === 'billing' && financeSurface === 'approvals' && visibleFinanceSurfaces.includes('approvals'),
+    'product-admin-root': section === 'billing' && financeSurface === 'products' && visibleFinanceSurfaces.includes('products'),
+    'pricing-admin-root': false,
   };
 
   useEffect(() => {
@@ -151,6 +171,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(null);
+  const [financeSurface, setFinanceSurface] = useState(() => sessionStorage.getItem('pinvou.admin.finance-surface') || 'operations');
   const authorizationRef = useRef(null);
   const authorizationRefreshRef = useRef(false);
 
@@ -330,6 +351,17 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     return () => globalThis.removeEventListener?.('popstate', onPopState);
   }, [auth, authorization, data, load, section]);
 
+  useEffect(() => {
+    if (auth !== 'ready' || !authorization) return;
+    const visible = financeSurfaces(authorization);
+    if (!visible.includes(financeSurface)) setFinanceSurface(visible[0] || 'operations');
+  }, [auth, authorization, financeSurface]);
+
+  const selectFinanceSurface = (value) => {
+    sessionStorage.setItem('pinvou.admin.finance-surface', value);
+    setFinanceSurface(value);
+  };
+
   const navigate = (key) => {
     if (!adminVisibleSections(authorization).includes(key)) return;
     setSection(key);
@@ -428,12 +460,21 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
         {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
         {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-        {section === 'billing' && <Billing copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+        {section === 'billing' && (
+          <>
+            <Tabs
+              items={financeSurfaces(authorization).map((key) => ({ key, label: copy.financeViews[key] }))}
+              active={financeSurface}
+              onChange={selectFinanceSurface}
+            />
+            {financeSurface === 'operations' && <Billing copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          </>
+        )}
         {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
         {section === 'system' && <SystemStatus copy={copy} data={data} />}
         {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
         {section === 'identity' && <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />}
-        <AdminExtensionSlot section={section} authorization={authorization} />
+        <AdminExtensionSlot section={section} authorization={authorization} financeSurface={financeSurface} />
       </main>
     </div>
   );

@@ -36,6 +36,7 @@ export const adminPlatformCopy = {
       governance: '治理',
       operations: '系统运行',
     },
+    financeViews: { operations: '账务运营', approvals: '审批与恢复', products: '充值商品' },
     nav: {
       overview: '总览',
       organizations: '组织',
@@ -366,6 +367,7 @@ export const adminPlatformCopy = {
       governance: 'Governance',
       operations: 'Operations',
     },
+    financeViews: { operations: 'Billing operations', approvals: 'Approvals & recovery', products: 'Recharge products' },
     nav: {
       overview: 'Overview',
       organizations: 'Organizations',
@@ -696,6 +698,7 @@ export const adminPlatformCopy = {
       governance: 'ガバナンス',
       operations: 'システム運用',
     },
+    financeViews: { operations: '請求運用', approvals: '承認と復旧', products: 'チャージ商品' },
     nav: {
       overview: '概要',
       organizations: '組織',

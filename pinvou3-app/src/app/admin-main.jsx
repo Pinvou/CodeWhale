@@ -19,6 +19,7 @@ function AdminPortalApp() {
     localStorage.setItem('pinvou.admin.language', value);
     document.documentElement.lang = value === 'zh' ? 'zh-CN' : value === 'ja' ? 'ja-JP' : 'en';
     setLanguage(value);
+    globalThis.dispatchEvent(new CustomEvent('pinvou-admin-language-change', { detail: { language: value } }));
   };
   return <AdminPlatformView client={client} copy={dict[language].uiAdminPlatform} language={language} onLanguageChange={updateLanguage} />;
 }
