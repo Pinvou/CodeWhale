@@ -192,6 +192,7 @@ pub struct BehaviorTelemetry {
     voice_submissions: Arc<StdMutex<HashMap<String, CollectionLease>>>,
     artifacts: Arc<StdMutex<HashMap<String, ArtifactTelemetryRecord>>>,
     latest_turns: Arc<StdMutex<HashMap<String, TurnTelemetryRecord>>>,
+    tool_install_terminals: ToolInstallTerminalCoordinator,
     event_tx: Option<mpsc::Sender<()>>,
     control_tx: Option<mpsc::Sender<()>>,
 }
@@ -252,6 +253,107 @@ struct ToolOperation {
     lease: CollectionLease,
 }
 
+#[derive(Debug, Clone)]
+struct DeferredToolInstallTerminal {
+    operation_id: String,
+    generation: u64,
+    event: BehaviorEvent,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolInstallTerminalCoordinator {
+    pending: Arc<StdMutex<HashMap<String, DeferredToolInstallTerminal>>>,
+}
+
+impl ToolInstallTerminalCoordinator {
+    fn submit<F>(
+        &self,
+        terminal: DeferredToolInstallTerminal,
+        authorization_generation: &AtomicU64,
+        mut publish: F,
+    ) where
+        F: FnMut(&BehaviorEvent, u64) -> bool,
+    {
+        let generation = terminal.generation;
+        if authorization_generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        if publish(&terminal.event, generation) {
+            return;
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            if authorization_generation.load(Ordering::Acquire) != generation {
+                return;
+            }
+            pending
+                .entry(terminal.operation_id.clone())
+                .or_insert(terminal);
+        }
+        // Close the race where renewal publishes its new lease after the first
+        // attempt but before the terminal is inserted into the deferred queue.
+        self.flush_inner(authorization_generation, generation, &mut publish);
+    }
+
+    fn flush<F>(&self, authorization_generation: &AtomicU64, generation: u64, mut publish: F)
+    where
+        F: FnMut(&BehaviorEvent, u64) -> bool,
+    {
+        self.flush_inner(authorization_generation, generation, &mut publish);
+    }
+
+    fn flush_inner<F>(&self, authorization_generation: &AtomicU64, generation: u64, publish: &mut F)
+    where
+        F: FnMut(&BehaviorEvent, u64) -> bool,
+    {
+        let current_generation = authorization_generation.load(Ordering::Acquire);
+        let terminals = match self.pending.lock() {
+            Ok(mut pending) => {
+                pending.retain(|_, terminal| terminal.generation == current_generation);
+                if current_generation != generation {
+                    return;
+                }
+                let operation_ids = pending
+                    .iter()
+                    .filter_map(|(operation_id, terminal)| {
+                        (terminal.generation == generation).then(|| operation_id.clone())
+                    })
+                    .collect::<Vec<_>>();
+                operation_ids
+                    .into_iter()
+                    .filter_map(|operation_id| pending.remove(&operation_id))
+                    .collect::<Vec<_>>()
+            }
+            Err(_) => return,
+        };
+
+        for terminal in terminals {
+            if authorization_generation.load(Ordering::Acquire) != generation {
+                continue;
+            }
+            if !publish(&terminal.event, generation)
+                && authorization_generation.load(Ordering::Acquire) == generation
+            {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending
+                        .entry(terminal.operation_id.clone())
+                        .or_insert(terminal);
+                }
+            }
+        }
+    }
+
+    fn discard_stale(&self, generation: u64) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.retain(|_, terminal| terminal.generation == generation);
+        }
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.pending.lock().map_or(0, |pending| pending.len())
+    }
+}
+
 pub struct ToolInstallGuard {
     app: tauri::AppHandle,
     operation_id: String,
@@ -285,9 +387,7 @@ impl ToolInstallGuard {
             self.app.try_state::<BehaviorTelemetry>(),
             self.authorization_generation,
         ) {
-            if let Some(lease) = lease_for_generation(telemetry.current_lease(), generation) {
-                telemetry.track_for_lease(event, &lease);
-            }
+            telemetry.complete_tool_install_terminal(self.operation_id.clone(), generation, event);
         }
         self.completed = true;
     }
@@ -868,6 +968,7 @@ impl BehaviorTelemetry {
             voice_submissions: Arc::new(StdMutex::new(HashMap::new())),
             artifacts: Arc::new(StdMutex::new(HashMap::new())),
             latest_turns: Arc::new(StdMutex::new(HashMap::new())),
+            tool_install_terminals: ToolInstallTerminalCoordinator::default(),
             event_tx,
             control_tx,
         };
@@ -935,14 +1036,15 @@ impl BehaviorTelemetry {
     }
 
     fn track_for_lease(&self, event: BehaviorEvent, lease: &CollectionLease) {
-        let Some(tx) = &self.event_tx else {
-            return;
-        };
+        let _ = self.try_track_for_lease(event, lease);
+    }
+
+    fn try_track_for_lease(&self, event: BehaviorEvent, lease: &CollectionLease) -> bool {
         let record = match self.prepare_record(event, lease) {
             Ok(record) => record,
             Err(error) => {
                 log::debug!("[pinvou3][behavior] event serialization skipped: {error:#}");
-                return;
+                return false;
             }
         };
         let enqueued = self
@@ -958,13 +1060,16 @@ impl BehaviorTelemetry {
             });
         match enqueued {
             Ok(true) => {}
-            Ok(false) => return,
+            Ok(false) => return false,
             Err(error) => {
                 log::debug!("[pinvou3][behavior] persistent enqueue skipped: {error:#}");
-                return;
+                return false;
             }
         }
-        let _ = tx.try_send(());
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.try_send(());
+        }
+        true
     }
 
     fn current_lease(&self) -> Option<CollectionLease> {
@@ -990,9 +1095,49 @@ impl BehaviorTelemetry {
     }
 
     fn invalidate_generation(&self) -> u64 {
-        self.authorization_generation
+        let generation = self
+            .authorization_generation
             .fetch_add(1, Ordering::AcqRel)
-            .saturating_add(1)
+            .saturating_add(1);
+        self.tool_install_terminals.discard_stale(generation);
+        generation
+    }
+
+    fn complete_tool_install_terminal(
+        &self,
+        operation_id: String,
+        generation: u64,
+        event: BehaviorEvent,
+    ) {
+        self.tool_install_terminals.submit(
+            DeferredToolInstallTerminal {
+                operation_id,
+                generation,
+                event,
+            },
+            &self.authorization_generation,
+            |event, expected_generation| {
+                let Some(lease) = lease_for_generation(self.current_lease(), expected_generation)
+                else {
+                    return false;
+                };
+                self.try_track_for_lease(event.clone(), &lease)
+            },
+        );
+    }
+
+    fn flush_tool_install_terminals(&self, generation: u64) {
+        self.tool_install_terminals.flush(
+            &self.authorization_generation,
+            generation,
+            |event, expected_generation| {
+                let Some(lease) = lease_for_generation(self.current_lease(), expected_generation)
+                else {
+                    return false;
+                };
+                self.try_track_for_lease(event.clone(), &lease)
+            },
+        );
     }
 
     fn rebind_lifecycle_state(&self, generation: u64, period_id: &str) -> Result<()> {
@@ -1099,6 +1244,7 @@ impl BehaviorTelemetry {
             voice_submissions: self.voice_submissions.clone(),
             artifacts: self.artifacts.clone(),
             latest_turns: self.latest_turns.clone(),
+            tool_install_terminals: self.tool_install_terminals.clone(),
             event_tx: None,
             control_tx: None,
         }
@@ -1428,6 +1574,7 @@ impl BehaviorTelemetry {
             *period = Some(started.collection_period_id);
         }
         self.collecting.store(true, Ordering::Release);
+        self.flush_tool_install_terminals(generation);
         Ok(true)
     }
 
@@ -4104,21 +4251,145 @@ mod tests {
     }
 
     #[test]
-    fn tool_install_terminal_rebinds_across_renewal_but_not_reauthorization() {
-        let renewed = CollectionLease {
-            generation: 12,
-            collection_period_id: "period_renewed".to_string(),
-        };
-        assert_eq!(
-            lease_for_generation(Some(renewed.clone()), 12),
-            Some(renewed)
-        );
+    fn tool_install_terminal_waits_for_renewal_and_drops_after_reauthorization() {
+        use std::sync::Barrier;
+        use std::thread;
 
-        let reauthorized = CollectionLease {
-            generation: 13,
-            collection_period_id: "period_after_delete".to_string(),
+        fn publish(
+            collecting: &AtomicBool,
+            generation: &AtomicU64,
+            period: &RwLock<Option<String>>,
+            delivered: &StdMutex<Vec<(String, String)>>,
+            event: &BehaviorEvent,
+            expected_generation: u64,
+        ) -> bool {
+            if !collecting.load(Ordering::Acquire)
+                || generation.load(Ordering::Acquire) != expected_generation
+            {
+                return false;
+            }
+            let Some(period_id) = period.read().unwrap().clone() else {
+                return false;
+            };
+            delivered
+                .lock()
+                .unwrap()
+                .push((event.event_id.clone(), period_id));
+            true
+        }
+
+        let coordinator = ToolInstallTerminalCoordinator::default();
+        let collecting = Arc::new(AtomicBool::new(true));
+        let generation = Arc::new(AtomicU64::new(12));
+        let period = Arc::new(RwLock::new(Some("period_old".to_string())));
+        let delivered = Arc::new(StdMutex::new(Vec::<(String, String)>::new()));
+        let renewal_paused = Arc::new(Barrier::new(2));
+        let renewal_resume = Arc::new(Barrier::new(2));
+
+        let renewal = {
+            let coordinator = coordinator.clone();
+            let collecting = collecting.clone();
+            let generation = generation.clone();
+            let period = period.clone();
+            let delivered = delivered.clone();
+            let renewal_paused = renewal_paused.clone();
+            let renewal_resume = renewal_resume.clone();
+            thread::spawn(move || {
+                collecting.store(false, Ordering::Release);
+                renewal_paused.wait();
+                renewal_resume.wait();
+                *period.write().unwrap() = Some("period_renewed".to_string());
+                collecting.store(true, Ordering::Release);
+                coordinator.flush(&generation, 12, |event, expected_generation| {
+                    publish(
+                        &collecting,
+                        &generation,
+                        &period,
+                        &delivered,
+                        event,
+                        expected_generation,
+                    )
+                });
+            })
         };
-        assert!(lease_for_generation(Some(reauthorized), 12).is_none());
+
+        renewal_paused.wait();
+        let terminal = DeferredToolInstallTerminal {
+            operation_id: "install_during_renewal".to_string(),
+            generation: 12,
+            event: BehaviorEvent::new("tool_install_completed")
+                .string("operation_id", "install_during_renewal")
+                .success(true),
+        };
+        coordinator.submit(terminal, &generation, |event, expected_generation| {
+            publish(
+                &collecting,
+                &generation,
+                &period,
+                &delivered,
+                event,
+                expected_generation,
+            )
+        });
+        assert_eq!(coordinator.pending_len(), 1);
+        assert!(delivered.lock().unwrap().is_empty());
+
+        renewal_resume.wait();
+        renewal.join().unwrap();
+        assert_eq!(coordinator.pending_len(), 0);
+        let delivered_after_renewal = delivered.lock().unwrap().clone();
+        assert_eq!(delivered_after_renewal.len(), 1);
+        assert_eq!(delivered_after_renewal[0].1, "period_renewed");
+        coordinator.flush(&generation, 12, |event, expected_generation| {
+            publish(
+                &collecting,
+                &generation,
+                &period,
+                &delivered,
+                event,
+                expected_generation,
+            )
+        });
+        assert_eq!(delivered.lock().unwrap().len(), 1);
+
+        collecting.store(false, Ordering::Release);
+        coordinator.submit(
+            DeferredToolInstallTerminal {
+                operation_id: "install_before_delete".to_string(),
+                generation: 12,
+                event: BehaviorEvent::new("tool_install_completed")
+                    .string("operation_id", "install_before_delete")
+                    .success(true),
+            },
+            &generation,
+            |event, expected_generation| {
+                publish(
+                    &collecting,
+                    &generation,
+                    &period,
+                    &delivered,
+                    event,
+                    expected_generation,
+                )
+            },
+        );
+        assert_eq!(coordinator.pending_len(), 1);
+        generation.store(13, Ordering::Release);
+        coordinator.discard_stale(13);
+        *period.write().unwrap() = Some("period_after_delete".to_string());
+        collecting.store(true, Ordering::Release);
+        coordinator.flush(&generation, 13, |event, expected_generation| {
+            publish(
+                &collecting,
+                &generation,
+                &period,
+                &delivered,
+                event,
+                expected_generation,
+            )
+        });
+        assert_eq!(coordinator.pending_len(), 0);
+        assert_eq!(delivered.lock().unwrap().len(), 1);
     }
 
     #[test]
