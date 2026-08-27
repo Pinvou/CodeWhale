@@ -326,7 +326,85 @@ test("WEVTA uses the latest feedback state and same-turn 30 minute window", () =
     wevta_installations: 1,
     weekly_successful_task_installations: 4,
     wevta_rate: 0.25,
+    positive_feedback_installations: 0,
+    response_copied_installations: 1,
+    artifact_exported_installations: 0,
+    negative_feedback_installations: 0,
+    negative_feedback_rate: 0,
   });
+});
+
+test("P1 dashboard metrics cover retention funnels version quality and confidence", () => {
+  const now = at("2026-08-12T12:00:00");
+  const behaviorEvents = [
+    { event_id: "cohort_d1", event_name: "analytics_cohort_started", identity_id: "retained_d1", occurred_at: at("2026-08-10T08:00:00") },
+    { event_id: "active_d1", event_name: "app_opened", identity_id: "retained_d1", occurred_at: at("2026-08-11T08:00:00") },
+    { event_id: "cohort_d7", event_name: "analytics_cohort_started", identity_id: "retained_d7", occurred_at: at("2026-08-04T08:00:00") },
+    { event_id: "active_d7", event_name: "app_opened", identity_id: "retained_d7", occurred_at: at("2026-08-11T08:00:00") },
+    { event_id: "cohort_d30", event_name: "analytics_cohort_started", identity_id: "retained_d30", occurred_at: at("2026-07-13T08:00:00") },
+    { event_id: "active_d30", event_name: "app_opened", identity_id: "retained_d30", occurred_at: at("2026-08-12T08:00:00") },
+    { event_id: "voice_entry", event_name: "voice_entry_clicked", operation_id: "voice_op", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:00") },
+    { event_id: "voice_permission", event_name: "voice_permission_result", operation_id: "voice_op", voice_permission_status: "granted", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:01") },
+    { event_id: "voice_started", event_name: "voice_started", operation_id: "voice_op", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:02") },
+    { event_id: "voice_recognized", event_name: "voice_recognition_completed", operation_id: "voice_op", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:03") },
+    { event_id: "voice_submitted", event_name: "voice_message_submitted", operation_id: "voice_op", attempt_id: "quality_attempt_0", identity_id: "quality_a", occurred_at: at("2026-08-12T09:00:04") },
+  ];
+  for (let index = 0; index < 30; index += 1) {
+    const attempt = `quality_attempt_${index}`;
+    const common = { attempt_id: attempt, identity_id: `quality_${index}`, app_version: "0.8.7", platform: "windows", arch: "x86_64" };
+    behaviorEvents.push(
+      { ...common, event_id: `submitted_${index}`, event_name: "task_submitted", occurred_at: at("2026-08-12T09:01:00") + index },
+      { ...common, event_id: `admitted_${index}`, event_name: "task_admitted", occurred_at: at("2026-08-12T09:01:01") + index },
+      { ...common, event_id: `output_${index}`, event_name: "task_first_output", duration_ms: index + 1, occurred_at: at("2026-08-12T09:01:02") + index },
+      { ...common, event_id: `finished_${index}`, event_name: "task_finished", turn_id: `turn_${index}`, mode: "assistant", initiator_type: "user", status: "success", duration_ms: (index + 1) * 10, occurred_at: at("2026-08-12T09:01:03") + index },
+    );
+  }
+  const overview = buildBehaviorOverview([], [], behaviorEvents, "30", now);
+  assert.deepEqual(overview.retention.d1, { horizon_days: 1, eligible_installations: 3, retained_installations: 1, retention_rate: 1 / 3, confidence: "low" });
+  assert.equal(overview.retention.d7.retained_installations, 1);
+  assert.equal(overview.retention.d30.retained_installations, 1);
+  assert.equal(overview.funnels.voice.entry_clicked, 1);
+  assert.equal(overview.funnels.voice.message_submitted, 1);
+  assert.equal(overview.funnels.voice.task_succeeded, 1);
+  assert.equal(overview.version_quality[0].confidence, "sufficient");
+  assert.equal(overview.version_quality[0].first_output_p50_ms, 15);
+  assert.equal(overview.version_quality[0].first_output_p90_ms, 27);
+  assert.equal(overview.version_quality[0].total_duration_p90_ms, 270);
+  assert.equal(overview.data_quality.confidence, "sufficient");
+});
+
+test("P1 tool and scene funnels preserve every stage and value outcome", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [
+    { event_id: "tool_impression", event_name: "tool_impression", view_id: "view_a", tool_key: "search", tool_type: "mcp", identity_id: "dev_a", occurred_at: at("2026-08-12T09:00:00") },
+    { event_id: "tool_detail", event_name: "tool_detail_opened", view_id: "view_a", tool_key: "search", tool_type: "mcp", identity_id: "dev_a", occurred_at: at("2026-08-12T09:01:00") },
+    { event_id: "tool_install_start", event_name: "tool_install_started", operation_id: "install_a", tool_key: "search", tool_type: "mcp", identity_id: "dev_a", occurred_at: at("2026-08-12T09:02:00") },
+    { event_id: "tool_install_done", event_name: "tool_install_completed", operation_id: "install_a", tool_key: "search", tool_type: "mcp", success: true, identity_id: "dev_a", occurred_at: at("2026-08-12T09:03:00") },
+    { event_id: "tool_config_start", event_name: "tool_configuration_started", operation_id: "config_a", tool_key: "search", tool_type: "mcp", identity_id: "dev_a", occurred_at: at("2026-08-12T09:04:00") },
+    { event_id: "tool_config_done", event_name: "tool_configuration_finished", operation_id: "config_a", tool_key: "search", tool_type: "mcp", success: true, identity_id: "dev_a", occurred_at: at("2026-08-12T09:05:00") },
+    { event_id: "tool_call_done", event_name: "tool_call_completed", operation_id: "call_a", tool_key: "search", tool_type: "mcp", success: true, identity_id: "dev_a", occurred_at: at("2026-08-12T09:06:00") },
+    { event_id: "scene_seen", event_name: "scene_impression", operation_id: "scene_view", scene_l1: "work", scene_l2: "document-writing", identity_id: "dev_a", occurred_at: at("2026-08-12T10:00:00") },
+    { event_id: "scene_pick", event_name: "scene_selected", operation_id: "scene_pick", scene_l1: "work", scene_l2: "document-writing", identity_id: "dev_a", occurred_at: at("2026-08-12T10:01:00") },
+    { event_id: "scene_submit", event_name: "scene_submitted", operation_id: "scene_submit", attempt_id: "scene_attempt", scene_l1: "work", scene_l2: "document-writing", identity_id: "dev_a", occurred_at: at("2026-08-12T10:02:00") },
+    { event_id: "scene_finish", event_name: "task_finished", attempt_id: "scene_attempt", turn_id: "scene_turn", status: "success", duration_ms: 1200, identity_id: "dev_a", occurred_at: at("2026-08-12T10:03:00") },
+    { event_id: "scene_copy", event_name: "response_copied", turn_id: "scene_turn", identity_id: "dev_a", occurred_at: at("2026-08-12T10:04:00") },
+  ];
+  const tools = buildBehaviorToolRanking([], [], events, "today", "install", now);
+  assert.deepEqual(tools.funnel_rows[0], {
+    tool_key: "search", tool_name: "search", tool_type: "mcp",
+    impression_count: 1, detail_count: 1, install_started_count: 1, install_succeeded_count: 1,
+    configuration_started_count: 1, configuration_succeeded_count: 1, call_succeeded_count: 1,
+    failed_count: 0, cancelled_count: 0, impression_to_install_rate: 1, install_success_rate: 1,
+    install_to_configuration_rate: 1, configuration_success_rate: 1, configuration_to_call_rate: 1,
+    configuration_to_call_p50_ms: 60_000,
+    confidence: "low",
+  });
+  const scenes = buildBehaviorSceneRanking([], [], events, "today", now);
+  assert.equal(scenes.rows[0].selection_rate, 1);
+  assert.equal(scenes.rows[0].submission_rate, 1);
+  assert.equal(scenes.rows[0].task_success_rate, 1);
+  assert.equal(scenes.rows[0].explicit_value_rate, 1);
+  assert.equal(scenes.rows[0].task_duration_p50_ms, 1200);
 });
 
 test("behavior collection control is opt-in, idempotent and deletion removes facts", () => {

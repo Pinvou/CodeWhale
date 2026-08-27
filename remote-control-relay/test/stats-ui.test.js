@@ -47,6 +47,12 @@ test("device detail sortable headers toggle descending and ascending order", asy
     const { document } = dom.window;
     assert.equal(document.querySelector('[data-view="behavior"]').textContent, "行为分析");
     assert.equal(document.querySelector('[data-view="commercial"]').textContent, "商业（未接入）");
+    assert.ok(document.querySelector("#valueWevta"));
+    assert.ok(document.querySelector("#retentionD30"));
+    assert.ok(document.querySelector("#voiceFunnelRows"));
+    assert.ok(document.querySelector("#versionQualityRows"));
+    assert.match(statsHtml, /WEVTA 是可观测价值下界/);
+    assert.match(statsHtml, /样本不足 30 时不展示百分比/);
     document.querySelector('[data-view="behavior"]').click();
     assert.equal(document.querySelector("#behaviorView").classList.contains("hidden"), false);
     document.querySelector('[data-view="commercial"]').click();

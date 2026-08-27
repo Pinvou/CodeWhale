@@ -385,6 +385,144 @@ function rate(part, total) {
 }
 
 const EXPLICIT_VALUE_WINDOW_MS = 30 * 60_000;
+const MIN_RELIABLE_SAMPLE = 30;
+
+function percentile(values, quantile) {
+  const sorted = values.map(Number).filter(Number.isFinite).sort((left, right) => left - right);
+  if (!sorted.length) return null;
+  return sorted[Math.max(0, Math.ceil(sorted.length * quantile) - 1)];
+}
+
+function sampleConfidence(sampleSize) {
+  return Number(sampleSize) >= MIN_RELIABLE_SAMPLE ? "sufficient" : "low";
+}
+
+function retentionMetric(usageEvents, behaviorEvents, horizon, now) {
+  const today = statsDay(now);
+  const cohorts = new Map();
+  for (const event of behaviorEvents) {
+    if (event.event_name !== "analytics_cohort_started") continue;
+    const identity = eventIdentity(event);
+    const day = statsDay(event.occurred_at);
+    if (!identity || day > today - horizon) continue;
+    if (!cohorts.has(identity) || day < cohorts.get(identity)) cohorts.set(identity, day);
+  }
+  const activity = new Map();
+  const addActivity = (identity, occurredAt) => {
+    if (!identity) return;
+    const bucket = activity.get(identity) || new Set();
+    bucket.add(statsDay(occurredAt));
+    activity.set(identity, bucket);
+  };
+  for (const event of usageEvents) addActivity(event.device_id, event.occurred_at);
+  for (const event of behaviorEvents) addActivity(eventIdentity(event), event.occurred_at);
+  let retained = 0;
+  for (const [identity, cohortDay] of cohorts) {
+    if (activity.get(identity)?.has(cohortDay + horizon)) retained += 1;
+  }
+  return {
+    horizon_days: horizon,
+    eligible_installations: cohorts.size,
+    retained_installations: retained,
+    retention_rate: rate(retained, cohorts.size),
+    confidence: sampleConfidence(cohorts.size),
+  };
+}
+
+function buildVersionQuality(windowEvents) {
+  const groups = new Map();
+  for (const event of windowEvents) {
+    if (!["task_submitted", "task_admitted", "task_first_output", "task_finished"].includes(event.event_name)) continue;
+    const version = boundedText(event.app_version, 64) || "unknown";
+    const platform = boundedText(event.platform, 32) || "unknown";
+    const arch = boundedText(event.arch, 32) || "unknown";
+    const key = `${version}:${platform}:${arch}`;
+    const row = groups.get(key) || {
+      app_version: version,
+      platform,
+      arch,
+      submitted: new Set(),
+      admitted: new Set(),
+      finished: new Set(),
+      success: new Set(),
+      cancelled: new Set(),
+      first_output_ms: [],
+      total_duration_ms: [],
+      errors: new Map(),
+    };
+    const attempt = boundedText(event.attempt_id, 128);
+    if (attempt) {
+      if (event.event_name === "task_submitted") row.submitted.add(attempt);
+      if (event.event_name === "task_admitted") row.admitted.add(attempt);
+      if (event.event_name === "task_first_output") {
+        row.first_output_ms.push(event.duration_ms);
+      }
+      if (event.event_name === "task_finished") {
+        row.finished.add(attempt);
+        row.total_duration_ms.push(event.duration_ms);
+        if (event.status === "success") row.success.add(attempt);
+        if (event.status === "cancelled") row.cancelled.add(attempt);
+        if (event.error_category) {
+          row.errors.set(event.error_category, (row.errors.get(event.error_category) || 0) + 1);
+        }
+      }
+    }
+    groups.set(key, row);
+  }
+  return [...groups.values()].map((row) => ({
+    app_version: row.app_version,
+    platform: row.platform,
+    arch: row.arch,
+    sample_size: row.submitted.size,
+    confidence: sampleConfidence(row.submitted.size),
+    admission_rate: rate(row.admitted.size, row.submitted.size),
+    success_rate: rate(row.success.size, row.finished.size),
+    cancellation_rate: rate(row.cancelled.size, row.finished.size),
+    first_output_p50_ms: percentile(row.first_output_ms, 0.5),
+    first_output_p90_ms: percentile(row.first_output_ms, 0.9),
+    total_duration_p50_ms: percentile(row.total_duration_ms, 0.5),
+    total_duration_p90_ms: percentile(row.total_duration_ms, 0.9),
+    error_categories: Object.fromEntries([...row.errors].sort((left, right) => right[1] - left[1])),
+  })).sort((left, right) => right.sample_size - left.sample_size
+    || left.app_version.localeCompare(right.app_version));
+}
+
+function buildVoiceFunnel(windowEvents, taskFinished) {
+  const operations = eventName => new Set(windowEvents
+    .filter(event => event.event_name === eventName)
+    .map(event => event.operation_id).filter(Boolean));
+  const entries = operations("voice_entry_clicked");
+  const permissions = new Set(windowEvents
+    .filter(event => event.event_name === "voice_permission_result" && event.voice_permission_status === "granted")
+    .map(event => event.operation_id).filter(Boolean));
+  const started = operations("voice_started");
+  const recognized = operations("voice_recognition_completed");
+  const submittedByOperation = new Map();
+  for (const event of windowEvents) {
+    if (event.event_name === "voice_message_submitted" && event.operation_id
+      && !submittedByOperation.has(event.operation_id)) submittedByOperation.set(event.operation_id, event);
+  }
+  const submittedEvents = [...submittedByOperation.values()];
+  const submittedAttempts = new Set(submittedEvents.map(event => event.attempt_id).filter(Boolean));
+  const successfulAttempts = new Set(taskFinished
+    .filter(event => event.status === "success")
+    .map(event => event.attempt_id).filter(attempt => submittedAttempts.has(attempt)));
+  const failed = operations("voice_recognition_failed");
+  const cancelled = operations("voice_cancelled");
+  return {
+    entry_clicked: entries.size,
+    permission_granted: permissions.size,
+    started: started.size,
+    recognition_completed: recognized.size,
+    message_submitted: submittedEvents.length,
+    task_succeeded: successfulAttempts.size,
+    recognition_failed: failed.size,
+    cancelled: cancelled.size,
+    entry_to_submit_rate: rate(submittedEvents.length, entries.size),
+    submit_to_success_rate: rate(successfulAttempts.size, submittedEvents.length),
+    confidence: sampleConfidence(entries.size),
+  };
+}
 
 function currentBeijingWeek(now) {
   const today = statsDay(now);
@@ -423,22 +561,43 @@ export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now())
   )), "task_finished");
   const weeklySuccessfulInstallations = new Set(successfulTasks.map(eventIdentity).filter(Boolean));
   const valuedInstallations = new Set();
+  const feedbackInstallations = new Set();
+  const copiedInstallations = new Set();
+  const exportedInstallations = new Set();
+  const negativeFeedbackInstallations = new Set();
   for (const task of successfulTasks) {
     const identity = eventIdentity(task);
     if (!identity || !task.turn_id) continue;
     const completedAt = Number(task.occurred_at);
-    const matched = valueSignals.some((signal) => (
+    const matchedSignals = valueSignals.filter((signal) => (
       eventIdentity(signal) === identity
         && signal.turn_id === task.turn_id
         && Number(signal.occurred_at) >= completedAt
         && Number(signal.occurred_at) <= completedAt + EXPLICIT_VALUE_WINDOW_MS
     ));
-    if (matched) valuedInstallations.add(identity);
+    if (matchedSignals.length) valuedInstallations.add(identity);
+    if (matchedSignals.some(signal => signal.event_name === "response_feedback_changed")) feedbackInstallations.add(identity);
+    if (matchedSignals.some(signal => signal.event_name === "response_copied")) copiedInstallations.add(identity);
+    if (matchedSignals.some(signal => signal.event_name === "artifact_exported")) exportedInstallations.add(identity);
+    const negativeFeedback = [...latestFeedback.values()].some(signal => (
+      signal.feedback_action === "set"
+        && signal.rating === "negative"
+        && eventIdentity(signal) === identity
+        && signal.turn_id === task.turn_id
+        && Number(signal.occurred_at) >= completedAt
+        && Number(signal.occurred_at) <= completedAt + EXPLICIT_VALUE_WINDOW_MS
+    ));
+    if (negativeFeedback) negativeFeedbackInstallations.add(identity);
   }
   return {
     wevta_installations: valuedInstallations.size,
     weekly_successful_task_installations: weeklySuccessfulInstallations.size,
     wevta_rate: rate(valuedInstallations.size, weeklySuccessfulInstallations.size),
+    positive_feedback_installations: feedbackInstallations.size,
+    response_copied_installations: copiedInstallations.size,
+    artifact_exported_installations: exportedInstallations.size,
+    negative_feedback_installations: negativeFeedbackInstallations.size,
+    negative_feedback_rate: rate(negativeFeedbackInstallations.size, weeklySuccessfulInstallations.size),
   };
 }
 
@@ -523,6 +682,23 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
   }, { accepted: 0, duplicate: 0, rejected: 0, retryable: 0 });
   const pipelineTotal = pipeline.accepted + pipeline.duplicate + pipeline.rejected + pipeline.retryable;
   const explicitValue = buildWeeklyExplicitValueMetric(behaviorEvents, now);
+  const taskFirstOutput = uniqueAttempts(windowEvents, "task_first_output");
+  const taskErrors = Object.fromEntries([...taskFinished.concat(taskRejected).reduce((groups, event) => {
+    if (event.error_category) groups.set(event.error_category, (groups.get(event.error_category) || 0) + 1);
+    return groups;
+  }, new Map())].sort((left, right) => right[1] - left[1]));
+  const retention = {
+    d1: retentionMetric(usageEvents, behaviorEvents, 1, now),
+    d7: retentionMetric(usageEvents, behaviorEvents, 7, now),
+    d30: retentionMetric(usageEvents, behaviorEvents, 30, now),
+  };
+  const voiceFunnel = buildVoiceFunnel(windowEvents, taskFinished);
+  const versionQuality = buildVersionQuality(windowEvents);
+  const qualityWarnings = [];
+  if (taskSubmitted.length < MIN_RELIABLE_SAMPLE) qualityWarnings.push("task_sample_low");
+  if (taskAdmitted.length && admittedTerminalCount / taskAdmitted.length < 0.98) qualityWarnings.push("task_terminal_incomplete");
+  if (pipelineTotal && pipeline.rejected / pipelineTotal > 0.01) qualityWarnings.push("pipeline_rejection_high");
+  if (windowEvents.some(event => event.clock_skew_bucket && event.clock_skew_bucket !== "normal")) qualityWarnings.push("clock_skew_present");
   return {
     generated_at: now,
     range: window.range,
@@ -553,6 +729,12 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
       task_cancelled_count: taskStatus.cancelled,
       task_submission_success_rate: rate(taskStatus.success, taskSubmitted.length),
       admitted_task_success_rate: rate(taskStatus.success, taskFinished.length),
+      task_first_output_rate: rate(taskFirstOutput.length, taskAdmitted.length),
+      task_cancel_rate: rate(taskStatus.cancelled, taskFinished.length),
+      task_first_output_p50_ms: percentile(taskFirstOutput.map(event => event.duration_ms), 0.5),
+      task_first_output_p90_ms: percentile(taskFirstOutput.map(event => event.duration_ms), 0.9),
+      task_total_duration_p50_ms: percentile(taskFinished.map(event => event.duration_ms), 0.5),
+      task_total_duration_p90_ms: percentile(taskFinished.map(event => event.duration_ms), 0.9),
       tool_call_started_count: toolCallStarted.length,
       tool_call_completed_count: toolCallCompleted.length,
       tool_call_completion_rate: rate(toolCallCompleted.length, toolCallStarted.length),
@@ -571,6 +753,16 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
       pipeline_duplicate_rate: rate(pipeline.duplicate, pipelineTotal),
       pipeline_rejection_rate: rate(pipeline.rejected, pipelineTotal),
       pipeline_retryable_rate: rate(pipeline.retryable, pipelineTotal),
+    },
+    retention,
+    funnels: { voice: voiceFunnel },
+    version_quality: versionQuality,
+    error_categories: taskErrors,
+    data_quality: {
+      minimum_reliable_sample: MIN_RELIABLE_SAMPLE,
+      task_sample_size: taskSubmitted.length,
+      confidence: sampleConfidence(taskSubmitted.length),
+      warnings: qualityWarnings,
     },
   };
 }
@@ -614,15 +806,115 @@ export function buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, r
     if (identity) row.users.add(identity);
     groups.set(toolKey, row);
   }
-  return { generated_at: now, range: window.range, type, rows: sortedRankingRows(groups, countKey, activeTotal) };
+  const funnelGroups = new Map();
+  const stageNames = new Map([
+    ["tool_impression", "impressions"],
+    ["tool_detail_opened", "details"],
+    ["tool_install_started", "install_started"],
+    ["tool_install_completed", "install_succeeded"],
+    ["tool_configuration_started", "configuration_started"],
+    ["tool_configuration_finished", "configuration_succeeded"],
+    ["tool_call_completed", "call_succeeded"],
+  ]);
+  for (const event of windowEventsForToolFunnel(behaviorEvents, window)) {
+    const stage = stageNames.get(event.event_name);
+    if (!stage) continue;
+    const toolKey = boundedText(event.tool_key || event.tool_name, 128) || "unknown";
+    const row = funnelGroups.get(toolKey) || {
+      tool_key: toolKey,
+      tool_name: boundedText(event.tool_name, 128) || toolKey,
+      tool_type: behaviorToolType(event.tool_type),
+      impressions: new Set(),
+      details: new Set(),
+      install_started: new Set(),
+      install_succeeded: new Set(),
+      configuration_started: new Set(),
+      configuration_succeeded: new Set(),
+      call_succeeded: new Set(),
+      failed: new Set(),
+      cancelled: new Set(),
+      configuration_completed_events: [],
+      successful_call_events: [],
+    };
+    const stageId = boundedText(event.operation_id || event.event_id
+      || `${event.view_id || "view"}:${toolKey}`, 256);
+    const successfulTerminal = !["tool_install_completed", "tool_configuration_finished", "tool_call_completed"].includes(event.event_name)
+      || event.success === true;
+    if (stageId && successfulTerminal) row[stage].add(stageId);
+    if (event.event_name === "tool_configuration_finished" && event.success === true) {
+      row.configuration_completed_events.push({ identity: eventIdentity(event), occurred_at: Number(event.occurred_at) });
+    }
+    if (event.event_name === "tool_call_completed" && event.success === true) {
+      row.successful_call_events.push({ identity: eventIdentity(event), occurred_at: Number(event.occurred_at) });
+    }
+    if (stageId && event.success === false) {
+      row.failed.add(stageId);
+      if (event.error_category === "user_cancelled") row.cancelled.add(stageId);
+    }
+    funnelGroups.set(toolKey, row);
+  }
+  const funnelRows = [...funnelGroups.values()].map(row => {
+    const configurationToCall = row.configuration_completed_events.flatMap(configuration => {
+      const call = row.successful_call_events
+        .filter(candidate => candidate.identity && candidate.identity === configuration.identity
+          && candidate.occurred_at >= configuration.occurred_at)
+        .sort((left, right) => left.occurred_at - right.occurred_at)[0];
+      return call ? [call.occurred_at - configuration.occurred_at] : [];
+    });
+    return {
+      tool_key: row.tool_key,
+      tool_name: row.tool_name,
+      tool_type: row.tool_type,
+      impression_count: row.impressions.size,
+      detail_count: row.details.size,
+      install_started_count: row.install_started.size,
+      install_succeeded_count: row.install_succeeded.size,
+      configuration_started_count: row.configuration_started.size,
+      configuration_succeeded_count: row.configuration_succeeded.size,
+      call_succeeded_count: row.call_succeeded.size,
+      failed_count: row.failed.size,
+      cancelled_count: row.cancelled.size,
+      impression_to_install_rate: rate(row.install_started.size, row.impressions.size),
+      install_success_rate: rate(row.install_succeeded.size, row.install_started.size),
+      install_to_configuration_rate: rate(row.configuration_started.size, row.install_succeeded.size),
+      configuration_success_rate: rate(row.configuration_succeeded.size, row.configuration_started.size),
+      configuration_to_call_rate: rate(row.call_succeeded.size, row.configuration_succeeded.size),
+      configuration_to_call_p50_ms: percentile(configurationToCall, 0.5),
+      confidence: sampleConfidence(row.impressions.size),
+    };
+  }).sort((left, right) => right.impression_count - left.impression_count
+    || right.install_started_count - left.install_started_count
+    || left.tool_key.localeCompare(right.tool_key, "zh-CN"));
+  return {
+    generated_at: now,
+    range: window.range,
+    type,
+    rows: sortedRankingRows(groups, countKey, activeTotal),
+    funnel_rows: funnelRows,
+  };
+}
+
+function windowEventsForToolFunnel(behaviorEvents, window) {
+  return filteredBehaviorEvents(behaviorEvents, window).filter(event => event.event_name.startsWith("tool_"));
 }
 
 export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, range = "30", now = Date.now()) {
   const window = rangeWindow(range, now);
   const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
   const groups = new Map();
-  for (const event of filteredBehaviorEvents(behaviorEvents, window)
-    .filter((event) => ["scene_submitted", "scene_triggered"].includes(event.event_name))) {
+  const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
+  const finishedByAttempt = new Map(uniqueAttempts(windowEvents, "task_finished")
+    .map(event => [event.attempt_id, event]));
+  const latestFeedbackByTurn = new Map();
+  for (const event of windowEvents) {
+    if (event.event_name !== "response_feedback_changed" || !event.turn_id) continue;
+    const previous = latestFeedbackByTurn.get(event.turn_id);
+    if (!previous || Number(event.occurred_at) >= Number(previous.occurred_at)) {
+      latestFeedbackByTurn.set(event.turn_id, event);
+    }
+  }
+  for (const event of windowEvents
+    .filter((entry) => ["scene_impression", "scene_selected", "scene_submitted", "scene_triggered"].includes(entry.event_name))) {
     const sceneL1 = boundedText(event.scene_l1, 64) || "unknown";
     const sceneL2 = boundedText(event.scene_l2, 96) || "unknown";
     const key = `${sceneL1}:${sceneL2}`;
@@ -632,17 +924,68 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
       total: 0,
       success_count: 0,
       users: new Set(),
+      impressions: new Set(),
+      selections: new Set(),
+      submissions: new Set(),
+      task_successes: new Set(),
+      valued_tasks: new Set(),
+      negative_feedback: new Set(),
+      durations: [],
     };
-    row.total += 1;
-    row.success_count += 1;
     const identity = eventIdentity(event);
+    const eventKey = boundedText(event.operation_id || event.attempt_id || event.event_id, 256);
+    if (event.event_name === "scene_impression" && eventKey) row.impressions.add(eventKey);
+    if (event.event_name === "scene_selected" && eventKey) row.selections.add(eventKey);
+    if (["scene_submitted", "scene_triggered"].includes(event.event_name) && eventKey) {
+      row.submissions.add(eventKey);
+      const finished = finishedByAttempt.get(event.attempt_id);
+      if (finished) {
+        row.durations.push(finished.duration_ms);
+        if (finished.status === "success") row.task_successes.add(event.attempt_id);
+        const feedback = latestFeedbackByTurn.get(finished.turn_id);
+        if (feedback?.feedback_action === "set" && feedback.rating === "negative") {
+          row.negative_feedback.add(event.attempt_id);
+        }
+        const hasValue = windowEvents.some(signal => (
+          eventIdentity(signal) === identity
+            && signal.turn_id === finished.turn_id
+            && ["response_copied", "artifact_exported"].includes(signal.event_name)
+            && Number(signal.occurred_at) >= Number(finished.occurred_at)
+            && Number(signal.occurred_at) <= Number(finished.occurred_at) + EXPLICIT_VALUE_WINDOW_MS
+        )) || (feedback?.feedback_action === "set"
+          && feedback.rating === "positive"
+          && eventIdentity(feedback) === identity
+          && Number(feedback.occurred_at) >= Number(finished.occurred_at)
+          && Number(feedback.occurred_at) <= Number(finished.occurred_at) + EXPLICIT_VALUE_WINDOW_MS);
+        if (finished.status === "success" && hasValue) row.valued_tasks.add(event.attempt_id);
+      }
+    }
+    row.total = row.submissions.size;
+    row.success_count = row.task_successes.size;
     if (identity) row.users.add(identity);
     groups.set(key, row);
   }
   return {
     generated_at: now,
     range: window.range,
-    rows: sortedRankingRows(groups, "trigger_count", activeTotal),
+    rows: [...groups.values()].map(row => ({
+      scene_l1: row.scene_l1,
+      scene_l2: row.scene_l2,
+      impression_count: row.impressions.size,
+      selection_count: row.selections.size,
+      trigger_count: row.submissions.size,
+      user_count: row.users.size,
+      penetration_rate: rate(row.users.size, activeTotal),
+      selection_rate: rate(row.selections.size, row.impressions.size),
+      submission_rate: rate(row.submissions.size, row.selections.size),
+      task_success_rate: rate(row.task_successes.size, row.submissions.size),
+      explicit_value_rate: rate(row.valued_tasks.size, row.task_successes.size),
+      negative_feedback_rate: rate(row.negative_feedback.size, row.submissions.size),
+      task_duration_p50_ms: percentile(row.durations, 0.5),
+      confidence: sampleConfidence(row.impressions.size),
+    })).sort((left, right) => right.trigger_count - left.trigger_count
+      || right.impression_count - left.impression_count
+      || left.scene_l2.localeCompare(right.scene_l2, "zh-CN")),
   };
 }
 
