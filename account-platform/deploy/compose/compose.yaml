@@ -14,6 +14,9 @@ x-service-build: &service-build
   context: ../..
   dockerfile: Dockerfile
 
+x-go-build-args: &go-build-args
+  GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+
 x-client-compatibility: &client-compatibility
   PINVOU_API_CONTRACT_VERSION: ${PINVOU_API_CONTRACT_VERSION:-account-platform-v1}
   PINVOU_CLIENT_UPGRADE_URL: ${PINVOU_CLIENT_UPGRADE_URL:-https://github.com/Pinvou/pinvou3/releases/latest}
@@ -111,6 +114,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: account-service
     environment:
       <<: *client-compatibility
@@ -170,6 +174,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: identity-service
     environment:
       APP_ENV: development
@@ -200,6 +205,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: billing-service
     environment:
       <<: *client-compatibility
@@ -250,6 +256,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: token-gateway
     environment:
       <<: *client-compatibility
@@ -306,7 +313,9 @@ services:
     <<: *service-defaults
     build:
       <<: *service-build
-      args: { SERVICE: event-relay }
+      args:
+        <<: *go-build-args
+        SERVICE: event-relay
     environment:
       APP_ENV: development
       EVENT_SOURCE: account
@@ -321,7 +330,9 @@ services:
     <<: *service-defaults
     build:
       <<: *service-build
-      args: { SERVICE: event-relay }
+      args:
+        <<: *go-build-args
+        SERVICE: event-relay
     environment:
       APP_ENV: development
       EVENT_SOURCE: billing
@@ -336,7 +347,9 @@ services:
     <<: *service-defaults
     build:
       <<: *service-build
-      args: { SERVICE: event-relay }
+      args:
+        <<: *go-build-args
+        SERVICE: event-relay
     environment:
       APP_ENV: development
       EVENT_SOURCE: token
@@ -352,6 +365,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: token-portal
     environment:
       <<: *client-compatibility
@@ -386,6 +400,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: mock-newapi
     environment:
       APP_ENV: development
@@ -434,6 +449,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: payment-simulator
     environment:
       APP_ENV: development
@@ -463,6 +479,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: migrate
     command: ["--dir", "/migrations/account"]
     environment:
@@ -477,6 +494,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: migrate
     command: ["--dir", "/migrations/billing"]
     environment:
@@ -491,6 +509,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: migrate
     command: ["--dir", "/migrations/token"]
     environment:
@@ -505,6 +524,7 @@ services:
     build:
       <<: *service-build
       args:
+        <<: *go-build-args
         SERVICE: migrate
     command: ["--dir", "/migrations/payment-simulator"]
     environment:

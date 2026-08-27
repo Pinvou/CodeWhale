@@ -376,7 +376,7 @@ docker compose --env-file <secret-env> <compose-files> build \
   account-migrate billing-migrate token-migrate
 ```
 
-如果站点需要 Go Module 代理，只通过受控构建参数临时配置，不在仓库硬编码区域性代理，也不把代理凭据写入镜像层。
+Compose 会把站点 `.env` 中的 `GOPROXY` 作为 BuildKit 构建参数传给全部 Go 服务；未配置时使用仓库的官方默认值 `https://proxy.golang.org,direct`。无法稳定访问官方代理的站点必须在受控 `.env` 中持久配置可达代理，例如中国区站点使用 `GOPROXY=https://goproxy.cn,direct`，然后仍执行上述统一构建命令。不得只设置未被 Compose 读取的宿主机环境变量，也不得每次临时手写 `--build-arg`；发布前先从构建容器验证代理可达。代理凭据不得写入仓库、构建命令、日志或镜像层。
 
 ### 8.5 执行迁移
 

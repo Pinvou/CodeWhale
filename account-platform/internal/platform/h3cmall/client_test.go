@@ -36,6 +36,16 @@ func TestDecimalConvertsMallYuanWithoutFloatingPoint(t *testing.T) {
 	}
 }
 
+func TestParseTimeValueAcceptsMallShanghaiLocalTime(t *testing.T) {
+	parsed, err := ParseTimeValue("2026-08-27 10:09:43")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expected := "2026-08-27T02:09:43Z"; parsed.Format(time.RFC3339) != expected {
+		t.Fatalf("ParseTimeValue() = %s; want %s", parsed.Format(time.RFC3339), expected)
+	}
+}
+
 func TestCreateAndPageQueryUseMerchantCustomerKey(t *testing.T) {
 	const customer = "019c0000-0000-7000-8000-000000000001"
 	mux := http.NewServeMux()

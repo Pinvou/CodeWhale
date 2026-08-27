@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 // Decimal preserves the Mall's decimal money values without passing through
