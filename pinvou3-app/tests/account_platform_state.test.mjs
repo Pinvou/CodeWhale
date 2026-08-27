@@ -663,6 +663,30 @@ test('personal center follows the restrained neutral visual system', async () =>
   assert.match(styles, /\.ap-sidebar nav button\.active \{ color: var\(--ap-primary\);/);
 });
 
+test('account settings uses row-based account facts without duplicating credit data', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
+  const start = view.indexOf('function PortalAccountSettings');
+  const end = view.indexOf('function IdentityDialog', start);
+  const accountSettings = view.slice(start, end);
+
+  assert.ok(start >= 0 && end > start, 'account settings source must remain independently inspectable');
+  assert.match(accountSettings, /className="ap-profile-details"/);
+  assert.match(accountSettings, /copy\.activeContext/);
+  assert.match(accountSettings, /copy\.userCode/);
+  assert.match(accountSettings, /copy\.organizations/);
+  assert.match(accountSettings, /copy\.accountStatus/);
+  assert.match(accountSettings, /copy\.currentUsername/);
+  assert.match(accountSettings, /copy\.currentMobile/);
+  assert.doesNotMatch(accountSettings, /copy\.availableCredits/);
+  assert.doesNotMatch(accountSettings, /available_microcredits/);
+  assert.doesNotMatch(accountSettings, /\bbalance\b/);
+  assert.match(view, /className="ap-card ap-danger-card"/);
+  assert.match(styles, /\.ap-profile-detail-row \{ display: grid; grid-template-columns: 168px minmax\(0, 1fr\)/);
+  assert.match(styles, /@media \(max-width: 560px\)[\s\S]*\.ap-profile-detail-row \{ grid-template-columns: 1fr/);
+  assert.match(styles, /\.ap-danger-card \.ap-primary \{ color: #d93025/);
+});
+
 test('admin organization detail supports ownership transfer, rename, leaf deletion, and list search', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');

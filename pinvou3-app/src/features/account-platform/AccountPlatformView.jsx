@@ -655,11 +655,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         {portal && section === 'accountSettings' && (
           <PortalAccountSettings
             copy={copy}
-            language={language}
             me={me}
             access={access}
             organizations={organizations}
-            balance={balance}
             activeOrganization={activeOrganization}
             activeOrganizationId={activeOrganizationId}
             busy={busy}
@@ -850,7 +848,7 @@ function PortalOrdersInvoices({ copy, language, orders, unavailable }) {
   );
 }
 
-function PortalAccountSettings({ copy, language, me, access, organizations, balance, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, closure, onRequestClosure, units, members, models, modelPolicy, onCreateUnit, onInvite, onUpdateModelPolicy }) {
+function PortalAccountSettings({ copy, me, access, organizations, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, closure, onRequestClosure, units, members, models, modelPolicy, onCreateUnit, onInvite, onUpdateModelPolicy }) {
   const requestedProfile = new URLSearchParams(globalThis.location?.search || '').get('profile');
   const initialProfile = requestedProfile === 'username' || requestedProfile === 'mobile' ? requestedProfile : '';
   const [profileDialog, setProfileDialog] = useState(initialProfile);
@@ -864,7 +862,7 @@ function PortalAccountSettings({ copy, language, me, access, organizations, bala
       <p className="ap-eyebrow">{copy.sections.accountSettings}</p>
       <h2>{copy.accountSettingsTitle}</h2>
       <p className="ap-lead">{copy.accountSettingsLead}</p>
-      <AccountProfileCard copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} canSwitchIdentity={access.contextSwitch} canEditProfile={access.profileUpdate} onSwitchIdentity={() => setIdentityDialog(true)} onEditUsername={() => setProfileDialog('username')} onEditMobile={() => setProfileDialog('mobile')} />
+      <AccountProfileCard copy={copy} me={me} organizations={organizations} activeOrganization={activeOrganization} canSwitchIdentity={access.contextSwitch} canEditProfile={access.profileUpdate} onSwitchIdentity={() => setIdentityDialog(true)} onEditUsername={() => setProfileDialog('username')} onEditMobile={() => setProfileDialog('mobile')} />
       {activeOrganization && <Organization copy={copy} organization={activeOrganization} units={units} members={members} models={models} modelPolicy={modelPolicy} permissions={me?.active_context?.permissions || []} busy={busy} onCreateUnit={onCreateUnit} onInvite={onInvite} onUpdateModelPolicy={onUpdateModelPolicy} embedded />}
       <AccountClosure copy={copy} item={closure} busy={busy} canRequest={access.closureRequest} onRequest={onRequestClosure} embedded />
       {identityDialog && (
@@ -922,63 +920,53 @@ function maskMobile(value) {
   return /^1\d{10}$/.test(digits) ? `${digits.slice(0, 3)}****${digits.slice(-4)}` : '—';
 }
 
-function AccountProfileCard({ copy, language, me, organizations, balance, activeOrganization, canSwitchIdentity, canEditProfile, onSwitchIdentity, onEditUsername, onEditMobile }) {
-  const displayName = me?.display_name || me?.username || copy.user;
+function AccountProfileCard({ copy, me, organizations, activeOrganization, canSwitchIdentity, canEditProfile, onSwitchIdentity, onEditUsername, onEditMobile }) {
   const identity = activeOrganization ? copy.organizationIdentity(activeOrganization.name) : copy.personal;
   return (
     <article className="ap-profile-card">
-      <header className="ap-profile-card-header">
-        <span className="ap-profile-avatar">{displayName.trim().slice(0, 1).toUpperCase()}</span>
-        <div>
-          <h3>{displayName}</h3>
-          <button type="button" className="ap-identity-trigger" disabled={!canSwitchIdentity} title={!canSwitchIdentity ? copy.permissionDenied : undefined} onClick={onSwitchIdentity}>
-            <span>{identity}</span>
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m9 18 6-6-6-6" />
-            </svg>
-          </button>
+      <dl className="ap-profile-details">
+        <div className="ap-profile-detail-row">
+          <dt>{copy.activeContext}</dt>
+          <dd>
+            <span className="ap-profile-value">{identity}</span>
+            <button type="button" disabled={!canSwitchIdentity} title={!canSwitchIdentity ? copy.permissionDenied : undefined} onClick={onSwitchIdentity}>
+              {copy.switchContext}
+            </button>
+          </dd>
         </div>
-      </header>
-      <dl className="ap-profile-facts">
-        <div>
+        <div className="ap-profile-detail-row">
           <dt>{copy.userCode}</dt>
           <dd>{me?.user_code || '—'}</dd>
         </div>
-        <div>
+        <div className="ap-profile-detail-row">
           <dt>{copy.organizations}</dt>
           <dd>{organizations.length}</dd>
         </div>
-        <div>
-          <dt>{copy.availableCredits}</dt>
-          <dd>{formatPoints(balance?.available_microcredits, language)}</dd>
-        </div>
-        <div>
+        <div className="ap-profile-detail-row">
           <dt>{copy.accountStatus}</dt>
           <dd>
             <span className={`ap-account-state ap-account-state-${String(me?.status || '').toLowerCase()}`}>{me?.status || '—'}</span>
           </dd>
         </div>
+        <div className="ap-profile-detail-row">
+          <dt>{copy.currentUsername}</dt>
+          <dd>
+            <span className="ap-profile-value">{me?.username || '—'}</span>
+            <button type="button" disabled={!canEditProfile} title={!canEditProfile ? copy.permissionDenied : undefined} onClick={onEditUsername}>
+              {copy.modify}
+            </button>
+          </dd>
+        </div>
+        <div className="ap-profile-detail-row">
+          <dt>{copy.currentMobile}</dt>
+          <dd>
+            <span className="ap-profile-value">{maskMobile(me?.mobile)}</span>
+            <button type="button" disabled={!canEditProfile} title={!canEditProfile ? copy.permissionDenied : undefined} onClick={onEditMobile}>
+              {copy.modify}
+            </button>
+          </dd>
+        </div>
       </dl>
-      <div className="ap-profile-rows">
-        <div>
-          <span>
-            <small>{copy.currentUsername}</small>
-            <strong>{me?.username || '—'}</strong>
-          </span>
-          <button type="button" disabled={!canEditProfile} title={!canEditProfile ? copy.permissionDenied : undefined} onClick={onEditUsername}>
-            {copy.modify}
-          </button>
-        </div>
-        <div>
-          <span>
-            <small>{copy.currentMobile}</small>
-            <strong>{maskMobile(me?.mobile)}</strong>
-          </span>
-          <button type="button" disabled={!canEditProfile} title={!canEditProfile ? copy.permissionDenied : undefined} onClick={onEditMobile}>
-            {copy.modify}
-          </button>
-        </div>
-      </div>
     </article>
   );
 }
@@ -1384,11 +1372,11 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
 function AccountClosure({ copy, item, busy, canRequest = true, onRequest, embedded = false }) {
   const Heading = embedded ? 'h3' : 'h2';
   return (
-    <section className={embedded ? 'ap-combined-section' : undefined}>
+    <section className={embedded ? 'ap-combined-section ap-danger-section' : 'ap-danger-section'}>
       {!embedded && <p className="ap-eyebrow">{copy.sections.closure}</p>}
       <Heading>{copy.closure.title}</Heading>
       <p className="ap-lead">{copy.closure.lead}</p>
-      <article className="ap-card">
+      <article className="ap-card ap-danger-card">
         {item ? (
           <>
             <div className="ap-inline">

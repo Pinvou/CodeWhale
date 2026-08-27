@@ -56,7 +56,7 @@
 | `ORGANIZATION-UNIT-LIFECYCLE` | 节点命令指纹幂等、组织结构版本、闭包树移动以及 Account/Billing/Token 限制态预检和逻辑删除 | Account/Billing/Token Go 单元测试、OpenAPI lint、节点生命周期合同测试与全量静态验证通过；数据库运行级迁移、真实并发和跨服务故障注入待部署 |
 | `MEMBERSHIP-GOVERNANCE` | 多目标邀请反枚举、成员命令幂等、即时撤权/上下文回退、Billing 限制投影和单 OWNER 数据库约束 | Account/Billing Go 单元测试、OpenAPI lint、成员治理合同测试与全量静态验证通过；数据库运行级迁移、真实并发、通知通道和跨服务故障注入待部署 |
 | `GLOBAL-CONTEXT` | 用户级唯一活动上下文、CAS 版本切换、跨端刷新、失效回退及 Account/Token/Portal 版本传播 | Account/Token/Portal Go 单元测试、OpenAPI lint、全局上下文合同、桌面 40 项状态测试和 Portal 构建通过；数据库运行级迁移、真实多端并发和生产缓存传播待部署 |
-| `PERSONAL-CENTER-IA` | Web 个人中心“额度与用量 / 订单与发票 / 账号设置”三 Tab、成功订单白名单、旧深链映射，以及个人/组织资源显示边界 | 42 项账号平台状态测试、UI ESLint 和 Portal 构建通过；订单只展示 `PAID/PAID_LATE`，组织能力嵌入账号设置且个人权益不回退到组织视图 |
+| `PERSONAL-CENTER-IA` | Web 个人中心“额度与用量 / 订单与发票 / 账号设置”三 Tab、成功订单白名单、旧深链映射，以及个人/组织资源显示边界 | 账号平台状态测试、UI ESLint 和 Portal 构建通过；订单只展示 `PAID/PAID_LATE`，账号设置使用响应式标签—值资料卡且不重复展示额度/权益/用量，组织能力嵌入账号设置且个人权益不回退到组织视图 |
 | `ORGANIZATION-MEMBER-QUOTA` | 组织购买、精确 BASE/BONUS 组成授予、逐项批量、成员生命周期、Hold/结算及权限化 UI | Go 单测、OpenAPI、组织额度合同、桌面状态测试及 Portal 构建通过；真实 PostgreSQL 并发竞争和生产迁移仍待部署验证 |
 | `METERING-PRICING-LIFECYCLE` | 版本化计量单位/协议公式、确定性估算、动态 Hold 续租与追加预占、逐单位价格匹配及完整生命周期 | Billing/Token/Portal Go 单测、OpenAPI lint、59 个合同测试和全量静态验证通过；数据库运行级迁移、真实并发发布和长流故障注入待部署 |
 | `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、合同测试、Portal 构建和部署模板检查通过；具体商品清单只从运行时目录和审计查询，真实 Provider 联调仍由 APT-048 收敛 |
@@ -456,7 +456,7 @@
 | PAY-34 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 按上海自然日由 Worker 每日获取 Provider 账单，并核对内部订单/支付流水、普通及强制退款/拒付和 Billing 账本；API、文件导入及手工重跑均保留独立运行。 |
 | PAY-36 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 差异冻结分类、严重度及 Provider/内部/退款/账本快照，状态、责任人、修复动作和复核结果只经带请求指纹的幂等命令推进，命令与时间线不可变且禁止直接改写证据。 |
 | UI-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | Web 一级导航固定为“额度与用量 / 订单与发票 / 账号设置”；旧页面深链归并映射，订单仅展示 `PAID/PAID_LATE`，组织管理嵌入账号设置并按有效成员关系显示，不提供普通用户 Token Account/供应商 Key 管理。 |
+| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | Web 一级导航固定为“额度与用量 / 订单与发票 / 账号设置”；账号设置以响应式标签—值行展示当前身份、用户编码、关联组织、账号状态、用户名和脱敏手机号，注销使用独立危险操作卡且不重复展示可用积分、权益或用量；旧页面深链归并映射，订单仅展示 `PAID/PAID_LATE`，组织管理按有效成员关系嵌入，不提供普通用户 Token Account/供应商 Key 管理。 |
 | UI-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; PERSONAL-CENTER-IA; IDENTITY-SMS; I18N-RELEASE-GATE | NOT_DEPLOYED | Web 个人中心提供三语“资料与安全”、用户名修改及新手机号滑块/短信验证；桌面移除资料修改区域但保留未登录忘记密码。 |
 | UI-06 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 个人中心所有余额、权益、订单和用量请求只按用户级活动上下文加载；个人上下文展示个人权益，组织上下文不混入个人权益明细。 |
@@ -846,7 +846,7 @@
 | target_requirement_id | 需求 | 状态 | 当前实现/边界 |
 |---|---|---|---|
 | UI-01 | 桌面用户入口常显，未登录在弹层内登录 | 已实现 | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | Web 个人中心固定三个合并 Tab | 已实现 | “额度与用量”合并额度、权益和用量；“订单与发票”仅展示 `PAID/PAID_LATE` 成功订单及发票说明；“账号设置”合并账号状态、身份切换、资料修改、注销和按成员关系显示的组织管理区。普通用户视图不存在 Token Account 或供应商 Key 管理。 |
+| UI-03 | Web 个人中心固定三个合并 Tab | 已实现 | “额度与用量”合并额度、权益和用量；“订单与发票”仅展示 `PAID/PAID_LATE` 成功订单及发票说明；“账号设置”以响应式标签—值资料卡展示账号事实和资料修改入口，不重复展示额度类事实，注销为独立危险操作卡，并按成员关系显示组织管理区。普通用户视图不存在 Token Account 或供应商 Key 管理。 |
 | UI-04 | 普通用户界面不暴露内部结算/供应商运维信息 | 已实现 | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | Web 资料修改与桌面密码恢复边界 | 已实现 | Web Portal 提供用户名/手机号修改和强制重新认证；桌面 Popover 无资料修改区域，但保留忘记密码模式及专用 Bridge/Tauri 密码重置命令。 |
 | UI-06 | 个人中心只展示活动上下文额度 | 已实现 | 上下文切换和跨端刷新会先清空旧余额、权益、订单与用量；个人/组织数据按新的服务端活动上下文重新加载。 |
