@@ -34,7 +34,48 @@ pub struct BehaviorTelemetry {
     collecting: Arc<AtomicBool>,
     collection_period_id: Arc<RwLock<Option<String>>>,
     outbox: Arc<StdMutex<Outbox>>,
+    tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
     event_tx: Option<mpsc::Sender<()>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TaskAttempt {
+    attempt_id: String,
+    submitted_at: u64,
+    admitted_at: Option<u64>,
+    turn_id: Option<String>,
+    mode: String,
+    initiator_type: String,
+    input_type: String,
+    has_attachment: bool,
+    first_output_emitted: bool,
+}
+
+pub struct TaskSubmissionGuard {
+    app: tauri::AppHandle,
+    session_id: String,
+    attempt_id: String,
+    reject_on_drop: bool,
+}
+
+impl TaskSubmissionGuard {
+    pub fn sent(mut self) {
+        self.reject_on_drop = false;
+    }
+}
+
+impl Drop for TaskSubmissionGuard {
+    fn drop(&mut self) {
+        if self.reject_on_drop {
+            reject_task_submission(
+                &self.app,
+                &self.session_id,
+                &self.attempt_id,
+                "validation_failed",
+                "submission",
+            );
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -485,6 +526,8 @@ impl BehaviorTelemetry {
             log::debug!("[pinvou3][behavior] failed to sanitize outbox period: {error:#}");
         }
         let outbox = Arc::new(StdMutex::new(loaded_outbox));
+        let recovered_tasks = load_task_attempts();
+        let tasks = Arc::new(StdMutex::new(recovered_tasks.clone()));
         let state = Arc::new(Mutex::new(persisted));
         let credential_gate = Arc::new(Mutex::new(()));
         let control_gate = Arc::new(Mutex::new(()));
@@ -507,6 +550,7 @@ impl BehaviorTelemetry {
             collecting,
             collection_period_id,
             outbox,
+            tasks,
             event_tx,
         };
         if let Some(rx) = event_rx {
@@ -539,6 +583,27 @@ impl BehaviorTelemetry {
                         crate::platform::startup::elapsed_ms().min(600_000),
                     ),
             );
+        }
+        for (session_id, attempt) in recovered_tasks {
+            if let Some(turn_id) = attempt.turn_id.as_deref() {
+                telemetry.track(
+                    task_fields(BehaviorEvent::new("task_finished"), &session_id, &attempt)
+                        .turn(turn_id)
+                        .status("interrupted")
+                        .integer("duration_ms", now_ms().saturating_sub(attempt.submitted_at))
+                        .string("error_category", "internal_error"),
+                );
+            } else {
+                telemetry.track(
+                    task_fields(BehaviorEvent::new("task_rejected"), &session_id, &attempt)
+                        .string("error_category", "internal_error")
+                        .stage("shutdown"),
+                );
+            }
+        }
+        if let Ok(mut tasks) = telemetry.tasks.lock() {
+            tasks.clear();
+            let _ = persist_task_attempts(&tasks);
         }
         telemetry
     }
@@ -623,6 +688,7 @@ impl BehaviorTelemetry {
             collecting: self.collecting.clone(),
             collection_period_id: self.collection_period_id.clone(),
             outbox: self.outbox.clone(),
+            tasks: self.tasks.clone(),
             event_tx: None,
         }
     }
@@ -802,6 +868,10 @@ impl BehaviorTelemetry {
             if let Ok(mut outbox) = self.outbox.lock() {
                 outbox.clear()?;
             }
+            if let Ok(mut tasks) = self.tasks.lock() {
+                tasks.clear();
+                persist_task_attempts(&tasks)?;
+            }
             let mut guard = self.state.lock().await;
             if let Some(state) = guard.as_mut() {
                 state.control.enabled = false;
@@ -827,6 +897,10 @@ impl BehaviorTelemetry {
             .lock()
             .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
             .clear()?;
+        if let Ok(mut tasks) = self.tasks.lock() {
+            tasks.clear();
+            persist_task_attempts(&tasks)?;
+        }
         Ok(self.status().await)
     }
 
@@ -1200,6 +1274,22 @@ fn outbox_path() -> PathBuf {
     paths::pinvou3_home().join("behavior-telemetry-outbox.jsonl")
 }
 
+fn task_attempts_path() -> PathBuf {
+    paths::pinvou3_home().join("behavior-telemetry-tasks.json")
+}
+
+fn load_task_attempts() -> HashMap<String, TaskAttempt> {
+    std::fs::read(task_attempts_path())
+        .ok()
+        .and_then(|data| serde_json::from_slice(&data).ok())
+        .unwrap_or_default()
+}
+
+fn persist_task_attempts(tasks: &HashMap<String, TaskAttempt>) -> Result<()> {
+    let data = serde_json::to_vec(tasks).context("serialize behavior task attempts")?;
+    filesystem::atomic_write(&task_attempts_path(), &data).context("persist behavior task attempts")
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1230,6 +1320,224 @@ fn nonempty(value: String) -> Option<String> {
 pub fn track(app: &tauri::AppHandle, event: BehaviorEvent) {
     if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
         telemetry.track(event);
+    }
+}
+
+fn task_fields(event: BehaviorEvent, session_id: &str, attempt: &TaskAttempt) -> BehaviorEvent {
+    event
+        .session(session_id)
+        .string("attempt_id", &attempt.attempt_id)
+        .string("mode", &attempt.mode)
+        .string("initiator_type", &attempt.initiator_type)
+        .input_type(&attempt.input_type)
+        .boolean("has_attachment", attempt.has_attachment)
+}
+
+pub fn begin_task_submission(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    mode: &str,
+    initiator_type: &str,
+    input_type: &str,
+    has_attachment: bool,
+) -> TaskSubmissionGuard {
+    let attempt = TaskAttempt {
+        attempt_id: token("attempt_", 16),
+        submitted_at: now_ms(),
+        admitted_at: None,
+        turn_id: None,
+        mode: mode.to_string(),
+        initiator_type: initiator_type.to_string(),
+        input_type: input_type.to_string(),
+        has_attachment,
+        first_output_emitted: false,
+    };
+    if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
+        if telemetry.collecting.load(Ordering::Acquire) {
+            if let Ok(mut tasks) = telemetry.tasks.lock() {
+                tasks.insert(session_id.to_string(), attempt.clone());
+                let _ = persist_task_attempts(&tasks);
+            }
+            telemetry.track(task_fields(
+                BehaviorEvent::new("task_submitted"),
+                session_id,
+                &attempt,
+            ));
+        }
+    }
+    TaskSubmissionGuard {
+        app: app.clone(),
+        session_id: session_id.to_string(),
+        attempt_id: attempt.attempt_id,
+        reject_on_drop: true,
+    }
+}
+
+pub fn reject_task_submission(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    attempt_id: &str,
+    error_category: &str,
+    stage: &str,
+) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
+        return;
+    };
+    let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
+        let removed = if tasks.get(session_id).is_some_and(|attempt| {
+            attempt.attempt_id == attempt_id && attempt.admitted_at.is_none()
+        }) {
+            tasks.remove(session_id)
+        } else {
+            None
+        };
+        if removed.is_some() {
+            let _ = persist_task_attempts(&tasks);
+        }
+        removed
+    });
+    if let Some(attempt) = attempt {
+        telemetry.track(
+            task_fields(BehaviorEvent::new("task_rejected"), session_id, &attempt)
+                .string("error_category", error_category)
+                .stage(stage),
+        );
+    }
+}
+
+pub fn admit_task(app: &tauri::AppHandle, session_id: &str, turn_id: &str) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
+        return;
+    };
+    let admitted_at = now_ms();
+    let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
+        let attempt = tasks.get_mut(session_id)?;
+        if attempt.admitted_at.is_some() {
+            return None;
+        }
+        attempt.admitted_at = Some(admitted_at);
+        attempt.turn_id = Some(turn_id.to_string());
+        let result = attempt.clone();
+        let _ = persist_task_attempts(&tasks);
+        Some(result)
+    });
+    if let Some(attempt) = attempt {
+        telemetry.track(
+            task_fields(BehaviorEvent::new("task_admitted"), session_id, &attempt)
+                .turn(turn_id)
+                .integer(
+                    "queue_duration_ms",
+                    admitted_at.saturating_sub(attempt.submitted_at),
+                ),
+        );
+    }
+}
+
+pub fn task_first_output(app: &tauri::AppHandle, session_id: &str, turn_id: &str) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
+        return;
+    };
+    let now = now_ms();
+    let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
+        let attempt = tasks.get_mut(session_id)?;
+        if attempt.turn_id.as_deref() != Some(turn_id) || attempt.first_output_emitted {
+            return None;
+        }
+        attempt.first_output_emitted = true;
+        let result = attempt.clone();
+        let _ = persist_task_attempts(&tasks);
+        Some(result)
+    });
+    if let Some(attempt) = attempt {
+        telemetry.track(
+            task_fields(
+                BehaviorEvent::new("task_first_output"),
+                session_id,
+                &attempt,
+            )
+            .turn(turn_id)
+            .string("output_type", "text")
+            .integer("duration_ms", now.saturating_sub(attempt.submitted_at)),
+        );
+    }
+}
+
+pub fn request_task_cancel(app: &tauri::AppHandle, session_id: &str) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
+        return;
+    };
+    let attempt = telemetry
+        .tasks
+        .lock()
+        .ok()
+        .and_then(|tasks| tasks.get(session_id).cloned());
+    if let Some(attempt) = attempt {
+        if let Some(turn_id) = attempt.turn_id.as_deref() {
+            telemetry.track(
+                BehaviorEvent::new("task_cancel_requested")
+                    .session(session_id)
+                    .string("attempt_id", &attempt.attempt_id)
+                    .turn(turn_id)
+                    .stage(if attempt.first_output_emitted {
+                        "output"
+                    } else {
+                        "model"
+                    }),
+            );
+        }
+    }
+}
+
+pub fn finish_task(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    turn_id: &str,
+    status: &str,
+    error_category: Option<&str>,
+) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
+        return;
+    };
+    let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
+        let removed = if tasks
+            .get(session_id)
+            .is_some_and(|attempt| attempt.turn_id.as_deref() == Some(turn_id))
+        {
+            tasks.remove(session_id)
+        } else {
+            None
+        };
+        if removed.is_some() {
+            let _ = persist_task_attempts(&tasks);
+        }
+        removed
+    });
+    if let Some(attempt) = attempt {
+        let mut event = task_fields(BehaviorEvent::new("task_finished"), session_id, &attempt)
+            .turn(turn_id)
+            .status(status)
+            .integer("duration_ms", now_ms().saturating_sub(attempt.submitted_at));
+        if status != "success" {
+            event = event.string("error_category", error_category.unwrap_or("unknown"));
+        }
+        telemetry.track(event);
+    }
+}
+
+pub fn error_category(error: Option<&str>) -> &'static str {
+    let error = error.unwrap_or_default().to_ascii_lowercase();
+    if error.contains("cancel") || error.contains("interrupt") {
+        "user_cancelled"
+    } else if error.contains("timeout") {
+        "timeout"
+    } else if error.contains("auth") || error.contains("401") || error.contains("403") {
+        "authentication_failed"
+    } else if error.contains("network") || error.contains("connect") {
+        "network_unavailable"
+    } else if error.contains("model") || error.contains("provider") {
+        "model_error"
+    } else {
+        "internal_error"
     }
 }
 

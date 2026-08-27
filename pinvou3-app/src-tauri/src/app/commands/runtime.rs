@@ -11,10 +11,12 @@ pub async fn cancel_generation(
     session_id: Option<String>,
     pool: State<'_, EnginePool>,
     store: State<'_, SessionStore>,
+    app: AppHandle,
 ) -> Result<(), String> {
     // 多 session:取消指定 session(前端传 session_id);兼容旧前端回退 active。
     if let Some(sid) = session_id.or_else(|| store.active_id()) {
         log::info!("[pinvou3][chat] cancel requested sid={}", sid);
+        crate::features::behavior_telemetry::request_task_cancel(&app, &sid);
         pool.cancel(&sid).await;
         log::info!("[pinvou3][chat] cancel command completed sid={}", sid);
     } else {

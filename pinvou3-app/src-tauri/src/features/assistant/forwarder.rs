@@ -105,12 +105,7 @@ pub(crate) fn spawn_event_forwarder(
                     active_operation_rejected = false;
                     chat_persistence_error = None;
                     current_turn_id = Some(turn_id.clone());
-                    crate::features::behavior_telemetry::track(
-                        &app,
-                        crate::features::behavior_telemetry::BehaviorEvent::new("task_started")
-                            .session(&session_id)
-                            .turn(&turn_id),
-                    );
+                    crate::features::behavior_telemetry::admit_task(&app, &session_id, &turn_id);
                     crate::features::behavior_telemetry::track_model_used(
                         &app,
                         &session_id,
@@ -135,6 +130,15 @@ pub(crate) fn spawn_event_forwarder(
                     }
                 }
                 Event::MessageDelta { content, .. } => {
+                    if !content.is_empty() {
+                        if let Some(turn_id) = current_turn_id.as_deref() {
+                            crate::features::behavior_telemetry::task_first_output(
+                                &app,
+                                &session_id,
+                                turn_id,
+                            );
+                        }
+                    }
                     #[cfg(feature = "benchmark-hooks")]
                     if crate::features::assistant::timing::eval_observation_enabled(&session_id) {
                         crate::features::assistant::timing::record_first_message_delta(&session_id);
@@ -999,17 +1003,18 @@ pub(crate) fn spawn_event_forwarder(
                         }
                     }
                     if let Some(turn_id) = current_turn_id.as_deref() {
-                        crate::features::behavior_telemetry::track(
+                        let status =
+                            behavior_task_status(terminal_status, terminal_error.as_deref());
+                        crate::features::behavior_telemetry::finish_task(
                             &app,
-                            crate::features::behavior_telemetry::BehaviorEvent::new(
-                                "task_finished",
-                            )
-                            .session(&session_id)
-                            .turn(turn_id)
-                            .status(behavior_task_status(
-                                terminal_status,
-                                terminal_error.as_deref(),
-                            )),
+                            &session_id,
+                            turn_id,
+                            status,
+                            (status != "success").then(|| {
+                                crate::features::behavior_telemetry::error_category(
+                                    terminal_error.as_deref(),
+                                )
+                            }),
                         );
                     }
                     maybe_notify_task_completed(
@@ -1166,12 +1171,12 @@ pub(crate) fn spawn_event_forwarder(
             Some(EmittedTerminal {
                 turn_id: Some(turn_id),
             }) => {
-                crate::features::behavior_telemetry::track(
+                crate::features::behavior_telemetry::finish_task(
                     &app,
-                    crate::features::behavior_telemetry::BehaviorEvent::new("task_finished")
-                        .session(&session_id)
-                        .turn(&turn_id)
-                        .status("failed"),
+                    &session_id,
+                    &turn_id,
+                    "failed",
+                    Some("internal_error"),
                 );
                 let _ = turn_events.send(EngineTurnSignal::Terminal {
                     turn_id,
