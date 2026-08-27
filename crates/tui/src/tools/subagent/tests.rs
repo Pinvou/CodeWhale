@@ -14744,6 +14744,41 @@ async fn test_disallowed_tools_execute_rejects_denied_tool() {
     );
 }
 
+#[tokio::test]
+async fn forkguard_denied_mcp_tool_error_matches_unknown_in_subagent() {
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime_with_disallowed(vec!["mcp_secret_*".to_string()]);
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let registry = new_registry_with_disallowed(runtime, None);
+
+    let denied_name = "mcp_secret_search";
+    let unknown_name = "mcp_missing_search";
+    let denied = registry
+        .execute("agent_test", denied_name, json!({}))
+        .await
+        .expect_err("denied MCP tool must fail")
+        .to_string();
+    let unknown = registry
+        .execute("agent_test", unknown_name, json!({}))
+        .await
+        .expect_err("unknown MCP tool must fail")
+        .to_string();
+
+    assert_eq!(
+        denied,
+        "MCP tool failed: Unknown MCP tool name: mcp_secret_search"
+    );
+    assert_eq!(
+        unknown,
+        "MCP tool failed: Unknown MCP tool name: mcp_missing_search"
+    );
+    assert_eq!(
+        denied.replace(denied_name, "<tool>"),
+        unknown.replace(unknown_name, "<tool>"),
+        "a child must not distinguish a denied MCP namespace from an unknown one"
+    );
+}
+
 // === deny-list propagation through runtime cloning ===
 
 #[test]

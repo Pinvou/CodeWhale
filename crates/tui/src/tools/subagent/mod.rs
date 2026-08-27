@@ -13224,6 +13224,14 @@ impl SubAgentToolRegistry {
                 "Tool Web is limited to search/fetch in the read-only evidence profile"
             ));
         }
+        // A denied MCP-shaped name must be indistinguishable from one that
+        // was never registered. Otherwise a child can probe session deny
+        // rules (and therefore disabled connector names) through the error.
+        if crate::mcp::McpPool::is_mcp_tool(name)
+            && (self.is_tool_denied(name) || self.registry.get(name).is_none())
+        {
+            return Err(anyhow!("MCP tool failed: Unknown MCP tool name: {name}"));
+        }
         let family_action_allowed = if !Self::ACTION_ALIASES
             .iter()
             .any(|(family, _, _)| *family == name)
