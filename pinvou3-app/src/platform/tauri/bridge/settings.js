@@ -17,18 +17,23 @@
     return !!(status && (status.withdrawal_pending || status.deletion_pending));
   }
 
+  function behaviorTelemetryStatusNeedsPoll(status) {
+    return !!(status && (status.enabled || behaviorTelemetryControlPending(status)));
+  }
+
   function scheduleBehaviorTelemetryStatusPoll() {
-    if (behaviorTelemetryStatusPollTimer || !behaviorTelemetryControlPending(state.behaviorTelemetry)) return;
+    if (behaviorTelemetryStatusPollTimer || !behaviorTelemetryStatusNeedsPoll(state.behaviorTelemetry)) return;
+    var delay = behaviorTelemetryControlPending(state.behaviorTelemetry) ? 1000 : 5000;
     behaviorTelemetryStatusPollTimer = setTimeout(async function pollBehaviorTelemetryStatus() {
       behaviorTelemetryStatusPollTimer = null;
       try {
         state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
         notify();
       } catch (_) {}
-      if (behaviorTelemetryControlPending(state.behaviorTelemetry)) {
+      if (behaviorTelemetryStatusNeedsPoll(state.behaviorTelemetry)) {
         scheduleBehaviorTelemetryStatusPoll();
       }
-    }, 1000);
+    }, delay);
   }
 
   function isBuiltinLlmApiModelId(modelId) {

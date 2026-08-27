@@ -900,10 +900,20 @@ impl BehaviorTelemetry {
             .outbox
             .lock()
             .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))
-            .and_then(|mut outbox| outbox.enqueue(record));
-        if let Err(error) = enqueued {
-            log::debug!("[pinvou3][behavior] persistent enqueue skipped: {error:#}");
-            return;
+            .and_then(|mut outbox| {
+                if !self.collecting.load(Ordering::Acquire) {
+                    return Ok(false);
+                }
+                outbox.enqueue(record)?;
+                Ok(true)
+            });
+        match enqueued {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                log::debug!("[pinvou3][behavior] persistent enqueue skipped: {error:#}");
+                return;
+            }
         }
         let _ = tx.try_send(());
     }
@@ -1099,6 +1109,10 @@ impl BehaviorTelemetry {
                 let _ = self.recover_expired_credentials(&credentials).await?;
                 anyhow::bail!("behavior telemetry credentials expired and were renewed");
             }
+            if error_code == "device_data_deleted" {
+                let _ = self.handle_authoritative_deletion(&credentials).await?;
+                anyhow::bail!("behavior telemetry data was deleted; local collection disabled");
+            }
             anyhow::bail!("behavior telemetry credentials unavailable: {error_code}");
         }
         if !response.status().is_success() {
@@ -1114,6 +1128,76 @@ impl BehaviorTelemetry {
     async fn recover_expired_credentials(&self, expired: &Credentials) -> Result<bool> {
         let _control_guard = self.control_gate.lock().await;
         self.recover_expired_credentials_locked(expired).await
+    }
+
+    async fn handle_authoritative_deletion(&self, deleted: &Credentials) -> Result<bool> {
+        let _control_guard = self.control_gate.lock().await;
+        self.handle_authoritative_deletion_locked(deleted).await
+    }
+
+    async fn handle_authoritative_deletion_locked(&self, deleted: &Credentials) -> Result<bool> {
+        let mut guard = self.state.lock().await;
+        let Some(fresh) = guard
+            .as_ref()
+            .and_then(|state| state_after_authoritative_deletion(state, &self.runtime, deleted))
+        else {
+            return Ok(false);
+        };
+
+        self.collecting.store(false, Ordering::Release);
+        if let Ok(mut period) = self.collection_period_id.write() {
+            *period = None;
+        }
+
+        let mut failures = Vec::new();
+        if let Err(error) = persist_state(&fresh) {
+            self.state_healthy.store(false, Ordering::Release);
+            failures.push(format!("persist disabled telemetry state: {error:#}"));
+        }
+        *guard = Some(fresh);
+        drop(guard);
+
+        match self.outbox.lock() {
+            Ok(mut outbox) => {
+                if let Err(error) = outbox.clear() {
+                    failures.push(format!("clear outbox: {error:#}"));
+                }
+            }
+            Err(_) => failures.push("clear outbox: lock poisoned".to_string()),
+        }
+        match self.tasks.lock() {
+            Ok(mut tasks) => {
+                tasks.clear();
+                if let Err(error) = persist_task_attempts(&tasks) {
+                    failures.push(format!("clear task attempts: {error:#}"));
+                }
+            }
+            Err(_) => failures.push("clear task attempts: lock poisoned".to_string()),
+        }
+        if let Ok(mut sessions) = self.team_sessions.lock() {
+            sessions.clear();
+        }
+        if let Ok(mut calls) = self.tool_calls.lock() {
+            calls.clear();
+        }
+        if let Ok(mut submissions) = self.voice_submissions.lock() {
+            submissions.clear();
+        }
+        if let Ok(mut artifacts) = self.artifacts.lock() {
+            artifacts.clear();
+        }
+        if let Ok(mut latest_turns) = self.latest_turns.lock() {
+            latest_turns.clear();
+        }
+
+        if failures.is_empty() {
+            Ok(true)
+        } else {
+            anyhow::bail!(
+                "authoritative deletion cleanup incomplete: {}",
+                failures.join("; ")
+            )
+        }
     }
 
     async fn recover_expired_credentials_locked(&self, expired: &Credentials) -> Result<bool> {
@@ -1645,6 +1729,12 @@ impl BehaviorTelemetry {
                     collection_period_id,
                 });
             }
+            if error_code == "device_data_deleted" {
+                let _ = self
+                    .handle_authoritative_deletion_locked(credentials)
+                    .await?;
+                anyhow::bail!("behavior telemetry data was deleted; local collection disabled");
+            }
             anyhow::bail!("behavior collection credentials unavailable: {error_code}");
         }
         if !response.status().is_success() {
@@ -1818,6 +1908,17 @@ async fn telemetry_error_code(response: reqwest::Response) -> String {
         .await
         .map(|body| body.error)
         .unwrap_or_else(|_| "unknown_credential_error".to_string())
+}
+
+fn state_after_authoritative_deletion(
+    state: &PersistedState,
+    runtime: &RuntimeConfig,
+    deleted: &Credentials,
+) -> Option<PersistedState> {
+    (state.behavior_events_url == deleted.behavior_events_url
+        && state.device_id.as_deref() == Some(deleted.device_id.as_str())
+        && state.device_token.as_deref() == Some(deleted.device_token.as_str()))
+    .then(|| PersistedState::fresh(runtime))
 }
 
 fn endpoint_matches_runtime(state: &PersistedState, runtime: &RuntimeConfig) -> bool {
@@ -3591,5 +3692,45 @@ mod tests {
             same_backend_targets[0].behavior_events_url,
             runtime_b.behavior_events_url
         );
+    }
+
+    #[test]
+    fn authoritative_deletion_resets_only_the_matching_credential_to_disabled_identity() {
+        let runtime = RuntimeConfig {
+            enabled: true,
+            telemetry_base_url: "https://example.test/pinvou3/telemetry".to_string(),
+            behavior_events_url: "https://example.test/pinvou3/stats/api/behavior/events"
+                .to_string(),
+            enrollment_token: None,
+            app_version: "0.0.0".to_string(),
+            platform: "test".to_string(),
+            arch: "test".to_string(),
+            channel: "dev".to_string(),
+            locale: "en".to_string(),
+        };
+        let mut state = PersistedState::fresh(&runtime);
+        let previous_installation_id = state.installation_id.clone();
+        let previous_registration_secret = state.registration_secret.clone();
+        state.device_id = Some("device_deleted".to_string());
+        state.device_token = Some("token_deleted".to_string());
+        state.control.enabled = true;
+        state.control.collection_period_id = Some("period_deleted".to_string());
+        let deleted = Credentials {
+            device_id: "device_deleted".to_string(),
+            device_token: "token_deleted".to_string(),
+            behavior_events_url: runtime.behavior_events_url.clone(),
+        };
+
+        let reset = state_after_authoritative_deletion(&state, &runtime, &deleted).unwrap();
+        assert!(!reset.control.enabled);
+        assert!(reset.control.collection_period_id.is_none());
+        assert!(reset.device_id.is_none());
+        assert!(reset.device_token.is_none());
+        assert_ne!(reset.installation_id, previous_installation_id);
+        assert_ne!(reset.registration_secret, previous_registration_secret);
+
+        let mut newer = state;
+        newer.device_token = Some("token_newer".to_string());
+        assert!(state_after_authoritative_deletion(&newer, &runtime, &deleted).is_none());
     }
 }

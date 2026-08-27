@@ -59,8 +59,12 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /StatusCode::GONE[\s\S]*device_credentials_expired[\s\S]*recover_expired_credentials/);
   assert.match(rust, /async fn recover_expired_credentials/);
   assert.match(rust, /rebind_period\(&started\.collection_period_id\)/);
+  assert.match(rust, /device_data_deleted[\s\S]*handle_authoritative_deletion/);
+  assert.match(rust, /async fn handle_authoritative_deletion_locked[\s\S]*collecting\.store\(false[\s\S]*persist_state\(&fresh\)[\s\S]*outbox\.clear\(\)[\s\S]*tasks\.clear\(\)/);
+  assert.match(rust, /fn state_after_authoritative_deletion[\s\S]*PersistedState::fresh/);
   assert.match(settingsBridge, /function scheduleBehaviorTelemetryStatusPoll/);
   assert.match(settingsBridge, /status\.withdrawal_pending \|\| status\.deletion_pending/);
+  assert.match(settingsBridge, /status\.enabled \|\| behaviorTelemetryControlPending\(status\)/);
   assert.match(settingsBridge, /get_behavior_telemetry_status/);
   assert.match(settingsBridge, /scheduleBehaviorTelemetryStatusPoll\(\);[\s\S]*return state\.behaviorTelemetry/);
   assert.match(usageRust, /StatusCode::GONE[\s\S]*credential_has_expired[\s\S]*clear_credentials/);
