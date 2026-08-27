@@ -481,7 +481,7 @@ func (r *PostgresRepository) EscalateProviderBlind(ctx context.Context, caseID, 
 	now := r.now()
 	_, err = tx.Exec(ctx, `UPDATE late_payment_review_cases SET review_status='PROVIDER_BLIND',blind_reason=$2,next_review_at=$3,updated_at=$3 WHERE id=$1`, caseID, reason, now.Add(24*time.Hour))
 	if err == nil {
-		_, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,updated_at) VALUES($1,$2,FALSE,$3,$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at`, item.ProviderID, item.ProviderVersion, reason, now)
+		_, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,reason_code,updated_at) VALUES($1,$2,FALSE,$3,'PROVIDER_BLIND',$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,reason_code='PROVIDER_BLIND',version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at`, item.ProviderID, item.ProviderVersion, reason, now)
 	}
 	if err == nil {
 		err = appendManualReviewEvent(ctx, tx, caseID, "PROVIDER_BLIND", &actorID, map[string]any{"reason": reason, "new_orders_enabled": false}, now)
@@ -709,7 +709,7 @@ func (r *PostgresRepository) EscalateArchiveBlindCases(ctx context.Context, limi
 		nextReviewAt := now.Add(24 * time.Hour)
 		command, err := tx.Exec(ctx, `UPDATE late_payment_review_cases SET review_status='PROVIDER_BLIND',blind_reason=$2,next_review_at=$3,updated_at=$4 WHERE id=$1 AND review_status='REVIEW_REQUIRED_LATE_PAYMENT'`, item.id, reason, nextReviewAt, now)
 		if err == nil && command.RowsAffected() == 1 {
-			_, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,updated_at) VALUES($1,$2,FALSE,$3,$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at`, item.providerID, item.providerVersion, reason, now)
+			_, err = tx.Exec(ctx, `INSERT INTO payment_provider_controls(provider_id,provider_version,new_orders_enabled,reason,reason_code,updated_at) VALUES($1,$2,FALSE,$3,'PROVIDER_BLIND',$4) ON CONFLICT(provider_id,provider_version) DO UPDATE SET new_orders_enabled=FALSE,reason=EXCLUDED.reason,reason_code='PROVIDER_BLIND',version=payment_provider_controls.version+1,updated_at=EXCLUDED.updated_at`, item.providerID, item.providerVersion, reason, now)
 		}
 		if err == nil && command.RowsAffected() == 1 {
 			err = appendManualReviewEvent(ctx, tx, item.id, "PROVIDER_BLIND", nil, map[string]any{"reason": reason, "new_orders_enabled": false}, now)
@@ -755,6 +755,7 @@ func NewManualReviewSLAWorker(repository *PostgresRepository, interval time.Dura
 
 func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 	_, _ = worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100)
+	_, _ = worker.repository.EvaluateProviderStopLosses(ctx, 100)
 	_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule)
 	_, _ = worker.repository.EscalateArchiveBlindCases(ctx, 100)
 	ticker := time.NewTicker(worker.interval)
@@ -765,6 +766,7 @@ func (worker *ManualReviewSLAWorker) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			_, _ = worker.repository.EvaluateOverduePaymentStopLosses(ctx, 100)
+			_, _ = worker.repository.EvaluateProviderStopLosses(ctx, 100)
 			_, _ = worker.repository.EscalateOverdueManualReviews(ctx, 100, worker.schedule)
 			_, _ = worker.repository.EscalateArchiveBlindCases(ctx, 100)
 		}

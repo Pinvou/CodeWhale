@@ -30,9 +30,9 @@ test('payment and model adapters record outcomes without automatic high-risk hal
   assert.match(payment, /BeforeHighRisk/);
   assert.match(payment, /UncertainResult/);
   assert.match(payment, /BusinessRejection/);
-  assert.match(payments, /providerCall\(p, "ORDER_CREATE", order\.Channel, true/);
-  assert.match(refunds, /providerCall\(p, "REFUND", "default", true/);
-  assert.match(reconciliation, /providerCall\(p, "ORDER_QUERY", order\.Channel, false/);
+  assert.match(payments, /providerCall\(ctx, p, "ORDER_CREATE", order\.Channel, true, providerCallScope\(order\)/);
+  assert.match(refunds, /providerCall\(ctx, p, "REFUND", "default", true/);
+  assert.match(reconciliation, /providerCall\(ctx, p, "ORDER_QUERY", order\.Channel, false, providerCallScope\(order\)/);
   assert.match(token, /BeforeHighRisk\(circuitKey\)[\s\S]*PROVIDER_CIRCUIT_OPEN/);
   assert.match(token, /UncertainResult[\s\S]*UPSTREAM_RESULT_UNKNOWN/);
 });

@@ -425,7 +425,7 @@ func (p *PaymentCoordinator) createOrder(ctx context.Context, requesterID, walle
 		return PaymentOrder{}, false, err
 	}
 
-	providerOrder, providerErr := providerCall(p, "ORDER_CREATE", order.Channel, true, func() (payment.ProviderOrder, error) {
+	providerOrder, providerErr := providerCall(ctx, p, "ORDER_CREATE", order.Channel, true, providerCallScope(order), func() (payment.ProviderOrder, error) {
 		return p.provider.Create(ctx, payment.Order{MerchantOrderNo: order.MerchantOrderNo, MerchantCustomerKey: requesterID.String(), Channel: order.Channel, AmountFen: order.AmountFen, Currency: order.Currency, Mobile: order.Mobile, ExternalSKU: order.ProviderSKU}, p.callbackURL)
 	})
 	if providerErr != nil {

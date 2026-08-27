@@ -824,6 +824,16 @@
         "file": "000046_clear_terminal_payment_instructions.up.sql",
         "version": 46,
         "sha256": "99dc6a07cbad5081de0c3f79f00ee7fa66b0fd58580d7a24a85fc144adb13fe2"
+      },
+      {
+        "file": "000047_payment_tiered_stop_loss.down.sql",
+        "version": 47,
+        "sha256": "729a6128e46142a9d915a1101e120ed85d5960760167e3fe6877a12aefa7ff6a"
+      },
+      {
+        "file": "000047_payment_tiered_stop_loss.up.sql",
+        "version": 47,
+        "sha256": "fae45c3b61cddd7aad9f12abb03d124d8b9278f2b0ac5aec85f5f4f9a36d5aa4"
       }
     ],
     "payment-simulator": [

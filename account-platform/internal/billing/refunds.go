@@ -123,7 +123,7 @@ func (p *PaymentCoordinator) CloseOrder(ctx context.Context, orderID, requesterI
 	if !p.Capabilities().CloseSupported {
 		return p.markLocallyClosed(ctx, orderID, requesterID)
 	}
-	providerOrder, err := providerCall(p, "ORDER_CLOSE", order.Channel, true, func() (ProviderOrder, error) {
+	providerOrder, err := providerCall(ctx, p, "ORDER_CLOSE", order.Channel, true, providerCallScope(order), func() (ProviderOrder, error) {
 		return p.provider.Close(ctx, order.MerchantOrderNo)
 	})
 	if err != nil {
@@ -220,7 +220,7 @@ func (p *PaymentCoordinator) ProcessRefund(ctx context.Context, refundID uuid.UU
 	if err != nil {
 		return err
 	}
-	providerRefund, providerErr := providerCall(p, "REFUND", "default", true, func() (ProviderRefund, error) {
+	providerRefund, providerErr := providerCall(ctx, p, "REFUND", "default", true, ProviderCallScope{OrderID: refund.PaymentOrderID, SubjectID: refund.RequesterID}, func() (ProviderRefund, error) {
 		return p.provider.Refund(ctx, merchantOrderNo, refund.MerchantRefundNo, refund.AmountFen)
 	})
 	if providerErr != nil {

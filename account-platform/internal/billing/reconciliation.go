@@ -268,7 +268,7 @@ func (p *PaymentCoordinator) ConfirmProviderFailed(ctx context.Context, caseID, 
 	if order.ProviderID != capabilities.ProviderID || order.ProviderVersion != capabilities.Version || order.Status != "MANUAL_REVIEW" {
 		return PaymentAnomalyCase{}, ErrConflict
 	}
-	providerOrder, err := providerCall(p, "ORDER_QUERY", order.Channel, false, func() (ProviderOrder, error) {
+	providerOrder, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
 		return p.provider.Get(ctx, order.MerchantOrderNo)
 	})
 	if err != nil {
@@ -292,7 +292,7 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 	if err != nil {
 		return PaymentOrder{}, err
 	}
-	providerOrder, err := providerCall(p, "ORDER_QUERY", order.Channel, false, func() (ProviderOrder, error) {
+	providerOrder, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
 		return p.provider.Get(ctx, order.MerchantOrderNo)
 	})
 	if err != nil {
@@ -324,7 +324,7 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 		if !p.Capabilities().CloseSupported {
 			return order, nil
 		}
-		closed, closeErr := providerCall(p, "ORDER_CLOSE", order.Channel, true, func() (ProviderOrder, error) {
+		closed, closeErr := providerCall(ctx, p, "ORDER_CLOSE", order.Channel, true, providerCallScope(order), func() (ProviderOrder, error) {
 			return p.provider.Close(ctx, order.MerchantOrderNo)
 		})
 		if closeErr != nil {
@@ -472,7 +472,7 @@ func (p *PaymentCoordinator) RepairReviewedOrder(ctx context.Context, orderID, a
 	if order.Status != "MANUAL_REVIEW" || order.FulfillmentStatus != "MANUAL_REVIEW" {
 		return PaymentOrder{}, ErrConflict
 	}
-	provider, err := providerCall(p, "ORDER_QUERY", order.Channel, false, func() (ProviderOrder, error) {
+	provider, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
 		return p.provider.Get(ctx, order.MerchantOrderNo)
 	})
 	if err != nil {
@@ -584,7 +584,7 @@ func (p *PaymentCoordinator) runProviderReconciliation(ctx context.Context, chan
 		return ReconciliationRun{}, ErrConflict
 	}
 	date := normalizedReconciliationBusinessDate(businessDate)
-	providerRows, err := providerCall(p, "BILL_QUERY", channel, false, func() ([]ProviderBillEntry, error) {
+	providerRows, err := providerCall(ctx, p, "BILL_QUERY", channel, false, ProviderCallScope{}, func() ([]ProviderBillEntry, error) {
 		return p.provider.Bill(ctx, channel, date)
 	})
 	if err != nil {

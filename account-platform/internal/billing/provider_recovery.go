@@ -97,7 +97,7 @@ func (p *PaymentCoordinator) probeProviderFailure(ctx context.Context, orderID u
 	if err != nil || order.ProviderID != p.Capabilities().ProviderID || order.ProviderVersion != p.Capabilities().Version {
 		return PaymentOrder{}, ProviderOrder{}, ErrConflict
 	}
-	providerOrder, err := providerCall(p, "ORDER_QUERY", order.Channel, false, func() (ProviderOrder, error) {
+	providerOrder, err := providerCall(ctx, p, "ORDER_QUERY", order.Channel, false, providerCallScope(order), func() (ProviderOrder, error) {
 		return p.provider.Get(ctx, order.MerchantOrderNo)
 	})
 	if err != nil {
