@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 379 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 343`、`部分实现 29`、`未实现 5`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `379` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。业务与安全两位独立审核者均已确认最终设计通过，APT-069–APT-086 的全部 CODE 任务已收敛。UI-24–UI-27 已完成需求审核并拆分为 APT-087–APT-090，当前尚未实现。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 344`、`部分实现 29`、`未实现 4`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `379` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。业务与安全两位独立审核者均已确认最终设计通过，APT-069–APT-086 的全部 CODE 任务已收敛。UI-24 已由 APT-087 在代码基线闭环，UI-25–UI-27 仍待 APT-088–APT-090 实现。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -353,7 +353,7 @@
 | UI-21 | 已实现 | AUDIT_HEAD | WEB-IDENTITY-LOGIN; AUTH-RISK; REGISTRATION-SAGA | NOT_DEPLOYED | Portal 未登录态直接进入 OIDC PKCE；Keycloak Pinvou 主题提供密码/短信/注册表单，短信登录和手机注册均强制一次性滑块与 6 位验证码，注册复用密码不透明引用及持久预约 Saga；密码不经过 Portal，真实短信、注册和 Cookie SSO 待部署联调 |
 | UI-22 | 已实现 | DOC_CURRENT | ROLE-PERMISSION-REDESIGN; PERMISSION-DRIVEN-UI; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 桌面账号弹层、Web 个人中心和平台后台均从 Account 权威授权上下文决定入口、只读态和操作可用性，不按角色名推导权限；个人、平台、组织任一授权版本变化均使缓存失效并刷新，退出登录和注销进度保持可达，服务端权限拒绝仍是最终边界。 |
 | UI-23 | 已实现 | AUDIT_HEAD | RECHARGE-PRODUCT-ADMIN; PORTAL-STEP-UP | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 后台按五项商品原子权限展示三语列表、添加、验证、上架、下架、删除和撤销入口；认证过期时保存只读草稿并完成 OIDC step-up，返回后不自动重放写请求。 |
-| UI-24 | 未实现 | DOC_CURRENT | REQUIREMENT-REVIEW | NOT_DEPLOYED | 已确认无合法 section 默认进入额度与用量，并要求 URL、Tab、内容、权限加载及浏览器历史一致；待 APT-087 实现。 |
+| UI-24 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-BUILD | NOT_DEPLOYED | 无合法 section 默认进入额度与用量；授权加载完成后统一校正 URL、Tab 和内容，点击及浏览器前进/后退同步，权限不足替换为首个可访问 Tab。 |
 | UI-25 | 未实现 | DOC_CURRENT | REQUIREMENT-REVIEW | NOT_DEPLOYED | 已确认普通个人中心完全移除角色授权区块和本人角色绑定请求，后台角色治理不受影响；待 APT-088 实现。 |
 | UI-26 | 未实现 | DOC_CURRENT | REQUIREMENT-REVIEW | NOT_DEPLOYED | 已确认权益包默认最多五条摘要、汇总、全量列表及组成级详情的渐进式交互；待 APT-089 实现。 |
 | UI-27 | 未实现 | DOC_CURRENT | REQUIREMENT-REVIEW | NOT_DEPLOYED | 已确认成功订单八列响应式摘要、组合状态和完整详情弹窗；待 APT-090 实现。 |
@@ -866,7 +866,7 @@
 | UI-20 | 充值商品暂停态 | 已实现 | Web、组织购买和桌面入口展示暂停态及三语维护提示且不可提交。 |
 | UI-21 | Web 统一身份登录页 | 已实现 | Portal 未登录后直接进入 Keycloak 三语 Pinvou 登录主题；密码登录、短信滑块验证码登录及手机滑块验证码注册均在 Identity 边界闭环，Portal 不接收密码或浏览器可读 Token。 |
 | UI-22 | 权限驱动入口状态 | 已实现 | 桌面、个人中心和后台直接消费权威权限集合，按个人/平台/组织独立授权版本刷新入口、只读态及操作按钮；退出登录和注销进度始终可达。 |
-| UI-24 | 个人中心 URL 与 Tab 状态一致性 | 未实现 | 已完成需求审核，待实现默认页、深链、权限加载和浏览器历史的一致性。 |
+| UI-24 | 个人中心 URL 与 Tab 状态一致性 | 已实现 | 无合法 section 默认进入额度与用量；深链、权限加载、Tab 点击和浏览器前进/后退均保持 URL、高亮与内容一致。 |
 | UI-25 | 普通个人中心角色信息收敛 | 未实现 | 已完成需求审核，待删除普通个人中心角色授权挂载点、制品和请求。 |
 | UI-26 | 权益包渐进式展示 | 未实现 | 已完成需求审核，待实现最多五条摘要、汇总、全量列表和组成级详情弹窗。 |
 | UI-27 | 成功订单摘要与详情 | 未实现 | 已完成需求审核，待实现响应式摘要、组合状态、时长推导和完整详情弹窗。 |

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
-import { initialPortalSection, portalNavigationSections, successfulPaymentOrders } from '../src/features/account-platform/portal-sections.js';
+import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
@@ -32,10 +32,15 @@ test('account balances convert internal microcredits to display points', () => {
 
 test('Web personal center uses three consolidated tabs and hides unsuccessful orders', () => {
   assert.deepEqual(portalNavigationSections, ['creditsUsage', 'ordersInvoices', 'accountSettings']);
-  assert.equal(initialPortalSection(''), 'accountSettings');
+  assert.equal(initialPortalSection(''), 'creditsUsage');
+  assert.equal(initialPortalSection('?section=unknown'), 'creditsUsage');
   assert.equal(initialPortalSection('?section=profile'), 'accountSettings');
   assert.equal(initialPortalSection('?section=usage'), 'creditsUsage');
   assert.equal(initialPortalSection('?section=invoice'), 'ordersInvoices');
+  assert.equal(availablePortalSection('?section=ordersInvoices', ['creditsUsage', 'accountSettings']), 'creditsUsage');
+  assert.equal(availablePortalSection('?section=accountSettings', ['creditsUsage', 'accountSettings']), 'accountSettings');
+  assert.equal(portalSectionLocation('ordersInvoices', '?profile=mobile&lang=zh', '/', false), '/?lang=zh&section=ordersInvoices');
+  assert.equal(portalSectionLocation('accountSettings', '?profile=mobile', '/', true), '/?profile=mobile&section=accountSettings');
   assert.deepEqual(successfulPaymentOrders([
     { order_id:'created', status:'CREATED' },
     { order_id:'pending', status:'PENDING' },
@@ -50,6 +55,14 @@ test('Web personal center uses three consolidated tabs and hides unsuccessful or
     assert.ok(accountPlatformCopy[locale].sections.accountSettings);
     assert.ok(accountPlatformCopy[locale].noPaidOrders);
   }
+});
+
+test('Web personal center keeps the URL, selected tab, and browser history synchronized', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /auth !== 'ready'[\s\S]*availablePortalSection\(globalThis\.location\?\.search \|\| '', navigationSections\)/);
+  assert.match(view, /history\?\.replaceState\?\.\(\{\}, '', nextLocation\)/);
+  assert.match(view, /addEventListener\?\.\('popstate', onPopState\)/);
+  assert.match(view, /history\?\.pushState\?\.\(\{\}, '', nextLocation\)/);
 });
 
 test('admin organization client uses protected organization, member, and unit endpoints', async () => {
@@ -542,7 +555,7 @@ test('Web personal center consolidates navigation while preserving context-sensi
   assert.match(view, /successfulOnly \? successfulPaymentOrders\(orders\) : orders/);
   assert.equal((i18n.match(/creditsTitle:/g) || []).length, 3);
   assert.equal((i18n.match(/entitlementsTitle:/g) || []).length, 3);
-  assert.match(view, /!navigationSections\.includes\(section\)[\s\S]*setSection\(portal \? 'accountSettings' : 'overview'\)/);
+  assert.match(view, /auth !== 'ready'[\s\S]*availablePortalSection\(globalThis\.location\?\.search \|\| '', navigationSections\)/);
   assert.match(view, /<nav>\{navigationSections\.map/);
 });
 

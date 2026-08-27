@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
-import { initialPortalSection, portalNavigationSections, successfulPaymentOrders } from './portal-sections.js';
+import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './account-platform.css';
@@ -336,8 +336,25 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [closure?.closure_request_id, closure?.status]);
 
   useEffect(() => {
-    if (!navigationSections.includes(section)) setSection(portal ? 'accountSettings' : 'overview');
-  }, [activeOrganizationId, organizations.length, section]);
+    if (!portal) {
+      if (!navigationSections.includes(section)) setSection('overview');
+      return;
+    }
+    if (auth !== 'ready') return;
+    const nextSection = navigationSections.includes(section) ? section : availablePortalSection(globalThis.location?.search || '', navigationSections);
+    if (nextSection !== section) setSection(nextSection);
+    const nextLocation = portalSectionLocation(nextSection, globalThis.location?.search || '', globalThis.location?.pathname || '/', true);
+    if (`${globalThis.location?.pathname || '/'}${globalThis.location?.search || ''}` !== nextLocation) {
+      globalThis.history?.replaceState?.({}, '', nextLocation);
+    }
+  }, [auth, portal, section, navigationSections.join('|')]);
+
+  useEffect(() => {
+    if (!portal) return undefined;
+    const onPopState = () => setSection(initialPortalSection(globalThis.location?.search || ''));
+    globalThis.addEventListener?.('popstate', onPopState);
+    return () => globalThis.removeEventListener?.('popstate', onPopState);
+  }, [portal]);
 
   useEffect(() => {
     if (portal && (auth === 'guest' || auth === 'error')) globalThis.location.replace('/auth/login');
@@ -527,6 +544,14 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
 
   const userLabel = me?.display_name || copy.user;
   const identityLabel = activeOrganization ? copy.organizationIdentity(activeOrganization.name) : copy.personal;
+  const navigateSection = (key) => {
+    setSection(key);
+    if (!portal) return;
+    const nextLocation = portalSectionLocation(key, globalThis.location?.search || '', globalThis.location?.pathname || '/');
+    if (`${globalThis.location?.pathname || '/'}${globalThis.location?.search || ''}` !== nextLocation) {
+      globalThis.history?.pushState?.({}, '', nextLocation);
+    }
+  };
 
   return (
     <div className={`ap-shell ap-app ${portal ? 'ap-portal' : 'ap-desktop'}`}>
@@ -547,7 +572,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         </div>
         <nav>
           {navigationSections.map((key) => (
-            <button key={key} className={section === key ? 'active' : ''} onClick={() => setSection(key)}>
+            <button key={key} className={section === key ? 'active' : ''} onClick={() => navigateSection(key)}>
               <NavIcon name={key} />
               <span>{copy.sections[key]}</span>
             </button>
@@ -830,7 +855,7 @@ function PortalAccountSettings({ copy, language, me, access, organizations, bala
   const [identityDialog, setIdentityDialog] = useState(false);
   const closeProfileDialog = () => {
     setProfileDialog('');
-    if (requestedProfile) globalThis.history?.replaceState?.({}, '', '/account?section=accountSettings');
+    if (requestedProfile) globalThis.history?.replaceState?.({}, '', portalSectionLocation('accountSettings', globalThis.location?.search || '', globalThis.location?.pathname || '/'));
   };
   return (
     <section className="ap-combined-tab">
