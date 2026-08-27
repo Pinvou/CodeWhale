@@ -4568,6 +4568,28 @@
     var ext = (String(path || "").split(".").pop() || "").toLowerCase();
     return DELIVERABLE_EXTS.indexOf(ext) >= 0;
   }
+  function artifactBehaviorType(path) {
+    var ext = (String(path || "").split(".").pop() || "").toLowerCase();
+    if (["doc", "docx", "md", "rtf"].indexOf(ext) >= 0) return "document";
+    if (["xls", "xlsx", "csv"].indexOf(ext) >= 0) return "spreadsheet";
+    if (["ppt", "pptx", "odp"].indexOf(ext) >= 0) return "slides";
+    if (ext === "pdf") return "pdf";
+    if (["png", "jpg", "jpeg", "gif", "webp", "svg"].indexOf(ext) >= 0) return "image";
+    if (["html", "htm"].indexOf(ext) >= 0) return "html";
+    if (["js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "cpp", "h", "css"].indexOf(ext) >= 0) return "code";
+    return "other";
+  }
+  function artifactBehaviorId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return "artifact_" + window.crypto.randomUUID().replace(/-/g, ""); // safari14-ok: guarded above
+    }
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      var bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      return "artifact_" + Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, "0"); }).join("");
+    }
+    return "artifact_" + Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
   function trackArtifact(path) {
     if (!path) return;
     if (state.activeSessionId && !artifactBelongsToSession(path, state.activeSessionId)) return;
@@ -4577,13 +4599,18 @@
         // 已有同名:write_file 跟踪的是相对路径、disk watcher 推的是绝对路径——同一文件
         // 两种 path 会重复。新 path 绝对而旧的相对则用绝对替换(open 可靠),否则忽略重复。
         if (isAbsPath(path) && !isAbsPath(state.artifacts[i].path)) {
-          state.artifacts[i] = { path: path, basename: bn };
+          state.artifacts[i] = Object.assign({}, state.artifacts[i], { path: path, basename: bn });
           notify();
         }
         return;
       }
     }
-    state.artifacts.push({ path: path, basename: bn });
+    var artifact = { path: path, basename: bn, telemetryId: artifactBehaviorId(), telemetryType: artifactBehaviorType(path) };
+    state.artifacts.push(artifact);
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "artifact_created", artifactId: artifact.telemetryId,
+      artifactType: artifact.telemetryType, sessionId: state.activeSessionId,
+    } }).catch(function () {});
     notify();
   }
   function markTurnDirtyArtifact(path) {
@@ -8015,6 +8042,22 @@
       : "";
     return new Error(bt("downloadLimitError")(suffix));
   }
+  function artifactExportFormat(path) {
+    var ext = (String(path || "").split(".").pop() || "").toLowerCase();
+    if (["docx", "xlsx", "pptx", "pdf", "png", "html"].indexOf(ext) >= 0) return ext;
+    if (ext === "htm") return "html";
+    if (ext === "md") return "markdown";
+    return "other";
+  }
+  function trackArtifactExported(path) {
+    var bn = basename(path);
+    var artifact = state.artifacts.find(function (item) { return basename(item.path) === bn; });
+    if (!artifact || !artifact.telemetryId) return;
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "artifact_exported", artifactId: artifact.telemetryId,
+      exportFormat: artifactExportFormat(path),
+    } }).catch(function () {});
+  }
 
   async function downloadArtifact(path, sessionId) {
     if (IS_WEB && !hasCapability("artifactDownload")) {
@@ -8022,7 +8065,9 @@
       return false;
     }
     try {
-      return await downloadArtifactRaw(path, sessionId);
+      var downloaded = await downloadArtifactRaw(path, sessionId);
+      if (downloaded) trackArtifactExported(path);
+      return downloaded;
     } catch (e) {
       addSystemItem(bt("downloadFailed") + String((e && e.message) || e));
       return false;
@@ -8195,14 +8240,65 @@
     }
   }
 
+  function attachmentTelemetryToken(prefix) {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return prefix + window.crypto.randomUUID().replace(/-/g, ""); // safari14-ok: guarded above
+    }
+    if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+      var bytes = new Uint8Array(12);
+      window.crypto.getRandomValues(bytes);
+      return prefix + Array.from(bytes, function (byte) { return byte.toString(16).padStart(2, "0"); }).join("");
+    }
+    return prefix + Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
+  function attachmentFileType(name) {
+    var ext = (String(name || "").split(".").pop() || "").toLowerCase();
+    if (["doc", "docx", "md", "txt", "rtf"].indexOf(ext) >= 0) return "document";
+    if (["xls", "xlsx", "csv", "tsv"].indexOf(ext) >= 0) return "spreadsheet";
+    if (["ppt", "pptx", "odp"].indexOf(ext) >= 0) return "presentation";
+    if (ext === "pdf") return "pdf";
+    if (["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "heic"].indexOf(ext) >= 0) return "image";
+    if (["zip", "7z", "rar", "tar", "gz"].indexOf(ext) >= 0) return "archive";
+    if (["js", "jsx", "ts", "tsx", "py", "rs", "go", "java", "c", "cpp", "h", "html", "css", "json", "yaml", "yml"].indexOf(ext) >= 0) return "code";
+    return "other";
+  }
+  function attachmentSizeBucket(size) {
+    var bytes = Number(size) || 0;
+    if (bytes <= 1024 * 1024) return "0_1mib";
+    if (bytes <= 10 * 1024 * 1024) return "1_10mib";
+    if (bytes <= 100 * 1024 * 1024) return "10_100mib";
+    return "100mib_plus";
+  }
+  function beginAttachmentTelemetry(att, size, entryPoint) {
+    var attempt = { attachmentId: attachmentTelemetryToken("attachment_"), operationId: attachmentTelemetryToken("attachment_op_"), fileTypeBucket: attachmentFileType(att.basename), startedAt: Date.now(), finished: false };
+    att.telemetryAttempt = attempt;
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "attachment_added", attachmentId: attempt.attachmentId, operationId: attempt.operationId,
+      attemptIndex: 1, fileTypeBucket: attempt.fileTypeBucket, sizeBucket: attachmentSizeBucket(size), entryPoint: entryPoint,
+    } }).catch(function () {});
+  }
+  function finishAttachmentTelemetry(att, success, errorCategory) {
+    var attempt = att && att.telemetryAttempt;
+    if (!attempt || attempt.finished) return;
+    attempt.finished = true;
+    invoke(IS_WEB ? "web_access_track_behavior_event" : "track_behavior_event", { request: {
+      eventName: "attachment_processing_completed", attachmentId: attempt.attachmentId,
+      operationId: attempt.operationId, attemptIndex: 1, fileTypeBucket: attempt.fileTypeBucket,
+      success: !!success, durationMs: Math.max(0, Date.now() - attempt.startedAt),
+      errorCategory: success ? undefined : (errorCategory || "validation_failed"),
+    } }).catch(function () {});
+  }
+
   async function addAttachmentByPath(path) {
     var id = ++attachIdSeq;
     var att = { id: id, basename: basename(path), status: "parsing", result: null, error: null };
     state.attachments.push(att); notify();
     try {
       var result = await invoke(IS_WEB ? "web_access_ingest_file" : "ingest_file", { path: path });
+      beginAttachmentTelemetry(att, result && (result.byteSize || result.byte_size), "composer");
       att.status = "ready"; att.result = result;
-    } catch (e) { att.status = "error"; att.error = String(e); }
+      finishAttachmentTelemetry(att, true);
+    } catch (e) { if (!att.telemetryAttempt) beginAttachmentTelemetry(att, 0, "composer"); att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, "validation_failed"); }
     notify();
   }
   async function addPasteImage(filename, bytes) {
@@ -8226,6 +8322,7 @@
   }
   function removeAttachment(id) {
     var removed = state.attachments.find(function (attachment) { return attachment.id === id; });
+    finishAttachmentTelemetry(removed, false, "user_cancelled");
     state.attachments = state.attachments.filter(function (a) { return a.id !== id; });
     releaseAttachmentOnDesktop(removed);
     notify();
@@ -8233,6 +8330,7 @@
   function clearAttachments() {
     var removed = state.attachments.slice();
     state.attachments = [];
+    removed.forEach(function (attachment) { finishAttachmentTelemetry(attachment, false, "user_cancelled"); });
     removed.forEach(releaseAttachmentOnDesktop);
   }
   // 打开系统文件选择器并摄入为附件
@@ -8260,6 +8358,7 @@
       status: "uploading", progress: 0, result: null, error: null,
     };
     state.attachments.push(att); notify();
+    beginAttachmentTelemetry(att, file.size, "composer");
     try {
       if (!uploader || typeof uploader.uploadFile !== "function") {
         throw new Error("chunked attachment uploader is unavailable");
@@ -8291,6 +8390,7 @@
       var summary = completed.result;
       att.status = "ready"; att.progress = 100; att.result = summary;
       att.basename = summary.basename || att.basename;
+      finishAttachmentTelemetry(att, true);
     } catch (e) {
       if (!e || e.code !== "device_upload_cancelled") {
         att.status = "error";
@@ -8310,6 +8410,7 @@
                 : rawUploadError;
         addSystemItem(bt("deviceUploadFailed") + att.error);
       }
+      finishAttachmentTelemetry(att, false, e && e.code === "device_upload_cancelled" ? "user_cancelled" : "validation_failed");
     }
     notify();
   }

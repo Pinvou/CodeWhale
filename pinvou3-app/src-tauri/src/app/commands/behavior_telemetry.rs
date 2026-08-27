@@ -73,6 +73,14 @@ pub struct TrackBehaviorEventRequest {
     pub recognizer_type: Option<String>,
     pub view_id: Option<String>,
     pub position_bucket: Option<String>,
+    pub attachment_id: Option<String>,
+    pub file_type_bucket: Option<String>,
+    pub size_bucket: Option<String>,
+    pub source_type: Option<String>,
+    pub item_count_bucket: Option<String>,
+    pub artifact_id: Option<String>,
+    pub artifact_type: Option<String>,
+    pub export_format: Option<String>,
 }
 
 #[tauri::command]
@@ -114,12 +122,43 @@ pub fn track_behavior_event(
                 request.scene_l2.as_deref().unwrap_or("unknown"),
             );
         }
+        "artifact_created" => {
+            let session_id = request
+                .session_id
+                .as_deref()
+                .ok_or_else(|| "artifact creation requires session_id".to_string())?;
+            let artifact_id = request
+                .artifact_id
+                .as_deref()
+                .ok_or_else(|| "artifact creation requires artifact_id".to_string())?;
+            return crate::features::behavior_telemetry::track_artifact_created(
+                &app,
+                session_id,
+                artifact_id,
+                request.artifact_type.as_deref().unwrap_or("other"),
+            );
+        }
+        "artifact_exported" => {
+            let artifact_id = request
+                .artifact_id
+                .as_deref()
+                .ok_or_else(|| "artifact export requires artifact_id".to_string())?;
+            return crate::features::behavior_telemetry::track_artifact_exported(
+                &app,
+                artifact_id,
+                request.export_format.as_deref().unwrap_or("other"),
+            );
+        }
         "tool_impression" => "tool_impression",
         "tool_detail_opened" => "tool_detail_opened",
         "tool_configuration_started" => "tool_configuration_started",
         "tool_configuration_finished" => "tool_configuration_finished",
         "scene_impression" => "scene_impression",
         "scene_selected" => "scene_selected",
+        "attachment_added" => "attachment_added",
+        "attachment_processing_completed" => "attachment_processing_completed",
+        "knowledge_import_started" => "knowledge_import_started",
+        "knowledge_import_completed" => "knowledge_import_completed",
         "onboarding_started" => "onboarding_started",
         "onboarding_completed" => "onboarding_completed",
         "onboarding_skipped" => "onboarding_skipped",
@@ -213,6 +252,30 @@ pub fn track_behavior_event(
     }
     if let Some(value) = request.position_bucket {
         event = event.string("position_bucket", value);
+    }
+    if let Some(value) = request.attachment_id {
+        event = event.string("attachment_id", value);
+    }
+    if let Some(value) = request.file_type_bucket {
+        event = event.string("file_type_bucket", value);
+    }
+    if let Some(value) = request.size_bucket {
+        event = event.string("size_bucket", value);
+    }
+    if let Some(value) = request.source_type {
+        event = event.string("source_type", value);
+    }
+    if let Some(value) = request.item_count_bucket {
+        event = event.string("item_count_bucket", value);
+    }
+    if let Some(value) = request.artifact_id {
+        event = event.string("artifact_id", value);
+    }
+    if let Some(value) = request.artifact_type {
+        event = event.string("artifact_type", value);
+    }
+    if let Some(value) = request.export_format {
+        event = event.string("export_format", value);
     }
     crate::features::behavior_telemetry::track(&app, event);
     Ok(())

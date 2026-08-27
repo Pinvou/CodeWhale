@@ -38,6 +38,8 @@ pub struct BehaviorTelemetry {
     team_sessions: Arc<StdMutex<HashSet<String>>>,
     tool_calls: Arc<StdMutex<HashMap<String, ToolOperation>>>,
     voice_submissions: Arc<StdMutex<HashSet<String>>>,
+    artifacts: Arc<StdMutex<HashMap<String, ArtifactTelemetryRecord>>>,
+    latest_turns: Arc<StdMutex<HashMap<String, String>>>,
     event_tx: Option<mpsc::Sender<()>>,
 }
 
@@ -52,6 +54,13 @@ struct TaskAttempt {
     input_type: String,
     has_attachment: bool,
     first_output_emitted: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ArtifactTelemetryRecord {
+    session_id: String,
+    turn_id: String,
+    artifact_type: String,
 }
 
 #[derive(Debug, Clone)]
@@ -599,6 +608,8 @@ impl BehaviorTelemetry {
             team_sessions: Arc::new(StdMutex::new(HashSet::new())),
             tool_calls: Arc::new(StdMutex::new(HashMap::new())),
             voice_submissions: Arc::new(StdMutex::new(HashSet::new())),
+            artifacts: Arc::new(StdMutex::new(HashMap::new())),
+            latest_turns: Arc::new(StdMutex::new(HashMap::new())),
             event_tx,
         };
         if let Some(rx) = event_rx {
@@ -741,6 +752,8 @@ impl BehaviorTelemetry {
             team_sessions: self.team_sessions.clone(),
             tool_calls: self.tool_calls.clone(),
             voice_submissions: self.voice_submissions.clone(),
+            artifacts: self.artifacts.clone(),
+            latest_turns: self.latest_turns.clone(),
             event_tx: None,
         }
     }
@@ -927,6 +940,12 @@ impl BehaviorTelemetry {
             if let Ok(mut submissions) = self.voice_submissions.lock() {
                 submissions.clear();
             }
+            if let Ok(mut artifacts) = self.artifacts.lock() {
+                artifacts.clear();
+            }
+            if let Ok(mut latest_turns) = self.latest_turns.lock() {
+                latest_turns.clear();
+            }
             let mut guard = self.state.lock().await;
             if let Some(state) = guard.as_mut() {
                 state.control.enabled = false;
@@ -958,6 +977,12 @@ impl BehaviorTelemetry {
         }
         if let Ok(mut submissions) = self.voice_submissions.lock() {
             submissions.clear();
+        }
+        if let Ok(mut artifacts) = self.artifacts.lock() {
+            artifacts.clear();
+        }
+        if let Ok(mut latest_turns) = self.latest_turns.lock() {
+            latest_turns.clear();
         }
         Ok(self.status().await)
     }
@@ -1545,6 +1570,116 @@ pub fn track_scene_submitted(
     Ok(())
 }
 
+fn artifact_type_key(value: &str) -> &'static str {
+    match value {
+        "document" => "document",
+        "spreadsheet" => "spreadsheet",
+        "slides" => "slides",
+        "pdf" => "pdf",
+        "image" => "image",
+        "code" => "code",
+        "html" => "html",
+        _ => "other",
+    }
+}
+
+fn export_format_key(value: &str) -> &'static str {
+    match value {
+        "docx" => "docx",
+        "xlsx" => "xlsx",
+        "pptx" => "pptx",
+        "pdf" => "pdf",
+        "png" => "png",
+        "html" => "html",
+        "markdown" => "markdown",
+        _ => "other",
+    }
+}
+
+pub fn track_artifact_created(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    artifact_id: &str,
+    artifact_type: &str,
+) -> Result<(), String> {
+    let telemetry = app
+        .try_state::<BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
+    if !telemetry.collecting.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let turn_id = telemetry
+        .tasks
+        .lock()
+        .map_err(|_| "behavior task state is unavailable".to_string())?
+        .get(session_id)
+        .and_then(|attempt| attempt.turn_id.clone());
+    let turn_id = turn_id
+        .or_else(|| {
+            telemetry
+                .latest_turns
+                .lock()
+                .ok()
+                .and_then(|turns| turns.get(session_id).cloned())
+        })
+        .ok_or_else(|| "no admitted turn for artifact creation".to_string())?;
+    let artifact_type = artifact_type_key(artifact_type);
+    let record = ArtifactTelemetryRecord {
+        session_id: session_id.to_string(),
+        turn_id: turn_id.clone(),
+        artifact_type: artifact_type.to_string(),
+    };
+    let mut artifacts = telemetry
+        .artifacts
+        .lock()
+        .map_err(|_| "artifact telemetry state is unavailable".to_string())?;
+    if artifacts.contains_key(artifact_id) {
+        return Ok(());
+    }
+    if artifacts.len() >= OUTBOX_MAX_EVENTS {
+        artifacts.clear();
+    }
+    artifacts.insert(artifact_id.to_string(), record);
+    drop(artifacts);
+    telemetry.track(
+        BehaviorEvent::new("artifact_created")
+            .session(session_id)
+            .turn(turn_id)
+            .string("artifact_id", artifact_id)
+            .string("artifact_type", artifact_type),
+    );
+    Ok(())
+}
+
+pub fn track_artifact_exported(
+    app: &tauri::AppHandle,
+    artifact_id: &str,
+    export_format: &str,
+) -> Result<(), String> {
+    let telemetry = app
+        .try_state::<BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
+    if !telemetry.collecting.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let record = telemetry
+        .artifacts
+        .lock()
+        .map_err(|_| "artifact telemetry state is unavailable".to_string())?
+        .get(artifact_id)
+        .cloned()
+        .ok_or_else(|| "unknown artifact telemetry id".to_string())?;
+    telemetry.track(
+        BehaviorEvent::new("artifact_exported")
+            .session(record.session_id)
+            .turn(record.turn_id)
+            .string("artifact_id", artifact_id)
+            .string("artifact_type", record.artifact_type)
+            .string("export_format", export_format_key(export_format)),
+    );
+    Ok(())
+}
+
 pub fn reject_task_submission(
     app: &tauri::AppHandle,
     session_id: &str,
@@ -1594,6 +1729,12 @@ pub fn admit_task(app: &tauri::AppHandle, session_id: &str, turn_id: &str) {
         Some(result)
     });
     if let Some(attempt) = attempt {
+        if let Ok(mut turns) = telemetry.latest_turns.lock() {
+            if turns.len() >= OUTBOX_MAX_EVENTS && !turns.contains_key(session_id) {
+                turns.clear();
+            }
+            turns.insert(session_id.to_string(), turn_id.to_string());
+        }
         telemetry.track(
             task_fields(BehaviorEvent::new("task_admitted"), session_id, &attempt)
                 .turn(turn_id)
