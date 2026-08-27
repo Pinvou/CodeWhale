@@ -130,6 +130,18 @@ const invoke = invokeTauri;
 const RECENT_WORKSPACES_KEY = 'pinvou_codex_recent_workspaces';
 const DRAFT_ATTACHMENT_KEY = '__codex_draft__';
 
+function codeTelemetryToken(prefix) {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return `${prefix}-${window.crypto.randomUUID().replace(/-/g, '')}`;
+  }
+  if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(12);
+    window.crypto.getRandomValues(bytes);
+    return `${prefix}-${Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
 // 草稿配置快照缓存已抽到 ./acp-draft-controls.js（供设置页共用，避免与
 // SettingsView 的循环引用）。
 import {
@@ -995,6 +1007,9 @@ export function CodexAcpView({
   onGotoSettings,
   fixedSession = false,
 }) {
+  const codeTelemetryViewIdRef = useRef(null);
+  const codeTelemetryReportedRef = useRef(false);
+  if (!codeTelemetryViewIdRef.current) codeTelemetryViewIdRef.current = codeTelemetryToken('code-view');
   const codexCopy = t.uiCodex;
   const [agents, setAgents] = useState(null); // null=加载中，[] 才允许回退当前 Agent。
   const [draftAgentId, setDraftAgentId] = useState(initialDraftAgentSelection);
@@ -1177,6 +1192,19 @@ export function CodexAcpView({
     [sessions, activeId],
   );
   const activeAgentId = activeSession?.agent_id || draftAgentId;
+  useEffect(() => {
+    if (codeTelemetryReportedRef.current || !activeId || !activeAgentId) return;
+    codeTelemetryReportedRef.current = true;
+    invoke(isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event', {
+      request: {
+        eventName: 'code_mode_opened',
+        viewId: codeTelemetryViewIdRef.current,
+        sessionId: activeId,
+        entryPoint: 'sidebar',
+        providerKey: activeAgentId,
+      },
+    }).catch(() => {});
+  }, [activeAgentId, activeId]);
   // 原生（品悟 Engine）代码会话：发消息走 chat 命令 + chat:* 事件，会话状态按
   // session 缓存在 lane Map 里（后台会话的 turn 也能继续推进，切回不丢流式内容）。
   const isNativeAgent = activeAgentId === 'pinvou';

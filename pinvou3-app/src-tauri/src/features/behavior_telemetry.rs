@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tauri::Manager;
 use tokio::sync::{mpsc, Mutex};
 
@@ -1594,6 +1595,130 @@ fn export_format_key(value: &str) -> &'static str {
         "markdown" => "markdown",
         _ => "other",
     }
+}
+
+fn scheduled_subject_id(
+    telemetry: &BehaviorTelemetry,
+    namespace: &str,
+    source_id: &str,
+) -> Result<String, String> {
+    let collection_period_id = telemetry
+        .collection_period_id
+        .read()
+        .map_err(|_| "behavior collection period is unavailable".to_string())?
+        .clone()
+        .ok_or_else(|| "behavior collection is not active".to_string())?;
+    let mut digest = Sha256::new();
+    digest.update(b"pinvou-behavior-v1\0");
+    digest.update(namespace.as_bytes());
+    digest.update(b"\0");
+    digest.update(collection_period_id.as_bytes());
+    digest.update(b"\0");
+    digest.update(source_id.as_bytes());
+    let hex = crate::platform::encoding::hex_lower(&digest.finalize());
+    Ok(format!("{namespace}_{}", &hex[..24]))
+}
+
+fn scheduled_schedule_type(rrule: &str) -> &'static str {
+    let rule = rrule.trim().to_ascii_uppercase();
+    if rule.contains("FREQ=MONTHLY") {
+        "monthly"
+    } else if rule.contains("FREQ=WEEKLY") {
+        let every_day = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
+            .iter()
+            .all(|day| rule.contains(day));
+        if every_day {
+            "daily"
+        } else {
+            "weekly"
+        }
+    } else if rule.contains("FREQ=DAILY") {
+        "daily"
+    } else if rule.contains("FREQ=HOURLY") || rule.contains("FREQ=") {
+        "cron"
+    } else {
+        "once"
+    }
+}
+
+fn scheduled_task_type(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "daily-brief" | "daily_brief" => "daily_brief",
+        "follow-up-monitor" | "follow_up_monitor" => "follow_up_monitor",
+        "weekly-review" | "weekly_review" => "weekly_review",
+        "custom" => "custom",
+        _ => "unknown",
+    }
+}
+
+fn scheduled_status(value: &str) -> Result<&'static str, String> {
+    match value {
+        "completed" | "success" => Ok("success"),
+        "failed" => Ok("failed"),
+        "canceled" | "cancelled" => Ok("cancelled"),
+        "interrupted" => Ok("interrupted"),
+        _ => Err("scheduled run is not terminal".to_string()),
+    }
+}
+
+pub fn track_scheduled_task_created(
+    app: &tauri::AppHandle,
+    source_task_id: &str,
+    rrule: &str,
+    task_type: &str,
+) -> Result<(), String> {
+    let telemetry = app
+        .try_state::<BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
+    if !telemetry.collecting.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let task_id = scheduled_subject_id(&telemetry, "scheduled", source_task_id)?;
+    let mut event = BehaviorEvent::new("scheduled_task_created")
+        .string("scheduled_task_id", &task_id)
+        .string("schedule_type", scheduled_schedule_type(rrule))
+        .string("task_type", scheduled_task_type(task_type));
+    event.event_id = scheduled_subject_id(&telemetry, "scheduled_created", source_task_id)?;
+    telemetry.track(event);
+    Ok(())
+}
+
+pub fn track_scheduled_run_finished(
+    app: &tauri::AppHandle,
+    source_task_id: &str,
+    source_run_id: &str,
+    status: &str,
+    duration_ms: u64,
+    category: Option<&str>,
+) -> Result<(), String> {
+    let telemetry = app
+        .try_state::<BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
+    if !telemetry.collecting.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let status = scheduled_status(status)?;
+    let task_id = scheduled_subject_id(&telemetry, "scheduled", source_task_id)?;
+    let operation_id = scheduled_subject_id(&telemetry, "scheduled_run", source_run_id)?;
+    let mut event = BehaviorEvent::new("scheduled_task_run_finished")
+        .string("scheduled_task_id", task_id)
+        .string("operation_id", operation_id)
+        .integer("attempt_index", 1)
+        .status(status)
+        .integer("duration_ms", duration_ms.min(86_400_000));
+    if status != "success" {
+        event = event.string(
+            "error_category",
+            if status == "cancelled" {
+                "user_cancelled"
+            } else {
+                error_category(category)
+            },
+        );
+    }
+    event.event_id = scheduled_subject_id(&telemetry, "scheduled_finished", source_run_id)?;
+    telemetry.track(event);
+    Ok(())
 }
 
 pub fn track_artifact_created(

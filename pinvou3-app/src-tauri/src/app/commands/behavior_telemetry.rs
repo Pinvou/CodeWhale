@@ -81,6 +81,11 @@ pub struct TrackBehaviorEventRequest {
     pub artifact_id: Option<String>,
     pub artifact_type: Option<String>,
     pub export_format: Option<String>,
+    pub scheduled_task_source_id: Option<String>,
+    pub scheduled_run_source_id: Option<String>,
+    pub schedule_rule: Option<String>,
+    pub task_type: Option<String>,
+    pub member_count_bucket: Option<String>,
 }
 
 #[tauri::command]
@@ -149,6 +154,36 @@ pub fn track_behavior_event(
                 request.export_format.as_deref().unwrap_or("other"),
             );
         }
+        "scheduled_task_created" => {
+            let task_id = request
+                .scheduled_task_source_id
+                .as_deref()
+                .ok_or_else(|| "scheduled task creation requires source id".to_string())?;
+            return crate::features::behavior_telemetry::track_scheduled_task_created(
+                &app,
+                task_id,
+                request.schedule_rule.as_deref().unwrap_or_default(),
+                request.task_type.as_deref().unwrap_or("custom"),
+            );
+        }
+        "scheduled_task_run_finished" => {
+            let task_id = request
+                .scheduled_task_source_id
+                .as_deref()
+                .ok_or_else(|| "scheduled run requires task source id".to_string())?;
+            let run_id = request
+                .scheduled_run_source_id
+                .as_deref()
+                .ok_or_else(|| "scheduled run requires run source id".to_string())?;
+            return crate::features::behavior_telemetry::track_scheduled_run_finished(
+                &app,
+                task_id,
+                run_id,
+                request.status.as_deref().unwrap_or("failed"),
+                request.duration_ms.unwrap_or_default(),
+                request.error_category.as_deref(),
+            );
+        }
         "tool_impression" => "tool_impression",
         "tool_detail_opened" => "tool_detail_opened",
         "tool_configuration_started" => "tool_configuration_started",
@@ -159,6 +194,8 @@ pub fn track_behavior_event(
         "attachment_processing_completed" => "attachment_processing_completed",
         "knowledge_import_started" => "knowledge_import_started",
         "knowledge_import_completed" => "knowledge_import_completed",
+        "code_mode_opened" => "code_mode_opened",
+        "team_mode_opened" => "team_mode_opened",
         "onboarding_started" => "onboarding_started",
         "onboarding_completed" => "onboarding_completed",
         "onboarding_skipped" => "onboarding_skipped",
@@ -230,7 +267,10 @@ pub fn track_behavior_event(
         event = event.string("error_category", value);
     }
     if let Some(value) = request.provider_key {
-        event = event.string("provider_key", value);
+        event = event.string(
+            "provider_key",
+            crate::features::behavior_telemetry::provider_registry_key(&value),
+        );
     }
     if let Some(value) = request.provider_configured {
         event = event.boolean("provider_configured", value);
@@ -276,6 +316,9 @@ pub fn track_behavior_event(
     }
     if let Some(value) = request.export_format {
         event = event.string("export_format", value);
+    }
+    if let Some(value) = request.member_count_bucket {
+        event = event.string("member_count_bucket", value);
     }
     crate::features::behavior_telemetry::track(&app, event);
     Ok(())
