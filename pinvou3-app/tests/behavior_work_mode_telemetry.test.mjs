@@ -46,8 +46,8 @@ test('backend replaces source ids with period-scoped pseudonyms and deterministi
   assert.match(telemetry, /fn scheduled_subject_id/);
   assert.match(telemetry, /collection_period_id/);
   assert.match(telemetry, /Sha256::new\(\)/);
-  assert.match(telemetry, /event\.event_id = scheduled_subject_id\(&telemetry, "scheduled_created"/);
-  assert.match(telemetry, /event\.event_id = scheduled_subject_id\(&telemetry, "scheduled_finished"/);
+  assert.match(telemetry, /event\.event_id = scheduled_subject_id\(&lease, "scheduled_created"/);
+  assert.match(telemetry, /event\.event_id = scheduled_subject_id\(&lease, "scheduled_finished"/);
   assert.doesNotMatch(telemetry, /string\("scheduled_task_id",\s*source_task_id\)/);
   assert.doesNotMatch(telemetry, /string\("operation_id",\s*source_run_id\)/);
 });

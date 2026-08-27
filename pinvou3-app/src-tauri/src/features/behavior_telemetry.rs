@@ -1,7 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::platform::{filesystem, paths};
 
-const STATE_VERSION: u8 = 5;
+const STATE_VERSION: u8 = 6;
 const CONTROLLED_PROVIDER_KEYS: &[&str] = &[
     "openai",
     "anthropic",
@@ -183,14 +183,15 @@ pub struct BehaviorTelemetry {
     credential_gate: Arc<Mutex<()>>,
     control_gate: Arc<Mutex<()>>,
     collecting: Arc<AtomicBool>,
+    authorization_generation: Arc<AtomicU64>,
     collection_period_id: Arc<RwLock<Option<String>>>,
     outbox: Arc<StdMutex<Outbox>>,
     tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
-    team_sessions: Arc<StdMutex<HashSet<String>>>,
+    team_sessions: Arc<StdMutex<HashMap<String, CollectionLease>>>,
     tool_calls: Arc<StdMutex<HashMap<String, ToolOperation>>>,
-    voice_submissions: Arc<StdMutex<HashSet<String>>>,
+    voice_submissions: Arc<StdMutex<HashMap<String, CollectionLease>>>,
     artifacts: Arc<StdMutex<HashMap<String, ArtifactTelemetryRecord>>>,
-    latest_turns: Arc<StdMutex<HashMap<String, String>>>,
+    latest_turns: Arc<StdMutex<HashMap<String, TurnTelemetryRecord>>>,
     event_tx: Option<mpsc::Sender<()>>,
     control_tx: Option<mpsc::Sender<()>>,
 }
@@ -206,6 +207,31 @@ struct TaskAttempt {
     input_type: String,
     has_attachment: bool,
     first_output_emitted: bool,
+    #[serde(default)]
+    generation: u64,
+    #[serde(default)]
+    collection_period_id: String,
+}
+
+impl TaskAttempt {
+    fn lease(&self) -> CollectionLease {
+        CollectionLease {
+            generation: self.generation,
+            collection_period_id: self.collection_period_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollectionLease {
+    generation: u64,
+    collection_period_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct TurnTelemetryRecord {
+    turn_id: String,
+    lease: CollectionLease,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +239,7 @@ struct ArtifactTelemetryRecord {
     session_id: String,
     turn_id: String,
     artifact_type: String,
+    lease: CollectionLease,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +249,7 @@ struct ToolOperation {
     turn_id: String,
     tool_key: &'static str,
     tool_type: &'static str,
+    lease: CollectionLease,
 }
 
 pub struct ToolInstallGuard {
@@ -230,6 +258,7 @@ pub struct ToolInstallGuard {
     started_at: u64,
     tool_key: &'static str,
     tool_type: &'static str,
+    lease: Option<CollectionLease>,
     completed: bool,
 }
 
@@ -252,7 +281,12 @@ impl ToolInstallGuard {
         if let Some(category) = error_category {
             event = event.string("error_category", category);
         }
-        track(&self.app, event);
+        if let (Some(telemetry), Some(lease)) = (
+            self.app.try_state::<BehaviorTelemetry>(),
+            self.lease.as_ref(),
+        ) {
+            telemetry.track_for_lease(event, lease);
+        }
         self.completed = true;
     }
 }
@@ -332,6 +366,7 @@ struct RetiredEndpointCredentials {
 struct CollectionControl {
     enabled: bool,
     collection_period_id: Option<String>,
+    generation: u64,
     cohort_started: bool,
     pending_request: Option<PendingControlRequest>,
     pending_deletions: Vec<PendingEndpointDeletion>,
@@ -379,6 +414,8 @@ pub struct BehaviorTelemetryStatus {
 struct OutboxRecord {
     event_id: String,
     collection_period_id: String,
+    #[serde(default)]
+    generation: u64,
     enqueued_at: u64,
     #[serde(default)]
     delivery_attempt_count: u32,
@@ -664,10 +701,12 @@ impl Outbox {
         self.rewrite()
     }
 
-    fn retain_period(&mut self, period_id: Option<&str>) -> Result<()> {
+    fn retain_period(&mut self, period_id: Option<&str>, generation: u64) -> Result<()> {
         let before = self.records.len();
         self.records.retain(|record| {
-            period_id.is_some_and(|period_id| record.collection_period_id == period_id)
+            period_id.is_some_and(|period_id| {
+                record.collection_period_id == period_id && record.generation == generation
+            })
         });
         if self.records.len() != before {
             self.recalculate_bytes();
@@ -679,9 +718,10 @@ impl Outbox {
         Ok(())
     }
 
-    fn rebind_period(&mut self, period_id: &str) -> Result<()> {
+    fn rebind_period(&mut self, period_id: &str, generation: u64) -> Result<()> {
         for record in &mut self.records {
             record.collection_period_id = period_id.to_string();
+            record.generation = generation;
             if let Some(event) = record.event.as_object_mut() {
                 event.insert(
                     "collection_period_id".to_string(),
@@ -765,6 +805,9 @@ impl BehaviorTelemetry {
                 .then(|| state.control.collection_period_id.clone())
                 .flatten()
         });
+        let active_generation = persisted
+            .as_ref()
+            .map_or(0, |state| state.control.generation);
         let collecting = Arc::new(AtomicBool::new(
             runtime.enabled && state_healthy && active_period.is_some(),
         ));
@@ -773,11 +816,18 @@ impl BehaviorTelemetry {
             log::debug!("[pinvou3][behavior] failed to load outbox: {error:#}");
             Outbox::empty(outbox_path())
         });
-        if let Err(error) = loaded_outbox.retain_period(active_period.as_deref()) {
+        if let Err(error) = loaded_outbox.retain_period(active_period.as_deref(), active_generation)
+        {
             log::debug!("[pinvou3][behavior] failed to sanitize outbox period: {error:#}");
         }
         let outbox = Arc::new(StdMutex::new(loaded_outbox));
-        let recovered_tasks = load_task_attempts();
+        let recovered_tasks = load_task_attempts()
+            .into_iter()
+            .filter(|(_, attempt)| {
+                active_period.as_deref() == Some(attempt.collection_period_id.as_str())
+                    && attempt.generation == active_generation
+            })
+            .collect::<HashMap<_, _>>();
         let tasks = Arc::new(StdMutex::new(recovered_tasks.clone()));
         let state = Arc::new(Mutex::new(persisted));
         let state_healthy = Arc::new(AtomicBool::new(state_healthy));
@@ -807,12 +857,13 @@ impl BehaviorTelemetry {
             credential_gate,
             control_gate,
             collecting,
+            authorization_generation: Arc::new(AtomicU64::new(active_generation)),
             collection_period_id,
             outbox,
             tasks,
-            team_sessions: Arc::new(StdMutex::new(HashSet::new())),
+            team_sessions: Arc::new(StdMutex::new(HashMap::new())),
             tool_calls: Arc::new(StdMutex::new(HashMap::new())),
-            voice_submissions: Arc::new(StdMutex::new(HashSet::new())),
+            voice_submissions: Arc::new(StdMutex::new(HashMap::new())),
             artifacts: Arc::new(StdMutex::new(HashMap::new())),
             latest_turns: Arc::new(StdMutex::new(HashMap::new())),
             event_tx,
@@ -875,21 +926,17 @@ impl BehaviorTelemetry {
     }
 
     pub fn track(&self, event: BehaviorEvent) {
-        if !self.collecting.load(Ordering::Acquire) {
+        let Some(lease) = self.current_lease() else {
             return;
-        }
+        };
+        self.track_for_lease(event, &lease);
+    }
+
+    fn track_for_lease(&self, event: BehaviorEvent, lease: &CollectionLease) {
         let Some(tx) = &self.event_tx else {
             return;
         };
-        let period_id = self
-            .collection_period_id
-            .read()
-            .ok()
-            .and_then(|value| value.clone());
-        let Some(period_id) = period_id else {
-            return;
-        };
-        let record = match self.prepare_record(event, period_id) {
+        let record = match self.prepare_record(event, lease) {
             Ok(record) => record,
             Err(error) => {
                 log::debug!("[pinvou3][behavior] event serialization skipped: {error:#}");
@@ -901,7 +948,7 @@ impl BehaviorTelemetry {
             .lock()
             .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))
             .and_then(|mut outbox| {
-                if !self.collecting.load(Ordering::Acquire) {
+                if !self.lease_is_current(lease) {
                     return Ok(false);
                 }
                 outbox.enqueue(record)?;
@@ -918,7 +965,80 @@ impl BehaviorTelemetry {
         let _ = tx.try_send(());
     }
 
-    fn prepare_record(&self, event: BehaviorEvent, period_id: String) -> Result<OutboxRecord> {
+    fn current_lease(&self) -> Option<CollectionLease> {
+        let generation = self.authorization_generation.load(Ordering::Acquire);
+        if !self.collecting.load(Ordering::Acquire) {
+            return None;
+        }
+        let collection_period_id = self.collection_period_id.read().ok()?.clone()?;
+        let lease = CollectionLease {
+            generation,
+            collection_period_id,
+        };
+        self.lease_is_current(&lease).then_some(lease)
+    }
+
+    fn lease_is_current(&self, lease: &CollectionLease) -> bool {
+        lease_matches_authorization(
+            &self.collecting,
+            &self.authorization_generation,
+            &self.collection_period_id,
+            lease,
+        )
+    }
+
+    fn invalidate_generation(&self) -> u64 {
+        self.authorization_generation
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1)
+    }
+
+    fn rebind_lifecycle_state(&self, generation: u64, period_id: &str) -> Result<()> {
+        let rebind = |lease: &mut CollectionLease| {
+            if lease.generation == generation {
+                lease.collection_period_id = period_id.to_string();
+            }
+        };
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("behavior task state lock poisoned"))?;
+        for attempt in tasks.values_mut() {
+            if attempt.generation == generation {
+                attempt.collection_period_id = period_id.to_string();
+            }
+        }
+        persist_task_attempts(&tasks)?;
+        drop(tasks);
+        if let Ok(mut sessions) = self.team_sessions.lock() {
+            sessions.values_mut().for_each(rebind);
+        }
+        if let Ok(mut calls) = self.tool_calls.lock() {
+            calls
+                .values_mut()
+                .for_each(|operation| rebind(&mut operation.lease));
+        }
+        if let Ok(mut submissions) = self.voice_submissions.lock() {
+            submissions.values_mut().for_each(rebind);
+        }
+        if let Ok(mut artifacts) = self.artifacts.lock() {
+            artifacts
+                .values_mut()
+                .for_each(|record| rebind(&mut record.lease));
+        }
+        if let Ok(mut turns) = self.latest_turns.lock() {
+            turns
+                .values_mut()
+                .for_each(|record| rebind(&mut record.lease));
+        }
+        Ok(())
+    }
+
+    fn prepare_record(
+        &self,
+        event: BehaviorEvent,
+        lease: &CollectionLease,
+    ) -> Result<OutboxRecord> {
         validate_client_event_fields(&event)?;
         let event_id = event.event_id.clone();
         let mut value = serde_json::to_value(event).context("serialize behavior event")?;
@@ -927,7 +1047,10 @@ impl BehaviorTelemetry {
             .context("behavior event must serialize as an object")?;
         object.insert("schema_version".to_string(), json!(1));
         object.insert("event_source".to_string(), json!("client"));
-        object.insert("collection_period_id".to_string(), json!(period_id.clone()));
+        object.insert(
+            "collection_period_id".to_string(),
+            json!(lease.collection_period_id.clone()),
+        );
         object.insert("producer".to_string(), json!("pinvou_agent"));
         object.insert(
             "producer_version".to_string(),
@@ -943,7 +1066,8 @@ impl BehaviorTelemetry {
         object.insert("locale".to_string(), json!(self.runtime.locale.clone()));
         Ok(OutboxRecord {
             event_id,
-            collection_period_id: period_id,
+            collection_period_id: lease.collection_period_id.clone(),
+            generation: lease.generation,
             enqueued_at: now_ms(),
             delivery_attempt_count: 0,
             last_reason_code: None,
@@ -964,6 +1088,7 @@ impl BehaviorTelemetry {
             credential_gate: self.credential_gate.clone(),
             control_gate: self.control_gate.clone(),
             collecting: self.collecting.clone(),
+            authorization_generation: self.authorization_generation.clone(),
             collection_period_id: self.collection_period_id.clone(),
             outbox: self.outbox.clone(),
             tasks: self.tasks.clone(),
@@ -1137,17 +1262,19 @@ impl BehaviorTelemetry {
 
     async fn handle_authoritative_deletion_locked(&self, deleted: &Credentials) -> Result<bool> {
         let mut guard = self.state.lock().await;
-        let Some(fresh) = guard
-            .as_ref()
-            .and_then(|state| state_after_authoritative_deletion(state, &self.runtime, deleted))
-        else {
+        let Some(state) = guard.as_ref() else {
             return Ok(false);
         };
+        if !deleted_credentials_match(state, deleted) {
+            return Ok(false);
+        }
 
+        let generation = self.invalidate_generation();
         self.collecting.store(false, Ordering::Release);
         if let Ok(mut period) = self.collection_period_id.write() {
             *period = None;
         }
+        let fresh = state_after_authoritative_deletion(state, &self.runtime, generation);
 
         let mut failures = Vec::new();
         if let Err(error) = persist_state(&fresh) {
@@ -1281,19 +1408,24 @@ impl BehaviorTelemetry {
         {
             return Ok(false);
         }
+        self.collecting.store(false, Ordering::Release);
+        let generation = self.authorization_generation.load(Ordering::Acquire);
         self.outbox
             .lock()
             .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
-            .rebind_period(&started.collection_period_id)?;
+            .rebind_period(&started.collection_period_id, generation)?;
+        self.rebind_lifecycle_state(generation, &started.collection_period_id)?;
         state.device_id = Some(renewed.device_id);
         state.device_token = Some(renewed.device_token);
         state.control.enabled = true;
         state.control.collection_period_id = Some(started.collection_period_id.clone());
+        state.control.generation = generation;
         state.control.pending_request = None;
         persist_state(state)?;
         if let Ok(mut period) = self.collection_period_id.write() {
             *period = Some(started.collection_period_id);
         }
+        self.collecting.store(true, Ordering::Release);
         Ok(true)
     }
 
@@ -1361,8 +1493,10 @@ impl BehaviorTelemetry {
             let mut guard = self.state.lock().await;
             let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
             let emit_cohort = !state.control.cohort_started;
+            let generation = self.invalidate_generation();
             state.control.enabled = true;
             state.control.collection_period_id = Some(response.collection_period_id);
+            state.control.generation = generation;
             state.control.pending_request = None;
             state.control.cohort_started = true;
             persist_state(state)?;
@@ -1389,6 +1523,7 @@ impl BehaviorTelemetry {
                 );
             }
         } else {
+            let generation = self.invalidate_generation();
             self.collecting.store(false, Ordering::Release);
             if let Ok(mut period) = self.collection_period_id.write() {
                 *period = None;
@@ -1399,6 +1534,12 @@ impl BehaviorTelemetry {
             if let Ok(mut tasks) = self.tasks.lock() {
                 tasks.clear();
                 persist_task_attempts(&tasks)?;
+            }
+            if let Ok(mut sessions) = self.team_sessions.lock() {
+                sessions.clear();
+            }
+            if let Ok(mut calls) = self.tool_calls.lock() {
+                calls.clear();
             }
             if let Ok(mut submissions) = self.voice_submissions.lock() {
                 submissions.clear();
@@ -1412,6 +1553,7 @@ impl BehaviorTelemetry {
             let mut guard = self.state.lock().await;
             if let Some(state) = guard.as_mut() {
                 state.control.enabled = false;
+                state.control.generation = generation;
                 if let Some(period_id) = state.control.collection_period_id.clone() {
                     state.control.pending_request = Some(PendingControlRequest {
                         kind: PendingControlKind::End,
@@ -1451,6 +1593,7 @@ impl BehaviorTelemetry {
 
     pub async fn delete_remote_data(&self) -> Result<BehaviorTelemetryStatus> {
         let _control_guard = self.control_gate.lock().await;
+        let generation = self.invalidate_generation();
         self.collecting.store(false, Ordering::Release);
         if let Ok(mut period) = self.collection_period_id.write() {
             *period = None;
@@ -1460,6 +1603,7 @@ impl BehaviorTelemetry {
             let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
             state.control.enabled = false;
             state.control.collection_period_id = None;
+            state.control.generation = generation;
             state.control.pending_request = None;
             state.control.pending_deletions = state.deletion_targets();
             persist_state(state)?;
@@ -1630,6 +1774,7 @@ impl BehaviorTelemetry {
                 }
                 *guard = Some(PersistedState {
                     control: CollectionControl {
+                        generation: self.authorization_generation.load(Ordering::Acquire),
                         last_deletion_request_id: deletion_request_id,
                         ..CollectionControl::default()
                     },
@@ -1868,6 +2013,21 @@ impl BehaviorTelemetry {
     }
 }
 
+fn lease_matches_authorization(
+    collecting: &AtomicBool,
+    generation: &AtomicU64,
+    period: &RwLock<Option<String>>,
+    lease: &CollectionLease,
+) -> bool {
+    collecting.load(Ordering::Acquire)
+        && generation.load(Ordering::Acquire) == lease.generation
+        && period
+            .read()
+            .is_ok_and(|current| current.as_deref() == Some(lease.collection_period_id.as_str()))
+        && collecting.load(Ordering::Acquire)
+        && generation.load(Ordering::Acquire) == lease.generation
+}
+
 #[derive(Debug, Deserialize)]
 struct RegistrationResponse {
     device_id: String,
@@ -1910,15 +2070,21 @@ async fn telemetry_error_code(response: reqwest::Response) -> String {
         .unwrap_or_else(|_| "unknown_credential_error".to_string())
 }
 
+fn deleted_credentials_match(state: &PersistedState, deleted: &Credentials) -> bool {
+    state.behavior_events_url == deleted.behavior_events_url
+        && state.device_id.as_deref() == Some(deleted.device_id.as_str())
+        && state.device_token.as_deref() == Some(deleted.device_token.as_str())
+}
+
 fn state_after_authoritative_deletion(
     state: &PersistedState,
     runtime: &RuntimeConfig,
-    deleted: &Credentials,
-) -> Option<PersistedState> {
-    (state.behavior_events_url == deleted.behavior_events_url
-        && state.device_id.as_deref() == Some(deleted.device_id.as_str())
-        && state.device_token.as_deref() == Some(deleted.device_token.as_str()))
-    .then(|| PersistedState::fresh(runtime))
+    generation: u64,
+) -> PersistedState {
+    debug_assert!(generation > state.control.generation);
+    let mut fresh = PersistedState::fresh(runtime);
+    fresh.control.generation = generation;
+    fresh
 }
 
 fn endpoint_matches_runtime(state: &PersistedState, runtime: &RuntimeConfig) -> bool {
@@ -2191,8 +2357,13 @@ pub fn track(app: &tauri::AppHandle, event: BehaviorEvent) {
 
 pub fn register_team_session(app: &tauri::AppHandle, session_id: &str) {
     if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
+        let Some(lease) = telemetry.current_lease() else {
+            return;
+        };
         if let Ok(mut sessions) = telemetry.team_sessions.lock() {
-            sessions.insert(session_id.to_string());
+            if telemetry.lease_is_current(&lease) {
+                sessions.insert(session_id.to_string(), lease);
+            }
         }
     }
 }
@@ -2200,10 +2371,11 @@ pub fn register_team_session(app: &tauri::AppHandle, session_id: &str) {
 pub fn is_team_session(app: &tauri::AppHandle, session_id: &str) -> bool {
     app.try_state::<BehaviorTelemetry>()
         .is_some_and(|telemetry| {
-            telemetry
-                .team_sessions
-                .lock()
-                .is_ok_and(|sessions| sessions.contains(session_id))
+            telemetry.team_sessions.lock().is_ok_and(|sessions| {
+                sessions
+                    .get(session_id)
+                    .is_some_and(|lease| telemetry.lease_is_current(lease))
+            })
         })
 }
 
@@ -2225,6 +2397,10 @@ pub fn begin_task_submission(
     input_type: &str,
     has_attachment: bool,
 ) -> TaskSubmissionGuard {
+    let telemetry = app.try_state::<BehaviorTelemetry>();
+    let lease = telemetry
+        .as_ref()
+        .and_then(|telemetry| telemetry.current_lease());
     let attempt = TaskAttempt {
         attempt_id: token("attempt_", 16),
         submitted_at: now_ms(),
@@ -2235,18 +2411,28 @@ pub fn begin_task_submission(
         input_type: input_type.to_string(),
         has_attachment,
         first_output_emitted: false,
+        generation: lease.as_ref().map_or(0, |lease| lease.generation),
+        collection_period_id: lease
+            .as_ref()
+            .map_or_else(String::new, |lease| lease.collection_period_id.clone()),
     };
-    if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
-        if telemetry.collecting.load(Ordering::Acquire) {
-            if let Ok(mut tasks) = telemetry.tasks.lock() {
+    if let (Some(telemetry), Some(lease)) = (telemetry, lease) {
+        let inserted = if let Ok(mut tasks) = telemetry.tasks.lock() {
+            if telemetry.lease_is_current(&lease) {
                 tasks.insert(session_id.to_string(), attempt.clone());
                 let _ = persist_task_attempts(&tasks);
+                true
+            } else {
+                false
             }
-            telemetry.track(task_fields(
-                BehaviorEvent::new("task_submitted"),
-                session_id,
-                &attempt,
-            ));
+        } else {
+            false
+        };
+        if inserted {
+            telemetry.track_for_lease(
+                task_fields(BehaviorEvent::new("task_submitted"), session_id, &attempt),
+                &lease,
+            );
         }
     }
     TaskSubmissionGuard {
@@ -2265,26 +2451,35 @@ pub fn begin_task_retry(
     has_attachment: bool,
     retry_reason: &str,
 ) -> TaskSubmissionGuard {
-    let source_turn_id = app
-        .try_state::<BehaviorTelemetry>()
-        .and_then(|telemetry| telemetry.latest_turns.lock().ok()?.get(session_id).cloned());
+    let source_turn = app.try_state::<BehaviorTelemetry>().and_then(|telemetry| {
+        let record = telemetry
+            .latest_turns
+            .lock()
+            .ok()?
+            .get(session_id)
+            .cloned()?;
+        telemetry.lease_is_current(&record.lease).then_some(record)
+    });
     let guard = begin_task_submission(app, session_id, mode, "user", input_type, has_attachment);
-    let Some(source_turn_id) = source_turn_id else {
+    let Some(source_turn) = source_turn else {
         return guard;
     };
     if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
-        let attempt_id = telemetry.tasks.lock().ok().and_then(|tasks| {
-            tasks
-                .get(session_id)
-                .map(|attempt| attempt.attempt_id.clone())
+        let attempt = telemetry.tasks.lock().ok().and_then(|tasks| {
+            tasks.get(session_id).cloned().filter(|attempt| {
+                attempt.generation == source_turn.lease.generation
+                    && attempt.collection_period_id == source_turn.lease.collection_period_id
+                    && telemetry.lease_is_current(&attempt.lease())
+            })
         });
-        if let Some(attempt_id) = attempt_id {
-            telemetry.track(
+        if let Some(attempt) = attempt {
+            telemetry.track_for_lease(
                 BehaviorEvent::new("task_retry_requested")
                     .session(session_id)
-                    .string("attempt_id", attempt_id)
-                    .string("source_turn_id", source_turn_id)
+                    .string("attempt_id", &attempt.attempt_id)
+                    .string("source_turn_id", source_turn.turn_id)
                     .string("retry_reason", retry_reason_key(retry_reason)),
+                &attempt.lease(),
             );
         }
     }
@@ -2301,9 +2496,6 @@ pub fn track_voice_message_submitted(
     let telemetry = app
         .try_state::<BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
-    if !telemetry.collecting.load(Ordering::Acquire) {
-        return Ok(());
-    }
     let attempt = telemetry
         .tasks
         .lock()
@@ -2311,6 +2503,10 @@ pub fn track_voice_message_submitted(
         .get(session_id)
         .cloned()
         .ok_or_else(|| "no active task attempt for voice submission".to_string())?;
+    let lease = attempt.lease();
+    if !telemetry.lease_is_current(&lease) {
+        return Ok(());
+    }
     let dedup_key = format!("{operation_id}:{}", attempt.attempt_id);
     let mut submissions = telemetry
         .voice_submissions
@@ -2319,15 +2515,17 @@ pub fn track_voice_message_submitted(
     if submissions.len() >= OUTBOX_MAX_EVENTS {
         submissions.clear();
     }
-    if !submissions.insert(dedup_key) {
+    if !telemetry.lease_is_current(&lease) || submissions.contains_key(&dedup_key) {
         return Ok(());
     }
+    submissions.insert(dedup_key, lease.clone());
     drop(submissions);
-    telemetry.track(
+    telemetry.track_for_lease(
         BehaviorEvent::new("voice_message_submitted")
             .session(session_id)
             .string("operation_id", operation_id)
             .string("attempt_id", attempt.attempt_id),
+        &lease,
     );
     Ok(())
 }
@@ -2355,9 +2553,6 @@ pub fn track_scene_submitted(
     let telemetry = app
         .try_state::<BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
-    if !telemetry.collecting.load(Ordering::Acquire) {
-        return Ok(());
-    }
     let attempt = telemetry
         .tasks
         .lock()
@@ -2365,6 +2560,10 @@ pub fn track_scene_submitted(
         .get(session_id)
         .cloned()
         .ok_or_else(|| "no active task attempt for scene submission".to_string())?;
+    let lease = attempt.lease();
+    if !telemetry.lease_is_current(&lease) {
+        return Ok(());
+    }
     let dedup_key = format!("scene:{}", attempt.attempt_id);
     let mut submissions = telemetry
         .voice_submissions
@@ -2373,16 +2572,18 @@ pub fn track_scene_submitted(
     if submissions.len() >= OUTBOX_MAX_EVENTS {
         submissions.clear();
     }
-    if !submissions.insert(dedup_key) {
+    if !telemetry.lease_is_current(&lease) || submissions.contains_key(&dedup_key) {
         return Ok(());
     }
+    submissions.insert(dedup_key, lease.clone());
     drop(submissions);
     let (scene_l1, scene_l2) = scene_registry_pair(scene_l1, scene_l2);
-    telemetry.track(
+    telemetry.track_for_lease(
         BehaviorEvent::new("scene_submitted")
             .session(session_id)
             .string("attempt_id", attempt.attempt_id)
             .scene(scene_l1, scene_l2),
+        &lease,
     );
     Ok(())
 }
@@ -2414,21 +2615,15 @@ fn export_format_key(value: &str) -> &'static str {
 }
 
 fn scheduled_subject_id(
-    telemetry: &BehaviorTelemetry,
+    lease: &CollectionLease,
     namespace: &str,
     source_id: &str,
 ) -> Result<String, String> {
-    let collection_period_id = telemetry
-        .collection_period_id
-        .read()
-        .map_err(|_| "behavior collection period is unavailable".to_string())?
-        .clone()
-        .ok_or_else(|| "behavior collection is not active".to_string())?;
     let mut digest = Sha256::new();
     digest.update(b"pinvou-behavior-v1\0");
     digest.update(namespace.as_bytes());
     digest.update(b"\0");
-    digest.update(collection_period_id.as_bytes());
+    digest.update(lease.collection_period_id.as_bytes());
     digest.update(b"\0");
     digest.update(source_id.as_bytes());
     let hex = crate::platform::encoding::hex_lower(&digest.finalize());
@@ -2496,9 +2691,9 @@ pub fn track_response_feedback_changed(
     let telemetry = app
         .try_state::<BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
-    if !telemetry.collecting.load(Ordering::Acquire) {
+    let Some(lease) = telemetry.current_lease() else {
         return Ok(());
-    }
+    };
     let action = feedback_action_key(action)?;
     let rating = feedback_rating_key(rating)?;
     let reason = feedback_reason_key(reason)?;
@@ -2506,7 +2701,7 @@ pub fn track_response_feedback_changed(
         return Err("feedback action and state do not match".to_string());
     }
     let source = format!("{session_id}\u{1f}{turn_id}");
-    let feedback_id = scheduled_subject_id(&telemetry, "feedback", &source)?;
+    let feedback_id = scheduled_subject_id(&lease, "feedback", &source)?;
     let mut event = BehaviorEvent::new("response_feedback_changed")
         .session(session_id)
         .turn(turn_id)
@@ -2518,7 +2713,7 @@ pub fn track_response_feedback_changed(
     if let Some(reason) = reason {
         event = event.string("reason_code", reason);
     }
-    telemetry.track(event);
+    telemetry.track_for_lease(event, &lease);
     Ok(())
 }
 
@@ -2531,14 +2726,15 @@ pub fn track_response_copied(
     let telemetry = app
         .try_state::<BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
-    if !telemetry.collecting.load(Ordering::Acquire) {
+    let Some(lease) = telemetry.current_lease() else {
         return Ok(());
-    }
-    telemetry.track(
+    };
+    telemetry.track_for_lease(
         BehaviorEvent::new("response_copied")
             .session(session_id)
             .turn(turn_id)
             .string("content_type", response_content_type_key(content_type)),
+        &lease,
     );
     Ok(())
 }
@@ -2594,16 +2790,16 @@ pub fn track_scheduled_task_created(
     let telemetry = app
         .try_state::<BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
-    if !telemetry.collecting.load(Ordering::Acquire) {
+    let Some(lease) = telemetry.current_lease() else {
         return Ok(());
-    }
-    let task_id = scheduled_subject_id(&telemetry, "scheduled", source_task_id)?;
+    };
+    let task_id = scheduled_subject_id(&lease, "scheduled", source_task_id)?;
     let mut event = BehaviorEvent::new("scheduled_task_created")
         .string("scheduled_task_id", &task_id)
         .string("schedule_type", scheduled_schedule_type(rrule))
         .string("task_type", scheduled_task_type(task_type));
-    event.event_id = scheduled_subject_id(&telemetry, "scheduled_created", source_task_id)?;
-    telemetry.track(event);
+    event.event_id = scheduled_subject_id(&lease, "scheduled_created", source_task_id)?;
+    telemetry.track_for_lease(event, &lease);
     Ok(())
 }
 
@@ -2618,12 +2814,12 @@ pub fn track_scheduled_run_finished(
     let telemetry = app
         .try_state::<BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
-    if !telemetry.collecting.load(Ordering::Acquire) {
+    let Some(lease) = telemetry.current_lease() else {
         return Ok(());
-    }
+    };
     let status = scheduled_status(status)?;
-    let task_id = scheduled_subject_id(&telemetry, "scheduled", source_task_id)?;
-    let operation_id = scheduled_subject_id(&telemetry, "scheduled_run", source_run_id)?;
+    let task_id = scheduled_subject_id(&lease, "scheduled", source_task_id)?;
+    let operation_id = scheduled_subject_id(&lease, "scheduled_run", source_run_id)?;
     let mut event = BehaviorEvent::new("scheduled_task_run_finished")
         .string("scheduled_task_id", task_id)
         .string("operation_id", operation_id)
@@ -2640,8 +2836,8 @@ pub fn track_scheduled_run_finished(
             },
         );
     }
-    event.event_id = scheduled_subject_id(&telemetry, "scheduled_finished", source_run_id)?;
-    telemetry.track(event);
+    event.event_id = scheduled_subject_id(&lease, "scheduled_finished", source_run_id)?;
+    telemetry.track_for_lease(event, &lease);
     Ok(())
 }
 
@@ -2654,35 +2850,42 @@ pub fn track_artifact_created(
     let telemetry = app
         .try_state::<BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
-    if !telemetry.collecting.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    let turn_id = telemetry
+    let turn = telemetry
         .tasks
         .lock()
         .map_err(|_| "behavior task state is unavailable".to_string())?
         .get(session_id)
-        .and_then(|attempt| attempt.turn_id.clone());
-    let turn_id = turn_id
+        .and_then(|attempt| {
+            let turn_id = attempt.turn_id.clone()?;
+            telemetry
+                .lease_is_current(&attempt.lease())
+                .then(|| TurnTelemetryRecord {
+                    turn_id,
+                    lease: attempt.lease(),
+                })
+        });
+    let turn = turn
         .or_else(|| {
             telemetry
                 .latest_turns
                 .lock()
                 .ok()
                 .and_then(|turns| turns.get(session_id).cloned())
+                .filter(|record| telemetry.lease_is_current(&record.lease))
         })
         .ok_or_else(|| "no admitted turn for artifact creation".to_string())?;
     let artifact_type = artifact_type_key(artifact_type);
     let record = ArtifactTelemetryRecord {
         session_id: session_id.to_string(),
-        turn_id: turn_id.clone(),
+        turn_id: turn.turn_id.clone(),
         artifact_type: artifact_type.to_string(),
+        lease: turn.lease.clone(),
     };
     let mut artifacts = telemetry
         .artifacts
         .lock()
         .map_err(|_| "artifact telemetry state is unavailable".to_string())?;
-    if artifacts.contains_key(artifact_id) {
+    if !telemetry.lease_is_current(&turn.lease) || artifacts.contains_key(artifact_id) {
         return Ok(());
     }
     if artifacts.len() >= OUTBOX_MAX_EVENTS {
@@ -2690,12 +2893,13 @@ pub fn track_artifact_created(
     }
     artifacts.insert(artifact_id.to_string(), record);
     drop(artifacts);
-    telemetry.track(
+    telemetry.track_for_lease(
         BehaviorEvent::new("artifact_created")
             .session(session_id)
-            .turn(turn_id)
+            .turn(turn.turn_id)
             .string("artifact_id", artifact_id)
             .string("artifact_type", artifact_type),
+        &turn.lease,
     );
     Ok(())
 }
@@ -2708,9 +2912,6 @@ pub fn track_artifact_exported(
     let telemetry = app
         .try_state::<BehaviorTelemetry>()
         .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
-    if !telemetry.collecting.load(Ordering::Acquire) {
-        return Ok(());
-    }
     let record = telemetry
         .artifacts
         .lock()
@@ -2718,13 +2919,17 @@ pub fn track_artifact_exported(
         .get(artifact_id)
         .cloned()
         .ok_or_else(|| "unknown artifact telemetry id".to_string())?;
-    telemetry.track(
+    if !telemetry.lease_is_current(&record.lease) {
+        return Ok(());
+    }
+    telemetry.track_for_lease(
         BehaviorEvent::new("artifact_exported")
             .session(record.session_id)
             .turn(record.turn_id)
             .string("artifact_id", artifact_id)
             .string("artifact_type", record.artifact_type)
             .string("export_format", export_format_key(export_format)),
+        &record.lease,
     );
     Ok(())
 }
@@ -2741,7 +2946,9 @@ pub fn reject_task_submission(
     };
     let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
         let removed = if tasks.get(session_id).is_some_and(|attempt| {
-            attempt.attempt_id == attempt_id && attempt.admitted_at.is_none()
+            attempt.attempt_id == attempt_id
+                && attempt.admitted_at.is_none()
+                && telemetry.lease_is_current(&attempt.lease())
         }) {
             tasks.remove(session_id)
         } else {
@@ -2753,10 +2960,11 @@ pub fn reject_task_submission(
         removed
     });
     if let Some(attempt) = attempt {
-        telemetry.track(
+        telemetry.track_for_lease(
             task_fields(BehaviorEvent::new("task_rejected"), session_id, &attempt)
                 .string("error_category", error_category)
                 .stage(stage),
+            &attempt.lease(),
         );
     }
 }
@@ -2768,7 +2976,7 @@ pub fn admit_task(app: &tauri::AppHandle, session_id: &str, turn_id: &str) {
     let admitted_at = now_ms();
     let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
         let attempt = tasks.get_mut(session_id)?;
-        if attempt.admitted_at.is_some() {
+        if attempt.admitted_at.is_some() || !telemetry.lease_is_current(&attempt.lease()) {
             return None;
         }
         attempt.admitted_at = Some(admitted_at);
@@ -2778,19 +2986,30 @@ pub fn admit_task(app: &tauri::AppHandle, session_id: &str, turn_id: &str) {
         Some(result)
     });
     if let Some(attempt) = attempt {
+        let lease = attempt.lease();
         if let Ok(mut turns) = telemetry.latest_turns.lock() {
+            if !telemetry.lease_is_current(&lease) {
+                return;
+            }
             if turns.len() >= OUTBOX_MAX_EVENTS && !turns.contains_key(session_id) {
                 turns.clear();
             }
-            turns.insert(session_id.to_string(), turn_id.to_string());
+            turns.insert(
+                session_id.to_string(),
+                TurnTelemetryRecord {
+                    turn_id: turn_id.to_string(),
+                    lease: lease.clone(),
+                },
+            );
         }
-        telemetry.track(
+        telemetry.track_for_lease(
             task_fields(BehaviorEvent::new("task_admitted"), session_id, &attempt)
                 .turn(turn_id)
                 .integer(
                     "queue_duration_ms",
                     admitted_at.saturating_sub(attempt.submitted_at),
                 ),
+            &lease,
         );
     }
 }
@@ -2802,7 +3021,10 @@ pub fn task_first_output(app: &tauri::AppHandle, session_id: &str, turn_id: &str
     let now = now_ms();
     let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
         let attempt = tasks.get_mut(session_id)?;
-        if attempt.turn_id.as_deref() != Some(turn_id) || attempt.first_output_emitted {
+        if attempt.turn_id.as_deref() != Some(turn_id)
+            || attempt.first_output_emitted
+            || !telemetry.lease_is_current(&attempt.lease())
+        {
             return None;
         }
         attempt.first_output_emitted = true;
@@ -2811,7 +3033,7 @@ pub fn task_first_output(app: &tauri::AppHandle, session_id: &str, turn_id: &str
         Some(result)
     });
     if let Some(attempt) = attempt {
-        telemetry.track(
+        telemetry.track_for_lease(
             task_fields(
                 BehaviorEvent::new("task_first_output"),
                 session_id,
@@ -2820,6 +3042,7 @@ pub fn task_first_output(app: &tauri::AppHandle, session_id: &str, turn_id: &str
             .turn(turn_id)
             .string("output_type", "text")
             .integer("duration_ms", now.saturating_sub(attempt.submitted_at)),
+            &attempt.lease(),
         );
     }
 }
@@ -2833,9 +3056,9 @@ pub fn request_task_cancel(app: &tauri::AppHandle, session_id: &str) {
         .lock()
         .ok()
         .and_then(|tasks| tasks.get(session_id).cloned());
-    if let Some(attempt) = attempt {
+    if let Some(attempt) = attempt.filter(|attempt| telemetry.lease_is_current(&attempt.lease())) {
         if let Some(turn_id) = attempt.turn_id.as_deref() {
-            telemetry.track(
+            telemetry.track_for_lease(
                 BehaviorEvent::new("task_cancel_requested")
                     .session(session_id)
                     .string("attempt_id", &attempt.attempt_id)
@@ -2845,6 +3068,7 @@ pub fn request_task_cancel(app: &tauri::AppHandle, session_id: &str) {
                     } else {
                         "model"
                     }),
+                &attempt.lease(),
             );
         }
     }
@@ -2878,7 +3102,10 @@ pub fn finish_task(
         })
         .unwrap_or_default();
     for operation in dangling_tools {
-        telemetry.track(
+        if !telemetry.lease_is_current(&operation.lease) {
+            continue;
+        }
+        telemetry.track_for_lease(
             BehaviorEvent::new("tool_call_completed")
                 .session(session_id)
                 .turn(&operation.turn_id)
@@ -2895,12 +3122,16 @@ pub fn finish_task(
                         "tool_error"
                     },
                 ),
+            &operation.lease,
         );
     }
     let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
         let removed = if tasks
             .get(session_id)
             .is_some_and(|attempt| attempt.turn_id.as_deref() == Some(turn_id))
+            && tasks
+                .get(session_id)
+                .is_some_and(|attempt| telemetry.lease_is_current(&attempt.lease()))
         {
             tasks.remove(session_id)
         } else {
@@ -2919,7 +3150,7 @@ pub fn finish_task(
         if status != "success" {
             event = event.string("error_category", error_category.unwrap_or("unknown"));
         }
-        telemetry.track(event);
+        telemetry.track_for_lease(event, &attempt.lease());
     }
 }
 
@@ -2960,6 +3191,9 @@ pub fn track_tool_call_started(
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
+    let Some(lease) = telemetry.current_lease() else {
+        return;
+    };
     let tool_type = classify_tool(tool_name);
     let operation = ToolOperation {
         operation_id: token("toolop_", 16),
@@ -2967,23 +3201,25 @@ pub fn track_tool_call_started(
         turn_id: turn_id.to_string(),
         tool_key: tool_registry_key(tool_name),
         tool_type,
+        lease: lease.clone(),
     };
     if let Ok(mut calls) = telemetry.tool_calls.lock() {
         let key = tool_operation_key(session_id, call_id);
-        if calls.contains_key(&key) {
+        if !telemetry.lease_is_current(&lease) || calls.contains_key(&key) {
             return;
         }
         calls.insert(key, operation.clone());
     } else {
         return;
     }
-    telemetry.track(
+    telemetry.track_for_lease(
         BehaviorEvent::new("tool_call_started")
             .session(session_id)
             .turn(turn_id)
             .string("operation_id", &operation.operation_id)
             .integer("attempt_index", 1)
             .tool(operation.tool_key, operation.tool_key, tool_type),
+        &lease,
     );
 }
 
@@ -3007,6 +3243,9 @@ pub fn track_tool_call_completed(
     let Some(operation) = operation else {
         return;
     };
+    if !telemetry.lease_is_current(&operation.lease) {
+        return;
+    }
     let mut event = BehaviorEvent::new("tool_call_completed")
         .session(session_id)
         .turn(operation.turn_id.clone())
@@ -3018,7 +3257,7 @@ pub fn track_tool_call_completed(
     if !success {
         event = event.string("error_category", error_category.unwrap_or("tool_error"));
     }
-    telemetry.track(event);
+    telemetry.track_for_lease(event, &operation.lease);
 }
 
 pub fn begin_tool_install(
@@ -3029,19 +3268,25 @@ pub fn begin_tool_install(
     let started_at = now_ms();
     let operation_id = token("install_", 16);
     let tool_key = tool_registry_key(tool_name);
-    track(
-        app,
-        BehaviorEvent::new("tool_install_started")
-            .tool(tool_key, tool_key, tool_type)
-            .string("operation_id", &operation_id)
-            .integer("attempt_index", 1),
-    );
+    let lease = app
+        .try_state::<BehaviorTelemetry>()
+        .and_then(|telemetry| telemetry.current_lease());
+    if let (Some(telemetry), Some(lease)) = (app.try_state::<BehaviorTelemetry>(), lease.as_ref()) {
+        telemetry.track_for_lease(
+            BehaviorEvent::new("tool_install_started")
+                .tool(tool_key, tool_key, tool_type)
+                .string("operation_id", &operation_id)
+                .integer("attempt_index", 1),
+            lease,
+        );
+    }
     ToolInstallGuard {
         app: app.clone(),
         operation_id,
         started_at,
         tool_key,
         tool_type,
+        lease,
         completed: false,
     }
 }
@@ -3083,17 +3328,21 @@ pub fn track_model_used_keys(
     let attempt = telemetry.tasks.lock().ok().and_then(|tasks| {
         tasks
             .get(session_id)
-            .filter(|attempt| attempt.turn_id.as_deref() == Some(turn_id))
+            .filter(|attempt| {
+                attempt.turn_id.as_deref() == Some(turn_id)
+                    && telemetry.lease_is_current(&attempt.lease())
+            })
             .cloned()
     });
     if let Some(attempt) = attempt {
-        telemetry.track(
+        telemetry.track_for_lease(
             BehaviorEvent::new("model_used")
                 .session(session_id)
-                .string("attempt_id", attempt.attempt_id)
+                .string("attempt_id", &attempt.attempt_id)
                 .turn(turn_id)
                 .model(provider_registry_key(provider), model_registry_key(model))
                 .string("selection_source", selection_source),
+            &attempt.lease(),
         );
     }
 }
@@ -3247,6 +3496,7 @@ mod tests {
         OutboxRecord {
             event_id: id.to_string(),
             collection_period_id: period.to_string(),
+            generation: 1,
             enqueued_at,
             delivery_attempt_count: 0,
             last_reason_code: None,
@@ -3425,8 +3675,9 @@ mod tests {
         outbox
             .enqueue(outbox_record("event_rebind", "period_expired", now_ms()))
             .unwrap();
-        outbox.rebind_period("period_renewed").unwrap();
+        outbox.rebind_period("period_renewed", 2).unwrap();
         assert_eq!(outbox.records[0].collection_period_id, "period_renewed");
+        assert_eq!(outbox.records[0].generation, 2);
         assert_eq!(
             outbox.records[0].event["collection_period_id"],
             "period_renewed"
@@ -3494,7 +3745,7 @@ mod tests {
             .all(|record| record.event_id != "expired"));
         assert!(outbox.dropped_event_count >= 2);
 
-        outbox.retain_period(Some("different_period")).unwrap();
+        outbox.retain_period(Some("different_period"), 1).unwrap();
         assert!(outbox.records.is_empty());
     }
 
@@ -3715,22 +3966,97 @@ mod tests {
         state.device_token = Some("token_deleted".to_string());
         state.control.enabled = true;
         state.control.collection_period_id = Some("period_deleted".to_string());
+        state.control.generation = 7;
         let deleted = Credentials {
             device_id: "device_deleted".to_string(),
             device_token: "token_deleted".to_string(),
             behavior_events_url: runtime.behavior_events_url.clone(),
         };
 
-        let reset = state_after_authoritative_deletion(&state, &runtime, &deleted).unwrap();
+        assert!(deleted_credentials_match(&state, &deleted));
+        let reset = state_after_authoritative_deletion(&state, &runtime, 8);
         assert!(!reset.control.enabled);
         assert!(reset.control.collection_period_id.is_none());
         assert!(reset.device_id.is_none());
         assert!(reset.device_token.is_none());
+        assert_eq!(reset.control.generation, 8);
         assert_ne!(reset.installation_id, previous_installation_id);
         assert_ne!(reset.registration_secret, previous_registration_secret);
 
         let mut newer = state;
         newer.device_token = Some("token_newer".to_string());
-        assert!(state_after_authoritative_deletion(&newer, &runtime, &deleted).is_none());
+        assert!(!deleted_credentials_match(&newer, &deleted));
+    }
+
+    #[test]
+    fn stale_producer_cannot_write_after_delete_and_reauthorization_aba() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        let collecting = Arc::new(AtomicBool::new(true));
+        let generation = Arc::new(AtomicU64::new(11));
+        let period = Arc::new(RwLock::new(Some("period_old".to_string())));
+        let tasks = Arc::new(StdMutex::new(HashMap::<String, CollectionLease>::new()));
+        let outbox = Arc::new(StdMutex::new(Vec::<CollectionLease>::new()));
+        let old_lease = CollectionLease {
+            generation: 11,
+            collection_period_id: "period_old".to_string(),
+        };
+        let captured = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+
+        let producer = {
+            let collecting = collecting.clone();
+            let generation = generation.clone();
+            let period = period.clone();
+            let tasks = tasks.clone();
+            let outbox = outbox.clone();
+            let captured = captured.clone();
+            let resume = resume.clone();
+            let old_lease = old_lease.clone();
+            thread::spawn(move || {
+                captured.wait();
+                resume.wait();
+                let mut tasks = tasks.lock().unwrap();
+                if lease_matches_authorization(&collecting, &generation, &period, &old_lease) {
+                    tasks.insert("stale-session".to_string(), old_lease.clone());
+                }
+                drop(tasks);
+                let mut outbox = outbox.lock().unwrap();
+                if lease_matches_authorization(&collecting, &generation, &period, &old_lease) {
+                    outbox.push(old_lease);
+                }
+            })
+        };
+
+        captured.wait();
+        generation.store(12, Ordering::Release);
+        collecting.store(false, Ordering::Release);
+        *period.write().unwrap() = None;
+        tasks.lock().unwrap().clear();
+
+        generation.store(13, Ordering::Release);
+        *period.write().unwrap() = Some("period_new".to_string());
+        collecting.store(true, Ordering::Release);
+        resume.wait();
+        producer.join().unwrap();
+
+        assert!(tasks.lock().unwrap().is_empty());
+        assert!(outbox.lock().unwrap().is_empty());
+        assert!(!lease_matches_authorization(
+            &collecting,
+            &generation,
+            &period,
+            &old_lease,
+        ));
+        assert!(lease_matches_authorization(
+            &collecting,
+            &generation,
+            &period,
+            &CollectionLease {
+                generation: 13,
+                collection_period_id: "period_new".to_string(),
+            },
+        ));
     }
 }

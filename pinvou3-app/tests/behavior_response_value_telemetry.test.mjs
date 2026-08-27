@@ -20,7 +20,7 @@ test('feedback and copy only send controlled response metadata', () => {
   assert.doesNotMatch(actions.match(/eventName: 'response_copied'[^]*?\}\s*\}/)?.[0] || '', /text:|value:|content:/);
   assert.match(command, /track_response_feedback_changed/);
   assert.match(command, /track_response_copied/);
-  assert.match(telemetry, /scheduled_subject_id\(&telemetry, "feedback", &source\)/);
+  assert.match(telemetry, /scheduled_subject_id\(&lease, "feedback", &source\)/);
   assert.match(telemetry, /if \(action == "set"\) != rating\.is_some\(\)/);
 });
 
@@ -32,11 +32,11 @@ test('regeneration creates a new task attempt correlated to the source turn', ()
   }
   assert.match(retryCommand, /begin_task_retry/);
   assert.match(retryCommand, /submission\.sent\(\)/);
-  assert.match(telemetry, /let source_turn_id = app[\s\S]*?latest_turns/);
+  assert.match(telemetry, /let source_turn = app[\s\S]*?latest_turns/);
   assert.match(telemetry, /let guard = begin_task_submission/);
   assert.match(telemetry, /BehaviorEvent::new\("task_retry_requested"\)/);
-  assert.match(telemetry, /\.string\("attempt_id", attempt_id\)/);
-  assert.match(telemetry, /\.string\("source_turn_id", source_turn_id\)/);
+  assert.match(telemetry, /\.string\("attempt_id", &attempt\.attempt_id\)/);
+  assert.match(telemetry, /\.string\("source_turn_id", source_turn\.turn_id\)/);
 });
 
 test('response actions require an authoritative projected turn id', () => {
