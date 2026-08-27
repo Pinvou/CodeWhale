@@ -421,6 +421,12 @@ assert.match(actions, /copyClipboardText\(value\)/);
 assert.match(actions, /aria-live="polite"/);
 assert.match(actions, /data-testid="assistant-message-export"/);
 assert.match(actions, /data-testid="assistant-message-share"/);
+assert.match(actions, /data-testid="assistant-feedback-positive"/);
+assert.match(actions, /data-testid="assistant-feedback-negative"/);
+assert.match(actions, /data-testid="assistant-message-retry"/);
+assert.match(actions, /if \(copied && sessionId && turnId\)/);
+assert.match(actions, /eventName: 'response_copied'/);
+assert.match(actions, /eventName: 'response_feedback_changed'/);
 assert.match(actions, /data-testid="assistant-export-md"/);
 assert.match(actions, /data-testid="assistant-export-html"/);
 for (const target of ['wechat', 'wecom', 'feishu', 'dingtalk', 'qq']) {
@@ -436,7 +442,7 @@ assert.match(nativeHandler, /commands::assistant_response::export_assistant_resp
 assert.match(nativeHandler, /commands::assistant_response::open_assistant_share_target/);
 assert.doesNotMatch(actions, /targetRef|querySelector/);
 assert.doesNotMatch(clipboard, /querySelectorAll|data-assistant-copy-source/);
-assert.match(timeline, /<AssistantMessageFooter>[\s\S]*?<AssistantMessageActions resolveText=\{\(\) => assistantResponseText\(turn\)\} copy=\{c\}/);
-assert.match(codexView, /<AssistantMessageFooter>[\s\S]*?<AssistantMessageActions resolveText=\{\(\) => assistantResponseText\(turn\)\} copy=\{copy\}/);
+assert.match(timeline, /<AssistantMessageFooter>[\s\S]*?<AssistantMessageActions[\s\S]*?resolveText=\{\(\) => assistantResponseText\(turn\)\}[\s\S]*?copy=\{c\}/);
+assert.match(codexView, /<AssistantMessageFooter>[\s\S]*?<AssistantMessageActions[\s\S]*?resolveText=\{\(\) => assistantResponseText\(turn\)\}[\s\S]*?copy=\{copy\}/);
 
 console.log('assistant message actions tests passed');

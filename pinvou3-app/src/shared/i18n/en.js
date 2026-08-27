@@ -615,6 +615,9 @@ dictEn.uiKnowledge = {
 };
 
 Object.assign(dictEn.uiConversation, {
+  feedbackPositive: 'Helpful',
+  feedbackNegative: 'Not helpful',
+  retryReply: 'Regenerate',
   callingTool: name => `Calling ${name}`,
   inputPlaceholder: 'Enter a value',
   otherAnswer: 'Other',

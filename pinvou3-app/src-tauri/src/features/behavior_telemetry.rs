@@ -1475,6 +1475,40 @@ pub fn begin_task_submission(
     }
 }
 
+pub fn begin_task_retry(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    mode: &str,
+    input_type: &str,
+    has_attachment: bool,
+    retry_reason: &str,
+) -> TaskSubmissionGuard {
+    let source_turn_id = app
+        .try_state::<BehaviorTelemetry>()
+        .and_then(|telemetry| telemetry.latest_turns.lock().ok()?.get(session_id).cloned());
+    let guard = begin_task_submission(app, session_id, mode, "user", input_type, has_attachment);
+    let Some(source_turn_id) = source_turn_id else {
+        return guard;
+    };
+    if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
+        let attempt_id = telemetry.tasks.lock().ok().and_then(|tasks| {
+            tasks
+                .get(session_id)
+                .map(|attempt| attempt.attempt_id.clone())
+        });
+        if let Some(attempt_id) = attempt_id {
+            telemetry.track(
+                BehaviorEvent::new("task_retry_requested")
+                    .session(session_id)
+                    .string("attempt_id", attempt_id)
+                    .string("source_turn_id", source_turn_id)
+                    .string("retry_reason", retry_reason_key(retry_reason)),
+            );
+        }
+    }
+    guard
+}
+
 /// Associates a voice operation with the task attempt that was actually
 /// admitted by the chat command. The frontend never manufactures attempt IDs.
 pub fn track_voice_message_submitted(
@@ -1617,6 +1651,114 @@ fn scheduled_subject_id(
     digest.update(source_id.as_bytes());
     let hex = crate::platform::encoding::hex_lower(&digest.finalize());
     Ok(format!("{namespace}_{}", &hex[..24]))
+}
+
+fn feedback_action_key(value: &str) -> Result<&'static str, String> {
+    match value {
+        "set" => Ok("set"),
+        "clear" => Ok("clear"),
+        _ => Err("unsupported feedback action".to_string()),
+    }
+}
+
+fn feedback_rating_key(value: Option<&str>) -> Result<Option<&'static str>, String> {
+    match value {
+        Some("positive") => Ok(Some("positive")),
+        Some("negative") => Ok(Some("negative")),
+        None => Ok(None),
+        _ => Err("unsupported feedback rating".to_string()),
+    }
+}
+
+fn feedback_reason_key(value: Option<&str>) -> Result<Option<&'static str>, String> {
+    match value {
+        Some("accurate") => Ok(Some("accurate")),
+        Some("helpful") => Ok(Some("helpful")),
+        Some("fast") => Ok(Some("fast")),
+        Some("incorrect") => Ok(Some("incorrect")),
+        Some("incomplete") => Ok(Some("incomplete")),
+        Some("unsafe") => Ok(Some("unsafe")),
+        Some("too_slow") => Ok(Some("too_slow")),
+        Some("other") => Ok(Some("other")),
+        None => Ok(None),
+        _ => Err("unsupported feedback reason".to_string()),
+    }
+}
+
+fn response_content_type_key(value: &str) -> &'static str {
+    match value {
+        "text" => "text",
+        "code" => "code",
+        "table" => "table",
+        _ => "other",
+    }
+}
+
+fn retry_reason_key(value: &str) -> &'static str {
+    match value {
+        "manual_regenerate" => "manual_regenerate",
+        "previous_failed" => "previous_failed",
+        "input_changed" => "input_changed",
+        _ => "unknown",
+    }
+}
+
+pub fn track_response_feedback_changed(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    turn_id: &str,
+    action: &str,
+    rating: Option<&str>,
+    reason: Option<&str>,
+) -> Result<(), String> {
+    let telemetry = app
+        .try_state::<BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
+    if !telemetry.collecting.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let action = feedback_action_key(action)?;
+    let rating = feedback_rating_key(rating)?;
+    let reason = feedback_reason_key(reason)?;
+    if (action == "set") != rating.is_some() || (action == "clear" && reason.is_some()) {
+        return Err("feedback action and state do not match".to_string());
+    }
+    let source = format!("{session_id}\u{1f}{turn_id}");
+    let feedback_id = scheduled_subject_id(&telemetry, "feedback", &source)?;
+    let mut event = BehaviorEvent::new("response_feedback_changed")
+        .session(session_id)
+        .turn(turn_id)
+        .string("feedback_id", feedback_id)
+        .string("feedback_action", action);
+    if let Some(rating) = rating {
+        event = event.string("rating", rating);
+    }
+    if let Some(reason) = reason {
+        event = event.string("reason_code", reason);
+    }
+    telemetry.track(event);
+    Ok(())
+}
+
+pub fn track_response_copied(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    turn_id: &str,
+    content_type: &str,
+) -> Result<(), String> {
+    let telemetry = app
+        .try_state::<BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())?;
+    if !telemetry.collecting.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    telemetry.track(
+        BehaviorEvent::new("response_copied")
+            .session(session_id)
+            .turn(turn_id)
+            .string("content_type", response_content_type_key(content_type)),
+    );
+    Ok(())
 }
 
 fn scheduled_schedule_type(rrule: &str) -> &'static str {

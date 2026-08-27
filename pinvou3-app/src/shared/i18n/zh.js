@@ -635,6 +635,9 @@ dictZh.uiKnowledge = {
 
 // features/conversation 追加词条（uiConversation 已存在，合并而非覆盖）
 Object.assign(dictZh.uiConversation, {
+  feedbackPositive: '有帮助',
+  feedbackNegative: '没有帮助',
+  retryReply: '重新生成',
   callingTool: name => `正在调用 ${name}`,
   inputPlaceholder: '请输入',
   otherAnswer: '其他',

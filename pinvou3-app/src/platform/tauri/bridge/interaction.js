@@ -450,7 +450,7 @@
   }
 
   // ── 编辑上一轮 / 手动压缩 ─────────────────────────────────────────
-  async function editLastTurn(newText) {
+  async function editLastTurn(newText, options) {
     if (state.busy || !state.activeSessionId) return;
     newText = (newText || "").trim();
     if (!newText) return;
@@ -507,7 +507,11 @@
     notify();
     turnUsageDirty[sid] = false; // 编辑重跑=新一轮，同 doSendFor 重置口径保护（用捕获的 sid，web 对齐）
     try {
-      await invoke("edit_last_turn", { newMessage: newText, sessionId: state.activeSessionId });
+      await invoke("edit_last_turn", {
+        newMessage: newText,
+        sessionId: state.activeSessionId,
+        retryReason: options && options.retryReason || "input_changed",
+      });
       // 编辑重跑 = 后端受理新一轮：未提交的「打开」转正锁死（同 doSendFor）。
       try { window.dispatchEvent(new CustomEvent("pinvou:chat-round-committed", { detail: { scope: "plain" } })); } catch (_) {}
     } catch (e) {

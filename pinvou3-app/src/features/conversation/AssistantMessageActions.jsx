@@ -9,8 +9,13 @@ import {
   FileText,
   MessageCircle,
   Share2,
+  RotateCcw,
+  ThumbsDown,
+  ThumbsUp,
   X,
 } from '../../components/icons.jsx';
+import { invokeTauri } from '../../platform/tauri/client.js';
+import { isWeb } from '../../shared/platform.js';
 import {
   openAssistantShareTarget,
   saveAssistantResponseFile,
@@ -23,6 +28,17 @@ import {
 import { copyClipboardText, normalizeAssistantMessageText } from './message-clipboard.js';
 
 const SHARE_TARGETS = Object.freeze(['wechat', 'wecom', 'feishu', 'dingtalk', 'qq']);
+const responseRatings = new Map();
+
+function telemetryCommand() {
+  return isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event';
+}
+
+function responseContentType(value) {
+  if (/```[\s\S]*```/.test(value)) return 'code';
+  if (/^\s*\|.+\|\s*\r?\n\s*\|(?:\s*:?-+:?\s*\|)+/m.test(value)) return 'table';
+  return 'text';
+}
 
 function menuPosition(trigger, width, height) {
   const rect = trigger.getBoundingClientRect();
@@ -44,11 +60,13 @@ export function AssistantMessageFooter({ children }) {
   );
 }
 
-export function AssistantMessageActions({ text, resolveText, copy }) {
+export function AssistantMessageActions({ text, resolveText, copy, sessionId, turnId, onRetry }) {
   const instanceId = useId().replace(/:/g, '');
   const [copyStatus, setCopyStatus] = useState('idle');
   const [menu, setMenu] = useState(null);
-  const [feedback, setFeedback] = useState(null);
+  const [actionFeedback, setActionFeedback] = useState(null);
+  const feedbackKey = sessionId && turnId ? `${sessionId}\u001f${turnId}` : '';
+  const [rating, setRating] = useState(() => responseRatings.get(feedbackKey) || null);
   const resetTimerRef = useRef(null);
   const exportTriggerRef = useRef(null);
   const shareTriggerRef = useRef(null);
@@ -78,7 +96,7 @@ export function AssistantMessageActions({ text, resolveText, copy }) {
     resetTimerRef.current = setTimeout(() => {
       resetTimerRef.current = null;
       setCopyStatus('idle');
-      setFeedback(null);
+      setActionFeedback(null);
     }, 2400);
   }, [clearResetTimer]);
 
@@ -137,21 +155,51 @@ export function AssistantMessageActions({ text, resolveText, copy }) {
 
   const showFeedback = (message, failed = false) => {
     setCopyStatus('idle');
-    setFeedback({ message, failed });
+    setActionFeedback({ message, failed });
     resetStatusLater();
+  };
+
+  const copyResponseToClipboard = async value => {
+    const copied = await copyClipboardText(value);
+    if (copied && sessionId && turnId) {
+      invokeTauri(telemetryCommand(), { request: {
+        eventName: 'response_copied',
+        sessionId,
+        turnId,
+        contentType: responseContentType(value),
+      } }).catch(() => {});
+    }
+    return copied;
   };
 
   const handleCopy = async () => {
     let copied = false;
+    let value = '';
     try {
-      const value = await responseText();
-      copied = await copyClipboardText(value);
+      value = await responseText();
+      copied = await copyResponseToClipboard(value);
     } catch {
       copied = false;
     }
-    setFeedback(null);
+    setActionFeedback(null);
     setCopyStatus(copied ? 'copied' : 'failed');
     resetStatusLater();
+  };
+
+  const changeRating = nextRating => {
+    if (!feedbackKey) return;
+    const clearing = rating === nextRating;
+    const next = clearing ? null : nextRating;
+    if (next) responseRatings.set(feedbackKey, next);
+    else responseRatings.delete(feedbackKey);
+    setRating(next);
+    invokeTauri(telemetryCommand(), { request: {
+      eventName: 'response_feedback_changed',
+      sessionId,
+      turnId,
+      feedbackAction: clearing ? 'clear' : 'set',
+      ...(clearing ? {} : { rating: nextRating }),
+    } }).catch(() => {});
   };
 
   const openMenu = (kind, event) => {
@@ -206,7 +254,7 @@ export function AssistantMessageActions({ text, resolveText, copy }) {
     }
   };
 
-  const copyForShare = async () => copyClipboardText(await responseText());
+  const copyForShare = async () => copyResponseToClipboard(await responseText());
 
   const handleSystemShare = async () => {
     closeMenu('share', true);
@@ -222,14 +270,14 @@ export function AssistantMessageActions({ text, resolveText, copy }) {
         showFeedback(copy.shareSuccess);
         return;
       }
-      const copied = await copyClipboardText(value);
+      const copied = await copyResponseToClipboard(value);
       showFeedback(copied ? copy.shareUnavailable : copy.shareFailed, !copied);
     } catch {
       // responseText 可能因 turndown chunk 拉取失败 reject——此时 catch 里再调
       // copyForShare() 会二次 reject 逃出 catch(unhandled rejection 且无反馈)。
       // 只复用 try 里已解析成功的 value 复制;连 value 都没有时如实报分享失败。
       try {
-        const copied = value !== null ? await copyClipboardText(value) : false;
+        const copied = value !== null ? await copyResponseToClipboard(value) : false;
         showFeedback(copied ? copy.shareUnavailable : copy.shareFailed, !copied);
       } catch {
         showFeedback(copy.shareFailed, true);
@@ -278,6 +326,19 @@ export function AssistantMessageActions({ text, resolveText, copy }) {
               : <Copy size={14} />}
           {copyStatus !== 'idle' && <span aria-live="polite">{copyLabel}</span>}
         </button>
+        {feedbackKey && <>
+          <button type="button" data-testid="assistant-feedback-positive" onClick={() => changeRating('positive')} title={copy.feedbackPositive} aria-label={copy.feedbackPositive} aria-pressed={rating === 'positive'} className={`${actionClass} ${rating === 'positive' ? '!bg-emerald-500/[0.10] !text-emerald-600 dark:!text-emerald-300' : ''}`}>
+            <ThumbsUp size={14} />
+          </button>
+          <button type="button" data-testid="assistant-feedback-negative" onClick={() => changeRating('negative')} title={copy.feedbackNegative} aria-label={copy.feedbackNegative} aria-pressed={rating === 'negative'} className={`${actionClass} ${rating === 'negative' ? '!bg-red-500/[0.08] !text-[#C5221F] dark:!text-[#F28B82]' : ''}`}>
+            <ThumbsDown size={14} />
+          </button>
+        </>}
+        {typeof onRetry === 'function' && (
+          <button type="button" data-testid="assistant-message-retry" onClick={onRetry} title={copy.retryReply} aria-label={copy.retryReply} className={actionClass}>
+            <RotateCcw size={14} />
+          </button>
+        )}
         <button
           ref={exportTriggerRef}
           id={triggerIds.export}
@@ -314,13 +375,13 @@ export function AssistantMessageActions({ text, resolveText, copy }) {
           <span>{copy.shareReply}</span>
           <ChevronDown size={11} className={menu?.kind === 'share' ? 'rotate-180' : ''} />
         </button>
-        {feedback && (
+        {actionFeedback && (
           <span
             aria-live="polite"
-            className={`max-w-[320px] truncate text-[12px] ${feedback?.failed ? 'text-[#C5221F] dark:text-[#F28B82]' : 'text-[#747775] dark:text-[#9AA0A6]'}`}
-            title={feedback?.message || copyLabel}
+            className={`max-w-[320px] truncate text-[12px] ${actionFeedback?.failed ? 'text-[#C5221F] dark:text-[#F28B82]' : 'text-[#747775] dark:text-[#9AA0A6]'}`}
+            title={actionFeedback?.message || copyLabel}
           >
-            {feedback.message}
+            {actionFeedback.message}
           </span>
         )}
       </div>

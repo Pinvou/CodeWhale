@@ -384,6 +384,64 @@ function rate(part, total) {
   return total ? part / total : 0;
 }
 
+const EXPLICIT_VALUE_WINDOW_MS = 30 * 60_000;
+
+function currentBeijingWeek(now) {
+  const today = statsDay(now);
+  const weekday = new Date(today * DAY_MS).getUTCDay();
+  const startDay = today - ((weekday + 6) % 7);
+  return { start: startDay * DAY_MS - STATS_TIMEZONE_OFFSET_MS, end: now };
+}
+
+export function buildWeeklyExplicitValueMetric(behaviorEvents, now = Date.now()) {
+  const week = currentBeijingWeek(now);
+  const latestFeedback = new Map();
+  for (const event of behaviorEvents) {
+    if (event.event_name !== "response_feedback_changed" || Number(event.occurred_at) > now) continue;
+    const key = boundedText(event.feedback_id || `${event.session_id || ""}:${event.turn_id || ""}`, 256);
+    const current = latestFeedback.get(key);
+    if (key && (!current || Number(event.occurred_at) >= Number(current.occurred_at))) {
+      latestFeedback.set(key, event);
+    }
+  }
+  const valueSignals = behaviorEvents.filter((event) => {
+    if (Number(event.occurred_at) > now) return false;
+    if (["response_copied", "artifact_exported"].includes(event.event_name)) return true;
+    if (event.event_name !== "response_feedback_changed") return false;
+    const key = boundedText(event.feedback_id || `${event.session_id || ""}:${event.turn_id || ""}`, 256);
+    return latestFeedback.get(key) === event
+      && event.feedback_action === "set"
+      && event.rating === "positive";
+  });
+  const successfulTasks = uniqueAttempts(behaviorEvents.filter((event) => (
+    event.event_name === "task_finished"
+      && event.status === "success"
+      && event.initiator_type === "user"
+      && ["assistant", "code", "team"].includes(event.mode)
+      && Number(event.occurred_at) >= week.start
+      && Number(event.occurred_at) <= week.end
+  )), "task_finished");
+  const weeklySuccessfulInstallations = new Set(successfulTasks.map(eventIdentity).filter(Boolean));
+  const valuedInstallations = new Set();
+  for (const task of successfulTasks) {
+    const identity = eventIdentity(task);
+    if (!identity || !task.turn_id) continue;
+    const completedAt = Number(task.occurred_at);
+    const matched = valueSignals.some((signal) => (
+      eventIdentity(signal) === identity
+        && signal.turn_id === task.turn_id
+        && Number(signal.occurred_at) >= completedAt
+        && Number(signal.occurred_at) <= completedAt + EXPLICIT_VALUE_WINDOW_MS
+    ));
+    if (matched) valuedInstallations.add(identity);
+  }
+  return {
+    wevta_installations: valuedInstallations.size,
+    weekly_successful_task_installations: weeklySuccessfulInstallations.size,
+    wevta_rate: rate(valuedInstallations.size, weeklySuccessfulInstallations.size),
+  };
+}
+
 function behaviorToolType(value) {
   const type = boundedText(value, 32);
   return ["skill", "mcp", "cli", "builtin", "custom", "unknown"].includes(type) ? type : "unknown";
@@ -464,6 +522,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
     return totals;
   }, { accepted: 0, duplicate: 0, rejected: 0, retryable: 0 });
   const pipelineTotal = pipeline.accepted + pipeline.duplicate + pipeline.rejected + pipeline.retryable;
+  const explicitValue = buildWeeklyExplicitValueMetric(behaviorEvents, now);
   return {
     generated_at: now,
     range: window.range,
@@ -482,6 +541,7 @@ export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, rang
       first_technical_value_24h_rate: rate(firstValueWithin24h.size, maturedCohorts.size),
       wsta_installations: successfulInstallations.size,
       wsta_rate: rate(successfulInstallations.size, activeTotal),
+      ...explicitValue,
       task_admission_rate_24h: rate(maturedAdmitted.length, maturedSubmissionIds.size),
       task_rejection_rate_24h: rate(maturedRejected.length, maturedSubmissionIds.size),
       task_submission_resolution_rate_24h: rate(resolvedMatured, maturedSubmissionIds.size),

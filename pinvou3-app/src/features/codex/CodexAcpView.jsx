@@ -917,6 +917,7 @@ function TurnItem({
 
 function Turn({
   turn,
+  sessionId,
   now,
   agentId,
   agentName,
@@ -975,7 +976,12 @@ function Turn({
           ))}
           {!running && (assistantAvailable || turn.completedAt || turn.error) && <AssistantMessageFooter>
             {assistantAvailable && (
-              <AssistantMessageActions resolveText={() => assistantResponseText(turn)} copy={copy} />
+              <AssistantMessageActions
+                resolveText={() => assistantResponseText(turn)}
+                copy={copy}
+                sessionId={sessionId}
+                turnId={turn.id}
+              />
             )}
             {(turn.completedAt || turn.error) && <>
               <StatusBadge status={turn.status} copy={copy} />
@@ -3356,6 +3362,7 @@ export function CodexAcpView({
                   <ConversationTurn
                     key={turn.id}
                     turn={turn}
+                    sessionId={activeId}
                     now={now}
                     copy={t.uiConversation}
                     pendingByTool={pendingByTool}
@@ -3401,7 +3408,7 @@ export function CodexAcpView({
                   />
                 )
               : (
-                  <Turn key={turn.id} turn={turn} now={now}
+                  <Turn key={turn.id} turn={turn} now={now} sessionId={activeId}
                     agentId={activeAgentId} agentName={activeAgentName}
                     copy={t.uiConversation}
                     cv={t.uiCodexView}

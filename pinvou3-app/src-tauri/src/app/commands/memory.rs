@@ -807,8 +807,10 @@ pub async fn delete_timed_memory(
 pub async fn edit_last_turn(
     new_message: String,
     session_id: Option<String>,
+    retry_reason: Option<String>,
     pool: State<'_, EnginePool>,
     store: State<'_, SessionStore>,
+    app: AppHandle,
 ) -> Result<(), String> {
     if new_message.trim().is_empty() {
         return Err("empty new_message".into());
@@ -818,6 +820,18 @@ pub async fn edit_last_turn(
         .reserve_turn(&sid)
         .map_err(|e| format!("reserve edit_last_turn: {e:#}"))?;
     let mode_state = store.mode_state(&sid);
+    let is_scheduled = store.scheduled_profile(&sid).is_some();
+    let team_initiated = crate::features::behavior_telemetry::is_team_session(&app, &sid);
+    let mut telemetry_submission = (!is_scheduled).then(|| {
+        crate::features::behavior_telemetry::begin_task_retry(
+            &app,
+            &sid,
+            if team_initiated { "team" } else { "assistant" },
+            "text",
+            false,
+            retry_reason.as_deref().unwrap_or("input_changed"),
+        )
+    });
     let full = super::multiagent::prepend_delegation_replay_reminder(
         pool.inner(),
         &sid,
@@ -830,7 +844,11 @@ pub async fn edit_last_turn(
     // 按 scheduled_profile 做 turn gate;会话管理类命令(删除/改名/归档)仍然拒绝。
     pool.edit_last_turn_reserved(&sid, full, display_message, reservation)
         .await
-        .map_err(|e| format!("edit_last_turn: {e:#}"))
+        .map_err(|e| format!("edit_last_turn: {e:#}"))?;
+    if let Some(submission) = telemetry_submission.take() {
+        submission.sent();
+    }
+    Ok(())
 }
 
 #[cfg(test)]

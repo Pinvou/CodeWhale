@@ -1926,6 +1926,12 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
                 {useUnifiedConversationUi ? (
                   <ConversationTimeline
                     turns={conversationProjection.turns}
+                    sessionId={activeSessionId}
+                    onRetry={(turn) => {
+                      if (!busy && turn.userText && bridge.available) {
+                        bridge.interaction.editLastTurn(turn.userText, { retryReason: 'manual_regenerate' });
+                      }
+                    }}
                     now={conversationNow}
                     copy={t.uiConversation}
                     agentLabel={chatViewCopy.agentName}

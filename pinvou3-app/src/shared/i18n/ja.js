@@ -616,6 +616,9 @@ dictJa.uiKnowledge = {
 };
 
 Object.assign(dictJa.uiConversation, {
+  feedbackPositive: '役に立った',
+  feedbackNegative: '役に立たなかった',
+  retryReply: '再生成',
   callingTool: name => `${name} を呼び出し中`,
   inputPlaceholder: '入力してください',
   otherAnswer: 'その他',

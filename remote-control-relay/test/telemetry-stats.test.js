@@ -8,6 +8,7 @@ import {
   TelemetryStore,
   buildBehaviorModelRanking,
   buildBehaviorOverview,
+  buildWeeklyExplicitValueMetric,
   buildBehaviorSceneRanking,
   buildBehaviorToolRanking,
   buildCommercialMock,
@@ -136,7 +137,8 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
     { event_id: "cohort_b", event_name: "analytics_cohort_started", identity_id: "dev_b", occurred_at: at("2026-08-10T08:00:00") },
     { event_id: "task_a", event_name: "task_submitted", attempt_id: "attempt_a", identity_id: "dev_a", mode: "assistant", initiator_type: "user", occurred_at: at("2026-08-10T09:01:00") },
     { event_id: "task_admit_a", event_name: "task_admitted", attempt_id: "attempt_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:01:01") },
-    { event_id: "task_done_a", event_name: "task_finished", attempt_id: "attempt_a", identity_id: "dev_a", mode: "assistant", initiator_type: "user", status: "success", occurred_at: at("2026-08-10T09:02:00") },
+    { event_id: "task_done_a", event_name: "task_finished", attempt_id: "attempt_a", turn_id: "turn_a", identity_id: "dev_a", mode: "assistant", initiator_type: "user", status: "success", occurred_at: at("2026-08-10T09:02:00") },
+    { event_id: "copy_a", event_name: "response_copied", turn_id: "turn_a", identity_id: "dev_a", content_type: "text", occurred_at: at("2026-08-10T09:22:00") },
     { event_id: "task_b", event_name: "task_submitted", attempt_id: "attempt_b", identity_id: "dev_b", mode: "code", initiator_type: "user", occurred_at: at("2026-08-10T10:01:00") },
     { event_id: "task_admit_b", event_name: "task_admitted", attempt_id: "attempt_b", identity_id: "dev_b", occurred_at: at("2026-08-10T10:01:01") },
     { event_id: "task_done_b", event_name: "task_finished", attempt_id: "attempt_b", identity_id: "dev_b", status: "interrupted", occurred_at: at("2026-08-10T10:02:00") },
@@ -172,6 +174,8 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal(overview.metrics.task_terminal_completeness_rate, 1);
   assert.equal(overview.metrics.task_compensation_rate, 1 / 3);
   assert.equal(overview.metrics.wsta_installations, 1);
+  assert.equal(overview.metrics.wevta_installations, 1);
+  assert.equal(overview.metrics.wevta_rate, 1);
   assert.equal(overview.metrics.cohort_matured_installations, 2);
   assert.equal(overview.metrics.first_technical_value_24h_installations, 1);
   assert.equal(overview.metrics.first_technical_value_24h_rate, 0.5);
@@ -292,6 +296,37 @@ test("behavior event store validates v1 independently, injects identity and dedu
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
+});
+
+test("WEVTA uses the latest feedback state and same-turn 30 minute window", () => {
+  const now = at("2026-08-12T12:00:00");
+  const successful = (id, identity, turn, time) => ({
+    event_id: id,
+    event_name: "task_finished",
+    attempt_id: `attempt_${id}`,
+    turn_id: turn,
+    identity_id: identity,
+    mode: "assistant",
+    initiator_type: "user",
+    status: "success",
+    occurred_at: at(time),
+  });
+  const events = [
+    successful("a", "dev_a", "turn_a", "2026-08-10T09:00:00"),
+    { event_id: "positive_a", event_name: "response_feedback_changed", feedback_id: "feedback_a", feedback_action: "set", rating: "positive", turn_id: "turn_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:10:00") },
+    { event_id: "clear_a", event_name: "response_feedback_changed", feedback_id: "feedback_a", feedback_action: "clear", turn_id: "turn_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:11:00") },
+    successful("b", "dev_b", "turn_b", "2026-08-10T10:00:00"),
+    { event_id: "late_copy_b", event_name: "response_copied", turn_id: "turn_b", identity_id: "dev_b", occurred_at: at("2026-08-10T10:31:00") },
+    successful("c", "dev_c", "turn_c", "2026-08-10T11:00:00"),
+    { event_id: "wrong_turn_c", event_name: "artifact_exported", turn_id: "turn_other", identity_id: "dev_c", occurred_at: at("2026-08-10T11:05:00") },
+    successful("d", "dev_d", "turn_d", "2026-08-10T12:00:00"),
+    { event_id: "copy_d", event_name: "response_copied", turn_id: "turn_d", identity_id: "dev_d", occurred_at: at("2026-08-10T12:30:00") },
+  ];
+  assert.deepEqual(buildWeeklyExplicitValueMetric(events, now), {
+    wevta_installations: 1,
+    weekly_successful_task_installations: 4,
+    wevta_rate: 0.25,
+  });
 });
 
 test("behavior collection control is opt-in, idempotent and deletion removes facts", () => {

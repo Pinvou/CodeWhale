@@ -239,6 +239,7 @@ export function projectDeepSeekConversation({
     if (!Number.isInteger(record.turnIndex) || !userTurns[record.turnIndex]) continue;
     const turn = userTurns[record.turnIndex];
     Object.assign(turn, {
+      id: record.id,
       status: record.status,
       error: record.error,
       startedAt: record.startedAt,
@@ -255,6 +256,7 @@ export function projectDeepSeekConversation({
   const trailingTurns = trailingPairCount > 0 ? unassignedTurns.slice(-trailingPairCount) : [];
   trailingRecords.forEach((record, index) => {
     Object.assign(trailingTurns[index], {
+      id: record.id,
       status: record.status,
       error: record.error,
       startedAt: record.startedAt,

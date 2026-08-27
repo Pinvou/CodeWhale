@@ -86,6 +86,10 @@ pub struct TrackBehaviorEventRequest {
     pub schedule_rule: Option<String>,
     pub task_type: Option<String>,
     pub member_count_bucket: Option<String>,
+    pub feedback_action: Option<String>,
+    pub rating: Option<String>,
+    pub reason_code: Option<String>,
+    pub content_type: Option<String>,
 }
 
 #[tauri::command]
@@ -182,6 +186,40 @@ pub fn track_behavior_event(
                 request.status.as_deref().unwrap_or("failed"),
                 request.duration_ms.unwrap_or_default(),
                 request.error_category.as_deref(),
+            );
+        }
+        "response_feedback_changed" => {
+            let session_id = request
+                .session_id
+                .as_deref()
+                .ok_or_else(|| "response feedback requires session_id".to_string())?;
+            let turn_id = request
+                .turn_id
+                .as_deref()
+                .ok_or_else(|| "response feedback requires turn_id".to_string())?;
+            return crate::features::behavior_telemetry::track_response_feedback_changed(
+                &app,
+                session_id,
+                turn_id,
+                request.feedback_action.as_deref().unwrap_or_default(),
+                request.rating.as_deref(),
+                request.reason_code.as_deref(),
+            );
+        }
+        "response_copied" => {
+            let session_id = request
+                .session_id
+                .as_deref()
+                .ok_or_else(|| "response copy requires session_id".to_string())?;
+            let turn_id = request
+                .turn_id
+                .as_deref()
+                .ok_or_else(|| "response copy requires turn_id".to_string())?;
+            return crate::features::behavior_telemetry::track_response_copied(
+                &app,
+                session_id,
+                turn_id,
+                request.content_type.as_deref().unwrap_or("other"),
             );
         }
         "tool_impression" => "tool_impression",
