@@ -45,8 +45,8 @@ test("device detail sortable headers toggle descending and ascending order", asy
   try {
     await new Promise((resolve) => dom.window.setTimeout(resolve, 10));
     const { document } = dom.window;
-    assert.equal(document.querySelector('[data-view="behavior"]').textContent, "用户行为");
-    assert.equal(document.querySelector('[data-view="commercial"]').textContent, "商业转化");
+    assert.equal(document.querySelector('[data-view="behavior"]').textContent, "行为分析");
+    assert.equal(document.querySelector('[data-view="commercial"]').textContent, "商业（未接入）");
     document.querySelector('[data-view="behavior"]').click();
     assert.equal(document.querySelector("#behaviorView").classList.contains("hidden"), false);
     document.querySelector('[data-view="commercial"]').click();

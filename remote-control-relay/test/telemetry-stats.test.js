@@ -132,52 +132,82 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
     { event_id: "usage_b", device_id: "dev_b", occurred_at: at("2026-08-12T10:00:00") },
   ];
   const behaviorEvents = [
-    { event_id: "task_a", event_name: "task_started", identity_id: "dev_a", occurred_at: at("2026-08-12T09:01:00") },
-    { event_id: "task_done_a", event_name: "task_finished", identity_id: "dev_a", status: "success", occurred_at: at("2026-08-12T09:02:00") },
-    { event_id: "task_done_b", event_name: "task_finished", identity_id: "dev_b", status: "interrupted", occurred_at: at("2026-08-12T10:02:00") },
+    { event_id: "cohort_a", event_name: "analytics_cohort_started", identity_id: "dev_a", occurred_at: at("2026-08-10T08:00:00") },
+    { event_id: "cohort_b", event_name: "analytics_cohort_started", identity_id: "dev_b", occurred_at: at("2026-08-10T08:00:00") },
+    { event_id: "task_a", event_name: "task_submitted", attempt_id: "attempt_a", identity_id: "dev_a", mode: "assistant", initiator_type: "user", occurred_at: at("2026-08-10T09:01:00") },
+    { event_id: "task_admit_a", event_name: "task_admitted", attempt_id: "attempt_a", identity_id: "dev_a", occurred_at: at("2026-08-10T09:01:01") },
+    { event_id: "task_done_a", event_name: "task_finished", attempt_id: "attempt_a", identity_id: "dev_a", mode: "assistant", initiator_type: "user", status: "success", occurred_at: at("2026-08-10T09:02:00") },
+    { event_id: "task_b", event_name: "task_submitted", attempt_id: "attempt_b", identity_id: "dev_b", mode: "code", initiator_type: "user", occurred_at: at("2026-08-10T10:01:00") },
+    { event_id: "task_admit_b", event_name: "task_admitted", attempt_id: "attempt_b", identity_id: "dev_b", occurred_at: at("2026-08-10T10:01:01") },
+    { event_id: "task_done_b", event_name: "task_finished", attempt_id: "attempt_b", identity_id: "dev_b", status: "interrupted", occurred_at: at("2026-08-10T10:02:00") },
+    { event_id: "task_c", event_name: "task_submitted", attempt_id: "attempt_c", identity_id: "dev_c", mode: "assistant", initiator_type: "user", occurred_at: at("2026-08-10T11:01:00") },
+    { event_id: "task_reject_c", event_name: "task_rejected", attempt_id: "attempt_c", identity_id: "dev_c", stage: "shutdown", occurred_at: at("2026-08-10T11:01:01") },
     { event_id: "voice_a", event_name: "voice_started", identity_id: "dev_a", occurred_at: at("2026-08-12T09:03:00") },
     { event_id: "voice_c", event_name: "voice_started", identity_id: "dev_c", occurred_at: at("2026-08-12T11:03:00") },
-    { event_id: "tool_a", event_name: "tool_call_completed", identity_id: "dev_a", tool_key: "search", tool_name: "Search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T09:04:00") },
-    { event_id: "tool_b", event_name: "tool_call_completed", identity_id: "dev_b", tool_key: "search", tool_name: "Search", tool_type: "builtin", success: false, occurred_at: at("2026-08-12T10:04:00") },
-    { event_id: "install_a", event_name: "tool_install_completed", identity_id: "dev_a", tool_key: "search", tool_name: "Search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T09:05:00") },
-    { event_id: "scene_a", event_name: "scene_triggered", identity_id: "dev_a", scene_l1: "work", scene_l2: "document-writing", occurred_at: at("2026-08-12T09:06:00") },
-    { event_id: "model_a", event_name: "model_used", identity_id: "dev_a", provider_key: "deepseek", provider_name: "DeepSeek", model_id: "deepseek-chat", model_name: "DeepSeek Chat", occurred_at: at("2026-08-12T09:07:00") },
-    { event_id: "model_b", event_name: "model_used", identity_id: "dev_b", provider_key: "deepseek", provider_name: "DeepSeek", model_id: "deepseek-chat", model_name: "DeepSeek Chat", occurred_at: at("2026-08-12T10:07:00") },
-    { event_id: "model_c", event_name: "model_used", identity_id: "dev_a", provider_key: "openai", provider_name: "OpenAI", model_id: "gpt-5", model_name: "GPT-5", occurred_at: at("2026-08-12T11:07:00") },
+    { event_id: "tool_start_a", event_name: "tool_call_started", operation_id: "op_tool_a", identity_id: "dev_a", tool_key: "search", tool_name: "Search", tool_type: "mcp", occurred_at: at("2026-08-12T09:03:59") },
+    { event_id: "tool_a", event_name: "tool_call_completed", operation_id: "op_tool_a", identity_id: "dev_a", tool_key: "search", tool_name: "Search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T09:04:00") },
+    { event_id: "tool_start_b", event_name: "tool_call_started", operation_id: "op_tool_b", identity_id: "dev_b", tool_key: "search", tool_name: "Search", tool_type: "builtin", occurred_at: at("2026-08-12T10:03:59") },
+    { event_id: "tool_b", event_name: "tool_call_completed", operation_id: "op_tool_b", identity_id: "dev_b", tool_key: "search", tool_name: "Search", tool_type: "builtin", success: false, occurred_at: at("2026-08-12T10:04:00") },
+    { event_id: "install_start_a", event_name: "tool_install_started", operation_id: "op_install_a", identity_id: "dev_a", tool_key: "search", tool_name: "Search", tool_type: "mcp", occurred_at: at("2026-08-12T09:04:59") },
+    { event_id: "install_a", event_name: "tool_install_completed", operation_id: "op_install_a", identity_id: "dev_a", tool_key: "search", tool_name: "Search", tool_type: "mcp", success: true, occurred_at: at("2026-08-12T09:05:00") },
+    { event_id: "scene_a", event_name: "scene_submitted", identity_id: "dev_a", scene_l1: "work", scene_l2: "document-writing", occurred_at: at("2026-08-12T09:06:00") },
+    { event_id: "model_a", event_name: "model_used", identity_id: "dev_a", provider_key: "deepseek", model_key: "deepseek", occurred_at: at("2026-08-12T09:07:00") },
+    { event_id: "model_b", event_name: "model_used", identity_id: "dev_b", provider_key: "deepseek", model_key: "deepseek", occurred_at: at("2026-08-12T10:07:00") },
+    { event_id: "model_c", event_name: "model_used", identity_id: "dev_a", provider_key: "openai", model_key: "gpt_5", occurred_at: at("2026-08-12T11:07:00") },
   ];
 
-  const overview = buildBehaviorOverview(devices, usageEvents, behaviorEvents, "today", now);
-  assert.equal(overview.active_users, 3);
-  assert.equal(overview.metrics.task_started_count, 1);
+  const overview = buildBehaviorOverview(devices, usageEvents, behaviorEvents, "7", now, [
+    { occurred_at: now, accepted: 90, duplicate: 5, rejected: 3, retryable: 2 },
+  ]);
+  assert.equal(overview.subject, "installation");
+  assert.equal(overview.active_installations, 3);
+  assert.equal(overview.metrics.task_submitted_count, 3);
+  assert.equal(overview.metrics.task_admitted_count, 2);
+  assert.equal(overview.metrics.task_rejected_count, 1);
+  assert.equal(overview.metrics.task_admission_rate_24h, 2 / 3);
+  assert.equal(overview.metrics.task_rejection_rate_24h, 1 / 3);
+  assert.equal(overview.metrics.task_submission_resolution_rate_24h, 1);
+  assert.equal(overview.metrics.active_installation_days, 6);
+  assert.equal(overview.metrics.task_submitted_per_active_installation_day, 0.5);
+  assert.equal(overview.metrics.task_terminal_completeness_rate, 1);
+  assert.equal(overview.metrics.task_compensation_rate, 1 / 3);
+  assert.equal(overview.metrics.wsta_installations, 1);
+  assert.equal(overview.metrics.cohort_matured_installations, 2);
+  assert.equal(overview.metrics.first_technical_value_24h_installations, 1);
+  assert.equal(overview.metrics.first_technical_value_24h_rate, 0.5);
+  assert.equal(overview.metrics.tool_call_completion_rate, 1);
+  assert.equal(overview.metrics.tool_call_success_rate, 0.5);
+  assert.equal(overview.metrics.tool_install_completion_rate, 1);
+  assert.equal(overview.metrics.pipeline_rejection_rate, 0.03);
   assert.equal(overview.metrics.task_success_count, 1);
   assert.equal(overview.metrics.task_interrupted_count, 1);
-  assert.equal(overview.metrics.voice_started_users, 2);
+  assert.equal(overview.metrics.voice_started_installations, 2);
   assert.equal(overview.metrics.voice_penetration_rate, 2 / 3);
 
-  const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "today", "call", now);
+  const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "call", now);
     assert.equal(tools.rows[0].tool_key, "search");
     assert.equal(tools.rows[0].call_count, 2);
     assert.equal(tools.rows[0].user_count, 2);
     assert.equal(tools.rows[0].tool_type, "mcp");
     assert.equal(tools.rows[0].success_rate, 0.5);
 
-  const installs = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "today", "install", now);
+  const installs = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "install", now);
   assert.equal(installs.rows[0].install_count, 1);
 
-  const scenes = buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, "today", now);
+  const scenes = buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, "7", now);
   assert.equal(scenes.rows[0].scene_l1, "work");
   assert.equal(scenes.rows[0].trigger_count, 1);
 
-  const models = buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, "today", now);
+  const models = buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, "7", now);
   assert.equal(models.rows[0].provider_key, "deepseek");
-  assert.equal(models.rows[0].model_id, "deepseek-chat");
+  assert.equal(models.rows[0].model_key, "deepseek");
   assert.equal(models.rows[0].user_count, 2);
   assert.equal(models.rows[0].use_count, 2);
-  assert.equal(models.rows[1].model_id, "gpt-5");
+  assert.equal(models.rows[1].model_key, "gpt_5");
 
   const commercial = buildCommercialMock("30", now);
-  assert.equal(commercial.mock, true);
-  assert.equal(typeof commercial.metrics.arpu, "number");
+  assert.equal(commercial.available, false);
+  assert.equal("metrics" in commercial, false);
 });
 
 test("behavior event store validates v1 independently, injects identity and deduplicates", () => {
@@ -243,6 +273,14 @@ test("behavior event store validates v1 independently, injects identity and dedu
     assert.equal(store.behaviorEvents[0].clock_skew_bucket, "normal");
     assert.equal(store.behaviorEvents[1].clock_skew_bucket, "past_1h_plus");
     assert.equal(readFileSync(join(dataDir, "behavior-events.jsonl"), "utf8").trim().split("\n").length, 2);
+    assert.deepEqual(store.behaviorPipelineEvents, [{
+      occurred_at: store.behaviorPipelineEvents[0].occurred_at,
+      accepted: 2,
+      duplicate: 1,
+      rejected: 4,
+      retryable: 0,
+    }]);
+    assert.equal(existsSync(join(dataDir, "behavior-pipeline.jsonl")), true);
     assert.throws(
       () => store.appendBehaviorEvents(device, Array.from({ length: 51 }, (_, index) => (
         behaviorEvent(collection.collection_period_id, {

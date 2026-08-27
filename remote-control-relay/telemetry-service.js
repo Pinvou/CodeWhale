@@ -353,17 +353,23 @@ function filteredBehaviorEvents(events, window, eventName = null) {
   });
 }
 
-function dailyAveragePerActive(events, activeByDay, window) {
-  const countByDay = new Map(dayRows(window).map((day) => [day, 0]));
+function perActiveInstallationDay(events, activeByDay) {
+  const activeInstallationDays = [...activeByDay.values()]
+    .reduce((sum, identities) => sum + identities.size, 0);
+  return {
+    active_installation_days: activeInstallationDays,
+    value: rate(events.length, activeInstallationDays),
+  };
+}
+
+function uniqueAttempts(events, eventName) {
+  const attempts = new Map();
   for (const event of events) {
-    const day = statsDay(event.occurred_at);
-    if (countByDay.has(day)) countByDay.set(day, countByDay.get(day) + 1);
+    if (event.event_name !== eventName) continue;
+    const key = boundedText(event.attempt_id || event.turn_id || event.event_id, 128);
+    if (key && !attempts.has(key)) attempts.set(key, event);
   }
-  const values = dayRows(window).map((day) => {
-    const dau = activeByDay.get(day)?.size || 0;
-    return dau ? (countByDay.get(day) || 0) / dau : 0;
-  });
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  return [...attempts.values()];
 }
 
 function periodActiveCount(activeByDay) {
@@ -380,37 +386,131 @@ function rate(part, total) {
 
 function behaviorToolType(value) {
   const type = boundedText(value, 32);
-  return ["skill", "mcp", "cli", "unknown"].includes(type) ? type : "unknown";
+  return ["skill", "mcp", "cli", "builtin", "custom", "unknown"].includes(type) ? type : "unknown";
 }
 
-export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now()) {
+export function buildBehaviorOverview(devices, usageEvents, behaviorEvents, range = "30", now = Date.now(), pipelineEvents = []) {
   const window = rangeWindow(range, now);
   const activeByDay = activeIdentityByDay(devices, usageEvents, behaviorEvents, window);
   const activeTotal = periodActiveCount(activeByDay);
-  const taskStarted = filteredBehaviorEvents(behaviorEvents, window, "task_started");
-  const taskFinished = filteredBehaviorEvents(behaviorEvents, window, "task_finished");
+  const windowEvents = filteredBehaviorEvents(behaviorEvents, window);
+  const taskSubmitted = uniqueAttempts(windowEvents, "task_submitted");
+  const taskAdmitted = uniqueAttempts(windowEvents, "task_admitted");
+  const taskRejected = uniqueAttempts(windowEvents, "task_rejected");
+  const taskFinished = uniqueAttempts(windowEvents, "task_finished");
+  const cohortStarted = filteredBehaviorEvents(behaviorEvents, window, "analytics_cohort_started");
+  const maturedCohorts = new Map();
+  for (const event of cohortStarted) {
+    const identity = eventIdentity(event);
+    if (!identity || Number(event.occurred_at) > now - DAY_MS) continue;
+    const prior = maturedCohorts.get(identity);
+    if (!prior || event.occurred_at < prior.occurred_at) maturedCohorts.set(identity, event);
+  }
   const voiceStarted = filteredBehaviorEvents(behaviorEvents, window, "voice_started");
-  const taskUsers = new Set(taskStarted.map(eventIdentity).filter(Boolean));
+  const taskInstallations = new Set(taskSubmitted.map(eventIdentity).filter(Boolean));
   const voiceUsers = new Set(voiceStarted.map(eventIdentity).filter(Boolean));
-  const taskStatus = { success: 0, interrupted: 0, failed: 0 };
+  const taskStatus = { success: 0, interrupted: 0, failed: 0, cancelled: 0 };
   for (const event of taskFinished) {
     if (event.status in taskStatus) taskStatus[event.status] += 1;
   }
+  const successfulInstallations = new Set(taskFinished
+    .filter((event) => event.status === "success"
+      && event.initiator_type === "user"
+      && ["assistant", "code", "team"].includes(event.mode))
+    .map(eventIdentity).filter(Boolean));
+  const firstValueWithin24h = new Set();
+  for (const event of taskFinished) {
+    if (event.status !== "success" || event.initiator_type !== "user") continue;
+    const identity = eventIdentity(event);
+    const cohort = maturedCohorts.get(identity);
+    if (cohort && event.occurred_at >= cohort.occurred_at
+      && event.occurred_at <= cohort.occurred_at + DAY_MS) firstValueWithin24h.add(identity);
+  }
+  const maturedSubmissionIds = new Set(taskSubmitted
+    .filter((event) => Number(event.occurred_at) <= now - DAY_MS)
+    .map((event) => event.attempt_id)
+    .filter(Boolean));
+  const maturedAdmitted = taskAdmitted.filter((event) => maturedSubmissionIds.has(event.attempt_id));
+  const maturedRejected = taskRejected.filter((event) => maturedSubmissionIds.has(event.attempt_id));
+  const resolvedMatured = maturedAdmitted.length + maturedRejected.length;
+  const finishedAttemptIds = new Set(taskFinished.map((event) => event.attempt_id));
+  const admittedTerminalCount = taskAdmitted.filter((event) => finishedAttemptIds.has(event.attempt_id)).length;
+  const compensatedCount = [...taskRejected, ...taskFinished]
+    .filter((event) => event.stage === "shutdown").length;
+  const activeDayMetric = perActiveInstallationDay(taskSubmitted, activeByDay);
+  const toolCallStarted = uniqueAttempts(windowEvents.map((event) => ({
+    ...event,
+    attempt_id: event.operation_id,
+  })), "tool_call_started");
+  const toolCallCompleted = uniqueAttempts(windowEvents.map((event) => ({
+    ...event,
+    attempt_id: event.operation_id,
+  })), "tool_call_completed");
+  const toolInstallStarted = uniqueAttempts(windowEvents.map((event) => ({
+    ...event,
+    attempt_id: event.operation_id,
+  })), "tool_install_started");
+  const toolInstallCompleted = uniqueAttempts(windowEvents.map((event) => ({
+    ...event,
+    attempt_id: event.operation_id,
+  })), "tool_install_completed");
+  const pipeline = pipelineEvents.filter((entry) => {
+    const day = statsDay(entry.occurred_at);
+    return day >= window.startDay && day <= window.endDay;
+  }).reduce((totals, entry) => {
+    for (const key of ["accepted", "duplicate", "rejected", "retryable"]) {
+      totals[key] += Number(entry[key] || 0);
+    }
+    return totals;
+  }, { accepted: 0, duplicate: 0, rejected: 0, retryable: 0 });
+  const pipelineTotal = pipeline.accepted + pipeline.duplicate + pipeline.rejected + pipeline.retryable;
   return {
     generated_at: now,
     range: window.range,
-    active_users: activeTotal,
+    subject: "installation",
+    active_installations: activeTotal,
     metrics: {
-      task_started_count: taskStarted.length,
-      task_started_users: taskUsers.size,
-      task_started_per_active: dailyAveragePerActive(taskStarted, activeByDay, window),
+      task_submitted_count: taskSubmitted.length,
+      task_admitted_count: taskAdmitted.length,
+      task_rejected_count: taskRejected.length,
+      task_finished_count: taskFinished.length,
+      task_active_installations: taskInstallations.size,
+      task_submitted_per_active_installation_day: activeDayMetric.value,
+      active_installation_days: activeDayMetric.active_installation_days,
+      cohort_matured_installations: maturedCohorts.size,
+      first_technical_value_24h_installations: firstValueWithin24h.size,
+      first_technical_value_24h_rate: rate(firstValueWithin24h.size, maturedCohorts.size),
+      wsta_installations: successfulInstallations.size,
+      wsta_rate: rate(successfulInstallations.size, activeTotal),
+      task_admission_rate_24h: rate(maturedAdmitted.length, maturedSubmissionIds.size),
+      task_rejection_rate_24h: rate(maturedRejected.length, maturedSubmissionIds.size),
+      task_submission_resolution_rate_24h: rate(resolvedMatured, maturedSubmissionIds.size),
+      task_terminal_completeness_rate: rate(admittedTerminalCount, taskAdmitted.length),
+      task_compensation_rate: rate(compensatedCount, taskFinished.length + taskRejected.length),
       task_success_count: taskStatus.success,
       task_interrupted_count: taskStatus.interrupted,
       task_failed_count: taskStatus.failed,
+      task_cancelled_count: taskStatus.cancelled,
+      task_submission_success_rate: rate(taskStatus.success, taskSubmitted.length),
+      admitted_task_success_rate: rate(taskStatus.success, taskFinished.length),
+      tool_call_started_count: toolCallStarted.length,
+      tool_call_completed_count: toolCallCompleted.length,
+      tool_call_completion_rate: rate(toolCallCompleted.length, toolCallStarted.length),
+      tool_call_success_rate: rate(
+        toolCallCompleted.filter((event) => event.success === true).length,
+        toolCallCompleted.length,
+      ),
+      tool_install_started_count: toolInstallStarted.length,
+      tool_install_completed_count: toolInstallCompleted.length,
+      tool_install_completion_rate: rate(toolInstallCompleted.length, toolInstallStarted.length),
       voice_penetration_rate: rate(voiceUsers.size, activeTotal),
-      voice_started_users: voiceUsers.size,
+      voice_started_installations: voiceUsers.size,
       voice_started_count: voiceStarted.length,
-      voice_starts_per_voice_user: rate(voiceStarted.length, voiceUsers.size),
+      voice_starts_per_installation: rate(voiceStarted.length, voiceUsers.size),
+      pipeline_accepted_count: pipeline.accepted,
+      pipeline_duplicate_rate: rate(pipeline.duplicate, pipelineTotal),
+      pipeline_rejection_rate: rate(pipeline.rejected, pipelineTotal),
+      pipeline_retryable_rate: rate(pipeline.retryable, pipelineTotal),
     },
   };
 }
@@ -461,7 +561,8 @@ export function buildBehaviorSceneRanking(devices, usageEvents, behaviorEvents, 
   const window = rangeWindow(range, now);
   const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
   const groups = new Map();
-  for (const event of filteredBehaviorEvents(behaviorEvents, window, "scene_triggered")) {
+  for (const event of filteredBehaviorEvents(behaviorEvents, window)
+    .filter((event) => ["scene_submitted", "scene_triggered"].includes(event.event_name))) {
     const sceneL1 = boundedText(event.scene_l1, 64) || "unknown";
     const sceneL2 = boundedText(event.scene_l2, 96) || "unknown";
     const key = `${sceneL1}:${sceneL2}`;
@@ -490,15 +591,13 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
   const activeTotal = periodActiveCount(activeIdentityByDay(devices, usageEvents, behaviorEvents, window));
   const groups = new Map();
   for (const event of filteredBehaviorEvents(behaviorEvents, window, "model_used")) {
-    const modelId = boundedText(event.model_id || event.model_name, 128);
+    const modelId = boundedText(event.model_key || event.model_id || event.model_name, 128);
     if (!modelId) continue;
     const providerKey = boundedText(event.provider_key, 64) || "unknown";
     const key = `${providerKey}:${modelId}`;
     const row = groups.get(key) || {
       provider_key: providerKey,
-      provider_name: boundedText(event.provider_name, 128) || providerKey,
-      model_id: modelId,
-      model_name: boundedText(event.model_name, 128) || modelId,
+      model_key: modelId,
       total: 0,
       success_count: 0,
       users: new Set(),
@@ -523,43 +622,18 @@ export function buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, 
         success_count: undefined,
       }))
       .sort((a, b) => b.user_count - a.user_count || b.use_count - a.use_count
-        || String(a.model_name || a.model_id).localeCompare(String(b.model_name || b.model_id), "zh-CN"))
+        || String(a.model_key).localeCompare(String(b.model_key), "zh-CN"))
       .slice(0, 50),
   };
 }
 
 export function buildCommercialMock(range = "30", now = Date.now()) {
   const window = rangeWindow(range, now);
-  const trend = dayRows(window).map((day, index) => ({
-    day: statsDayLabel(day),
-    revenue: 680 + index * 38 + (index % 5) * 42,
-    paid_users: 108 + Math.floor(index * 1.7),
-  }));
   return {
     generated_at: now,
     range: window.range,
-    mock: true,
-    metrics: {
-      paid_penetration_rate: 0.082,
-      paid_users: 128,
-      arpu: 18.6,
-      arppu: 226.8,
-      mrr: 29030,
-      new_paid_users: 21,
-      renewal_rate: 0.74,
-      trial_to_paid_rate: 0.16,
-    },
-    revenue_trend: trend,
-    plan_distribution: [
-      { plan: "Pro 月付", users: 74 },
-      { plan: "Pro 年付", users: 39 },
-      { plan: "Team", users: 15 },
-    ],
-    conversion_funnel: [
-      { stage: "激活", count: 1420 },
-      { stage: "试用", count: 318 },
-      { stage: "付费", count: 128 },
-    ],
+    available: false,
+    reason: "authoritative_commercial_source_not_connected",
   };
 }
 
@@ -620,6 +694,7 @@ export class TelemetryStore {
     this.devicesPath = join(dataDir, "devices.json");
     this.eventsPath = join(dataDir, "usage-events.jsonl");
     this.behaviorEventsPath = join(dataDir, "behavior-events.jsonl");
+    this.behaviorPipelinePath = join(dataDir, "behavior-pipeline.jsonl");
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     this.devices = new Map();
     this.devicesByHardwareHash = new Map();
@@ -627,6 +702,7 @@ export class TelemetryStore {
     this.eventIds = new Set();
     this.behaviorEvents = [];
     this.behaviorEventIds = new Set();
+    this.behaviorPipelineEvents = [];
     this.saveTimer = null;
     this.lastEventCompactionAt = 0;
     this.eventRateBuckets = new Map();
@@ -669,6 +745,7 @@ export class TelemetryStore {
     }
     this.loadEvents();
     this.loadBehaviorEvents();
+    this.loadBehaviorPipelineEvents();
   }
 
   loadEvents() {
@@ -874,6 +951,7 @@ export class TelemetryStore {
     if (now - this.lastEventCompactionAt < 60 * 60_000) return false;
     const usageChanged = this.compactEvents(now);
     this.compactBehaviorEvents(now);
+    this.compactBehaviorPipelineEvents(now);
     return usageChanged;
   }
 
@@ -971,6 +1049,7 @@ export class TelemetryStore {
         status: "retryable",
         reason_code: "rate_limited",
       }));
+      this.recordBehaviorPipelineResponse(response, now);
       return response;
     }
 
@@ -1048,6 +1127,7 @@ export class TelemetryStore {
             reason_code: "storage_unavailable",
           };
         }
+        this.recordBehaviorPipelineResponse(response, now);
         return response;
       }
       for (const event of accepted) {
@@ -1058,7 +1138,56 @@ export class TelemetryStore {
       device.last_seen_at = now;
       this.saveSoon();
     }
+    this.recordBehaviorPipelineResponse(response, now);
     return response;
+  }
+
+  loadBehaviorPipelineEvents() {
+    if (!existsSync(this.behaviorPipelinePath)) return;
+    const lines = readFileSync(this.behaviorPipelinePath, "utf8").split("\n");
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (Number.isFinite(Number(entry?.occurred_at))) this.behaviorPipelineEvents.push(entry);
+      } catch {
+        // Ignore a torn final line; pipeline health must not block service boot.
+      }
+    }
+    this.compactBehaviorPipelineEvents(Date.now());
+  }
+
+  compactBehaviorPipelineEvents(now = Date.now()) {
+    const cutoff = now - this.eventRetentionMs;
+    const retained = this.behaviorPipelineEvents
+      .filter((entry) => Number(entry.occurred_at) >= cutoff)
+      .slice(-this.eventCompactionTarget);
+    const changed = retained.length !== this.behaviorPipelineEvents.length;
+    this.behaviorPipelineEvents = retained;
+    if (changed) atomicWriteJsonLines(this.behaviorPipelinePath, retained);
+  }
+
+  recordBehaviorPipelineResponse(response, now = Date.now()) {
+    const entry = {
+      occurred_at: now,
+      accepted: 0,
+      duplicate: 0,
+      rejected: 0,
+      retryable: 0,
+    };
+    for (const result of response.results || []) {
+      if (Object.hasOwn(entry, result.status)) entry[result.status] += 1;
+    }
+    try {
+      appendFileSync(this.behaviorPipelinePath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+    } catch (error) {
+      console.error("[telemetry] failed to persist behavior pipeline counters:", error);
+      return;
+    }
+    this.behaviorPipelineEvents.push(entry);
+    if (this.behaviorPipelineEvents.length > this.maxEvents) {
+      this.compactBehaviorPipelineEvents(now);
+    }
   }
 
   rememberBehaviorControlRequest(device, requestId, kind, response) {
@@ -1178,7 +1307,14 @@ export class TelemetryStore {
 
   behaviorOverview(range) {
     if (this.compactExpiredEventsIfDue()) this.rebuildUsageCounters();
-    return buildBehaviorOverview([...this.devices.values()], this.events, this.behaviorEvents, range);
+    return buildBehaviorOverview(
+      [...this.devices.values()],
+      this.events,
+      this.behaviorEvents,
+      range,
+      Date.now(),
+      this.behaviorPipelineEvents,
+    );
   }
 
   behaviorTools(range, type) {

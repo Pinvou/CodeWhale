@@ -636,6 +636,7 @@ impl BehaviorTelemetry {
                     task_fields(BehaviorEvent::new("task_finished"), &session_id, &attempt)
                         .turn(turn_id)
                         .status("interrupted")
+                        .stage("shutdown")
                         .integer("duration_ms", now_ms().saturating_sub(attempt.submitted_at))
                         .string("error_category", "internal_error"),
                 );
