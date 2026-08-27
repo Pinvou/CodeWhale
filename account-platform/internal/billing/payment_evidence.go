@@ -181,7 +181,7 @@ func (p *PaymentCoordinator) mergeSuccessfulPaymentWithinTransaction(ctx context
 		if evidenceErr != nil {
 			return order, uuid.Nil, evidenceErr
 		}
-		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status='MANUAL_REVIEW',fulfillment_status='MANUAL_REVIEW',payment_url=NULL,qr_data=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
 			return order, uuid.Nil, err
 		}
 		if _, err := createPaymentAnomalyWithinTransaction(ctx, tx, "PAYMENT_FACT_CONFLICT", "P1", "payment-evidence:"+evidenceID.String(), paymentAnomalyReference{PaymentOrderID: &order.ID, PaymentEvidenceID: &evidenceID}, map[string]any{"evidence_type": evidenceType, "provider_transaction_id": provider.ChannelTransactionID, "reason": "order channel amount or currency mismatch"}, now); err != nil {
@@ -372,6 +372,8 @@ UPDATE payment_orders payment SET
    ELSE 'NORMAL' END,
  status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.late_paid_count>0 THEN 'PAID_LATE' WHEN facts.paid_count>0 THEN 'PAID' ELSE payment.status END,
  fulfillment_status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.paid_count>0 AND facts.credited_count=facts.paid_count THEN 'CREDITED' ELSE payment.fulfillment_status END,
+ payment_url=CASE WHEN facts.paid_count>0 OR facts.review_count>0 THEN NULL ELSE payment.payment_url END,
+ qr_data=CASE WHEN facts.paid_count>0 OR facts.review_count>0 THEN NULL ELSE payment.qr_data END,
  primary_provider_transaction_id=COALESCE(payment.primary_provider_transaction_id,facts.primary_transaction),
  paid_at=COALESCE(payment.paid_at,facts.first_paid_at),summary_version=summary_version+1,updated_at=$2
 FROM facts,refunds,forced_refunds,chargebacks,receivables,anomalies WHERE payment.id=$1`, orderID, now)

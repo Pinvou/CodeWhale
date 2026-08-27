@@ -665,6 +665,15 @@ test('personal plan history shows traceable package and payment identifiers', as
   assert.match(view, /points_remaining_microcredits/);
 });
 
+test('payment QR instructions disappear when an order reaches a terminal state', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
+  assert.match(view, /setQrData\(order && !terminalOrderStates\.has\(order\.status\)/);
+  assert.match(view, /!terminal && <div>\{qrData && <img/);
+  assert.match(view, /paid \? copy\.paymentReceived : terminal \? copy\.orderNoLongerPayable/);
+  assert.match(popover, /!terminalOrderStates\.has\(order\?\.status\) \? order\?\.qr_data/);
+});
+
 test('billing operators can search repair candidates without provider-specific UI branches', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');

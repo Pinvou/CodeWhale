@@ -487,7 +487,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   }, [smsCooldown]);
 
   useEffect(() => {
-    const paymentContent = order?.qr_data || '';
+    const paymentContent = !terminalOrderStates.has(order?.status) ? order?.qr_data || '' : '';
     if (!paymentContent) {
       setQrData('');
       setQrError(false);
@@ -496,7 +496,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
     setQrData(paymentContent);
     setQrError(!paymentContent.startsWith('data:image/png;base64,'));
     return undefined;
-  }, [order?.qr_data, qrRetry]);
+  }, [order?.qr_data, order?.status, qrRetry]);
 
   useEffect(() => {
     if (!open || auth !== 'ready' || !order?.order_id || terminalOrderStates.has(order.status)) return undefined;

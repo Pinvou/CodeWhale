@@ -814,6 +814,16 @@
         "file": "000045_system_ledger_accounts_repair.up.sql",
         "version": 45,
         "sha256": "c0ee5d31a93d4bc01bd9a4e24bbdccd4db4b7b84b21fdda180b20477421682f2"
+      },
+      {
+        "file": "000046_clear_terminal_payment_instructions.down.sql",
+        "version": 46,
+        "sha256": "a89054df1f953b12275069dc71ade09615153f8568b0eff12c2248fb2ae822f8"
+      },
+      {
+        "file": "000046_clear_terminal_payment_instructions.up.sql",
+        "version": 46,
+        "sha256": "99dc6a07cbad5081de0c3f79f00ee7fa66b0fd58580d7a24a85fc144adb13fe2"
       }
     ],
     "payment-simulator": [

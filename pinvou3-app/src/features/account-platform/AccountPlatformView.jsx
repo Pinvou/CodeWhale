@@ -7,6 +7,7 @@ import { localeNames, supportedLocales } from '../../shared/supported-locales.js
 import './account-platform.css';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'MANUAL_REVIEW']);
+const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
 const idempotencyKey = (prefix) => `${prefix}-${globalThis.crypto.randomUUID()}`;
 
 function Field({ label, children }) {
@@ -323,8 +324,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [client]);
 
   useEffect(() => {
-    setQrData(order?.qr_data || '');
-  }, [order?.qr_data]);
+    setQrData(order && !terminalOrderStates.has(order.status) ? order.qr_data || '' : '');
+  }, [order?.qr_data, order?.status]);
 
   useEffect(() => {
     if (!closure || closure.status === 'COMPLETED') return undefined;
@@ -1783,6 +1784,8 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
   }, [order?.order_id, order?.status]);
   const remainingSeconds = order ? Math.max(0, Math.ceil((new Date(order.expires_at).getTime() - now) / 1000)) : 0;
   const displayStatus = order?.status;
+  const paid = paidOrderStates.has(displayStatus);
+  const terminal = terminalOrderStates.has(displayStatus);
   const countdown = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
   const Heading = embedded ? 'h3' : 'h2';
   return (
@@ -1832,13 +1835,11 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
         </div>
         {order && (
           <div className="ap-payment">
-            <div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div>
+            {!terminal && <div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div>}
             <div>
               <span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span>
-              <h3>
-                ¥{(order.amount_fen / 100).toFixed(2)} · {copy.scanToPay}
-              </h3>
-              <p>{remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderStatuses.PENDING}</p>
+              <h3>¥{(order.amount_fen / 100).toFixed(2)}</h3>
+              <p>{paid ? copy.paymentReceived : terminal ? copy.orderNoLongerPayable : remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderStatuses.PENDING}</p>
             </div>
           </div>
         )}

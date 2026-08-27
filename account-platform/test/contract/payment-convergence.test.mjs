@@ -32,6 +32,15 @@ test('payment order close states progress monotonically and hide payment instruc
   assert.doesNotMatch(`${refunds}\n${reconciliation}`, /close_status=\$2/);
 });
 
+test('successful or review-required payments retire obsolete payment instructions', async () => {
+  const convergence = await read('internal/billing/payment_evidence.go');
+  const cleanup = await read('migrations/billing/000046_clear_terminal_payment_instructions.up.sql');
+  assert.match(convergence, /payment_url=CASE WHEN facts\.paid_count>0 OR facts\.review_count>0 THEN NULL/);
+  assert.match(convergence, /qr_data=CASE WHEN facts\.paid_count>0 OR facts\.review_count>0 THEN NULL/);
+  assert.match(cleanup, /status NOT IN \('CREATED', 'PENDING'\)/);
+  assert.match(cleanup, /close_status <> 'OPEN'/);
+});
+
 test('order projections derive independent payment refund chargeback and attention summaries', async () => {
   const source = await read('internal/billing/payment_evidence.go');
   assert.match(source, /FROM forced_refund_cases/);
