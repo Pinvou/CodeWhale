@@ -157,6 +157,8 @@ pub async fn install_marketplace_tool(
     app: tauri::AppHandle,
     pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
 ) -> Result<(), String> {
+    let telemetry_install =
+        crate::features::behavior_telemetry::begin_tool_install(&app, &tool_id, "mcp");
     let user_config = config.unwrap_or_default();
     let install_tool_id = tool_id.clone();
     let companion_tool_id = tool_id.clone();
@@ -183,6 +185,7 @@ pub async fn install_marketplace_tool(
                 mgr.uninstall(&rollback_tool_id)
             })
             .await;
+            telemetry_install.failed(&err);
             return Err(err);
         }
     }
@@ -217,12 +220,7 @@ pub async fn install_marketplace_tool(
     pool.refresh_live_sessions_skills().await;
     // 新装包的 CLI/技能脚本纳入/移出 deny 规则集（M-6：install 路径热刷）。
     pool.refresh_permission_rulesets().await;
-    crate::features::behavior_telemetry::track(
-        &app,
-        crate::features::behavior_telemetry::BehaviorEvent::new("tool_install_completed")
-            .tool(&tool_id, &tool_id, "mcp")
-            .success(true),
-    );
+    telemetry_install.success();
     Ok(())
 }
 
@@ -510,6 +508,8 @@ pub async fn install_marketplace_skill(
     app: tauri::AppHandle,
     pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
 ) -> Result<(), String> {
+    let telemetry_install =
+        crate::features::behavior_telemetry::begin_tool_install(&app, &skill_id, "skill");
     let install_skill_id = skill_id.clone();
     tokio::task::spawn_blocking(move || install_marketplace_skill_sync(&install_skill_id))
         .await
@@ -520,12 +520,7 @@ pub async fn install_marketplace_skill(
     pool.refresh_live_sessions_skills().await;
     // 导入包的 CLI/技能脚本纳入 deny 规则集（M-6：import 路径热刷）。
     pool.refresh_permission_rulesets().await;
-    crate::features::behavior_telemetry::track(
-        &app,
-        crate::features::behavior_telemetry::BehaviorEvent::new("tool_install_completed")
-            .tool(&skill_id, &skill_id, "skill")
-            .success(true),
-    );
+    telemetry_install.success();
     Ok(())
 }
 

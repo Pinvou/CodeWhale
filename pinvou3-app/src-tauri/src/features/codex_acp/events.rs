@@ -908,6 +908,15 @@ impl EventBridge {
             &call.title,
             &input,
         );
+        if let Some(turn_id) = self.current_turn.read().as_deref() {
+            crate::features::behavior_telemetry::track_tool_call_started(
+                &self.app,
+                &self.pinvou_session_id,
+                turn_id,
+                &id,
+                &call.title,
+            );
+        }
         let terminal = is_terminal(call.status);
         self.tools.lock().insert(id.clone(), call.clone());
         self.emit_protocol("tool_call", call.clone(), notification_meta);
@@ -937,6 +946,15 @@ impl EventBridge {
                     &call.title,
                     &call.raw_input.clone().unwrap_or_else(|| json!({})),
                 );
+                if let Some(turn_id) = self.current_turn.read().as_deref() {
+                    crate::features::behavior_telemetry::track_tool_call_started(
+                        &self.app,
+                        &self.pinvou_session_id,
+                        turn_id,
+                        &id,
+                        &call.title,
+                    );
+                }
                 if is_terminal(call.status) {
                     completed = Some(call.clone());
                 }
@@ -957,6 +975,17 @@ impl EventBridge {
             &call.raw_input.clone().unwrap_or_else(|| json!({})),
             matches!(call.status, ToolCallStatus::Completed),
         );
+        if let Some(turn_id) = self.current_turn.read().as_deref() {
+            crate::features::behavior_telemetry::track_tool_call_completed(
+                &self.app,
+                &self.pinvou_session_id,
+                turn_id,
+                &call.tool_call_id.to_string(),
+                &call.title,
+                matches!(call.status, ToolCallStatus::Completed),
+                Some("tool_error"),
+            );
+        }
     }
 
     pub fn emit(&self, event_type: &str, data: Value) -> AcpEventEnvelope {

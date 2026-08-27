@@ -190,6 +190,15 @@ pub(crate) fn spawn_event_forwarder(
                     );
                 }
                 Event::ToolCallStarted { id, name, input } => {
+                    if let Some(turn_id) = current_turn_id.as_deref() {
+                        crate::features::behavior_telemetry::track_tool_call_started(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            &id,
+                            &name,
+                        );
+                    }
                     #[cfg(feature = "benchmark-hooks")]
                     if crate::features::assistant::timing::eval_observation_enabled(&session_id) {
                         crate::features::assistant::timing::record_tool_started(&session_id, &name);
@@ -225,6 +234,19 @@ pub(crate) fn spawn_event_forwarder(
                     }
                     // 携带 metadata 让前端识别 careful hook 拦截 (safety_level=="dangerous")
                     let (output, success, metadata) = tool_call_result_parts(result);
+                    if let Some(turn_id) = current_turn_id.as_deref() {
+                        crate::features::behavior_telemetry::track_tool_call_completed(
+                            &app,
+                            &session_id,
+                            turn_id,
+                            &id,
+                            &name,
+                            success,
+                            (!success).then(|| {
+                                crate::features::behavior_telemetry::error_category(Some(&output))
+                            }),
+                        );
+                    }
                     #[cfg(feature = "benchmark-hooks")]
                     if crate::features::assistant::timing::eval_observation_enabled(&session_id) {
                         crate::features::assistant::timing::record_tool_completed(

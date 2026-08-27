@@ -36,6 +36,7 @@ pub struct BehaviorTelemetry {
     outbox: Arc<StdMutex<Outbox>>,
     tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
     team_sessions: Arc<StdMutex<HashSet<String>>>,
+    tool_calls: Arc<StdMutex<HashMap<String, ToolOperation>>>,
     event_tx: Option<mpsc::Sender<()>>,
 }
 
@@ -50,6 +51,56 @@ struct TaskAttempt {
     input_type: String,
     has_attachment: bool,
     first_output_emitted: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ToolOperation {
+    operation_id: String,
+    started_at: u64,
+    turn_id: String,
+    tool_key: &'static str,
+    tool_type: &'static str,
+}
+
+pub struct ToolInstallGuard {
+    app: tauri::AppHandle,
+    operation_id: String,
+    started_at: u64,
+    tool_key: &'static str,
+    tool_type: &'static str,
+    completed: bool,
+}
+
+impl ToolInstallGuard {
+    pub fn success(mut self) {
+        self.complete(true, None);
+    }
+
+    pub fn failed(mut self, error: &str) {
+        self.complete(false, Some(error_category(Some(error))));
+    }
+
+    fn complete(&mut self, success: bool, error_category: Option<&str>) {
+        let mut event = BehaviorEvent::new("tool_install_completed")
+            .tool(self.tool_key, self.tool_key, self.tool_type)
+            .string("operation_id", &self.operation_id)
+            .integer("attempt_index", 1)
+            .success(success)
+            .integer("duration_ms", now_ms().saturating_sub(self.started_at));
+        if let Some(category) = error_category {
+            event = event.string("error_category", category);
+        }
+        track(&self.app, event);
+        self.completed = true;
+    }
+}
+
+impl Drop for ToolInstallGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.complete(false, Some("internal_error"));
+        }
+    }
 }
 
 pub struct TaskSubmissionGuard {
@@ -545,6 +596,7 @@ impl BehaviorTelemetry {
             outbox,
             tasks,
             team_sessions: Arc::new(StdMutex::new(HashSet::new())),
+            tool_calls: Arc::new(StdMutex::new(HashMap::new())),
             event_tx,
         };
         if let Some(rx) = event_rx {
@@ -684,6 +736,7 @@ impl BehaviorTelemetry {
             outbox: self.outbox.clone(),
             tasks: self.tasks.clone(),
             team_sessions: self.team_sessions.clone(),
+            tool_calls: self.tool_calls.clone(),
             event_tx: None,
         }
     }
@@ -1511,6 +1564,43 @@ pub fn finish_task(
     let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
     };
+    let dangling_tools = telemetry
+        .tool_calls
+        .lock()
+        .ok()
+        .map(|mut calls| {
+            let keys = calls
+                .iter()
+                .filter(|(key, operation)| {
+                    key.starts_with(&format!("{session_id}\u{1f}")) && operation.turn_id == turn_id
+                })
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| calls.remove(&key))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for operation in dangling_tools {
+        telemetry.track(
+            BehaviorEvent::new("tool_call_completed")
+                .session(session_id)
+                .turn(&operation.turn_id)
+                .string("operation_id", operation.operation_id)
+                .integer("attempt_index", 1)
+                .tool(operation.tool_key, operation.tool_key, operation.tool_type)
+                .success(false)
+                .integer("duration_ms", now_ms().saturating_sub(operation.started_at))
+                .string(
+                    "error_category",
+                    if matches!(status, "cancelled" | "interrupted") {
+                        "user_cancelled"
+                    } else {
+                        "tool_error"
+                    },
+                ),
+        );
+    }
     let attempt = telemetry.tasks.lock().ok().and_then(|mut tasks| {
         let removed = if tasks
             .get(session_id)
@@ -1541,12 +1631,18 @@ pub fn error_category(error: Option<&str>) -> &'static str {
     let error = error.unwrap_or_default().to_ascii_lowercase();
     if error.contains("cancel") || error.contains("interrupt") {
         "user_cancelled"
+    } else if error.contains("permission") || error.contains("denied") {
+        "permission_denied"
     } else if error.contains("timeout") {
         "timeout"
     } else if error.contains("auth") || error.contains("401") || error.contains("403") {
         "authentication_failed"
     } else if error.contains("network") || error.contains("connect") {
         "network_unavailable"
+    } else if error.contains("rate limit") || error.contains("429") {
+        "rate_limited"
+    } else if error.contains("config") || error.contains("missing") {
+        "configuration_missing"
     } else if error.contains("model") || error.contains("provider") {
         "model_error"
     } else {
@@ -1554,21 +1650,104 @@ pub fn error_category(error: Option<&str>) -> &'static str {
     }
 }
 
-pub fn track_tool_call(
+fn tool_operation_key(session_id: &str, call_id: &str) -> String {
+    format!("{session_id}\u{1f}{call_id}")
+}
+
+pub fn track_tool_call_started(
     app: &tauri::AppHandle,
     session_id: &str,
-    turn_id: Option<&str>,
+    turn_id: &str,
+    call_id: &str,
     tool_name: &str,
-    success: bool,
 ) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
+        return;
+    };
+    let tool_type = classify_tool(tool_name);
+    let operation = ToolOperation {
+        operation_id: token("toolop_", 16),
+        started_at: now_ms(),
+        turn_id: turn_id.to_string(),
+        tool_key: tool_registry_key(tool_name),
+        tool_type,
+    };
+    if let Ok(mut calls) = telemetry.tool_calls.lock() {
+        let key = tool_operation_key(session_id, call_id);
+        if calls.contains_key(&key) {
+            return;
+        }
+        calls.insert(key, operation.clone());
+    } else {
+        return;
+    }
+    telemetry.track(
+        BehaviorEvent::new("tool_call_started")
+            .session(session_id)
+            .turn(turn_id)
+            .string("operation_id", &operation.operation_id)
+            .integer("attempt_index", 1)
+            .tool(operation.tool_key, operation.tool_key, tool_type),
+    );
+}
+
+pub fn track_tool_call_completed(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    _turn_id: &str,
+    call_id: &str,
+    _tool_name: &str,
+    success: bool,
+    error_category: Option<&str>,
+) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
+        return;
+    };
+    let operation = telemetry
+        .tool_calls
+        .lock()
+        .ok()
+        .and_then(|mut calls| calls.remove(&tool_operation_key(session_id, call_id)));
+    let Some(operation) = operation else {
+        return;
+    };
     let mut event = BehaviorEvent::new("tool_call_completed")
         .session(session_id)
-        .tool(tool_name, tool_name, classify_tool(tool_name))
-        .success(success);
-    if let Some(turn_id) = turn_id {
-        event = event.turn(turn_id);
+        .turn(operation.turn_id.clone())
+        .string("operation_id", operation.operation_id)
+        .integer("attempt_index", 1)
+        .tool(operation.tool_key, operation.tool_key, operation.tool_type)
+        .success(success)
+        .integer("duration_ms", now_ms().saturating_sub(operation.started_at));
+    if !success {
+        event = event.string("error_category", error_category.unwrap_or("tool_error"));
     }
-    track(app, event);
+    telemetry.track(event);
+}
+
+pub fn begin_tool_install(
+    app: &tauri::AppHandle,
+    tool_name: &str,
+    tool_type: &'static str,
+) -> ToolInstallGuard {
+    let started_at = now_ms();
+    let operation_id = token("install_", 16);
+    let tool_key = tool_registry_key(tool_name);
+    track(
+        app,
+        BehaviorEvent::new("tool_install_started")
+            .tool(tool_key, tool_key, tool_type)
+            .string("operation_id", &operation_id)
+            .integer("attempt_index", 1),
+    );
+    ToolInstallGuard {
+        app: app.clone(),
+        operation_id,
+        started_at,
+        tool_key,
+        tool_type,
+        completed: false,
+    }
 }
 
 pub fn track_model_used(
@@ -1711,6 +1890,28 @@ pub fn classify_tool(tool_name: &str) -> &'static str {
         "skill"
     } else {
         "unknown"
+    }
+}
+
+pub fn tool_registry_key(tool_name: &str) -> &'static str {
+    match tool_name {
+        "Bash" | "exec_shell" | "task_shell_start" => "shell",
+        "read_file" => "read_file",
+        "write_file" | "apply_patch" => "edit_file",
+        "glob" | "rg" | "search_files" => "search_files",
+        "web_search" | "search_query" => "web_search",
+        "view_image" => "view_image",
+        "image_gen" | "imagegen" => "image_generation",
+        "load_skill" => "load_skill",
+        "tool_search" => "tool_search",
+        "request_user_input" => "request_user_input",
+        "update_plan" | "checklist_write" | "todo_write" => "update_plan",
+        "feishu" => "feishu",
+        "wecom" => "wecom",
+        "dingtalk" => "dingtalk",
+        "tmeet" => "tmeet",
+        name if name.starts_with("mcp_") || name.contains("-mcp") => "mcp_custom",
+        _ => "custom",
     }
 }
 
