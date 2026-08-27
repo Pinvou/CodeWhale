@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
+import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
@@ -1775,6 +1776,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
 function Wallet({ copy, language, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, canRecharge = true, onRecharge, embedded = false }) {
   const [productId, setProductIdState] = useState('');
   const [channel, setChannel] = useState('');
+  const [entitlementDialog, setEntitlementDialog] = useState(null);
   const setProductId = (nextProductId) => {
     if (!nextProductId || products.some((item) => item.product_id === nextProductId && item.availability_status === 'AVAILABLE')) setProductIdState(nextProductId);
   };
@@ -1812,6 +1814,10 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
   const paid = paidOrderStates.has(displayStatus);
   const terminal = terminalOrderStates.has(displayStatus);
   const countdown = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
+  const activePackages = activeEntitlementPackages(packages.items || [], now);
+  const summarizedPackages = activePackages.slice(0, 5);
+  const allPackages = allEntitlementPackages(packages.items || []);
+  const remainingMicrocredits = remainingEntitlementMicrocredits(activePackages);
   const Heading = embedded ? 'h3' : 'h2';
   return (
     <section className={embedded ? 'ap-combined-section' : undefined}>
@@ -1871,68 +1877,114 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
       </div>
       <div className="ap-card ap-entitlements">
         <h3>{copy.myEntitlements}</h3>
-        <p className="ap-muted">{copy.consumptionOrder}</p>
-        <p className="ap-muted">{copy.refundCompositionNotice}</p>
         {detailsUnavailable ? (
           <div role="alert" className="ap-alert error">
             {copy.billingUnavailable}
           </div>
-        ) : packages.items?.length ? (
-          <div className="ap-order-list">
-            {packages.items.map((item) => (
-              <article className="ap-trace-card" key={item.package_id}>
-                <header>
-                  <div>
-                    <strong>{item.plan_name}</strong>
-                    <small>{item.sku_code}</small>
-                  </div>
-                  <div>
-                    <strong>
-                      {formatPoints(item.points_remaining_microcredits, language)} {copy.points}
-                    </strong>
-                    <span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span>
-                  </div>
-                </header>
-                <TraceDetails
-                  items={[
-                    [copy.packageId, item.package_id],
-                    [copy.entitlementSource, item.source_reference],
-                    [copy.pinvouOrder, item.pinvou_order_id],
-                    [copy.providerOrderReference, item.provider_order_reference],
-                    [copy.amount, formatMoney(item.amount_fen)],
-                    [copy.creditedAt, formatUsageTime(item.credited_at, language)],
-                    [copy.validPeriod, `${formatUsageTime(item.valid_from, language)} — ${formatUsageTime(item.valid_until, language)}`],
-                    [copy.totalPoints, `${formatPoints(item.points_total_microcredits, language)} ${copy.points}`],
-                    [copy.usedPoints, `${formatPoints(item.points_used_microcredits, language)} ${copy.points}`],
-                    [copy.expiredPoints, `${formatPoints(item.points_expired_microcredits, language)} ${copy.points}`],
-                    [copy.revokedPoints, `${formatPoints(item.points_revoked_microcredits, language)} ${copy.points}`],
-                  ]}
-                />
-                {item.components?.map((component) => (
-                  <div className="ap-card" key={component.component_id}>
-                    <strong>{copy.componentTypes[component.component_type] || component.component_type}</strong>
-                    <TraceDetails
-                      items={[
-                        [copy.totalPoints, `${formatPoints(component.original_microcredits, language)} ${copy.points}`],
-                        [copy.availableCredits, `${formatPoints(component.available_microcredits, language)} ${copy.points}`],
-                        [copy.reservedCredits, `${formatPoints(component.reserved_microcredits, language)} ${copy.points}`],
-                        [copy.usedPoints, `${formatPoints(component.used_microcredits, language)} ${copy.points}`],
-                        [copy.expiredPoints, `${formatPoints(component.expired_microcredits, language)} ${copy.points}`],
-                        [copy.revokedPoints, `${formatPoints(component.revoked_microcredits, language)} ${copy.points}`],
-                        [copy.validUntil, formatUsageTime(component.expires_at, language)],
-                        [copy.expiryReminder, copy.expiryReminderAt(formatUsageTime(component.expires_at, language))],
-                      ]}
-                    />
-                  </div>
+        ) : allPackages.length ? (
+          <div className="ap-entitlement-summary">
+            {summarizedPackages.length ? (
+              <div className="ap-entitlement-summary-list">
+                {summarizedPackages.map((item) => (
+                  <EntitlementPackageRow key={item.package_id} copy={copy} language={language} item={item} onOpen={() => setEntitlementDialog({ mode: 'detail', item, returnToAll: false })} />
                 ))}
-              </article>
-            ))}
+              </div>
+            ) : <Empty>{copy.noEntitlements}</Empty>}
+            <footer>
+              <strong>{copy.entitlementSummary(activePackages.length, formatPoints(remainingMicrocredits, language))}</strong>
+              <button type="button" onClick={() => setEntitlementDialog({ mode: 'all' })}>{copy.viewAll}</button>
+            </footer>
           </div>
         ) : (
           <Empty>{copy.noEntitlements}</Empty>
         )}
       </div>
+      {entitlementDialog && (
+        <Dialog title={entitlementDialog.mode === 'all' ? copy.allEntitlements : copy.entitlementDetails} closeLabel={copy.closeDialog} onClose={() => setEntitlementDialog(null)} className="ap-entitlement-dialog">
+          {entitlementDialog.mode === 'all' ? (
+            <div className="ap-entitlement-summary-list ap-entitlement-all-list">
+              {allPackages.map((item) => (
+                <EntitlementPackageRow key={item.package_id} copy={copy} language={language} item={item} onOpen={() => setEntitlementDialog({ mode: 'detail', item, returnToAll: true })} />
+              ))}
+            </div>
+          ) : (
+            <>
+              {entitlementDialog.returnToAll && <button type="button" className="ap-dialog-back" onClick={() => setEntitlementDialog({ mode: 'all' })}>{copy.backToEntitlements}</button>}
+              <EntitlementPackageDetail copy={copy} language={language} item={entitlementDialog.item} />
+            </>
+          )}
+        </Dialog>
+      )}
     </section>
+  );
+}
+
+function EntitlementPackageRow({ copy, language, item, onOpen }) {
+  const progress = entitlementProgress(item);
+  return (
+    <button type="button" className="ap-entitlement-row" onClick={onOpen}>
+      <span className="ap-entitlement-row-main">
+        <strong>{item.plan_name}</strong>
+        <small>{copy.usedOfTotal(formatPoints(item.points_used_microcredits, language), formatPoints(item.points_total_microcredits, language))}</small>
+      </span>
+      <span className="ap-entitlement-row-meta">
+        <span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span>
+        <small>{copy.validUntil}: {formatUsageTime(item.valid_until, language)}</small>
+      </span>
+      <span className="ap-entitlement-progress" role="progressbar" aria-label={copy.entitlementProgress} aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(progress)}>
+        <span style={{ width: `${progress}%` }} />
+      </span>
+    </button>
+  );
+}
+
+function EntitlementPackageDetail({ copy, language, item }) {
+  return (
+    <div className="ap-entitlement-detail">
+      <header>
+        <div>
+          <strong>{item.plan_name}</strong>
+          <small>{item.sku_code || item.plan_id}</small>
+        </div>
+        <span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span>
+      </header>
+      <TraceDetails
+        items={[
+          [copy.packageId, item.package_id],
+          [copy.entitlementSource, item.source_reference],
+          [copy.pinvouOrder, item.pinvou_order_id],
+          [copy.providerOrderReference, item.provider_order_reference],
+          [copy.amount, formatMoney(item.amount_fen)],
+          [copy.creditedAt, formatUsageTime(item.credited_at, language)],
+          [copy.validPeriod, `${formatUsageTime(item.valid_from, language)} — ${formatUsageTime(item.valid_until, language)}`],
+          [copy.totalPoints, `${formatPoints(item.points_total_microcredits, language)} ${copy.points}`],
+          [copy.usedPoints, `${formatPoints(item.points_used_microcredits, language)} ${copy.points}`],
+          [copy.expiredPoints, `${formatPoints(item.points_expired_microcredits, language)} ${copy.points}`],
+          [copy.revokedPoints, `${formatPoints(item.points_revoked_microcredits, language)} ${copy.points}`],
+        ]}
+      />
+      <p className="ap-muted">{copy.consumptionOrder}</p>
+      <p className="ap-muted">{copy.refundCompositionNotice}</p>
+      <div className="ap-entitlement-components">
+        {item.components?.map((component) => (
+          <article className="ap-card" key={component.component_id}>
+            <strong>{copy.componentTypes[component.component_type] || component.component_type}</strong>
+            <TraceDetails
+              items={[
+                [copy.totalPoints, `${formatPoints(component.original_microcredits, language)} ${copy.points}`],
+                [copy.availableCredits, `${formatPoints(component.available_microcredits, language)} ${copy.points}`],
+                [copy.reservedCredits, `${formatPoints(component.reserved_microcredits, language)} ${copy.points}`],
+                [copy.usedPoints, `${formatPoints(component.used_microcredits, language)} ${copy.points}`],
+                [copy.expiredPoints, `${formatPoints(component.expired_microcredits, language)} ${copy.points}`],
+                [copy.revokedPoints, `${formatPoints(component.revoked_microcredits, language)} ${copy.points}`],
+                [copy.validUntil, formatUsageTime(component.expires_at, language)],
+                [copy.expiryReminder, copy.expiryReminderAt(formatUsageTime(component.expires_at, language))],
+              ]}
+            />
+          </article>
+        ))}
+      </div>
+    </div>
   );
 }
 

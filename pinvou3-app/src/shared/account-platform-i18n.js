@@ -903,6 +903,13 @@ Object.assign(accountPlatformCopy.zh, {
   expiryReminderAt: (value) => `${value} 到期；到期后不可再用于新消费。`,
   consumptionOrder: '消费顺序：优先使用最早到期的权益；同一天到期时先用 BONUS，再用 BASE；同类型按到账时间和编号顺序使用。',
   refundCompositionNotice: 'BONUS 不产生现金退款金额，但普通退款成功时该支付产生的未消费关联 BONUS 将随 BASE 一并撤销。',
+  viewAll: '查看全部',
+  allEntitlements: '全部权益包',
+  entitlementDetails: '权益包详情',
+  backToEntitlements: '返回全部权益包',
+  entitlementProgress: '权益包使用进度',
+  usedOfTotal: (used, total) => `${used}/${total} 积分（已用/总量）`,
+  entitlementSummary: (count, remaining) => `有效权益包 ${count} 个 · 剩余 ${remaining} 积分`,
 });
 Object.assign(accountPlatformCopy.en, {
   basePoints: 'Base points (BASE)',
@@ -915,6 +922,13 @@ Object.assign(accountPlatformCopy.en, {
   expiryReminderAt: (value) => `Expires ${value}; it cannot fund new usage after expiry.`,
   consumptionOrder: 'Consumption order: earliest expiry first; for the same expiry date, BONUS before BASE; then credit time and stable ID.',
   refundCompositionNotice: 'BONUS has no cash refund value. When a normal refund succeeds, all unconsumed BONUS associated with that payment is revoked together with BASE.',
+  viewAll: 'View all',
+  allEntitlements: 'All benefit packages',
+  entitlementDetails: 'Benefit package details',
+  backToEntitlements: 'Back to all packages',
+  entitlementProgress: 'Benefit package usage progress',
+  usedOfTotal: (used, total) => `${used}/${total} points (used/total)`,
+  entitlementSummary: (count, remaining) => `${count} active packages · ${remaining} points remaining`,
 });
 Object.assign(accountPlatformCopy.ja, {
   basePoints: '基本ポイント（BASE）',
@@ -930,6 +944,13 @@ Object.assign(accountPlatformCopy.ja, {
   expiryReminderAt: (value) => `${value} に期限切れとなり、それ以降は新しい利用に使用できません。`,
   consumptionOrder: '消費順序：期限が早い特典を優先し、同じ期限では BONUS、BASE の順、同種では付与日時と固定 ID の順に使用します。',
   refundCompositionNotice: 'BONUS は現金返金額を生みません。通常返金が成功すると、その支払いに紐づく未消費の BONUS は BASE とともに取り消されます。',
+  viewAll: 'すべて表示',
+  allEntitlements: 'すべての特典パッケージ',
+  entitlementDetails: '特典パッケージ詳細',
+  backToEntitlements: 'パッケージ一覧に戻る',
+  entitlementProgress: '特典パッケージ利用進捗',
+  usedOfTotal: (used, total) => `${used}/${total} ポイント（使用済み/合計）`,
+  entitlementSummary: (count, remaining) => `有効な特典 ${count} 件 · 残り ${remaining} ポイント`,
 });
 
 Object.assign(accountPlatformCopy.zh, {

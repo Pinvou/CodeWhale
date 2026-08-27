@@ -3,6 +3,7 @@ import test from 'node:test';
 import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
+import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
@@ -63,6 +64,26 @@ test('Web personal center keeps the URL, selected tab, and browser history synch
   assert.match(view, /history\?\.replaceState\?\.\(\{\}, '', nextLocation\)/);
   assert.match(view, /addEventListener\?\.\('popstate', onPopState\)/);
   assert.match(view, /history\?\.pushState\?\.\(\{\}, '', nextLocation\)/);
+});
+
+test('Web personal center summarizes active benefit packages before opening full details', async () => {
+  const now = Date.parse('2026-08-27T00:00:00Z');
+  const items = [
+    { package_id: 'later', status: 'ACTIVE', valid_until: '2026-09-30T00:00:00Z', points_total_microcredits: 100, points_used_microcredits: 25, points_remaining_microcredits: 75 },
+    { package_id: 'used', status: 'CONSUMED', valid_until: '2026-08-29T00:00:00Z', points_total_microcredits: 100, points_used_microcredits: 140, points_remaining_microcredits: 0 },
+    { package_id: 'revoked', status: 'REVOKED', valid_until: '2026-09-01T00:00:00Z', points_total_microcredits: 100, points_used_microcredits: 0, points_remaining_microcredits: 100 },
+    { package_id: 'expired', status: 'ACTIVE', valid_until: '2026-08-01T00:00:00Z', points_total_microcredits: 0, points_used_microcredits: 0, points_remaining_microcredits: 10 },
+  ];
+  assert.deepEqual(activeEntitlementPackages(items, now).map((item) => item.package_id), ['used', 'later']);
+  assert.equal(entitlementProgress(items[0]), 25);
+  assert.equal(entitlementProgress(items[1]), 100);
+  assert.equal(entitlementProgress(items[3]), 0);
+  assert.equal(remainingEntitlementMicrocredits(activeEntitlementPackages(items, now)), 75);
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /activePackages\.slice\(0, 5\)/);
+  assert.match(view, /copy\.entitlementSummary\(activePackages\.length/);
+  assert.match(view, /mode: 'all'/);
+  assert.match(view, /<EntitlementPackageDetail/);
 });
 
 test('admin organization client uses protected organization, member, and unit endpoints', async () => {
