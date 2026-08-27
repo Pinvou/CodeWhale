@@ -60,6 +60,15 @@ pub struct TrackBehaviorEventRequest {
     pub success: Option<bool>,
     pub scene_l1: Option<String>,
     pub scene_l2: Option<String>,
+    pub operation_id: Option<String>,
+    pub attempt_index: Option<u16>,
+    pub entry_point: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub error_category: Option<String>,
+    pub provider_key: Option<String>,
+    pub provider_configured: Option<bool>,
+    pub step: Option<String>,
+    pub readiness_source: Option<String>,
 }
 
 #[tauri::command]
@@ -70,6 +79,13 @@ pub fn track_behavior_event(
     let event_name = match request.event_name.as_str() {
         "voice_started" => "voice_started",
         "scene_triggered" => "scene_triggered",
+        "onboarding_started" => "onboarding_started",
+        "onboarding_completed" => "onboarding_completed",
+        "onboarding_skipped" => "onboarding_skipped",
+        "provider_setup_started" => "provider_setup_started",
+        "provider_setup_completed" => "provider_setup_completed",
+        "provider_setup_failed" => "provider_setup_failed",
+        "task_environment_ready" => "task_environment_ready",
         _ => return Err("unsupported behavior event".to_string()),
     };
     let mut event = crate::features::behavior_telemetry::BehaviorEvent::new(event_name);
@@ -103,6 +119,33 @@ pub fn track_behavior_event(
             request.scene_l1.unwrap_or_default(),
             request.scene_l2.unwrap_or_default(),
         );
+    }
+    if let Some(value) = request.operation_id {
+        event = event.string("operation_id", value);
+    }
+    if let Some(value) = request.attempt_index {
+        event = event.integer("attempt_index", u64::from(value));
+    }
+    if let Some(value) = request.entry_point {
+        event = event.string("entry_point", value);
+    }
+    if let Some(value) = request.duration_ms {
+        event = event.integer("duration_ms", value.min(86_400_000));
+    }
+    if let Some(value) = request.error_category {
+        event = event.string("error_category", value);
+    }
+    if let Some(value) = request.provider_key {
+        event = event.string("provider_key", value);
+    }
+    if let Some(value) = request.provider_configured {
+        event = event.boolean("provider_configured", value);
+    }
+    if let Some(value) = request.step {
+        event = event.string("step", value);
+    }
+    if let Some(value) = request.readiness_source {
+        event = event.string("readiness_source", value);
     }
     crate::features::behavior_telemetry::track(&app, event);
     Ok(())

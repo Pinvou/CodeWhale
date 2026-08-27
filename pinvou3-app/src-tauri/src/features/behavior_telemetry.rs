@@ -152,40 +152,8 @@ pub struct BehaviorEvent {
     pub event_id: String,
     pub event_name: &'static str,
     pub occurred_at: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub app_version: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub platform: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stage: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub success: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scene_l1: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scene_l2: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_name: Option<String>,
+    #[serde(flatten)]
+    fields: serde_json::Map<String, Value>,
 }
 
 impl BehaviorEvent {
@@ -194,86 +162,81 @@ impl BehaviorEvent {
             event_id: event_id(),
             event_name,
             occurred_at: now_ms(),
-            app_version: None,
-            platform: None,
-            session_id: None,
-            turn_id: None,
-            input_type: None,
-            status: None,
-            stage: None,
-            tool_key: None,
-            tool_name: None,
-            tool_type: None,
-            success: None,
-            scene_l1: None,
-            scene_l2: None,
-            provider_key: None,
-            provider_name: None,
-            model_id: None,
-            model_name: None,
+            fields: serde_json::Map::new(),
         }
     }
 
+    pub fn string(mut self, key: &'static str, value: impl Into<String>) -> Self {
+        if let Some(value) = nonempty(value.into()) {
+            self.fields.insert(key.to_string(), Value::String(value));
+        }
+        self
+    }
+
+    pub fn boolean(mut self, key: &'static str, value: bool) -> Self {
+        self.fields.insert(key.to_string(), Value::Bool(value));
+        self
+    }
+
+    pub fn integer(mut self, key: &'static str, value: u64) -> Self {
+        self.fields.insert(key.to_string(), json!(value));
+        self
+    }
+
     pub fn session(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = nonempty(session_id.into());
+        if let Some(value) = nonempty(session_id.into()) {
+            self.fields
+                .insert("session_id".to_string(), Value::String(value));
+        }
         self
     }
 
-    pub fn turn(mut self, turn_id: impl Into<String>) -> Self {
-        self.turn_id = nonempty(turn_id.into());
-        self
+    pub fn turn(self, turn_id: impl Into<String>) -> Self {
+        self.string("turn_id", turn_id)
     }
 
-    pub fn input_type(mut self, input_type: impl Into<String>) -> Self {
-        self.input_type = nonempty(input_type.into());
-        self
+    pub fn input_type(self, input_type: impl Into<String>) -> Self {
+        self.string("input_type", input_type)
     }
 
-    pub fn status(mut self, status: impl Into<String>) -> Self {
-        self.status = nonempty(status.into());
-        self
+    pub fn status(self, status: impl Into<String>) -> Self {
+        self.string("status", status)
     }
 
-    pub fn stage(mut self, stage: impl Into<String>) -> Self {
-        self.stage = nonempty(stage.into());
-        self
+    pub fn stage(self, stage: impl Into<String>) -> Self {
+        self.string("stage", stage)
     }
 
     pub fn tool(
-        mut self,
+        self,
         key: impl Into<String>,
         name: impl Into<String>,
         tool_type: impl Into<String>,
     ) -> Self {
-        self.tool_key = nonempty(key.into());
-        self.tool_name = nonempty(name.into());
-        self.tool_type = nonempty(tool_type.into());
-        self
+        self.string("tool_key", key)
+            .string("tool_name", name)
+            .string("tool_type", tool_type)
     }
 
-    pub fn success(mut self, success: bool) -> Self {
-        self.success = Some(success);
-        self
+    pub fn success(self, success: bool) -> Self {
+        self.boolean("success", success)
     }
 
-    pub fn scene(mut self, l1: impl Into<String>, l2: impl Into<String>) -> Self {
-        self.scene_l1 = nonempty(l1.into());
-        self.scene_l2 = nonempty(l2.into());
-        self
+    pub fn scene(self, l1: impl Into<String>, l2: impl Into<String>) -> Self {
+        self.string("scene_l1", l1).string("scene_l2", l2)
     }
 
     pub fn model(
-        mut self,
+        self,
         provider_key: impl Into<String>,
         provider_name: impl Into<String>,
         model_id: impl Into<String>,
         model_name: impl Into<String>,
     ) -> Self {
-        self.provider_key = nonempty(provider_key.into());
-        self.provider_name = nonempty(provider_name.into());
-        self.model_id = nonempty(model_id.into());
-        self.model_name = nonempty(model_name.into());
-        self
+        self.string("provider_key", provider_key)
+            .string("provider_name", provider_name)
+            .string("model_id", model_id)
+            .string("model_name", model_name)
     }
 }
 
@@ -567,6 +530,16 @@ impl BehaviorTelemetry {
         if telemetry.runtime.enabled && telemetry.event_tx.is_none() {
             log::debug!("[pinvou3][behavior] telemetry disabled: queue initialization failed");
         }
+        if telemetry.collecting.load(Ordering::Acquire) {
+            telemetry.track(
+                BehaviorEvent::new("app_opened")
+                    .string("launch_type", "cold")
+                    .integer(
+                        "startup_duration_ms",
+                        crate::platform::startup::elapsed_ms().min(600_000),
+                    ),
+            );
+        }
         telemetry
     }
 
@@ -793,14 +766,34 @@ impl BehaviorTelemetry {
                 .await?;
             let mut guard = self.state.lock().await;
             let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
+            let emit_cohort = !state.control.cohort_started;
             state.control.enabled = true;
             state.control.collection_period_id = Some(response.collection_period_id);
             state.control.pending_request = None;
+            state.control.cohort_started = true;
             persist_state(state)?;
             if let Ok(mut period) = self.collection_period_id.write() {
                 *period = state.control.collection_period_id.clone();
             }
             self.collecting.store(true, Ordering::Release);
+            drop(guard);
+            if emit_cohort {
+                let previous_version_present =
+                    paths::pinvou3_home().join("settings.json").is_file();
+                self.track(
+                    BehaviorEvent::new("analytics_cohort_started")
+                        .string("eligibility_source", "later_opt_in")
+                        .string(
+                            "install_source",
+                            if previous_version_present {
+                                "upgrade"
+                            } else {
+                                "direct"
+                            },
+                        )
+                        .boolean("previous_version_present", previous_version_present),
+                );
+            }
         } else {
             self.collecting.store(false, Ordering::Release);
             if let Ok(mut period) = self.collection_period_id.write() {

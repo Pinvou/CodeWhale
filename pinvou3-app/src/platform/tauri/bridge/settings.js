@@ -560,11 +560,61 @@
   }
   // model 对象字段须是 snake_case(SavedModel serde):
   // {id,name,preset,context_window_tokens,max_output_tokens,model,base_url,api_key,credential_action,image_capability_override,vision_model_id}
+ function analyticsOperationId(prefix) {
+   return `${prefix}_${globalThis.crypto.randomUUID().replaceAll('-', '_')}`;
+ }
+ function analyticsProviderKey(model) {
+   const raw = String(model.vendor || model.preset || 'unknown').toLowerCase();
+   const normalized = raw.replace(/[^a-z0-9_.-]+/g, '_').replace(/^[^a-z0-9]+/, '').slice(0, 64);
+   return normalized || 'unknown';
+ }
+ function hasConfiguredUserModel() {
+   return (state.savedModels || []).some(item => {
+     if (item && item.kind === 'builtin_llmapi') return false;
+     const credential = item.credential_state || (item.has_secret ? 'configured' : 'missing');
+     return credential === 'configured' || credential === 'env_override';
+   });
+ }
+ async function trackProviderSetup(request) {
+   try { await invoke("track_behavior_event", { request }); } catch (_) { /* analytics is best effort */ }
+ }
  async function saveModel(model) {
-   await invoke("save_model", { model: model });
-   await loadModels();
-   await loadSettings();
-   await loadEffectiveModelConfig();
+   const operationId = analyticsOperationId('provider');
+   const providerKey = analyticsProviderKey(model);
+   const startedAt = Date.now();
+   const initialSetup = !hasConfiguredUserModel();
+   if (initialSetup) {
+     await trackProviderSetup({ eventName: 'onboarding_started', entryPoint: 'settings' });
+   }
+   await trackProviderSetup({
+     eventName: 'provider_setup_started', providerKey, entryPoint: 'settings',
+     operationId, attemptIndex: 1,
+   });
+   try {
+     await invoke("save_model", { model: model });
+     const durationMs = Math.max(0, Date.now() - startedAt);
+     await trackProviderSetup({
+       eventName: 'provider_setup_completed', providerKey, operationId,
+       attemptIndex: 1, durationMs,
+     });
+     if (initialSetup) {
+       await trackProviderSetup({
+         eventName: 'onboarding_completed', durationMs, providerConfigured: true,
+       });
+       await trackProviderSetup({
+         eventName: 'task_environment_ready', readinessSource: 'provider_setup', providerKey,
+       });
+     }
+     await loadModels();
+     await loadSettings();
+     await loadEffectiveModelConfig();
+   } catch (error) {
+     await trackProviderSetup({
+       eventName: 'provider_setup_failed', providerKey, operationId,
+       attemptIndex: 1, errorCategory: 'validation_failed',
+     });
+     throw error;
+   }
  }
  async function revealModelApiKey(id) {
    return await invoke("reveal_model_api_key", { id: id });

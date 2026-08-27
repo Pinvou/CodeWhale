@@ -298,7 +298,12 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
   const doSave = async (apiKeyAction, trimmedKey) => {
     setSaving(true);
     setError('');
+    const operationId = `provider_${globalThis.crypto.randomUUID().replaceAll('-', '_')}`;
+    const providerKey = String(agent || 'unknown').toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').replace(/^[^a-z0-9]+/, '').slice(0, 64) || 'unknown';
+    const startedAt = Date.now();
+    const trackSetup = request => invokeTauri('track_behavior_event', { request }).catch(() => {});
     try {
+      await trackSetup({ eventName: 'provider_setup_started', providerKey, entryPoint: 'settings', operationId, attemptIndex: 1 });
       const { slotPayload, contextWindowPayload } = payloadRef.current;
       const saved = await invokeTauri('save_acp_provider', {
         agent,
@@ -312,9 +317,17 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
         apiKey: trimmedKey || null,
         apiKeyAction,
       });
+      await trackSetup({
+        eventName: 'provider_setup_completed', providerKey, operationId, attemptIndex: 1,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      });
       onSaved(saved);
       onClose();
     } catch (e) {
+      await trackSetup({
+        eventName: 'provider_setup_failed', providerKey, operationId, attemptIndex: 1,
+        errorCategory: 'validation_failed',
+      });
       setError(String(e));
       setSaving(false);
     }
