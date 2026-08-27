@@ -71,6 +71,8 @@ pub struct TrackBehaviorEventRequest {
     pub readiness_source: Option<String>,
     pub voice_permission_status: Option<String>,
     pub recognizer_type: Option<String>,
+    pub view_id: Option<String>,
+    pub position_bucket: Option<String>,
 }
 
 #[tauri::command]
@@ -100,6 +102,10 @@ pub fn track_behavior_event(
                 operation_id,
             );
         }
+        "tool_impression" => "tool_impression",
+        "tool_detail_opened" => "tool_detail_opened",
+        "tool_configuration_started" => "tool_configuration_started",
+        "tool_configuration_finished" => "tool_configuration_finished",
         "scene_triggered" => "scene_triggered",
         "onboarding_started" => "onboarding_started",
         "onboarding_completed" => "onboarding_completed",
@@ -127,10 +133,23 @@ pub fn track_behavior_event(
         event = event.stage(value);
     }
     if request.tool_key.is_some() || request.tool_name.is_some() || request.tool_type.is_some() {
+        let raw_tool = request
+            .tool_key
+            .as_deref()
+            .or(request.tool_name.as_deref())
+            .unwrap_or_default();
+        let tool_type = match request.tool_type.as_deref() {
+            Some("mcp") => "mcp",
+            Some("cli") => "cli",
+            Some("skill") => "skill",
+            Some("builtin") => "builtin",
+            Some("custom") => "custom",
+            _ => crate::features::behavior_telemetry::classify_tool(raw_tool),
+        };
         event = event.tool(
-            request.tool_key.unwrap_or_default(),
-            request.tool_name.unwrap_or_default(),
-            request.tool_type.unwrap_or_default(),
+            crate::features::behavior_telemetry::tool_registry_key(raw_tool),
+            "",
+            tool_type,
         );
     }
     if let Some(value) = request.success {
@@ -174,6 +193,12 @@ pub fn track_behavior_event(
     }
     if let Some(value) = request.recognizer_type {
         event = event.string("recognizer_type", value);
+    }
+    if let Some(value) = request.view_id {
+        event = event.string("view_id", value);
+    }
+    if let Some(value) = request.position_bucket {
+        event = event.string("position_bucket", value);
     }
     crate::features::behavior_telemetry::track(&app, event);
     Ok(())
