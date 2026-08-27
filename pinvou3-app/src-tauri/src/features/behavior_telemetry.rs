@@ -268,17 +268,9 @@ impl BehaviorEvent {
         self.string("scene_l1", l1).string("scene_l2", l2)
     }
 
-    pub fn model(
-        self,
-        provider_key: impl Into<String>,
-        provider_name: impl Into<String>,
-        model_id: impl Into<String>,
-        model_name: impl Into<String>,
-    ) -> Self {
+    pub fn model(self, provider_key: impl Into<String>, model_key: impl Into<String>) -> Self {
         self.string("provider_key", provider_key)
-            .string("provider_name", provider_name)
-            .string("model_id", model_id)
-            .string("model_name", model_name)
+            .string("model_key", model_key)
     }
 }
 
@@ -1588,25 +1580,126 @@ pub fn track_model_used(
     let Some(model) = bridge.effective_model_owned() else {
         return;
     };
-    let provider_key = model
-        .vendor
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| model.preset.as_str())
-        .to_ascii_lowercase();
-    let provider_name = provider_key.clone();
-    let model_id = model.model.trim();
-    if model_id.is_empty() {
+    track_model_used_keys(
+        app,
+        session_id,
+        turn_id,
+        model.preset.as_str(),
+        &model.model,
+        if bridge.session_model.is_some() {
+            "session_default"
+        } else {
+            "app_default"
+        },
+    );
+}
+
+pub fn track_model_used_keys(
+    app: &tauri::AppHandle,
+    session_id: &str,
+    turn_id: &str,
+    provider: &str,
+    model: &str,
+    selection_source: &str,
+) {
+    let Some(telemetry) = app.try_state::<BehaviorTelemetry>() else {
         return;
+    };
+    let attempt = telemetry.tasks.lock().ok().and_then(|tasks| {
+        tasks
+            .get(session_id)
+            .filter(|attempt| attempt.turn_id.as_deref() == Some(turn_id))
+            .cloned()
+    });
+    if let Some(attempt) = attempt {
+        telemetry.track(
+            BehaviorEvent::new("model_used")
+                .session(session_id)
+                .string("attempt_id", attempt.attempt_id)
+                .turn(turn_id)
+                .model(provider_registry_key(provider), model_registry_key(model))
+                .string("selection_source", selection_source),
+        );
     }
+}
+
+pub fn track_model_selected(
+    app: &tauri::AppHandle,
+    provider: &str,
+    model: &str,
+    selection_scope: &str,
+    entry_point: &str,
+) {
     track(
         app,
-        BehaviorEvent::new("model_used")
-            .session(session_id)
-            .turn(turn_id)
-            .model(provider_key, provider_name, model_id, model_id),
+        BehaviorEvent::new("model_selected")
+            .model(provider_registry_key(provider), model_registry_key(model))
+            .string("selection_scope", selection_scope)
+            .string("entry_point", entry_point),
     );
+}
+
+pub fn provider_registry_key(provider: &str) -> &'static str {
+    match provider.trim().to_ascii_lowercase().as_str() {
+        "deepseek" => "deepseek",
+        "kimi" | "kimi_acp" => "kimi",
+        "qwen" => "qwen",
+        "doubao" => "doubao",
+        "minimax" => "minimax",
+        "glm" => "glm",
+        "mimo" => "mimo",
+        "openai" | "codex" | "codex_acp" => "openai",
+        "anthropic" | "claude" | "claude_acp" => "anthropic",
+        "gemini" => "gemini",
+        "xai" => "xai",
+        "local_vllm" => "local",
+        "openai_compatible" => "custom",
+        _ => "unknown",
+    }
+}
+
+pub fn model_registry_key(model: &str) -> &'static str {
+    let model = model.trim().to_ascii_lowercase();
+    if model.is_empty() {
+        return "unknown";
+    }
+    if model.contains("deepseek") {
+        "deepseek"
+    } else if model.contains("claude") && model.contains("opus") {
+        "claude_opus"
+    } else if model.contains("claude") && model.contains("haiku") {
+        "claude_haiku"
+    } else if model.contains("claude") {
+        "claude_sonnet"
+    } else if model.contains("gpt-5") || model.contains("gpt_5") {
+        "gpt_5"
+    } else if model.contains("gpt-4") || model.contains("gpt_4") {
+        "gpt_4"
+    } else if model == "o3" || model.starts_with("o3-") {
+        "o3"
+    } else if model.contains("gemini") {
+        "gemini"
+    } else if model.contains("qwen") {
+        "qwen"
+    } else if model.contains("kimi") || model.contains("moonshot") {
+        "kimi"
+    } else if model.contains("minimax") {
+        "minimax"
+    } else if model.contains("glm") {
+        "glm"
+    } else if model.contains("mimo") {
+        "mimo"
+    } else if model.contains("doubao") {
+        "doubao"
+    } else if model.contains("grok") {
+        "grok"
+    } else if model.contains("llama") {
+        "llama"
+    } else if model.contains("mistral") {
+        "mistral"
+    } else {
+        "custom"
+    }
 }
 
 pub fn classify_tool(tool_name: &str) -> &'static str {
@@ -1655,6 +1748,18 @@ mod tests {
         assert_eq!(value["success"], false);
         assert!(value.get("app_version").is_none());
         assert!(value.get("scene_l1").is_none());
+    }
+
+    #[test]
+    fn model_registry_never_returns_user_supplied_identifiers() {
+        assert_eq!(provider_registry_key("openai_compatible"), "custom");
+        assert_eq!(
+            provider_registry_key("https://private.example/v1"),
+            "unknown"
+        );
+        assert_eq!(model_registry_key("customer-secret-alias"), "custom");
+        assert_eq!(model_registry_key("claude-4-sonnet"), "claude_sonnet");
+        assert_eq!(model_registry_key("gpt-5.2-codex"), "gpt_5");
     }
 
     #[test]

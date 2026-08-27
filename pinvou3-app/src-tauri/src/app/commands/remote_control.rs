@@ -1167,11 +1167,23 @@ pub async fn web_access_set_codex_acp_model(
     session_id: String,
     model_id: String,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<Value, String> {
-    let outcome = acp_pool
-        .set_model(&session_id, &model_id)
-        .await
-        .and_then(project_acp_session_info_for_web);
+    let provider = acp_pool
+        .backend(&session_id)
+        .agent_id()
+        .unwrap_or("unknown");
+    let outcome = acp_pool.set_model(&session_id, &model_id).await;
+    if outcome.is_ok() {
+        crate::features::behavior_telemetry::track_model_selected(
+            &app,
+            provider,
+            &model_id,
+            "session",
+            "web_code_model_picker",
+        );
+    }
+    let outcome = outcome.and_then(project_acp_session_info_for_web);
     web_acp_result(WebAcpOperation::SetModel, outcome)
 }
 

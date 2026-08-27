@@ -228,11 +228,24 @@ pub async fn set_codex_acp_model(
     session_id: String,
     model_id: String,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<CodexAcpSessionInfo, String> {
-    acp_pool
+    let provider = acp_pool
+        .backend(&session_id)
+        .agent_id()
+        .unwrap_or("unknown");
+    let info = acp_pool
         .set_model(&session_id, &model_id)
         .await
-        .map_err(|error| format!("切换 Codex 模型失败: {error:#}"))
+        .map_err(|error| format!("切换 Codex 模型失败: {error:#}"))?;
+    crate::features::behavior_telemetry::track_model_selected(
+        &app,
+        provider,
+        &model_id,
+        "session",
+        "code_model_picker",
+    );
+    Ok(info)
 }
 
 /// 发送未经 Pinvou skill、persona 或知识库 prompt 注入的原始用户消息。

@@ -783,6 +783,17 @@ impl EventBridge {
         turn_id
     }
 
+    pub fn track_model_used(&self, turn_id: &str, provider: &str, model: &str) {
+        crate::features::behavior_telemetry::track_model_used_keys(
+            &self.app,
+            &self.pinvou_session_id,
+            turn_id,
+            provider,
+            model,
+            "session_default",
+        );
+    }
+
     pub fn finish_turn(&self, turn_id: &str, status: &str, error: Option<&str>) {
         self.emit_with_turn(
             Some(turn_id.to_string()),
