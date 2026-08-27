@@ -20,6 +20,7 @@ codewhale-hooks = { path = "../hooks", version = "0.9.5" }
 codewhale-mcp = { path = "../mcp", version = "0.9.5" }
 codewhale-protocol = { path = "../protocol", version = "0.9.5" }
 codewhale-release = { path = "../release", version = "0.9.5" }
+codewhale-secrets = { path = "../secrets", version = "0.9.5" }
 codewhale-state = { path = "../state", version = "0.9.5" }
 codewhale-tools = { path = "../tools", version = "0.9.5" }
 serde.workspace = true

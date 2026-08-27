@@ -16,6 +16,20 @@ struct HeaderItemsTestConfig {
 }
 
 #[test]
+fn external_runtime_profile_reasoning_overrides_persisted_config() {
+    let _lock = lock_test_env();
+    let _reasoning = EnvVarGuard::set("CODEWHALE_EXTERNAL_REASONING_EFFORT", "off");
+    let mut config = Config {
+        reasoning_effort: Some("high".into()),
+        ..Config::default()
+    };
+
+    apply_env_overrides_unlocked(&mut config, ConfigEnvironmentPolicy::Runtime);
+
+    assert_eq!(config.reasoning_effort.as_deref(), Some("off"));
+}
+
+#[test]
 fn parses_header_tokens_item() {
     let config: HeaderItemsTestConfig = toml::from_str(
         r#"

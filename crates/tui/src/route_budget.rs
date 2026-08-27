@@ -33,11 +33,21 @@ pub(crate) fn route_context_window_tokens(
     model: &str,
     route_limits: Option<RouteLimits>,
 ) -> u32 {
+    if let Some(tokens) = external_route_limit("CODEWHALE_EXTERNAL_CONTEXT_WINDOW_TOKENS") {
+        return tokens;
+    }
     route_limits
         .and_then(|limits| limits.context_tokens)
         .and_then(|tokens| u32::try_from(tokens).ok())
         .filter(|tokens| *tokens > 0)
         .unwrap_or_else(|| provider_capability(provider, model).context_window)
+}
+
+fn external_route_limit(name: &str) -> Option<u32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|tokens| *tokens > 0)
 }
 
 /// Provider/offering output cap, when the resolved route reports one.
@@ -147,6 +157,18 @@ pub(crate) fn effective_max_output_tokens_for_route(
     model: &str,
     route_limits: Option<RouteLimits>,
 ) -> u32 {
+    if let Some(external_cap) = external_route_limit("CODEWHALE_EXTERNAL_MAX_OUTPUT_TOKENS") {
+        let context =
+            external_route_limit("CODEWHALE_EXTERNAL_CONTEXT_WINDOW_TOKENS").or_else(|| {
+                route_limits
+                    .and_then(|limits| limits.context_tokens)
+                    .and_then(|tokens| u32::try_from(tokens).ok())
+                    .filter(|tokens| *tokens > 0)
+            });
+        return context.map_or(external_cap, |window| {
+            external_cap.min(window.saturating_sub(1_024).max(1))
+        });
+    }
     let requested_cap = effective_max_output_tokens(model);
     let compatibility_cap = output_ceiling_source(provider, model).clamp_tokens();
     let route_cap = route_output_limit_tokens(route_limits);

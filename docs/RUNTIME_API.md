@@ -115,6 +115,27 @@ printf '%s\n' \
 set is pinned by a drift test in `crates/app-server/src/lib.rs`, so SDK and
 local integration clients can rely on it not changing silently.
 
+### Volatile host runtime profiles
+
+A trusted local host may call `app/runtime-profile/set` before starting or
+resuming a thread. The method accepts a revision, provider id, model id,
+HTTP(S) base URL, optional authentication mode, optional positive
+`context_window_tokens` / `max_output_tokens`, optional `reasoning_effort`, and an optional credential
+reference shaped as `{service, account, version}`. Version `1` references are
+resolved through CodeWhale's platform keyring with its encrypted file-store
+fallback. The request never accepts a plaintext API key.
+
+The resolved profile is process-local and is not written to CodeWhale config,
+session records, argv, logs, or protocol replies. Route changes invalidate the
+cached runtime bridge without interrupting an in-flight turn; an identical
+resolved profile is idempotent. Credentials and route limits reach the nested
+runtime only through its inherited environment. A missing required credential
+fails the profile update before the next turn starts.
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"app/runtime-profile/set","params":{"revision":"settings-42","provider":"openai","model":"custom-model","base_url":"https://example.test/v1","auth_mode":"api_key","credential":{"service":"desktop-model-key","account":"model:custom","version":1},"requires_auth":true,"context_window_tokens":131072,"max_output_tokens":24576,"reasoning_effort":"off"}}
+```
+
 ### Interrupting a turn
 
 `thread/message` streams until the turn reaches a terminal state, which can

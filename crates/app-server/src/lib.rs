@@ -21,6 +21,7 @@ use codewhale_protocol::{
     AppRequest, AppResponse, PromptRequest, PromptResponse, ThreadGoalClearParams,
     ThreadGoalGetParams, ThreadGoalSetParams, ThreadRequest, ThreadResponse, UserInputAnswerEvent,
 };
+use codewhale_secrets::{DefaultKeyringStore, FileKeyringStore, KeyringStore};
 use codewhale_state::StateStore;
 use codewhale_tools::{ToolCall, ToolRegistry};
 use serde::de::DeserializeOwned;
@@ -133,6 +134,75 @@ struct AppState {
     /// it cannot be used to stop the turn. This holds its own copy of what an
     /// interrupt needs, so a cancel never waits on the turn it is cancelling.
     in_flight_turns: Arc<Mutex<HashMap<String, InFlightTurn>>>,
+    /// Volatile route supplied by a trusted local runtime host. It is never
+    /// persisted; credentials are resolved from an OS/file-store reference
+    /// and live only until this app-server process exits.
+    external_runtime_profile: Arc<RwLock<Option<ExternalRuntimeProfile>>>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ExternalRuntimeProfileParams {
+    revision: String,
+    provider: String,
+    model: String,
+    base_url: String,
+    #[serde(default)]
+    auth_mode: Option<String>,
+    #[serde(default)]
+    credential: Option<ExternalCredentialReference>,
+    #[serde(default)]
+    requires_auth: bool,
+    #[serde(default)]
+    context_window_tokens: Option<u32>,
+    #[serde(default)]
+    max_output_tokens: Option<u32>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+struct ExternalCredentialReference {
+    service: String,
+    account: String,
+    version: u32,
+}
+
+#[derive(Deserialize)]
+struct ExternalCredentialSetParams {
+    service: String,
+    account: String,
+    version: u32,
+    api_key: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ExternalRuntimeProfile {
+    revision: String,
+    provider: String,
+    model: String,
+    base_url: String,
+    auth_mode: Option<String>,
+    api_key: Option<String>,
+    context_window_tokens: Option<u32>,
+    max_output_tokens: Option<u32>,
+    reasoning_effort: Option<String>,
+}
+
+impl std::fmt::Debug for ExternalRuntimeProfile {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExternalRuntimeProfile")
+            .field("revision", &self.revision)
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("auth_mode", &self.auth_mode)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("context_window_tokens", &self.context_window_tokens)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .finish()
+    }
 }
 
 /// Everything needed to interrupt a running turn without the bridge lock.
@@ -233,6 +303,15 @@ struct ThreadMessageParams {
 #[derive(Debug, Deserialize)]
 struct ThreadInterruptParams {
     thread_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApprovalResolveParams {
+    thread_id: String,
+    approval_id: String,
+    decision: String,
+    #[serde(default)]
+    remember: bool,
 }
 
 pub async fn run(options: AppServerOptions) -> Result<()> {
@@ -433,12 +512,12 @@ fn parse_stdio_line(line: &str) -> ParsedStdioLine {
 
 /// Triage a request that arrived mid-turn.
 ///
-/// Cancellation is the whole point of reading here, so `thread/interrupt`
-/// runs immediately and only its reply waits for the writer. `shutdown` also
-/// interrupts immediately — otherwise it would block on the bridge mutex the
-/// turn is holding — and then queues so the turn can unwind first. Everything
-/// else simply queues: it was never urgent, and running it now would race the
-/// turn for the writer.
+/// Cancellation and interactive decisions are the point of reading here, so
+/// `thread/interrupt` and `approval/resolve` run immediately and only their
+/// replies wait for the writer. `shutdown` also interrupts immediately —
+/// otherwise it would block on the bridge mutex the turn is holding — and then
+/// queues so the turn can unwind first. Everything else simply queues: it was
+/// never urgent, and running it now would race the turn for the writer.
 async fn handle_line_during_turn(
     state: &AppState,
     line: &str,
@@ -463,6 +542,27 @@ async fn handle_line_during_turn(
                     Ok(interrupted) => jsonrpc_result(
                         id,
                         json!({ "thread_id": parsed.thread_id, "interrupted": interrupted }),
+                    ),
+                    Err(err) => jsonrpc_error(id, err),
+                },
+                Err(err) => jsonrpc_error(id, err),
+            };
+            pending.push_back(PendingStdioWork::Response(response));
+        }
+        "approval/resolve" => {
+            let id = request.id.clone();
+            let response = match parse_params::<ApprovalResolveParams>(params_or_object(
+                request.params.clone(),
+            )) {
+                Ok(parsed) => match resolve_stdio_approval(state, &parsed).await {
+                    Ok(delivered) => jsonrpc_result(
+                        id,
+                        json!({
+                            "thread_id": parsed.thread_id,
+                            "approval_id": parsed.approval_id,
+                            "decision": parsed.decision,
+                            "delivered": delivered,
+                        }),
                     ),
                     Err(err) => jsonrpc_error(id, err),
                 },
@@ -677,6 +777,7 @@ fn build_state_with_transport(
         stdio_thread_hints: Arc::new(Mutex::new(HashMap::new())),
         pending_user_input: Arc::new(Mutex::new(std::collections::HashMap::new())),
         in_flight_turns: Arc::new(Mutex::new(HashMap::new())),
+        external_runtime_profile: Arc::new(RwLock::new(None)),
     })
 }
 
@@ -961,8 +1062,9 @@ async fn acquire_stdio_bridge(
     if let Some(bridge) = state.stdio_bridge.lock().await.as_ref() {
         return Ok(bridge.clone());
     }
+    let external_profile = state.external_runtime_profile.read().await.clone();
     let bridge = Arc::new(Mutex::new(
-        RuntimeBridge::start(state.config_path.as_deref())
+        RuntimeBridge::start(state.config_path.as_deref(), external_profile.as_ref())
             .await
             .map_err(|err| JsonRpcError::internal(err.to_string()))?,
     ));
@@ -1003,6 +1105,59 @@ async fn interrupt_stdio_turn(
     Ok(true)
 }
 
+/// Deliver an approval decision without taking the runtime bridge mutex.
+///
+/// A streaming turn owns that mutex until it reaches a terminal event, while
+/// the runtime deliberately pauses the same turn until this decision arrives.
+/// Using the registered live-turn connection avoids that circular wait.
+async fn resolve_stdio_approval(
+    state: &AppState,
+    params: &ApprovalResolveParams,
+) -> std::result::Result<bool, JsonRpcError> {
+    if params.approval_id.trim().is_empty()
+        || !params.approval_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | ':' | '.')
+        })
+    {
+        return Err(JsonRpcError::invalid_params("approval_id is invalid"));
+    }
+    if !matches!(params.decision.as_str(), "allow" | "deny") {
+        return Err(JsonRpcError::invalid_params(
+            "approval decision must be \"allow\" or \"deny\"",
+        ));
+    }
+    let Some(turn) = state
+        .in_flight_turns
+        .lock()
+        .await
+        .get(&params.thread_id)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    let mut request = codewhale_release::platform_http_client_builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|err| JsonRpcError::internal(err.to_string()))?
+        .post(format!(
+            "{}/v1/approvals/{}",
+            turn.base_url, params.approval_id
+        ))
+        .json(&json!({
+            "decision": params.decision,
+            "remember": params.remember,
+        }));
+    if let Some(token) = turn.auth_token.as_deref() {
+        request = request.bearer_auth(token);
+    }
+    request
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|err| JsonRpcError::internal(format!("approval resolution failed: {err}")))?;
+    Ok(true)
+}
+
 /// Drop the cached runtime bridge so the next stdio thread message spawns a
 /// fresh child that re-reads the persisted config. An in-flight message
 /// keeps its own [`SharedRuntimeBridge`] clone and finishes against the old
@@ -1012,12 +1167,173 @@ async fn invalidate_stdio_bridge(state: &AppState) {
     *bridge = None;
 }
 
+async fn set_external_runtime_profile(
+    state: &AppState,
+    params: ExternalRuntimeProfileParams,
+) -> std::result::Result<StdioDispatchResult, JsonRpcError> {
+    for (name, value) in [
+        ("revision", params.revision.as_str()),
+        ("provider", params.provider.as_str()),
+        ("model", params.model.as_str()),
+        ("base_url", params.base_url.as_str()),
+    ] {
+        if value.trim().is_empty() || value.len() > 4096 {
+            return Err(JsonRpcError::invalid_params(format!(
+                "runtime profile {name} is invalid"
+            )));
+        }
+    }
+    if params.reasoning_effort.as_deref().is_some_and(|value| {
+        !matches!(
+            value,
+            "auto" | "off" | "low" | "medium" | "high" | "max" | "xhigh" | "ultracode"
+        )
+    }) {
+        return Err(JsonRpcError::invalid_params(
+            "runtime profile reasoning_effort is invalid",
+        ));
+    }
+    if !params
+        .provider
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(JsonRpcError::invalid_params(
+            "runtime profile provider is invalid",
+        ));
+    }
+    let endpoint = reqwest::Url::parse(&params.base_url)
+        .map_err(|_| JsonRpcError::invalid_params("runtime profile base_url is invalid"))?;
+    if !matches!(endpoint.scheme(), "http" | "https") {
+        return Err(JsonRpcError::invalid_params(
+            "runtime profile base_url must use http or https",
+        ));
+    }
+    let api_key = match params.credential.as_ref() {
+        Some(reference) => resolve_external_credential(reference)?,
+        None => None,
+    };
+    if params.requires_auth && api_key.is_none() {
+        return Err(JsonRpcError::internal(
+            "Pinvou Desktop provider credential is unavailable; reopen Provider settings and save the credential again",
+        ));
+    }
+    for (name, value) in [
+        ("context_window_tokens", params.context_window_tokens),
+        ("max_output_tokens", params.max_output_tokens),
+    ] {
+        if value == Some(0) {
+            return Err(JsonRpcError::invalid_params(format!(
+                "runtime profile {name} must be greater than zero"
+            )));
+        }
+    }
+    let profile = ExternalRuntimeProfile {
+        revision: params.revision,
+        provider: params.provider,
+        model: params.model,
+        base_url: params.base_url,
+        auth_mode: params.auth_mode,
+        api_key,
+        context_window_tokens: params.context_window_tokens,
+        max_output_tokens: params.max_output_tokens,
+        reasoning_effort: params.reasoning_effort,
+    };
+    let revision = profile.revision.clone();
+    let mut active_profile = state.external_runtime_profile.write().await;
+    let changed = active_profile.as_ref() != Some(&profile);
+    if changed {
+        *active_profile = Some(profile);
+    }
+    drop(active_profile);
+    if changed {
+        invalidate_stdio_bridge(state).await;
+    }
+    Ok(StdioDispatchResult {
+        result: json!({"ok":true,"revision":revision,"reloaded":changed}),
+        should_exit: false,
+    })
+}
+
+fn resolve_external_credential(
+    reference: &ExternalCredentialReference,
+) -> std::result::Result<Option<String>, JsonRpcError> {
+    if reference.version != 1
+        || reference.service.trim().is_empty()
+        || reference.account.trim().is_empty()
+        || reference.service.len() > 256
+        || reference.account.len() > 512
+    {
+        return Err(JsonRpcError::invalid_params(
+            "runtime profile credential reference is invalid",
+        ));
+    }
+    let system = DefaultKeyringStore::new(&reference.service);
+    let resolved = match system.probe() {
+        Ok(()) => system.get(&reference.account),
+        Err(_) => FileKeyringStore::default_path()
+            .map(FileKeyringStore::new)
+            .and_then(|store| store.get(&reference.account)),
+    }
+    .map_err(|_| {
+        JsonRpcError::internal(
+            "Pinvou Desktop provider credential could not be read from secure storage",
+        )
+    })?;
+    Ok(resolved.filter(|value| !value.trim().is_empty()))
+}
+
+fn set_external_credential(
+    params: ExternalCredentialSetParams,
+) -> std::result::Result<StdioDispatchResult, JsonRpcError> {
+    let reference = ExternalCredentialReference {
+        service: params.service,
+        account: params.account,
+        version: params.version,
+    };
+    if reference.version != 1
+        || reference.service.trim().is_empty()
+        || reference.account.trim().is_empty()
+        || reference.service.len() > 256
+        || reference.account.len() > 512
+        || params.api_key.trim().is_empty()
+        || params.api_key.len() > 16_384
+    {
+        return Err(JsonRpcError::invalid_params(
+            "credential reference or API key is invalid",
+        ));
+    }
+    let system = DefaultKeyringStore::new(&reference.service);
+    let stored = match system.probe() {
+        Ok(()) => system.set(&reference.account, params.api_key.trim()),
+        Err(_) => FileKeyringStore::default_path()
+            .map(FileKeyringStore::new)
+            .and_then(|store| store.set(&reference.account, params.api_key.trim())),
+    };
+    stored
+        .map_err(|_| JsonRpcError::internal("credential could not be saved to secure storage"))?;
+    Ok(StdioDispatchResult {
+        result: json!({
+            "ok": true,
+            "credential": {
+                "service": reference.service,
+                "account": reference.account,
+                "version": 1
+            }
+        }),
+        should_exit: false,
+    })
+}
+
 impl RuntimeBridge {
-    async fn start(config_path: Option<&Path>) -> Result<Self> {
+    async fn start(
+        config_path: Option<&Path>,
+        external_profile: Option<&ExternalRuntimeProfile>,
+    ) -> Result<Self> {
         install_rustls_crypto_provider();
         let port = reserve_runtime_port()?;
         let auth_token = format!("cwrt_{}", Uuid::new_v4().simple());
-        let child = Self::runtime_command(config_path, port, &auth_token)?
+        let child = Self::runtime_command(config_path, port, &auth_token, external_profile)?
             .spawn()
             .context("failed to start runtime API bridge")?;
         let mut bridge = Self {
@@ -1034,7 +1350,12 @@ impl RuntimeBridge {
         Ok(bridge)
     }
 
-    fn runtime_command(config_path: Option<&Path>, port: u16, auth_token: &str) -> Result<Command> {
+    fn runtime_command(
+        config_path: Option<&Path>,
+        port: u16,
+        auth_token: &str,
+        external_profile: Option<&ExternalRuntimeProfile>,
+    ) -> Result<Command> {
         let current_exe = std::env::current_exe().ok();
         let mut command = if let Some(path) = current_exe {
             Command::new(path)
@@ -1045,6 +1366,15 @@ impl RuntimeBridge {
         // `ps` cannot read credential material from the child command line.
         // The TUI/runtime server already accepts CODEWHALE_RUNTIME_TOKEN /
         // DEEPSEEK_RUNTIME_TOKEN when --auth-token is absent.
+        if let Some(profile) = external_profile {
+            command
+                .arg("--provider")
+                .arg(&profile.provider)
+                .arg("--model")
+                .arg(&profile.model)
+                .arg("--base-url")
+                .arg(&profile.base_url);
+        }
         command
             .arg("app-server")
             .arg("--http")
@@ -1059,6 +1389,29 @@ impl RuntimeBridge {
             .stderr(Stdio::null());
         if let Some(config_path) = config_path {
             command.arg("--config").arg(config_path);
+        }
+        if let Some(profile) = external_profile {
+            if let Some(auth_mode) = profile.auth_mode.as_deref() {
+                command.env("CODEWHALE_AUTH_MODE", auth_mode);
+            }
+            if let Some(reasoning_effort) = profile.reasoning_effort.as_deref() {
+                command.env("CODEWHALE_EXTERNAL_REASONING_EFFORT", reasoning_effort);
+            }
+            if let Some(api_key) = profile.api_key.as_deref() {
+                command
+                    .env("CODEWHALE_CLI_API_KEY", api_key)
+                    .env("DEEPSEEK_API_KEY", api_key)
+                    .env("DEEPSEEK_API_KEY_SOURCE", "cli");
+            }
+            if let Some(tokens) = profile.context_window_tokens {
+                command.env(
+                    "CODEWHALE_EXTERNAL_CONTEXT_WINDOW_TOKENS",
+                    tokens.to_string(),
+                );
+            }
+            if let Some(tokens) = profile.max_output_tokens {
+                command.env("CODEWHALE_EXTERNAL_MAX_OUTPUT_TOKENS", tokens.to_string());
+            }
         }
         Ok(command)
     }
@@ -1316,6 +1669,64 @@ impl RuntimeBridge {
                             )
                             .await?;
                         }
+                        if kind == "agent_reasoning"
+                            && let Some(delta) = payload.get("delta").and_then(Value::as_str)
+                            && !delta.is_empty()
+                        {
+                            emit_stdio_event(
+                                writer,
+                                json!({
+                                    "type": "thinking_delta",
+                                    "response_id": response_id,
+                                    "delta": delta,
+                                }),
+                            )
+                            .await?;
+                        }
+                    }
+                    "approval.required" => {
+                        let approval_id = payload
+                            .get("approval_id")
+                            .or_else(|| payload.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if !approval_id.is_empty() {
+                            emit_stdio_event(
+                                writer,
+                                json!({
+                                    "type": "approval_required",
+                                    "response_id": response_id,
+                                    "approval_id": approval_id,
+                                    "tool_name": payload.get("tool_name"),
+                                    "description": payload.get("description"),
+                                    "intent_summary": payload.get("intent_summary"),
+                                }),
+                            )
+                            .await?;
+                        }
+                    }
+                    "approval.decided" | "approval.timeout" => {
+                        let approval_id = payload
+                            .get("approval_id")
+                            .or_else(|| payload.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if !approval_id.is_empty() {
+                            emit_stdio_event(
+                                writer,
+                                json!({
+                                    "type": "approval_resolved",
+                                    "response_id": response_id,
+                                    "approval_id": approval_id,
+                                    "outcome": if event_name == "approval.timeout" {
+                                        "timeout"
+                                    } else {
+                                        payload.get("decision").and_then(Value::as_str).unwrap_or("resolved")
+                                    },
+                                }),
+                            )
+                            .await?;
+                        }
                     }
                     "turn.completed" => {
                         let status = turn_terminal_status(&payload);
@@ -1494,6 +1905,7 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                     "thread/unarchive",
                     "thread/message",
                     "thread/interrupt",
+                    "approval/resolve",
                     "app/capabilities",
                     "app/request",
                     "app/config/get",
@@ -1501,6 +1913,8 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                     "app/config/unset",
                     "app/config/list",
                     "app/config/reload",
+                    "app/runtime-profile/set",
+                    "app/credential/set",
                     "app/models",
                     "app/thread_loaded_list",
                     "prompt/capabilities",
@@ -1741,6 +2155,14 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
         }
         "app/config/list" => dispatch_stdio_app_request(state, AppRequest::ConfigList).await?,
         "app/config/reload" => dispatch_stdio_app_request(state, AppRequest::ConfigReload).await?,
+        "app/runtime-profile/set" => {
+            let parsed: ExternalRuntimeProfileParams = parse_params(params_or_object(params))?;
+            set_external_runtime_profile(state, parsed).await?
+        }
+        "app/credential/set" => {
+            let parsed: ExternalCredentialSetParams = parse_params(params_or_object(params))?;
+            set_external_credential(parsed)?
+        }
         "app/models" => dispatch_stdio_app_request(state, AppRequest::Models).await?,
         "app/thread_loaded_list" | "app/thread-loaded-list" => {
             dispatch_stdio_app_request(state, AppRequest::ThreadLoadedList).await?
@@ -1767,6 +2189,19 @@ async fn dispatch_stdio_request_with_writer<W: AsyncWrite + Unpin>(
                 result: json!({
                     "thread_id": parsed.thread_id,
                     "interrupted": interrupted,
+                }),
+                should_exit: false,
+            }
+        }
+        "approval/resolve" => {
+            let parsed: ApprovalResolveParams = parse_params(params_or_object(params))?;
+            let delivered = resolve_stdio_approval(state, &parsed).await?;
+            StdioDispatchResult {
+                result: json!({
+                    "thread_id": parsed.thread_id,
+                    "approval_id": parsed.approval_id,
+                    "decision": parsed.decision,
+                    "delivered": delivered,
                 }),
                 should_exit: false,
             }
@@ -1804,7 +2239,7 @@ async fn process_app_request(
             data: json!({
                 "routes": ["/thread", "/app", "/prompt", "/tool", "/jobs", "/mcp/startup"],
                 "config": ["get", "set", "unset", "list", "reload"],
-                "events": ["response_start", "response_delta", "response_end", "tool_call_start", "tool_call_result", "mcp_startup_update", "mcp_startup_complete"],
+                "events": ["response_start", "response_delta", "thinking_delta", "response_end", "tool_call_start", "tool_call_result", "mcp_startup_update", "mcp_startup_complete"],
                 "transport": "stdio+http",
                 "config_path": state.config_path.as_ref().map(|p| p.display().to_string()),
             }),
@@ -2923,6 +3358,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stdio_approval_resolution_uses_the_live_turn_transport() {
+        async fn approve(
+            State(seen): State<Arc<Mutex<Vec<Value>>>>,
+            AxumPath(approval_id): AxumPath<String>,
+            Json(body): Json<Value>,
+        ) -> Json<Value> {
+            seen.lock()
+                .await
+                .push(json!({"approval_id":approval_id,"body":body}));
+            Json(json!({"ok":true,"delivered":true}))
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let app = Router::new()
+            .route("/v1/approvals/{approval_id}", post(approve))
+            .with_state(seen.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test runtime");
+        });
+
+        let (state, _tmp) = capability_test_state();
+        state.in_flight_turns.lock().await.insert(
+            "stdio-thread".into(),
+            InFlightTurn {
+                base_url: format!("http://{addr}"),
+                auth_token: None,
+                runtime_thread_id: "runtime-thread".into(),
+                turn_id: "turn-live".into(),
+            },
+        );
+        let delivered = resolve_stdio_approval(
+            &state,
+            &ApprovalResolveParams {
+                thread_id: "stdio-thread".into(),
+                approval_id: "call-weather".into(),
+                decision: "allow".into(),
+                remember: false,
+            },
+        )
+        .await
+        .expect("approval resolution");
+        assert!(delivered);
+        assert_eq!(
+            seen.lock().await.as_slice(),
+            &[json!({
+                "approval_id":"call-weather",
+                "body":{"decision":"allow","remember":false}
+            })]
+        );
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn stdio_runtime_bridge_streams_response_delta_events() {
         async fn create_turn(AxumPath(thread_id): AxumPath<String>) -> Json<Value> {
             Json(json!({
@@ -2940,9 +3436,32 @@ mod tests {
 
             let body = [
                 sse_frame(
-                    "item.delta",
+                    "approval.required",
                     json!({
                         "seq": 1,
+                        "turn_id": "turn_test",
+                        "payload": {
+                            "approval_id": "approval_test",
+                            "tool_name": "js_execution",
+                            "description": "Fetch weather"
+                        }
+                    }),
+                ),
+                sse_frame(
+                    "approval.decided",
+                    json!({
+                        "seq": 2,
+                        "turn_id": "turn_test",
+                        "payload": {
+                            "approval_id": "approval_test",
+                            "decision": "allow"
+                        }
+                    }),
+                ),
+                sse_frame(
+                    "item.delta",
+                    json!({
+                        "seq": 3,
                         "turn_id": "turn_test",
                         "payload": {
                             "kind": "agent_message",
@@ -2951,9 +3470,20 @@ mod tests {
                     }),
                 ),
                 sse_frame(
+                    "item.delta",
+                    json!({
+                        "seq": 4,
+                        "turn_id": "turn_test",
+                        "payload": {
+                            "kind": "agent_reasoning",
+                            "delta": "inspect route"
+                        }
+                    }),
+                ),
+                sse_frame(
                     "turn.completed",
                     json!({
-                        "seq": 2,
+                        "seq": 5,
                         "turn_id": "turn_test",
                         "payload": {
                             "turn": {
@@ -3013,7 +3543,7 @@ mod tests {
             result.pointer("/data/turn_id").and_then(Value::as_str),
             Some("turn_test")
         );
-        assert_eq!(bridge.last_seq_by_thread.get("thr_test"), Some(&2));
+        assert_eq!(bridge.last_seq_by_thread.get("thr_test"), Some(&5));
 
         let event_types: Vec<&str> = lines
             .iter()
@@ -3025,9 +3555,18 @@ mod tests {
             .collect();
         assert_eq!(
             event_types,
-            vec!["response_start", "response_delta", "response_end"]
+            vec![
+                "response_start",
+                "approval_required",
+                "approval_resolved",
+                "response_delta",
+                "thinking_delta",
+                "response_end"
+            ]
         );
-        assert_eq!(lines[1]["delta"], "hello");
+        assert_eq!(lines[1]["approval_id"], "approval_test");
+        assert_eq!(lines[3]["delta"], "hello");
+        assert_eq!(lines[4]["delta"], "inspect route");
     }
 
     #[tokio::test]
@@ -3101,6 +3640,7 @@ mod tests {
         "thread/unarchive",
         "thread/message",
         "thread/interrupt",
+        "approval/resolve",
         "app/capabilities",
         "app/request",
         "app/config/get",
@@ -3108,6 +3648,8 @@ mod tests {
         "app/config/unset",
         "app/config/list",
         "app/config/reload",
+        "app/runtime-profile/set",
+        "app/credential/set",
         "app/models",
         "app/thread_loaded_list",
         "prompt/capabilities",
@@ -3194,7 +3736,7 @@ mod tests {
         // FR001-C001: runtime auth token must not appear on the child argv
         // (visible via local `ps`); pass it via env instead.
         let token = "cwrt_unit_test_secret_token_not_for_argv";
-        let cmd = RuntimeBridge::runtime_command(None, 18787, token).expect("command");
+        let cmd = RuntimeBridge::runtime_command(None, 18787, token, None).expect("command");
         let argv: Vec<String> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -3224,6 +3766,65 @@ mod tests {
                 .any(|(k, v)| k == "DEEPSEEK_RUNTIME_TOKEN" && v == token),
             "legacy alias DEEPSEEK_RUNTIME_TOKEN must also carry the token: {envs:?}"
         );
+    }
+
+    #[test]
+    fn forkguard_external_runtime_profile_keeps_provider_secret_out_of_argv() {
+        let profile = ExternalRuntimeProfile {
+            revision: "revision-1".into(),
+            provider: "openai".into(),
+            model: "custom-model".into(),
+            base_url: "https://example.invalid/v1".into(),
+            auth_mode: Some("api_key".into()),
+            api_key: Some("pinvou-desktop-secret-not-for-argv".into()),
+            context_window_tokens: Some(131_072),
+            max_output_tokens: Some(24_576),
+            reasoning_effort: Some("off".into()),
+        };
+        let command = RuntimeBridge::runtime_command(None, 18787, "runtime-token", Some(&profile))
+            .expect("command");
+        let argv = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(argv.iter().any(|arg| arg == "custom-model"));
+        assert!(argv.iter().any(|arg| arg == "https://example.invalid/v1"));
+        assert!(!argv.iter().any(|arg| arg == "--reasoning-effort"));
+        assert!(!argv.iter().any(|arg| arg.contains("desktop-secret")));
+        let envs = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        assert!(envs.iter().any(|(key, value)| {
+            key == "CODEWHALE_EXTERNAL_CONTEXT_WINDOW_TOKENS" && value == "131072"
+        }));
+        assert!(envs.iter().any(|(key, value)| {
+            key == "CODEWHALE_EXTERNAL_MAX_OUTPUT_TOKENS" && value == "24576"
+        }));
+        assert!(envs.iter().any(|(key, value)| {
+            key == "CODEWHALE_EXTERNAL_REASONING_EFFORT" && value == "off"
+        }));
+        assert!(command.get_envs().any(|(key, value)| {
+            key == "CODEWHALE_CLI_API_KEY"
+                && value.is_some_and(|value| value == "pinvou-desktop-secret-not-for-argv")
+        }));
+    }
+
+    #[test]
+    fn forkguard_controlled_credential_pipe_rejects_empty_secret() {
+        let error = set_external_credential(ExternalCredentialSetParams {
+            service: "pinvou3-model-api-key".into(),
+            account: "model:test".into(),
+            version: 1,
+            api_key: "   ".into(),
+        })
+        .expect_err("empty credentials must never reach secure storage");
+        assert_eq!(error.code, -32602);
     }
 
     #[test]

@@ -762,6 +762,7 @@ dependencies = [
  "codewhale-mcp",
  "codewhale-protocol",
  "codewhale-release",
+ "codewhale-secrets",
  "codewhale-state",
  "codewhale-tools",
  "reqwest 0.13.4",

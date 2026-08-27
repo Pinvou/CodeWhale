@@ -7050,6 +7050,11 @@ fn apply_env_overrides(config: &mut Config, policy: ConfigEnvironmentPolicy) {
 }
 
 fn apply_env_overrides_unlocked(config: &mut Config, policy: ConfigEnvironmentPolicy) {
+    if let Ok(value) = std::env::var("CODEWHALE_EXTERNAL_REASONING_EFFORT")
+        && !value.trim().is_empty()
+    {
+        config.reasoning_effort = Some(value);
+    }
     if let Ok(value) = codewhale_env_var("CODEWHALE_PROVIDER", "DEEPSEEK_PROVIDER") {
         config.provider = Some(value);
     }
