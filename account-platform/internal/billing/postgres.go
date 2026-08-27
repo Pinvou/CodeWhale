@@ -42,6 +42,10 @@ func NewPostgresRepository(ctx context.Context, databaseURL string) (*PostgresRe
 		pool.Close()
 		return nil, err
 	}
+	if err := repository.ValidateSystemLedgerAccounts(ctx); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return repository, nil
 }
 

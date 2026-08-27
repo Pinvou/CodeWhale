@@ -804,6 +804,16 @@
         "file": "000044_recharge_product_commands.up.sql",
         "version": 44,
         "sha256": "fe531a9fd9da73172517fe9caf2d47302f1137f758b3e9c005d24b2e615a8cde"
+      },
+      {
+        "file": "000045_system_ledger_accounts_repair.down.sql",
+        "version": 45,
+        "sha256": "144368b9b576996b9d1a572b2802cb130b2e6d2b8c6b7e49e83b4473bcd733a2"
+      },
+      {
+        "file": "000045_system_ledger_accounts_repair.up.sql",
+        "version": 45,
+        "sha256": "c0ee5d31a93d4bc01bd9a4e24bbdccd4db4b7b84b21fdda180b20477421682f2"
       }
     ],
     "payment-simulator": [

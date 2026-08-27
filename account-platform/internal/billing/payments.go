@@ -649,7 +649,7 @@ func (p *PaymentCoordinator) ProcessPersistedNotification(ctx context.Context, n
 	if merged.Status == "MANUAL_REVIEW" || errors.Is(mergeErr, ErrConflict) {
 		result = "MANUAL_REVIEW"
 	}
-	_, err = tx.Exec(ctx, `UPDATE payment_notifications SET result=$2,processed_at=$3,payment_evidence_id=$4 WHERE notification_id=$1`, notification.NotificationID, result, p.now(), evidenceID)
+	_, err = tx.Exec(ctx, `UPDATE payment_notifications SET result=$2,processed_at=$3,payment_evidence_id=$4,next_attempt_at=NULL,last_error_code=NULL WHERE notification_id=$1`, notification.NotificationID, result, p.now(), evidenceID)
 	if err != nil {
 		return err
 	}

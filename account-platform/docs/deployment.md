@@ -692,3 +692,9 @@ Token Gateway 同时运行托管路由 Provisioning Worker。上线迁移 `00001
 - `deploy/runbooks/event-delivery.md`
 - `deploy/runbooks/observability.md`
 - `deploy/runbooks/rpo-rto-exercise-template.md`
+
+## 17. Billing 系统总账账户与调试清理
+
+Billing `000045_system_ledger_accounts_repair` 会幂等恢复支付清算、用量收入、退款清算、人工调整、应收和拒付清算六个系统级总账账户，并为支付回调入箱增加失败次数、稳定错误码和退避时间。迁移必须先于 Billing 应用发布；应用启动时会再次校验六个账户的固定 ID、代码、类型及无钱包归属，缺失或被改写时拒绝承接流量。
+
+用户调试数据清理只能删除明确归属于目标用户或钱包的数据，不得清空 `ledger_accounts`，也不得删除 `wallet_id IS NULL` 的平台级账户。清理后至少校验：六个系统账户完整、待处理回调不会以高频率反复失败、同一支付流水仅产生一个权益包和一组平衡分录。回调失败只记录稳定错误码，不记录原始请求、回调载荷或用户标识；Worker 按指数退避重试，基础依赖恢复后继续走原有幂等归并流程。
