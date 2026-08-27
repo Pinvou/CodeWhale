@@ -176,21 +176,23 @@ XMODIFIERS=@im=fcitx
 
 ### 5.4 多架构本地二进制
 
-品悟不仅包含主 Rust ELF，还包含或调用其他本地二进制。当前已发现：
+品悟不仅包含主 Rust ELF，还包含或调用其他本地二进制。当前打包链路需要覆盖：
 
-- `resources/platforms/linux/asr/sense-voice-main` 是 ARM64 ELF；
+- SenseVoice runtime 从固定上游 commit 在对应架构的 Ubuntu 22.04 runner 原生构建，
+  经 `x86_64` / `aarch64` overlay 分别装入；源码树不再保存单架构 ELF；
 - 历史 x86_64 包中的 `web-template` 曾混入 ARM64 esbuild；
 - fastembed/ONNX Runtime 需要逐架构确认可用性；
 - ffmpeg、pandoc、poppler、tesseract、LibreOffice 等系统包需要确认目标架构的软件源支持。
 
-正式构建必须增加“包内 ELF 架构扫描”，至少覆盖：
+正式构建已通过 `scripts/check-linux-elf-policy.sh` 扫描包内全部 ELF 的目标架构
+和 Ubuntu 22.04 ABI 下限；麒麟适配仍应保留人工清单复核：
 
 ```bash
 find <unpacked-package> -type f -exec file {} \; \
   | grep -E 'ELF|executable|shared object'
 ```
 
-资源应按 target triple 管理，例如：
+生成资源按 target triple 管理，例如：
 
 ```text
 sense-voice-main-x86_64-unknown-linux-gnu

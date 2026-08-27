@@ -1,3 +1,4 @@
+import platform
 import subprocess
 import unittest
 from pathlib import Path
@@ -6,6 +7,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE_WORKFLOW = ROOT / ".github/workflows/release-packages.yml"
 GUARD_SCRIPT = ROOT / "scripts" / "check-linux-glibc-floor.sh"
+ELF_POLICY_SCRIPT = ROOT / "scripts" / "check-linux-elf-policy.sh"
+ASR_BUILD_SCRIPT = ROOT / "scripts" / "asr" / "build-sensevoice-runtime.sh"
 LINUX_OVERLAY = ROOT / "pinvou3-app/src-tauri/config/platforms/linux/tauri.conf.json"
 
 # Linux 发布基线是 Ubuntu 22.04 (glibc 2.35) x86_64/arm64。发布二进制链接
@@ -30,14 +33,18 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
         self.assertNotIn("ubuntu-latest", self.x64_job.split("\n    steps:")[0])
         self.assertNotIn("ubuntu-24.04", self.arm64_job.split("\n    steps:")[0])
 
-    def test_linux_builds_run_glibc_floor_guard_before_upload(self):
-        # 守护必须覆盖两个 Linux job,且位于产物上传之前(失败即阻断发布)。
-        for job in (self.x64_job, self.arm64_job):
+    def test_linux_builds_run_arch_and_glibc_guard_before_upload(self):
+        # 守护必须覆盖两个 Linux job、传入对应 deb 架构，且位于上传之前。
+        for job, arch in ((self.x64_job, "amd64"), (self.arm64_job, "arm64")):
             guard = job.find("check-linux-glibc-floor.sh")
             upload = job.find("uses: actions/upload-artifact@")
             self.assertGreater(guard, 0, "missing glibc floor guard step")
             self.assertGreater(upload, guard, "glibc floor guard must run before upload")
-        self.assertEqual(self.workflow.count("check-linux-glibc-floor.sh"), 2)
+            guard_step = self._step_block(job, "check-linux-glibc-floor.sh")
+            self.assertRegex(guard_step, rf'\.deb" {arch}\s*$')
+        self.assertEqual(
+            self.workflow.count("run: ./scripts/check-linux-glibc-floor.sh"), 2
+        )
 
     def test_linux_builds_rotate_rust_cache_key_per_runner_baseline(self):
         # 换 runner 基座必须换 rust-cache key:24.04 glibc 环境编译的缓存产物
@@ -80,14 +87,52 @@ class ReleaseLinuxFloorPolicyTests(unittest.TestCase):
             )
 
     def test_guard_script_defaults_to_2204_glibc_floor(self):
-        # 脚本默认 glibc 下限必须与基线一致;workflow 不传参即用默认值。
-        source = GUARD_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('glibc_floor="${2:-2.35}"', source)
+        # 通用 ELF 守卫统一持有基线，deb wrapper 只负责解包和传递目标架构。
+        source = ELF_POLICY_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('glibc_floor="${3:-2.35}"', source)
         self.assertIn('"3.4.30"', source)  # GLIBCXX_ (jammy gcc 12)
         self.assertIn('"1.3.13"', source)  # CXXABI_ (jammy gcc 12)
+        wrapper = GUARD_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('expected_arch="${2:-}"', wrapper)
+        self.assertIn("check-linux-elf-policy.sh", wrapper)
 
     def test_guard_script_is_valid_bash(self):
-        subprocess.run(["bash", "-n", str(GUARD_SCRIPT)], check=True)
+        for script in (GUARD_SCRIPT, ELF_POLICY_SCRIPT, ASR_BUILD_SCRIPT):
+            with self.subTest(script=script.name):
+                subprocess.run(["bash", "-n", str(script)], check=True)
+
+    def test_sensevoice_runtime_is_rebuilt_from_pinned_source(self):
+        source = ASR_BUILD_SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("sensevoice-source.env", source)
+        self.assertIn("-DBUILD_SHARED_LIBS=OFF", source)
+        self.assertIn("-DGGML_NATIVE=OFF", source)
+        self.assertIn("check-linux-elf-policy.sh", source)
+        self.assertNotIn(
+            "pinvou3-app/src-tauri/resources/platforms/linux/asr/sense-voice-main",
+            subprocess.run(
+                ["git", "ls-files"], cwd=ROOT, check=True, text=True, capture_output=True
+            ).stdout.splitlines(),
+        )
+
+    def test_elf_policy_accepts_host_arch_and_rejects_mismatch(self):
+        machine = platform.machine().lower()
+        if machine in ("x86_64", "amd64"):
+            expected, wrong = "amd64", "arm64"
+        elif machine in ("aarch64", "arm64"):
+            expected, wrong = "arm64", "amd64"
+        else:
+            self.skipTest(f"unsupported test host architecture: {machine}")
+
+        host_elf = str(Path("/bin/true").resolve())
+        subprocess.run([str(ELF_POLICY_SCRIPT), host_elf, expected], check=True)
+        mismatch = subprocess.run(
+            [str(ELF_POLICY_SCRIPT), host_elf, wrong],
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("architecture", mismatch.stderr)
+        self.assertIn("!= expected", mismatch.stderr)
 
     def test_deb_declares_webkit_floor(self):
         # tauri-runtime-wry 启用 webkit2gtk v2_40,运行时需要 WebKitGTK ≥ 2.40;
