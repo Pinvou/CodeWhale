@@ -117,8 +117,10 @@ test("deploy script rolls back when post-deploy public verification fails", {
   await executable(join(bin, "scp"), `#!/usr/bin/env bash\necho scp >> "${log}"\n`);
   await executable(join(bin, "ssh"), `#!/usr/bin/env bash
 cat >/dev/null
-if [[ "$*" == *"cat > '/tmp/pinvou-remote-web-"* ]]; then
-  echo upload >> "${log}"
+if [[ "$*" == *"cat > '/tmp/pinvou-remote-code-"* ]]; then
+  echo upload_code >> "${log}"
+elif [[ "$*" == *"cat > '/tmp/pinvou-remote-web-"* ]]; then
+  echo upload_web >> "${log}"
 elif (( $# >= 10 )); then
   echo deploy >> "${log}"
   echo 'backup=/opt/pinvou-remote-relay/backups/fake'
@@ -170,7 +172,7 @@ esac
   assert.match(calls, /deploy/);
   assert.match(calls, /rollback/);
   assert.deepEqual(
-    calls.split(/\r?\n/).filter((entry) => ["upload", "deploy", "rollback"].includes(entry)),
-    ["upload", "deploy", "rollback"],
+    calls.split(/\r?\n/).filter((entry) => ["upload_code", "upload_web", "deploy", "rollback"].includes(entry)),
+    ["upload_code", "upload_web", "deploy", "rollback"],
   );
 });
