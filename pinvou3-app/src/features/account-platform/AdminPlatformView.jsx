@@ -115,6 +115,34 @@ function Tabs({ items, active, onChange }) {
   );
 }
 
+function AdminExtensionSlot({ section, authorization }) {
+  const hostRef = useRef(null);
+  const platformPermissions = new Set(authorization?.platform_permissions || []);
+  const visible = {
+    'role-bindings-root': section === 'users' && platformPermissions.has('platform.roles.read'),
+    'registration-repair-root': section === 'identity' && platformPermissions.has('platform.registrations.repair'),
+  };
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return undefined;
+    const nodes = Object.keys(visible).map((id) => document.getElementById(id)).filter(Boolean);
+    for (const node of nodes) host.append(node);
+    return () => {
+      for (const node of nodes) document.body.append(node);
+    };
+  }, []);
+
+  useEffect(() => {
+    for (const [id, isVisible] of Object.entries(visible)) {
+      const node = document.getElementById(id);
+      if (node) node.hidden = !isVisible;
+    }
+  }, [section, authorization]);
+
+  return <div ref={hostRef} className="adm-extension-stack" />;
+}
+
 export function AdminPlatformView({ client, copy, language, onLanguageChange }) {
   const [auth, setAuth] = useState('loading');
   const [section, setSection] = useState('overview');
@@ -180,7 +208,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           const audits = await client.audits({}, signal);
           next = { audits: audits.items || [] };
         } else if (target === 'identity') {
-          const closures = await client.accountClosures(signal);
+          const closures = await read('platform.account-closures.read', () => client.accountClosures(signal));
           next = { accountClosures: closures.items || [] };
         } else {
           return;
@@ -405,6 +433,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         {section === 'system' && <SystemStatus copy={copy} data={data} />}
         {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
         {section === 'identity' && <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />}
+        <AdminExtensionSlot section={section} authorization={authorization} />
       </main>
     </div>
   );
@@ -3574,6 +3603,7 @@ function IdentitySecurity({ copy, closures, client, setData, permissions }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const canRepairClosures = (permissions || []).includes('platform.account-closures.repair');
+  const canReadClosures = (permissions || []).includes('platform.account-closures.read');
   const commands = {
     ssh: 'ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 18081:127.0.0.1:18080 <ssh-user>@<server>',
     kubernetes: 'kubectl -n <namespace> port-forward service/<release>-account-platform-keycloak 18081:8080 --address 127.0.0.1',
@@ -3672,12 +3702,14 @@ function IdentitySecurity({ copy, closures, client, setData, permissions }) {
           <li>{copy.identity.stepClose}</li>
         </ol>
       </article>
-      <article className="adm-panel" style={{ gridColumn: '1 / -1' }}>
-        <SectionHeader title={copy.closure.title} count={closures.length} copy={copy} />
-        <p>{copy.closure.lead}</p>
-        {error && <div className="adm-inline-message error">{error}</div>}
-        <Table columns={closureColumns} items={closures} copy={copy} />
-      </article>
+      {canReadClosures && (
+        <article className="adm-panel" style={{ gridColumn: '1 / -1' }}>
+          <SectionHeader title={copy.closure.title} count={closures.length} copy={copy} />
+          <p>{copy.closure.lead}</p>
+          {error && <div className="adm-inline-message error">{error}</div>}
+          <Table columns={closureColumns} items={closures} copy={copy} />
+        </article>
+      )}
     </section>
   );
 }

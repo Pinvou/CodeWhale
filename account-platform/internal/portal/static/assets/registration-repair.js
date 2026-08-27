@@ -1,7 +1,8 @@
 import { registrationRepairCopies as copies } from './registration-repair-i18n.js';
 
 const root = document.querySelector('#registration-repair-root');
-const state = { language: navigator.language.startsWith('ja') ? 'ja' : navigator.language.startsWith('en') ? 'en' : 'zh', items: [], filters: {}, busy: false, error: '' };
+const storedLanguage = localStorage.getItem('pinvou.admin.language');
+const state = { language: ['zh', 'en', 'ja'].includes(storedLanguage) ? storedLanguage : navigator.language.startsWith('ja') ? 'ja' : navigator.language.startsWith('en') ? 'en' : 'zh', items: [], filters: {}, busy: false, error: '' };
 
 function element(name, text, className) {
   const node = document.createElement(name);
@@ -70,10 +71,7 @@ function render() {
   const section = element('section', undefined, 'registration-repair');
   const header = element('header');
   header.append(element('h2', copy.title));
-  const language = field('select', [['zh', '简体中文'], ['en', 'English'], ['ja', '日本語']], state.language);
-  language.setAttribute('aria-label', copy.language);
-  language.onchange = () => { state.language = language.value; render(); };
-  header.append(language); section.append(header, element('p', copy.description, 'muted'));
+  section.append(header, element('p', copy.description, 'muted'));
 
   const filters = element('div', undefined, 'filters');
   const definitions = [
@@ -109,3 +107,16 @@ function render() {
 
 render();
 load();
+window.addEventListener('storage', (event) => {
+  if (event.key === 'pinvou.admin.language' && ['zh', 'en', 'ja'].includes(event.newValue)) {
+    state.language = event.newValue;
+    render();
+  }
+});
+window.setInterval(() => {
+  const next = localStorage.getItem('pinvou.admin.language');
+  if (['zh', 'en', 'ja'].includes(next) && next !== state.language) {
+    state.language = next;
+    render();
+  }
+}, 1000);

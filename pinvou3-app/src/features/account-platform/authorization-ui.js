@@ -8,7 +8,7 @@ export const adminSectionPermissions = Object.freeze({
   tokens: ['platform.tokens.read', 'platform.models.read', 'platform.usage.read'],
   system: ['platform.system.status.read'],
   audit: ['platform.audit.read'],
-  identity: ['platform.account-closures.read'],
+  identity: ['platform.users.identity.repair', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.read'],
 });
 
 export const adminSectionMutationPermissions = Object.freeze({
@@ -19,7 +19,7 @@ export const adminSectionMutationPermissions = Object.freeze({
   tokens: ['platform.tokens.manage', 'platform.tokens.credentials.validate', 'platform.models.sync', 'platform.models.manage', 'platform.usage.reconcile.retry'],
   system: [],
   audit: ['platform.audit.export'],
-  identity: ['platform.account-closures.repair'],
+  identity: ['platform.users.identity.repair', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.repair'],
 });
 
 export function permissionSet(snapshot, scope = 'active') {

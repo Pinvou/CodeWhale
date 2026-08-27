@@ -36,6 +36,19 @@
 .adm-progress { left:252px; }
 .adm-table-wrap { border-radius:8px; outline:none; }
 .adm-table-wrap:focus-visible { box-shadow:0 0 0 3px rgba(15,118,110,.18); }
+.adm-extension-stack { display:grid; gap:16px; margin-top:16px; }
+.adm-extension-stack > [hidden] { display:none !important; }
+.adm-extension-stack #role-bindings-root { max-width:none; margin:0; padding:0; }
+.adm-extension-stack .role-binding-panel,
+.adm-extension-stack .registration-repair { max-width:none; margin:0; padding:24px; border:1px solid var(--adm-line); border-radius:12px; background:#fff; box-shadow:0 8px 24px rgba(27,45,52,.035); }
+.adm-extension-stack .role-binding-panel h2,
+.adm-extension-stack .registration-repair h2 { font-size:18px; }
+.adm-extension-stack .role-binding-panel form,
+.adm-extension-stack .registration-repair .filters { padding:14px; border:1px solid #e4e9eb; border-radius:9px; background:#f8fafb; }
+.adm-extension-stack .role-binding-panel form button,
+.adm-extension-stack .registration-repair button { border-color:var(--adm-primary); color:#fff; background:var(--adm-primary); }
+.adm-extension-stack table { font-size:12px; }
+.adm-extension-stack th { color:#718088; background:#f5f7f8; font-size:10px; letter-spacing:.04em; text-transform:uppercase; }
 @media (max-width:1100px) { .adm-metrics { grid-template-columns:repeat(3,1fr); }.adm-attention { grid-template-columns:repeat(3,1fr); }.adm-attention div:nth-child(4) { border-left:0; }.adm-overview-grid,.adm-security-grid { grid-template-columns:1fr; } }
 @media (max-width:760px) { .adm-shell { grid-template-columns:1fr; }.adm-sidebar { position:static; height:auto; padding:14px; }.adm-brand { padding-bottom:14px; }.adm-sidebar nav { grid-template-columns:repeat(6,minmax(88px,1fr)); margin-top:12px; overflow:auto; }.adm-sidebar nav button { justify-content:center; }.adm-sidebar-foot { grid-template-columns:auto 1fr; align-items:center; margin-top:12px; padding-top:12px; }.adm-main { padding:22px 14px 48px; }.adm-topbar { align-items:flex-start; }.adm-actions > small, .adm-admin div { display:none; }.adm-admin { padding-left:0; border:0; }.adm-progress { left:0; }.adm-metrics { grid-template-columns:repeat(2,1fr); }.adm-attention { grid-template-columns:repeat(2,1fr); }.adm-attention div:nth-child(odd) { border-left:0; }.adm-section-head { align-items:flex-start; flex-direction:column; }.adm-search { width:100%; }.adm-search input { width:100%; }.adm-hero { align-items:flex-start; flex-direction:column; }.adm-create-row, .adm-unit-form, .adm-owner-card { grid-template-columns:1fr; }.adm-owner-card form { flex-direction:column; }.adm-org-title { align-items:flex-start; }.adm-org-rename { align-items:stretch; flex-direction:column; }.adm-org-rename input { width:100%; }.adm-unit-node { align-items:flex-start; flex-direction:column; }.adm-unit-actions { margin-left:0; }.adm-unit-children { margin-left:10px; padding-left:9px; } }
 @media (max-width:760px) { .adm-sidebar nav { grid-template-columns:none; grid-auto-flow:column; grid-auto-columns:max-content; gap:8px; }.adm-nav-group { display:flex; min-width:max-content; }.adm-nav-label { display:none; }.adm-sidebar nav button { justify-content:flex-start; width:auto; } }

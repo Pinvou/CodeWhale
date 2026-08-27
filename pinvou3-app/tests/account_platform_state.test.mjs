@@ -31,6 +31,19 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   ]);
 });
 
+test('admin identity extensions are mounted inside permission-gated pages', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
+  const repair = await readFile(new URL('../../account-platform/internal/portal/static/assets/registration-repair.js', import.meta.url), 'utf8');
+  assert.match(view, /function AdminExtensionSlot/);
+  assert.match(view, /'role-bindings-root'.*platform\.roles\.read/);
+  assert.match(view, /'registration-repair-root'.*platform\.registrations\.repair/);
+  assert.match(view, /host\.append\(node\)/);
+  assert.match(authorization, /identity: \['platform\.users\.identity\.repair', 'platform\.registrations\.repair', 'platform\.profile-changes\.repair', 'platform\.account-closures\.read'\]/);
+  assert.match(repair, /localStorage\.getItem\('pinvou\.admin\.language'\)/);
+  assert.doesNotMatch(repair, /header\.append\(language\)/);
+});
+
 async function sourceFiles(root) {
   const files = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
