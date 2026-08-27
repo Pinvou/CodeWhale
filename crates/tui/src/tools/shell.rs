@@ -3427,11 +3427,11 @@ impl ToolSpec for BashTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds. The default depends on the action: action=run 120000 (capped at 600000), action=wait 30000, action=interact 1000. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases."
+                    "description": "Timeout in milliseconds. Only bounds the foreground wait: for action=run without background=true, the process is killed and reported TimedOut at the deadline (values clamped to 1000-600000). A background=true task is NOT killed at the timeout — it keeps running until it finishes, is cancelled (action=cancel), or is cleaned up; bound polling of background work with action=wait's timeout, or stop it with action=cancel. Defaults: action=run 120000, action=wait 30000, action=interact 1000. For action=wait, `timeout_secs` (seconds) and `timeout` (milliseconds) are accepted aliases."
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background and return task_id (default: false). Prefer this for commands expected to take >5 seconds."
+                    "description": "Run in background and return task_id (default: false). Prefer this for commands expected to take >5 seconds. The task is not killed at timeout_ms; plan to poll it with action=wait or stop it with action=cancel."
                 },
                 "interactive": {
                     "type": "boolean",
