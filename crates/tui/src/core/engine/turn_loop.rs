@@ -1067,7 +1067,13 @@ impl Engine {
                         // the moment we cross from "stream not yet productive"
                         // (eligible for transparent retry) into "DeepSeek has
                         // billed us / user has seen output" (must surface).
-                        if !any_content_received && !matches!(e, StreamEvent::MessageStart { .. }) {
+                        if !any_content_received
+                            && !matches!(
+                                e,
+                                StreamEvent::MessageStart { .. }
+                                    | StreamEvent::ToolProjectionWarning { .. }
+                            )
+                        {
                             any_content_received = true;
                         }
                         e
@@ -1222,6 +1228,18 @@ impl Engine {
                 };
 
                 match event {
+                    StreamEvent::ToolProjectionWarning {
+                        provider,
+                        omitted_tool_names,
+                    } => {
+                        let _ = self
+                            .tx_event
+                            .send(Event::ToolProjectionWarning {
+                                provider,
+                                omitted_tool_names,
+                            })
+                            .await;
+                    }
                     StreamEvent::MessageStart { message } => {
                         // The chat-completions adapter emits a synthetic
                         // MessageStart with a zeroed usage; only a usage that
