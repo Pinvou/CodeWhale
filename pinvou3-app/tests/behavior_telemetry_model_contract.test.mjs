@@ -6,6 +6,7 @@ const telemetry = readFileSync(new URL('../src-tauri/src/features/behavior_telem
 const forwarder = readFileSync(new URL('../src-tauri/src/features/assistant/forwarder.rs', import.meta.url), 'utf8');
 const acp = readFileSync(new URL('../src-tauri/src/features/codex_acp/mod.rs', import.meta.url), 'utf8');
 const settings = readFileSync(new URL('../src-tauri/src/app/commands/settings.rs', import.meta.url), 'utf8');
+const registries = JSON.parse(readFileSync(new URL('../../docs/schemas/behavior-telemetry-registries.json', import.meta.url), 'utf8'));
 
 test('model use is correlated to the admitted attempt in assistant and ACP modes', () => {
   assert(telemetry.includes('.string("attempt_id", attempt.attempt_id)'));
@@ -20,6 +21,11 @@ test('model telemetry emits registry keys instead of raw model metadata', () => 
   assert.equal(telemetry.includes('.string("model_id"'), false);
   assert.equal(telemetry.includes('.string("model_name"'), false);
   assert.equal(telemetry.includes('.string("provider_name"'), false);
+  assert.ok(registries.providers.includes('xai'));
+  assert.ok(registries.providers.includes('local'));
+  assert.match(telemetry, /"xai" => "xai"/);
+  assert.match(telemetry, /"local_vllm" => "local"/);
+  assert.match(telemetry, /client_registries_match_the_shared_machine_readable_contract/);
 });
 
 test('explicit global and session selections produce model_selected', () => {

@@ -199,8 +199,8 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal(overview.metrics.task_admission_rate_24h, null);
   assert.equal(overview.metrics.task_rejection_rate_24h, null);
   assert.equal(overview.metrics.task_submission_resolution_rate_24h, null);
-  assert.equal(overview.metrics.active_installation_days, 6);
-  assert.equal(overview.metrics.task_submitted_per_active_installation_day, 0.5);
+  assert.equal(overview.metrics.active_installation_days, 3);
+  assert.equal(overview.metrics.task_submitted_per_active_installation_day, 1);
   assert.equal(overview.metrics.task_terminal_completeness_rate, null);
   assert.equal(overview.metrics.task_compensation_rate, null);
   assert.equal(overview.metrics.wsta_installations, 1);
@@ -215,13 +215,15 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal(overview.metrics.pipeline_rejection_rate, 0.03);
   assert.equal(overview.metrics.task_success_count, 1);
   assert.equal(overview.metrics.task_interrupted_count, 1);
-  assert.equal(overview.metrics.voice_started_installations, 2);
+  assert.equal(overview.metrics.voice_started_installations, 1);
+  assert.equal(overview.metrics.voice_observed_installations, 2);
   assert.equal(overview.metrics.voice_penetration_rate, null);
 
   const tools = buildBehaviorToolRanking(devices, usageEvents, behaviorEvents, "7", "call", now, { minimumGroupSubjects: 0 });
     assert.equal(tools.rows[0].tool_key, "search");
     assert.equal(tools.rows[0].call_count, 2);
-    assert.equal(tools.rows[0].user_count, 2);
+    assert.equal(tools.rows[0].user_count, 1);
+    assert.equal(tools.rows[0].observed_user_count, 2);
     assert.equal(tools.rows[0].tool_type, "mcp");
     assert.equal(tools.rows[0].success_rate, null);
 
@@ -235,7 +237,8 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   const models = buildBehaviorModelRanking(devices, usageEvents, behaviorEvents, "7", now, { minimumGroupSubjects: 0 });
   assert.equal(models.rows[0].provider_key, "deepseek");
   assert.equal(models.rows[0].model_key, "deepseek");
-  assert.equal(models.rows[0].user_count, 2);
+  assert.equal(models.rows[0].user_count, 1);
+  assert.equal(models.rows[0].observed_user_count, 2);
   assert.equal(models.rows[0].use_count, 2);
   assert.equal(models.rows[1].model_key, "gpt_5");
 
@@ -466,6 +469,49 @@ test("retention ignores opens and failures while terminal completeness excludes 
   assert(matured.data_quality.warnings.includes("task_terminal_incomplete"));
 });
 
+test("active and feature-adoption denominators use core submissions and successful active installations", () => {
+  const now = at("2026-08-12T12:00:00");
+  const events = [];
+  for (let index = 0; index < 30; index += 1) {
+    const identity = `core_${index}`;
+    const attempt = `core_attempt_${index}`;
+    events.push(
+      { event_id: `submitted_${index}`, event_name: "task_submitted", attempt_id: attempt, identity_id: identity, mode: "assistant", initiator_type: "user", occurred_at: at("2026-08-12T08:00:00") + index },
+      { event_id: `finished_${index}`, event_name: "task_finished", attempt_id: attempt, identity_id: identity, mode: "assistant", initiator_type: "user", status: "success", occurred_at: at("2026-08-12T08:10:00") + index },
+    );
+    if (index < 12) events.push(
+      { event_id: `voice_${index}`, event_name: "voice_started", identity_id: identity, occurred_at: at("2026-08-12T09:00:00") + index },
+      { event_id: `tool_${index}`, event_name: "tool_call_completed", operation_id: `tool_op_${index}`, tool_key: "search", tool_type: "mcp", success: true, identity_id: identity, occurred_at: at("2026-08-12T09:10:00") + index },
+    );
+  }
+  events.push(
+    { event_id: "passive_open", event_name: "app_opened", identity_id: "passive", occurred_at: at("2026-08-12T10:00:00") },
+    { event_id: "passive_voice", event_name: "voice_started", identity_id: "passive", occurred_at: at("2026-08-12T10:01:00") },
+    { event_id: "passive_tool", event_name: "tool_call_completed", operation_id: "passive_tool_op", tool_key: "search", tool_type: "mcp", success: true, identity_id: "passive", occurred_at: at("2026-08-12T10:02:00") },
+    { event_id: "scheduled", event_name: "task_submitted", attempt_id: "scheduled_attempt", identity_id: "scheduled", mode: "scheduled", initiator_type: "system", occurred_at: at("2026-08-12T10:03:00") },
+  );
+  const overview = buildBehaviorOverview(
+    [{ device_id: "passive_device", last_active_at: at("2026-08-12T11:00:00") }],
+    [{ event_id: "passive_usage", device_id: "passive_usage", occurred_at: at("2026-08-12T11:00:00") }],
+    events,
+    "today",
+    now,
+  );
+  assert.equal(overview.active_installations, 30);
+  assert.equal(overview.metrics.active_installation_days, 30);
+  assert.equal(overview.metrics.task_submitted_per_active_installation_day, 1);
+  assert.equal(overview.metrics.wsta_installations, 30);
+  assert.equal(overview.metrics.voice_observed_installations, 13);
+  assert.equal(overview.metrics.voice_started_installations, 12);
+  assert.equal(overview.metrics.voice_penetration_rate, 0.4);
+
+  const tool = buildBehaviorToolRanking([], [], events, "today", "call", now, { minimumGroupSubjects: 0 }).rows[0];
+  assert.equal(tool.observed_user_count, 13);
+  assert.equal(tool.user_count, 12);
+  assert.equal(tool.penetration_sample_size, 30);
+  assert.equal(tool.penetration_rate, 0.4);
+});
+
 test("activation funnel and model ranking expose complete quality dimensions", () => {
   const now = at("2026-08-12T12:00:00");
   const events = [];
@@ -553,11 +599,15 @@ test("legacy behavior files are rewritten without raw tool or model aliases", ()
     writeFileSync(join(dataDir, "behavior-events.jsonl"), [
       JSON.stringify({ event_id: "legacy_tool_event_0001", event_name: "tool_call_completed", device_id: "legacy_device", tool_name: privateTool, tool_type: "custom", success: true, occurred_at: Date.now(), received_at: Date.now() }),
       JSON.stringify({ event_id: "legacy_model_event_0001", event_name: "model_used", device_id: "legacy_device", provider_name: "private-provider", model_name: privateModel, occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "xai_model_event_0001", event_name: "model_used", device_id: "xai_device", provider_key: "xai", model_key: "grok", occurred_at: Date.now(), received_at: Date.now() }),
+      JSON.stringify({ event_id: "local_model_event_0001", event_name: "model_used", device_id: "local_device", provider_key: "local", model_key: "qwen", occurred_at: Date.now(), received_at: Date.now() }),
     ].join("\n") + "\n");
     const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
     assert.equal(store.behaviorEvents[0].tool_key, "custom");
     assert.equal(store.behaviorEvents[1].provider_key, "custom");
     assert.equal(store.behaviorEvents[1].model_key, "custom");
+    assert.equal(store.behaviorEvents[2].provider_key, "xai");
+    assert.equal(store.behaviorEvents[3].provider_key, "local");
     const persisted = readFileSync(join(dataDir, "behavior-events.jsonl"), "utf8");
     assert(!persisted.includes(privateTool));
     assert(!persisted.includes(privateModel));

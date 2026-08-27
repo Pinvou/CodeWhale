@@ -51,6 +51,10 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /async fn run_control_worker[\s\S]*while telemetry\.has_pending_control\(\)\.await/);
   assert.match(rust, /pending control retry deferred[\s\S]*tokio::select!/);
   assert.match(rust, /fn wake_control_worker[\s\S]*tx\.try_send/);
+  assert.match(rust, /async fn retry_pending_control\(&self\)[\s\S]*self\.control_gate\.lock\(\)\.await/);
+  assert.match(rust, /pending_request_matches\(state, &pending\)/);
+  assert.match(rust, /behavior_events_url: state\.behavior_events_url\.clone\(\)/);
+  assert.match(rust, /async fn migrate_endpoint_locked/);
 });
 
 test('credential and pending-control state is atomically replaced', () => {
