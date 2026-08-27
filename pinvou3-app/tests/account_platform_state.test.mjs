@@ -10,7 +10,26 @@ import { AccountPlatformBffClient } from '../src/features/account-platform/bff-c
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
+import { adminNavigationGroups, adminSectionURL, readAdminSection, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
+
+test('admin portal navigation groups and URL state remain deterministic', () => {
+  assert.deepEqual(adminNavigationGroups.map((group) => group.key), ['overview', 'identity', 'finance', 'models', 'governance', 'operations']);
+  const location = { pathname: '/admin.html', search: '?trace=kept&section=users', hash: '#focus' };
+  assert.equal(readAdminSection(location), 'users');
+  assert.equal(adminSectionURL('billing', location), '/admin.html?trace=kept&section=billing#focus');
+  const calls = [];
+  const history = {
+    pushState: (...args) => calls.push(['push', ...args]),
+    replaceState: (...args) => calls.push(['replace', ...args]),
+  };
+  writeAdminSection('tokens', 'push', history, location);
+  writeAdminSection('audit', 'replace', history, location);
+  assert.deepEqual(calls, [
+    ['push', { section: 'tokens' }, '', '/admin.html?trace=kept&section=tokens#focus'],
+    ['replace', { section: 'audit' }, '', '/admin.html?trace=kept&section=audit#focus'],
+  ]);
+});
 
 async function sourceFiles(root) {
   const files = [];

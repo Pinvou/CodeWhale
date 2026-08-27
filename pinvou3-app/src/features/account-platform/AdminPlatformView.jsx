@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildUnitTree } from './admin-organization-tree.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
+import { adminNavigationGroups, readAdminSection, writeAdminSection } from './admin-navigation.js';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './admin-platform.css';
@@ -46,7 +47,7 @@ function userLabel(user) {
 function Status({ value }) {
   const status = String(value || '—');
   const tone = okStatuses.has(status) ? 'ok' : warnStatuses.has(status) ? 'warn' : status === '—' ? '' : 'neutral';
-  return <span className={`adm-status ${tone}`}>{status}</span>;
+  return <span className={`adm-status ${tone}`} aria-label={status}>{status}</span>;
 }
 
 function Metric({ label, value, tone = '', formatter = formatNumber }) {
@@ -59,13 +60,13 @@ function Metric({ label, value, tone = '', formatter = formatNumber }) {
 }
 
 function Empty({ copy }) {
-  return <div className="adm-empty">{copy.noData}</div>;
+  return <div className="adm-empty" role="status">{copy.noData}</div>;
 }
 
 function Table({ columns, items, copy }) {
   if (!items?.length) return <Empty copy={copy} />;
   return (
-    <div className="adm-table-wrap">
+    <div className="adm-table-wrap" tabIndex="0">
       <table className="adm-table">
         <thead>
           <tr>
@@ -104,9 +105,9 @@ function Tabs({ items, active, onChange }) {
   const receivablesLabel = Object.values(adminPlatformCopy).find((candidate) => candidate.billing.wallets === items[0]?.label)?.billing.receivables;
   const visibleItems = items.some((item) => item.key === 'wallets') && !items.some((item) => item.key === 'receivables') ? [items[0], { key: 'receivables', label: receivablesLabel }, ...items.slice(1)] : items;
   return (
-    <div className="adm-tabs">
+    <div className="adm-tabs" role="tablist">
       {visibleItems.map((item) => (
-        <button key={item.key} className={active === item.key ? 'active' : ''} onClick={() => onChange(item.key)}>
+        <button key={item.key} type="button" role="tab" aria-selected={active === item.key} className={active === item.key ? 'active' : ''} onClick={() => onChange(item.key)}>
           {item.label}
         </button>
       ))}
@@ -219,8 +220,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         }
         authorizationRef.current = granted;
         setAuthorization(granted);
-        const target = visible[0];
+        const requested = readAdminSection();
+        const target = visible.includes(requested) ? requested : visible[0];
         setSection(target);
+        writeAdminSection(target, 'replace');
         await load(target, controller.signal, granted);
       } catch (reason) {
         if (reason?.name !== 'AbortError') {
@@ -258,6 +261,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           }
           const target = visible.includes(section) ? section : visible[0];
           setSection(target);
+          writeAdminSection(target, 'replace');
           await load(target, undefined, next);
         }
       } catch (reason) {
@@ -281,9 +285,27 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     };
   }, [auth, client, copy.failed, load, section]);
 
+  useEffect(() => {
+    if (auth !== 'ready' || !authorization) return undefined;
+    const onPopState = () => {
+      const requested = readAdminSection();
+      const visible = adminVisibleSections(authorization);
+      if (!visible.includes(requested)) {
+        writeAdminSection(section, 'replace');
+        return;
+      }
+      if (requested === section) return;
+      setSection(requested);
+      if (!sectionHasData(requested, data)) void load(requested, undefined, authorization);
+    };
+    globalThis.addEventListener?.('popstate', onPopState);
+    return () => globalThis.removeEventListener?.('popstate', onPopState);
+  }, [auth, authorization, data, load, section]);
+
   const navigate = (key) => {
     if (!adminVisibleSections(authorization).includes(key)) return;
     setSection(key);
+    writeAdminSection(key, 'push');
     if (!sectionHasData(key, data)) load(key, undefined, authorization);
   };
   const logout = async () => {
@@ -297,11 +319,15 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   if (auth === 'error') return <StatePage copy={copy} kind="error" onRetry={() => window.location.reload()} />;
 
   const visibleSections = adminVisibleSections(authorization);
+  const visibleGroups = adminNavigationGroups
+    .map((group) => ({ ...group, sections: group.sections.filter((key) => visibleSections.includes(key)) }))
+    .filter((group) => group.sections.length > 0);
   const platformPermissions = authorization?.platform_permissions || [];
   const sectionIsReadOnly = adminSectionReadOnly(authorization, section);
 
   return (
     <div className="adm-shell">
+      <a className="adm-skip-link" href="#admin-content">{copy.skipToContent}</a>
       <aside className="adm-sidebar">
         <div className="adm-brand">
           <div className="adm-mark">P</div>
@@ -310,12 +336,17 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             <span>{copy.product}</span>
           </div>
         </div>
-        <nav>
-          {visibleSections.map((key) => (
-            <button key={key} className={section === key ? 'active' : ''} onClick={() => navigate(key)}>
-              <span>{NAV_ICONS[key]}</span>
-              {copy.nav[key]}
-            </button>
+        <nav aria-label={copy.primaryNavigation}>
+          {visibleGroups.map((group) => (
+            <div className="adm-nav-group" key={group.key}>
+              <span className="adm-nav-label">{copy.navGroups[group.key]}</span>
+              {group.sections.map((key) => (
+                <button key={key} type="button" aria-current={section === key ? 'page' : undefined} className={section === key ? 'active' : ''} onClick={() => navigate(key)}>
+                  <span aria-hidden="true">{NAV_ICONS[key]}</span>
+                  {copy.nav[key]}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="adm-sidebar-foot">
@@ -329,7 +360,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           </select>
         </div>
       </aside>
-      <main className="adm-main">
+      <main className="adm-main" id="admin-content" tabIndex="-1">
         <header className="adm-topbar">
           <div>
             <span className="adm-eyebrow">{copy.product}</span>
@@ -360,7 +391,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             {error}
           </div>
         )}
-        {busy && <div className="adm-progress" />}
+        {busy && <div className="adm-progress" role="progressbar" aria-label={copy.loading} />}
         {sectionIsReadOnly && (
           <div className="adm-inline-message" role="status">
             {copy.permissionReadOnlyReason}
