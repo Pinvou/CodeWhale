@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 379 个目标编号全部完成代码审计并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 356`、`部分实现 29`、`未实现 3`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `390` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55–PAY-58、ADM-53、NFR-54 已由 APT-091–APT-093 收敛。UI-24～UI-30 已由 APT-087～APT-096 在代码基线全部闭环。UI-31～UI-32 当前分别由 APT-097～APT-098 排队实施。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 357`、`部分实现 29`、`未实现 2`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `390` 项。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55–PAY-58、ADM-53、NFR-54 已由 APT-091–APT-093 收敛。UI-24～UI-31 已由 APT-087～APT-097 在代码基线全部闭环。UI-32 由 APT-098 排队实施。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -369,7 +369,7 @@
 | UI-28 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 后台按六组信息架构展示精确授权页面；合法 URL 深链、刷新和前进/后退保持当前页，非法或无权 section 失败关闭到首个可访问页；共享状态、Tab、表格、进度、跳转主内容及移动导航已完成三语、键盘和响应式基线。 |
 | UI-29 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-IDENTITY-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 用户、组织和节点保留现有真实操作；角色绑定和注册修复已按原子权限移入相应身份页面并跟随全局三语，注册/资料/注销类权限可独立使身份修复页可见，无注销读取权限时不请求或展示注销数据。 |
 | UI-30 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-FINANCE-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 财务工作区按精确权限提供账务运营、审批与恢复、充值商品子页；现有真实接口、命令和数据保持不变，支付控制快照渐进披露，未获准的新定价草稿模块保持隐藏。 |
-| UI-31 | 未实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW | NOT_DEPLOYED | 依赖 UI-28；现有 Token、系统和审计功能可用，但页面视觉、技术字段交互和只读运行手册尚未统一。 |
+| UI-31 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-MODEL-SYSTEM-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 模型、Token、Provisioning、用量、系统与审计沿用真实接口和精确权限；非秘密技术标识可复制完整值，四类运行手册按系统/审计读权限只读展示，公网无 Bootstrap、Break-glass、IdP 或服务身份执行入口。 |
 | UI-32 | 未实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW | NOT_DEPLOYED | 依赖 UI-28～UI-31；尚未建立覆盖三语、WCAG 2.1 AA、响应式、真实异常状态和源码/制品一致性的无产品代码总验收。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
@@ -891,7 +891,7 @@
 | UI-28 | 统一管理后台壳层与共享基础组件 | 已实现 | 后台已按六组信息架构展示精确授权页面，URL 深链与浏览器历史一致；共享状态、Tab、表格、进度播报、跳转主内容及移动导航具备三语、键盘和响应式基线。 |
 | UI-29 | 身份、用户、角色与组织后台界面改版 | 已实现 | 用户、组织和节点保留现有数据与动作；角色绑定和注册修复按原子权限收进相应身份页面并跟随全局三语，注销数据无权时不请求、不展示。 |
 | UI-30 | 财务、支付、审批、定价与充值商品后台界面改版 | 已实现 | 财务工作区按精确权限提供账务运营、审批与恢复、充值商品子页；现有真实接口、命令和数据保持不变，支付控制快照渐进披露，未获准的新定价草稿模块保持隐藏。 |
-| UI-31 | 模型、Token、系统与审计后台界面改版 | 未实现 | 依赖 UI-28；现有 Token、系统和审计功能可用，但页面视觉、技术字段交互和只读运行手册尚未统一。 |
+| UI-31 | 模型、Token、系统与审计后台界面改版 | 已实现 | 模型、Token、Provisioning、用量、系统与审计沿用真实接口和精确权限；非秘密技术标识可复制完整值，四类运行手册按系统/审计读权限只读展示，公网无 Bootstrap、Break-glass、IdP 或服务身份执行入口。 |
 | UI-32 | 管理后台跨页面集成与发布验收 | 未实现 | 依赖 UI-28～UI-31；尚未建立覆盖三语、WCAG 2.1 AA、响应式、真实异常状态和源码/制品一致性的无产品代码总验收。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |

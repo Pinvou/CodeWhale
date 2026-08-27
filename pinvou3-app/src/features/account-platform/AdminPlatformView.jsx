@@ -50,6 +50,29 @@ function Status({ value }) {
   return <span className={`adm-status ${tone}`} aria-label={status}>{status}</span>;
 }
 
+function TechnicalID({ value, copy, compact = true }) {
+  const [copied, setCopied] = useState(false);
+  const text = String(value || '');
+  if (!text) return '—';
+  const copyValue = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <span className="adm-technical-id">
+      <code title={text}>{compact ? shortID(text) : text}</code>
+      <button type="button" onClick={copyValue} aria-label={`${copy.copyIdentifier}: ${text}`}>
+        {copied ? copy.copiedIdentifier : copy.copyIdentifier}
+      </button>
+    </span>
+  );
+}
+
 function Metric({ label, value, tone = '', formatter = formatNumber }) {
   return (
     <article className={`adm-metric ${tone}`}>
@@ -471,7 +494,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           </>
         )}
         {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-        {section === 'system' && <SystemStatus copy={copy} data={data} />}
+        {section === 'system' && <SystemStatus copy={copy} data={data} permissions={platformPermissions} />}
         {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
         {section === 'identity' && <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />}
         <AdminExtensionSlot section={section} authorization={authorization} financeSurface={financeSurface} />
@@ -3101,9 +3124,10 @@ function Tokens({ copy, language, data, client, setData, permissions }) {
             key: 'owner_id',
             label: copy.tokens.owner,
             render: (item) => (
-              <code title={item.owner_id}>
-                {item.owner_type} · {shortID(item.owner_id)}
-              </code>
+              <span className="adm-id-with-type">
+                <span>{item.owner_type}</span>
+                <TechnicalID value={item.owner_id} copy={copy} />
+              </span>
             ),
           },
           {
@@ -3150,7 +3174,7 @@ function Tokens({ copy, language, data, client, setData, permissions }) {
             {
               key: 'upstream_request_id',
               label: copy.tokens.upstreamReference,
-              render: (item) => <code title={item.upstream_request_id}>{shortID(item.upstream_request_id)}</code>,
+              render: (item) => <TechnicalID value={item.upstream_request_id} copy={copy} />,
             },
             { key: 'error_class', label: copy.tokens.error },
             {
@@ -3169,7 +3193,7 @@ function Tokens({ copy, language, data, client, setData, permissions }) {
               {
                 key: 'model_id',
                 label: copy.tokens.modelID,
-                render: (item) => <code title={item.model_id}>{shortID(item.model_id)}</code>,
+                render: (item) => <TechnicalID value={item.model_id} copy={copy} />,
               },
               {
                 key: 'lifecycle_status',
@@ -3226,7 +3250,7 @@ function Tokens({ copy, language, data, client, setData, permissions }) {
               {
                 key: 'provisioning_id',
                 label: copy.tokens.provisioningID,
-                render: (item) => <code title={item.provisioning_id}>{shortID(item.provisioning_id)}</code>,
+                render: (item) => <TechnicalID value={item.provisioning_id} copy={copy} />,
               },
               {
                 key: 'scope_type',
@@ -3236,7 +3260,7 @@ function Tokens({ copy, language, data, client, setData, permissions }) {
               {
                 key: 'model_id',
                 label: copy.tokens.modelID,
-                render: (item) => <code title={item.model_id}>{shortID(item.model_id)}</code>,
+                render: (item) => <TechnicalID value={item.model_id} copy={copy} />,
               },
               {
                 key: 'status',
@@ -3519,7 +3543,7 @@ function UsageRequestDetail({ copy, language, item, busy, notice, error, onBack,
     [copy.tokens.actual, formatPoints(item.actual_microcredits, language)],
     [copy.tokens.provider, item.provider_id || '—'],
     [copy.tokens.adapterVersion, item.adapter_version || '—'],
-    [copy.tokens.upstreamReference, <code>{item.upstream_request_id || '—'}</code>],
+    [copy.tokens.upstreamReference, <TechnicalID value={item.upstream_request_id} copy={copy} compact={false} />],
     [copy.tokens.attemptStatus, item.attempt_status || '—'],
     [copy.tokens.tokens, `${formatNumber(item.input_tokens)} / ${formatNumber(item.output_tokens)} / ${formatNumber(item.cached_input_tokens)}`],
     [copy.tokens.persistedSequence, formatNumber(item.last_persisted_sequence)],
@@ -3557,7 +3581,7 @@ function UsageRequestDetail({ copy, language, item, busy, notice, error, onBack,
   );
 }
 
-function SystemStatus({ copy, data }) {
+function SystemStatus({ copy, data, permissions }) {
   const status = data.systemStatus || {
     services: [],
     relays: [],
@@ -3611,7 +3635,7 @@ function SystemStatus({ copy, data }) {
     {
       key: 'resource',
       label: copy.system.resource,
-      render: (item) => <code title={item.resource}>{shortID(item.resource)}</code>,
+      render: (item) => <TechnicalID value={item.resource} copy={copy} />,
     },
     { key: 'message', label: copy.system.message },
     {
@@ -3635,6 +3659,40 @@ function SystemStatus({ copy, data }) {
         <h3>{copy.system.recentErrors}</h3>
         <Table columns={errorColumns} items={status.recent_errors} copy={copy} />
       </article>
+      <RunbookBoundary copy={copy} permissions={permissions} mode="system" />
+    </section>
+  );
+}
+
+function RunbookBoundary({ copy, permissions, mode }) {
+  const permissionSet = new Set(permissions || []);
+  const entries = mode === 'system'
+    ? [
+        permissionSet.has('platform.system.status.read') && ['bootstrap', copy.runbooks.bootstrap, copy.runbooks.bootstrapHelp],
+        permissionSet.has('platform.system.status.read') && ['idp', copy.runbooks.idp, copy.runbooks.idpHelp],
+      ]
+    : [
+        permissionSet.has('platform.audit.read') && ['breakGlass', copy.runbooks.breakGlass, copy.runbooks.breakGlassHelp],
+        permissionSet.has('platform.audit.read') && ['serviceIdentities', copy.runbooks.serviceIdentities, copy.runbooks.serviceIdentitiesHelp],
+      ];
+  const visibleEntries = entries.filter(Boolean);
+  if (!visibleEntries.length) return null;
+  return (
+    <section className="adm-panel adm-runbook-panel">
+      <SectionHeader title={copy.runbooks.title} copy={copy} />
+      <p className="adm-help">{copy.runbooks.lead}</p>
+      <div className="adm-runbook-list">
+        {visibleEntries.map(([key, title, help]) => (
+          <details key={key}>
+            <summary>
+              <strong>{title}</strong>
+              <Status value="OUT_OF_BAND" />
+            </summary>
+            <p>{help}</p>
+            <p className="adm-help">{copy.runbooks.noExecution}</p>
+          </details>
+        ))}
+      </div>
     </section>
   );
 }
@@ -3886,7 +3944,7 @@ function Audit({ copy, data, client, setData, permissions }) {
         <span>
           {item.resource_type}
           <br />
-          <code title={item.resource_id}>{shortID(item.resource_id)}</code>
+          <TechnicalID value={item.resource_id} copy={copy} />
         </span>
       ),
     },
@@ -3897,7 +3955,7 @@ function Audit({ copy, data, client, setData, permissions }) {
         <span>
           {item.actor_display_name || item.actor_email || '—'}
           <br />
-          <code title={item.actor_user_id}>{shortID(item.actor_user_id)}</code>
+          <TechnicalID value={item.actor_user_id} copy={copy} />
         </span>
       ),
     },
@@ -3909,7 +3967,7 @@ function Audit({ copy, data, client, setData, permissions }) {
     {
       key: 'request_id',
       label: copy.audit.request,
-      render: (item) => <code title={item.request_id}>{shortID(item.request_id)}</code>,
+      render: (item) => <TechnicalID value={item.request_id} copy={copy} />,
     },
     {
       key: 'occurred_at',
@@ -3918,6 +3976,7 @@ function Audit({ copy, data, client, setData, permissions }) {
     },
   ];
   return (
+    <>
     <section className="adm-panel">
       <SectionHeader title={copy.audit.title} count={items.length} copy={copy}>
         <button disabled={busy || !canExport} title={!canExport ? copy.permissionDenied : undefined} onClick={createExport}>
@@ -4011,18 +4070,20 @@ function Audit({ copy, data, client, setData, permissions }) {
       {error && <div className="adm-inline-message error">{error}</div>}
       <Table columns={columns} items={items} copy={copy} />
     </section>
+    <RunbookBoundary copy={copy} permissions={permissions} mode="audit" />
+    </>
   );
 }
 
 function AuditDetail({ copy, item, onBack }) {
   const rows = [
     [copy.audit.source, 'Account Service'],
-    [copy.audit.actor, item.actor_display_name || item.actor_email || item.actor_user_id || '—'],
+    [copy.audit.actor, item.actor_display_name || item.actor_email || <TechnicalID value={item.actor_user_id} copy={copy} compact={false} />],
     [copy.audit.action, item.action],
-    [copy.audit.resource, `${item.resource_type} · ${item.resource_id}`],
+    [copy.audit.resource, <span>{item.resource_type} · <TechnicalID value={item.resource_id} copy={copy} compact={false} /></span>],
     [copy.audit.result, <Status value={item.result} />],
-    [copy.audit.request, item.request_id],
-    [copy.audit.organization, item.active_organization_id || '—'],
+    [copy.audit.request, <TechnicalID value={item.request_id} copy={copy} compact={false} />],
+    [copy.audit.organization, <TechnicalID value={item.active_organization_id} copy={copy} compact={false} />],
     [copy.audit.occurred, formatDate(item.occurred_at)],
   ];
   return (

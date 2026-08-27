@@ -68,6 +68,30 @@ test('admin finance workspace integrates approvals and products without exposing
   assert.match(products, /pinvou-admin-language-change/);
 });
 
+test('admin model, system, audit, and runbook surfaces keep technical identifiers usable and secrets out of the DOM', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/features/account-platform/admin-platform.css', import.meta.url), 'utf8');
+
+  assert.match(view, /function TechnicalID/);
+  assert.match(view, /navigator\.clipboard\.writeText\(text\)/);
+  assert.match(view, /aria-label=\{`\$\{copy\.copyIdentifier\}: \$\{text\}`\}/);
+  assert.match(view, /<TechnicalID value=\{item\.model_id\} copy=\{copy\}/);
+  assert.match(view, /<TechnicalID value=\{item\.provisioning_id\} copy=\{copy\}/);
+  assert.match(view, /<TechnicalID value=\{item\.request_id\} copy=\{copy\}/);
+  assert.match(view, /function RunbookBoundary/);
+  assert.match(view, /platform\.system\.status\.read/);
+  assert.match(view, /platform\.audit\.read/);
+  assert.match(view, /<Status value="OUT_OF_BAND"/);
+  assert.match(view, /copy\.runbooks\.noExecution/);
+  assert.match(styles, /\.adm-technical-id/);
+  assert.match(styles, /\.adm-runbook-list/);
+  assert.equal((i18n.match(/copyIdentifier:/g) || []).length, 3);
+  assert.equal((i18n.match(/runbooks: \{/g) || []).length, 3);
+  assert.match(i18n, /凭据、Token 和可复用验证材料永不显示/);
+  assert.doesNotMatch(view, /Authorization Header|client_secret|access_token/);
+});
+
 async function sourceFiles(root) {
   const files = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
