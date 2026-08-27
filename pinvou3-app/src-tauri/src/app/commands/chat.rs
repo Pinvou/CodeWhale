@@ -96,11 +96,12 @@ pub(crate) async fn chat_with_reservation(
         (false, true) => "attachment",
         _ => "text",
     };
+    let team_initiated = crate::features::behavior_telemetry::is_team_session(app, &sid);
     let mut telemetry_submission = (!is_scheduled).then(|| {
         crate::features::behavior_telemetry::begin_task_submission(
             app,
             &sid,
-            "assistant",
+            if team_initiated { "team" } else { "assistant" },
             "user",
             input_type,
             has_attachment,

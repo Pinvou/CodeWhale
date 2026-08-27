@@ -988,8 +988,9 @@ pub async fn web_access_get_codex_workspace_diff(
 pub async fn web_access_cancel_codex_acp(
     session_id: String,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<(), String> {
-    let result = super::codex::cancel_codex_acp(session_id, acp_pool).await;
+    let result = super::codex::cancel_codex_acp(session_id, acp_pool, app).await;
     web_acp_result(WebAcpOperation::Cancel, result)
 }
 
@@ -1006,6 +1007,7 @@ pub async fn web_access_codex_acp_prompt(
     manager: State<'_, RemoteControlManager>,
     store: State<'_, SessionStore>,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<(), String> {
     let outcome = async {
         crate::features::sessions::validate_session_id(&session_id)
@@ -1043,6 +1045,7 @@ pub async fn web_access_codex_acp_prompt(
             workspace_references.unwrap_or_default(),
             &store,
             &acp_pool,
+            &app,
         )
         .await;
         if result.is_err() {

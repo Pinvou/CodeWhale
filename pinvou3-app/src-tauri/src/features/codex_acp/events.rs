@@ -775,6 +775,11 @@ impl EventBridge {
             "turn_started",
             json!({ "status": "running" }),
         );
+        crate::features::behavior_telemetry::admit_task(
+            &self.app,
+            &self.pinvou_session_id,
+            &turn_id,
+        );
         turn_id
     }
 
@@ -783,6 +788,19 @@ impl EventBridge {
             Some(turn_id.to_string()),
             "turn_completed",
             json!({ "status": status, "error": error }),
+        );
+        let telemetry_status = match status {
+            "Completed" => "success",
+            "Interrupted" => "interrupted",
+            _ => "failed",
+        };
+        crate::features::behavior_telemetry::finish_task(
+            &self.app,
+            &self.pinvou_session_id,
+            turn_id,
+            telemetry_status,
+            (telemetry_status != "success")
+                .then(|| crate::features::behavior_telemetry::error_category(error)),
         );
         let mut current = self.current_turn.write();
         if current.as_deref() == Some(turn_id) {
@@ -831,6 +849,13 @@ impl EventBridge {
                 self.emit_protocol("user_message_chunk", chunk, meta)
             }
             SessionUpdate::AgentMessageChunk(chunk) => {
+                if let Some(turn_id) = self.current_turn.read().as_deref() {
+                    crate::features::behavior_telemetry::task_first_output(
+                        &self.app,
+                        &self.pinvou_session_id,
+                        turn_id,
+                    );
+                }
                 self.emit_protocol("agent_message_chunk", chunk, meta)
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {

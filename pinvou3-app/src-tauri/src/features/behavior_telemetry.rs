@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +35,7 @@ pub struct BehaviorTelemetry {
     collection_period_id: Arc<RwLock<Option<String>>>,
     outbox: Arc<StdMutex<Outbox>>,
     tasks: Arc<StdMutex<HashMap<String, TaskAttempt>>>,
+    team_sessions: Arc<StdMutex<HashSet<String>>>,
     event_tx: Option<mpsc::Sender<()>>,
 }
 
@@ -551,6 +552,7 @@ impl BehaviorTelemetry {
             collection_period_id,
             outbox,
             tasks,
+            team_sessions: Arc::new(StdMutex::new(HashSet::new())),
             event_tx,
         };
         if let Some(rx) = event_rx {
@@ -689,6 +691,7 @@ impl BehaviorTelemetry {
             collection_period_id: self.collection_period_id.clone(),
             outbox: self.outbox.clone(),
             tasks: self.tasks.clone(),
+            team_sessions: self.team_sessions.clone(),
             event_tx: None,
         }
     }
@@ -1321,6 +1324,24 @@ pub fn track(app: &tauri::AppHandle, event: BehaviorEvent) {
     if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
         telemetry.track(event);
     }
+}
+
+pub fn register_team_session(app: &tauri::AppHandle, session_id: &str) {
+    if let Some(telemetry) = app.try_state::<BehaviorTelemetry>() {
+        if let Ok(mut sessions) = telemetry.team_sessions.lock() {
+            sessions.insert(session_id.to_string());
+        }
+    }
+}
+
+pub fn is_team_session(app: &tauri::AppHandle, session_id: &str) -> bool {
+    app.try_state::<BehaviorTelemetry>()
+        .is_some_and(|telemetry| {
+            telemetry
+                .team_sessions
+                .lock()
+                .is_ok_and(|sessions| sessions.contains(session_id))
+        })
 }
 
 fn task_fields(event: BehaviorEvent, session_id: &str, attempt: &TaskAttempt) -> BehaviorEvent {

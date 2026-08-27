@@ -7,7 +7,7 @@ use anyhow::Context;
 use deepseek_tui::session_manager::SessionMetadata;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::features::assistant::engine_pool::EnginePool;
 use crate::features::codex_acp::reader_window::{self, ReaderOpenRequest};
@@ -244,6 +244,7 @@ pub async fn codex_acp_prompt(
     workspace_references: Option<Vec<String>>,
     store: State<'_, SessionStore>,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<(), String> {
     codex_acp_prompt_with_attachments(
         session_id,
@@ -252,6 +253,7 @@ pub async fn codex_acp_prompt(
         workspace_references.unwrap_or_default(),
         &store,
         &acp_pool,
+        &app,
     )
     .await
 }
@@ -263,6 +265,7 @@ pub(crate) async fn codex_acp_prompt_with_attachments(
     workspace_references: Vec<String>,
     store: &SessionStore,
     acp_pool: &AcpPool,
+    app: &AppHandle,
 ) -> Result<(), String> {
     let message = message.trim().to_string();
     if message.is_empty() && attachments.is_empty() && workspace_references.is_empty() {
@@ -271,6 +274,25 @@ pub(crate) async fn codex_acp_prompt_with_attachments(
     if !acp_pool.is_acp(&session_id) {
         return Err("当前会话不是 ACP 会话".to_string());
     }
+    let has_attachment = !attachments.is_empty() || !workspace_references.is_empty();
+    let input_type = match (!message.is_empty(), has_attachment) {
+        (true, true) => "mixed",
+        (false, true) => "attachment",
+        _ => "text",
+    };
+    let mut telemetry_submission =
+        Some(crate::features::behavior_telemetry::begin_task_submission(
+            app,
+            &session_id,
+            if crate::features::behavior_telemetry::is_team_session(app, &session_id) {
+                "team"
+            } else {
+                "code"
+            },
+            "user",
+            input_type,
+            has_attachment,
+        ));
     let title_source = if message.is_empty() {
         attachments
             .first()
@@ -289,6 +311,9 @@ pub(crate) async fn codex_acp_prompt_with_attachments(
         .send_message(&session_id, message, attachments, workspace_references)
         .await
         .map_err(|error| format!("ACP Agent send failed: {error:#}"))?;
+    if let Some(submission) = telemetry_submission.take() {
+        submission.sent();
+    }
     Ok(())
 }
 
@@ -514,10 +539,12 @@ pub async fn set_codex_acp_config_option(
 pub async fn cancel_codex_acp(
     session_id: String,
     acp_pool: State<'_, AcpPool>,
+    app: AppHandle,
 ) -> Result<(), String> {
     if !acp_pool.is_acp(&session_id) {
         return Err("当前会话不是 Codex ACP 会话".to_string());
     }
+    crate::features::behavior_telemetry::request_task_cancel(&app, &session_id);
     acp_pool.cancel(&session_id).await;
     Ok(())
 }

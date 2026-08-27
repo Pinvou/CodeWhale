@@ -333,16 +333,26 @@ pub fn team_relay_task_workspace_status(
     thread_id: String,
     team_id: Option<String>,
     manager: State<'_, TeamRelayManager>,
+    app: AppHandle,
 ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
-    manager.task_workspace_status(&thread_id, team_id.as_deref())
+    let status = manager.task_workspace_status(&thread_id, team_id.as_deref())?;
+    if let Some(link) = status.agent_session.as_ref() {
+        crate::features::behavior_telemetry::register_team_session(&app, &link.session_id);
+    }
+    Ok(status)
 }
 
 #[tauri::command]
 pub async fn team_relay_prepare_task_workspace(
     thread_id: String,
     manager: State<'_, TeamRelayManager>,
+    app: AppHandle,
 ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
-    manager.prepare_task_workspace(&thread_id).await
+    let status = manager.prepare_task_workspace(&thread_id).await?;
+    if let Some(link) = status.agent_session.as_ref() {
+        crate::features::behavior_telemetry::register_team_session(&app, &link.session_id);
+    }
+    Ok(status)
 }
 
 #[tauri::command]
@@ -361,8 +371,12 @@ pub fn team_relay_set_task_agent_session(
     input: SetTeamRelayAgentSessionInput,
     team_id: Option<String>,
     manager: State<'_, TeamRelayManager>,
+    app: AppHandle,
 ) -> Result<TeamRelayTaskWorkspaceStatus, String> {
-    manager.set_task_agent_session(&thread_id, input, team_id.as_deref())
+    let session_id = input.session_id.clone();
+    let status = manager.set_task_agent_session(&thread_id, input, team_id.as_deref())?;
+    crate::features::behavior_telemetry::register_team_session(&app, &session_id);
+    Ok(status)
 }
 
 #[tauri::command]
