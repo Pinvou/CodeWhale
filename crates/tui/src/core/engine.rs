@@ -579,6 +579,21 @@ pub enum CancelMode {
     StopDropInbox,
 }
 
+/// Outcome of withdrawing a queued steer by id. Hosts that re-send the same
+/// input through another path (e.g. interrupt-and-send) need to know whether
+/// the engine copy can still be committed, otherwise the same message may be
+/// delivered twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteerWithdrawal {
+    /// The steer was still pending and is now marked withdrawn: it will never
+    /// be injected and settles with exactly one `Event::SteerDropped`.
+    Retired,
+    /// The id was not pending — already committed, already settled, or never
+    /// seen. The withdrawal is a no-op and the engine copy may already be in
+    /// the transcript; hosts must not re-send in that case.
+    NotPending,
+}
+
 impl CancelReason {
     fn describe(self) -> &'static str {
         match self {
@@ -665,9 +680,15 @@ impl SteerControlState {
         self.withdrawn.remove(id);
     }
 
-    fn withdraw(&mut self, id: &str) {
+    fn withdraw(&mut self, id: &str) -> SteerWithdrawal {
         if self.unsettled.contains_key(id) {
             self.withdrawn.insert(id.to_string());
+            SteerWithdrawal::Retired
+        } else {
+            // Unknown ids must not grow the withdrawal set (bounded), and an
+            // id that already settled (committed or dropped) must stay a
+            // no-op so a late withdraw cannot rewrite history.
+            SteerWithdrawal::NotPending
         }
     }
 

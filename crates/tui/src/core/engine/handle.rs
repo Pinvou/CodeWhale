@@ -271,19 +271,22 @@ impl EngineHandle {
 
     /// Withdraw a queued steer before the engine injects it.
     ///
-    /// Fire-and-forget: the id is recorded in a set shared with the engine,
-    /// which checks it at every steer collection and injection point. A
-    /// withdrawn steer is never appended to the transcript; when the engine
-    /// next encounters it, the steer is skipped and reported once via
-    /// `Event::SteerDropped`. Withdrawing an id that was already committed —
-    /// or never existed — is a no-op with no event. The mark survives across
-    /// turns (a parked steer may only surface in a later turn) and is cleared
-    /// on session switch and shutdown.
-    pub fn withdraw_steer(&self, steer_id: &str) {
+    /// The id is recorded in a set shared with the engine, which checks it at
+    /// every steer collection and injection point. A withdrawn steer is never
+    /// appended to the transcript; when the engine next encounters it, the
+    /// steer is skipped and reported once via `Event::SteerDropped`.
+    ///
+    /// Returns [`SteerWithdrawal::Retired`] when the id was still pending and
+    /// is now guaranteed never to be injected, or
+    /// [`SteerWithdrawal::NotPending`] when the id already settled (committed
+    /// or dropped) or was never seen — a no-op with no event. Hosts that
+    /// re-send the same input through another path must check this outcome to
+    /// avoid delivering the message twice.
+    pub fn withdraw_steer(&self, steer_id: &str) -> crate::core::engine::SteerWithdrawal {
         self.steer_control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .withdraw(steer_id);
+            .withdraw(steer_id)
     }
 
     /// Steer an in-flight turn with additional user input.
