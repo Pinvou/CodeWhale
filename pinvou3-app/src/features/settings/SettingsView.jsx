@@ -1728,6 +1728,8 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         deletion_pending: false,
         last_deletion_request_id: null,
         retention_days: 35,
+        pending_event_count: 0,
+        dropped_event_count: 0,
       };
       const feedbackTypes = [
         { key: 'issue', label: t.feedbackIssue },

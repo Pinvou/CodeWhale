@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -14,9 +15,14 @@ use tokio::sync::{mpsc, Mutex};
 use crate::platform::{filesystem, paths};
 
 const STATE_VERSION: u8 = 2;
-const EVENT_QUEUE_CAPACITY: usize = 512;
+const EVENT_WAKE_CAPACITY: usize = 1;
 const EVENT_FLUSH_MAX: usize = 50;
+const EVENT_BATCH_MAX_BYTES: usize = 400 * 1024;
 const EVENT_FLUSH_DEBOUNCE: Duration = Duration::from_millis(1500);
+const OUTBOX_RETENTION_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+const OUTBOX_MAX_EVENTS: usize = 5_000;
+const OUTBOX_MAX_BYTES: usize = 64 * 1024 * 1024;
+const RETRY_MAX_DELAY: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct BehaviorTelemetry {
@@ -26,7 +32,9 @@ pub struct BehaviorTelemetry {
     credential_gate: Arc<Mutex<()>>,
     control_gate: Arc<Mutex<()>>,
     collecting: Arc<AtomicBool>,
-    event_tx: Option<mpsc::Sender<BehaviorEvent>>,
+    collection_period_id: Arc<RwLock<Option<String>>>,
+    outbox: Arc<StdMutex<Outbox>>,
+    event_tx: Option<mpsc::Sender<()>>,
 }
 
 #[derive(Debug)]
@@ -38,6 +46,8 @@ struct RuntimeConfig {
     app_version: String,
     platform: String,
     arch: String,
+    channel: String,
+    locale: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +96,55 @@ pub struct BehaviorTelemetryStatus {
     pub deletion_pending: bool,
     pub last_deletion_request_id: Option<String>,
     pub retention_days: u8,
+    pub pending_event_count: usize,
+    pub dropped_event_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OutboxRecord {
+    event_id: String,
+    collection_period_id: String,
+    enqueued_at: u64,
+    #[serde(default)]
+    delivery_attempt_count: u32,
+    #[serde(default)]
+    last_reason_code: Option<String>,
+    event: Value,
+}
+
+#[derive(Debug)]
+struct Outbox {
+    path: PathBuf,
+    records: Vec<OutboxRecord>,
+    serialized_bytes: usize,
+    dropped_event_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryStatus {
+    Accepted,
+    Duplicate,
+    Retryable,
+    Rejected,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventDeliveryResult {
+    event_id: String,
+    status: String,
+    reason_code: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EventUploadResponse {
+    #[serde(default)]
+    results: Vec<EventDeliveryResult>,
+    #[serde(default)]
+    accepted: Vec<String>,
+    #[serde(default)]
+    duplicates: Vec<String>,
+    #[serde(default)]
+    rejected: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -218,21 +277,256 @@ impl BehaviorEvent {
     }
 }
 
+impl Outbox {
+    fn empty(path: PathBuf) -> Self {
+        Self {
+            path,
+            records: Vec::new(),
+            serialized_bytes: 0,
+            dropped_event_count: 0,
+        }
+    }
+
+    fn load(path: PathBuf) -> Result<Self> {
+        let mut outbox = Self::empty(path.clone());
+        if path.is_file() {
+            let contents = std::fs::read_to_string(&path)
+                .with_context(|| format!("read {}", path.display()))?;
+            for line in contents.lines().filter(|line| !line.trim().is_empty()) {
+                match serde_json::from_str::<OutboxRecord>(line) {
+                    Ok(record) => {
+                        outbox.serialized_bytes = outbox
+                            .serialized_bytes
+                            .saturating_add(Self::record_bytes(&record));
+                        outbox.records.push(record);
+                    }
+                    Err(_) => outbox.dropped_event_count += 1,
+                }
+            }
+        }
+        let changed = outbox.enforce_bounds(now_ms());
+        if changed {
+            outbox.rewrite()?;
+        }
+        Ok(outbox)
+    }
+
+    fn enqueue(&mut self, record: OutboxRecord) -> Result<()> {
+        let changed = self.enforce_bounds(now_ms());
+        if changed {
+            self.rewrite()?;
+        }
+        let parent = self
+            .path
+            .parent()
+            .with_context(|| format!("invalid outbox path: {}", self.path.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        let line = serde_json::to_vec(&record).context("serialize outbox record")?;
+        let mut file = filesystem::open_private_append_file(&self.path)
+            .with_context(|| format!("append {}", self.path.display()))?;
+        file.write_all(&line)?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        self.serialized_bytes = self.serialized_bytes.saturating_add(line.len() + 1);
+        self.records.push(record);
+        if self.enforce_bounds(now_ms()) {
+            self.rewrite()?;
+        }
+        Ok(())
+    }
+
+    fn enforce_bounds(&mut self, now: u64) -> bool {
+        let before = self.records.len();
+        let cutoff = now.saturating_sub(OUTBOX_RETENTION_MS);
+        self.records.retain(|record| record.enqueued_at >= cutoff);
+        if self.records.len() != before {
+            self.recalculate_bytes();
+        }
+        while self.records.len() > OUTBOX_MAX_EVENTS || self.serialized_bytes > OUTBOX_MAX_BYTES {
+            self.serialized_bytes = self
+                .serialized_bytes
+                .saturating_sub(Self::record_bytes(&self.records[0]));
+            self.records.remove(0);
+        }
+        let removed = before.saturating_sub(self.records.len());
+        if removed > 0 {
+            self.dropped_event_count = self.dropped_event_count.saturating_add(removed as u64);
+        }
+        removed > 0
+    }
+
+    fn record_bytes(record: &OutboxRecord) -> usize {
+        serde_json::to_vec(record).map_or(0, |value| value.len() + 1)
+    }
+
+    fn recalculate_bytes(&mut self) {
+        self.serialized_bytes = self.records.iter().map(Self::record_bytes).sum();
+    }
+
+    fn batch(&self) -> Vec<OutboxRecord> {
+        let mut bytes = 0;
+        self.records
+            .iter()
+            .take_while(|record| {
+                let size = serde_json::to_vec(&record.event).map_or(0, |value| value.len());
+                if bytes + size > EVENT_BATCH_MAX_BYTES {
+                    return false;
+                }
+                bytes += size;
+                true
+            })
+            .take(EVENT_FLUSH_MAX)
+            .cloned()
+            .collect()
+    }
+
+    fn apply_results(
+        &mut self,
+        batch: &[OutboxRecord],
+        results: &HashMap<String, (DeliveryStatus, Option<String>)>,
+    ) -> Result<()> {
+        let batch_ids: std::collections::HashSet<&str> = batch
+            .iter()
+            .map(|record| record.event_id.as_str())
+            .collect();
+        self.records.retain_mut(|record| {
+            if !batch_ids.contains(record.event_id.as_str()) {
+                return true;
+            }
+            let (status, reason) = results.get(&record.event_id).cloned().unwrap_or((
+                DeliveryStatus::Retryable,
+                Some("missing_result".to_string()),
+            ));
+            match status {
+                DeliveryStatus::Accepted | DeliveryStatus::Duplicate | DeliveryStatus::Rejected => {
+                    false
+                }
+                DeliveryStatus::Retryable => {
+                    record.delivery_attempt_count = record.delivery_attempt_count.saturating_add(1);
+                    record.last_reason_code = reason;
+                    true
+                }
+            }
+        });
+        self.recalculate_bytes();
+        self.rewrite()
+    }
+
+    fn mark_retry(&mut self, batch: &[OutboxRecord], reason: &str) -> Result<()> {
+        let batch_ids: std::collections::HashSet<&str> = batch
+            .iter()
+            .map(|record| record.event_id.as_str())
+            .collect();
+        for record in &mut self.records {
+            if batch_ids.contains(record.event_id.as_str()) {
+                record.delivery_attempt_count = record.delivery_attempt_count.saturating_add(1);
+                record.last_reason_code = Some(reason.to_string());
+            }
+        }
+        self.recalculate_bytes();
+        self.rewrite()
+    }
+
+    fn clear(&mut self) -> Result<()> {
+        self.records.clear();
+        self.serialized_bytes = 0;
+        self.rewrite()
+    }
+
+    fn retain_period(&mut self, period_id: Option<&str>) -> Result<()> {
+        let before = self.records.len();
+        self.records.retain(|record| {
+            period_id.is_some_and(|period_id| record.collection_period_id == period_id)
+        });
+        if self.records.len() != before {
+            self.recalculate_bytes();
+            self.dropped_event_count = self
+                .dropped_event_count
+                .saturating_add(before.saturating_sub(self.records.len()) as u64);
+            self.rewrite()?;
+        }
+        Ok(())
+    }
+
+    fn rewrite(&self) -> Result<()> {
+        let parent = self
+            .path
+            .parent()
+            .with_context(|| format!("invalid outbox path: {}", self.path.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        let mut data = Vec::new();
+        for record in &self.records {
+            serde_json::to_writer(&mut data, record).context("serialize outbox record")?;
+            data.push(b'\n');
+        }
+        filesystem::atomic_write(&self.path, &data)
+            .with_context(|| format!("rewrite {}", self.path.display()))
+    }
+}
+
+fn delivery_results(
+    records: &[OutboxRecord],
+    response: EventUploadResponse,
+) -> HashMap<String, (DeliveryStatus, Option<String>)> {
+    let mut results = HashMap::new();
+    for result in response.results {
+        let status = match result.status.as_str() {
+            "accepted" => DeliveryStatus::Accepted,
+            "duplicate" => DeliveryStatus::Duplicate,
+            "rejected" => DeliveryStatus::Rejected,
+            _ => DeliveryStatus::Retryable,
+        };
+        results.insert(result.event_id, (status, result.reason_code));
+    }
+    for event_id in response.accepted {
+        results.insert(event_id, (DeliveryStatus::Accepted, None));
+    }
+    for event_id in response.duplicates {
+        results.insert(event_id, (DeliveryStatus::Duplicate, None));
+    }
+    for event_id in response.rejected {
+        results.insert(
+            event_id,
+            (DeliveryStatus::Rejected, Some("rejected".to_string())),
+        );
+    }
+    for record in records {
+        results.entry(record.event_id.clone()).or_insert_with(|| {
+            (
+                DeliveryStatus::Retryable,
+                Some("missing_result".to_string()),
+            )
+        });
+    }
+    results
+}
+
 impl BehaviorTelemetry {
     pub fn new() -> Self {
         let runtime = Arc::new(RuntimeConfig::from_env());
         let persisted = load_state().ok().flatten();
-        let collecting = Arc::new(AtomicBool::new(
-            runtime.enabled
-                && persisted.as_ref().is_some_and(|state| {
-                    state.control.enabled && state.control.collection_period_id.is_some()
-                }),
-        ));
+        let active_period = persisted.as_ref().and_then(|state| {
+            state
+                .control
+                .enabled
+                .then(|| state.control.collection_period_id.clone())
+                .flatten()
+        });
+        let collecting = Arc::new(AtomicBool::new(runtime.enabled && active_period.is_some()));
+        let collection_period_id = Arc::new(RwLock::new(active_period.clone()));
+        let mut loaded_outbox = Outbox::load(outbox_path()).unwrap_or_else(|error| {
+            log::debug!("[pinvou3][behavior] failed to load outbox: {error:#}");
+            Outbox::empty(outbox_path())
+        });
+        if let Err(error) = loaded_outbox.retain_period(active_period.as_deref()) {
+            log::debug!("[pinvou3][behavior] failed to sanitize outbox period: {error:#}");
+        }
+        let outbox = Arc::new(StdMutex::new(loaded_outbox));
         let state = Arc::new(Mutex::new(persisted));
         let credential_gate = Arc::new(Mutex::new(()));
         let control_gate = Arc::new(Mutex::new(()));
         let (event_tx, event_rx) = if runtime.enabled {
-            let (tx, rx) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+            let (tx, rx) = mpsc::channel(EVENT_WAKE_CAPACITY);
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -248,10 +542,21 @@ impl BehaviorTelemetry {
             credential_gate,
             control_gate,
             collecting,
+            collection_period_id,
+            outbox,
             event_tx,
         };
         if let Some(rx) = event_rx {
             tauri::async_runtime::spawn(Self::run_worker(rx, telemetry.worker_clone()));
+            if telemetry
+                .outbox
+                .lock()
+                .is_ok_and(|outbox| !outbox.records.is_empty())
+            {
+                if let Some(tx) = &telemetry.event_tx {
+                    let _ = tx.try_send(());
+                }
+            }
             let retry = telemetry.worker_clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = retry.retry_pending_control().await {
@@ -272,9 +577,63 @@ impl BehaviorTelemetry {
         let Some(tx) = &self.event_tx else {
             return;
         };
-        if let Err(error) = tx.try_send(event) {
-            log::debug!("[pinvou3][behavior] telemetry queue skipped event: {error}");
+        let period_id = self
+            .collection_period_id
+            .read()
+            .ok()
+            .and_then(|value| value.clone());
+        let Some(period_id) = period_id else {
+            return;
+        };
+        let record = match self.prepare_record(event, period_id) {
+            Ok(record) => record,
+            Err(error) => {
+                log::debug!("[pinvou3][behavior] event serialization skipped: {error:#}");
+                return;
+            }
+        };
+        let enqueued = self
+            .outbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))
+            .and_then(|mut outbox| outbox.enqueue(record));
+        if let Err(error) = enqueued {
+            log::debug!("[pinvou3][behavior] persistent enqueue skipped: {error:#}");
+            return;
         }
+        let _ = tx.try_send(());
+    }
+
+    fn prepare_record(&self, event: BehaviorEvent, period_id: String) -> Result<OutboxRecord> {
+        let event_id = event.event_id.clone();
+        let mut value = serde_json::to_value(event).context("serialize behavior event")?;
+        let object = value
+            .as_object_mut()
+            .context("behavior event must serialize as an object")?;
+        object.insert("schema_version".to_string(), json!(1));
+        object.insert("event_source".to_string(), json!("client"));
+        object.insert("collection_period_id".to_string(), json!(period_id.clone()));
+        object.insert("producer".to_string(), json!("pinvou_agent"));
+        object.insert(
+            "producer_version".to_string(),
+            json!(self.runtime.app_version.clone()),
+        );
+        object.insert(
+            "app_version".to_string(),
+            json!(self.runtime.app_version.clone()),
+        );
+        object.insert("platform".to_string(), json!(self.runtime.platform.clone()));
+        object.insert("arch".to_string(), json!(self.runtime.arch.clone()));
+        object.insert("channel".to_string(), json!(self.runtime.channel.clone()));
+        object.insert("locale".to_string(), json!(self.runtime.locale.clone()));
+        Ok(OutboxRecord {
+            event_id,
+            collection_period_id: period_id,
+            enqueued_at: now_ms(),
+            delivery_attempt_count: 0,
+            last_reason_code: None,
+            event: value,
+        })
     }
 
     fn worker_clone(&self) -> Self {
@@ -289,59 +648,69 @@ impl BehaviorTelemetry {
             credential_gate: self.credential_gate.clone(),
             control_gate: self.control_gate.clone(),
             collecting: self.collecting.clone(),
+            collection_period_id: self.collection_period_id.clone(),
+            outbox: self.outbox.clone(),
             event_tx: None,
         }
     }
 
-    async fn run_worker(mut rx: mpsc::Receiver<BehaviorEvent>, telemetry: Self) {
-        let mut batch = Vec::with_capacity(EVENT_FLUSH_MAX);
-        while let Some(event) = rx.recv().await {
-            batch.push(event);
-            while batch.len() < EVENT_FLUSH_MAX {
-                match tokio::time::timeout(EVENT_FLUSH_DEBOUNCE, rx.recv()).await {
-                    Ok(Some(event)) => batch.push(event),
-                    Ok(None) | Err(_) => break,
+    async fn run_worker(mut rx: mpsc::Receiver<()>, telemetry: Self) {
+        let mut retry_delay = Duration::from_secs(1);
+        loop {
+            let has_events = telemetry
+                .outbox
+                .lock()
+                .is_ok_and(|outbox| !outbox.records.is_empty());
+            if !has_events || !telemetry.collecting.load(Ordering::Acquire) {
+                if rx.recv().await.is_none() {
+                    break;
                 }
+                let _ = tokio::time::timeout(EVENT_FLUSH_DEBOUNCE, rx.recv()).await;
+                continue;
             }
-            let events = std::mem::take(&mut batch);
-            if let Err(error) = telemetry.send_events(events).await {
-                log::debug!("[pinvou3][behavior] telemetry skipped: {error:#}");
+            let batch = telemetry
+                .outbox
+                .lock()
+                .map(|outbox| outbox.batch())
+                .unwrap_or_default();
+            if batch.is_empty() {
+                continue;
+            }
+            match telemetry.send_events(&batch).await {
+                Ok(results) => {
+                    if let Ok(mut outbox) = telemetry.outbox.lock() {
+                        if let Err(error) = outbox.apply_results(&batch, &results) {
+                            log::debug!(
+                                "[pinvou3][behavior] persist delivery results failed: {error:#}"
+                            );
+                        }
+                    }
+                    retry_delay = Duration::from_secs(1);
+                }
+                Err(error) => {
+                    log::debug!("[pinvou3][behavior] upload deferred: {error:#}");
+                    if let Ok(mut outbox) = telemetry.outbox.lock() {
+                        let _ = outbox.mark_retry(&batch, "network_unavailable");
+                    }
+                    let jitter = Duration::from_millis(now_ms() % 251);
+                    tokio::time::sleep(retry_delay.saturating_add(jitter)).await;
+                    retry_delay = retry_delay.saturating_mul(2).min(RETRY_MAX_DELAY);
+                }
             }
         }
     }
 
-    async fn send_events(&self, events: Vec<BehaviorEvent>) -> Result<()> {
+    async fn send_events(
+        &self,
+        records: &[OutboxRecord],
+    ) -> Result<HashMap<String, (DeliveryStatus, Option<String>)>> {
+        let events: Vec<&Value> = records.iter().map(|record| &record.event).collect();
         if events.is_empty() {
-            return Ok(());
+            return Ok(HashMap::new());
         }
         let credentials = self.ensure_credentials().await?;
-        let collection_period_id = self
-            .state
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|state| state.control.collection_period_id.clone())
-            .context("behavior collection is inactive")?;
-        let events: Vec<Value> = events
-            .into_iter()
-            .filter_map(|event| {
-                let mut value = serde_json::to_value(event).ok()?;
-                if let Value::Object(ref mut object) = value {
-                    object.insert(
-                        "collection_period_id".to_string(),
-                        Value::String(collection_period_id.clone()),
-                    );
-                    object
-                        .entry("app_version".to_string())
-                        .or_insert_with(|| Value::String(self.runtime.app_version.clone()));
-                    object
-                        .entry("platform".to_string())
-                        .or_insert_with(|| Value::String(self.runtime.platform.clone()));
-                }
-                Some(value)
-            })
-            .collect();
         let body = json!({
+            "batch_id": token("batch_", 18),
             "device_id": credentials.device_id,
             "events": events,
         });
@@ -356,12 +725,21 @@ impl BehaviorTelemetry {
         if !response.status().is_success() {
             anyhow::bail!("behavior events endpoint returned {}", response.status());
         }
-        Ok(())
+        let response: EventUploadResponse = response
+            .json()
+            .await
+            .context("parse behavior event delivery response")?;
+        Ok(delivery_results(records, response))
     }
 
     pub async fn status(&self) -> BehaviorTelemetryStatus {
         let state = self.state.lock().await;
         let control = state.as_ref().map(|value| &value.control);
+        let (pending_event_count, dropped_event_count) = self
+            .outbox
+            .lock()
+            .map(|outbox| (outbox.records.len(), outbox.dropped_event_count))
+            .unwrap_or_default();
         BehaviorTelemetryStatus {
             configured: self.runtime.enabled,
             enabled: self.collecting.load(Ordering::Acquire),
@@ -381,6 +759,8 @@ impl BehaviorTelemetry {
             last_deletion_request_id: control
                 .and_then(|value| value.last_deletion_request_id.clone()),
             retention_days: 35,
+            pending_event_count,
+            dropped_event_count,
         }
     }
 
@@ -417,9 +797,18 @@ impl BehaviorTelemetry {
             state.control.collection_period_id = Some(response.collection_period_id);
             state.control.pending_request = None;
             persist_state(state)?;
+            if let Ok(mut period) = self.collection_period_id.write() {
+                *period = state.control.collection_period_id.clone();
+            }
             self.collecting.store(true, Ordering::Release);
         } else {
             self.collecting.store(false, Ordering::Release);
+            if let Ok(mut period) = self.collection_period_id.write() {
+                *period = None;
+            }
+            if let Ok(mut outbox) = self.outbox.lock() {
+                outbox.clear()?;
+            }
             let mut guard = self.state.lock().await;
             if let Some(state) = guard.as_mut() {
                 state.control.enabled = false;
@@ -441,16 +830,19 @@ impl BehaviorTelemetry {
     }
 
     pub async fn delete_local_data(&self) -> Result<BehaviorTelemetryStatus> {
-        let path = outbox_path();
-        if path.is_file() {
-            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
-        }
+        self.outbox
+            .lock()
+            .map_err(|_| anyhow::anyhow!("behavior outbox lock poisoned"))?
+            .clear()?;
         Ok(self.status().await)
     }
 
     pub async fn delete_remote_data(&self) -> Result<BehaviorTelemetryStatus> {
         let _control_guard = self.control_gate.lock().await;
         self.collecting.store(false, Ordering::Release);
+        if let Ok(mut period) = self.collection_period_id.write() {
+            *period = None;
+        }
         let Some(credentials) = self.current_credentials().await else {
             let mut guard = self.state.lock().await;
             if let Some(state) = guard.as_mut() {
@@ -542,6 +934,9 @@ impl BehaviorTelemetry {
                 });
                 if let Some(state) = guard.as_ref() {
                     persist_state(state)?;
+                }
+                if let Ok(mut period) = self.collection_period_id.write() {
+                    *period = None;
                 }
             }
         }
@@ -637,6 +1032,7 @@ impl BehaviorTelemetry {
         persist_state(&state)?;
         let mut guard = self.state.lock().await;
         *guard = Some(state);
+        drop(guard);
         self.current_credentials()
             .await
             .context("telemetry credentials missing after registration")
@@ -715,9 +1111,45 @@ impl RuntimeConfig {
             enrollment_token,
             app_version: env!("CARGO_PKG_VERSION").to_string(),
             platform: std::env::consts::OS.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
+            arch: match std::env::consts::ARCH {
+                "x86_64" => "x86_64",
+                "aarch64" => "aarch64",
+                _ => "unknown",
+            }
+            .to_string(),
+            channel: behavior_release_channel(),
+            locale: behavior_locale(),
         }
     }
+}
+
+fn behavior_release_channel() -> String {
+    match std::env::var("PINVOU_RELEASE_CHANNEL")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "stable" => "stable",
+        "beta" => "beta",
+        "dev" => "dev",
+        _ if cfg!(debug_assertions) => "dev",
+        _ => "unknown",
+    }
+    .to_string()
+}
+
+fn behavior_locale() -> String {
+    let language = std::fs::read_to_string(paths::settings_path())
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+        .and_then(|settings| settings.get("language")?.as_str().map(str::to_string));
+    match language.as_deref() {
+        Some("en") => "en",
+        Some("ja") => "ja",
+        _ => "zh-CN",
+    }
+    .to_string()
 }
 
 impl PersistedState {
@@ -871,6 +1303,17 @@ pub fn classify_tool(tool_name: &str) -> &'static str {
 mod tests {
     use super::*;
 
+    fn outbox_record(id: &str, period: &str, enqueued_at: u64) -> OutboxRecord {
+        OutboxRecord {
+            event_id: id.to_string(),
+            collection_period_id: period.to_string(),
+            enqueued_at,
+            delivery_attempt_count: 0,
+            last_reason_code: None,
+            event: json!({ "event_id": id, "collection_period_id": period }),
+        }
+    }
+
     #[test]
     fn behavior_event_serializes_sparse_fields() {
         let event = BehaviorEvent::new("tool_call_completed")
@@ -903,6 +1346,8 @@ mod tests {
             app_version: "0.0.0".to_string(),
             platform: "test".to_string(),
             arch: "test".to_string(),
+            channel: "dev".to_string(),
+            locale: "en".to_string(),
         };
         let state = PersistedState::fresh(&runtime);
         assert!(state.registration_secret.len() >= 32);
@@ -921,10 +1366,113 @@ mod tests {
             app_version: "0.0.0".to_string(),
             platform: "test".to_string(),
             arch: "test".to_string(),
+            channel: "dev".to_string(),
+            locale: "en".to_string(),
         };
         let state = PersistedState::fresh(&runtime);
         assert!(!state.control.enabled);
         assert!(state.control.collection_period_id.is_none());
         assert!(state.control.pending_request.is_none());
+    }
+
+    #[test]
+    fn persistent_outbox_recovers_and_applies_per_event_results() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("outbox.jsonl");
+        let now = now_ms();
+        let mut outbox = Outbox::empty(path.clone());
+        outbox
+            .enqueue(outbox_record("event_accept", "period_one", now))
+            .unwrap();
+        outbox
+            .enqueue(outbox_record("event_retry", "period_one", now))
+            .unwrap();
+        outbox
+            .enqueue(outbox_record("event_reject", "period_one", now))
+            .unwrap();
+
+        let mut recovered = Outbox::load(path).unwrap();
+        assert_eq!(recovered.records.len(), 3);
+        let batch = recovered.batch();
+        let results = HashMap::from([
+            ("event_accept".to_string(), (DeliveryStatus::Accepted, None)),
+            (
+                "event_retry".to_string(),
+                (DeliveryStatus::Retryable, Some("rate_limited".to_string())),
+            ),
+            (
+                "event_reject".to_string(),
+                (DeliveryStatus::Rejected, Some("invalid_field".to_string())),
+            ),
+        ]);
+        recovered.apply_results(&batch, &results).unwrap();
+        assert_eq!(recovered.records.len(), 1);
+        assert_eq!(recovered.records[0].event_id, "event_retry");
+        assert_eq!(recovered.records[0].delivery_attempt_count, 1);
+        assert_eq!(
+            recovered.records[0].last_reason_code.as_deref(),
+            Some("rate_limited")
+        );
+    }
+
+    #[test]
+    fn outbox_enforces_period_age_count_and_batch_limits() {
+        let now = now_ms();
+        let directory = tempfile::tempdir().unwrap();
+        let mut outbox = Outbox::empty(directory.path().join("outbox.jsonl"));
+        outbox.records.push(outbox_record(
+            "expired",
+            "old_period",
+            now - OUTBOX_RETENTION_MS - 1,
+        ));
+        for index in 0..=OUTBOX_MAX_EVENTS {
+            outbox.records.push(outbox_record(
+                &format!("event_{index}"),
+                "period_current",
+                now,
+            ));
+        }
+        assert!(outbox.enforce_bounds(now));
+        assert_eq!(outbox.records.len(), OUTBOX_MAX_EVENTS);
+        assert!(outbox
+            .records
+            .iter()
+            .all(|record| record.event_id != "expired"));
+        assert!(outbox.dropped_event_count >= 2);
+
+        outbox.retain_period(Some("different_period")).unwrap();
+        assert!(outbox.records.is_empty());
+    }
+
+    #[test]
+    fn upload_response_supports_v1_results_and_legacy_arrays() {
+        let records = vec![
+            outbox_record("event_a", "period_one", now_ms()),
+            outbox_record("event_b", "period_one", now_ms()),
+        ];
+        let v1 = delivery_results(
+            &records,
+            EventUploadResponse {
+                results: vec![EventDeliveryResult {
+                    event_id: "event_a".to_string(),
+                    status: "duplicate".to_string(),
+                    reason_code: None,
+                }],
+                ..EventUploadResponse::default()
+            },
+        );
+        assert_eq!(v1["event_a"].0, DeliveryStatus::Duplicate);
+        assert_eq!(v1["event_b"].0, DeliveryStatus::Retryable);
+
+        let legacy = delivery_results(
+            &records,
+            EventUploadResponse {
+                accepted: vec!["event_a".to_string()],
+                rejected: vec!["event_b".to_string()],
+                ..EventUploadResponse::default()
+            },
+        );
+        assert_eq!(legacy["event_a"].0, DeliveryStatus::Accepted);
+        assert_eq!(legacy["event_b"].0, DeliveryStatus::Rejected);
     }
 }

@@ -126,6 +126,8 @@
         deletion_pending: false,
         last_deletion_request_id: null,
         retention_days: 35,
+        pending_event_count: 0,
+        dropped_event_count: 0,
       };
     }
     notify();
