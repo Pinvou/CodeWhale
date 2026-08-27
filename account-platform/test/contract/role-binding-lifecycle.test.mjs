@@ -6,8 +6,8 @@ import test from 'node:test';
 const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
-test('role bindings have validity, idempotent revocation, cache invalidation, and three-language views', async () => {
-  const [migration, authorization, lifecycle, adminLifecycle, service, main, accountOpenAPI, adminOpenAPI, myUI, adminUI] = await Promise.all([
+test('role bindings have validity, idempotent revocation, cache invalidation, and an admin-only management view', async () => {
+  const [migration, authorization, lifecycle, adminLifecycle, service, main, accountOpenAPI, adminOpenAPI, adminUI, accountHTML, viteConfig] = await Promise.all([
     read('migrations/account/000016_role_binding_lifecycle.up.sql'),
     read('internal/account/authorization.go'),
     read('internal/account/role_bindings.go'),
@@ -16,8 +16,9 @@ test('role bindings have validity, idempotent revocation, cache invalidation, an
     read('cmd/account-service/main.go'),
     read('contracts/openapi/account.yaml'),
     read('contracts/openapi/admin.yaml'),
-    read('internal/portal/static/assets/my-role-bindings.js'),
-    read('internal/portal/static/assets/role-bindings.js')
+    read('internal/portal/static/assets/role-bindings.js'),
+    read('internal/portal/static/account.html'),
+    read('../pinvou3-app/vite.config.js')
   ]);
 
   for (const column of ['starts_at', 'expires_at', 'revoked_at', 'revoked_by', 'grant_source', 'idempotency_key']) {
@@ -43,8 +44,10 @@ test('role bindings have validity, idempotent revocation, cache invalidation, an
   assert.match(adminOpenAPI, /operationId: grantAdminRoleBinding/);
   assert.match(adminOpenAPI, /operationId: revokeAdminRoleBinding/);
   for (const language of ['zh', 'en', 'ja']) {
-    assert.match(myUI, new RegExp(`${language}:\\{`));
     assert.match(adminUI, new RegExp(`${language}: \\{`));
   }
-  assert.match(myUI, /catch\{return\}if\(!session\.authenticated\)return/, 'the role grant surface must stay absent when the session cannot be established');
+  assert.doesNotMatch(accountHTML, /my-role-bindings/, 'the personal center must not mount the raw role binding surface');
+  assert.doesNotMatch(viteConfig, /my-role-bindings/, 'the personal center build must not re-inject the raw role binding surface');
+  assert.match(adminUI, /`\/api\/admin\/account\$\{path\}`/, 'role management remains behind the admin Account proxy');
+  assert.match(adminUI, /request\("\/admin\/v1\/role-bindings"\)/, 'role management remains available in the admin console');
 });

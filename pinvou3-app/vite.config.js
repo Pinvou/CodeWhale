@@ -63,13 +63,6 @@ function copyRuntimeAssets() {
 
 function preserveAccountPortalExtensions() {
   const extensions = {
-    'account.html': {
-      head: [
-        '<script type="module" crossorigin src="/assets/my-role-bindings.js"></script>',
-        '<link rel="stylesheet" crossorigin href="/assets/my-role-bindings.css">',
-      ],
-      body: ['<div id="my-role-bindings-root"></div>'],
-    },
     'admin.html': {
       head: [
         '<script type="module" crossorigin src="/assets/registration-repair.js"></script>',
