@@ -17,13 +17,18 @@ import {
   newWithVectorIndex,
   verifyFromFile,
 } from "ip2region.js";
+import {
+  BEHAVIOR_EVENT_NAMES,
+  validateBehaviorEventShape,
+} from "./behavior-telemetry-schema.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TELEMETRY_PREFIX = "/pinvou3/telemetry";
 const STATS_PREFIX = "/pinvou3/stats";
-const MAX_JSON_BYTES = 256 * 1024;
-const MAX_EVENTS_PER_BATCH = 200;
-const BEHAVIOR_EVENT_NAMES = new Set([
+const MAX_JSON_BYTES = 512 * 1024;
+const MAX_USAGE_EVENTS_PER_BATCH = 200;
+const MAX_BEHAVIOR_EVENTS_PER_BATCH = 50;
+const LEGACY_BEHAVIOR_EVENT_NAMES = new Set([
   "task_started",
   "task_finished",
   "voice_started",
@@ -32,6 +37,11 @@ const BEHAVIOR_EVENT_NAMES = new Set([
   "scene_triggered",
   "model_used",
 ]);
+const STORED_BEHAVIOR_EVENT_NAMES = new Set([
+  ...BEHAVIOR_EVENT_NAMES,
+  ...LEGACY_BEHAVIOR_EVENT_NAMES,
+]);
+const TELEMETRY_ENVIRONMENTS = new Set(["production", "staging", "development", "test"]);
 const RANGE_DAYS = new Map([
   ["today", 1],
   ["7", 7],
@@ -97,6 +107,18 @@ function boundedInteger(value, fallback, minimum, maximum) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(maximum, Math.max(minimum, Math.floor(parsed)));
+}
+
+function telemetryEnvironment(value) {
+  const environment = boundedText(value, 32).toLowerCase();
+  return TELEMETRY_ENVIRONMENTS.has(environment) ? environment : "production";
+}
+
+function clockSkewBucket(occurredAt, receivedAt) {
+  if (!Number.isSafeInteger(occurredAt) || !Number.isSafeInteger(receivedAt)) return "unknown";
+  if (occurredAt > receivedAt + MAX_CLIENT_FUTURE_SKEW_MS) return "future_5m_plus";
+  if (occurredAt < receivedAt - 60 * 60_000) return "past_1h_plus";
+  return "normal";
 }
 
 class TelemetryHttpError extends Error {
@@ -609,6 +631,7 @@ export class TelemetryStore {
     this.lastEventCompactionAt = 0;
     this.eventRateBuckets = new Map();
     this.globalEventRateBucket = null;
+    this.environment = telemetryEnvironment(options.environment);
     this.maxDevices = boundedInteger(options.maxDevices, DEFAULT_MAX_DEVICES, 1, 1_000_000);
     this.maxEvents = boundedInteger(options.maxEvents, DEFAULT_MAX_EVENTS, 100, 5_000_000);
     this.eventCompactionTarget = Math.max(1, Math.floor(this.maxEvents * 0.9));
@@ -621,13 +644,13 @@ export class TelemetryStore {
     this.eventRatePerMinute = boundedInteger(
       options.eventRatePerMinute,
       DEFAULT_EVENT_RATE_PER_MINUTE,
-      MAX_EVENTS_PER_BATCH,
+      MAX_USAGE_EVENTS_PER_BATCH,
       100_000,
     );
     this.globalEventRatePerMinute = boundedInteger(
       options.globalEventRatePerMinute,
       DEFAULT_GLOBAL_EVENT_RATE_PER_MINUTE,
-      MAX_EVENTS_PER_BATCH,
+      MAX_USAGE_EVENTS_PER_BATCH,
       1_000_000,
     );
 
@@ -685,7 +708,7 @@ export class TelemetryStore {
       try {
         const event = JSON.parse(line);
         if (!event.event_id || this.behaviorEventIds.has(event.event_id)
-          || !BEHAVIOR_EVENT_NAMES.has(event.event_name)) {
+          || !STORED_BEHAVIOR_EVENT_NAMES.has(event.event_name)) {
           rewriteNeeded = true;
           continue;
         }
@@ -894,7 +917,7 @@ export class TelemetryStore {
       throw new TelemetryHttpError(429, "event_rate_limited");
     }
     const batchEventIds = new Set();
-    for (const raw of inputEvents.slice(0, MAX_EVENTS_PER_BATCH)) {
+    for (const raw of inputEvents.slice(0, MAX_USAGE_EVENTS_PER_BATCH)) {
       const eventId = boundedText(raw?.event_id, 96);
       if (eventId.length < 12) continue;
       if (this.eventIds.has(eventId) || batchEventIds.has(eventId)) {
@@ -932,71 +955,101 @@ export class TelemetryStore {
     return { accepted: accepted.map((event) => event.event_id), duplicates };
   }
 
-  normalizedOccurredAt(value, now = Date.now()) {
-    const occurredAt = Number(value);
-    if (!Number.isFinite(occurredAt) || occurredAt <= 0) return now;
-    if (occurredAt > now + MAX_CLIENT_FUTURE_SKEW_MS) return now;
-    if (occurredAt < now - this.eventRetentionMs) return now;
-    return occurredAt;
-  }
-
-  appendBehaviorEvents(device, inputEvents) {
-    const accepted = [];
-    const duplicates = [];
-    const rejected = [];
+  appendBehaviorEvents(device, inputEvents, batchId = null) {
+    if (inputEvents.length > MAX_BEHAVIOR_EVENTS_PER_BATCH) {
+      throw new TelemetryHttpError(413, "too_many_events");
+    }
     const now = Date.now();
+    const response = {
+      batch_id: boundedText(batchId, 96) || null,
+      results: [],
+    };
     this.compactExpiredEventsIfDue(now);
     if (this.eventRateLimited(device.device_id, inputEvents.length, now)) {
-      throw new TelemetryHttpError(429, "event_rate_limited");
+      response.results = inputEvents.map((raw) => ({
+        event_id: boundedText(raw?.event_id, 96),
+        status: "retryable",
+        reason_code: "rate_limited",
+      }));
+      return response;
     }
+
+    const collection = device.behavior_collection;
+    const accepted = [];
+    const acceptedResultIndexes = [];
     const batchEventIds = new Set();
-    for (const raw of inputEvents.slice(0, MAX_EVENTS_PER_BATCH)) {
+    for (const raw of inputEvents.slice(0, MAX_BEHAVIOR_EVENTS_PER_BATCH)) {
       const eventId = boundedText(raw?.event_id, 96);
-      const eventName = boundedText(raw?.event_name, 64);
-      if (eventId.length < 12 || !BEHAVIOR_EVENT_NAMES.has(eventName)) {
-        rejected.push(eventId || eventName || "invalid_event");
+      const validation = validateBehaviorEventShape(raw, {
+        now,
+        retentionMs: this.eventRetentionMs,
+      });
+      if (!validation.ok) {
+        response.results.push({
+          event_id: eventId,
+          status: "rejected",
+          reason_code: validation.reason,
+        });
+        continue;
+      }
+      if (raw.account_subject_id !== undefined) {
+        response.results.push({
+          event_id: eventId,
+          status: "rejected",
+          reason_code: "invalid_identity_claim",
+        });
+        continue;
+      }
+      if (collection?.status !== "active"
+        || raw.collection_period_id !== collection.collection_period_id) {
+        response.results.push({
+          event_id: eventId,
+          status: "rejected",
+          reason_code: "collection_inactive",
+        });
         continue;
       }
       if (this.behaviorEventIds.has(eventId) || batchEventIds.has(eventId)) {
-        duplicates.push(eventId);
-        continue;
-      }
-      const identityType = boundedText(raw.identity_type, 16) || "device";
-      const identityId = boundedText(raw.identity_id, 128) || device.device_id;
-      if (identityType !== "device" || identityId !== device.device_id) {
-        rejected.push(eventId);
+        response.results.push({
+          event_id: eventId,
+          status: "duplicate",
+          reason_code: null,
+        });
         continue;
       }
       batchEventIds.add(eventId);
-      const event = {
+      acceptedResultIndexes.push(response.results.length);
+      response.results.push({
         event_id: eventId,
-        event_name: eventName,
-        occurred_at: this.normalizedOccurredAt(raw.occurred_at, now),
+        status: "accepted",
+        reason_code: null,
+      });
+      accepted.push({
+        ...raw,
         received_at: now,
-        app_version: boundedText(raw.app_version, 48) || boundedText(device.app_version, 48),
-        platform: boundedText(raw.platform, 32) || boundedText(device.platform, 32),
-        identity_id: device.device_id,
-        identity_type: "device",
-        session_id: boundedText(raw.session_id, 128),
-        turn_id: boundedText(raw.turn_id, 128),
-        input_type: boundedText(raw.input_type, 32),
-        status: ["success", "failed", "interrupted"].includes(raw.status) ? raw.status : undefined,
-        stage: boundedText(raw.stage, 32),
-        tool_key: boundedText(raw.tool_key, 128),
-        tool_name: boundedText(raw.tool_name, 128),
-        tool_type: behaviorToolType(raw.tool_type),
-        success: raw.success !== false,
-        scene_l1: boundedText(raw.scene_l1, 64),
-        scene_l2: boundedText(raw.scene_l2, 96),
-        provider_key: boundedText(raw.provider_key, 64),
-        provider_name: boundedText(raw.provider_name, 128),
-        model_id: boundedText(raw.model_id, 128),
-        model_name: boundedText(raw.model_name, 128),
-      };
-      accepted.push(event);
+        device_id: device.device_id,
+        environment: this.environment,
+        clock_skew_bucket: clockSkewBucket(raw.occurred_at, now),
+      });
     }
     if (accepted.length) {
-      appendFileSync(this.behaviorEventsPath, accepted.map((event) => JSON.stringify(event)).join("\n") + "\n", { mode: 0o600 });
+      try {
+        appendFileSync(
+          this.behaviorEventsPath,
+          `${accepted.map((event) => JSON.stringify(event)).join("\n")}\n`,
+          { mode: 0o600 },
+        );
+      } catch (error) {
+        console.error("[telemetry] failed to persist behavior events:", error);
+        for (const index of acceptedResultIndexes) {
+          response.results[index] = {
+            event_id: response.results[index].event_id,
+            status: "retryable",
+            reason_code: "storage_unavailable",
+          };
+        }
+        return response;
+      }
       for (const event of accepted) {
         this.behaviorEventIds.add(event.event_id);
         this.behaviorEvents.push(event);
@@ -1005,7 +1058,7 @@ export class TelemetryStore {
       device.last_seen_at = now;
       this.saveSoon();
     }
-    return { accepted: accepted.map((event) => event.event_id), duplicates, rejected };
+    return response;
   }
 
   rememberBehaviorControlRequest(device, requestId, kind, response) {
@@ -1155,6 +1208,9 @@ export function createTelemetryService(options = {}) {
   const dataDir = process.env.PINVOU_TELEMETRY_DATA_DIR || "/var/lib/pinvou-telemetry";
   const enabled = enrollmentToken.length >= 24 && devicePepper.length >= 24 && adminPassword.length >= 12;
   const store = enabled ? new TelemetryStore(dataDir, devicePepper, {
+    environment: options.environment
+      ?? process.env.PINVOU_TELEMETRY_ENVIRONMENT
+      ?? process.env.NODE_ENV,
     maxDevices: options.maxDevices ?? process.env.PINVOU_TELEMETRY_MAX_DEVICES,
     maxEvents: options.maxEvents ?? process.env.PINVOU_TELEMETRY_MAX_EVENTS,
     eventRetentionMs: options.eventRetentionMs
@@ -1272,7 +1328,7 @@ export function createTelemetryService(options = {}) {
           return true;
         }
         const events = Array.isArray(input.events) ? input.events : [];
-        if (events.length > MAX_EVENTS_PER_BATCH) {
+        if (events.length > MAX_USAGE_EVENTS_PER_BATCH) {
           json(res, 413, { error: "too_many_events" });
           return true;
         }
@@ -1287,11 +1343,11 @@ export function createTelemetryService(options = {}) {
           return true;
         }
         const events = Array.isArray(input.events) ? input.events : [];
-        if (events.length > MAX_EVENTS_PER_BATCH) {
+        if (events.length > MAX_BEHAVIOR_EVENTS_PER_BATCH) {
           json(res, 413, { error: "too_many_events" });
           return true;
         }
-        json(res, 200, store.appendBehaviorEvents(device, events));
+        json(res, 200, store.appendBehaviorEvents(device, events, input.batch_id));
         return true;
       }
       if (req.method === "POST" && routePath === `${STATS_PREFIX}/api/behavior/collection/start`) {

@@ -63,6 +63,9 @@ test("validates required fields, controlled enums and server-owned fields", () =
 });
 
 test("rejects unknown, oversized, stale and future events independently", () => {
+  assert.deepEqual(validateBehaviorEventShape(taskFinished({ schema_version: 2 }), { now: NOW }), {
+    ok: false, reason: "unsupported_schema", field: "schema_version",
+  });
   assert.deepEqual(validateBehaviorEventShape(taskFinished({ event_name: "payment_succeeded" }), { now: NOW }), {
     ok: false, reason: "unknown_event", field: "event_name",
   });

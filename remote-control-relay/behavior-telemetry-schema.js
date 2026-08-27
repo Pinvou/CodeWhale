@@ -46,6 +46,7 @@ function resolvedDefinition(definition) {
 export function validateBehaviorEventShape(raw, options = {}) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return invalid("invalid_event");
   if (Buffer.byteLength(JSON.stringify(raw), "utf8") > MAX_EVENT_BYTES) return invalid("too_large");
+  if (raw.schema_version !== 1) return invalid("unsupported_schema", "schema_version");
   const eventName = raw.event_name;
   const contract = BEHAVIOR_EVENT_CONTRACTS[eventName];
   if (!contract) return invalid("unknown_event", "event_name");

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,6 +18,31 @@ import {
 } from "../telemetry-service.js";
 
 const at = (value) => Date.parse(`${value}+08:00`);
+
+function behaviorEvent(collectionPeriodId, overrides = {}) {
+  return {
+    schema_version: 1,
+    event_id: "behavior_event_test_000001",
+    event_name: "task_submitted",
+    event_source: "client",
+    occurred_at: Date.now(),
+    collection_period_id: collectionPeriodId,
+    producer: "pinvou_agent",
+    producer_version: "0.8.7",
+    app_version: "0.8.7",
+    platform: "windows",
+    arch: "x86_64",
+    channel: "dev",
+    locale: "zh-CN",
+    session_id: "session_test_000001",
+    attempt_id: "attempt_test_000001",
+    mode: "assistant",
+    initiator_type: "user",
+    input_type: "text",
+    has_attachment: false,
+    ...overrides,
+  };
+}
 
 test("dashboard metrics use unique devices and 30 complete Beijing calendar days", () => {
   const now = at("2026-07-14T12:00:00");
@@ -155,7 +180,7 @@ test("behavior analytics aggregates tasks voice tools installs scenes and models
   assert.equal(typeof commercial.metrics.arpu, "number");
 });
 
-test("behavior event store requires authenticated device identity and deduplicates", () => {
+test("behavior event store validates v1 independently, injects identity and deduplicates", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-events-"));
   try {
     const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars", {
@@ -172,46 +197,60 @@ test("behavior event store requires authenticated device identity and deduplicat
       arch: "x64",
     }, null);
     const device = store.authenticate(credential.device_id, credential.device_token);
+    const collection = store.startBehaviorCollection(device, {
+      request_id: "request_behavior_start_000001",
+    });
     const result = store.appendBehaviorEvents(device, [
-      {
-        event_id: "behavior_evt_000001",
-        event_name: "voice_started",
-        identity_id: credential.device_id,
-        identity_type: "device",
-        app_version: "0.8.1",
-        platform: "windows",
-        tool_type: "builtin",
-        provider_key: "deepseek",
-        provider_name: "DeepSeek",
-        model_id: "deepseek-chat",
-        model_name: "DeepSeek Chat",
-        occurred_at: Date.now(),
-      },
-      {
-        event_id: "behavior_evt_000001",
-        event_name: "voice_started",
-        identity_id: credential.device_id,
-        identity_type: "device",
-        occurred_at: Date.now(),
-      },
-      {
-        event_id: "behavior_evt_000002",
-        event_name: "voice_started",
-        identity_id: "spoofed",
-        identity_type: "device",
-        occurred_at: Date.now(),
-      },
+      behaviorEvent(collection.collection_period_id),
+      behaviorEvent(collection.collection_period_id),
+      behaviorEvent(collection.collection_period_id, {
+        event_id: "behavior_event_test_000002",
+        device_id: "spoofed_device_test_01",
+      }),
+      behaviorEvent(collection.collection_period_id, {
+        event_id: "behavior_event_test_000003",
+        event_name: "unknown_event",
+      }),
+      behaviorEvent("period_inactive_test_001", {
+        event_id: "behavior_event_test_000004",
+      }),
+      behaviorEvent(collection.collection_period_id, {
+        event_id: "behavior_event_test_000005",
+        occurred_at: Date.now() - 2 * 60 * 60_000,
+      }),
+      behaviorEvent(collection.collection_period_id, {
+        event_id: "behavior_event_test_000006",
+        account_subject_id: "account_subject_test_001",
+      }),
+    ], "batch_behavior_test_000001");
+    assert.equal(result.batch_id, "batch_behavior_test_000001");
+    assert.deepEqual(result.results, [
+      { event_id: "behavior_event_test_000001", status: "accepted", reason_code: null },
+      { event_id: "behavior_event_test_000001", status: "duplicate", reason_code: null },
+      { event_id: "behavior_event_test_000002", status: "rejected", reason_code: "invalid_field" },
+      { event_id: "behavior_event_test_000003", status: "rejected", reason_code: "unknown_event" },
+      { event_id: "behavior_event_test_000004", status: "rejected", reason_code: "collection_inactive" },
+      { event_id: "behavior_event_test_000005", status: "accepted", reason_code: null },
+      { event_id: "behavior_event_test_000006", status: "rejected", reason_code: "invalid_identity_claim" },
     ]);
-    assert.deepEqual(result.accepted, ["behavior_evt_000001"]);
-    assert.deepEqual(result.duplicates, ["behavior_evt_000001"]);
-    assert.deepEqual(result.rejected, ["behavior_evt_000002"]);
-    assert.equal(store.behaviorEvents.length, 1);
-    assert.equal(store.behaviorEvents[0].app_version, "0.8.1");
+    assert.equal(result.results.length, 7);
+    assert.equal(store.behaviorEvents.length, 2);
+    assert.equal(store.behaviorEvents[0].schema_version, 1);
+    assert.equal(store.behaviorEvents[0].app_version, "0.8.7");
     assert.equal(store.behaviorEvents[0].platform, "windows");
-    assert.equal(store.behaviorEvents[0].tool_type, "unknown");
-    assert.equal(store.behaviorEvents[0].provider_key, "deepseek");
-    assert.equal(store.behaviorEvents[0].model_id, "deepseek-chat");
-    assert.equal(readFileSync(join(dataDir, "behavior-events.jsonl"), "utf8").trim().split("\n").length, 1);
+    assert.equal(store.behaviorEvents[0].device_id, credential.device_id);
+    assert.equal(store.behaviorEvents[0].environment, "production");
+    assert.equal(store.behaviorEvents[0].clock_skew_bucket, "normal");
+    assert.equal(store.behaviorEvents[1].clock_skew_bucket, "past_1h_plus");
+    assert.equal(readFileSync(join(dataDir, "behavior-events.jsonl"), "utf8").trim().split("\n").length, 2);
+    assert.throws(
+      () => store.appendBehaviorEvents(device, Array.from({ length: 51 }, (_, index) => (
+        behaviorEvent(collection.collection_period_id, {
+          event_id: `behavior_event_limit_${String(index).padStart(6, "0")}`,
+        })
+      ))),
+      (error) => error.status === 413 && error.message === "too_many_events",
+    );
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -276,6 +315,39 @@ test("behavior collection control is opt-in, idempotent and deletion removes fac
       reloaded.deleteBehaviorData(reloadedDevice, { request_id: "request_delete_0001" }),
       deletion,
     );
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("behavior event rate limits return retryable results without persisting", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pinvou-behavior-rate-limit-"));
+  try {
+    const store = new TelemetryStore(dataDir, "test-device-pepper-at-least-24-chars");
+    const credential = store.register({
+      hardware_claim: "behavior-rate-limit-hardware-0001",
+      registration_secret: "registration-secret-rate-limit-00000001",
+      app_version: "0.8.7",
+      platform: "windows",
+      arch: "x86_64",
+    }, null);
+    const device = store.authenticate(credential.device_id, credential.device_token);
+    const collection = store.startBehaviorCollection(device, {
+      request_id: "request_rate_start_000001",
+    });
+    store.eventRatePerMinute = 1;
+    const result = store.appendBehaviorEvents(device, [
+      behaviorEvent(collection.collection_period_id),
+      behaviorEvent(collection.collection_period_id, {
+        event_id: "behavior_event_test_000002",
+      }),
+    ], "batch_rate_limited_000001");
+    assert.deepEqual(result.results, [
+      { event_id: "behavior_event_test_000001", status: "retryable", reason_code: "rate_limited" },
+      { event_id: "behavior_event_test_000002", status: "retryable", reason_code: "rate_limited" },
+    ]);
+    assert.equal(store.behaviorEvents.length, 0);
+    assert.equal(existsSync(join(dataDir, "behavior-events.jsonl")), false);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
