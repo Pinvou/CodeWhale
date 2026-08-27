@@ -5385,7 +5385,11 @@ async fn steer_lifecycle_withdrawal_is_bounded_and_prevents_commit() {
         &Config::default(),
     );
     let turn = engine.begin_steer_turn();
-    handle.withdraw_steer("never-existed");
+    assert_eq!(
+        handle.withdraw_steer("never-existed"),
+        crate::core::engine::SteerWithdrawal::NotPending,
+        "unknown ids report NotPending"
+    );
     assert!(
         engine
             .steer_control
@@ -5397,10 +5401,18 @@ async fn steer_lifecycle_withdrawal_is_bounded_and_prevents_commit() {
     );
 
     let steer_id = handle.steer("withdraw this").await.expect("queue steer");
-    handle.withdraw_steer(&steer_id);
+    assert_eq!(
+        handle.withdraw_steer(&steer_id),
+        crate::core::engine::SteerWithdrawal::Retired,
+        "pending steer reports Retired"
+    );
     let steer = engine.rx_steer.recv().await.expect("queued steer");
     assert!(!engine.inject_steer(steer).await);
-    handle.withdraw_steer(&steer_id);
+    assert_eq!(
+        handle.withdraw_steer(&steer_id),
+        crate::core::engine::SteerWithdrawal::NotPending,
+        "settled id reports NotPending and stays a no-op"
+    );
     let state = engine
         .steer_control
         .lock()
