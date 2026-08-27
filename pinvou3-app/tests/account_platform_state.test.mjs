@@ -4,7 +4,7 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
-import { compactOrderID, orderDurationDays, orderSummaryStatus, summarizedPaymentOrders } from '../src/features/account-platform/order-view.js';
+import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderSummaryStatus, payablePaymentOrders, paymentOrderRemainingSeconds, summarizedPaymentOrders } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
@@ -81,10 +81,15 @@ test('Web personal center summarizes active benefit packages before opening full
   assert.equal(entitlementProgress(items[3]), 0);
   assert.equal(remainingEntitlementMicrocredits(activeEntitlementPackages(items, now)), 75);
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
   assert.match(view, /activePackages\.slice\(0, 5\)/);
   assert.match(view, /copy\.entitlementSummary\(activePackages\.length/);
   assert.match(view, /mode: 'all'/);
   assert.match(view, /<EntitlementPackageDetail/);
+  assert.match(view, /<section className="ap-entitlements">/);
+  assert.doesNotMatch(view, /className="ap-card ap-entitlements"/);
+  assert.match(styles, /\.ap-entitlements \{ margin-top: 28px; padding-top: 32px; border-top: 1px solid var\(--ap-border-soft\); \}/);
+  assert.match(styles, /\.ap-entitlement-summary-list \{[^}]*border: 1px solid var\(--ap-border-soft\)/);
 });
 
 test('Web personal center renders successful orders as responsive summaries with accessible details', async () => {
@@ -100,6 +105,16 @@ test('Web personal center renders successful orders as responsive summaries with
   assert.equal(orderDurationDays(orders[1]), 30);
   assert.equal(orderDurationDays(orders[2]), null);
   assert.equal(compactOrderID('1234567890abcdef'), '12345678…');
+  const now = Date.parse('2026-08-27T08:00:00Z');
+  const payable = [
+    { order_id: 'open', status: 'PENDING', close_status: 'OPEN', expires_at: '2026-08-27T08:10:00Z', created_at: '2026-08-27T07:59:00Z' },
+    { order_id: 'expired', status: 'PENDING', close_status: 'OPEN', expires_at: '2026-08-27T07:59:59Z', created_at: '2026-08-27T07:58:00Z' },
+    { order_id: 'closing', status: 'PENDING', close_status: 'CLOSE_REQUESTED', expires_at: '2026-08-27T08:10:00Z', created_at: '2026-08-27T07:57:00Z' },
+    { order_id: 'paid', status: 'PAID', close_status: 'OPEN', expires_at: '2026-08-27T08:10:00Z', created_at: '2026-08-27T07:56:00Z' },
+  ];
+  assert.equal(isPayablePaymentOrder(payable[0], now), true);
+  assert.deepEqual(payablePaymentOrders(payable, now).map((item) => item.order_id), ['open']);
+  assert.equal(paymentOrderRemainingSeconds(payable[0], now), 600);
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
   assert.match(view, /<table className="ap-order-summary-table">/);
@@ -754,12 +769,17 @@ test('personal plan history shows traceable package and payment identifiers', as
   assert.match(view, /points_remaining_microcredits/);
 });
 
-test('payment QR instructions disappear when an order reaches a terminal state', async () => {
+test('Web payment QR uses a dialog and only user-activated payable orders can reopen it', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const popover = await readFile(new URL('../src/features/account-platform/AccountPlatformPopover.jsx', import.meta.url), 'utf8');
-  assert.match(view, /setQrData\(order && !terminalOrderStates\.has\(order\.status\)/);
-  assert.match(view, /!terminal && <div>\{qrData && <img/);
-  assert.match(view, /paid \? copy\.paymentReceived : terminal \? copy\.orderNoLongerPayable/);
+  assert.match(view, /setQrData\(isPayablePaymentOrder\(order\)/);
+  assert.match(view, /paymentDialogOpen && activePayment && <PaymentQRCodeDialog/);
+  assert.match(view, /<PendingPaymentOrders copy=\{copy\} orders=\{pendingOrders\}/);
+  assert.match(view, /onActivateRecharge\(orderId\)/);
+  assert.match(view, /const history = await client\.rechargeOrders\(\)/);
+  assert.match(view, /setInterval\(\(\) => void refresh\(\), 5000\)/);
+  assert.doesNotMatch(view, /className="ap-payment"/);
+  assert.doesNotMatch(view, /client\.recentRechargeOrder\(request\.signal\)/);
   assert.match(popover, /!terminalOrderStates\.has\(order\?\.status\) \? order\?\.qr_data/);
 });
 

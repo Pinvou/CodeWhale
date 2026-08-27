@@ -2,14 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
-import { compactOrderID, orderDurationDays, orderSummaryStatus, summarizedPaymentOrders } from './order-view.js';
+import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderSummaryStatus, payablePaymentOrders, paymentOrderRemainingSeconds, summarizedPaymentOrders } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './account-platform.css';
 
-const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'MANUAL_REVIEW']);
-const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
+const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
 const idempotencyKey = (prefix) => `${prefix}-${globalThis.crypto.randomUUID()}`;
 
 function Field({ label, children }) {
@@ -187,6 +186,10 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const activePermissions = new Set(me?.active_context?.permissions || []);
   const canReadOrganization = activePermissions.has('org.profile.read') || activePermissions.has('org.units.read') || activePermissions.has('org.members.read') || activePermissions.has('org.models.read');
   const navigationSections = portal ? portalNavigationSections.filter((key) => key === 'accountSettings' || (key === 'creditsUsage' && (access.billingRead || access.usageRead)) || (key === 'ordersInvoices' && personalContext && access.billingRead)) : [...(access.profileRead || access.billingRead ? ['overview'] : []), ...(access.billingRead ? ['credits', 'entitlements'] : []), ...(access.usageRead ? ['usage'] : []), ...(organizations.length > 0 && canReadOrganization ? ['organization'] : []), ...(personalContext && access.billingRead ? ['orders', 'invoice'] : []), 'closure'];
+  const pendingOrderRefreshKey = orders
+    .filter((item) => ['CREATED', 'PENDING'].includes(item.status) && item.close_status === 'OPEN')
+    .map((item) => `${item.order_id}:${item.status}:${item.close_status}:${item.expires_at}`)
+    .join('|');
 
   const refreshClosure = async (signal) => {
     try {
@@ -229,7 +232,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       const canAllocateQuota = permissions.has('org.quota.allocate');
       const canReadModelPolicy = permissions.has('org.models.read') || permissions.has('org.models.manage');
       const canReadModels = isPersonal ? hasPermission(nextMe, 'personal.models.read') : canReadModelPolicy;
-      const results = await Promise.allSettled([hasPermission(nextMe, 'personal.profile.read') ? client.organizations(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.rechargeCreate ? client.products(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead ? client.balance(request.signal) : Promise.resolve(null), isPersonal && (surfaceAccess.billingRead || hasPermission(nextMe, 'personal.recharge.manage')) ? client.recentRechargeOrder(request.signal) : Promise.resolve({ order: null }), organizationId ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }), surfaceAccess.usageRead ? client.usageHistory('', request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead && (isPersonal || canReadOrganizationEntitlements) ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] }), isPersonal && surfaceAccess.billingRead ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }), canReadModels ? client.models(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null)]);
+      const results = await Promise.allSettled([hasPermission(nextMe, 'personal.profile.read') ? client.organizations(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.rechargeCreate ? client.products(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead ? client.balance(request.signal) : Promise.resolve(null), Promise.resolve({ order: null }), organizationId ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }), surfaceAccess.usageRead ? client.usageHistory('', request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead && (isPersonal || canReadOrganizationEntitlements) ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] }), isPersonal && surfaceAccess.billingRead ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }), canReadModels ? client.models(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null)]);
       if (!guardRef.current.isCurrent(request.generation)) return;
       const value = (index) => (results[index].status === 'fulfilled' ? results[index].value : null);
       setOrganizations(value(0)?.items || []);
@@ -326,8 +329,30 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [client]);
 
   useEffect(() => {
-    setQrData(order && !terminalOrderStates.has(order.status) ? order.qr_data || '' : '');
-  }, [order?.qr_data, order?.status]);
+    setQrData(isPayablePaymentOrder(order) ? order.qr_data || '' : '');
+    if (!isPayablePaymentOrder(order)) return undefined;
+    const expiresIn = new Date(order.expires_at).getTime() - Date.now();
+    const timer = globalThis.setTimeout(() => setQrData(''), Math.max(0, expiresIn));
+    return () => globalThis.clearTimeout(timer);
+  }, [order?.order_id, order?.qr_data, order?.status, order?.close_status, order?.expires_at]);
+
+  useEffect(() => {
+    if (auth !== 'ready' || !personalContext || !pendingOrderRefreshKey) return undefined;
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const history = await client.rechargeOrders();
+        if (!stopped) setOrders(history.items || []);
+      } catch {
+        // Preserve the last authoritative list while the background refresh retries.
+      }
+    };
+    const timer = globalThis.setInterval(() => void refresh(), 5000);
+    return () => {
+      stopped = true;
+      globalThis.clearInterval(timer);
+    };
+  }, [auth, client, personalContext, pendingOrderRefreshKey]);
 
   useEffect(() => {
     if (!closure || closure.status === 'COMPLETED') return undefined;
@@ -372,6 +397,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         const latest = await client.rechargeOrder(order.order_id);
         if (stopped) return;
         setOrder(latest);
+        setOrders((current) => current.map((item) => (item.order_id === latest.order_id ? { ...item, status: latest.status, fulfillment_status: latest.fulfillment_status, close_status: latest.close_status, expires_at: latest.expires_at, paid_at: latest.paid_at } : item)));
         if (latest.status === 'PAID' || latest.status === 'PAID_LATE') {
           setBalance(await client.balance());
           setNotice(copy.paymentReceived);
@@ -404,6 +430,33 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     } finally {
       setBusy(false);
     }
+  };
+
+  const createPersonalRecharge = (productId, channel) =>
+    run(async () => {
+      const created = await client.createRecharge(productId, channel, idempotencyKey('recharge'));
+      const product = products.find((item) => item.product_id === productId);
+      setOrder(created);
+      setOrders((current) => [
+        {
+          ...created,
+          plan_name: product?.plan_name || productId,
+          display_points: product?.display_points || 0,
+          created_at: created.created_at || new Date().toISOString(),
+        },
+        ...current.filter((item) => item.order_id !== created.order_id),
+      ]);
+    });
+
+  const activatePersonalRecharge = async (orderId) => {
+    let payable = false;
+    const loaded = await run(async () => {
+      const latest = await client.rechargeOrder(orderId);
+      payable = isPayablePaymentOrder(latest);
+      setOrder(latest);
+      setOrders((current) => current.map((item) => (item.order_id === latest.order_id ? { ...item, status: latest.status, fulfillment_status: latest.fulfillment_status, close_status: latest.close_status, expires_at: latest.expires_at, paid_at: latest.paid_at } : item)));
+    });
+    return loaded && payable;
   };
 
   const login = () =>
@@ -608,6 +661,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             products={products}
             balance={balance}
             packages={packages}
+            orders={orders}
             billingUnavailable={billingUnavailable}
             detailsUnavailable={billingDetailsUnavailable}
             order={order}
@@ -621,7 +675,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             usageCursor={usageCursor}
             canRecharge={access.rechargeCreate}
             canCancelUsage={access.usageCancel}
-            onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))}
+            onRecharge={createPersonalRecharge}
+            onActivateRecharge={activatePersonalRecharge}
             onPurchase={(productId, channel) => run(async () => setOrder(await client.purchaseOrganizationEntitlements(activeOrganizationId, productId, channel, idempotencyKey('org-recharge'))))}
             onAllocate={(items) =>
               run(async () => {
@@ -706,13 +761,13 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             {section === 'overview' && <Overview copy={copy} language={language} me={me} organizations={organizations} balance={balance} activeOrganization={activeOrganization} activeOrganizationId={activeOrganizationId} busy={busy} canSwitch={access.contextSwitch} onSwitchContext={switchContext} />}
             {section === 'credits' && (
               <ResourceSection name="credits" personalContext={personalContext} copy={copy}>
-                {personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} canRecharge={access.rechargeCreate} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} /> : <ContextCredits copy={copy} language={language} balance={balance} />}
+                {personalContext ? <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} orders={orders} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} canRecharge={access.rechargeCreate} onRecharge={createPersonalRecharge} onActivateRecharge={activatePersonalRecharge} /> : <ContextCredits copy={copy} language={language} balance={balance} />}
               </ResourceSection>
             )}
             {section === 'entitlements' && (
               <ResourceSection name="entitlements" personalContext={personalContext} copy={copy}>
                 {personalContext ? (
-                  <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} canRecharge={access.rechargeCreate} onRecharge={(productId, channel) => run(async () => setOrder(await client.createRecharge(productId, channel, idempotencyKey('recharge'))))} />
+                  <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} orders={orders} billingUnavailable={billingUnavailable} detailsUnavailable={billingDetailsUnavailable} order={order} qrData={qrData} busy={busy} canRecharge={access.rechargeCreate} onRecharge={createPersonalRecharge} onActivateRecharge={activatePersonalRecharge} />
                 ) : (
                   <OrganizationEntitlements
                     copy={copy}
@@ -817,14 +872,14 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   );
 }
 
-function PortalCreditsUsage({ copy, language, personalContext, organizationId, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, permissions, members, grants, usageRecords, usageUnavailable, usageCursor, canRecharge, canCancelUsage, onRecharge, onPurchase, onAllocate, onRevoke, onReclaim, onLoadMoreUsage, onCancelUsage }) {
+function PortalCreditsUsage({ copy, language, personalContext, organizationId, products, balance, packages, orders, billingUnavailable, detailsUnavailable, order, qrData, busy, permissions, members, grants, usageRecords, usageUnavailable, usageCursor, canRecharge, canCancelUsage, onRecharge, onActivateRecharge, onPurchase, onAllocate, onRevoke, onReclaim, onLoadMoreUsage, onCancelUsage }) {
   return (
     <section className="ap-combined-tab">
       <p className="ap-eyebrow">{copy.sections.creditsUsage}</p>
       <h2>{copy.creditsUsageTitle}</h2>
       <p className="ap-lead">{copy.creditsUsageLead}</p>
       {personalContext ? (
-        <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} billingUnavailable={billingUnavailable} detailsUnavailable={detailsUnavailable} order={order} qrData={qrData} busy={busy} canRecharge={canRecharge} onRecharge={onRecharge} embedded />
+        <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} orders={orders} billingUnavailable={billingUnavailable} detailsUnavailable={detailsUnavailable} order={order} qrData={qrData} busy={busy} canRecharge={canRecharge} onRecharge={onRecharge} onActivateRecharge={onActivateRecharge} embedded />
       ) : (
         <>
           <ContextCredits copy={copy} language={language} balance={balance} />
@@ -1762,10 +1817,11 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   );
 }
 
-function Wallet({ copy, language, products, balance, packages, billingUnavailable, detailsUnavailable, order, qrData, busy, canRecharge = true, onRecharge, embedded = false }) {
+function Wallet({ copy, language, products, balance, packages, orders = [], billingUnavailable, detailsUnavailable, order, qrData, busy, canRecharge = true, onRecharge, onActivateRecharge, embedded = false }) {
   const [productId, setProductIdState] = useState('');
   const [channel, setChannel] = useState('');
   const [entitlementDialog, setEntitlementDialog] = useState(null);
+  const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const setProductId = (nextProductId) => {
     if (!nextProductId || products.some((item) => item.product_id === nextProductId && item.availability_status === 'AVAILABLE')) setProductIdState(nextProductId);
   };
@@ -1793,16 +1849,22 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
     if (!availableChannels.includes(channel)) setChannel(availableChannels[0] || '');
   }, [channel, productId, availableChannels.join('|')]);
   useEffect(() => {
-    if (!order || terminalOrderStates.has(order.status)) return undefined;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [order?.order_id, order?.status]);
-  const remainingSeconds = order ? Math.max(0, Math.ceil((new Date(order.expires_at).getTime() - now) / 1000)) : 0;
-  const displayStatus = order?.status;
-  const paid = paidOrderStates.has(displayStatus);
-  const terminal = terminalOrderStates.has(displayStatus);
-  const countdown = `${String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:${String(remainingSeconds % 60).padStart(2, '0')}`;
+  }, []);
+  const pendingOrders = payablePaymentOrders(orders, now);
+  const activePayment = isPayablePaymentOrder(order, now);
+  const remainingSeconds = paymentOrderRemainingSeconds(order, now);
+  useEffect(() => {
+    if (paymentDialogOpen && !activePayment) setPaymentDialogOpen(false);
+  }, [paymentDialogOpen, activePayment]);
+  const createAndOpenPayment = async () => {
+    if (await onRecharge(productId, channel)) setPaymentDialogOpen(true);
+  };
+  const activateAndOpenPayment = async (orderId) => {
+    if (await onActivateRecharge(orderId)) setPaymentDialogOpen(true);
+  };
   const activePackages = activeEntitlementPackages(packages.items || [], now);
   const summarizedPackages = activePackages.slice(0, 5);
   const allPackages = allEntitlementPackages(packages.items || []);
@@ -1849,22 +1911,14 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
               </option>
             ))}
           </select>
-          <button className="ap-primary" disabled={busy || !canRecharge || billingUnavailable || !selected || !channel} title={!canRecharge ? copy.permissionDenied : undefined} onClick={() => onRecharge(productId, channel)}>
+          <button className="ap-primary" disabled={busy || !canRecharge || billingUnavailable || !selected || !channel} title={!canRecharge ? copy.permissionDenied : undefined} onClick={createAndOpenPayment}>
             {copy.createRecharge}
           </button>
         </div>
-        {order && (
-          <div className="ap-payment">
-            {!terminal && <div>{qrData && <img src={qrData} alt={copy.paymentQR} />}</div>}
-            <div>
-              <span className="ap-status">{copy.orderStatuses[displayStatus] || displayStatus}</span>
-              <h3>¥{(order.amount_fen / 100).toFixed(2)}</h3>
-              <p>{paid ? copy.paymentReceived : terminal ? copy.orderNoLongerPayable : remainingSeconds > 0 ? copy.countdown(countdown) : copy.orderStatuses.PENDING}</p>
-            </div>
-          </div>
-        )}
+        {pendingOrders.length > 0 && <PendingPaymentOrders copy={copy} orders={pendingOrders} now={now} busy={busy} onActivate={activateAndOpenPayment} />}
       </div>
-      <div className="ap-card ap-entitlements">
+      {paymentDialogOpen && activePayment && <PaymentQRCodeDialog copy={copy} order={order} qrData={qrData} remainingSeconds={remainingSeconds} onClose={() => setPaymentDialogOpen(false)} />}
+      <section className="ap-entitlements">
         <h3>{copy.myEntitlements}</h3>
         {detailsUnavailable ? (
           <div role="alert" className="ap-alert error">
@@ -1887,7 +1941,7 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
         ) : (
           <Empty>{copy.noEntitlements}</Empty>
         )}
-      </div>
+      </section>
       {entitlementDialog && (
         <Dialog title={entitlementDialog.mode === 'all' ? copy.allEntitlements : copy.entitlementDetails} closeLabel={copy.closeDialog} onClose={() => setEntitlementDialog(null)} className="ap-entitlement-dialog">
           {entitlementDialog.mode === 'all' ? (
@@ -1905,6 +1959,58 @@ function Wallet({ copy, language, products, balance, packages, billingUnavailabl
         </Dialog>
       )}
     </section>
+  );
+}
+
+function formatPaymentCountdown(seconds) {
+  return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function PendingPaymentOrders({ copy, orders, now, busy, onActivate }) {
+  return (
+    <section className="ap-pending-payments" aria-label={copy.pendingPayments}>
+      <h4>{copy.pendingPayments}</h4>
+      <div className="ap-pending-payment-list">
+        {orders.map((item) => {
+          const remaining = paymentOrderRemainingSeconds(item, now);
+          return (
+            <button type="button" key={item.order_id} disabled={busy} onClick={() => onActivate(item.order_id)} aria-label={copy.continuePaymentFor(item.plan_name)}>
+              <span>
+                <strong>{item.plan_name}</strong>
+                <small>¥{(item.amount_fen / 100).toFixed(2)}</small>
+              </span>
+              <span>
+                <span className="ap-status">{copy.orderStatuses[item.status] || item.status}</span>
+                <small>{copy.countdown(formatPaymentCountdown(remaining))}</small>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PaymentQRCodeDialog({ copy, order, qrData, remainingSeconds, onClose }) {
+  return (
+    <Dialog title={copy.createRecharge} closeLabel={copy.closeDialog} onClose={onClose} className="ap-payment-dialog">
+      <div className="ap-payment-dialog-body">
+        <div className="ap-payment-qr">
+          {qrData ? (
+            <img src={qrData} alt={copy.paymentQR} />
+          ) : (
+            <span className="ap-payment-qr-loading">
+              <span className="ap-spinner" aria-hidden="true" />
+              <span>{copy.qrGenerating}</span>
+            </span>
+          )}
+        </div>
+        <span className="ap-status">{copy.orderStatuses[order.status] || order.status}</span>
+        <strong className="ap-payment-amount">¥{(order.amount_fen / 100).toFixed(2)}</strong>
+        <p>{copy.scanToPay}</p>
+        <small>{copy.countdown(formatPaymentCountdown(remainingSeconds))}</small>
+      </div>
+    </Dialog>
   );
 }
 

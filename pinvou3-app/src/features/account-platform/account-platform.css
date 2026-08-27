@@ -142,10 +142,27 @@
 .ap-product-grid button:hover { border-color: var(--ap-border); }
 .ap-product-grid button.selected { color: var(--ap-primary); border-color: #dcdfe3; background: #ececec; }
 .ap-product-grid span { color: var(--ap-secondary); font-size: 12px; }
-.ap-payment { display: flex; gap: 28px; align-items: center; margin-top: 28px; padding-top: 28px; border-top: 1px solid var(--ap-border-soft); }
-.ap-payment img { width: 180px; border: 1px solid var(--ap-border-soft); border-radius: 16px; }
+.ap-pending-payments { margin-top: 28px; padding-top: 22px; border-top: 1px solid var(--ap-border-soft); }
+.ap-pending-payments h4 { margin: 0 0 8px; color: var(--ap-secondary); font-size: 13px; font-weight: 500; }
+.ap-pending-payment-list { display: grid; }
+.ap-pending-payment-list > button { display: flex; align-items: center; justify-content: space-between; gap: 20px; width: 100%; padding: 14px 12px; border: 0; border-top: 1px solid var(--ap-border-soft); border-radius: 0; text-align: left; background: transparent; }
+.ap-pending-payment-list > button:first-child { border-top: 0; }
+.ap-pending-payment-list > button:hover { background: #f7f8fa; }
+.ap-pending-payment-list > button > span { display: grid; gap: 4px; min-width: 0; }
+.ap-pending-payment-list > button > span:last-child { justify-items: end; }
+.ap-pending-payment-list strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-pending-payment-list small { color: var(--ap-tertiary); font-size: 11px; }
+.ap-payment-dialog { width: min(420px, 100%); }
+.ap-payment-dialog-body { display: grid; justify-items: center; gap: 9px; padding-top: 8px; text-align: center; }
+.ap-payment-dialog-body p { margin: 3px 0 0; color: var(--ap-secondary); }
+.ap-payment-dialog-body > small { color: var(--ap-tertiary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.ap-payment-qr { display: grid; place-items: center; width: 232px; height: 232px; margin-bottom: 10px; overflow: hidden; border: 1px solid var(--ap-border-soft); border-radius: 16px; background: #fff; }
+.ap-payment-qr img { width: 212px; height: 212px; object-fit: contain; }
+.ap-payment-qr-loading { display: grid; justify-items: center; gap: 12px; color: var(--ap-tertiary); font-size: 12px; }
+.ap-payment-amount { font-size: 24px; font-weight: 500; }
 .ap-status { display: inline-flex; padding: 3px 9px; border-radius: 999px; color: #16765f; background: var(--ap-accent-soft); font-size: 11px; font-weight: 600; }
-.ap-entitlements { margin-top: 24px; }
+.ap-entitlements { margin-top: 28px; padding-top: 32px; border-top: 1px solid var(--ap-border-soft); }
+.ap-entitlements > h3 { margin-bottom: 24px; font-weight: 500; }
 .ap-entitlement-summary { display: grid; gap: 20px; }
 .ap-entitlement-summary-list { display: grid; gap: 0; border: 1px solid var(--ap-border-soft); border-radius: 16px; overflow: hidden; }
 .ap-entitlement-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 24px; width: 100%; padding: 18px 20px; border: 0; border-top: 1px solid var(--ap-border-soft); border-radius: 0; text-align: left; background: #fff; }
@@ -295,7 +312,7 @@
   .ap-context-card, .ap-card, .ap-balance-hero { padding: 24px; }
   .ap-context-card { gap: 20px; }
   .ap-product-grid { grid-template-columns: repeat(2, 1fr); }
-  .ap-payment { align-items: flex-start; flex-direction: column; }
+  .ap-pending-payment-list > button { align-items: flex-start; }
   .ap-inline { flex-wrap: wrap; }
   .ap-inline input { min-width: 0; flex: 1; }
   .ap-usage-row { align-items: start; grid-template-columns: 1fr; }
