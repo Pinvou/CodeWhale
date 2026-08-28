@@ -49,6 +49,15 @@ export const adminPlatformCopy = {
       audit: '审计日志',
       identity: '身份安全',
     },
+    pageLeads: {
+      organizations: '管理组织生命周期、所有者、成员与节点结构。',
+      users: '按永久用户编码和用户名查找账号，并查看授权与成员关系。',
+      billing: '处理账本、订单、案件、审批和充值商品，资金事实与人民币金额分别展示。',
+      tokens: '管理模型目录、Token Account、路由、Provisioning 与用量证据。',
+      system: '查看服务健康、事件转发和对账状态；高风险恢复仅提供只读运行边界。',
+      audit: '检索脱敏审计事实，并通过受控异步流程创建导出。',
+      identity: '处理注册、资料变更和注销修复，不恢复已匿名化身份。',
+    },
     overview: {
       title: '运营总览',
       lead: '集中查看身份、资金和模型调用链路的当前状态。',
@@ -395,6 +404,15 @@ export const adminPlatformCopy = {
       audit: 'Audit log',
       identity: 'Identity security',
     },
+    pageLeads: {
+      organizations: 'Manage organization lifecycle, ownership, membership, and unit structure.',
+      users: 'Find accounts by permanent user code or username and inspect access and memberships.',
+      billing: 'Operate ledgers, orders, cases, approvals, and recharge products with funds and CNY kept distinct.',
+      tokens: 'Operate model catalogs, token accounts, routes, provisioning, and usage evidence.',
+      system: 'Review service, relay, and reconciliation health while keeping high-risk recovery out of band.',
+      audit: 'Search redacted audit facts and create exports through the controlled asynchronous flow.',
+      identity: 'Repair registration, profile-change, and closure workflows without restoring anonymized identities.',
+    },
     overview: {
       title: 'Operations overview',
       lead: 'Review the current state of identity, funds, and model usage in one place.',
@@ -740,6 +758,15 @@ export const adminPlatformCopy = {
       system: 'システム稼働',
       audit: '監査ログ',
       identity: 'ID セキュリティ',
+    },
+    pageLeads: {
+      organizations: '組織のライフサイクル、所有者、メンバー、組織ツリーを管理します。',
+      users: '恒久ユーザーコードまたはユーザー名で検索し、権限と所属を確認します。',
+      billing: '台帳、注文、案件、承認、チャージ商品を運用し、資金事実と CNY を分離表示します。',
+      tokens: 'モデルカタログ、Token Account、ルート、Provisioning、利用証拠を運用します。',
+      system: 'サービス、Relay、照合の状態を確認し、高リスク復旧は帯域外に維持します。',
+      audit: 'マスキング済み監査事実を検索し、管理された非同期フローでエクスポートします。',
+      identity: '匿名化済み ID を復元せず、登録・プロフィール変更・退会処理を修復します。',
     },
     overview: {
       title: '運用概要',

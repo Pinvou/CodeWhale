@@ -124,6 +124,63 @@ function SectionHeader({ title, count, copy, children }) {
   );
 }
 
+function PageHeader({ eyebrow, title, subtitle, updatedAt, canRefresh, busy, copy, onRefresh }) {
+  return (
+    <header className="adm-page-head">
+      <div>
+        <span className="adm-eyebrow">{eyebrow}</span>
+        <h2>{title}</h2>
+        <p>{subtitle}</p>
+      </div>
+      <div className="adm-page-head-actions">
+        {updatedAt && <small>{copy.updated} {updatedAt.toLocaleTimeString()}</small>}
+        {canRefresh && <button type="button" onClick={onRefresh} disabled={busy}>{copy.refresh}</button>}
+      </div>
+    </header>
+  );
+}
+
+function DetailDrawer({ label, onClose, children }) {
+  const drawerRef = useRef(null);
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    drawerRef.current?.focus();
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') onClose();
+    };
+    globalThis.addEventListener?.('keydown', onKeyDown);
+    return () => {
+      globalThis.removeEventListener?.('keydown', onKeyDown);
+      previousFocus?.focus?.();
+    };
+  }, [onClose]);
+  const trapFocus = (event) => {
+    if (event.key !== 'Tab') return;
+    const focusable = [...(drawerRef.current?.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])') || [])];
+    if (!focusable.length) {
+      event.preventDefault();
+      drawerRef.current?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+  return (
+    <div className="adm-drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <aside ref={drawerRef} className="adm-detail-drawer" role="dialog" aria-modal="true" aria-label={label} tabIndex="-1" onKeyDown={trapFocus}>
+        {children}
+      </aside>
+    </div>
+  );
+}
+
 function Tabs({ items, active, onChange }) {
   const receivablesLabel = Object.values(adminPlatformCopy).find((candidate) => candidate.billing.wallets === items[0]?.label)?.billing.receivables;
   const visibleItems = items.some((item) => item.key === 'wallets') && !items.some((item) => item.key === 'receivables') ? [items[0], { key: 'receivables', label: receivablesLabel }, ...items.slice(1)] : items;
@@ -407,6 +464,9 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     .filter((group) => group.sections.length > 0);
   const platformPermissions = authorization?.platform_permissions || [];
   const sectionIsReadOnly = adminSectionReadOnly(authorization, section);
+  const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
+  const currentPageTitle = section === 'overview' ? copy.overview.title : copy.nav[section];
+  const currentPageLead = section === 'overview' ? copy.overview.lead : copy.pageLeads?.[section] || copy.subtitle;
 
   return (
     <div className="adm-shell">
@@ -450,16 +510,6 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             <h1>{copy.nav[section]}</h1>
           </div>
           <div className="adm-actions">
-            {updatedAt && section !== 'identity' && (
-              <small>
-                {copy.updated} {updatedAt.toLocaleTimeString()}
-              </small>
-            )}
-            {section !== 'identity' && (
-              <button onClick={() => load(section, undefined, authorization)} disabled={busy}>
-                {copy.refresh}
-              </button>
-            )}
             <div className="adm-admin">
               <span>PA</span>
               <div>
@@ -469,35 +519,47 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             </div>
           </div>
         </header>
-        {error && (
-          <div role="alert" className="adm-alert">
-            {error}
-          </div>
-        )}
         {busy && <div className="adm-progress" role="progressbar" aria-label={copy.loading} />}
-        {sectionIsReadOnly && (
-          <div className="adm-inline-message" role="status">
-            {copy.permissionReadOnlyReason}
-          </div>
-        )}
-        {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
-        {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-        {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-        {section === 'billing' && (
-          <>
-            <Tabs
-              items={financeSurfaces(authorization).map((key) => ({ key, label: copy.financeViews[key] }))}
-              active={financeSurface}
-              onChange={selectFinanceSurface}
-            />
-            {financeSurface === 'operations' && <Billing copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          </>
-        )}
-        {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-        {section === 'system' && <SystemStatus copy={copy} data={data} permissions={platformPermissions} />}
-        {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-        {section === 'identity' && <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />}
-        <AdminExtensionSlot section={section} authorization={authorization} financeSurface={financeSurface} />
+        <div className="adm-page">
+          <PageHeader
+            eyebrow={copy.navGroups[currentGroup?.key] || copy.product}
+            title={currentPageTitle}
+            subtitle={currentPageLead}
+            updatedAt={section === 'identity' ? null : updatedAt}
+            canRefresh={section !== 'identity'}
+            busy={busy}
+            copy={copy}
+            onRefresh={() => load(section, undefined, authorization)}
+          />
+          {error && (
+            <div role="alert" className="adm-alert">
+              {error}
+            </div>
+          )}
+          {sectionIsReadOnly && (
+            <div className="adm-inline-message" role="status">
+              {copy.permissionReadOnlyReason}
+            </div>
+          )}
+          {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
+          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'billing' && (
+            <>
+              <Tabs
+                items={financeSurfaces(authorization).map((key) => ({ key, label: copy.financeViews[key] }))}
+                active={financeSurface}
+                onChange={selectFinanceSurface}
+              />
+              {financeSurface === 'operations' && <Billing copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+            </>
+          )}
+          {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'system' && <SystemStatus copy={copy} data={data} permissions={platformPermissions} />}
+          {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'identity' && <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />}
+          <AdminExtensionSlot section={section} authorization={authorization} financeSurface={financeSurface} />
+        </div>
       </main>
     </div>
   );
@@ -537,13 +599,6 @@ function Overview({ copy, language, data }) {
   ];
   return (
     <section>
-      <div className="adm-hero">
-        <div>
-          <h2>{copy.overview.title}</h2>
-          <p>{copy.overview.lead}</p>
-        </div>
-        <Status value="ACTIVE" />
-      </div>
       <div className="adm-metrics">
         <Metric label={copy.overview.users} value={a.users} />
         <Metric label={copy.overview.organizations} value={a.organizations} />
@@ -848,6 +903,7 @@ function UserMembershipDetail({ copy, user, roles, client, onBack }) {
     return () => controller.abort();
   }, [client, copy.accounts.actionFailed, user.user_id]);
   return (
+    <DetailDrawer label={`${copy.roles.userMemberships} · ${userLabel(user)}`} onClose={onBack}>
     <section className="adm-panel adm-org-detail">
       <button className="adm-back" onClick={onBack}>
         ← {copy.roles.backToUsers}
@@ -891,6 +947,7 @@ function UserMembershipDetail({ copy, user, roles, client, onBack }) {
       )}
       <RoleDefinitions copy={copy} roles={roles} />
     </section>
+    </DetailDrawer>
   );
 }
 
@@ -1078,6 +1135,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
     }
   };
   return (
+    <DetailDrawer label={`${copy.accounts.organizationManagement} · ${organizationName}`} onClose={onBack}>
     <section className="adm-panel adm-org-detail">
       <button className="adm-back" onClick={onBack}>
         ← {copy.accounts.backToOrganizations}
@@ -1212,6 +1270,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
         </div>
       )}
     </section>
+    </DetailDrawer>
   );
 }
 
@@ -2125,6 +2184,7 @@ function Billing({ copy, language, data, client, setData, permissions }) {
     );
   if (holdDetail)
     return (
+      <DetailDrawer label={`${copy.billing.holdEvidence} · ${shortID(holdDetail.hold.hold_id)}`} onClose={() => setHoldDetail(null)}>
       <section className="adm-panel">
         <button className="adm-back" onClick={() => setHoldDetail(null)}>
           ← {copy.billing.back}
@@ -2219,6 +2279,7 @@ function Billing({ copy, language, data, client, setData, permissions }) {
           copy={copy}
         />
       </section>
+      </DetailDrawer>
     );
   if (cases)
     return (
@@ -2294,6 +2355,7 @@ function Billing({ copy, language, data, client, setData, permissions }) {
   if (anomalyDetail) {
     const item = anomalyDetail.case;
     return (
+      <DetailDrawer label={`${copy.billing.anomalyDetail} · ${item.anomaly_type}`} onClose={() => setAnomalyDetail(null)}>
       <section className="adm-panel">
         <button className="adm-back" onClick={() => setAnomalyDetail(null)}>
           ← {copy.billing.back}
@@ -2366,12 +2428,14 @@ function Billing({ copy, language, data, client, setData, permissions }) {
           copy={copy}
         />
       </section>
+      </DetailDrawer>
     );
   }
   if (lateReviewDetail) {
     const item = lateReviewDetail.case;
     const active = ['REVIEW_REQUIRED_LATE_PAYMENT', 'PROVIDER_BLIND'].includes(item.review_status);
     return (
+      <DetailDrawer label={`${copy.billing.reviewDetail} · ${item.merchant_order_no}`} onClose={() => setLateReviewDetail(null)}>
       <section className="adm-panel">
         <button className="adm-back" onClick={() => setLateReviewDetail(null)}>
           ← {copy.billing.back}
@@ -2476,10 +2540,12 @@ function Billing({ copy, language, data, client, setData, permissions }) {
           copy={copy}
         />
       </section>
+      </DetailDrawer>
     );
   }
   if (orderDetail)
     return (
+      <DetailDrawer label={`${copy.billing.orderDetail} · ${orderDetail.merchant_order_no}`} onClose={() => setOrderDetail(null)}>
       <section className="adm-panel">
         <button className="adm-back" onClick={() => setOrderDetail(null)}>
           ← {copy.billing.back}
@@ -2612,6 +2678,7 @@ function Billing({ copy, language, data, client, setData, permissions }) {
           copy={copy}
         />
       </section>
+      </DetailDrawer>
     );
   return (
     <section className="adm-panel">
@@ -2872,6 +2939,7 @@ function Billing({ copy, language, data, client, setData, permissions }) {
 
 function BillingDetail({ copy, title, items, columns, onBack }) {
   return (
+    <DetailDrawer label={title} onClose={onBack}>
     <section className="adm-panel">
       <button className="adm-back" onClick={onBack}>
         ← {copy.billing.back}
@@ -2879,6 +2947,7 @@ function BillingDetail({ copy, title, items, columns, onBack }) {
       <SectionHeader title={title} count={items.length} copy={copy} />
       <Table columns={columns} items={items} copy={copy} />
     </section>
+    </DetailDrawer>
   );
 }
 
@@ -3454,6 +3523,7 @@ function TokenAccountDetail({ copy, account, route, setRoute, busy, notice, erro
     },
   ];
   return (
+    <DetailDrawer label={`${copy.tokens.accountDetail} · ${account.name}`} onClose={onBack}>
     <section className="adm-panel">
       <button className="adm-back" onClick={onBack}>
         ← {copy.tokens.back}
@@ -3528,6 +3598,7 @@ function TokenAccountDetail({ copy, account, route, setRoute, busy, notice, erro
       )}
       <Table columns={routeColumns} items={account.routes} copy={copy} />
     </section>
+    </DetailDrawer>
   );
 }
 
@@ -3556,6 +3627,7 @@ function UsageRequestDetail({ copy, language, item, busy, notice, error, onBack,
   ];
   const retryAvailable = ['SETTLEMENT_PENDING', 'REVIEW'].includes(item.status);
   return (
+    <DetailDrawer label={`${copy.tokens.usageDetail} · ${shortID(item.usage_request_id)}`} onClose={onBack}>
     <section className="adm-panel">
       <button className="adm-back" onClick={onBack}>
         ← {copy.tokens.back}
@@ -3578,6 +3650,7 @@ function UsageRequestDetail({ copy, language, item, busy, notice, error, onBack,
         ))}
       </dl>
     </section>
+    </DetailDrawer>
   );
 }
 
@@ -4087,6 +4160,7 @@ function AuditDetail({ copy, item, onBack }) {
     [copy.audit.occurred, formatDate(item.occurred_at)],
   ];
   return (
+    <DetailDrawer label={copy.audit.detail} onClose={onBack}>
     <section className="adm-panel">
       <button className="adm-back" onClick={onBack}>
         ← {copy.audit.back}
@@ -4103,5 +4177,6 @@ function AuditDetail({ copy, item, onBack }) {
       <h3>{copy.audit.changeSummary}</h3>
       <pre className="adm-json-detail">{JSON.stringify(item.change_summary || {}, null, 2)}</pre>
     </section>
+    </DetailDrawer>
   );
 }
