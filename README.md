@@ -6,6 +6,8 @@ PINVOU 不只是一个聊天界面。它把通用工作、视觉设计和软件�
 
 模型既可以运行在本地，也可以接入 OpenAI-compatible 服务；工具、Skills 与连接器按需启用。
 
+[官网](https://pinvou.com/) · [QQ 用户群](#用户交流与安全) · [问题反馈](https://github.com/Pinvou/pinvou-agent/issues) · [讨论区](https://github.com/Pinvou/pinvou-agent/discussions) · [安全政策](SECURITY.md)
+
 <p align="center">
   <a href="https://pinvou.com/assets/videos/pinvou-agent-feature-update-2026-07.mp4">
     <img src="docs/assets/screenshots/mode-work.webp" alt="PINVOU 工作模式">
@@ -177,6 +179,17 @@ scripts/              测试、守卫、构建与发布脚本
 docs/                 架构设计、验证报告与维护文档
 资料包/               面向终端用户的指南与界面素材
 ```
+
+## 用户交流与安全
+
+- **QQ 用户交流群：1108909346** — 扫描下方二维码，或在 QQ 中搜索群号加入
+- [GitHub Issues](https://github.com/Pinvou/pinvou-agent/issues) — 可复现的问题与聚焦的功能建议
+- [GitHub Discussions](https://github.com/Pinvou/pinvou-agent/discussions) — 问题与想法交流
+- **请勿在公开 Issue 或群聊中报告安全漏洞** — 请使用 [SECURITY.md](SECURITY.md) 中的私有渠道
+
+<p align="center">
+  <img src="pinvou3-app/src/assets/community/qq-group-1108909346.png" alt="PINVOU 官方 QQ 用户交流群二维码，群号 1108909346" width="260" />
+</p>
 
 ## 进一步阅读
 
