@@ -35,11 +35,28 @@ pub struct PlatformCapabilities {
     pub local_vllm_supported: bool,
     pub codex_acp_supported: bool,
     pub team_relay_supported: bool,
+    pub browser_native_display: bool,
+    pub browser_agent_automation: bool,
+    pub browser_cdp: bool,
 }
 
 impl PlatformCapabilities {
     fn current() -> Self {
+        let browser_runtime_ready =
+            crate::features::runtime_bundle::platform::Pinvou3Bundle::paths()
+                .browser_mcp_entry()
+                .is_some();
+        Self::current_with_browser_runtime_ready(browser_runtime_ready)
+    }
+
+    fn current_with_browser_runtime_ready(browser_runtime_ready: bool) -> Self {
         let capabilities = crate::platform::capabilities::current();
+        // The UI and the session MCP configuration must cross the same runtime
+        // readiness gate. Static product support alone is insufficient when
+        // Node, the wrapper, CDMCP, or WebKitWebDriver is unavailable.
+        let browser_ready = capabilities.browser_native_display
+            && capabilities.browser_agent_automation
+            && browser_runtime_ready;
         Self {
             os: capabilities.os,
             show_megacube_site: capabilities.show_megacube_site,
@@ -51,6 +68,9 @@ impl PlatformCapabilities {
             local_vllm_supported: capabilities.local_vllm_supported,
             codex_acp_supported: capabilities.codex_acp_supported,
             team_relay_supported: capabilities.team_relay_supported,
+            browser_native_display: browser_ready,
+            browser_agent_automation: browser_ready,
+            browser_cdp: capabilities.browser_cdp,
         }
     }
 }
@@ -116,6 +136,31 @@ mod platform_capability_tests {
         assert_eq!(
             capabilities.codex_acp_supported,
             expected.codex_acp_supported
+        );
+        assert_eq!(
+            capabilities.browser_native_display, capabilities.browser_agent_automation,
+            "UI display and Agent MCP must cross the runtime gate atomically"
+        );
+        assert!(!capabilities.browser_native_display || expected.browser_native_display);
+        assert!(!capabilities.browser_agent_automation || expected.browser_agent_automation);
+        assert_eq!(capabilities.browser_cdp, expected.browser_cdp);
+    }
+
+    #[test]
+    fn browser_runtime_readiness_closes_both_public_capabilities() {
+        let unavailable = PlatformCapabilities::current_with_browser_runtime_ready(false);
+        assert!(!unavailable.browser_native_display);
+        assert!(!unavailable.browser_agent_automation);
+
+        let ready = PlatformCapabilities::current_with_browser_runtime_ready(true);
+        let expected = crate::platform::capabilities::current();
+        assert_eq!(
+            ready.browser_native_display,
+            expected.browser_native_display
+        );
+        assert_eq!(
+            ready.browser_agent_automation,
+            expected.browser_agent_automation
         );
     }
 }

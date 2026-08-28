@@ -1,4 +1,4 @@
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const { writeEffectiveArtifacts } = require("./effective-config.js");
@@ -7,6 +7,10 @@ const {
   prepareWindowsCodexBridge,
   WINDOWS_BRIDGE_CONFIG_PATH,
 } = require("./codex-bridge.js");
+const {
+  outputRoot: chromeDevtoolsMcpOutputRoot,
+  prepareChromeDevtoolsMcp,
+} = require("./chrome-devtools-mcp.js");
 const {
   APP_ROOT,
   platformArchitectureConfigPath,
@@ -352,6 +356,50 @@ function tauriRuntimeEnvironment(runtime, environment = process.env) {
     : environment;
 }
 
+function supportsChromeDevtoolsMcp(platform = process.platform) {
+  return platform === "win32";
+}
+
+function prepareChromeDevtoolsMcpForPlatform({
+  platform = process.platform,
+  prepare = prepareChromeDevtoolsMcp,
+} = {}) {
+  if (!supportsChromeDevtoolsMcp(platform)) return false;
+  return prepare({ platform });
+}
+
+function withoutChromeDevtoolsMcpOverride(environment) {
+  if (!Object.prototype.hasOwnProperty.call(environment, "PINVOU3_CDMCP_BIN")) {
+    return environment;
+  }
+  const sanitized = { ...environment };
+  delete sanitized.PINVOU3_CDMCP_BIN;
+  return sanitized;
+}
+
+function chromeDevtoolsMcpEnvironment(
+  development,
+  environment = process.env,
+  platform = process.platform,
+) {
+  // Only the Windows WebView2 host currently exposes the app-owned CDP endpoint.
+  // Never leak a caller-provided MCP binary override into packaged builds or into
+  // the currently inactive WKWebView/WebKitGTK substrate.
+  if (!development || !supportsChromeDevtoolsMcp(platform)) {
+    return withoutChromeDevtoolsMcpOverride(environment);
+  }
+  return {
+    ...environment,
+    PINVOU3_CDMCP_BIN: path.join(
+      chromeDevtoolsMcpOutputRoot(platform),
+      "build",
+      "src",
+      "bin",
+      "chrome-devtools-mcp.js",
+    ),
+  };
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const validateOnly = args[0] === "--validate-only";
@@ -387,6 +435,11 @@ async function main() {
     : undefined;
   if (isDev) {
     prepareCodexBridge();
+    // Tauri dev does not apply the package resource overlay, so the development process
+    // points directly to the verified workspace vendor entry. Only Windows WebView2 exposes
+    // app-owned CDP. Linux uses BrowserCore/WebKitWebDriver and macOS product capability is
+    // currently disabled; neither platform may prepare or fall back to external Chrome.
+    prepareChromeDevtoolsMcpForPlatform();
     prepareWindowsCodexBridge();
     const developmentHost = prepareKnowledgeHost({ development: true });
     if (developmentHost?.configSpec) additionalConfigs.push(developmentHost.configSpec);
@@ -394,6 +447,7 @@ async function main() {
   if (hasTauriBuildCommand) {
     prepareLinuxAsrRuntime();
     prepareCodexBridge();
+    prepareChromeDevtoolsMcpForPlatform();
     prepareWindowsCodexBridge(windowsBridgeOptions);
     prepareKnowledgeHost();
     if (process.platform === "win32") {
@@ -414,7 +468,10 @@ async function main() {
   }
 
   return runTauri(preparedArgs, {
-    environment: tauriRuntimeEnvironment(windowsRuntime || windowsDevRuntime),
+    environment: chromeDevtoolsMcpEnvironment(
+      isDev,
+      tauriRuntimeEnvironment(windowsRuntime || windowsDevRuntime),
+    ),
   });
 }
 
@@ -430,9 +487,12 @@ if (require.main === module) {
 module.exports = {
   configureIsolatedWindowsRustToolchain,
   configSpecs,
+  chromeDevtoolsMcpEnvironment,
   ensureWindowsRustToolchain,
   formatElapsed,
   main,
+  prepareChromeDevtoolsMcp,
+  prepareChromeDevtoolsMcpForPlatform,
   prepareCodexBridge,
   prepareKnowledgeHost,
   prepareLinuxAsrRuntime,
@@ -442,6 +502,7 @@ module.exports = {
   stageWindowsRuntime,
   prepareTauriArgs,
   runTauri,
+  supportsChromeDevtoolsMcp,
   tauriRuntimeEnvironment,
   pinnedRustToolchainChannel,
   tauriCommandIndex,
