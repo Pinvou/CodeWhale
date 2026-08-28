@@ -350,6 +350,7 @@ GROUP BY u.id,s.session_id,active.context_type,active.organization_id,active.con
 	if err != nil {
 		return AuthorizationContext{}, err
 	}
+	normalizeActiveScopeAuthorization(&resolved)
 	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil && len(resolved.Roles) == 0 {
 		return AuthorizationContext{}, ErrForbidden
 	}
@@ -393,6 +394,19 @@ GROUP BY u.id,s.session_id,active.context_type,active.organization_id,active.con
 		resolved.PersonalPermissions = []string{}
 	}
 	return resolved, nil
+}
+
+// Permissions and Roles are the authorization snapshot for the active billing
+// and model-usage context. The three-scope response also exposes personal and
+// platform grants separately for management UIs. In a PERSONAL context there
+// is no organization_id, so the organization-scoped SQL projection above is
+// intentionally empty and must be replaced by the personal projection.
+func normalizeActiveScopeAuthorization(resolved *AuthorizationContext) {
+	if resolved == nil || resolved.ContextType != "PERSONAL" {
+		return
+	}
+	resolved.Roles = append([]string(nil), resolved.PersonalRoles...)
+	resolved.Permissions = append([]string(nil), resolved.PersonalPermissions...)
 }
 
 func (r *PostgresRepository) ListOrganizations(ctx context.Context, principal identity.Principal) ([]Organization, error) {

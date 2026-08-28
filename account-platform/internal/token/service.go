@@ -793,6 +793,8 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 		AncestorUnitIDs           []uuid.UUID                `json:"ancestor_unit_ids"`
 		Roles                     []string                   `json:"roles"`
 		Permissions               []string                   `json:"permissions"`
+		PersonalRoles             []string                   `json:"personal_roles"`
+		PersonalPermissions       []string                   `json:"personal_permissions"`
 		UnitAuthorizationBindings []UnitAuthorizationBinding `json:"unit_authorization_bindings"`
 		Mobile                    *string                    `json:"mobile"`
 		MobileVerified            bool                       `json:"mobile_verified"`
@@ -800,7 +802,23 @@ func (r *HTTPContextResolver) Resolve(ctx context.Context, authorization string)
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&body); err != nil {
 		return AuthorizationContext{}, err
 	}
-	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: body.Roles, Permissions: body.Permissions, UnitAuthorizationBindings: body.UnitAuthorizationBindings, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
+	roles, permissions := activeScopeAuthorization(body.ContextType, body.Roles, body.Permissions, body.PersonalRoles, body.PersonalPermissions)
+	return AuthorizationContext{UserID: body.UserID, SessionID: body.SessionID, ContextType: body.ContextType, OrganizationID: body.OrganizationID, MembershipVersion: body.MembershipVersion, ContextVersion: body.ContextVersion, AuthorizationVersion: body.AuthorizationVersion, UnitIDs: body.UnitIDs, AncestorUnitIDs: body.AncestorUnitIDs, Roles: roles, Permissions: permissions, UnitAuthorizationBindings: body.UnitAuthorizationBindings, Mobile: body.Mobile, MobileVerified: body.MobileVerified}, nil
+}
+
+func activeScopeAuthorization(contextType string, roles, permissions, personalRoles, personalPermissions []string) ([]string, []string) {
+	if contextType != "PERSONAL" {
+		return roles, permissions
+	}
+	// Accept both the current three-scope Account contract and the earlier
+	// active-scope-only payload during a rolling deployment.
+	if personalRoles != nil {
+		roles = personalRoles
+	}
+	if personalPermissions != nil {
+		permissions = personalPermissions
+	}
+	return roles, permissions
 }
 
 func (r *HTTPContextResolver) ResolveClosureRead(ctx context.Context, authorization string) (AuthorizationContext, error) {
