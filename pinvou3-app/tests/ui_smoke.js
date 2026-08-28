@@ -635,7 +635,9 @@ async function expand(page) {
       dataTransfer: dragData,
     }));
     await new Promise(resolve => setTimeout(resolve, 80));
-    const attachmentDropWithheldUntilHideAck = !document.querySelector('[data-testid="attachment-drop-overlay"]');
+    const attachmentDropBeforeHideAck = document.querySelector('[data-testid="attachment-drop-overlay"]');
+    const attachmentDropWithheldUntilHideAck = !attachmentDropBeforeHideAck
+      || attachmentDropBeforeHideAck.getAttribute('aria-hidden') !== 'false';
     const attachmentDropHidePending = typeof window.__RESOLVE_BROWSER_HIDE__ === 'function';
     window.__RESOLVE_BROWSER_HIDE__?.();
     await window.__uiWait__(() => document.querySelector('[data-testid="attachment-drop-overlay"]')
