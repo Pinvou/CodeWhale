@@ -85,7 +85,9 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /device_data_deleted[\s\S]*handle_authoritative_deletion/);
   assert.match(rust, /async fn handle_authoritative_deletion_locked[\s\S]*collecting\.store\(false[\s\S]*persist_state\(&fresh\)[\s\S]*outbox\.clear\(\)[\s\S]*tasks\.clear\(\)/);
   assert.match(rust, /fn state_after_authoritative_deletion[\s\S]*PersistedState::fresh/);
-  assert.match(rust, /prepare_disabled_state\(state, generation\)[\s\S]*persist_state\(state\)[\s\S]*outbox\.clear\(\)/);
+  assert.match(rust, /prepare_disabled_state\(state, generation\)[\s\S]*persist_state\(state\)[\s\S]*clear_local_transient_state\(\)/);
+  assert.match(rust, /fn clear_local_transient_state[\s\S]*tool_install_terminals\.clear_all\(\)/);
+  assert.match(rust, /fn enter_generation_exhausted_fail_close[\s\S]*credential_renewal_in_progress[\s\S]*tool_install_terminals\.clear_all\(\)/);
   assert.match(rust, /fresh\.retired_endpoints[\s\S]*fresh\.control\.pending_deletions/);
   assert.match(rust, /authorization_generation[\s\S]*fn lease_is_current/);
   assert.match(rust, /fn lease_matches_authorization[\s\S]*generation\.load\(Ordering::Acquire\) == lease\.generation/);

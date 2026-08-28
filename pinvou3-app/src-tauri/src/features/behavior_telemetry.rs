@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -267,6 +267,14 @@ struct ToolInstallTerminalCoordinator {
 }
 
 impl ToolInstallTerminalCoordinator {
+    fn lock_pending(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, DeferredToolInstallTerminal>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn submit<F>(
         &self,
         terminal: DeferredToolInstallTerminal,
@@ -292,7 +300,8 @@ impl ToolInstallTerminalCoordinator {
             return;
         }
         let mut terminal = Some(terminal);
-        if let Ok(mut pending) = self.pending.lock() {
+        {
+            let mut pending = self.lock_pending();
             if authorization_generation.load(Ordering::Acquire) != generation
                 || !renewal_in_progress.load(Ordering::Acquire)
             {
@@ -344,26 +353,44 @@ impl ToolInstallTerminalCoordinator {
     ) where
         F: FnMut(&BehaviorEvent, u64) -> bool,
     {
+        self.flush_inner_with_reinsert_hook(
+            authorization_generation,
+            renewal_in_progress,
+            generation,
+            publish,
+            &mut || {},
+        );
+    }
+
+    fn flush_inner_with_reinsert_hook<F, H>(
+        &self,
+        authorization_generation: &AtomicU64,
+        renewal_in_progress: &AtomicBool,
+        generation: u64,
+        publish: &mut F,
+        before_reinsert_lock: &mut H,
+    ) where
+        F: FnMut(&BehaviorEvent, u64) -> bool,
+        H: FnMut(),
+    {
         let current_generation = authorization_generation.load(Ordering::Acquire);
         let renewal_was_in_progress = renewal_in_progress.load(Ordering::Acquire);
-        let terminals = match self.pending.lock() {
-            Ok(mut pending) => {
-                pending.retain(|_, terminal| terminal.generation == current_generation);
-                if current_generation != generation {
-                    return;
-                }
-                let operation_ids = pending
-                    .iter()
-                    .filter_map(|(operation_id, terminal)| {
-                        (terminal.generation == generation).then(|| operation_id.clone())
-                    })
-                    .collect::<Vec<_>>();
-                operation_ids
-                    .into_iter()
-                    .filter_map(|operation_id| pending.remove(&operation_id))
-                    .collect::<Vec<_>>()
+        let terminals = {
+            let mut pending = self.lock_pending();
+            pending.retain(|_, terminal| terminal.generation == current_generation);
+            if current_generation != generation {
+                return;
             }
-            Err(_) => return,
+            let operation_ids = pending
+                .iter()
+                .filter_map(|(operation_id, terminal)| {
+                    (terminal.generation == generation).then(|| operation_id.clone())
+                })
+                .collect::<Vec<_>>();
+            operation_ids
+                .into_iter()
+                .filter_map(|operation_id| pending.remove(&operation_id))
+                .collect::<Vec<_>>()
         };
 
         for terminal in terminals {
@@ -374,7 +401,11 @@ impl ToolInstallTerminalCoordinator {
                 && authorization_generation.load(Ordering::Acquire) == generation
             {
                 if renewal_in_progress.load(Ordering::Acquire) {
-                    if let Ok(mut pending) = self.pending.lock() {
+                    before_reinsert_lock();
+                    let mut pending = self.lock_pending();
+                    if authorization_generation.load(Ordering::Acquire) == generation
+                        && renewal_in_progress.load(Ordering::Acquire)
+                    {
                         pending
                             .entry(terminal.operation_id.clone())
                             .or_insert(terminal);
@@ -386,21 +417,44 @@ impl ToolInstallTerminalCoordinator {
         }
     }
 
+    #[cfg(test)]
+    fn flush_with_reinsert_hook<F, H>(
+        &self,
+        authorization_generation: &AtomicU64,
+        renewal_in_progress: &AtomicBool,
+        generation: u64,
+        mut publish: F,
+        mut before_reinsert_lock: H,
+    ) where
+        F: FnMut(&BehaviorEvent, u64) -> bool,
+        H: FnMut(),
+    {
+        self.flush_inner_with_reinsert_hook(
+            authorization_generation,
+            renewal_in_progress,
+            generation,
+            &mut publish,
+            &mut before_reinsert_lock,
+        );
+    }
+
     fn discard_stale(&self, generation: u64) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.retain(|_, terminal| terminal.generation == generation);
-        }
+        self.lock_pending()
+            .retain(|_, terminal| terminal.generation == generation);
     }
 
     fn discard_generation(&self, generation: u64) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.retain(|_, terminal| terminal.generation != generation);
-        }
+        self.lock_pending()
+            .retain(|_, terminal| terminal.generation != generation);
+    }
+
+    fn clear_all(&self) {
+        self.lock_pending().clear();
     }
 
     #[cfg(test)]
     fn pending_len(&self) -> usize {
-        self.pending.lock().map_or(0, |pending| pending.len())
+        self.lock_pending().len()
     }
 }
 
@@ -980,7 +1034,7 @@ fn delivery_results(
 impl BehaviorTelemetry {
     pub fn new() -> Self {
         let runtime = Arc::new(RuntimeConfig::from_env());
-        let (persisted, state_healthy) = match load_state() {
+        let (mut persisted, mut state_healthy) = match load_state() {
             Ok(state) => (state, true),
             Err(error) => {
                 log::error!(
@@ -989,10 +1043,24 @@ impl BehaviorTelemetry {
                 (None, false)
             }
         };
+        if !runtime.enabled {
+            if let Some(state) = persisted.as_mut() {
+                if prepare_operational_stop(state) {
+                    if let Err(error) = persist_state(state) {
+                        log::error!(
+                            "[pinvou3][behavior] failed to persist operational telemetry stop: {error:#}"
+                        );
+                        state_healthy = false;
+                    }
+                }
+            }
+        }
         let active_period = persisted.as_ref().and_then(|state| {
-            (state.telemetry_base_url == runtime.telemetry_base_url
+            (runtime.enabled
+                && state.telemetry_base_url == runtime.telemetry_base_url
                 && state.behavior_events_url == runtime.behavior_events_url
-                && state.control.enabled)
+                && state.control.enabled
+                && !state.control.collection_blocked)
                 .then(|| state.control.collection_period_id.clone())
                 .flatten()
         });
@@ -1030,7 +1098,7 @@ impl BehaviorTelemetry {
         } else {
             (None, None)
         };
-        let (control_tx, control_rx) = if runtime.enabled {
+        let (control_tx, control_rx) = if state_healthy.load(Ordering::Acquire) {
             let (tx, rx) = mpsc::channel(CONTROL_WAKE_CAPACITY);
             (Some(tx), Some(rx))
         } else {
@@ -1075,7 +1143,9 @@ impl BehaviorTelemetry {
             }
         }
         if let Some(rx) = control_rx {
-            tauri::async_runtime::spawn(Self::run_control_worker(rx, telemetry.worker_clone()));
+            let mut control_worker = telemetry.worker_clone();
+            control_worker.control_tx = None;
+            tauri::async_runtime::spawn(Self::run_control_worker(rx, control_worker));
             if telemetry.has_pending_control_sync() {
                 telemetry.wake_control_worker();
             }
@@ -1147,6 +1217,11 @@ impl BehaviorTelemetry {
                         log::debug!(
                             "[pinvou3][behavior] default collection start deferred: {error:#}"
                         );
+                        if !telemetry.state_healthy.load(Ordering::Acquire)
+                            || telemetry.collection_is_blocked().await
+                        {
+                            return;
+                        }
                         let jitter = Duration::from_millis(now_ms() % 251);
                         tokio::time::sleep(retry_delay.saturating_add(jitter)).await;
                         retry_delay = retry_delay.saturating_mul(2).min(RETRY_MAX_DELAY);
@@ -1230,13 +1305,56 @@ impl BehaviorTelemetry {
         )
     }
 
-    fn invalidate_generation(&self) -> u64 {
-        let generation = self
-            .authorization_generation
-            .fetch_add(1, Ordering::AcqRel)
-            .saturating_add(1);
-        self.tool_install_terminals.discard_stale(generation);
-        generation
+    fn invalidate_generation_above(&self, floor: u64) -> Result<u64> {
+        let mut observed = self.authorization_generation.load(Ordering::Acquire);
+        loop {
+            let generation = observed
+                .max(floor)
+                .checked_add(1)
+                .context("behavior telemetry generation is exhausted")?;
+            match self.authorization_generation.compare_exchange_weak(
+                observed,
+                generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.tool_install_terminals.discard_stale(generation);
+                    return Ok(generation);
+                }
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+
+    fn enter_generation_exhausted_fail_close(&self) {
+        self.authorization_generation
+            .store(u64::MAX, Ordering::Release);
+        self.collecting.store(false, Ordering::Release);
+        self.credential_renewal_in_progress
+            .store(false, Ordering::Release);
+        self.tool_install_terminals.clear_all();
+        if let Ok(mut period) = self.collection_period_id.write() {
+            *period = None;
+        }
+    }
+
+    fn finish_generation_exhausted<T>(
+        &self,
+        context: &str,
+        mut failures: Vec<String>,
+    ) -> Result<T> {
+        failures.extend(self.clear_local_transient_state());
+        self.wake_control_worker();
+        if failures.is_empty() {
+            anyhow::bail!(
+                "{context}: behavior telemetry generation exhausted; collection permanently blocked"
+            );
+        }
+        anyhow::bail!(
+            "{context}: behavior telemetry generation exhausted; fail-close cleanup incomplete: {}",
+            failures.join("; ")
+        )
     }
 
     fn complete_tool_install_terminal(
@@ -1385,7 +1503,7 @@ impl BehaviorTelemetry {
             latest_turns: self.latest_turns.clone(),
             tool_install_terminals: self.tool_install_terminals.clone(),
             event_tx: None,
-            control_tx: None,
+            control_tx: self.control_tx.clone(),
         }
     }
 
@@ -1556,7 +1674,14 @@ impl BehaviorTelemetry {
             return Ok(false);
         }
 
-        let generation = self.invalidate_generation();
+        let (generation, generation_exhausted) =
+            match self.invalidate_generation_above(state.control.generation) {
+                Ok(generation) => (generation, false),
+                Err(_) => {
+                    self.enter_generation_exhausted_fail_close();
+                    (u64::MAX, true)
+                }
+            };
         self.collecting.store(false, Ordering::Release);
         if let Ok(mut period) = self.collection_period_id.write() {
             *period = None;
@@ -1571,6 +1696,82 @@ impl BehaviorTelemetry {
         *guard = Some(fresh);
         drop(guard);
 
+        if generation_exhausted {
+            return self.finish_generation_exhausted("authoritative device deletion", failures);
+        }
+        failures.extend(self.clear_local_transient_state());
+        self.wake_control_worker();
+
+        if failures.is_empty() {
+            Ok(true)
+        } else {
+            anyhow::bail!(
+                "authoritative deletion cleanup incomplete: {}",
+                failures.join("; ")
+            )
+        }
+    }
+
+    async fn handle_authoritative_installation_deletion_locked(
+        &self,
+        expected: &PersistedState,
+    ) -> Result<bool> {
+        let mut guard = self.state.lock().await;
+        let Some(current) = guard.as_ref() else {
+            return Ok(false);
+        };
+        if current.installation_id != expected.installation_id
+            || current.registration_secret != expected.registration_secret
+        {
+            return Ok(false);
+        }
+
+        let (generation, generation_exhausted) =
+            match self.invalidate_generation_above(current.control.generation) {
+                Ok(generation) => (generation, false),
+                Err(_) => {
+                    self.enter_generation_exhausted_fail_close();
+                    (u64::MAX, true)
+                }
+            };
+        self.collecting.store(false, Ordering::Release);
+        if let Ok(mut period) = self.collection_period_id.write() {
+            *period = None;
+        }
+        let blocked = state_after_authoritative_installation_deletion(
+            current,
+            expected,
+            &self.runtime,
+            generation,
+        );
+        let mut failures = Vec::new();
+        if let Err(error) = persist_state(&blocked) {
+            self.state_healthy.store(false, Ordering::Release);
+            failures.push(format!(
+                "persist authoritative installation deletion: {error:#}"
+            ));
+        }
+        *guard = Some(blocked);
+        drop(guard);
+
+        if generation_exhausted {
+            return self
+                .finish_generation_exhausted("authoritative installation deletion", failures);
+        }
+        failures.extend(self.clear_local_transient_state());
+        self.wake_control_worker();
+        if failures.is_empty() {
+            Ok(true)
+        } else {
+            anyhow::bail!(
+                "authoritative installation deletion cleanup incomplete: {}",
+                failures.join("; ")
+            )
+        }
+    }
+
+    fn clear_local_transient_state(&self) -> Vec<String> {
+        let mut failures = Vec::new();
         match self.outbox.lock() {
             Ok(mut outbox) => {
                 if let Err(error) = outbox.clear() {
@@ -1603,15 +1804,8 @@ impl BehaviorTelemetry {
         if let Ok(mut latest_turns) = self.latest_turns.lock() {
             latest_turns.clear();
         }
-
-        if failures.is_empty() {
-            Ok(true)
-        } else {
-            anyhow::bail!(
-                "authoritative deletion cleanup incomplete: {}",
-                failures.join("; ")
-            )
-        }
+        self.tool_install_terminals.clear_all();
+        failures
     }
 
     async fn recover_expired_credentials_locked(&self, expired: &Credentials) -> Result<bool> {
@@ -1652,6 +1846,21 @@ impl BehaviorTelemetry {
             .send()
             .await
             .context("renew expired behavior telemetry registration")?;
+        if response.status() == reqwest::StatusCode::GONE {
+            let error_code = telemetry_error_code(response).await;
+            if error_code == "installation_data_deleted" {
+                let handled = self
+                    .handle_authoritative_installation_deletion_locked(&snapshot)
+                    .await?;
+                if !handled {
+                    self.fail_close_unmatched_authoritative_deletion();
+                }
+                anyhow::bail!(
+                    "behavior telemetry installation data was deleted; local collection disabled"
+                );
+            }
+            anyhow::bail!("telemetry registration renewal unavailable: {error_code}");
+        }
         if !response.status().is_success() {
             anyhow::bail!(
                 "telemetry registration renewal returned {}",
@@ -1675,6 +1884,24 @@ impl BehaviorTelemetry {
                 json!({ "request_id": request_id }),
             )
             .await?;
+        if started_response.status() == reqwest::StatusCode::GONE {
+            match parse_control_gone(started_response, "renewed collection/start").await? {
+                GoneReason::DeviceCredentialsExpired => {
+                    anyhow::bail!("renewed behavior credentials expired before collection start");
+                }
+                GoneReason::DeviceDataDeleted => {
+                    let handled = self
+                        .handle_authoritative_installation_deletion_locked(&snapshot)
+                        .await?;
+                    if !handled {
+                        self.fail_close_unmatched_authoritative_deletion();
+                    }
+                    anyhow::bail!(
+                        "renewed behavior device data was deleted before collection start"
+                    );
+                }
+            }
+        }
         if !started_response.status().is_success() {
             anyhow::bail!(
                 "renewed behavior collection start returned {}",
@@ -1692,6 +1919,9 @@ impl BehaviorTelemetry {
             .context("behavior telemetry state disappeared during credential renewal")?;
         if state.device_id.as_deref() != Some(expired.device_id.as_str())
             || state.device_token.as_deref() != Some(expired.device_token.as_str())
+            || state.control.generation != snapshot.control.generation
+            || state.control.collection_blocked
+            || state.has_pending_control()
         {
             return Ok(false);
         }
@@ -1783,7 +2013,17 @@ impl BehaviorTelemetry {
             {
                 self.retry_pending_control_locked().await?;
             }
+            if self.collection_is_blocked().await {
+                anyhow::bail!(
+                    "behavior telemetry collection is blocked after authoritative deletion"
+                );
+            }
             self.migrate_endpoint_locked().await?;
+            if self.collection_is_blocked().await {
+                anyhow::bail!(
+                    "behavior telemetry collection is blocked after authoritative deletion"
+                );
+            }
             let credentials = self.ensure_credentials().await?;
             let request_id = token("control_", 18);
             let response = self
@@ -1792,7 +2032,24 @@ impl BehaviorTelemetry {
             let mut guard = self.state.lock().await;
             let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
             let emit_cohort = !state.control.cohort_started;
-            let generation = self.invalidate_generation();
+            let generation = match self.invalidate_generation_above(state.control.generation) {
+                Ok(generation) => generation,
+                Err(_) => {
+                    state.control.collection_period_id = Some(response.collection_period_id);
+                    state.control.pending_request = None;
+                    converge_generation_exhausted(state);
+                    self.enter_generation_exhausted_fail_close();
+                    let mut failures = Vec::new();
+                    if let Err(error) = persist_state(state) {
+                        self.state_healthy.store(false, Ordering::Release);
+                        failures.push(format!(
+                            "persist generation-exhausted collection start: {error:#}"
+                        ));
+                    }
+                    drop(guard);
+                    return self.finish_generation_exhausted("start behavior collection", failures);
+                }
+            };
             state.control.enabled = true;
             state.control.collection_period_id = Some(response.collection_period_id);
             state.control.generation = generation;
@@ -1822,43 +2079,44 @@ impl BehaviorTelemetry {
                 );
             }
         } else {
-            let generation = self.invalidate_generation();
-            self.collecting.store(false, Ordering::Release);
-            if let Ok(mut period) = self.collection_period_id.write() {
-                *period = None;
-            }
+            let mut generation_exhausted = false;
+            let mut exhaustion_failures = Vec::new();
             {
                 let mut guard = self.state.lock().await;
-                if let Some(state) = guard.as_mut() {
-                    prepare_disabled_state(state, generation);
-                    if let Err(error) = persist_state(state) {
-                        self.state_healthy.store(false, Ordering::Release);
+                let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
+                match self.invalidate_generation_above(state.control.generation) {
+                    Ok(generation) => prepare_disabled_state(state, generation),
+                    Err(_) => {
+                        generation_exhausted = true;
+                        converge_generation_exhausted(state);
+                        self.enter_generation_exhausted_fail_close();
+                    }
+                }
+                if let Err(error) = persist_state(state) {
+                    self.state_healthy.store(false, Ordering::Release);
+                    if generation_exhausted {
+                        exhaustion_failures
+                            .push(format!("persist generation-exhausted stop: {error:#}"));
+                    } else {
                         return Err(error.context("persist disabled behavior telemetry state"));
                     }
                 }
             }
+            self.collecting.store(false, Ordering::Release);
+            if let Ok(mut period) = self.collection_period_id.write() {
+                *period = None;
+            }
+            if generation_exhausted {
+                return self
+                    .finish_generation_exhausted("stop behavior collection", exhaustion_failures);
+            }
             self.wake_control_worker();
-            if let Ok(mut outbox) = self.outbox.lock() {
-                outbox.clear()?;
-            }
-            if let Ok(mut tasks) = self.tasks.lock() {
-                tasks.clear();
-                persist_task_attempts(&tasks)?;
-            }
-            if let Ok(mut sessions) = self.team_sessions.lock() {
-                sessions.clear();
-            }
-            if let Ok(mut calls) = self.tool_calls.lock() {
-                calls.clear();
-            }
-            if let Ok(mut submissions) = self.voice_submissions.lock() {
-                submissions.clear();
-            }
-            if let Ok(mut artifacts) = self.artifacts.lock() {
-                artifacts.clear();
-            }
-            if let Ok(mut latest_turns) = self.latest_turns.lock() {
-                latest_turns.clear();
+            let failures = self.clear_local_transient_state();
+            if !failures.is_empty() {
+                anyhow::bail!(
+                    "stop behavior collection cleanup incomplete: {}",
+                    failures.join("; ")
+                );
             }
         }
         Ok(self.status().await)
@@ -1887,21 +2145,45 @@ impl BehaviorTelemetry {
 
     pub async fn delete_remote_data(&self) -> Result<BehaviorTelemetryStatus> {
         let _control_guard = self.control_gate.lock().await;
-        let generation = self.invalidate_generation();
-        self.collecting.store(false, Ordering::Release);
-        if let Ok(mut period) = self.collection_period_id.write() {
-            *period = None;
-        }
+        let mut generation_exhausted = false;
+        let mut failures = Vec::new();
         {
             let mut guard = self.state.lock().await;
             let state = guard.get_or_insert_with(|| PersistedState::fresh(&self.runtime));
+            let generation = match self.invalidate_generation_above(state.control.generation) {
+                Ok(generation) => generation,
+                Err(_) => {
+                    generation_exhausted = true;
+                    self.enter_generation_exhausted_fail_close();
+                    u64::MAX
+                }
+            };
+            let mut deletion_targets = state.control.pending_deletions.clone();
+            deletion_targets.extend(state.deletion_targets());
             state.control.enabled = false;
             state.control.collection_period_id = None;
             state.control.generation = generation;
             state.control.collection_blocked = true;
             state.control.pending_request = None;
-            state.control.pending_deletions = state.deletion_targets();
-            persist_state(state)?;
+            state.control.pending_deletions = deletion_targets;
+            enqueue_retired_endpoint_deletions(state);
+            if let Err(error) = persist_state(state) {
+                self.state_healthy.store(false, Ordering::Release);
+                if generation_exhausted {
+                    failures.push(format!(
+                        "persist generation-exhausted remote deletion: {error:#}"
+                    ));
+                } else {
+                    return Err(error.context("persist remote behavior deletion"));
+                }
+            }
+        }
+        self.collecting.store(false, Ordering::Release);
+        if let Ok(mut period) = self.collection_period_id.write() {
+            *period = None;
+        }
+        if generation_exhausted {
+            return self.finish_generation_exhausted("delete remote behavior data", failures);
         }
         if self.has_pending_control().await {
             self.wake_control_worker();
@@ -1945,20 +2227,27 @@ impl BehaviorTelemetry {
                 json!({ "request_id": pending.request_id.clone() }),
             )
             .await?;
-        let deletion_request_id = if response.status() == reqwest::StatusCode::GONE {
-            None
-        } else {
-            if !response.status().is_success() {
-                anyhow::bail!("behavior control deletion returned {}", response.status());
-            }
-            Some(
-                response
-                    .json::<DeletionResponse>()
-                    .await
-                    .context("parse behavior control deletion")?
-                    .deletion_request_id,
-            )
-        };
+        let (deletion_request_id, authoritative_deleted) =
+            if response.status() == reqwest::StatusCode::GONE {
+                match parse_control_gone(response, "deletion").await? {
+                    GoneReason::DeviceCredentialsExpired => (None, false),
+                    GoneReason::DeviceDataDeleted => (None, true),
+                }
+            } else {
+                if !response.status().is_success() {
+                    anyhow::bail!("behavior control deletion returned {}", response.status());
+                }
+                (
+                    Some(
+                        response
+                            .json::<DeletionResponse>()
+                            .await
+                            .context("parse behavior control deletion")?
+                            .deletion_request_id,
+                    ),
+                    false,
+                )
+            };
         let mut guard = self.state.lock().await;
         let Some(state) = guard.as_mut() else {
             return Ok(());
@@ -1971,30 +2260,68 @@ impl BehaviorTelemetry {
         {
             return Ok(());
         }
+        let mut generation_exhausted = false;
+        let completion_generation = if authoritative_deleted
+            || !state.control.collection_blocked
+            || state.control.enabled
+            || state.control.collection_period_id.is_some()
+        {
+            match self.invalidate_generation_above(state.control.generation) {
+                Ok(generation) => generation,
+                Err(_) => {
+                    generation_exhausted = true;
+                    self.enter_generation_exhausted_fail_close();
+                    u64::MAX
+                }
+            }
+        } else {
+            self.authorization_generation.load(Ordering::Acquire)
+        };
+        self.collecting.store(false, Ordering::Release);
+        if let Ok(mut period) = self.collection_period_id.write() {
+            *period = None;
+        }
         state.control.pending_deletions.remove(0);
+        state.control.enabled = false;
+        state.control.collection_period_id = None;
+        state.control.pending_request = None;
+        state.control.collection_blocked = true;
+        state.control.generation = state.control.generation.max(completion_generation);
         if deletion_request_id.is_some() {
             state.control.last_deletion_request_id = deletion_request_id;
         }
         state.retired_endpoints.retain(|retired| {
-            retired.device_id != pending.device_id || retired.device_token != pending.device_token
+            retired.behavior_events_url != pending.behavior_events_url
+                || retired.device_id != pending.device_id
+                || retired.device_token != pending.device_token
         });
         if state.behavior_events_url == pending.behavior_events_url
             && state.device_id.as_deref() == Some(pending.device_id.as_str())
+            && state.device_token.as_deref() == Some(pending.device_token.as_str())
         {
             state.device_id = None;
             state.device_token = None;
         }
-        if state.control.pending_deletions.is_empty() {
-            let last_deletion_request_id = state.control.last_deletion_request_id.clone();
-            *state = PersistedState {
-                control: CollectionControl {
-                    last_deletion_request_id,
-                    ..CollectionControl::default()
-                },
-                ..PersistedState::fresh(&self.runtime)
-            };
+        let mut failures = Vec::new();
+        if let Err(error) = persist_state(state) {
+            self.state_healthy.store(false, Ordering::Release);
+            failures.push(format!("persist endpoint deletion: {error:#}"));
         }
-        persist_state(state)?;
+        let has_more_deletions = !state.control.pending_deletions.is_empty();
+        drop(guard);
+        if has_more_deletions {
+            self.wake_control_worker();
+        }
+        if generation_exhausted {
+            return self.finish_generation_exhausted("endpoint deletion", failures);
+        }
+        failures.extend(self.clear_local_transient_state());
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "endpoint deletion cleanup incomplete: {}",
+                failures.join("; ")
+            );
+        }
         Ok(())
     }
 
@@ -2015,7 +2342,19 @@ impl BehaviorTelemetry {
                         }),
                     )
                     .await?;
-                if response.status() != reqwest::StatusCode::GONE {
+                if response.status() == reqwest::StatusCode::GONE {
+                    match parse_control_gone(response, "collection/end").await? {
+                        GoneReason::DeviceCredentialsExpired => {}
+                        GoneReason::DeviceDataDeleted => {
+                            let _ = self
+                                .handle_authoritative_deletion_locked(credentials)
+                                .await?;
+                            anyhow::bail!(
+                                "behavior telemetry data was deleted while ending collection"
+                            );
+                        }
+                    }
+                } else {
                     if !response.status().is_success() {
                         anyhow::bail!(
                             "behavior control collection/end returned {}",
@@ -2045,21 +2384,28 @@ impl BehaviorTelemetry {
                         json!({ "request_id": pending.request_id.clone() }),
                     )
                     .await?;
-                let deletion_request_id = if response.status() == reqwest::StatusCode::GONE {
-                    None
+                let (deletion_request_id, authoritative_deleted) = if response.status()
+                    == reqwest::StatusCode::GONE
+                {
+                    match parse_control_gone(response, "legacy deletion").await? {
+                        GoneReason::DeviceCredentialsExpired => (None, false),
+                        GoneReason::DeviceDataDeleted => (None, true),
+                    }
                 } else {
                     if !response.status().is_success() {
                         anyhow::bail!("behavior control deletion returned {}", response.status());
                     }
-                    Some(
-                        response
-                            .json::<DeletionResponse>()
-                            .await
-                            .context("parse behavior control deletion")?
-                            .deletion_request_id,
+                    (
+                        Some(
+                            response
+                                .json::<DeletionResponse>()
+                                .await
+                                .context("parse behavior control deletion")?
+                                .deletion_request_id,
+                        ),
+                        false,
                     )
                 };
-                let fresh = PersistedState::fresh(&self.runtime);
                 let mut guard = self.state.lock().await;
                 if !guard
                     .as_ref()
@@ -2067,20 +2413,46 @@ impl BehaviorTelemetry {
                 {
                     return Ok(());
                 }
-                *guard = Some(PersistedState {
-                    control: CollectionControl {
-                        generation: self.authorization_generation.load(Ordering::Acquire),
-                        collection_blocked: true,
-                        last_deletion_request_id: deletion_request_id,
-                        ..CollectionControl::default()
-                    },
-                    ..fresh
-                });
-                if let Some(state) = guard.as_ref() {
-                    persist_state(state)?;
-                }
+                let state = guard
+                    .as_mut()
+                    .expect("legacy deletion state remains available");
+                let mut generation_exhausted = false;
+                let generation = if authoritative_deleted {
+                    match self.invalidate_generation_above(state.control.generation) {
+                        Ok(generation) => generation,
+                        Err(_) => {
+                            generation_exhausted = true;
+                            self.enter_generation_exhausted_fail_close();
+                            u64::MAX
+                        }
+                    }
+                } else {
+                    self.authorization_generation.load(Ordering::Acquire)
+                };
+                converge_legacy_deletion(state, credentials, deletion_request_id, generation);
+                self.collecting.store(false, Ordering::Release);
                 if let Ok(mut period) = self.collection_period_id.write() {
                     *period = None;
+                }
+                let mut failures = Vec::new();
+                if let Err(error) = persist_state(state) {
+                    self.state_healthy.store(false, Ordering::Release);
+                    failures.push(format!("persist legacy behavior deletion: {error:#}"));
+                }
+                let has_more_deletions = !state.control.pending_deletions.is_empty();
+                drop(guard);
+                if generation_exhausted {
+                    return self.finish_generation_exhausted("legacy behavior deletion", failures);
+                }
+                failures.extend(self.clear_local_transient_state());
+                if has_more_deletions {
+                    self.wake_control_worker();
+                }
+                if !failures.is_empty() {
+                    anyhow::bail!(
+                        "legacy behavior deletion cleanup incomplete: {}",
+                        failures.join("; ")
+                    );
                 }
             }
         }
@@ -2126,22 +2498,6 @@ impl BehaviorTelemetry {
         self.retry_pending_control_locked().await
     }
 
-    async fn post_control<T: for<'de> Deserialize<'de>>(
-        &self,
-        credentials: &Credentials,
-        path: &str,
-        body: Value,
-    ) -> Result<T> {
-        let response = self.request_control(credentials, path, body).await?;
-        if !response.status().is_success() {
-            anyhow::bail!("behavior control {path} returned {}", response.status());
-        }
-        response
-            .json()
-            .await
-            .with_context(|| format!("parse behavior control {path}"))
-    }
-
     async fn start_collection_with_renewal_locked(
         &self,
         credentials: &Credentials,
@@ -2155,28 +2511,29 @@ impl BehaviorTelemetry {
             )
             .await?;
         if response.status() == reqwest::StatusCode::GONE {
-            let error_code = telemetry_error_code(response).await;
-            if error_code == "device_credentials_expired"
-                && self.recover_expired_credentials_locked(credentials).await?
-            {
-                let collection_period_id = self
-                    .state
-                    .lock()
-                    .await
-                    .as_ref()
-                    .and_then(|state| state.control.collection_period_id.clone())
-                    .context("renewed behavior collection period is unavailable")?;
-                return Ok(CollectionStartResponse {
-                    collection_period_id,
-                });
+            match parse_control_gone(response, "collection/start").await? {
+                GoneReason::DeviceCredentialsExpired => {
+                    if self.recover_expired_credentials_locked(credentials).await? {
+                        let collection_period_id = self
+                            .state
+                            .lock()
+                            .await
+                            .as_ref()
+                            .and_then(|state| state.control.collection_period_id.clone())
+                            .context("renewed behavior collection period is unavailable")?;
+                        return Ok(CollectionStartResponse {
+                            collection_period_id,
+                        });
+                    }
+                    anyhow::bail!("behavior collection credentials expired");
+                }
+                GoneReason::DeviceDataDeleted => {
+                    let _ = self
+                        .handle_authoritative_deletion_locked(credentials)
+                        .await?;
+                    anyhow::bail!("behavior telemetry data was deleted; local collection disabled");
+                }
             }
-            if error_code == "device_data_deleted" {
-                let _ = self
-                    .handle_authoritative_deletion_locked(credentials)
-                    .await?;
-                anyhow::bail!("behavior telemetry data was deleted; local collection disabled");
-            }
-            anyhow::bail!("behavior collection credentials unavailable: {error_code}");
         }
         if !response.status().is_success() {
             anyhow::bail!(
@@ -2267,6 +2624,21 @@ impl BehaviorTelemetry {
             .send()
             .await
             .context("register behavior telemetry device")?;
+        if response.status() == reqwest::StatusCode::GONE {
+            let error_code = telemetry_error_code(response).await;
+            if error_code == "installation_data_deleted" {
+                let handled = self
+                    .handle_authoritative_installation_deletion_locked(&state)
+                    .await?;
+                if !handled {
+                    self.fail_close_unmatched_authoritative_deletion();
+                }
+                anyhow::bail!(
+                    "behavior telemetry installation data was deleted; local collection disabled"
+                );
+            }
+            anyhow::bail!("telemetry registration unavailable: {error_code}");
+        }
         if !response.status().is_success() {
             anyhow::bail!("telemetry registration returned {}", response.status());
         }
@@ -2276,13 +2648,32 @@ impl BehaviorTelemetry {
             .context("parse telemetry registration response")?;
         state.device_id = Some(registered.device_id);
         state.device_token = Some(registered.device_token);
-        persist_state(&state)?;
         let mut guard = self.state.lock().await;
+        let current = guard
+            .as_ref()
+            .context("behavior telemetry state disappeared during registration")?;
+        if current.installation_id != state.installation_id
+            || current.registration_secret != state.registration_secret
+            || current.control.generation != state.control.generation
+            || current.control.collection_blocked
+            || current.has_pending_control()
+        {
+            anyhow::bail!("behavior telemetry state changed while registration was in flight");
+        }
+        persist_state(&state)?;
         *guard = Some(state);
         drop(guard);
         self.current_credentials()
             .await
             .context("telemetry credentials missing after registration")
+    }
+
+    fn fail_close_unmatched_authoritative_deletion(&self) {
+        self.state_healthy.store(false, Ordering::Release);
+        self.collecting.store(false, Ordering::Release);
+        if let Ok(mut period) = self.collection_period_id.write() {
+            *period = None;
+        }
     }
 
     async fn current_credentials(&self) -> Option<Credentials> {
@@ -2351,6 +2742,12 @@ struct TelemetryErrorResponse {
     error: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoneReason {
+    DeviceCredentialsExpired,
+    DeviceDataDeleted,
+}
+
 #[derive(Debug)]
 struct Credentials {
     device_id: String,
@@ -2366,6 +2763,18 @@ async fn telemetry_error_code(response: reqwest::Response) -> String {
         .unwrap_or_else(|_| "unknown_credential_error".to_string())
 }
 
+async fn parse_control_gone(response: reqwest::Response, operation: &str) -> Result<GoneReason> {
+    let body = response
+        .json::<TelemetryErrorResponse>()
+        .await
+        .with_context(|| format!("parse behavior control {operation} 410 response"))?;
+    match body.error.as_str() {
+        "device_credentials_expired" => Ok(GoneReason::DeviceCredentialsExpired),
+        "device_data_deleted" => Ok(GoneReason::DeviceDataDeleted),
+        error => anyhow::bail!("unsupported behavior control {operation} 410 error: {error}"),
+    }
+}
+
 fn deleted_credentials_match(state: &PersistedState, deleted: &Credentials) -> bool {
     state.behavior_events_url == deleted.behavior_events_url
         && state.device_id.as_deref() == Some(deleted.device_id.as_str())
@@ -2378,10 +2787,11 @@ fn state_after_authoritative_deletion(
     deleted: &Credentials,
     generation: u64,
 ) -> PersistedState {
-    debug_assert!(generation > state.control.generation);
+    debug_assert!(generation >= state.control.generation);
     let mut fresh = PersistedState::fresh(runtime);
     fresh.control.generation = generation;
     fresh.control.collection_blocked = true;
+    fresh.control.last_deletion_request_id = state.control.last_deletion_request_id.clone();
     fresh.retired_endpoints = state
         .retired_endpoints
         .iter()
@@ -2395,7 +2805,128 @@ fn state_after_authoritative_deletion(
         .filter(|pending| !pending_deletion_matches(pending, deleted))
         .cloned()
         .collect();
+    enqueue_retired_endpoint_deletions(&mut fresh);
     fresh
+}
+
+fn state_after_authoritative_installation_deletion(
+    current: &PersistedState,
+    expected: &PersistedState,
+    runtime: &RuntimeConfig,
+    generation: u64,
+) -> PersistedState {
+    debug_assert!(generation >= current.control.generation);
+    let mut blocked = current.clone();
+
+    for state in [current, expected] {
+        if let Some(credentials) = persisted_credentials_from_state(state) {
+            if credentials.behavior_events_url != runtime.behavior_events_url
+                || state.control.pending_request.is_some()
+            {
+                remember_retired_credentials(&mut blocked, credentials);
+            }
+        }
+        for retired in &state.retired_endpoints {
+            remember_retired_endpoint(&mut blocked, retired.clone());
+        }
+        blocked
+            .control
+            .pending_deletions
+            .extend(state.control.pending_deletions.iter().cloned());
+    }
+
+    blocked.version = STATE_VERSION;
+    blocked.control.enabled = false;
+    blocked.control.collection_period_id = None;
+    blocked.control.generation = generation;
+    blocked.control.collection_blocked = true;
+    if blocked.control.pending_request.is_none() {
+        blocked.telemetry_base_url = runtime.telemetry_base_url.clone();
+        blocked.behavior_events_url = runtime.behavior_events_url.clone();
+        blocked.device_id = None;
+        blocked.device_token = None;
+    }
+    enqueue_retired_endpoint_deletions(&mut blocked);
+    blocked
+}
+
+fn remember_retired_credentials(state: &mut PersistedState, credentials: Credentials) {
+    remember_retired_endpoint(
+        state,
+        RetiredEndpointCredentials {
+            behavior_events_url: credentials.behavior_events_url,
+            device_id: credentials.device_id,
+            device_token: credentials.device_token,
+        },
+    );
+}
+
+fn remember_retired_endpoint(state: &mut PersistedState, retired: RetiredEndpointCredentials) {
+    if !state.retired_endpoints.iter().any(|existing| {
+        existing.behavior_events_url == retired.behavior_events_url
+            && existing.device_id == retired.device_id
+            && existing.device_token == retired.device_token
+    }) {
+        state.retired_endpoints.push(retired);
+    }
+}
+
+fn converge_legacy_deletion(
+    state: &mut PersistedState,
+    deleted: &Credentials,
+    deletion_request_id: Option<String>,
+    generation: u64,
+) {
+    state.control.enabled = false;
+    state.control.collection_period_id = None;
+    state.control.generation = state.control.generation.max(generation);
+    state.control.collection_blocked = true;
+    state.control.pending_request = None;
+    if deletion_request_id.is_some() {
+        state.control.last_deletion_request_id = deletion_request_id;
+    }
+    state
+        .retired_endpoints
+        .retain(|retired| !retired_credentials_match(retired, deleted));
+    state
+        .control
+        .pending_deletions
+        .retain(|pending| !pending_deletion_matches(pending, deleted));
+    if deleted_credentials_match(state, deleted) {
+        state.device_id = None;
+        state.device_token = None;
+    }
+    enqueue_retired_endpoint_deletions(state);
+}
+
+fn enqueue_retired_endpoint_deletions(state: &mut PersistedState) {
+    let mut seen = HashSet::new();
+    state.control.pending_deletions.retain(|pending| {
+        seen.insert((
+            pending.behavior_events_url.clone(),
+            pending.device_id.clone(),
+            pending.device_token.clone(),
+        ))
+    });
+    for retired in &state.retired_endpoints {
+        if state
+            .control
+            .pending_deletions
+            .iter()
+            .any(|pending| pending_matches_retired(pending, retired))
+        {
+            continue;
+        }
+        state
+            .control
+            .pending_deletions
+            .push(PendingEndpointDeletion {
+                request_id: token("control_", 18),
+                behavior_events_url: retired.behavior_events_url.clone(),
+                device_id: retired.device_id.clone(),
+                device_token: retired.device_token.clone(),
+            });
+    }
 }
 
 fn retired_credentials_match(retired: &RetiredEndpointCredentials, deleted: &Credentials) -> bool {
@@ -2408,6 +2939,15 @@ fn pending_deletion_matches(pending: &PendingEndpointDeletion, deleted: &Credent
     pending.behavior_events_url == deleted.behavior_events_url
         && pending.device_id == deleted.device_id
         && pending.device_token == deleted.device_token
+}
+
+fn pending_matches_retired(
+    pending: &PendingEndpointDeletion,
+    retired: &RetiredEndpointCredentials,
+) -> bool {
+    pending.behavior_events_url == retired.behavior_events_url
+        && pending.device_id == retired.device_id
+        && pending.device_token == retired.device_token
 }
 
 fn lease_for_generation(
@@ -2446,14 +2986,51 @@ fn pending_request_matches(state: &PersistedState, pending: &PendingControlReque
 fn prepare_disabled_state(state: &mut PersistedState, generation: u64) {
     state.control.enabled = false;
     state.control.generation = generation;
-    if let Some(period_id) = state.control.collection_period_id.clone() {
-        state.control.pending_request = Some(PendingControlRequest {
-            kind: PendingControlKind::End,
-            request_id: token("control_", 18),
-            collection_period_id: Some(period_id),
-            behavior_events_url: state.behavior_events_url.clone(),
-        });
+    if state.control.pending_request.is_none() {
+        if let Some(period_id) = state.control.collection_period_id.clone() {
+            state.control.pending_request = Some(PendingControlRequest {
+                kind: PendingControlKind::End,
+                request_id: token("control_", 18),
+                collection_period_id: Some(period_id),
+                behavior_events_url: state.behavior_events_url.clone(),
+            });
+        }
     }
+}
+
+fn converge_generation_exhausted(state: &mut PersistedState) {
+    if state.control.pending_request.is_none() {
+        if let (Some(period_id), Some(_)) = (
+            state.control.collection_period_id.clone(),
+            persisted_credentials_from_state(state),
+        ) {
+            state.control.pending_request = Some(PendingControlRequest {
+                kind: PendingControlKind::End,
+                request_id: token("control_", 18),
+                collection_period_id: Some(period_id),
+                behavior_events_url: state.behavior_events_url.clone(),
+            });
+        }
+    }
+    state.control.enabled = false;
+    state.control.collection_period_id = None;
+    state.control.generation = u64::MAX;
+    state.control.collection_blocked = true;
+    enqueue_retired_endpoint_deletions(state);
+}
+
+fn prepare_operational_stop(state: &mut PersistedState) -> bool {
+    if !state.control.enabled
+        && (state.control.collection_period_id.is_none() || state.control.pending_request.is_some())
+    {
+        return false;
+    }
+    if let Some(generation) = state.control.generation.checked_add(1) {
+        prepare_disabled_state(state, generation);
+    } else {
+        converge_generation_exhausted(state);
+    }
+    true
 }
 
 impl RuntimeConfig {
@@ -2559,7 +3136,8 @@ impl PersistedState {
                 device_token,
             };
             if !self.retired_endpoints.iter().any(|existing| {
-                existing.device_id == retired.device_id
+                existing.behavior_events_url == retired.behavior_events_url
+                    && existing.device_id == retired.device_id
                     && existing.device_token == retired.device_token
             }) {
                 self.retired_endpoints.push(retired);
@@ -2581,9 +3159,10 @@ impl PersistedState {
             targets.push(PendingEndpointDeletion::from_credentials(credentials));
         }
         for retired in &self.retired_endpoints {
-            if !targets.iter().any(|target| {
-                target.device_id == retired.device_id && target.device_token == retired.device_token
-            }) {
+            if !targets
+                .iter()
+                .any(|target| pending_matches_retired(target, retired))
+            {
                 targets.push(PendingEndpointDeletion {
                     request_id: token("control_", 18),
                     behavior_events_url: retired.behavior_events_url.clone(),
@@ -2610,6 +3189,7 @@ impl PendingEndpointDeletion {
         self.request_id == other.request_id
             && self.behavior_events_url == other.behavior_events_url
             && self.device_id == other.device_id
+            && self.device_token == other.device_token
     }
 }
 
@@ -2626,9 +3206,18 @@ fn load_state_at(path: &Path) -> Result<Option<PersistedState>> {
     let mut state: PersistedState =
         serde_json::from_slice(&data).with_context(|| format!("parse {}", path.display()))?;
     if state.version > STATE_VERSION {
-        return Ok(None);
+        anyhow::bail!(
+            "unsupported behavior telemetry state version {} (maximum supported {})",
+            state.version,
+            STATE_VERSION
+        );
     }
     state.version = STATE_VERSION;
+    if state.control.generation == u64::MAX {
+        converge_generation_exhausted(&mut state);
+        persist_state_at(path, &state)
+            .context("persist generation-exhausted behavior telemetry fail-close state")?;
+    }
     Ok(Some(state))
 }
 
@@ -3840,6 +4429,217 @@ fn controlled_registry_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::MutexGuard;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    struct TestHome {
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+        _directory: tempfile::TempDir,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let lock = crate::platform::paths::tests::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let directory = tempfile::tempdir().unwrap();
+            let previous = std::env::var_os("PINVOU3_HOME");
+            std::env::set_var("PINVOU3_HOME", directory.path());
+            Self {
+                _lock: lock,
+                previous,
+                _directory: directory,
+            }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("PINVOU3_HOME", value),
+                None => std::env::remove_var("PINVOU3_HOME"),
+            }
+        }
+    }
+
+    struct EnvRestore {
+        values: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvRestore {
+        fn set(values: &[(&'static str, &str)]) -> Self {
+            let previous = values
+                .iter()
+                .map(|(key, value)| {
+                    let old = std::env::var_os(key);
+                    std::env::set_var(key, value);
+                    (*key, old)
+                })
+                .collect();
+            Self { values: previous }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (key, value) in self.values.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn test_runtime(base_url: &str) -> RuntimeConfig {
+        RuntimeConfig {
+            enabled: true,
+            telemetry_base_url: base_url.to_string(),
+            behavior_events_url: format!("{base_url}/events"),
+            enrollment_token: Some("test-enrollment-token-1234567890".to_string()),
+            app_version: "0.0.0-test".to_string(),
+            platform: "test".to_string(),
+            arch: "test".to_string(),
+            channel: "dev".to_string(),
+            locale: "en".to_string(),
+        }
+    }
+
+    fn test_telemetry(runtime: RuntimeConfig, state: PersistedState) -> BehaviorTelemetry {
+        let active_period = state.control.collection_period_id.clone();
+        let generation = state.control.generation;
+        BehaviorTelemetry {
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap(),
+            runtime: Arc::new(runtime),
+            state: Arc::new(Mutex::new(Some(state))),
+            state_healthy: Arc::new(AtomicBool::new(true)),
+            credential_gate: Arc::new(Mutex::new(())),
+            control_gate: Arc::new(Mutex::new(())),
+            collecting: Arc::new(AtomicBool::new(active_period.is_some())),
+            authorization_generation: Arc::new(AtomicU64::new(generation)),
+            credential_renewal_in_progress: Arc::new(AtomicBool::new(false)),
+            collection_period_id: Arc::new(RwLock::new(active_period)),
+            outbox: Arc::new(StdMutex::new(Outbox::empty(outbox_path()))),
+            tasks: Arc::new(StdMutex::new(HashMap::new())),
+            team_sessions: Arc::new(StdMutex::new(HashMap::new())),
+            tool_calls: Arc::new(StdMutex::new(HashMap::new())),
+            voice_submissions: Arc::new(StdMutex::new(HashMap::new())),
+            artifacts: Arc::new(StdMutex::new(HashMap::new())),
+            latest_turns: Arc::new(StdMutex::new(HashMap::new())),
+            tool_install_terminals: ToolInstallTerminalCoordinator::default(),
+            event_tx: None,
+            control_tx: None,
+        }
+    }
+
+    async fn mock_http(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buffer[..read]);
+                    let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if bytes.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&bytes).into_owned());
+                let reason = if status == 200 { "OK" } else { "Gone" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    async fn controlled_http(
+        status: u16,
+        body: &'static str,
+    ) -> (
+        String,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<String>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+                let Some(header_end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if bytes.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            let _ = seen_tx.send(());
+            let _ = release_rx.await;
+            let reason = if status == 200 { "OK" } else { "Gone" };
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+            String::from_utf8_lossy(&bytes).into_owned()
+        });
+        (format!("http://{address}"), seen_rx, release_tx, handle)
+    }
 
     fn outbox_record(id: &str, period: &str, enqueued_at: u64) -> OutboxRecord {
         OutboxRecord {
@@ -4213,6 +5013,1086 @@ mod tests {
     }
 
     #[test]
+    fn future_state_version_fails_closed_instead_of_creating_a_new_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("behavior-telemetry.json");
+        let runtime = test_runtime("https://future.example.test");
+        let mut state = PersistedState::fresh(&runtime);
+        state.version = STATE_VERSION.saturating_add(1);
+        state.installation_id = "future_installation_identity".to_string();
+        std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let error = load_state_at(&path).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported behavior telemetry state version"));
+        let unchanged: PersistedState =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(unchanged.installation_id, "future_installation_identity");
+        assert_eq!(unchanged.version, STATE_VERSION + 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_legacy_deletion_remains_blocked_across_restart() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![(
+            200,
+            r#"{"deletion_request_id":"deletion_complete"}"#,
+        )])
+        .await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("legacy_device".to_string());
+        state.device_token = Some("legacy_token".to_string());
+        state.control.generation = 11;
+        state.control.collection_blocked = true;
+        let pending = PendingEndpointDeletion {
+            request_id: "legacy_delete".to_string(),
+            behavior_events_url: runtime.behavior_events_url.clone(),
+            device_id: "legacy_device".to_string(),
+            device_token: "legacy_token".to_string(),
+        };
+        state.control.pending_deletions.push(pending.clone());
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+
+        telemetry.send_pending_deletion(pending).await.unwrap();
+        let after = telemetry.state.lock().await.clone().unwrap();
+        assert!(after.control.collection_blocked);
+        assert_eq!(after.control.generation, 11);
+        assert!(after.control.pending_deletions.is_empty());
+        assert!(after.device_id.is_none());
+        assert!(telemetry.set_collection_enabled(true).await.is_err());
+
+        let recovered = load_state().unwrap().unwrap();
+        assert!(recovered.control.collection_blocked);
+        assert_eq!(recovered.control.generation, 11);
+        assert!(recovered.device_id.is_none());
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /deletion "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn endpoint_migration_end_410_deletion_blocks_and_queues_all_retired_endpoints() {
+        let _home = TestHome::new();
+        let (old_base, server) = mock_http(vec![
+            (410, r#"{"error":"device_data_deleted"}"#),
+            (200, r#"{"deletion_request_id":"delete_retired_a"}"#),
+            (200, r#"{"deletion_request_id":"delete_retired_b"}"#),
+        ])
+        .await;
+        let old_runtime = test_runtime(&old_base);
+        let new_runtime = test_runtime("https://new.example.test");
+        let mut state = PersistedState::fresh(&old_runtime);
+        state.device_id = Some("deleted_device".to_string());
+        state.device_token = Some("deleted_token".to_string());
+        state.control.enabled = false;
+        state.control.collection_period_id = Some("old_period".to_string());
+        state.control.generation = 4;
+        let pending = PendingControlRequest {
+            kind: PendingControlKind::End,
+            request_id: "end_old_endpoint".to_string(),
+            collection_period_id: Some("old_period".to_string()),
+            behavior_events_url: old_runtime.behavior_events_url.clone(),
+        };
+        state.control.pending_request = Some(pending.clone());
+        state.retired_endpoints = vec![
+            RetiredEndpointCredentials {
+                behavior_events_url: old_runtime.behavior_events_url.clone(),
+                device_id: "retired_a".to_string(),
+                device_token: "token_a".to_string(),
+            },
+            RetiredEndpointCredentials {
+                behavior_events_url: old_runtime.behavior_events_url.clone(),
+                device_id: "retired_b".to_string(),
+                device_token: "token_b".to_string(),
+            },
+        ];
+        state
+            .control
+            .pending_deletions
+            .push(PendingEndpointDeletion {
+                request_id: "existing_retired_a_delete".to_string(),
+                behavior_events_url: old_runtime.behavior_events_url.clone(),
+                device_id: "retired_a".to_string(),
+                device_token: "token_a".to_string(),
+            });
+        state
+            .control
+            .pending_deletions
+            .push(PendingEndpointDeletion {
+                request_id: "duplicate_retired_a_delete".to_string(),
+                behavior_events_url: old_runtime.behavior_events_url.clone(),
+                device_id: "retired_a".to_string(),
+                device_token: "token_a".to_string(),
+            });
+        persist_state(&state).unwrap();
+        let credentials = persisted_credentials_from_state(&state).unwrap();
+        let mut telemetry = test_telemetry(new_runtime.clone(), state);
+        let (control_tx, mut control_rx) = mpsc::channel(1);
+        telemetry.control_tx = Some(control_tx);
+
+        let error = telemetry
+            .send_pending_control(&credentials, pending)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("deleted while ending"));
+        let after = telemetry.state.lock().await.clone().unwrap();
+        assert!(after.control.collection_blocked);
+        assert_eq!(after.control.generation, 5);
+        assert_eq!(after.telemetry_base_url, new_runtime.telemetry_base_url);
+        assert_eq!(after.control.pending_deletions.len(), 2);
+        assert_eq!(
+            after
+                .control
+                .pending_deletions
+                .iter()
+                .filter(|target| target.device_id == "retired_a")
+                .count(),
+            1
+        );
+        assert!(after
+            .control
+            .pending_deletions
+            .iter()
+            .any(|target| target.device_id == "retired_b"));
+        assert!(control_rx.try_recv().is_ok());
+        telemetry.retry_pending_control().await.unwrap();
+        telemetry.retry_pending_control().await.unwrap();
+        let after_retired_cleanup = telemetry.state.lock().await.clone().unwrap();
+        assert!(after_retired_cleanup.control.collection_blocked);
+        assert_eq!(after_retired_cleanup.control.generation, 5);
+        assert!(after_retired_cleanup.control.pending_deletions.is_empty());
+        assert!(after_retired_cleanup.retired_endpoints.is_empty());
+        assert!(telemetry.set_collection_enabled(true).await.is_err());
+        let persisted = load_state().unwrap().unwrap();
+        assert!(persisted.control.collection_blocked);
+        assert!(persisted.control.pending_deletions.is_empty());
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with("POST /collection/end "));
+        assert!(requests[1].starts_with("POST /deletion "));
+        assert!(requests[2].starts_with("POST /deletion "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unknown_json_410_keeps_pending_end_for_a_future_retry() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![(410, r#"{"error":"future_reason"}"#)]).await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("device_unknown_410".to_string());
+        state.device_token = Some("token_unknown_410".to_string());
+        state.control.collection_period_id = Some("period_unknown_410".to_string());
+        state.control.generation = 6;
+        let pending = PendingControlRequest {
+            kind: PendingControlKind::End,
+            request_id: "end_unknown_410".to_string(),
+            collection_period_id: Some("period_unknown_410".to_string()),
+            behavior_events_url: runtime.behavior_events_url.clone(),
+        };
+        state.control.pending_request = Some(pending.clone());
+        persist_state(&state).unwrap();
+        let credentials = persisted_credentials_from_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+
+        let error = telemetry
+            .send_pending_control(&credentials, pending)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("future_reason"));
+        let after = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(after.control.generation, 6);
+        assert!(after.control.pending_request.is_some());
+        assert_eq!(
+            after.control.collection_period_id.as_deref(),
+            Some("period_unknown_410")
+        );
+        assert!(!after.control.collection_blocked);
+        let persisted = load_state().unwrap().unwrap();
+        assert!(persisted.control.pending_request.is_some());
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /collection/end "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_json_410_keeps_pending_endpoint_deletion_unchanged() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![(410, "not-json")]).await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("device_non_json".to_string());
+        state.device_token = Some("token_non_json".to_string());
+        state.control.collection_blocked = true;
+        state.control.generation = 9;
+        let pending = PendingEndpointDeletion {
+            request_id: "delete_non_json".to_string(),
+            behavior_events_url: runtime.behavior_events_url.clone(),
+            device_id: "device_non_json".to_string(),
+            device_token: "token_non_json".to_string(),
+        };
+        state.control.pending_deletions.push(pending.clone());
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+
+        let error = telemetry
+            .send_pending_deletion(pending.clone())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("410 response"));
+        let after = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(after.control.generation, 9);
+        assert_eq!(after.control.pending_deletions.len(), 1);
+        assert!(after.control.pending_deletions[0].same_request(&pending));
+        assert_eq!(after.device_id.as_deref(), Some("device_non_json"));
+        let persisted = load_state().unwrap().unwrap();
+        assert_eq!(persisted.control.pending_deletions.len(), 1);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /deletion "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn legacy_delete_converges_then_drains_retired_endpoint_without_losing_state() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![
+            (200, r#"{"deletion_request_id":"delete_current"}"#),
+            (200, r#"{"deletion_request_id":"delete_retired"}"#),
+        ])
+        .await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("current_device".to_string());
+        state.device_token = Some("current_token".to_string());
+        state.control.generation = 12;
+        state.control.collection_period_id = Some("legacy_period".to_string());
+        state.control.pending_request = Some(PendingControlRequest {
+            kind: PendingControlKind::Delete,
+            request_id: "legacy_delete_current".to_string(),
+            collection_period_id: Some("legacy_period".to_string()),
+            behavior_events_url: runtime.behavior_events_url.clone(),
+        });
+        state.retired_endpoints.push(RetiredEndpointCredentials {
+            behavior_events_url: runtime.behavior_events_url.clone(),
+            device_id: "retired_device".to_string(),
+            device_token: "retired_token".to_string(),
+        });
+        state
+            .control
+            .pending_deletions
+            .push(PendingEndpointDeletion {
+                request_id: "existing_retired_delete".to_string(),
+                behavior_events_url: runtime.behavior_events_url.clone(),
+                device_id: "retired_device".to_string(),
+                device_token: "retired_token".to_string(),
+            });
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+
+        telemetry.retry_pending_control().await.unwrap();
+        let converged = telemetry.state.lock().await.clone().unwrap();
+        assert!(converged.control.collection_blocked);
+        assert_eq!(converged.control.generation, 12);
+        assert!(converged.control.pending_request.is_none());
+        assert!(converged.device_id.is_none());
+        assert_eq!(converged.retired_endpoints.len(), 1);
+        assert_eq!(converged.control.pending_deletions.len(), 1);
+        assert_eq!(
+            converged.control.last_deletion_request_id.as_deref(),
+            Some("delete_current")
+        );
+
+        telemetry.retry_pending_control().await.unwrap();
+        let drained = telemetry.state.lock().await.clone().unwrap();
+        assert!(drained.control.collection_blocked);
+        assert_eq!(drained.control.generation, 12);
+        assert!(drained.control.pending_deletions.is_empty());
+        assert!(drained.retired_endpoints.is_empty());
+        let recovered = load_state().unwrap().unwrap();
+        assert!(recovered.control.collection_blocked);
+        assert!(recovered.control.pending_deletions.is_empty());
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /deletion "));
+        assert!(requests[1].starts_with("POST /deletion "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn registration_installation_tombstone_persists_block_and_clears_transient_data() {
+        let _home = TestHome::new();
+        let (base_url, server) =
+            mock_http(vec![(410, r#"{"error":"installation_data_deleted"}"#)]).await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        let installation_id = state.installation_id.clone();
+        state.retired_endpoints.push(RetiredEndpointCredentials {
+            behavior_events_url: "https://retired.example.test/events".to_string(),
+            device_id: "retired_device".to_string(),
+            device_token: "retired_token".to_string(),
+        });
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+        telemetry
+            .outbox
+            .lock()
+            .unwrap()
+            .enqueue(outbox_record(
+                "pending_before_tombstone",
+                "old_period",
+                now_ms(),
+            ))
+            .unwrap();
+        telemetry.tasks.lock().unwrap().insert(
+            "session_before_tombstone".to_string(),
+            TaskAttempt {
+                attempt_id: "attempt_before_tombstone".to_string(),
+                submitted_at: now_ms(),
+                admitted_at: None,
+                turn_id: None,
+                mode: "assistant".to_string(),
+                initiator_type: "user".to_string(),
+                input_type: "text".to_string(),
+                has_attachment: false,
+                first_output_emitted: false,
+                generation: 0,
+                collection_period_id: "old_period".to_string(),
+            },
+        );
+
+        let error = telemetry.ensure_credentials().await.unwrap_err();
+        assert!(error.to_string().contains("installation data was deleted"));
+        let blocked = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(blocked.installation_id, installation_id);
+        assert!(blocked.control.collection_blocked);
+        assert_eq!(blocked.control.generation, 1);
+        assert!(blocked.device_id.is_none());
+        assert!(blocked.device_token.is_none());
+        assert_eq!(blocked.control.pending_deletions.len(), 1);
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+        assert!(telemetry.tasks.lock().unwrap().is_empty());
+        assert!(telemetry.set_collection_enabled(true).await.is_err());
+
+        let recovered = load_state().unwrap().unwrap();
+        assert!(recovered.control.collection_blocked);
+        assert_eq!(recovered.installation_id, installation_id);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /v1/register "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn renewal_registration_installation_tombstone_also_fails_closed() {
+        let _home = TestHome::new();
+        let (base_url, server) =
+            mock_http(vec![(410, r#"{"error":"installation_data_deleted"}"#)]).await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("expired_device".to_string());
+        state.device_token = Some("expired_token".to_string());
+        state.control.enabled = true;
+        state.control.collection_period_id = Some("expired_period".to_string());
+        state.control.generation = 3;
+        persist_state(&state).unwrap();
+        let expired = persisted_credentials_from_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+
+        let error = telemetry
+            .recover_expired_credentials_locked(&expired)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("installation data was deleted"));
+        let blocked = telemetry.state.lock().await.clone().unwrap();
+        assert!(blocked.control.collection_blocked);
+        assert!(!blocked.control.enabled);
+        assert!(blocked.control.collection_period_id.is_none());
+        assert_eq!(blocked.control.generation, 4);
+        assert!(blocked.device_id.is_none());
+        assert!(blocked.device_token.is_none());
+        assert!(telemetry.set_collection_enabled(true).await.is_err());
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /v1/register "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initial_registration_tombstone_at_max_generation_persists_fail_close() {
+        let _home = TestHome::new();
+        let (base_url, server) =
+            mock_http(vec![(410, r#"{"error":"installation_data_deleted"}"#)]).await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.control.generation = u64::MAX;
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+        telemetry
+            .outbox
+            .lock()
+            .unwrap()
+            .enqueue(outbox_record(
+                "max_initial_outbox",
+                "stale_period",
+                now_ms(),
+            ))
+            .unwrap();
+
+        let error = telemetry.ensure_credentials().await.unwrap_err();
+        assert!(error.to_string().contains("generation exhausted"));
+        assert!(!telemetry.collecting.load(Ordering::Acquire));
+        assert_eq!(
+            telemetry.authorization_generation.load(Ordering::Acquire),
+            u64::MAX
+        );
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+        let blocked = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(blocked.control.generation, u64::MAX);
+        assert!(blocked.control.collection_blocked);
+        assert!(!blocked.control.enabled);
+        assert!(blocked.control.collection_period_id.is_none());
+        assert!(blocked.device_id.is_none());
+        let persisted = load_state().unwrap().unwrap();
+        assert_eq!(persisted.control.generation, u64::MAX);
+        assert!(persisted.control.collection_blocked);
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /v1/register "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn renewal_registration_tombstone_at_max_generation_cleans_active_state() {
+        let _home = TestHome::new();
+        let (base_url, server) =
+            mock_http(vec![(410, r#"{"error":"installation_data_deleted"}"#)]).await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("max_expired_device".to_string());
+        state.device_token = Some("max_expired_token".to_string());
+        state.control.enabled = true;
+        state.control.collection_period_id = Some("max_expired_period".to_string());
+        state.control.generation = u64::MAX;
+        persist_state(&state).unwrap();
+        let expired = persisted_credentials_from_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+        telemetry
+            .outbox
+            .lock()
+            .unwrap()
+            .enqueue(outbox_record(
+                "max_renewal_outbox",
+                "max_expired_period",
+                now_ms(),
+            ))
+            .unwrap();
+
+        let error = telemetry
+            .recover_expired_credentials_locked(&expired)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("generation exhausted"));
+        let blocked = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(blocked.control.generation, u64::MAX);
+        assert!(blocked.control.collection_blocked);
+        assert!(!blocked.control.enabled);
+        assert!(blocked.control.collection_period_id.is_none());
+        assert!(blocked.device_id.is_none());
+        assert!(blocked.device_token.is_none());
+        assert!(!telemetry.collecting.load(Ordering::Acquire));
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+        let persisted = load_state().unwrap().unwrap();
+        assert_eq!(persisted.control.generation, u64::MAX);
+        assert!(persisted.control.collection_blocked);
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /v1/register "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authoritative_device_deletion_at_max_generation_never_wraps() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![(410, r#"{"error":"device_data_deleted"}"#)]).await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("max_deleted_device".to_string());
+        state.device_token = Some("max_deleted_token".to_string());
+        state.control.enabled = true;
+        state.control.collection_period_id = Some("max_deleted_period".to_string());
+        state.control.generation = u64::MAX;
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+        telemetry
+            .credential_renewal_in_progress
+            .store(true, Ordering::Release);
+        telemetry.collecting.store(false, Ordering::Release);
+        telemetry.complete_tool_install_terminal(
+            "max_deleted_install".to_string(),
+            u64::MAX,
+            BehaviorEvent::new("tool_install_completed")
+                .string("operation_id", "max_deleted_install")
+                .success(true),
+        );
+        assert_eq!(telemetry.tool_install_terminals.pending_len(), 1);
+        telemetry.collecting.store(true, Ordering::Release);
+        let record = outbox_record("max_deleted_event", "max_deleted_period", now_ms());
+        telemetry
+            .outbox
+            .lock()
+            .unwrap()
+            .enqueue(record.clone())
+            .unwrap();
+
+        let error = telemetry.send_events(&[record]).await.unwrap_err();
+        assert!(error.to_string().contains("generation exhausted"));
+        let blocked = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(blocked.control.generation, u64::MAX);
+        assert!(blocked.control.collection_blocked);
+        assert!(!blocked.control.enabled);
+        assert!(blocked.device_id.is_none());
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+        assert_eq!(telemetry.tool_install_terminals.pending_len(), 0);
+        assert!(!telemetry
+            .credential_renewal_in_progress
+            .load(Ordering::Acquire));
+        telemetry.flush_tool_install_terminals(u64::MAX);
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+        assert!(!telemetry.collecting.load(Ordering::Acquire));
+        assert_eq!(
+            telemetry.authorization_generation.load(Ordering::Acquire),
+            u64::MAX
+        );
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /events "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn registration_tombstone_merges_concurrent_control_state_before_worker_cleanup() {
+        let _home = TestHome::new();
+        let (deletion_base_url, deletion_server) = mock_http(vec![
+            (200, r#"{"collection_period_id":"concurrent_period"}"#),
+            (200, r#"{"deletion_request_id":"delete_existing"}"#),
+            (200, r#"{"deletion_request_id":"delete_retired"}"#),
+            (200, r#"{"deletion_request_id":"delete_migrated"}"#),
+        ])
+        .await;
+        let (registration_base_url, request_seen, release_response, registration_server) =
+            controlled_http(410, r#"{"error":"installation_data_deleted"}"#).await;
+        let old_runtime = test_runtime(&deletion_base_url);
+        let new_runtime = test_runtime(&registration_base_url);
+        let mut state = PersistedState::fresh(&old_runtime);
+        state.device_id = Some("migrated_device".to_string());
+        state.device_token = Some("migrated_token".to_string());
+        state.control.generation = 7;
+        persist_state(&state).unwrap();
+
+        let mut telemetry = test_telemetry(new_runtime, state);
+        let (control_tx, control_rx) = mpsc::channel(1);
+        telemetry.control_tx = Some(control_tx);
+        let registration = {
+            let telemetry = telemetry.clone();
+            tokio::spawn(async move { telemetry.ensure_credentials().await })
+        };
+        request_seen.await.unwrap();
+
+        let concurrent_end = PendingControlRequest {
+            kind: PendingControlKind::End,
+            request_id: "concurrent_end".to_string(),
+            collection_period_id: Some("concurrent_period".to_string()),
+            behavior_events_url: old_runtime.behavior_events_url.clone(),
+        };
+        {
+            let mut guard = telemetry.state.lock().await;
+            let current = guard.as_mut().unwrap();
+            current.control.enabled = false;
+            current.control.collection_period_id = Some("concurrent_period".to_string());
+            current.control.generation = 40;
+            current.control.collection_blocked = true;
+            current.control.pending_request = Some(concurrent_end.clone());
+            current.retired_endpoints.push(RetiredEndpointCredentials {
+                behavior_events_url: old_runtime.behavior_events_url.clone(),
+                device_id: "retired_device".to_string(),
+                device_token: "retired_token".to_string(),
+            });
+            current
+                .control
+                .pending_deletions
+                .push(PendingEndpointDeletion {
+                    request_id: "existing_delete".to_string(),
+                    behavior_events_url: old_runtime.behavior_events_url.clone(),
+                    device_id: "existing_pending_device".to_string(),
+                    device_token: "existing_pending_token".to_string(),
+                });
+            persist_state(current).unwrap();
+        }
+        telemetry
+            .authorization_generation
+            .store(50, Ordering::Release);
+        release_response.send(()).unwrap();
+
+        let error = registration.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("installation data was deleted"));
+        let converged = telemetry.state.lock().await.clone().unwrap();
+        assert!(converged.control.collection_blocked);
+        assert!(!converged.control.enabled);
+        assert_eq!(converged.control.generation, 51);
+        assert_eq!(
+            telemetry.authorization_generation.load(Ordering::Acquire),
+            51
+        );
+        assert!(pending_request_matches(&converged, &concurrent_end));
+        assert_eq!(converged.device_id.as_deref(), Some("migrated_device"));
+        assert_eq!(converged.retired_endpoints.len(), 2);
+        assert!(converged
+            .retired_endpoints
+            .iter()
+            .any(|retired| retired.device_id == "retired_device"));
+        assert!(converged
+            .retired_endpoints
+            .iter()
+            .any(|retired| retired.device_id == "migrated_device"));
+        assert_eq!(converged.control.pending_deletions.len(), 3);
+        assert!(converged
+            .control
+            .pending_deletions
+            .iter()
+            .any(|pending| pending.request_id == "existing_delete"));
+        for device_id in [
+            "existing_pending_device",
+            "retired_device",
+            "migrated_device",
+        ] {
+            assert_eq!(
+                converged
+                    .control
+                    .pending_deletions
+                    .iter()
+                    .filter(|pending| pending.device_id == device_id)
+                    .count(),
+                1,
+                "deletion responsibility for {device_id} must be preserved exactly once"
+            );
+        }
+        let persisted = load_state().unwrap().unwrap();
+        assert_eq!(persisted.control.generation, 51);
+        assert!(pending_request_matches(&persisted, &concurrent_end));
+        assert_eq!(persisted.control.pending_deletions.len(), 3);
+
+        let mut control_worker = telemetry.worker_clone();
+        control_worker.control_tx = None;
+        drop(telemetry.control_tx.take());
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            BehaviorTelemetry::run_control_worker(control_rx, control_worker),
+        )
+        .await
+        .expect("control worker should drain merged installation deletion duties");
+
+        let cleaned = telemetry.state.lock().await.clone().unwrap();
+        assert!(cleaned.control.collection_blocked);
+        assert_eq!(cleaned.control.generation, 51);
+        assert!(cleaned.control.pending_request.is_none());
+        assert!(cleaned.control.pending_deletions.is_empty());
+        assert!(cleaned.retired_endpoints.is_empty());
+        assert!(cleaned.device_id.is_none());
+        assert!(cleaned.device_token.is_none());
+        let persisted = load_state().unwrap().unwrap();
+        assert!(persisted.control.collection_blocked);
+        assert_eq!(persisted.control.generation, 51);
+        assert!(persisted.control.pending_deletions.is_empty());
+
+        let registration_request = registration_server.await.unwrap();
+        assert!(registration_request.starts_with("POST /v1/register "));
+        let deletion_requests = deletion_server.await.unwrap();
+        assert_eq!(deletion_requests.len(), 4);
+        assert!(deletion_requests[0].starts_with("POST /collection/end "));
+        assert!(deletion_requests[1..]
+            .iter()
+            .all(|request| request.starts_with("POST /deletion ")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn registration_success_cannot_overwrite_concurrent_stop_or_delete_state() {
+        let _home = TestHome::new();
+        for authoritative_delete in [false, true] {
+            let (base_url, request_seen, release_response, server) = controlled_http(
+                200,
+                r#"{"device_id":"registered_device","device_token":"registered_token"}"#,
+            )
+            .await;
+            let runtime = test_runtime(&base_url);
+            let state = PersistedState::fresh(&runtime);
+            persist_state(&state).unwrap();
+            let telemetry = test_telemetry(runtime, state);
+            let registration = {
+                let telemetry = telemetry.clone();
+                tokio::spawn(async move { telemetry.ensure_credentials().await })
+            };
+            request_seen.await.unwrap();
+            {
+                let mut guard = telemetry.state.lock().await;
+                let state = guard.as_mut().unwrap();
+                state.control.generation = 1;
+                state.control.enabled = false;
+                state.control.collection_blocked = authoritative_delete;
+                if authoritative_delete {
+                    state
+                        .control
+                        .pending_deletions
+                        .push(PendingEndpointDeletion {
+                            request_id: "concurrent_delete".to_string(),
+                            behavior_events_url: state.behavior_events_url.clone(),
+                            device_id: "concurrent_device".to_string(),
+                            device_token: "concurrent_token".to_string(),
+                        });
+                }
+                persist_state(state).unwrap();
+            }
+            release_response.send(()).unwrap();
+            let error = registration.await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("state changed"));
+            let after = telemetry.state.lock().await.clone().unwrap();
+            assert_eq!(after.control.generation, 1);
+            assert_eq!(after.control.collection_blocked, authoritative_delete);
+            assert!(after.device_id.is_none());
+            assert!(after.device_token.is_none());
+            if authoritative_delete {
+                assert_eq!(after.control.pending_deletions.len(), 1);
+            }
+            let persisted = load_state().unwrap().unwrap();
+            assert_eq!(persisted.control.generation, 1);
+            assert_eq!(persisted.control.collection_blocked, authoritative_delete);
+            assert!(persisted.device_id.is_none());
+            let request = server.await.unwrap();
+            assert!(request.starts_with("POST /v1/register "));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn operational_stop_discards_old_outbox_and_restore_starts_a_new_period() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![
+            (200, r#"{"collection_period_id":"old_period"}"#),
+            (200, r#"{"collection_period_id":"new_period"}"#),
+        ])
+        .await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("active_device".to_string());
+        state.device_token = Some("active_token".to_string());
+        state.control.enabled = true;
+        state.control.collection_period_id = Some("old_period".to_string());
+        state.control.generation = 7;
+        persist_state(&state).unwrap();
+        let mut outbox = Outbox::empty(outbox_path());
+        outbox
+            .enqueue(outbox_record("old_pending_event", "old_period", now_ms()))
+            .unwrap();
+        let _env = EnvRestore::set(&[
+            ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "false"),
+            ("PINVOU_TELEMETRY_BASE_URL", &runtime.telemetry_base_url),
+            ("PINVOU_BEHAVIOR_EVENTS_URL", &runtime.behavior_events_url),
+            (
+                "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+                "test-enrollment-token-1234567890",
+            ),
+        ]);
+
+        let stopped = BehaviorTelemetry::new();
+        assert!(!stopped.collecting.load(Ordering::Acquire));
+        assert!(stopped.outbox.lock().unwrap().records.is_empty());
+        let stopped_state = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = stopped.state.lock().await.clone().unwrap();
+                if snapshot.control.pending_request.is_none()
+                    && snapshot.control.collection_period_id.is_none()
+                {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("kill-switch control worker should finish the pending End");
+        assert!(!stopped_state.control.enabled);
+        assert_eq!(stopped_state.control.generation, 8);
+        assert!(stopped_state.control.pending_request.is_none());
+        assert!(stopped_state.control.collection_period_id.is_none());
+        let mut repeated_stop = stopped_state.clone();
+        assert!(!prepare_operational_stop(&mut repeated_stop));
+        assert_eq!(repeated_stop.control.generation, 8);
+        assert!(repeated_stop.control.pending_request.is_none());
+        drop(stopped);
+
+        let restored = test_telemetry(runtime, stopped_state);
+        restored.set_collection_enabled(true).await.unwrap();
+        let restored_state = restored.state.lock().await.clone().unwrap();
+        assert!(restored_state.control.enabled);
+        assert_eq!(restored_state.control.generation, 9);
+        assert_eq!(
+            restored_state.control.collection_period_id.as_deref(),
+            Some("new_period")
+        );
+        assert!(restored.outbox.lock().unwrap().records.is_empty());
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /collection/end "));
+        assert!(requests[1].starts_with("POST /collection/start "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn max_generation_stop_persists_block_and_restart_discards_old_outbox() {
+        let _home = TestHome::new();
+        let (base_url, server) =
+            mock_http(vec![(200, r#"{"collection_period_id":"max_period"}"#)]).await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("max_active_device".to_string());
+        state.device_token = Some("max_active_token".to_string());
+        state.control.enabled = true;
+        state.control.collection_period_id = Some("max_period".to_string());
+        state.control.generation = u64::MAX;
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime.clone(), state);
+        telemetry
+            .credential_renewal_in_progress
+            .store(true, Ordering::Release);
+        telemetry.collecting.store(false, Ordering::Release);
+        telemetry.complete_tool_install_terminal(
+            "max_stop_install".to_string(),
+            u64::MAX,
+            BehaviorEvent::new("tool_install_completed")
+                .string("operation_id", "max_stop_install")
+                .success(true),
+        );
+        assert_eq!(telemetry.tool_install_terminals.pending_len(), 1);
+        telemetry.collecting.store(true, Ordering::Release);
+        telemetry
+            .outbox
+            .lock()
+            .unwrap()
+            .enqueue(outbox_record("max_old_event", "max_period", now_ms()))
+            .unwrap();
+
+        let error = telemetry.set_collection_enabled(false).await.unwrap_err();
+        assert!(error.to_string().contains("generation exhausted"));
+        assert!(!telemetry.collecting.load(Ordering::Acquire));
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+        assert_eq!(telemetry.tool_install_terminals.pending_len(), 0);
+        assert!(!telemetry
+            .credential_renewal_in_progress
+            .load(Ordering::Acquire));
+        telemetry.flush_tool_install_terminals(u64::MAX);
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+        let stopped = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(stopped.control.generation, u64::MAX);
+        assert!(stopped.control.collection_blocked);
+        assert!(stopped.control.collection_period_id.is_none());
+        assert!(matches!(
+            stopped
+                .control
+                .pending_request
+                .as_ref()
+                .map(|pending| pending.kind),
+            Some(PendingControlKind::End)
+        ));
+        drop(telemetry);
+
+        let _env = EnvRestore::set(&[
+            ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
+            ("PINVOU_TELEMETRY_BASE_URL", &runtime.telemetry_base_url),
+            ("PINVOU_BEHAVIOR_EVENTS_URL", &runtime.behavior_events_url),
+            (
+                "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+                "test-enrollment-token-1234567890",
+            ),
+        ]);
+        let restarted = BehaviorTelemetry::new();
+        assert!(!restarted.collecting.load(Ordering::Acquire));
+        assert_eq!(
+            restarted.authorization_generation.load(Ordering::Acquire),
+            u64::MAX
+        );
+        assert!(restarted.outbox.lock().unwrap().records.is_empty());
+        let restarted_state = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = restarted.state.lock().await.clone().unwrap();
+                if snapshot.control.pending_request.is_none() {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("restart control worker should finish the MAX generation End");
+        assert_eq!(restarted_state.control.generation, u64::MAX);
+        assert!(restarted_state.control.collection_blocked);
+        assert!(!restarted_state.control.enabled);
+        assert!(restarted_state.control.collection_period_id.is_none());
+        assert!(!restarted.collecting.load(Ordering::Acquire));
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /collection/end "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn max_generation_start_ends_new_remote_period_and_stays_blocked() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![
+            (200, r#"{"collection_period_id":"started_at_max"}"#),
+            (200, r#"{"ended":true}"#),
+        ])
+        .await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("max_start_device".to_string());
+        state.device_token = Some("max_start_token".to_string());
+        state.control.generation = u64::MAX;
+        persist_state(&state).unwrap();
+        let mut telemetry = test_telemetry(runtime, state);
+        let (control_tx, control_rx) = mpsc::channel(1);
+        telemetry.control_tx = Some(control_tx);
+        let mut control_worker = telemetry.worker_clone();
+        control_worker.control_tx = None;
+        let worker = tokio::spawn(BehaviorTelemetry::run_control_worker(
+            control_rx,
+            control_worker,
+        ));
+
+        let error = telemetry.set_collection_enabled(true).await.unwrap_err();
+        assert!(error.to_string().contains("generation exhausted"));
+        let blocked = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let snapshot = telemetry.state.lock().await.clone().unwrap();
+                if snapshot.control.pending_request.is_none() {
+                    break snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("control worker should end the period created before generation exhaustion");
+        assert_eq!(blocked.control.generation, u64::MAX);
+        assert!(blocked.control.collection_blocked);
+        assert!(!blocked.control.enabled);
+        assert!(blocked.control.collection_period_id.is_none());
+        assert!(blocked.control.pending_request.is_none());
+        assert!(!telemetry.collecting.load(Ordering::Acquire));
+        assert!(telemetry.outbox.lock().unwrap().records.is_empty());
+
+        drop(telemetry.control_tx.take());
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .expect("control worker should stop when its sender is dropped")
+            .unwrap();
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /collection/start "));
+        assert!(requests[1].starts_with("POST /collection/end "));
+        assert!(requests
+            .iter()
+            .all(|request| !request.starts_with("POST /v1/register ")
+                && !request.starts_with("POST /events ")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn max_generation_remote_delete_drains_without_wraparound() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![(
+            200,
+            r#"{"deletion_request_id":"max_delete_complete"}"#,
+        )])
+        .await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("max_delete_device".to_string());
+        state.device_token = Some("max_delete_token".to_string());
+        state.control.generation = u64::MAX;
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+
+        let error = telemetry.delete_remote_data().await.unwrap_err();
+        assert!(error.to_string().contains("generation exhausted"));
+        let pending = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(pending.control.generation, u64::MAX);
+        assert!(pending.control.collection_blocked);
+        assert_eq!(pending.control.pending_deletions.len(), 1);
+
+        telemetry.retry_pending_control().await.unwrap();
+        let cleaned = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(cleaned.control.generation, u64::MAX);
+        assert!(cleaned.control.collection_blocked);
+        assert!(cleaned.control.pending_deletions.is_empty());
+        assert!(cleaned.device_id.is_none());
+        assert_eq!(
+            telemetry.authorization_generation.load(Ordering::Acquire),
+            u64::MAX
+        );
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /deletion "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn max_generation_legacy_delete_preserves_followup_queue() {
+        let _home = TestHome::new();
+        let (base_url, server) = mock_http(vec![
+            (410, r#"{"error":"device_data_deleted"}"#),
+            (200, r#"{"deletion_request_id":"retired_complete"}"#),
+        ])
+        .await;
+        let runtime = test_runtime(&base_url);
+        let mut state = PersistedState::fresh(&runtime);
+        state.device_id = Some("max_legacy_device".to_string());
+        state.device_token = Some("max_legacy_token".to_string());
+        state.control.generation = u64::MAX;
+        state.control.pending_request = Some(PendingControlRequest {
+            kind: PendingControlKind::Delete,
+            request_id: "max_legacy_delete".to_string(),
+            collection_period_id: None,
+            behavior_events_url: runtime.behavior_events_url.clone(),
+        });
+        state.retired_endpoints.push(RetiredEndpointCredentials {
+            behavior_events_url: runtime.behavior_events_url.clone(),
+            device_id: "max_retired_device".to_string(),
+            device_token: "max_retired_token".to_string(),
+        });
+        persist_state(&state).unwrap();
+        let telemetry = test_telemetry(runtime, state);
+
+        let error = telemetry.retry_pending_control().await.unwrap_err();
+        assert!(error.to_string().contains("generation exhausted"));
+        let converged = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(converged.control.generation, u64::MAX);
+        assert!(converged.control.collection_blocked);
+        assert!(converged.control.pending_request.is_none());
+        assert_eq!(converged.control.pending_deletions.len(), 1);
+        assert_eq!(
+            converged.control.pending_deletions[0].device_id,
+            "max_retired_device"
+        );
+
+        telemetry.retry_pending_control().await.unwrap();
+        let cleaned = telemetry.state.lock().await.clone().unwrap();
+        assert_eq!(cleaned.control.generation, u64::MAX);
+        assert!(cleaned.control.collection_blocked);
+        assert!(cleaned.control.pending_deletions.is_empty());
+        assert!(cleaned.retired_endpoints.is_empty());
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|request| request.starts_with("POST /deletion ")));
+    }
+
+    #[test]
     fn endpoint_rotation_keeps_pending_control_bound_to_the_previous_endpoint() {
         let runtime_a = RuntimeConfig {
             enabled: true,
@@ -4291,16 +6171,18 @@ mod tests {
         same_backend_state
             .retired_endpoints
             .push(RetiredEndpointCredentials {
-                behavior_events_url: runtime_a.behavior_events_url,
+                behavior_events_url: runtime_a.behavior_events_url.clone(),
                 device_id: "shared_device".to_string(),
                 device_token: "shared_token".to_string(),
             });
         let same_backend_targets = same_backend_state.deletion_targets();
-        assert_eq!(same_backend_targets.len(), 1);
-        assert_eq!(
-            same_backend_targets[0].behavior_events_url,
-            runtime_b.behavior_events_url
-        );
+        assert_eq!(same_backend_targets.len(), 2);
+        assert!(same_backend_targets
+            .iter()
+            .any(|target| target.behavior_events_url == runtime_b.behavior_events_url));
+        assert!(same_backend_targets
+            .iter()
+            .any(|target| target.behavior_events_url == runtime_a.behavior_events_url));
     }
 
     #[test]
@@ -4586,6 +6468,112 @@ mod tests {
         );
         assert_eq!(coordinator.pending_len(), 0);
         assert_eq!(delivered.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn tool_install_flush_cleanup_is_linearized_before_reinsert() {
+        use std::sync::Barrier;
+        use std::thread;
+
+        #[derive(Clone, Copy, Debug)]
+        enum Cleanup {
+            FailClose,
+            GenerationAdvance,
+            RenewalDrop,
+        }
+
+        fn run_interleaving(cleanup: Cleanup) {
+            let coordinator = ToolInstallTerminalCoordinator::default();
+            let generation = Arc::new(AtomicU64::new(77));
+            let renewal_in_progress = Arc::new(AtomicBool::new(true));
+            coordinator.submit(
+                DeferredToolInstallTerminal {
+                    operation_id: format!("linearized_{cleanup:?}"),
+                    generation: 77,
+                    event: BehaviorEvent::new("tool_install_completed")
+                        .string("operation_id", format!("linearized_{cleanup:?}")),
+                },
+                &generation,
+                &renewal_in_progress,
+                |_, _| false,
+            );
+            assert_eq!(coordinator.pending_len(), 1);
+
+            let before_reinsert = Arc::new(Barrier::new(2));
+            let resume_reinsert = Arc::new(Barrier::new(2));
+            let flush = {
+                let coordinator = coordinator.clone();
+                let generation = generation.clone();
+                let renewal_in_progress = renewal_in_progress.clone();
+                let before_reinsert = before_reinsert.clone();
+                let resume_reinsert = resume_reinsert.clone();
+                thread::spawn(move || {
+                    coordinator.flush_with_reinsert_hook(
+                        &generation,
+                        &renewal_in_progress,
+                        77,
+                        |_, _| false,
+                        || {
+                            before_reinsert.wait();
+                            resume_reinsert.wait();
+                        },
+                    );
+                })
+            };
+
+            // The terminal has been removed for publication, publication failed,
+            // and flush observed renewal=true before pausing outside pending's lock.
+            before_reinsert.wait();
+            match cleanup {
+                Cleanup::FailClose => {
+                    renewal_in_progress.store(false, Ordering::Release);
+                    coordinator.clear_all();
+                }
+                Cleanup::GenerationAdvance => {
+                    generation.store(78, Ordering::Release);
+                    coordinator.discard_stale(78);
+                }
+                Cleanup::RenewalDrop => {
+                    let transition =
+                        CredentialRenewalTransition::begin(&renewal_in_progress, &coordinator, 77);
+                    drop(transition);
+                }
+            }
+            resume_reinsert.wait();
+            flush.join().unwrap();
+
+            assert_eq!(
+                coordinator.pending_len(),
+                0,
+                "cleanup {cleanup:?} must prevent a terminal from being reinserted"
+            );
+            renewal_in_progress.store(false, Ordering::Release);
+            let simulated_outbox = StdMutex::new(Vec::<String>::new());
+            coordinator.flush(
+                &generation,
+                &renewal_in_progress,
+                generation.load(Ordering::Acquire),
+                |event, _| {
+                    simulated_outbox
+                        .lock()
+                        .unwrap()
+                        .push(event.event_id.clone());
+                    true
+                },
+            );
+            assert!(
+                simulated_outbox.lock().unwrap().is_empty(),
+                "cleanup {cleanup:?} must not allow delayed publication"
+            );
+        }
+
+        for cleanup in [
+            Cleanup::FailClose,
+            Cleanup::GenerationAdvance,
+            Cleanup::RenewalDrop,
+        ] {
+            run_interleaving(cleanup);
+        }
     }
 
     #[test]
