@@ -12,9 +12,14 @@ const appRoot = path.join(repoRoot, "pinvou3-app");
 export function commandFor({ kind, target }) {
   if (kind === "npm") {
     if (process.platform === "win32") {
+      // Node 24 no longer spawns .cmd shims directly. Invoke npm's JavaScript
+      // entry point with the current Node executable so the smoke runner stays
+      // shell-free and does not depend on command-line quoting.
+      const npmCli = process.env.npm_execpath
+        || path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
       return {
-        executable: process.env.ComSpec || "cmd.exe",
-        args: ["/d", "/s", "/c", `npm.cmd run ${target}`],
+        executable: process.execPath,
+        args: [npmCli, "run", target],
       };
     }
     return {
