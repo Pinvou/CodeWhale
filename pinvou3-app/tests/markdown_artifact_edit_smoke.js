@@ -136,6 +136,41 @@ function injectSource() {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitForMarkdownWrite(page, startIndex, requiredText, timeout = 10000) {
+  try {
+    await page.waitForFunction(
+      ({ startIndex, artifactPath, requiredText }) => {
+        const writes = (window.__MD_WRITES__ || []).slice(startIndex);
+        return writes.some((write) =>
+          write.path === artifactPath &&
+          requiredText.every((text) => String(write.content || '').includes(text))
+        );
+      },
+      { timeout, polling: 50 },
+      { startIndex, artifactPath: ARTIFACT_PATH, requiredText },
+    );
+  } catch (_) {
+    // Return the observed writes below so the smoke reports a useful assertion
+    // failure instead of losing the timing evidence in a wait timeout.
+  }
+  return page.evaluate(({ startIndex, artifactPath, requiredText }) => {
+    const writes = window.__MD_WRITES__ || [];
+    const observed = writes.slice(startIndex);
+    const matching = observed.filter((write) =>
+      write.path === artifactPath &&
+      requiredText.every((text) => String(write.content || '').includes(text))
+    );
+    const last = matching[matching.length - 1] || observed[observed.length - 1] || {};
+    return {
+      count: writes.length,
+      operationWriteCount: writes.length - startIndex,
+      matched: matching.length > 0,
+      path: last.path,
+      content: last.content || '',
+    };
+  }, { startIndex, artifactPath: ARTIFACT_PATH, requiredText });
+}
+
 async function clickText(page, text) {
   return page.evaluate((needle) => {
     let els = [...document.querySelectorAll('button,div,span,a')]
@@ -265,34 +300,35 @@ async function rec(results, name, pass, detail) {
     process.exit(1);
   }
 
+  const editWriteStart = await page.evaluate(() => (window.__MD_WRITES__ || []).length);
   await page.evaluate(() => {
     const editable = document.querySelector('[contenteditable="true"]');
     const p = [...editable.querySelectorAll('p')].find((el) => el.textContent.includes('这是一段正文'));
     p.textContent = '这是一段正文，已经被自动化修改。';
     editable.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '自动化修改' }));
   });
-  await sleep(1300);
-  const saved = await page.evaluate(() => {
-    const writes = window.__MD_WRITES__ || [];
-    const last = writes[writes.length - 1] || {};
-    return {
-      count: writes.length,
-      path: last.path,
-      content: last.content || '',
-      bodyText: document.body.innerText,
-    };
-  });
+  const saved = await waitForMarkdownWrite(
+    page,
+    editWriteStart,
+    ['已经被自动化修改', '| Alpha |'],
+  );
   await rec(
     results,
     'auto-saves edited content as markdown',
-    saved.count >= 1 &&
+    saved.matched &&
       saved.path === ARTIFACT_PATH &&
       saved.content.includes('已经被自动化修改') &&
       saved.content.includes('| Alpha |') &&
       !saved.content.includes('<h1'),
-    JSON.stringify({ count: saved.count, path: saved.path, content: saved.content.slice(0, 160) }),
+    JSON.stringify({
+      count: saved.count,
+      operationWriteCount: saved.operationWriteCount,
+      path: saved.path,
+      content: saved.content.slice(0, 160),
+    }),
   );
 
+  const pasteWriteStart = await page.evaluate(() => (window.__MD_WRITES__ || []).length);
   await page.evaluate(() => {
     const editable = document.querySelector('[contenteditable="true"]');
     const p = [...editable.querySelectorAll('p')].find((el) => el.textContent.includes('已经被自动化修改'));
@@ -314,21 +350,24 @@ async function rec(results, name, pass, detail) {
     });
     editable.dispatchEvent(event);
   });
-  await sleep(1300);
-  const pasted = await page.evaluate(() => {
-    const writes = window.__MD_WRITES__ || [];
-    const last = writes[writes.length - 1] || {};
-    return { count: writes.length, content: last.content || '' };
-  });
+  const pasted = await waitForMarkdownWrite(
+    page,
+    pasteWriteStart,
+    ['PASTED', 'plain text'],
+  );
   await rec(
     results,
     'paste sanitizes rich html to plain markdown text',
-    pasted.count >= 2 &&
+    pasted.matched &&
       pasted.content.includes('PASTED') &&
       pasted.content.includes('plain text') &&
       !pasted.content.includes('<script>') &&
       !pasted.content.includes('onerror'),
-    JSON.stringify({ count: pasted.count, content: pasted.content.slice(0, 200) }),
+    JSON.stringify({
+      count: pasted.count,
+      operationWriteCount: pasted.operationWriteCount,
+      content: pasted.content.slice(0, 200),
+    }),
   );
 
   await page.evaluate(() => {
