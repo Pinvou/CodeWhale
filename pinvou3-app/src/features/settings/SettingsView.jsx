@@ -24,6 +24,13 @@ import {
   selectorMainLabel,
   reasoningEffortTiersForModel, reasoningEffortForModelSwitch, normalizeStoredReasoningEffort,
 } from './model-catalog.js';
+import { CommunityPanel } from './CommunityPanel.jsx';
+import {
+  COMMUNITY_DISCUSSIONS_URL,
+  COMMUNITY_QQ_GROUP_NAME,
+  COMMUNITY_QQ_GROUP_NUMBER,
+  COMMUNITY_QQ_QR_IMAGE_SRC,
+} from './community-config.js';
 import { ProvidersSection } from './ProvidersSection.jsx';
 
 function isReadonlyModel(model) {
@@ -2421,6 +2428,18 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
           </IOSRow>
         </IOSSection>
       );
+      const renderCommunity = () => (
+        <CommunityPanel
+          copy={t}
+          groupName={COMMUNITY_QQ_GROUP_NAME}
+          groupNumber={COMMUNITY_QQ_GROUP_NUMBER}
+          qrImageSrc={COMMUNITY_QQ_QR_IMAGE_SRC}
+          onOpenDiscussions={() => {
+            if (!bridge.available || !bridge.artifacts?.openUserExternalUrl) return;
+            bridge.artifacts.openUserExternalUrl(COMMUNITY_DISCUSSIONS_URL).catch(() => {});
+          }}
+        />
+      );
       const renderContent = () => {
         if (activeSection === 'model') return renderModels();
         if (activeSection === 'search') return renderSearch();
@@ -2429,6 +2448,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
         if (activeSection === 'data') return renderData();
         if (activeSection === 'update') return renderUpdate();
         if (activeSection === 'help') return renderHelp();
+        if (activeSection === 'community') return renderCommunity();
         return renderGeneral();
       };
       const sectionTitle = (activeSection === 'model' && modelTab === 'acp' && acpProvidersTabVisible)
@@ -2442,6 +2462,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
             data: t.uiSettings.data,
             update: t.uiSettings.update,
             help: t.uiSettings.help,
+            community: t.uiSettings.community,
           }[activeSection] || t.uiSettings.general);
       const SearchSourceModal = ({ provider, isNew, onClose }) => {
         const option = searchOptions.find(x => x.key === provider);
@@ -2576,6 +2597,7 @@ const SCard = React.forwardRef(({ title, titleAdornment, children, id, style }, 
                 <SectionButton id="data" icon={<Archive size={17} />} label={t.uiSettings.data} />
                 {canUpdateApp && <SectionButton id="update" icon={<RefreshCw size={17} />} label={t.uiSettings.update} dot={hasUpdate} />}
                 <SectionButton id="help" icon={<MessageSquare size={17} />} label={t.uiSettings.help} />
+                <SectionButton id="community" icon={<Users size={17} />} label={t.uiSettings.community} />
               </div>
             </aside>
             {onCloseSettings && (
