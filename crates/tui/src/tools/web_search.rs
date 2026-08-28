@@ -761,10 +761,24 @@ pub(crate) async fn execute_search(
 
     let started = Instant::now();
     let requested_timeout = Duration::from_millis(timeout_ms.max(1));
-    let (total_timeout, first_attempt_budget) =
-        search_timeout_budgets(initial_backend, requested_timeout);
+    let provider_native_timeout_floor = context
+        .provider_native_search
+        .as_ref()
+        .and_then(crate::client::ProviderNativeSearchClient::search_timeout_floor_override);
+    let (total_timeout, first_attempt_budget, fallback_budget_after_first) = search_timeout_budgets(
+        initial_backend,
+        requested_timeout,
+        provider_native_timeout_floor,
+    );
     let deadline = started + total_timeout;
-    let chained = chain.search(&query, deadline, first_attempt_budget).await?;
+    let chained = chain
+        .search(
+            &query,
+            deadline,
+            first_attempt_budget,
+            fallback_budget_after_first,
+        )
+        .await?;
     let mut response =
         finalize_search_response(query.clone(), chained.capabilities, chained.raw, started);
     register_search_citations(&mut response, context);
@@ -781,11 +795,16 @@ pub(crate) async fn execute_search(
 fn search_timeout_budgets(
     initial_backend: BackendId,
     requested_timeout: Duration,
-) -> (Duration, Option<Duration>) {
+    provider_native_timeout_floor: Option<Duration>,
+) -> (Duration, Option<Duration>, Option<Duration>) {
     match initial_backend {
         BackendId::Volcengine => {
             let provider_budget = Duration::from_millis(VOLCENGINE_MIN_TIMEOUT_MS);
-            (provider_budget + requested_timeout, Some(provider_budget))
+            (
+                provider_budget + requested_timeout,
+                Some(provider_budget),
+                None,
+            )
         }
         BackendId::ProviderNative => {
             // Provider-native search is the preferred route and commonly
@@ -793,14 +812,17 @@ fn search_timeout_budgets(
             // Give it a separate bounded minimum instead of an equal share
             // that shrinks as fallbacks are added. Preserve the caller's
             // requested timeout as the configured/local fallback budget.
-            let provider_budget =
-                requested_timeout.max(Duration::from_millis(PROVIDER_NATIVE_MIN_TIMEOUT_MS));
+            let provider_budget = requested_timeout.max(
+                provider_native_timeout_floor
+                    .unwrap_or(Duration::from_millis(PROVIDER_NATIVE_MIN_TIMEOUT_MS)),
+            );
             (
                 provider_budget.saturating_add(requested_timeout),
                 Some(provider_budget),
+                Some(requested_timeout),
             )
         }
-        _ => (requested_timeout, None),
+        _ => (requested_timeout, None, None),
     }
 }
 
@@ -1014,9 +1036,11 @@ pub(crate) fn apply_domain_constraints(
         capabilities.domains,
         super::web::contract::CapabilityState::Supported
     );
-    if !provider_honored && raw.backend == BackendId::ProviderNative {
+    let filtered_any = raw.results.len() != before;
+    if raw.backend == BackendId::ProviderNative && (!provider_honored || filtered_any) {
         // Post-filtering can constrain returned citations, but it cannot
-        // prove that a provider-generated answer used only those sources.
+        // prove that a provider-generated answer did not rely on a removed
+        // source.
         raw.note = None;
     }
     let already_recorded = raw.degraded.iter().any(|reason| {
@@ -1027,7 +1051,7 @@ pub(crate) fn apply_domain_constraints(
             }
         )
     });
-    if (!provider_honored || raw.results.len() != before) && !already_recorded {
+    if (!provider_honored || filtered_any) && !already_recorded {
         raw.degraded.push(DegradedReason::PostFiltered {
             knob: QueryKnob::Domains,
         });
@@ -1960,10 +1984,21 @@ mod tests {
     #[test]
     fn provider_native_receives_dedicated_minimum_budget_before_fallback() {
         let requested = Duration::from_millis(15_000);
-        let (total, first) = search_timeout_budgets(BackendId::ProviderNative, requested);
+        let (total, first, fallback) =
+            search_timeout_budgets(BackendId::ProviderNative, requested, None);
 
         assert_eq!(total, Duration::from_millis(60_000));
         assert_eq!(first, Some(Duration::from_millis(45_000)));
+        assert_eq!(fallback, Some(requested));
+
+        let (total, first, fallback) = search_timeout_budgets(
+            BackendId::ProviderNative,
+            requested,
+            Some(Duration::from_secs(180)),
+        );
+        assert_eq!(total, Duration::from_secs(195));
+        assert_eq!(first, Some(Duration::from_secs(180)));
+        assert_eq!(fallback, Some(requested));
     }
 
     // Regression guard: Bing /ck/a redirect hrefs are HTML-entity-encoded
@@ -2935,7 +2970,7 @@ mod tests {
     }
 
     #[test]
-    fn finalization_defensively_discards_unconstrained_native_answer() {
+    fn provider_native_discards_answer_when_supported_domain_filter_leaks_source() {
         let query = SearchQuery::new(
             "current release".to_string(),
             3,
@@ -2945,24 +2980,43 @@ mod tests {
         );
         let raw = BackendSearch {
             backend: BackendId::ProviderNative,
-            source: "provider-native/deepseek/deepseek-v4-flash".to_string(),
-            backend_detail: Some("api.deepseek.com".to_string()),
-            results: vec![SearchResult::new(
-                1,
-                "Outside source".to_string(),
-                "https://outside.test/release".to_string(),
-                None,
-                None,
-            )],
+            source: "provider-native/xai/grok-4.5".to_string(),
+            backend_detail: Some("api.x.ai".to_string()),
+            results: vec![
+                SearchResult::new(
+                    1,
+                    "Allowed source".to_string(),
+                    "https://docs.example.com/release".to_string(),
+                    None,
+                    None,
+                ),
+                SearchResult::new(
+                    2,
+                    "Leaked source".to_string(),
+                    "https://outside.test/release".to_string(),
+                    None,
+                    None,
+                ),
+            ],
             degraded: Vec::new(),
-            note: Some("Answer synthesized from an unconstrained search.".to_string()),
+            note: Some("Answer synthesized from both sources.".to_string()),
         };
-        let response =
-            finalize_search_response(query, QueryCapabilities::count_only(), raw, Instant::now());
+        let response = finalize_search_response(
+            query,
+            QueryCapabilities {
+                max_results: CapabilityState::Supported,
+                recency: CapabilityState::Unsupported,
+                domains: CapabilityState::Supported,
+                locale: CapabilityState::Unsupported,
+                published_date: CapabilityState::Unknown,
+            },
+            raw,
+            Instant::now(),
+        );
 
-        assert_eq!(response.count, 0);
-        assert_eq!(response.message, "No results found");
-        assert!(response.receipt.honored.domains);
+        assert_eq!(response.count, 1);
+        assert_eq!(response.results[0].domain, "docs.example.com");
+        assert_eq!(response.message, "Found 1 result(s)");
         assert!(response.receipt.degraded.iter().any(|reason| matches!(
             reason,
             DegradedReason::PostFiltered {

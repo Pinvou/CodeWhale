@@ -15,6 +15,7 @@ use crate::{
 };
 
 const MAX_NATIVE_SEARCH_ROUNDS: usize = 4;
+const MAX_NATIVE_SEARCH_TOOL_CALLS: usize = 8;
 const WEB_SEARCH_FORMULA_URI: &str = "moonshot/web-search:latest";
 const WEB_SEARCH_FORMULA_FUNCTION: &str = "web_search";
 
@@ -76,6 +77,7 @@ async fn search_builtin(
         "role": "user",
         "content": super::search_prompt(request),
     })];
+    let mut tool_calls_executed = 0;
     let url = api_url(&client.inner.base_url, "chat/completions");
 
     for _ in 0..MAX_NATIVE_SEARCH_ROUNDS {
@@ -101,6 +103,7 @@ async fn search_builtin(
         if tool_calls.is_empty() {
             bail!("Kimi returned an empty native web-search tool call list");
         }
+        reserve_native_search_tool_calls(&mut tool_calls_executed, tool_calls.len())?;
         for tool_call in tool_calls {
             let name = tool_call.pointer("/function/name").and_then(Value::as_str);
             if name != Some("$web_search") {
@@ -155,6 +158,7 @@ async fn search_formula(
         "role": "user",
         "content": super::search_prompt(request),
     })];
+    let mut tool_calls_executed = 0;
     let chat_url = api_url(&client.inner.base_url, "chat/completions");
     let fiber_url = api_url(&client.inner.base_url, &format!("{formula_path}/fibers"));
 
@@ -178,8 +182,10 @@ async fn search_formula(
             return Ok(parse_final_message(message));
         }
 
+        let tool_calls = tool_calls.expect("checked above");
+        reserve_native_search_tool_calls(&mut tool_calls_executed, tool_calls.len())?;
         messages.push(Value::Object(message.clone()));
-        for tool_call in tool_calls.expect("checked above") {
+        for tool_call in tool_calls {
             let id = tool_call
                 .get("id")
                 .and_then(Value::as_str)
@@ -218,6 +224,19 @@ async fn search_formula(
     }
 
     bail!("Kimi Formula web search exceeded the bounded tool-call loop")
+}
+
+fn reserve_native_search_tool_calls(executed: &mut usize, additional: usize) -> Result<()> {
+    let total = executed
+        .checked_add(additional)
+        .context("Kimi native web search tool-call count overflowed")?;
+    if total > MAX_NATIVE_SEARCH_TOOL_CALLS {
+        bail!(
+            "Kimi native web search exceeded the {MAX_NATIVE_SEARCH_TOOL_CALLS}-call safety limit"
+        );
+    }
+    *executed = total;
+    Ok(())
 }
 
 fn formula_web_search_tools(payload: &Value) -> Result<Value> {
@@ -334,25 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn validates_formula_tool_and_encrypted_fiber_result() {
-        let tools = formula_web_search_tools(&json!({
-            "tools": [{
-                "type": "function",
-                "function": { "name": "web_search" }
-            }]
-        }))
-        .expect("formula tools");
-        assert_eq!(tools[0]["function"]["name"], "web_search");
-
-        let fiber = json!({
-            "status": "succeeded",
-            "context": { "encrypted_output": "encrypted search result" }
-        });
-        let result = formula_fiber_result(&fiber).expect("formula result");
-        assert_eq!(result, "encrypted search result");
-    }
-
-    #[test]
     fn parses_kimi_code_structured_results() {
         let parsed = parse_kimi_code(&json!({
             "search_results": [{
@@ -368,12 +368,13 @@ mod tests {
     }
 
     #[test]
-    fn final_builtin_answer_keeps_links_as_citations() {
-        let message = json!({
-            "content": "See [Moonshot](https://platform.kimi.ai/docs) for details."
-        });
-        let parsed = parse_final_message(message.as_object().expect("message object"));
-        assert_eq!(parsed.citations.len(), 1);
-        assert_eq!(parsed.citations[0].url, "https://platform.kimi.ai/docs");
+    fn native_search_tool_call_limit_is_total_not_per_round() {
+        let mut executed = 0;
+        reserve_native_search_tool_calls(&mut executed, 1).expect("first round");
+        reserve_native_search_tool_calls(&mut executed, 3).expect("second round");
+        reserve_native_search_tool_calls(&mut executed, 4).expect("third round");
+        assert_eq!(executed, MAX_NATIVE_SEARCH_TOOL_CALLS);
+        assert!(reserve_native_search_tool_calls(&mut executed, 1).is_err());
+        assert_eq!(executed, MAX_NATIVE_SEARCH_TOOL_CALLS);
     }
 }

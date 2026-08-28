@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Treat the exact Moonshot China endpoint `https://api.moonshot.cn/v1` as a
+  first-party direct route, and bound live K3 Formula search with a dedicated
+  180-second budget and eight total provider tool calls before local fallback.
 - Z.AI configurations using `https://open.bigmodel.cn/api/paas/v4` are now
   treated as official Zhipu routes for model-alias normalization, credential
   scoping, and native web search. Existing unknown model IDs continue to pass

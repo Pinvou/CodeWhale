@@ -134,13 +134,21 @@ impl<'a> SearchBackendChain<'a> {
         query: &SearchQuery,
         deadline: Instant,
         first_attempt_budget: Option<Duration>,
+        fallback_budget_after_first: Option<Duration>,
     ) -> Result<ChainedSearch, ToolError> {
         let backends = self
             .backends
             .iter()
             .map(|backend| backend.as_ref())
             .collect::<Vec<_>>();
-        run_backend_chain(&backends, query, deadline, first_attempt_budget).await
+        run_backend_chain(
+            &backends,
+            query,
+            deadline,
+            first_attempt_budget,
+            fallback_budget_after_first,
+        )
+        .await
     }
 }
 
@@ -161,14 +169,20 @@ const fn provider_native_is_available(capability_supported: bool, client_present
 async fn run_backend_chain(
     backends: &[&dyn SearchBackend],
     query: &SearchQuery,
-    deadline: Instant,
+    mut deadline: Instant,
     first_attempt_budget: Option<Duration>,
+    fallback_budget_after_first: Option<Duration>,
 ) -> Result<ChainedSearch, ToolError> {
     let mut degraded = Vec::new();
     let mut last_empty = None;
     let mut attempted = Vec::new();
 
     for (index, backend) in backends.iter().enumerate() {
+        if index == 1
+            && let Some(fallback_budget) = fallback_budget_after_first
+        {
+            deadline = Instant::now() + fallback_budget.max(Duration::from_millis(1));
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
@@ -406,6 +420,12 @@ mod tests {
         result: Result<Vec<super::super::contract::SearchResult>, ToolError>,
     }
 
+    struct DeadlineBackend {
+        id: BackendId,
+        observed_budget: Arc<Mutex<Option<Duration>>>,
+        delay: Duration,
+    }
+
     #[async_trait]
     impl SearchBackend for FakeBackend {
         fn id(&self) -> BackendId {
@@ -426,6 +446,35 @@ mod tests {
                 source: self.id.as_str().to_string(),
                 backend_detail: None,
                 results: self.result.clone()?,
+                degraded: Vec::new(),
+                note: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SearchBackend for DeadlineBackend {
+        fn id(&self) -> BackendId {
+            self.id
+        }
+
+        fn capabilities(&self) -> QueryCapabilities {
+            QueryCapabilities::count_only()
+        }
+
+        async fn search(
+            &self,
+            _query: &SearchQuery,
+            deadline: Instant,
+        ) -> Result<BackendSearch, ToolError> {
+            *self.observed_budget.lock().expect("budget lock") =
+                Some(deadline.saturating_duration_since(Instant::now()));
+            tokio::time::sleep(self.delay).await;
+            Ok(BackendSearch {
+                backend: self.id,
+                source: self.id.as_str().to_string(),
+                backend_detail: None,
+                results: vec![result()],
                 degraded: Vec::new(),
                 note: None,
             })
@@ -497,6 +546,7 @@ mod tests {
             &query(),
             Instant::now() + Duration::from_secs(1),
             None,
+            None,
         )
         .await
         .expect("fallback should succeed");
@@ -536,6 +586,7 @@ mod tests {
             &query(),
             Instant::now() + Duration::from_secs(1),
             None,
+            None,
         )
         .await
         .expect("final scrape fallback should succeed");
@@ -564,41 +615,11 @@ mod tests {
 
     #[tokio::test]
     async fn first_attempt_budget_overrides_the_default_fair_share() {
-        struct DeadlineBackend {
-            observed_budget: Arc<Mutex<Option<Duration>>>,
-        }
-
-        #[async_trait]
-        impl SearchBackend for DeadlineBackend {
-            fn id(&self) -> BackendId {
-                BackendId::Volcengine
-            }
-
-            fn capabilities(&self) -> QueryCapabilities {
-                QueryCapabilities::count_only()
-            }
-
-            async fn search(
-                &self,
-                _query: &SearchQuery,
-                deadline: Instant,
-            ) -> Result<BackendSearch, ToolError> {
-                *self.observed_budget.lock().expect("budget lock") =
-                    Some(deadline.saturating_duration_since(Instant::now()));
-                Ok(BackendSearch {
-                    backend: BackendId::Volcengine,
-                    source: "volcengine".to_string(),
-                    backend_detail: None,
-                    results: vec![result()],
-                    degraded: Vec::new(),
-                    note: None,
-                })
-            }
-        }
-
         let observed_budget = Arc::new(Mutex::new(None));
         let volcengine = DeadlineBackend {
+            id: BackendId::Volcengine,
             observed_budget: Arc::clone(&observed_budget),
+            delay: Duration::ZERO,
         };
         let fallback = FakeBackend {
             id: BackendId::DuckDuckGo,
@@ -610,6 +631,7 @@ mod tests {
             &query(),
             Instant::now() + Duration::from_secs(2),
             Some(first_attempt_budget),
+            None,
         )
         .await
         .expect("the first backend should complete inside its dedicated budget");
@@ -627,6 +649,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_native_unused_budget_does_not_extend_fallback_deadline() {
+        let native = FakeBackend {
+            id: BackendId::ProviderNative,
+            result: Err(ToolError::execution_failed("native unavailable")),
+        };
+        let observed_budget = Arc::new(Mutex::new(None));
+        let fallback = DeadlineBackend {
+            id: BackendId::DuckDuckGo,
+            observed_budget: Arc::clone(&observed_budget),
+            delay: Duration::from_millis(200),
+        };
+        let fallback_budget = Duration::from_millis(30);
+        let error = run_backend_chain(
+            &[&native, &fallback],
+            &query(),
+            Instant::now() + Duration::from_millis(500),
+            Some(Duration::from_millis(500)),
+            Some(fallback_budget),
+        )
+        .await
+        .expect_err("blocking fallback must stop at its own budget");
+
+        assert!(matches!(error, ToolError::NotAvailable { .. }));
+        let observed = observed_budget
+            .lock()
+            .expect("budget lock")
+            .expect("fallback must observe a deadline");
+        assert!(observed <= fallback_budget);
+    }
+
+    #[tokio::test]
     async fn all_unavailable_returns_typed_error_with_backend_ids_only() {
         let private_error = "secret provider response";
         let api = FakeBackend {
@@ -641,6 +694,7 @@ mod tests {
             &[&api, &scrape],
             &query(),
             Instant::now() + Duration::from_secs(1),
+            None,
             None,
         )
         .await
@@ -691,6 +745,7 @@ mod tests {
             &query(),
             Instant::now() + Duration::from_secs(1),
             None,
+            None,
         )
         .await
         .expect_err("policy error must fail closed");
@@ -713,6 +768,7 @@ mod tests {
             &[&api, &scrape],
             &query(),
             Instant::now() + Duration::from_secs(1),
+            None,
             None,
         )
         .await
