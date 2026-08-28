@@ -204,20 +204,19 @@ async fn run_backend_chain(
             .and_then(std::convert::identity);
 
         match result {
-            Ok(mut raw) if !raw.results.is_empty() => {
-                degraded.append(&mut raw.degraded);
-                raw.degraded = degraded;
-                return Ok(ChainedSearch {
-                    raw,
-                    capabilities: backend.capabilities(),
-                });
-            }
             Ok(mut raw) => {
+                let capabilities = backend.capabilities();
+                crate::tools::web_search::apply_domain_constraints(query, capabilities, &mut raw);
+                if !raw.results.is_empty() {
+                    degraded.append(&mut raw.degraded);
+                    raw.degraded = degraded;
+                    return Ok(ChainedSearch { raw, capabilities });
+                }
                 degraded.push(DegradedReason::NoUsableResults {
                     backend: backend_id,
                 });
                 degraded.append(&mut raw.degraded);
-                last_empty = Some((raw, backend.capabilities()));
+                last_empty = Some((raw, capabilities));
             }
             Err(error) if is_fail_closed(&error) => return Err(error),
             Err(error) if backends.len() == 1 => return Err(error),
