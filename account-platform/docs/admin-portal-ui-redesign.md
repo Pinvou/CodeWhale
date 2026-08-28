@@ -91,17 +91,18 @@
 
 | 导航组 | 页面 | 出现条件 |
 |---|---|---|
-| 总览 | 平台总览、系统状态 | 具有 `platform.system.status.read`，或总览卡片在 4.2 明列的精确读权限；卡片仍独立鉴权 |
-| 身份与组织 | 用户、角色绑定、组织、注册/资料/注销修复 | 拥有相关 `platform.users.*`、`platform.roles.read`、`platform.organizations.*` 或修复权限 |
-| 财务与支付 | 额度/账本、应收、订单、支付案件、退款记录、调账、Hold、定价、充值商品 | 至少具有 `platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.usage.read`、`platform.pricing.read` 或 `platform.products.read` 中该子页所需权限 |
-| 模型与 Token | 模型、Token Account、路由、凭据验证、Provisioning、用量请求/对账、协议/公式 | 子页分别要求 `platform.models.read`、`platform.tokens.read`、`platform.usage.read` 或 `platform.pricing.read`；写权限不替代读权限 |
-| 治理 | 我的申请、待我审批、审批策略、审批执行、审计与导出 | 根据冻结策略中的申请/审批权限和 `platform.audit.*` 动态显示 |
-| 运行手册 | Bootstrap、Break-glass、服务身份、IdP 边界 | Bootstrap/IdP 要求 `platform.system.status.read`；Break-glass/服务身份要求 `platform.audit.read`；不包含执行代理 |
-| 我的组织 | 组织资料（只读摘要）、节点、成员、角色、额度、本人用量、模型策略 | 当前用户为有效成员、组织 ACTIVE，并分别具有 `org.profile.read`、`org.units.read`、`org.members.read`、`org.roles.read`、`org.wallet.read`、`org.usage.read.self` 或 `org.models.read`；无 API 项不显示 |
+| 工作台 | 平台总览 | 至少具有一个平台页面的精确读权限；卡片仍按各自读权限独立请求和展示 |
+| 身份与组织 | 用户管理、角色与授权、组织管理、我的组织 | 子页分别要求现有 `platform.users.*` 修复/读取权限、`platform.roles.read`、`platform.organizations.read` 或现有组织作用域读权限；没有可用接口的“我的组织”隐藏 |
+| 财务与支付 | 计费运营、支付与资金、定价与商品 | 子页分别要求 `platform.billing.wallets.read` / `platform.pricing.read` / `platform.usage.read`、`platform.billing.wallets.read`、`platform.products.read`；一个子页的权限不解锁相邻子页 |
+| 模型与 Token | Token Gateway | 至少具有 `platform.models.read`、`platform.tokens.read` 或 `platform.usage.read` 中该页真实数据所需权限；写权限不替代读权限 |
+| 治理与安全 | 审批中心、审计与导出、系统与安全、偏好设置 | 审批读取沿用 `platform.billing.wallets.read` 且动作继续精确鉴权；审计和系统分别要求 `platform.audit.read`、`platform.system.status.read`；偏好设置只在已有管理页面可访问且存在真实本地偏好时显示 |
+
+以上五组及页面名称以 `admin-portal-ui-prototype.html` 的 `navGroups` 为唯一信息架构，不再保留“总览/治理/运行手册/系统运行”六组旧分类。角色、支付、商品、审批、偏好均为独立 URL `section`，不能作为用户或财务页内的二级聚合 Tab。只读运行手册作为“系统与安全”或“审计与导出”的内容区存在，不形成第六导航组；现有注册、资料与注销修复归入“用户管理”。
 
 ### 3.2 导航与组件鉴权
 
 - 页面是否显示由服务端返回的精确权限集合决定，不用角色名称硬编码。
+- 原型定义页面但当前没有真实接口或适用读权限时必须隐藏；不得以静态样例、假数据或空壳页面补齐导航。
 - 页面标题、统计卡片、表格列、详情字段、导出按钮和行内动作分别声明所需权限。
 - 对无权字段不请求或由服务端裁剪；不得请求后仅用 CSS 隐藏。
 - 无页面读权限时不显示导航；直接访问路由返回统一“无权访问”，不泄露资源是否存在。

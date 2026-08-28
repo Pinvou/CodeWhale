@@ -37,8 +37,8 @@
 | `BILLING-SCOPE-AUTHORIZATION` | 个人余额、权益包、订单与充值管理按 `personal.*` 权限和个人上下文失败关闭；组织购买、余额、权益及额度授予按显式组织目标与 `org.*` 权限实时决定 | Token/Portal Go 测试、显式组织目标和个人/组织不可互借权限用例、OpenAPI 及全量合同通过；数据库撤权和真实组织钱包联调待部署 |
 | `PERMISSION-DRIVEN-UI` | 桌面账号弹层、Web 个人中心和平台后台直接消费 Account 权威权限集合及个人/平台/组织独立授权版本；入口、只读态和操作按钮按精确权限决定，版本变化触发失效刷新，退出及注销进度保持可达 | 权限 UI 合同、Portal/桌面版本头传播、三语文案、Portal Go 测试、前端 lint/构建及架构守卫通过；真实撤权推送时延和浏览器/桌面交互待部署验证 |
 | `ADMIN-PORTAL-UI-REVIEW` | 管理后台改版只调整展示、交互与验收，现有功能需求、API、权限、治理和状态机保持不变；UI-28～UI-32 拥有独立交付边界 | 角色 A 与角色 B 交替完成三轮独立复审，最终无 P0/P1；正式实现与运行验证分别由 APT-094～APT-098 收敛 |
-| `ADMIN-PORTAL-SHELL` | 管理后台分组导航、URL 状态、共享基础组件、三语、响应式和无障碍壳层 | 导航单元测试、前端 lint、三语发布门禁、Portal 构建和架构守卫通过；领域页面改版由 APT-095～APT-097 收敛 |
-| `ADMIN-PORTAL-PROTOTYPE-CONFORMANCE` | 以 `admin-portal-ui-prototype.html` 为第一视觉基准，核验浅色蓝白壳层、页头、指标卡、业务卡片、工具栏、数据表、右侧详情抽屉和旧扩展页融合；禁止旧深色/青绿色设计回退 | 2026-08-28 源码/制品合同、前端 lint、Portal 构建和定向合同通过；`CLOUD_UAT 0.8.0@474a522e` Portal 健康，公网 CSS `76950367…`、JS `61bd3b57…` 与仓库制品一致，`admin.html` 返回 200 |
+| `ADMIN-PORTAL-SHELL` | 管理后台严格采用 HTML 原型的五组导航、独立 URL 状态、共享基础组件、三语、响应式和无障碍壳层 | 工作台、身份与组织、财务与支付、模型与 Token、治理与安全五组及角色/支付/商品/审批/偏好独立 section 已通过源码、构建制品、URL、权限矩阵和三语合同；尚未部署 |
+| `ADMIN-PORTAL-PROTOTYPE-CONFORMANCE` | 以 `admin-portal-ui-prototype.html` 为第一视觉和信息架构基准，核验五组导航及精确页面命名、浅色蓝白壳层、页头、指标卡、业务卡片、工具栏、数据表、右侧详情抽屉和旧扩展页融合；禁止旧六组分类及旧深色/青绿色设计回退 | 2026-08-28 源码/制品五组合同、前端 lint、Portal 构建、215 项合同、Go 单测、任务覆盖和架构守卫通过；`CLOUD_UAT 0.8.0@474a522e` 仍为旧六组导航，不能作为本轮完成证据，发布状态为 NOT_DEPLOYED |
 | `ADMIN-IDENTITY-UX` | 用户、组织、角色绑定、注册修复与注销修复在统一身份页面内按精确权限展示 | 身份扩展挂载测试、37 个权限/角色/基础合同测试、前端 lint 和 Portal 构建通过；未改变现有 Account API 或管理动作 |
 | `AUTHORIZATION-COVERAGE-GATE` | 自动发现生产 Go 源码中的 HTTP 路由、后台任务、事件 Consumer/Relay 及全部 CLI，并要求稳定个人/平台/组织权限、精确 `internal.*` 权限或专用公开协议策略逐项分类 | 当前 260 个 HTTP 路由、21 个任务、3 个事件入口和 13 个 CLI 全部登记；删除登记、未知权限、作用域错配、陈旧项和新增未分类入口的负向合同通过，统一 verify 与正式客户端发布门禁均执行该检查 |
 | `WEB-IDENTITY-LOGIN` | Keycloak 浏览器 Authenticator、Pinvou 三语主题、密码边界、短信滑块登录、手机验证码注册、Portal 未登录直达及 Compose/Helm 运行配置合同 | 仓库代码和静态合同通过；自定义 Keycloak 镜像构建及真实短信/注册/PKCE 联调待部署 |
@@ -367,11 +367,11 @@
 | UI-25 | 已实现 | AUDIT_HEAD | ROLE-BINDING-LIFECYCLE; UI-BUILD | NOT_DEPLOYED | 普通个人中心不再挂载角色授权组件、加载对应制品或请求本人角色绑定；后台角色定义、授权与撤销界面及服务端权限边界保持不变。 |
 | UI-26 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 默认按到期时间展示最多五个有效包及安全进度和汇总；主页面采用无整体边框、无圆角、只保留条目分隔线的扁平列表；全量列表包含历史状态，详情弹窗保留组成、来源、订单及退款说明并支持键盘关闭。 |
 | UI-27 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 成功订单按付款时间倒序展示八列桌面摘要，中宽隐藏次要列、移动端使用卡片；组合支付/履约状态、时长推导、完整订单号和详情弹窗均可访问。 |
-| UI-28 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | CLOUD_UAT `0.8.0@474a522e` 2026-08-28 | 后台按六组信息架构展示精确授权页面；合法 URL 深链、刷新和前进/后退保持当前页，非法或无权 section 失败关闭到首个可访问页；壳层已按 HTML 原型切换为固定蓝白侧栏/顶栏、独立页头、四列指标及 1480px 内容区，旧深色/青绿色视觉被门禁禁止。 |
-| UI-29 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-IDENTITY-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@474a522e` 2026-08-28 | 用户、组织和节点保留现有真实操作；目录使用卡片标题、查询工具栏与数据表编排，用户/组织详情改为保留列表上下文的右侧抽屉；角色绑定和注册修复按原子权限进入同一领域卡片流。 |
-| UI-30 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-FINANCE-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@474a522e` 2026-08-28 | 财务工作区按精确权限提供账务运营、审批与恢复、充值商品子页；指标、筛选、表格和订单/案件详情按 HTML 原型重新编排，历史审批/商品挂载页继承统一卡片与工具栏样式，现有真实接口、命令和数据保持不变。 |
-| UI-31 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-MODEL-SYSTEM-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@474a522e` 2026-08-28 | 模型、Token、Provisioning、用量、系统与审计沿用真实接口和精确权限；列表与筛选进入统一卡片流，已有 Token/用量/审计详情使用键盘可关闭的右侧抽屉；公网仍无 Bootstrap、Break-glass、IdP 或服务身份执行入口。 |
-| UI-32 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-UI-INTEGRATION; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | CLOUD_UAT `0.8.0@474a522e` 2026-08-28 | 总验收除正式需求与任务唯一所有权、分组导航/URL、精确权限和不可用能力隐藏外，新增源码/制品设计 Token、业务页结构、旧视觉禁用、详情抽屉焦点/Esc、320px/200%、触控目标与减弱动画回归门禁。 |
+| UI-28 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 后台严格采用 HTML 原型的五组信息架构及页面命名；合法 URL 深链、刷新和前进/后退保持当前页，非法或无权 section 失败关闭到首个可访问页；无真实接口或无精确读权限页面隐藏，不使用假数据。云端 `0.8.0@474a522e` 仍是旧六组实现。 |
+| UI-29 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-IDENTITY-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 用户管理、角色与授权、组织管理成为原型命名页面；角色从用户聚合页拆为独立 section，注册/资料/注销修复归入用户管理，“我的组织”在缺少真实后台接口时隐藏；既有 Account API 与动作不变。 |
+| UI-30 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-FINANCE-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 计费运营、支付与资金、定价与商品、审批中心成为独立 section，删除旧财务聚合 Tab；各页继续复用现有 Billing API，并按精确读/写权限分别展示，未新增业务能力。 |
+| UI-31 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-MODEL-SYSTEM-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | Token Gateway、审计与导出、系统与安全采用原型命名；只读运行手册保留在系统/审计内容中而不形成第六导航组；公网仍无 Bootstrap、Break-glass、IdP 或服务身份执行入口。 |
+| UI-32 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-UI-INTEGRATION; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 总验收改为验证 HTML 原型定义的五组信息架构、独立 URL、精确权限与不可用能力隐藏，并继续覆盖源码/制品设计 Token、旧视觉禁用、详情抽屉、响应式、触控目标与减弱动画。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
 | NFR-51 | 已实现 | AUDIT_HEAD | MODEL-CATALOG-SELECTION; ACCOUNT-PLATFORM-STATE; BRIDGE-DOMAIN-PROTOCOL; WEB-BRIDGE-DOMAIN; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 账号 Popover 退役入口、设置全局默认、对话会话选择、类型化来源、生命周期和失败关闭执行同一门禁；简中、英文、日文词条及桌面/Web 桥接协议由自动测试阻断回归 |
@@ -889,11 +889,11 @@
 | UI-25 | 普通个人中心角色信息收敛 | 已实现 | 普通个人中心已删除角色授权挂载点、制品和请求，不展示原始角色信息；后台角色治理保持可用。 |
 | UI-26 | 权益包渐进式展示 | 已实现 | 默认最多五条有效包摘要并汇总数量和余额，主页面去除重复资料卡及列表整体边框，只以横向分隔线区分条目；完整列表、历史状态、BASE/BONUS 组成和支付关联进入可访问详情弹窗。 |
 | UI-27 | 成功订单摘要与详情 | 已实现 | 仅成功订单按付款时间倒序展示响应式摘要；桌面八列、中宽精简、移动卡片，复杂支付、履约及发票字段进入可访问详情弹窗。 |
-| UI-28 | 统一管理后台壳层与共享基础组件 | 已实现 | 后台按 HTML 原型使用固定蓝白壳层、独立页头、四列指标与 1480px 内容区；URL 深链、浏览器历史、共享状态、三语、键盘和响应式边界保持有效。 |
-| UI-29 | 身份、用户、角色与组织后台界面改版 | 已实现 | 用户和组织目录已按卡片标题、查询工具栏、表格及右侧详情抽屉编排；角色绑定和注册修复按原子权限融入同一领域卡片流，数据与动作不变。 |
-| UI-30 | 财务、支付、审批、定价与充值商品后台界面改版 | 已实现 | 财务、审批与商品现有能力使用统一指标、筛选、表格和详情抽屉结构；旧扩展页不再悬挂于新壳层之外，真实接口、命令和隐藏能力边界不变。 |
-| UI-31 | 模型、Token、系统与审计后台界面改版 | 已实现 | 模型、Token、Provisioning、用量、系统与审计采用统一业务卡片和数据表，已有详情进入可通过 Esc 关闭的右侧抽屉；秘密和公网执行能力仍不展示。 |
-| UI-32 | 管理后台跨页面集成与发布验收 | 已实现 | 验收覆盖源码/制品设计 Token、旧配色禁用、页头/指标/工具栏/表格/抽屉结构、精确权限、不可用能力隐藏、三语、读屏、响应式、触控目标和减弱动画。 |
+| UI-28 | 统一管理后台壳层与共享基础组件 | 已实现 | 源码严格采用 HTML 原型的工作台、身份与组织、财务与支付、模型与 Token、治理与安全五组导航和页面命名；URL 深链、浏览器历史、共享状态、三语、键盘和响应式边界保持有效，尚未部署。 |
+| UI-29 | 身份、用户、角色与组织后台界面改版 | 已实现 | 用户管理、角色与授权、组织管理按独立页面编排；现有修复能力归入用户管理，“我的组织”因无真实后台接口而隐藏，数据与动作不变。 |
+| UI-30 | 财务、支付、审批、定价与充值商品后台界面改版 | 已实现 | 计费运营、支付与资金、定价与商品、审批中心成为独立页面，继续复用原 API；旧财务聚合 Tab 已删除。 |
+| UI-31 | 模型、Token、系统与审计后台界面改版 | 已实现 | Token Gateway、审计与导出、系统与安全按原型命名；只读运行手册作为页面内容保留，不新增导航组或公网执行能力。 |
+| UI-32 | 管理后台跨页面集成与发布验收 | 已实现 | 验收覆盖 HTML 原型五组信息架构、独立 URL、源码/制品设计 Token、旧六组与旧配色禁用、精确权限、不可用能力隐藏、三语、读屏和响应式。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
 | ADM-03 | 服务身份权限 | 部分实现 | 云端 UAT 已验证真实 OIDC/JWKS 和独立 Relay 容器，但仍共用静态 HTTP 令牌；正式集群投射身份、轮换、撤销与权限故障演练未完成。 |
