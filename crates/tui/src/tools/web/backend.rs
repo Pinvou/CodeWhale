@@ -301,10 +301,19 @@ impl SearchBackend for ProviderNativeSearchBackend<'_> {
     }
 
     fn capabilities(&self) -> QueryCapabilities {
+        let domains = self
+            .context
+            .provider_native_search
+            .as_ref()
+            .is_some_and(crate::client::ProviderNativeSearchClient::supports_domain_filter);
         QueryCapabilities {
             max_results: QueryCapabilityState::Supported,
             recency: QueryCapabilityState::Unsupported,
-            domains: QueryCapabilityState::Supported,
+            domains: if domains {
+                QueryCapabilityState::Supported
+            } else {
+                QueryCapabilityState::Unsupported
+            },
             locale: QueryCapabilityState::Unsupported,
             published_date: QueryCapabilityState::Unknown,
         }

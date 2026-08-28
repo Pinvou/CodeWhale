@@ -4575,6 +4575,12 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
         ProviderKind::Moonshot => {
             normalized == DEFAULT_MOONSHOT_BASE_URL || moonshot_base_url_uses_kimi_code(base_url)
         }
+        ProviderKind::Zai => matches!(
+            normalized.as_str(),
+            "https://api.z.ai/api/coding/paas/v4"
+                | "https://api.z.ai/api/paas/v4"
+                | "https://open.bigmodel.cn/api/paas/v4"
+        ),
         ProviderKind::XiaomiMimo => {
             xiaomi_mimo_base_url_uses_token_plan(base_url)
                 || xiaomi_mimo_base_url_is_pay_as_you_go(base_url)

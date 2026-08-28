@@ -1258,7 +1258,7 @@ fn priced_deepseek_resolver() -> RouteResolver {
 }
 
 #[test]
-fn resolver_carries_exact_offering_capabilities_without_protocol_inference() {
+fn resolver_carries_exact_offering_capabilities_and_adds_sourced_route_search() {
     use crate::catalog::{CatalogOffering, CatalogSource};
     use crate::route::CapabilityState;
 
@@ -1289,7 +1289,7 @@ fn resolver_carries_exact_offering_capabilities_without_protocol_inference() {
     assert_eq!(capabilities.streaming, CapabilityState::Unknown);
     assert_eq!(
         capabilities.server_side_web_search,
-        CapabilityState::Unknown
+        CapabilityState::Supported
     );
 }
 
@@ -1327,6 +1327,79 @@ fn provider_native_web_search_requires_exact_direct_endpoint_offering() {
         custom_endpoint.capabilities().server_side_web_search,
         CapabilityState::Unknown
     );
+}
+
+#[test]
+fn domestic_native_search_is_exact_to_model_and_product_route() {
+    use crate::route::CapabilityState;
+
+    let resolver = RouteResolver::new();
+    for (provider, model) in [
+        (ProviderKind::Deepseek, "deepseek-v4-flash"),
+        (ProviderKind::Moonshot, "kimi-k3"),
+        (ProviderKind::ModelstudioTokenPlan, "qwen3.8-max"),
+        (ProviderKind::XiaomiMimo, "mimo-v2.5-pro"),
+    ] {
+        let route = resolver
+            .resolve(&req(Some(provider), Some(model)))
+            .expect("documented native-search route resolves");
+        assert_eq!(
+            route.capabilities().server_side_web_search,
+            CapabilityState::Supported,
+            "{provider:?}/{model} should carry the exact route fact"
+        );
+    }
+
+    let kimi_code = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::Moonshot),
+            model_selector: Some(LogicalModelRef::from("k3")),
+            saved_provider_model: None,
+            base_url_override: Some("https://api.kimi.com/coding/v1".to_string()),
+            limit_overrides: Vec::new(),
+        })
+        .expect("Kimi Code route resolves");
+    assert_eq!(
+        kimi_code.capabilities().server_side_web_search,
+        CapabilityState::Supported
+    );
+
+    let zai_coding = resolver
+        .resolve(&req(Some(ProviderKind::Zai), Some("GLM-5.3")))
+        .expect("Z.AI Coding Plan route resolves");
+    assert_eq!(
+        zai_coding.capabilities().server_side_web_search,
+        CapabilityState::Unknown
+    );
+    let zai_general = resolver
+        .resolve(&RouteRequest {
+            explicit_provider: Some(ProviderKind::Zai),
+            model_selector: Some(LogicalModelRef::from("GLM-5.3")),
+            saved_provider_model: None,
+            base_url_override: Some("https://api.z.ai/api/paas/v4".to_string()),
+            limit_overrides: Vec::new(),
+        })
+        .expect("Z.AI general route resolves");
+    assert_eq!(
+        zai_general.capabilities().server_side_web_search,
+        CapabilityState::Supported
+    );
+
+    for (provider, model) in [
+        (ProviderKind::ModelstudioCodingPlan, "qwen3.8-max"),
+        (ProviderKind::ModelstudioTokenPlan, "qwen3.8-max-preview"),
+        (ProviderKind::Moonshot, "kimi-k2.7-code"),
+        (ProviderKind::XiaomiMimo, "mimo-v2.5-pro-ultraspeed"),
+    ] {
+        let route = resolver
+            .resolve(&req(Some(provider), Some(model)))
+            .expect("unproven route still resolves");
+        assert_eq!(
+            route.capabilities().server_side_web_search,
+            CapabilityState::Unknown,
+            "{provider:?}/{model} must not inherit search by similarity"
+        );
+    }
 }
 
 #[test]
