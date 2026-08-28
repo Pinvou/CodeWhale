@@ -2292,8 +2292,10 @@ product surface:
 - OpenAI Responses, Anthropic Messages, and xAI Responses use their documented
   web-search tools.
 - DeepSeek V4 Flash/Pro/vision-exp use the first-party Responses search tool.
-- Direct Moonshot `kimi-k3` / `kimi-k2.6` use `$web_search`; the exact Kimi Code
-  membership endpoint uses its structured `/search` service.
+- Direct Moonshot `kimi-k3` uses the official
+  `moonshot/web-search:latest` Formula tool. The older `kimi-k2.6` route keeps
+  the `$web_search` compatibility contract with thinking disabled. The exact
+  Kimi Code membership endpoint uses its structured `/search` service.
 - Alibaba Model Studio **Token Plan** `qwen3.8-max`, `qwen3.7-max`, and
   `qwen3.7-plus` use Responses Harness search. Coding Plan,
   `qwen3.8-max-preview`, and Anthropic-compatible product variants do not
@@ -2308,6 +2310,13 @@ product surface:
 Provider entitlement, activation, quota, and per-call billing still apply.
 Codewhale makes this auxiliary request only after the model invokes the
 `web_search` tool; it does not search on every chat turn.
+
+The direct Moonshot Formula/legacy `$web_search`, Model Studio Token Plan,
+China Zhipu `search_std`, and MiMo plugin paths are covered by request-contract
+mocks but were not live-account verified for this integration. That
+verification gap is accepted because execution failures and responses without
+usable citations are recorded in the structured receipt before Codewhale
+visibly continues to the configured search backend.
 
 Custom endpoints, aggregators, nearby model names, and local/self-hosted models
 never inherit native search by naming similarity. They start directly at the

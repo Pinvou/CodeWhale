@@ -9,9 +9,14 @@ use super::{
     ProviderNativeSearchClient, ProviderNativeSearchRequest, ProviderNativeSearchResponse,
     bounded_answer, citation_from_url, citations_from_text, push_citation,
 };
-use crate::client::api_url;
+use crate::{
+    client::api_url,
+    config::{DEFAULT_KIMI_CODE_BASE_URL, MOONSHOT_KIMI_K3_MODEL},
+};
 
-const MAX_BUILTIN_SEARCH_ROUNDS: usize = 4;
+const MAX_NATIVE_SEARCH_ROUNDS: usize = 4;
+const WEB_SEARCH_FORMULA_URI: &str = "moonshot/web-search:latest";
+const WEB_SEARCH_FORMULA_FUNCTION: &str = "web_search";
 
 pub(super) async fn search(
     client: &ProviderNativeSearchClient,
@@ -19,6 +24,13 @@ pub(super) async fn search(
 ) -> Result<ProviderNativeSearchResponse> {
     if is_kimi_code_route(&client.inner.base_url) {
         search_kimi_code(client, request).await
+    } else if client
+        .inner
+        .default_model
+        .trim()
+        .eq_ignore_ascii_case(MOONSHOT_KIMI_K3_MODEL)
+    {
+        search_formula(client, request).await
     } else {
         search_builtin(client, request).await
     }
@@ -28,7 +40,7 @@ fn is_kimi_code_route(base_url: &str) -> bool {
     base_url
         .trim()
         .trim_end_matches('/')
-        .eq_ignore_ascii_case("https://api.kimi.com/coding/v1")
+        .eq_ignore_ascii_case(DEFAULT_KIMI_CODE_BASE_URL)
 }
 
 async fn search_kimi_code(
@@ -66,14 +78,8 @@ async fn search_builtin(
     })];
     let url = api_url(&client.inner.base_url, "chat/completions");
 
-    for _ in 0..MAX_BUILTIN_SEARCH_ROUNDS {
-        let body = json!({
-            "model": client.inner.default_model,
-            "messages": &messages,
-            "tools": &tools,
-            "max_completion_tokens": 4_096,
-            "stream": false,
-        });
+    for _ in 0..MAX_NATIVE_SEARCH_ROUNDS {
+        let body = build_builtin_chat_body(&client.inner.default_model, &messages, &tools);
         let payload = client.post_json(&url, &body, &[]).await?;
         let choice = payload
             .pointer("/choices/0")
@@ -120,6 +126,126 @@ async fn search_builtin(
     }
 
     bail!("Kimi native web search exceeded the bounded tool-call loop")
+}
+
+fn build_builtin_chat_body(model: &str, messages: &[Value], tools: &Value) -> Value {
+    json!({
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "max_completion_tokens": 4_096,
+        "stream": false,
+        "thinking": { "type": "disabled" },
+    })
+}
+
+async fn search_formula(
+    client: &ProviderNativeSearchClient,
+    request: &ProviderNativeSearchRequest,
+) -> Result<ProviderNativeSearchResponse> {
+    let formula_path = format!("formulas/{WEB_SEARCH_FORMULA_URI}");
+    let tools_payload = client
+        .get_json(&api_url(
+            &client.inner.base_url,
+            &format!("{formula_path}/tools"),
+        ))
+        .await?;
+    let tools = formula_web_search_tools(&tools_payload)?;
+    let mut messages = vec![json!({
+        "role": "user",
+        "content": super::search_prompt(request),
+    })];
+    let chat_url = api_url(&client.inner.base_url, "chat/completions");
+    let fiber_url = api_url(&client.inner.base_url, &format!("{formula_path}/fibers"));
+
+    for _ in 0..MAX_NATIVE_SEARCH_ROUNDS {
+        let body = json!({
+            "model": client.inner.default_model,
+            "messages": &messages,
+            "tools": &tools,
+            "stream": false,
+        });
+        let payload = client.post_json(&chat_url, &body, &[]).await?;
+        let choice = payload
+            .pointer("/choices/0")
+            .context("Kimi Formula web search response omitted choices[0]")?;
+        let message = choice
+            .get("message")
+            .and_then(Value::as_object)
+            .context("Kimi Formula web search response omitted assistant message")?;
+        let tool_calls = message.get("tool_calls").and_then(Value::as_array);
+        if tool_calls.is_none_or(Vec::is_empty) {
+            return Ok(parse_final_message(message));
+        }
+
+        messages.push(Value::Object(message.clone()));
+        for tool_call in tool_calls.expect("checked above") {
+            let id = tool_call
+                .get("id")
+                .and_then(Value::as_str)
+                .context("Kimi Formula web-search call omitted id")?;
+            let function = tool_call
+                .get("function")
+                .and_then(Value::as_object)
+                .context("Kimi Formula web-search call omitted function")?;
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .context("Kimi Formula web-search call omitted function name")?;
+            if name != WEB_SEARCH_FORMULA_FUNCTION {
+                bail!("Kimi Formula web search requested an unexpected tool");
+            }
+            let arguments = function
+                .get("arguments")
+                .and_then(Value::as_str)
+                .context("Kimi Formula web-search call omitted arguments")?;
+            let _: Value = serde_json::from_str(arguments)
+                .context("Kimi Formula web-search arguments were not valid JSON")?;
+            let fiber = client
+                .post_json(
+                    &fiber_url,
+                    &json!({ "name": name, "arguments": arguments }),
+                    &[],
+                )
+                .await?;
+            let result = formula_fiber_result(&fiber)?;
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "content": result,
+            }));
+        }
+    }
+
+    bail!("Kimi Formula web search exceeded the bounded tool-call loop")
+}
+
+fn formula_web_search_tools(payload: &Value) -> Result<Value> {
+    let tools = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .context("Kimi web-search Formula omitted tools")?;
+    if tools.len() != 1
+        || tools[0].get("type").and_then(Value::as_str) != Some("function")
+        || tools[0].pointer("/function/name").and_then(Value::as_str)
+            != Some(WEB_SEARCH_FORMULA_FUNCTION)
+    {
+        bail!("Kimi web-search Formula returned an unexpected tool declaration");
+    }
+    Ok(Value::Array(tools.clone()))
+}
+
+fn formula_fiber_result(payload: &Value) -> Result<&str> {
+    if payload.get("status").and_then(Value::as_str) != Some("succeeded") {
+        bail!("Kimi web-search Formula fiber did not succeed");
+    }
+    payload
+        .pointer("/context/output")
+        .or_else(|| payload.pointer("/context/encrypted_output"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|result| !result.is_empty())
+        .context("Kimi web-search Formula fiber omitted its result")
 }
 
 fn builtin_search_tools() -> Value {
@@ -202,6 +328,28 @@ mod tests {
         let tools = builtin_search_tools();
         assert_eq!(tools[0]["type"], "builtin_function");
         assert_eq!(tools[0]["function"]["name"], "$web_search");
+        let body = build_builtin_chat_body("kimi-k2.6", &[], &tools);
+        assert_eq!(body["max_completion_tokens"], 4_096);
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn validates_formula_tool_and_encrypted_fiber_result() {
+        let tools = formula_web_search_tools(&json!({
+            "tools": [{
+                "type": "function",
+                "function": { "name": "web_search" }
+            }]
+        }))
+        .expect("formula tools");
+        assert_eq!(tools[0]["function"]["name"], "web_search");
+
+        let fiber = json!({
+            "status": "succeeded",
+            "context": { "encrypted_output": "encrypted search result" }
+        });
+        let result = formula_fiber_result(&fiber).expect("formula result");
+        assert_eq!(result, "encrypted search result");
     }
 
     #[test]

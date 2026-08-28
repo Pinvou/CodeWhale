@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Z.AI configurations using `https://open.bigmodel.cn/api/paas/v4` are now
+  treated as official Zhipu routes for model-alias normalization, credential
+  scoping, and native web search. Existing unknown model IDs continue to pass
+  through unchanged.
+
 ## [0.9.5] - 2026-08-08
 
 Codewhale v0.9.5 consolidates the terminal application into one compiled
