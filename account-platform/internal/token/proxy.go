@@ -141,7 +141,7 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	price, err := s.billing.Price(r.Context(), catalogModel.ModelID.String())
 	if err != nil {
-		api.WriteError(w, http.StatusServiceUnavailable, "PRICING_UNAVAILABLE", "the model price is unavailable", httpserver.RequestID(r.Context()))
+		s.writePricingError(w, r, err)
 		return
 	}
 	if err := ValidatePriceFormula(price); err != nil {
@@ -244,6 +244,24 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.dispatchUsage(w, r, usageRequest, envelope)
+}
+
+func (s *Service) writePricingError(w http.ResponseWriter, r *http.Request, err error) {
+	var billingError *BillingHTTPError
+	if errors.As(err, &billingError) {
+		switch billingError.Code {
+		case "PRICE_MISSING":
+			api.WriteError(w, http.StatusUnprocessableEntity, "PRICING_MISSING", "a published model price is required", httpserver.RequestID(r.Context()))
+			return
+		case "PRICE_AMBIGUOUS":
+			api.WriteError(w, http.StatusConflict, "PRICING_AMBIGUOUS", "multiple model prices match the request", httpserver.RequestID(r.Context()))
+			return
+		case "PRICE_UNAVAILABLE":
+			api.WriteError(w, http.StatusServiceUnavailable, "PRICING_UNAVAILABLE", "pricing is explicitly unavailable for this model", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
+	api.WriteError(w, http.StatusServiceUnavailable, "PRICING_UNAVAILABLE", "the model price is unavailable", httpserver.RequestID(r.Context()))
 }
 
 func (s *Service) dispatchUsage(w http.ResponseWriter, r *http.Request, usageRequest UsageRequest, envelope DispatchEnvelope) {
