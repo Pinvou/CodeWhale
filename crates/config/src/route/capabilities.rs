@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ProviderKind, provider_base_url_is_official};
+use crate::{DEFAULT_MOONSHOT_BASE_URL, ProviderKind, provider_base_url_is_official};
 
 /// Whether a resolved provider/model offering supports one capability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,8 +142,11 @@ pub(crate) fn documented_server_side_web_search_for_route(
         | ProviderKind::Openai
         | ProviderKind::Anthropic
         | ProviderKind::Xai
-        | ProviderKind::Moonshot
         | ProviderKind::XiaomiMimo => true,
+        // Moonshot's built-in `$web_search` contract belongs to the exact
+        // direct API product. Kimi Code's exact `/coding/v1` product is
+        // handled above; adjacent coding paths must remain fail-closed.
+        ProviderKind::Moonshot => normalized == DEFAULT_MOONSHOT_BASE_URL,
         // Token Plan exposes Harness web_search only on its Responses API.
         // The Anthropic and Coding Plan products do not inherit that fact.
         ProviderKind::ModelstudioTokenPlan => true,
@@ -273,6 +276,14 @@ mod tests {
     fn route_fact_rejects_unproven_product_surfaces() {
         assert_eq!(
             documented_server_side_web_search_for_route(
+                ProviderKind::Moonshot,
+                "kimi-k3",
+                "https://api.moonshot.ai/v1",
+            ),
+            CapabilityState::Supported
+        );
+        assert_eq!(
+            documented_server_side_web_search_for_route(
                 ProviderKind::ModelstudioTokenPlan,
                 "qwen3.8-max",
                 "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
@@ -287,6 +298,20 @@ mod tests {
             ),
             CapabilityState::Supported
         );
+        for (model, base_url) in [
+            ("kimi-k3", "https://api.kimi.com/coding/v2"),
+            ("kimi-k2.6", "https://api.kimi.com/coding/v1/preview"),
+        ] {
+            assert_eq!(
+                documented_server_side_web_search_for_route(
+                    ProviderKind::Moonshot,
+                    model,
+                    base_url,
+                ),
+                CapabilityState::Unknown,
+                "adjacent Kimi Code route {base_url} must remain fail-closed"
+            );
+        }
         assert_eq!(
             documented_server_side_web_search_for_route(
                 ProviderKind::ModelstudioCodingPlan,

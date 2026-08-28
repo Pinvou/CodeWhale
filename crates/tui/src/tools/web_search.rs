@@ -947,25 +947,11 @@ fn finalize_search_response(
         }
     }
     if !query.domains.is_empty() {
-        let before = raw.results.len();
-        raw.results
-            .retain(|result| domain_matches(&result.url, &query.domains));
-        rerank(&mut raw.results);
+        // The backend chain applies this before deciding whether a backend
+        // produced usable results. Keep finalization defensive for cached or
+        // directly constructed responses; the helper is idempotent.
+        apply_domain_constraints(&query, capabilities, &mut raw);
         honored.domains = true;
-        let provider_honored = matches!(
-            capabilities.domains,
-            super::web::contract::CapabilityState::Supported
-        );
-        if !provider_honored && raw.backend == BackendId::ProviderNative {
-            // Post-filtering can constrain returned citations, but it cannot
-            // prove that a provider-generated answer used only those sources.
-            raw.note = None;
-        }
-        if !provider_honored || raw.results.len() != before {
-            raw.degraded.push(DegradedReason::PostFiltered {
-                knob: QueryKnob::Domains,
-            });
-        }
     }
     if query.locale.is_some() {
         if matches!(
@@ -1008,6 +994,43 @@ fn finalize_search_response(
         message,
         results: raw.results,
         receipt,
+    }
+}
+
+pub(crate) fn apply_domain_constraints(
+    query: &SearchQuery,
+    capabilities: super::web::contract::QueryCapabilities,
+    raw: &mut BackendSearch,
+) {
+    if query.domains.is_empty() {
+        return;
+    }
+
+    let before = raw.results.len();
+    raw.results
+        .retain(|result| domain_matches(&result.url, &query.domains));
+    rerank(&mut raw.results);
+    let provider_honored = matches!(
+        capabilities.domains,
+        super::web::contract::CapabilityState::Supported
+    );
+    if !provider_honored && raw.backend == BackendId::ProviderNative {
+        // Post-filtering can constrain returned citations, but it cannot
+        // prove that a provider-generated answer used only those sources.
+        raw.note = None;
+    }
+    let already_recorded = raw.degraded.iter().any(|reason| {
+        matches!(
+            reason,
+            DegradedReason::PostFiltered {
+                knob: QueryKnob::Domains
+            }
+        )
+    });
+    if (!provider_honored || raw.results.len() != before) && !already_recorded {
+        raw.degraded.push(DegradedReason::PostFiltered {
+            knob: QueryKnob::Domains,
+        });
     }
 }
 
@@ -2912,7 +2935,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_native_post_filter_discards_unconstrained_answer() {
+    fn finalization_defensively_discards_unconstrained_native_answer() {
         let query = SearchQuery::new(
             "current release".to_string(),
             3,
@@ -2946,6 +2969,119 @@ mod tests {
                 knob: QueryKnob::Domains
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn domain_filtered_native_results_fall_back_in_execution_receipt() {
+        use crate::client::{DeepSeekClient, ProviderNativeSearchClient};
+        use crate::config::{Config, ProviderConfig, ProvidersConfig, SearchProvider};
+        use crate::tools::spec::{ToolContext, ToolSpec};
+        use codewhale_config::route::CapabilityState as RouteCapabilityState;
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "action": {
+                            "type": "open_page",
+                            "url": "https://github.com/example/project"
+                        }
+                    },
+                    {
+                        "type": "message",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "Unconstrained provider answer."
+                        }]
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/search"))
+            .and(query_param("q", "example crate docs"))
+            .and(query_param("format", "json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "title": "Matching docs.rs source",
+                    "url": "https://docs.rs/example/latest/example/",
+                    "content": "Configured backend result"
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = Config {
+            provider: Some("deepseek".to_string()),
+            providers: Some(ProvidersConfig {
+                deepseek: ProviderConfig {
+                    api_key: Some("deepseek-test-key".to_string()),
+                    base_url: Some(format!("{}/v1", server.uri())),
+                    model: Some("deepseek-v4-flash".to_string()),
+                    ..ProviderConfig::default()
+                },
+                ..ProvidersConfig::default()
+            }),
+            ..Config::default()
+        };
+        let native = ProviderNativeSearchClient::new(
+            DeepSeekClient::new(&config).expect("test DeepSeek client"),
+        )
+        .expect("DeepSeek native adapter");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut context = ToolContext::new(tmp.path().to_path_buf())
+            .with_state_namespace("domain-filter-native-fallback");
+        context.search_provider = SearchProvider::Searxng;
+        context.search_base_url = Some(server.uri());
+        context.provider_native_search = Some(native);
+        context.route_capabilities.server_side_web_search = RouteCapabilityState::Supported;
+
+        let result = WebSearchTool
+            .execute(
+                json!({
+                    "query": "example crate docs",
+                    "domains": ["docs.rs"]
+                }),
+                &context,
+            )
+            .await
+            .expect("configured backend should satisfy the domain constraint");
+        let value: serde_json::Value =
+            serde_json::from_str(&result.content).expect("web search response");
+
+        assert_eq!(value["count"], 1);
+        assert_eq!(value["results"][0]["domain"], "docs.rs");
+        assert_eq!(value["receipt"]["backend"], "searxng");
+        assert!(
+            !value["message"]
+                .as_str()
+                .expect("search message")
+                .contains("Unconstrained provider answer")
+        );
+        let degraded = value["receipt"]["degraded"]
+            .as_array()
+            .expect("degraded receipt array");
+        assert!(degraded.iter().any(|item| {
+            item["kind"] == "no_usable_results" && item["backend"] == "provider_native"
+        }));
+        assert!(
+            degraded
+                .iter()
+                .any(|item| item["kind"] == "post_filtered" && item["knob"] == "domains")
+        );
+        assert!(degraded.iter().any(|item| {
+            item["kind"] == "backend_fallback"
+                && item["from"] == "provider_native"
+                && item["to"] == "searxng"
+        }));
     }
 
     #[test]
