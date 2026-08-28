@@ -748,8 +748,10 @@ pub fn run() {
                 move || remote_event_endpoint.has_active_web_transport(),
             ));
             app.handle().manage(remote_control_manager.clone());
-            app.handle()
-                .manage(features::behavior_telemetry::BehaviorTelemetry::new());
+            let behavior_telemetry =
+                features::behavior_telemetry::BehaviorTelemetry::new();
+            app.handle().manage(behavior_telemetry.clone());
+            behavior_telemetry.start_default_collection();
             // 匿名设备遥测：独立于 UI/Engine，失败只写日志；先 manage 再建 EnginePool，
             // 让每个 session forwarder 都能在 TurnStarted/TurnComplete 取到状态。
             match telemetry::TelemetryState::boot(env!("CARGO_PKG_VERSION")) {
@@ -1049,10 +1051,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::chat::chat,
             commands::behavior_telemetry::track_behavior_event,
-            commands::behavior_telemetry::get_behavior_telemetry_status,
-            commands::behavior_telemetry::set_behavior_telemetry_enabled,
-            commands::behavior_telemetry::delete_local_behavior_telemetry_data,
-            commands::behavior_telemetry::delete_remote_behavior_telemetry_data,
             commands::assistant_response::export_assistant_response,
             commands::assistant_response::open_assistant_share_target,
             commands::browser::browser_stop,

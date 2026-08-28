@@ -6,6 +6,9 @@ const rust = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry.
 const usageRust = readFileSync(new URL('../src-tauri/src/platform/telemetry.rs', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
 const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
+const bridge = readFileSync(new URL('../src/platform/tauri/bridge.js', import.meta.url), 'utf8');
+const settingsView = readFileSync(new URL('../src/features/settings/SettingsView.jsx', import.meta.url), 'utf8');
+const appLib = readFileSync(new URL('../src-tauri/src/lib.rs', import.meta.url), 'utf8');
 const acpProviderForm = readFileSync(new URL('../src/features/settings/ProviderFormModal.jsx', import.meta.url), 'utf8');
 const schema = JSON.parse(readFileSync(new URL('../../docs/schemas/behavior-telemetry-v1.schema.json', import.meta.url), 'utf8'));
 
@@ -14,6 +17,26 @@ test('activation cohort is persisted before its one-time event is enqueued', () 
   assert.match(rust, /state\.control\.cohort_started = true;[\s\S]*persist_state\(state\)\?/);
   assert.match(rust, /BehaviorEvent::new\("analytics_cohort_started"\)/);
   assert.match(rust, /BehaviorEvent::new\("app_opened"\)/);
+  assert.match(rust, /\.string\("eligibility_source", "first_open"\)/);
+});
+
+test('internal preview collection starts by default without user controls', () => {
+  assert.match(rust, /fn behavior_telemetry_enabled_by_config[\s\S]*"0" \| "false" \| "no" \| "off"/);
+  assert.match(rust, /pub fn start_default_collection[\s\S]*set_collection_enabled\(true\)/);
+  assert.match(rust, /default collection start deferred[\s\S]*RETRY_MAX_DELAY/);
+  assert.match(appLib, /behavior_telemetry\.start_default_collection\(\)/);
+  for (const removedCommand of [
+    'get_behavior_telemetry_status',
+    'set_behavior_telemetry_enabled',
+    'delete_local_behavior_telemetry_data',
+    'delete_remote_behavior_telemetry_data',
+  ]) {
+    assert.ok(!command.includes(removedCommand));
+    assert.ok(!appLib.includes(`commands::behavior_telemetry::${removedCommand}`));
+    assert.ok(!settingsBridge.includes(removedCommand));
+    assert.ok(!bridge.includes(removedCommand));
+  }
+  assert.doesNotMatch(settingsView, /behaviorTelemetry|behaviorAnalytics/);
 });
 
 test('provider setup and first task environment use the v1 lifecycle events', () => {
@@ -68,11 +91,6 @@ test('retryable delivery and pending privacy controls keep bounded background re
   assert.match(rust, /fn lease_matches_authorization[\s\S]*generation\.load\(Ordering::Acquire\) == lease\.generation/);
   assert.match(rust, /fn stale_producer_cannot_write_after_delete_and_reauthorization_aba/);
   assert.match(rust, /fn disabled_state_survives_restart_before_fallible_cleanup/);
-  assert.match(settingsBridge, /function scheduleBehaviorTelemetryStatusPoll/);
-  assert.match(settingsBridge, /status\.withdrawal_pending \|\| status\.deletion_pending/);
-  assert.match(settingsBridge, /status\.enabled \|\| behaviorTelemetryControlPending\(status\)/);
-  assert.match(settingsBridge, /get_behavior_telemetry_status/);
-  assert.match(settingsBridge, /scheduleBehaviorTelemetryStatusPoll\(\);[\s\S]*return state\.behaviorTelemetry/);
   assert.match(usageRust, /StatusCode::GONE[\s\S]*credential_has_expired[\s\S]*clear_credentials/);
   assert.match(usageRust, /credential_has_expired[\s\S]*device_credentials_expired/);
   assert.match(usageRust, /credential_has_expired\("device_data_deleted"\)/);
@@ -84,4 +102,5 @@ test('credential and pending-control state is atomically replaced', () => {
   assert.doesNotMatch(persistence, /create_secret_file|File::create|std::fs::write/);
   assert.match(rust, /telemetry state is unreadable; collection is disabled/);
   assert.match(rust, /refusing to replace the persisted installation identity/);
+  assert.match(rust, /state_after_authoritative_deletion[\s\S]*collection_blocked = true/);
 });

@@ -11,31 +11,6 @@
   var invoke = context.invoke;
   var listen = context.listen;
   var authoritativeAccountRevision = 0;
-  var behaviorTelemetryStatusPollTimer = null;
-
-  function behaviorTelemetryControlPending(status) {
-    return !!(status && (status.withdrawal_pending || status.deletion_pending));
-  }
-
-  function behaviorTelemetryStatusNeedsPoll(status) {
-    return !!(status && (status.enabled || behaviorTelemetryControlPending(status)));
-  }
-
-  function scheduleBehaviorTelemetryStatusPoll() {
-    if (behaviorTelemetryStatusPollTimer || !behaviorTelemetryStatusNeedsPoll(state.behaviorTelemetry)) return;
-    var delay = behaviorTelemetryControlPending(state.behaviorTelemetry) ? 1000 : 5000;
-    behaviorTelemetryStatusPollTimer = setTimeout(async function pollBehaviorTelemetryStatus() {
-      behaviorTelemetryStatusPollTimer = null;
-      try {
-        state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
-        notify();
-      } catch (_) {}
-      if (behaviorTelemetryStatusNeedsPoll(state.behaviorTelemetry)) {
-        scheduleBehaviorTelemetryStatusPoll();
-      }
-    }, delay);
-  }
-
   function isBuiltinLlmApiModelId(modelId) {
     if (modelId === "builtin_llmapi") return true;
     return (state.savedModels || []).some(function (model) {
@@ -137,43 +112,6 @@
       state.settings = { theme: "genesis", language: "zh-Hans" };
     }
     notify();
-  }
-  async function loadBehaviorTelemetryStatus() {
-    try {
-      state.behaviorTelemetry = await invoke("get_behavior_telemetry_status");
-    } catch (e) {
-      state.behaviorTelemetry = {
-        configured: false,
-        enabled: false,
-        collection_period_id: null,
-        withdrawal_pending: false,
-        deletion_pending: false,
-        last_deletion_request_id: null,
-        retention_days: 35,
-        pending_event_count: 0,
-        dropped_event_count: 0,
-      };
-    }
-    notify();
-    scheduleBehaviorTelemetryStatusPoll();
-    return state.behaviorTelemetry;
-  }
-  async function setBehaviorTelemetryEnabled(enabled) {
-    state.behaviorTelemetry = await invoke("set_behavior_telemetry_enabled", { enabled: !!enabled });
-    notify();
-    scheduleBehaviorTelemetryStatusPoll();
-    return state.behaviorTelemetry;
-  }
-  async function deleteLocalBehaviorTelemetryData() {
-    state.behaviorTelemetry = await invoke("delete_local_behavior_telemetry_data");
-    notify();
-    return state.behaviorTelemetry;
-  }
-  async function deleteRemoteBehaviorTelemetryData() {
-    state.behaviorTelemetry = await invoke("delete_remote_behavior_telemetry_data");
-    notify();
-    scheduleBehaviorTelemetryStatusPoll();
-    return state.behaviorTelemetry;
   }
   async function loadSelectedPet() {
     try {
@@ -703,10 +641,6 @@
 
     return {
       loadSettings: loadSettings,
-      loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
-      setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
-      deleteLocalBehaviorTelemetryData: deleteLocalBehaviorTelemetryData,
-      deleteRemoteBehaviorTelemetryData: deleteRemoteBehaviorTelemetryData,
       loadSelectedPet: loadSelectedPet,
       setSelectedPet: setSelectedPet,
       loadEffectiveModelConfig: loadEffectiveModelConfig,

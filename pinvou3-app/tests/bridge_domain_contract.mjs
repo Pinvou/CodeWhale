@@ -8,7 +8,7 @@ export const desktopBridgeApi = {
   scheduled: ['clearScheduledTaskDraft', 'clearScheduledTaskSelection', 'confirmScheduledTaskDraft', 'createScheduledTask', 'deleteScheduledTask', 'dismissScheduledTaskError', 'exitScheduledRunChat', 'loadScheduledTaskRecentRuns', 'loadScheduledTaskRuns', 'loadScheduledTasks', 'openScheduledRunChat', 'pauseScheduledTask', 'pickFolder', 'readScheduledTask', 'refreshScheduledTaskData', 'resumeScheduledTask', 'runScheduledTaskNow', 'selectScheduledTask', 'startScheduledTaskChat', 'toggleScheduledTaskPinned', 'updateScheduledTask'],
   sessions: ['archiveSession', 'createNewSession', 'deleteSession', 'materializeSession', 'renameSession', 'restoreArchivedSession', 'switchToSession', 'toggleSessionPinned'],
   monitor: ['clearMonitorStats', 'startMonitorPolling', 'stopMonitorPolling'],
-  settings: ['deleteLocalBehaviorTelemetryData', 'deleteRemoteBehaviorTelemetryData', 'loadBehaviorTelemetryStatus', 'saveSearchSettings', 'saveSearchSettingsAndRestart', 'saveSettings', 'saveSettingsAndRestart', 'setBehaviorTelemetryEnabled', 'setSelectedPet', 'testSearchProvider'],
+  settings: ['saveSearchSettings', 'saveSearchSettingsAndRestart', 'saveSettings', 'saveSettingsAndRestart', 'setSelectedPet', 'testSearchProvider'],
   feedback: ['submitFeedback'],
   llmapi: ['ensureLlmApiBinding', 'getLlmApiAdminOverview', 'getLlmApiModels', 'getLlmApiStatus', 'loginLlmApiUser', 'refreshLlmApi', 'retryLlmApiProvisioning', 'saveLlmApiUserSession', 'setLlmApiDefaultModel', 'setLlmApiUserEnabled'],
   vllm: ['bootstrapLocalVllm', 'declineVllmSetup', 'detectLocalVllmSetup', 'dismissVllmSetup', 'discoverLocalVllm'],
@@ -35,7 +35,6 @@ export const desktopOnlyBridgeApi = {
   voice: ['cancelVoiceAsrSetup'],
   knowledge: ['loadKnowledgeEmbedderAfterFirstFrame', 'mountRemoteCollection', 'removeRemoteCollection', 'setRemoteCollectionEnabled'],
   llmapi: ['ensureLlmApiBinding', 'getLlmApiAdminOverview', 'getLlmApiModels', 'getLlmApiStatus', 'loginLlmApiUser', 'refreshLlmApi', 'retryLlmApiProvisioning', 'saveLlmApiUserSession', 'setLlmApiDefaultModel', 'setLlmApiUserEnabled'],
-  settings: ['deleteLocalBehaviorTelemetryData', 'deleteRemoteBehaviorTelemetryData', 'loadBehaviorTelemetryStatus', 'setBehaviorTelemetryEnabled'],
   // 多智能体开关是桌面专属操作（ADR-0006）：Web 端只读呈现。
   interaction: ['setMultiAgentMode'],
 };

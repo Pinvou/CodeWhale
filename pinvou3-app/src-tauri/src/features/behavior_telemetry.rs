@@ -557,6 +557,8 @@ struct CollectionControl {
     collection_period_id: Option<String>,
     generation: u64,
     cohort_started: bool,
+    #[serde(default)]
+    collection_blocked: bool,
     pending_request: Option<PendingControlRequest>,
     pending_deletions: Vec<PendingEndpointDeletion>,
     last_deletion_request_id: Option<String>,
@@ -1114,6 +1116,52 @@ impl BehaviorTelemetry {
             let _ = persist_task_attempts(&tasks);
         }
         telemetry
+    }
+
+    pub fn start_default_collection(&self) {
+        if !self.runtime.enabled || self.collecting.load(Ordering::Acquire) {
+            return;
+        }
+        let telemetry = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut retry_delay = Duration::from_secs(1);
+            loop {
+                if !telemetry.state_healthy.load(Ordering::Acquire)
+                    || telemetry.collection_is_blocked().await
+                {
+                    return;
+                }
+                match telemetry.set_collection_enabled(true).await {
+                    Ok(_) => {
+                        telemetry.track(
+                            BehaviorEvent::new("app_opened")
+                                .string("launch_type", "cold")
+                                .integer(
+                                    "startup_duration_ms",
+                                    crate::platform::startup::elapsed_ms().min(600_000),
+                                ),
+                        );
+                        return;
+                    }
+                    Err(error) => {
+                        log::debug!(
+                            "[pinvou3][behavior] default collection start deferred: {error:#}"
+                        );
+                        let jitter = Duration::from_millis(now_ms() % 251);
+                        tokio::time::sleep(retry_delay.saturating_add(jitter)).await;
+                        retry_delay = retry_delay.saturating_mul(2).min(RETRY_MAX_DELAY);
+                    }
+                }
+            }
+        });
+    }
+
+    async fn collection_is_blocked(&self) -> bool {
+        self.state
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|state| state.control.collection_blocked)
     }
 
     pub fn track(&self, event: BehaviorEvent) {
@@ -1721,6 +1769,11 @@ impl BehaviorTelemetry {
             if self.collecting.load(Ordering::Acquire) {
                 return Ok(self.status().await);
             }
+            if self.collection_is_blocked().await {
+                anyhow::bail!(
+                    "behavior telemetry collection is blocked after authoritative deletion"
+                );
+            }
             while self
                 .state
                 .lock()
@@ -1756,7 +1809,7 @@ impl BehaviorTelemetry {
                     paths::pinvou3_home().join("settings.json").is_file();
                 self.track(
                     BehaviorEvent::new("analytics_cohort_started")
-                        .string("eligibility_source", "later_opt_in")
+                        .string("eligibility_source", "first_open")
                         .string(
                             "install_source",
                             if previous_version_present {
@@ -1845,6 +1898,7 @@ impl BehaviorTelemetry {
             state.control.enabled = false;
             state.control.collection_period_id = None;
             state.control.generation = generation;
+            state.control.collection_blocked = true;
             state.control.pending_request = None;
             state.control.pending_deletions = state.deletion_targets();
             persist_state(state)?;
@@ -2016,6 +2070,7 @@ impl BehaviorTelemetry {
                 *guard = Some(PersistedState {
                     control: CollectionControl {
                         generation: self.authorization_generation.load(Ordering::Acquire),
+                        collection_blocked: true,
                         last_deletion_request_id: deletion_request_id,
                         ..CollectionControl::default()
                     },
@@ -2326,6 +2381,7 @@ fn state_after_authoritative_deletion(
     debug_assert!(generation > state.control.generation);
     let mut fresh = PersistedState::fresh(runtime);
     fresh.control.generation = generation;
+    fresh.control.collection_blocked = true;
     fresh.retired_endpoints = state
         .retired_endpoints
         .iter()
@@ -2402,14 +2458,11 @@ fn prepare_disabled_state(state: &mut PersistedState, generation: u64) {
 
 impl RuntimeConfig {
     fn from_env() -> Self {
-        let requested_enabled = std::env::var("PINVOU_BEHAVIOR_TELEMETRY_ENABLED")
-            .ok()
-            .is_some_and(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            });
+        let requested_enabled = behavior_telemetry_enabled_by_config(
+            std::env::var("PINVOU_BEHAVIOR_TELEMETRY_ENABLED")
+                .ok()
+                .as_deref(),
+        );
         let telemetry_base_url = std::env::var("PINVOU_TELEMETRY_BASE_URL")
             .unwrap_or_default()
             .trim_end_matches('/')
@@ -2437,6 +2490,15 @@ impl RuntimeConfig {
             locale: behavior_locale(),
         }
     }
+}
+
+fn behavior_telemetry_enabled_by_config(value: Option<&str>) -> bool {
+    !value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 fn behavior_release_channel() -> String {
@@ -3895,7 +3957,7 @@ mod tests {
     }
 
     #[test]
-    fn public_builds_do_not_collect_without_explicit_control_state() {
+    fn fresh_state_awaits_a_server_confirmed_default_collection_period() {
         let runtime = RuntimeConfig {
             enabled: true,
             telemetry_base_url: "https://example.test/pinvou3/telemetry".to_string(),
@@ -3912,6 +3974,15 @@ mod tests {
         assert!(!state.control.enabled);
         assert!(state.control.collection_period_id.is_none());
         assert!(state.control.pending_request.is_none());
+    }
+
+    #[test]
+    fn internal_collection_is_enabled_by_default_with_an_operational_kill_switch() {
+        assert!(behavior_telemetry_enabled_by_config(None));
+        assert!(behavior_telemetry_enabled_by_config(Some("true")));
+        assert!(behavior_telemetry_enabled_by_config(Some("1")));
+        assert!(!behavior_telemetry_enabled_by_config(Some("false")));
+        assert!(!behavior_telemetry_enabled_by_config(Some("off")));
     }
 
     #[test]
@@ -4233,7 +4304,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_deletion_resets_only_the_matching_credential_to_disabled_identity() {
+    fn authoritative_deletion_blocks_default_restart_for_the_matching_credential() {
         let runtime_a = RuntimeConfig {
             enabled: true,
             telemetry_base_url: "https://a.example.test/pinvou3/telemetry".to_string(),
@@ -4285,6 +4356,7 @@ mod tests {
         assert!(deleted_credentials_match(&state, &deleted));
         let reset = state_after_authoritative_deletion(&state, &runtime_b, &deleted, 8);
         assert!(!reset.control.enabled);
+        assert!(reset.control.collection_blocked);
         assert!(reset.control.collection_period_id.is_none());
         assert!(reset.device_id.is_none());
         assert!(reset.device_token.is_none());

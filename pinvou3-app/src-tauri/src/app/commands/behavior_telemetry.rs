@@ -1,50 +1,5 @@
 use super::prelude::*;
 
-fn telemetry(
-    app: &AppHandle,
-) -> Result<tauri::State<'_, crate::features::behavior_telemetry::BehaviorTelemetry>, String> {
-    app.try_state::<crate::features::behavior_telemetry::BehaviorTelemetry>()
-        .ok_or_else(|| "behavior telemetry is unavailable".to_string())
-}
-
-#[tauri::command]
-pub async fn get_behavior_telemetry_status(
-    app: AppHandle,
-) -> Result<crate::features::behavior_telemetry::BehaviorTelemetryStatus, String> {
-    Ok(telemetry(&app)?.status().await)
-}
-
-#[tauri::command]
-pub async fn set_behavior_telemetry_enabled(
-    enabled: bool,
-    app: AppHandle,
-) -> Result<crate::features::behavior_telemetry::BehaviorTelemetryStatus, String> {
-    telemetry(&app)?
-        .set_collection_enabled(enabled)
-        .await
-        .map_err(|error| format!("update behavior telemetry consent: {error:#}"))
-}
-
-#[tauri::command]
-pub async fn delete_local_behavior_telemetry_data(
-    app: AppHandle,
-) -> Result<crate::features::behavior_telemetry::BehaviorTelemetryStatus, String> {
-    telemetry(&app)?
-        .delete_local_data()
-        .await
-        .map_err(|error| format!("delete local behavior telemetry data: {error:#}"))
-}
-
-#[tauri::command]
-pub async fn delete_remote_behavior_telemetry_data(
-    app: AppHandle,
-) -> Result<crate::features::behavior_telemetry::BehaviorTelemetryStatus, String> {
-    telemetry(&app)?
-        .delete_remote_data()
-        .await
-        .map_err(|error| format!("delete remote behavior telemetry data: {error:#}"))
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackBehaviorEventRequest {
