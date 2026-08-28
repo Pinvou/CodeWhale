@@ -70,9 +70,17 @@ test('personal bootstrap remains usable while an older Account service omits roo
 
 test('admin navigation and read-only state are derived from exact platform permissions', () => {
   const value = snapshot({ platform: ['platform.users.read', 'platform.audit.read', 'platform.audit.export'] });
-  assert.deepEqual(adminVisibleSections(value), ['users', 'audit']);
+  assert.deepEqual(adminVisibleSections(value), ['overview', 'users', 'audit', 'settings']);
   assert.equal(adminSectionReadOnly(value, 'users'), true);
   assert.equal(adminSectionReadOnly(value, 'audit'), false);
+});
+
+test('independent admin routes require their exact read capability and hide unsupported prototype pages', () => {
+  assert.deepEqual(adminVisibleSections(snapshot({ platform: ['platform.roles.read'] })), ['roles', 'settings']);
+  assert.deepEqual(adminVisibleSections(snapshot({ platform: ['platform.products.read'] })), ['products', 'settings']);
+  assert.deepEqual(adminVisibleSections(snapshot({ platform: ['platform.billing.wallets.read'] })), ['overview', 'billing', 'payments', 'approvals', 'settings']);
+  assert.deepEqual(adminVisibleSections(snapshot()), []);
+  assert.ok(!adminVisibleSections(snapshot({ platform: ['platform.organizations.read'] })).includes('myorg'));
 });
 
 test('every independent authorization version invalidates a rendered snapshot', () => {

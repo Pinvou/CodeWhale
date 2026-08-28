@@ -26,28 +26,40 @@ test('approved admin UI requirements and task ownership remain traceable without
   assert.match(status, /\| UI-31 \| 已实现/);
 });
 
-test('source and built admin portal preserve navigation, permission, and unavailable-capability boundaries', async () => {
-  const [view, authorization, navigation, sourceCSS, builtHTML, builtJS, builtCSS] = await Promise.all([
+test('source and built admin portal preserve the HTML prototype five-group navigation and capability boundaries', async () => {
+  const [view, authorization, navigation, i18n, prototype, sourceCSS, builtHTML, builtJS, builtCSS] = await Promise.all([
     read('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
     read('../../../pinvou3-app/src/features/account-platform/authorization-ui.js'),
     read('../../../pinvou3-app/src/features/account-platform/admin-navigation.js'),
+    read('../../../pinvou3-app/src/shared/admin-platform-i18n.js'),
+    read('../../docs/admin-portal-ui-prototype.html'),
     read('../../../pinvou3-app/src/features/account-platform/admin-platform.css'),
     read('../../internal/portal/static/admin.html'),
     read('../../internal/portal/static/assets/admin.js'),
     read('../../internal/portal/static/assets/admin.css'),
   ]);
 
-  for (const group of ['overview', 'identity', 'finance', 'models', 'governance', 'operations']) {
+  for (const group of ['workbench', 'identity', 'finance', 'models', 'governance']) {
     assert.match(navigation, new RegExp(`key: '${group}'`));
     assert.ok(builtJS.includes(group));
+  }
+  assert.doesNotMatch(navigation, /key: 'operations'/);
+  const exactSections = ['overview', 'users', 'roles', 'organizations', 'myorg', 'billing', 'payments', 'products', 'tokens', 'approvals', 'audit', 'system', 'settings'];
+  for (const section of exactSections) assert.ok(navigation.includes(`'${section}'`), `${section} is part of the canonical information architecture`);
+  for (const label of ['工作台', '平台总览', '身份与组织', '用户管理', '角色与授权', '组织管理', '我的组织', '财务与支付', '计费运营', '支付与资金', '定价与商品', '模型与 Token', 'Token Gateway', '治理与安全', '审批中心', '审计与导出', '系统与安全', '偏好设置']) {
+    assert.ok(prototype.includes(label), `${label} is defined by the HTML prototype`);
+    assert.ok(i18n.includes(label), `${label} is preserved by source translations`);
+    assert.ok(builtJS.includes(label), `${label} is preserved by the built portal`);
   }
   assert.match(navigation, /URLSearchParams/);
   assert.match(navigation, /historyLike\.pushState/);
   assert.match(navigation, /historyLike\.replaceState/);
   assert.match(authorization, /platform\.tokens\.read/);
   assert.match(view, /'pricing-admin-root': false/);
-  assert.match(view, /visibleFinanceSurfaces\.includes\('approvals'\)/);
-  assert.match(view, /visibleFinanceSurfaces\.includes\('products'\)/);
+  assert.match(view, /'approval-requests-root': section === 'approvals'/);
+  assert.match(view, /'product-admin-root': section === 'products'/);
+  assert.match(view, /surface="payments"/);
+  assert.match(view, /function SettingsWorkspace/);
   assert.match(view, /copy\.runbooks\.noExecution/);
   assert.doesNotMatch(view, /createUser\(|createRole\(|eventReplay\(/);
   for (const root of ['approval-requests-root', 'pricing-admin-root', 'product-admin-root', 'registration-repair-root', 'role-bindings-root']) {

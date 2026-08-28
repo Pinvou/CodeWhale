@@ -1,25 +1,32 @@
 const VERSION_KEYS = ['context_version', 'personal_authorization_version', 'platform_authorization_version', 'organization_authorization_version'];
 
 export const adminSectionPermissions = Object.freeze({
-  overview: ['platform.system.status.read'],
+  overview: ['platform.users.read', 'platform.organizations.read', 'platform.billing.wallets.read', 'platform.tokens.read', 'platform.usage.read', 'platform.system.status.read'],
   organizations: ['platform.organizations.read'],
-  users: ['platform.users.read'],
-  billing: ['platform.billing.wallets.read', 'platform.pricing.read', 'platform.products.read', 'platform.usage.read'],
+  users: ['platform.users.read', 'platform.users.identity.repair', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.read'],
+  roles: ['platform.roles.read'],
+  billing: ['platform.billing.wallets.read', 'platform.pricing.read', 'platform.usage.read'],
+  payments: ['platform.billing.wallets.read'],
+  products: ['platform.products.read'],
   tokens: ['platform.tokens.read', 'platform.models.read', 'platform.usage.read'],
+  approvals: ['platform.billing.wallets.read'],
   system: ['platform.system.status.read'],
   audit: ['platform.audit.read'],
-  identity: ['platform.users.identity.repair', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.read'],
 });
 
 export const adminSectionMutationPermissions = Object.freeze({
   overview: [],
   organizations: ['platform.organizations.create', 'platform.organizations.status.manage', 'platform.organizations.delete', 'platform.organizations.owner.transfer'],
   users: ['platform.users.status.manage'],
-  billing: ['platform.billing.orders.sync', 'platform.billing.repairs.request', 'platform.billing.adjustments.request', 'platform.billing.adjustments.approve', 'platform.billing.holds.release', 'platform.billing.payment-controls.resume.request', 'platform.billing.payment-controls.resume.approve', 'platform.pricing.manage', 'platform.products.create', 'platform.products.publish', 'platform.products.unpublish', 'platform.products.delete', 'platform.usage.reconcile.retry'],
+  roles: ['platform.roles.assign'],
+  billing: ['platform.billing.adjustments.request', 'platform.billing.adjustments.approve', 'platform.billing.holds.release', 'platform.pricing.manage', 'platform.usage.reconcile.retry'],
+  payments: ['platform.billing.orders.sync', 'platform.billing.repairs.request'],
+  products: ['platform.products.create', 'platform.products.publish', 'platform.products.unpublish', 'platform.products.delete'],
   tokens: ['platform.tokens.manage', 'platform.tokens.credentials.validate', 'platform.models.sync', 'platform.models.manage', 'platform.usage.reconcile.retry'],
+  approvals: ['platform.billing.adjustments.request', 'platform.billing.adjustments.approve', 'platform.billing.repairs.request', 'platform.billing.repairs.approve', 'platform.billing.payment-controls.resume.request', 'platform.billing.payment-controls.resume.approve'],
   system: [],
   audit: ['platform.audit.export'],
-  identity: ['platform.users.identity.repair', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.repair'],
+  settings: [],
 });
 
 export function permissionSet(snapshot, scope = 'active') {
@@ -69,7 +76,9 @@ export function mergeObservedVersions(current = {}, observed = {}) {
 }
 
 export function adminVisibleSections(snapshot) {
-  return Object.keys(adminSectionPermissions).filter((section) => hasAnyPermission(snapshot, adminSectionPermissions[section]));
+  const visible = Object.keys(adminSectionPermissions).filter((section) => hasAnyPermission(snapshot, adminSectionPermissions[section]));
+  if (visible.length > 0) visible.push('settings');
+  return visible;
 }
 
 export function adminSectionReadOnly(snapshot, section) {

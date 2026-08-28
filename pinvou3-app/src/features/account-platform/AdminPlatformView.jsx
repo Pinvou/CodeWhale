@@ -11,11 +11,15 @@ const NAV_ICONS = {
   overview: '⌂',
   organizations: '▦',
   users: '◎',
+  roles: '◆',
   billing: '◇',
+  payments: '¤',
+  products: '□',
   tokens: '↗',
+  approvals: '✓',
   system: '◉',
   audit: '≡',
-  identity: '⚿',
+  settings: '⚙',
 };
 const okStatuses = new Set(['ACTIVE', 'PAID', 'SETTLED', 'HEALTHY', 'APPROVED', 'SUCCESS']);
 const warnStatuses = new Set(['PENDING', 'CREATED', 'SETTLEMENT_PENDING', 'REVIEW', 'MANUAL_REVIEW', 'PENDING_APPROVAL']);
@@ -195,31 +199,14 @@ function Tabs({ items, active, onChange }) {
   );
 }
 
-export function financeSurfaces(authorization) {
-  const permissions = new Set(authorization?.platform_permissions || []);
-  const surfaces = [];
-  if (['platform.billing.wallets.read', 'platform.pricing.read', 'platform.usage.read'].some((permission) => permissions.has(permission))) surfaces.push('operations');
-  if ([
-    'platform.billing.adjustments.request',
-    'platform.billing.adjustments.approve',
-    'platform.billing.repairs.request',
-    'platform.billing.repairs.approve',
-    'platform.billing.payment-controls.resume.request',
-    'platform.billing.payment-controls.resume.approve',
-  ].some((permission) => permissions.has(permission))) surfaces.push('approvals');
-  if (permissions.has('platform.products.read')) surfaces.push('products');
-  return surfaces;
-}
-
-function AdminExtensionSlot({ section, authorization, financeSurface = 'operations' }) {
+function AdminExtensionSlot({ section, authorization }) {
   const hostRef = useRef(null);
   const platformPermissions = new Set(authorization?.platform_permissions || []);
-  const visibleFinanceSurfaces = financeSurfaces(authorization);
   const visible = {
-    'role-bindings-root': section === 'users' && platformPermissions.has('platform.roles.read'),
-    'registration-repair-root': section === 'identity' && platformPermissions.has('platform.registrations.repair'),
-    'approval-requests-root': section === 'billing' && financeSurface === 'approvals' && visibleFinanceSurfaces.includes('approvals'),
-    'product-admin-root': section === 'billing' && financeSurface === 'products' && visibleFinanceSurfaces.includes('products'),
+    'role-bindings-root': section === 'roles' && platformPermissions.has('platform.roles.read'),
+    'registration-repair-root': section === 'users' && platformPermissions.has('platform.registrations.repair'),
+    'approval-requests-root': section === 'approvals',
+    'product-admin-root': section === 'products' && platformPermissions.has('platform.products.read'),
     'pricing-admin-root': false,
   };
 
@@ -251,7 +238,6 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(null);
-  const [financeSurface, setFinanceSurface] = useState(() => sessionStorage.getItem('pinvou.admin.finance-surface') || 'operations');
   const authorizationRef = useRef(null);
   const authorizationRefreshRef = useRef(false);
 
@@ -262,9 +248,14 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       try {
         const allowed = (permission) => hasPermission(granted, permission);
         const read = (permission, action, fallback = { items: [] }) => (allowed(permission) ? action() : Promise.resolve(fallback));
+        const readAny = (permissions, action, fallback = { items: [] }) => (permissions.some(allowed) ? action() : Promise.resolve(fallback));
         let next = {};
         if (target === 'overview') {
-          const [account, billing, token] = await Promise.all([client.accountOverview(signal), client.billingOverview(signal), client.tokenOverview(signal)]);
+          const [account, billing, token] = await Promise.all([
+            readAny(['platform.users.read', 'platform.organizations.read'], () => client.accountOverview(signal), {}),
+            read('platform.billing.wallets.read', () => client.billingOverview(signal), {}),
+            readAny(['platform.tokens.read', 'platform.usage.read'], () => client.tokenOverview(signal), {}),
+          ]);
           next = {
             accountOverview: account,
             billingOverview: billing,
@@ -278,22 +269,36 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             roles: roles.items || [],
           };
         } else if (target === 'users') {
-          const [users, roles] = await Promise.all([client.users('', signal), read('platform.roles.read', () => client.roles(signal))]);
-          next = { users: users.items || [], roles: roles.items || [] };
+          const [users, closures] = await Promise.all([
+            read('platform.users.read', () => client.users('', signal)),
+            read('platform.account-closures.read', () => client.accountClosures(signal)),
+          ]);
+          next = { users: users.items || [], accountClosures: closures.items || [] };
+        } else if (target === 'roles') {
+          const roles = await client.roles(signal);
+          next = { roles: roles.items || [] };
         } else if (target === 'billing') {
-          const [wallets, receivables, prices, orders, refunds, adjustments, holds, reconciliations, lateReviews, anomalies] = await Promise.all([read('platform.billing.wallets.read', () => client.wallets(signal)), read('platform.billing.wallets.read', () => client.receivables(signal)), read('platform.pricing.read', () => client.priceVersions(signal)), read('platform.billing.wallets.read', () => client.paymentOrders({}, signal)), read('platform.billing.wallets.read', () => client.refunds(signal)), read('platform.billing.wallets.read', () => client.adjustments(signal)), read('platform.usage.read', () => client.holds(signal)), read('platform.usage.read', () => client.reconciliationRuns(signal)), read('platform.billing.wallets.read', () => client.latePaymentReviews({}, signal)), read('platform.billing.wallets.read', () => client.paymentAnomalies({}, signal))]);
+          const [overview, wallets, receivables, prices, adjustments, holds, reconciliations] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.wallets(signal)), read('platform.billing.wallets.read', () => client.receivables(signal)), read('platform.pricing.read', () => client.priceVersions(signal)), read('platform.billing.wallets.read', () => client.adjustments(signal)), read('platform.usage.read', () => client.holds(signal)), read('platform.usage.read', () => client.reconciliationRuns(signal))]);
           next = {
+            billingOverview: overview,
             wallets: wallets.items || [],
             receivables: receivables.items || [],
             prices: prices.items || [],
-            orders: orders.items || [],
-            refunds: refunds.items || [],
             adjustments: adjustments.items || [],
             holds: holds.items || [],
             reconciliations: reconciliations.items || [],
+          };
+        } else if (target === 'payments') {
+          const [overview, orders, refunds, lateReviews, anomalies] = await Promise.all([client.billingOverview(signal), client.paymentOrders({}, signal), client.refunds(signal), client.latePaymentReviews({}, signal), client.paymentAnomalies({}, signal)]);
+          next = {
+            billingOverview: overview,
+            orders: orders.items || [],
+            refunds: refunds.items || [],
             lateReviews: lateReviews.items || [],
             anomalies: anomalies.items || [],
           };
+        } else if (target === 'products' || target === 'approvals' || target === 'settings') {
+          next = {};
         } else if (target === 'tokens') {
           const [accounts, usage, models, provisionings] = await Promise.all([read('platform.tokens.read', () => client.tokenAccounts(signal)), read('platform.usage.read', () => client.usageRequests(signal)), read('platform.models.read', () => client.catalogModels(signal)), read('platform.tokens.read', () => client.provisionings(signal))]);
           next = {
@@ -308,13 +313,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         } else if (target === 'audit') {
           const audits = await client.audits({}, signal);
           next = { audits: audits.items || [] };
-        } else if (target === 'identity') {
-          const closures = await read('platform.account-closures.read', () => client.accountClosures(signal));
-          next = { accountClosures: closures.items || [] };
         } else {
           return;
         }
-        setData((current) => ({ ...current, ...next }));
+        setData((current) => ({ ...current, ...next, loadedSections: { ...(current.loadedSections || {}), [target]: true } }));
         setUpdatedAt(new Date());
         setAuth('ready');
       } catch (reason) {
@@ -431,17 +433,6 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     return () => globalThis.removeEventListener?.('popstate', onPopState);
   }, [auth, authorization, data, load, section]);
 
-  useEffect(() => {
-    if (auth !== 'ready' || !authorization) return;
-    const visible = financeSurfaces(authorization);
-    if (!visible.includes(financeSurface)) setFinanceSurface(visible[0] || 'operations');
-  }, [auth, authorization, financeSurface]);
-
-  const selectFinanceSurface = (value) => {
-    sessionStorage.setItem('pinvou.admin.finance-surface', value);
-    setFinanceSurface(value);
-  };
-
   const navigate = (key) => {
     if (!adminVisibleSections(authorization).includes(key)) return;
     setSection(key);
@@ -463,9 +454,9 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     .map((group) => ({ ...group, sections: group.sections.filter((key) => visibleSections.includes(key)) }))
     .filter((group) => group.sections.length > 0);
   const platformPermissions = authorization?.platform_permissions || [];
-  const sectionIsReadOnly = adminSectionReadOnly(authorization, section);
+  const sectionIsReadOnly = section === 'settings' ? false : adminSectionReadOnly(authorization, section);
   const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
-  const currentPageTitle = section === 'overview' ? copy.overview.title : copy.nav[section];
+  const currentPageTitle = copy.nav[section];
   const currentPageLead = section === 'overview' ? copy.overview.lead : copy.pageLeads?.[section] || copy.subtitle;
 
   return (
@@ -525,8 +516,8 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             eyebrow={copy.navGroups[currentGroup?.key] || copy.product}
             title={currentPageTitle}
             subtitle={currentPageLead}
-            updatedAt={section === 'identity' ? null : updatedAt}
-            canRefresh={section !== 'identity'}
+            updatedAt={['products', 'approvals', 'settings'].includes(section) ? null : updatedAt}
+            canRefresh={!['products', 'approvals', 'settings'].includes(section)}
             busy={busy}
             copy={copy}
             onRefresh={() => load(section, undefined, authorization)}
@@ -543,22 +534,24 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           )}
           {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
           {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {section === 'users' && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {section === 'billing' && (
+          {section === 'users' && (
             <>
-              <Tabs
-                items={financeSurfaces(authorization).map((key) => ({ key, label: copy.financeViews[key] }))}
-                active={financeSurface}
-                onChange={selectFinanceSurface}
-              />
-              {financeSurface === 'operations' && <Billing copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+              {hasPermission(authorization, 'platform.users.read') && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+              {(hasPermission(authorization, 'platform.users.identity.repair') ||
+                hasPermission(authorization, 'platform.profile-changes.repair') ||
+                hasPermission(authorization, 'platform.account-closures.read')) && (
+                <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />
+              )}
             </>
           )}
+          {section === 'roles' && <RolesWorkspace copy={copy} roles={data.roles || []} />}
+          {section === 'billing' && <Billing key="billing" surface="billing" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'payments' && <Billing key="payments" surface="payments" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'system' && <SystemStatus copy={copy} data={data} permissions={platformPermissions} />}
           {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {section === 'identity' && <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />}
-          <AdminExtensionSlot section={section} authorization={authorization} financeSurface={financeSurface} />
+          {section === 'settings' && <SettingsWorkspace copy={copy} language={language} onLanguageChange={onLanguageChange} />}
+          <AdminExtensionSlot section={section} authorization={authorization} />
         </div>
       </main>
     </div>
@@ -566,7 +559,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
 }
 
 function sectionHasData(section, data) {
-  return section === 'identity' ? data.accountClosures : section === 'overview' ? data.accountOverview : section === 'organizations' ? data.organizations : section === 'users' ? data.users : section === 'billing' ? data.wallets : section === 'tokens' ? data.tokenAccounts : section === 'system' ? data.systemStatus : data.audits;
+  return data.loadedSections?.[section] === true;
 }
 
 function StatePage({ copy, kind, onRetry }) {
@@ -861,15 +854,23 @@ function AccountDirectory({ section, copy, data, client, setData, permissions })
         </div>
       )}
       <Table columns={columns} items={items} copy={copy} />
-      <RoleDefinitions copy={copy} roles={data.roles || []} />
     </section>
   );
 }
 
-function RoleDefinitions({ copy, roles }) {
+function RolesWorkspace({ copy, roles }) {
+  return (
+    <section className="adm-panel">
+      <SectionHeader title={copy.roles.title} count={roles.length} copy={copy} />
+      <RoleDefinitions copy={copy} roles={roles} expanded />
+    </section>
+  );
+}
+
+function RoleDefinitions({ copy, roles, expanded = false }) {
   if (!roles.length) return null;
   return (
-    <details className="adm-role-definitions">
+    <details className="adm-role-definitions" open={expanded}>
       <summary>{copy.roles.definitions}</summary>
       <div className="adm-role-grid">
         {roles.map((role) => (
@@ -884,6 +885,27 @@ function RoleDefinitions({ copy, roles }) {
         {copy.roles.ownerRoleHint} {copy.roles.baseRoleHint}
       </small>
     </details>
+  );
+}
+
+function SettingsWorkspace({ copy, language, onLanguageChange }) {
+  return (
+    <section className="adm-panel adm-settings-panel">
+      <SectionHeader title={copy.settings.title} copy={copy} />
+      <div className="adm-detail-grid">
+        <label>
+          <span>{copy.settings.language}</span>
+          <select value={language} onChange={(event) => onLanguageChange(event.target.value)}>
+            {supportedLocales.map((locale) => (
+              <option key={locale} value={locale}>
+                {localeNames[locale]}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <p className="adm-muted">{copy.settings.boundary}</p>
+    </section>
   );
 }
 
@@ -1387,8 +1409,8 @@ function UnitBranch({ unit, copy, disabled, addDisabled, onAddChild, onRename, o
   );
 }
 
-function Billing({ copy, language, data, client, setData, permissions }) {
-  const [tab, setTab] = useState('wallets');
+function Billing({ copy, language, data, client, setData, permissions, surface = 'billing' }) {
+  const [tab, setTab] = useState(surface === 'payments' ? 'orders' : 'wallets');
   const items = data[tab] || [];
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -1435,9 +1457,14 @@ function Billing({ copy, language, data, client, setData, permissions }) {
   const canReleaseHold = permissionSet.has('platform.billing.holds.release');
   const canManagePricing = permissionSet.has('platform.pricing.manage');
   const canReconcile = permissionSet.has('platform.usage.reconcile.retry');
-  const visibleTabs = [...(canReadWallets ? ['wallets', 'orders', 'refunds', 'adjustments', 'lateReviews', 'anomalies'] : []), ...(canReadPricing ? ['prices'] : []), ...(canReadUsage ? ['holds', 'reconciliations'] : [])];
+  const visibleTabs =
+    surface === 'payments'
+      ? canReadWallets
+        ? ['orders', 'refunds', 'lateReviews', 'anomalies']
+        : []
+      : [...(canReadWallets ? ['wallets', 'receivables', 'adjustments'] : []), ...(canReadPricing ? ['prices'] : []), ...(canReadUsage ? ['holds', 'reconciliations'] : [])];
   useEffect(() => {
-    if (!visibleTabs.includes(tab)) setTab(visibleTabs[0] || 'wallets');
+    if (!visibleTabs.includes(tab)) setTab(visibleTabs[0] || (surface === 'payments' ? 'orders' : 'wallets'));
   }, [tab, visibleTabs.join('|')]);
   const paymentCapabilities = data.billingOverview?.payment_capabilities || {};
   const normalRefundCreationEnabled =
@@ -1448,20 +1475,13 @@ function Billing({ copy, language, data, client, setData, permissions }) {
   const repairSupported = paymentCapabilities.manual_repair_supported === true;
   const hasLimitedPaymentCapabilities = paymentCapabilities.provider_id && (!paymentCapabilities.refund_supported || !paymentCapabilities.close_supported || !paymentCapabilities.notification_supported || paymentCapabilities.reconciliation_mode !== 'API');
   const reload = async () => {
-    const [wallets, receivables, prices, orders, refunds, adjustments, holds, reconciliations, lateReviews, anomalies] = await Promise.all([canReadWallets ? client.wallets() : Promise.resolve({ items: [] }), canReadWallets ? client.receivables() : Promise.resolve({ items: [] }), canReadPricing ? client.priceVersions() : Promise.resolve({ items: [] }), canReadWallets ? client.paymentOrders(orderFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.refunds() : Promise.resolve({ items: [] }), canReadWallets ? client.adjustments() : Promise.resolve({ items: [] }), canReadUsage ? client.holds() : Promise.resolve({ items: [] }), canReadUsage ? client.reconciliationRuns() : Promise.resolve({ items: [] }), canReadWallets ? client.latePaymentReviews(lateFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.paymentAnomalies(anomalyFilter) : Promise.resolve({ items: [] })]);
-    setData((current) => ({
-      ...current,
-      wallets: wallets.items || [],
-      receivables: receivables.items || [],
-      prices: prices.items || [],
-      orders: orders.items || [],
-      refunds: refunds.items || [],
-      adjustments: adjustments.items || [],
-      holds: holds.items || [],
-      reconciliations: reconciliations.items || [],
-      lateReviews: lateReviews.items || [],
-      anomalies: anomalies.items || [],
-    }));
+    if (surface === 'payments') {
+      const [orders, refunds, lateReviews, anomalies] = await Promise.all([canReadWallets ? client.paymentOrders(orderFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.refunds() : Promise.resolve({ items: [] }), canReadWallets ? client.latePaymentReviews(lateFilter) : Promise.resolve({ items: [] }), canReadWallets ? client.paymentAnomalies(anomalyFilter) : Promise.resolve({ items: [] })]);
+      setData((current) => ({ ...current, orders: orders.items || [], refunds: refunds.items || [], lateReviews: lateReviews.items || [], anomalies: anomalies.items || [] }));
+      return;
+    }
+    const [wallets, receivables, prices, adjustments, holds, reconciliations] = await Promise.all([canReadWallets ? client.wallets() : Promise.resolve({ items: [] }), canReadWallets ? client.receivables() : Promise.resolve({ items: [] }), canReadPricing ? client.priceVersions() : Promise.resolve({ items: [] }), canReadWallets ? client.adjustments() : Promise.resolve({ items: [] }), canReadUsage ? client.holds() : Promise.resolve({ items: [] }), canReadUsage ? client.reconciliationRuns() : Promise.resolve({ items: [] })]);
+    setData((current) => ({ ...current, wallets: wallets.items || [], receivables: receivables.items || [], prices: prices.items || [], adjustments: adjustments.items || [], holds: holds.items || [], reconciliations: reconciliations.items || [] }));
   };
   const perform = async (action) => {
     setBusy(true);
@@ -2682,8 +2702,8 @@ function Billing({ copy, language, data, client, setData, permissions }) {
     );
   return (
     <section className="adm-panel">
-      <SectionHeader title={copy.billing.title} count={items.length} copy={copy} />
-      {hasLimitedPaymentCapabilities && (
+      <SectionHeader title={surface === 'payments' ? copy.billing.paymentsTitle : copy.billing.title} count={items.length} copy={copy} />
+      {surface === 'payments' && hasLimitedPaymentCapabilities && (
         <div className="adm-inline-message">
           {copy.billing.capabilityLimitations} {copy.billing.reconciliationMode}: <strong>{paymentCapabilities.reconciliation_mode || '—'}</strong>
         </div>

@@ -14,7 +14,13 @@ import { adminNavigationGroups, adminSectionURL, readAdminSection, writeAdminSec
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 
 test('admin portal navigation groups and URL state remain deterministic', () => {
-  assert.deepEqual(adminNavigationGroups.map((group) => group.key), ['overview', 'identity', 'finance', 'models', 'governance', 'operations']);
+  assert.deepEqual(adminNavigationGroups, [
+    { key: 'workbench', sections: ['overview'] },
+    { key: 'identity', sections: ['users', 'roles', 'organizations', 'myorg'] },
+    { key: 'finance', sections: ['billing', 'payments', 'products'] },
+    { key: 'models', sections: ['tokens'] },
+    { key: 'governance', sections: ['approvals', 'audit', 'system', 'settings'] },
+  ]);
   const location = { pathname: '/admin.html', search: '?trace=kept&section=users', hash: '#focus' };
   assert.equal(readAdminSection(location), 'users');
   assert.equal(adminSectionURL('billing', location), '/admin.html?trace=kept&section=billing#focus');
@@ -31,7 +37,7 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   ]);
 });
 
-test('admin identity extensions are mounted inside permission-gated pages', async () => {
+test('admin identity pages mount role and repair extensions under independent permission-gated routes', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
   const repair = await readFile(new URL('../../account-platform/internal/portal/static/assets/registration-repair.js', import.meta.url), 'utf8');
@@ -39,12 +45,14 @@ test('admin identity extensions are mounted inside permission-gated pages', asyn
   assert.match(view, /'role-bindings-root'.*platform\.roles\.read/);
   assert.match(view, /'registration-repair-root'.*platform\.registrations\.repair/);
   assert.match(view, /host\.append\(node\)/);
-  assert.match(authorization, /identity: \['platform\.users\.identity\.repair', 'platform\.registrations\.repair', 'platform\.profile-changes\.repair', 'platform\.account-closures\.read'\]/);
+  assert.match(authorization, /users: \['platform\.users\.read', 'platform\.users\.identity\.repair', 'platform\.registrations\.repair', 'platform\.profile-changes\.repair', 'platform\.account-closures\.read'\]/);
+  assert.match(authorization, /roles: \['platform\.roles\.read'\]/);
+  assert.doesNotMatch(authorization, /identity: \[/);
   assert.match(repair, /localStorage\.getItem\('pinvou\.admin\.language'\)/);
   assert.doesNotMatch(repair, /header\.append\(language\)/);
 });
 
-test('admin finance workspace integrates approvals and products without exposing unsupported pricing drafts', async () => {
+test('admin finance capabilities use independent permission-gated routes without unsupported drafts', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../src/features/account-platform/admin-platform.css', import.meta.url), 'utf8');
@@ -52,14 +60,19 @@ test('admin finance workspace integrates approvals and products without exposing
   const approvals = await readFile(new URL('../../account-platform/internal/portal/static/assets/approval-requests.js', import.meta.url), 'utf8');
   const products = await readFile(new URL('../../account-platform/internal/portal/static/assets/product-admin.js', import.meta.url), 'utf8');
 
-  assert.match(view, /function financeSurfaces/);
-  assert.match(view, /platform\.billing\.payment-controls\.resume\.approve/);
-  assert.match(view, /permissions\.has\('platform\.products\.read'\)/);
-  assert.match(view, /'approval-requests-root'.*visibleFinanceSurfaces\.includes\('approvals'\)/);
-  assert.match(view, /'product-admin-root'.*visibleFinanceSurfaces\.includes\('products'\)/);
+  assert.doesNotMatch(view, /function financeSurfaces/);
+  assert.doesNotMatch(view, /pinvou\.admin\.finance-surface/);
+  assert.match(view, /platformPermissions\.has\('platform\.products\.read'\)/);
+  assert.match(view, /'approval-requests-root': section === 'approvals'/);
+  assert.match(view, /'product-admin-root': section === 'products'/);
+  assert.match(view, /section === 'billing'.*surface="billing"/s);
+  assert.match(view, /section === 'payments'.*surface="payments"/s);
+  assert.match(view, /section === 'settings'.*SettingsWorkspace/s);
   assert.match(view, /'pricing-admin-root': false/);
-  assert.match(view, /sessionStorage\.setItem\('pinvou\.admin\.finance-surface'/);
-  assert.match(authorization, /billing: \['platform\.billing\.wallets\.read', 'platform\.pricing\.read', 'platform\.products\.read', 'platform\.usage\.read'\]/);
+  assert.match(authorization, /billing: \['platform\.billing\.wallets\.read', 'platform\.pricing\.read', 'platform\.usage\.read'\]/);
+  assert.match(authorization, /payments: \['platform\.billing\.wallets\.read'\]/);
+  assert.match(authorization, /products: \['platform\.products\.read'\]/);
+  assert.match(authorization, /approvals: \['platform\.billing\.wallets\.read'\]/);
   assert.match(styles, /\.admin-portal-body > #approval-requests-root[\s\S]*display:none/);
   assert.match(styles, /\.approval-control-snapshot/);
   assert.match(main, /pinvou-admin-language-change/);
@@ -650,14 +663,15 @@ test('desktop account restoration starts with the app without blocking startup',
   assert.match(source, /accountPlatformClient\.session\(controller\.signal\)\.catch/);
 });
 
-test('admin console exposes organizations and users as independent primary tabs', async () => {
+test('admin console exposes users, roles, and organizations as independently named HTML prototype pages', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/admin-platform-i18n.js', import.meta.url), 'utf8');
   assert.match(view, /section === 'organizations'/);
   assert.match(view, /section === 'users'/);
+  assert.match(view, /section === 'roles'/);
   assert.doesNotMatch(view, /section === 'accounts'/);
   assert.doesNotMatch(i18n, /账号与组织/);
-  assert.match(i18n, /organizations:\s*'组织',\s*users:\s*'用户'/);
+  assert.match(i18n, /users:\s*'用户管理',\s*roles:\s*'角色与授权',\s*organizations:\s*'组织管理'/);
   assert.match(view, /key:\s*'username',\s*label:\s*copy\.username/);
   assert.match(i18n, /username:\s*'用户名'/);
 });

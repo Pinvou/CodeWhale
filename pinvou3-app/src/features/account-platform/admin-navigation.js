@@ -1,10 +1,9 @@
 export const adminNavigationGroups = Object.freeze([
-  { key: 'overview', sections: ['overview'] },
-  { key: 'identity', sections: ['users', 'organizations', 'identity'] },
-  { key: 'finance', sections: ['billing'] },
+  { key: 'workbench', sections: ['overview'] },
+  { key: 'identity', sections: ['users', 'roles', 'organizations', 'myorg'] },
+  { key: 'finance', sections: ['billing', 'payments', 'products'] },
   { key: 'models', sections: ['tokens'] },
-  { key: 'governance', sections: ['audit'] },
-  { key: 'operations', sections: ['system'] },
+  { key: 'governance', sections: ['approvals', 'audit', 'system', 'settings'] },
 ]);
 
 export function readAdminSection(locationLike = globalThis.location) {
