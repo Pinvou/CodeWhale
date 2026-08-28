@@ -113,9 +113,14 @@ impl<'a> SearchBackendChain<'a> {
             context, selected,
         )));
         if !matches!(selected, SearchProvider::Bing | SearchProvider::DuckDuckGo) {
+            // The keyless tail must stay reachable from mainland-China
+            // networks, where DuckDuckGo is DNS-poisoned and SNI-reset while
+            // Bing serves both its global and China endpoints without a key.
+            // The tail is picked by reachability, not by geo detection: the
+            // engine never guesses the user's location.
             backends.push(Box::new(ConfiguredSearchBackend::from_provider(
                 context,
-                SearchProvider::DuckDuckGo,
+                SearchProvider::Bing,
             )));
         }
         Self { backends }
@@ -255,7 +260,8 @@ async fn run_backend_chain(
         .collect::<Vec<_>>()
         .join(", ");
     Err(ToolError::not_available(format!(
-        "web search backends unavailable: {backend_ids}"
+        "web search backends unavailable: {backend_ids}; \
+         configure an API-backed [search] provider (tavily, bocha, metaso, baidu, volcengine) for dependable results"
     )))
 }
 
@@ -521,6 +527,47 @@ mod tests {
         }
     }
 
+    /// API-backed providers must fall back to the keyless Bing tail, not
+    /// DuckDuckGo: DDG is unreachable from mainland-China networks
+    /// (DNS poisoning + SNI reset), so a DDG tail turns every API outage
+    /// into a guaranteed total failure there, while Bing stays reachable
+    /// globally without a key. Bing and DuckDuckGo themselves stay
+    /// single-backend chains (their internal fallbacks own that job).
+    #[test]
+    fn forkguard_api_provider_chain_tail_is_bing() {
+        for selected in [
+            SearchProvider::Tavily,
+            SearchProvider::Bocha,
+            SearchProvider::Metaso,
+            SearchProvider::Baidu,
+            SearchProvider::Searxng,
+            SearchProvider::Volcengine,
+            SearchProvider::Sofya,
+        ] {
+            let mut context = ToolContext::new(std::path::PathBuf::from("."));
+            context.search_provider = selected;
+            let chain = SearchBackendChain::from_context(&context);
+            let ids: Vec<BackendId> = chain.backends.iter().map(|backend| backend.id()).collect();
+            let expected_tail = BackendId::Bing;
+            assert_eq!(
+                ids.last(),
+                Some(&expected_tail),
+                "{selected:?} chain must keep a reachable keyless Bing tail"
+            );
+        }
+
+        for selected in [SearchProvider::Bing, SearchProvider::DuckDuckGo] {
+            let mut context = ToolContext::new(std::path::PathBuf::from("."));
+            context.search_provider = selected;
+            let chain = SearchBackendChain::from_context(&context);
+            assert_eq!(
+                chain.backends.len(),
+                1,
+                "{selected:?} must stay a single-backend chain"
+            );
+        }
+    }
+
     #[test]
     fn provider_native_is_fail_closed_without_both_fact_and_client() {
         assert!(!provider_native_is_available(false, false));
@@ -703,6 +750,7 @@ mod tests {
 
         assert!(matches!(error, ToolError::NotAvailable { .. }));
         assert!(message.contains("bocha, duckduckgo"));
+        assert!(message.contains("configure an API-backed [search] provider"));
         assert!(!message.contains(private_error));
         assert!(!message.contains("different private response"));
     }
