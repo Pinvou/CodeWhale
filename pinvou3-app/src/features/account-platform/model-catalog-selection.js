@@ -3,7 +3,7 @@ export const LOCAL_CONFIG_SOURCE = 'LOCAL_CONFIG';
 
 export function platformModelSelectableForNewSession(item, now = Date.now()) {
   if (!item || item.context_eligible !== true) return false;
-  if (item.lifecycle_status === 'ACTIVE') return true;
+  if (item.lifecycle_status === 'PUBLISHED') return true;
   if (item.lifecycle_status !== 'DEPRECATED' || !item.new_session_cutoff_at) return false;
   const cutoff = Date.parse(item.new_session_cutoff_at);
   return Number.isFinite(cutoff) && cutoff > now;

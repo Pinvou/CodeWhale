@@ -323,7 +323,7 @@ fn ensure_new_session_model_selectable(item: &serde_json::Value) -> Result<(), S
         .get("lifecycle_status")
         .and_then(serde_json::Value::as_str)
     {
-        Some("ACTIVE") => Ok(()),
+        Some("PUBLISHED") => Ok(()),
         Some("DEPRECATED") => {
             let cutoff = item
                 .get("new_session_cutoff_at")
@@ -346,11 +346,11 @@ mod tests {
     #[test]
     fn catalog_selection_obeys_new_session_cutoff_and_context_eligibility() {
         assert!(ensure_new_session_model_selectable(&serde_json::json!({
-            "lifecycle_status":"ACTIVE", "context_eligible":true
+            "lifecycle_status":"PUBLISHED", "context_eligible":true
         }))
         .is_ok());
         assert!(ensure_new_session_model_selectable(&serde_json::json!({
-            "lifecycle_status":"ACTIVE", "context_eligible":false,
+            "lifecycle_status":"PUBLISHED", "context_eligible":false,
             "eligibility_reason":"ORGANIZATION_MODEL_DENIED"
         }))
         .is_err());

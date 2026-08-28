@@ -1073,7 +1073,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
         let active = true;
         bridge.accountPlatform.modelCatalog().then(result => {
           if (!active) return;
-          const items = (result?.items || []).filter(item => item.context_eligible && item.lifecycle_status === 'ACTIVE');
+          const items = (result?.items || []).filter(item => item.context_eligible && item.lifecycle_status === 'PUBLISHED');
           setReplacementModels(items);
           setReplacementModelId(current => items.some(item => item.model_id === current) ? current : (items[0]?.model_id || ''));
         }).catch(error => { if (active) setReplacementError(String(error?.message || error || '')); });

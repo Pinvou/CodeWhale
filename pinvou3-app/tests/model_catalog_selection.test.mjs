@@ -11,8 +11,8 @@ import {
 
 test('platform model selection follows context and new-session lifecycle cutoffs', () => {
   const now = Date.parse('2026-08-25T08:00:00Z');
-  assert.equal(platformModelSelectableForNewSession({ context_eligible: true, lifecycle_status: 'ACTIVE' }, now), true);
-  assert.equal(platformModelSelectableForNewSession({ context_eligible: false, lifecycle_status: 'ACTIVE' }, now), false);
+  assert.equal(platformModelSelectableForNewSession({ context_eligible: true, lifecycle_status: 'PUBLISHED' }, now), true);
+  assert.equal(platformModelSelectableForNewSession({ context_eligible: false, lifecycle_status: 'PUBLISHED' }, now), false);
   assert.equal(platformModelSelectableForNewSession({ context_eligible: true, lifecycle_status: 'REMOVED' }, now), false);
   assert.equal(platformModelSelectableForNewSession({
     context_eligible: true,
@@ -29,12 +29,12 @@ test('platform model selection follows context and new-session lifecycle cutoffs
 
 test('composer lists context-visible models while selection references remain source-aware', () => {
   const visible = composerPlatformModels([
-    { model_id: 'active', context_eligible: true, lifecycle_status: 'ACTIVE' },
+    { model_id: 'published', context_eligible: true, lifecycle_status: 'PUBLISHED' },
     { model_id: 'deprecated', context_eligible: true, lifecycle_status: 'DEPRECATED' },
     { model_id: 'removed', context_eligible: true, lifecycle_status: 'REMOVED' },
-    { model_id: 'denied', context_eligible: false, lifecycle_status: 'ACTIVE' },
+    { model_id: 'denied', context_eligible: false, lifecycle_status: 'PUBLISHED' },
   ]);
-  assert.deepEqual(visible.map(item => item.model_id), ['active', 'deprecated']);
+  assert.deepEqual(visible.map(item => item.model_id), ['published', 'deprecated']);
   assert.equal(sameModelSelectionRef(
     { source: ACCOUNT_PLATFORM_SOURCE, model_id: 'active' },
     { source: ACCOUNT_PLATFORM_SOURCE, model_id: 'active' },

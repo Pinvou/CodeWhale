@@ -1,11 +1,43 @@
 package token
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+type catalogRouteProvisionerFake struct {
+	models []uuid.UUID
+}
+
+func (f *catalogRouteProvisionerFake) Ensure(_ context.Context, _ AuthorizationContext, _ uuid.UUID, model CatalogModel) (RouteProvisioning, error) {
+	f.models = append(f.models, model.ModelID)
+	return RouteProvisioning{Status: "PENDING"}, nil
+}
+
+func TestCatalogDiscoveryPreparesOnlyInvokableVisibleModels(t *testing.T) {
+	userID, walletID := uuid.New(), uuid.New()
+	resolved := AuthorizationContext{UserID: userID, ContextType: "PERSONAL", Permissions: []string{"personal.models.read", "personal.model.invoke"}}
+	if !canPrepareCatalogRoutes(resolved) {
+		t.Fatal("personal model invocation permission must admit route preparation")
+	}
+	if canPrepareCatalogRoutes(AuthorizationContext{UserID: userID, ContextType: "PERSONAL", Permissions: []string{"personal.models.read"}}) {
+		t.Fatal("catalog read permission alone must not provision managed credentials")
+	}
+	fake := &catalogRouteProvisionerFake{}
+	service := &Service{defaultRoutes: fake}
+	publishedID, removedID, unavailableID := uuid.New(), uuid.New(), uuid.New()
+	queued := service.ensureCatalogRoutes(context.Background(), resolved, walletID, []CatalogModel{
+		{ModelID: publishedID, LifecycleStatus: "PUBLISHED", SourceAvailable: true},
+		{ModelID: removedID, LifecycleStatus: "REMOVED", SourceAvailable: true},
+		{ModelID: unavailableID, LifecycleStatus: "PUBLISHED", SourceAvailable: false},
+	})
+	if !queued || len(fake.models) != 1 || fake.models[0] != publishedID {
+		t.Fatalf("unexpected route preparation: queued=%v models=%v", queued, fake.models)
+	}
+}
 
 func TestCatalogDraftNormalizationAndVersionBoundaries(t *testing.T) {
 	input := CatalogDraftInput{DisplayName: "  DeepSeek V4  ", Aliases: []string{" DS-V4 ", "ds-v4"}, ProtocolCode: "chat", ProtocolVersion: 1, ContextLength: 128000, MaximumOutputTokens: 4096, SupportedModalities: []string{" Text ", "text"}, TokenizerVersion: " tokenizer-v1 "}
