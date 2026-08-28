@@ -273,6 +273,12 @@ pub enum Event {
         usage: Usage,
         /// Wall-clock duration of this model call's stream.
         duration_ms: u64,
+        /// Client-observed duration from request dispatch through stream end.
+        #[cfg(feature = "benchmark-observability")]
+        request_duration_ms: u64,
+        /// Client-observed time from request dispatch to first productive stream event.
+        #[cfg(feature = "benchmark-observability")]
+        ttft_ms: Option<u64>,
     },
 
     /// Runtime goal state changed inside the engine, usually from model-visible
