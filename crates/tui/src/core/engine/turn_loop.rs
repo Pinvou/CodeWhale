@@ -50,15 +50,33 @@ fn repair_benchmark_read_call(
     let Some(object) = input.as_object_mut() else {
         return Vec::new();
     };
+    let original_object = object.clone();
     let mut repairs = Vec::new();
+    let is_web = matches!(tool_name, "Web" | "web" | "web_search" | "fetch_url");
+    let is_file = matches!(
+        tool_name,
+        "File" | "file" | "read_file" | "file_search" | "grep_files" | "list_files"
+    );
+    let is_image = tool_name == "image_analyze";
+
+    // Preserve the File execution layer's documented aliases before pruning
+    // cross-action parameters. Conflicting aliases are deliberately left for
+    // the strict execution layer to reject instead of being guessed away.
+    if is_file {
+        match fold_benchmark_alias_group(object, "path", &["file_path", "filePath"]) {
+            Ok(true) => repairs.push("file_parameter_alias"),
+            Ok(false) => {}
+            Err(()) => {
+                *object = original_object;
+                return Vec::new();
+            }
+        }
+    }
     let has_action = object
         .get("action")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|value| !value.trim().is_empty());
 
-    let is_web = matches!(tool_name, "Web" | "web" | "web_search" | "fetch_url");
-    let is_file = matches!(tool_name, "File" | "file" | "read_file");
-    let is_image = tool_name == "image_analyze";
     if !has_action {
         let inferred = if is_web
             && object
@@ -98,6 +116,9 @@ fn repair_benchmark_read_call(
                 .get("path")
                 .and_then(serde_json::Value::as_str)
                 .is_some()
+            && !["content", "text", "data", "patch", "search", "replace"]
+                .iter()
+                .any(|key| object.contains_key(*key))
         {
             Some("read")
         } else {
@@ -160,11 +181,39 @@ fn repair_benchmark_read_call(
                 object.insert("max_bytes".to_string(), max_chars);
             }
             // When max_bytes already exists, max_chars is just an unsupported
-            // duplicate. Either way it must not reach per-action validation.
+            // duplicate. Mapping characters to bytes is intentionally a
+            // stricter cap for multi-byte text. Either way the alias must not
+            // reach per-action validation.
             repairs.push("max_chars_alias");
         }
 
-        for key in ["max_results", "timeout_ms", "max_bytes", "port"] {
+        if let Some(format) = object
+            .get("format")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+        {
+            let normalized = match format.to_ascii_lowercase().as_str() {
+                "txt" | "plain" => Some("text"),
+                "md" => Some("markdown"),
+                "html" | "bytes" | "json" => Some("raw"),
+                _ => None,
+            };
+            if let Some(normalized) = normalized {
+                object.insert(
+                    "format".to_string(),
+                    serde_json::Value::String(normalized.to_string()),
+                );
+                repairs.push("format_alias");
+            }
+        }
+
+        for key in [
+            "max_results",
+            "timeout_ms",
+            "max_bytes",
+            "port",
+            "poll_interval_ms",
+        ] {
             if normalize_benchmark_u64(object, key) {
                 repairs.push("numeric_string");
             }
@@ -233,6 +282,22 @@ fn repair_benchmark_read_call(
                 serde_json::Value::String(action.to_string()),
             );
             repairs.push("file_action_alias");
+        }
+
+        if object.get("action").and_then(serde_json::Value::as_str) == Some("read") {
+            for (canonical, aliases) in [
+                ("start_line", &["offset", "line_offset"][..]),
+                ("max_lines", &["limit", "n_lines", "num_lines"][..]),
+            ] {
+                match fold_benchmark_alias_group(object, canonical, aliases) {
+                    Ok(true) => repairs.push("file_parameter_alias"),
+                    Ok(false) => {}
+                    Err(()) => {
+                        *object = original_object;
+                        return Vec::new();
+                    }
+                }
+            }
         }
 
         if object.get("action").and_then(serde_json::Value::as_str) == Some("search_name")
@@ -358,6 +423,35 @@ fn repair_benchmark_read_call(
     }
 
     repairs
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+fn fold_benchmark_alias_group(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    canonical: &str,
+    aliases: &[&str],
+) -> Result<bool, ()> {
+    let present = aliases
+        .iter()
+        .filter_map(|alias| object.get(*alias).map(|value| (*alias, value.clone())))
+        .collect::<Vec<_>>();
+    let Some((_, value)) = present.first() else {
+        return Ok(false);
+    };
+    if present.iter().any(|(_, candidate)| candidate != value)
+        || object
+            .get(canonical)
+            .is_some_and(|candidate| candidate != value)
+    {
+        return Err(());
+    }
+    object
+        .entry(canonical.to_string())
+        .or_insert_with(|| value.clone());
+    for (alias, _) in present {
+        object.remove(alias);
+    }
+    Ok(true)
 }
 
 #[cfg(feature = "benchmark-eval-controls")]
@@ -2763,8 +2857,6 @@ impl Engine {
 
             let active_tools_at_batch_start = active_tool_names.clone();
             #[cfg(feature = "benchmark-eval-controls")]
-            let benchmark_final_only_before_batch = benchmark_tool_budget_fused;
-            #[cfg(feature = "benchmark-eval-controls")]
             let mut benchmark_budget_exhausted_in_batch = false;
             #[cfg(feature = "benchmark-eval-controls")]
             let mut benchmark_skipped_over_budget_tool_ids =
@@ -4614,24 +4706,9 @@ impl Engine {
                 // extra rounds proposing calls that can never execute.
                 tool_catalog.clear();
                 active_tool_names.clear();
-                if benchmark_final_only_before_batch {
-                    benchmark_final_only_violations =
-                        benchmark_final_only_violations.saturating_add(1);
-                }
-                if benchmark_final_only_violations >= 2 {
-                    let reason =
-                        "benchmark final-only mode was ignored after tool budget exhaustion"
-                            .to_string();
-                    let _ = self.tx_event.send(Event::status(reason.clone())).await;
-                    return (TurnOutcomeStatus::Failed, Some(reason));
-                }
-                let instruction = if benchmark_final_only_violations == 0 {
-                    "Tool budget is exhausted. All tools are now disabled for this turn. Do not call any tool again. Use only the evidence already present in the conversation and provide the requested final answer now, in the exact output format requested by the user."
-                } else {
-                    "Final-only mode is active and tools remain disabled. Your previous response still attempted a tool call. This is the last recovery attempt: provide the requested final answer now in the exact required format, with no tool call."
-                };
                 self.add_session_message(self.runtime_text_message_with_turn_metadata(
-                    instruction.to_string(),
+                    "Tool budget is exhausted. All tools are now disabled for this turn. Do not call any tool again. Use only the evidence already present in the conversation and provide the requested final answer now, in the exact output format requested by the user."
+                        .to_string(),
                     UserInputProvenance::Runtime,
                 ))
                 .await;
@@ -5277,6 +5354,25 @@ mod benchmark_eval_control_tests {
         assert_eq!(max_chars["max_bytes"], 12000);
         assert!(max_chars.get("max_chars").is_none());
 
+        let mut fetch_aliases = json!({
+            "action": "fetch",
+            "url": "https://example.test/data.json",
+            "format": "json"
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut fetch_aliases, workspace.path());
+        assert!(repairs.contains(&"format_alias"));
+        assert_eq!(fetch_aliases["format"], "raw");
+
+        let mut wait_poll = json!({
+            "action": "wait",
+            "host": "127.0.0.1",
+            "port": "3000",
+            "poll_interval_ms": "50"
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut wait_poll, workspace.path());
+        assert!(repairs.contains(&"numeric_string"));
+        assert_eq!(wait_poll["poll_interval_ms"], 50);
+
         let mut search_with_scalar_domain = json!({
             "action": "search",
             "query": "example",
@@ -5326,6 +5422,32 @@ mod benchmark_eval_control_tests {
         assert_eq!(noisy_file_read["max_lines"], 200);
         assert_eq!(noisy_file_read.as_object().unwrap().len(), 3);
 
+        let mut aliased_file_read = json!({
+            "action": "read",
+            "file_path": "data.csv",
+            "offset": "5",
+            "limit": 50
+        });
+        let repairs = repair_benchmark_read_call("File", &mut aliased_file_read, workspace.path());
+        assert!(repairs.contains(&"file_parameter_alias"));
+        assert_eq!(aliased_file_read["path"], "attachments/data.csv");
+        assert_eq!(aliased_file_read["start_line"], 5);
+        assert_eq!(aliased_file_read["max_lines"], 50);
+        assert!(aliased_file_read.get("file_path").is_none());
+        assert!(aliased_file_read.get("offset").is_none());
+        assert!(aliased_file_read.get("limit").is_none());
+
+        let mut conflicting_alias = json!({
+            "action": "read",
+            "path": "data.csv",
+            "file_path": "other.csv"
+        });
+        let original_conflict = conflicting_alias.clone();
+        assert!(
+            repair_benchmark_read_call("File", &mut conflicting_alias, workspace.path()).is_empty()
+        );
+        assert_eq!(conflicting_alias, original_conflict);
+
         let mut write = json!({
             "action": "write",
             "path": "answer.txt",
@@ -5334,6 +5456,16 @@ mod benchmark_eval_control_tests {
         });
         assert!(repair_benchmark_read_call("File", &mut write, workspace.path()).is_empty());
         assert_eq!(write["content"], "must remain blocked");
+
+        let mut implicit_write = json!({
+            "path": "answer.txt",
+            "content": "must not become a read"
+        });
+        assert!(
+            repair_benchmark_read_call("File", &mut implicit_write, workspace.path()).is_empty()
+        );
+        assert!(implicit_write.get("action").is_none());
+        assert_eq!(implicit_write["content"], "must not become a read");
 
         let mut image = json!({"image_path": "photo.png", "prompt": "read the label"});
         let repairs = repair_benchmark_read_call("image_analyze", &mut image, workspace.path());

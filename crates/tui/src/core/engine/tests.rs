@@ -3738,6 +3738,177 @@ async fn run_budgeted_read_turn(
     (status, error, completions)
 }
 
+#[cfg(feature = "benchmark-eval-controls")]
+async fn run_benchmark_controlled_read_turn(
+    workspace: &Path,
+    mock: std::sync::Arc<crate::llm_client::mock::MockLlmClient>,
+) -> (
+    TurnOutcomeStatus,
+    Option<String>,
+    Vec<(String, Result<ToolResult, ToolError>)>,
+) {
+    let mut engine_config = deterministic_engine_config(workspace);
+    engine_config.max_tool_calls = Some(1);
+    engine_config.turn_tool_security = Some(Arc::new(
+        TurnToolSecurityPolicy::new(
+            Some(Vec::new()),
+            Some(
+                ExactToolDispatchPolicy::try_new(vec!["File".to_string()])
+                    .expect("read-only benchmark policy"),
+            ),
+        )
+        .with_read_only_dispatch()
+        .with_final_only_after_tool_budget()
+        .with_missing_read_action_repair(),
+    ));
+    let client: crate::core::model_client::SharedModelClient = mock;
+    let (mut engine, handle) =
+        Engine::new_with_model_client(engine_config, &Config::default(), client);
+    let context = crate::tools::ToolContext::new(workspace.to_path_buf());
+    let mut registry = crate::tools::ToolRegistry::new(context);
+    registry.register(std::sync::Arc::new(
+        crate::tools::file_tool::FileTool::read_only("File"),
+    ));
+    let tools = Some(registry.to_api_tools_with_cache(true));
+    let surface = test_tool_surface(&engine, registry, tools, AppMode::Agent);
+    let mut turn = crate::core::turn::TurnContext::new(6);
+
+    let (status, error) = engine.handle_deepseek_turn(&mut turn, surface, None).await;
+    let mut events = handle.rx_event.write().await;
+    let completions = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            Event::ToolCallComplete { id, result, .. } => Some((id, result)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (status, error, completions)
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+#[tokio::test]
+async fn forkguard_benchmark_budget_truncates_batch_and_clears_followup_tool_surface() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    for name in ["one.txt", "two.txt", "three.txt"] {
+        fs::write(workspace.path().join(name), name).expect("write fixture");
+    }
+    let mock = Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&[
+            ("call-1", "File", r#"{"action":"read","path":"one.txt"}"#),
+            ("call-2", "File", r#"{"action":"read","path":"two.txt"}"#),
+            ("call-3", "File", r#"{"action":"read","path":"three.txt"}"#),
+        ]),
+        tool_batch_turn(&[(
+            "call-after-fuse",
+            "File",
+            r#"{"action":"read","path":"one.txt"}"#,
+        )]),
+        canned::simple_text_turn("FINAL ANSWER: one"),
+    ]));
+
+    let (status, error, completions) =
+        run_benchmark_controlled_read_turn(workspace.path(), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(mock.call_count(), 3);
+    assert_eq!(
+        completions
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["call-1", "call-2"],
+        "the first over-budget call is retained as the only receipt"
+    );
+    assert!(completions[0].1.is_ok(), "{completions:?}");
+    assert!(completions[1].1.is_err(), "{completions:?}");
+    let requests = mock.captured_requests();
+    assert!(
+        requests
+            .first()
+            .and_then(|request| request.tools.as_ref())
+            .is_some_and(|tools| tools.iter().any(|tool| tool.name == "File"))
+    );
+    assert!(
+        requests
+            .iter()
+            .skip(1)
+            .all(|request| request.tools.as_ref().is_none_or(Vec::is_empty)),
+        "all follow-up requests must be final-only"
+    );
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+#[tokio::test]
+async fn forkguard_benchmark_final_only_rejects_repeated_tool_only_responses() {
+    use crate::llm_client::mock::MockLlmClient;
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(workspace.path().join("one.txt"), "one").expect("write fixture");
+    let repeated = || {
+        tool_batch_turn(&[(
+            "call-retry",
+            "File",
+            r#"{"action":"read","path":"one.txt"}"#,
+        )])
+    };
+    let mock = Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&[
+            ("call-1", "File", r#"{"action":"read","path":"one.txt"}"#),
+            (
+                "call-over-budget",
+                "File",
+                r#"{"action":"read","path":"one.txt"}"#,
+            ),
+        ]),
+        repeated(),
+        repeated(),
+    ]));
+
+    let (status, error, completions) =
+        run_benchmark_controlled_read_turn(workspace.path(), mock.clone()).await;
+    assert_eq!(status, TurnOutcomeStatus::Failed);
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|message| message.contains("repeated tool-only responses")),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(mock.call_count(), 3, "the final-only fuse must be bounded");
+    assert_eq!(completions.len(), 2);
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+#[tokio::test]
+async fn forkguard_benchmark_turn_repairs_file_aliases_before_execution() {
+    use crate::llm_client::mock::{MockLlmClient, canned};
+
+    let workspace = tempdir().expect("tempdir");
+    fs::write(
+        workspace.path().join("lines.txt"),
+        "one\ntwo\nthree\nfour\nfive\nsix\n",
+    )
+    .expect("write fixture");
+    let mock = Arc::new(MockLlmClient::new(vec![
+        tool_batch_turn(&[(
+            "call-aliased",
+            "File",
+            r#"{"file_path":"lines.txt","offset":"5","limit":1}"#,
+        )]),
+        canned::simple_text_turn("FINAL ANSWER: five"),
+    ]));
+
+    let (status, error, completions) =
+        run_benchmark_controlled_read_turn(workspace.path(), mock).await;
+    assert_eq!(status, TurnOutcomeStatus::Completed, "{error:?}");
+    assert_eq!(completions.len(), 1);
+    let result = completions[0].1.as_ref().expect("aliased read executes");
+    assert!(result.content.contains("five"), "{result:?}");
+    assert!(
+        !result.content.contains("one\n"),
+        "window must be preserved"
+    );
+}
+
 /// #4415 AC(a): an 8-call cap admits exactly 8 calls; the 9th is rejected
 /// with the typed reason carrying `remaining=0` and is never executed.
 #[tokio::test]
