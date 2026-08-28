@@ -2272,13 +2272,17 @@ first makes a separate, bounded request through that provider's native search
 contract. It reuses the active route's authentication and transport, but does
 not inject provider-owned tools into the main conversation. A runtime failure
 or a response without usable citations then falls back visibly to the
-configured `[search]` backend and, unless that backend is already Bing or
-DuckDuckGo, to DuckDuckGo. Provider-native search receives a separate bounded
+configured `[search]` backend and then to the keyless Bing tail. Bing is
+picked over DuckDuckGo by reachability, not geo detection: Bing serves both
+its global and China endpoints without a key, while DuckDuckGo is unreachable
+from mainland-China networks. Provider-native search receives a separate bounded
 budget of at least 45 seconds instead of an equal share that shrinks as
 fallbacks are added. Direct Moonshot `kimi-k3` Formula search uses a 180-second
 floor because its bounded protocol can require several Chat Completions and
 Fiber steps; the caller's configured search timeout remains available to the
-configured/local fallback. The structured search receipt records every hop.
+configured/local fallback. The structured search receipt records every hop. When every backend is
+unavailable the tool fails closed with an error suggesting API-backed
+`[search]` providers.
 
 Without an eligible provider-native route, `web_search` uses DuckDuckGo by
 default and does not require an API key. The DuckDuckGo path keeps a Bing
