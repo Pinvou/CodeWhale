@@ -72,8 +72,12 @@ class MergeQueuePolicyTests(unittest.TestCase):
         self.assertIn("save-if: ${{ github.ref == 'refs/heads/main' }}", rust_test)
 
         windows_rust_test = self._job("windows-rust-test", "windows-rustup-repair-test")
-        self.assertIn("github.event_name == 'push'", windows_rust_test)
-        self.assertNotIn("needs.changes.outputs.rust_code", windows_rust_test)
+        self.assertIn("github.event_name == 'push' ||", windows_rust_test)
+        self.assertIn("github.event_name == 'pull_request'", windows_rust_test)
+        self.assertIn("github.event.pull_request.draft == false", windows_rust_test)
+        self.assertIn("needs.changes.outputs.rust_full == 'true'", windows_rust_test)
+        self.assertIn("needs.changes.outputs.rust_code == 'true'", windows_rust_test)
+        self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import re
 import unittest
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 
@@ -10,10 +11,45 @@ MAC_BUILD_WORKFLOW = ROOT / ".github/workflows/mac-build.yml"
 PUBLIC_SUBMODULE_VERIFIER = ROOT / "scripts/verify-public-submodule.sh"
 
 
+def _extract_quoted_paths(block):
+    """提取 YAML 块中 `- 'path'` 形式的路径条目（保持文本序）。"""
+    paths = []
+    for line in block.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- '") and stripped.endswith("'"):
+            paths.append(stripped[3:-1])
+    return paths
+
+
 def _without_yaml_comments(block):
     return "\n".join(
         line for line in block.splitlines() if not line.lstrip().startswith("#")
     )
+
+
+def _is_covered_by_trigger(entry, trigger_paths):
+    """entry 被 trigger path 覆盖:完全相同,或 trigger 是其上层 `/**` 目录 glob。"""
+    for trigger in trigger_paths:
+        if entry == trigger:
+            return True
+        if trigger.endswith("/**") and entry.startswith(trigger[:-2]):
+            return True
+    return False
+
+
+def _matches_paths_filter(path, patterns):
+    """Model paths-filter v4 some-with-excludes routing for policy examples."""
+    included = any(
+        fnmatchcase(path, pattern)
+        for pattern in patterns
+        if not pattern.startswith("!")
+    )
+    excluded = any(
+        fnmatchcase(path, pattern[1:])
+        for pattern in patterns
+        if pattern.startswith("!")
+    )
+    return included and not excluded
 
 
 class CiGatePolicyTests(unittest.TestCase):
@@ -69,9 +105,11 @@ class CiGatePolicyTests(unittest.TestCase):
         )[0]
         self.assertIn("github.event.pull_request.draft == false", frontend)
         self.assertIn("Ready PR 定向浏览器 smoke", frontend)
-        self.assertIn("Merge Queue 完整浏览器 smoke", frontend)
-        self.assertIn("select-frontend-smokes.mjs", frontend)
-        self.assertIn("npm run test:browser-smoke", frontend)
+        self.assertIn("Merge Queue diff-selected browser smoke", frontend)
+        self.assertIn("github.event.merge_group.base_sha", frontend)
+        self.assertIn("github.event.merge_group.head_sha", frontend)
+        self.assertEqual(frontend.count("select-frontend-smokes.mjs"), 2)
+        self.assertNotIn("npm run test:browser-smoke", frontend)
         self.assertEqual(frontend.count("npm run test:markdown"), 0)
 
     def test_static_analysis_gate_configs_route_to_frontend_test(self):
@@ -108,6 +146,7 @@ class CiGatePolicyTests(unittest.TestCase):
         for output in (
             "rust_code",
             "rust_dependencies",
+            "rust_full",
             "knowledge_rust",
             "knowledge_dependencies",
             "release_contract",
@@ -224,94 +263,99 @@ class CiGatePolicyTests(unittest.TestCase):
         self.assertIn("- knowledge-rust", required_gate)
         self.assertIn('"knowledge-rust:$KNOWLEDGE_RUST_RESULT"', required_gate)
 
-    def test_benchmark_jobs_are_hard_disabled_and_cannot_be_enabled_by_label(self):
+    def test_benchmark_jobs_stay_out_of_product_pr_workflow(self):
+        self.assertNotIn("\n  benchmark-contract:", self.pr_workflow)
+        self.assertNotIn("\n  benchmark-test:", self.pr_workflow)
         changes = self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
             "\n  fast-gate:", maxsplit=1
         )[0]
-        self.assertIn("benchmark:", changes)
-        self.assertIn("benchmark_cli:", changes)
-        self.assertIn("benchmark_headless:", changes)
-        self.assertIn("benchmark_codewhale:", changes)
-        self.assertIn("- 'pinvou-cli/**'", changes)
+        self.assertNotIn("benchmark:", changes)
+        self.assertNotIn("benchmark_cli:", changes)
+        self.assertNotIn("benchmark_headless:", changes)
+        self.assertNotIn("benchmark_codewhale:", changes)
+
+    def test_full_rust_filter_fails_closed_with_stable_module_boundaries(self):
+        changes = _without_yaml_comments(
+            self.pr_workflow.split("\n  changes:", maxsplit=1)[1].split(
+                "\n  fast-gate:", maxsplit=1
+            )[0]
+        )
+        rust_full = changes.split("            rust_full:", maxsplit=1)[1].split(
+            "            knowledge_rust:", maxsplit=1
+        )[0]
+        rust_full_paths = _extract_quoted_paths(rust_full)
         self.assertIn(
-            "- 'pinvou3-app/src-tauri/src/features/assistant/product_runtime/headless_bridge.rs'",
+            "predicate-quantifier: some-with-excludes",
             changes,
         )
+        self.assertIn("pinvou3-app/src-tauri/**/*.rs", rust_full_paths)
 
-        contract = self.pr_workflow.split("\n  benchmark-contract:", maxsplit=1)[1].split(
-            "\n  benchmark-test:", maxsplit=1
-        )[0]
-        contract_header = contract.split("\n    runs-on:", maxsplit=1)[0]
-        self.assertIn("if: ${{ false }}", contract_header)
-        self.assertNotIn("ci:full-benchmark", contract_header)
-        self.assertNotIn("github.event_name", contract_header)
-        self.assertNotIn("needs.changes.outputs.benchmark == 'true'", contract_header)
-        self.assertIn("runs-on: ubuntu-latest", contract)
-        self.assertIn(
-            "RUSTC_WRAPPER: ${{ github.workspace }}/pinvou3-app/src-tauri/scripts/rustc-stack-wrapper",
-            contract,
+        low_risk_boundaries = (
+            "!pinvou3-app/src-tauri/src/features/feedback/**",
+            "!pinvou3-app/src-tauri/src/features/personas/**",
+            "!pinvou3-app/src-tauri/src/features/pet/**",
         )
-        self.assertIn(
-            "cargo test --manifest-path pinvou-cli/Cargo.toml --all-features", contract
+        for boundary in low_risk_boundaries:
+            self.assertIn(boundary, rust_full_paths)
+
+        high_risk_examples = (
+            "pinvou3-app/src-tauri/src/app/commands/chat.rs",
+            "pinvou3-app/src-tauri/src/app/commands/interaction.rs",
+            "pinvou3-app/src-tauri/src/app/commands/settings.rs",
+            "pinvou3-app/src-tauri/src/features/knowledge/mod.rs",
+            "pinvou3-app/src-tauri/src/features/review/mod.rs",
+            "pinvou3-app/src-tauri/src/features/runtime_bundle/platform/mod.rs",
+            "pinvou3-app/src-tauri/src/features/voice/voice_asr.rs",
+            "pinvou3-app/src-tauri/src/features/updater/mod.rs",
+            "pinvou3-app/src-tauri/src/features/future_feature/mod.rs",
+            "pinvou3-app/src-tauri/tests/headless_bridge_contract.rs",
         )
-        for package in (
-            "agent-backend-api",
-            "benchmark-core",
-            "adapter-smoke",
-            "adapter-gaia",
+        for path in high_risk_examples:
+            self.assertTrue(
+                _matches_paths_filter(path, rust_full_paths),
+                f"unclassified/high-risk Rust path must run full tests: {path}",
+            )
+
+        low_risk_examples = (
+            "pinvou3-app/src-tauri/src/features/feedback/mod.rs",
+            "pinvou3-app/src-tauri/src/features/personas/mod.rs",
+            "pinvou3-app/src-tauri/src/features/pet/platform/detach.rs",
+        )
+        for path in low_risk_examples:
+            self.assertFalse(
+                _matches_paths_filter(path, rust_full_paths),
+                f"documented low-risk leaf should use the fast route: {path}",
+            )
+
+        for workflow_path in (
+            ".github/workflows/pr-check.yml",
+            ".github/workflows/mac-build.yml",
         ):
-            self.assertIn(f"-p {package}", contract)
-        self.assertIn(
-            "-p pinvou-cli --no-default-features", contract
-        )
-        self.assertIn(
-            "cargo check --manifest-path pinvou3-app/src-tauri/Cargo.toml", contract
-        )
-        self.assertIn("--features benchmark-hooks --test headless_bridge_contract", contract)
-        self.assertIn("--features benchmark-hooks --lib", contract)
-        self.assertIn(
-            "features::assistant::product_runtime::headless_bridge::", contract
-        )
-        self.assertIn("-- --test-threads=1", contract)
-        self.assertIn("needs.changes.outputs.benchmark_codewhale == 'true'", contract)
+            self.assertNotIn(
+                workflow_path,
+                rust_full_paths,
+                "workflow policy changes must not link the full application tests",
+            )
 
-        benchmark = self.pr_workflow.split("\n  benchmark-test:", maxsplit=1)[1].split(
-            "\n  required-gate:", maxsplit=1
-        )[0]
-        benchmark_header = benchmark.split("\n    runs-on:", maxsplit=1)[0]
-        self.assertIn("cargo test --manifest-path pinvou-cli/Cargo.toml --all-features", benchmark)
-        self.assertIn(
-            "cargo test --manifest-path pinvou-cli/Cargo.toml --no-default-features", benchmark
+        literal_feature_files = [
+            path
+            for path in rust_full_paths
+            if "/src/features/" in path
+            and path.endswith(".rs")
+            and "*" not in path
+        ]
+        self.assertEqual(
+            literal_feature_files,
+            [],
+            "rust_full must not enumerate internal feature files",
         )
-        self.assertIn("--features benchmark-hooks", benchmark)
-        self.assertIn("cargo test --manifest-path CodeWhale/Cargo.toml", benchmark)
-        self.assertIn("-p codewhale-tui --lib --locked forkguard_", benchmark)
-        self.assertIn("            CodeWhale", benchmark)
-        self.assertIn("if: ${{ false }}", benchmark_header)
-        self.assertNotIn("ci:full-benchmark", benchmark_header)
-        self.assertNotIn("github.event_name", benchmark_header)
-        self.assertNotIn("github.event_name == 'merge_group'", benchmark)
-        self.assertNotIn("github.event_name == 'push'", benchmark)
-        self.assertNotIn("needs.changes.outputs.benchmark", benchmark_header)
-        self.assertNotIn("\n        if:", benchmark)
 
-        benchmark_filter = changes.split("benchmark:", 1)[1].split(
-            "release_contract:", 1
-        )[0]
-        self.assertNotIn(".github/workflows/pr-check.yml", benchmark_filter)
-
-        required_gate = self.pr_workflow.split("\n  required-gate:", maxsplit=1)[1]
-        self.assertIn("- benchmark-contract", required_gate)
-        self.assertIn("BENCHMARK_CONTRACT_RESULT", required_gate)
-        self.assertIn('"benchmark-contract:$BENCHMARK_CONTRACT_RESULT"', required_gate)
-        self.assertNotIn("- benchmark-test", required_gate)
-        self.assertNotIn("BENCHMARK_TEST_RESULT", required_gate)
-        self.assertNotIn('"benchmark-test:$BENCHMARK_TEST_RESULT"', required_gate)
-
-    def test_rust_modes_preserve_fast_drafts_and_queue_validation(self):
-        rust_lint = self.workflow.split("\n  rust-lint:", maxsplit=1)[1].split(
-            "\n  rust-test:", maxsplit=1
-        )[0]
+    def test_rust_modes_run_combined_full_regression_only_for_high_risk(self):
+        self.assertIn("merge_group:", self.pr_workflow)
+        self.assertIn("ci:full-rust", self.pr_workflow)
+        rust_lint = self.pr_workflow.split(
+            "\n  rust-lint:", maxsplit=1
+        )[1].split("\n  rust-test:", maxsplit=1)[0]
         self.assertIn("RUN_HEAVY_RUST_CHECKS", rust_lint)
         self.assertIn("github.event.pull_request.draft == false", rust_lint)
         self.assertIn("needs.changes.outputs.rust_dependencies == 'true'", rust_lint)
@@ -319,18 +363,38 @@ class CiGatePolicyTests(unittest.TestCase):
         rust_test = self.workflow.split("\n  rust-test:", maxsplit=1)[1].split(
             "\n  windows-rust-test:", maxsplit=1
         )[0]
-        self.assertIn("github.event_name == 'merge_group'", rust_test)
-        self.assertIn("needs.changes.outputs.rust_code == 'true'", rust_test)
+        self.assertRegex(
+            rust_test,
+            r"github\.event_name == 'merge_group'\s*&&\s*"
+            r"needs\.changes\.outputs\.rust_full == 'true'",
+        )
+        self.assertIn(
+            "needs.changes.outputs.rust_full == 'true'",
+            rust_test,
+        )
+        self.assertIn(
+            "needs.changes.outputs.rust_code == 'true'",
+            rust_test,
+        )
+        self.assertIn(
+            "needs.changes.outputs.trusted_backflow != 'true'",
+            rust_test,
+        )
         self.assertIn("github.event.pull_request.draft == false", rust_test)
         self.assertIn(
             "contains(github.event.pull_request.labels.*.name, 'ci:full-rust')",
             rust_test,
         )
-        self.assertIn("github.event_name == 'push'", rust_test)
-        self.assertNotIn(
-            "github.event_name == 'push' || needs.changes.outputs.rust_code == 'true'",
+        # Main is a cumulative regression and must not depend on adjacent diff paths.
+        self.assertIn(
+            "github.event_name == 'push' ||",
             rust_test,
         )
+        self.assertIn(
+            "cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-threads=1",
+            rust_test,
+        )
+        self.assertNotIn("cargo test --lib --no-run", rust_test)
         self.assertIn("timeout-minutes: 120", rust_test)
         self.assertIn(
             'RUSTFLAGS: "-C link-arg=-fuse-ld=lld '
@@ -339,18 +403,29 @@ class CiGatePolicyTests(unittest.TestCase):
             rust_test,
         )
 
-    def test_windows_rust_test_runs_on_every_retained_main_push(self):
-        # concurrency 可能用后续非 Rust pending 替换含 Rust 变更的 pending；Windows
-        # 累计验证不得依赖单次 push 的相邻路径 diff。
+    def test_windows_rust_test_cumulative_main_push_is_path_independent(self):
+        # Main's Windows regression must remain independent of adjacent diff paths.
         windows_rust_test = _without_yaml_comments(
-            self.workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
+            self.pr_workflow.split("\n  windows-rust-test:", maxsplit=1)[1].split(
                 "\n  windows-rustup-repair-test:", maxsplit=1
             )[0]
         )
-        self.assertIn("github.event_name == 'push'", windows_rust_test)
-        self.assertNotIn("needs.changes.outputs.rust_code == 'true'", windows_rust_test)
+        self.assertIn(
+            "github.event_name == 'push' ||", windows_rust_test
+        )
+        self.assertIn(
+            "needs.changes.outputs.rust_full == 'true'",
+            windows_rust_test,
+        )
         self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
-        self.assertNotIn("github.event.pull_request.draft == false", windows_rust_test)
+        self.assertIn(
+            "contains(github.event.pull_request.labels.*.name, 'ci:full-rust')",
+            windows_rust_test,
+        )
+        self.assertIn(
+            "github.event.pull_request.draft == false", windows_rust_test
+        )
+        self.assertNotIn("github.event_name == 'merge_group'", windows_rust_test)
 
         self.assertIn(
             "defaults:\n      run:\n        shell: bash",
