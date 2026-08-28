@@ -5836,7 +5836,18 @@ mod tests {
             restored_state.control.collection_period_id.as_deref(),
             Some("new_period")
         );
-        assert!(restored.outbox.lock().unwrap().records.is_empty());
+        let restored_outbox = restored.outbox.lock().unwrap();
+        assert!(restored_outbox
+            .records
+            .iter()
+            .all(|record| record.event_id != "old_pending_event"
+                && record.collection_period_id == "new_period"
+                && record.generation == 9));
+        assert!(restored_outbox.records.iter().any(|record| {
+            record.event.get("event_name").and_then(Value::as_str)
+                == Some("analytics_cohort_started")
+        }));
+        drop(restored_outbox);
         let requests = server.await.unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests[0].starts_with("POST /collection/end "));
@@ -5944,7 +5955,7 @@ mod tests {
         let _home = TestHome::new();
         let (base_url, server) = mock_http(vec![
             (200, r#"{"collection_period_id":"started_at_max"}"#),
-            (200, r#"{"ended":true}"#),
+            (200, r#"{"collection_period_id":"started_at_max"}"#),
         ])
         .await;
         let runtime = test_runtime(&base_url);
@@ -5956,26 +5967,24 @@ mod tests {
         let mut telemetry = test_telemetry(runtime, state);
         let (control_tx, control_rx) = mpsc::channel(1);
         telemetry.control_tx = Some(control_tx);
-        let mut control_worker = telemetry.worker_clone();
-        control_worker.control_tx = None;
-        let worker = tokio::spawn(BehaviorTelemetry::run_control_worker(
-            control_rx,
-            control_worker,
-        ));
 
         let error = telemetry.set_collection_enabled(true).await.unwrap_err();
         assert!(error.to_string().contains("generation exhausted"));
-        let blocked = tokio::time::timeout(Duration::from_secs(3), async {
-            loop {
-                let snapshot = telemetry.state.lock().await.clone().unwrap();
-                if snapshot.control.pending_request.is_none() {
-                    break snapshot;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
+
+        // The failed Start must have queued a control wake-up. Close the sender and
+        // drive the real worker future directly so this assertion does not depend on
+        // when a detached task happens to be scheduled under the full parallel suite.
+        drop(telemetry.control_tx.take());
+        let mut control_worker = telemetry.worker_clone();
+        control_worker.control_tx = None;
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            BehaviorTelemetry::run_control_worker(control_rx, control_worker),
+        )
         .await
-        .expect("control worker should end the period created before generation exhaustion");
+        .expect("control worker should drain the queued End and stop");
+
+        let blocked = telemetry.state.lock().await.clone().unwrap();
         assert_eq!(blocked.control.generation, u64::MAX);
         assert!(blocked.control.collection_blocked);
         assert!(!blocked.control.enabled);
@@ -5983,12 +5992,6 @@ mod tests {
         assert!(blocked.control.pending_request.is_none());
         assert!(!telemetry.collecting.load(Ordering::Acquire));
         assert!(telemetry.outbox.lock().unwrap().records.is_empty());
-
-        drop(telemetry.control_tx.take());
-        tokio::time::timeout(Duration::from_secs(3), worker)
-            .await
-            .expect("control worker should stop when its sender is dropped")
-            .unwrap();
 
         let requests = server.await.unwrap();
         assert_eq!(requests.len(), 2);

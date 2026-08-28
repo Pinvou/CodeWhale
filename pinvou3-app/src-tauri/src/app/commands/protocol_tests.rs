@@ -419,6 +419,7 @@ command_protocol!(
         "web_access_get_acp_agent_status",
         "web_access_save_session_messages_chunk",
         "web_access_transcribe_voice_audio",
+        "web_access_track_behavior_event",
         "web_access_read_artifact_chunk",
         "web_access_update_settings",
         "web_access_artifact_info",
