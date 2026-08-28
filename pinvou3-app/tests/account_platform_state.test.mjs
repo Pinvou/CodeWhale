@@ -263,7 +263,7 @@ test('user code is displayed to its owner and resolved through a dedicated exact
   assert.match(personal, /me\?\.user_code/);
   assert.match(popover, /me\?\.user_code/);
   assert.match(admin, /client\.userByCode/);
-  assert.match(admin, /key:'user_code'/);
+  assert.match(admin, /key:\s*'user_code'/);
   assert.doesNotMatch(personal, /me\?\.user_id/);
   for (const locale of ['zh', 'en', 'ja']) assert.ok(accountPlatformCopy[locale].userCode);
 });
@@ -657,9 +657,9 @@ test('admin console exposes organizations and users as independent primary tabs'
   assert.match(view, /section === 'users'/);
   assert.doesNotMatch(view, /section === 'accounts'/);
   assert.doesNotMatch(i18n, /账号与组织/);
-  assert.match(i18n, /organizations:'组织', users:'用户'/);
-  assert.match(view, /key:'username', label:copy\.username/);
-  assert.match(i18n, /username:'用户名'/);
+  assert.match(i18n, /organizations:\s*'组织',\s*users:\s*'用户'/);
+  assert.match(view, /key:\s*'username',\s*label:\s*copy\.username/);
+  assert.match(i18n, /username:\s*'用户名'/);
 });
 
 test('personal center keeps context on overview and cannot create organizations', async () => {
@@ -799,13 +799,13 @@ test('admin organization detail supports ownership transfer, rename, leaf deleti
   assert.match(view, /client\.transferOrganizationOwnership\(organization\.organization_id, target\.user_id\)/);
   assert.match(view, /copy\.accounts\.confirmOwnership/);
   assert.match(view, /copy\.accounts\.transferOwner/);
-  assert.match(i18n, /transferOwner:'转让所有权'/);
+  assert.match(i18n, /transferOwner:\s*'转让所有权'/);
   assert.match(view, /client\.renameOrganization\(organization\.organization_id, nextName\)/);
   assert.match(view, /client\.renameOrganizationUnit\(organization\.organization_id, unit\.unit_id, trimmed\)/);
   assert.match(view, /client\.deleteOrganizationUnit\(organization\.organization_id, unit\.unit_id\)/);
   assert.match(view, /unit\.children\.length > 0/);
   assert.match(view, /copy\.accounts\.organizationSearch/);
-  assert.match(view, /editingOrganizationName \? <form/);
+  assert.match(view, /editingOrganizationName \?\s*\(\s*<form/);
   assert.match(view, /setEditingOrganizationName\(true\)/);
 });
 
