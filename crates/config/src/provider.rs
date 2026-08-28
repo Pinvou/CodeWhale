@@ -415,7 +415,7 @@ pub const fn credential_help(kind: ProviderKind) -> CredentialHelp {
     }
 }
 
-fn is_exact_https_route(base_url: &str, expected_authority: &str, expected_path: &str) -> bool {
+fn exact_route_parts(base_url: &str) -> Option<(&str, &str, &str)> {
     // URL schemes and host names are ASCII case-insensitive; paths are not.
     // Do not lowercase the whole URL here: a differently-cased path is a
     // neighboring route, not the official endpoint. Keep this intentionally
@@ -424,15 +424,41 @@ fn is_exact_https_route(base_url: &str, expected_authority: &str, expected_path:
     let trimmed = base_url.trim();
     let normalized = trimmed.strip_suffix('/').unwrap_or(trimmed);
     let Some((scheme, authority_and_path)) = normalized.split_once("://") else {
+        return None;
+    };
+    let path_start = authority_and_path
+        .find('/')
+        .unwrap_or(authority_and_path.len());
+    let (authority, path) = authority_and_path.split_at(path_start);
+    if scheme.is_empty() || authority.is_empty() {
+        return None;
+    }
+
+    Some((scheme, authority, path))
+}
+
+pub(crate) fn is_exact_url_route(base_url: &str, expected: &str) -> bool {
+    let (
+        Some((scheme, authority, path)),
+        Some((expected_scheme, expected_authority, expected_path)),
+    ) = (exact_route_parts(base_url), exact_route_parts(expected))
+    else {
         return false;
     };
-    let Some((authority, path)) = authority_and_path.split_once('/') else {
+
+    scheme.eq_ignore_ascii_case(expected_scheme)
+        && authority.eq_ignore_ascii_case(expected_authority)
+        && path == expected_path
+}
+
+fn is_exact_https_route(base_url: &str, expected_authority: &str, expected_path: &str) -> bool {
+    let Some((scheme, authority, path)) = exact_route_parts(base_url) else {
         return false;
     };
 
     scheme.eq_ignore_ascii_case("https")
         && authority.eq_ignore_ascii_case(expected_authority)
-        && path == expected_path
+        && path.strip_prefix('/') == Some(expected_path)
 }
 
 /// Whether a configured route is exactly the official Kimi Code endpoint.
