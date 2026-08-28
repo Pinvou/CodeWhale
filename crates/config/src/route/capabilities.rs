@@ -7,9 +7,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_KIMI_CODE_BASE_URL, ProviderKind, provider_base_url_is_official};
+use crate::{ProviderKind, provider_base_url_is_official};
 
-use crate::provider::is_exact_moonshot_platform_route;
+use crate::provider::{
+    is_exact_kimi_code_route, is_exact_moonshot_platform_route, is_exact_url_route,
+};
 
 /// Whether a resolved provider/model offering supports one capability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,13 +121,11 @@ pub(crate) fn documented_server_side_web_search_for_route(
     wire_model_id: &str,
     base_url: &str,
 ) -> CapabilityState {
-    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
     if !provider_base_url_is_official(provider, base_url) {
         return CapabilityState::Unknown;
     }
 
-    if provider == ProviderKind::Moonshot
-        && normalized == DEFAULT_KIMI_CODE_BASE_URL
+    if is_exact_kimi_code_route(provider, base_url)
         && matches!(
             wire_model_id.trim().to_ascii_lowercase().as_str(),
             "k3" | "k3-256k" | "kimi-for-coding" | "kimi-for-coding-highspeed"
@@ -159,10 +159,10 @@ pub(crate) fn documented_server_side_web_search_for_route(
         | ProviderKind::ModelstudioCodingPlanAnthropic => false,
         // Z.AI and Zhipu expose the same structured Web Search contract on
         // their general API products, not on the Coding Plan chat endpoint.
-        ProviderKind::Zai => matches!(
-            normalized.as_str(),
-            "https://api.z.ai/api/paas/v4" | "https://open.bigmodel.cn/api/paas/v4"
-        ),
+        ProviderKind::Zai => {
+            is_exact_url_route(base_url, "https://api.z.ai/api/paas/v4")
+                || is_exact_url_route(base_url, "https://open.bigmodel.cn/api/paas/v4")
+        }
         _ => false,
     };
 
@@ -345,6 +345,18 @@ mod tests {
                 "GLM-5.3",
                 "https://open.bigmodel.cn/api/paas/v4",
                 CapabilityState::Supported,
+            ),
+            (
+                ProviderKind::Zai,
+                "GLM-5.3",
+                "https://api.z.ai/API/paas/v4",
+                CapabilityState::Unknown,
+            ),
+            (
+                ProviderKind::Zai,
+                "GLM-5.3",
+                "https://api.z.ai/api/paas/v4//",
+                CapabilityState::Unknown,
             ),
         ] {
             assert_eq!(
