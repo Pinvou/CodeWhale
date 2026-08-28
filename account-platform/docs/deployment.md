@@ -222,6 +222,7 @@ Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移
 - `H3C_MALL_APP_SECRET`
 - `BILLING_PAYMENT_PROVIDER=h3c_mall`
 - `BILLING_ALLOW_TENTATIVE_PRICES`
+- `BILLING_TEST_ADMISSION_EVIDENCE_TTL`：仅控制 development/test 环境中 `TEST_ONLY` 现场验证证据的有效期，默认 `720h`，允许 `1h` 至 `2160h`；正式 `FROZEN` 证据仍由外部受信验证结果决定，不使用该参数。
 - `BILLING_PAYMENT_EXPIRY_INTERVAL_SECONDS`（不得小于 Adapter 声明的最小查询间隔）
 - `PAYMENT_MERCHANT_ID`（商城回调订单归属校验）
 - `PAYMENT_CALLBACK_CLIENT_ID`（当前凭据绑定 H3C Provider Profile）
@@ -230,7 +231,7 @@ Hold 运营证据继续执行 Billing `000026_hold_operations_evidence`。迁移
 - `PAYMENT_CALLBACK_TOKEN_KEY_ID`
 - `PAYMENT_CALLBACK_TOKEN_TTL_SECONDS`（60至900秒，默认300秒）
 
-UAT 联调可显式允许 `TEST_ONLY` 暂定目录；正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C Profile 处理，不能通过通用环境变量绕过服务端商品目录。通用 Provider 回调与 Web 个人中心统一使用独立账号子域名，公网边界只允许把 `POST https://account.pinvou.com/api/v1/payment-callback/token` 和 `POST https://account.pinvou.com/api/v1/payment-callbacks` 两个精确路径转发到 Billing，其余同源流量进入 Portal；`pinvou.com` 不再承载相关接口。客户端凭据由服务端绑定 Provider、版本和商户，回调请求体不得携带 Provider 身份；Token 仅含 `payment.callback.write` 权限，回调收到 `202` 只表示通知已持久化。后端主机变化时只更新 Nginx/网关 upstream，Provider 配置不得改为实例 IP 或临时地址。
+UAT 联调可显式允许 `TEST_ONLY` 暂定目录，并通过 `BILLING_TEST_ADMISSION_EVIDENCE_TTL` 设定受控测试证据有效期；默认 30 天，避免固定 24 小时导致联调商品每日被准入到期任务暂停。该设置只影响新签发证据，不延长或改写既有证据；证据已失效时仍须重新验证并完成商品恢复审批，禁止自动续证或自动开放新单。正式环境必须由业务确认 SKU、金额、BASE/BONUS 权益、有效期和 Provider 映射，发布新的 `FROZEN` 映射后关闭该开关。已有映射不可原地修改，只能退休并发布更高版本；商城特殊状态映射由 H3C Profile 处理，不能通过通用环境变量绕过服务端商品目录。通用 Provider 回调与 Web 个人中心统一使用独立账号子域名，公网边界只允许把 `POST https://account.pinvou.com/api/v1/payment-callback/token` 和 `POST https://account.pinvou.com/api/v1/payment-callbacks` 两个精确路径转发到 Billing，其余同源流量进入 Portal；`pinvou.com` 不再承载相关接口。客户端凭据由服务端绑定 Provider、版本和商户，回调请求体不得携带 Provider 身份；Token 仅含 `payment.callback.write` 权限，回调收到 `202` 只表示通知已持久化。后端主机变化时只更新 Nginx/网关 upstream，Provider 配置不得改为实例 IP 或临时地址。
 
 新华三应用授权 Token 按供应商建议缓存 1 小时；收到 `401/403` 才强制刷新一次，禁止每单登录或超过每 AppKey 每小时 3 次的授权限流。创建订单必须同时发送 `orderKey`、大陆手机号、`skuBom` 和 `merchantCustomerKey`，最后一项固定为付款人的永久 `user_id`；商城异步受理后由客户端/后台按 `orderKey` 查询，Adapter 声明的最小真实查询间隔为 2 秒。`pageQueryOrder` 以同一 `merchantCustomerKey` 为必填条件，手机号只是可选过滤条件。
 

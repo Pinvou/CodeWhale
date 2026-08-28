@@ -46,7 +46,7 @@ docker compose --env-file account-platform/deploy/compose/.env \
 
 支付 Provider 回调按原生能力启用，生产公开地址固定为 `POST https://account.pinvou.com/api/v1/payment-callback/token` 与 `POST https://account.pinvou.com/api/v1/payment-callbacks`。每个 Provider 的独立 HTTP Basic 客户端凭据在服务端绑定 Provider、Adapter 版本和商户，换取 1–15 分钟的最小权限 Bearer Token；回调请求体不能提交 Provider 身份，Billing 按 Token 选择 Profile，先把通知写入 Inbox 再返回 `202`。当前注册新华三为首个 Profile。Web 个人中心使用 `PORTAL_PUBLIC_URL=https://account.pinvou.com`，浏览器入口为 `https://account.pinvou.com/`；身份服务仍由 `PUBLIC_BASE_URL` 独立配置。`account.pinvou.com` 使用独立 HTTPS 站点，HTTP 只允许跳转 HTTPS；`pinvou.com` 不再承载个人中心或支付回调路由。部署时必须为 Billing 配置 `PAYMENT_CALLBACK_CLIENT_ID`、至少32字符的 `PAYMENT_CALLBACK_CLIENT_SECRET`、至少256 bit 的 `PAYMENT_CALLBACK_TOKEN_SIGNING_KEY_BASE64`、`PAYMENT_CALLBACK_TOKEN_KEY_ID` 和 `PAYMENT_CALLBACK_TOKEN_TTL_SECONDS`，不得把真实值写入仓库或日志。
 
-当前商城合同仍没有主动关闭订单、退款和对账单接口，因此这些能力不会伪造：订单关闭跟随商城查询到的 `PAY_CLOSED`，退款和渠道账单明确返回“供应商能力不可用”，对账模式显示为 `QUERY_DEGRADED`。普通未支付订单在72小时最终查询后进入唯一 P2 晚到复核案件，回调漏送时继续由查询补偿；若超过最终归档期限仍无法取得成功的权威未支付查询，则升级 `PROVIDER_BLIND` 并停用该 Provider 版本新单。没有有限晚到窗口、长期历史查询、权威终态和足够保留期时不得把商城 `TEST_ONLY` 映射升级为正式 `FROZEN` 映射；查询快照不能冒充渠道账单。上线退款前仍需补充商城退款合同。
+当前商城合同仍没有主动关闭订单、退款和对账单接口，因此这些能力不会伪造：订单关闭跟随商城查询到的 `PAY_CLOSED`，退款和渠道账单明确返回“供应商能力不可用”，对账模式显示为 `QUERY_DEGRADED`。普通未支付订单在72小时最终查询后进入唯一 P2 晚到复核案件，回调漏送时继续由查询补偿；若超过最终归档期限仍无法取得成功的权威未支付查询，则升级 `PROVIDER_BLIND` 并停用该 Provider 版本新单。没有有限晚到窗口、长期历史查询、权威终态和足够保留期时不得把商城 `TEST_ONLY` 映射升级为正式 `FROZEN` 映射；查询快照不能冒充渠道账单。UAT 的新 `TEST_ONLY` 验证证据默认有效 `720h`，可用 `BILLING_TEST_ADMISSION_EVIDENCE_TTL` 在 `1h` 至 `2160h` 范围内调整；该参数不续期既有证据，也不绕过失效后的验证和恢复审批。上线退款前仍需补充商城退款合同。
 
 确定性集成烟测使用独立 project：`node scripts/account-platform.mjs test integration`。命令会启动完整栈、验证五个 Readiness、请求/Trace 关联头和 Portal 安全头，然后仅删除该测试 project 的卷。
 

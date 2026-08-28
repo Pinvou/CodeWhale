@@ -32,9 +32,14 @@ type RechargeProductCatalogItem struct {
 	Mapping            RechargeProductMappingDraft `json:"mapping"`
 }
 
-func (r *PostgresRepository) VerifyPendingTestProductAdmissions(ctx context.Context, capabilities payment.Capabilities, limit int) (int, error) {
+const defaultTestAdmissionEvidenceTTL = 30 * 24 * time.Hour
+
+func (r *PostgresRepository) VerifyPendingTestProductAdmissions(ctx context.Context, capabilities payment.Capabilities, evidenceTTL time.Duration, limit int) (int, error) {
 	if limit < 1 || limit > 100 {
 		limit = 20
+	}
+	if evidenceTTL <= 0 {
+		evidenceTTL = defaultTestAdmissionEvidenceTTL
 	}
 	rows, err := r.pool.Query(ctx, `SELECT verification.verification_id,draft.provider_id,draft.provider_version,draft.channels
 FROM product_admission_verifications verification
@@ -70,7 +75,7 @@ ORDER BY verification.requested_at,verification.verification_id LIMIT $1`, limit
 		if !valid {
 			continue
 		}
-		if _, err := r.CompleteProductAdmissionVerification(ctx, item.id, "billing-admission-verifier", "TEST_ADAPTER_CAPABILITY_VALIDATION", capabilities.ProviderID+"/"+capabilities.Version, r.now().Add(24*time.Hour)); err == nil {
+		if _, err := r.CompleteProductAdmissionVerification(ctx, item.id, "billing-admission-verifier", "TEST_ADAPTER_CAPABILITY_VALIDATION", capabilities.ProviderID+"/"+capabilities.Version, r.now().Add(evidenceTTL)); err == nil {
 			completed++
 		}
 	}
@@ -81,19 +86,23 @@ type ProductAdmissionVerificationWorker struct {
 	repository   *PostgresRepository
 	capabilities payment.Capabilities
 	interval     time.Duration
+	evidenceTTL  time.Duration
 }
 
-func NewProductAdmissionVerificationWorker(repository *PostgresRepository, capabilities payment.Capabilities, interval time.Duration) *ProductAdmissionVerificationWorker {
+func NewProductAdmissionVerificationWorker(repository *PostgresRepository, capabilities payment.Capabilities, interval, evidenceTTL time.Duration) *ProductAdmissionVerificationWorker {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
-	return &ProductAdmissionVerificationWorker{repository: repository, capabilities: capabilities, interval: interval}
+	if evidenceTTL <= 0 {
+		evidenceTTL = defaultTestAdmissionEvidenceTTL
+	}
+	return &ProductAdmissionVerificationWorker{repository: repository, capabilities: capabilities, interval: interval, evidenceTTL: evidenceTTL}
 }
 func (w *ProductAdmissionVerificationWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
-		_, _ = w.repository.VerifyPendingTestProductAdmissions(ctx, w.capabilities, 20)
+		_, _ = w.repository.VerifyPendingTestProductAdmissions(ctx, w.capabilities, w.evidenceTTL, 20)
 		select {
 		case <-ctx.Done():
 			return

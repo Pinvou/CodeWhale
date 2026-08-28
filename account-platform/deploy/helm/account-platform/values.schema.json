@@ -190,11 +190,12 @@
     },
     "billing": {
       "type": "object",
-      "required": ["paymentProvider", "allowTentativePrices", "normalRefundCreationEnabled", "paymentExpiryIntervalSeconds", "paymentCallbackTokenKeyId", "paymentCallbackTokenTtlSeconds"],
+      "required": ["paymentProvider", "allowTentativePrices", "testAdmissionEvidenceTtl", "normalRefundCreationEnabled", "paymentExpiryIntervalSeconds", "paymentCallbackTokenKeyId", "paymentCallbackTokenTtlSeconds"],
       "additionalProperties": false,
       "properties": {
         "paymentProvider": { "type": "string", "minLength": 1 },
         "allowTentativePrices": { "type": "boolean" },
+        "testAdmissionEvidenceTtl": { "type": "string", "pattern": "^[0-9]+h$" },
         "normalRefundCreationEnabled": { "type": "boolean" },
         "paymentExpiryIntervalSeconds": { "type": "integer", "minimum": 1, "maximum": 300 },
         "paymentCallbackTokenKeyId": { "type": "string", "minLength": 1, "maxLength": 128 },

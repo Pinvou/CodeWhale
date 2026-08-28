@@ -129,9 +129,13 @@ func main() {
 	if payments.Capabilities().NotificationSupported {
 		go observability.RunBackground(workerContext, "payment-notification-inbox", billing.NewPaymentNotificationWorker(payments, 50*time.Millisecond).Run)
 	}
+	testAdmissionEvidenceTTL, err := testAdmissionEvidenceTTLFromEnvironment()
+	if err != nil {
+		log.Fatal(err)
+	}
 	go observability.RunBackground(workerContext, "package-expiry", billing.NewPackageExpiryWorker(repository, time.Minute).Run)
 	go observability.RunBackground(workerContext, "product-admission-expiry", billing.NewProductAdmissionExpiryWorker(repository, time.Minute).Run)
-	go observability.RunBackground(workerContext, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second).Run)
+	go observability.RunBackground(workerContext, "product-admission-verification", billing.NewProductAdmissionVerificationWorker(repository, payments.Capabilities(), 5*time.Second, testAdmissionEvidenceTTL).Run)
 	go observability.RunBackground(workerContext, "manual-review-sla", billing.NewManualReviewSLAWorker(repository, time.Minute, onCallSchedule).Run)
 	if payments.Capabilities().BillSupported {
 		go observability.RunBackground(workerContext, "daily-payment-reconciliation", billing.NewDailyPaymentReconciliationWorker(payments).Run)
@@ -208,6 +212,26 @@ func optionalBooleanEnvironment(name string, fallback bool) (bool, error) {
 		return false, fmt.Errorf("%s must be a boolean: %w", name, err)
 	}
 	return value, nil
+}
+
+func testAdmissionEvidenceTTLFromEnvironment() (time.Duration, error) {
+	const (
+		fallback = 30 * 24 * time.Hour
+		minimum  = time.Hour
+		maximum  = 90 * 24 * time.Hour
+	)
+	raw := strings.TrimSpace(os.Getenv("BILLING_TEST_ADMISSION_EVIDENCE_TTL"))
+	if raw == "" {
+		return fallback, nil
+	}
+	ttl, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("BILLING_TEST_ADMISSION_EVIDENCE_TTL must be a Go duration: %w", err)
+	}
+	if ttl < minimum || ttl > maximum {
+		return 0, errors.New("BILLING_TEST_ADMISSION_EVIDENCE_TTL must be between 1h and 2160h")
+	}
+	return ttl, nil
 }
 
 func paymentCallbackConfiguration(capabilities payment.Capabilities) (*paymentcallback.Authenticator, *paymentcallback.Profiles, error) {
