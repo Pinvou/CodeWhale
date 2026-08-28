@@ -20,3 +20,21 @@ export function formatPoints(value, language) {
     maximumFractionDigits: 4,
   });
 }
+
+export function formatWholePoints(value, language) {
+  const points = microcreditsToPoints(value);
+  if (points == null) return '—';
+  return Math.floor(points).toLocaleString(locales[language] || language || undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  });
+}
+
+export function formatUsagePoints(value, language) {
+  const points = microcreditsToPoints(value);
+  if (points == null) return '—';
+  return points.toLocaleString(locales[language] || language || undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}

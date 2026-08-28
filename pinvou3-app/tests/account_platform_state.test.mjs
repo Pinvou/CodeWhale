@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
-import { formatPoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
+import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
 import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderSummaryStatus, payablePaymentOrders, paymentOrderRemainingSeconds, summarizedPaymentOrders } from '../src/features/account-platform/order-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from '../src/features/account-platform/portal-sections.js';
@@ -11,6 +11,7 @@ import { AccountPlatformDesktopClient } from '../src/features/account-platform/d
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
 import { adminNavigationGroups, adminSectionURL, readAdminSection, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
+import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 
 test('admin portal navigation groups and URL state remain deterministic', () => {
@@ -123,6 +124,41 @@ test('account balances convert internal microcredits to display points', () => {
   assert.equal(formatPoints(1, 'en'), '0.0001');
   assert.equal(formatPoints(0, 'en'), '0');
   assert.equal(formatPoints(null, 'en'), '—');
+  assert.equal(formatWholePoints(7_969_994, 'en'), '796');
+  assert.equal(formatUsagePoints(8_317, 'en'), '0.83');
+  assert.equal(formatUsagePoints(10_000, 'en'), '1.00');
+});
+
+test('Web personal center groups model calls by logical conversation turn', () => {
+  const records = [
+    { usage_request_id: 'request-2', logical_turn_id: 'turn-a', model: 'model-a', display_status: 'SETTLED', execution_status: 'SUCCEEDED', delivery_status: 'COMPLETED', actual_microcredits: 5_000, input_tokens: 20, output_tokens: 4, cached_input_tokens: 1, started_at: '2026-08-28T08:01:00Z', completed_at: '2026-08-28T08:02:00Z' },
+    { usage_request_id: 'request-1', logical_turn_id: 'turn-a', model: 'model-a', display_status: 'SETTLED', execution_status: 'SUCCEEDED', delivery_status: 'COMPLETED', actual_microcredits: 3_317, input_tokens: 10, output_tokens: 2, cached_input_tokens: 0, started_at: '2026-08-28T08:00:00Z', completed_at: '2026-08-28T08:01:30Z' },
+    { usage_request_id: 'legacy-request', model: 'model-a', display_status: 'RELEASED', execution_status: 'FAILED', delivery_status: 'COMPLETED', actual_microcredits: null, input_tokens: null, output_tokens: null, cached_input_tokens: null, started_at: '2026-08-27T08:00:00Z' },
+  ];
+  const summaries = summarizeUsageRecords(records);
+  assert.equal(summaries.length, 2);
+  assert.equal(summaries[0].logical_turn_id, 'turn-a');
+  assert.equal(summaries[0].usage_request_count, 2);
+  assert.equal(summaries[0].actual_microcredits, 8_317);
+  assert.equal(summaries[0].input_tokens, 30);
+  assert.equal(summaries[0].output_tokens, 6);
+  assert.equal(summaries[0].cached_input_tokens, 1);
+  assert.equal(summaries[0].started_at, '2026-08-28T08:00:00Z');
+  assert.equal(summaries[0].completed_at, '2026-08-28T08:02:00Z');
+  assert.equal(summaries[1].usage_request_count, 1);
+  assert.equal(summaries[1].actual_microcredits, 0);
+});
+
+test('Web usage summary keeps an unfinished request actionable within a grouped turn', () => {
+  const [summary] = summarizeUsageRecords([
+    { usage_request_id: 'request-complete', logical_turn_id: 'turn-active', display_status: 'SETTLED', execution_status: 'SUCCEEDED', delivery_status: 'COMPLETED', settlement_status: 'SETTLED', actual_microcredits: 1_000, input_tokens: 10, output_tokens: 2, cached_input_tokens: 0, started_at: '2026-08-28T08:00:00Z', completed_at: '2026-08-28T08:01:00Z' },
+    { usage_request_id: 'request-active', logical_turn_id: 'turn-active', display_status: 'RUNNING', execution_status: 'UPSTREAM_DISPATCHING', delivery_status: 'STREAMING', settlement_status: 'PENDING', actual_microcredits: null, input_tokens: null, output_tokens: null, cached_input_tokens: null, started_at: '2026-08-28T08:02:00Z' },
+  ]);
+  assert.equal(summary.cancel_usage_request_id, 'request-active');
+  assert.equal(summary.display_status, 'RUNNING');
+  assert.equal(summary.execution_status, 'UPSTREAM_DISPATCHING');
+  assert.equal(summary.actual_microcredits, null);
+  assert.equal(summary.completed_at, '');
 });
 
 test('Web personal center uses three consolidated tabs and hides unsuccessful orders', () => {
@@ -150,6 +186,16 @@ test('Web personal center uses three consolidated tabs and hides unsuccessful or
     assert.ok(accountPlatformCopy[locale].sections.accountSettings);
     assert.ok(accountPlatformCopy[locale].noPaidOrders);
   }
+});
+
+test('Web credits and usage use the requested compact presentation', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const portalCredits = view.match(/function PortalCreditsUsage[\s\S]*?function PortalOrdersInvoices/)?.[0] || '';
+  assert.doesNotMatch(portalCredits, /creditsUsageLead/);
+  assert.match(view, /formatWholePoints\(balance\?\.available_microcredits, language\)/);
+  assert.match(view, /entitlementSummary\(activePackages\.length, formatWholePoints\(remainingMicrocredits, language\)\)/);
+  assert.match(view, /const summaries = summarizeUsageRecords\(records\)/);
+  assert.match(view, /formatUsagePoints\(record\.actual_microcredits \|\| 0, language\)/);
 });
 
 test('Web personal center keeps the URL, selected tab, and browser history synchronized', async () => {
@@ -862,7 +908,7 @@ test('personal plan history shows traceable package and payment identifiers', as
   }
   assert.match(view, /points_total_microcredits/);
   assert.match(view, /points_used_microcredits/);
-  assert.match(view, /points_remaining_microcredits/);
+  assert.match(view, /remainingEntitlementMicrocredits/);
 });
 
 test('Web payment QR uses a dialog and only user-activated payable orders can reopen it', async () => {

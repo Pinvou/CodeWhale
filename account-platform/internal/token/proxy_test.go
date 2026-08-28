@@ -23,6 +23,21 @@ func TestGatewayAdaptersOwnProtocolAndReferenceMapping(t *testing.T) {
 	}
 }
 
+func TestNormalizeLogicalTurnID(t *testing.T) {
+	valid := "pinvou-turn-0123456789abcdef"
+	if got, err := normalizeLogicalTurnID(valid); err != nil || got != valid {
+		t.Fatalf("logical turn ID = %q, %v", got, err)
+	}
+	if got, err := normalizeLogicalTurnID(""); err != nil || got != "" {
+		t.Fatalf("empty logical turn ID = %q, %v", got, err)
+	}
+	for _, invalid := range []string{"short", "contains spaces and punctuation!"} {
+		if _, err := normalizeLogicalTurnID(invalid); err == nil {
+			t.Fatalf("accepted invalid logical turn ID %q", invalid)
+		}
+	}
+}
+
 func TestParseUsageJSON(t *testing.T) {
 	usage, ok := parseUsageJSON([]byte(`{"usage":{"prompt_tokens":11,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":3}}}`))
 	if !ok || usage.InputTokens != 8 || usage.OutputTokens != 7 || usage.CachedInputTokens != 3 {

@@ -161,26 +161,26 @@ func (r *PostgresRepository) ListUsageForContext(ctx context.Context, resolved A
 	if resolved.UserID == uuid.Nil || limit < 1 || limit > 101 {
 		return nil, ErrForbidden
 	}
-	query := `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+	query := `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL
 ORDER BY started_at DESC,id DESC LIMIT $2`
 	arguments := []any{resolved.UserID, limit}
 	if cursor != nil {
-		query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+		query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id IS NULL AND (started_at,id)<($2,$3)
 ORDER BY started_at DESC,id DESC LIMIT $4`
 		arguments = []any{resolved.UserID, cursor.StartedAt, cursor.ID, limit}
 	}
 	if resolved.ContextType == "ORGANIZATION" && resolved.OrganizationID != nil {
-		query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+		query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2
 ORDER BY started_at DESC,id DESC LIMIT $3`
 		arguments = []any{resolved.UserID, *resolved.OrganizationID, limit}
 		if cursor != nil {
-			query = `SELECT id,COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
+			query = `SELECT id,COALESCE(request_snapshot->>'logical_turn_id',''),COALESCE(model_snapshot->>'display_name',model),model_id,catalog_version,status,execution_status,delivery_status,cancel_status,settlement_status,actual_microcredits,usage_snapshot,started_at,terminal_at,updated_at
 FROM usage_requests
 WHERE user_id=$1 AND organization_id=$2 AND (started_at,id)<($3,$4)
 ORDER BY started_at DESC,id DESC LIMIT $5`
@@ -198,7 +198,7 @@ ORDER BY started_at DESC,id DESC LIMIT $5`
 	for rows.Next() {
 		var item UserUsageRecord
 		var snapshot []byte
-		if err := rows.Scan(&item.UsageRequestID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.status, &item.ExecutionStatus, &item.DeliveryStatus, &item.CancelStatus, &item.SettlementStatus, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.UsageRequestID, &item.LogicalTurnID, &item.Model, &item.ModelID, &item.CatalogVersion, &item.status, &item.ExecutionStatus, &item.DeliveryStatus, &item.CancelStatus, &item.SettlementStatus, &item.ActualMicrocredits, &snapshot, &item.StartedAt, &item.CompletedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if len(snapshot) > 0 {

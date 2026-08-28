@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
-import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
+import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
 import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderSummaryStatus, payablePaymentOrders, paymentOrderRemainingSeconds, summarizedPaymentOrders } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
+import { summarizeUsageRecords } from './usage-summary.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './account-platform.css';
 
@@ -41,7 +42,7 @@ function ContextCredits({ copy, language, balance }) {
   return (
     <div className="ap-balance-hero">
       <span>{copy.availableCredits}</span>
-      <strong>{formatPoints(balance?.available_microcredits, language)}</strong>
+      <strong>{formatWholePoints(balance?.available_microcredits, language)}</strong>
       <small>
         {copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}
       </small>
@@ -877,7 +878,6 @@ function PortalCreditsUsage({ copy, language, personalContext, organizationId, p
     <section className="ap-combined-tab">
       <p className="ap-eyebrow">{copy.sections.creditsUsage}</p>
       <h2>{copy.creditsUsageTitle}</h2>
-      <p className="ap-lead">{copy.creditsUsageLead}</p>
       {personalContext ? (
         <Wallet copy={copy} language={language} products={products} balance={balance} packages={packages} orders={orders} billingUnavailable={billingUnavailable} detailsUnavailable={detailsUnavailable} order={order} qrData={qrData} busy={busy} canRecharge={canRecharge} onRecharge={onRecharge} onActivateRecharge={onActivateRecharge} embedded />
       ) : (
@@ -1882,7 +1882,7 @@ function Wallet({ copy, language, products, balance, packages, orders = [], bill
       )}
       <div className="ap-balance-hero">
         <span>{copy.availableCredits}</span>
-        <strong>{formatPoints(balance?.available_microcredits, language)}</strong>
+        <strong>{formatWholePoints(balance?.available_microcredits, language)}</strong>
         <small>
           {copy.basePoints}: {formatPoints(packages.summary?.base_available_microcredits, language)} · {copy.bonusPoints}: {formatPoints(packages.summary?.bonus_available_microcredits, language)} · {copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}
         </small>
@@ -1934,7 +1934,7 @@ function Wallet({ copy, language, products, balance, packages, orders = [], bill
               </div>
             ) : <Empty>{copy.noEntitlements}</Empty>}
             <footer>
-              <strong>{copy.entitlementSummary(activePackages.length, formatPoints(remainingMicrocredits, language))}</strong>
+              <strong>{copy.entitlementSummary(activePackages.length, formatWholePoints(remainingMicrocredits, language))}</strong>
               <button type="button" onClick={() => setEntitlementDialog({ mode: 'all' })}>{copy.viewAll}</button>
             </footer>
           </div>
@@ -2269,6 +2269,7 @@ function formatUsageTime(value, language) {
 
 function Usage({ copy, language, records, unavailable, hasMore, busy, canCancel = true, onLoadMore, onCancel, embedded = false }) {
   const Heading = embedded ? 'h3' : 'h2';
+  const summaries = summarizeUsageRecords(records);
   const header = (
     <>
       {!embedded && <p className="ap-eyebrow">{copy.sections.usage}</p>}
@@ -2288,17 +2289,17 @@ function Usage({ copy, language, records, unavailable, hasMore, busy, canCancel 
   return (
     <section className={embedded ? 'ap-combined-section' : undefined}>
       {header}
-      {records.length ? (
+      {summaries.length ? (
         <div className="ap-usage-list">
-          {records.map((record, index) => {
-            const consumed = record.actual_microcredits == null && record.display_status !== 'RELEASED' ? '—' : formatPoints(record.actual_microcredits || 0, language);
+          {summaries.map((record, index) => {
+            const consumed = record.actual_microcredits == null && record.display_status !== 'RELEASED' ? '—' : formatUsagePoints(record.actual_microcredits || 0, language);
             const statusClass = String(record.display_status || '')
               .toLowerCase()
               .replaceAll('_', '-');
             const tokenKnown = record.input_tokens != null && record.output_tokens != null;
-            const canStop = record.delivery_status !== 'USER_STOPPED' && !['SUCCEEDED', 'FAILED', 'CANCELLED_BEFORE_DISPATCH'].includes(record.execution_status);
+            const canStop = Boolean(record.cancel_usage_request_id);
             return (
-              <article className="ap-usage-row" key={record.usage_request_id || `${record.started_at}-${record.model}-${index}`}>
+              <article className="ap-usage-row" key={record.logical_turn_id || record.usage_request_id || `${record.started_at}-${record.model}-${index}`}>
                 <div>
                   <strong>{record.model || copy.unknownModel}</strong>
                   <small>{formatUsageTime(record.started_at, language)}</small>
@@ -2307,8 +2308,8 @@ function Usage({ copy, language, records, unavailable, hasMore, busy, canCancel 
                       {copy.inputTokens}: {record.input_tokens.toLocaleString()} · {copy.outputTokens}: {record.output_tokens.toLocaleString()} · {copy.cachedTokens}: {(record.cached_input_tokens || 0).toLocaleString()}
                     </small>
                   )}
-                  <small title={record.usage_request_id}>
-                    {copy.usageRecord}: {String(record.usage_request_id || '—').slice(0, 8)}
+                  <small title={record.logical_turn_id || record.usage_request_id}>
+                    {copy.usageRecord}: {String(record.logical_turn_id || record.usage_request_id || '—').slice(0, 8)}
                   </small>
                 </div>
                 <div>
@@ -2320,7 +2321,7 @@ function Usage({ copy, language, records, unavailable, hasMore, busy, canCancel 
                     {copy.executionState}: {record.execution_status} · {copy.settlementState}: {record.settlement_status}
                   </small>
                   {canStop && (
-                    <button disabled={busy || !canCancel} title={!canCancel ? copy.permissionDenied : undefined} onClick={() => onCancel(record.usage_request_id)}>
+                    <button disabled={busy || !canCancel} title={!canCancel ? copy.permissionDenied : undefined} onClick={() => onCancel(record.cancel_usage_request_id)}>
                       {copy.stopDelivery}
                     </button>
                   )}

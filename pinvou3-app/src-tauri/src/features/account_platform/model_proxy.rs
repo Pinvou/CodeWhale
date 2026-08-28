@@ -19,6 +19,8 @@ use tokio::time::sleep;
 
 const MAX_CHAT_BODY_BYTES: usize = 4 * 1024 * 1024;
 const IDEMPOTENCY_PREFIX: &str = "pinvou-desktop-";
+const LOGICAL_TURN_PREFIX: &str = "pinvou-turn-";
+const LOGICAL_TURN_HEADER: &str = "X-Pinvou-Logical-Turn-ID";
 
 #[derive(Clone, Default)]
 pub(super) struct ModelGatewayProxy {
@@ -148,6 +150,7 @@ async fn forward_chat(
         Err(_) => return proxy_error(StatusCode::BAD_REQUEST, "invalid chat request body"),
     };
     let idempotency_key = request_idempotency_key(&route, target.turn_generation, &body);
+    let logical_turn_id = logical_turn_id(&route, target.turn_generation);
     forward(
         &state,
         target,
@@ -156,6 +159,7 @@ async fn forward_chat(
         &parts.headers,
         Some(body),
         Some(&idempotency_key),
+        Some(&logical_turn_id),
     )
     .await
 }
@@ -177,6 +181,7 @@ async fn forward_models(
         &parts.headers,
         None,
         None,
+        None,
     )
     .await
 }
@@ -189,6 +194,7 @@ async fn forward(
     headers: &axum::http::HeaderMap,
     body: Option<Bytes>,
     idempotency_key: Option<&str>,
+    logical_turn_id: Option<&str>,
 ) -> Response<Body> {
     let target_url = match Url::parse(&format!(
         "{}/{resource}",
@@ -220,6 +226,9 @@ async fn forward(
         }
         if let Some(key) = idempotency_key {
             builder = builder.header("Idempotency-Key", key);
+        }
+        if let Some(turn_id) = logical_turn_id {
+            builder = builder.header(LOGICAL_TURN_HEADER, turn_id);
         }
         if let Some(body) = body.clone() {
             builder = builder.body(body);
@@ -294,6 +303,17 @@ fn request_idempotency_key(route: &str, turn_generation: u64, body: &[u8]) -> St
     )
 }
 
+fn logical_turn_id(route: &str, turn_generation: u64) -> String {
+    let mut digest = Sha256::new();
+    digest.update(route.as_bytes());
+    digest.update([0]);
+    digest.update(turn_generation.to_be_bytes());
+    format!(
+        "{LOGICAL_TURN_PREFIX}{}",
+        crate::platform::encoding::hex_lower(&digest.finalize())
+    )
+}
+
 fn enforce_chat_output_limit(body: Bytes, maximum_output_tokens: u32) -> serde_json::Result<Bytes> {
     let mut payload: serde_json::Value = serde_json::from_slice(&body)?;
     let Some(object) = payload.as_object_mut() else {
@@ -346,7 +366,9 @@ mod tests {
     use axum::Router;
     use tokio::sync::Mutex;
 
-    use super::{enforce_chat_output_limit, request_idempotency_key, ModelGatewayProxy};
+    use super::{
+        enforce_chat_output_limit, logical_turn_id, request_idempotency_key, ModelGatewayProxy,
+    };
 
     #[test]
     fn idempotency_key_is_stable_bounded_and_scoped_to_session_route() {
@@ -364,6 +386,15 @@ mod tests {
         assert!(first
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+    }
+
+    #[test]
+    fn logical_turn_id_is_stable_within_a_turn_and_rotates_between_turns() {
+        let first = logical_turn_id("session-route-a", 1);
+        assert_eq!(first, logical_turn_id("session-route-a", 1));
+        assert_ne!(first, logical_turn_id("session-route-a", 2));
+        assert_ne!(first, logical_turn_id("session-route-b", 1));
+        assert!((16..=128).contains(&first.len()));
     }
 
     #[test]
@@ -385,12 +416,12 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_injects_stable_key_and_preserves_sse_response() {
-        let captures = Arc::new(Mutex::new(Vec::<(String, String, u64)>::new()));
+        let captures = Arc::new(Mutex::new(Vec::<(String, String, String, u64)>::new()));
         let upstream = Router::new()
             .route(
                 "/v1/chat/completions",
                 post(
-                    |State(captures): State<Arc<Mutex<Vec<(String, String, u64)>>>>,
+                    |State(captures): State<Arc<Mutex<Vec<(String, String, String, u64)>>>>,
                      headers: HeaderMap,
                      body: Bytes| async move {
                         let key = headers
@@ -403,16 +434,23 @@ mod tests {
                             .and_then(|value| value.to_str().ok())
                             .unwrap_or_default()
                             .to_string();
+                        let logical_turn = headers
+                            .get("x-pinvou-logical-turn-id")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
                         let maximum_output = serde_json::from_slice::<serde_json::Value>(&body)
                             .ok()
                             .and_then(|body| {
                                 body.get("max_tokens").and_then(|value| value.as_u64())
                             })
                             .unwrap_or_default();
-                        captures
-                            .lock()
-                            .await
-                            .push((key, authorization, maximum_output));
+                        captures.lock().await.push((
+                            key,
+                            authorization,
+                            logical_turn,
+                            maximum_output,
+                        ));
                         (
                             [(header::CONTENT_TYPE, "text/event-stream")],
                             "data: [DONE]\n\n",
@@ -478,12 +516,15 @@ mod tests {
         assert_eq!(captures[0].0, captures[1].0);
         assert_ne!(captures[0].0, captures[2].0);
         assert_ne!(captures[2].0, captures[3].0);
+        assert_eq!(captures[0].2, captures[1].2);
+        assert_ne!(captures[0].2, captures[2].2);
+        assert_eq!(captures[2].2, captures[3].2);
         assert!((16..=128).contains(&captures[0].0.len()));
-        assert!(captures
-            .iter()
-            .all(
-                |(_, authorization, maximum_output)| authorization == "Bearer oidc-access-token"
-                    && *maximum_output == 4096
-            ));
+        assert!(captures.iter().all(
+            |(_, authorization, logical_turn, maximum_output)| authorization
+                == "Bearer oidc-access-token"
+                && logical_turn.starts_with("pinvou-turn-")
+                && *maximum_output == 4096
+        ));
     }
 }

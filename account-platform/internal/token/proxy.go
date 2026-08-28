@@ -21,6 +21,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const logicalTurnHeader = "X-Pinvou-Logical-Turn-ID"
+
 func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	resolved, ok := s.resolveModelUsagePermission(w, r, "personal.model.invoke", "org.model.invoke")
 	if !ok {
@@ -44,6 +46,11 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if len(idempotencyKey) < 16 || len(idempotencyKey) > 128 {
 		api.WriteError(w, http.StatusBadRequest, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key must contain between 16 and 128 characters", httpserver.RequestID(r.Context()))
+		return
+	}
+	logicalTurnID, err := normalizeLogicalTurnID(r.Header.Get(logicalTurnHeader))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "LOGICAL_TURN_ID_INVALID", logicalTurnHeader+" must be 16 to 128 URL-safe characters", httpserver.RequestID(r.Context()))
 		return
 	}
 	body, err = normalizeInferenceBody(body, request.Stream)
@@ -161,6 +168,9 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	usageRequest := UsageRequest{ID: usageID, IdempotencyKeyDigest: keyDigest, IdempotencyNamespace: "model-inference", CanonicalVersion: 1, RequestFingerprint: requestFingerprint, UserID: resolved.UserID, SessionID: resolved.SessionID, OrganizationID: resolved.OrganizationID, TokenAccountID: route.TokenAccountID, CredentialID: route.CredentialID, WalletID: route.WalletID, Model: catalogModel.ModelID.String(), ModelID: &modelID, CatalogVersion: &catalogVersion, CapabilityVersionID: &capabilityID, ProtocolDefinitionID: &protocolID, RouteGeneration: &routeGeneration, ModelSnapshot: modelSnapshot, MaximumMicrocredits: maximumCost}
 	pricingSnapshot, _ := json.Marshal(price)
 	requestSnapshot := map[string]any{"request_sha256": hex.EncodeToString(digest[:]), "model_id": catalogModel.ModelID, "upstream_model_ref": catalogModel.UpstreamModelRef, "catalog_version": catalogModel.CatalogVersion, "model_capability_version_id": catalogModel.ModelCapabilityVersionID, "protocol_definition_id": catalogModel.ProtocolDefinitionID, "protocol_code": "CHAT", "protocol_version": catalogModel.ProtocolVersion, "route_generation": route.RouteGeneration, "lifecycle_status": catalogModel.LifecycleStatus, "deprecation_effective_at": catalogModel.DeprecationEffectiveAt, "display_name": catalogModel.DisplayName, "context_length": catalogModel.ContextLength, "stream": request.Stream, "estimated_input_tokens": maximumUsage.InputTokens, "maximum_output_tokens": maximumOutput, "estimator": map[string]any{"code": "UTF8_BYTES_DIV4_CEIL", "version": 1}, "context_type": resolved.ContextType, "organization_id": resolved.OrganizationID, "context_version": resolved.ContextVersion, "authorization_version": resolved.AuthorizationVersion, "membership_version": resolved.MembershipVersion, "wallet_id": route.WalletID, "token_account_id": route.TokenAccountID, "credential_id": route.CredentialID, "formula_version_id": price.FormulaVersionID, "price_version_id": price.ID, "pricing_snapshot": json.RawMessage(pricingSnapshot)}
+	if logicalTurnID != "" {
+		requestSnapshot["logical_turn_id"] = logicalTurnID
+	}
 	usageRequest, created, err := s.repository.BeginUsage(r.Context(), usageRequest, requestSnapshot)
 	if err != nil {
 		if errors.Is(err, ErrIdempotencyConflict) {
@@ -244,6 +254,23 @@ func (s *Service) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.dispatchUsage(w, r, usageRequest, envelope)
+}
+
+func normalizeLogicalTurnID(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) < 16 || len(value) > 128 {
+		return "", ErrForbidden
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' {
+			continue
+		}
+		return "", ErrForbidden
+	}
+	return value, nil
 }
 
 func (s *Service) writePricingError(w http.ResponseWriter, r *http.Request, err error) {

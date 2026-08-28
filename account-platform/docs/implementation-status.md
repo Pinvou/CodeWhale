@@ -471,7 +471,7 @@
 | PAY-34 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 按上海自然日由 Worker 每日获取 Provider 账单，并核对内部订单/支付流水、普通及强制退款/拒付和 Billing 账本；API、文件导入及手工重跑均保留独立运行。 |
 | PAY-36 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 差异冻结分类、严重度及 Provider/内部/退款/账本快照，状态、责任人、修复动作和复核结果只经带请求指纹的幂等命令推进，命令与时间线不可变且禁止直接改写证据。 |
 | UI-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | Web 一级导航固定为“额度与用量 / 订单与发票 / 账号设置”；账号设置以紧凑响应式行展示身份及本地化状态、用户名、手机号、用户编码、组织数，桌面普通行 `56px`、身份行 `60px`，注销使用独立危险操作卡且不重复展示可用积分、权益或用量；旧页面深链归并映射，订单仅展示 `PAID/PAID_LATE`，组织管理按有效成员关系嵌入，不提供普通用户 Token Account/供应商 Key 管理。 |
+| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | Web 一级导航固定为“额度与用量 / 订单与发票 / 账号设置”；额度页移除标题下重复引导语，主可用积分和有效权益包剩余汇总向下取整为整数，新产生的用量按桌面逻辑轮次标识汇总多次模型请求并固定显示两位小数，旧记录保持逐请求展示；账号设置以紧凑响应式行展示身份及本地化状态、用户名、手机号、用户编码、组织数，注销使用独立危险操作卡且不重复展示可用积分、权益或用量；旧页面深链归并映射，订单仅展示 `PAID/PAID_LATE`，组织管理按有效成员关系嵌入，不提供普通用户 Token Account/供应商 Key 管理。 |
 | UI-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; PERSONAL-CENTER-IA; IDENTITY-SMS; I18N-RELEASE-GATE | NOT_DEPLOYED | Web 个人中心提供三语“资料与安全”、用户名修改及新手机号滑块/短信验证；桌面移除资料修改区域但保留未登录忘记密码。 |
 | UI-06 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 个人中心所有余额、权益、订单和用量请求只按用户级活动上下文加载；个人上下文展示个人权益，组织上下文不混入个人权益明细。 |

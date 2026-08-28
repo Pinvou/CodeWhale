@@ -178,6 +178,7 @@ type UsageHistoryCursor struct {
 
 type UserUsageRecord struct {
 	UsageRequestID     uuid.UUID  `json:"usage_request_id"`
+	LogicalTurnID      string     `json:"logical_turn_id,omitempty"`
 	Model              string     `json:"model"`
 	ModelID            *uuid.UUID `json:"model_id,omitempty"`
 	CatalogVersion     *int64     `json:"catalog_version,omitempty"`
