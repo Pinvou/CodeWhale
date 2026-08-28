@@ -728,21 +728,28 @@ impl AccountPlatformState {
                 "account_platform_configuration_invalid: cannot resolve account bootstrap"
                     .to_string()
             })?;
-        let response = self
-            .client
-            .post(url)
-            .bearer_auth(access_token)
-            .header("Accept", "application/json")
-            .header(
-                crate::platform::client_version::HEADER,
-                crate::platform::client_version::CURRENT,
-            )
-            .header("X-Request-ID", random_urlsafe(18))
-            .header("X-Device-ID", &self.device_id)
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .map_err(|error| format!("account_platform_service_unavailable: {error}"))?;
+        let request_id = random_urlsafe(18);
+        let send = || {
+            self.client
+                .post(url.clone())
+                .bearer_auth(access_token)
+                .header("Accept", "application/json")
+                .header(
+                    crate::platform::client_version::HEADER,
+                    crate::platform::client_version::CURRENT,
+                )
+                .header("X-Request-ID", &request_id)
+                .header("X-Device-ID", &self.device_id)
+                .json(&serde_json::json!({}))
+                .send()
+        };
+        let response = match send().await {
+            Ok(response) => response,
+            Err(error) if bootstrap_transport_retryable(&error) => send()
+                .await
+                .map_err(|retry_error| account_platform_transport_error(&retry_error))?,
+            Err(error) => return Err(account_platform_transport_error(&error)),
+        };
         if response.status() == StatusCode::UNAUTHORIZED {
             return Err("authentication_required: account session was rejected".to_string());
         }
@@ -1149,6 +1156,28 @@ fn session_error_code(error: &str) -> &'static str {
 
 fn credential_store_error(error: impl std::fmt::Display) -> String {
     format!("credential_store_unavailable: {error}")
+}
+
+fn bootstrap_transport_retryable(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout()
+}
+
+fn account_platform_transport_error(error: &reqwest::Error) -> String {
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_builder() {
+        "request_builder"
+    } else if error.is_redirect() {
+        "redirect"
+    } else {
+        "request"
+    };
+    let cause = std::error::Error::source(error)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "no additional transport detail".to_string());
+    format!("account_platform_service_unavailable: {category}: {error}; cause={cause}")
 }
 
 fn random_urlsafe(bytes: usize) -> String {
