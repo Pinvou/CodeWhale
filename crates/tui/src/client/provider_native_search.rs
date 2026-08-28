@@ -182,6 +182,23 @@ impl ProviderNativeSearchClient {
             .await
             .context("provider-native web search returned invalid JSON")
     }
+
+    pub(super) async fn get_json(&self, url: &str) -> Result<Value> {
+        let response = self
+            .inner
+            .send_with_retry(|| {
+                self.inner
+                    .http_client
+                    .get(url)
+                    .header("Accept", "application/json")
+            })
+            .await
+            .context("provider-native web search request failed")?;
+        response
+            .json::<Value>()
+            .await
+            .context("provider-native web search returned invalid JSON")
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -510,7 +527,7 @@ fn bounded_answer(parts: Vec<String>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::{Config, ProviderConfig, ProvidersConfig};
-    use wiremock::matchers::{body_partial_json, header, method, path};
+    use wiremock::matchers::{body_partial_json, body_string_contains, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn request() -> ProviderNativeSearchRequest {
@@ -809,18 +826,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn moonshot_adapter_declares_builtin_search_and_recovers_citations() {
+    async fn moonshot_k3_adapter_uses_formula_search_and_recovers_citations() {
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/formulas/moonshot/web-search:latest/tools"))
+            .and(header("authorization", "Bearer moonshot-test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list",
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "web_search",
+                        "description": "Search the web",
+                        "parameters": {
+                            "type": "object",
+                            "properties": { "query": { "type": "string" } },
+                            "required": ["query"]
+                        }
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .and(header("authorization", "Bearer moonshot-test-key"))
             .and(body_partial_json(json!({
                 "model": "kimi-k3",
                 "tools": [{
-                    "type": "builtin_function",
-                    "function": { "name": "$web_search" }
+                    "type": "function",
+                    "function": { "name": "web_search" }
                 }]
             })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{
+                    "finish_reason": "tool_calls",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{
+                            "id": "web_search:0",
+                            "type": "function",
+                            "function": {
+                                "name": "web_search",
+                                "arguments": "{\"query\":\"current release\"}"
+                            }
+                        }]
+                    }
+                }]
+            })))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/v1/formulas/moonshot/web-search:latest/fibers",
+            ))
+            .and(header("authorization", "Bearer moonshot-test-key"))
+            .and(body_partial_json(json!({
+                "name": "web_search",
+                "arguments": "{\"query\":\"current release\"}"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "succeeded",
+                "context": {
+                    "encrypted_output": "----MOONSHOT ENCRYPTED BEGIN----result----MOONSHOT ENCRYPTED END----"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(header("authorization", "Bearer moonshot-test-key"))
+            .and(body_string_contains("MOONSHOT ENCRYPTED BEGIN"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "choices": [{
                     "finish_reason": "stop",

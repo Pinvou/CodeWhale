@@ -7,7 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_MOONSHOT_BASE_URL, ProviderKind, provider_base_url_is_official};
+use crate::{
+    DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL, ProviderKind,
+    provider_base_url_is_official,
+};
 
 /// Whether a resolved provider/model offering supports one capability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +89,8 @@ pub(crate) fn documented_server_side_web_search(
             wire_model_id.as_str(),
             "deepseek-v4-flash" | "deepseek-v4-pro" | "deepseek-v4-flash-vision-exp"
         ),
+        // K3 uses the Formula API official-tools channel; K2.6 retains the
+        // earlier `$web_search` contract with thinking disabled.
         "moonshot" => matches!(wire_model_id.as_str(), "kimi-k3" | "kimi-k2.6"),
         "modelstudio-token-plan" => matches!(
             wire_model_id.as_str(),
@@ -121,7 +126,7 @@ pub(crate) fn documented_server_side_web_search_for_route(
     }
 
     if provider == ProviderKind::Moonshot
-        && normalized == "https://api.kimi.com/coding/v1"
+        && normalized == DEFAULT_KIMI_CODE_BASE_URL
         && matches!(
             wire_model_id.trim().to_ascii_lowercase().as_str(),
             "k3" | "k3-256k" | "kimi-for-coding" | "kimi-for-coding-highspeed"
@@ -143,8 +148,8 @@ pub(crate) fn documented_server_side_web_search_for_route(
         | ProviderKind::Anthropic
         | ProviderKind::Xai
         | ProviderKind::XiaomiMimo => true,
-        // Moonshot's built-in `$web_search` contract belongs to the exact
-        // direct API product. Kimi Code's exact `/coding/v1` product is
+        // Moonshot's Formula/legacy `$web_search` contracts belong to the
+        // exact direct API product. Kimi Code's exact `/coding/v1` product is
         // handled above; adjacent coding paths must remain fail-closed.
         ProviderKind::Moonshot => normalized == DEFAULT_MOONSHOT_BASE_URL,
         // Token Plan exposes Harness web_search only on its Responses API.
@@ -246,6 +251,14 @@ mod tests {
             CapabilityState::Supported
         );
         assert_eq!(
+            documented_server_side_web_search("moonshot", "kimi-k2.6"),
+            CapabilityState::Supported
+        );
+        assert_eq!(
+            documented_server_side_web_search("moonshot", "kimi-k3"),
+            CapabilityState::Supported
+        );
+        assert_eq!(
             documented_server_side_web_search("modelstudio-token-plan", "qwen3.8-max"),
             CapabilityState::Supported
         );
@@ -278,6 +291,14 @@ mod tests {
             documented_server_side_web_search_for_route(
                 ProviderKind::Moonshot,
                 "kimi-k3",
+                "https://api.moonshot.ai/v1",
+            ),
+            CapabilityState::Supported
+        );
+        assert_eq!(
+            documented_server_side_web_search_for_route(
+                ProviderKind::Moonshot,
+                "kimi-k2.6",
                 "https://api.moonshot.ai/v1",
             ),
             CapabilityState::Supported
