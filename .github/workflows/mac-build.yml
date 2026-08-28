@@ -5,7 +5,9 @@ name: mac-build
 # runner:macos-15(GitHub-hosted Apple Silicon,M Series;钉死大版本号以保证可复现)。
 #
 # 与 pr-check.yml 的 rust-test 关系:
-# - rust-test 在 ubuntu 上跑完整 lib tests(含 Linux-only eip/zhidao 等),是主线 gate。
+# - rust-test runs full lib tests for high-risk ready PRs, matching merge groups,
+#   and every main push. Explicitly low-risk Rust changes use the fast gate;
+#   trusted same-repository backflows use their dedicated portability gate.
 # - mac-build 在 macos-15 上只跑 cargo check + cargo test --lib + release-fast 冒烟
 #   (cargo build 与 tauri bundle 共用同一 release-fast profile,产物互相复用,不重复编译),
 #   验证 macOS 平台目标零回归。真发版的 thin-LTO --release 产物由 scripts/release-macos.sh 产出。
