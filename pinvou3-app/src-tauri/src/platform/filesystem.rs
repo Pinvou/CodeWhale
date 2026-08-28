@@ -2017,6 +2017,8 @@ pub(crate) mod tests {
     use std::path::Path;
 
     use super::{atomic_write, atomic_write_private, is_executable_file};
+    #[cfg(unix)]
+    use super::{create_secret_file, open_private_append_file};
     #[cfg(any(
         windows,
         target_os = "macos",
@@ -2414,6 +2416,15 @@ pub(crate) mod tests {
         drop(open_private_append_file(&append).unwrap());
         assert_eq!(
             std::fs::metadata(&append).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let secret = dir.join("secret.json");
+        std::fs::write(&secret, b"existing\n").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(create_secret_file(&secret).unwrap());
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
             0o600
         );
 
