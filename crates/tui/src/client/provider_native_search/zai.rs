@@ -1,6 +1,6 @@
 //! Z.AI structured Web Search API adapter.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use super::{
@@ -13,19 +13,25 @@ pub(super) async fn search(
     client: &ProviderNativeSearchClient,
     request: &ProviderNativeSearchRequest,
 ) -> Result<ProviderNativeSearchResponse> {
-    let body = build_body(request);
+    let body = build_body(request, &client.inner.base_url)?;
     let payload = client
         .post_json(&api_url(&client.inner.base_url, "web_search"), &body, &[])
         .await?;
     Ok(parse(&payload))
 }
 
-fn build_body(request: &ProviderNativeSearchRequest) -> Value {
-    json!({
-        "search_engine": "search-prime",
+fn build_body(request: &ProviderNativeSearchRequest, base_url: &str) -> Result<Value> {
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let search_engine = match normalized.as_str() {
+        "https://api.z.ai/api/paas/v4" => "search-prime",
+        "https://open.bigmodel.cn/api/paas/v4" => "search_std",
+        _ => bail!("unsupported Z.AI web-search endpoint: {base_url}"),
+    };
+    Ok(json!({
+        "search_engine": search_engine,
         "search_query": request.query,
         "count": request.max_results,
-    })
+    }))
 }
 
 fn parse(payload: &Value) -> ProviderNativeSearchResponse {
@@ -64,17 +70,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_uses_search_prime_without_unproven_filter_fields() {
+    fn request_uses_site_specific_search_engine_without_unproven_filter_fields() {
         let request = ProviderNativeSearchRequest {
             query: "current release".to_string(),
             max_results: 3,
             domains: vec!["example.com".to_string()],
         };
-        let body = build_body(&request);
-        assert_eq!(body["search_engine"], "search-prime");
-        assert_eq!(body["search_query"], "current release");
-        assert_eq!(body["count"], 3);
-        assert!(body.get("search_domain_filter").is_none());
+        for (base_url, expected_engine) in [
+            ("https://api.z.ai/api/paas/v4", "search-prime"),
+            ("https://open.bigmodel.cn/api/paas/v4/", "search_std"),
+        ] {
+            let body = build_body(&request, base_url).expect("official endpoint");
+            assert_eq!(body["search_engine"], expected_engine);
+            assert_eq!(body["search_query"], "current release");
+            assert_eq!(body["count"], 3);
+            assert!(body.get("search_domain_filter").is_none());
+        }
+    }
+
+    #[test]
+    fn request_rejects_unproven_zai_product_surface() {
+        let request = ProviderNativeSearchRequest {
+            query: "current release".to_string(),
+            max_results: 3,
+            domains: Vec::new(),
+        };
+        assert!(build_body(&request, "https://api.z.ai/api/coding/paas/v4").is_err());
     }
 
     #[test]

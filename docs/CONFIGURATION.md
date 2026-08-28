@@ -2314,8 +2314,8 @@ never inherit native search by naming similarity. They start directly at the
 configured backend. Network-policy denials fail closed without sending the
 query to a fallback. China deployments can explicitly select Baidu, Metaso,
 Volcengine, or a trusted SearXNG endpoint; Codewhale does not guess geography
-from locale or model provider. Keyless Firecrawl remains the default configured
-backend.
+from locale or model provider. DuckDuckGo remains the default configured
+backend and does not require an API key.
 
 For a private/internal search service that serves DuckDuckGo-compatible HTML,
 keep `provider = "duckduckgo"` and set `base_url`; Codewhale appends the `q`

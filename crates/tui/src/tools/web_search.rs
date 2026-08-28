@@ -956,6 +956,11 @@ fn finalize_search_response(
             capabilities.domains,
             super::web::contract::CapabilityState::Supported
         );
+        if !provider_honored && raw.backend == BackendId::ProviderNative {
+            // Post-filtering can constrain returned citations, but it cannot
+            // prove that a provider-generated answer used only those sources.
+            raw.note = None;
+        }
         if !provider_honored || raw.results.len() != before {
             raw.degraded.push(DegradedReason::PostFiltered {
                 knob: QueryKnob::Domains,
@@ -2898,6 +2903,44 @@ mod tests {
             }
         )));
         assert!(!response.receipt.degraded.iter().any(|reason| matches!(
+            reason,
+            DegradedReason::PostFiltered {
+                knob: QueryKnob::Domains
+            }
+        )));
+        assert!(response.message.contains("Grounded answer."));
+    }
+
+    #[test]
+    fn provider_native_post_filter_discards_unconstrained_answer() {
+        let query = SearchQuery::new(
+            "current release".to_string(),
+            3,
+            None,
+            vec!["example.com".to_string()],
+            None,
+        );
+        let raw = BackendSearch {
+            backend: BackendId::ProviderNative,
+            source: "provider-native/deepseek/deepseek-v4-flash".to_string(),
+            backend_detail: Some("api.deepseek.com".to_string()),
+            results: vec![SearchResult::new(
+                1,
+                "Outside source".to_string(),
+                "https://outside.test/release".to_string(),
+                None,
+                None,
+            )],
+            degraded: Vec::new(),
+            note: Some("Answer synthesized from an unconstrained search.".to_string()),
+        };
+        let response =
+            finalize_search_response(query, QueryCapabilities::count_only(), raw, Instant::now());
+
+        assert_eq!(response.count, 0);
+        assert_eq!(response.message, "No results found");
+        assert!(response.receipt.honored.domains);
+        assert!(response.receipt.degraded.iter().any(|reason| matches!(
             reason,
             DegradedReason::PostFiltered {
                 knob: QueryKnob::Domains

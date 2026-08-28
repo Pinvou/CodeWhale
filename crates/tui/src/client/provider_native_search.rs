@@ -233,9 +233,10 @@ fn build_responses_search_body(
         ResponsesSearchDialect::Xai => {
             body["tool_choice"] = json!("required");
         }
-        ResponsesSearchDialect::Deepseek | ResponsesSearchDialect::ModelStudio => {
+        ResponsesSearchDialect::Deepseek => {
             body["tool_choice"] = json!({ "type": "web_search" });
         }
+        ResponsesSearchDialect::ModelStudio => body["tool_choice"] = json!("required"),
     }
     body
 }
@@ -454,10 +455,13 @@ fn citations_from_text(text: &str) -> Vec<ProviderNativeCitation> {
     let mut offset = 0;
     while offset < text.len() {
         let remaining = &text[offset..];
-        let Some(relative_start) = remaining
-            .find("https://")
-            .or_else(|| remaining.find("http://"))
-        else {
+        let relative_start = match (remaining.find("https://"), remaining.find("http://")) {
+            (Some(https), Some(http)) => Some(https.min(http)),
+            (Some(https), None) => Some(https),
+            (None, Some(http)) => Some(http),
+            (None, None) => None,
+        };
+        let Some(relative_start) = relative_start else {
             break;
         };
         let start = offset + relative_start;
@@ -553,7 +557,7 @@ mod tests {
         );
         assert_eq!(body["tools"][0]["type"], "web_search");
         assert!(body["tools"][0].get("filters").is_none());
-        assert_eq!(body["tool_choice"]["type"], "web_search");
+        assert_eq!(body["tool_choice"], "required");
         assert!(body.get("include").is_none());
     }
 
@@ -701,6 +705,15 @@ mod tests {
         assert_eq!(citations[1].url, "https://example.org/b");
     }
 
+    #[test]
+    fn answer_links_preserve_mixed_scheme_source_order() {
+        let citations =
+            citations_from_text("First http://legacy.example/a, then https://secure.example/b.");
+        assert_eq!(citations.len(), 2);
+        assert_eq!(citations[0].url, "http://legacy.example/a");
+        assert_eq!(citations[1].url, "https://secure.example/b");
+    }
+
     #[tokio::test]
     async fn xai_adapter_reuses_active_authenticated_transport() {
         let server = MockServer::start().await;
@@ -756,7 +769,8 @@ mod tests {
             .and(header("authorization", "Bearer modelstudio-test-key"))
             .and(body_partial_json(json!({
                 "model": "qwen3.8-max",
-                "tools": [{ "type": "web_search" }]
+                "tools": [{ "type": "web_search" }],
+                "tool_choice": "required"
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "output": [{
