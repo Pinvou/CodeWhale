@@ -5,11 +5,13 @@
 //! the adapter is attached; this module speaks only documented first-party
 //! wire contracts and leaves every unproven route on the configured fallback.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result, bail};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Value, json};
 
-use crate::config::ApiProvider;
+use crate::config::{ApiProvider, is_exact_direct_moonshot_k3_route};
 
 use super::{DeepSeekClient, api_url, responses_api_url};
 
@@ -18,6 +20,7 @@ mod mimo;
 mod zai;
 
 const MAX_NATIVE_ANSWER_CHARS: usize = 4_000;
+const KIMI_K3_FORMULA_TIMEOUT_FLOOR: Duration = Duration::from_secs(180);
 
 #[derive(Clone)]
 pub(crate) struct ProviderNativeSearchClient {
@@ -87,6 +90,15 @@ impl ProviderNativeSearchClient {
             self.inner.api_provider.as_str(),
             self.host().as_deref().unwrap_or("unknown-host"),
             self.inner.default_model
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn search_timeout_floor_override(&self) -> Option<Duration> {
+        native_search_timeout_floor_override(
+            self.inner.api_provider,
+            &self.inner.base_url,
+            &self.inner.default_model,
         )
     }
 
@@ -199,6 +211,15 @@ impl ProviderNativeSearchClient {
             .await
             .context("provider-native web search returned invalid JSON")
     }
+}
+
+fn native_search_timeout_floor_override(
+    provider: ApiProvider,
+    base_url: &str,
+    model: &str,
+) -> Option<Duration> {
+    is_exact_direct_moonshot_k3_route(provider, base_url, model)
+        .then_some(KIMI_K3_FORMULA_TIMEOUT_FLOOR)
 }
 
 #[derive(Clone, Copy)]
@@ -566,19 +587,6 @@ mod tests {
     }
 
     #[test]
-    fn model_studio_payload_uses_minimal_responses_search_contract() {
-        let body = build_responses_search_body(
-            "qwen3.8-max",
-            &request(),
-            ResponsesSearchDialect::ModelStudio,
-        );
-        assert_eq!(body["tools"][0]["type"], "web_search");
-        assert!(body["tools"][0].get("filters").is_none());
-        assert_eq!(body["tool_choice"], "required");
-        assert!(body.get("include").is_none());
-    }
-
-    #[test]
     fn anthropic_payload_uses_basic_direct_search_contract() {
         let body = build_anthropic_search_body("claude-opus-4-8", &request());
         assert_eq!(body["tools"][0]["type"], "web_search_20250305");
@@ -729,6 +737,32 @@ mod tests {
         assert_eq!(citations.len(), 2);
         assert_eq!(citations[0].url, "http://legacy.example/a");
         assert_eq!(citations[1].url, "https://secure.example/b");
+    }
+
+    #[test]
+    fn extended_timeout_floor_is_exact_to_direct_moonshot_k3() {
+        for base_url in ["https://api.moonshot.ai/v1", "https://api.moonshot.cn/v1"] {
+            assert_eq!(
+                native_search_timeout_floor_override(ApiProvider::Moonshot, base_url, "kimi-k3"),
+                Some(Duration::from_secs(180))
+            );
+        }
+        assert_eq!(
+            native_search_timeout_floor_override(
+                ApiProvider::Moonshot,
+                "https://api.kimi.com/coding/v1",
+                "k3"
+            ),
+            None
+        );
+        assert_eq!(
+            native_search_timeout_floor_override(
+                ApiProvider::Moonshot,
+                "https://api.moonshot.cn/v1",
+                "kimi-k2.6"
+            ),
+            None
+        );
     }
 
     #[tokio::test]

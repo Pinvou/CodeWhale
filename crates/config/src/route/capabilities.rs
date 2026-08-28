@@ -7,10 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    DEFAULT_KIMI_CODE_BASE_URL, DEFAULT_MOONSHOT_BASE_URL, ProviderKind,
-    provider_base_url_is_official,
-};
+use crate::{DEFAULT_KIMI_CODE_BASE_URL, ProviderKind, provider_base_url_is_official};
+
+use crate::provider::is_exact_moonshot_platform_route;
 
 /// Whether a resolved provider/model offering supports one capability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,7 +150,7 @@ pub(crate) fn documented_server_side_web_search_for_route(
         // Moonshot's Formula/legacy `$web_search` contracts belong to the
         // exact direct API product. Kimi Code's exact `/coding/v1` product is
         // handled above; adjacent coding paths must remain fail-closed.
-        ProviderKind::Moonshot => normalized == DEFAULT_MOONSHOT_BASE_URL,
+        ProviderKind::Moonshot => is_exact_moonshot_platform_route(provider, base_url),
         // Token Plan exposes Harness web_search only on its Responses API.
         // The Anthropic and Coding Plan products do not inherit that fact.
         ProviderKind::ModelstudioTokenPlan => true,
@@ -246,26 +245,19 @@ mod tests {
             documented_server_side_web_search("anthropic", "claude-sonnet-4-6"),
             CapabilityState::Supported
         );
-        assert_eq!(
-            documented_server_side_web_search("deepseek", "deepseek-v4-flash"),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            documented_server_side_web_search("moonshot", "kimi-k2.6"),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            documented_server_side_web_search("moonshot", "kimi-k3"),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            documented_server_side_web_search("modelstudio-token-plan", "qwen3.8-max"),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            documented_server_side_web_search("xiaomi-mimo", "mimo-v2.5-pro"),
-            CapabilityState::Supported
-        );
+        for (provider, model) in [
+            ("deepseek", "deepseek-v4-flash"),
+            ("moonshot", "kimi-k2.6"),
+            ("moonshot", "kimi-k3"),
+            ("modelstudio-token-plan", "qwen3.8-max"),
+            ("xiaomi-mimo", "mimo-v2.5-pro"),
+        ] {
+            assert_eq!(
+                documented_server_side_web_search(provider, model),
+                CapabilityState::Supported,
+                "{provider}/{model} should carry the documented fact"
+            );
+        }
 
         for (provider, model) in [
             ("openrouter", "openai/gpt-5.6"),
@@ -286,84 +278,80 @@ mod tests {
     }
 
     #[test]
-    fn route_fact_rejects_unproven_product_surfaces() {
-        assert_eq!(
-            documented_server_side_web_search_for_route(
+    fn route_fact_is_exact_to_documented_product_surfaces() {
+        for (provider, model, base_url, expected) in [
+            (
                 ProviderKind::Moonshot,
                 "kimi-k3",
                 "https://api.moonshot.ai/v1",
+                CapabilityState::Supported,
             ),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            documented_server_side_web_search_for_route(
+            (
+                ProviderKind::Moonshot,
+                "kimi-k3",
+                "https://api.moonshot.cn/v1",
+                CapabilityState::Supported,
+            ),
+            (
                 ProviderKind::Moonshot,
                 "kimi-k2.6",
                 "https://api.moonshot.ai/v1",
+                CapabilityState::Supported,
             ),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            documented_server_side_web_search_for_route(
-                ProviderKind::ModelstudioTokenPlan,
-                "qwen3.8-max",
-                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
-            ),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            documented_server_side_web_search_for_route(
+            (
                 ProviderKind::Moonshot,
                 "k3",
                 "https://api.kimi.com/coding/v1",
+                CapabilityState::Supported,
             ),
-            CapabilityState::Supported
-        );
-        for (model, base_url) in [
-            ("kimi-k3", "https://api.kimi.com/coding/v2"),
-            ("kimi-k2.6", "https://api.kimi.com/coding/v1/preview"),
-        ] {
-            assert_eq!(
-                documented_server_side_web_search_for_route(
-                    ProviderKind::Moonshot,
-                    model,
-                    base_url,
-                ),
+            (
+                ProviderKind::ModelstudioTokenPlan,
+                "qwen3.8-max",
+                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+                CapabilityState::Supported,
+            ),
+            (
+                ProviderKind::Moonshot,
+                "kimi-k3",
+                "https://api.kimi.com/coding/v2",
                 CapabilityState::Unknown,
-                "adjacent Kimi Code route {base_url} must remain fail-closed"
-            );
-        }
-        assert_eq!(
-            documented_server_side_web_search_for_route(
+            ),
+            (
+                ProviderKind::Moonshot,
+                "kimi-k2.6",
+                "https://api.kimi.com/coding/v1/preview",
+                CapabilityState::Unknown,
+            ),
+            (
                 ProviderKind::ModelstudioCodingPlan,
                 "qwen3.8-max",
                 "https://coding-intl.dashscope.aliyuncs.com/v1",
+                CapabilityState::Unknown,
             ),
-            CapabilityState::Unknown
-        );
-        assert_eq!(
-            documented_server_side_web_search_for_route(
+            (
                 ProviderKind::Zai,
                 "GLM-5.3",
                 "https://api.z.ai/api/coding/paas/v4",
+                CapabilityState::Unknown,
             ),
-            CapabilityState::Unknown
-        );
-        assert_eq!(
-            documented_server_side_web_search_for_route(
+            (
                 ProviderKind::Zai,
                 "GLM-5.3",
                 "https://api.z.ai/api/paas/v4",
+                CapabilityState::Supported,
             ),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            documented_server_side_web_search_for_route(
+            (
                 ProviderKind::Zai,
                 "GLM-5.3",
                 "https://open.bigmodel.cn/api/paas/v4",
+                CapabilityState::Supported,
             ),
-            CapabilityState::Supported
-        );
+        ] {
+            assert_eq!(
+                documented_server_side_web_search_for_route(provider, model, base_url,),
+                expected,
+                "unexpected native-search fact for {provider:?}/{model} at {base_url}"
+            );
+        }
     }
 }
