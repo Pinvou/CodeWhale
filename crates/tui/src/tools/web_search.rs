@@ -49,6 +49,7 @@ const BAIDU_ENDPOINT: &str = "https://qianfan.baidubce.com/v2/ai_search/web_sear
 const VOLCENGINE_RESPONSES_ENDPOINT: &str = "https://ark.cn-beijing.volces.com/api/v3/responses";
 const SOFYA_ENDPOINT: &str = "https://sofya.co/v1/search";
 const ERROR_BODY_PREVIEW_BYTES: usize = 512;
+const PROVIDER_NATIVE_MIN_TIMEOUT_MS: u64 = 45_000;
 const VOLCENGINE_MIN_TIMEOUT_MS: u64 = 90_000;
 
 /// Returns `Ok(())` if the policy allows the call, or a `ToolError` otherwise.
@@ -143,7 +144,7 @@ impl ToolSpec for WebSearchTool {
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "Timeout in milliseconds (default: 15000, max: 60000)"
+                    "description": "Configured/local search timeout in milliseconds (default: 15000, max: 60000). Model-backed provider-native search has a separate bounded minimum before fallback."
                 },
                 "recency": {
                     "oneOf": [
@@ -760,12 +761,8 @@ pub(crate) async fn execute_search(
 
     let started = Instant::now();
     let requested_timeout = Duration::from_millis(timeout_ms.max(1));
-    let (total_timeout, first_attempt_budget) = if initial_backend == BackendId::Volcengine {
-        let provider_budget = Duration::from_millis(VOLCENGINE_MIN_TIMEOUT_MS);
-        (provider_budget + requested_timeout, Some(provider_budget))
-    } else {
-        (requested_timeout, None)
-    };
+    let (total_timeout, first_attempt_budget) =
+        search_timeout_budgets(initial_backend, requested_timeout);
     let deadline = started + total_timeout;
     let chained = chain.search(&query, deadline, first_attempt_budget).await?;
     let mut response =
@@ -779,6 +776,32 @@ pub(crate) async fn execute_search(
         response.clone(),
     );
     Ok(response)
+}
+
+fn search_timeout_budgets(
+    initial_backend: BackendId,
+    requested_timeout: Duration,
+) -> (Duration, Option<Duration>) {
+    match initial_backend {
+        BackendId::Volcengine => {
+            let provider_budget = Duration::from_millis(VOLCENGINE_MIN_TIMEOUT_MS);
+            (provider_budget + requested_timeout, Some(provider_budget))
+        }
+        BackendId::ProviderNative => {
+            // Provider-native search is the preferred route and commonly
+            // performs a full model-backed Responses/Interactions request.
+            // Give it a separate bounded minimum instead of an equal share
+            // that shrinks as fallbacks are added. Preserve the caller's
+            // requested timeout as the configured/local fallback budget.
+            let provider_budget =
+                requested_timeout.max(Duration::from_millis(PROVIDER_NATIVE_MIN_TIMEOUT_MS));
+            (
+                provider_budget.saturating_add(requested_timeout),
+                Some(provider_budget),
+            )
+        }
+        _ => (requested_timeout, None),
+    }
 }
 
 fn register_search_citations(response: &mut SearchResponse, context: &ToolContext) {
@@ -1895,8 +1918,8 @@ mod tests {
         finalize_search_response, optional_search_max_results, parse_baidu_results,
         parse_bocha_results, parse_metaso_results, parse_searxng_results, parse_sofya_results,
         parse_tavily_results, parse_volcengine_results, register_search_citations, rerank,
-        run_scrape_search_with_endpoints, sanitize_error_body, searxng_search_url,
-        truncate_error_body, volcengine_extract_text,
+        run_scrape_search_with_endpoints, sanitize_error_body, search_timeout_budgets,
+        searxng_search_url, truncate_error_body, volcengine_extract_text,
     };
     use crate::tools::web::contract::{
         BackendId, BackendSearch, CapabilityState, DegradedReason, QueryCapabilities, QueryKnob,
@@ -1904,7 +1927,16 @@ mod tests {
     };
     use crate::tools::web::scrape::{decode_html_entities, normalize_bing_url};
     use serde_json::json;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn provider_native_receives_dedicated_minimum_budget_before_fallback() {
+        let requested = Duration::from_millis(15_000);
+        let (total, first) = search_timeout_budgets(BackendId::ProviderNative, requested);
+
+        assert_eq!(total, Duration::from_millis(60_000));
+        assert_eq!(first, Some(Duration::from_millis(45_000)));
+    }
 
     // Regression guard: Bing /ck/a redirect hrefs are HTML-entity-encoded
     // (`&amp;`). normalize_bing_url must decode entities before extracting the

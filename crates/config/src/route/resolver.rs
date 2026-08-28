@@ -31,7 +31,9 @@ use super::candidate::{
     LimitField, PricingSku, ReadyRouteCandidate, ResolvedAuthSource, ResolvedEndpoint,
     SourcedLimitOverride, ValidationReport,
 };
-use super::capabilities::RouteCapabilities;
+use super::capabilities::{
+    CapabilityState, RouteCapabilities, documented_server_side_web_search_for_route,
+};
 use super::descriptor::ProviderDescriptor;
 use super::errors::RouteError;
 use super::ids::{LogicalModelRef, ModelId, ProviderId, WireModelId};
@@ -254,6 +256,22 @@ impl RouteResolver {
                 .unwrap_or_else(|| descriptor.default_base_url().to_string()),
             endpoint_key: selected.endpoint_key,
             protocol,
+        };
+        let native_search_fact = documented_server_side_web_search_for_route(
+            provider_kind,
+            selected.wire_model_id.as_str(),
+            &endpoint.base_url,
+        );
+        selected.capabilities.server_side_web_search = if native_search_fact.is_supported() {
+            native_search_fact
+        } else if selected.capabilities.server_side_web_search == CapabilityState::Unsupported {
+            CapabilityState::Unsupported
+        } else {
+            // A catalog-level positive fact does not prove this adapter knows
+            // the product-specific wire contract. Only the exact table above
+            // may activate provider-native execution; a sourced negative fact
+            // remains negative rather than being weakened to unknown.
+            CapabilityState::Unknown
         };
 
         // Advisory validation (#1519): a non-loopback `http://` endpoint sends

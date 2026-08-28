@@ -6110,6 +6110,28 @@ fn deepseek_official_endpoint_family_shares_canonical_model_namespace() {
 }
 
 #[test]
+fn zai_official_endpoint_family_includes_zhipu_general_api() {
+    let _lock = env_lock();
+    let _env = EnvGuard::without_deepseek_runtime_overrides();
+
+    for base_url in [
+        "https://api.z.ai/api/coding/paas/v4",
+        "https://api.z.ai/api/paas/v4/",
+        "https://open.bigmodel.cn/api/paas/v4",
+    ] {
+        assert!(provider_base_url_is_official(ProviderKind::Zai, base_url));
+        assert!(!provider_preserves_custom_base_url_model(
+            ProviderKind::Zai,
+            base_url
+        ));
+    }
+    assert!(!provider_base_url_is_official(
+        ProviderKind::Zai,
+        "https://open.bigmodel.cn/api/paas/v4/preview"
+    ));
+}
+
+#[test]
 fn ollama_provider_preserves_model_tags() {
     let _lock = env_lock();
     let _env = EnvGuard::without_deepseek_runtime_overrides();

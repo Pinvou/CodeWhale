@@ -2267,16 +2267,55 @@ graduate behind real gated flags.
 
 ## Web Search Provider
 
-`web_search` uses DuckDuckGo by default and does not require an API key. The
-DuckDuckGo path keeps a Bing fallback when DDG returns a bot challenge or no
-parseable results. Bing remains selectable for users who explicitly want it,
-and Tavily, Bocha, Metaso, SearXNG, Baidu, Volcengine, or Sofya can be selected
-when an API-backed provider is preferred.
+When the active model is an exact documented first-party route, `web_search`
+first makes a separate, bounded request through that provider's native search
+contract. It reuses the active route's authentication and transport, but does
+not inject provider-owned tools into the main conversation. A runtime failure
+or a response without usable citations then falls back visibly to the
+configured `[search]` backend and, unless that backend is already Bing or
+DuckDuckGo, to DuckDuckGo. Provider-native search receives a separate bounded
+budget of at least 45 seconds instead of an equal share that shrinks as
+fallbacks are added; the caller's configured search timeout remains available
+to the configured/local fallback. The structured search receipt records every
+hop.
 
-Configured API providers are attempted first. Runtime failure or an empty
-result visibly degrades through DuckDuckGo and then Bing; the structured search
-receipt records every hop. Missing configuration and network-policy denials
-fail closed without sending the query to another provider.
+Without an eligible provider-native route, `web_search` uses DuckDuckGo by
+default and does not require an API key. The DuckDuckGo path keeps a Bing
+fallback when DDG returns a bot challenge or no parseable results. Bing remains
+selectable for users who explicitly want it, and Tavily, Bocha, Metaso,
+SearXNG, Baidu, Volcengine, or Sofya can be selected when an API-backed provider
+is preferred.
+
+The native adapter is deliberately exact to the provider, model, endpoint, and
+product surface:
+
+- OpenAI Responses, Anthropic Messages, and xAI Responses use their documented
+  web-search tools.
+- DeepSeek V4 Flash/Pro/vision-exp use the first-party Responses search tool.
+- Direct Moonshot `kimi-k3` / `kimi-k2.6` use `$web_search`; the exact Kimi Code
+  membership endpoint uses its structured `/search` service.
+- Alibaba Model Studio **Token Plan** `qwen3.8-max`, `qwen3.7-max`, and
+  `qwen3.7-plus` use Responses Harness search. Coding Plan,
+  `qwen3.8-max-preview`, and Anthropic-compatible product variants do not
+  inherit this capability.
+- Z.AI/GLM structured search is enabled on the global
+  `https://api.z.ai/api/paas/v4` and China
+  `https://open.bigmodel.cn/api/paas/v4` general API endpoints; the default
+  Coding Plan endpoint remains on the configured search backend.
+- Xiaomi MiMo `mimo-v2.5-pro` and `mimo-v2.5` use the web-search plugin when it
+  is enabled for the account.
+
+Provider entitlement, activation, quota, and per-call billing still apply.
+Codewhale makes this auxiliary request only after the model invokes the
+`web_search` tool; it does not search on every chat turn.
+
+Custom endpoints, aggregators, nearby model names, and local/self-hosted models
+never inherit native search by naming similarity. They start directly at the
+configured backend. Network-policy denials fail closed without sending the
+query to a fallback. China deployments can explicitly select Baidu, Metaso,
+Volcengine, or a trusted SearXNG endpoint; Codewhale does not guess geography
+from locale or model provider. Keyless Firecrawl remains the default configured
+backend.
 
 For a private/internal search service that serves DuckDuckGo-compatible HTML,
 keep `provider = "duckduckgo"` and set `base_url`; Codewhale appends the `q`
