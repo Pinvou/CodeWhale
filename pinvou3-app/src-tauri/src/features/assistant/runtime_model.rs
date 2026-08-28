@@ -95,6 +95,15 @@ pub trait RuntimeModelProvider: Send + Sync {
     }
 
     async fn prepare(&self, request: RuntimeModelRequest) -> Result<PreparedRuntimeModel>;
+
+    /// Mark the boundary of a newly admitted logical model turn.
+    ///
+    /// Providers that add transport idempotency can rotate their per-turn
+    /// namespace here without rebuilding the underlying engine. Ordinary
+    /// providers need no additional behavior.
+    async fn begin_logical_turn(&self, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]

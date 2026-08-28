@@ -1007,8 +1007,11 @@ impl EnginePool {
             .as_ref()
             .map_or(false, |c| c.conversational_only);
         let restrict_tools = restrict_tools || restrict_tools_for_turn;
-        self.get_or_spawn(session_id)
-            .await?
+        let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
+        engine
             .send_reserved_user_message(
                 content,
                 mode,
@@ -1079,6 +1082,9 @@ impl EnginePool {
                     cancel_requested: true,
                 });
             }
+            self.runtime_model_provider
+                .begin_logical_turn(session_id)
+                .await?;
             engine.send_scheduled_message(content, &profile).await?;
             wait_for_scheduled_terminal(
                 &mut turn_events,
@@ -1293,8 +1299,11 @@ impl EnginePool {
             })?;
         }
         reservation.ensure_active()?;
-        self.get_or_spawn(session_id)
-            .await?
+        let engine = self.get_or_spawn(session_id).await?;
+        self.runtime_model_provider
+            .begin_logical_turn(session_id)
+            .await?;
+        engine
             .edit_last_turn_reserved(new_message, reservation)
             .await
     }

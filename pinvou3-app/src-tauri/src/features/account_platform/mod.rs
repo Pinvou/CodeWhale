@@ -6,6 +6,7 @@
 //! token in the system credential store so the next launch can sign in again.
 
 pub(crate) mod client_migration;
+mod model_proxy;
 mod platform;
 pub(crate) mod runtime_model;
 
