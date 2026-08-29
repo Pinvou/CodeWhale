@@ -989,7 +989,7 @@ impl Outbox {
             serde_json::to_writer(&mut data, record).context("serialize outbox record")?;
             data.push(b'\n');
         }
-        filesystem::atomic_write(&self.path, &data)
+        filesystem::atomic_write_private(&self.path, &data)
             .with_context(|| format!("rewrite {}", self.path.display()))
     }
 }
@@ -3232,7 +3232,8 @@ fn persist_state_at(path: &Path, state: &PersistedState) -> Result<()> {
         .with_context(|| format!("invalid behavior telemetry path: {}", path.display()))?;
     std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     let data = serde_json::to_vec_pretty(state).context("serialize behavior telemetry state")?;
-    filesystem::atomic_write(path, &data).with_context(|| format!("write {}", path.display()))?;
+    filesystem::atomic_write_private(path, &data)
+        .with_context(|| format!("write {}", path.display()))?;
     Ok(())
 }
 
@@ -3257,7 +3258,8 @@ fn load_task_attempts() -> HashMap<String, TaskAttempt> {
 
 fn persist_task_attempts(tasks: &HashMap<String, TaskAttempt>) -> Result<()> {
     let data = serde_json::to_vec(tasks).context("serialize behavior task attempts")?;
-    filesystem::atomic_write(&task_attempts_path(), &data).context("persist behavior task attempts")
+    filesystem::atomic_write_private(&task_attempts_path(), &data)
+        .context("persist behavior task attempts")
 }
 
 fn now_ms() -> u64 {

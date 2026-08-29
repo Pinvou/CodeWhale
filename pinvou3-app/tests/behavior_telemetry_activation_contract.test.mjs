@@ -58,7 +58,7 @@ test('provider setup and first task environment use the v1 lifecycle events', ()
 });
 
 test('client privacy allowlist stays aligned with schema and excludes server identity', () => {
-  const allowlistBody = rust.match(/fn client_event_field_allowed[\s\S]*?\n}\n\nfn validate_client_event_fields/)?.[0] || '';
+  const allowlistBody = rust.match(/fn client_event_field_allowed[\s\S]*?fn validate_client_event_fields/)?.[0] || '';
   const actual = Array.from(allowlistBody.matchAll(/\|?\s*"([a-z0-9_]+)"/g), match => match[1])
     .toSorted((left, right) => left.localeCompare(right));
   const expected = schema['x-client-optional-fields'].toSorted((left, right) => left.localeCompare(right));
@@ -99,8 +99,8 @@ test('retryable delivery and pending privacy controls keep bounded background re
 });
 
 test('credential and pending-control state is atomically replaced', () => {
-  const persistence = rust.match(/fn persist_state_at[\s\S]*?\n}\n\nfn state_path/)?.[0] || '';
-  assert.match(persistence, /filesystem::atomic_write\(path, &data\)/);
+  const persistence = rust.match(/fn persist_state_at[\s\S]*?fn state_path/)?.[0] || '';
+  assert.match(persistence, /filesystem::atomic_write_private\(path, &data\)/);
   assert.doesNotMatch(persistence, /create_secret_file|File::create|std::fs::write/);
   assert.match(rust, /telemetry state is unreadable; collection is disabled/);
   assert.match(rust, /refusing to replace the persisted installation identity/);
