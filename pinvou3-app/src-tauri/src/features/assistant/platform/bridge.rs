@@ -690,6 +690,17 @@ impl Pinvou3Bridge {
     /// 真正的自定义 OpenAI 兼容接口保持 None，继续采用底座的安全默认值，
     /// 不根据回答文本猜测思考内容。
     fn reasoning_stream_style(&self, provider: &str) -> Option<&'static str> {
+        // 账号平台在运行时把公开模型名替换为稳定的模型 UUID，并通过本地
+        // OpenAI-compatible proxy 转发。此时既不能再根据模型名识别 DeepSeek，
+        // 也不能把账号平台误当成未知的第三方兼容端点；Gateway 的 CHAT SSE
+        // 合同会把思考放在 reasoning_content/reasoning 独立字段中。
+        // 显式保留该协议事实，避免底座为兼容未知端点而把思考降级成正文。
+        if self
+            .effective_model()
+            .is_some_and(SavedModel::is_builtin_account_platform)
+        {
+            return Some(SEPARATE_REASONING_FIELD);
+        }
         if matches!(
             provider,
             "deepseek" | "moonshot" | "zai" | "minimax" | "xiaomi-mimo" | "volcengine"
@@ -3739,6 +3750,40 @@ mod tests {
                 .and_then(|providers| providers.openai.reasoning_stream_style.as_deref()),
             None,
             "generic OpenAI-compatible routes must not guess reasoning semantics"
+        );
+    }
+
+    #[test]
+    fn account_platform_runtime_uuid_keeps_reasoning_out_of_answer_text() {
+        let (_lock, _env) = locked_env(&[
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ]);
+        for name in [
+            "DEEPSEEK_MODEL",
+            "DEEPSEEK_PROVIDER",
+            "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_API_KEY",
+        ] {
+            std::env::remove_var(name);
+        }
+        let mut bridge = fixture_bridge();
+        let mut runtime_model = SavedModel::builtin_account_platform();
+        runtime_model.model = "00000000-0000-7000-8000-000000000042".to_string();
+        runtime_model.base_url = "http://127.0.0.1:18181/session-route/v1".to_string();
+        bridge.session_model = Some(runtime_model);
+
+        assert_eq!(bridge.provider(), "openai");
+        assert_eq!(
+            bridge
+                .build_dt_config()
+                .providers
+                .as_ref()
+                .and_then(|providers| providers.openai.reasoning_stream_style.as_deref()),
+            Some(SEPARATE_REASONING_FIELD),
+            "账号平台即使使用运行时 UUID，也必须把 reasoning_content 分类为思考"
         );
     }
 
