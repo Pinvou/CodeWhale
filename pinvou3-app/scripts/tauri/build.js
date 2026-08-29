@@ -439,7 +439,7 @@ async function main() {
     // points directly to the verified workspace vendor entry. Only Windows WebView2 exposes
     // app-owned CDP. Linux uses BrowserCore/WebKitWebDriver and macOS product capability is
     // currently disabled; neither platform may prepare or fall back to external Chrome.
-    prepareChromeDevtoolsMcpForPlatform();
+    await prepareChromeDevtoolsMcpForPlatform();
     prepareWindowsCodexBridge();
     const developmentHost = prepareKnowledgeHost({ development: true });
     if (developmentHost?.configSpec) additionalConfigs.push(developmentHost.configSpec);
@@ -447,7 +447,7 @@ async function main() {
   if (hasTauriBuildCommand) {
     prepareLinuxAsrRuntime();
     prepareCodexBridge();
-    prepareChromeDevtoolsMcpForPlatform();
+    await prepareChromeDevtoolsMcpForPlatform();
     prepareWindowsCodexBridge(windowsBridgeOptions);
     prepareKnowledgeHost();
     if (process.platform === "win32") {
