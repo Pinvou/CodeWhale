@@ -1,8 +1,8 @@
 # 账号平台部署与运维
 
-> 状态：当前部署基线
+> 状态：当前单机 Compose 部署基线；生产提升仍以本文列出的 NO-GO 门禁为准
 >
-> 校准日期：2026-08-23
+> 校准日期：2026-08-29
 >
 > 安全要求：本文只列配置名称和占位符，不保存真实域名、IP、账号、密码、AccessKey、Token 或商城密钥。
 
@@ -20,6 +20,8 @@
 - 数据库、Redis、NATS、New API 和内部管理端口不直接向公网开放。
 
 该形态是可运维的单机部署，但不是高可用架构。主机、Docker Engine 或本地 PostgreSQL 故障会影响整个平台。
+
+当前公网单机站点在同时满足以下条件前只能按 UAT/受控调试环境管理，不得仅因使用正式域名或真实 Provider 就宣称为生产：`APP_ENV` 为正式环境值；所有测试 Provider、测试证据和暂定价格开关关闭；镜像、配置与迁移均绑定不可变发布标识；备份恢复、容量、高可用、安全和客户端三层门禁均有同一候选版本的有效证据。当前环境状态必须写入每次发布的 `deployment-manifest.json`，不得从域名、Compose project 名或人工口头说明推断。
 
 ### 1.2 仓库提供的目标形态
 
@@ -95,17 +97,20 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 /opt/
   pinvou-account-platform-<commit>-<timestamp>/
     account-platform/
+      deploy/compose/.env        # 站点 Secret，0600，不入仓库
+      deploy/compose/compose.site.yaml
     pinvou3-app/
     scripts/
     VERSION
-    .env                         # 站点 Secret，不入仓库
-    compose.site.yaml            # 站点覆盖，不入仓库
+    deployment-manifest.json     # 脱敏发布清单，不含 Secret
   pinvou-account-platform-current -> pinvou-account-platform-<commit>-<timestamp>/
   pinvou-account-platform-backups/
     <deployment-id>/
 ```
 
-不要在原目录上直接覆盖源码。新版本在独立目录完成构建、迁移和验证后，再原子切换 `pinvou-account-platform-current`。
+不要在原目录上直接覆盖源码。新版本在独立目录完成构建、迁移和验证后，再原子切换 `pinvou-account-platform-current`。站点 `.env` 和 override 可以从当前受控版本复制，但复制后必须再次核对权限、摘要和目标路径；不得把它们移动到仓库根、发布清单或构建日志中。
+
+`deployment-manifest.json` 至少记录 `deployment_id`、完整 `source_commit`、工作树/制品是否干净、构建时间、环境等级、Compose 文件 SHA-256、迁移清单 SHA-256、每个服务的镜像 ID 与不可变 digest、上一可回滚部署及其镜像 digest、迁移计划、备份 ID、验证结果和操作者。该清单不得记录 Secret 值、Token、Cookie、个人信息或 Provider 原始报文。若健康响应、镜像标签和清单不能共同证明运行 Commit，发布失败关闭。
 
 每次正式迁移必须先运行 `node scripts/account-platform-migration-manifest.mjs check`，创建24小时内的一致性快照，并把不含凭据的快照 ID、完成时间和 SHA-256 注入迁移 Job；缺项会在连接数据库前失败。Job 成功后还要归档 `migration.post_verification` 摘要及四库只读审计结果。新增迁移只能运行 `node scripts/account-platform-migration-manifest.mjs append` 追加更高版本，禁止编辑、删除或重命名清单内历史文件。
 
@@ -118,7 +123,7 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - 反向代理能够访问本机回环端口。
 - 独立 New API 已初始化管理员、供应商 Channel 和最小权限 API Token，并能按请求 ID 查询用量日志。
 - 阿里云短信认证的 RAM AccessKey、签名和模板已审核可用。
-- 新华三商城环境、App 凭据和四个商品 SKU 已可联调。
+- 新华三商城环境和 App 凭据已可联调；运行时目录中至少存在一条经受信准入验证、与目标 Provider/Adapter 版本匹配的可售商品映射。部署资料不记录 SKU/BOM、金额、权益或商品数量。
 - Secret 通过主机 Secret 文件、Docker Secret、Vault/KMS 或平台 Secret 管理注入；不能进入 Git。
 - 发布前有足够空间保存新镜像、数据库备份和上一个可回滚版本。
 - 已明确发布负责人、数据库负责人、支付尾单负责人和回滚决策人。
@@ -281,13 +286,36 @@ Web 个人中心的用户名/手机号修改依赖 Portal OIDC Authorization Cod
 
 Web 首次登录同样使用该 Authorization Code + PKCE 流程，但登录、短信登录与手机注册表单由 Keycloak 的 `pinvou` 主题和 `pinvou-browser-authenticator` 承载。Keycloak 镜像必须由 `deploy/keycloak/Dockerfile` 构建并包含 Authenticator JAR 与主题，不能把 Helm 的 `images.keycloak` 指向未包含扩展的官方裸镜像。运行时必须配置 `PINVOU_ACCOUNT_AUTH_URL`、与 Account `OIDC_ISSUER` 完全一致的 `PINVOU_OIDC_ISSUER`、`PINVOU_IDENTITY_AUTH_URL`、`PINVOU_SMS_VERIFY_URL` 及既有工作负载身份；Account 的工作负载规则只向 Keycloak 开放 `POST /internal/v1/auth/sms/verify` 和 `POST /internal/v1/authorization/check`，缺失或超出路径时认证失败关闭。发布后需分别验证密码登录、手机号密码登录、短信滑块与验证码登录、注册滑块与验证码注册、三语和手机号/来源/设备限流；再撤销 `PERSONAL_USER` 的测试副本、停用测试主体并阻断 Account，逐项确认密码及短信路径都不会签发新客户端/Portal 会话。既有 Cookie SSO 不替代凭据路径的 ID-19 检查，其撤权收敛仍按会话撤销和授权版本失效策略执行。
 
-### 6.1 死信检查与受审计重放
+### 6.7 配置完整性与环境分级
+
+`account-platform/deploy/compose/.env.example` 只用于本地开发起步，不是生产配置的完整真相源。每次发布必须以目标版本实际参与渲染的全部 Compose 文件为准执行 `docker compose --env-file <secret-env> <compose-files> config`，归档脱敏后的配置键名、Compose 文件摘要和渲染结果摘要；存在未解析变量、空的必填值、开发默认值或站点 override 未纳入摘要时均为 NO-GO。
+
+除前述领域配置外，发布配置清单还必须显式覆盖：
+
+| 类别 | 配置名与约束 |
+|---|---|
+| 环境与契约 | `APP_ENV`、`PINVOU_API_CONTRACT_VERSION`、`ACCOUNT_SERVICE_VERSION`、`ACCOUNT_CLIENT_CONTRACT_VERSION`、`TOKEN_SERVICE_VERSION`、`TOKEN_CLIENT_CONTRACT_VERSION`；正式环境不得使用 `development`、`dev` 或未知 Commit |
+| Keycloak 管理 | `KEYCLOAK_ADMIN_BASE_URL`、`KEYCLOAK_ADMIN_USERNAME`、`KEYCLOAK_ADMIN_PASSWORD`；管理地址不得使用公网 Admin 路径 |
+| 认证风控 | `AUTH_RISK_REDIS_URL`、`AUTH_RISK_HMAC_KEY_BASE64`；密钥须独立生成并与注册、短信、支付密钥隔离 |
+| 客户端 Readiness | `CLIENT_READINESS_ATTESTATION_KEY_ID`、`CLIENT_READINESS_ATTESTATION_PRIVATE_KEY_BASE64`、`CLIENT_READINESS_ATTESTATION_TTL_SECONDS`、`TOKEN_MINIMUM_CLIENT_VERSION`、`TOKEN_MAXIMUM_CLIENT_VERSION`、`PINVOU_CLIENT_RELEASE_MANIFEST`、`PINVOU_CLIENT_UPGRADE_URL` |
+| 模型目录 | `TOKEN_GATEWAY_ADAPTER`、`TOKEN_MODEL_CATALOG_DEFAULT_CONTEXT_TOKENS`、`TOKEN_MODEL_CATALOG_DEFAULT_MAX_OUTPUT_TOKENS`、`TOKEN_MODEL_CATALOG_SYNC_MINUTES`、`MODEL_GATEWAY_STATUS_URL` |
+| 支付产品门禁 | `BILLING_ALLOW_TENTATIVE_PRICES`、`BILLING_NORMAL_REFUND_CREATION_ENABLED`；正式环境前者必须为 `false`，当前退款入口关闭阶段后者必须为 `false` |
+| New API | `NEWAPI_CRYPTO_SECRET`、`NEWAPI_SESSION_SECRET` 及真实数据面的最小权限管理凭据；`MOCK_NEWAPI_KEY` 仅允许隔离开发/测试 |
+| Payment Simulator | `PAYMENT_SIM_HMAC_ALIPAY`、`PAYMENT_SIM_HMAC_UNIONPAY`、`PAYMENT_SIM_HMAC_WECHAT`、`PAYMENT_SIM_PAY_TOKEN_SECRET`；只允许隔离开发/测试，正式发布清单不得出现 |
+
+仓库 Compose 基线将 `APP_ENV` 和部分测试准入开关固定为开发/UAT语义；仅在 `.env` 中写同名变量不会覆盖 YAML 中的固定值。需要生产提升时必须通过受审计的站点 override 显式改写这些服务环境，并以最终 `docker compose config` 结果验收，不能以宿主机环境变量或未参与渲染的 `.env` 行作为证据。
+
+`H3C_MALL_PRODUCTS_JSON` 不再是运行时商品真相源，不得用于上架、下架或变更商品；商品事实只来自 Billing 运行时目录和受审计命令。`.env.example`、Compose 和本文三者的配置键必须在发布前对账，任一新增 Compose 变量未被示例或本文分类说明时阻止提升，废弃变量应从示例和站点配置中删除而不是静默保留。
+
+### 6.8 死信检查与受审计重放
 
 先按目标领域选择只读数据库凭据，执行 `event-replay --event-id <uuid> --inspect` 并留存返回的事件类型、聚合版本和摘要。根因修复后，使用受控 `event-replay` 工作负载及新的稳定幂等键执行 `--event-id <uuid> --expected-digest <sha256> --idempotency-key <key> --reason <不少于20字符> --confirm`；命令会以 `actor_type=SERVICE`、`EVENT_REPLAY`、`job_run_id` 和原因写入不可变审计，再原子重新排队。
 
 不得修改 Payload、跳过摘要、复用其他服务数据库身份或直接更新 `outbox_events`；同一命令重试返回原审计结果，同键异请求拒绝。上线须先完成 Account `000030_event_replay_audit`、Billing `000032_event_replay_audit`、Token `000018_event_replay_audit`。
 
-## 7. 本地开发
+## 7. 本地开发与专项升级约束
+
+### 7.1 本地开发
 
 1. 将 `account-platform/deploy/compose/.env.example` 复制为被 Git 忽略的 `.env`。
 2. 为每个占位 Secret 生成不同随机值。
@@ -307,6 +335,8 @@ node scripts/account-platform.mjs dev down
 
 `dev down` 不应被用于生产。集成测试使用独立 Compose project，并只清理自己的卷。
 
+### 7.2 专项升级约束
+
 账号注销资格与静默期上线执行 Account `000027_account_closure_saga`。滚动顺序必须先发布提供只读资格评估端点的 Billing 和 Token，再迁移并发布 Account，最后发布 Portal 与桌面制品；Account 继续通过现有 `BILLING_SERVICE_URL`、`TOKEN_SERVICE_URL` 和内部服务身份访问评估端点。上线后验证：最后组织所有者或最后有效超级管理员只会停留在静默期前且仍可完成交接；进入 `CLOSING` 后新支付、新权益与新模型调用统一返回 `ACCOUNT_CLOSING`，注销进度、历史查询及必要修复入口仍可用；任一领域不可用或存在阻断时请求保持持久化并按租约重试，运营只能提交带原因的幂等重试命令，不能跳过阻断。监控请求阶段、租约超时、阻断码、重试次数和 30 分钟 SLA。禁止恢复直接删除用户接口或通过 SQL 推进阶段。库中出现 `CLOSING` 用户、注销请求或不可变审计后禁止执行 down migration；故障时暂停 worker、保留查询与修复能力，待依赖恢复后从原阶段续跑。
 
 注销后半段清理与组织授予隔离上线执行 Account `000028_account_closure_cleanup` 和 Billing `000030_account_closed_grants`。先完成两库迁移，再发布具备 Account 注销状态校验和内部隔离/回收端点的 Billing，随后发布 Account，最后发布 Token、Portal 与桌面制品；这样 Account Worker 首次进入 `IDENTITY_CLEANUP` 前，Billing 已能幂等接收隔离命令。Account 必须配置可用的 `IDENTITY_SERVICE_URL` 和服务凭据，即使没有开启手机号登录，也不能把 Identity 删除失败当作成功。上线后至少验证：注销期间角色、成员、Session、邀请和非资金 Commerce 任务自动收敛；资料 Saga 在 Identity 更新前取消、更新后向前归并；旧生命周期迟到结果不能重绑 Mapping；全部远端 Identity 删除和全部组织授予隔离均有完成证明后才进入 `ANONYMIZED`；永久 `user_id/user_code` 不变，原用户名/手机号可被全新用户使用；匿名化事件发布后才显示 `COMPLETED`。
@@ -321,10 +351,12 @@ node scripts/account-platform.mjs dev down
 
 下面流程以 `<release-dir>`、`<backup-dir>` 和 `<compose-files>` 为占位符。站点专用配置和 Secret 不进入仓库。
 
+发布不是“在新目录执行一次 `docker compose up`”。每次发布必须形成一个不可变部署单元：源码/制品、Compose 与站点 override 摘要、迁移计划、备份证据、服务镜像 digest、验证结果和上一回滚目标必须共同绑定同一个 `<deployment-id>`。缺少其中任一项时不得替换运行容器或切换稳定链接。
+
 ### 8.1 发布前检查
 
-1. 确认目标 Git Commit、当前运行 Commit、数据库迁移版本和当前符号链接。
-2. 检查工作树/发布包来源，确保构建内容可追溯且不包含本地私人文件。
+1. 确认目标 Git Commit、当前运行 Commit、数据库迁移版本、当前符号链接和上一可回滚部署清单。当前服务若仍报告 `commit=unknown`、`version=dev` 或镜像只有可变 `latest` 标签，先补齐制品标识，不得把目录名当作运行 Commit 证明。
+2. 检查工作树/发布包来源，确保构建内容可追溯且不包含本地私人文件；使用 `git archive <commit>` 或等价的受审计制品生成方式，禁止从脏工作树直接复制。
 3. 运行与变更范围相符的测试：
 
 ```text
@@ -340,20 +372,22 @@ node scripts/account-platform.mjs test fault
 node scripts/account-platform.mjs test security
 ```
 
-4. 检查磁盘空间、Docker 可用空间、数据库健康、待处理支付订单、有效 Hold、Outbox 积压和死信。
-5. 验证 Secret 文件权限，确认不会被复制到公开日志或提交。
+4. 运行 `node scripts/account-platform-migration-manifest.mjs check`，比较目标 Commit 与当前部署之间新增的 Account/Billing/Token 迁移，生成逐步迁移计划；不能只按目录名称或最高版本号猜测跨库顺序。
+5. 使用目标 `.env` 和全部 Compose 文件执行 `docker compose ... config`，确认无未解析变量、空必填项、测试工作负载、开发开关、意外公开端口或未摘要的站点 override。
+6. 检查磁盘空间、Docker 可用空间、数据库健康、待处理支付订单、有效 Hold、Outbox 积压和死信。至少保留新制品、新镜像、当前版本、上一回滚版本和本次备份所需空间。
+7. 验证 Secret 文件为受限所有者且权限不宽于 `0600`，确认不会被复制到发布清单、公开日志或提交。
 
 ### 8.2 创建版本目录
 
 1. 创建 `/opt/pinvou-account-platform-<commit>-<timestamp>`。
 2. 将已审核源码或发布包复制到版本目录。
 3. 从当前部署安全复制 `.env` 和站点 override，仅保留受限权限。
-4. 在版本目录记录完整 Git Commit 和构建时间。
+4. 创建 `deployment-manifest.json`，写入完整 Git Commit、构建时间、环境等级、输入文件摘要、当前/上一部署标识和待填充的镜像/迁移/验证字段。
 5. 不修改当前稳定符号链接，不停止现有服务。
 
 ### 8.3 数据库备份
 
-迁移前至少备份：
+包含新增迁移、数据回填或人工修复的发布，迁移前至少备份：
 
 - PostgreSQL globals/roles。
 - Account 数据库。
@@ -362,9 +396,9 @@ node scripts/account-platform.mjs test security
 - Keycloak 数据库。
 - 独立 New API 数据库（若本次变更涉及）。
 
-备份写入 `<backup-dir>/<deployment-id>`，生成校验和并执行最小可读性检查。Billing 备份是资金恢复依据，未验证备份时不得迁移。
+备份写入 `<backup-dir>/<deployment-id>`，生成校验和并执行最小可读性检查，把备份 ID、时间点、校验结果和恢复演练引用写入发布清单。Billing 备份是资金恢复依据，未验证备份时不得迁移。
 
-即使此前部署后人工删除过迁移备份，也不能把“无需备份”固化为流程。可按保留策略在稳定观察期和恢复演练完成后清理旧备份，但发布前备份仍是必需门禁。
+纯应用发布只有在迁移清单差异为空、没有数据修复且 Schema 向前/向后兼容时，才可引用仍在 RPO 范围内并已验证可恢复的最近备份；该判断、清单差异摘要和备份 ID 必须写入发布清单。不能证明为纯应用发布时按迁移发布处理。即使此前部署后人工删除过临时迁移备份，也不能把“无需备份”固化为流程；可按保留策略在稳定观察期和恢复演练完成后清理旧备份。
 
 ### 8.4 构建镜像
 
@@ -377,17 +411,27 @@ docker compose --env-file <secret-env> <compose-files> build \
   account-migrate billing-migrate token-migrate
 ```
 
+构建完成后必须为每个应用和迁移镜像赋予包含完整或唯一 Commit 的不可变 tag，优先推送到支持 digest 的受控 Registry；站点 override 的 `image:` 必须引用该 tag 或 digest。不得让发布和回滚依赖 Compose 自动生成的无版本镜像名或 `latest`。使用 `docker image inspect` 取得镜像 ID/digest，写入 `deployment-manifest.json`，并确认镜像 OCI label 或服务健康响应至少有一处能返回同一完整 Commit；二者均缺失时为 NO-GO。
+
+只构建和替换受影响服务可以降低风险，但必须由目标 Commit 的实际差异和依赖图确定，并在发布清单记录服务集合。共享库、迁移、协议、环境变量或基础镜像发生变化时，不得误判为单服务发布。
+
 Compose 会把站点 `.env` 中的 `GOPROXY` 作为 BuildKit 构建参数传给全部 Go 服务；未配置时使用仓库的官方默认值 `https://proxy.golang.org,direct`。无法稳定访问官方代理的站点必须在受控 `.env` 中持久配置可达代理，例如中国区站点使用 `GOPROXY=https://goproxy.cn,direct`，然后仍执行上述统一构建命令。不得只设置未被 Compose 读取的宿主机环境变量，也不得每次临时手写 `--build-arg`；发布前先从构建容器验证代理可达。代理凭据不得写入仓库、构建命令、日志或镜像层。
 
 ### 8.5 执行迁移
 
-迁移顺序：
+不存在适用于所有版本的固定跨库顺序。每个数据库内部严格按版本号递增；跨库顺序以目标版本专项升级约束和发布清单中的迁移依赖图为准。例如组织生命周期要求 Billing/Token 先于 Account，而部分 Account 授权或命令策略必须先于消费它们的应用。若同一发布同时命中多组约束，先合并为无环依赖图；存在环、缺少所有者或无法证明兼容时停止发布并拆分为多个兼容阶段。
 
-1. `account-migrate`
-2. `billing-migrate`
-3. `token-migrate`
+每一步应使用一次性迁移服务显式执行并记录起止版本、退出码和日志摘要，例如 `docker compose ... run --rm <domain>-migrate`。当前步骤退出码为 0、迁移表版本/校验和正确且专项后置检查通过后，才能执行下一步。已应用迁移文件不得修改，只能新增更高版本；迁移器可兼容仅换行符不同的旧校验和，但不接受语义内容变化。
 
-每个迁移任务必须退出码为 0，再继续下一个。迁移器记录版本和校验和；已应用迁移文件不得修改，只能新增更高版本。迁移器可兼容仅换行符不同的旧校验和，但不接受语义内容变化。
+当前基线还必须覆盖以下近期升级组；组内各数据库仍按自身版本号递增，全部所需 Schema/策略就绪后才滚动对应应用：
+
+1. Account `000037_recharge_product_permissions` 与 Billing `000043_recharge_product_catalog`、`000044_recharge_product_commands`：先完成目录、命令和权限迁移，再开放后台商品管理；旧的商品导入迁移只保留历史事实，不代表当前可售清单。
+2. Billing `000038_provider_failure_confirmation`、`000039_payment_product_controls`、`000040_payment_provider_resume_audit`、`000047_payment_tiered_stop_loss` 与 Account `000038_payment_product_resume_policy`、Billing `000048_payment_product_resume_audit`：在启用分级止损和商品/Provider 恢复前完成策略、控制、审批与不可变审计迁移；恢复入口在两库均就绪前失败关闭。
+3. Billing `000041_human_delegation_audit`：在商品和 Provider 人工控制命令上线前确认人类委托审计可用，禁止回退到调用方自报操作者。
+4. Billing `000045_system_ledger_accounts_repair`：在 Billing 承接流量前核验六个系统账户和回调重试字段。
+5. Billing `000046_clear_terminal_payment_instructions`：迁移后核验所有非可支付或已关闭订单均不再保存/返回 `payment_url`、`qr_data`，再发布会主动关闭到期订单的 Billing。
+
+Billing 目录相关迁移中的历史 SKU/BOM、金额或权益仅是一次性数据事实，不得复制到部署资料、站点环境变量或发布脚本，也不得作为当前上架状态判断。当前可售性只能从运行时目录、准入证据及商品/Provider 控制读取。
 
 Account `000011_permanent_user_codes` 会为历史用户回填永久编码并建立不可变触发器。迁移后必须核验：所有用户均有格式与校验码有效的唯一编码、`user_code_registry` 与用户一一对应、更新 `users.id/user_code` 和物理删除用户均被拒绝。不得通过禁用触发器、清空登记表或回滚迁移来“释放”已发放编码。
 
@@ -401,25 +445,25 @@ Account `000026_token_account_operations` 注册平台 Token Account 创建为�
 
 ### 8.6 替换应用服务
 
-迁移完成后只更新应用服务，不主动重建正在运行且无需变更的 PostgreSQL、Redis、NATS 和独立 New API：
+迁移完成后只更新发布清单列出的受影响应用服务，不主动重建正在运行且无需变更的 PostgreSQL、Redis、NATS 和独立 New API。下面是全量示例；单服务发布必须显式替换为经审核的服务集合：
 
 ```text
-docker compose --env-file <secret-env> <compose-files> up -d --no-deps \
+docker compose --env-file <secret-env> <compose-files> up -d --no-deps --wait \
   account-service billing-service token-gateway token-portal \
   account-event-relay billing-event-relay token-event-relay
 ```
 
-使用 `--no-deps` 的前提是基础设施已经健康、网络和服务名没有变化。若发布涉及基础设施，必须使用单独审批和维护窗口。
+使用 `--no-deps` 的前提是基础设施已经健康、网络、服务名、共享配置和依赖契约没有变化。`--wait` 超时、容器反复重启、镜像 ID 与发布清单不一致或任一 readiness 失败时，停止继续切换并按 13.1 使用上一清单回滚；若发布涉及基础设施，必须使用单独审批和维护窗口。
 
 ### 8.7 切换稳定链接
 
-应用和公共烟测通过后，原子更新：
+应用、公共烟测、领域烟测和短观察窗通过后，先把实际镜像 digest、迁移结果和验证结果补齐到发布清单，再原子更新：
 
 ```text
 /opt/pinvou-account-platform-current -> /opt/pinvou-account-platform-<commit>-<timestamp>
 ```
 
-符号链接只表示当前发布源码/配置位置；正在运行容器的镜像 Commit 仍需通过健康响应或镜像标签独立验证。
+符号链接只表示当前发布源码/配置位置；切换后再次读取运行容器镜像 ID/digest、健康响应 Commit 和 Compose 工作目录，三者必须与新发布清单一致。保留上一版本目录、其站点配置摘要和全部回滚镜像，至少经过稳定观察窗及下一次可恢复备份验证后才能清理。
 
 ## 9. 首次或升级后初始化 Keycloak
 
@@ -505,7 +549,7 @@ docker compose --env-file <secret-env> <compose-files> exec keycloak \
 
 UAT 只使用明确的测试商品和测试商城账号：
 
-1. 创建订单前确认 `/v1/payment-capabilities` 的 Provider/版本、渠道和动作与正式合同一致，并确认商品金额、映射 SKU、积分和有效期。
+1. 创建订单前确认 `/v1/payment-capabilities` 的 Provider/版本、渠道和动作与正式合同一致，并从运行时目录核对所选商品的准入、可售性、金额、映射、权益和有效期；不得从部署脚本或文档读取商品事实。
 2. 返回二维码和应付金额必须与商城事实一致。
 3. 客户端退出后，Billing 继续轮询。
 4. 商城 PAID 后仅入账一次，权益包与平衡账本一致。
@@ -514,6 +558,11 @@ UAT 只使用明确的测试商品和测试商城账号：
 7. 新订单必须保存 Provider/版本、商品映射 ID、映射快照和能力快照；历史订单不随 Adapter 或映射升级变化。
 8. 订单越过72小时边界后只产生一个晚到支付案件；认领、复核查询、安排、用户申诉、归档和 blind 升级均保留不可变时间线。
 9. 无回调无账单 Provider 只有在有限窗口、长期历史查询、权威未支付终态和证据保留均满足时才允许正式新单；blind 后同版本新单立即失败关闭。
+10. 创建订单返回的 Provider 最后付款期限必须原样冻结为本地 `expires_at/provider_payable_until`；轮询、重启或再次打开二维码不得延长期限。
+11. 到达最后付款期限且仍未收到成功事实时，Worker 必须先执行一次最终权威查询；查询仍未支付后进入 `LOCALLY_CLOSED_EXTERNAL_PENDING`（Provider 不支持主动关单时），清除公开响应中的二维码和支付链接，并拒绝把该订单重新激活为可支付。
+12. 已支付、已超时、本地已关闭或其他终态订单不得继续出现在“待支付订单”及二维码弹窗；支付成功后当前弹窗应自动收敛并消失。期限后晚到的可信成功仍按 `LATE_PAID` 幂等履约，不能因本地关闭丢失资金事实。
+13. 普通用户未付款和正常到期关闭不得计入 Provider/商品基础设施异常。注入单订单异常时只隔离订单；同商品达到规则时只暂停该商品；只有连续异常、跨商品异常、Provider 不可查询或失败率/样本多样性达到已发布策略时才关闭 Provider。
+14. 商品或 Provider 恢复必须核验最新受信探测、观察缺口清零、控制/策略/目录/准入版本未漂移、申请人与审批人不同且审计已落库。Provider 仍暂停时商品恢复失败关闭；Provider 恢复后商品必须重新走双人恢复，不得自动可售。
 
 ### 11.4 客户端三层发布门禁
 
@@ -594,7 +643,8 @@ New API 自身日志位置由其独立部署定义决定；核对用量优先调
 
 - Readiness 连续失败或 5xx/延迟升高。
 - Billing 账本不平或余额投影不一致。
-- PENDING/本地过期支付订单持续增长。
+- PENDING 超过 Provider 最后付款期限、最终查询缺口、`LOCALLY_CLOSED_EXTERNAL_PENDING` 长期不收敛或终态订单仍残留支付指令。
+- 单订单隔离、商品暂停和 Provider 暂停数量突增；连续异常、跨商品、不可查询和失败率阈值必须分别带策略版本与原因告警，正常未付款不得混入。
 - `REVIEW`/`SETTLEMENT_PENDING` 用量请求超出自动核对窗口。
 - 有效 Hold 过期、无法解释或长期未收敛。
 - Outbox 积压、Relay 重试、NATS Consumer Lag 和死信增长。
@@ -605,12 +655,15 @@ New API 自身日志位置由其独立部署定义决定；核对用量优先调
 
 ### 13.1 应用回滚
 
-只有当数据库 Schema 与上一版本镜像向后兼容时，才能：
+只有当数据库 Schema 与上一版本应用向后兼容，且上一部署清单、版本目录和不可变镜像 digest 均仍可用时，才能执行应用回滚：
 
-1. 停止新增发布动作，保留支付轮询、用量核对和事件投递。
-2. 用上一版本镜像对应用服务执行 `up -d --no-deps`。
-3. 恢复稳定符号链接。
-4. 重新执行健康、身份、聊天、账本和支付尾单验证。
+1. 停止新增发布动作，保留支付轮询、到期最终查询、用量核对和事件投递；冻结会制造更多不确定事实的入口。
+2. 读取当前与上一 `deployment-manifest.json`，核对数据库版本、Compose 摘要、目标服务、上一镜像 digest 和站点配置兼容性；不允许使用 `latest`、重新构建旧源码或仅凭目录名猜测镜像。
+3. 使用上一版本的站点 override（其中 `image:` 指向清单记录的不可变 tag/digest）执行 `docker compose ... up -d --no-deps --wait <affected-services>`。
+4. 核验每个运行容器的镜像 ID/digest、健康响应 Commit 和 Compose 工作目录均与上一清单一致，再原子恢复稳定符号链接。
+5. 重新执行健康、身份、聊天、账本、支付尾单、支付到期关闭、Outbox/Relay 和本次变更领域烟测，并记录回滚观察窗。
+
+若新版本尚未切换稳定链接但已经替换了同一 Compose project 的容器，仍必须按上述镜像清单回滚；稳定链接未切换不代表运行服务仍是旧版本。若 Schema 不兼容或已产生旧应用不能表达的新事实，停止普通应用回滚，按专项约束保留 Schema 并采用前向修复。
 
 不要因为应用回滚而停止 Billing 对已创建订单的查询，也不要释放结果仍不确定的模型 Hold。
 
@@ -645,6 +698,7 @@ New API 自身日志位置由其独立部署定义决定；核对用量优先调
 - PostgreSQL、NATS 或 New API 的活跃数据卷。
 - 尚未收敛支付、Hold、人工修复和审计所需的数据。
 - 当前有效的 `.env`、站点 override 和 Secret，除非已有受控替代且服务验证完成。
+- 当前和上一部署清单引用的镜像 digest、Compose 文件、迁移计划及备份证据。
 
 清理前先用只读命令核对 Docker 容器、镜像引用、卷挂载、目录绝对路径和磁盘占用；不要对未解析变量、通配符、`/opt` 根目录或 Docker 根目录执行递归删除。
 
