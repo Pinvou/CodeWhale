@@ -301,10 +301,23 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET last_successful_query_at=$2,last_authoritative_unpaid_at=CASE WHEN $3 AND $4 IN ('CLOSED','FAILED') THEN $2 ELSE last_authoritative_unpaid_at END,updated_at=$2 WHERE id=$1`, order.ID, p.now(), p.Capabilities().AuthoritativeUnpaidTerminal, providerOrder.Status); err != nil {
 		return PaymentOrder{}, err
 	}
+	if deadline := providerPaymentDeadline(providerOrder); deadline != nil && order.CloseStatus == "OPEN" {
+		finalArchiveEligibleAt := deadline.Add(time.Duration(p.Capabilities().MaximumLateConfirmationSeconds)*time.Second + 7*24*time.Hour)
+		command, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET expires_at=$2,provider_payable_until=$2,final_archive_eligible_at=$3,updated_at=$4 WHERE id=$1 AND close_status='OPEN'`, order.ID, *deadline, finalArchiveEligibleAt, p.now())
+		if err != nil {
+			return PaymentOrder{}, err
+		}
+		if command.RowsAffected() == 1 {
+			order.ExpiresAt = *deadline
+			order.ProviderPayableUntil = *deadline
+			order.FinalArchiveEligibleAt = finalArchiveEligibleAt
+		}
+	}
 	if _, err := p.repository.pool.Exec(ctx, `UPDATE payment_orders SET payment_url=CASE WHEN close_status='OPEN' THEN NULLIF($2,'') END,qr_data=CASE WHEN close_status='OPEN' THEN NULLIF($3,'') END,provider_status=NULLIF($4,''),provider_trace_id=NULLIF($5,''),updated_at=$6 WHERE id=$1`, order.ID, providerOrder.PaymentURL, providerOrder.QRData, providerOrder.ProviderStatus, providerOrder.ProviderTraceID, p.now()); err != nil {
 		return PaymentOrder{}, err
 	}
 	order.PaymentURL, order.QRData = providerOrder.PaymentURL, providerOrder.QRData
+	maskClosedPaymentInstructions(&order)
 	if providerOrder.Status == "SUCCESS" {
 		return p.applyQueriedPayment(ctx, order.ID, providerOrder, reviewed)
 	}
@@ -320,9 +333,13 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 		}
 		return p.applyProviderTerminalStatus(ctx, order, providerOrder.Status)
 	}
-	if (order.Status == "CREATED" || order.Status == "PENDING") && !order.ExpiresAt.After(p.now()) && providerOrder.Status == "PENDING" {
+	if shouldCloseExpiredPaymentOrder(order, providerOrder, p.now()) {
+		locallyClosed, err := p.markExpiredOrderLocallyClosed(ctx, order.ID)
+		if err != nil {
+			return PaymentOrder{}, err
+		}
 		if !p.Capabilities().CloseSupported {
-			return order, nil
+			return locallyClosed, nil
 		}
 		closed, closeErr := providerCall(ctx, p, "ORDER_CLOSE", order.Channel, true, providerCallScope(order), func() (ProviderOrder, error) {
 			return p.provider.Close(ctx, order.MerchantOrderNo)
@@ -347,9 +364,14 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 				return PaymentOrder{}, err
 			}
 			if !p.Capabilities().AuthoritativeUnpaidTerminal {
-				return order, nil
+				return locallyClosed, nil
 			}
 			return p.applyProviderTerminalStatus(ctx, order, closed.Status)
+		case "CREATED", "PENDING":
+			if err := p.recordProviderObservation(ctx, order.ID, "QUERY", closed); err != nil {
+				return PaymentOrder{}, err
+			}
+			return locallyClosed, nil
 		default:
 			if err := p.recordProviderObservation(ctx, order.ID, "QUERY", closed); err != nil {
 				return PaymentOrder{}, err
@@ -361,6 +383,60 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 		return p.applyProviderReviewStatus(ctx, order, providerOrder.Status)
 	}
 	return order, nil
+}
+
+func shouldCloseExpiredPaymentOrder(order PaymentOrder, provider ProviderOrder, now time.Time) bool {
+	return (order.Status == "CREATED" || order.Status == "PENDING") &&
+		(order.CloseStatus == "OPEN" || order.CloseStatus == "CLOSE_REQUESTED" || order.CloseStatus == "LOCALLY_CLOSED_EXTERNAL_PENDING") &&
+		!order.ExpiresAt.After(now) && provider.Status == "PENDING"
+}
+
+func providerPaymentDeadline(provider ProviderOrder) *time.Time {
+	if provider.ProviderPayableUntil != nil && !provider.ProviderPayableUntil.IsZero() {
+		deadline := provider.ProviderPayableUntil.UTC()
+		return &deadline
+	}
+	if provider.PaymentInstructionExpiresAt != nil && !provider.PaymentInstructionExpiresAt.IsZero() {
+		deadline := provider.PaymentInstructionExpiresAt.UTC()
+		return &deadline
+	}
+	return nil
+}
+
+func (p *PaymentCoordinator) markExpiredOrderLocallyClosed(ctx context.Context, orderID uuid.UUID) (PaymentOrder, error) {
+	tx, err := p.repository.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	defer tx.Rollback(ctx)
+	order, err := getPaymentOrderByID(ctx, tx, orderID, true)
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	now := p.now()
+	if order.Status != "CREATED" && order.Status != "PENDING" {
+		return order, tx.Commit(ctx)
+	}
+	if order.ExpiresAt.After(now) {
+		return PaymentOrder{}, ErrConflict
+	}
+	if order.CloseStatus == "OPEN" {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET close_status='CLOSE_REQUESTED',close_requested_at=COALESCE(close_requested_at,$2),payment_url=NULL,qr_data=NULL,attention_summary='PROCESSING',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING') AND close_status='OPEN'`, order.ID, now); err != nil {
+			return PaymentOrder{}, err
+		}
+		order.CloseStatus = "CLOSE_REQUESTED"
+	}
+	if order.CloseStatus == "CLOSE_REQUESTED" {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET close_status='LOCALLY_CLOSED_EXTERNAL_PENDING',locally_closed_at=COALESCE(locally_closed_at,$2),payment_url=NULL,qr_data=NULL,attention_summary='PROCESSING',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING') AND close_status='CLOSE_REQUESTED'`, order.ID, now); err != nil {
+			return PaymentOrder{}, err
+		}
+	}
+	updated, err := getPaymentOrderByID(ctx, tx, order.ID, false)
+	if err != nil {
+		return PaymentOrder{}, err
+	}
+	maskClosedPaymentInstructions(&updated)
+	return updated, tx.Commit(ctx)
 }
 
 func (p *PaymentCoordinator) applyProviderReviewStatus(ctx context.Context, order PaymentOrder, providerStatus string) (PaymentOrder, error) {

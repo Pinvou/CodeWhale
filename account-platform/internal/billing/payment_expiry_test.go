@@ -141,3 +141,39 @@ func TestPaymentReconciliationErrorIsTrimmedAndBounded(t *testing.T) {
 		t.Fatalf("error length = %d, want 500", len(got))
 	}
 }
+
+func TestExpiredPendingPaymentRequiresLocalCloseAtDeadline(t *testing.T) {
+	now := time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
+	base := PaymentOrder{Status: "PENDING", CloseStatus: "OPEN", ExpiresAt: now}
+	provider := ProviderOrder{Status: "PENDING"}
+	if !shouldCloseExpiredPaymentOrder(base, provider, now) {
+		t.Fatal("pending order must be locally closed when its payment deadline is reached")
+	}
+	base.CloseStatus = "LOCALLY_CLOSED_EXTERNAL_PENDING"
+	if !shouldCloseExpiredPaymentOrder(base, provider, now) {
+		t.Fatal("locally closed order must remain eligible for provider close convergence")
+	}
+	base.CloseStatus = "OPEN"
+	base.ExpiresAt = now.Add(time.Second)
+	if shouldCloseExpiredPaymentOrder(base, provider, now) {
+		t.Fatal("order must not close before its payment deadline")
+	}
+	base.ExpiresAt = now
+	provider.Status = "SUCCESS"
+	if shouldCloseExpiredPaymentOrder(base, provider, now) {
+		t.Fatal("confirmed payment must take precedence over expiry close")
+	}
+}
+
+func TestProviderPaymentDeadlinePrefersFinalPayableUntil(t *testing.T) {
+	payableUntil := time.Date(2026, 8, 29, 10, 15, 0, 0, time.UTC)
+	instructionExpires := payableUntil.Add(-time.Minute)
+	got := providerPaymentDeadline(ProviderOrder{ProviderPayableUntil: &payableUntil, PaymentInstructionExpiresAt: &instructionExpires})
+	if got == nil || !got.Equal(payableUntil) {
+		t.Fatalf("provider deadline = %v, want %v", got, payableUntil)
+	}
+	got = providerPaymentDeadline(ProviderOrder{PaymentInstructionExpiresAt: &instructionExpires})
+	if got == nil || !got.Equal(instructionExpires) {
+		t.Fatalf("instruction deadline fallback = %v, want %v", got, instructionExpires)
+	}
+}

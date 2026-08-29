@@ -40,7 +40,7 @@ func (p *Provider) Capabilities() payment.Capabilities {
 		ProviderID: "h3c_mall", Version: "h3c-mall-v1", Channels: []string{"ALIPAY"},
 		OrderQuerySupported: true, MinimumQueryIntervalSeconds: 2, NotificationSupported: true,
 		AuthoritativeUnpaidTerminal: false, ManualRepairSupported: true,
-		CommerceCustomerRequired: true, ReusePendingOrderAfterExpiry: true, ReviewLatePayment: true,
+		CommerceCustomerRequired: true, ReusePendingOrderAfterExpiry: false, ReviewLatePayment: true,
 	}
 }
 
@@ -121,6 +121,14 @@ func MapMallOrder(order h3cmall.Order, expected *Product) (payment.ProviderOrder
 		}
 		result.ProviderEventAt = &parsed
 	}
+	payEndTime, parseErr := optionalMallTime(order.PayEndTime)
+	if parseErr != nil {
+		return payment.ProviderOrder{}, parseErr
+	}
+	if payEndTime != nil {
+		result.ProviderPayableUntil = payEndTime
+		result.PaymentInstructionExpiresAt = payEndTime
+	}
 	switch strings.ToUpper(order.Status) {
 	case "PENDING", "PROCESSING", "WAIT_PAY":
 		result.Status = "PENDING"
@@ -149,6 +157,20 @@ func MapMallOrder(order h3cmall.Order, expected *Product) (payment.ProviderOrder
 		result.Status = "REVIEW_REQUIRED"
 	}
 	return result, nil
+}
+
+func optionalMallTime(value any) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+	parsed, err := h3cmall.ParseTimeValue(value)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
 func mallAmountFen(order h3cmall.Order, expected *Product) (int64, string, error) {

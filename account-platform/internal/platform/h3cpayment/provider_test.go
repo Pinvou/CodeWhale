@@ -36,7 +36,7 @@ func newTestProvider(t *testing.T, client mallClient) *Provider {
 
 func TestCapabilitiesAreVersionedAndSupplierSpecific(t *testing.T) {
 	capabilities := newTestProvider(t, &mallStub{}).Capabilities()
-	if !capabilities.Valid() || capabilities.ProviderID != "h3c_mall" || capabilities.Version == "" || !capabilities.CommerceCustomerRequired || !capabilities.SupportsChannel("ALIPAY") || !capabilities.NotificationSupported || capabilities.RefundSupported || capabilities.AuthoritativeUnpaidTerminal || capabilities.TestOnly {
+	if !capabilities.Valid() || capabilities.ProviderID != "h3c_mall" || capabilities.Version == "" || !capabilities.CommerceCustomerRequired || !capabilities.SupportsChannel("ALIPAY") || !capabilities.NotificationSupported || capabilities.RefundSupported || capabilities.AuthoritativeUnpaidTerminal || capabilities.ReusePendingOrderAfterExpiry || capabilities.TestOnly {
 		t.Fatalf("unexpected capabilities: %#v", capabilities)
 	}
 }
@@ -59,6 +59,23 @@ func TestMapsPaidOrder(t *testing.T) {
 	order, err := newTestProvider(t, client).Get(context.Background(), "pv-1")
 	if err != nil || order.Status != "SUCCESS" || order.ChannelTransactionID == nil || *order.ChannelTransactionID != "trade-1" || order.PaidAt == nil || order.PaidAt.Location() != time.UTC || order.AmountSource != "PROVIDER" || order.ProviderOrderReference != "mall-1" || order.ProviderEventAt == nil || order.ExternalSKU != "sku-100" {
 		t.Fatalf("unexpected paid mapping: %#v %v", order, err)
+	}
+}
+
+func TestMapsMallPaymentDeadline(t *testing.T) {
+	client := &mallStub{order: h3cmall.Order{OrderKey: "pv-1", MerchantCustomerKey: "019c0000-0000-7000-8000-000000000001", SKU: "sku-100", Status: "WAIT_PAY", NeedPayAmount: "1.00", PayEndTime: "2026-08-29 18:15:00"}}
+	order, err := newTestProvider(t, client).Get(context.Background(), "pv-1")
+	want := time.Date(2026, 8, 29, 10, 15, 0, 0, time.UTC)
+	if err != nil || order.ProviderPayableUntil == nil || !order.ProviderPayableUntil.Equal(want) || order.PaymentInstructionExpiresAt == nil || !order.PaymentInstructionExpiresAt.Equal(want) {
+		t.Fatalf("unexpected payment deadline mapping: %#v %v", order, err)
+	}
+}
+
+func TestEmptyMallPaymentDeadlineRemainsOptional(t *testing.T) {
+	client := &mallStub{order: h3cmall.Order{OrderKey: "pv-1", MerchantCustomerKey: "019c0000-0000-7000-8000-000000000001", SKU: "sku-100", Status: "WAIT_PAY", NeedPayAmount: "1.00", PayEndTime: "  "}}
+	order, err := newTestProvider(t, client).Get(context.Background(), "pv-1")
+	if err != nil || order.ProviderPayableUntil != nil || order.PaymentInstructionExpiresAt != nil {
+		t.Fatalf("empty optional payment deadline must be ignored: %#v %v", order, err)
 	}
 }
 
