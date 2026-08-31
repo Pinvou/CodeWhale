@@ -11,7 +11,7 @@ import { AccountPlatformDesktopClient } from '../src/features/account-platform/d
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
 import { adminNavigationGroups, adminSectionURL, readAdminSection, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
-import { adminSectionReadOnly, adminVisibleSections } from '../src/features/account-platform/authorization-ui.js';
+import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 
@@ -176,23 +176,35 @@ test('Web usage summary keeps an unfinished request actionable within a grouped 
   assert.equal(summary.completed_at, '');
 });
 
-test('Web personal center uses three consolidated tabs and describes all order states', () => {
-  assert.deepEqual(portalNavigationSections, ['creditsUsage', 'ordersInvoices', 'accountSettings']);
+test('Web personal center uses a permission-gated organization tab and describes all order states', () => {
+  assert.deepEqual(portalNavigationSections, ['creditsUsage', 'ordersInvoices', 'myOrganization', 'accountSettings']);
   assert.equal(initialPortalSection(''), 'creditsUsage');
   assert.equal(initialPortalSection('?section=unknown'), 'creditsUsage');
   assert.equal(initialPortalSection('?section=profile'), 'accountSettings');
   assert.equal(initialPortalSection('?section=usage'), 'creditsUsage');
   assert.equal(initialPortalSection('?section=invoice'), 'ordersInvoices');
+  assert.equal(initialPortalSection('?section=organization'), 'myOrganization');
+  assert.equal(initialPortalSection('?section=myOrganization'), 'myOrganization');
   assert.equal(availablePortalSection('?section=ordersInvoices', ['creditsUsage', 'accountSettings']), 'creditsUsage');
+  assert.equal(availablePortalSection('?section=myOrganization', ['creditsUsage', 'accountSettings']), 'creditsUsage');
   assert.equal(availablePortalSection('?section=accountSettings', ['creditsUsage', 'accountSettings']), 'accountSettings');
   assert.equal(portalSectionLocation('ordersInvoices', '?profile=mobile&lang=zh', '/', false), '/?lang=zh&section=ordersInvoices');
   assert.equal(portalSectionLocation('accountSettings', '?profile=mobile', '/', true), '/?profile=mobile&section=accountSettings');
   for (const locale of ['zh', 'en', 'ja']) {
     assert.ok(accountPlatformCopy[locale].sections.creditsUsage);
     assert.ok(accountPlatformCopy[locale].sections.ordersInvoices);
+    assert.ok(accountPlatformCopy[locale].sections.myOrganization);
     assert.ok(accountPlatformCopy[locale].sections.accountSettings);
     assert.ok(accountPlatformCopy[locale].orderHistoryLead);
   }
+});
+
+test('My organization visibility requires an active organization and a read permission', () => {
+  const snapshot = (organizationID, permissions) => ({ active_context: { organization_id: organizationID, permissions } });
+  assert.equal(canAccessOrganizationPortal(snapshot('org-1', ['org.profile.read'])), true);
+  assert.equal(canAccessOrganizationPortal(snapshot('org-1', ['org.wallet.read'])), true);
+  assert.equal(canAccessOrganizationPortal(snapshot('org-1', ['org.members.manage'])), false);
+  assert.equal(canAccessOrganizationPortal(snapshot('', ['org.profile.read'])), false);
 });
 
 test('Web credits and usage use the requested compact presentation', async () => {
@@ -764,21 +776,28 @@ test('personal center keeps context on overview and cannot create organizations'
 test('Web personal center consolidates navigation while preserving context-sensitive capabilities', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
-  assert.match(view, /organizations\.length > 0 \? \['organization'\] : \[\]/);
-  assert.match(view, /'overview',[\s\S]*'credits',[\s\S]*'entitlements',[\s\S]*'usage'/);
-  assert.match(view, /personalContext \? \['orders', 'invoice'\] : \[\]/);
+  assert.match(view, /organizations\.length > 0 && canReadOrganization \? \['organization'\] : \[\]/);
+  assert.match(view, /access\.profileRead \|\| access\.billingRead \? \['overview'\]/);
+  assert.match(view, /access\.billingRead \? \['credits', 'entitlements'\]/);
+  assert.match(view, /access\.usageRead \? \['usage'\]/);
+  assert.match(view, /personalContext && access\.billingRead \? \['orders', 'invoice'\] : \[\]/);
   assert.match(view, /portal \? portalNavigationSections/);
   assert.match(view, /section === 'creditsUsage'[\s\S]*<PortalCreditsUsage/);
   assert.match(view, /section === 'ordersInvoices'[\s\S]*<PortalOrdersInvoices/);
+  assert.match(view, /section === 'myOrganization'[\s\S]*<PortalMyOrganization/);
   assert.match(view, /section === 'accountSettings'[\s\S]*<PortalAccountSettings/);
   assert.doesNotMatch(view, /section === 'wallet'/);
-  assert.match(view, /personalContext \? <Wallet[\s\S]*: <ContextCredits/);
-  assert.match(view, /activeOrganization && <Organization/);
+  assert.match(view, /personalContext \? \([\s\S]*<Wallet[\s\S]*: \([\s\S]*<ContextCredits/);
+  assert.match(view, /function PortalMyOrganization[\s\S]*<OrganizationEntitlements[\s\S]*<Organization/);
+  const creditsUsage = view.slice(view.indexOf('function PortalCreditsUsage'), view.indexOf('function PortalMyOrganization'));
+  const accountSettings = view.slice(view.indexOf('function PortalAccountSettings'), view.indexOf('function Dialog'));
+  assert.doesNotMatch(creditsUsage, /OrganizationEntitlements/);
+  assert.doesNotMatch(accountSettings, /<Organization\b/);
   assert.match(view, /summary \? paymentOrderHistory\(orders\) : orders/);
   assert.equal((i18n.match(/creditsTitle:/g) || []).length, 3);
   assert.equal((i18n.match(/entitlementsTitle:/g) || []).length, 3);
   assert.match(view, /auth !== 'ready'[\s\S]*availablePortalSection\(globalThis\.location\?\.search \|\| '', navigationSections\)/);
-  assert.match(view, /<nav>\{navigationSections\.map/);
+  assert.match(view, /<nav>\s*\{navigationSections\.map/);
 });
 
 test('personal center exposes only user-facing usage history instead of Token administration', async () => {

@@ -88,6 +88,7 @@
 .ap-context-card strong { color: rgba(8, 8, 11, .86); font-size: 24px; font-weight: 500; line-height: 32px; }
 .ap-context-card small { color: rgba(0, 0, 0, .44); font-size: 14px; line-height: 22px; }
 .ap-context-card select { width: 100%; background: var(--ap-component); border-color: transparent; }
+.ap-organization-summary { grid-template-columns: minmax(0, 1fr); align-items: start; }
 .ap-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 0 0 28px; }
 .ap-metrics article, .ap-card, .ap-balance-hero {
   padding: 28px 32px; border: 1px solid rgba(0, 0, 0, .08); border-radius: 20px; background: var(--ap-card); box-shadow: none;

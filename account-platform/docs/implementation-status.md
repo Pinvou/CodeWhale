@@ -60,7 +60,7 @@
 | `ORGANIZATION-UNIT-LIFECYCLE` | 节点命令指纹幂等、组织结构版本、闭包树移动以及 Account/Billing/Token 限制态预检和逻辑删除 | Account/Billing/Token Go 单元测试、OpenAPI lint、节点生命周期合同测试与全量静态验证通过；数据库运行级迁移、真实并发和跨服务故障注入待部署 |
 | `MEMBERSHIP-GOVERNANCE` | 多目标邀请反枚举、成员命令幂等、即时撤权/上下文回退、Billing 限制投影和单 OWNER 数据库约束 | Account/Billing Go 单元测试、OpenAPI lint、成员治理合同测试与全量静态验证通过；数据库运行级迁移、真实并发、通知通道和跨服务故障注入待部署 |
 | `GLOBAL-CONTEXT` | 用户级唯一活动上下文、CAS 版本切换、跨端刷新、失效回退及 Account/Token/Portal 版本传播 | Account/Token/Portal Go 单元测试、OpenAPI lint、全局上下文合同、桌面 40 项状态测试和 Portal 构建通过；数据库运行级迁移、真实多端并发和生产缓存传播待部署 |
-| `PERSONAL-CENTER-IA` | Web 个人中心“额度与用量 / 订单与发票 / 账号设置”三 Tab、全状态订单历史、旧深链映射，以及个人/组织资源显示边界 | 账号平台状态测试、UI ESLint 和 Portal 构建验证；订单展示 Billing 返回的全部状态并按创建时间稳定倒序，账号设置以紧凑身份/状态首行和“用户名、手机号、用户编码、组织数”顺序展示且不重复额度/权益/用量，组织能力嵌入账号设置且个人权益不回退到组织视图 |
+| `PERSONAL-CENTER-IA` | Web 个人中心“额度与用量 / 订单与发票 / 我的组织 / 账号设置”条件导航、全状态订单历史、旧深链映射，以及个人/组织资源显示边界 | 账号平台状态测试、UI ESLint 和 Portal 构建验证；“我的组织”只在活动组织和适用读取权限同时存在时显示，集中承载购买、额度、成员、节点和模型策略；额度页只保留当前身份只读事实与本人用量，账号设置不再混入组织管理 |
 | `ORGANIZATION-MEMBER-QUOTA` | 组织购买、精确 BASE/BONUS 组成授予、逐项批量、成员生命周期、Hold/结算及权限化 UI | Go 单测、OpenAPI、组织额度合同、桌面状态测试及 Portal 构建通过；真实 PostgreSQL 并发竞争和生产迁移仍待部署验证 |
 | `METERING-PRICING-LIFECYCLE` | 版本化计量单位/协议公式、确定性估算、动态 Hold 续租与追加预占、逐单位价格匹配及完整生命周期 | Billing/Token/Portal Go 单测、OpenAPI lint、59 个合同测试和全量静态验证通过；数据库运行级迁移、真实并发发布和长流故障注入待部署 |
 | `PAYMENT-PROVIDER-BOUNDARY` | 供应商中立支付端口、版本化能力发现、商品映射与订单快照、动态渠道 UI、能力门禁及生产测试隔离 | Go 单测、OpenAPI lint、合同测试、Portal 构建和部署模板检查通过；具体商品清单只从运行时目录和审计查询，真实 Provider 联调仍由 APT-048 收敛 |
@@ -363,7 +363,7 @@
 | UI-21 | 已实现 | AUDIT_HEAD | WEB-IDENTITY-LOGIN; AUTH-RISK; REGISTRATION-SAGA | NOT_DEPLOYED | Portal 未登录态直接进入 OIDC PKCE；Keycloak Pinvou 主题提供密码/短信/注册表单，短信登录和手机注册均强制一次性滑块与 6 位验证码，注册复用密码不透明引用及持久预约 Saga；密码不经过 Portal，真实短信、注册和 Cookie SSO 待部署联调 |
 | UI-22 | 已实现 | DOC_CURRENT | ROLE-PERMISSION-REDESIGN; PERMISSION-DRIVEN-UI; UI-LANGUAGE-COVERAGE; UI-LINT; UI-BUILD; ARCHITECTURE-GUARD | NOT_DEPLOYED | 桌面账号弹层、Web 个人中心和平台后台均从 Account 权威授权上下文决定入口、只读态和操作可用性，不按角色名推导权限；个人、平台、组织任一授权版本变化均使缓存失效并刷新，退出登录和注销进度保持可达，服务端权限拒绝仍是最终边界。 |
 | UI-23 | 已实现 | AUDIT_HEAD | RECHARGE-PRODUCT-ADMIN; PORTAL-STEP-UP | 0.8.0@79828dd1 (CLOUD_UAT, 2026-08-26) | 后台按五项商品原子权限展示三语列表、添加、验证、上架、下架、删除和撤销入口；认证过期时保存只读草稿并完成 OIDC step-up，返回后不自动重放写请求。 |
-| UI-24 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-BUILD | NOT_DEPLOYED | 无合法 section 默认进入额度与用量；授权加载完成后统一校正 URL、Tab 和内容，点击及浏览器前进/后退同步，权限不足替换为首个可访问 Tab。 |
+| UI-24 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-BUILD; PERSONAL-CENTER-IA | NOT_DEPLOYED | 无合法 section 默认进入额度与用量；`myOrganization` 仅在活动组织及适用读取权限同时存在时可用，退出组织或授权回收后替换为首个可访问 Tab；URL、Tab、内容及浏览器历史保持一致。 |
 | UI-25 | 已实现 | AUDIT_HEAD | ROLE-BINDING-LIFECYCLE; UI-BUILD | NOT_DEPLOYED | 普通个人中心不再挂载角色授权组件、加载对应制品或请求本人角色绑定；后台角色定义、授权与撤销界面及服务端权限边界保持不变。 |
 | UI-26 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 默认按到期时间展示最多五个有效包及安全进度和汇总；主页面采用无整体边框、无圆角、只保留条目分隔线的扁平列表；全量列表包含历史状态，详情弹窗保留组成、来源、订单及退款说明并支持键盘关闭。 |
 | UI-27 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 全状态充值订单按创建时间稳定倒序展示；本地 `EXPIRED` 及兼容的外部待关闭状态统一显示已超时，关闭请求显示处理中且均不恢复二维码；八列桌面摘要、中宽精简、移动卡片和详情弹窗保持可访问。 |
@@ -471,7 +471,7 @@
 | PAY-34 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 按上海自然日由 Worker 每日获取 Provider 账单，并核对内部订单/支付流水、普通及强制退款/拒付和 Billing 账本；API、文件导入及手工重跑均保留独立运行。 |
 | PAY-36 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-ANOMALY-RECONCILIATION | NOT_DEPLOYED | 差异冻结分类、严重度及 Provider/内部/退款/账本快照，状态、责任人、修复动作和复核结果只经带请求指纹的幂等命令推进，命令与时间线不可变且禁止直接改写证据。 |
 | UI-01 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | Web 一级导航固定为“额度与用量 / 订单与发票 / 账号设置”；额度页移除标题下重复引导语，主可用积分和有效权益包剩余汇总向下取整为整数，新产生的用量按桌面逻辑轮次标识汇总多次模型请求并固定显示两位小数，旧记录保持逐请求展示；账号设置以紧凑响应式行展示身份及本地化状态、用户名、手机号、用户编码、组织数，注销使用独立危险操作卡且不重复展示可用积分、权益或用量；旧页面深链归并映射，订单展示服务端返回的全部历史状态，组织管理按有效成员关系嵌入，不提供普通用户 Token Account/供应商 Key 管理。 |
+| UI-03 | 已实现 | DOC_CURRENT | PERSONAL-CENTER-IA; GLOBAL-CONTEXT | NOT_DEPLOYED | Web 一级导航新增按活动组织及精确读取权限显示的“我的组织”；额度页只保留当前身份余额、只读权益与本人用量，账号设置只保留个人资料、身份切换和注销，组织购买、额度、成员、节点和模型策略集中迁入独立页面；原有精度、全状态订单、紧凑账号资料和旧深链规则保持不变。 |
 | UI-04 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36 | NOT_DEPLOYED | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; PERSONAL-CENTER-IA; IDENTITY-SMS; I18N-RELEASE-GATE | NOT_DEPLOYED | Web 个人中心的用户名/手机号修改通过 Identity 托管页近期认证，Portal/Account 不接收密码；所有发起端统一使用根路径回到对应修改弹窗，已删除的 `/account` 页面地址不再生成，桌面移除资料修改区域但保留未登录忘记密码。 |
 | UI-06 | 已实现 | DOC_CURRENT | GLOBAL-CONTEXT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 个人中心所有余额、权益、订单和用量请求只按用户级活动上下文加载；个人上下文展示个人权益，组织上下文不混入个人权益明细。 |
@@ -479,7 +479,7 @@
 | UI-08 | 已实现 | AUDIT_HEAD | CODE-AUDIT; ENTITLEMENT-COMPONENTS | NOT_DEPLOYED | 桌面与 Portal 三语展示总可用、BASE/BONUS、来源、各组成余额、到期提醒及确定消费顺序，并明确 BONUS 零现金退款和普通退款关联撤销规则 |
 | UI-09 | 已实现 | DOC_CURRENT | DESKTOP-CLIENT-SWITCH; ACCOUNT-DOMAIN-UAT-20260825 | NOT_DEPLOYED | 登录后的账号 Popover 提供三语 Web 个人中心入口；专用 Tauri 命令只打开配置的 HTTPS/loopback Portal 根地址，不接受 WebView URL 或在 URL 中携带 Token。`https://account.pinvou.com/` 已发布，但桌面签名制品安装仍待验收 |
 | UI-10 | 已实现 | AUDIT_HEAD | CODE-AUDIT; DESKTOP-39; CONTRACT-36; ACCOUNT-PLATFORM-STATE; UI-BUILD | NOT_DEPLOYED | Web 个人中心以模态弹窗展示新建或主动恢复订单的二维码，套餐区只列出 `CREATED/PENDING + OPEN + 未超期` 订单并在状态失效时立即移除。 |
-| UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | Web 切换到目标组织后在“额度与用量”按 `org.entitlements.purchase` 显示购买入口，在“账号设置”嵌入组织管理区；读取、授予和撤回仍按独立原子权限控制，组织资源不回退个人权益。 |
+| UI-11 | 已实现 | DOC_CURRENT | DESKTOP-39; ORGANIZATION-MEMBER-QUOTA; PERSONAL-CENTER-IA | NOT_DEPLOYED | Web 切换到目标组织后，仅在具备适用读取权限时显示“我的组织”，并按原子权限分别提供购买、额度分配/撤回、成员、节点和模型策略；额度与用量、账号设置不再承载组织管理动作。 |
 | UI-12 | 已实现 | AUDIT_HEAD | TARGETED-REFUND; REFUND-PRODUCT-GATE; DESKTOP-39 | NOT_DEPLOYED | 用户端不含新建普通退款入口；运营端显式同时消费 `normal_refund_creation_enabled` 与 `refund_supported`，Provider capability 单独变化不能解除产品屏蔽 |
 | ADM-01 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 云端UAT运行库实测为0个有效超级管理员且无待激活用户；离线安全引导代码已部署，但正式密码必须由用户控制的受控终端设置，尚未执行激活、并发兑换、Keycloak/数据库故障补偿和告警投递验收 |
 | ADM-02 | 部分实现 | DOC_CURRENT | GO-UNIT; SECURITY-RECOVERY; CLOUD-UAT-20260824 | 0.8.0@9271c307 (CLOUD_UAT) | 运行库实测为0条Break-glass操作和0条安全告警；首次初始化不得伪装成管理员失联事故，需先正常激活管理员，再验收事故授权、CRITICAL告警接收、5–60分钟到期与正常交接 |
@@ -865,7 +865,7 @@
 | target_requirement_id | 需求 | 状态 | 当前实现/边界 |
 |---|---|---|---|
 | UI-01 | 桌面用户入口常显，未登录在弹层内登录 | 已实现 | 不跳外部浏览器；个人信息也在弹层中展示。 |
-| UI-03 | Web 个人中心固定三个合并 Tab | 已实现 | “额度与用量”合并额度、权益和用量；“订单与发票”展示服务端返回的全部充值订单状态及发票说明；“账号设置”以紧凑的身份/状态首行和“用户名、手机号、用户编码、组织数”顺序展示账号事实与资料修改入口，不重复展示额度类事实，注销为独立危险操作卡，并按成员关系显示组织管理区。普通用户视图不存在 Token Account 或供应商 Key 管理。 |
+| UI-03 | Web 个人中心条件式四 Tab 信息架构 | 已实现 | 个人上下文保留“额度与用量 / 订单与发票 / 账号设置”，活动组织且具备读取权限时增加“我的组织”；组织购买、额度、成员、节点和模型策略从额度页及账号设置迁入该页，其他账号、订单和展示精度规则保持不变。 |
 | UI-04 | 普通用户界面不暴露内部结算/供应商运维信息 | 已实现 | 模型准备、内部结算状态、供应商凭据等从普通用户视图移除。 |
 | UI-05 | Web 资料修改与桌面密码恢复边界 | 已实现 | Web Portal 提供用户名/手机号修改并由 Identity 强制重新认证，不接收密码；认证后使用根路径回到对应修改弹窗，所有发起端不再生成已删除的 `/account` 页面地址。桌面 Popover 无资料修改区域，但保留忘记密码模式及专用 Bridge/Tauri 密码重置命令。 |
 | UI-06 | 个人中心只展示活动上下文额度 | 已实现 | 上下文切换和跨端刷新会先清空旧余额、权益、订单与用量；个人/组织数据按新的服务端活动上下文重新加载。 |
@@ -873,7 +873,7 @@
 | UI-08 | 权益包、到期与退款说明 | 已实现 | 桌面与 Portal 三语展示总可用、BASE/BONUS 分项、来源、消费顺序和到期提醒，并明确 BONUS 零现金退款及普通退款关联撤销。 |
 | UI-09 | 桌面跳转 Web 个人中心 | 已实现 | 登录后的账号 Popover 通过专用命令打开固定 `https://account.pinvou.com/`，不接受任意外链且不携带 Token；旧官网路径未保留。 |
 | UI-10 | Web 个人充值入口 | 已实现 | 新订单二维码使用弹窗；套餐区列出仍可付款订单，支付完成、超时或其他不可付款状态立即移除。 |
-| UI-11 | Web 组织购买入口 | 已实现 | 具有组织采购权限的管理员可在活动组织的“额度与用量”购买组织权益；组织设置在“账号设置”中展示，读取、授予与撤回入口分别按对应原子权限显示。 |
+| UI-11 | Web 我的组织管理入口 | 已实现 | 活动组织的购买、额度、成员、节点和模型策略集中在“我的组织”，各区块按既有原子权限独立显示和加载；额度页只读，账号设置保持个人账号职责。 |
 | UI-12 | 退款入口屏蔽与支付能力降级展示 | 已实现 | 用户端无新建入口；运营动作同时要求独立产品门禁和 Provider 退款能力，所有交付配置默认关闭，未来 Provider 声明能力也不会自动展示。 |
 | UI-13 | 模型停止与结算状态反馈 | 已实现 | 三语用量页提供显式停止并同时展示 execution/settlement；不支持取消时明确后台继续和按可信实际用量结算，重开后读取同一请求真实状态。 |
 | UI-14 | 注销进度与阻断原因展示 | 已实现 | 桌面与 Web 个人中心三语展示持久阶段、状态、SLA、稳定阻断原因和用户动作；响应删除内部资源 ID 并自动刷新，未完成前不显示完成。 |
@@ -885,7 +885,7 @@
 | UI-20 | 充值商品暂停态 | 已实现 | Web、组织购买和桌面入口展示暂停态及三语维护提示且不可提交。 |
 | UI-21 | Web 统一身份登录页 | 已实现 | Portal 未登录后直接进入 Keycloak 三语 Pinvou 登录主题；密码登录、短信滑块验证码登录及手机滑块验证码注册均在 Identity 边界闭环，Portal 不接收密码或浏览器可读 Token。 |
 | UI-22 | 权限驱动入口状态 | 已实现 | 桌面、个人中心和后台直接消费权威权限集合，按个人/平台/组织独立授权版本刷新入口、只读态及操作按钮；退出登录和注销进度始终可达。 |
-| UI-24 | 个人中心 URL 与 Tab 状态一致性 | 已实现 | 无合法 section 默认进入额度与用量；深链、权限加载、Tab 点击和浏览器前进/后退均保持 URL、高亮与内容一致。 |
+| UI-24 | 个人中心 URL 与 Tab 状态一致性 | 已实现 | 无合法 section 默认进入额度与用量；`myOrganization` 按活动组织及读取权限失败关闭，深链、授权变化、Tab 点击和浏览器前进/后退均保持 URL、高亮与内容一致。 |
 | UI-25 | 普通个人中心角色信息收敛 | 已实现 | 普通个人中心已删除角色授权挂载点、制品和请求，不展示原始角色信息；后台角色治理保持可用。 |
 | UI-26 | 权益包渐进式展示 | 已实现 | 默认最多五条有效包摘要并汇总数量和余额，主页面去除重复资料卡及列表整体边框，只以横向分隔线区分条目；完整列表、历史状态、BASE/BONUS 组成和支付关联进入可访问详情弹窗。 |
 | UI-27 | 全状态订单摘要与详情 | 已实现 | 全部充值订单按创建时间稳定倒序展示响应式摘要；本地超时与兼容关闭观察统一显示已超时且不恢复付款入口，桌面八列、中宽精简、移动卡片及详情弹窗保持可访问。 |

@@ -1,5 +1,15 @@
 const VERSION_KEYS = ['context_version', 'personal_authorization_version', 'platform_authorization_version', 'organization_authorization_version'];
 
+export const organizationPortalReadPermissions = Object.freeze([
+  'org.profile.read',
+  'org.wallet.read',
+  'org.quota.read.self',
+  'org.quota.read.all',
+  'org.units.read',
+  'org.members.read',
+  'org.models.read',
+]);
+
 export const adminSectionPermissions = Object.freeze({
   overview: ['platform.users.read', 'platform.organizations.read', 'platform.billing.wallets.read', 'platform.tokens.read', 'platform.usage.read', 'platform.system.status.read'],
   organizations: ['platform.organizations.read'],
@@ -47,6 +57,10 @@ export function hasPermission(snapshot, permission) {
 
 export function hasAnyPermission(snapshot, permissions = []) {
   return permissions.some((permission) => hasPermission(snapshot, permission));
+}
+
+export function canAccessOrganizationPortal(snapshot) {
+  return Boolean(snapshot?.active_context?.organization_id) && hasAnyPermission(snapshot, organizationPortalReadPermissions);
 }
 
 export function authorizationVersions(snapshot) {

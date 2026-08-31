@@ -4,7 +4,7 @@ import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_PO
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
 import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
-import { authorizationVersionChanged, authorizationVersions, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
+import { authorizationVersionChanged, authorizationVersions, canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { summarizeUsageRecords } from './usage-summary.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './account-platform.css';
@@ -119,6 +119,14 @@ function NavIcon({ name }) {
         <path d="M8 8h8M8 12h8M8 16h5" />
       </>
     ),
+    myOrganization: (
+      <>
+        <circle cx="12" cy="7" r="3" />
+        <circle cx="6" cy="17" r="2.5" />
+        <circle cx="18" cy="17" r="2.5" />
+        <path d="M12 10v3M8 15l4-2 4 2" />
+      </>
+    ),
     accountSettings: (
       <>
         <circle cx="12" cy="8" r="4" />
@@ -186,7 +194,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const access = personalSurfaceAccess(me);
   const activePermissions = new Set(me?.active_context?.permissions || []);
   const canReadOrganization = activePermissions.has('org.profile.read') || activePermissions.has('org.units.read') || activePermissions.has('org.members.read') || activePermissions.has('org.models.read');
-  const navigationSections = portal ? portalNavigationSections.filter((key) => key === 'accountSettings' || (key === 'creditsUsage' && (access.billingRead || access.usageRead)) || (key === 'ordersInvoices' && personalContext && access.billingRead)) : [...(access.profileRead || access.billingRead ? ['overview'] : []), ...(access.billingRead ? ['credits', 'entitlements'] : []), ...(access.usageRead ? ['usage'] : []), ...(organizations.length > 0 && canReadOrganization ? ['organization'] : []), ...(personalContext && access.billingRead ? ['orders', 'invoice'] : []), 'closure'];
+  const canOpenMyOrganization = canAccessOrganizationPortal(me);
+  const navigationSections = portal ? portalNavigationSections.filter((key) => key === 'accountSettings' || (key === 'creditsUsage' && (access.billingRead || access.usageRead)) || (key === 'ordersInvoices' && personalContext && access.billingRead) || (key === 'myOrganization' && canOpenMyOrganization)) : [...(access.profileRead || access.billingRead ? ['overview'] : []), ...(access.billingRead ? ['credits', 'entitlements'] : []), ...(access.usageRead ? ['usage'] : []), ...(organizations.length > 0 && canReadOrganization ? ['organization'] : []), ...(personalContext && access.billingRead ? ['orders', 'invoice'] : []), 'closure'];
   const pendingOrderRefreshKey = orders
     .filter((item) => ['CREATED', 'PENDING'].includes(item.status) && item.close_status === 'OPEN')
     .map((item) => `${item.order_id}:${item.status}:${item.close_status}:${item.expires_at}`)
@@ -229,11 +238,12 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       const permissions = new Set(nextMe?.active_context?.permissions || []);
       const canReadOrganizationEntitlements = permissions.has('org.wallet.read') || permissions.has('org.quota.allocate') || permissions.has('org.entitlements.purchase');
       const canReadQuota = permissions.has('org.quota.read.self') || permissions.has('org.quota.read.all');
+      const canReadUnits = permissions.has('org.units.read');
       const canReadMembers = permissions.has('org.members.read');
       const canAllocateQuota = permissions.has('org.quota.allocate');
       const canReadModelPolicy = permissions.has('org.models.read') || permissions.has('org.models.manage');
       const canReadModels = isPersonal ? hasPermission(nextMe, 'personal.models.read') : canReadModelPolicy;
-      const results = await Promise.allSettled([hasPermission(nextMe, 'personal.profile.read') ? client.organizations(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.rechargeCreate ? client.products(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead ? client.balance(request.signal) : Promise.resolve(null), Promise.resolve({ order: null }), organizationId ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }), surfaceAccess.usageRead ? client.usageHistory('', request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead && (isPersonal || canReadOrganizationEntitlements) ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] }), isPersonal && surfaceAccess.billingRead ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }), canReadModels ? client.models(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null)]);
+      const results = await Promise.allSettled([hasPermission(nextMe, 'personal.profile.read') ? client.organizations(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.rechargeCreate ? client.products(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead ? client.balance(request.signal) : Promise.resolve(null), Promise.resolve({ order: null }), organizationId && canReadUnits ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }), surfaceAccess.usageRead ? client.usageHistory('', request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead && (isPersonal || canReadOrganizationEntitlements) ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] }), isPersonal && surfaceAccess.billingRead ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }), canReadModels ? client.models(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null)]);
       if (!guardRef.current.isCurrent(request.generation)) return;
       const value = (index) => (results[index].status === 'fulfilled' ? results[index].value : null);
       setOrganizations(value(0)?.items || []);
@@ -668,9 +678,6 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             order={order}
             qrData={qrData}
             busy={busy}
-            permissions={me?.active_context?.permissions || []}
-            members={quotaMembers}
-            grants={quotaGrants}
             usageRecords={usageRecords}
             usageUnavailable={usageUnavailable}
             usageCursor={usageCursor}
@@ -678,6 +685,33 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             canCancelUsage={access.usageCancel}
             onRecharge={createPersonalRecharge}
             onActivateRecharge={activatePersonalRecharge}
+            onLoadMoreUsage={loadMoreUsage}
+            onCancelUsage={(usageRequestID) =>
+              run(async () => {
+                await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel'));
+                await loadContext(me);
+                setNotice(copy.stopRequested);
+              })
+            }
+          />
+        )}
+        {portal && section === 'ordersInvoices' && <PortalOrdersInvoices copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
+        {portal && section === 'myOrganization' && (
+          <PortalMyOrganization
+            copy={copy}
+            language={language}
+            organization={activeOrganization}
+            permissions={me?.active_context?.permissions || []}
+            products={products}
+            packages={packages}
+            members={members}
+            quotaMembers={quotaMembers}
+            grants={quotaGrants}
+            order={order}
+            units={units}
+            models={catalogModels}
+            modelPolicy={modelPolicy}
+            busy={busy}
             onPurchase={(productId, channel) => run(async () => setOrder(await client.purchaseOrganizationEntitlements(activeOrganizationId, productId, channel, idempotencyKey('org-recharge'))))}
             onAllocate={(items) =>
               run(async () => {
@@ -697,37 +731,6 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
                 await loadContext(me);
               })
             }
-            onLoadMoreUsage={loadMoreUsage}
-            onCancelUsage={(usageRequestID) =>
-              run(async () => {
-                await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel'));
-                await loadContext(me);
-                setNotice(copy.stopRequested);
-              })
-            }
-          />
-        )}
-        {portal && section === 'ordersInvoices' && <PortalOrdersInvoices copy={copy} language={language} orders={orders} unavailable={billingDetailsUnavailable} />}
-        {portal && section === 'accountSettings' && (
-          <PortalAccountSettings
-            copy={copy}
-            me={me}
-            access={access}
-            organizations={organizations}
-            activeOrganization={activeOrganization}
-            activeOrganizationId={activeOrganizationId}
-            busy={busy}
-            onSwitchContext={switchContext}
-            client={client}
-            onProfileError={(reason) => localizedError(copy, reason)}
-            onProfileChanged={finishProfileChange}
-            onProfileRecovering={() => setNotice(copy.profileChangeRecovering)}
-            closure={closure}
-            onRequestClosure={requestClosure}
-            units={units}
-            members={members}
-            models={catalogModels}
-            modelPolicy={modelPolicy}
             onCreateUnit={(name, parentId) =>
               run(async () => {
                 await client.createUnit(activeOrganizationId, name, parentId);
@@ -755,6 +758,24 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
                 await loadContext(me);
               })
             }
+          />
+        )}
+        {portal && section === 'accountSettings' && (
+          <PortalAccountSettings
+            copy={copy}
+            me={me}
+            access={access}
+            organizations={organizations}
+            activeOrganization={activeOrganization}
+            activeOrganizationId={activeOrganizationId}
+            busy={busy}
+            onSwitchContext={switchContext}
+            client={client}
+            onProfileError={(reason) => localizedError(copy, reason)}
+            onProfileChanged={finishProfileChange}
+            onProfileRecovering={() => setNotice(copy.profileChangeRecovering)}
+            closure={closure}
+            onRequestClosure={requestClosure}
           />
         )}
         {!portal && (
@@ -873,7 +894,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   );
 }
 
-function PortalCreditsUsage({ copy, language, personalContext, organizationId, products, balance, packages, orders, billingUnavailable, detailsUnavailable, order, qrData, busy, permissions, members, grants, usageRecords, usageUnavailable, usageCursor, canRecharge, canCancelUsage, onRecharge, onActivateRecharge, onPurchase, onAllocate, onRevoke, onReclaim, onLoadMoreUsage, onCancelUsage }) {
+function PortalCreditsUsage({ copy, language, personalContext, products, balance, packages, orders, billingUnavailable, detailsUnavailable, order, qrData, busy, usageRecords, usageUnavailable, usageCursor, canRecharge, canCancelUsage, onRecharge, onActivateRecharge, onLoadMoreUsage, onCancelUsage }) {
   return (
     <section className="ap-combined-tab">
       <p className="ap-eyebrow">{copy.sections.creditsUsage}</p>
@@ -883,10 +904,30 @@ function PortalCreditsUsage({ copy, language, personalContext, organizationId, p
       ) : (
         <>
           <ContextCredits copy={copy} language={language} balance={balance} />
-          <OrganizationEntitlements copy={copy} language={language} organizationId={organizationId} permissions={permissions} products={products} packages={packages} members={members} grants={grants} order={order} busy={busy} onPurchase={onPurchase} onAllocate={onAllocate} onRevoke={onRevoke} onReclaim={onReclaim} />
+          <EntitlementSummary copy={copy} language={language} packages={packages} detailsUnavailable={detailsUnavailable} />
         </>
       )}
       <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} canCancel={canCancelUsage} onLoadMore={onLoadMoreUsage} onCancel={onCancelUsage} embedded />
+    </section>
+  );
+}
+
+function PortalMyOrganization({ copy, language, organization, permissions, products, packages, members, quotaMembers, grants, order, units, models, modelPolicy, busy, onPurchase, onAllocate, onRevoke, onReclaim, onCreateUnit, onInvite, onUpdateModelPolicy }) {
+  if (!organization) return <Empty>{copy.chooseOrganization}</Empty>;
+  return (
+    <section className="ap-combined-tab">
+      <p className="ap-eyebrow">{copy.sections.myOrganization}</p>
+      <h2>{copy.myOrganizationTitle}</h2>
+      <p className="ap-lead">{copy.myOrganizationLead}</p>
+      <article className="ap-context-card ap-organization-summary">
+        <div>
+          <span>{copy.currentOrganization}</span>
+          <strong>{organization.name}</strong>
+          <small>{copy.myOrganizationScopeLead}</small>
+        </div>
+      </article>
+      <OrganizationEntitlements copy={copy} language={language} permissions={permissions} products={products} packages={packages} members={quotaMembers} grants={grants} order={order} busy={busy} onPurchase={onPurchase} onAllocate={onAllocate} onRevoke={onRevoke} onReclaim={onReclaim} />
+      <Organization copy={copy} organization={organization} units={units} members={members} models={models} modelPolicy={modelPolicy} permissions={permissions} busy={busy} onCreateUnit={onCreateUnit} onInvite={onInvite} onUpdateModelPolicy={onUpdateModelPolicy} embedded />
     </section>
   );
 }
@@ -903,7 +944,7 @@ function PortalOrdersInvoices({ copy, language, orders, unavailable }) {
   );
 }
 
-function PortalAccountSettings({ copy, me, access, organizations, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, closure, onRequestClosure, units, members, models, modelPolicy, onCreateUnit, onInvite, onUpdateModelPolicy }) {
+function PortalAccountSettings({ copy, me, access, organizations, activeOrganization, activeOrganizationId, busy, onSwitchContext, client, onProfileError, onProfileChanged, onProfileRecovering, closure, onRequestClosure }) {
   const requestedProfile = new URLSearchParams(globalThis.location?.search || '').get('profile');
   const initialProfile = requestedProfile === 'username' || requestedProfile === 'mobile' ? requestedProfile : '';
   const [profileDialog, setProfileDialog] = useState(initialProfile);
@@ -918,7 +959,6 @@ function PortalAccountSettings({ copy, me, access, organizations, activeOrganiza
       <h2>{copy.accountSettingsTitle}</h2>
       <p className="ap-lead">{copy.accountSettingsLead}</p>
       <AccountProfileCard copy={copy} me={me} organizations={organizations} activeOrganization={activeOrganization} canSwitchIdentity={access.contextSwitch} canEditProfile={access.profileUpdate} onSwitchIdentity={() => setIdentityDialog(true)} onEditUsername={() => setProfileDialog('username')} onEditMobile={() => setProfileDialog('mobile')} />
-      {activeOrganization && <Organization copy={copy} organization={activeOrganization} units={units} members={members} models={models} modelPolicy={modelPolicy} permissions={me?.active_context?.permissions || []} busy={busy} onCreateUnit={onCreateUnit} onInvite={onInvite} onUpdateModelPolicy={onUpdateModelPolicy} embedded />}
       <AccountClosure copy={copy} item={closure} busy={busy} canRequest={access.closureRequest} onRequest={onRequestClosure} embedded />
       {identityDialog && (
         <IdentityDialog
@@ -1523,9 +1563,13 @@ function Organization({ copy, organization, units, members, models, modelPolicy,
   const [parentId, setParentId] = useState('');
   const [email, setEmail] = useState('');
   const permissionSet = new Set(permissions || []);
+  const canReadUnits = permissionSet.has('org.units.read');
+  const canReadMembers = permissionSet.has('org.members.read');
+  const canReadModelPolicy = permissionSet.has('org.models.read');
   const canManageUnits = permissionSet.has('org.units.manage');
   const canManageMembers = permissionSet.has('org.members.manage');
   if (!organization) return <Empty>{copy.chooseOrganization}</Empty>;
+  if (!canReadUnits && !canReadMembers && !canReadModelPolicy) return null;
   return (
     <section className={embedded ? 'ap-combined-section' : undefined}>
       {!embedded && <p className="ap-eyebrow">{copy.sections.organization}</p>}
@@ -1537,7 +1581,7 @@ function Organization({ copy, organization, units, members, models, modelPolicy,
         <h2>{organization.name}</h2>
       )}
       <div className="ap-grid">
-        <article className="ap-card">
+        {canReadUnits && <article className="ap-card">
           <h3>{copy.organizationTree}</h3>
           {units.length ? (
             <ul className="ap-list">
@@ -1575,8 +1619,8 @@ function Organization({ copy, organization, units, members, models, modelPolicy,
               <button disabled={busy || !unitName.trim()}>{copy.createUnit}</button>
             </form>
           )}
-        </article>
-        <article className="ap-card">
+        </article>}
+        {canReadMembers && <article className="ap-card">
           <h3>{copy.members}</h3>
           {members.length ? (
             <ul className="ap-list">
@@ -1604,9 +1648,9 @@ function Organization({ copy, organization, units, members, models, modelPolicy,
               <button disabled={busy || !email.trim()}>{copy.createInvitation}</button>
             </form>
           )}
-        </article>
+        </article>}
       </div>
-      {modelPolicy && <ModelPolicy copy={copy} policy={modelPolicy} models={models} canManage={(permissions || []).includes('org.models.manage')} busy={busy} onSave={onUpdateModelPolicy} />}
+      {canReadModelPolicy && modelPolicy && <ModelPolicy copy={copy} policy={modelPolicy} models={models} canManage={(permissions || []).includes('org.models.manage')} busy={busy} onSave={onUpdateModelPolicy} />}
     </section>
   );
 }
@@ -1656,6 +1700,7 @@ function ModelPolicy({ copy, policy, models, canManage, busy, onSave }) {
 
 function OrganizationEntitlements({ copy, language, permissions, products, packages, members, grants, order, busy, onPurchase, onAllocate, onRevoke, onReclaim }) {
   const permissionSet = new Set(permissions || []);
+  const canReadQuota = permissionSet.has('org.quota.read.self') || permissionSet.has('org.quota.read.all');
   const canPurchase = permissionSet.has('org.entitlements.purchase');
   const canAllocate = permissionSet.has('org.quota.allocate');
   const canRevoke = permissionSet.has('org.quota.revoke');
@@ -1688,6 +1733,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   const selectedComponent = allocatableComponents.find((item) => item.component_id === effectiveComponentId);
   const selectedMember = members.find((item) => item.user_id === memberId);
   const amountMicrocredits = Math.round(Number(amount) * MICROCREDITS_PER_POINT);
+  if (!canPurchase && !canAllocate && !canReadQuota) return null;
   return (
     <section className="ap-stack">
       {canPurchase && (
@@ -1776,7 +1822,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
           </form>
         </article>
       )}
-      <article className="ap-card">
+      {canReadQuota && <article className="ap-card">
         <h3>{copy.memberQuotaGrants}</h3>
         {grants.length ? (
           <div className="ap-order-list">
@@ -1812,7 +1858,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
         ) : (
           <Empty>{copy.noMemberQuotaGrants}</Empty>
         )}
-      </article>
+      </article>}
     </section>
   );
 }
@@ -1820,7 +1866,6 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
 function Wallet({ copy, language, products, balance, packages, orders = [], billingUnavailable, detailsUnavailable, order, qrData, busy, canRecharge = true, onRecharge, onActivateRecharge, embedded = false }) {
   const [productId, setProductIdState] = useState('');
   const [channel, setChannel] = useState('');
-  const [entitlementDialog, setEntitlementDialog] = useState(null);
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const setProductId = (nextProductId) => {
     if (!nextProductId || products.some((item) => item.product_id === nextProductId && item.availability_status === 'AVAILABLE')) setProductIdState(nextProductId);
@@ -1865,10 +1910,6 @@ function Wallet({ copy, language, products, balance, packages, orders = [], bill
   const activateAndOpenPayment = async (orderId) => {
     if (await onActivateRecharge(orderId)) setPaymentDialogOpen(true);
   };
-  const activePackages = activeEntitlementPackages(packages.items || [], now);
-  const summarizedPackages = activePackages.slice(0, 5);
-  const allPackages = allEntitlementPackages(packages.items || []);
-  const remainingMicrocredits = remainingEntitlementMicrocredits(activePackages);
   const Heading = embedded ? 'h3' : 'h2';
   return (
     <section className={embedded ? 'ap-combined-section' : undefined}>
@@ -1918,6 +1959,24 @@ function Wallet({ copy, language, products, balance, packages, orders = [], bill
         {pendingOrders.length > 0 && <PendingPaymentOrders copy={copy} orders={pendingOrders} now={now} busy={busy} onActivate={activateAndOpenPayment} />}
       </div>
       {paymentDialogOpen && activePayment && <PaymentQRCodeDialog copy={copy} order={order} qrData={qrData} remainingSeconds={remainingSeconds} onClose={() => setPaymentDialogOpen(false)} />}
+      <EntitlementSummary copy={copy} language={language} packages={packages} detailsUnavailable={detailsUnavailable} />
+    </section>
+  );
+}
+
+function EntitlementSummary({ copy, language, packages, detailsUnavailable }) {
+  const [entitlementDialog, setEntitlementDialog] = useState(null);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const activePackages = activeEntitlementPackages(packages.items || [], now);
+  const summarizedPackages = activePackages.slice(0, 5);
+  const allPackages = allEntitlementPackages(packages.items || []);
+  const remainingMicrocredits = remainingEntitlementMicrocredits(activePackages);
+  return (
+    <>
       <section className="ap-entitlements">
         <h3>{copy.myEntitlements}</h3>
         {detailsUnavailable ? (
@@ -1958,7 +2017,7 @@ function Wallet({ copy, language, products, balance, packages, orders = [], bill
           )}
         </Dialog>
       )}
-    </section>
+    </>
   );
 }
 

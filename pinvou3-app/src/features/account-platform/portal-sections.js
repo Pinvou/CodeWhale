@@ -1,9 +1,10 @@
-export const portalNavigationSections = ['creditsUsage', 'ordersInvoices', 'accountSettings'];
+export const portalNavigationSections = ['creditsUsage', 'ordersInvoices', 'myOrganization', 'accountSettings'];
 
 export function initialPortalSection(search = '') {
   const requested = new URLSearchParams(search).get('section');
   if (['credits', 'entitlements', 'usage', 'creditsUsage'].includes(requested)) return 'creditsUsage';
   if (['orders', 'invoice', 'ordersInvoices'].includes(requested)) return 'ordersInvoices';
+  if (['organization', 'myOrganization'].includes(requested)) return 'myOrganization';
   if (['overview', 'profile', 'closure', 'accountSettings'].includes(requested)) return 'accountSettings';
   return 'creditsUsage';
 }
