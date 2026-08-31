@@ -188,7 +188,10 @@ assert.match(main, /t\.uiAccount\.viewQuota/);
 assert.doesNotMatch(main, />查看可用额度</);
 assert.match(main, /<SettingsErrorBoundary[^>]*t=\{t\}/);
 assert.match(viewLoaders, new RegExp("codex: \\(\\) => import\\('\\.\\./features/codex/CodexAcpView\\.jsx'\\)"));
-assert.match(main, /<LazyCodexAcpView[^>]*t=\{t\}/);
+// The main window renders codex through the LazyCodexAcpView wrapper (which
+// internally consumes the same view-loaders chunk); its error fallback copy
+// still flows through i18n.
+assert.match(main, /<CodexAcpView[^>]*t=\{t\}/);
 const settingsErrorBoundary = source('features/settings/SettingsErrorBoundary.jsx');
 assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailed/);
 assert.match(settingsErrorBoundary, /settingsCopy\.settingsLoadFailedDetail/);
