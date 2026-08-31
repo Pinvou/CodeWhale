@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
-import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
+import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
 import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
@@ -44,7 +44,7 @@ function ContextCredits({ copy, language, balance }) {
       <span>{copy.availableCredits}</span>
       <strong>{formatWholePoints(balance?.available_microcredits, language)}</strong>
       <small>
-        {copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}
+        {copy.reservedCredits}: {formatWholePoints(balance?.reserved_microcredits, language)}
       </small>
     </div>
   );
@@ -1568,7 +1568,7 @@ function Overview({ copy, language, me, organizations, balance, activeOrganizati
         </article>
         <article>
           <span>{copy.availableCredits}</span>
-          <strong>{formatPoints(balance?.available_microcredits, language)}</strong>
+          <strong>{formatWholePoints(balance?.available_microcredits, language)}</strong>
         </article>
         <article>
           <span>{copy.accountStatus}</span>
@@ -1847,7 +1847,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
               <select value={effectiveComponentId} onChange={(event) => setComponentId(event.target.value)}>
                 {allocatableComponents.map((component) => (
                   <option key={component.component_id} value={component.component_id}>
-                    {copy.componentTypes[component.component_type] || component.component_type} · {formatPoints(component.available_microcredits, language)}
+                    {copy.componentTypes[component.component_type] || component.component_type} · {formatWholePoints(component.available_microcredits, language)}
                   </option>
                 ))}
               </select>
@@ -1874,7 +1874,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
                   </div>
                   <div>
                     <strong>
-                      {formatPoints(grant.available_microcredits, language)} {copy.points}
+                      {formatWholePoints(grant.available_microcredits, language)} {copy.points}
                     </strong>
                     <span className="ap-status">{copy.grantStatuses?.[grant.status] || grant.status}</span>
                   </div>
@@ -1962,7 +1962,7 @@ function Wallet({ copy, language, products, balance, packages, orders = [], bill
         <span>{copy.availableCredits}</span>
         <strong>{formatWholePoints(balance?.available_microcredits, language)}</strong>
         <small>
-          {copy.basePoints}: {formatPoints(packages.summary?.base_available_microcredits, language)} · {copy.bonusPoints}: {formatPoints(packages.summary?.bonus_available_microcredits, language)} · {copy.reservedCredits}: {formatPoints(balance?.reserved_microcredits, language)}
+          {copy.basePoints}: {formatWholePoints(packages.summary?.base_available_microcredits, language)} · {copy.bonusPoints}: {formatWholePoints(packages.summary?.bonus_available_microcredits, language)} · {copy.reservedCredits}: {formatWholePoints(balance?.reserved_microcredits, language)}
         </small>
       </div>
       <div className="ap-card">
@@ -2148,10 +2148,10 @@ function EntitlementPackageDetail({ copy, language, item }) {
           [copy.amount, formatMoney(item.amount_fen)],
           [copy.creditedAt, formatUsageTime(item.credited_at, language)],
           [copy.validPeriod, `${formatUsageTime(item.valid_from, language)} — ${formatUsageTime(item.valid_until, language)}`],
-          [copy.totalPoints, `${formatPoints(item.points_total_microcredits, language)} ${copy.points}`],
-          [copy.usedPoints, `${formatPoints(item.points_used_microcredits, language)} ${copy.points}`],
-          [copy.expiredPoints, `${formatPoints(item.points_expired_microcredits, language)} ${copy.points}`],
-          [copy.revokedPoints, `${formatPoints(item.points_revoked_microcredits, language)} ${copy.points}`],
+          [copy.totalPoints, `${formatWholePoints(item.points_total_microcredits, language)} ${copy.points}`],
+          [copy.usedPoints, `${formatWholePoints(item.points_used_microcredits, language)} ${copy.points}`],
+          [copy.expiredPoints, `${formatWholePoints(item.points_expired_microcredits, language)} ${copy.points}`],
+          [copy.revokedPoints, `${formatWholePoints(item.points_revoked_microcredits, language)} ${copy.points}`],
         ]}
       />
       <p className="ap-muted">{copy.consumptionOrder}</p>
@@ -2162,12 +2162,12 @@ function EntitlementPackageDetail({ copy, language, item }) {
             <strong>{copy.componentTypes[component.component_type] || component.component_type}</strong>
             <TraceDetails
               items={[
-                [copy.totalPoints, `${formatPoints(component.original_microcredits, language)} ${copy.points}`],
-                [copy.availableCredits, `${formatPoints(component.available_microcredits, language)} ${copy.points}`],
-                [copy.reservedCredits, `${formatPoints(component.reserved_microcredits, language)} ${copy.points}`],
-                [copy.usedPoints, `${formatPoints(component.used_microcredits, language)} ${copy.points}`],
-                [copy.expiredPoints, `${formatPoints(component.expired_microcredits, language)} ${copy.points}`],
-                [copy.revokedPoints, `${formatPoints(component.revoked_microcredits, language)} ${copy.points}`],
+                [copy.totalPoints, `${formatWholePoints(component.original_microcredits, language)} ${copy.points}`],
+                [copy.availableCredits, `${formatWholePoints(component.available_microcredits, language)} ${copy.points}`],
+                [copy.reservedCredits, `${formatWholePoints(component.reserved_microcredits, language)} ${copy.points}`],
+                [copy.usedPoints, `${formatWholePoints(component.used_microcredits, language)} ${copy.points}`],
+                [copy.expiredPoints, `${formatWholePoints(component.expired_microcredits, language)} ${copy.points}`],
+                [copy.revokedPoints, `${formatWholePoints(component.revoked_microcredits, language)} ${copy.points}`],
                 [copy.validUntil, formatUsageTime(component.expires_at, language)],
                 [copy.expiryReminder, copy.expiryReminderAt(formatUsageTime(component.expires_at, language))],
               ]}

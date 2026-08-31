@@ -226,7 +226,7 @@ test('organization billing uses organization-scoped routes and reports only serv
   assert.ok(view.includes('setBillingDetailsUnavailable([7, 8, 9].some((index) => serviceRequestFailed(results[index])))'));
 });
 
-test('Web credits and usage use the requested compact presentation', async () => {
+test('Web personal center shows whole-point balances and two-decimal model usage', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const portalCredits = view.match(/function PortalCreditsUsage[\s\S]*?function PortalOrdersInvoices/)?.[0] || '';
   const entitlementRow = view.match(/function EntitlementPackageRow[\s\S]*?function EntitlementPackageDetail/)?.[0] || '';
@@ -236,6 +236,7 @@ test('Web credits and usage use the requested compact presentation', async () =>
   assert.match(entitlementRow, /data-points-format="integer"/);
   assert.match(entitlementRow, /usedOfTotal\(formatWholePoints\(item\.points_used_microcredits, language\), formatWholePoints\(item\.points_total_microcredits, language\)\)/);
   assert.doesNotMatch(entitlementRow, /usedOfTotal\(formatPoints\(/);
+  assert.doesNotMatch(view, /\bformatPoints\(/);
   assert.match(view, /const summaries = summarizeUsageRecords\(records\)/);
   assert.match(view, /formatUsagePoints\(record\.actual_microcredits \|\| 0, language\)/);
 });
