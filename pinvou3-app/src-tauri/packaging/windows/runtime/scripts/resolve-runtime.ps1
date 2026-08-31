@@ -30,7 +30,6 @@ if ([string]::IsNullOrWhiteSpace($LockFile)) {
 if (-not (Test-Path -LiteralPath $LockFile -PathType Leaf)) {
   throw "Windows runtime lock manifest not found: $LockFile"
 }
-
 $lock = Get-Content -LiteralPath $LockFile -Raw -Encoding UTF8 | ConvertFrom-Json
 if ([int]$lock.schemaVersion -ne 2 -or [string]$lock.source.type -ne "git-submodule") {
   throw "Unsupported Windows runtime lock schema or source type."
@@ -744,41 +743,45 @@ function Test-PythonWheelTarget {
   return $false
 }
 
-function Test-PythonDependencyLock {
-  param($Spec)
+function Test-PythonDependencyTarget {
+  param($Target)
 
   if (
-    $null -eq $Spec -or
-    $Spec.target -isnot [string] -or
-    $Spec.lock_id -isnot [string] -or
-    $Spec.imports -isnot [System.Array] -or
-    $Spec.wheels -isnot [System.Array] -or
-    @($Spec.imports).Count -eq 0 -or
-    @($Spec.wheels).Count -eq 0 -or
-    $Spec.lock_id -cnotmatch '^[0-9a-f]{64}$'
+    $null -eq $Target -or
+    $Target.platform -isnot [string] -or
+    $Target.python -isnot [string] -or
+    $Target.imports -isnot [System.Array] -or
+    $Target.wheels -isnot [System.Array] -or
+    $Target.platform -cnotmatch '^[a-z0-9]+-[a-z0-9]+$' -or
+    $Target.python -cnotmatch '^\d+\.\d+$' -or
+    @($Target.imports).Count -eq 0 -or
+    @($Target.wheels).Count -eq 0
   ) {
     return $false
   }
-  $target = $Spec.target
-  if ($target -cnotmatch '^cp\d+-[a-z0-9_]+$') {
-    return $false
-  }
-  foreach ($import in @($Spec.imports)) {
+  foreach ($import in @($Target.imports)) {
     if ($import -isnot [string] -or $import -cnotmatch '^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$') {
       return $false
     }
   }
-  $canonicalLines = @("target:$target")
-  foreach ($wheel in @($Spec.wheels)) {
-    # 文件名字符集与 Rust 侧 validate_wheel 一致（仅字母数字与 `._+-`）：
-    # 既挡路径分隔符，也杜绝 canonical lock 拼接歧义（`:`/换行）。
+
+  $wheelTarget = $null
+  if ($Target.platform -ceq 'windows-x64') {
+    $versionDigits = ([string]$Target.python).Replace('.', '')
+    $wheelTarget = "cp${versionDigits}-win_amd64"
+  }
+  foreach ($wheel in @($Target.wheels)) {
     if (
+      $null -eq $wheel -or
+      $wheel.name -isnot [string] -or
+      $wheel.version -isnot [string] -or
+      [string]::IsNullOrWhiteSpace([string]$wheel.name) -or
+      [string]::IsNullOrWhiteSpace([string]$wheel.version) -or
       $wheel.filename -isnot [string] -or
       $wheel.url -isnot [string] -or
       $wheel.sha256 -isnot [string] -or
       $wheel.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
-      $wheel.filename -cnotmatch '^[A-Za-z0-9._+-]+\.whl$' -or
-      -not (Test-PythonWheelTarget -Filename $wheel.filename -Target $target)
+      $wheel.filename -cnotmatch '^[A-Za-z0-9._+-]+\.whl$'
     ) {
       return $false
     }
@@ -787,58 +790,100 @@ function Test-PythonDependencyLock {
     } catch {
       return $false
     }
-    if ($uri.Scheme -cne 'https' -or $uri.Host -cne 'files.pythonhosted.org') {
+    if (
+      $uri.Scheme -cne 'https' -or
+      $uri.Host -cne 'files.pythonhosted.org' -or
+      [System.Uri]::UnescapeDataString($uri.Segments[-1]) -cne [string]$wheel.filename -or
+      ($null -ne $wheelTarget -and -not (Test-PythonWheelTarget -Filename $wheel.filename -Target $wheelTarget))
+    ) {
       return $false
     }
-    $canonicalLines += "$($wheel.filename):$($wheel.sha256)"
   }
-  $computedLock = Get-StringSha256 -Value ($canonicalLines -join "`n")
-  return $computedLock -ceq $Spec.lock_id
+  return $true
 }
 
 function Test-PythonDependencyTargets {
-  param([string]$PythonRoot, [scriptblock]$AbiProbe)
+  param(
+    [string]$PythonRoot,
+    [scriptblock]$AbiProbe,
+    [string]$ManifestRoot = ""
+  )
 
   $pythonExe = Join-Path $PythonRoot "python.exe"
   if ($null -eq $AbiProbe -and -not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) {
     Write-Warning "Python dependency ABI probe could not find python.exe: $pythonExe"
     return $false
   }
-  $manifestRoot = Join-Path $appRoot "resources\mcp-servers"
-  $manifestPaths = @(Get-ChildItem -LiteralPath $manifestRoot -Filter manifest.json -File -Recurse)
+  if ([string]::IsNullOrWhiteSpace($ManifestRoot)) {
+    $ManifestRoot = Join-Path $appRoot "resources\mcp-servers"
+  }
+  if (-not (Test-Path -LiteralPath $ManifestRoot -PathType Container)) {
+    Write-Warning "Python dependency manifest root does not exist: $ManifestRoot"
+    return $false
+  }
+  $manifestPaths = @(Get-ChildItem -LiteralPath $ManifestRoot -Filter manifest.json -File -Recurse)
   foreach ($manifestItem in $manifestPaths) {
     $manifestPath = $manifestItem.FullName
     $tool = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($null -eq $tool.windows_python_dependencies) {
-      # 声明了 pip 依赖的内置 MCP 必须随附 Windows 可验证依赖锁：运行期
-      # ensure_for_builtin_manifest 对无锁条目 fail-closed，构建期在此同步拦截，
-      # 避免漏配锁的 manifest 被打包后在用户机器上才报错。
-      $pipDeps = @($tool.pip_dependencies | Where-Object { $null -ne $_ })
-      if ($pipDeps.Count -gt 0) {
-        Write-Warning "Python MCP declares pip_dependencies without a windows_python_dependencies lock: $manifestPath"
+    $pipDependencies = @($tool.pip_dependencies | Where-Object { $null -ne $_ })
+    if ($null -eq $tool.python_dependencies) {
+      if ($pipDependencies.Count -gt 0) {
+        Write-Warning "Python MCP declares pip_dependencies without a python_dependencies lock: $manifestPath"
         return $false
       }
       continue
     }
-    $spec = $tool.windows_python_dependencies
-    if (-not (Test-PythonDependencyLock -Spec $spec)) {
-      Write-Warning "Python MCP dependency lock is invalid or incompatible: $manifestPath"
+    $dependencyLock = $tool.python_dependencies
+    if (
+      [int]$dependencyLock.schema_version -ne 1 -or
+      $dependencyLock.targets -isnot [System.Array] -or
+      @($dependencyLock.targets).Count -eq 0
+    ) {
+      Write-Warning "Python MCP dependency lock schema is invalid: $manifestPath"
       return $false
     }
-    $target = $spec.target
+    $seenPlatforms = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
+    foreach ($target in @($dependencyLock.targets)) {
+      if (-not (Test-PythonDependencyTarget -Target $target) -or -not $seenPlatforms.Add([string]$target.platform)) {
+        Write-Warning "Python MCP dependency target is invalid or duplicated: $manifestPath"
+        return $false
+      }
+    }
+    $windowsTargets = @($dependencyLock.targets | Where-Object { [string]$_.platform -ceq 'windows-x64' })
+    if ($windowsTargets.Count -ne 1) {
+      Write-Warning "Python MCP dependency lock must contain exactly one windows-x64 target: $manifestPath"
+      return $false
+    }
+    $target = $windowsTargets[0]
     $abiMatches = if ($null -ne $AbiProbe) {
       & $AbiProbe $pythonExe $target
     } else {
-      $probe = "import platform,sys;m=platform.machine().lower();p='win_amd64' if m in ('amd64','x86_64') else 'win_'+m;a=f'cp{sys.version_info.major}{sys.version_info.minor}-{p}';raise SystemExit(0 if a==sys.argv[1] else 17)"
-      & $pythonExe -I -c $probe $target
+      $probe = "import platform,sys; expected=(int(sys.argv[1]),int(sys.argv[2])); machine=platform.machine().lower(); ok=sys.version_info[:2]==expected and machine in ('amd64','x86_64'); raise SystemExit(0 if ok else 17)"
+      $version = ([string]$target.python).Split('.')
+      # Discard probe stdout: pipeline output would join the trailing boolean into
+      # an array and make `-not $abiMatches` false even on a non-zero exit code.
+      $null = & $pythonExe -I -S -B -c $probe $version[0] $version[1]
       $LASTEXITCODE -eq 0
     }
     if (-not $abiMatches) {
-      Write-Warning "Bundled Python ABI does not match MCP dependency target '$target' in $manifestPath"
+      Write-Warning "Bundled Python ABI does not match MCP dependency target '$($target.python)/$($target.platform)' in $manifestPath"
       return $false
     }
   }
   return $true
+}
+
+function Assert-FreshStagePythonDependencies {
+  param([string]$PythonRoot, [scriptblock]$PythonDependencyProbe)
+
+  $valid = if ($null -eq $PythonDependencyProbe) {
+    Test-PythonDependencyTargets -PythonRoot $PythonRoot
+  } else {
+    & $PythonDependencyProbe $PythonRoot
+  }
+  if (-not $valid) {
+    throw "Bundled Python ABI is incompatible with the locked Windows MCP dependency wheels."
+  }
 }
 
 function Write-TauriOverlay {
@@ -946,9 +991,7 @@ function Stage-Submodule {
       }
 
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "python-*-embed-amd64.zip" -Label "Python") -Destination (Join-Path $expandedRoot "python") -RequiredFile "pythonw.exe"
-      if (-not (Test-PythonDependencyTargets -PythonRoot (Join-Path $expandedRoot "python"))) {
-        throw "Bundled Python ABI is incompatible with the locked Windows MCP dependency wheels."
-      }
+      Assert-FreshStagePythonDependencies -PythonRoot (Join-Path $expandedRoot "python")
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "node-*-win-x64.zip" -Label "Node.js") -Destination (Join-Path $expandedRoot "node") -RequiredFile "node.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "pandoc-*-windows-x86_64.zip" -Label "Pandoc") -Destination (Join-Path $expandedRoot "pandoc") -RequiredFile "pandoc.exe"
       Expand-FlattenedRuntime -ZipPath (Find-ComponentArchive -PayloadRoot $payloadRoot -Pattern "onnxruntime-win-x64-*-runtime.zip" -Label "ONNX Runtime") -Destination (Join-Path $expandedRoot "onnxruntime") -RequiredFile "onnxruntime.dll" -OnnxOnly

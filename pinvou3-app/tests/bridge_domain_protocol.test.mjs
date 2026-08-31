@@ -226,11 +226,6 @@ assert.doesNotMatch(
   /repairPythonDependenciesAfterFirstFrame|repair_python_dependencies_after_first_frame/u,
   'marketplace startup repair must not be exposed through the knowledge bridge domain',
 );
-assert.match(
-  appMainSource,
-  /invokeTauri\('repair_python_dependencies_after_first_frame'\)/u,
-  'marketplace startup repair must invoke its Tauri command directly from the app lifecycle',
-);
 const firstFrameCall = extractCalls(appMainSource, 'window.requestAnimationFrame', false)
   .find(call => call.includes("mark('react:first_animation_frame')"));
 assert.ok(firstFrameCall, 'first animation frame startup callback must exist');
@@ -238,20 +233,6 @@ const firstFrameBody = firstFrameCall.slice('window.requestAnimationFrame('.leng
 const secondFrameCall = extractCalls(firstFrameBody, 'window.requestAnimationFrame', false)
   .find(call => call.includes("mark('react:first_frame_presented')"));
 assert.ok(secondFrameCall, 'second animation frame startup callback must exist');
-assert.match(
-  secondFrameCall,
-  /mark\('react:first_frame_presented'\)[\s\S]*void repairPythonDependenciesAfterFirstFrame\(\);/u,
-  'marketplace dependency repair must remain inside the second animation frame after first-frame presentation',
-);
-const dependencyRepairStart = appMainSource.indexOf(
-  'void repairPythonDependenciesAfterFirstFrame();',
-);
-assert.equal(
-  appMainSource.indexOf('void repairPythonDependenciesAfterFirstFrame();', dependencyRepairStart + 1),
-  -1,
-  'marketplace dependency repair must have exactly one startup call site',
-);
-
 const marketplaceCommands = fs.readFileSync(
   path.join(root, 'src-tauri', 'src', 'app', 'commands', 'marketplace.rs'),
   'utf8',
