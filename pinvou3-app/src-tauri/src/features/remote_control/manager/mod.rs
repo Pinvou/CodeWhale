@@ -1327,6 +1327,7 @@ impl RemoteControlManager {
         total: usize,
         data: &[u8],
         commit: bool,
+        sha256: Option<&str>,
     ) -> Result<Option<(String, Vec<u8>)>, String> {
         append_web_attachment_upload_chunk(
             &mut self.inner.lock(),
@@ -1336,6 +1337,7 @@ impl RemoteControlManager {
             total,
             data,
             commit,
+            sha256,
         )
     }
 
@@ -1672,15 +1674,13 @@ impl RemoteControlManager {
         }
     }
 
-    /// Cheap, read-only projection gate for optional event transports.
-    /// Delivery revalidates the same state in `publish_event_inner`.
-    pub(crate) fn has_active_subscription(&self, event: &str) -> bool {
-        let inner = self.inner.lock();
-        let web_client_connected = inner
-            .endpoint
-            .as_ref()
-            .is_some_and(|endpoint| endpoint.web_client_connected);
-        has_active_event_subscription(web_client_connected, &inner.subscriptions, event)
+    /// Whether the remote-control endpoint is active at all. Producers use
+    /// this as the journal gate: while the endpoint is active, events are
+    /// journaled even if the browser is momentarily disconnected, so replay
+    /// on reconnect covers the disconnect window. When remote control is off,
+    /// producers skip both the projection cost and the journal entirely.
+    pub(crate) fn has_active_web_transport(&self) -> bool {
+        self.inner.lock().endpoint.is_some()
     }
 
     pub fn publish_frontend_event(&self, event: &str, payload: Value) -> Result<(), String> {
@@ -2888,14 +2888,6 @@ impl RemoteControlManager {
     }
 }
 
-fn has_active_event_subscription(
-    web_client_connected: bool,
-    subscriptions: &HashSet<String>,
-    event: &str,
-) -> bool {
-    web_client_connected && is_event_subscribed(subscriptions, event)
-}
-
 #[cfg(test)]
 mod tests {
     use super::persistence::{
@@ -2915,16 +2907,6 @@ mod tests {
 
         assert!(is_event_subscribed(&subscriptions, "session:deleted"));
         assert!(!is_event_subscribed(&subscriptions, "session:list_changed"));
-        assert!(!has_active_event_subscription(
-            false,
-            &subscriptions,
-            "session:deleted"
-        ));
-        assert!(has_active_event_subscription(
-            true,
-            &subscriptions,
-            "session:deleted"
-        ));
     }
 
     #[test]
@@ -2992,6 +2974,7 @@ mod tests {
             6,
             b"abc",
             false,
+            None,
         )
         .expect("first chunk");
         assert!(first.is_none());
@@ -3004,6 +2987,7 @@ mod tests {
             6,
             b"def",
             true,
+            None,
         )
         .expect("final chunk")
         .expect("commit returns the payload");
@@ -3011,6 +2995,99 @@ mod tests {
         assert_eq!(completed.1, b"abcdef");
         assert!(inner.web_attachment_uploads.is_empty());
         assert!(inner.web_attachment_upload_order.is_empty());
+    }
+
+    #[test]
+    fn web_attachment_upload_verifies_sha256_on_commit() {
+        use sha2::{Digest, Sha256};
+
+        let mut inner = Inner::default();
+        let mut hasher = Sha256::new();
+        hasher.update(b"abcdef");
+        let good = crate::platform::encoding::hex_lower(&hasher.finalize());
+
+        append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_hash",
+            "notes.txt",
+            0,
+            6,
+            b"abc",
+            false,
+            None,
+        )
+        .expect("first chunk");
+
+        let completed = append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_hash",
+            "notes.txt",
+            3,
+            6,
+            b"def",
+            true,
+            Some(&good),
+        )
+        .expect("digest match must commit");
+        assert_eq!(completed.expect("payload").1, b"abcdef");
+
+        append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_hash_bad",
+            "notes.txt",
+            0,
+            6,
+            b"abc",
+            false,
+            None,
+        )
+        .expect("first chunk");
+        let error = append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_hash_bad",
+            "notes.txt",
+            3,
+            6,
+            b"def",
+            true,
+            Some(&"b".repeat(64)),
+        )
+        .expect_err("digest mismatch must abort the commit");
+        assert_eq!(
+            error,
+            transfer::WEB_ATTACHMENT_INTEGRITY_MISMATCH,
+            "the mismatch failure must surface as a stable wire code for localized client copy"
+        );
+
+        // Malformed digests are rejected before hashing and keep the upload
+        // resumable (the entry is not consumed).
+        append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_hash_invalid",
+            "notes.txt",
+            0,
+            6,
+            b"abc",
+            false,
+            None,
+        )
+        .expect("first chunk");
+        let error = append_web_attachment_upload_chunk(
+            &mut inner,
+            "upload_device_hash_invalid",
+            "notes.txt",
+            3,
+            6,
+            b"def",
+            true,
+            Some("not-hex"),
+        )
+        .expect_err("malformed digest must be rejected");
+        assert_eq!(
+            error,
+            transfer::WEB_ATTACHMENT_DIGEST_INVALID,
+            "the malformed-digest failure must surface as a stable wire code for localized client copy"
+        );
     }
 
     #[test]
@@ -3026,6 +3103,7 @@ mod tests {
             oversized,
             b"x",
             false,
+            None,
         )
         .expect_err("uploads above MAX_FILE_BYTES must fail before transfer");
         assert!(error.contains("上限"), "unexpected error: {error}");
@@ -3043,6 +3121,7 @@ mod tests {
             8,
             b"abcd",
             false,
+            None,
         )
         .expect("first chunk");
 
@@ -3054,6 +3133,7 @@ mod tests {
             8,
             b"cdef",
             false,
+            None,
         )
         .expect_err("out-of-order chunks must be rejected");
         assert!(error.contains("偏移量"), "unexpected error: {error}");
@@ -3070,6 +3150,7 @@ mod tests {
             8,
             b"abcd",
             false,
+            None,
         )
         .expect("first chunk");
 
@@ -3085,6 +3166,7 @@ mod tests {
             8,
             b"efgh",
             true,
+            None,
         )
         .expect_err("continuing an aborted upload must fail");
         assert!(
@@ -3105,6 +3187,7 @@ mod tests {
                 8,
                 b"abcd",
                 false,
+                None,
             )
             .expect("start upload");
         }
@@ -3121,6 +3204,7 @@ mod tests {
             8,
             b"efgh",
             true,
+            None,
         )
         .expect_err("the evicted oldest upload must no longer continue");
         assert!(

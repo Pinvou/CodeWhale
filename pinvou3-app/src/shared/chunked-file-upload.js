@@ -17,6 +17,50 @@
     return error;
   }
 
+  // The duck-typed argument may not be a real File (test stub/host-injected); guard against negative
+  // or invalid size so a negative size cannot skip the chunk loop straight into the success path.
+  function isValidUploadSize(size) {
+    return typeof size === "number" && Number.isSafeInteger(size) && size >= 0;
+  }
+
+  function toHex(bytes) {
+    var hex = "";
+    for (var i = 0; i < bytes.length; i += 1) {
+      hex += (bytes[i] + 0x100).toString(16).slice(1);
+    }
+    return hex;
+  }
+
+  // crypto.subtle is undefined on insecure origins (e.g. plain-HTTP remote
+  // access) — exactly where transfer corruption is most likely. The unchecked
+  // downgrade stays safe, but it must not be invisible.
+  function warnUncheckedUpload(reason) {
+    if (root.console && typeof root.console.warn === "function") {
+      root.console.warn("device upload integrity unavailable (" + reason + "); transfer proceeds unchecked");
+    }
+  }
+
+  // Web Crypto has no incremental digest, so the whole file (bounded by
+  // MAX_FILE_BYTES) is hashed once before the first chunk is sent. The hash
+  // rides the final chunk and the desktop re-verifies the assembled bytes.
+  async function fileSha256Hex(file) {
+    var subtle = root.crypto && root.crypto.subtle;
+    if (!subtle || typeof subtle.digest !== "function" || typeof file.arrayBuffer !== "function") {
+      warnUncheckedUpload("web crypto unavailable in this context");
+      return null;
+    }
+    try {
+      var buffer = await file.arrayBuffer();
+      var digest = await subtle.digest("SHA-256", buffer);
+      return toHex(new Uint8Array(digest));
+    } catch (error) {
+      // A hash we cannot compute locally degrades to an unchecked transfer;
+      // the desktop side still verifies whatever digest does arrive.
+      warnUncheckedUpload("digest failed: " + (error && error.message ? error.message : error));
+      return null;
+    }
+  }
+
   function bytesToBase64(bytes) {
     var binary = "";
     for (var offset = 0; offset < bytes.length; offset += 0x8000) {
@@ -50,6 +94,8 @@
     var offset = 0;
     var result = null;
     var commitAcknowledged = false;
+    var integrity = options.integrity !== false;
+    var sha256Hex = null;
     function assertActive() {
       if (typeof options.isCancelled === "function" && options.isCancelled()) {
         throw cancelledError();
@@ -57,6 +103,9 @@
     }
 
     try {
+      if (integrity) {
+        sha256Hex = await fileSha256Hex(file);
+      }
       while (offset < file.size) {
         var end = Math.min(offset + CHUNK_BYTES, file.size);
         var bytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
@@ -68,6 +117,7 @@
           total: file.size,
           dataBase64: bytesToBase64(bytes),
           commit: end === file.size,
+          ...(end === file.size && sha256Hex ? { sha256: sha256Hex } : {}),
         });
         commitAcknowledged = end === file.size;
         offset = end;
