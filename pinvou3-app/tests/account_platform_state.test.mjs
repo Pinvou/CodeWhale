@@ -988,6 +988,16 @@ test('Web payment QR uses a dialog and only user-activated payable orders can re
   assert.match(popover, /isPayablePaymentOrder\(order\) \? order\?\.qr_data/);
 });
 
+test('organization purchases open the shared payment dialog and refresh organization entitlements after payment', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const organizationEntitlements = view.slice(view.indexOf('function OrganizationEntitlements'), view.indexOf('function EntitlementSummary'));
+  assert.match(view, /<PortalMyOrganization[\s\S]*qrData=\{qrData\}/);
+  assert.match(organizationEntitlements, /if \(await onPurchase\(productId, channel\)\) setPaymentDialogOpen\(true\)/);
+  assert.match(organizationEntitlements, /paymentDialogOpen && activePayment && <PaymentQRCodeDialog/);
+  assert.match(view, /client\.organizationBalance\(activeOrganizationId\)/);
+  assert.match(view, /client\.organizationEntitlementPackages\(activeOrganizationId\)/);
+});
+
 test('billing operators can search repair candidates without provider-specific UI branches', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');

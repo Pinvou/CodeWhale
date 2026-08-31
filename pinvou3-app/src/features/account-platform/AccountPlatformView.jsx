@@ -422,7 +422,12 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         setOrder(latest);
         setOrders((current) => current.map((item) => (item.order_id === latest.order_id ? { ...item, status: latest.status, fulfillment_status: latest.fulfillment_status, close_status: latest.close_status, expires_at: latest.expires_at, paid_at: latest.paid_at } : item)));
         if (latest.status === 'PAID' || latest.status === 'PAID_LATE') {
-          setBalance(await client.balance());
+          const [nextBalance, nextPackages] = activeOrganizationId
+            ? await Promise.all([client.organizationBalance(activeOrganizationId), client.organizationEntitlementPackages(activeOrganizationId)])
+            : await Promise.all([client.balance(), client.entitlementPackages()]);
+          if ((meRef.current?.active_context?.organization_id || '') !== activeOrganizationId) return;
+          setBalance(nextBalance);
+          setPackages(nextPackages);
           setNotice(copy.paymentReceived);
           return;
         }
@@ -438,7 +443,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       stopped = true;
       clearTimeout(timer);
     };
-  }, [order?.order_id, order?.status]);
+  }, [activeOrganizationId, order?.order_id, order?.status]);
 
   const run = async (action) => {
     setBusy(true);
@@ -720,6 +725,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             quotaMembers={quotaMembers}
             grants={quotaGrants}
             order={order}
+            qrData={qrData}
             units={units}
             models={catalogModels}
             modelPolicy={modelPolicy}
@@ -813,6 +819,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
                     members={quotaMembers}
                     grants={quotaGrants}
                     order={order}
+                    qrData={qrData}
                     busy={busy}
                     onPurchase={(productId, channel) => run(async () => setOrder(await client.purchaseOrganizationEntitlements(activeOrganizationId, productId, channel, idempotencyKey('org-recharge'))))}
                     onAllocate={(items) =>
@@ -924,7 +931,7 @@ function PortalCreditsUsage({ copy, language, personalContext, products, balance
   );
 }
 
-function PortalMyOrganization({ copy, language, organization, permissions, products, packages, members, quotaMembers, grants, order, units, models, modelPolicy, busy, onPurchase, onAllocate, onRevoke, onReclaim, onCreateUnit, onInvite, onUpdateModelPolicy }) {
+function PortalMyOrganization({ copy, language, organization, permissions, products, packages, members, quotaMembers, grants, order, qrData, units, models, modelPolicy, busy, onPurchase, onAllocate, onRevoke, onReclaim, onCreateUnit, onInvite, onUpdateModelPolicy }) {
   if (!organization) return <Empty>{copy.chooseOrganization}</Empty>;
   return (
     <section className="ap-combined-tab">
@@ -938,7 +945,7 @@ function PortalMyOrganization({ copy, language, organization, permissions, produ
           <small>{copy.myOrganizationScopeLead}</small>
         </div>
       </article>
-      <OrganizationEntitlements copy={copy} language={language} permissions={permissions} products={products} packages={packages} members={quotaMembers} grants={grants} order={order} busy={busy} onPurchase={onPurchase} onAllocate={onAllocate} onRevoke={onRevoke} onReclaim={onReclaim} />
+      <OrganizationEntitlements copy={copy} language={language} permissions={permissions} products={products} packages={packages} members={quotaMembers} grants={grants} order={order} qrData={qrData} busy={busy} onPurchase={onPurchase} onAllocate={onAllocate} onRevoke={onRevoke} onReclaim={onReclaim} />
       <Organization copy={copy} organization={organization} units={units} members={members} models={models} modelPolicy={modelPolicy} permissions={permissions} busy={busy} onCreateUnit={onCreateUnit} onInvite={onInvite} onUpdateModelPolicy={onUpdateModelPolicy} embedded />
     </section>
   );
@@ -1710,7 +1717,7 @@ function ModelPolicy({ copy, policy, models, canManage, busy, onSave }) {
   );
 }
 
-function OrganizationEntitlements({ copy, language, permissions, products, packages, members, grants, order, busy, onPurchase, onAllocate, onRevoke, onReclaim }) {
+function OrganizationEntitlements({ copy, language, permissions, products, packages, members, grants, order, qrData, busy, onPurchase, onAllocate, onRevoke, onReclaim }) {
   const permissionSet = new Set(permissions || []);
   const canReadQuota = permissionSet.has('org.quota.read.self') || permissionSet.has('org.quota.read.all');
   const canPurchase = permissionSet.has('org.entitlements.purchase');
@@ -1723,6 +1730,8 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   const [packageId, setPackageId] = useState('');
   const [componentId, setComponentId] = useState('');
   const [amount, setAmount] = useState('');
+  const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
+  const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!products.some((item) => item.product_id === productId && item.availability_status === 'AVAILABLE')) {
       setProductId(products.find((item) => item.availability_status === 'AVAILABLE')?.product_id || '');
@@ -1745,6 +1754,19 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
   const selectedComponent = allocatableComponents.find((item) => item.component_id === effectiveComponentId);
   const selectedMember = members.find((item) => item.user_id === memberId);
   const amountMicrocredits = Math.round(Number(amount) * MICROCREDITS_PER_POINT);
+  const activePayment = isPayablePaymentOrder(order, now);
+  const remainingSeconds = paymentOrderRemainingSeconds(order, now);
+  useEffect(() => {
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    if (paymentDialogOpen && !activePayment) setPaymentDialogOpen(false);
+  }, [paymentDialogOpen, activePayment]);
+  const purchaseAndOpenPayment = async () => {
+    if (await onPurchase(productId, channel)) setPaymentDialogOpen(true);
+  };
   if (!canPurchase && !canAllocate && !canReadQuota) return null;
   return (
     <section className="ap-stack">
@@ -1768,7 +1790,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
                 </option>
               ))}
             </select>
-            <button className="ap-primary" disabled={busy || !selectedProduct || !channel} onClick={() => onPurchase(productId, channel)}>
+            <button className="ap-primary" disabled={busy || !selectedProduct || !channel} onClick={purchaseAndOpenPayment}>
               {copy.purchaseForOrganization}
             </button>
           </div>
@@ -1779,6 +1801,7 @@ function OrganizationEntitlements({ copy, language, permissions, products, packa
           )}
         </article>
       )}
+      {paymentDialogOpen && activePayment && <PaymentQRCodeDialog copy={copy} order={order} qrData={qrData} remainingSeconds={remainingSeconds} onClose={() => setPaymentDialogOpen(false)} />}
       {canAllocate && (
         <article className="ap-card">
           <h3>{copy.allocateMemberQuota}</h3>
