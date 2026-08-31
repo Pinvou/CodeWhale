@@ -31,24 +31,26 @@ function Test-FixtureStageReusable {
   return Test-VerifiedStageReusable -Manifest $Manifest -PythonDependencyProbe { param($PythonRoot) $true }
 }
 
-function New-PythonDependencySpec {
+function New-PythonDependencyTarget {
   param([string]$Target, [string]$Filename)
   $wheelSha = "a" * 64
-  $spec = [pscustomobject]@{
-    target = $Target
-    lock_id = ""
+  if ($Target -cnotmatch '^cp(?<major>\d)(?<minor>\d+)-win_amd64$') {
+    throw "invalid test target: $Target"
+  }
+  return [pscustomobject]@{
+    platform = "windows-x64"
+    python = "$($Matches['major']).$($Matches['minor'])"
     imports = [object[]]@("demo")
     wheels = [object[]]@(
       [pscustomobject]@{
+        name = "demo"
+        version = "1"
         filename = $Filename
-        url = "https://files.pythonhosted.org/packages/demo.whl"
+        url = "https://files.pythonhosted.org/packages/$Filename"
         sha256 = $wheelSha
       }
     )
   }
-  $canonical = "target:$Target`n${Filename}:$wheelSha"
-  $spec.lock_id = Get-StringSha256 -Value $canonical
-  return $spec
 }
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pinvou3-runtime-cache-test-" + [System.Guid]::NewGuid().ToString("N"))
@@ -66,7 +68,7 @@ try {
     "demo-1-py3-none-any.whl"
   )) {
     Assert-True -Condition (Test-PythonWheelTarget -Filename $filename -Target "cp313-win_amd64") -Message "compatible PEP 425 tag should pass: $filename"
-    Assert-True -Condition (Test-PythonDependencyLock -Spec (New-PythonDependencySpec -Target "cp313-win_amd64" -Filename $filename)) -Message "valid target-bound dependency lock should pass: $filename"
+    Assert-True -Condition (Test-PythonDependencyTarget -Target (New-PythonDependencyTarget -Target "cp313-win_amd64" -Filename $filename)) -Message "valid target-bound dependency lock should pass: $filename"
   }
   foreach ($filename in @(
     "demo-1-cp27-abi3-win_amd64.whl",
@@ -80,19 +82,19 @@ try {
   )) {
     Assert-True -Condition (-not (Test-PythonWheelTarget -Filename $filename -Target "cp313-win_amd64")) -Message "incompatible PEP 425 tag should fail: $filename"
   }
-  $targetDrift = New-PythonDependencySpec -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
-  $targetDrift.target = "cp314-win_amd64"
-  Assert-True -Condition (-not (Test-PythonDependencyLock -Spec $targetDrift)) -Message "dependency lock must bind target canonically"
-  $uppercaseSha = New-PythonDependencySpec -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
+  $targetDrift = New-PythonDependencyTarget -Target "cp313-win_amd64" -Filename "demo-1-cp313-cp313-win_amd64.whl"
+  $targetDrift.python = "3.14"
+  Assert-True -Condition (-not (Test-PythonDependencyTarget -Target $targetDrift)) -Message "dependency lock must bind target canonically"
+  $uppercaseSha = New-PythonDependencyTarget -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
   $uppercaseSha.wheels[0].sha256 = "A" * 64
-  Assert-True -Condition (-not (Test-PythonDependencyLock -Spec $uppercaseSha)) -Message "wheel SHA must be lowercase hexadecimal"
-  $nonStringTarget = New-PythonDependencySpec -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
-  $nonStringTarget.target = 313
-  Assert-True -Condition (-not (Test-PythonDependencyLock -Spec $nonStringTarget)) -Message "dependency target must remain a JSON string"
-  $emptyImports = New-PythonDependencySpec -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
+  Assert-True -Condition (-not (Test-PythonDependencyTarget -Target $uppercaseSha)) -Message "wheel SHA must be lowercase hexadecimal"
+  $nonStringTarget = New-PythonDependencyTarget -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
+  $nonStringTarget.python = 313
+  Assert-True -Condition (-not (Test-PythonDependencyTarget -Target $nonStringTarget)) -Message "dependency target must remain a JSON string"
+  $emptyImports = New-PythonDependencyTarget -Target "cp313-win_amd64" -Filename "demo-1-py3-none-any.whl"
   $emptyImports.imports = [object[]]@()
-  Assert-True -Condition (-not (Test-PythonDependencyLock -Spec $emptyImports)) -Message "dependency imports must be a non-empty array"
-  Assert-True -Condition (Test-PythonDependencyTargets -PythonRoot $testRoot -AbiProbe { param($PythonExe, $Target) $Target -ceq "cp313-win_amd64" }) -Message "manifest ABI/canonical gate should accept matching injected runtime ABI"
+  Assert-True -Condition (-not (Test-PythonDependencyTarget -Target $emptyImports)) -Message "dependency imports must be a non-empty array"
+  Assert-True -Condition (Test-PythonDependencyTargets -PythonRoot $testRoot -AbiProbe { param($PythonExe, $Target) $Target.python -ceq "3.13" -and $Target.platform -ceq "windows-x64" }) -Message "manifest ABI/canonical gate should accept matching injected runtime ABI"
   Assert-True -Condition (-not (Test-PythonDependencyTargets -PythonRoot $testRoot -AbiProbe { param($PythonExe, $Target) $false })) -Message "manifest ABI gate should reject a mismatched injected runtime ABI"
 
   $successfulGitCommand = Join-Path $testRoot "git-success.cmd"
