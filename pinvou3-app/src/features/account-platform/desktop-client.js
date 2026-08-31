@@ -273,6 +273,9 @@ export class AccountPlatformDesktopClient {
   rechargeOrder(orderId, signal) {
     return this.request('token', `/v1/recharge/orders/${orderId}`, { signal });
   }
+  organizationRechargeOrder(organizationId, orderId, signal) {
+    return this.request('token', `/v1/organizations/${organizationId}/recharge/orders/${orderId}`, { signal });
+  }
   entitlementPackages(signal) {
     return this.request('token', '/v1/me/entitlement-packages', { signal });
   }

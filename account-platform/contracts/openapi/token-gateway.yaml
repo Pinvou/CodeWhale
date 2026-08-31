@@ -545,6 +545,26 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "429": { $ref: "#/components/responses/RateLimited" }
+  /organizations/{organization_id}/recharge/orders/{order_id}:
+    get:
+      operationId: getOrganizationRechargeOrder
+      summary: Read a caller-owned recharge order only when its beneficiary and wallet match the explicit organization
+      parameters:
+        - { name: organization_id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: order_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Organization recharge order
+          headers:
+            Cache-Control:
+              required: true
+              schema:
+                type: string
+                const: no-store
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/Error" }
   /organizations/{organization_id}/quota-grants:
     get:
       operationId: listOrganizationQuotaGrants

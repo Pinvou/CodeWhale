@@ -93,6 +93,51 @@ func TestOrganizationBalanceUsesExplicitTargetWithoutActiveContextSwitch(t *test
 	}
 }
 
+func TestOrganizationRechargeOrderRequiresMatchingOrganizationScope(t *testing.T) {
+	userID, organizationID, otherOrganizationID, walletID, orderID := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	authorizationRecorder := &authorizationDecisionRecorder{allowed: true, userID: userID}
+	authorizationServer := httptest.NewServer(authorizationRecorder)
+	defer authorizationServer.Close()
+	authorizer, err := authorization.NewClient(authorizationServer.URL, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	billingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/internal/v1/recharge/orders/"+orderID.String() || request.URL.Query().Get("requester_id") != userID.String() {
+			t.Fatalf("unexpected Billing request %q?%s", request.URL.Path, request.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"order_id": orderID, "requester_id": userID, "beneficiary_organization_id": organizationID, "wallet_id": walletID, "status": "PENDING"})
+	}))
+	defer billingServer.Close()
+	billingClient, err := NewHTTPBillingClient(billingServer.URL, "service-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wallets := &recordingWalletResolver{walletID: walletID}
+	service := NewService(nil, fixedBillingContextResolver{resolved: AuthorizationContext{UserID: userID, ContextType: "PERSONAL"}}, wallets, nil, ProviderURLPolicy{}, billingClient, nil, 0).WithAuthorizer(authorizer)
+	handler := service.Handler("service-token", successfulBillingVerify)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/organizations/"+organizationID.String()+"/recharge/orders/"+orderID.String(), nil)
+	request.Header.Set("Authorization", "Bearer oidc-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("matching organization response: %d %s", response.Code, response.Body.String())
+	}
+	if len(authorizationRecorder.permissions) != 1 || authorizationRecorder.permissions[0] != "org.entitlements.purchase" || authorizationRecorder.organizationID == nil || *authorizationRecorder.organizationID != organizationID {
+		t.Fatalf("unexpected authorization decision: %#v / %v", authorizationRecorder.permissions, authorizationRecorder.organizationID)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/organizations/"+otherOrganizationID.String()+"/recharge/orders/"+orderID.String(), nil)
+	request.Header.Set("Authorization", "Bearer oidc-token")
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("cross-organization order leaked: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestPersonalBalanceCannotBorrowPermissionFromOrganizationContext(t *testing.T) {
 	userID, organizationID := uuid.New(), uuid.New()
 	authorizationRecorder := &authorizationDecisionRecorder{allowed: true, userID: userID}

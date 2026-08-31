@@ -536,6 +536,55 @@ test('account clients publish only increasing global context versions', async ()
   }
 });
 
+test('BFF client refreshes a stale CSRF token once before replaying a rejected mutation', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  let sessionCalls = 0;
+  let mutationCalls = 0;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (String(url).endsWith('/api/session')) {
+      sessionCalls += 1;
+      const token = sessionCalls === 1 ? 'o'.repeat(32) : 'n'.repeat(32);
+      return new Response(JSON.stringify({ authenticated: true, csrf_token: token }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    mutationCalls += 1;
+    if (mutationCalls === 1) {
+      return new Response(JSON.stringify({ code: 'CSRF_REJECTED', message: 'stale token' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ active_context: { context_version: 8 } }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const client = new AccountPlatformBffClient('https://portal.example');
+    await client.session();
+    const result = await client.switchContext('PERSONAL', null, 7);
+    assert.equal(result.active_context.context_version, 8);
+    assert.equal(calls.length, 4);
+    assert.equal(calls[1].options.headers['X-CSRF-Token'], 'o'.repeat(32));
+    assert.equal(calls[3].options.headers['X-CSRF-Token'], 'n'.repeat(32));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('BFF client never retries a non-CSRF authorization denial', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push({ url, options });
+    if (String(url).endsWith('/api/session')) return new Response(JSON.stringify({ authenticated: true, csrf_token: 'c'.repeat(32) }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ code: 'FORBIDDEN', message: 'permission denied' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const client = new AccountPlatformBffClient('https://portal.example');
+    await client.session();
+    await assert.rejects(client.switchContext('PERSONAL', null, 7), error => error.code === 'FORBIDDEN');
+    assert.equal(calls.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('personal usage history supports opaque pagination without exposing routing secrets', async () => {
   const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
@@ -990,12 +1039,16 @@ test('Web payment QR uses a dialog and only user-activated payable orders can re
 
 test('organization purchases open the shared payment dialog and refresh organization entitlements after payment', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const backend = await readFile(new URL('../src-tauri/src/features/account_platform/mod.rs', import.meta.url), 'utf8');
   const organizationEntitlements = view.slice(view.indexOf('function OrganizationEntitlements'), view.indexOf('function EntitlementSummary'));
   assert.match(view, /<PortalMyOrganization[\s\S]*qrData=\{qrData\}/);
   assert.match(organizationEntitlements, /if \(await onPurchase\(productId, channel\)\) setPaymentDialogOpen\(true\)/);
   assert.match(organizationEntitlements, /paymentDialogOpen && activePayment && <PaymentQRCodeDialog/);
   assert.match(view, /client\.organizationBalance\(activeOrganizationId\)/);
   assert.match(view, /client\.organizationEntitlementPackages\(activeOrganizationId\)/);
+  assert.match(view, /client\.organizationRechargeOrder\(activeOrganizationId, order\.order_id\)/);
+  assert.match(backend, /\["v1", "organizations", organization_id, "recharge", "orders", order_id\]/);
+  assert.match(backend, /safe_id\(organization_id\) && safe_id\(order_id\)/);
 });
 
 test('billing operators can search repair candidates without provider-specific UI branches', async () => {

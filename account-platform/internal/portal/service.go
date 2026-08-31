@@ -509,6 +509,9 @@ func tokenPathAllowed(method, resource string) bool {
 	if len(parts) == 5 && parts[3] == "recharge" && parts[4] == "orders" {
 		return method == http.MethodPost
 	}
+	if len(parts) == 6 && parts[3] == "recharge" && parts[4] == "orders" {
+		return method == http.MethodGet && safeProxyPathID(parts[5])
+	}
 	return len(parts) == 6 && method == http.MethodPost && safeProxyPathID(parts[4]) && ((parts[3] == "quota-grants" && parts[5] == "revoke") || (parts[3] == "account-closed-grants" && parts[5] == "reclaim"))
 }
 

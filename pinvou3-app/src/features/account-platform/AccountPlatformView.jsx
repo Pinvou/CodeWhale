@@ -417,7 +417,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     let attempt = 0;
     const poll = async () => {
       try {
-        const latest = await client.rechargeOrder(order.order_id);
+        const latest = activeOrganizationId
+          ? await client.organizationRechargeOrder(activeOrganizationId, order.order_id)
+          : await client.rechargeOrder(order.order_id);
         if (stopped) return;
         setOrder(latest);
         setOrders((current) => current.map((item) => (item.order_id === latest.order_id ? { ...item, status: latest.status, fulfillment_status: latest.fulfillment_status, close_status: latest.close_status, expires_at: latest.expires_at, paid_at: latest.paid_at } : item)));

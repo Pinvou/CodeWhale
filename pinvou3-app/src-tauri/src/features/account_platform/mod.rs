@@ -1341,6 +1341,12 @@ fn route_allowed(area: &str, method: &Method, path: &str, query: Option<&str>) -
         | ("token", &Method::GET, ["v1", "recharge", "orders", id], None)
         | ("token", &Method::GET, ["v1", "organizations", id, "model-policy"], None)
         | ("token", &Method::PUT, ["v1", "organizations", id, "model-policy"], None) => safe_id(id),
+        (
+            "token",
+            &Method::GET,
+            ["v1", "organizations", organization_id, "recharge", "orders", order_id],
+            None,
+        ) => safe_id(organization_id) && safe_id(order_id),
         ("token", &Method::GET, ["v1", "me", "balance"], Some("consistency=strong")) => true,
         ("token", &Method::GET, ["v1", "me", "usage-requests"], query) => {
             usage_history_query_allowed(query)
@@ -1553,6 +1559,19 @@ mod tests {
                     "reason": "initial policy"
                 })),
                 idempotency_key: Some("model-policy-0001".to_string()),
+            },
+        )
+        .is_ok());
+
+        assert!(prepare_request(
+            &config(),
+            ApiRequest {
+                area: "token".to_string(),
+                resource: "/v1/organizations/018f47b4-e124-7dca-9c85-6f7688436600/recharge/orders/019c1234-e124-7dca-9c85-6f7688436601"
+                    .to_string(),
+                method: "GET".to_string(),
+                body: None,
+                idempotency_key: None,
             },
         )
         .is_ok());

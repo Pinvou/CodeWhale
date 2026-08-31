@@ -176,6 +176,49 @@ func (s *Service) createOrganizationRechargeOrder(w http.ResponseWriter, r *http
 	writeRawNoStore(w, http.StatusCreated, payload)
 }
 
+func (s *Service) getOrganizationRechargeOrder(w http.ResponseWriter, r *http.Request) {
+	resolved, organizationID, _, ok := s.resolveOrganizationBilling(w, r, "org.entitlements.purchase")
+	if !ok {
+		return
+	}
+	orderID, err := uuid.Parse(r.PathValue("order_id"))
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid organization recharge order", httpserver.RequestID(r.Context()))
+		return
+	}
+	walletID, err := s.wallets.Ensure(r.Context(), "ORGANIZATION", organizationID)
+	if err != nil {
+		api.WriteError(w, http.StatusServiceUnavailable, "BILLING_UNAVAILABLE", "the organization wallet is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	payload, err := s.billing.RechargeOrder(paymentSourceContext(r), orderID, resolved.UserID)
+	if err != nil {
+		var limited *BillingHTTPError
+		if errors.As(err, &limited) && limited.Status == http.StatusTooManyRequests {
+			if limited.RetryAfter != "" {
+				w.Header().Set("Retry-After", limited.RetryAfter)
+			}
+			api.WriteError(w, http.StatusTooManyRequests, "PAYMENT_RATE_LIMITED", "the payment action exceeds a rate limit", httpserver.RequestID(r.Context()))
+			return
+		}
+		api.WriteError(w, http.StatusNotFound, "RECHARGE_ORDER_NOT_FOUND", "the organization recharge order was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	var scope struct {
+		BeneficiaryOrganizationID *uuid.UUID `json:"beneficiary_organization_id"`
+		WalletID                  uuid.UUID  `json:"wallet_id"`
+	}
+	if json.Unmarshal(payload, &scope) != nil {
+		api.WriteError(w, http.StatusBadGateway, "BILLING_UNAVAILABLE", "the organization recharge order is unavailable", httpserver.RequestID(r.Context()))
+		return
+	}
+	if scope.BeneficiaryOrganizationID == nil || *scope.BeneficiaryOrganizationID != organizationID || scope.WalletID != walletID {
+		api.WriteError(w, http.StatusNotFound, "RECHARGE_ORDER_NOT_FOUND", "the organization recharge order was not found", httpserver.RequestID(r.Context()))
+		return
+	}
+	writeRawNoStore(w, http.StatusOK, payload)
+}
+
 func (s *Service) listOrganizationQuotaGrants(w http.ResponseWriter, r *http.Request) {
 	resolved, organizationID, client, ok := s.resolveOrganizationBilling(w, r, "org.quota.read.self")
 	if !ok {
