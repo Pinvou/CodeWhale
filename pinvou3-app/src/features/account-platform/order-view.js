@@ -27,9 +27,16 @@ export function paymentOrderRemainingSeconds(item, now = Date.now()) {
 }
 
 export function orderSummaryStatus(item) {
-  if (!['PAID', 'PAID_LATE'].includes(item?.status)) return item?.status || 'UNKNOWN';
-  if (item?.fulfillment_status !== 'CREDITED') return 'PROCESSING';
-  return item.status === 'PAID_LATE' ? 'LATE_COMPLETED' : 'COMPLETED';
+  if (['PAID', 'PAID_LATE'].includes(item?.status)) {
+    if (item?.fulfillment_status !== 'CREDITED') return 'PROCESSING';
+    return item.status === 'PAID_LATE' ? 'LATE_COMPLETED' : 'COMPLETED';
+  }
+  if (['CREATED', 'PENDING'].includes(item?.status)) {
+    if (item?.close_status === 'CLOSE_REQUESTED') return 'CLOSING';
+    if (item?.close_status === 'LOCALLY_CLOSED_EXTERNAL_PENDING' || item?.close_status === 'EXPIRED') return 'EXPIRED';
+    if (item?.close_status === 'PROVIDER_CLOSED') return 'CLOSED';
+  }
+  return item?.status || 'UNKNOWN';
 }
 
 export function orderDurationDays(item) {

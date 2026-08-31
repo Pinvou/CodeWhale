@@ -587,7 +587,7 @@ components:
           format: uuid
         status:
           type: string
-          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, MANUAL_REVIEW]
+          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, EXPIRED, MANUAL_REVIEW]
         fulfillment_status:
           type: string
           enum: [PENDING, CREDITED, MANUAL_REVIEW]
@@ -658,7 +658,7 @@ components:
           $ref: "#/components/schemas/PaymentChannel"
         status:
           type: string
-          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, MANUAL_REVIEW]
+          enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, EXPIRED, MANUAL_REVIEW]
         fulfillment_status:
           type: string
           enum: [PENDING, CREDITED, MANUAL_REVIEW]

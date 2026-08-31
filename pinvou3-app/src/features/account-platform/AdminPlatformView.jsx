@@ -2732,7 +2732,7 @@ function Billing({ copy, language, data, client, setData, permissions, surface =
             }
           >
             <option value="">{copy.billing.allStatuses}</option>
-            {['CREATED', 'PENDING', 'PAID', 'PAID_LATE', 'FAILED', 'CLOSED', 'MANUAL_REVIEW'].map((status) => (
+            {['CREATED', 'PENDING', 'PAID', 'PAID_LATE', 'FAILED', 'CLOSED', 'EXPIRED', 'MANUAL_REVIEW'].map((status) => (
               <option key={status}>{status}</option>
             ))}
           </select>

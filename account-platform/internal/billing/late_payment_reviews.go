@@ -115,7 +115,7 @@ func (r *PostgresRepository) EscalateLatePaymentReview(ctx context.Context, orde
 	if err != nil {
 		return LatePaymentReviewCase{}, err
 	}
-	if (orderStatus != "CREATED" && orderStatus != "PENDING") || fulfillmentStatus != "PENDING" {
+	if (orderStatus != "CREATED" && orderStatus != "PENDING" && orderStatus != "EXPIRED") || fulfillmentStatus != "PENDING" {
 		return LatePaymentReviewCase{}, ErrConflict
 	}
 	item.ID = uuid.Must(uuid.NewV7())

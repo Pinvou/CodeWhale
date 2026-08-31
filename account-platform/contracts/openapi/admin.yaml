@@ -818,7 +818,7 @@ paths:
           schema: { type: string, maxLength: 160 }
         - name: status
           in: query
-          schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, MANUAL_REVIEW] }
+          schema: { type: string, enum: [CREATED, PENDING, PAID, PAID_LATE, FAILED, CLOSED, EXPIRED, MANUAL_REVIEW] }
       responses:
         "200": { $ref: "#/components/responses/Collection" }
         "400": { $ref: "#/components/responses/Error" }

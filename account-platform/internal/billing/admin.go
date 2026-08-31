@@ -409,7 +409,7 @@ func (s *Service) adminPaymentOrderDetail(w http.ResponseWriter, r *http.Request
 
 func validAdminPaymentStatus(status string) bool {
 	switch status {
-	case "CREATED", "PENDING", "PAID", "PAID_LATE", "FAILED", "CLOSED", "MANUAL_REVIEW":
+	case "CREATED", "PENDING", "PAID", "PAID_LATE", "FAILED", "CLOSED", "EXPIRED", "MANUAL_REVIEW":
 		return true
 	default:
 		return false
@@ -1049,7 +1049,7 @@ SELECT
   (SELECT COALESCE(sum(posted_microcredits),0) FROM wallets),
   (SELECT COALESCE(sum(reserved_microcredits),0) FROM wallets),
   (SELECT count(*) FROM payment_orders WHERE status IN ('CREATED','PENDING') AND expires_at > now()),
-  (SELECT count(*) FROM payment_orders WHERE status IN ('CREATED','PENDING') AND expires_at <= now()),
+  (SELECT count(*) FROM payment_orders WHERE status='EXPIRED' OR (status IN ('CREATED','PENDING') AND expires_at <= now())),
   (SELECT count(*) FROM payment_orders WHERE status='MANUAL_REVIEW' OR fulfillment_status='MANUAL_REVIEW'),
   (SELECT count(*) FROM manual_adjustments WHERE status='PENDING_APPROVAL'),
   (SELECT count(*) FROM usage_holds WHERE status IN ('ACTIVE','REVIEW'))`).Scan(

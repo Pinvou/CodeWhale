@@ -45,12 +45,13 @@ func (s *paymentSynchronizerStub) SyncOrder(_ context.Context, orderID uuid.UUID
 }
 
 func TestExpiredPaymentReconcilerReschedulesFailuresAndNonTerminalProviderStates(t *testing.T) {
-	closedID, pendingID, failedID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
+	closedID, pendingID, expiredID, failedID := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
 	store := &expiredPaymentStoreStub{
 		items: []ExpiredPaymentCandidate{
 			{OrderID: closedID, Attempts: 1, LateReviewBoundaryAt: now.Add(time.Hour)},
 			{OrderID: pendingID, Attempts: 2, LateReviewBoundaryAt: now.Add(time.Hour)},
+			{OrderID: expiredID, Attempts: 4, LateReviewBoundaryAt: now.Add(time.Hour)},
 			{OrderID: failedID, Attempts: 3, LateReviewBoundaryAt: now.Add(time.Hour)},
 		},
 		rescheduled: map[uuid.UUID]time.Time{},
@@ -61,6 +62,7 @@ func TestExpiredPaymentReconcilerReschedulesFailuresAndNonTerminalProviderStates
 		orders: map[uuid.UUID]PaymentOrder{
 			closedID:  {ID: closedID, Status: "CLOSED"},
 			pendingID: {ID: pendingID, Status: "PENDING"},
+			expiredID: {ID: expiredID, Status: "EXPIRED"},
 		},
 		errors: map[uuid.UUID]error{failedID: errors.New("provider unavailable")},
 	}
@@ -76,10 +78,13 @@ func TestExpiredPaymentReconcilerReschedulesFailuresAndNonTerminalProviderStates
 	if got := store.rescheduled[pendingID]; !got.Equal(now.Add(15 * time.Second)) {
 		t.Fatalf("pending order retry = %v, want %v", got, now.Add(15*time.Second))
 	}
+	if got := store.rescheduled[expiredID]; !got.Equal(now.Add(5 * time.Minute)) {
+		t.Fatalf("expired order retry = %v, want %v", got, now.Add(5*time.Minute))
+	}
 	if got := store.rescheduled[failedID]; !got.Equal(now.Add(time.Minute)) {
 		t.Fatalf("failed order retry = %v, want %v", got, now.Add(time.Minute))
 	}
-	if store.errors[pendingID] != "" || store.errors[failedID] != "payment order synchronization failed" {
+	if store.errors[pendingID] != "" || store.errors[expiredID] != "" || store.errors[failedID] != "payment order synchronization failed" {
 		t.Fatalf("unexpected retry errors: %#v", store.errors)
 	}
 }
@@ -88,7 +93,7 @@ func TestExpiredPaymentReconcilerEscalatesExactlyAfterBoundaryQuery(t *testing.T
 	orderID := uuid.Must(uuid.NewV7())
 	now := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
 	store := &expiredPaymentStoreStub{items: []ExpiredPaymentCandidate{{OrderID: orderID, Attempts: 9, LateReviewBoundaryAt: now}}, rescheduled: map[uuid.UUID]time.Time{}, errors: map[uuid.UUID]string{}, escalated: map[uuid.UUID]string{}}
-	synchronizer := &paymentSynchronizerStub{orders: map[uuid.UUID]PaymentOrder{orderID: {ID: orderID, Status: "PENDING"}}, errors: map[uuid.UUID]error{}}
+	synchronizer := &paymentSynchronizerStub{orders: map[uuid.UUID]PaymentOrder{orderID: {ID: orderID, Status: "EXPIRED"}}, errors: map[uuid.UUID]error{}}
 	reconciler := NewExpiredPaymentReconciler(store, synchronizer, 15*time.Second)
 	reconciler.now = func() time.Time { return now }
 	reconciler.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -162,6 +167,18 @@ func TestExpiredPendingPaymentRequiresLocalCloseAtDeadline(t *testing.T) {
 	provider.Status = "SUCCESS"
 	if shouldCloseExpiredPaymentOrder(base, provider, now) {
 		t.Fatal("confirmed payment must take precedence over expiry close")
+	}
+	provider.Status = "CREATED"
+	if !shouldCloseExpiredPaymentOrder(base, provider, now) {
+		t.Fatal("created provider order is still unpaid and must close at the local deadline")
+	}
+}
+
+func TestExpiredOrderNeverReturnsPaymentInstructions(t *testing.T) {
+	order := PaymentOrder{Status: "EXPIRED", CloseStatus: "OPEN", PaymentURL: "https://provider.invalid/pay", QRData: "provider-qr"}
+	maskClosedPaymentInstructions(&order)
+	if order.PaymentURL != "" || order.QRData != "" {
+		t.Fatalf("expired order retained payment instructions: %#v", order)
 	}
 }
 

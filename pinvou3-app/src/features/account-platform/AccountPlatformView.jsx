@@ -2111,7 +2111,7 @@ function Orders({ copy, language, orders, unavailable, summary = false, embedded
                 </div>
                 <div>
                   <strong>{formatMoney(item.amount_fen)}</strong>
-                  <span className="ap-status">{copy.orderStatuses[item.status] || item.status}</span>
+                  <span className="ap-status">{orderStatusLabel(copy, item)}</span>
                 </div>
               </header>
               <TraceDetails
@@ -2142,10 +2142,6 @@ function Orders({ copy, language, orders, unavailable, summary = false, embedded
 }
 
 function OrderSummaryList({ copy, language, orders, onOpen }) {
-  const statusLabel = (item) => {
-    const status = orderSummaryStatus(item);
-    return copy.orderSummaryStatuses[status] || copy.orderStatuses[item?.status] || item?.status || '—';
-  };
   const openWithKeyboard = (event, item) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -2178,7 +2174,7 @@ function OrderSummaryList({ copy, language, orders, onOpen }) {
                   <td>{copy.orderTypeRecharge}</td>
                   <td>{formatMoney(item.amount_fen)}</td>
                   <td>{formatUsageTime(orderHistoryTimestamp(item), language)}</td>
-                  <td><span className="ap-status">{statusLabel(item)}</span></td>
+                  <td><span className="ap-status">{orderStatusLabel(copy, item)}</span></td>
                   <td><span className="ap-order-id" title={orderID}>{compactOrderID(orderID)}</span></td>
                   <td className="ap-order-optional">{duration == null ? '—' : copy.durationDays(duration)}</td>
                   <td className="ap-order-optional">1</td>
@@ -2192,7 +2188,7 @@ function OrderSummaryList({ copy, language, orders, onOpen }) {
         {orders.map((item) => (
           <button type="button" key={item.order_id} onClick={() => onOpen(item)} aria-label={copy.openOrderDetails(item.plan_name)}>
             <span><strong>{item.plan_name}</strong><small>{formatUsageTime(orderHistoryTimestamp(item), language)}</small></span>
-            <span><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{statusLabel(item)}</span></span>
+            <span><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{orderStatusLabel(copy, item)}</span></span>
           </button>
         ))}
       </div>
@@ -2219,13 +2215,18 @@ function OrderDetails({ copy, language, item }) {
           [copy.paidAt, formatUsageTime(item.paid_at, language)],
           [copy.creditedAt, formatUsageTime(item.credited_at, language)],
           [copy.validUntil, formatUsageTime(item.valid_until, language)],
-          [copy.paymentStatus, copy.orderStatuses[item.status] || item.status],
+          [copy.paymentStatus, orderStatusLabel(copy, item)],
           [copy.fulfillmentStatus, copy.fulfillmentStatuses?.[item.fulfillment_status] || item.fulfillment_status],
           [copy.invoiceStatus, copy.invoiceStatuses?.[item.invoice_status] || item.invoice_status],
         ]}
       />
     </div>
   );
+}
+
+function orderStatusLabel(copy, item) {
+  const status = orderSummaryStatus(item);
+  return copy.orderSummaryStatuses[status] || copy.orderStatuses[status] || status || '—';
 }
 
 function TraceDetails({ items }) {

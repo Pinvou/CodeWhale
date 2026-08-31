@@ -854,6 +854,16 @@
         "file": "000048_payment_product_resume_audit.up.sql",
         "version": 48,
         "sha256": "db18a1f67b85785014828c331a91e0e2f546e2b1f569d61c26a31e3aa0ca9a6c"
+      },
+      {
+        "file": "000049_local_payment_expiry.down.sql",
+        "version": 49,
+        "sha256": "9bf90e923bf56cf23ed5e0211482367483848296347b21a6c7c31cfc3f2d201b"
+      },
+      {
+        "file": "000049_local_payment_expiry.up.sql",
+        "version": 49,
+        "sha256": "13c2cfd865feb46bca7f4811b2b4ca6be96c9906195f45bfc7aa839da78a5866"
       }
     ],
     "payment-simulator": [

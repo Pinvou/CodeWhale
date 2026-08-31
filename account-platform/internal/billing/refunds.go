@@ -179,7 +179,7 @@ func (p *PaymentCoordinator) markProviderClosed(ctx context.Context, orderID, re
 }
 
 func maskClosedPaymentInstructions(order *PaymentOrder) {
-	if order != nil && order.CloseStatus != "" && order.CloseStatus != "OPEN" {
+	if order != nil && (order.Status == "EXPIRED" || (order.CloseStatus != "" && order.CloseStatus != "OPEN")) {
 		order.PaymentURL, order.QRData = "", ""
 	}
 }

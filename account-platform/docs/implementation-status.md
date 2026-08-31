@@ -243,8 +243,8 @@
 | PAY-11 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 订单允许多笔 Provider 流水；支付来源权益包唯一绑定一笔成功流水，不同成功流水分别独立履约或进入复核 |
 | PAY-12 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; PAYMENT-CONVERGENCE | NOT_DEPLOYED | 回调、主动查询、Provider 账单和人工修复均先保存 Provider/版本/流水/金额/时间/载荷摘要；成功账单行复用统一归并器并按流水防止重复入账，未匹配或冲突账单仍留证并进入对账复核 |
 | PAY-13 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE; RECEIVABLE-LIFECYCLE | NOT_DEPLOYED | 支付流水 `PAID/LATE_PAID` 不被退款、拒付或关单覆盖；退款、拒付、关单分别推进独立状态机，订单支付/退款/拒付/关注摘要由底层事实含应收优先级完整重建 |
-| PAY-14 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE | NOT_DEPLOYED | 关单按 `OPEN → CLOSE_REQUESTED → LOCALLY_CLOSED_EXTERNAL_PENDING → PROVIDER_CLOSED` 单调推进，未支付权威失败进入 `EXPIRED`；本地关单立即隐藏支付指令，冲突证据进入复核且不能覆盖成功支付事实 |
-| PAY-19 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 订单冻结72小时边界，后台在边界执行最后查询后停止高频任务并幂等转唯一审核案件；真实 Provider 故障注入待部署 |
+| PAY-14 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE; ACCOUNT-PLATFORM-STATE | NOT_DEPLOYED | Pinvou 订单到期末次查询仍未付款即以 `EXPIRED` 形成用户可见本地终态并清除支付指令；`close_status` 独立跟踪 Provider 关闭观察，商城无法关单不阻塞本地终态，晚到成功仍保留并归并 |
+| PAY-19 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 本地 `EXPIRED` 后以不高于每5分钟一次的频率继续捕获晚到支付；72小时边界执行最终查询并幂等转唯一审核案件，绝不恢复普通 `PENDING`；真实 Provider 故障注入待部署 |
 | PAY-20 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 本地关闭或超时后可创建新订单；不同 Provider 成功流水分别幂等履约或复核，同一流水重复证据只归并一次并保留 LATE_PAID |
 | PAY-23 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; COMMERCE-MAPPING | NOT_DEPLOYED | 组织订单冻结实际付款管理员、受益组织及付款人的 Provider Commerce Mapping 快照；组织级 Mapping 只由 Provider 能力选择 |
 | PAY-24 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | 普通退款同时绑定并校验支付流水、权益包和订单归属；订单 ID 不能单独执行退款 |
@@ -366,7 +366,7 @@
 | UI-24 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-BUILD | NOT_DEPLOYED | 无合法 section 默认进入额度与用量；授权加载完成后统一校正 URL、Tab 和内容，点击及浏览器前进/后退同步，权限不足替换为首个可访问 Tab。 |
 | UI-25 | 已实现 | AUDIT_HEAD | ROLE-BINDING-LIFECYCLE; UI-BUILD | NOT_DEPLOYED | 普通个人中心不再挂载角色授权组件、加载对应制品或请求本人角色绑定；后台角色定义、授权与撤销界面及服务端权限边界保持不变。 |
 | UI-26 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 默认按到期时间展示最多五个有效包及安全进度和汇总；主页面采用无整体边框、无圆角、只保留条目分隔线的扁平列表；全量列表包含历史状态，详情弹窗保留组成、来源、订单及退款说明并支持键盘关闭。 |
-| UI-27 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 全状态充值订单按创建时间稳定倒序展示八列桌面摘要，中宽隐藏次要列、移动端使用卡片；支付/履约组合状态、非付款状态、日期回退、时长推导、完整订单号和详情弹窗均可访问。 |
+| UI-27 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 全状态充值订单按创建时间稳定倒序展示；本地 `EXPIRED` 及兼容的外部待关闭状态统一显示已超时，关闭请求显示处理中且均不恢复二维码；八列桌面摘要、中宽精简、移动卡片和详情弹窗保持可访问。 |
 | UI-28 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 后台严格采用 HTML 原型的五组信息架构及页面命名；合法 URL 深链、刷新和前进/后退保持当前页，非法或无权 section 失败关闭到首个可访问页；无真实接口或无精确读权限页面隐藏，不使用假数据。 |
 | UI-29 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-IDENTITY-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 用户管理、角色与授权、组织管理成为原型命名页面；角色从用户聚合页拆为独立 section，注册/资料/注销修复归入用户管理，“我的组织”在缺少真实后台接口时隐藏；既有 Account API 与动作不变。 |
 | UI-30 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-FINANCE-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 计费运营、支付与资金、定价与商品、审批中心成为独立 section，删除旧财务聚合 Tab；各页继续复用现有 Billing API，并按精确读/写权限分别展示，未新增业务能力。 |
@@ -463,7 +463,7 @@
 | PAY-15 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; PAYMENT-CALLBACK-GATEWAY; ACCOUNT-DOMAIN-UAT-20260825 | 0.8.0@1efb79d6 (CLOUD_UAT) | 通用回调凭据与 Token 绑定 Provider、版本和商户，Billing 按 Profile 严格解析并先持久化再返回 `202`，与主动查询共用归并器；H3C 是首个 Profile 且固定声明 `notification_supported=true`。`https://account.pinvou.com/api/v1` 下两个通用精确路径已发布并完成受控客户端 Token 签发；真实新华三通知报文、重复/乱序与履约结果仍待联合验收 |
 | PAY-16 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; CONTRACT-36 | NOT_DEPLOYED | Billing 后台查询不依赖客户端二维码页面持续打开 |
 | PAY-17 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 普通 PENDING 在订单期限后继续按退避查询，72小时最终查询仍无终态则转换为明确人工审核，不会永久停留普通 PENDING |
-| PAY-18 | 已实现 | DOC_CURRENT | GO-UNIT; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | Provider 支持时调用外部关单并核验；不支持时仅隐藏本地支付入口、继续保存/查询外部可能支付事实，最终进入审核而不伪造关单成功 |
+| PAY-18 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-CONVERGENCE; LATE-PAYMENT-REVIEW | NOT_DEPLOYED | 冻结最后付款期限到达后先末次查询，仍未付款即提交本地 `EXPIRED`、清除二维码并退出待支付集合；商城关单为可选外部证据步骤，不影响本地终态，正常未付款不计入异常止损 |
 | PAY-21 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE | NOT_DEPLOYED | 每笔确认成功支付流水至多幂等创建一个独立权益包和一组平衡账本入账；重复回调、查询或修复不重复增加额度 |
 | PAY-22 | 已实现 | DOC_CURRENT | GO-UNIT; PAYMENT-EVIDENCE-LIFECYCLE; ORGANIZATION-MEMBER-QUOTA | NOT_DEPLOYED | 具备 `org.entitlements.purchase` 权限的管理员可在线购买组织权益；订单冻结付款用户和受益组织，到账只进入受益组织钱包 |
 | PAY-30 | 已实现 | DOC_CURRENT | GO-UNIT; TARGETED-REFUND | NOT_DEPLOYED | Provider 成功证据校验后同一事务消费退款预约、撤销目标全部 BASE/关联 BONUS、更新权益/退款终态并写平衡账本；其他来源不受影响 |
@@ -831,8 +831,8 @@
 | PAY-15 | 支付回调与主动查询 | 已实现 | H3C 以专用 Basic 凭据换取短期 Bearer Token 后投递回调，通知先持久化再返回 `202`；`account.pinvou.com/api/v1` 下两个精确入口已在 Nginx 模板代理到 Billing，回调和主动查询使用同一不可变证据归并器，服务端查询继续补偿漏回调。 |
 | PAY-16 | 客户端关闭后订单仍继续收敛 | 已实现 | 查询任务运行在 Billing 服务端。 |
 | PAY-17 | 超时订单不永久停留普通 PENDING | 已实现 | 订单过期后继续服务端退避查询；72小时仍无终态时转入唯一人工审核案件，订单不再表现为普通 PENDING。 |
-| PAY-18 | 主动关闭未支付订单 | 已实现 | Provider 返回的精确最后付款期限（新华三 `payEndTime`）规范化后冻结到订单，缺失才使用能力窗口；期限到达后先末次查询，仍未付款即自动进入本地关闭、外部待确认并清除支付指令，Provider 支持时继续调用并核验外部关单，不支持时持续查询至权威终态或72小时审核，绝不以本地状态模拟外部关单成功。 |
-| PAY-19 | 主动查询退避与72小时边界 | 已实现 | 创建订单冻结最小查询间隔、支付窗口和72小时边界；边界任务先完成最后一次查询，再清除高频调度并幂等创建案件。 |
+| PAY-18 | 主动关闭未支付订单 | 已实现 | Provider 返回的精确最后付款期限（新华三 `payEndTime`）规范化后冻结到订单，缺失才使用能力窗口；期限到达后先末次查询，仍未付款即提交本地 `EXPIRED`、清除支付指令并退出待付款，Provider 外部关单仅作为独立证据继续收敛，不阻塞本地终态。 |
+| PAY-19 | 主动查询退避与72小时边界 | 已实现 | 创建订单冻结最小查询间隔、支付窗口和72小时边界；本地到期后查询间隔至少5分钟，边界任务先完成最后一次查询，再清除高频调度并幂等创建案件。 |
 | PAY-21 | 支付后自动更新额度 | 已实现 | 每个确认支付流水至多创建一个独立权益包、BASE/BONUS 组成和账本入账，重复证据不重复更新额度。 |
 | PAY-22 | 企业管理员在线购买组织权益 | 已实现 | 有 `org.entitlements.purchase` 权限的企业管理员可在组织上下文购买；订单保存付款用户与受益组织，到账后只增加组织权益。 |
 | PAY-24 | 退款目标绑定支付流水和权益包 | 已实现 | 请求和执行均保存并校验 payment_transaction_id、entitlement_package_id 与订单归属；payment_order_id 只作归属和审计。 |
@@ -888,7 +888,7 @@
 | UI-24 | 个人中心 URL 与 Tab 状态一致性 | 已实现 | 无合法 section 默认进入额度与用量；深链、权限加载、Tab 点击和浏览器前进/后退均保持 URL、高亮与内容一致。 |
 | UI-25 | 普通个人中心角色信息收敛 | 已实现 | 普通个人中心已删除角色授权挂载点、制品和请求，不展示原始角色信息；后台角色治理保持可用。 |
 | UI-26 | 权益包渐进式展示 | 已实现 | 默认最多五条有效包摘要并汇总数量和余额，主页面去除重复资料卡及列表整体边框，只以横向分隔线区分条目；完整列表、历史状态、BASE/BONUS 组成和支付关联进入可访问详情弹窗。 |
-| UI-27 | 全状态订单摘要与详情 | 已实现 | 全部充值订单按创建时间稳定倒序展示响应式摘要；桌面八列、中宽精简、移动卡片，非付款状态及复杂支付、履约、发票字段进入可访问详情弹窗。 |
+| UI-27 | 全状态订单摘要与详情 | 已实现 | 全部充值订单按创建时间稳定倒序展示响应式摘要；本地超时与兼容关闭观察统一显示已超时且不恢复付款入口，桌面八列、中宽精简、移动卡片及详情弹窗保持可访问。 |
 | UI-28 | 统一管理后台壳层与共享基础组件 | 已实现 | 已在 CLOUD_UAT 部署 HTML 原型的工作台、身份与组织、财务与支付、模型与 Token、治理与安全五组导航和页面命名；URL 深链、浏览器历史、共享状态、三语、键盘和响应式边界保持有效。 |
 | UI-29 | 身份、用户、角色与组织后台界面改版 | 已实现 | 用户管理、角色与授权、组织管理按独立页面编排；现有修复能力归入用户管理，“我的组织”因无真实后台接口而隐藏，数据与动作不变。 |
 | UI-30 | 财务、支付、审批、定价与充值商品后台界面改版 | 已实现 | 计费运营、支付与资金、定价与商品、审批中心成为独立页面，继续复用原 API；旧财务聚合 Tab 已删除。 |

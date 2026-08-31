@@ -32,6 +32,16 @@ test('payment order close states progress monotonically and hide payment instruc
   assert.doesNotMatch(`${refunds}\n${reconciliation}`, /close_status=\$2/);
 });
 
+test('local payment expiry is terminal without requiring provider order closure', async () => {
+  const reconciliation = await read('internal/billing/reconciliation.go');
+  const migration = await read('migrations/billing/000049_local_payment_expiry.up.sql');
+  assert.match(migration, /status IN \('CREATED','PENDING','PAID','PAID_LATE','FAILED','CLOSED','EXPIRED','MANUAL_REVIEW'\)/);
+  assert.match(migration, /SET status='EXPIRED'/);
+  assert.match(reconciliation, /SET status='EXPIRED',close_status='LOCALLY_CLOSED_EXTERNAL_PENDING'/);
+  assert.match(reconciliation, /order\.Status == "EXPIRED" && delay < 5\*time\.Minute/);
+  assert.match(reconciliation, /status IN \('CREATED','PENDING','EXPIRED'\)/);
+});
+
 test('successful or review-required payments retire obsolete payment instructions', async () => {
   const convergence = await read('internal/billing/payment_evidence.go');
   const cleanup = await read('migrations/billing/000046_clear_terminal_payment_instructions.up.sql');

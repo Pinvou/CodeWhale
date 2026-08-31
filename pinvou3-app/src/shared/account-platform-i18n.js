@@ -727,7 +727,7 @@ Object.assign(accountPlatformCopy.zh, {
   orderTypeRecharge: '充值',
   orderDetails: '订单详情',
   paymentStatus: '支付状态',
-  orderSummaryStatuses: { COMPLETED: '已完成', LATE_COMPLETED: '迟到支付已完成', PROCESSING: '到账处理中' },
+  orderSummaryStatuses: { COMPLETED: '已完成', LATE_COMPLETED: '迟到支付已完成', PROCESSING: '到账处理中', CLOSING: '正在关闭' },
   durationDays: (days) => `${days} 天`,
   openOrderDetails: (name) => `查看 ${name || '充值订单'} 详情`,
 });
@@ -772,7 +772,7 @@ Object.assign(accountPlatformCopy.en, {
   orderTypeRecharge: 'Recharge',
   orderDetails: 'Order details',
   paymentStatus: 'Payment status',
-  orderSummaryStatuses: { COMPLETED: 'Completed', LATE_COMPLETED: 'Late payment completed', PROCESSING: 'Crediting' },
+  orderSummaryStatuses: { COMPLETED: 'Completed', LATE_COMPLETED: 'Late payment completed', PROCESSING: 'Crediting', CLOSING: 'Closing' },
   durationDays: (days) => `${days} days`,
   openOrderDetails: (name) => `View details for ${name || 'recharge order'}`,
 });
@@ -820,7 +820,7 @@ Object.assign(accountPlatformCopy.ja, {
   orderTypeRecharge: 'チャージ',
   orderDetails: '注文詳細',
   paymentStatus: '支払い状態',
-  orderSummaryStatuses: { COMPLETED: '完了', LATE_COMPLETED: '遅延支払い完了', PROCESSING: '反映処理中' },
+  orderSummaryStatuses: { COMPLETED: '完了', LATE_COMPLETED: '遅延支払い完了', PROCESSING: '反映処理中', CLOSING: 'クローズ中' },
   durationDays: (days) => `${days} 日`,
   openOrderDetails: (name) => `${name || 'チャージ注文'}の詳細を表示`,
 });

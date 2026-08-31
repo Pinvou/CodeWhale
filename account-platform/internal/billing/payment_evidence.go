@@ -146,7 +146,7 @@ func (p *PaymentCoordinator) mergeProviderObservationWithinTransaction(ctx conte
 		return err
 	}
 	if reviewRequired {
-		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status=CASE WHEN status IN ('CREATED','PENDING') THEN 'MANUAL_REVIEW' ELSE status END,fulfillment_status=CASE WHEN fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE fulfillment_status END,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET attention_summary='REVIEW_REQUIRED',status=CASE WHEN status IN ('CREATED','PENDING','EXPIRED') THEN 'MANUAL_REVIEW' ELSE status END,fulfillment_status=CASE WHEN fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE fulfillment_status END,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1`, order.ID, now); err != nil {
 			return err
 		}
 		anomalyType := "ILLEGAL_TRANSITION"
@@ -160,9 +160,9 @@ func (p *PaymentCoordinator) mergeProviderObservationWithinTransaction(ctx conte
 	}
 	if (provider.Status == "CLOSED" || provider.Status == "FAILED") && p.Capabilities().AuthoritativeUnpaidTerminal {
 		if provider.Status == "FAILED" {
-			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='FAILED',close_status='EXPIRED',payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, now)
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=CASE WHEN status='EXPIRED' THEN 'EXPIRED' ELSE 'FAILED' END,close_status='EXPIRED',payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING','EXPIRED')`, order.ID, now)
 		} else {
-			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='CLOSED',close_status='PROVIDER_CLOSED',provider_closed_at=COALESCE(provider_closed_at,$2),payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,attention_summary='NORMAL',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING')`, order.ID, now)
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=CASE WHEN status='EXPIRED' THEN 'EXPIRED' ELSE 'CLOSED' END,close_status='PROVIDER_CLOSED',provider_closed_at=COALESCE(provider_closed_at,$2),payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,attention_summary='NORMAL',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING','EXPIRED')`, order.ID, now)
 		}
 	}
 	return err
@@ -368,7 +368,7 @@ UPDATE payment_orders payment SET
  attention_summary=CASE
    WHEN receivables.open_count>0 THEN 'RECEIVABLE_OPEN'
    WHEN facts.review_count>0 OR refunds.review_count>0 OR forced_refunds.review_count>0 OR chargebacks.review_count>0 OR anomalies.open_count>0 THEN 'REVIEW_REQUIRED'
-   WHEN refunds.pending_count>0 OR payment.close_status IN ('CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING') THEN 'PROCESSING'
+   WHEN refunds.pending_count>0 OR (payment.status IN ('CREATED','PENDING') AND payment.close_status IN ('CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING')) THEN 'PROCESSING'
    ELSE 'NORMAL' END,
  status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.late_paid_count>0 THEN 'PAID_LATE' WHEN facts.paid_count>0 THEN 'PAID' ELSE payment.status END,
  fulfillment_status=CASE WHEN facts.review_count>0 THEN 'MANUAL_REVIEW' WHEN facts.paid_count>0 AND facts.credited_count=facts.paid_count THEN 'CREDITED' ELSE payment.fulfillment_status END,

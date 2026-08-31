@@ -107,7 +107,7 @@ func (r *ExpiredPaymentReconciler) runOnce(ctx context.Context) {
 	}
 	for _, item := range items {
 		order, syncErr := r.synchronizer.SyncOrder(ctx, item.OrderID)
-		if syncErr == nil && (order.Status == "CREATED" || order.Status == "PENDING") {
+		if syncErr == nil && (order.Status == "CREATED" || order.Status == "PENDING" || order.Status == "EXPIRED") {
 			if !item.LateReviewBoundaryAt.After(r.now()) {
 				if _, err := r.store.EscalateLatePaymentReview(ctx, item.OrderID, "PENDING"); err != nil {
 					r.logger.Error("escalate late payment review failed", "order_id", item.OrderID, "error", err)
@@ -117,7 +117,11 @@ func (r *ExpiredPaymentReconciler) runOnce(ctx context.Context) {
 			// Providers without notifications converge through server-side polling,
 			// including after the client closes the QR page. A non-terminal state is
 			// expected here and is rescheduled rather than treated as an error.
-			nextAt := r.now().Add(r.interval)
+			delay := r.interval
+			if order.Status == "EXPIRED" && delay < 5*time.Minute {
+				delay = 5 * time.Minute
+			}
+			nextAt := r.now().Add(delay)
 			if err := r.store.RescheduleExpiredPaymentOrder(ctx, item.OrderID, "", nextAt); err != nil {
 				r.logger.Error("reschedule pending payment order failed", "order_id", item.OrderID, "error", err)
 			}
@@ -183,7 +187,7 @@ func (r *PostgresRepository) ClaimExpiredPaymentOrders(ctx context.Context, limi
 WITH candidates AS (
     SELECT id
     FROM payment_orders
-    WHERE status IN ('CREATED','PENDING')
+    WHERE status IN ('CREATED','PENDING','EXPIRED')
       AND (expires_at <= $1 OR provider_sku IS NOT NULL)
       AND (reconciliation_next_at IS NULL OR reconciliation_next_at <= $1)
       AND (reconciliation_lease_until IS NULL OR reconciliation_lease_until <= $1)
@@ -217,7 +221,7 @@ RETURNING payment.id, payment.reconciliation_attempts, payment.late_review_bound
 func (r *PostgresRepository) RescheduleExpiredPaymentOrder(ctx context.Context, orderID uuid.UUID, lastError string, nextAt time.Time) error {
 	_, err := r.pool.Exec(ctx, `UPDATE payment_orders
 SET reconciliation_next_at=$2,reconciliation_lease_until=NULL,reconciliation_last_error=NULLIF($3,''),updated_at=$4
-WHERE id=$1 AND status IN ('CREATED','PENDING')`, orderID, nextAt.UTC(), truncatePaymentReconciliationError(lastError), r.now())
+WHERE id=$1 AND status IN ('CREATED','PENDING','EXPIRED')`, orderID, nextAt.UTC(), truncatePaymentReconciliationError(lastError), r.now())
 	return err
 }
 
@@ -388,7 +392,7 @@ func (p *PaymentCoordinator) syncOrder(ctx context.Context, orderID uuid.UUID, r
 func shouldCloseExpiredPaymentOrder(order PaymentOrder, provider ProviderOrder, now time.Time) bool {
 	return (order.Status == "CREATED" || order.Status == "PENDING") &&
 		(order.CloseStatus == "OPEN" || order.CloseStatus == "CLOSE_REQUESTED" || order.CloseStatus == "LOCALLY_CLOSED_EXTERNAL_PENDING") &&
-		!order.ExpiresAt.After(now) && provider.Status == "PENDING"
+		!order.ExpiresAt.After(now) && (provider.Status == "CREATED" || provider.Status == "PENDING")
 }
 
 func providerPaymentDeadline(provider ProviderOrder) *time.Time {
@@ -427,7 +431,11 @@ func (p *PaymentCoordinator) markExpiredOrderLocallyClosed(ctx context.Context, 
 		order.CloseStatus = "CLOSE_REQUESTED"
 	}
 	if order.CloseStatus == "CLOSE_REQUESTED" {
-		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET close_status='LOCALLY_CLOSED_EXTERNAL_PENDING',locally_closed_at=COALESCE(locally_closed_at,$2),payment_url=NULL,qr_data=NULL,attention_summary='PROCESSING',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING') AND close_status='CLOSE_REQUESTED'`, order.ID, now); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET status='EXPIRED',close_status='LOCALLY_CLOSED_EXTERNAL_PENDING',locally_closed_at=COALESCE(locally_closed_at,$2),payment_url=NULL,qr_data=NULL,attention_summary='NORMAL',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING') AND close_status='CLOSE_REQUESTED'`, order.ID, now); err != nil {
+			return PaymentOrder{}, err
+		}
+	} else if order.CloseStatus == "LOCALLY_CLOSED_EXTERNAL_PENDING" {
+		if _, err := tx.Exec(ctx, `UPDATE payment_orders SET status='EXPIRED',payment_url=NULL,qr_data=NULL,attention_summary='NORMAL',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND status IN ('CREATED','PENDING') AND close_status='LOCALLY_CLOSED_EXTERNAL_PENDING'`, order.ID, now); err != nil {
 			return PaymentOrder{}, err
 		}
 	}
@@ -450,8 +458,8 @@ func (p *PaymentCoordinator) applyProviderReviewStatus(ctx context.Context, orde
 	}
 	now := p.now()
 	_, err = tx.Exec(ctx, `UPDATE payment_orders
-SET status=CASE WHEN status IN ('CREATED','PENDING') AND fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE status END,
-    fulfillment_status=CASE WHEN status IN ('CREATED','PENDING') AND fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE fulfillment_status END,
+SET status=CASE WHEN status IN ('CREATED','PENDING','EXPIRED') AND fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE status END,
+	fulfillment_status=CASE WHEN status IN ('CREATED','PENDING','EXPIRED') AND fulfillment_status='PENDING' THEN 'MANUAL_REVIEW' ELSE fulfillment_status END,
     attention_summary='REVIEW_REQUIRED',summary_version=summary_version+1,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,updated_at=$2
 WHERE id=$1`, order.ID, now)
 	if err != nil {
@@ -483,7 +491,7 @@ func (p *PaymentCoordinator) applyProviderTerminalStatus(ctx context.Context, or
 	now := p.now()
 	if status == "FAILED" {
 		if current.CloseStatus != "EXPIRED" {
-			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='FAILED',close_status='EXPIRED',payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND close_status IN ('OPEN','CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING')`, order.ID, now)
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=CASE WHEN status='EXPIRED' THEN 'EXPIRED' ELSE 'FAILED' END,close_status='EXPIRED',payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND close_status IN ('OPEN','CLOSE_REQUESTED','LOCALLY_CLOSED_EXTERNAL_PENDING')`, order.ID, now)
 		}
 	} else if current.CloseStatus != "PROVIDER_CLOSED" {
 		if current.CloseStatus == "OPEN" {
@@ -493,7 +501,7 @@ func (p *PaymentCoordinator) applyProviderTerminalStatus(ctx context.Context, or
 			_, err = tx.Exec(ctx, `UPDATE payment_orders SET close_status='LOCALLY_CLOSED_EXTERNAL_PENDING',locally_closed_at=COALESCE(locally_closed_at,$2),updated_at=$2 WHERE id=$1 AND close_status='CLOSE_REQUESTED'`, order.ID, now)
 		}
 		if err == nil {
-			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status='CLOSED',close_status='PROVIDER_CLOSED',provider_closed_at=COALESCE(provider_closed_at,$2),payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,attention_summary='NORMAL',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND close_status='LOCALLY_CLOSED_EXTERNAL_PENDING'`, order.ID, now)
+			_, err = tx.Exec(ctx, `UPDATE payment_orders SET status=CASE WHEN status='EXPIRED' THEN 'EXPIRED' ELSE 'CLOSED' END,close_status='PROVIDER_CLOSED',provider_closed_at=COALESCE(provider_closed_at,$2),payment_url=NULL,qr_data=NULL,reconciliation_next_at=NULL,reconciliation_lease_until=NULL,reconciliation_last_error=NULL,attention_summary='NORMAL',summary_version=summary_version+1,updated_at=$2 WHERE id=$1 AND close_status='LOCALLY_CLOSED_EXTERNAL_PENDING'`, order.ID, now)
 		}
 	}
 	if err != nil {

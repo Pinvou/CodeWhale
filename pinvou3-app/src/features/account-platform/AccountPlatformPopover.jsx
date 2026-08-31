@@ -3,6 +3,7 @@ import { ArrowLeft, CheckCircle2, Plus, RefreshCw, User, X } from '../../compone
 import { formatPoints } from './credit-units.js';
 import { rechargePollDelay } from './context-guard.js';
 import { authorizationVersions, personalSurfaceAccess } from './authorization-ui.js';
+import { isPayablePaymentOrder, orderSummaryStatus } from './order-view.js';
 
 const terminalOrderStates = new Set(['PAID', 'PAID_LATE', 'CLOSED', 'FAILED', 'EXPIRED', 'MANUAL_REVIEW']);
 const paidOrderStates = new Set(['PAID', 'PAID_LATE']);
@@ -112,9 +113,8 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
   const channels = selectedAvailable && selected?.channels?.length ? selected.channels : fallbackChannels;
   const remainingSeconds = orderRemainingSeconds(order, now);
   const paid = paidOrderStates.has(order?.status);
-  const terminal = terminalOrderStates.has(order?.status);
-  const displayStatus = order?.status;
-  const canScan = Boolean(order && !terminal);
+  const displayStatus = orderSummaryStatus(order);
+  const canScan = isPayablePaymentOrder(order, now);
   const inactiveHint = copy.orderNoLongerPayable;
 
   useEffect(() => {
@@ -184,7 +184,7 @@ function RechargePanel({ copy, language, products, balance, order, qrData, qrErr
         )}
         <div className={`rounded-2xl border p-3 ${cardTheme}`}>
           <div className="flex items-center justify-between gap-3">
-            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${canScan ? 'bg-[#10B981]/10 text-[#07966F]' : 'bg-[#EA4335]/10 text-[#D93025]'}`}>{copy.orderStatuses[displayStatus] || displayStatus}</span>
+            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${canScan ? 'bg-[#10B981]/10 text-[#07966F]' : 'bg-[#EA4335]/10 text-[#D93025]'}`}>{copy.orderSummaryStatuses?.[displayStatus] || copy.orderStatuses[displayStatus] || displayStatus}</span>
             <strong className="text-[15px] tabular-nums">¥{(order.amount_fen / 100).toFixed(2)}</strong>
           </div>
           {canScan ? (
@@ -487,7 +487,7 @@ export function AccountPlatformPopover({ open, client, copy, language, theme, co
   }, [smsCooldown]);
 
   useEffect(() => {
-    const paymentContent = !terminalOrderStates.has(order?.status) ? order?.qr_data || '' : '';
+    const paymentContent = isPayablePaymentOrder(order) ? order?.qr_data || '' : '';
     if (!paymentContent) {
       setQrData('');
       setQrError(false);

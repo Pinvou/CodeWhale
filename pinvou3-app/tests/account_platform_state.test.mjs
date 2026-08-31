@@ -240,6 +240,10 @@ test('Web personal center renders all order states as responsive summaries with 
   assert.equal(orderSummaryStatus({ status: 'PAID_LATE', fulfillment_status: 'CREDITED' }), 'LATE_COMPLETED');
   assert.equal(orderSummaryStatus(orders[2]), 'PROCESSING');
   assert.equal(orderSummaryStatus(orders[3]), 'FAILED');
+  assert.equal(orderSummaryStatus({ status: 'PENDING', close_status: 'CLOSE_REQUESTED' }), 'CLOSING');
+  assert.equal(orderSummaryStatus({ status: 'PENDING', close_status: 'LOCALLY_CLOSED_EXTERNAL_PENDING' }), 'EXPIRED');
+  assert.equal(orderSummaryStatus({ status: 'PENDING', close_status: 'PROVIDER_CLOSED' }), 'CLOSED');
+  assert.equal(orderSummaryStatus({ status: 'EXPIRED', close_status: 'LOCALLY_CLOSED_EXTERNAL_PENDING' }), 'EXPIRED');
   assert.equal(orderDurationDays(orders[1]), 30);
   assert.equal(orderDurationDays(orders[2]), null);
   assert.equal(compactOrderID('1234567890abcdef'), '12345678…');
@@ -924,7 +928,7 @@ test('Web payment QR uses a dialog and only user-activated payable orders can re
   assert.match(view, /setInterval\(\(\) => void refresh\(\), 5000\)/);
   assert.doesNotMatch(view, /className="ap-payment"/);
   assert.doesNotMatch(view, /client\.recentRechargeOrder\(request\.signal\)/);
-  assert.match(popover, /!terminalOrderStates\.has\(order\?\.status\) \? order\?\.qr_data/);
+  assert.match(popover, /isPayablePaymentOrder\(order\) \? order\?\.qr_data/);
 });
 
 test('billing operators can search repair candidates without provider-specific UI branches', async () => {
