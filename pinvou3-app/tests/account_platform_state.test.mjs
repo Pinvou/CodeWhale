@@ -4,8 +4,8 @@ import { readFile, readdir } from 'node:fs/promises';
 import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from '../src/features/account-platform/context-guard.js';
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
-import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderSummaryStatus, payablePaymentOrders, paymentOrderRemainingSeconds, summarizedPaymentOrders } from '../src/features/account-platform/order-view.js';
-import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation, successfulPaymentOrders } from '../src/features/account-platform/portal-sections.js';
+import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from '../src/features/account-platform/order-view.js';
+import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
@@ -161,7 +161,7 @@ test('Web usage summary keeps an unfinished request actionable within a grouped 
   assert.equal(summary.completed_at, '');
 });
 
-test('Web personal center uses three consolidated tabs and hides unsuccessful orders', () => {
+test('Web personal center uses three consolidated tabs and describes all order states', () => {
   assert.deepEqual(portalNavigationSections, ['creditsUsage', 'ordersInvoices', 'accountSettings']);
   assert.equal(initialPortalSection(''), 'creditsUsage');
   assert.equal(initialPortalSection('?section=unknown'), 'creditsUsage');
@@ -172,19 +172,11 @@ test('Web personal center uses three consolidated tabs and hides unsuccessful or
   assert.equal(availablePortalSection('?section=accountSettings', ['creditsUsage', 'accountSettings']), 'accountSettings');
   assert.equal(portalSectionLocation('ordersInvoices', '?profile=mobile&lang=zh', '/', false), '/?lang=zh&section=ordersInvoices');
   assert.equal(portalSectionLocation('accountSettings', '?profile=mobile', '/', true), '/?profile=mobile&section=accountSettings');
-  assert.deepEqual(successfulPaymentOrders([
-    { order_id:'created', status:'CREATED' },
-    { order_id:'pending', status:'PENDING' },
-    { order_id:'paid', status:'PAID' },
-    { order_id:'late', status:'PAID_LATE' },
-    { order_id:'failed', status:'FAILED' },
-    { order_id:'review', status:'MANUAL_REVIEW' },
-  ]).map(order => order.order_id), ['paid', 'late']);
   for (const locale of ['zh', 'en', 'ja']) {
     assert.ok(accountPlatformCopy[locale].sections.creditsUsage);
     assert.ok(accountPlatformCopy[locale].sections.ordersInvoices);
     assert.ok(accountPlatformCopy[locale].sections.accountSettings);
-    assert.ok(accountPlatformCopy[locale].noPaidOrders);
+    assert.ok(accountPlatformCopy[locale].orderHistoryLead);
   }
 });
 
@@ -233,16 +225,21 @@ test('Web personal center summarizes active benefit packages before opening full
   assert.match(styles, /\.ap-entitlement-row \{[^}]*padding: 18px 0;[^}]*background: transparent;/);
 });
 
-test('Web personal center renders successful orders as responsive summaries with accessible details', async () => {
+test('Web personal center renders all order states as responsive summaries with accessible details', async () => {
   const orders = [
-    { order_id: 'pending', status: 'PENDING', paid_at: null, fulfillment_status: 'PENDING' },
-    { order_id: 'paid', status: 'PAID', paid_at: '2026-08-26T08:00:00Z', credited_at: '2026-08-26T08:01:00Z', valid_until: '2026-09-25T08:01:00Z', fulfillment_status: 'CREDITED' },
-    { order_id: 'late', status: 'PAID_LATE', paid_at: '2026-08-27T08:00:00Z', fulfillment_status: 'PENDING' },
+    { order_id: 'pending', status: 'PENDING', created_at: '2026-08-28T08:00:00Z', paid_at: null, fulfillment_status: 'PENDING' },
+    { order_id: 'paid', status: 'PAID', created_at: '2026-08-26T08:00:00Z', paid_at: '2026-08-26T08:10:00Z', credited_at: '2026-08-26T08:11:00Z', valid_until: '2026-09-25T08:11:00Z', fulfillment_status: 'CREDITED' },
+    { order_id: 'late', status: 'PAID_LATE', created_at: '2026-08-27T08:00:00Z', paid_at: '2026-08-29T08:00:00Z', fulfillment_status: 'PENDING' },
+    { order_id: 'failed', status: 'FAILED', created_at: '2026-08-25T08:00:00Z', fulfillment_status: 'PENDING' },
   ];
-  assert.deepEqual(summarizedPaymentOrders(orders).map((item) => item.order_id), ['late', 'paid']);
+  assert.deepEqual(paymentOrderHistory(orders).map((item) => item.order_id), ['pending', 'late', 'paid', 'failed']);
+  assert.equal(orderHistoryTimestamp(orders[0]), '2026-08-28T08:00:00Z');
+  assert.equal(orderHistoryTimestamp(orders[1]), '2026-08-26T08:10:00Z');
+  assert.equal(orderSummaryStatus(orders[0]), 'PENDING');
   assert.equal(orderSummaryStatus(orders[1]), 'COMPLETED');
   assert.equal(orderSummaryStatus({ status: 'PAID_LATE', fulfillment_status: 'CREDITED' }), 'LATE_COMPLETED');
   assert.equal(orderSummaryStatus(orders[2]), 'PROCESSING');
+  assert.equal(orderSummaryStatus(orders[3]), 'FAILED');
   assert.equal(orderDurationDays(orders[1]), 30);
   assert.equal(orderDurationDays(orders[2]), null);
   assert.equal(compactOrderID('1234567890abcdef'), '12345678…');
@@ -574,9 +571,14 @@ test('desktop retains forgotten password while profile changes are Web-only', as
   assert.match(webView, /client\.sendProfileMobileChallenge/);
   assert.match(webClient, /reauthenticate=1/);
   assert.match(webClient, /section=accountSettings/);
+  assert.match(webView, /client\.reauthenticate\(`\/\?section=accountSettings&profile=\$\{field\}`\)/);
+  assert.doesNotMatch(webView, /client\.reauthenticate\(`?\/account/);
+  assert.match(webView, /return_to=%2F%3Fsection%3DaccountSettings/);
+  assert.match(webClient, /reauthenticate\(returnTo = '\/\?section=accountSettings'\)/);
+  assert.doesNotMatch(webClient, /returnTo = '\/account/);
   assert.match(webClient, /profile-change-requests/);
   assert.match(portal, /query\.Set\("prompt", "login"\)/);
-  assert.match(portal, /query\.Set\("max_age", "0"\)/);
+  assert.match(portal, /query\.Set\("max_age", "900"\)/);
   assert.match(accountRoutes, /POST\("\/v1\/auth\/password-resets"/);
   assert.match(accountRoutes, /POST\("\/v1\/me\/profile-change-requests"/);
   assert.match(accountProfile, /case "USERNAME":/);
@@ -753,7 +755,7 @@ test('Web personal center consolidates navigation while preserving context-sensi
   assert.doesNotMatch(view, /section === 'wallet'/);
   assert.match(view, /personalContext \? <Wallet[\s\S]*: <ContextCredits/);
   assert.match(view, /activeOrganization && <Organization/);
-  assert.match(view, /successfulOnly \? summarizedPaymentOrders\(orders\) : orders/);
+  assert.match(view, /summary \? paymentOrderHistory\(orders\) : orders/);
   assert.equal((i18n.match(/creditsTitle:/g) || []).length, 3);
   assert.equal((i18n.match(/entitlementsTitle:/g) || []).length, 3);
   assert.match(view, /auth !== 'ready'[\s\S]*availablePortalSection\(globalThis\.location\?\.search \|\| '', navigationSections\)/);

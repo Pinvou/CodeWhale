@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createContextRequestGuard, rechargePollDelay } from './context-guard.js';
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
-import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderSummaryStatus, payablePaymentOrders, paymentOrderRemainingSeconds, summarizedPaymentOrders } from './order-view.js';
+import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from './order-view.js';
 import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { summarizeUsageRecords } from './usage-summary.js';
@@ -551,7 +551,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       return;
     }
     await client.logout();
-    globalThis.location.assign('/auth/login?return_to=%2Faccount');
+    globalThis.location.assign('/auth/login?return_to=%2F%3Fsection%3DaccountSettings');
   };
 
   if (auth === 'loading')
@@ -897,7 +897,7 @@ function PortalOrdersInvoices({ copy, language, orders, unavailable }) {
       <p className="ap-eyebrow">{copy.sections.ordersInvoices}</p>
       <h2>{copy.ordersInvoicesTitle}</h2>
       <p className="ap-lead">{copy.ordersInvoicesLead}</p>
-      <Orders copy={copy} language={language} orders={orders} unavailable={unavailable} successfulOnly embedded />
+      <Orders copy={copy} language={language} orders={orders} unavailable={unavailable} summary embedded />
       <Invoice copy={copy} embedded />
     </section>
   );
@@ -1096,7 +1096,7 @@ function ProfileChangeDialog({ copy, field, me, client, reauthenticated, onClose
     }
   };
   const finish = (result) => (result?.status === 'COMPLETED' ? onChanged(result) : onRecovering());
-  const reauthenticate = () => client.reauthenticate(`/account?section=accountSettings&profile=${field}`);
+  const reauthenticate = () => client.reauthenticate(`/?section=accountSettings&profile=${field}`);
   const submitUsername = (event) => {
     event.preventDefault();
     void perform(async () => {
@@ -1338,7 +1338,7 @@ function ProfileSettings({ copy, client, me, onError, onChanged, onRecovering, e
       await finish(await client.completeProfileChange(requestId, smsCode.trim()));
     });
   };
-  const reauthenticate = () => client.reauthenticate('/account?section=accountSettings');
+  const reauthenticate = () => client.reauthenticate('/?section=accountSettings');
 
   const Heading = embedded ? 'h3' : 'h2';
   return (
@@ -2083,20 +2083,20 @@ function EntitlementPackageDetail({ copy, language, item }) {
   );
 }
 
-function Orders({ copy, language, orders, unavailable, successfulOnly = false, embedded = false }) {
+function Orders({ copy, language, orders, unavailable, summary = false, embedded = false }) {
   const [selectedOrder, setSelectedOrder] = useState(null);
-  const visibleOrders = successfulOnly ? summarizedPaymentOrders(orders) : orders;
+  const visibleOrders = summary ? paymentOrderHistory(orders) : orders;
   const Heading = embedded ? 'h3' : 'h2';
   return (
     <section className={embedded ? 'ap-combined-section' : undefined}>
       {!embedded && <p className="ap-eyebrow">{copy.sections.orders}</p>}
       <Heading>{copy.ordersTitle}</Heading>
-      <p className="ap-lead">{successfulOnly ? copy.paidOrdersLead : copy.ordersLead}</p>
+      <p className="ap-lead">{summary ? copy.orderHistoryLead : copy.ordersLead}</p>
       {unavailable ? (
         <div role="alert" className="ap-alert error">
           {copy.billingUnavailable}
         </div>
-      ) : visibleOrders.length && successfulOnly ? (
+      ) : visibleOrders.length && summary ? (
         <OrderSummaryList copy={copy} language={language} orders={visibleOrders} onOpen={setSelectedOrder} />
       ) : visibleOrders.length ? (
         <div className="ap-order-list">
@@ -2130,7 +2130,7 @@ function Orders({ copy, language, orders, unavailable, successfulOnly = false, e
           ))}
         </div>
       ) : (
-        <Empty>{successfulOnly ? copy.noPaidOrders : copy.noOrders}</Empty>
+        <Empty>{copy.noOrders}</Empty>
       )}
       {selectedOrder && (
         <Dialog title={copy.orderDetails} closeLabel={copy.closeDialog} onClose={() => setSelectedOrder(null)} className="ap-order-dialog">
@@ -2142,6 +2142,10 @@ function Orders({ copy, language, orders, unavailable, successfulOnly = false, e
 }
 
 function OrderSummaryList({ copy, language, orders, onOpen }) {
+  const statusLabel = (item) => {
+    const status = orderSummaryStatus(item);
+    return copy.orderSummaryStatuses[status] || copy.orderStatuses[item?.status] || item?.status || '—';
+  };
   const openWithKeyboard = (event, item) => {
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
@@ -2173,8 +2177,8 @@ function OrderSummaryList({ copy, language, orders, onOpen }) {
                   <td><strong>{item.plan_name}</strong></td>
                   <td>{copy.orderTypeRecharge}</td>
                   <td>{formatMoney(item.amount_fen)}</td>
-                  <td>{formatUsageTime(item.paid_at, language)}</td>
-                  <td><span className="ap-status">{copy.orderSummaryStatuses[orderSummaryStatus(item)]}</span></td>
+                  <td>{formatUsageTime(orderHistoryTimestamp(item), language)}</td>
+                  <td><span className="ap-status">{statusLabel(item)}</span></td>
                   <td><span className="ap-order-id" title={orderID}>{compactOrderID(orderID)}</span></td>
                   <td className="ap-order-optional">{duration == null ? '—' : copy.durationDays(duration)}</td>
                   <td className="ap-order-optional">1</td>
@@ -2187,8 +2191,8 @@ function OrderSummaryList({ copy, language, orders, onOpen }) {
       <div className="ap-order-summary-cards">
         {orders.map((item) => (
           <button type="button" key={item.order_id} onClick={() => onOpen(item)} aria-label={copy.openOrderDetails(item.plan_name)}>
-            <span><strong>{item.plan_name}</strong><small>{formatUsageTime(item.paid_at, language)}</small></span>
-            <span><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{copy.orderSummaryStatuses[orderSummaryStatus(item)]}</span></span>
+            <span><strong>{item.plan_name}</strong><small>{formatUsageTime(orderHistoryTimestamp(item), language)}</small></span>
+            <span><strong>{formatMoney(item.amount_fen)}</strong><span className="ap-status">{statusLabel(item)}</span></span>
           </button>
         ))}
       </div>

@@ -87,7 +87,7 @@ export class AccountPlatformBffClient {
       signal,
     });
   }
-  reauthenticate(returnTo = '/account?section=accountSettings') {
+  reauthenticate(returnTo = '/?section=accountSettings') {
     globalThis.location.assign(`${this.baseURL}/auth/login?reauthenticate=1&return_to=${encodeURIComponent(returnTo)}`);
   }
   createProfileChange(field, value, signal) {
