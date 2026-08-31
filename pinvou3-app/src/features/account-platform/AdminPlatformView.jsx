@@ -309,7 +309,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             catalogVersion: models.catalog_version || 0,
           };
         } else if (target === 'system') {
-          next = { systemStatus: await client.systemStatus(signal) };
+          next = { systemStatus: await read('platform.system.status.read', () => client.systemStatus(signal), null) };
         } else if (target === 'audit') {
           const audits = await client.audits({}, signal);
           next = { audits: audits.items || [] };
@@ -537,18 +537,19 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           {section === 'users' && (
             <>
               {hasPermission(authorization, 'platform.users.read') && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-              {(hasPermission(authorization, 'platform.users.identity.repair') ||
-                hasPermission(authorization, 'platform.profile-changes.repair') ||
-                hasPermission(authorization, 'platform.account-closures.read')) && (
-                <IdentitySecurity copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />
-              )}
+              {hasPermission(authorization, 'platform.account-closures.read') && <AccountClosureOperations copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />}
             </>
           )}
           {section === 'roles' && <RolesWorkspace copy={copy} roles={data.roles || []} />}
           {section === 'billing' && <Billing key="billing" surface="billing" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'payments' && <Billing key="payments" surface="payments" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-          {section === 'system' && <SystemStatus copy={copy} data={data} permissions={platformPermissions} />}
+          {section === 'system' && (
+            <>
+              {hasPermission(authorization, 'platform.system.status.read') && <SystemStatus copy={copy} data={data} permissions={platformPermissions} />}
+              {hasPermission(authorization, 'platform.users.identity.repair') && <KeycloakSecurityAccess copy={copy} />}
+            </>
+          )}
           {section === 'audit' && <Audit copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'settings' && <SettingsWorkspace copy={copy} language={language} onLanguageChange={onLanguageChange} />}
           <AdminExtensionSlot section={section} authorization={authorization} />
@@ -3790,24 +3791,10 @@ function RunbookBoundary({ copy, permissions, mode }) {
   );
 }
 
-function IdentitySecurity({ copy, closures, client, setData, permissions }) {
-  const [copied, setCopied] = useState('');
+function AccountClosureOperations({ copy, closures, client, setData, permissions }) {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const canRepairClosures = (permissions || []).includes('platform.account-closures.repair');
-  const canReadClosures = (permissions || []).includes('platform.account-closures.read');
-  const commands = {
-    ssh: 'ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 18081:127.0.0.1:18080 <ssh-user>@<server>',
-    kubernetes: 'kubectl -n <namespace> port-forward service/<release>-account-platform-keycloak 18081:8080 --address 127.0.0.1',
-  };
-  const copyCommand = async (key) => {
-    try {
-      await navigator.clipboard.writeText(commands[key]);
-      setCopied(key);
-    } catch {
-      setCopied('');
-    }
-  };
   const retryClosure = async (item) => {
     const reason = window.prompt(copy.closure.retryReason);
     if (!reason?.trim()) return;
@@ -3871,6 +3858,32 @@ function IdentitySecurity({ copy, closures, client, setData, permissions }) {
   ];
   return (
     <section className="adm-security-grid">
+      <article className="adm-panel" style={{ gridColumn: '1 / -1' }}>
+        <SectionHeader title={copy.closure.title} count={closures.length} copy={copy} />
+        <p>{copy.closure.lead}</p>
+        {error && <div className="adm-inline-message error">{error}</div>}
+        <Table columns={closureColumns} items={closures} copy={copy} />
+      </article>
+    </section>
+  );
+}
+
+function KeycloakSecurityAccess({ copy }) {
+  const [copied, setCopied] = useState('');
+  const commands = {
+    ssh: 'ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -L 18081:127.0.0.1:18080 <ssh-user>@<server>',
+    kubernetes: 'kubectl -n <namespace> port-forward service/<release>-account-platform-keycloak 18081:8080 --address 127.0.0.1',
+  };
+  const copyCommand = async (key) => {
+    try {
+      await navigator.clipboard.writeText(commands[key]);
+      setCopied(key);
+    } catch {
+      setCopied('');
+    }
+  };
+  return (
+    <section className="adm-security-grid">
       <article className="adm-panel adm-security-intro">
         <span className="adm-eyebrow">KEYCLOAK</span>
         <h2>{copy.identity.title}</h2>
@@ -3894,14 +3907,6 @@ function IdentitySecurity({ copy, closures, client, setData, permissions }) {
           <li>{copy.identity.stepClose}</li>
         </ol>
       </article>
-      {canReadClosures && (
-        <article className="adm-panel" style={{ gridColumn: '1 / -1' }}>
-          <SectionHeader title={copy.closure.title} count={closures.length} copy={copy} />
-          <p>{copy.closure.lead}</p>
-          {error && <div className="adm-inline-message error">{error}</div>}
-          <Table columns={closureColumns} items={closures} copy={copy} />
-        </article>
-      )}
     </section>
   );
 }

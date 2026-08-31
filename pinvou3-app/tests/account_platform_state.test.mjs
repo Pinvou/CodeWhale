@@ -11,6 +11,7 @@ import { AccountPlatformDesktopClient } from '../src/features/account-platform/d
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
 import { adminNavigationGroups, adminSectionURL, readAdminSection, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
+import { adminSectionReadOnly, adminVisibleSections } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
 
@@ -38,6 +39,16 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   ]);
 });
 
+test('Keycloak security access and user operations have independent permission boundaries', () => {
+  const snapshot = (permissions) => ({ platform_permissions: permissions });
+
+  assert.deepEqual(adminVisibleSections(snapshot(['platform.users.identity.repair'])), ['system', 'settings']);
+  assert.deepEqual(adminVisibleSections(snapshot(['platform.account-closures.read'])), ['users', 'settings']);
+  assert.equal(adminSectionReadOnly(snapshot(['platform.system.status.read']), 'system'), true);
+  assert.equal(adminSectionReadOnly(snapshot(['platform.users.identity.repair']), 'system'), false);
+  assert.equal(adminSectionReadOnly(snapshot(['platform.account-closures.repair']), 'users'), false);
+});
+
 test('admin identity pages mount role and repair extensions under independent permission-gated routes', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
@@ -46,7 +57,11 @@ test('admin identity pages mount role and repair extensions under independent pe
   assert.match(view, /'role-bindings-root'.*platform\.roles\.read/);
   assert.match(view, /'registration-repair-root'.*platform\.registrations\.repair/);
   assert.match(view, /host\.append\(node\)/);
-  assert.match(authorization, /users: \['platform\.users\.read', 'platform\.users\.identity\.repair', 'platform\.registrations\.repair', 'platform\.profile-changes\.repair', 'platform\.account-closures\.read'\]/);
+  assert.match(authorization, /users: \['platform\.users\.read', 'platform\.registrations\.repair', 'platform\.profile-changes\.repair', 'platform\.account-closures\.read'\]/);
+  assert.match(authorization, /system: \['platform\.system\.status\.read', 'platform\.users\.identity\.repair'\]/);
+  assert.match(view, /section === 'users'.*AccountClosureOperations/s);
+  assert.match(view, /section === 'system'.*KeycloakSecurityAccess/s);
+  assert.doesNotMatch(view, /function IdentitySecurity/);
   assert.match(authorization, /roles: \['platform\.roles\.read'\]/);
   assert.doesNotMatch(authorization, /identity: \[/);
   assert.match(repair, /localStorage\.getItem\('pinvou\.admin\.language'\)/);

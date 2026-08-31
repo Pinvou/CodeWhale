@@ -97,7 +97,7 @@
 | 模型与 Token | Token Gateway | 至少具有 `platform.models.read`、`platform.tokens.read` 或 `platform.usage.read` 中该页真实数据所需权限；写权限不替代读权限 |
 | 治理与安全 | 审批中心、审计与导出、系统与安全、偏好设置 | 审批读取沿用 `platform.billing.wallets.read` 且动作继续精确鉴权；审计和系统分别要求 `platform.audit.read`、`platform.system.status.read`；偏好设置只在已有管理页面可访问且存在真实本地偏好时显示 |
 
-以上五组及页面名称以 `admin-portal-ui-prototype.html` 的 `navGroups` 为唯一信息架构，不再保留“总览/治理/运行手册/系统运行”六组旧分类。角色、支付、商品、审批、偏好均为独立 URL `section`，不能作为用户或财务页内的二级聚合 Tab。只读运行手册作为“系统与安全”或“审计与导出”的内容区存在，不形成第六导航组；现有注册、资料与注销修复归入“用户管理”。
+以上五组及页面名称以 `admin-portal-ui-prototype.html` 的 `navGroups` 为唯一信息架构，不再保留“总览/治理/运行手册/系统运行”六组旧分类。角色、支付、商品、审批、偏好均为独立 URL `section`，不能作为用户或财务页内的二级聚合 Tab。只读运行手册作为“系统与安全”或“审计与导出”的内容区存在，不形成第六导航组；面向具体用户的注册、资料与注销修复归入“用户管理”，Keycloak 平台级受控入口及隧道说明归入“系统与安全”，两者使用各自既有精确权限独立显示。
 
 ### 3.2 导航与组件鉴权
 

@@ -3,28 +3,28 @@ const VERSION_KEYS = ['context_version', 'personal_authorization_version', 'plat
 export const adminSectionPermissions = Object.freeze({
   overview: ['platform.users.read', 'platform.organizations.read', 'platform.billing.wallets.read', 'platform.tokens.read', 'platform.usage.read', 'platform.system.status.read'],
   organizations: ['platform.organizations.read'],
-  users: ['platform.users.read', 'platform.users.identity.repair', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.read'],
+  users: ['platform.users.read', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.read'],
   roles: ['platform.roles.read'],
   billing: ['platform.billing.wallets.read', 'platform.pricing.read', 'platform.usage.read'],
   payments: ['platform.billing.wallets.read'],
   products: ['platform.products.read'],
   tokens: ['platform.tokens.read', 'platform.models.read', 'platform.usage.read'],
   approvals: ['platform.billing.wallets.read'],
-  system: ['platform.system.status.read'],
+  system: ['platform.system.status.read', 'platform.users.identity.repair'],
   audit: ['platform.audit.read'],
 });
 
 export const adminSectionMutationPermissions = Object.freeze({
   overview: [],
   organizations: ['platform.organizations.create', 'platform.organizations.status.manage', 'platform.organizations.delete', 'platform.organizations.owner.transfer'],
-  users: ['platform.users.status.manage'],
+  users: ['platform.users.status.manage', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.repair'],
   roles: ['platform.roles.assign'],
   billing: ['platform.billing.adjustments.request', 'platform.billing.adjustments.approve', 'platform.billing.holds.release', 'platform.pricing.manage', 'platform.usage.reconcile.retry'],
   payments: ['platform.billing.orders.sync', 'platform.billing.repairs.request'],
   products: ['platform.products.create', 'platform.products.publish', 'platform.products.unpublish', 'platform.products.delete'],
   tokens: ['platform.tokens.manage', 'platform.tokens.credentials.validate', 'platform.models.sync', 'platform.models.manage', 'platform.usage.reconcile.retry'],
   approvals: ['platform.billing.adjustments.request', 'platform.billing.adjustments.approve', 'platform.billing.repairs.request', 'platform.billing.repairs.approve', 'platform.billing.payment-controls.resume.request', 'platform.billing.payment-controls.resume.approve'],
-  system: [],
+  system: ['platform.users.identity.repair'],
   audit: ['platform.audit.export'],
   settings: [],
 });

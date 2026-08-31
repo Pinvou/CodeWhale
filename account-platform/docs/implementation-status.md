@@ -368,9 +368,9 @@
 | UI-26 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 默认按到期时间展示最多五个有效包及安全进度和汇总；主页面采用无整体边框、无圆角、只保留条目分隔线的扁平列表；全量列表包含历史状态，详情弹窗保留组成、来源、订单及退款说明并支持键盘关闭。 |
 | UI-27 | 已实现 | AUDIT_HEAD | ACCOUNT-PLATFORM-STATE; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 全状态充值订单按创建时间稳定倒序展示；本地 `EXPIRED` 及兼容的外部待关闭状态统一显示已超时，关闭请求显示处理中且均不恢复二维码；八列桌面摘要、中宽精简、移动卡片和详情弹窗保持可访问。 |
 | UI-28 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 后台严格采用 HTML 原型的五组信息架构及页面命名；合法 URL 深链、刷新和前进/后退保持当前页，非法或无权 section 失败关闭到首个可访问页；无真实接口或无精确读权限页面隐藏，不使用假数据。 |
-| UI-29 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-IDENTITY-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 用户管理、角色与授权、组织管理成为原型命名页面；角色从用户聚合页拆为独立 section，注册/资料/注销修复归入用户管理，“我的组织”在缺少真实后台接口时隐藏；既有 Account API 与动作不变。 |
+| UI-29 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-SHELL; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-IDENTITY-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | 用户管理、角色与授权、组织管理成为原型命名页面；面向具体用户的注册/资料/注销修复保留在用户管理，Keycloak 平台级入口不再与用户目录混合，“我的组织”在缺少真实后台接口时隐藏；既有 Account API 与动作不变。 |
 | UI-30 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-FINANCE-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 计费运营、支付与资金、定价与商品、审批中心成为独立 section，删除旧财务聚合 Tab；各页继续复用现有 Billing API，并按精确读/写权限分别展示，未新增业务能力。 |
-| UI-31 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-MODEL-SYSTEM-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | Token Gateway、审计与导出、系统与安全采用原型命名；只读运行手册保留在系统/审计内容中而不形成第六导航组；公网仍无 Bootstrap、Break-glass、IdP 或服务身份执行入口。 |
+| UI-31 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-MODEL-SYSTEM-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | NOT_DEPLOYED | Token Gateway、审计与导出、系统与安全采用原型命名；Keycloak 受控入口迁入系统与安全并与系统状态按 `platform.users.identity.repair`、`platform.system.status.read` 独立显示，只读运行手册不形成第六导航组；公网仍无 Bootstrap、Break-glass、IdP 或服务身份执行入口。 |
 | UI-32 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-UI-INTEGRATION; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 总验收验证 HTML 原型定义的五组信息架构、独立 URL、精确权限与不可用能力隐藏，并继续覆盖源码/制品设计 Token、旧视觉禁用、详情抽屉、响应式、触控目标与减弱动画。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
@@ -890,9 +890,9 @@
 | UI-26 | 权益包渐进式展示 | 已实现 | 默认最多五条有效包摘要并汇总数量和余额，主页面去除重复资料卡及列表整体边框，只以横向分隔线区分条目；完整列表、历史状态、BASE/BONUS 组成和支付关联进入可访问详情弹窗。 |
 | UI-27 | 全状态订单摘要与详情 | 已实现 | 全部充值订单按创建时间稳定倒序展示响应式摘要；本地超时与兼容关闭观察统一显示已超时且不恢复付款入口，桌面八列、中宽精简、移动卡片及详情弹窗保持可访问。 |
 | UI-28 | 统一管理后台壳层与共享基础组件 | 已实现 | 已在 CLOUD_UAT 部署 HTML 原型的工作台、身份与组织、财务与支付、模型与 Token、治理与安全五组导航和页面命名；URL 深链、浏览器历史、共享状态、三语、键盘和响应式边界保持有效。 |
-| UI-29 | 身份、用户、角色与组织后台界面改版 | 已实现 | 用户管理、角色与授权、组织管理按独立页面编排；现有修复能力归入用户管理，“我的组织”因无真实后台接口而隐藏，数据与动作不变。 |
+| UI-29 | 身份、用户、角色与组织后台界面改版 | 已实现 | 用户管理、角色与授权、组织管理按独立页面编排；面向具体用户的修复能力归入用户管理，Keycloak 平台级入口不与用户目录混合，“我的组织”因无真实后台接口而隐藏，数据与动作不变。 |
 | UI-30 | 财务、支付、审批、定价与充值商品后台界面改版 | 已实现 | 计费运营、支付与资金、定价与商品、审批中心成为独立页面，继续复用原 API；旧财务聚合 Tab 已删除。 |
-| UI-31 | 模型、Token、系统与审计后台界面改版 | 已实现 | Token Gateway、审计与导出、系统与安全按原型命名；只读运行手册作为页面内容保留，不新增导航组或公网执行能力。 |
+| UI-31 | 模型、Token、系统与审计后台界面改版 | 已实现 | Token Gateway、审计与导出、系统与安全按原型命名；Keycloak 受控入口归入系统与安全并与系统状态独立按权限显示，只读运行手册作为页面内容保留，不新增导航组或公网执行能力。 |
 | UI-32 | 管理后台跨页面集成与发布验收 | 已实现 | 验收覆盖 HTML 原型五组信息架构、独立 URL、源码/制品设计 Token、旧六组与旧配色禁用、精确权限、不可用能力隐藏、三语、读屏和响应式。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |
