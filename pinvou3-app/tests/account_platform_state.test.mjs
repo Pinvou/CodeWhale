@@ -1052,6 +1052,14 @@ test('organization purchases open the shared payment dialog and refresh organiza
   assert.match(backend, /safe_id\(organization_id\) && safe_id\(order_id\)/);
 });
 
+test('personal center clears a transient background synchronization error after account bootstrap recovers', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /const \[synchronizationError, setSynchronizationError\] = useState\(''\)/);
+  assert.match(view, /const account = await client\.bootstrap\(\);[\s\S]*?setSynchronizationError\(''\);[\s\S]*?authorizationVersionChanged/);
+  assert.match(view, /catch \(reason\) \{[\s\S]*?setSynchronizationError\(localizedError\(copy, reason\)\)/);
+  assert.match(view, /const visibleError = error \|\| synchronizationError/);
+});
+
 test('billing operators can search repair candidates without provider-specific UI branches', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const client = await readFile(new URL('../src/features/account-platform/admin-client.js', import.meta.url), 'utf8');

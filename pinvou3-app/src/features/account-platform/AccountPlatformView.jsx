@@ -180,6 +180,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [section, setSection] = useState(() => (portal ? initialPortalSection(globalThis.location?.search || '') : 'overview'));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [synchronizationError, setSynchronizationError] = useState('');
   const [notice, setNotice] = useState('');
   const [order, setOrder] = useState(null);
   const [orders, setOrders] = useState([]);
@@ -321,6 +322,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       try {
         const account = await client.bootstrap();
         if (disposed) return;
+        setSynchronizationError('');
         if (authorizationVersionChanged(authorizationVersions(meRef.current), authorizationVersions(account))) {
           clearContextResources();
           meRef.current = account;
@@ -328,7 +330,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
           await loadContext(account);
         }
       } catch (reason) {
-        if (!disposed && reason?.name !== 'AbortError') setError(localizedError(copy, reason));
+        if (!disposed && reason?.name !== 'AbortError') setSynchronizationError(localizedError(copy, reason));
       } finally {
         contextRefreshRef.current = false;
       }
@@ -574,6 +576,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setNotice(copy.closure.requested);
     });
 
+  const visibleError = error || synchronizationError;
+
   const finishProfileChange = async (result) => {
     if (result?.status !== 'COMPLETED') {
       setNotice(copy.profileChangeRecovering);
@@ -604,9 +608,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
           <p className="ap-eyebrow">PINVOU ACCOUNT PLATFORM</p>
           <h1>{copy.title}</h1>
           <p>{portal ? copy.loginIntro : copy.desktopLoginIntro}</p>
-          {error && (
+          {visibleError && (
             <div role="alert" className="ap-alert error">
-              {error}
+              {visibleError}
             </div>
           )}
           {portal ? (
@@ -676,9 +680,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         </div>
       </aside>
       <main className="ap-main">
-        {error && (
+        {visibleError && (
           <div role="alert" className="ap-alert error">
-            {error}
+            {visibleError}
           </div>
         )}
         {notice && <div className="ap-alert success">{notice}</div>}
