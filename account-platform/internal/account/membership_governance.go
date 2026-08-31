@@ -328,7 +328,10 @@ func (r *PostgresRepository) transferOwnership(ctx context.Context, principal id
 		if _, err := tx.Exec(ctx, `UPDATE role_bindings SET revoked_at=$2,revoked_by=$3 WHERE membership_id=$1 AND role='OWNER' AND revoked_at IS NULL`, previousMembershipID, now, actorID); err != nil {
 			return OwnershipTransferResult{}, err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,$4,'OWNERSHIP_TRANSFER')`, uuid.Must(uuid.NewV7()), targetMembershipID, actorID, now); err != nil {
+		// Keep the new OWNER effective at the exact timestamp used by the
+		// deferred single-owner constraint. A later application timestamp would
+		// leave the organization with zero effective owners at COMMIT.
+		if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,transaction_timestamp(),'OWNERSHIP_TRANSFER')`, uuid.Must(uuid.NewV7()), targetMembershipID, actorID, now); err != nil {
 			return OwnershipTransferResult{}, mapConstraintError(err)
 		}
 		membershipIDs := []uuid.UUID{previousMembershipID}

@@ -1082,7 +1082,11 @@ func (r *PostgresRepository) AdminCreateOrganization(ctx context.Context, princi
 	if _, err := tx.Exec(ctx, `INSERT INTO memberships(id,organization_id,user_id,status,joined_at,updated_at) VALUES($1,$2,$3,'ACTIVE',$4,$4)`, membershipID, organization.ID, ownerUserID, now); err != nil {
 		return Organization{}, mapConstraintError(err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,$4,'ORGANIZATION_CREATION')`, uuid.Must(uuid.NewV7()), membershipID, ownerUserID, now); err != nil {
+	// The deferred single-owner constraint evaluates effective bindings against
+	// PostgreSQL's transaction timestamp. Use that same timestamp for an
+	// immediately effective OWNER grant; an application timestamp captured
+	// after BEGIN would otherwise make the grant appear future-dated at COMMIT.
+	if _, err := tx.Exec(ctx, `INSERT INTO role_bindings(id,membership_id,role,created_by,created_at,starts_at,grant_source) VALUES($1,$2,'OWNER',$3,$4,transaction_timestamp(),'ORGANIZATION_CREATION')`, uuid.Must(uuid.NewV7()), membershipID, ownerUserID, now); err != nil {
 		return Organization{}, mapConstraintError(err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET membership_version=membership_version+1,updated_at=$2 WHERE id=$1`, ownerUserID, now); err != nil {
