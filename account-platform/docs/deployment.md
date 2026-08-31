@@ -2,7 +2,7 @@
 
 > 状态：当前单机 Compose 部署基线；生产提升仍以本文列出的 NO-GO 门禁为准
 >
-> 校准日期：2026-08-29
+> 校准日期：2026-08-31
 >
 > 安全要求：本文只列配置名称和占位符，不保存真实域名、IP、账号、密码、AccessKey、Token 或商城密钥。
 
@@ -14,12 +14,14 @@
 
 - Docker Compose 管理账号平台应用服务和基础设施。
 - 仓库基础定义为 `deploy/compose/compose.yaml`，远程公共 URL 覆盖为 `compose.remote.yaml`，生产环境还可叠加不入库的站点专用 override。
-- 宿主机反向代理终止 HTTPS，并把允许公开的路径转发到回环端口。
+- 边缘主机或应用宿主机上的反向代理终止 HTTPS，并把允许公开的路径转发到应用主机回环端口；边缘与应用分离时，转发链路、证书、防火墙和 MTU/MSS 持久化均属于恢复边界。
 - 独立 New API 为模型数据面，由 Token Gateway 通过私网/容器网络调用。
 - 发布物放在带 Git Commit 和时间戳的版本目录，稳定符号链接指向当前版本。
 - 数据库、Redis、NATS、New API 和内部管理端口不直接向公网开放。
 
 该形态是可运维的单机部署，但不是高可用架构。主机、Docker Engine 或本地 PostgreSQL 故障会影响整个平台。
+
+“Compose 能启动”不等于“系统可完全重新部署”。恢复现有系统还必须具备同一恢复集内的四库、NATS、独立模型网关、站点 Secret、边缘代理/证书/网络配置和不可变发布制品。完整新主机重建统一执行 [`deploy/runbooks/full-redeployment.md`](../deploy/runbooks/full-redeployment.md)；缺少恢复集时只能创建空环境，不能宣称恢复了当前用户、资金和权限状态。
 
 当前公网单机站点在同时满足以下条件前只能按 UAT/受控调试环境管理，不得仅因使用正式域名或真实 Provider 就宣称为生产：`APP_ENV` 为正式环境值；所有测试 Provider、测试证据和暂定价格开关关闭；镜像、配置与迁移均绑定不可变发布标识；备份恢复、容量、高可用、安全和客户端三层门禁均有同一候选版本的有效证据。当前环境状态必须写入每次发布的 `deployment-manifest.json`，不得从域名、Compose project 名或人工口头说明推断。
 
@@ -97,8 +99,8 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 /opt/
   pinvou-account-platform-<commit>-<timestamp>/
     account-platform/
-      deploy/compose/.env        # 站点 Secret，0600，不入仓库
-      deploy/compose/compose.site.yaml
+      deploy/compose/.env        # 站点 Secret 的运行副本，0600，不入仓库
+      deploy/compose/compose.site.yaml  # 私有配置运行副本
     pinvou3-app/
     scripts/
     VERSION
@@ -106,11 +108,16 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
   pinvou-account-platform-current -> pinvou-account-platform-<commit>-<timestamp>/
   pinvou-account-platform-backups/
     <deployment-id>/
+/etc/pinvou-account-platform/    # 0700；由 Secret/私有配置系统恢复，不属于发布目录
+  account-platform.env           # 0600；站点 Secret 的受控来源
+  compose.site.yaml              # 0600/0640；站点私有覆盖
+/var/lib/pinvou-recovery/
+  <deployment-id>/               # 0700；短期恢复工作区，不是长期备份唯一副本
 ```
 
-不要在原目录上直接覆盖源码。新版本在独立目录完成构建、迁移和验证后，再原子切换 `pinvou-account-platform-current`。站点 `.env` 和 override 可以从当前受控版本复制，但复制后必须再次核对权限、摘要和目标路径；不得把它们移动到仓库根、发布清单或构建日志中。
+不要在原目录上直接覆盖源码。新版本在独立目录完成构建、迁移和验证后，再原子切换 `pinvou-account-platform-current`。日常发布可以从 `/etc` 下的受控来源安装站点 `.env` 和 override；从当前版本复制只能作为短期发布便利，不能作为灾难恢复方案。Secret/override 必须另有加密、离机、可验证恢复的副本，复制后再次核对权限、摘要和目标路径；不得把它们移动到仓库根、发布清单或构建日志中。
 
-`deployment-manifest.json` 至少记录 `deployment_id`、完整 `source_commit`、工作树/制品是否干净、构建时间、环境等级、Compose 文件 SHA-256、迁移清单 SHA-256、每个服务的镜像 ID 与不可变 digest、上一可回滚部署及其镜像 digest、迁移计划、备份 ID、验证结果和操作者。该清单不得记录 Secret 值、Token、Cookie、个人信息或 Provider 原始报文。若健康响应、镜像标签和清单不能共同证明运行 Commit，发布失败关闭。
+`deployment-manifest.json` 至少记录 `deployment_id`、完整 `source_commit`、工作树/制品是否干净、构建时间、环境等级、Compose 文件 SHA-256、迁移清单 SHA-256、每个服务的镜像 ID 与不可变 digest、上一可回滚部署及其镜像 digest、迁移计划、完整恢复集 ID、四库/NATS/模型网关/边缘配置备份引用、Secret 版本引用、验证结果和操作者。该清单不得记录 Secret 值、Token、Cookie、个人信息或 Provider 原始报文。若健康响应、镜像标签和清单不能共同证明运行 Commit，发布失败关闭。
 
 每次正式迁移必须先运行 `node scripts/account-platform-migration-manifest.mjs check`，创建24小时内的一致性快照，并把不含凭据的快照 ID、完成时间和 SHA-256 注入迁移 Job；缺项会在连接数据库前失败。Job 成功后还要归档 `migration.post_verification` 摘要及四库只读审计结果。新增迁移只能运行 `node scripts/account-platform-migration-manifest.mjs append` 追加更高版本，禁止编辑、删除或重命名清单内历史文件。
 
@@ -128,6 +135,8 @@ Compose 的宿主机端口均绑定回环地址，供本机反向代理或运维
 - 发布前有足够空间保存新镜像、数据库备份和上一个可回滚版本。
 - 已明确发布负责人、数据库负责人、支付尾单负责人和回滚决策人。
 - Account 数据库允许迁移用户安装 `pgcrypto` 扩展；若由 DBA 预装，发布前核验 `digest` 与 `gen_random_bytes` 可用。
+- 若目标包含整机/持久状态重建，已经从独立存储取得 `RESTORABLE` 的完整恢复集，覆盖四库、NATS、模型网关、站点 Secret、边缘配置和不可变制品；单独的数据库 dump 或发布目录副本不满足门禁。
+- 已在隔离环境使用相同恢复格式完成演练，并记录实际 RPO/RTO、镜像/迁移版本、恢复工具版本和全链路验收；不能把当前线上主机作为首次恢复试验目标。
 
 ## 6. 配置清单
 
@@ -307,6 +316,10 @@ Web 首次登录同样使用该 Authorization Code + PKCE 流程，但登录、�
 
 `H3C_MALL_PRODUCTS_JSON` 不再是运行时商品真相源，不得用于上架、下架或变更商品；商品事实只来自 Billing 运行时目录和受审计命令。`.env.example`、Compose 和本文三者的配置键必须在发布前对账，任一新增 Compose 变量未被示例或本文分类说明时阻止提升，废弃变量应从示例和站点配置中删除而不是静默保留。
 
+站点配置对账必须比较“精确键名”，不能只凭人工目视或相似前缀判断已配置。例如构建代理键必须是 `GOPROXY`，带额外前缀、后缀、转义字符或不可见字符的变体均视为缺失；同理，废弃键、重复键和未被最终 Compose 消费的键必须报告并清理。发布前至少归档以下脱敏检查结果：示例键集合、站点键集合、最终 Compose 引用键集合、缺失/多余/重复键和 `docker compose config` 退出码，绝不归档值。
+
+发布目录中的 `.env` 和站点 override 只是运行副本，不得成为唯一恢复来源。它们必须在独立 Vault/KMS/Secret 系统或加密离机恢复包中具有可取得的版本引用，且解密密钥与密文不在同一故障域。没有独立 Secret 版本、站点 override 摘要或恢复验证证据时，只允许重建空环境，不得宣称能够恢复当前平台。
+
 ### 6.8 死信检查与受审计重放
 
 先按目标领域选择只读数据库凭据，执行 `event-replay --event-id <uuid> --inspect` 并留存返回的事件类型、聚合版本和摘要。根因修复后，使用受控 `event-replay` 工作负载及新的稳定幂等键执行 `--event-id <uuid> --expected-digest <sha256> --idempotency-key <key> --reason <不少于20字符> --confirm`；命令会以 `actor_type=SERVICE`、`EVENT_REPLAY`、`job_run_id` 和原因写入不可变审计，再原子重新排队。
@@ -385,7 +398,7 @@ node scripts/account-platform.mjs test security
 4. 创建 `deployment-manifest.json`，写入完整 Git Commit、构建时间、环境等级、输入文件摘要、当前/上一部署标识和待填充的镜像/迁移/验证字段。
 5. 不修改当前稳定符号链接，不停止现有服务。
 
-### 8.3 数据库备份
+### 8.3 完整恢复集与数据库备份
 
 包含新增迁移、数据回填或人工修复的发布，迁移前至少备份：
 
@@ -398,6 +411,8 @@ node scripts/account-platform.mjs test security
 
 备份写入 `<backup-dir>/<deployment-id>`，生成校验和并执行最小可读性检查，把备份 ID、时间点、校验结果和恢复演练引用写入发布清单。Billing 备份是资金恢复依据，未验证备份时不得迁移。
 
+上述数据库文件只是完整恢复集的一部分。能够从新主机恢复当前系统的恢复集还必须绑定同一目标恢复时刻下的 NATS JetStream、独立模型网关数据库/数据目录/私有配置、站点 Secret 版本、站点 override、边缘代理/证书引用/网络配置以及目标 Commit 或镜像 digest。Redis 仅承载短期会话、验证码/风险和缓存，不作为长期事实恢复；恢复后所有会话和未完成挑战失效。恢复集结构、校验和 NO-GO 条件见 [`../deploy/runbooks/full-redeployment.md`](../deploy/runbooks/full-redeployment.md)，备份和 PITR 细则见 [`../deploy/runbooks/backup-restore.md`](../deploy/runbooks/backup-restore.md)。
+
 纯应用发布只有在迁移清单差异为空、没有数据修复且 Schema 向前/向后兼容时，才可引用仍在 RPO 范围内并已验证可恢复的最近备份；该判断、清单差异摘要和备份 ID 必须写入发布清单。不能证明为纯应用发布时按迁移发布处理。即使此前部署后人工删除过临时迁移备份，也不能把“无需备份”固化为流程；可按保留策略在稳定观察期和恢复演练完成后清理旧备份。
 
 ### 8.4 构建镜像
@@ -406,12 +421,17 @@ node scripts/account-platform.mjs test security
 
 ```text
 docker compose --env-file <secret-env> <compose-files> build \
-  account-service billing-service token-gateway token-portal \
+  keycloak token-portal
+
+docker compose --env-file <secret-env> <compose-files> build \
+  --build-arg VERSION=<release-version> \
+  --build-arg COMMIT=<full-commit> \
+  account-service identity-service billing-service token-gateway \
   account-event-relay billing-event-relay token-event-relay \
   account-migrate billing-migrate token-migrate
 ```
 
-构建完成后必须为每个应用和迁移镜像赋予包含完整或唯一 Commit 的不可变 tag，优先推送到支持 digest 的受控 Registry；站点 override 的 `image:` 必须引用该 tag 或 digest。不得让发布和回滚依赖 Compose 自动生成的无版本镜像名或 `latest`。使用 `docker image inspect` 取得镜像 ID/digest，写入 `deployment-manifest.json`，并确认镜像 OCI label 或服务健康响应至少有一处能返回同一完整 Commit；二者均缺失时为 NO-GO。
+构建完成后必须为每个应用和迁移镜像赋予包含完整或唯一 Commit 的不可变 tag，优先推送到支持 digest 的受控 Registry；站点 override 的 `image:` 必须引用该 tag 或 digest。应用和基础镜像的 digest/目标平台必须进入发布清单或离线恢复包；不得让发布、回滚或灾难恢复依赖 Compose 自动生成的无版本镜像名、`latest` 或未来可能变化的基础镜像 tag。使用 `docker image inspect` 取得镜像 ID/digest，写入 `deployment-manifest.json`，并确认镜像 OCI label 或服务健康响应至少有一处能返回同一完整 Commit；二者均缺失时为 NO-GO。
 
 只构建和替换受影响服务可以降低风险，但必须由目标 Commit 的实际差异和依赖图确定，并在发布清单记录服务集合。共享库、迁移、协议、环境变量或基础镜像发生变化时，不得误判为单服务发布。
 
@@ -682,7 +702,9 @@ New API 自身日志位置由其独立部署定义决定；核对用量优先调
 
 ## 14. 备份、保留和安全清理
 
-必须备份的持久状态：PostgreSQL 各数据库、NATS JetStream、独立 New API 数据和部署 Secret 的受控副本。Redis Portal 会话可丢失并要求用户重新登录，不应把 Redis 当长期事实源。
+必须备份的持久状态：PostgreSQL 各数据库、NATS JetStream、独立模型网关数据库与挂载目录、站点 override、部署 Secret 的受控版本引用，以及边缘代理、证书引用、转发链路、防火墙和 MTU/MSS 配置。Redis Portal 会话可丢失并要求用户重新登录，不应把 Redis 当长期事实源。上述资产必须组成带统一恢复时刻、摘要和验证结果的完整恢复集，不能分别保留一批互不对应的“最新文件”。
+
+当前发布目录、当前应用主机和当前边缘主机都不能是自身恢复材料的唯一保存位置。站点 `.env`、override、模型网关私有清单和边缘配置必须有加密离机副本或受控配置源；证书私钥和备份解密密钥仍由独立 Secret 系统交付，恢复包只保存引用。删除旧部署、旧卷或旧主机前，必须完成隔离的新主机全量恢复演练和观察窗，并取得明确批准。
 
 可以在确认当前版本稳定、备份保留策略满足且不影响恢复目标后清理：
 
@@ -741,6 +763,7 @@ Token Gateway 同时运行托管路由 Provisioning Worker。上线迁移 `00001
 模型执行恢复继续执行 Token `000014_usage_execution_replay`，并先确认生产 Secret Provider 可同时解密旧凭据和新重放载荷。迁移会把既有原始模型幂等键不可逆替换为 SHA-256 摘要，并建立稳定用户级唯一索引；因此必须先滚动 Gateway 客户端，确保每个逻辑模型请求都发送16至128字符且不会复用的 `Idempotency-Key`。发布后验证：跨 OIDC Session 使用同键同请求只恢复同一执行，同键异请求在 Hold 前返回409；分别在 Hold 请求、Hold 成功、派发意图、取得租约及流事件阶段杀进程，只有能够证明未派发的准备阶段继续原执行，已取得派发租约但结果未知且 Adapter 不保证幂等的请求进入 REVIEW；断开 SSE 后服务端继续读取并结算，使用原键和 `Last-Event-ID` 只补发更大序号。监控 `HOLD_RESERVING`、`UPSTREAM_DISPATCHING` 租约过期、`REVIEW`、事件/结果清理失败和 KMS 解密失败；不得通过延长普通表 TTL、复制正文到日志或人工清除墓碑来恢复请求。流事件、结果和墓碑从执行/财务终态起算，硬上限分别为24小时、30天和90天；法律保全/未结案件只能迁入独立受限案件表并在解除后30天内清理。备份必须在30天内生命周期过期或使用可销毁独立数据密钥，三年用量/账本/审计证据禁止包含模型正文。写入新版执行状态、清除派发正文或释放过期墓碑键后不得回滚旧 Gateway；紧急故障应停止接收新模型请求并前向修复。
 
 - `deploy/runbooks/backup-restore.md`
+- `deploy/runbooks/full-redeployment.md`
 - `deploy/runbooks/cutover-rollback.md`
 - `deploy/runbooks/newapi-deployment.md`
 - `deploy/runbooks/keycloak-admin-access.md`
@@ -753,3 +776,19 @@ Token Gateway 同时运行托管路由 Provisioning Worker。上线迁移 `00001
 Billing `000045_system_ledger_accounts_repair` 会幂等恢复支付清算、用量收入、退款清算、人工调整、应收和拒付清算六个系统级总账账户，并为支付回调入箱增加失败次数、稳定错误码和退避时间。迁移必须先于 Billing 应用发布；应用启动时会再次校验六个账户的固定 ID、代码、类型及无钱包归属，缺失或被改写时拒绝承接流量。
 
 用户调试数据清理只能删除明确归属于目标用户或钱包的数据，不得清空 `ledger_accounts`，也不得删除 `wallet_id IS NULL` 的平台级账户。清理后至少校验：六个系统账户完整、待处理回调不会以高频率反复失败、同一支付流水仅产生一个权益包和一组平衡分录。回调失败只记录稳定错误码，不记录原始请求、回调载荷或用户标识；Worker 按指数退避重试，基础依赖恢复后继续走原有幂等归并流程。
+
+## 18. 完全重新部署判定与执行入口
+
+完全重新部署不是 `docker compose up` 的同义词。执行前必须在恢复记录中明确以下三种模式之一：
+
+| 模式 | 适用范围 | 可宣称的结果 |
+|---|---|---|
+| `APPLICATION_REBUILD` | 仅重建应用容器/镜像，原四库、NATS、模型网关、Secret 和边缘配置均保留 | 应用重建完成，原业务状态未丢失 |
+| `STATEFUL_RESTORE` | 新主机或持久状态丢失，从完整恢复集恢复 | 当前系统恢复到声明的恢复点 |
+| `EMPTY_BOOTSTRAP` | 全新独立环境，不恢复历史状态 | 仅初始化空平台，不是现有系统恢复 |
+
+`STATEFUL_RESTORE` 的最小输入是：目标 Commit、应用及基础镜像的不可变 digest/离线包、最终 Compose 与站点 override、四个 PostgreSQL 数据库和角色证据、NATS JetStream、独立模型网关数据与私有配置、站点 Secret 版本、边缘代理/证书引用/网络配置，以及同一恢复集的摘要、RPO/RTO 和最近演练证据。缺少任一资金、身份、事件、模型或入口状态时均为 NO-GO；不得用重新创建管理员、商品、Provider、角色、定价或模型渠道来冒充历史恢复。
+
+标准执行顺序为：验证恢复集与目标 Commit → 在隔离主机恢复私有配置 → 恢复 PostgreSQL 四库 → 恢复 NATS → 使 Redis 会话失效并启动空实例 → 恢复独立模型网关 → 按 digest 导入/拉取镜像，或在锁定输入下构建带版本/Commit 的不可变镜像 → 执行无环迁移计划 → 启动身份、业务、Relay 与 Portal → 恢复边缘入口 → 完成身份、权限、资金、支付、模型、用量、事件和公网验收 → 原子切流。详细命令和失败处理统一见 [`../deploy/runbooks/full-redeployment.md`](../deploy/runbooks/full-redeployment.md)。
+
+恢复状态必须逐级记录：`ARTIFACTS_VERIFIED`、`INFRA_RESTORED`、`SERVICES_STARTED`、`DOMAIN_VERIFIED`、`FULLY_RESTORED`。健康检查全绿最多只能证明 `SERVICES_STARTED`；只有跨域账实核对、回调/模型/权限烟测、实际 RPO/RTO 和批准均完成，才可标记 `FULLY_RESTORED`。旧环境和回滚材料的清理必须是之后的独立审批动作。

@@ -2,7 +2,8 @@
 
 - [事件投递、死信与安全重放](event-delivery.md)
 - [可观测性与告警响应](observability.md)
-- [数据库备份、PITR 与恢复](backup-restore.md)
+- [账号平台完整重部署与现有状态恢复](full-redeployment.md)
+- [账号平台全量备份、PITR 与恢复](backup-restore.md)
 - [production-new 切换与回滚](cutover-rollback.md)
 - [真实 New API 部署与初始化](newapi-deployment.md)
 - [Keycloak 受控管理访问](keycloak-admin-access.md)

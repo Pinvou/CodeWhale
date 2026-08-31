@@ -1,5 +1,7 @@
 # 本地 Compose 环境
 
+本目录的 Compose 基线用于开发、测试和单机部署编排；能够启动这些容器不代表能够从空白主机恢复当前账号平台。完整恢复还需要同一恢复集中的四个 PostgreSQL 数据库、NATS JetStream、独立模型网关、站点 Secret/override、边缘代理/证书/网络配置和不可变制品。生产或灾难恢复必须执行 [`../runbooks/full-redeployment.md`](../runbooks/full-redeployment.md)，不得把新建空卷后的健康检查当作恢复成功。
+
 1. 将 `.env.example` 复制为 `.env`，把每个占位值替换为不同的随机值；`.env` 已被仓库忽略。
 2. 从仓库根执行 `node scripts/account-platform.mjs dev up`。
 3. Keycloak 开发入口为 `http://127.0.0.1:18080`；Account、Billing、Token Gateway、Payment Simulator、Token Portal、New API 和 Identity Adapter 分别绑定 `18101` 至 `18107` 的对应回环端口。
