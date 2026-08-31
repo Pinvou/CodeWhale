@@ -158,6 +158,12 @@ function localizedError(copy, reason) {
   return copy.errors?.[code] || copy.requestFailed;
 }
 
+function serviceRequestFailed(result) {
+  if (result?.status !== 'rejected') return false;
+  const status = Number(result.reason?.status || 0);
+  return status === 0 || status >= 500;
+}
+
 export function AccountPlatformView({ client, copy, language, onLanguageChange, portal = false, onClose }) {
   const [auth, setAuth] = useState('loading');
   const [me, setMe] = useState(null);
@@ -236,14 +242,20 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       const isPersonal = !organizationId;
       const surfaceAccess = personalSurfaceAccess(nextMe);
       const permissions = new Set(nextMe?.active_context?.permissions || []);
-      const canReadOrganizationEntitlements = permissions.has('org.wallet.read') || permissions.has('org.quota.allocate') || permissions.has('org.entitlements.purchase');
+      const canReadOrganizationWallet = permissions.has('org.wallet.read');
       const canReadQuota = permissions.has('org.quota.read.self') || permissions.has('org.quota.read.all');
       const canReadUnits = permissions.has('org.units.read');
       const canReadMembers = permissions.has('org.members.read');
       const canAllocateQuota = permissions.has('org.quota.allocate');
       const canReadModelPolicy = permissions.has('org.models.read') || permissions.has('org.models.manage');
       const canReadModels = isPersonal ? hasPermission(nextMe, 'personal.models.read') : canReadModelPolicy;
-      const results = await Promise.allSettled([hasPermission(nextMe, 'personal.profile.read') ? client.organizations(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.rechargeCreate ? client.products(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead ? client.balance(request.signal) : Promise.resolve(null), Promise.resolve({ order: null }), organizationId && canReadUnits ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }), surfaceAccess.usageRead ? client.usageHistory('', request.signal) : Promise.resolve({ items: [] }), surfaceAccess.billingRead && (isPersonal || canReadOrganizationEntitlements) ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] }), isPersonal && surfaceAccess.billingRead ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }), canReadModels ? client.models(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null)]);
+      const balanceRequest = isPersonal
+        ? surfaceAccess.billingRead ? client.balance(request.signal) : Promise.resolve(null)
+        : canReadOrganizationWallet ? client.organizationBalance(organizationId, request.signal) : Promise.resolve(null);
+      const packageRequest = isPersonal
+        ? surfaceAccess.billingRead ? client.entitlementPackages(request.signal) : Promise.resolve({ summary: null, items: [] })
+        : canReadOrganizationWallet ? client.organizationEntitlementPackages(organizationId, request.signal) : Promise.resolve({ summary: null, items: [] });
+      const results = await Promise.allSettled([hasPermission(nextMe, 'personal.profile.read') ? client.organizations(request.signal) : Promise.resolve({ items: [] }), surfaceAccess.rechargeCreate ? client.products(request.signal) : Promise.resolve({ items: [] }), balanceRequest, Promise.resolve({ order: null }), organizationId && canReadUnits ? client.units(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canReadMembers ? client.members(organizationId, request.signal) : Promise.resolve({ items: [] }), surfaceAccess.usageRead ? client.usageHistory('', request.signal) : Promise.resolve({ items: [] }), packageRequest, isPersonal && surfaceAccess.billingRead ? client.rechargeOrders(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadQuota ? client.organizationQuotaGrants(organizationId, request.signal) : Promise.resolve({ items: [] }), organizationId && canAllocateQuota ? client.quotaMembers(organizationId, request.signal) : Promise.resolve({ items: [] }), canReadModels ? client.models(request.signal) : Promise.resolve({ items: [] }), organizationId && canReadModelPolicy ? client.organizationModelPolicy(organizationId, request.signal) : Promise.resolve(null)]);
       if (!guardRef.current.isCurrent(request.generation)) return;
       const value = (index) => (results[index].status === 'fulfilled' ? results[index].value : null);
       setOrganizations(value(0)?.items || []);
@@ -254,16 +266,16 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setMembers(value(5)?.items || []);
       setUsageRecords(value(6)?.items || []);
       setUsageCursor(value(6)?.next_cursor || null);
-      setUsageUnavailable(results[6].status === 'rejected');
+      setUsageUnavailable(serviceRequestFailed(results[6]));
       setPackages(value(7) || { summary: null, items: [] });
       setOrders(value(8)?.items || []);
       setQuotaGrants(value(9)?.items || []);
       setQuotaMembers(value(10)?.items || []);
       setCatalogModels(value(11)?.items || []);
       setModelPolicy(value(12));
-      const billingFailed = [1, 2, 3].some((index) => results[index].status === 'rejected');
+      const billingFailed = [1, 2, 3].some((index) => serviceRequestFailed(results[index]));
       setBillingUnavailable(billingFailed);
-      setBillingDetailsUnavailable([7, 8, 9].some((index) => results[index].status === 'rejected'));
+      setBillingDetailsUnavailable([7, 8, 9].some((index) => serviceRequestFailed(results[index])));
       if ([0, 4, 5].some((index) => results[index].status === 'rejected')) setError(copy.requestFailed);
     } catch (reason) {
       if (reason?.name !== 'AbortError' && guardRef.current.isCurrent(request.generation)) setError(copy.requestFailed);
@@ -2076,10 +2088,10 @@ function PaymentQRCodeDialog({ copy, order, qrData, remainingSeconds, onClose })
 function EntitlementPackageRow({ copy, language, item, onOpen }) {
   const progress = entitlementProgress(item);
   return (
-    <button type="button" className="ap-entitlement-row" onClick={onOpen}>
+    <button type="button" className="ap-entitlement-row" data-points-format="integer" onClick={onOpen}>
       <span className="ap-entitlement-row-main">
         <strong>{item.plan_name}</strong>
-        <small>{copy.usedOfTotal(formatPoints(item.points_used_microcredits, language), formatPoints(item.points_total_microcredits, language))}</small>
+        <small>{copy.usedOfTotal(formatWholePoints(item.points_used_microcredits, language), formatWholePoints(item.points_total_microcredits, language))}</small>
       </span>
       <span className="ap-entitlement-row-meta">
         <span className="ap-status">{copy.packageStatuses[item.status] || item.status}</span>

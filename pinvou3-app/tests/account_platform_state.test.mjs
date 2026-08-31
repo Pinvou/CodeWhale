@@ -207,12 +207,35 @@ test('My organization visibility requires an active organization and a read perm
   assert.equal(canAccessOrganizationPortal(snapshot('', ['org.profile.read'])), false);
 });
 
+test('organization billing uses organization-scoped routes and reports only service failures as unavailable', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
+  const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
+  const desktopClient = await readFile(new URL('../src/features/account-platform/desktop-client.js', import.meta.url), 'utf8');
+
+  assert.ok(authorization.includes("billingRead: organizationContext ? active.has('org.wallet.read') :"));
+  assert.doesNotMatch(authorization, /billingRead: organizationContext \?[^\n]*org\.quota\.read/);
+  for (const source of [bffClient, desktopClient]) {
+    assert.match(source, /organizationBalance\(organizationId, signal\)[\s\S]*?`\/v1\/organizations\/\$\{organizationId\}\/balance`/);
+    assert.match(source, /organizationEntitlementPackages\(organizationId, signal\)[\s\S]*?`\/v1\/organizations\/\$\{organizationId\}\/entitlement-packages`/);
+  }
+  assert.ok(view.includes('client.organizationBalance(organizationId, request.signal)'));
+  assert.ok(view.includes('client.organizationEntitlementPackages(organizationId, request.signal)'));
+  assert.match(view, /function serviceRequestFailed\(result\)[\s\S]*?status === 0 \|\| status >= 500/);
+  assert.match(view, /setBillingUnavailable\(billingFailed\)/);
+  assert.ok(view.includes('setBillingDetailsUnavailable([7, 8, 9].some((index) => serviceRequestFailed(results[index])))'));
+});
+
 test('Web credits and usage use the requested compact presentation', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const portalCredits = view.match(/function PortalCreditsUsage[\s\S]*?function PortalOrdersInvoices/)?.[0] || '';
+  const entitlementRow = view.match(/function EntitlementPackageRow[\s\S]*?function EntitlementPackageDetail/)?.[0] || '';
   assert.doesNotMatch(portalCredits, /creditsUsageLead/);
   assert.match(view, /formatWholePoints\(balance\?\.available_microcredits, language\)/);
   assert.match(view, /entitlementSummary\(activePackages\.length, formatWholePoints\(remainingMicrocredits, language\)\)/);
+  assert.match(entitlementRow, /data-points-format="integer"/);
+  assert.match(entitlementRow, /usedOfTotal\(formatWholePoints\(item\.points_used_microcredits, language\), formatWholePoints\(item\.points_total_microcredits, language\)\)/);
+  assert.doesNotMatch(entitlementRow, /usedOfTotal\(formatPoints\(/);
   assert.match(view, /const summaries = summarizeUsageRecords\(records\)/);
   assert.match(view, /formatUsagePoints\(record\.actual_microcredits \|\| 0, language\)/);
 });

@@ -108,7 +108,7 @@ export function personalSurfaceAccess(snapshot) {
     contextSwitch: hasPermission(snapshot, 'personal.context.switch'),
     closureRead: hasPermission(snapshot, 'personal.account.close.read'),
     closureRequest: hasPermission(snapshot, 'personal.account.close.request'),
-    billingRead: organizationContext ? active.has('org.wallet.read') || active.has('org.quota.read.self') || active.has('org.quota.read.all') : hasPermission(snapshot, 'personal.billing.read'),
+    billingRead: organizationContext ? active.has('org.wallet.read') : hasPermission(snapshot, 'personal.billing.read'),
     rechargeCreate: organizationContext ? active.has('org.entitlements.purchase') : hasPermission(snapshot, 'personal.recharge.create'),
     usageRead: organizationContext ? active.has('org.usage.read.self') || active.has('org.usage.read.all') : hasPermission(snapshot, 'personal.usage.read'),
     usageCancel: organizationContext ? false : hasPermission(snapshot, 'personal.usage.cancel'),

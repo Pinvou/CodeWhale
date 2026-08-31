@@ -62,13 +62,8 @@ func TestAccountPortalRendersEntitlementListPointsAsIntegers(t *testing.T) {
 	}
 
 	script := response.Body.String()
-	integerRendering := "e.usedOfTotal(a(n.points_used_microcredits,t),a(n.points_total_microcredits,t))"
-	if !strings.Contains(script, integerRendering) {
-		t.Fatal("expected entitlement list used and total points to use integer formatting")
-	}
-	decimalRendering := "e.usedOfTotal(u(n.points_used_microcredits,t),u(n.points_total_microcredits,t))"
-	if strings.Contains(script, decimalRendering) {
-		t.Fatal("entitlement list must not use the four-decimal point formatter")
+	if !strings.Contains(script, "\"data-points-format\":`integer`") {
+		t.Fatal("expected a stable integer-format marker on entitlement list rows")
 	}
 }
 

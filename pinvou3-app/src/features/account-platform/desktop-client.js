@@ -235,6 +235,9 @@ export class AccountPlatformDesktopClient {
       signal,
     });
   }
+  organizationBalance(organizationId, signal) {
+    return this.request('token', `/v1/organizations/${organizationId}/balance`, { signal });
+  }
   createRecharge(productId, channel, key) {
     return this.request('token', '/v1/recharge/orders', {
       method: 'POST',
@@ -272,6 +275,9 @@ export class AccountPlatformDesktopClient {
   }
   entitlementPackages(signal) {
     return this.request('token', '/v1/me/entitlement-packages', { signal });
+  }
+  organizationEntitlementPackages(organizationId, signal) {
+    return this.request('token', `/v1/organizations/${organizationId}/entitlement-packages`, { signal });
   }
   usageHistory(cursor = '', signal) {
     const next = cursor ? `&cursor=${encodeURIComponent(cursor)}` : '';
