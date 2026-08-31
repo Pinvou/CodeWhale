@@ -124,8 +124,20 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 ///       旧目录（wecomcli-msg/wecomcli-schedule）启动门控时清理。
 /// 0.24: Windows Python MCP 第三方依赖改为清单锁定、用户目录按需安装；升级时
 ///       刷新内嵌清单，依赖迁移在每次启动首帧后的后台任务中可重试。
+/// 0.28: lark-skills doc audit fixes, 31 findings across eight packs
+///       (registered in lark-skills/NOTICE.md, including review fixes
+///       aligned with CLI v1.0.87 ground truth). Version takes the next
+///       free slot after 0.24 (weibo #333), 0.25 (wecom #366),
+///       0.26 (tmeet #362), and 0.27 (dws #359); 0.27 was already
+///       claimed by #359, and a duplicate number would leave the
+///       upgraded build VERSION unchanged between the two PRs and skip
+///       startup re-extraction. Skill trees are excluded from the
+///       content hash, so the semantic version must be bumped for
+///       connected users to refresh at startup (otherwise the refresh
+///       waits for the post-first-frame refresh_connector_auth_gates
+///       backfill).
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.24-",
+    "0.28-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
