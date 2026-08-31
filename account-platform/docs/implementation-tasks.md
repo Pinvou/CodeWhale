@@ -36,7 +36,7 @@
 | APT-010 | 组织节点创建、移动、重命名和受阻逻辑删除 | ACC-21, ACC-23–ACC-25 | APT-006, APT-009 | CODE | DONE |
 | APT-011 | 多方式邀请、成员增删、所有权转让和即时撤权 | ACC-26–ACC-29 | APT-006, APT-009, APT-010 | CODE | DONE |
 | APT-012 | 用户级全局活动上下文、跨端版本同步和成员失效回退 | CORE-02, ACC-34, ACC-38, ACC-39, NFR-08, UI-06, UI-07 | APT-006, APT-011 | CODE | DONE |
-| APT-013 | Web 个人中心三 Tab 合并、成功订单过滤与普通用户资源边界收敛 | UI-03 | APT-012 | CODE | DONE |
+| APT-013 | Web 个人中心三 Tab 合并、全状态订单历史与普通用户资源边界收敛 | UI-03 | APT-012 | CODE | DONE |
 | APT-014 | 账号注销资格、持久 Saga、静默期、跨域阻断与修复入口 | ACC-10, ACC-40–ACC-45, UI-14, ADM-34 | APT-003, APT-006, APT-018, APT-021–APT-025, APT-030 | CODE | DONE |
 | APT-015 | 注销资料清理、标识墓碑、Commerce/邀请收敛及组织授予隔离回收 | ACC-11, ACC-46, ACC-47, ACC-49, ACC-50, BILL-39, BILL-40, NFR-13 | APT-014, APT-016, APT-017, APT-019, APT-025 | CODE | DONE |
 | APT-016 | BASE/BONUS 组成级权益、消费顺序、到期与守恒约束 | CORE-04, BILL-05, BILL-06, BILL-14, BILL-16–BILL-19, BILL-36, UI-08 | 无 | CODE | DONE |
@@ -113,7 +113,7 @@
 | APT-087 | Portal 查询参数、Tab、浏览器历史与权限加载状态一致性 | UI-24 | APT-013, APT-078 | CODE | DONE |
 | APT-088 | 从普通个人中心移除角色授权展示和本人角色绑定请求 | UI-25 | APT-013, APT-078 | CODE | DONE |
 | APT-089 | 权益包摘要、全量列表和组成级详情渐进式交互 | UI-26 | APT-013, APT-016, APT-034 | CODE | DONE |
-| APT-090 | 成功订单响应式摘要表格与完整详情弹窗 | UI-27 | APT-013, APT-034 | CODE | DONE |
+| APT-090 | 全状态订单响应式摘要表格与完整详情弹窗 | UI-27 | APT-013, APT-034 | CODE | DONE |
 | APT-091 | 单订单隔离、案件止损准入矩阵与商品级聚合暂停 | PAY-55 | APT-051, APT-066 | CODE | DONE |
 | APT-092 | Provider 调用健康观察、分区聚合持久止损、观察缺口与历史控制迁移 | PAY-56, PAY-57, NFR-54 | APT-022, APT-045, APT-076, APT-091 | CODE | DONE |
 | APT-093 | Provider/商品独立双人恢复及分级控制后台证据 | PAY-58, ADM-53 | APT-008, APT-067, APT-092 | CODE | DONE |
