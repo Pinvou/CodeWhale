@@ -124,6 +124,14 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 ///       旧目录（wecomcli-msg/wecomcli-schedule）启动门控时清理。
 /// 0.24: Windows Python MCP 第三方依赖改为清单锁定、用户目录按需安装；升级时
 ///       刷新内嵌清单，依赖迁移在每次启动首帧后的后台任务中可重试。
+/// 0.25: wecom sheet/smartsheet/smartpage routing-rule unification and
+///       fixes, plus calendar/meeting/email/message/media doc-audit
+///       fixes (15 findings; all registered in NOTICE-wecom.md). Takes
+///       the slot reserved for #366 by the 0.28 entry; the
+///       extracted-VERSION gate is inequality-only, so landing order
+///       and skipped numbers stay safe. Skill trees are excluded from
+///       the content hash, so the semantic bump is required for
+///       connected users to refresh at startup.
 /// 0.26: tmeet-skill doc-audit fixes (seventh review round), registered
 ///       as entries 7-12 in NOTICE-tmeet.md: contact downstream command
 ///       list, underscore command names, crossed cause/solution columns
@@ -147,7 +155,7 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 ///       waits for the post-first-frame refresh_connector_auth_gates
 ///       backfill).
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.26-",
+    "0.25-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
