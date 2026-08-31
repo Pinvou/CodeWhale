@@ -45,6 +45,10 @@ const runtimeScript = readApp(
   "scripts",
   "resolve-runtime.ps1",
 );
+const pythonDependencyRuntimeTest = readApp(
+  "tests",
+  "windows_python_dependency_contract.ps1",
+);
 const onnxRuntimeScript = readApp(
   "src-tauri",
   "packaging",
@@ -132,9 +136,48 @@ for (const contract of [
   ".stage-manifest.json",
   "Get-RuntimeDescriptorContent",
   'delivery = "download-on-first-use"',
+  "Test-PythonDependencyTarget",
+  "Test-PythonDependencyTargets",
+  "Test-PythonWheelTarget",
+  "python_dependencies",
+  "windows-x64",
+  "files.pythonhosted.org",
 ]) {
   assert.ok(runtimeScript.includes(contract), `runtime staging must retain ${contract}`);
 }
+const reusableStageStart = runtimeScript.indexOf("function Test-VerifiedStageReusable");
+const freshStageStart = runtimeScript.indexOf("function Stage-Submodule", reusableStageStart);
+const onnxDescriptorStart = runtimeScript.indexOf(
+  "function Get-OnnxDevDescriptorContent",
+  freshStageStart,
+);
+assert.ok(reusableStageStart >= 0 && freshStageStart > reusableStageStart);
+assert.ok(onnxDescriptorStart > freshStageStart);
+assert.match(
+  runtimeScript.slice(reusableStageStart, freshStageStart),
+  /Test-PythonDependencyTargets/,
+  "verified stage reuse must revalidate bundled Python ABI and wheel locks",
+);
+assert.match(
+  runtimeScript.slice(freshStageStart, onnxDescriptorStart),
+  /Assert-FreshStagePythonDependencies/,
+  "fresh runtime staging must validate bundled Python ABI and wheel locks",
+);
+assert.match(
+  pythonDependencyRuntimeTest,
+  /ABI mismatch must fail closed/,
+  "PowerShell contract must exercise fail-closed ABI validation",
+);
+assert.match(
+  runtimeScript,
+  /\$null = & \$pythonExe -I -S -B -c \$probe/u,
+  "ABI probe stdout must be discarded so stray output cannot flip the exit-code check",
+);
+assert.match(
+  packageJson.scripts["test:windows-runtime"],
+  /windows_python_dependency_contract\.ps1/u,
+  "the windows runtime npm chain must execute the python dependency contract, or the ps1 loses its only CI runner",
+);
 assert.match(runtimeScript, /Get-Sha256 -Path \$sourcePath/u);
 assert.match(runtimeScript, /vcRedist\.minimumVersion/u);
 assert.match(runtimeScript, /System\.Diagnostics\.FileVersionInfo/u);
@@ -420,18 +463,18 @@ assert.ok(
 );
 assert.match(
   runtimeScript,
-  /Get-ChildItem -LiteralPath \$manifestRoot -Filter manifest\.json -File -Recurse/u,
+  /Get-ChildItem -LiteralPath \$manifestRoot -Filter manifest\.json -File -Recurse/iu,
   "the Python dependency gate must enumerate every built-in MCP manifest",
 );
 assert.match(
   runtimeScript,
-  /Test-PythonWheelTarget -Filename \$wheel\.filename -Target \$target/u,
+  /Test-PythonWheelTarget -Filename \$wheel\.filename -Target \$wheelTarget/u,
   "the Python dependency gate must validate locked wheel PEP 425 tags",
 );
 assert.match(
   runtimeScript,
-  /"target:\$target"/u,
-  "the Python dependency lock must bind its interpreter target",
+  /\$wheelTarget = "cp\$\{versionDigits\}-win_amd64"/u,
+  "the Python dependency gate must bind wheel validation to the declared interpreter target",
 );
 assert.ok(
   runtimeInitScript.includes(

@@ -10,30 +10,6 @@ pub fn list_marketplace_tools(
     Ok(tools)
 }
 
-/// React 首帧呈现后触发：在 blocking 线程中修复存量内置 Python MCP 依赖。
-/// 每次启动都会调用，离线/临时失败可在后续启动重试；仅在实际改写 mcp.json 后
-/// 递增配置修订号（无变化不 bump，避免每次启动都无谓重建在线会话的 engine），
-/// 重建发生在下一轮，安全重新发现 MCP 工具。
-#[tauri::command]
-pub async fn repair_python_dependencies_after_first_frame(
-    pool: tauri::State<'_, crate::features::assistant::engine_pool::EnginePool>,
-) -> Result<Vec<String>, String> {
-    let (errors, mcp_config_changed) = tokio::task::spawn_blocking(|| {
-        crate::features::marketplace::MarketplaceManager::new()
-            .repair_installed_builtin_python_dependencies()
-    })
-    .await
-    .map_err(|error| format!("Python MCP 依赖后台修复任务失败: {error}"))?;
-    if mcp_config_changed {
-        pool.mark_mcp_config_updated();
-        pool.refresh_disallowed_tools().await;
-    }
-    for error in &errors {
-        log::warn!("[marketplace] 已安装 Python MCP 依赖后台修复失败: {error}");
-    }
-    Ok(errors)
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct MarketplaceOAuthLoginResult {
     pub status: String,
@@ -475,7 +451,8 @@ pub async fn uninstall_marketplace_tool(
 
 pub(super) fn uninstall_marketplace_tool_sync(tool_id: &str) -> Result<(), String> {
     let mgr = crate::features::marketplace::MarketplaceManager::new();
-    let companions = mgr.companion_skills(tool_id); // 卸前先取(manifest 不删,卸后也能读,保险先读)
+    // Resolve companion ownership before any OAuth, skill, or MCP state is mutated.
+    let companions = mgr.companion_skills(tool_id);
     if let Some(server_name) = mgr.oauth_remote_server_name(tool_id) {
         match marketplace_oauth_server_from_mcp_config(&server_name)? {
             Some(server) => {

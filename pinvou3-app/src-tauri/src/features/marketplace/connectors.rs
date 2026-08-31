@@ -12,7 +12,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::platform::paths;
 
 use super::bundle;
-use super::python_dependencies::InstalledPythonDependencies;
+use super::python_dependencies;
 use super::secrets::{is_sensitive_key_name, set_remote_secret_header};
 use super::types::ToolManifest;
 use super::MarketplaceManager;
@@ -21,203 +21,24 @@ use super::MarketplaceManager;
 /// 并发安装/卸载会交错丢更新；与 store.rs 的 BUNDLES_FILE_LOCK 同一范式。
 static MCP_JSON_LOCK: Mutex<()> = Mutex::new(());
 
+#[cfg(test)]
+static NEXT_PIP_INSTALL_RESULT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+pub(super) fn set_next_pip_install_result_for_test(result: u8) {
+    NEXT_PIP_INSTALL_RESULT.store(result, std::sync::atomic::Ordering::SeqCst);
+}
+#[cfg(test)]
+pub(super) fn take_pending_pip_install_result_for_test() -> u8 {
+    NEXT_PIP_INSTALL_RESULT.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
+
 pub(super) fn mcp_json_lock() -> MutexGuard<'static, ()> {
     MCP_JSON_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-#[cfg(test)]
-mod dependency_launch_tests {
-    use super::*;
-
-    #[test]
-    fn windows_python_bootstrap_preserves_server_argv() {
-        let args = python_launch_args(
-            Path::new(r"C:\Users\tester\.pinvou3\runtimes\python-packages\abc"),
-            vec![
-                r"C:\Users\tester\bundle\server.py".to_string(),
-                "--stdio".to_string(),
-            ],
-        );
-        assert_eq!(&args[..3], ["-I", "-B", "-c"]);
-        assert_eq!(args[3], WINDOWS_PYTHON_BOOTSTRAP);
-        assert!(args[4].ends_with(r"python-packages\abc"));
-        assert!(args[5].ends_with(r"bundle\server.py"));
-        assert_eq!(args[6], "--stdio");
-    }
-
-    #[test]
-    fn upgrade_repair_preserves_existing_env_fields() {
-        let _guard = crate::bridge::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_home = std::env::var_os("PINVOU3_HOME");
-        let root =
-            std::env::temp_dir().join(format!("pinvou-python-mcp-repair-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::env::set_var("PINVOU3_HOME", &root);
-
-        let result = (|| {
-            let mcp_path = paths::mcp_config_path();
-            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
-            std::fs::write(
-                &mcp_path,
-                r#"{"servers":{"gongwen":{"command":"python","args":["old.py"],"env":{"SECRET":"${SECRET}","KEEP":"value"},"future":true}}}"#,
-            )
-            .unwrap();
-            let manifest: ToolManifest = serde_json::from_str(include_str!(
-                "../../../../resources/mcp-servers/gongwen/manifest.json"
-            ))
-            .unwrap();
-            let dependencies = InstalledPythonDependencies {
-                dir: root.join("runtimes/python-packages/lock"),
-                asset: super::super::store::AssetRef {
-                    kind: "python-packages".into(),
-                    name: "cp313-win_amd64".into(),
-                    version: "lock".into(),
-                    sha256: "lock".into(),
-                },
-            };
-            assert!(MarketplaceManager::new()
-                .repair_python_dependency_entry(
-                    &manifest,
-                    &root.join("bundles/gongwen/mcp"),
-                    &dependencies,
-                )
-                .unwrap());
-            let repaired: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(mcp_path).unwrap()).unwrap();
-            let entry = &repaired["servers"]["gongwen"];
-            assert_eq!(entry["env"]["SECRET"], "${SECRET}");
-            assert_eq!(entry["env"]["KEEP"], "value");
-            assert_eq!(entry["future"], true);
-            assert_eq!(entry["args"][0], "-I");
-        })();
-
-        match old_home {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(root);
-        result
-    }
-
-    /// 与 upgrade_repair_preserves_existing_env_fields 相同的 PINVOU3_HOME 隔离
-    /// 脚手架，供修复短路/防卫用例复用。
-    fn with_repair_test_home<F: FnOnce(&std::path::Path) -> R, R>(f: F) -> R {
-        let _guard = crate::bridge::paths::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_home = std::env::var_os("PINVOU3_HOME");
-        let root =
-            std::env::temp_dir().join(format!("pinvou-python-mcp-repair-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::env::set_var("PINVOU3_HOME", &root);
-        let result = f(&root);
-        match old_home {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&root);
-        result
-    }
-
-    fn gongwen_repair_fixture(
-        root: &std::path::Path,
-    ) -> (ToolManifest, InstalledPythonDependencies) {
-        let manifest: ToolManifest = serde_json::from_str(include_str!(
-            "../../../../resources/mcp-servers/gongwen/manifest.json"
-        ))
-        .unwrap();
-        let dependencies = InstalledPythonDependencies {
-            dir: root.join("runtimes/python-packages/lock"),
-            asset: super::super::store::AssetRef {
-                kind: "python-packages".into(),
-                name: "cp313-win_amd64".into(),
-                version: "lock".into(),
-                sha256: "lock".into(),
-            },
-        };
-        (manifest, dependencies)
-    }
-
-    #[test]
-    fn upgrade_repair_skips_write_when_entry_already_bootstrapped() {
-        with_repair_test_home(|root| {
-            let mcp_path = paths::mcp_config_path();
-            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
-            std::fs::write(
-                &mcp_path,
-                r#"{"servers":{"gongwen":{"command":"python","args":["old.py"],"env":{"KEEP":"value"}}}}"#,
-            )
-            .unwrap();
-            let (manifest, dependencies) = gongwen_repair_fixture(root);
-            let server_dir = root.join("bundles/gongwen/mcp");
-            let manager = MarketplaceManager::new();
-
-            // 首次：旧直启条目被改写为隔离 bootstrap。
-            assert!(manager
-                .repair_python_dependency_entry(&manifest, &server_dir, &dependencies)
-                .unwrap());
-            // 二次：条目已是目标形态，报告无变化且不再写盘。
-            assert!(!manager
-                .repair_python_dependency_entry(&manifest, &server_dir, &dependencies)
-                .unwrap());
-            let repaired: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(mcp_path).unwrap()).unwrap();
-            assert_eq!(repaired["servers"]["gongwen"]["env"]["KEEP"], "value");
-        });
-    }
-
-    #[test]
-    fn upgrade_repair_rejects_remote_url_entry() {
-        with_repair_test_home(|root| {
-            let mcp_path = paths::mcp_config_path();
-            std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
-            std::fs::write(
-                &mcp_path,
-                r#"{"servers":{"gongwen":{"url":"https://example.invalid/mcp"}}}"#,
-            )
-            .unwrap();
-            let (manifest, dependencies) = gongwen_repair_fixture(root);
-
-            let error = MarketplaceManager::new()
-                .repair_python_dependency_entry(
-                    &manifest,
-                    &root.join("bundles/gongwen/mcp"),
-                    &dependencies,
-                )
-                .unwrap_err();
-
-            assert!(error.contains("远程 url 配置"), "{error}");
-            // 条目保持原样，未被覆写 command/args。
-            let entry: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(mcp_path).unwrap()).unwrap();
-            assert!(entry["servers"]["gongwen"].get("command").is_none());
-        });
-    }
-
-    #[test]
-    fn unlocked_custom_python_dependencies_are_rejected_only_on_windows() {
-        assert!(should_reject_unlocked_python_dependencies(
-            true, false, false
-        ));
-        assert!(!should_reject_unlocked_python_dependencies(
-            false, false, false
-        ));
-        assert!(!should_reject_unlocked_python_dependencies(
-            true, true, false
-        ));
-        assert!(!should_reject_unlocked_python_dependencies(
-            true, false, true
-        ));
-    }
-}
-
-/// 把 JSON 值以 pretty 形式写盘(迁移与 connector 注册共用)。
-/// 写前创建父目录：全新 PINVOU3_HOME 下 `bundle/` 尚不存在，直接写会 ENOENT。
-/// tmp + rename 原子落盘（底座 `write_atomic`，与 store.rs 同一做法）——安装
 /// 中途崩溃不得留下半写的 mcp.json（幽灵 server，四轮评审 M-8）。
 pub(super) fn write_json_pretty(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
@@ -237,62 +58,30 @@ fn default_mcp_json() -> serde_json::Value {
 /// 用户目录依赖。用隔离模式启动一段固定 bootstrap，显式把已验证的锁目录插到
 /// sys.path，再以原始 argv 执行 MCP server。`-I` 同时隔离了 server 所在目录，
 /// bootstrap 一并补入（锁目录保持最高优先级），避免未来含 sibling 模块的
-/// MCP 只在 Windows 上 import 失败。
-const WINDOWS_PYTHON_BOOTSTRAP: &str = "import os,runpy,sys; d=sys.argv.pop(1); p=sys.argv.pop(1); sys.path.insert(0,os.path.dirname(p)); sys.path.insert(0,d); sys.argv[0]=p; runpy.run_path(p,run_name='__main__')";
-
-fn python_launch_args(dependency_dir: &Path, server_args: Vec<String>) -> Vec<String> {
-    let mut args = vec![
-        "-I".to_string(),
-        "-B".to_string(),
-        "-c".to_string(),
-        WINDOWS_PYTHON_BOOTSTRAP.to_string(),
-        dependency_dir.to_string_lossy().into_owned(),
-    ];
-    args.extend(server_args);
-    args
-}
-
-fn should_reject_unlocked_python_dependencies(
-    is_windows: bool,
-    has_trusted_builtin_manifest: bool,
-    pip_dependencies_empty: bool,
-) -> bool {
-    is_windows && !has_trusted_builtin_manifest && !pip_dependencies_empty
-}
-
 impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S> {
     /// 装 `manifest.pip_dependencies` 里的 Python 依赖（跨平台）。
     /// 用 `python -m pip install`（保证装进跑 MCP server 的同一个 python，不裸 `pip`）。
     /// ① 先预检依赖是否已可用（系统已装/此前装过）→ 命中即跳过，不跑 pip；
     /// ② 否则按序兜底：`--user` → `--user --break-system-packages`（PEP 668）→ `--break-system-packages`，任一成功即 Ok。
     /// 零依赖工具（pip_dependencies 为空）直接返回 Ok，不影响 weather/obsidian 等。
-    pub(super) fn pip_install_deps(
-        &self,
-        manifest: &ToolManifest,
-        trusted_builtin_manifest: Option<&ToolManifest>,
-    ) -> Result<Option<InstalledPythonDependencies>, String> {
-        // Windows 基础解释器随安装包提供，第三方包由受信任的内嵌 manifest 以
-        // wheel + SHA-256 锁定，按需装到用户目录。上传/自定义 manifest 不得借此
-        // 触发联网代码下载。
-        let is_windows = crate::platform::capabilities::is_windows();
-        if is_windows {
-            if let Some(builtin) = trusted_builtin_manifest {
-                return super::python_dependencies::ensure_for_builtin_manifest(builtin);
-            }
-            if should_reject_unlocked_python_dependencies(
-                is_windows,
-                trusted_builtin_manifest.is_some(),
-                manifest.pip_dependencies.is_empty(),
-            ) {
-                return Err(format!(
-                    "自定义 MCP '{}' 的 Python 依赖未经过 Windows 可验证依赖锁，无法自动安装；请将兼容依赖随附在上传包内，并移除 pip_dependencies 后重试",
-                    manifest.id
-                ));
-            }
-            return Ok(None);
-        }
+    pub(super) fn pip_install_deps(&self, manifest: &ToolManifest) -> Result<(), String> {
         if manifest.pip_dependencies.is_empty() {
-            return Ok(None);
+            return Ok(());
+        }
+        #[cfg(test)]
+        match NEXT_PIP_INSTALL_RESULT.swap(0, std::sync::atomic::Ordering::SeqCst) {
+            1 => return Err("test-injected pip dependency failure".to_string()),
+            2 => return Ok(()),
+            _ => {}
+        }
+        // The bundled Windows interpreter is not an implicit dependency source. Every non-empty
+        // dependency set must have a verified platform wheel lock; silently accepting ambient or
+        // preinstalled packages would make the manifest incomplete and non-reproducible.
+        if crate::platform::capabilities::is_windows() {
+            return Err(format!(
+                "tool '{}' is missing the Windows Python dependency lock required for a safe install",
+                manifest.id
+            ));
         }
         let python_cmd = "python3";
         let deps = &manifest.pip_dependencies;
@@ -307,7 +96,7 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
             .map(|o| o.status.success())
             .unwrap_or(false);
         if satisfied {
-            return Ok(None);
+            return Ok(());
         }
 
         // ② pip 安装,按序兜底,任一成功即 Ok:
@@ -334,7 +123,7 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
         let mut last_err = String::new();
         for extra in attempts {
             match run(extra) {
-                Ok(o) if o.status.success() => return Ok(None),
+                Ok(o) if o.status.success() => return Ok(()),
                 Ok(o) => {
                     last_err = String::from_utf8_lossy(&o.stderr)
                         .trim()
@@ -354,18 +143,13 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
             "依赖安装失败（pip）：{last_err}（已尝试 --user 与 --break-system-packages;请确认网络可达且 python3 自带 pip）"
         ))
     }
-
-    /// 把 manifest 注册进 `mcp.json`(`servers` 表)。
-    ///
-    /// facade:加载 mcp.json → 取 `servers` map → 按 manifest 是否含远程 server
-    /// 委托给 `add_remote_to_mcp_json`(远程:url/headers/oauth)或
     /// `add_local_to_mcp_json`(本地:command/args/env)→ 落盘。
     pub(super) fn add_to_mcp_json(
         &self,
         manifest: &ToolManifest,
         user_config: &HashMap<String, String>,
         server_dir: &std::path::Path,
-        python_dependencies: Option<&InstalledPythonDependencies>,
+        python_environment: Option<&python_dependencies::InstalledPythonEnvironment>,
     ) -> Result<(), String> {
         let _guard = mcp_json_lock();
         let mcp_path = paths::mcp_config_path();
@@ -389,7 +173,7 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
                 manifest,
                 user_config,
                 server_dir,
-                python_dependencies,
+                python_environment,
                 servers,
             )?;
         }
@@ -516,17 +300,8 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
         Ok(())
     }
 
-    /// 本地工具路径:command/args/env。Python 工具用内置 python(Windows)或系统 python3。
-    /// 敏感字段走 `${ENV}` 占位,非敏感原样写。
-    fn add_local_to_mcp_json(
-        &self,
-        manifest: &ToolManifest,
-        user_config: &HashMap<String, String>,
-        server_dir: &std::path::Path,
-        python_dependencies: Option<&InstalledPythonDependencies>,
-        servers: &mut serde_json::Map<String, serde_json::Value>,
-    ) -> Result<(), String> {
-        let mut args: Vec<String> = manifest
+    fn local_server_args(manifest: &ToolManifest, server_dir: &Path) -> Vec<String> {
+        manifest
             .args
             .iter()
             .map(|a| {
@@ -536,15 +311,101 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
                     a.clone()
                 }
             })
-            .collect();
+            .collect()
+    }
 
-        if (manifest.command == "python" || manifest.command == "python3")
-            && crate::platform::capabilities::is_windows()
-        {
-            if let Some(dependencies) = python_dependencies {
-                args = python_launch_args(&dependencies.dir, args);
-            }
+    fn managed_python_runtime_fields(
+        manifest: &ToolManifest,
+        server_dir: &Path,
+        environment: &python_dependencies::InstalledPythonEnvironment,
+    ) -> Result<(String, Vec<String>), String> {
+        if manifest.command != "python" && manifest.command != "python3" {
+            return Err(format!(
+                "tool '{}' declares Python dependencies but does not use a Python command",
+                manifest.id
+            ));
         }
+        let args = Self::local_server_args(manifest, server_dir);
+        let Some(server_script) = args.first().cloned() else {
+            return Err(format!(
+                "tool '{}' has no Python server argument",
+                manifest.id
+            ));
+        };
+        if !Path::new(&server_script).is_file() {
+            return Err(format!(
+                "tool '{}' Python server does not exist: {}",
+                manifest.id, server_script
+            ));
+        }
+        let runner = paths::bundle_mcp_python_runner();
+        if !runner.is_file() {
+            return Err("Python MCP dependency runner is missing; restart and retry".to_string());
+        }
+        let mut wrapped_args = vec![
+            "-I".to_string(),
+            "-S".to_string(),
+            "-B".to_string(),
+            runner.to_string_lossy().into_owned(),
+            environment.site_packages.to_string_lossy().into_owned(),
+            server_script,
+        ];
+        wrapped_args.extend(args.into_iter().skip(1));
+        Ok((environment.python_command.clone(), wrapped_args))
+    }
+
+    /// Repair only the managed launcher fields. Existing configuration, secret placeholders,
+    /// enabled state, timeouts, and forward-compatible fields retain their JSON values.
+    pub(super) fn patch_managed_python_runtime(
+        &self,
+        manifest: &ToolManifest,
+        server_dir: &Path,
+        environment: &python_dependencies::InstalledPythonEnvironment,
+    ) -> Result<(), String> {
+        let (command, args) =
+            Self::managed_python_runtime_fields(manifest, server_dir, environment)?;
+        let _guard = mcp_json_lock();
+        let mcp_path = paths::mcp_config_path();
+        let content = std::fs::read_to_string(&mcp_path)
+            .map_err(|error| format!("read mcp.json: {error}"))?;
+        let mut mcp: serde_json::Value =
+            serde_json::from_str(&content).map_err(|error| format!("parse mcp.json: {error}"))?;
+        let entry = mcp
+            .get_mut("servers")
+            .and_then(serde_json::Value::as_object_mut)
+            .and_then(|servers| servers.get_mut(&manifest.id))
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| format!("mcp.json has no local server entry for '{}'", manifest.id))?;
+        let command = serde_json::Value::String(command);
+        let args = serde_json::to_value(args).map_err(|error| error.to_string())?;
+        if entry.get("command") == Some(&command) && entry.get("args") == Some(&args) {
+            return Ok(());
+        }
+        entry.insert("command".to_string(), command);
+        entry.insert("args".to_string(), args);
+        write_json_pretty(&mcp_path, &mcp)
+    }
+
+    /// Local tool layout: command/args/env. Python tools use the bundled python (Windows)
+    /// or the system python3; sensitive fields go through `${ENV}` placeholders, non-sensitive ones verbatim.
+    fn add_local_to_mcp_json(
+        &self,
+        manifest: &ToolManifest,
+        user_config: &HashMap<String, String>,
+        server_dir: &std::path::Path,
+        python_environment: Option<&python_dependencies::InstalledPythonEnvironment>,
+        servers: &mut serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        let (command, args) = if let Some(environment) = python_environment {
+            Self::managed_python_runtime_fields(manifest, server_dir, environment)?
+        } else {
+            let command = if manifest.command == "python" || manifest.command == "python3" {
+                paths::python_command()
+            } else {
+                manifest.command.clone()
+            };
+            (command, Self::local_server_args(manifest, server_dir))
+        };
 
         let mut env = manifest
             .env
@@ -593,13 +454,6 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
             }
         }
 
-        // python 工具:Windows 用内置 pythonw；第三方依赖由上面的隔离启动参数注入。
-        // 其他平台继续使用系统 python3。
-        let command = if manifest.command == "python" || manifest.command == "python3" {
-            paths::python_command()
-        } else {
-            manifest.command.clone()
-        };
         let mut entry = serde_json::json!({
             "command": command,
             "args": args,
@@ -615,58 +469,6 @@ impl<S: crate::platform::credential_store::CredentialStore> MarketplaceManager<S
     /// 升级迁移：为已安装的内置 Python MCP 刷新依赖 bootstrap。只改 command/args，
     /// 保留既有 env/凭据占位及未知字段，避免用空 user_config 重建条目时丢用户配置。
     /// 返回是否实际改写了 mcp.json：条目已是目标形态时不写盘（Ok(false)），避免每次
-    /// 启动都无谓改写配置并触发 engine 重建。
-    pub(super) fn repair_python_dependency_entry(
-        &self,
-        manifest: &ToolManifest,
-        server_dir: &Path,
-        dependencies: &InstalledPythonDependencies,
-    ) -> Result<bool, String> {
-        let _guard = mcp_json_lock();
-        let mcp_path = paths::mcp_config_path();
-        let content =
-            std::fs::read_to_string(&mcp_path).map_err(|e| format!("读取 mcp.json 失败: {e}"))?;
-        let mut mcp: serde_json::Value =
-            serde_json::from_str(&content).map_err(|e| format!("mcp.json 格式错误: {e}"))?;
-        let entry = mcp
-            .get_mut("servers")
-            .and_then(|servers| servers.as_object_mut())
-            .and_then(|servers| servers.get_mut(&manifest.id))
-            .and_then(|entry| entry.as_object_mut())
-            .ok_or_else(|| format!("mcp.json 缺少已安装工具 '{}' 的本地条目", manifest.id))?;
-
-        // 远程 url 条目不是本地 bootstrap 的修复对象：引擎在 url 存在时优先走 HTTP
-        // transport，覆写 command/args 不会生效。明确报错以避免“修复成功”假阳性。
-        if entry.get("url").is_some() {
-            return Err(format!(
-                "mcp.json 条目 '{}' 为远程 url 配置，不适用本地 Python bootstrap 修复",
-                manifest.id
-            ));
-        }
-
-        let server_args = manifest
-            .args
-            .iter()
-            .map(|arg| {
-                if arg == "server.py" || arg.ends_with("/server.py") {
-                    server_dir.join("server.py").to_string_lossy().into_owned()
-                } else {
-                    arg.clone()
-                }
-            })
-            .collect();
-        let new_command = serde_json::Value::String(paths::python_command());
-        let new_args = serde_json::to_value(python_launch_args(&dependencies.dir, server_args))
-            .map_err(|e| format!("序列化 Python 启动参数失败: {e}"))?;
-        if entry.get("command") == Some(&new_command) && entry.get("args") == Some(&new_args) {
-            return Ok(false);
-        }
-        entry.insert("command".to_string(), new_command);
-        entry.insert("args".to_string(), new_args);
-        write_json_pretty(&mcp_path, &mcp)?;
-        Ok(true)
-    }
-
     pub(super) fn remove_from_mcp_json(&self, tool_id: &str) -> Result<(), String> {
         let _guard = mcp_json_lock();
         let mcp_path = paths::mcp_config_path();

@@ -254,7 +254,6 @@ command_protocol!(
     "marketplace.rs",
     [
         "list_marketplace_tools",
-        "repair_python_dependencies_after_first_frame",
         "install_marketplace_tool",
         "get_marketplace_tool_auth_status",
         "start_marketplace_tool_oauth_login",

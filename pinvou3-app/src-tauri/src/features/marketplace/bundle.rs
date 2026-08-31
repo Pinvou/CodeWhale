@@ -967,7 +967,7 @@ mod tests {
             routing_rules: vec![],
             tool_table_entries: vec![],
             pip_dependencies: vec![],
-            windows_python_dependencies: None,
+            python_dependencies: None,
             servers: vec![],
             companion_skills: vec![],
         };
@@ -1034,7 +1034,7 @@ mod tests {
             routing_rules: vec![],
             tool_table_entries: vec![],
             pip_dependencies: vec![],
-            windows_python_dependencies: None,
+            python_dependencies: None,
             servers: vec![],
             companion_skills: vec![],
         };
