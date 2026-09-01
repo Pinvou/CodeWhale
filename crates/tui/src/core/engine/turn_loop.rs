@@ -1840,8 +1840,7 @@ impl Engine {
                 match stuck_guard.observe(StepFingerprint::assistant_no_tool(&current_text_visible))
                 {
                     Some(StuckSignal::Warn { reason }) => {
-                        let started =
-                            no_progress_warning_started_at.get_or_insert_with(Instant::now);
+                        let started = no_progress_warning_started_at.insert(Instant::now());
                         let status = no_progress_status_message(&reason, started.elapsed());
                         let _ = self.tx_event.send(Event::status(status)).await;
                         self.add_session_message(self.runtime_text_message_with_turn_metadata(
@@ -4046,8 +4045,10 @@ impl Engine {
             if let Some(signal) = stuck_signal {
                 match signal {
                     StuckSignal::Warn { reason } => {
-                        let started =
-                            no_progress_warning_started_at.get_or_insert_with(Instant::now);
+                        // A freshly emitted warning starts a new no-progress
+                        // episode; overwrite so an earlier episode's clock
+                        // cannot bleed into this one.
+                        let started = no_progress_warning_started_at.insert(Instant::now());
                         let status = no_progress_status_message(&reason, started.elapsed());
                         let _ = self.tx_event.send(Event::status(status)).await;
                     }
@@ -4061,9 +4062,12 @@ impl Engine {
                         return (TurnOutcomeStatus::Failed, Some(status));
                     }
                 }
-            } else {
-                no_progress_warning_started_at = None;
             }
+            // No reset on a signal-less step: between a Warn and its Stop the
+            // guard returns None exactly once (`repeats_after_warn_to_stop`
+            // counts 1, then 2), so resetting here erased the episode clock and
+            // every Stop reported "elapsed 0s". The clock restarts on the next
+            // emitted Warn instead.
 
             if !self.pending_steers.is_empty() {
                 let pending = std::mem::take(&mut self.pending_steers);
