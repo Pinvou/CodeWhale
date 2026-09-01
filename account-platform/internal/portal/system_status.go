@@ -92,32 +92,40 @@ func (s *Service) adminSystemStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) hasSystemStatusPermission(ctx context.Context, accessToken string) (bool, bool) {
-	targets := []*url.URL{s.config.AccountURL, s.config.BillingURL, s.config.TokenGatewayURL}
-	type result struct{ status int }
-	results := make(chan result, len(targets))
-	for _, target := range targets {
-		go func(base *url.URL) {
-			response, err := s.get(ctx, endpoint(base, "/admin/v1/overview"), accessToken)
-			if err != nil {
-				results <- result{}
-				return
-			}
-			defer response.Body.Close()
-			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-			results <- result{status: response.StatusCode}
-		}(target)
+	target := endpoint(s.config.AccountURL, "/v1/account/bootstrap")
+	if target == nil {
+		return false, false
 	}
-	denied := false
-	for range targets {
-		result := <-results
-		if result.status >= 200 && result.status < 300 {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), strings.NewReader("{}"))
+	if err != nil {
+		return false, false
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	response, err := s.client.Do(request)
+	if err != nil {
+		return false, false
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return false, true
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false, false
+	}
+	var bootstrap struct {
+		PlatformPermissions []string `json:"platform_permissions"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&bootstrap); err != nil {
+		return false, false
+	}
+	for _, permission := range bootstrap.PlatformPermissions {
+		if permission == "platform.system.status.read" {
 			return true, true
 		}
-		if result.status == http.StatusUnauthorized || result.status == http.StatusForbidden {
-			denied = true
-		}
 	}
-	return false, denied
+	return false, true
 }
 
 func (s *Service) collectSystemStatus(ctx context.Context, accessToken string) systemStatusResponse {

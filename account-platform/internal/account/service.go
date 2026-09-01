@@ -148,7 +148,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	protected.DELETE("/v1/organizations/:organization_id/members/:user_id", httpserver.AdaptFunc(s.revokeMembership))
 	protected.POST("/v1/organizations/:organization_id/ownership", httpserver.AdaptFunc(s.transferOwnership))
 	admin := protected.Group("/admin/v1")
-	admin.GET("/overview", s.requirePermission(PermissionPlatformSystemStatusRead), httpserver.AdaptFunc(s.adminOverview))
+	admin.GET("/overview", s.requireAnyPermission(PermissionPlatformUsersRead, PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminOverview))
 	admin.GET("/roles", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoles))
 	admin.GET("/role-bindings", s.requirePermission(PermissionPlatformRolesRead), httpserver.AdaptFunc(s.adminRoleBindings))
 	admin.POST("/role-bindings", s.requirePermission(PermissionPlatformRolesAssign), approvalpolicy.Require("ACCOUNT_ROLE_BINDING_GRANT", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminGrantRoleBinding))

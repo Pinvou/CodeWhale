@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	platformauthorization "github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
@@ -206,7 +207,18 @@ func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, result)
+	response := make(map[string]int64, 6)
+	if platformauthorization.GrantedPermission(r.Context(), PermissionPlatformUsersRead) {
+		response["users"] = result.Users
+		response["active_users"] = result.ActiveUsers
+		response["disabled_users"] = result.DisabledUsers
+	}
+	if platformauthorization.GrantedPermission(r.Context(), PermissionPlatformOrganizationsRead) {
+		response["organizations"] = result.Organizations
+		response["active_memberships"] = result.ActiveMemberships
+		response["pending_invitations"] = result.PendingInvitations
+	}
+	api.WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *Service) adminRoles(w http.ResponseWriter, r *http.Request) {

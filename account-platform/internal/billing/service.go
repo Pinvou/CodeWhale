@@ -133,7 +133,7 @@ func (s *Service) Handler(serviceToken string, adminVerify ...identity.VerifyFun
 	if len(adminVerify) > 0 && adminVerify[0] != nil && s.authorizer != nil {
 		admin := router.Group("/admin/v1")
 		admin.Use(identity.GinMiddleware(adminVerify[0]))
-		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/overview", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/wallets", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminWallets))
 		admin.GET("/wallets/:wallet_id/ledger", s.authorizer.Require("platform.billing.ledger.read"), httpserver.AdaptFunc(s.adminWalletLedger))
 		admin.GET("/receivables", s.authorizer.Require("platform.billing.wallets.read"), httpserver.AdaptFunc(s.adminReceivables))

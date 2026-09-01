@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildUnitTree } from './admin-organization-tree.js';
-import { formatPoints, MICROCREDITS_PER_POINT } from './credit-units.js';
+import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminNavigationGroups, readAdminSection, writeAdminSection } from './admin-navigation.js';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
@@ -251,15 +251,35 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         const readAny = (permissions, action, fallback = { items: [] }) => (permissions.some(allowed) ? action() : Promise.resolve(fallback));
         let next = {};
         if (target === 'overview') {
-          const [account, billing, token] = await Promise.all([
-            readAny(['platform.users.read', 'platform.organizations.read'], () => client.accountOverview(signal), {}),
-            read('platform.billing.wallets.read', () => client.billingOverview(signal), {}),
-            readAny(['platform.tokens.read', 'platform.usage.read'], () => client.tokenOverview(signal), {}),
-          ]);
+          const sources = [
+            ['identity', ['platform.users.read', 'platform.organizations.read'].some(allowed), () => client.accountOverview(signal)],
+            ['finance', allowed('platform.billing.wallets.read'), () => client.billingOverview(signal)],
+            ['modelToken', ['platform.tokens.read', 'platform.usage.read'].some(allowed), () => client.tokenOverview(signal)],
+            ['system', allowed('platform.system.status.read'), () => client.systemStatus(signal)],
+          ];
+          const results = await Promise.allSettled(sources.map(([, enabled, action]) => (enabled ? action() : Promise.resolve(null))));
+          const overviewAvailability = {};
+          const values = {};
+          results.forEach((result, index) => {
+            const [key, enabled] = sources[index];
+            if (!enabled) {
+              overviewAvailability[key] = 'hidden';
+              values[key] = null;
+            } else if (result.status === 'fulfilled') {
+              overviewAvailability[key] = 'ready';
+              values[key] = result.value;
+            } else {
+              if (result.reason?.name === 'AbortError' || result.reason?.status === 401) throw result.reason;
+              overviewAvailability[key] = 'error';
+              values[key] = null;
+            }
+          });
           next = {
-            accountOverview: account,
-            billingOverview: billing,
-            tokenOverview: token,
+            accountOverview: values.identity || {},
+            billingOverview: values.finance || {},
+            tokenOverview: values.modelToken || {},
+            systemStatus: values.system,
+            overviewAvailability,
           };
         } else if (target === 'organizations') {
           const [users, organizations, roles] = await Promise.all([read('platform.users.read', () => client.users('', signal)), read('platform.organizations.read', () => client.organizations('', signal)), read('platform.roles.read', () => client.roles(signal))]);
@@ -454,7 +474,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     .map((group) => ({ ...group, sections: group.sections.filter((key) => visibleSections.includes(key)) }))
     .filter((group) => group.sections.length > 0);
   const platformPermissions = authorization?.platform_permissions || [];
-  const sectionIsReadOnly = section === 'settings' ? false : adminSectionReadOnly(authorization, section);
+  const sectionIsReadOnly = section === 'settings' || section === 'overview' ? false : adminSectionReadOnly(authorization, section);
   const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
   const currentPageTitle = copy.nav[section];
   const currentPageLead = section === 'overview' ? copy.overview.lead : copy.pageLeads?.[section] || copy.subtitle;
@@ -532,7 +552,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
               {copy.permissionReadOnlyReason}
             </div>
           )}
-          {section === 'overview' && <Overview copy={copy} language={language} data={data} />}
+          {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} onNavigate={navigate} />}
           {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'users' && (
             <>
@@ -580,56 +600,127 @@ function StatePage({ copy, kind, onRetry }) {
   );
 }
 
-function Overview({ copy, language, data }) {
+function Overview({ copy, language, data, permissions, onNavigate }) {
   const a = data.accountOverview || {},
     b = data.billingOverview || {},
     t = data.tokenOverview || {};
+  const availability = data.overviewAvailability || {};
+  const permissionSet = new Set(permissions || []);
+  const canUsers = permissionSet.has('platform.users.read');
+  const canOrganizations = permissionSet.has('platform.organizations.read');
+  const canBilling = permissionSet.has('platform.billing.wallets.read');
+  const canTokens = permissionSet.has('platform.tokens.read');
+  const canUsage = permissionSet.has('platform.usage.read');
+  const available = Number(b.posted_microcredits || 0) - Number(b.reserved_microcredits || 0) - Number(b.receivable_microcredits || 0);
+  const routeTotal = Number(t.routes || 0);
+  const healthyRoutes = Number(t.healthy_routes || 0);
+  const routePercent = routeTotal > 0 ? Math.min(100, (healthyRoutes / routeTotal) * 100) : null;
+  const status = data.systemStatus || { services: [], relays: [], recent_errors: [] };
+  const healthyServices = status.services.filter((item) => item.status === 'HEALTHY').length;
+  const serviceIssues = status.services.length - healthyServices;
+  const relayIssues = status.relays.filter((item) => item.status !== 'HEALTHY' || Number(item.dead_lettered_events) > 0).length;
   const alerts = [
-    [copy.overview.disabledUsers, a.disabled_users],
-    [copy.overview.invitations, a.pending_invitations],
-    [copy.overview.paymentReview, b.review_payment_orders],
-    [copy.overview.pendingAdjustments, b.pending_adjustments],
-    [copy.overview.usageReview, t.review_usage_requests],
-  ];
+    canOrganizations && { label: copy.overview.invitations, value: a.pending_invitations, section: 'organizations', tone: 'warning' },
+    canBilling && { label: copy.overview.paymentReview, value: b.review_payment_orders, section: 'payments', tone: 'danger' },
+    canBilling && { label: copy.overview.pendingAdjustments, value: b.pending_adjustments, section: 'approvals', tone: 'warning' },
+    canUsage && { label: copy.overview.usageReview, value: t.review_usage_requests, section: 'tokens', tone: 'warning' },
+    canUsage && { label: copy.overview.reconciliationStopped, value: t.reconciliation_stopped, section: 'tokens', tone: 'danger' },
+  ].filter((item) => item && Number(item.value) > 0);
+  const sourceError = (source) => availability[source] === 'error';
   return (
-    <section>
-      <div className="adm-metrics">
-        <Metric label={copy.overview.users} value={a.users} />
-        <Metric label={copy.overview.organizations} value={a.organizations} />
-        <Metric label={copy.overview.available} value={Number(b.posted_microcredits || 0) - Number(b.reserved_microcredits || 0)} tone="accent" formatter={(value) => formatPoints(value, language)} />
-        <Metric label={copy.overview.reserved} value={b.reserved_microcredits} formatter={(value) => formatPoints(value, language)} />
-        <Metric label={copy.overview.tokenAccounts} value={t.token_accounts} />
-        <Metric label={copy.overview.usageRequests} value={t.usage_requests} />
+    <section className="adm-overview">
+      {availability.system !== 'hidden' && (
+        <article className={`adm-overview-health ${sourceError('system') ? 'is-error' : ''}`}>
+          <div>
+            <span className="adm-overview-kicker">{copy.overview.systemHealth}</span>
+            {sourceError('system') ? <strong>{copy.overview.unavailable}</strong> : <strong>{copy.overview.servicesHealthy(healthyServices, status.services.length)}</strong>}
+          </div>
+          {!sourceError('system') && (
+            <dl>
+              <div><dt>{copy.overview.serviceIssues}</dt><dd className={serviceIssues ? 'has-issue' : ''}>{formatNumber(serviceIssues)}</dd></div>
+              <div><dt>{copy.overview.relayIssues}</dt><dd className={relayIssues ? 'has-issue' : ''}>{formatNumber(relayIssues)}</dd></div>
+              <div><dt>{copy.overview.recentErrors}</dt><dd className={status.recent_errors.length ? 'has-issue' : ''}>{formatNumber(status.recent_errors.length)}</dd></div>
+            </dl>
+          )}
+          <button type="button" onClick={() => onNavigate('system')}>{copy.overview.viewDetails}</button>
+        </article>
+      )}
+      <div className="adm-overview-domains">
+        {(canUsers || canOrganizations) && (
+          <OverviewDomain title={copy.overview.identity} action={copy.overview.viewDetails} onAction={() => onNavigate(canUsers ? 'users' : 'organizations')} error={sourceError('identity')} copy={copy}>
+            {canUsers && <OverviewPrimary label={copy.overview.activeUsers} value={a.active_users} suffix={copy.overview.ofTotal(a.users)} />}
+            {!canUsers && canOrganizations && <OverviewPrimary label={copy.overview.organizations} value={a.organizations} />}
+            <OverviewFacts rows={[
+              canOrganizations && [copy.overview.organizations, a.organizations],
+              canOrganizations && [copy.overview.activeMemberships, a.active_memberships],
+              canUsers && [copy.overview.disabledUsers, a.disabled_users],
+              canOrganizations && [copy.overview.invitations, a.pending_invitations],
+            ].filter(Boolean)} />
+          </OverviewDomain>
+        )}
+        {canBilling && (
+          <OverviewDomain title={copy.overview.finance} action={copy.overview.viewDetails} onAction={() => onNavigate('billing')} error={sourceError('finance')} copy={copy} accent>
+            <OverviewPrimary label={copy.overview.available} value={available} formatter={(value) => formatUsagePoints(value, language)} />
+            <OverviewFacts rows={[
+              [copy.overview.posted, b.posted_microcredits, (value) => formatUsagePoints(value, language)],
+              [copy.overview.reserved, b.reserved_microcredits, (value) => formatUsagePoints(value, language)],
+              [copy.overview.receivable, b.receivable_microcredits, (value) => formatUsagePoints(value, language)],
+              [copy.overview.wallets, b.wallets],
+            ]} />
+          </OverviewDomain>
+        )}
+        {(canTokens || canUsage) && (
+          <OverviewDomain title={copy.overview.modelToken} action={copy.overview.viewDetails} onAction={() => onNavigate('tokens')} error={sourceError('modelToken')} copy={copy}>
+            {canTokens ? (
+              <OverviewPrimary label={copy.overview.routesHealthy} value={routeTotal ? `${formatNumber(healthyRoutes)} / ${formatNumber(routeTotal)}` : copy.overview.noRoutes} />
+            ) : (
+              <OverviewPrimary label={copy.overview.cumulativeUsage} value={t.usage_requests} />
+            )}
+            {canTokens && <div className="adm-overview-progress" aria-label={copy.overview.routesHealthy}><i style={{ width: `${routePercent || 0}%` }} /></div>}
+            <OverviewFacts rows={[
+              canTokens && [copy.overview.activeAccounts, t.active_accounts, (value) => `${formatNumber(value)} / ${formatNumber(t.token_accounts)}`],
+              canTokens && [copy.overview.activeCredentials, t.active_credentials],
+              canUsage && [copy.overview.cumulativeUsage, t.usage_requests],
+              canUsage && [copy.overview.reconciliationPending, t.reconciliation_pending],
+            ].filter(Boolean)} />
+          </OverviewDomain>
+        )}
       </div>
-      <div className="adm-overview-grid">
-        <article className="adm-panel">
-          <SectionHeader title={copy.overview.attention} copy={copy} />
-          <div className="adm-attention">
-            {alerts.map(([label, value]) => (
-              <div key={label}>
-                <span>{label}</span>
-                <strong className={Number(value) ? 'has-value' : ''}>{formatNumber(value)}</strong>
-              </div>
+      <article className="adm-panel adm-overview-attention">
+        <SectionHeader title={copy.overview.attention} count={alerts.length} copy={copy} />
+        <p className="adm-help">{copy.overview.attentionLead}</p>
+        {alerts.length ? (
+          <div className="adm-attention-list">
+            {alerts.map((item) => (
+              <button type="button" key={`${item.section}-${item.label}`} onClick={() => onNavigate(item.section)}>
+                <span className={`adm-attention-dot ${item.tone}`} aria-hidden="true" />
+                <span>{item.label}</span>
+                <strong>{formatNumber(item.value)}</strong>
+                <small>{copy.overview.reviewNow} →</small>
+              </button>
             ))}
           </div>
-        </article>
-        <article className="adm-panel adm-health">
-          <span>{copy.overview.healthyRoutes}</span>
-          <strong>{formatNumber(t.healthy_routes)}</strong>
-          <small>
-            / {formatNumber(t.token_accounts)} {copy.overview.tokenAccounts}
-          </small>
-          <div>
-            <i
-              style={{
-                width: `${Math.min(100, Number(t.token_accounts) ? (Number(t.healthy_routes) / Number(t.token_accounts)) * 100 : 0)}%`,
-              }}
-            />
-          </div>
-        </article>
-      </div>
+        ) : <div className="adm-overview-empty">{copy.overview.noAttention}</div>}
+      </article>
     </section>
   );
+}
+
+function OverviewDomain({ title, action, onAction, error, copy, accent = false, children }) {
+  return (
+    <article className={`adm-overview-domain ${accent ? 'accent' : ''} ${error ? 'is-error' : ''}`}>
+      <header><h2>{title}</h2><button type="button" onClick={onAction}>{action} →</button></header>
+      {error ? <div className="adm-overview-source-error"><strong>{copy.overview.unavailable}</strong><span>{copy.overview.unavailableHelp}</span></div> : children}
+    </article>
+  );
+}
+
+function OverviewPrimary({ label, value, suffix = '', formatter = formatNumber }) {
+  return <div className="adm-overview-primary"><span>{label}</span><strong>{typeof value === 'string' ? value : formatter(value)}</strong>{suffix && <small>{suffix}</small>}</div>;
+}
+
+function OverviewFacts({ rows }) {
+  return <dl className="adm-overview-facts">{rows.map(([label, value, formatter = formatNumber]) => <div key={label}><dt>{label}</dt><dd>{formatter(value)}</dd></div>)}</dl>;
 }
 
 function AccountDirectory({ section, copy, data, client, setData, permissions }) {

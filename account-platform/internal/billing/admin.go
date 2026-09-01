@@ -23,6 +23,7 @@ type AdminOverview struct {
 	Wallets                  int64                      `json:"wallets"`
 	PostedMicrocredits       int64                      `json:"posted_microcredits"`
 	ReservedMicrocredits     int64                      `json:"reserved_microcredits"`
+	ReceivableMicrocredits   int64                      `json:"receivable_microcredits"`
 	PendingPaymentOrders     int64                      `json:"pending_payment_orders"`
 	ExpiredPaymentOrders     int64                      `json:"expired_payment_orders"`
 	ReviewPaymentOrders      int64                      `json:"review_payment_orders"`
@@ -1048,12 +1049,13 @@ SELECT
   (SELECT count(*) FROM wallets),
   (SELECT COALESCE(sum(posted_microcredits),0) FROM wallets),
   (SELECT COALESCE(sum(reserved_microcredits),0) FROM wallets),
+  (SELECT COALESCE(sum(receivable_microcredits),0) FROM wallets),
   (SELECT count(*) FROM payment_orders WHERE status IN ('CREATED','PENDING') AND expires_at > now()),
   (SELECT count(*) FROM payment_orders WHERE status='EXPIRED' OR (status IN ('CREATED','PENDING') AND expires_at <= now())),
   (SELECT count(*) FROM payment_orders WHERE status='MANUAL_REVIEW' OR fulfillment_status='MANUAL_REVIEW'),
   (SELECT count(*) FROM manual_adjustments WHERE status='PENDING_APPROVAL'),
   (SELECT count(*) FROM usage_holds WHERE status IN ('ACTIVE','REVIEW'))`).Scan(
-		&result.Wallets, &result.PostedMicrocredits, &result.ReservedMicrocredits,
+		&result.Wallets, &result.PostedMicrocredits, &result.ReservedMicrocredits, &result.ReceivableMicrocredits,
 		&result.PendingPaymentOrders, &result.ExpiredPaymentOrders, &result.ReviewPaymentOrders, &result.PendingAdjustments,
 		&result.ActiveOrReviewUsageHolds,
 	)

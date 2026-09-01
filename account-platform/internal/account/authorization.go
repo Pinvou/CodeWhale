@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	platformauthorization "github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/gin-gonic/gin"
@@ -245,6 +246,40 @@ func (s *Service) requirePermission(permission string) gin.HandlerFunc {
 			return
 		}
 		writeAuthorizationVersions(c.Writer.Header(), decision)
+		c.Next()
+	}
+}
+
+func (s *Service) requireAnyPermission(permissions ...string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		repository, ok := s.repository.(authorizationRepository)
+		principal, authenticated := identity.FromContext(c.Request.Context())
+		if !ok || !authenticated {
+			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "none of the requested permissions is granted", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		granted := make([]string, 0, len(permissions))
+		var lastDecision AuthorizationDecision
+		for _, permission := range permissions {
+			decision, err := repository.Authorize(c.Request.Context(), principal, permission, nil, nil)
+			if err != nil {
+				api.WriteError(c.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(c.Request.Context()))
+				c.Abort()
+				return
+			}
+			lastDecision = decision
+			if decision.Allowed {
+				granted = append(granted, permission)
+			}
+		}
+		if len(granted) == 0 {
+			api.WriteError(c.Writer, http.StatusForbidden, "PERMISSION_DENIED", "none of the requested permissions is granted", httpserver.RequestID(c.Request.Context()))
+			c.Abort()
+			return
+		}
+		writeAuthorizationVersions(c.Writer.Header(), lastDecision)
+		c.Request = c.Request.WithContext(platformauthorization.WithGrantedPermissions(c.Request.Context(), granted...))
 		c.Next()
 	}
 }

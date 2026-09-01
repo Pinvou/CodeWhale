@@ -264,6 +264,13 @@ func TestSessionEndpointDoesNotExposeOIDCTokens(t *testing.T) {
 func TestSystemStatusAggregatesInternalHealthWithoutExposingEndpoints(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v1/account/bootstrap":
+			if r.Method != http.MethodPost {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"platform_permissions":["platform.system.status.read"]}`)
 		case "/admin/v1/overview":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"reconciliation_pending":2,"reconciliation_stopped":1}`)

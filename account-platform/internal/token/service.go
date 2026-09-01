@@ -152,7 +152,7 @@ func (s *Service) Handler(serviceToken string, verify identity.VerifyFunc) http.
 	protected.GET("/v1/me/entitlement-packages", httpserver.AdaptFunc(s.getEntitlementPackages))
 	admin := protected.Group("/admin/v1")
 	if s.authorizer != nil {
-		admin.GET("/overview", s.authorizer.Require("platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
+		admin.GET("/overview", s.authorizer.RequireAny("platform.tokens.read", "platform.usage.read", "platform.system.status.read"), httpserver.AdaptFunc(s.adminOverview))
 		admin.GET("/token-accounts", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccounts))
 		admin.POST("/token-accounts", s.authorizer.Require("platform.tokens.manage"), approvalpolicy.Require("TOKEN_ACCOUNT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateTokenAccount))
 		admin.GET("/token-accounts/:token_account_id", s.authorizer.Require("platform.tokens.read"), httpserver.AdaptFunc(s.adminTokenAccount))

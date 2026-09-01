@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/authorization"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
 	"github.com/google/uuid"
@@ -22,6 +23,7 @@ type AdminOverview struct {
 	TokenAccounts         int64 `json:"token_accounts"`
 	ActiveAccounts        int64 `json:"active_accounts"`
 	ActiveCredentials     int64 `json:"active_credentials"`
+	Routes                int64 `json:"routes"`
 	HealthyRoutes         int64 `json:"healthy_routes"`
 	UsageRequests         int64 `json:"usage_requests"`
 	ReviewUsageRequests   int64 `json:"review_usage_requests"`
@@ -156,7 +158,24 @@ func (s *Service) adminOverview(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, result)
+	response := make(map[string]int64, 9)
+	if authorization.GrantedPermission(r.Context(), "platform.tokens.read") {
+		response["token_accounts"] = result.TokenAccounts
+		response["active_accounts"] = result.ActiveAccounts
+		response["active_credentials"] = result.ActiveCredentials
+		response["routes"] = result.Routes
+		response["healthy_routes"] = result.HealthyRoutes
+	}
+	if authorization.GrantedPermission(r.Context(), "platform.usage.read") {
+		response["usage_requests"] = result.UsageRequests
+		response["review_usage_requests"] = result.ReviewUsageRequests
+		response["reconciliation_pending"] = result.ReconciliationPending
+		response["reconciliation_stopped"] = result.ReconciliationStopped
+	} else if authorization.GrantedPermission(r.Context(), "platform.system.status.read") {
+		response["reconciliation_pending"] = result.ReconciliationPending
+		response["reconciliation_stopped"] = result.ReconciliationStopped
+	}
+	api.WriteJSON(w, http.StatusOK, response)
 }
 
 func (s *Service) adminTokenAccounts(w http.ResponseWriter, r *http.Request) {
@@ -434,12 +453,13 @@ SELECT
   (SELECT count(*) FROM token_accounts),
   (SELECT count(*) FROM token_accounts WHERE status='ACTIVE'),
   (SELECT count(*) FROM provider_credentials WHERE status='ACTIVE' AND validation_status='VALID'),
+  (SELECT count(*) FROM routing_policies),
   (SELECT count(*) FROM routing_policies WHERE health_status='HEALTHY'),
   (SELECT count(*) FROM usage_requests),
   (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW')),
   (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NULL),
   (SELECT count(*) FROM usage_requests WHERE status IN ('SETTLEMENT_PENDING','REVIEW') AND reconciliation_stopped_at IS NOT NULL)`).Scan(
-		&result.TokenAccounts, &result.ActiveAccounts, &result.ActiveCredentials,
+		&result.TokenAccounts, &result.ActiveAccounts, &result.ActiveCredentials, &result.Routes,
 		&result.HealthyRoutes, &result.UsageRequests, &result.ReviewUsageRequests,
 		&result.ReconciliationPending, &result.ReconciliationStopped,
 	)

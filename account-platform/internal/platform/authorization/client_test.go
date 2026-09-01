@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/identity"
+	"github.com/gin-gonic/gin"
 )
 
 func TestClientUsesServiceAuthenticationAndReturnsVersions(t *testing.T) {
@@ -63,5 +64,44 @@ func TestClientRejectsInvalidConfiguration(t *testing.T) {
 	}
 	if _, err := NewClient("https://account.example", ""); err == nil {
 		t.Fatal("empty service token must be rejected")
+	}
+}
+
+func TestRequireAnyRecordsOnlyVerifiedPermissions(t *testing.T) {
+	checks := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		checks++
+		var body struct {
+			Permission string `json:"permission"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("X-Context-Version", "3")
+		w.Header().Set("X-Authorization-Version", "5")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"allowed": body.Permission == "platform.users.read"})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "service-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(identity.GinMiddleware(func(context.Context, string) (identity.Principal, error) {
+		return identity.Principal{Issuer: "issuer", Subject: "subject"}, nil
+	}))
+	router.GET("/overview", client.RequireAny("platform.users.read", "platform.organizations.read"), func(c *gin.Context) {
+		if !GrantedPermission(c.Request.Context(), "platform.users.read") || GrantedPermission(c.Request.Context(), "platform.organizations.read") {
+			t.Fatal("request context did not preserve the exact granted permission set")
+		}
+		c.Status(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodGet, "/overview", nil)
+	request.Header.Set("Authorization", "Bearer user-token")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || checks != 2 || response.Header().Get("X-Authorization-Version") != "5" {
+		t.Fatalf("status=%d checks=%d headers=%v", response.Code, checks, response.Header())
 	}
 }

@@ -129,9 +129,13 @@ export function validateCatalog(catalog, discovered, knownPermissions) {
       if (!exactInternalPermission(workload)) errors.push(`invalid_workload_permission:${key}:${workload}`);
       continue;
     }
-    const inlineHuman = literalHuman || (constant ? constantValues.get(constant) : '');
-    if (inlineHuman) {
-      if (!knownPermissions.has(inlineHuman)) errors.push(`unknown_human_permission:${key}:${inlineHuman}`);
+    const literalAnyArguments = route.registration.match(/authorizer\.RequireAny\(([^)]*)\)/)?.[1] || '';
+    const literalAny = [...literalAnyArguments.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
+    const constantAnyArguments = route.registration.match(/requireAnyPermission\(([^)]*)\)/)?.[1] || '';
+    const constantAny = [...constantAnyArguments.matchAll(/Permission[A-Za-z0-9]+/g)].map((match) => constantValues.get(match[0])).filter(Boolean);
+    const inlineHumans = [literalHuman || (constant ? constantValues.get(constant) : ''), ...literalAny, ...constantAny].filter(Boolean);
+    if (inlineHumans.length > 0) {
+      for (const inlineHuman of inlineHumans) if (!knownPermissions.has(inlineHuman)) errors.push(`unknown_human_permission:${key}:${inlineHuman}`);
       continue;
     }
     const policy = policies.get(key);

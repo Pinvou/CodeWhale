@@ -189,3 +189,72 @@ func (c *Client) Require(permission string) gin.HandlerFunc {
 		ginContext.Next()
 	}
 }
+
+type grantedPermissionsContextKey struct{}
+
+// WithGrantedPermissions records the permissions that were verified for the
+// current request. It is intentionally request-scoped so handlers can redact
+// mixed-domain responses without trusting client-provided selectors.
+func WithGrantedPermissions(ctx context.Context, permissions ...string) context.Context {
+	granted := make(map[string]struct{}, len(permissions))
+	for _, permission := range permissions {
+		if permission = strings.TrimSpace(permission); permission != "" {
+			granted[permission] = struct{}{}
+		}
+	}
+	return context.WithValue(ctx, grantedPermissionsContextKey{}, granted)
+}
+
+func GrantedPermission(ctx context.Context, permission string) bool {
+	granted, _ := ctx.Value(grantedPermissionsContextKey{}).(map[string]struct{})
+	_, ok := granted[strings.TrimSpace(permission)]
+	return ok
+}
+
+// RequireAny authorizes every requested permission independently, permits the
+// request when at least one is granted, and records only verified grants for
+// field-level response filtering.
+func (c *Client) RequireAny(permissions ...string) gin.HandlerFunc {
+	return func(ginContext *gin.Context) {
+		principal, ok := identity.FromContext(ginContext.Request.Context())
+		if !ok {
+			api.WriteError(ginContext.Writer, http.StatusUnauthorized, "AUTH_REQUIRED", "a valid bearer token is required", httpserver.RequestID(ginContext.Request.Context()))
+			ginContext.Abort()
+			return
+		}
+		granted := make([]string, 0, len(permissions))
+		var versionHeaders http.Header
+		authorizationUnavailable := false
+		for _, permission := range permissions {
+			permission = strings.TrimSpace(permission)
+			if permission == "" {
+				continue
+			}
+			allowed, headers, err := c.Allowed(ginContext.Request.Context(), principal, permission)
+			if err != nil {
+				authorizationUnavailable = true
+				continue
+			}
+			versionHeaders = headers
+			if allowed {
+				granted = append(granted, permission)
+			}
+		}
+		if len(granted) == 0 {
+			if authorizationUnavailable {
+				api.WriteError(ginContext.Writer, http.StatusServiceUnavailable, "AUTHORIZATION_UNAVAILABLE", "authorization is temporarily unavailable", httpserver.RequestID(ginContext.Request.Context()))
+			} else {
+				api.WriteError(ginContext.Writer, http.StatusForbidden, "PERMISSION_DENIED", "none of the requested permissions is granted", httpserver.RequestID(ginContext.Request.Context()))
+			}
+			ginContext.Abort()
+			return
+		}
+		for _, name := range []string{"X-Context-Version", "X-Authorization-Version"} {
+			if value := versionHeaders.Get(name); value != "" {
+				ginContext.Header(name, value)
+			}
+		}
+		ginContext.Request = ginContext.Request.WithContext(WithGrantedPermissions(ginContext.Request.Context(), granted...))
+		ginContext.Next()
+	}
+}

@@ -142,3 +142,52 @@ test('admin portal follows the approved HTML visual system and business-page com
   assert.match(view, /window\.prompt/);
   assert.doesNotMatch(sourceCSS, /https?:\/\//);
 });
+
+test('platform overview uses permission-scoped sources, correct business metrics, and actionable queues', async () => {
+  const [view, css, i18n, builtJS, accountService, billingService, tokenService, accountAdmin, billingAdmin, tokenAdmin, systemStatus, openapi, requirements, design] = await Promise.all([
+    read('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
+    read('../../../pinvou3-app/src/features/account-platform/admin-platform.css'),
+    read('../../../pinvou3-app/src/shared/admin-platform-i18n.js'),
+    read('../../internal/portal/static/assets/admin.js'),
+    read('../../internal/account/service.go'),
+    read('../../internal/billing/service.go'),
+    read('../../internal/token/service.go'),
+    read('../../internal/account/admin.go'),
+    read('../../internal/billing/admin.go'),
+    read('../../internal/token/admin.go'),
+    read('../../internal/portal/system_status.go'),
+    read('../../contracts/openapi/admin.yaml'),
+    read('../../docs/requirements.md'),
+    read('../../docs/admin-portal-ui-redesign.md'),
+  ]);
+
+  assert.match(view, /Promise\.allSettled/);
+  for (const source of ["'identity'", "'finance'", "'modelToken'", "'system'"]) assert.ok(view.includes(source));
+  assert.match(view, /posted_microcredits \|\| 0\) - Number\(b\.reserved_microcredits \|\| 0\) - Number\(b\.receivable_microcredits \|\| 0\)/);
+  assert.match(view, /healthyRoutes \/ routeTotal/);
+  assert.match(view, /className="adm-overview-domains"/);
+  assert.match(view, /onNavigate\(item\.section\)/);
+  assert.match(view, /section === 'settings' \|\| section === 'overview'/);
+  assert.match(css, /\.adm-overview-domains\{[^}]*repeat\(3/);
+  assert.doesNotMatch(css, /\.adm-overview-domain\.accent\{[^}]*gradient/);
+
+  assert.match(accountService, /requireAnyPermission\(PermissionPlatformUsersRead, PermissionPlatformOrganizationsRead\)/);
+  assert.match(billingService, /Require\("platform\.billing\.wallets\.read"\)/);
+  assert.match(tokenService, /RequireAny\("platform\.tokens\.read", "platform\.usage\.read", "platform\.system\.status\.read"\)/);
+  assert.match(accountAdmin, /GrantedPermission\(r\.Context\(\), PermissionPlatformUsersRead\)/);
+  assert.match(accountAdmin, /GrantedPermission\(r\.Context\(\), PermissionPlatformOrganizationsRead\)/);
+  assert.match(billingAdmin, /receivable_microcredits/);
+  assert.match(tokenAdmin, /SELECT count\(\*\) FROM routing_policies\)/);
+  assert.match(tokenAdmin, /response\["routes"\] = result\.Routes/);
+  assert.match(systemStatus, /\/v1\/account\/bootstrap/);
+  assert.match(systemStatus, /permission == "platform\.system\.status\.read"/);
+  assert.doesNotMatch(systemStatus, /targets := \[\]\*url\.URL/);
+
+  for (const contract of ['AccountOverview:', 'BillingOverview:', 'TokenOverview:', 'receivable_microcredits:', 'routes:']) assert.ok(openapi.includes(contract));
+  for (const translation of ['身份与组织', 'Funds & billing', 'システム正常性', '数据暂不可用']) {
+    assert.ok(i18n.includes(translation));
+    assert.ok(builtJS.includes(translation));
+  }
+  assert.match(requirements, /平台总览采用身份与组织、资金与计费、模型与 Token 三张领域摘要卡/);
+  assert.match(design, /healthy_routes \/ routes/);
+});

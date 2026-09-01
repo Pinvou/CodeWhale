@@ -23,9 +23,11 @@ paths:
     get:
       operationId: getAdminAccountOverview
       summary: Get platform-wide account and organization counts
+      description: Requires platform.users.read or platform.organizations.read. The response omits each permission domain that is not granted.
       responses:
-        "200": { $ref: "#/components/responses/Overview" }
+        "200": { $ref: "#/components/responses/AccountOverview" }
         "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/users:
     get:
       operationId: listAdminUsers
@@ -518,9 +520,11 @@ paths:
     get:
       operationId: getAdminBillingOverview
       summary: Get platform-wide wallet, order, adjustment, and hold counts
+      description: Requires platform.billing.wallets.read. Available points are posted minus reserved minus receivable microcredits.
       responses:
-        "200": { $ref: "#/components/responses/Overview" }
+        "200": { $ref: "#/components/responses/BillingOverview" }
         "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /billing/admin/v1/wallets:
     get:
       operationId: listAdminWallets
@@ -1137,9 +1141,11 @@ paths:
     get:
       operationId: getAdminTokenOverview
       summary: Get platform-wide Token account, route, and usage counts
+      description: Requires platform.tokens.read, platform.usage.read, or platform.system.status.read. Token and usage fields are independently omitted unless their permission domain is granted; system status receives reconciliation fields only.
       responses:
-        "200": { $ref: "#/components/responses/Overview" }
+        "200": { $ref: "#/components/responses/TokenOverview" }
         "403": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /token/admin/v1/token-accounts:
     get:
       operationId: listAdminTokenAccounts
@@ -2739,16 +2745,63 @@ components:
               relays: { type: array, items: { type: object, additionalProperties: true } }
               reconciliation: { type: object, additionalProperties: true }
               recent_errors: { type: array, items: { type: object, additionalProperties: true } }
-    Overview:
-      description: Service overview counters
+    AccountOverview:
+      description: Permission-filtered account and organization counters
       content:
         application/json:
           schema:
             type: object
-            additionalProperties:
-              type: integer
-              format: int64
-              minimum: 0
+            additionalProperties: false
+            properties:
+              users: { type: integer, format: int64, minimum: 0 }
+              active_users: { type: integer, format: int64, minimum: 0 }
+              disabled_users: { type: integer, format: int64, minimum: 0 }
+              organizations: { type: integer, format: int64, minimum: 0 }
+              active_memberships: { type: integer, format: int64, minimum: 0 }
+              pending_invitations: { type: integer, format: int64, minimum: 0 }
+    BillingOverview:
+      description: Wallet, balance, payment, adjustment, and hold counters
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [wallets, posted_microcredits, reserved_microcredits, receivable_microcredits, pending_payment_orders, expired_payment_orders, review_payment_orders, pending_adjustments, active_or_review_usage_holds, payment_capabilities]
+            properties:
+              wallets: { type: integer, format: int64, minimum: 0 }
+              posted_microcredits: { type: integer, format: int64 }
+              reserved_microcredits: { type: integer, format: int64, minimum: 0 }
+              receivable_microcredits: { type: integer, format: int64, minimum: 0 }
+              pending_payment_orders: { type: integer, format: int64, minimum: 0 }
+              expired_payment_orders: { type: integer, format: int64, minimum: 0 }
+              review_payment_orders: { type: integer, format: int64, minimum: 0 }
+              pending_adjustments: { type: integer, format: int64, minimum: 0 }
+              active_or_review_usage_holds: { type: integer, format: int64, minimum: 0 }
+              payment_capabilities: { type: object, additionalProperties: true }
+    TokenOverview:
+      description: Permission-filtered Token route and usage counters
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            properties:
+              token_accounts: { type: integer, format: int64, minimum: 0 }
+              active_accounts: { type: integer, format: int64, minimum: 0 }
+              active_credentials: { type: integer, format: int64, minimum: 0 }
+              routes: { type: integer, format: int64, minimum: 0 }
+              healthy_routes: { type: integer, format: int64, minimum: 0 }
+              usage_requests: { type: integer, format: int64, minimum: 0 }
+              review_usage_requests: { type: integer, format: int64, minimum: 0 }
+              reconciliation_pending: { type: integer, format: int64, minimum: 0 }
+              reconciliation_stopped: { type: integer, format: int64, minimum: 0 }
+    Overview:
+      description: Generic service detail or command result
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: true
     Collection:
       description: A bounded collection ordered by recent activity
       content:
