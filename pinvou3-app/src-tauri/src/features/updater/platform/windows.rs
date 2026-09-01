@@ -1426,7 +1426,8 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("PINVOU3_HOME").ok();
         let root = temp_root("direct-full-pack");
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         let updates = paths::updates_dir();
         std::fs::create_dir_all(&updates).unwrap();
 
@@ -1463,8 +1464,10 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: ENV_LOCK remains held while the original value is restored.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 
@@ -1475,7 +1478,8 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("PINVOU3_HOME").ok();
         let root = temp_root("nsis-full-pack");
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         let updates = paths::updates_dir();
         std::fs::create_dir_all(&updates).unwrap();
 
@@ -1512,8 +1516,10 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: ENV_LOCK remains held while the original value is restored.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 }

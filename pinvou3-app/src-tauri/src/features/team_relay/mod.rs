@@ -5,12 +5,13 @@ pub use types::*;
 use crate::platform::credential_store::{
     CredentialReference, CredentialStore, SystemCredentialStore,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
-use futures_util::{future::join_all, StreamExt};
+use futures_util::{StreamExt, future::join_all};
 use reqwest::{
-    header::{HeaderMap, HeaderValue, CONTENT_TYPE},
-    multipart, Client, Response, StatusCode, Url,
+    Client, Response, StatusCode, Url,
+    header::{CONTENT_TYPE, HeaderMap, HeaderValue},
+    multipart,
 };
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -1437,7 +1438,7 @@ impl TeamRelayManager {
         let parent = self
             .settings_path
             .parent()
-            .expect("team relay settings parent");
+            .unwrap_or_else(|| std::path::Path::new("."));
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("team_relay_settings_write_failed: {error}"))?;
         let payload = serde_json::to_vec_pretty(settings)
@@ -1449,7 +1450,7 @@ impl TeamRelayManager {
     fn task_workspace_root(&self, team_id: &str, thread_id: &str) -> PathBuf {
         self.settings_path
             .parent()
-            .expect("team relay settings parent")
+            .unwrap_or_else(|| std::path::Path::new("."))
             .join("workspaces")
             .join(path_fingerprint(team_id))
             .join(path_fingerprint(thread_id))

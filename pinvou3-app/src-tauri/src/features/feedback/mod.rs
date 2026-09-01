@@ -10,7 +10,7 @@ use std::{
 };
 
 use chrono::Utc;
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Builder as TarBuilder;
@@ -278,9 +278,11 @@ pub fn build_app_context(request: &FeedbackSubmitRequest) -> BTreeMap<String, se
     );
     context.insert(
         "language".to_string(),
-        serde_json::json!(crate::platform::prefs::UserPrefs::load()
-            .language
-            .locale_tag()),
+        serde_json::json!(
+            crate::platform::prefs::UserPrefs::load()
+                .language
+                .locale_tag()
+        ),
     );
     context.insert(
         "entry_point".to_string(),
@@ -742,7 +744,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let root = unique_temp_dir("mock");
-        std::env::set_var("PINVOU3_HOME", &root);
+        let previous_home = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
 
         let ok = submit_feedback_with_uploader(base_request(), &MockUploader { result: Ok(()) })
             .await
@@ -761,7 +765,12 @@ mod tests {
         assert_eq!(fail.status, FeedbackStatus::FailedRetryable);
         assert!(fail.retryable);
 
-        std::env::remove_var("PINVOU3_HOME");
+        match previous_home {
+            // SAFETY: the crate-wide ENV_LOCK remains held while the original value is restored.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
         let _ = fs::remove_dir_all(root);
     }
 
@@ -780,23 +789,27 @@ mod tests {
         let bad = root.join("bad.exe");
         fs::write(&bad, b"bad").unwrap();
 
-        assert!(validate_attachments(&[FeedbackAttachmentRequest {
-            path: image.to_string_lossy().into_owned(),
-            name: "ok.png".to_string(),
-            media_type: "image".to_string(),
-            mime: None,
-            size_bytes: None,
-        }])
-        .is_ok());
+        assert!(
+            validate_attachments(&[FeedbackAttachmentRequest {
+                path: image.to_string_lossy().into_owned(),
+                name: "ok.png".to_string(),
+                media_type: "image".to_string(),
+                mime: None,
+                size_bytes: None,
+            }])
+            .is_ok()
+        );
 
-        assert!(validate_attachments(&[FeedbackAttachmentRequest {
-            path: video.to_string_lossy().into_owned(),
-            name: "ok.mp4".to_string(),
-            media_type: "video".to_string(),
-            mime: None,
-            size_bytes: None,
-        }])
-        .is_ok());
+        assert!(
+            validate_attachments(&[FeedbackAttachmentRequest {
+                path: video.to_string_lossy().into_owned(),
+                name: "ok.mp4".to_string(),
+                media_type: "video".to_string(),
+                mime: None,
+                size_bytes: None,
+            }])
+            .is_ok()
+        );
 
         assert!(matches!(
             validate_attachments(&[FeedbackAttachmentRequest {
@@ -832,7 +845,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let root = unique_temp_dir("manifest");
-        std::env::set_var("PINVOU3_HOME", &root);
+        let previous_home = std::env::var_os("PINVOU3_HOME");
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         let image = root.join("source.png");
         fs::write(&image, b"png").unwrap();
         let mut req = base_request();
@@ -849,7 +864,12 @@ mod tests {
         assert!(manifest.contains("attachments/001-image.png"));
         assert!(!manifest.contains(&image.to_string_lossy().to_string()));
 
-        std::env::remove_var("PINVOU3_HOME");
+        match previous_home {
+            // SAFETY: the crate-wide ENV_LOCK remains held while the original value is restored.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
+        }
         let _ = fs::remove_dir_all(root);
     }
 

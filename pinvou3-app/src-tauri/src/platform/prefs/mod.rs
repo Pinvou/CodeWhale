@@ -149,13 +149,13 @@ impl Language {
 }
 
 pub(crate) mod model;
+pub use model::{
+    BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL, BUILTIN_LLMAPI_DEFAULT_MODEL, BUILTIN_LLMAPI_MODEL_ID,
+    BUILTIN_LLMAPI_MODEL_NAME, MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM,
+    MODEL_PROVIDER_KIND_OFFICIAL_API, ModelPreset, select_builtin_llmapi_model,
+};
 use model::{
     identify_coding_plan_endpoint, migrated_minimax_base_url, strip_chat_completions_suffix,
-};
-pub use model::{
-    select_builtin_llmapi_model, ModelPreset, BUILTIN_LLMAPI_DEFAULT_CHAT_BASE_URL,
-    BUILTIN_LLMAPI_DEFAULT_MODEL, BUILTIN_LLMAPI_MODEL_ID, BUILTIN_LLMAPI_MODEL_NAME,
-    MODEL_PROVIDER_KIND_CODING_PLAN, MODEL_PROVIDER_KIND_CUSTOM, MODEL_PROVIDER_KIND_OFFICIAL_API,
 };
 
 /// 用户对某条 [`SavedModel`] 图片输入能力的显式覆盖(模型设置页「图片输入能力」,
@@ -677,7 +677,10 @@ impl UserPrefs {
             model.normalize_route_limits();
         }
         normalized.sanitize_plaintext_api_keys();
-        let s = serde_json::to_string_pretty(&normalized).expect("UserPrefs serialize");
+        // UserPrefs is plain data (no map keys or custom Serialize failure
+        // paths), so serialization should never fail; still fall back to
+        // error propagation instead of panicking.
+        let s = serde_json::to_string_pretty(&normalized).map_err(std::io::Error::other)?;
         // 原子写：直接 std::fs::write 在进程中断时可能留下截断文件，而 load 对
         // 损坏的 settings.json 是回退默认值——code_permission.last_mode 等持久化
         // 偏好会整体丢失，表现为「重启后设置回到默认」。tmp + rename 保证目标
@@ -2096,6 +2099,7 @@ mod tests {
             "pinvou3-prefs-save-normalize-{}",
             std::process::id()
         ));
+        // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
         let prefs = UserPrefs {
@@ -2116,7 +2120,9 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
         match old_home {
+            // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
@@ -2132,6 +2138,7 @@ mod tests {
             std::process::id(),
             crate::platform::paths::tests::unique_suffix()
         ));
+        // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
         unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
 
         let mut initial = UserPrefs::default();
@@ -2170,14 +2177,18 @@ mod tests {
         let saved = UserPrefs::load();
         assert!(saved.model_by_id("concurrent-model").is_some());
         assert_eq!(saved.search.provider, SearchProvider::Tavily);
-        assert!(saved
-            .search
-            .enabled_providers
-            .contains(&SearchProvider::Tavily));
+        assert!(
+            saved
+                .search
+                .enabled_providers
+                .contains(&SearchProvider::Tavily)
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
         match old_home {
+            // SAFETY: holding the crate-level ENV_LOCK (acquired on this test's first line); env writes are serialized.
             Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: same as above; restore-side removal serialized under ENV_LOCK.
             None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }

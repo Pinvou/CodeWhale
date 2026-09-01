@@ -56,12 +56,16 @@ fn apply(kind: ConnectorKind, visible: bool) {
 }
 
 pub(crate) fn turn_submitted() {
-    let mut guard = state().lock().expect("connector visibility lock poisoned");
+    let mut guard = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.active_turns = guard.active_turns.saturating_add(1);
 }
 
 pub(crate) fn turn_finished() {
-    let mut guard = state().lock().expect("connector visibility lock poisoned");
+    let mut guard = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let pending = guard.finish_turn();
     if let Some(visible) = pending.0 {
         apply(ConnectorKind::Eip, visible);
@@ -73,7 +77,9 @@ pub(crate) fn turn_finished() {
 
 /// Apply immediately while idle, otherwise keep only the newest desired state.
 pub(crate) fn request(kind: ConnectorKind, visible: bool) -> bool {
-    let mut guard = state().lock().expect("connector visibility lock poisoned");
+    let mut guard = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let deferred = guard.request(kind, visible);
     if !deferred {
         apply(kind, visible);

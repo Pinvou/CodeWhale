@@ -5,8 +5,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use rand::Rng;
 use reqwest::{Client, StatusCode};
 use rusqlite::types::Type;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{Connection, Row, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

@@ -4,12 +4,12 @@ use std::time::Instant;
 use parking_lot::Mutex;
 use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::System::Performance::{
-    PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
-    PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
+    PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW,
+    PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue, PdhOpenQueryW,
 };
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
-    REG_EXPAND_SZ, REG_SZ,
+    HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegOpenKeyExW,
+    RegQueryValueExW,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes, GetSystemTimes};
 
@@ -83,6 +83,8 @@ struct PdhCpuCounter {
     counter: PDH_HCOUNTER,
 }
 
+// SAFETY: the owned PDH handles are accessed only through `&mut self` and are closed exactly
+// once by Drop, so moving the counter between threads cannot introduce concurrent handle use.
 unsafe impl Send for PdhCpuCounter {}
 
 impl PdhCpuCounter {
@@ -97,6 +99,7 @@ impl PdhCpuCounter {
 
     fn open(path: &str) -> Option<Self> {
         let mut query = std::ptr::null_mut();
+        // SAFETY: the data-source pointer is null by contract and `query` is a valid out pointer.
         let open_status = unsafe { PdhOpenQueryW(std::ptr::null(), 0, &mut query) };
         if open_status != 0 {
             return None;
@@ -104,14 +107,17 @@ impl PdhCpuCounter {
 
         let path = wide_null(path);
         let mut counter = std::ptr::null_mut();
+        // SAFETY: `query` was opened successfully, `path` is NUL-terminated, and `counter` is writable.
         let add_status = unsafe { PdhAddEnglishCounterW(query, path.as_ptr(), 0, &mut counter) };
         if add_status != 0 {
+            // SAFETY: `query` is the live handle returned by PdhOpenQueryW and is closed once here.
             unsafe {
                 PdhCloseQuery(query);
             }
             return None;
         }
 
+        // SAFETY: `query` remains live and exclusively owned while the initial sample is collected.
         unsafe {
             PdhCollectQueryData(query);
         }
@@ -119,6 +125,7 @@ impl PdhCpuCounter {
     }
 
     fn sample(&mut self) -> Option<f64> {
+        // SAFETY: mutable access guarantees exclusive use of the live query handle.
         let collect_status = unsafe { PdhCollectQueryData(self.query) };
         if collect_status != 0 {
             return None;
@@ -126,6 +133,7 @@ impl PdhCpuCounter {
 
         let mut value_type = 0;
         let mut value = PDH_FMT_COUNTERVALUE::default();
+        // SAFETY: the counter belongs to the live query and both output pointers are writable.
         let value_status = unsafe {
             PdhGetFormattedCounterValue(self.counter, PDH_FMT_DOUBLE, &mut value_type, &mut value)
         };
@@ -133,12 +141,14 @@ impl PdhCpuCounter {
             return None;
         }
 
+        // SAFETY: PDH_FMT_DOUBLE with a successful status initializes the union's doubleValue field.
         Some(clamp_pct(unsafe { value.Anonymous.doubleValue }))
     }
 }
 
 impl Drop for PdhCpuCounter {
     fn drop(&mut self) {
+        // SAFETY: this struct exclusively owns the live query handle and Drop runs exactly once.
         unsafe {
             PdhCloseQuery(self.query);
         }
@@ -149,6 +159,7 @@ fn read_system_times() -> Option<SystemTimes> {
     let mut idle = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
+    // SAFETY: all three FILETIME arguments are valid writable output buffers.
     let ok = unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) };
     if ok == 0 {
         return None;
@@ -164,6 +175,7 @@ fn read_process_times() -> Option<ProcessTimes> {
     let mut exit = FILETIME::default();
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
+    // SAFETY: GetCurrentProcess returns the current pseudo-handle and all FILETIME outputs are valid.
     let ok = unsafe {
         GetProcessTimes(
             GetCurrentProcess(),
@@ -243,12 +255,14 @@ fn read_registry_string(root: HKEY, key_path: &str, value_name: &str) -> Option<
     let key_path = wide_null(key_path);
     let value_name = wide_null(value_name);
     let mut key = std::ptr::null_mut();
+    // SAFETY: key_path is NUL-terminated and `key` is a valid output pointer closed below on success.
     let open_status = unsafe { RegOpenKeyExW(root, key_path.as_ptr(), 0, KEY_READ, &mut key) };
     if open_status != 0 {
         return None;
     }
 
     let result = query_registry_string(key, &value_name);
+    // SAFETY: `key` was opened successfully above and is closed exactly once here.
     unsafe {
         RegCloseKey(key);
     }
@@ -258,6 +272,7 @@ fn read_registry_string(root: HKEY, key_path: &str, value_name: &str) -> Option<
 fn query_registry_string(key: HKEY, value_name: &[u16]) -> Option<String> {
     let mut value_type = 0;
     let mut byte_len = 0;
+    // SAFETY: `key` is live, value_name is NUL-terminated, and output size/type pointers are valid.
     let query_status = unsafe {
         RegQueryValueExW(
             key,
@@ -273,6 +288,7 @@ fn query_registry_string(key: HKEY, value_name: &[u16]) -> Option<String> {
     }
 
     let mut bytes = vec![0u8; byte_len as usize];
+    // SAFETY: the buffer was allocated to the queried byte length and all output pointers are valid.
     let read_status = unsafe {
         RegQueryValueExW(
             key,

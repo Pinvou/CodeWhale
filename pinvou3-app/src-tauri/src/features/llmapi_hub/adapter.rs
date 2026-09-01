@@ -1,4 +1,4 @@
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -558,7 +558,9 @@ impl HttpLlmApiHubAdapter {
             "[llmapi_hub][adapter] current user ok newapi_user_id={} username={} has_display_name={} elapsed_ms={}",
             user.id,
             user.username,
-            user.display_name.as_ref().is_some_and(|v| !v.trim().is_empty()),
+            user.display_name
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty()),
             started_at.elapsed().as_millis()
         );
         Ok(user)
@@ -1109,7 +1111,7 @@ fn blocking_client() -> reqwest::blocking::Client {
         .connect_timeout(Duration::from_secs(HTTP_CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .build()
-        .expect("build New API blocking HTTP client");
+        .unwrap_or_else(|error| panic!("build New API blocking HTTP client: {error}"));
     log::info!(
         "[llmapi_hub][adapter] blocking client build ok elapsed_ms={}",
         started_at.elapsed().as_millis()
