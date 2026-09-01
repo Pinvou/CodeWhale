@@ -2,6 +2,7 @@ pub mod bash_arity;
 pub mod shell_expand;
 
 use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use bash_arity::BashArityDict;
@@ -312,7 +313,14 @@ pub struct ExecPolicyContext<'a> {
 pub struct ExecPolicyEngine {
     /// Layered rulesets (builtin → agent → user). When non-empty, takes precedence
     /// over the legacy flat lists below.
-    rulesets: Vec<Ruleset>,
+    ///
+    /// Shared behind an `Arc<RwLock<..>>` so that [`Self::set_ruleset`] applied
+    /// through one clone is observed by every clone. Hosts clone the engine
+    /// into long-lived side executors (nested sub-agent tool registries); a
+    /// plain `Vec` would leave those executors on a stale ruleset after a live
+    /// permission update, reopening an enforcement gap the parent no longer
+    /// has.
+    rulesets: Arc<RwLock<Vec<Ruleset>>>,
     /// Legacy flat lists kept for backward compatibility with `new()`.
     trusted_prefixes: Vec<String>,
     denied_prefixes: Vec<String>,
@@ -325,7 +333,7 @@ impl ExecPolicyEngine {
     /// Legacy constructor: wraps the two vecs into a User-layer ruleset.
     pub fn new(trusted_prefixes: Vec<String>, denied_prefixes: Vec<String>) -> Self {
         Self {
-            rulesets: vec![],
+            rulesets: Arc::new(RwLock::new(vec![])),
             trusted_prefixes,
             denied_prefixes,
             approved_for_session: HashSet::new(),
@@ -338,7 +346,7 @@ impl ExecPolicyEngine {
     pub fn with_rulesets(mut rulesets: Vec<Ruleset>) -> Self {
         rulesets.sort_by_key(|r| r.layer);
         Self {
-            rulesets,
+            rulesets: Arc::new(RwLock::new(rulesets)),
             trusted_prefixes: vec![],
             denied_prefixes: vec![],
             approved_for_session: HashSet::new(),
@@ -348,17 +356,37 @@ impl ExecPolicyEngine {
 
     /// Add a ruleset layer (re-sorts internally).
     pub fn add_ruleset(&mut self, ruleset: Ruleset) {
-        self.rulesets.push(ruleset);
-        self.rulesets.sort_by_key(|r| r.layer);
+        let mut guard = Self::lock_rulesets(&self.rulesets);
+        guard.push(ruleset);
+        guard.sort_by_key(|r| r.layer);
     }
 
     /// Replace the ruleset at one priority layer without clearing approvals
     /// remembered for the current session.
     pub fn set_ruleset(&mut self, ruleset: Ruleset) {
+        let mut guard = Self::lock_rulesets(&self.rulesets);
+        guard.retain(|existing| existing.layer != ruleset.layer);
+        guard.push(ruleset);
+        guard.sort_by_key(|existing| existing.layer);
+    }
+
+    /// Lock the shared ruleset list for reading or writing.
+    ///
+    /// A poisoned lock (a panic held the guard mid-mutation) is recovered from:
+    /// the ruleset vec is plain data and a torn update sorts itself out on the
+    /// next `set_ruleset`, while refusing to answer policy checks would fail
+    /// closed for every command in the process.
+    fn lock_rulesets(
+        rulesets: &Arc<RwLock<Vec<Ruleset>>>,
+    ) -> std::sync::RwLockWriteGuard<'_, Vec<Ruleset>> {
+        rulesets.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Read-only snapshot of the shared ruleset list.
+    fn read_rulesets(&self) -> std::sync::RwLockReadGuard<'_, Vec<Ruleset>> {
         self.rulesets
-            .retain(|existing| existing.layer != ruleset.layer);
-        self.rulesets.push(ruleset);
-        self.rulesets.sort_by_key(|existing| existing.layer);
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Resolve the effective trusted/denied prefix sets by merging all rulesets.
@@ -368,17 +396,19 @@ impl ExecPolicyEngine {
     /// semantics: any matching deny prefix blocks the command regardless of layer.
     /// Trusted rules are only consulted after deny checks pass.
     fn resolve_prefixes(&self) -> (Vec<String>, Vec<String>) {
-        if self.rulesets.is_empty() {
+        let rulesets = self.read_rulesets();
+        if rulesets.is_empty() {
             return (self.trusted_prefixes.clone(), self.denied_prefixes.clone());
         }
         // Collect all trusted/denied across all layers, highest-priority last so they
         // shadow lower-priority entries with the same prefix.
         let mut trusted: Vec<String> = vec![];
         let mut denied: Vec<String> = vec![];
-        for rs in &self.rulesets {
+        for rs in rulesets.iter() {
             trusted.extend(rs.trusted_prefixes.iter().cloned());
             denied.extend(rs.denied_prefixes.iter().cloned());
         }
+        drop(rulesets);
         // Also merge legacy flat lists as user-layer.
         trusted.extend(self.trusted_prefixes.iter().cloned());
         denied.extend(self.denied_prefixes.iter().cloned());
@@ -391,7 +421,8 @@ impl ExecPolicyEngine {
             .path
             .and_then(|path| normalize_workspace_relative_path(path, ctx.cwd));
 
-        self.rulesets
+        let rulesets = self.read_rulesets();
+        let matched = rulesets
             .iter()
             .flat_map(|ruleset| {
                 ruleset
@@ -422,7 +453,9 @@ impl ExecPolicyEngine {
                 (None, _) => true,
             })
             .max_by_key(|(layer, rule)| (*layer, rule.action, ask_rule_specificity(rule)))
-            .map(|(_, rule)| rule.clone())
+            .map(|(_, rule)| (*rule).clone());
+        drop(rulesets);
+        matched
     }
 
     /// Records an approval key for the current session so subsequent checks skip approval.
