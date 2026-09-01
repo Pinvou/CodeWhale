@@ -893,7 +893,7 @@ test('admin console exposes users, roles, and organizations as independently nam
   assert.match(view, /section === 'roles'/);
   assert.doesNotMatch(view, /section === 'accounts'/);
   assert.doesNotMatch(i18n, /账号与组织/);
-  assert.match(i18n, /users:\s*'用户管理',\s*roles:\s*'角色与授权',\s*organizations:\s*'组织管理'/);
+  assert.match(i18n, /users:\s*'用户管理',\s*roles:\s*'角色与权限',\s*organizations:\s*'组织管理'/);
   assert.match(view, /key:\s*'username',\s*label:\s*copy\.userManagement\.account/);
   assert.doesNotMatch(view, /copy\.accounts\.email/);
   assert.doesNotMatch(view, /function userLabel\(user\) \{[\s\S]*?user\?\.email[\s\S]*?\}/);

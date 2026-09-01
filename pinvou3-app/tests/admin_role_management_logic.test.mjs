@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   canGrantRole,
@@ -6,8 +7,11 @@ import {
   filterBindings,
   filterRoles,
   permissionGroups,
+  roleCatalogScope,
+  roleCatalogScopes,
   roleGrantMode,
   roleScopeLabel,
+  roleScopes,
   summarizeRoleScopes,
 } from '../src/features/account-platform/admin-role-management.js';
 
@@ -37,12 +41,22 @@ test('role scope and grantability follow server definitions and protected lifecy
   assert.equal(canGrantRole(roles[2]), false);
   assert.equal(canRevokeBinding({ role_code: 'PLATFORM_BILLING_OPERATOR', status: 'ACTIVE' }, new Map(roles.map((role) => [role.code, role]))), true);
   assert.equal(canRevokeBinding({ role_code: 'OWNER', status: 'ACTIVE' }, new Map(roles.map((role) => [role.code, role]))), false);
-  assert.deepEqual(summarizeRoleScopes(roles), { PERSONAL: 1, PLATFORM: 1, ORGANIZATION: 1, UNIT: 1 });
+  assert.deepEqual(roleCatalogScopes, ['PERSONAL', 'PLATFORM', 'ORGANIZATION']);
+  assert.deepEqual(roleScopes, ['PERSONAL', 'PLATFORM', 'ORGANIZATION', 'UNIT']);
+  assert.equal(roleCatalogScope('UNIT'), 'ORGANIZATION');
+  assert.deepEqual(summarizeRoleScopes(roles), { PERSONAL: 1, PLATFORM: 1, ORGANIZATION: 2 });
+});
+
+test('role catalog action column keeps its view action on one line', async () => {
+  const styles = await readFile(new URL('../src/features/account-platform/admin-role-management.css', import.meta.url), 'utf8');
+  assert.match(styles, /\.adm-role-table th:last-child,\.adm-role-table td:last-child\{width:96px;min-width:96px;white-space:nowrap\}/);
+  assert.match(styles, /\.adm-role-table td:last-child \.adm-name-link\{white-space:nowrap\}/);
 });
 
 test('role catalog searches localized names and exact permission codes', () => {
   assert.deepEqual(filterRoles(roles, { query: '平台计费', scope: '', grantable: '' }, copy).map((role) => role.code), ['PLATFORM_BILLING_OPERATOR']);
   assert.deepEqual(filterRoles(roles, { query: 'wallets.read', scope: 'PLATFORM', grantable: 'direct' }, copy).map((role) => role.code), ['PLATFORM_BILLING_OPERATOR']);
+  assert.deepEqual(filterRoles(roles, { query: '', scope: 'ORGANIZATION', grantable: '' }, copy).map((role) => role.code), ['OWNER', 'UNIT_ADMIN']);
   assert.equal(permissionGroups(copy, roles[1])[0].label, '财务与支付');
 });
 

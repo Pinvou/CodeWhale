@@ -8,6 +8,8 @@ import {
   roleGrantMode,
   roleDescription,
   roleName,
+  roleCatalogScope,
+  roleCatalogScopes,
   roleScopeLabel,
   roleScopes,
   summarizeRoleScopes,
@@ -66,8 +68,9 @@ function Drawer({ label, onClose, children }) {
   );
 }
 
-function ScopeBadge({ copy, scope }) {
-  return <span className={`adm-role-scope ${String(scope || '').toLowerCase()}`}>{roleScopeLabel(copy, scope)}</span>;
+function ScopeBadge({ copy, scope, catalog = false }) {
+  const displayScope = catalog ? roleCatalogScope(scope) : scope;
+  return <span className={`adm-role-scope ${String(displayScope || '').toLowerCase()}`}>{roleScopeLabel(copy, displayScope)}</span>;
 }
 
 function RoleDetail({ copy, role, onGrant }) {
@@ -80,7 +83,7 @@ function RoleDetail({ copy, role, onGrant }) {
           <h3>{roleName(copy, role.code)}</h3>
           <code>{role.code}</code>
         </div>
-        <ScopeBadge copy={copy} scope={role.scope} />
+        <ScopeBadge copy={copy} scope={role.scope} catalog />
       </header>
       <p>{roleDescription(copy, role)}</p>
       <dl className="adm-role-facts">
@@ -271,7 +274,7 @@ export function AdminRolesWorkspace({ copy, roles, bindings, users, organization
   const params = new URLSearchParams(String(globalThis.location?.search || ''));
   const deepLinkedRole = params.get('role');
   const [tab, setTab] = useState(params.get('role_view') === 'bindings' ? 'bindings' : 'catalog');
-  const [roleFilters, setRoleFilters] = useState({ query: '', scope: params.get('role_scope') || '', grantable: '' });
+  const [roleFilters, setRoleFilters] = useState({ query: '', scope: roleCatalogScope(params.get('role_scope') || ''), grantable: '' });
   const [bindingFilters, setBindingFilters] = useState({ query: '', scope: '', status: '' });
   const [selectedRoleCode, setSelectedRoleCode] = useState(deepLinkedRole || roles[0]?.code || '');
   const [selectedBinding, setSelectedBinding] = useState(null);
@@ -314,13 +317,13 @@ export function AdminRolesWorkspace({ copy, roles, bindings, users, organization
     }
   };
   return <div className="adm-role-workspace">
-    <section className="adm-role-summary" aria-label={copy.roles.scopeSummary}>{roleScopes.map((scope) => <article key={scope}><span>{roleScopeLabel(copy, scope)}</span><strong>{scopeCounts[scope]}</strong><small>{copy.roles.scopeHints?.[scope]}</small></article>)}</section>
+    <section className="adm-role-summary" aria-label={copy.roles.scopeSummary}>{roleCatalogScopes.map((scope) => <article key={scope}><span>{roleScopeLabel(copy, scope)}</span><strong>{scopeCounts[scope]}</strong><small>{copy.roles.scopeHints?.[scope]}</small></article>)}</section>
     <section className="adm-panel adm-role-panel">
       <header className="adm-role-workspace-head"><div className="adm-tabs" role="tablist"><button type="button" role="tab" aria-selected={tab === 'catalog'} className={tab === 'catalog' ? 'active' : ''} onClick={() => setTab('catalog')}>{copy.roles.catalog}</button><button type="button" role="tab" aria-selected={tab === 'bindings'} className={tab === 'bindings' ? 'active' : ''} onClick={() => setTab('bindings')}>{copy.roles.bindingManagement}</button></div><div>{permissionSet.has('platform.audit.read') && <button type="button" onClick={() => onNavigate('audit', { audit_action: 'admin.role.binding', audit_resource: 'role_binding' })}>{copy.roles.viewChanges}</button>}{canAssign && <button className="adm-role-primary" type="button" onClick={() => setGrantRole({})}>{copy.roles.newGrant}</button>}</div></header>
       {message.text && <div className={`adm-inline-message ${message.tone}`} role={message.tone === 'error' ? 'alert' : 'status'}>{message.text}</div>}
       {tab === 'catalog' ? <>
-        <div className="adm-role-toolbar"><input value={roleFilters.query} onChange={(event) => setRoleFilters((current) => ({ ...current, query: event.target.value }))} placeholder={copy.roles.roleSearchPlaceholder} /><select value={roleFilters.scope} onChange={(event) => setRoleFilters((current) => ({ ...current, scope: event.target.value }))}><option value="">{copy.roles.allScopes}</option>{roleScopes.map((scope) => <option key={scope} value={scope}>{roleScopeLabel(copy, scope)}</option>)}</select><select value={roleFilters.grantable} onChange={(event) => setRoleFilters((current) => ({ ...current, grantable: event.target.value }))}><option value="">{copy.roles.allGrantMethods}</option><option value="direct">{copy.roles.directGrant}</option><option value="managed">{copy.roles.managedGrant}</option></select><span>{copy.items(visibleRoles.length)}</span></div>
-        <div className="adm-role-catalog-layout"><div className="adm-table-wrap" tabIndex="0"><table className="adm-table adm-role-table"><thead><tr><th>{copy.roles.role}</th><th>{copy.roles.scope}</th><th>{copy.roles.permissionCount}</th><th>{copy.roles.type}</th><th>{copy.roles.grantMethod}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>{visibleRoles.map((role) => <tr key={role.code} className={selectedRole?.code === role.code ? 'selected' : ''} onClick={() => setSelectedRoleCode(role.code)}><td><strong>{roleName(copy, role.code)}</strong><code>{role.code}</code></td><td><ScopeBadge copy={copy} scope={role.scope} /></td><td>{copy.roles.permissionsCount(role.permissions?.length || 0)}</td><td>{copy.roles.builtIn}</td><td>{roleGrantMode(copy, role)}</td><td><button type="button" className="adm-name-link" onClick={(event) => { event.stopPropagation(); setSelectedRoleCode(role.code); }}>{copy.roles.view}</button></td></tr>)}</tbody></table>{!visibleRoles.length && <div className="adm-empty">{copy.roles.noRoles}</div>}</div><RoleDetail copy={copy} role={selectedRole} onGrant={canAssign ? setGrantRole : null} /></div>
+        <div className="adm-role-toolbar"><input value={roleFilters.query} onChange={(event) => setRoleFilters((current) => ({ ...current, query: event.target.value }))} placeholder={copy.roles.roleSearchPlaceholder} /><select value={roleFilters.scope} onChange={(event) => setRoleFilters((current) => ({ ...current, scope: event.target.value }))}><option value="">{copy.roles.allScopes}</option>{roleCatalogScopes.map((scope) => <option key={scope} value={scope}>{roleScopeLabel(copy, scope)}</option>)}</select><select value={roleFilters.grantable} onChange={(event) => setRoleFilters((current) => ({ ...current, grantable: event.target.value }))}><option value="">{copy.roles.allGrantMethods}</option><option value="direct">{copy.roles.directGrant}</option><option value="managed">{copy.roles.managedGrant}</option></select><span>{copy.items(visibleRoles.length)}</span></div>
+        <div className="adm-role-catalog-layout"><div className="adm-table-wrap" tabIndex="0"><table className="adm-table adm-role-table"><thead><tr><th>{copy.roles.role}</th><th>{copy.roles.scope}</th><th>{copy.roles.permissionCount}</th><th>{copy.roles.type}</th><th>{copy.roles.grantMethod}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>{visibleRoles.map((role) => <tr key={role.code} className={selectedRole?.code === role.code ? 'selected' : ''} onClick={() => setSelectedRoleCode(role.code)}><td><strong>{roleName(copy, role.code)}</strong><code>{role.code}</code></td><td><ScopeBadge copy={copy} scope={role.scope} catalog /></td><td>{copy.roles.permissionsCount(role.permissions?.length || 0)}</td><td>{copy.roles.builtIn}</td><td>{roleGrantMode(copy, role)}</td><td><button type="button" className="adm-name-link" onClick={(event) => { event.stopPropagation(); setSelectedRoleCode(role.code); }}>{copy.roles.view}</button></td></tr>)}</tbody></table>{!visibleRoles.length && <div className="adm-empty">{copy.roles.noRoles}</div>}</div><RoleDetail copy={copy} role={selectedRole} onGrant={canAssign ? setGrantRole : null} /></div>
       </> : <>
         <div className="adm-role-toolbar"><input value={bindingFilters.query} onChange={(event) => { setBindingPage(1); setBindingFilters((current) => ({ ...current, query: event.target.value })); }} placeholder={copy.roles.bindingSearchPlaceholder} /><select value={bindingFilters.scope} onChange={(event) => { setBindingPage(1); setBindingFilters((current) => ({ ...current, scope: event.target.value })); }}><option value="">{copy.roles.allScopes}</option>{roleScopes.map((scope) => <option key={scope} value={scope}>{roleScopeLabel(copy, scope)}</option>)}</select><select value={bindingFilters.status} onChange={(event) => { setBindingPage(1); setBindingFilters((current) => ({ ...current, status: event.target.value })); }}><option value="">{copy.roles.allStatuses}</option>{['SCHEDULED', 'ACTIVE', 'EXPIRED', 'REVOKED'].map((status) => <option key={status} value={status}>{copy.roles.statuses?.[status] || status}</option>)}</select><span>{copy.items(visibleBindings.length)}</span></div>
         <div className="adm-table-wrap" tabIndex="0"><table className="adm-table adm-role-binding-table"><thead><tr><th>{copy.roles.user}</th><th>{copy.roles.roleAndScope}</th><th>{copy.roles.validity}</th><th>{copy.roles.source}</th><th>{copy.accounts.status}</th><th>{copy.accounts.actions}</th></tr></thead><tbody>{pageItems.map((binding) => { const user = userByID.get(binding.user_id); const organization = organizationByID.get(binding.organization_id); const role = roleByCode.get(binding.role_code); const revocable = canAssign && canRevokeBinding(binding, roleByCode); return <tr key={binding.binding_id}><td><strong>{userLabel(user, binding.user_id)}</strong><small>{user?.user_code || shortID(binding.user_id)}</small></td><td><strong>{roleName(copy, binding.role_code)}</strong><div><ScopeBadge copy={copy} scope={binding.scope} />{organization && <small>{organization.name}</small>}</div></td><td>{formatDate(binding.starts_at, copy)}<small>{formatDate(binding.expires_at, copy)}</small></td><td>{copy.roles.sources?.[binding.grant_source] || binding.grant_source}</td><td><span className={`adm-status ${binding.status === 'ACTIVE' ? 'ok' : binding.status === 'SCHEDULED' ? 'warn' : 'neutral'}`}>{copy.roles.statuses?.[binding.status] || binding.status}</span></td><td><div className="adm-row-actions"><button type="button" onClick={() => setSelectedBinding(binding)}>{copy.roles.view}</button>{revocable && <button type="button" className="danger" disabled={busy} onClick={() => revoke(binding)}>{copy.roles.revoke}</button>}</div></td></tr>; })}</tbody></table>{!pageItems.length && <div className="adm-empty">{copy.roles.noBindings}</div>}</div>

@@ -165,7 +165,7 @@ export const adminPlatformCopy = {
       title: '角色与权限', definitions: '角色定义', catalog: '角色目录', bindingManagement: '授权管理', viewChanges: '查看变更记录',
       userMemberships: '用户关联角色', organizationMembers: '组织成员权限', role: '角色', roleAndScope: '角色与作用域', scope: '适用范围', description: '说明',
       scopes: { PERSONAL: '个人', PLATFORM: '平台', ORGANIZATION: '组织', UNIT: '组织节点' }, organizationScope: '组织', unitScope: '组织节点',
-      scopeHints: { PERSONAL: '由账户生命周期维护', PLATFORM: '在整个平台生效', ORGANIZATION: '仅在指定组织生效', UNIT: '按节点及其子树生效' }, scopeSummary: '角色作用域摘要',
+      scopeHints: { PERSONAL: '由账户生命周期维护', PLATFORM: '在整个平台生效', ORGANIZATION: '包含组织级和节点级角色', UNIT: '按节点及其子树生效' }, scopeSummary: '角色作用域摘要',
       names: {
         AUDITOR: '组织审计员', BILLING_ADMIN: '组织计费管理员', MEMBER: '组织成员', ORG_ADMIN: '组织管理员', ORG_MODEL_ADMIN: '组织模型管理员', OWNER: '组织所有者', PERSONAL_USER: '个人用户',
         PLATFORM_AUDITOR: '平台审计员', PLATFORM_AUDIT_PII_EXPORT: '临时敏感数据导出', PLATFORM_BILLING_APPROVER: '平台计费审批员', PLATFORM_BILLING_OPERATOR: '平台计费操作员', PLATFORM_IDENTITY_ADMIN: '平台身份管理员',
@@ -562,7 +562,7 @@ export const adminPlatformCopy = {
       title: 'Roles and permissions', definitions: 'Role definitions', catalog: 'Role catalog', bindingManagement: 'Grant management', viewChanges: 'View change history',
       userMemberships: 'User roles', organizationMembers: 'Organization member access', role: 'Role', roleAndScope: 'Role and scope', scope: 'Scope', description: 'Description',
       scopes: { PERSONAL: 'Personal', PLATFORM: 'Platform', ORGANIZATION: 'Organization', UNIT: 'Organization unit' }, organizationScope: 'Organization', unitScope: 'Organization unit',
-      scopeHints: { PERSONAL: 'Maintained by the account lifecycle', PLATFORM: 'Effective across the platform', ORGANIZATION: 'Effective in one organization', UNIT: 'Effective in a unit subtree' }, scopeSummary: 'Role scope summary',
+      scopeHints: { PERSONAL: 'Maintained by the account lifecycle', PLATFORM: 'Effective across the platform', ORGANIZATION: 'Includes organization- and unit-scoped roles', UNIT: 'Effective in a unit subtree' }, scopeSummary: 'Role scope summary',
       names: {
         AUDITOR: 'Organization auditor', BILLING_ADMIN: 'Organization billing admin', MEMBER: 'Organization member', ORG_ADMIN: 'Organization admin', ORG_MODEL_ADMIN: 'Organization model admin', OWNER: 'Organization owner', PERSONAL_USER: 'Personal user',
         PLATFORM_AUDITOR: 'Platform auditor', PLATFORM_AUDIT_PII_EXPORT: 'Temporary sensitive-data export', PLATFORM_BILLING_APPROVER: 'Platform billing approver', PLATFORM_BILLING_OPERATOR: 'Platform billing operator', PLATFORM_IDENTITY_ADMIN: 'Platform identity admin', PLATFORM_MODEL_ADMIN: 'Platform model admin', PLATFORM_OPERATIONS_ADMIN: 'Platform operations admin', PLATFORM_ORGANIZATION_ADMIN: 'Platform organization admin', PLATFORM_PRICING_ADMIN: 'Platform pricing admin', PLATFORM_SUPER_ADMIN: 'Platform super admin', UNIT_ADMIN: 'Organization unit admin',
@@ -953,7 +953,7 @@ export const adminPlatformCopy = {
     roles: {
       title: 'ロールと権限', definitions: 'ロール定義', catalog: 'ロール一覧', bindingManagement: '付与管理', viewChanges: '変更履歴を見る',
       userMemberships: 'ユーザーのロール', organizationMembers: '組織メンバー権限', role: 'ロール', roleAndScope: 'ロールと範囲', scope: '範囲', description: '説明',
-      scopes: { PERSONAL: '個人', PLATFORM: 'プラットフォーム', ORGANIZATION: '組織', UNIT: '組織ノード' }, organizationScope: '組織', unitScope: '組織ノード', scopeHints: { PERSONAL: 'アカウントのライフサイクルで管理', PLATFORM: 'プラットフォーム全体で有効', ORGANIZATION: '指定した組織で有効', UNIT: 'ノードと配下で有効' }, scopeSummary: 'ロール範囲の概要',
+      scopes: { PERSONAL: '個人', PLATFORM: 'プラットフォーム', ORGANIZATION: '組織', UNIT: '組織ノード' }, organizationScope: '組織', unitScope: '組織ノード', scopeHints: { PERSONAL: 'アカウントのライフサイクルで管理', PLATFORM: 'プラットフォーム全体で有効', ORGANIZATION: '組織単位とノード単位のロールを含む', UNIT: 'ノードと配下で有効' }, scopeSummary: 'ロール範囲の概要',
       names: {
         AUDITOR: '組織監査担当', BILLING_ADMIN: '組織請求管理者', MEMBER: '組織メンバー', ORG_ADMIN: '組織管理者', ORG_MODEL_ADMIN: '組織モデル管理者', OWNER: '組織所有者', PERSONAL_USER: '個人ユーザー', PLATFORM_AUDITOR: 'プラットフォーム監査担当', PLATFORM_AUDIT_PII_EXPORT: '一時的な機密データ出力', PLATFORM_BILLING_APPROVER: '請求承認担当', PLATFORM_BILLING_OPERATOR: '請求運用担当', PLATFORM_IDENTITY_ADMIN: 'ID 管理者', PLATFORM_MODEL_ADMIN: 'モデル管理者', PLATFORM_OPERATIONS_ADMIN: '運用管理者', PLATFORM_ORGANIZATION_ADMIN: '組織管理担当', PLATFORM_PRICING_ADMIN: '価格管理者', PLATFORM_SUPER_ADMIN: 'スーパー管理者', UNIT_ADMIN: '組織ノード管理者',
       },
