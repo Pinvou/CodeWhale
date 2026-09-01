@@ -324,6 +324,9 @@ pub struct ExecPolicyEngine {
     /// Legacy flat lists kept for backward compatibility with `new()`.
     trusted_prefixes: Vec<String>,
     denied_prefixes: Vec<String>,
+    /// Deliberately clone-private, unlike `rulesets`: a remembered grant is a
+    /// decision the parent session made for its own calls, so it must not
+    /// silently authorize a delegated call in a cloned executor.
     approved_for_session: HashSet<String>,
     /// Arity dictionary for command-prefix allow-rule matching.
     arity_dict: BashArityDict,
@@ -2285,6 +2288,22 @@ mod tests {
             })
             .unwrap();
         assert_eq!(decision.matched_rule, None);
+
+        // The fallback is exact: a traversal spelling of the same file is a
+        // different token string and must stay unmatchable (the documented
+        // "traversal is never matchable" stance, pinned through the rooted
+        // fallback too).
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("read_file"),
+                path: Some("/root/../root/.ssh/config"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        assert_eq!(decision.matched_rule, None);
     }
 
     #[test]
@@ -2312,6 +2331,20 @@ mod tests {
             })
             .unwrap();
         assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
+
+        // The tilde-rooted channel is exact as well: a traversal spelling of
+        // the same file must not match (never-matchable-traversal stance).
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("read_file"),
+                path: Some("~/.ssh/../ssh/config"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        assert_eq!(decision.matched_rule, None);
     }
 
     #[test]
