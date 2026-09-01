@@ -3836,14 +3836,20 @@ function SystemStatus({ copy, data, permissions }) {
         <Metric label={copy.system.pendingReconciliation} value={status.reconciliation.pending} />
         <Metric label={copy.system.stoppedReconciliation} value={status.reconciliation.stopped} tone={Number(status.reconciliation.stopped) ? 'accent' : ''} />
       </div>
-      <article className="adm-panel">
-        <SectionHeader title={copy.system.services} count={status.services.length} copy={copy} />
-        <Table columns={serviceColumns} items={status.services} copy={copy} />
-        <h3>{copy.system.relays}</h3>
-        <Table columns={relayColumns} items={status.relays} copy={copy} />
-        <h3>{copy.system.recentErrors}</h3>
-        <Table columns={errorColumns} items={status.recent_errors} copy={copy} />
-      </article>
+      <div className="adm-system-sections">
+        <article className="adm-panel">
+          <SectionHeader title={copy.system.services} count={status.services.length} copy={copy} />
+          <Table columns={serviceColumns} items={status.services} copy={copy} />
+        </article>
+        <article className="adm-panel">
+          <SectionHeader title={copy.system.relays} count={status.relays.length} copy={copy} />
+          <Table columns={relayColumns} items={status.relays} copy={copy} />
+        </article>
+        <article className="adm-panel">
+          <SectionHeader title={copy.system.recentErrors} count={status.recent_errors.length} copy={copy} />
+          <Table columns={errorColumns} items={status.recent_errors} copy={copy} />
+        </article>
+      </div>
       <RunbookBoundary copy={copy} permissions={permissions} mode="system" />
     </section>
   );

@@ -125,6 +125,8 @@ test('admin portal follows the approved HTML visual system and business-page com
   assert.match(sourceCSS, /@media\s*\(pointer:\s*coarse\)[\s\S]*min-height:44px/);
   assert.match(sourceCSS, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
   assert.match(sourceCSS, /\.adm-table-wrap\{[^}]*max-width:100%[^}]*overflow:auto/);
+  assert.match(view, /className="adm-system-sections"[\s\S]*copy\.system\.services[\s\S]*copy\.system\.relays[\s\S]*copy\.system\.recentErrors/);
+  assert.match(sourceCSS, /\.adm-system-sections\{[^}]*display:grid[^}]*gap:18px[^}]*margin-bottom:18px/);
   assert.match(sourceCSS, /\.adm-drawer-backdrop\{[^}]*position:fixed[^}]*backdrop-filter:blur\(3px\)/);
   assert.match(sourceCSS, /\.adm-detail-drawer\{[^}]*width:min\(620px,100vw\)[^}]*height:100vh/);
   assert.match(sourceCSS, /\.adm-extension-stack \.product-admin\{[^}]*background:var\(--adm-surface\)/);
