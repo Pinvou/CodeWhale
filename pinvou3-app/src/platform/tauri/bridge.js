@@ -288,8 +288,11 @@
     queued: [],
     // 输入框待发附件 [{ id, basename, status:'parsing'|'ready'|'error', result, error }]
     attachments: [],
-    // token 预算（input_tokens / maxModelLen）
-    tokens: { input: 0, max: 32768 },
+    // Token budget (input_tokens / maxModelLen). max=0 means the window is
+    // unknown: the context meter line stays hidden (its render guard needs
+    // max > 0) until a real window lands — a chat:usage context_window or a
+    // local backend max_model_len. No fabricated denominator.
+    tokens: { input: 0, max: 0 },
     // 思考指示器：active 时 React 渲染计时气泡（Braille + 思考中/调用工具 + 秒数）
     thinking: { active: false, phase: "thinking", toolName: "", startedAt: 0 },
     // 卡片池: 专家面具。activePersona = 当前 session 加持的专家卡(完整对象)或 null,
@@ -817,6 +820,7 @@
   var markTurnDirtyArtifact = artifactTrackerFeature.markTurnDirtyArtifact;
   var untrackArtifact = artifactTrackerFeature.untrackArtifact;
   var findPresentedArtifact = artifactTrackerFeature.findPresentedArtifact;
+  var updatePresentedArtifact = artifactTrackerFeature.updatePresentedArtifact;
   var reconcileArtifacts = artifactTrackerFeature.reconcileArtifacts;
   var extractArtifactPaths = artifactTrackerFeature.extractArtifactPaths;
   var extractArtifactPath = artifactTrackerFeature.extractArtifactPath;
@@ -870,7 +874,6 @@
   var toolCallAlreadyStarted = chatFeature.toolCallAlreadyStarted;
   var toolCallAlreadyFinished = chatFeature.toolCallAlreadyFinished;
   var hasChatItemForTool = chatFeature.hasChatItemForTool;
-  var isDuplicateArtifactCard = chatFeature.isDuplicateArtifactCard;
   var addSystemItem = chatFeature.addSystemItem;
   var addAuthoritySyncNotice = chatFeature.addAuthoritySyncNotice;
   var compactPruneRollupText = chatFeature.compactPruneRollupText;
@@ -1913,16 +1916,15 @@
             var pares = resultById[b.id];
             if (!(pares && pares.is_error)) {
               var rpp = presentArtifactAbsPath(pares && pares.content, b.input && b.input.path);
-              if (!isDuplicateArtifactCard(rpp)) {
-                addChatItem({
-                  type: "artifact_card",
-                  path: rpp,
-                  title: (b.input && b.input.title) || "",
-                  description: (b.input && b.input.description) || "",
-                  time: "",
-                  sessionId: state.activeSessionId,
-                });
-              }
+              var restoredCard = {
+                type: "artifact_card",
+                path: rpp,
+                title: (b.input && b.input.title) || "",
+                description: (b.input && b.input.description) || "",
+                time: "",
+                sessionId: state.activeSessionId,
+              };
+              if (!updatePresentedArtifact(restoredCard)) addChatItem(restoredCard);
               continue;
             }
           }
@@ -1942,10 +1944,11 @@
             if (!(gres2 && gres2.is_error) && gap && isDeliverable(gap) && lastDirtyArtifactId[gap] === b.id && !presentedArtifacts[gap] && !presentedArtifactNames[basename(gap)]) {
               var gprev = findPresentedArtifact(gap);
               if (gprev) {
-                addChatItem({
+                var gcard = {
                   type: "artifact_card", path: gprev.path, title: gprev.title,
                   description: gprev.description, time: "", sessionId: state.activeSessionId,
-                });
+                };
+                if (!updatePresentedArtifact(gcard)) addChatItem(gcard);
               } else if (writtenArtifacts[gap]) {
                 addChatItem({ type: "artifact_card", path: gap, title: basename(gap), description: "", time: "", sessionId: state.activeSessionId });
               }
@@ -1961,10 +1964,11 @@
               if ((wres && wres.is_error) || lastDirtyArtifactId[wap] !== b.id) return;
               var wprev = findPresentedArtifact(wap);
               if (wprev) {
-                addChatItem({
+                var wcard = {
                   type: "artifact_card", path: wprev.path, title: wprev.title,
                   description: wprev.description, time: "", sessionId: state.activeSessionId,
-                });
+                };
+                if (!updatePresentedArtifact(wcard)) addChatItem(wcard);
               } else if (writtenArtifacts[wap] && !presentedArtifacts[wap] && !presentedArtifactNames[basename(wap)]) {
                 // AI 写了产物但全程没 present_artifact → 兜底补首卡(与实时 chat:done 对齐)
                 addChatItem({ type: "artifact_card", path: wap, title: basename(wap), description: "", time: "", sessionId: state.activeSessionId });
@@ -2099,7 +2103,7 @@
     scheduleShellNotify: scheduleShellNotify,
     markBackgroundToolItem: markBackgroundToolItem,
     patchLastItem: patchLastItem,
-    isDuplicateArtifactCard: isDuplicateArtifactCard,
+    updatePresentedArtifact: updatePresentedArtifact,
     updateToolItem: updateToolItem,
     basename: basename,
     hasUnresolvedItem: hasUnresolvedItem,
@@ -2107,7 +2111,7 @@
     safeConsoleInfo: safeConsoleInfo,
     isScheduledRunSession: isScheduledRunSession,
     markScheduledInitialTurnTerminal: markScheduledInitialTurnTerminal,
-    isAbsPath: isAbsPath,
+    isAbsPath: isAbsPath, normalizedPath: normalizedPath,
     addOrMergePruneCompaction: addOrMergePruneCompaction,
     toolResultDisplayContent: toolResultDisplayContent,
     get currentStreamText() { return currentStreamText; },

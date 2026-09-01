@@ -15,7 +15,10 @@
     var monitorIntervalId = null;
     var monitorPollInFlight = false;
     var gpuUtilHistory = [];
-    var maxModelLen = state.tokens.max || 32768;
+    // 0 = no real max_model_len received yet from get_backend_status or the
+    // monitor snapshot; write state.tokens.max back only for real values
+    // (both assignment sites are truthiness-guarded).
+    var maxModelLen = state.tokens.max || 0;
     var MONITOR_BASELINE_KEY = "pinvou3.monitorStatsBaseline.self";
     var monitorBaseline = null;
     try {
