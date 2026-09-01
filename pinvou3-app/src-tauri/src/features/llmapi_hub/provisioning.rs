@@ -11,7 +11,7 @@ use super::models::{
     LlmApiErrorCode, LlmApiIdentity, LlmApiPolicy, LlmApiStatusResponse, ProvisioningStatus,
     QuotaStatus,
 };
-use super::store::{admin_overview_items, FileLlmApiBindingStore, LlmApiBindingStore};
+use super::store::{FileLlmApiBindingStore, LlmApiBindingStore, admin_overview_items};
 
 pub fn ensure_binding<S, C, A, I>(
     store: &S,
@@ -794,7 +794,11 @@ pub fn status_for_current_user_system() -> Result<LlmApiStatusResponse, LlmApiEr
         status.backend_display_name.as_deref().unwrap_or(""),
         status.quota.as_ref().map(|q| q.limit_tokens).unwrap_or(0),
         status.quota.as_ref().map(|q| q.used_tokens).unwrap_or(0),
-        status.quota.as_ref().map(|q| q.remaining_tokens).unwrap_or(0),
+        status
+            .quota
+            .as_ref()
+            .map(|q| q.remaining_tokens)
+            .unwrap_or(0),
         started_at.elapsed().as_millis()
     );
     Ok(status)
@@ -1337,7 +1341,12 @@ where
             log::info!(
                 "[llmapi_hub][provisioning] api key ensured from current user profile user_id={} model={} used={} remaining={} elapsed_ms={}",
                 identity.pinvou_user_id,
-                binding.policy.allowed_models.first().map(String::as_str).unwrap_or(""),
+                binding
+                    .policy
+                    .allowed_models
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(""),
                 binding.usage.used_tokens,
                 binding.usage.remaining_tokens,
                 started_at.elapsed().as_millis()
@@ -1354,7 +1363,12 @@ where
                 log::info!(
                     "[llmapi_hub][provisioning] api key usage ok user_id={} model={} used={} remaining={} elapsed_ms={}",
                     identity.pinvou_user_id,
-                    binding.policy.allowed_models.first().map(String::as_str).unwrap_or(""),
+                    binding
+                        .policy
+                        .allowed_models
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or(""),
                     binding.usage.used_tokens,
                     binding.usage.remaining_tokens,
                     started_at.elapsed().as_millis()
@@ -1465,7 +1479,12 @@ where
         "[llmapi_hub][provisioning] default api key refresh ok user_id={} token_id={} model={} used={} remaining={} elapsed_ms={}",
         identity.pinvou_user_id,
         refreshed.id,
-        binding.policy.allowed_models.first().map(String::as_str).unwrap_or(""),
+        binding
+            .policy
+            .allowed_models
+            .first()
+            .map(String::as_str)
+            .unwrap_or(""),
         binding.usage.used_tokens,
         binding.usage.remaining_tokens,
         started_at.elapsed().as_millis()
@@ -1649,8 +1668,8 @@ pub fn ready_saved_model_system() -> Result<crate::platform::prefs::SavedModel, 
     Ok(model)
 }
 
-pub fn ready_saved_model_from_local_binding_system(
-) -> Result<crate::platform::prefs::SavedModel, LlmApiError> {
+pub fn ready_saved_model_from_local_binding_system()
+-> Result<crate::platform::prefs::SavedModel, LlmApiError> {
     let started_at = Instant::now();
     log::info!("[llmapi_hub][provisioning] ready_saved_model_local start");
     let store = FileLlmApiBindingStore::default();

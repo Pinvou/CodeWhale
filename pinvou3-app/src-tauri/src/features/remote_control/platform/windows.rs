@@ -4,9 +4,9 @@ use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Storage::FileSystem::{
-    GetFileInformationByHandle, GetLogicalDrives, MoveFileExW, BY_HANDLE_FILE_INFORMATION,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, GetLogicalDrives,
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +75,7 @@ pub(super) fn workspace_identity(path: &Path) -> std::io::Result<WorkspaceIdenti
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `directory` owns a live handle and `information` is a valid writable output buffer.
     if unsafe { GetFileInformationByHandle(directory.as_raw_handle(), &mut information) } == 0 {
         return Err(std::io::Error::last_os_error());
     }

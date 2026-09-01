@@ -1,5 +1,5 @@
 use super::super::{
-    identity::{resolve_identity_from_parts, PINVOU_BOUND_BIOS_SN_SHA256_ENV},
+    identity::{PINVOU_BOUND_BIOS_SN_SHA256_ENV, resolve_identity_from_parts},
     models::{LlmApiError, LlmApiErrorCode, LlmApiIdentity},
 };
 

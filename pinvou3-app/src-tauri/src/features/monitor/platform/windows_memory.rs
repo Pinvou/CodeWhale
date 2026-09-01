@@ -3,9 +3,12 @@ use super::super::RamSnapshot;
 use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
 pub fn ram_snapshot() -> Option<RamSnapshot> {
+    // SAFETY: MEMORYSTATUSEX is a plain Windows FFI record that permits zero initialization
+    // before its required dwLength field is populated.
     let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
     status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
 
+    // SAFETY: `status` has the required dwLength and is a valid writable output buffer.
     let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
     if ok == 0 {
         return None;

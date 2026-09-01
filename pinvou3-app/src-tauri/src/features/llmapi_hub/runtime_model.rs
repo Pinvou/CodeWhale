@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 
 use crate::features::assistant::runtime_model::{

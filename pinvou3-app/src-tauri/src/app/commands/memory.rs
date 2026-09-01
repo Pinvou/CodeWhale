@@ -517,8 +517,8 @@ pub async fn never_pending_memory(
 }
 
 #[tauri::command]
-pub async fn list_recent_work_memory(
-) -> Result<Vec<crate::features::memory::RecentWorkItem>, String> {
+pub async fn list_recent_work_memory()
+-> Result<Vec<crate::features::memory::RecentWorkItem>, String> {
     crate::features::memory::load_recent_work().map_err(|e| format!("load recent work memory: {e}"))
 }
 

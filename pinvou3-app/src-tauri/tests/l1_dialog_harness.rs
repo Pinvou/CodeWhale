@@ -28,6 +28,13 @@ use pinvou3_lib::features::assistant::platform::bridge::Pinvou3Bridge;
 
 const DEFAULT_VLLM_BASE_URL: &str = "http://10.214.74.113:8000/v1";
 
+/// PINVOU3_HOME / DEEPSEEK_* env vars are shared across cases: tests in the same
+/// target run in parallel by default, so overlapping env writes would race --
+/// serialize them with an in-process std Mutex (same pattern as the lib unit-test
+/// ENV_LOCK, no new dependency; the integration-test process cannot reach the
+/// lib's cfg(test) lock, so this file owns its own).
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn strict_l1_enabled() -> bool {
     std::env::var("PINVOU3_L1_REQUIRE_VLLM")
         .map(|value| !matches!(value.trim(), "" | "0" | "false" | "FALSE" | "no" | "NO"))
@@ -542,7 +549,8 @@ fn ensure_runtime_env() {
 
 fn set_var_if_unset(k: &str, v: &str) {
     if std::env::var_os(k).is_none() {
-        std::env::set_var(k, v);
+        // SAFETY: this file's ENV_LOCK is held; env writes are serialized in the test process.
+        unsafe { std::env::set_var(k, v) };
     }
 }
 
@@ -554,6 +562,7 @@ fn set_var_if_unset(k: &str, v: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn l1_health_and_boot() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if !require_vllm("l1_health_and_boot").await {
         return;
     }
@@ -567,6 +576,7 @@ async fn l1_health_and_boot() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn translate_no_tool() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "translate_no_tool";
     if !require_vllm(scenario).await {
         return;
@@ -595,6 +605,7 @@ async fn translate_no_tool() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn batch_create_7_files() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "batch_create_7_files";
     if !require_vllm(scenario).await {
         return;
@@ -634,6 +645,7 @@ async fn batch_create_7_files() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn plan_mode_list_dir() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "plan_mode_list_dir";
     if !require_vllm(scenario).await {
         return;
@@ -662,6 +674,7 @@ async fn plan_mode_list_dir() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn plan_pure_planning() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "plan_pure_planning";
     if !require_vllm(scenario).await {
         return;
@@ -689,6 +702,7 @@ async fn plan_pure_planning() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn plan_dev_task_plan() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "plan_dev_task_plan";
     if !require_vllm(scenario).await {
         return;
@@ -727,6 +741,7 @@ async fn plan_dev_task_plan() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn plan_mode_write_blocked() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "plan_mode_write_blocked";
     if !require_vllm(scenario).await {
         return;
@@ -774,6 +789,7 @@ async fn plan_mode_write_blocked() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn yolo_large_html() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "yolo_large_html";
     if !require_vllm(scenario).await {
         return;
@@ -816,6 +832,7 @@ async fn yolo_large_html() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn sudo_off_root_task() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "sudo_off_root_task";
     if !require_vllm(scenario).await {
         return;
@@ -843,6 +860,7 @@ async fn sudo_off_root_task() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn save_to_tmp_no_validate_fail() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "save_to_tmp_no_validate_fail";
     if !require_vllm(scenario).await {
         return;
@@ -886,6 +904,7 @@ async fn save_to_tmp_no_validate_fail() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn reasoning_off_speed() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "reasoning_off_speed";
     if !require_vllm(scenario).await {
         return;
@@ -916,6 +935,7 @@ async fn reasoning_off_speed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn multi_turn_context() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "multi_turn_context";
     if !require_vllm(scenario).await {
         return;
@@ -952,6 +972,7 @@ async fn multi_turn_context() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn write_okr_md() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "write_okr_md";
     if !require_vllm(scenario).await {
         return;
@@ -986,6 +1007,7 @@ async fn write_okr_md() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn data_analysis_csv() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "data_analysis_csv";
     if !require_vllm(scenario).await {
         return;
@@ -1032,6 +1054,7 @@ date,product,units,revenue
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn plan_travel_web() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "plan_travel_web";
     if !require_vllm(scenario).await {
         return;
@@ -1064,6 +1087,7 @@ async fn plan_travel_web() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn refusal_correct() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "refusal_correct";
     if !require_vllm(scenario).await {
         return;
@@ -1092,6 +1116,7 @@ async fn refusal_correct() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn long_output_1500() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "long_output_1500";
     if !require_vllm(scenario).await {
         return;
@@ -1121,6 +1146,7 @@ async fn long_output_1500() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn chinese_idiomatic() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "chinese_idiomatic";
     if !require_vllm(scenario).await {
         return;
@@ -1151,6 +1177,7 @@ async fn chinese_idiomatic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn tool_error_recovery() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "tool_error_recovery";
     if !require_vllm(scenario).await {
         return;
@@ -1193,6 +1220,7 @@ async fn tool_error_recovery() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn subagent_single_simple() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "subagent_single_simple";
     if !require_vllm(scenario).await {
         return;
@@ -1221,6 +1249,7 @@ async fn subagent_single_simple() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn relpath_write_file() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "relpath_write_file";
     if !require_vllm(scenario).await {
         return;
@@ -1250,6 +1279,7 @@ async fn relpath_write_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn subagent_compare_3_libs() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "subagent_compare_3_libs";
     if !require_vllm(scenario).await {
         return;
@@ -1277,6 +1307,7 @@ async fn subagent_compare_3_libs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn subagent_research_topic() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "subagent_research_topic";
     if !require_vllm(scenario).await {
         return;
@@ -1305,6 +1336,7 @@ async fn subagent_research_topic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn subagent_no_need() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "subagent_no_need";
     if !require_vllm(scenario).await {
         return;
@@ -1332,6 +1364,7 @@ async fn subagent_no_need() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn subagent_one_fails() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "subagent_one_fails";
     if !require_vllm(scenario).await {
         return;
@@ -1369,6 +1402,7 @@ async fn subagent_one_fails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn image_vision_analyze() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "image_vision_analyze";
     if !require_vllm(scenario).await {
         return;
@@ -1432,6 +1466,7 @@ async fn image_vision_analyze() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "L1 真 vLLM 端到端,默认不跑"]
 async fn large_xlsx_attachment_path_mode() {
+    let _env_lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let scenario = "large_xlsx_attachment_path_mode";
     if !require_vllm(scenario).await {
         return;

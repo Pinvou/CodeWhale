@@ -313,11 +313,8 @@ fn starting_is_stale(snapshot: &RuntimeSnapshot) -> bool {
 }
 
 fn classify_runtime_state(snapshot: &RuntimeSnapshot) -> LocalVllmEngineState {
-    match snapshot.container_status.as_deref() {
-        Some("exited" | "dead" | "removing" | "paused") => {
-            return LocalVllmEngineState::Failed;
-        }
-        _ => {}
+    if let Some("exited" | "dead" | "removing" | "paused") = snapshot.container_status.as_deref() {
+        return LocalVllmEngineState::Failed;
     }
 
     if snapshot.service_active.as_deref() == Some("failed")

@@ -231,8 +231,8 @@ pub async fn reveal_conversation_attachment(
 /// 返回系统工具检测结果（pandoc / pdftotext 是否可用）。
 /// 前端启动时调一次，缺工具时给一次性 toast 引导 apt install。
 #[tauri::command]
-pub async fn detect_system_tools(
-) -> Result<crate::features::files::file_ingest::SystemTools, String> {
+pub async fn detect_system_tools()
+-> Result<crate::features::files::file_ingest::SystemTools, String> {
     Ok(crate::features::files::file_ingest::system_tools())
 }
 

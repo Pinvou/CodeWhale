@@ -498,9 +498,11 @@ mod tests {
 
         assert_eq!(detail.unread_count, None);
         let serialized = serde_json::to_value(detail).expect("thread detail should serialize");
-        assert!(!serialized
-            .as_object()
-            .expect("thread detail should serialize as an object")
-            .contains_key("unread_count"));
+        assert!(
+            !serialized
+                .as_object()
+                .expect("thread detail should serialize as an object")
+                .contains_key("unread_count")
+        );
     }
 }

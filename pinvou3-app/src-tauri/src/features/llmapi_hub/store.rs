@@ -133,7 +133,13 @@ impl LlmApiBindingStore for FileLlmApiBindingStore {
                     false,
                 )
             })?;
-        let binding = db.bindings.get_mut(&key).expect("binding key from map");
+        let binding = db.bindings.get_mut(&key).ok_or_else(|| {
+            LlmApiError::new(
+                LlmApiErrorCode::Unavailable,
+                "LLM API Hub 绑定状态在更新过程中发生变化",
+                true,
+            )
+        })?;
         binding.enabled = enabled;
         binding.provisioning_status = if enabled {
             ProvisioningStatus::Ready
@@ -161,7 +167,7 @@ impl LlmApiBindingStore for MemoryLlmApiBindingStore {
         Ok(self
             .bindings
             .lock()
-            .expect("memory llmapi binding lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&binding_key(pinvou_user_id, device_binding_id))
             .cloned())
     }
@@ -169,7 +175,7 @@ impl LlmApiBindingStore for MemoryLlmApiBindingStore {
     fn upsert_binding(&self, binding: LlmApiBinding) -> Result<(), LlmApiError> {
         self.bindings
             .lock()
-            .expect("memory llmapi binding lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(
                 binding_key(&binding.pinvou_user_id, &binding.device_binding_id),
                 binding,
@@ -181,7 +187,7 @@ impl LlmApiBindingStore for MemoryLlmApiBindingStore {
         Ok(self
             .bindings
             .lock()
-            .expect("memory llmapi binding lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .values()
             .cloned()
             .collect())
@@ -192,7 +198,10 @@ impl LlmApiBindingStore for MemoryLlmApiBindingStore {
         pinvou_user_id: &str,
         enabled: bool,
     ) -> Result<LlmApiBinding, LlmApiError> {
-        let mut bindings = self.bindings.lock().expect("memory llmapi binding lock");
+        let mut bindings = self
+            .bindings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = bindings
             .keys()
             .find(|key| key.starts_with(&format!("{pinvou_user_id}:")))
@@ -204,7 +213,13 @@ impl LlmApiBindingStore for MemoryLlmApiBindingStore {
                     false,
                 )
             })?;
-        let binding = bindings.get_mut(&key).expect("binding key from map");
+        let binding = bindings.get_mut(&key).ok_or_else(|| {
+            LlmApiError::new(
+                LlmApiErrorCode::Unavailable,
+                "LLM API Hub 绑定状态在更新过程中发生变化",
+                true,
+            )
+        })?;
         binding.enabled = enabled;
         binding.provisioning_status = if enabled {
             ProvisioningStatus::Ready

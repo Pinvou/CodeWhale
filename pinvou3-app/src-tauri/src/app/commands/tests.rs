@@ -1,4 +1,4 @@
-// 本文件为命令层测试,借 platform::paths::tests::ENV_LOCK(std Mutex)串行化全局 env;跨 await 持有无竞争者,不会死锁。
+// Command-layer tests borrow platform::paths::tests::ENV_LOCK (a std Mutex) to serialize global env; cargo test runs on multiple threads, but env-writing tests are serialized by the mutex, and within a current_thread runtime holding the lock across await has no reentrant path, so it cannot deadlock.
 // architecture-guard: allow-target-cfg -- artifact 调用链回归需用 Windows 独占句柄模拟 ReplaceFileW 1177 布局
 #![allow(clippy::await_holding_lock)]
 
@@ -176,7 +176,8 @@ impl TempPinvou3Home {
         let previous = std::env::var("PINVOU3_HOME").ok();
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         Self { root, previous }
     }
 }
@@ -184,8 +185,10 @@ impl TempPinvou3Home {
 impl Drop for TempPinvou3Home {
     fn drop(&mut self) {
         match &self.previous {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -234,7 +237,7 @@ fn write_test_oauth_marketplace_files(server_name: &str, mcp_server: serde_json:
 }
 
 fn test_oauth_store_key(server_name: &str, url: &str) -> String {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
 
     let mut payload = Vec::with_capacity(server_name.len() + url.len() + 1);
@@ -412,9 +415,11 @@ fn uninstall_marketplace_tool_deletes_oauth_token_before_mcp_config() {
     uninstall_marketplace_tool_sync("yuandian-mcp").unwrap();
 
     assert!(!test_oauth_token_exists(&key));
-    assert!(!crate::features::marketplace::MarketplaceManager::new()
-        .installed_ids()
-        .contains(&"yuandian-mcp".to_string()));
+    assert!(
+        !crate::features::marketplace::MarketplaceManager::new()
+            .installed_ids()
+            .contains(&"yuandian-mcp".to_string())
+    );
     let mcp_content = std::fs::read_to_string(crate::platform::paths::mcp_config_path()).unwrap();
     let mcp: serde_json::Value = serde_json::from_str(&mcp_content).unwrap();
     assert!(mcp["servers"].get(server_name).is_none());
@@ -437,9 +442,11 @@ fn uninstall_marketplace_tool_aborts_if_oauth_token_delete_fails() {
 
     let err = uninstall_marketplace_tool_sync("yuandian-mcp").unwrap_err();
     assert!(err.contains("删除 MCP OAuth token 失败"));
-    assert!(crate::features::marketplace::MarketplaceManager::new()
-        .installed_ids()
-        .contains(&"yuandian-mcp".to_string()));
+    assert!(
+        crate::features::marketplace::MarketplaceManager::new()
+            .installed_ids()
+            .contains(&"yuandian-mcp".to_string())
+    );
     let mcp_content = std::fs::read_to_string(crate::platform::paths::mcp_config_path()).unwrap();
     let mcp: serde_json::Value = serde_json::from_str(&mcp_content).unwrap();
     assert!(mcp["servers"].get(server_name).is_some());
@@ -454,8 +461,10 @@ struct TestPinvouHome {
 impl Drop for TestPinvouHome {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(&self.root);
     }
@@ -469,7 +478,8 @@ fn test_pinvou_home(tag: &str) -> TestPinvouHome {
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
     TestPinvouHome {
         root,
         previous,
@@ -484,7 +494,8 @@ struct TestE2EFlag {
 impl TestE2EFlag {
     fn enable() -> Self {
         let previous = std::env::var("PINVOU3_E2E").ok();
-        std::env::set_var("PINVOU3_E2E", "1");
+        // SAFETY: every caller holds the crate-wide ENV_LOCK through TestPinvouHome.
+        unsafe { std::env::set_var("PINVOU3_E2E", "1") };
         Self { previous }
     }
 }
@@ -492,8 +503,10 @@ impl TestE2EFlag {
 impl Drop for TestE2EFlag {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var("PINVOU3_E2E", value),
-            None => std::env::remove_var("PINVOU3_E2E"),
+            // SAFETY: the owning test still holds the crate-wide ENV_LOCK while guards drop.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_E2E", value) },
+            // SAFETY: same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_E2E") },
         }
     }
 }
@@ -505,7 +518,8 @@ struct RemoveE2EOnDrop {
 impl RemoveE2EOnDrop {
     fn clear() -> Self {
         let previous = std::env::var("PINVOU3_E2E").ok();
-        std::env::remove_var("PINVOU3_E2E");
+        // SAFETY: every caller acquires the crate-wide ENV_LOCK before constructing this guard.
+        unsafe { std::env::remove_var("PINVOU3_E2E") };
         Self { previous }
     }
 }
@@ -513,8 +527,10 @@ impl RemoveE2EOnDrop {
 impl Drop for RemoveE2EOnDrop {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var("PINVOU3_E2E", value),
-            None => std::env::remove_var("PINVOU3_E2E"),
+            // SAFETY: the owning test still holds the crate-wide ENV_LOCK while guards drop.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_E2E", value) },
+            // SAFETY: same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_E2E") },
         }
     }
 }
@@ -579,7 +595,8 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
 
     // 用户关闭 visualizer（独立 disabled_skills.json，不再借道连接器文件）→
     // 组合目录计算排除该技能。
@@ -592,9 +609,11 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
         "安装后仍受用户关闭状态约束（plain scope 禁用集）"
     );
     // code scope 未初始化时新装技能默认全禁，初始化后自动加入 code 禁用集。
-    assert!(sm::load_disabled_skills_for(ConnectorScope::Code)
-        .iter()
-        .any(|id| id == "visualizer"));
+    assert!(
+        sm::load_disabled_skills_for(ConnectorScope::Code)
+            .iter()
+            .any(|id| id == "visualizer")
+    );
 
     uninstall_marketplace_skill_sync("visualizer").unwrap();
     // 卸载清除两个 scope 禁用集残留（与连接器同语义）→ 重装后默认启用。
@@ -613,8 +632,10 @@ fn direct_skill_install_uninstall_scope_state_roundtrip() {
     );
 
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -634,7 +655,8 @@ fn mcp_install_links_companion_skills() {
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
 
     let mgr = crate::features::marketplace::MarketplaceManager::new();
     let skill_mgr = crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new();
@@ -659,8 +681,10 @@ fn mcp_install_links_companion_skills() {
     }
 
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1111,8 +1135,8 @@ fn artifact_read_recovers_an_occupied_1177_layout_after_release() {
 #[cfg(windows)]
 #[test]
 fn artifact_writes_never_expose_partial_utf8_to_concurrent_readers() {
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let _home = test_pinvou_home("pinvou3-artifact-concurrent-read");
     let md = session_artifact_path("s1", "note.md");
@@ -1277,7 +1301,8 @@ fn resolve_artifact_path_relative_joins_active_workspace() {
     let _g = crate::platform::paths::tests::ENV_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
-    std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-resolve-test");
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-resolve-test") };
     let store = SessionStore::boot().expect("boot");
 
     // 无 active session 且无显式 session → 相对路径原样返回(行为同旧版)
@@ -1331,7 +1356,8 @@ fn scheduled_attachment_staging_and_artifact_resolution_use_task_workspace() {
     ));
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
     let scheduled_root = root.join("scheduled");
     std::fs::create_dir_all(&root).expect("test root");
     let source = root.join("source.png");
@@ -1407,8 +1433,10 @@ fn scheduled_attachment_staging_and_artifact_resolution_use_task_workspace() {
 
     drop(store);
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1429,7 +1457,8 @@ fn scheduled_session_metadata_dispatch_supports_rename_pin_archive() {
     ));
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
     let store =
         SessionStore::boot_with_scheduled_root(root.join("scheduled")).expect("session store");
     let scheduled = store
@@ -1467,11 +1496,13 @@ fn scheduled_session_metadata_dispatch_supports_rename_pin_archive() {
     // set_session_archived 路径：共用收起表,且归档列表能列出 sched-* 会话。
     store.set_hidden(&id, true);
     assert!(store.is_hidden(&id));
-    assert!(store
-        .list_scheduled()
-        .expect("list scheduled")
-        .iter()
-        .any(|metadata| metadata.id == id));
+    assert!(
+        store
+            .list_scheduled()
+            .expect("list scheduled")
+            .iter()
+            .any(|metadata| metadata.id == id)
+    );
     // 收起会强制取消置顶(与普通会话一致)。
     assert!(!store.is_pinned(&id));
     store.set_hidden(&id, false);
@@ -1481,14 +1512,18 @@ fn scheduled_session_metadata_dispatch_supports_rename_pin_archive() {
     let delete_error = store
         .delete(&id)
         .expect_err("scheduled sessions must not be deleted as ordinary chats");
-    assert!(delete_error
-        .to_string()
-        .contains("deleted through their automation"));
+    assert!(
+        delete_error
+            .to_string()
+            .contains("deleted through their automation")
+    );
 
     drop(store);
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(root);
 }
@@ -1504,7 +1539,8 @@ fn ordinary_ledger_root_behavior_is_unchanged() {
     ));
     let previous = std::env::var("PINVOU3_HOME").ok();
     let _ = std::fs::remove_dir_all(&root);
-    std::env::set_var("PINVOU3_HOME", &root);
+    // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+    unsafe { std::env::set_var("PINVOU3_HOME", &root) };
     let store = SessionStore::boot().expect("session store");
     let chat = store
         .create_new(
@@ -1529,8 +1565,10 @@ fn ordinary_ledger_root_behavior_is_unchanged() {
 
     drop(store);
     match previous {
-        Some(value) => std::env::set_var("PINVOU3_HOME", value),
-        None => std::env::remove_var("PINVOU3_HOME"),
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        None => unsafe { std::env::remove_var("PINVOU3_HOME") },
     }
     let _ = std::fs::remove_dir_all(root);
 }

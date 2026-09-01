@@ -234,11 +234,7 @@ async fn read_bios_sn() -> Option<String> {
         return None;
     }
     let sn = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sn.is_empty() {
-        None
-    } else {
-        Some(sn)
-    }
+    if sn.is_empty() { None } else { Some(sn) }
 }
 
 #[cfg(test)]
@@ -277,10 +273,12 @@ mod tests {
 
     #[test]
     fn parse_smarthub_ota_rejects_missing_data_key_and_invalid_url() {
-        assert!(parse_smarthub_ota(response(
-            r#"{"success":true,"code":200,"message":"操作成功"}"#
-        ))
-        .is_err());
+        assert!(
+            parse_smarthub_ota(response(
+                r#"{"success":true,"code":200,"message":"操作成功"}"#
+            ))
+            .is_err()
+        );
         assert!(parse_smarthub_ota(response(
             r#"{"success":true,"code":200,"message":"操作成功","data":{"mqtt":"https://mqtt.example.com"}}"#,
         ))
@@ -297,15 +295,18 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("PINVOU3_HOME").ok();
-        std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-bootstrap-path-test");
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", "/tmp/pinvou3-bootstrap-path-test") };
         let root = crate::platform::os::platform_compat_path("/tmp/pinvou3-bootstrap-path-test");
         assert_eq!(
             bootstrap_config_path(),
             root.join("windows-ota-bootstrap.json")
         );
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: ENV_LOCK remains held while the original value is restored.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 
@@ -319,7 +320,8 @@ mod tests {
             std::env::temp_dir().join(format!("pinvou3-bootstrap-config-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         let path = bootstrap_config_path();
 
         assert_eq!(
@@ -344,8 +346,10 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: ENV_LOCK remains held while the original value is restored.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 
@@ -359,7 +363,8 @@ mod tests {
             std::env::temp_dir().join(format!("pinvou3-bootstrap-custom-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        std::env::set_var("PINVOU3_HOME", &root);
+        // SAFETY: the crate-wide ENV_LOCK serializes this test's process-env mutation.
+        unsafe { std::env::set_var("PINVOU3_HOME", &root) };
         let path = bootstrap_config_path();
         let raw = "\u{feff}{\"bootstrapHost\":\"http://127.0.0.1:8788/\"}";
         std::fs::write(&path, raw).unwrap();
@@ -371,8 +376,10 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: ENV_LOCK remains held while the original value is restored.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: the same lock serializes restoration by removal.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 
