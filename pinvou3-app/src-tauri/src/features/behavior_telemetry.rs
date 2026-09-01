@@ -302,7 +302,6 @@ impl ToolInstallTerminalCoordinator {
             let _ = publish(&terminal.event, generation);
             return;
         }
-        let mut terminal = Some(terminal);
         {
             let mut pending = self.lock_pending();
             if authorization_generation.load(Ordering::Acquire) != generation
@@ -310,12 +309,10 @@ impl ToolInstallTerminalCoordinator {
             {
                 drop(pending);
                 if authorization_generation.load(Ordering::Acquire) == generation {
-                    let terminal = terminal.as_ref().expect("terminal remains available");
                     let _ = publish(&terminal.event, generation);
                 }
                 return;
             }
-            let terminal = terminal.take().expect("terminal inserted once");
             pending
                 .entry(terminal.operation_id.clone())
                 .or_insert(terminal);
@@ -2471,15 +2468,12 @@ impl BehaviorTelemetry {
                     )
                 };
                 let mut guard = self.state.lock().await;
-                if !guard
-                    .as_ref()
-                    .is_some_and(|state| pending_request_matches(state, &pending))
-                {
+                let Some(state) = guard.as_mut() else {
+                    return Ok(());
+                };
+                if !pending_request_matches(state, &pending) {
                     return Ok(());
                 }
-                let state = guard
-                    .as_mut()
-                    .expect("legacy deletion state remains available");
                 let mut generation_exhausted = false;
                 let generation = if authoritative_deleted {
                     match self.invalidate_generation_above(state.control.generation) {
