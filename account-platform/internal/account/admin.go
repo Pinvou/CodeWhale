@@ -141,7 +141,7 @@ type adminRepository interface {
 	AdminOrganizationDeletionBlockers(context.Context, uuid.UUID) ([]OrganizationLifecycleBlocker, error)
 	AdminRenameOrganization(context.Context, identity.Principal, uuid.UUID, string) error
 	AdminSetOrganizationStatus(context.Context, identity.Principal, uuid.UUID, string) error
-	AdminDeleteOrganization(context.Context, identity.Principal, uuid.UUID) error
+	AdminDeleteOrganization(context.Context, identity.Principal, uuid.UUID, string) error
 	AdminUnits(context.Context, uuid.UUID) (UnitTree, error)
 	AdminUnitState(context.Context, uuid.UUID, uuid.UUID) (UnitMutationResult, error)
 	AdminMembers(context.Context, uuid.UUID) ([]Member, error)
@@ -833,14 +833,49 @@ func (s *Service) adminSetStatus(w http.ResponseWriter, r *http.Request, resourc
 }
 
 func (s *Service) adminDeleteUser(w http.ResponseWriter, r *http.Request) {
-	s.adminDelete(w, r, "user")
+	s.adminDelete(w, r, "user", "")
 }
 
 func (s *Service) adminDeleteOrganization(w http.ResponseWriter, r *http.Request) {
-	s.adminDelete(w, r, "organization")
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := api.DecodeJSON(w, r, &body); err != nil {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "request body must be valid JSON", httpserver.RequestID(r.Context()))
+			return
+		}
+		body.Reason = strings.TrimSpace(body.Reason)
+		if body.Reason == "" || len([]rune(body.Reason)) > 500 {
+			api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "reason must contain between 1 and 500 characters", httpserver.RequestID(r.Context()))
+			return
+		}
+	}
+	s.adminDelete(w, r, "organization", body.Reason)
 }
 
-func (s *Service) adminDelete(w http.ResponseWriter, r *http.Request, resource string) {
+func (s *Service) adminOrganizationDeletionReadiness(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	readiness, err := s.assessOrganizationDeletion(r.Context(), repository, organizationID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			s.writeError(w, r, err)
+			return
+		}
+		api.WriteError(w, http.StatusServiceUnavailable, "ORGANIZATION_LIFECYCLE_UNAVAILABLE", "organization lifecycle facts could not be confirmed", httpserver.RequestID(r.Context()))
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, readiness)
+}
+
+func (s *Service) adminDelete(w http.ResponseWriter, r *http.Request, resource, reason string) {
 	repository, ok := s.requireAdminRepository(w, r)
 	if !ok {
 		return
@@ -893,7 +928,7 @@ func (s *Service) adminDelete(w http.ResponseWriter, r *http.Request, resource s
 				return
 			}
 		}
-		err = repository.AdminDeleteOrganization(r.Context(), principal, resourceID)
+		err = repository.AdminDeleteOrganization(r.Context(), principal, resourceID, reason)
 	}
 	if err != nil {
 		s.writeError(w, r, err)
@@ -1641,7 +1676,7 @@ WHERE id IN (SELECT user_id FROM changed)`, organizationID, toMembershipStatus, 
 	return tx.Commit(ctx)
 }
 
-func (r *PostgresRepository) AdminDeleteOrganization(ctx context.Context, principal identity.Principal, organizationID uuid.UUID) error {
+func (r *PostgresRepository) AdminDeleteOrganization(ctx context.Context, principal identity.Principal, organizationID uuid.UUID, reason string) error {
 	tx, err := r.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
 		return err
@@ -1691,7 +1726,11 @@ WHERE id IN (SELECT user_id FROM changed)`, organizationID, now); err != nil {
 	if _, err := tx.Exec(ctx, `UPDATE organizations SET status='DELETED',name='Deleted organization '||left(id::text,8),version=version+1,deleted_at=$2,updated_at=$2 WHERE id=$1`, organizationID, now); err != nil {
 		return err
 	}
-	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.organization.delete", "organization", organizationID.String(), map[string]any{"from": status, "to": "DELETED"}); err != nil {
+	summary := map[string]any{"from": status, "to": "DELETED"}
+	if reason != "" {
+		summary["reason"] = reason
+	}
+	if err := appendAdminAudit(ctx, tx, actorID, principal, &organizationID, "admin.organization.delete", "organization", organizationID.String(), summary); err != nil {
 		return err
 	}
 	if err := appendOutbox(ctx, tx, "account.organization.deleted.v1", organizationID, currentVersion+1, map[string]any{"organization_id": organizationID, "status": "DELETED", "version": currentVersion + 1}); err != nil {

@@ -626,6 +626,9 @@ func accountAdminPathAllowed(method, resource string) bool {
 	if method == http.MethodDelete && len(parts) == 4 && parts[2] == "organizations" {
 		return true
 	}
+	if method == http.MethodGet && len(parts) == 5 && parts[2] == "organizations" && parts[4] == "deletion-readiness" {
+		return true
+	}
 	if parts[2] == "users" && len(parts) == 5 && parts[4] == "memberships" {
 		return method == http.MethodGet
 	}

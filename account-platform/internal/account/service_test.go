@@ -14,14 +14,16 @@ import (
 )
 
 type fakeRepository struct {
-	me            Me
-	activateCalls int
-	adminCalls    []string
-	deny          bool
-	lookupResult  AdminUser
-	lookupErr     error
-	setExpected   int64
-	setContext    Context
+	me                   Me
+	activateCalls        int
+	adminCalls           []string
+	deny                 bool
+	lookupResult         AdminUser
+	lookupErr            error
+	setExpected          int64
+	setContext           Context
+	organizationState    *AdminOrganizationState
+	organizationBlockers []OrganizationLifecycleBlocker
 }
 
 func (f *fakeRepository) Bootstrap(context.Context, identity.Principal) (Me, bool, error) {
@@ -148,10 +150,13 @@ func (*fakeRepository) AdminRecordOrganizationCreationFailure(context.Context, i
 	return nil
 }
 func (f *fakeRepository) AdminOrganizationState(_ context.Context, id uuid.UUID) (AdminOrganizationState, error) {
+	if f.organizationState != nil {
+		return *f.organizationState, nil
+	}
 	return AdminOrganizationState{ID: id, Status: "DISABLED", Version: 1}, nil
 }
-func (*fakeRepository) AdminOrganizationDeletionBlockers(context.Context, uuid.UUID) ([]OrganizationLifecycleBlocker, error) {
-	return []OrganizationLifecycleBlocker{}, nil
+func (f *fakeRepository) AdminOrganizationDeletionBlockers(context.Context, uuid.UUID) ([]OrganizationLifecycleBlocker, error) {
+	return append([]OrganizationLifecycleBlocker{}, f.organizationBlockers...), nil
 }
 func (f *fakeRepository) AdminRenameOrganization(_ context.Context, _ identity.Principal, id uuid.UUID, name string) error {
 	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":rename:"+name)
@@ -161,8 +166,8 @@ func (f *fakeRepository) AdminSetOrganizationStatus(_ context.Context, _ identit
 	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":"+status)
 	return nil
 }
-func (f *fakeRepository) AdminDeleteOrganization(_ context.Context, _ identity.Principal, id uuid.UUID) error {
-	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":DELETE")
+func (f *fakeRepository) AdminDeleteOrganization(_ context.Context, _ identity.Principal, id uuid.UUID, reason string) error {
+	f.adminCalls = append(f.adminCalls, "organization:"+id.String()+":DELETE:"+reason)
 	return nil
 }
 func (f *fakeRepository) AdminUnits(_ context.Context, organizationID uuid.UUID) (UnitTree, error) {
@@ -359,7 +364,7 @@ func TestAdminLifecycleRoutesDispatchProtectedMutations(t *testing.T) {
 		{http.MethodPatch, "/admin/v1/users/" + userID.String() + "/status", `{"status":"DISABLED"}`, "user:" + userID.String() + ":DISABLED"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String(), `{"name":"Renamed"}`, "organization:" + organizationID.String() + ":rename:Renamed"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/status", `{"status":"ACTIVE"}`, "organization:" + organizationID.String() + ":ACTIVE"},
-		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String(), "", "organization:" + organizationID.String() + ":DELETE"},
+		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String(), `{"reason":"duplicate tenant"}`, "organization:" + organizationID.String() + ":DELETE:duplicate tenant"},
 	}
 	for _, test := range tests {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))

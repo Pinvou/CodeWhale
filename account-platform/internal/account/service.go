@@ -161,6 +161,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.POST("/organizations", s.requirePermission(PermissionPlatformOrganizationsCreate), approvalpolicy.Require("ACCOUNT_ORGANIZATION_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateOrganization))
 	admin.PATCH("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_ORGANIZATION_RENAME", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRenameOrganization))
 	admin.PATCH("/organizations/:organization_id/status", s.requirePermission(PermissionPlatformOrganizationsStatusManage), approvalpolicy.Require("ACCOUNT_ORGANIZATION_STATUS_CHANGE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminSetOrganizationStatus))
+	admin.GET("/organizations/:organization_id/deletion-readiness", s.requirePermission(PermissionPlatformOrganizationsDelete), httpserver.AdaptFunc(s.adminOrganizationDeletionReadiness))
 	admin.DELETE("/organizations/:organization_id", s.requirePermission(PermissionPlatformOrganizationsDelete), approvalpolicy.Require("ACCOUNT_ORGANIZATION_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteOrganization))
 	admin.GET("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminUnits))
 	admin.GET("/organizations/:organization_id/members", s.requirePermission(PermissionPlatformOrganizationsRead), httpserver.AdaptFunc(s.adminMembers))

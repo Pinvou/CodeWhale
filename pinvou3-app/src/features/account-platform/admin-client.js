@@ -4,6 +4,8 @@ function errorFromResponse(response, payload) {
   const error = new Error(payload?.message || `HTTP ${response.status}`);
   error.code = payload?.code || 'REQUEST_FAILED';
   error.status = response.status;
+  error.details = payload?.details || null;
+  error.requestID = payload?.request_id || '';
   return error;
 }
 
@@ -168,8 +170,11 @@ export class AdminPlatformClient {
   setOrganizationStatus(organizationID, status) {
     return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/status`, 'PATCH', { status });
   }
-  deleteOrganization(organizationID) {
-    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'DELETE');
+  organizationDeletionReadiness(organizationID, signal) {
+    return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/deletion-readiness`, signal);
+  }
+  deleteOrganization(organizationID, reason) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'DELETE', { reason });
   }
   organizationMembers(organizationID, signal) {
     return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, signal);

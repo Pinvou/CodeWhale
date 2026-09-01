@@ -61,3 +61,34 @@ func TestOrganizationDeletionPreflightCollectsEveryDomainBlocker(t *testing.T) {
 		t.Fatalf("preflight=%#v error=%v", assessment, err)
 	}
 }
+
+func TestOrganizationDeletionReadinessIsReadOnlyAndExplainsBlockers(t *testing.T) {
+	organizationID := uuid.Must(uuid.NewV7())
+	calls := []string{}
+	repository := &fakeRepository{organizationState: &AdminOrganizationState{ID: organizationID, Status: "DISABLED", Version: 7}}
+	service := NewService(repository, &fakeWalletProvisioner{}).WithOrganizationLifecycle(
+		fakeOrganizationLifecycleClient{domain: "BILLING", calls: &calls, blockers: []OrganizationLifecycleBlocker{{Code: "WALLET_BALANCE_NOT_ZERO", Domain: "BILLING", ResourceType: "wallet", ResourceID: organizationID.String()}}},
+		fakeOrganizationLifecycleClient{domain: "TOKEN", calls: &calls},
+	)
+	readiness, err := service.assessOrganizationDeletion(context.Background(), repository, organizationID)
+	if err != nil || readiness.Ready || readiness.CurrentStatus != "DISABLED" || readiness.AccountVersion != 7 || len(readiness.Blockers) != 1 {
+		t.Fatalf("readiness=%#v error=%v", readiness, err)
+	}
+	if len(calls) != 2 || calls[0] != "BILLING:preflight:DELETED" || calls[1] != "TOKEN:preflight:DELETED" {
+		t.Fatalf("readiness must only preflight every domain: calls=%v", calls)
+	}
+}
+
+func TestOrganizationDeletionReadinessRequiresDisabledStatusBeforeDomainCalls(t *testing.T) {
+	organizationID := uuid.Must(uuid.NewV7())
+	calls := []string{}
+	repository := &fakeRepository{organizationState: &AdminOrganizationState{ID: organizationID, Status: "ACTIVE", Version: 3}}
+	service := NewService(repository, &fakeWalletProvisioner{}).WithOrganizationLifecycle(fakeOrganizationLifecycleClient{domain: "BILLING", calls: &calls})
+	readiness, err := service.assessOrganizationDeletion(context.Background(), repository, organizationID)
+	if err != nil || readiness.Ready || len(readiness.Blockers) != 1 || readiness.Blockers[0].Code != "ORGANIZATION_NOT_DISABLED" {
+		t.Fatalf("readiness=%#v error=%v", readiness, err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("active organization should be blocked before domain calls: %v", calls)
+	}
+}

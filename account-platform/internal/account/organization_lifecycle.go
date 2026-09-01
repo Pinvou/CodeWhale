@@ -32,6 +32,14 @@ type OrganizationLifecycleAssessment struct {
 	Blockers       []OrganizationLifecycleBlocker `json:"blockers"`
 }
 
+type OrganizationDeletionReadiness struct {
+	OrganizationID uuid.UUID                      `json:"organization_id"`
+	CurrentStatus  string                         `json:"current_status"`
+	AccountVersion int64                          `json:"account_version"`
+	Ready          bool                           `json:"ready"`
+	Blockers       []OrganizationLifecycleBlocker `json:"blockers"`
+}
+
 type OrganizationLifecycleClient interface {
 	Apply(context.Context, uuid.UUID, string, int64) (OrganizationLifecycleAssessment, error)
 	Preflight(context.Context, uuid.UUID, string, int64) (OrganizationLifecycleAssessment, error)
@@ -136,4 +144,50 @@ func (s *Service) preflightOrganizationLifecycleProjection(ctx context.Context, 
 		}
 	}
 	return combined, nil
+}
+
+func (s *Service) assessOrganizationDeletion(ctx context.Context, repository adminRepository, organizationID uuid.UUID) (OrganizationDeletionReadiness, error) {
+	state, err := repository.AdminOrganizationState(ctx, organizationID)
+	if err != nil {
+		return OrganizationDeletionReadiness{}, err
+	}
+	readiness := OrganizationDeletionReadiness{
+		OrganizationID: organizationID,
+		CurrentStatus:  state.Status,
+		AccountVersion: state.Version,
+		Ready:          false,
+		Blockers:       []OrganizationLifecycleBlocker{},
+	}
+	if state.Status == "DELETED" {
+		readiness.Ready = true
+		return readiness, nil
+	}
+	if state.Status != "DISABLED" {
+		readiness.Blockers = append(readiness.Blockers, OrganizationLifecycleBlocker{
+			Code:         "ORGANIZATION_NOT_DISABLED",
+			Domain:       "ACCOUNT",
+			ResourceType: "organization",
+			ResourceID:   organizationID.String(),
+		})
+		return readiness, nil
+	}
+	blockers, err := repository.AdminOrganizationDeletionBlockers(ctx, organizationID)
+	if err != nil {
+		return OrganizationDeletionReadiness{}, err
+	}
+	if len(blockers) > 0 {
+		readiness.Blockers = append(readiness.Blockers, blockers...)
+		return readiness, nil
+	}
+	if len(s.organizationLifecycle) == 0 {
+		readiness.Ready = true
+		return readiness, nil
+	}
+	assessment, err := s.preflightOrganizationLifecycleProjection(ctx, organizationID, "DELETED", state.Version+1)
+	if err != nil {
+		return OrganizationDeletionReadiness{}, err
+	}
+	readiness.Ready = assessment.Ready
+	readiness.Blockers = append(readiness.Blockers, assessment.Blockers...)
+	return readiness, nil
 }

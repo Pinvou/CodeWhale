@@ -323,6 +323,20 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/deletion-readiness:
+    get:
+      operationId: getAdminOrganizationDeletionReadiness
+      summary: Assess all known blockers before an organization is deleted
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      responses:
+        "200":
+          description: Current organization deletion readiness without mutating lifecycle state
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationDeletionReadiness" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}:
     patch:
       operationId: renameAdminOrganization
@@ -341,13 +355,21 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
     delete:
       operationId: deleteAdminOrganization
-      summary: Soft-delete an organization and revoke its memberships
+      summary: Soft-delete a disabled and deletion-ready organization, revoke memberships, and record an audit reason
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      requestBody:
+        required: false
+        description: New clients provide a reason; an absent body remains accepted for legacy clients.
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrganizationDeleteRequest" }
       responses:
         "204": { description: Organization deleted }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
   /account/admin/v1/audit-logs:
     get:
       operationId: listAdminAuditLogs
@@ -2287,6 +2309,33 @@ components:
           items: { $ref: "#/components/schemas/AdminOrganizationSummary" }
         next_cursor:
           type: [string, "null"]
+    OrganizationLifecycleBlocker:
+      type: object
+      additionalProperties: false
+      required: [code, resource_type, resource_id]
+      properties:
+        code: { type: string }
+        domain: { type: string, enum: [ACCOUNT, BILLING, TOKEN] }
+        resource_type: { type: string }
+        resource_id: { type: string }
+    OrganizationDeletionReadiness:
+      type: object
+      additionalProperties: false
+      required: [organization_id, current_status, account_version, ready, blockers]
+      properties:
+        organization_id: { type: string, format: uuid }
+        current_status: { type: string, enum: [ACTIVE, DISABLED, DELETED] }
+        account_version: { type: integer, format: int64, minimum: 1 }
+        ready: { type: boolean }
+        blockers:
+          type: array
+          items: { $ref: "#/components/schemas/OrganizationLifecycleBlocker" }
+    OrganizationDeleteRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
     OrganizationUnit:
       type: object
       additionalProperties: false
@@ -2843,3 +2892,6 @@ components:
               code: { type: string }
               message: { type: string }
               request_id: { type: string }
+              details:
+                type: object
+                additionalProperties: true

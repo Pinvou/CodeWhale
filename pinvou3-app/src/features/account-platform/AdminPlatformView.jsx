@@ -813,6 +813,94 @@ function UsersWorkspace({ copy, data, client, setData, permissions, currentUserI
   );
 }
 
+function OrganizationDeletionDialog({ copy, organization, client, onClose, onDeleted }) {
+  const [assessment, setAssessment] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const [typedName, setTypedName] = useState('');
+  const [reason, setReason] = useState('');
+  const [error, setError] = useState('');
+  const [requestID, setRequestID] = useState('');
+  const loadReadiness = useCallback(async (signal) => {
+    setLoading(true);
+    setError('');
+    setRequestID('');
+    try {
+      setAssessment(await client.organizationDeletionReadiness(organization.organization_id, signal));
+    } catch (cause) {
+      if (cause?.name === 'AbortError') return;
+      setError(cause?.code === 'ORGANIZATION_LIFECYCLE_UNAVAILABLE' ? copy.accounts.deletionUnavailable : copy.accounts.deletionLoadFailed);
+      setRequestID(cause?.requestID || '');
+    } finally {
+      setLoading(false);
+    }
+  }, [client, copy, organization.organization_id]);
+  useEffect(() => {
+    const controller = new globalThis.AbortController();
+    loadReadiness(controller.signal);
+    return () => controller.abort();
+  }, [loadReadiness]);
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!assessment?.ready || typedName !== organization.name || !reason.trim() || deleting) return;
+    setDeleting(true);
+    setError('');
+    setRequestID('');
+    try {
+      await client.deleteOrganization(organization.organization_id, reason.trim());
+      await onDeleted();
+    } catch (cause) {
+      const blockers = cause?.details?.blockers;
+      if (cause?.code === 'ORGANIZATION_LIFECYCLE_BLOCKED' && Array.isArray(blockers)) {
+        setAssessment((current) => ({
+          ...(current || {}),
+          ready: false,
+          blockers,
+        }));
+        setError(copy.accounts.deletionChanged);
+      } else {
+        setError(cause?.code === 'ORGANIZATION_LIFECYCLE_UNAVAILABLE' ? copy.accounts.deletionUnavailable : copy.accounts.actionFailed);
+      }
+      setRequestID(cause?.requestID || '');
+    } finally {
+      setDeleting(false);
+    }
+  };
+  const blockerMessage = (blocker) => copy.accounts.deletionBlockers[blocker.code] || copy.accounts.unknownDeletionBlocker(blocker.code, copy.accounts.deletionDomains[blocker.domain] || blocker.domain || copy.accounts.unknownDomain);
+  return (
+    <DetailDrawer label={`${copy.accounts.deletionReview} · ${organization.name}`} onClose={deleting ? () => {} : onClose}>
+      <section className="adm-panel adm-deletion-review">
+        <SectionHeader title={copy.accounts.deletionReview} copy={copy}>
+          <button type="button" onClick={onClose} disabled={deleting}>{copy.accounts.cancel}</button>
+        </SectionHeader>
+        <p className="adm-help">{copy.accounts.deletionReviewHelp}</p>
+        <dl className="adm-detail-list">
+          <div><dt>{copy.accounts.organizationName}</dt><dd>{organization.name}</dd></div>
+          <div><dt>ID</dt><dd><TechnicalID value={organization.organization_id} copy={copy} /></dd></div>
+          <div><dt>{copy.accounts.currentStatus}</dt><dd><Status value={assessment?.current_status || organization.status} /></dd></div>
+          <div><dt>{copy.accounts.deletionCheck}</dt><dd>{loading ? copy.loading : assessment?.ready ? copy.accounts.deletionReady : copy.accounts.deletionBlocked}</dd></div>
+        </dl>
+        {error && <div className="adm-inline-message error" role="alert">{error}{requestID && <small>{copy.accounts.requestID}: {requestID}</small>}</div>}
+        {!loading && assessment && !assessment.ready && (
+          <div className="adm-deletion-blockers" role="status">
+            <strong>{copy.accounts.deletionBlockerTitle}</strong>
+            <ul>{(assessment.blockers || []).map((blocker, index) => <li key={`${blocker.domain}:${blocker.code}:${blocker.resource_id}:${index}`}><span>{blockerMessage(blocker)}</span><code>{blocker.domain || 'ACCOUNT'} · {blocker.code}</code></li>)}</ul>
+          </div>
+        )}
+        {!loading && !assessment && <button type="button" onClick={() => loadReadiness()}>{copy.accounts.retryDeletionCheck}</button>}
+        <form className="adm-deletion-form" onSubmit={submit}>
+          <label><span>{copy.accounts.deletionNameLabel(organization.name)}</span><input value={typedName} onChange={(event) => setTypedName(event.target.value)} placeholder={organization.name} autoComplete="off" /></label>
+          <label><span>{copy.accounts.deletionReason}</span><textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder={copy.accounts.deletionReasonPlaceholder} maxLength={500} rows={4} /></label>
+          <div className="adm-row-actions">
+            <button type="button" onClick={() => loadReadiness()} disabled={loading || deleting}>{copy.accounts.retryDeletionCheck}</button>
+            <button className="danger" disabled={!assessment?.ready || typedName !== organization.name || !reason.trim() || deleting}>{deleting ? copy.accounts.deleting : copy.accounts.confirmDelete}</button>
+          </div>
+        </form>
+      </section>
+    </DetailDrawer>
+  );
+}
+
 function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate }) {
   const [search, setSearch] = useState('');
   const [userCode, setUserCode] = useState('');
@@ -824,6 +912,7 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
   const [notice, setNotice] = useState('');
   const [actionError, setActionError] = useState('');
   const [selectedOrganization, setSelectedOrganization] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
   const [organizationName, setOrganizationName] = useState('');
   const [ownerUserID, setOwnerUserID] = useState('');
@@ -859,7 +948,6 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
     const isUser = isUserSection;
     const id = isUser ? item.user_id : item.organization_id;
     const label = isUser ? userLabel(item) : item.name;
-    if (action === 'delete' && !window.confirm(copy.accounts.confirmOrganization(label))) return;
     if (isUser && action === 'disable' && !window.confirm(copy.userManagement.confirmDisable(label, item.user_code || shortID(id)))) return;
     setActionKey(`${section}:${id}:${action}`);
     setNotice('');
@@ -867,8 +955,7 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
     try {
       if (isUser) {
         await client.setUserStatus(id, action === 'enable' ? 'ACTIVE' : 'DISABLED');
-      } else if (action === 'delete') await client.deleteOrganization(id);
-      else await client.setOrganizationStatus(id, action === 'enable' ? 'ACTIVE' : 'DISABLED');
+      } else await client.setOrganizationStatus(id, action === 'enable' ? 'ACTIVE' : 'DISABLED');
       await reload();
       setNotice(copy.accounts.updated);
     } catch (reason) {
@@ -879,7 +966,6 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
   };
   const actionButtons = (item, isUser) => {
     const id = isUser ? item.user_id : item.organization_id;
-    const prefix = `${isUser ? 'users' : 'organizations'}:${id}:`;
     const buttons = [];
     const canManageStatus = isUser ? canManageUserStatus : canManageOrganizationStatus;
     if (isUser && id === currentUserID) return <span className="adm-row-note" title={copy.userManagement.selfActionHelp}>{copy.userManagement.currentAccount}</span>;
@@ -895,10 +981,10 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
           {copy.accounts.disable}
         </button>,
       );
-    if (!isUser && canDeleteOrganization)
+    if (!isUser && canDeleteOrganization && item.status === 'DISABLED')
       buttons.push(
-        <button key="delete" className="danger" disabled={Boolean(actionKey)} onClick={() => perform(item, 'delete')}>
-          {actionKey === `${prefix}delete` ? '…' : copy.accounts.delete}
+        <button key="delete" className="danger" disabled={Boolean(actionKey)} onClick={() => setDeleteTarget(item)}>
+          {copy.accounts.delete}
         </button>,
       );
     return <div className="adm-row-actions">{buttons}</div>;
@@ -1054,6 +1140,7 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
       />
     );
   return (
+    <>
     <section className="adm-panel">
       <SectionHeader title={copy.accounts[section]} count={items.length} copy={copy}>
         {isUserSection ? (
@@ -1110,6 +1197,8 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
         </footer>
       )}
     </section>
+    {deleteTarget && <OrganizationDeletionDialog copy={copy} organization={deleteTarget} client={client} onClose={() => setDeleteTarget(null)} onDeleted={() => { setDeleteTarget(null); setNotice(copy.accounts.organizationDeleted); reload().catch(() => setActionError(copy.accounts.lookupUnavailable || copy.accounts.actionFailed)); }} />}
+    </>
   );
 }
 

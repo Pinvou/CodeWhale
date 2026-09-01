@@ -7,7 +7,7 @@ const root = path.resolve(import.meta.dirname, '../..');
 const read = relative => readFile(path.join(root, relative), 'utf8');
 
 test('organization lifecycle is idempotent, paginated, fail-closed, and cross-domain safe', async () => {
-  const [accountMigration, billingMigration, tokenMigration, accountAdmin, accountAuthorization, accountLifecycle, billingLifecycle, tokenLifecycle, billingRepository, tokenRepository, accountService, billingService, tokenService, policy, openAPI, compose, helm] = await Promise.all([
+  const [accountMigration, billingMigration, tokenMigration, accountAdmin, accountAuthorization, accountLifecycle, billingLifecycle, tokenLifecycle, billingRepository, tokenRepository, accountService, billingService, tokenService, policy, openAPI, compose, helm, adminClient, adminView] = await Promise.all([
     read('migrations/account/000019_organization_lifecycle.up.sql'),
     read('migrations/billing/000018_organization_lifecycle.up.sql'),
     read('migrations/token/000008_organization_lifecycle.up.sql'),
@@ -24,7 +24,9 @@ test('organization lifecycle is idempotent, paginated, fail-closed, and cross-do
     read('internal/platform/approvalpolicy/registry.go'),
     read('contracts/openapi/admin.yaml'),
     read('deploy/compose/compose.yaml'),
-    read('deploy/helm/account-platform/templates/app-deployments.yaml')
+    read('deploy/helm/account-platform/templates/app-deployments.yaml'),
+    read('../pinvou3-app/src/features/account-platform/admin-client.js'),
+    read('../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx')
   ]);
 
   assert.match(accountMigration, /organization_creation_requests/);
@@ -40,12 +42,15 @@ test('organization lifecycle is idempotent, paginated, fail-closed, and cross-do
   assert.match(accountAdmin, /status == "DELETED"/);
   assert.match(accountAdmin, /AdminRecordOrganizationCreationFailure/);
   assert.match(accountAdmin, /NAME_OR_IDEMPOTENCY_CONFLICT/);
+  assert.match(accountAdmin, /reason must contain between 1 and 500 characters/);
+  assert.match(accountAdmin, /summary\["reason"\] = reason/);
   assert.match(accountAuthorization, /RecordPermissionDenial/);
   assert.match(accountAuthorization, /authorization\.permission\.denied/);
 
   assert.match(accountLifecycle, /\/internal\/v1\/organizations\//);
   assert.match(accountLifecycle, /preflight_only/);
   assert.match(accountLifecycle, /client\.Preflight/);
+  assert.match(accountLifecycle, /assessOrganizationDeletion/);
   assert.match(accountLifecycle, /INTERNAL_SERVICE_TOKEN is required/);
   assert.match(accountService, /WithOrganizationLifecycle/);
   assert.match(billingService, /BILLING_ORGANIZATION_LIFECYCLE_APPLY/);
@@ -77,4 +82,11 @@ test('organization lifecycle is idempotent, paginated, fail-closed, and cross-do
   assert.match(openAPI, /AdminOrganizationPage/);
   assert.match(openAPI, /Idempotency-Key/);
   assert.match(openAPI, /enum: \[ACTIVE, DISABLED, DELETED\]/);
+  assert.match(openAPI, /operationId: getAdminOrganizationDeletionReadiness/);
+  assert.match(openAPI, /OrganizationDeleteRequest/);
+  assert.match(adminClient, /organizationDeletionReadiness/);
+  assert.match(adminClient, /error\.details = payload\?\.details/);
+  assert.match(adminView, /function OrganizationDeletionDialog/);
+  assert.match(adminView, /typedName !== organization\.name/);
+  assert.match(adminView, /item\.status === 'DISABLED'/);
 });
