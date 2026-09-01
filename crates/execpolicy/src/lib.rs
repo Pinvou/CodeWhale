@@ -444,13 +444,24 @@ impl ExecPolicyEngine {
                 None => true,
             })
             .filter(|(_, rule)| match (rule.path.as_deref(), ctx.path) {
-                (Some(pattern), Some(_)) => match (
-                    normalize_workspace_relative_path(pattern, ctx.cwd),
-                    normalized_path.as_deref(),
-                ) {
-                    (Some(pattern), Some(path)) => pattern == path,
-                    _ => false,
-                },
+                (Some(pattern), Some(call_path)) => {
+                    let ws_rule = normalize_workspace_relative_path(pattern, ctx.cwd);
+                    match (ws_rule, normalized_path.as_deref()) {
+                        // Workspace-relative normalization fails for a call
+                        // outside the workspace or a rule that names one, and
+                        // on a POSIX host a Windows-spelled rule/call pair
+                        // parses as unrelated relative forms. A rule spelling
+                        // an ABSOLUTE path must still be able to match such a
+                        // call exactly, or pinned locations (a real home,
+                        // `/root`, a Windows profile) are unmatchable. The
+                        // helper only fires for rooted rules, so relative
+                        // semantics are unchanged.
+                        (Some(ws_rule), Some(ws_call)) => {
+                            ws_rule == ws_call || absolute_path_rule_matches(pattern, call_path)
+                        }
+                        _ => absolute_path_rule_matches(pattern, call_path),
+                    }
+                }
                 (Some(_), None) => false,
                 (None, _) => true,
             })
@@ -1115,6 +1126,33 @@ fn parse_path_for_matching_with_case(
 fn is_windows_absolute_path(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+/// Exact-match fallback for a typed path rule that names an ABSOLUTE path.
+///
+/// The primary match normalizes both sides to workspace-relative form, which
+/// only succeeds when the call lives inside the workspace — so a rule pinning
+/// a location outside it (a real home, `/root`, another user's home, or a
+/// literal `~` spelling the tool passed through unexpanded) could never match.
+/// This fallback fires only when workspace normalization failed on either
+/// side, and only for a ROOTED rule (leading `/`, `~`, or a Windows drive):
+/// separators fold to `/`, case folds on case-insensitive platforms, and the
+/// comparison is plain equality. A relative rule never reaches it, so
+/// workspace-relative semantics are unchanged, and because there are no
+/// wildcards the deny direction keeps its precision while the allow direction
+/// can only ever match the exact path the rule spells.
+fn absolute_path_rule_matches(rule_path: &str, call_path: &str) -> bool {
+    let fold = |value: &str| {
+        let value = value.trim().replace('\\', "/");
+        if platform_paths_are_case_insensitive() {
+            value.to_ascii_lowercase()
+        } else {
+            value
+        }
+    };
+    let rule = fold(rule_path);
+    let rooted = rule.starts_with('/') || rule.starts_with("~/") || is_windows_absolute_path(&rule);
+    rooted && rule == fold(call_path)
 }
 
 fn has_windows_drive_prefix(value: &str) -> bool {
@@ -2205,6 +2243,132 @@ mod tests {
             .unwrap();
 
         assert!(decision.requires_approval);
+    }
+
+    #[test]
+    fn typed_ask_absolute_path_rule_matches_absolute_call_outside_workspace() {
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "read_file".into(),
+                    command: None,
+                    command_exact: false,
+                    path: Some("/root/.ssh/config".into()),
+                    workspace: None,
+                    action: PermissionAction::Deny,
+                }],
+            )]);
+
+        // An absolute rule must reach a call outside the workspace that the
+        // workspace-relative normalization cannot express.
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("read_file"),
+                path: Some("/root/.ssh/config"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
+
+        // A different absolute path must not match.
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("read_file"),
+                path: Some("/root/.ssh/known_hosts"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        assert_eq!(decision.matched_rule, None);
+    }
+
+    #[test]
+    fn typed_ask_literal_tilde_rule_matches_unexpanded_call_spelling() {
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "read_file".into(),
+                    command: None,
+                    command_exact: false,
+                    path: Some("~/.ssh/config".into()),
+                    workspace: None,
+                    action: PermissionAction::Deny,
+                }],
+            )]);
+
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("read_file"),
+                path: Some("~/.ssh/config"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
+    }
+
+    #[test]
+    fn typed_ask_relative_path_rule_still_rejects_absolute_call() {
+        // The absolute fallback is rooted-rule-only: a relative rule keeps
+        // its workspace-relative semantics and must not reach an absolute
+        // call path through it.
+        let engine = ExecPolicyEngine::with_rulesets(vec![
+            Ruleset::user(vec![], vec![])
+                .with_ask_rules(vec![ToolAskRule::file_path("edit_file", "src/a.rs")]),
+        ]);
+
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: "/workspace",
+                tool: Some("edit_file"),
+                path: Some("/src/a.rs"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        assert_eq!(decision.matched_rule, None);
+    }
+
+    #[test]
+    fn typed_ask_absolute_path_rule_folds_separators_and_case_on_windows() {
+        let engine =
+            ExecPolicyEngine::with_rulesets(vec![Ruleset::user(vec![], vec![]).with_ask_rules(
+                vec![ToolAskRule {
+                    tool: "read_file".into(),
+                    command: None,
+                    command_exact: false,
+                    path: Some("C:/Users/u/.aws/credentials".into()),
+                    workspace: None,
+                    action: PermissionAction::Deny,
+                }],
+            )]);
+
+        let decision = engine
+            .check(ExecPolicyContext {
+                command: "",
+                cwd: r"C:\workspace",
+                tool: Some("read_file"),
+                path: Some(r"C:\Users\U\.AWS\credentials"),
+                ask_for_approval: AskForApproval::OnFailure,
+                sandbox_mode: Some("workspace-write"),
+            })
+            .unwrap();
+        // The rule folds `C:/Users/u/...` and the call folds `C:\Users\U\...`
+        // to the same form on a case-insensitive platform; on a
+        // case-sensitive one the case difference is a different file.
+        if platform_paths_are_case_insensitive() {
+            assert_eq!(decision.matched_action, Some(PermissionAction::Deny));
+        } else {
+            assert_eq!(decision.matched_rule, None);
+        }
     }
 
     // ── deny / allow action tests ──────────────────────────────────────────
