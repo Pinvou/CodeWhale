@@ -32,7 +32,14 @@ paths:
     get:
       operationId: listAdminUsers
       summary: List and search platform users
-      parameters: [{ $ref: "#/components/parameters/Search" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" }]
+      parameters:
+        - { $ref: "#/components/parameters/Search" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - name: exclude_organization_id
+          in: query
+          description: Exclude users who already have a non-revoked membership in this organization; also requires platform.organizations.read.
+          schema: { type: string, format: uuid }
       responses:
         "200":
           description: Stable user page ordered by update time and user ID
@@ -201,10 +208,22 @@ paths:
   /account/admin/v1/organizations/{organization_id}/members:
     get:
       operationId: listAdminOrganizationMembers
-      summary: List active organization members and their roles
-      parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
+      summary: Search and page active organization members and their roles
+      parameters:
+        - { $ref: "#/components/parameters/OrganizationID" }
+        - { $ref: "#/components/parameters/Search" }
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - name: role
+          in: query
+          schema: { type: string, enum: [OWNER, ORG_ADMIN, ORG_MODEL_ADMIN, BILLING_ADMIN, AUDITOR, MEMBER, UNIT_ADMIN] }
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200":
+          description: Stable member page ordered by join time and membership identifier
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminOrganizationMemberPage" }
+        "400": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
     post:
@@ -2307,6 +2326,17 @@ components:
           type: array
           maxItems: 200
           items: { $ref: "#/components/schemas/AdminOrganizationSummary" }
+        next_cursor:
+          type: [string, "null"]
+    AdminOrganizationMemberPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: "account.yaml#/components/schemas/OrganizationMember" }
         next_cursor:
           type: [string, "null"]
     OrganizationLifecycleBlocker:

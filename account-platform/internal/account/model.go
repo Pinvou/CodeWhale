@@ -109,6 +109,7 @@ type UnitTree struct {
 
 type Member struct {
 	UserID       uuid.UUID   `json:"user_id"`
+	UserCode     string      `json:"user_code"`
 	DisplayName  *string     `json:"display_name"`
 	Email        *string     `json:"email"`
 	Status       string      `json:"status"`

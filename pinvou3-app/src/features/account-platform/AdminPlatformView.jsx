@@ -1245,7 +1245,6 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
       <OrganizationDetail
         copy={copy}
         organization={selectedOrganization}
-        users={data.users || []}
         roles={data.roles || []}
         client={client}
         permissions={permissions}
@@ -1455,9 +1454,25 @@ function UserMembershipDetail({ copy, user, client, onBack, onNavigate }) {
   );
 }
 
-function OrganizationDetail({ copy, organization, users, roles, client, permissions, onBack, onRenamed, onStatusChanged, onDeleted, onNavigate, activeTab = 'overview', refreshVersion = 0, onTabChange }) {
+function OrganizationDetail({ copy, organization, roles, client, permissions, onBack, onRenamed, onStatusChanged, onDeleted, onNavigate, activeTab = 'overview', refreshVersion = 0, onTabChange }) {
   const [units, setUnits] = useState([]);
   const [members, setMembers] = useState([]);
+  const [owners, setOwners] = useState([]);
+  const [memberNextCursor, setMemberNextCursor] = useState('');
+  const [memberCursor, setMemberCursor] = useState('');
+  const [memberPage, setMemberPage] = useState(1);
+  const memberCursorBack = useRef(new Map());
+  const [memberSearch, setMemberSearch] = useState('');
+  const [memberQuery, setMemberQuery] = useState('');
+  const [memberRole, setMemberRole] = useState('');
+  const [memberQueryRole, setMemberQueryRole] = useState('');
+  const [selectedMember, setSelectedMember] = useState(null);
+  const [addMemberOpen, setAddMemberOpen] = useState(false);
+  const [memberCandidateSearch, setMemberCandidateSearch] = useState('');
+  const [memberCandidates, setMemberCandidates] = useState([]);
+  const [memberCandidatesLoading, setMemberCandidatesLoading] = useState(false);
+  const [ownerCandidateSearch, setOwnerCandidateSearch] = useState('');
+  const [ownerCandidates, setOwnerCandidates] = useState([]);
   const [name, setName] = useState('');
   const [organizationName, setOrganizationName] = useState(organization.name);
   const [currentStatus, setCurrentStatus] = useState(organization.status);
@@ -1478,9 +1493,22 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
       setBusy(true);
       setError('');
       try {
-        const [unitResult, memberResult] = await Promise.all([client.organizationUnits(organization.organization_id, signal), client.organizationMembers(organization.organization_id, signal)]);
+        const [unitResult, memberResult, ownerResult] = await Promise.all([
+          client.organizationUnits(organization.organization_id, signal),
+          client.organizationMembers(organization.organization_id, {}, signal),
+          client.organizationMembers(organization.organization_id, { role:'OWNER' }, signal),
+        ]);
         setUnits(unitResult.items || []);
         setMembers(memberResult.items || []);
+        setMemberNextCursor(memberResult.next_cursor || '');
+        setOwners(ownerResult.items || []);
+        setMemberSearch('');
+        setMemberQuery('');
+        setMemberRole('');
+        setMemberQueryRole('');
+        setMemberCursor('');
+        setMemberPage(1);
+        memberCursorBack.current.clear();
       } catch (reason) {
         if (reason?.name !== 'AbortError') setError(copy.accounts.actionFailed);
       } finally {
@@ -1496,18 +1524,83 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
   }, [load, refreshVersion]);
   useEffect(() => setOrganizationName(organization.name), [organization.name]);
   useEffect(() => setCurrentStatus(organization.status), [organization.status]);
+  useEffect(() => {
+    if (!addMemberOpen) return undefined;
+    const controller = new globalThis.AbortController();
+    const timer = globalThis.setTimeout?.(() => {
+      setMemberCandidatesLoading(true);
+      client.users({ q:memberCandidateSearch.trim(), exclude_organization_id:organization.organization_id }, controller.signal).then((result) => {
+        setMemberCandidates((result.items || []).filter((user) => user.status === 'ACTIVE'));
+      }).catch((reason) => {
+        if (reason?.name !== 'AbortError') setError(copy.roles.usersLoadFailed);
+      }).finally(() => setMemberCandidatesLoading(false));
+    }, 250);
+    return () => {
+      if (timer) globalThis.clearTimeout?.(timer);
+      controller.abort();
+    };
+  }, [addMemberOpen, client, copy.roles.usersLoadFailed, memberCandidateSearch, organization.organization_id]);
+  useEffect(() => {
+    if (!canTransferOwnership) return undefined;
+    const controller = new globalThis.AbortController();
+    const timer = globalThis.setTimeout?.(() => {
+      client.organizationMembers(organization.organization_id, { q:ownerCandidateSearch.trim() }, controller.signal).then((result) => {
+        setOwnerCandidates((result.items || []).filter((member) => member.status === 'ACTIVE' && !(member.roles || []).includes('OWNER')));
+      }).catch((reason) => {
+        if (reason?.name !== 'AbortError') setError(copy.accounts.actionFailed);
+      });
+    }, 250);
+    return () => {
+      if (timer) globalThis.clearTimeout?.(timer);
+      controller.abort();
+    };
+  }, [canTransferOwnership, client, copy.accounts.actionFailed, organization.organization_id, ownerCandidateSearch]);
   const roots = useMemo(() => buildUnitTree(units), [units]);
-  const owners = useMemo(() => members.filter((member) => (member.roles || []).includes('OWNER')), [members]);
-  const transferCandidates = useMemo(() => members.filter((member) => member.status === 'ACTIVE' && !(member.roles || []).includes('OWNER')), [members]);
-  const addCandidates = useMemo(() => users.filter((user) => user.status === 'ACTIVE' && !members.some((member) => member.user_id === user.user_id)), [members, users]);
-  const memberLabel = (member) => member.display_name || member.email || shortID(member.user_id);
+  const memberLabel = (member) => member.display_name || member.user_code || shortID(member.user_id);
   const refreshUnits = async () => {
     const result = await client.organizationUnits(organization.organization_id);
     setUnits(result.items || []);
   };
-  const refreshMembers = async () => {
-    const result = await client.organizationMembers(organization.organization_id);
+  const refreshMembers = async (filters = { q:memberQuery, role:memberQueryRole, cursor:memberCursor }) => {
+    const result = await client.organizationMembers(organization.organization_id, filters);
     setMembers(result.items || []);
+    setMemberNextCursor(result.next_cursor || '');
+    const ownerResult = await client.organizationMembers(organization.organization_id, { role:'OWNER' });
+    setOwners(ownerResult.items || []);
+  };
+  const searchMembers = async (event) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    const query = memberSearch.trim();
+    try {
+      setMemberQuery(query);
+      setMemberQueryRole(memberRole);
+      setMemberCursor('');
+      setMemberPage(1);
+      memberCursorBack.current.clear();
+      await refreshMembers({ q:query, role:memberRole, cursor:'' });
+    } catch {
+      setError(copy.accounts.actionFailed);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const changeMemberPage = async (direction) => {
+    const nextCursor = direction === 'next' ? memberNextCursor : memberCursorBack.current.get(memberCursor) || '';
+    if (direction === 'next' && nextCursor) memberCursorBack.current.set(nextCursor, memberCursor);
+    setBusy(true);
+    setError('');
+    try {
+      await refreshMembers({ q:memberQuery, role:memberQueryRole, cursor:nextCursor });
+      setMemberCursor(nextCursor);
+      setMemberPage((value) => Math.max(1, value + (direction === 'next' ? 1 : -1)));
+    } catch {
+      setError(copy.accounts.actionFailed);
+    } finally {
+      setBusy(false);
+    }
   };
   const changeStatus = async (status) => {
     if (busy || status === currentStatus) return;
@@ -1563,7 +1656,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
   };
   const transferOwnership = async (event) => {
     event.preventDefault();
-    const target = transferCandidates.find((member) => member.user_id === newOwnerUserID);
+    const target = ownerCandidates.find((member) => member.user_id === newOwnerUserID);
     if (!target || busy || currentStatus !== 'ACTIVE' || !window.confirm(copy.accounts.confirmOwnership(memberLabel(target)))) return;
     setBusy(true);
     setNotice('');
@@ -1572,6 +1665,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
       await client.transferOrganizationOwnership(organization.organization_id, target.user_id);
       await refreshMembers();
       setNewOwnerUserID('');
+      setOwnerCandidateSearch('');
       setNotice(copy.accounts.ownershipTransferred);
     } catch {
       setError(copy.accounts.actionFailed);
@@ -1587,8 +1681,17 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
     setError('');
     try {
       await client.addOrganizationMember(organization.organization_id, newMemberUserID, ['MEMBER'], []);
-      await refreshMembers();
+      setMemberSearch('');
+      setMemberQuery('');
+      setMemberRole('');
+      setMemberQueryRole('');
+      setMemberCursor('');
+      setMemberPage(1);
+      memberCursorBack.current.clear();
+      await refreshMembers({ q:'', role:'', cursor:'' });
       setNewMemberUserID('');
+      setMemberCandidateSearch('');
+      setAddMemberOpen(false);
       setNotice(copy.roles.memberAdded);
     } catch {
       setError(copy.accounts.actionFailed);
@@ -1603,6 +1706,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
     try {
       await client.replaceOrganizationMemberRoles(organization.organization_id, member.user_id, selectedRoles, unitIDs);
       await refreshMembers();
+      setSelectedMember(null);
       setNotice(copy.roles.rolesUpdated);
     } catch {
       setError(copy.accounts.actionFailed);
@@ -1618,6 +1722,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
     try {
       await client.removeOrganizationMember(organization.organization_id, member.user_id);
       await refreshMembers();
+      setSelectedMember(null);
       setNotice(copy.roles.memberRemoved);
     } catch (reason) {
       setError(reason?.code === 'LAST_OWNER_REQUIRED' ? copy.accounts.ownerRequired : copy.accounts.actionFailed);
@@ -1717,7 +1822,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
       <dl className="adm-detail-list">
         <div><dt>ID</dt><dd><TechnicalID value={organization.organization_id} copy={copy} compact={false} /></dd></div>
         <div><dt>{copy.accounts.status}</dt><dd><Status value={currentStatus} /></dd></div>
-        <div><dt>{copy.accounts.members}</dt><dd>{members.length}</dd></div>
+        <div><dt>{copy.accounts.members}</dt><dd>{organization.member_count ?? members.length}</dd></div>
         <div><dt>{copy.accounts.unitHierarchy}</dt><dd>{units.length}</dd></div>
         <div><dt>{copy.accounts.created}</dt><dd>{formatDate(organization.created_at)}</dd></div>
         <div><dt>{copy.accounts.updatedAt}</dt><dd>{formatDate(organization.updated_at)}</dd></div>
@@ -1729,9 +1834,10 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
         </div>
         {canTransferOwnership && (
           <form onSubmit={transferOwnership}>
+            <input value={ownerCandidateSearch} onChange={(event) => { setOwnerCandidateSearch(event.target.value); setNewOwnerUserID(''); }} placeholder={copy.roles.memberSearchPlaceholder} />
             <select value={newOwnerUserID} onChange={(event) => setNewOwnerUserID(event.target.value)} aria-label={copy.accounts.chooseNewOwner}>
               <option value="">{copy.accounts.chooseNewOwner}</option>
-              {transferCandidates.map((member) => (
+              {ownerCandidates.map((member) => (
                 <option key={member.user_id} value={member.user_id}>
                   {memberLabel(member)}
                 </option>
@@ -1740,7 +1846,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
             <button disabled={busy || currentStatus !== 'ACTIVE' || !newOwnerUserID}>{copy.accounts.transferOwner}</button>
           </form>
         )}
-        {!busy && transferCandidates.length === 0 && <small>{copy.accounts.noTransferCandidate}</small>}
+        {!busy && ownerCandidates.length === 0 && <small>{copy.accounts.noTransferCandidate}</small>}
       </div>
         </div>
       )}
@@ -1748,26 +1854,49 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
         <div className="adm-org-section">
       <div className="adm-unit-head">
         <h3>{copy.roles.organizationMembers}</h3>
-        <span>{copy.items(members.length)}</span>
+        <button type="button" disabled={!canManageOrganization || busy || currentStatus !== 'ACTIVE'} onClick={() => setAddMemberOpen((value) => !value)}>{addMemberOpen ? copy.accounts.cancel : copy.roles.addMember}</button>
       </div>
-      {canManageOrganization && (
-        <form className="adm-create-row" onSubmit={addMember}>
+      <form className="adm-member-search" onSubmit={searchMembers}>
+        <input value={memberSearch} onChange={(event) => setMemberSearch(event.target.value)} placeholder={copy.roles.memberSearchPlaceholder} />
+        <select value={memberRole} onChange={(event) => setMemberRole(event.target.value)} aria-label={copy.roles.roleFilter}>
+          <option value="">{copy.roles.allMemberRoles}</option>
+          {roles.filter((role) => role.scope === 'ORGANIZATION' || role.scope === 'UNIT').map((role) => <option key={role.code} value={role.code}>{copy.roles.names?.[role.code] || role.code}</option>)}
+        </select>
+        <button disabled={busy}>{copy.searchAction}</button>
+      </form>
+      {canManageOrganization && addMemberOpen && (
+        <form className="adm-create-row adm-member-add" onSubmit={addMember}>
+          <input value={memberCandidateSearch} onChange={(event) => { setMemberCandidateSearch(event.target.value); setNewMemberUserID(''); }} placeholder={copy.roles.userSearchPlaceholder} />
           <select value={newMemberUserID} onChange={(event) => setNewMemberUserID(event.target.value)} aria-label={copy.roles.chooseMember}>
-            <option value="">{copy.roles.chooseMember}</option>
-            {addCandidates.map((user) => (
+            <option value="">{memberCandidatesLoading ? copy.loading : copy.roles.chooseMember}</option>
+            {memberCandidates.map((user) => (
               <option key={user.user_id} value={user.user_id}>
-                {user.display_name || user.email || shortID(user.user_id)}
+                {userLabel(user)}{user.user_code ? ` · ${user.user_code}` : ''}
               </option>
             ))}
           </select>
           <button disabled={busy || !newMemberUserID}>{copy.roles.addMember}</button>
         </form>
       )}
-      <div className="adm-member-access-list">
-        {members.map((member) => (
-          <MemberAccessEditor key={member.user_id} copy={copy} member={member} units={units} roles={roles} disabled={!canManageOrganization || busy || currentStatus !== 'ACTIVE'} onSave={saveMemberRoles} onRemove={removeMember} />
-        ))}
-      </div>
+      <Table
+        copy={copy}
+        items={members}
+        columns={[
+          { key:'member', label:copy.roles.user, render:(member) => <span className="adm-member-identity"><strong>{memberLabel(member)}</strong><small>{member.user_code || shortID(member.user_id)}</small></span> },
+          { key:'status', label:copy.accounts.status, render:(member) => <Status value={member.status} /> },
+          { key:'roles', label:copy.roles.role, render:(member) => <div className="adm-tag-list">{(member.roles || []).map((role) => <span key={role}>{copy.roles.names?.[role] || role}</span>)}</div> },
+          { key:'unit_scope', label:copy.roles.unitAdminNodes, render:(member) => copy.roles.unitScopeCount((member.unit_admin_unit_ids || []).length) },
+          { key:'joined_at', label:copy.roles.joinedAt, render:(member) => formatDate(member.joined_at) },
+          { key:'actions', label:copy.accounts.actions, render:(member) => <button type="button" disabled={!canManageOrganization || busy || currentStatus !== 'ACTIVE'} onClick={() => setSelectedMember(member)}>{copy.roles.editRoles}</button> },
+        ]}
+      />
+      <footer className="adm-pagination">
+        <span>{copy.roles.memberPageSummary(memberPage, members.length)}</span>
+        <div>
+          <button type="button" disabled={!memberCursorBack.current.has(memberCursor) || busy} onClick={() => changeMemberPage('previous')}>{copy.userManagement.previous}</button>
+          <button type="button" disabled={!memberNextCursor || busy} onClick={() => changeMemberPage('next')}>{copy.userManagement.next}</button>
+        </div>
+      </footer>
       <div className="adm-role-reference">
         <p>{copy.roles.organizationRoleReference}</p>
         <button type="button" onClick={() => onNavigate('roles', { role_scope: 'ORGANIZATION' })}>{copy.roles.viewOrganizationRoles}</button>
@@ -1841,6 +1970,11 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
         </div>
       )}
     </section>
+    {selectedMember && (
+      <DetailDrawer label={`${copy.roles.editRoles} · ${memberLabel(selectedMember)}`} onClose={() => setSelectedMember(null)}>
+        <MemberAccessEditor copy={copy} member={selectedMember} units={units} roles={roles} disabled={!canManageOrganization || busy || currentStatus !== 'ACTIVE'} onSave={saveMemberRoles} onRemove={removeMember} />
+      </DetailDrawer>
+    )}
     {deleteOpen && <OrganizationDeletionDialog copy={copy} organization={{ ...organization, status: currentStatus, name: organizationName }} client={client} onClose={() => setDeleteOpen(false)} onDeleted={onDeleted} />}
     </>
   );
@@ -1859,8 +1993,8 @@ function MemberAccessEditor({ copy, member, units, roles, disabled, onSave, onRe
     <article className="adm-member-access">
       <header>
         <div>
-          <strong>{member.display_name || member.email || shortID(member.user_id)}</strong>
-          <small>{member.email}</small>
+          <strong>{member.display_name || member.user_code || shortID(member.user_id)}</strong>
+          <small>{member.user_code || shortID(member.user_id)}</small>
         </div>
         <Status value={member.status} />
       </header>

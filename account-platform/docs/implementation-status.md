@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 398 个目标编号给出实现结论并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 362`、`部分实现 30`、`未实现 4`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `398` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-101 已完成，其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 364`、`部分实现 30`、`未实现 2`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `398` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-102 已完成，其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -181,7 +181,7 @@
 | ACC-63 | 已实现 | DOC_CURRENT | GO-UNIT; PERSONAL-ACCOUNT-AUTHORIZATION | NOT_DEPLOYED | 本人资料/授权/组织读取、资料修改、上下文切换、注销申请/查询及邀请读取/接受均绑定对应 `personal.*` 中间件并公开 403 契约；领域目标只取 OIDC 主体，生命周期矩阵在权限通过后继续失败关闭。 |
 | ACC-64 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-OBJECT-AUTHORIZATION | NOT_DEPLOYED | 组织管理使用显式组织和可选节点目标，不切换活动计费上下文；节点树、成员、节点移动和成员移除按目标实际归属及完整子树失败关闭。 |
 | ACC-65 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE; OPENAPI; UI-BUILD | NOT_DEPLOYED | 新增删除就绪度只读端点，聚合 Account、Billing、Token 阻断且不写生命周期投影；DELETE 保持二次强校验并把可选兼容请求中的原因写入审计。 |
-| ACC-66 | 未实现 | DOC_CURRENT | CODE-AUDIT | NOT_DEPLOYED | 平台成员端点当前一次返回全部成员，尚无 cursor、搜索和角色筛选。由 APT-102 实现。 |
+| ACC-66 | 已实现 | DOC_CURRENT | CONTRACT; ACCOUNT-SERVICE | NOT_DEPLOYED | 平台成员端点按加入时间与成员关系 ID 提供稳定游标页，支持显示名、用户编码、完整用户 ID 搜索及角色筛选，并拒绝非法游标和角色。 |
 | ACC-67 | 未实现 | DOC_CURRENT | CODE-AUDIT | NOT_DEPLOYED | 组织改名、成员和节点写操作仍复用 `platform.organizations.status.manage`，未达到最小权限。由 APT-103 实现并兼容迁移既有角色。 |
 | ACC-68 | 部分实现 | DOC_CURRENT | ORGANIZATION-OBJECT-AUTHORIZATION | NOT_DEPLOYED | 普通组织管理端点已具备节点移动 CAS 和对象边界，但平台管理 API/Portal 尚未暴露同等能力。由 APT-104 补齐。 |
 | TOK-04 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | `/v1/model-protocols` 暴露 Adapter 版本和显式 `CHAT v1` JSON/SSE 能力；路由持久化 `protocol_code`，未声明的 Embedding/Rerank/Image 等协议不会被推断可用 |
@@ -380,7 +380,7 @@
 | UI-32 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-UI-INTEGRATION; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 总验收验证 HTML 原型定义的五组信息架构、独立 URL、精确权限与不可用能力隐藏，并继续覆盖源码/制品设计 Token、旧视觉禁用、详情抽屉、响应式、触控目标与减弱动画。 |
 | UI-33 | 已实现 | DOC_CURRENT | ACCOUNT-PLATFORM-STATE; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | 组织目录接入 25 条游标分页、状态筛选和 q/status/cursor URL 恢复；创建表单按需展开，初始所有者通过远程用户搜索选择，不再局限于页面首次加载的 25 个用户。 |
 | UI-34 | 已实现 | DOC_CURRENT | ACCOUNT-PLATFORM-STATE; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | 组织详情改为主内容区独立页面，以 organization_id 和 organization_tab 恢复目标及概览、成员权限、组织结构、生命周期四分区；支持刷新、分享、前进后退并保留目录查询参数。 |
-| UI-35 | 未实现 | DOC_CURRENT | CODE-AUDIT | NOT_DEPLOYED | 成员未分页且每个成员预渲染全部角色和节点复选框，仍残留邮箱标签。由 APT-102 实现。 |
+| UI-35 | 已实现 | DOC_CURRENT | ACCOUNT-PLATFORM-STATE; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | 成员区改为紧凑分页表格、远程用户候选与按需权限抽屉；列表不再预渲染全部角色/节点控件，也不展示或搜索邮箱。 |
 | UI-36 | 已实现 | DOC_CURRENT | CONTRACT; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | ACTIVE 组织不再显示删除；DISABLED 组织通过删除检查界面展示跨域阻断，区分 409/503 与 request_id，并要求精确名称和审计理由后才可提交。 |
 | NFR-49 | 已实现 | DOC_CURRENT | USAGE-EXECUTION-REPLAY | NOT_DEPLOYED | 在线事件/结果/墓碑硬上限和清理 Worker、主体即时删除内部入口、派发正文取得租约即销毁、受限案件迁移及解除后最多30天清理已实现；Account 注销编排复用该入口，备份30天生命周期仍须随 APT-037 做生产环境验收 |
 | NFR-50 | 已实现 | AUDIT_HEAD | CODE-AUDIT; GO-UNIT; USER-CODE | NOT_DEPLOYED | 独立精确查询接口验证完整编码和 `platform.users.read`，统一隐藏无效/不存在/越权差异，按操作者、来源、设备和目标摘要限流并审计所有结果；列表搜索不按编码模糊匹配 |
@@ -741,7 +741,7 @@
 | ACC-63 | Account 本人入口原子授权 | 已实现 | 本人资料、上下文、注销和邀请路由逐项使用独立个人权限，目标只从认证主体解析，生命周期白名单不扩大普通能力。 |
 | ACC-64 | 组织对象级授权 | 已实现 | 组织管理不依赖活动计费上下文；节点管理员必须提交明确节点目标，列表限于子树，移动同时校验源与新父节点，跨节点成员不向单子树管理者暴露或开放移除。 |
 | ACC-65 | 组织删除就绪度查询 | 已实现 | 只读端点返回当前状态、版本、ready 和结构化跨域 blockers；实际删除再次强一致预检，不信任前端检查结果。 |
-| ACC-66 | 平台组织成员稳定分页 | 未实现 | 当前平台成员查询一次返回全部成员，缺 cursor、搜索和角色筛选。 |
+| ACC-66 | 平台组织成员稳定分页 | 已实现 | 管理端成员查询提供 q、role、cursor、limit，按加入时间与成员关系 ID 稳定翻页，并返回用户编码作为非邮箱识别事实。 |
 | ACC-67 | 平台组织治理最小权限 | 未实现 | 改名、成员和节点管理仍由状态权限隐式放行。 |
 | ACC-68 | 平台组织节点移动 | 部分实现 | 领域移动事务已实现，平台管理端点和界面尚未接入。 |
 
@@ -910,7 +910,7 @@
 | UI-32 | 管理后台跨页面集成与发布验收 | 已实现 | 验收覆盖 HTML 原型五组信息架构、独立 URL、源码/制品设计 Token、旧六组与旧配色禁用、精确权限、不可用能力隐藏、三语、读屏和响应式。 |
 | UI-33 | 组织目录可扩展交互 | 已实现 | 列表按 25 条游标分页并支持状态筛选和 URL 恢复；创建入口按需展开，初始所有者候选随用户名、显示名、用户编码或完整 ID 远程搜索。 |
 | UI-34 | 独立组织详情深链 | 已实现 | 详情占用主内容区并由 organization_id/organization_tab 深链恢复，浏览器前进后退和返回目录均保持 URL 状态；组织详情不再使用模态抽屉。 |
-| UI-35 | 紧凑成员权限工作区 | 未实现 | 成员未分页且角色/节点控件全部展开，邮箱残留未清理。 |
+| UI-35 | 紧凑成员权限工作区 | 已实现 | 成员以紧凑表格分页展示；添加成员使用远程用户搜索，角色与节点范围仅在选中单个成员后打开编辑抽屉。 |
 | UI-36 | 组织删除交互闭环 | 已实现 | ACTIVE 不出现删除入口；DISABLED 的删除面板展示就绪度与结构化阻断，要求名称和原因双确认，并保留可重试错误与 request_id。 |
 | ADM-01 | 首个超级管理员安全初始化 | 部分实现 | 云端 UAT 已部署离线安全引导代码，但运行库当前为0个有效/待激活管理员；正式密码须由用户控制终端设置，生产等价并发及故障演练仍缺失。 |
 | ADM-02 | Break-glass 恢复 | 部分实现 | 云端 UAT 当前无 Break-glass 或告警记录；首次初始化不得使用恢复命令，需先正常激活管理员，再做真实事故、告警投递、到期回收和交接演练。 |

@@ -117,10 +117,12 @@ export class AdminPlatformClient {
   revokeRoleBinding(bindingID) {
     return this.mutate('account', `/admin/v1/role-bindings/${encodeURIComponent(bindingID)}`, 'DELETE');
   }
-  users(search, signal, cursor = '') {
+  users(searchOrFilters = '', signal, cursor = '') {
+    const filters = typeof searchOrFilters === 'string' ? { q:searchOrFilters, cursor } : (searchOrFilters || {});
     const query = new URLSearchParams({ limit: '25' });
-    if (search) query.set('q', search);
-    if (cursor) query.set('cursor', cursor);
+    if (filters.q) query.set('q', filters.q);
+    if (filters.cursor) query.set('cursor', filters.cursor);
+    if (filters.exclude_organization_id) query.set('exclude_organization_id', filters.exclude_organization_id);
     return this.request('account', `/admin/v1/users?${query}`, signal);
   }
   userByCode(userCode, signal) {
@@ -181,8 +183,14 @@ export class AdminPlatformClient {
   deleteOrganization(organizationID, reason) {
     return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}`, 'DELETE', { reason });
   }
-  organizationMembers(organizationID, signal) {
-    return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, signal);
+  organizationMembers(organizationID, filtersOrSignal = {}, signal) {
+    const filters = filtersOrSignal instanceof globalThis.AbortSignal ? {} : (filtersOrSignal || {});
+    const requestSignal = filtersOrSignal instanceof globalThis.AbortSignal ? filtersOrSignal : signal;
+    const params = new URLSearchParams({ limit:'25' });
+    if (filters.q) params.set('q', filters.q);
+    if (filters.role) params.set('role', filters.role);
+    if (filters.cursor) params.set('cursor', filters.cursor);
+    return this.request('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members?${params}`, requestSignal);
   }
   addOrganizationMember(organizationID, userID, roles, unitAdminUnitIDs) {
     return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/members`, 'POST', { user_id: userID, roles, unit_admin_unit_ids: unitAdminUnitIDs });

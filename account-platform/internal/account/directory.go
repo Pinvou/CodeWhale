@@ -70,7 +70,7 @@ func (r *PostgresRepository) ListMembers(ctx context.Context, principal identity
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `
-SELECT m.id,u.id,u.display_name,u.email,m.status,m.version,m.joined_at,
+SELECT m.id,u.id,u.user_code,u.display_name,u.email,m.status,m.version,m.joined_at,
        ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.role),
        ARRAY(SELECT mu.unit_id FROM membership_units mu WHERE mu.membership_id=m.id ORDER BY mu.unit_id),
        ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.unit_id)
@@ -98,7 +98,7 @@ ORDER BY COALESCE(u.display_name,u.email,u.id::text),u.id`, organizationID, unit
 	items := make([]Member, 0)
 	for rows.Next() {
 		var item Member
-		if err := rows.Scan(&item.MembershipID, &item.UserID, &item.DisplayName, &item.Email, &item.Status, &item.Version, &item.JoinedAt, &item.Roles, &item.UnitIDs, &item.UnitAdminIDs); err != nil {
+		if err := rows.Scan(&item.MembershipID, &item.UserID, &item.UserCode, &item.DisplayName, &item.Email, &item.Status, &item.Version, &item.JoinedAt, &item.Roles, &item.UnitIDs, &item.UnitAdminIDs); err != nil {
 			return nil, err
 		}
 		items = append(items, item)
@@ -226,10 +226,10 @@ func validateManagedRoles(roles []string) ([]string, error) {
 func getMember(ctx context.Context, database pgx.Tx, membershipID uuid.UUID) (Member, error) {
 	var item Member
 	err := database.QueryRow(ctx, `
-SELECT m.id,u.id,u.display_name,u.email,m.status,m.version,m.joined_at,
+SELECT m.id,u.id,u.user_code,u.display_name,u.email,m.status,m.version,m.joined_at,
        ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.role),
        ARRAY(SELECT mu.unit_id FROM membership_units mu WHERE mu.membership_id=m.id ORDER BY mu.unit_id),
        ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.unit_id)
-FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.id=$1`, membershipID).Scan(&item.MembershipID, &item.UserID, &item.DisplayName, &item.Email, &item.Status, &item.Version, &item.JoinedAt, &item.Roles, &item.UnitIDs, &item.UnitAdminIDs)
+FROM memberships m JOIN users u ON u.id=m.user_id WHERE m.id=$1`, membershipID).Scan(&item.MembershipID, &item.UserID, &item.UserCode, &item.DisplayName, &item.Email, &item.Status, &item.Version, &item.JoinedAt, &item.Roles, &item.UnitIDs, &item.UnitAdminIDs)
 	return item, err
 }

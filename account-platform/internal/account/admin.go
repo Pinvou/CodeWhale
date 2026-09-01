@@ -45,10 +45,11 @@ type AdminUser struct {
 }
 
 type AdminUserFilter struct {
-	Search          string
-	Limit           int
-	CursorUpdatedAt *time.Time
-	CursorID        *uuid.UUID
+	Search                string
+	Limit                 int
+	ExcludeOrganizationID *uuid.UUID
+	CursorUpdatedAt       *time.Time
+	CursorID              *uuid.UUID
 }
 
 type AdminUserPage struct {
@@ -76,6 +77,19 @@ type AdminOrganizationFilter struct {
 type AdminOrganizationPage struct {
 	Items      []AdminOrganization `json:"items"`
 	NextCursor *string             `json:"next_cursor"`
+}
+
+type AdminMemberFilter struct {
+	Search         string
+	Role           string
+	Limit          int
+	CursorJoinedAt *time.Time
+	CursorID       *uuid.UUID
+}
+
+type AdminMemberPage struct {
+	Items      []Member `json:"items"`
+	NextCursor *string  `json:"next_cursor"`
 }
 
 type AdminOrganizationState struct {
@@ -144,7 +158,7 @@ type adminRepository interface {
 	AdminDeleteOrganization(context.Context, identity.Principal, uuid.UUID, string) error
 	AdminUnits(context.Context, uuid.UUID) (UnitTree, error)
 	AdminUnitState(context.Context, uuid.UUID, uuid.UUID) (UnitMutationResult, error)
-	AdminMembers(context.Context, uuid.UUID) ([]Member, error)
+	AdminMembers(context.Context, uuid.UUID, AdminMemberFilter) (AdminMemberPage, error)
 	AdminAddMember(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string, []uuid.UUID, string) (MembershipMutationResult, error)
 	AdminReplaceMemberRoles(context.Context, identity.Principal, uuid.UUID, uuid.UUID, []string, []uuid.UUID) (Member, error)
 	AdminRemoveMember(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (MembershipMutationResult, error)
@@ -178,6 +192,11 @@ func adminLimit(r *http.Request) int {
 
 func parseAdminUserFilter(r *http.Request) (AdminUserFilter, error) {
 	filter := AdminUserFilter{Search: strings.TrimSpace(r.URL.Query().Get("q")), Limit: adminLimit(r)}
+	excludeOrganizationID, err := optionalQueryUUID(r, "exclude_organization_id")
+	if err != nil {
+		return AdminUserFilter{}, err
+	}
+	filter.ExcludeOrganizationID = excludeOrganizationID
 	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
 	if cursor == "" {
 		return filter, nil
@@ -233,6 +252,42 @@ func parseAdminOrganizationFilter(r *http.Request) (AdminOrganizationFilter, err
 
 func encodeAdminOrganizationCursor(item AdminOrganization) (string, error) {
 	body, err := json.Marshal(map[string]any{"updated_at": item.UpdatedAt.UTC(), "organization_id": item.ID})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(body), nil
+}
+
+func parseAdminMemberFilter(r *http.Request) (AdminMemberFilter, error) {
+	filter := AdminMemberFilter{Search: strings.TrimSpace(r.URL.Query().Get("q")), Role: strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("role"))), Limit: adminLimit(r)}
+	if filter.Role != "" {
+		allowed := map[string]bool{"OWNER": true, "ORG_ADMIN": true, "ORG_MODEL_ADMIN": true, "BILLING_ADMIN": true, "AUDITOR": true, "MEMBER": true, "UNIT_ADMIN": true}
+		if !allowed[filter.Role] {
+			return AdminMemberFilter{}, ErrConflict
+		}
+	}
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor == "" {
+		return filter, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return AdminMemberFilter{}, err
+	}
+	var value struct {
+		JoinedAt time.Time `json:"joined_at"`
+		ID       uuid.UUID `json:"membership_id"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil || value.JoinedAt.IsZero() || value.ID == uuid.Nil {
+		return AdminMemberFilter{}, ErrConflict
+	}
+	value.JoinedAt = value.JoinedAt.UTC()
+	filter.CursorJoinedAt, filter.CursorID = &value.JoinedAt, &value.ID
+	return filter, nil
+}
+
+func encodeAdminMemberCursor(item Member) (string, error) {
+	body, err := json.Marshal(map[string]any{"joined_at": item.JoinedAt.UTC(), "membership_id": item.MembershipID})
 	if err != nil {
 		return "", err
 	}
@@ -357,6 +412,10 @@ func (s *Service) adminUsers(w http.ResponseWriter, r *http.Request) {
 	filter, err := parseAdminUserFilter(r)
 	if err != nil {
 		api.WriteError(w, http.StatusBadRequest, "INVALID_USER_FILTER", "user filters are invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	if filter.ExcludeOrganizationID != nil && !platformauthorization.GrantedPermission(r.Context(), PermissionPlatformOrganizationsRead) {
+		api.WriteError(w, http.StatusForbidden, "FORBIDDEN", "organization visibility is required for membership exclusion", httpserver.RequestID(r.Context()))
 		return
 	}
 	page, err := repository.AdminUsers(r.Context(), filter)
@@ -508,12 +567,17 @@ func (s *Service) adminMembers(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := repository.AdminMembers(r.Context(), organizationID)
+	filter, err := parseAdminMemberFilter(r)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_ORGANIZATION_MEMBER_FILTER", "organization member filters are invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	page, err := repository.AdminMembers(r.Context(), organizationID, filter)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, page)
 }
 
 type adminMemberRolesBody struct {
@@ -1034,8 +1098,9 @@ SELECT u.id,u.user_code,u.username,u.display_name,u.email,u.status,
        u.created_at,u.updated_at
 FROM users u
 WHERE u.status<>'DELETED' AND ($1='' OR lower(COALESCE(u.username,'')) LIKE $2 OR lower(COALESCE(u.display_name,'')) LIKE $2 OR u.id::text=$1)
-	AND ($3::timestamptz IS NULL OR u.updated_at<$3 OR (u.updated_at=$3 AND u.id<$4::uuid))
-ORDER BY u.updated_at DESC,u.id DESC LIMIT $5`, search, pattern, filter.CursorUpdatedAt, filter.CursorID, limit+1)
+	AND ($3::uuid IS NULL OR NOT EXISTS(SELECT 1 FROM memberships m WHERE m.organization_id=$3 AND m.user_id=u.id AND m.status<>'REVOKED'))
+	AND ($4::timestamptz IS NULL OR u.updated_at<$4 OR (u.updated_at=$4 AND u.id<$5::uuid))
+ORDER BY u.updated_at DESC,u.id DESC LIMIT $6`, search, pattern, filter.ExcludeOrganizationID, filter.CursorUpdatedAt, filter.CursorID, limit+1)
 	if err != nil {
 		return AdminUserPage{}, err
 	}
@@ -1325,40 +1390,60 @@ func (r *PostgresRepository) AdminUnits(ctx context.Context, organizationID uuid
 	return UnitTree{Items: items, StructureVersion: structureVersion}, rows.Err()
 }
 
-func (r *PostgresRepository) AdminMembers(ctx context.Context, organizationID uuid.UUID) ([]Member, error) {
+func (r *PostgresRepository) AdminMembers(ctx context.Context, organizationID uuid.UUID, filter AdminMemberFilter) (AdminMemberPage, error) {
 	var exists bool
 	if err := r.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM organizations WHERE id=$1 AND status<>'DELETED')`, organizationID).Scan(&exists); err != nil {
-		return nil, err
+		return AdminMemberPage{}, err
 	}
 	if !exists {
-		return nil, ErrNotFound
+		return AdminMemberPage{}, ErrNotFound
+	}
+	search := strings.ToLower(strings.TrimSpace(filter.Search))
+	pattern := "%" + search + "%"
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
 	}
 	rows, err := r.pool.Query(ctx, `
-SELECT m.id,m.user_id,u.display_name,u.email,m.status,m.version,m.joined_at,
+SELECT m.id,m.user_id,u.user_code,u.display_name,u.email,m.status,m.version,m.joined_at,
        ARRAY(SELECT DISTINCT rb.role FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.role),
        ARRAY(SELECT mu.unit_id FROM membership_units mu WHERE mu.membership_id=m.id ORDER BY mu.unit_id),
        ARRAY(SELECT rb.unit_id FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='UNIT_ADMIN' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now()) ORDER BY rb.unit_id)
 FROM memberships m JOIN users u ON u.id=m.user_id
 WHERE m.organization_id=$1 AND m.status<>'REVOKED' AND u.status='ACTIVE'
-ORDER BY CASE WHEN EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role='OWNER' AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now())) THEN 0 ELSE 1 END,
-         lower(COALESCE(u.display_name,u.email,'')),m.user_id`, organizationID)
+  AND ($2='' OR lower(COALESCE(u.display_name,'')) LIKE $3 OR lower(u.user_code) LIKE $3 OR u.id::text=$2)
+  AND ($4='' OR EXISTS(SELECT 1 FROM role_bindings rb WHERE rb.membership_id=m.id AND rb.role=$4 AND rb.revoked_at IS NULL AND rb.starts_at<=now() AND (rb.expires_at IS NULL OR rb.expires_at>now())))
+  AND ($5::timestamptz IS NULL OR m.joined_at<$5 OR (m.joined_at=$5 AND m.id<$6::uuid))
+ORDER BY m.joined_at DESC,m.id DESC LIMIT $7`, organizationID, search, pattern, filter.Role, filter.CursorJoinedAt, filter.CursorID, limit+1)
 	if err != nil {
-		return nil, err
+		return AdminMemberPage{}, err
 	}
 	defer rows.Close()
-	items := make([]Member, 0)
+	items := make([]Member, 0, limit+1)
 	for rows.Next() {
 		var item Member
-		if err := rows.Scan(&item.MembershipID, &item.UserID, &item.DisplayName, &item.Email, &item.Status, &item.Version, &item.JoinedAt, &item.Roles, &item.UnitIDs, &item.UnitAdminIDs); err != nil {
-			return nil, err
+		if err := rows.Scan(&item.MembershipID, &item.UserID, &item.UserCode, &item.DisplayName, &item.Email, &item.Status, &item.Version, &item.JoinedAt, &item.Roles, &item.UnitIDs, &item.UnitAdminIDs); err != nil {
+			return AdminMemberPage{}, err
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return AdminMemberPage{}, err
+	}
+	page := AdminMemberPage{Items: items, NextCursor: nil}
+	if len(items) > limit {
+		cursor, err := encodeAdminMemberCursor(items[limit-1])
+		if err != nil {
+			return AdminMemberPage{}, err
+		}
+		page.Items = items[:limit]
+		page.NextCursor = &cursor
+	}
+	return page, nil
 }
 
 func normalizeAdminMemberRoles(roles []string, unitAdminIDs []uuid.UUID) ([]string, []uuid.UUID, error) {
-	allowed := map[string]bool{"ORG_ADMIN": true, "BILLING_ADMIN": true, "AUDITOR": true, "MEMBER": true}
+	allowed := map[string]bool{"ORG_ADMIN": true, "ORG_MODEL_ADMIN": true, "BILLING_ADMIN": true, "AUDITOR": true, "MEMBER": true}
 	roleSet := map[string]bool{"MEMBER": true}
 	for _, role := range roles {
 		role = strings.ToUpper(strings.TrimSpace(role))

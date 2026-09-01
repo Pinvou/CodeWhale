@@ -1910,3 +1910,28 @@ Object.assign(adminPlatformCopy.ja, {
     retryFailed: '削除段階を再試行できませんでした。権限と現在の状態を確認してください。',
   },
 });
+
+Object.assign(adminPlatformCopy.zh.roles, {
+  memberSearchPlaceholder: '搜索显示名称、用户编码或完整用户 ID',
+  roleFilter: '成员角色筛选',
+  allMemberRoles: '全部成员角色',
+  unitScopeCount: (count) => count ? `${count} 个节点` : '无',
+  joinedAt: '加入时间',
+  memberPageSummary: (page, count) => `第 ${page} 页 · 本页 ${count} 条`,
+});
+Object.assign(adminPlatformCopy.en.roles, {
+  memberSearchPlaceholder: 'Search display name, user code, or complete user ID',
+  roleFilter: 'Member role filter',
+  allMemberRoles: 'All member roles',
+  unitScopeCount: (count) => count ? `${count} units` : 'None',
+  joinedAt: 'Joined',
+  memberPageSummary: (page, count) => `Page ${page} · ${count} on this page`,
+});
+Object.assign(adminPlatformCopy.ja.roles, {
+  memberSearchPlaceholder: '表示名、ユーザーコード、完全なユーザー ID で検索',
+  roleFilter: 'メンバーロール絞り込み',
+  allMemberRoles: 'すべてのメンバーロール',
+  unitScopeCount: (count) => count ? `${count} ノード` : 'なし',
+  joinedAt: '参加日時',
+  memberPageSummary: (page, count) => `${page} ページ · このページ ${count} 件`,
+});

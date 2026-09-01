@@ -1187,7 +1187,7 @@ components:
     OrganizationMember:
       type: object
       additionalProperties: false
-      required: [membership_id, user_id, status, version, roles, unit_ids, joined_at]
+      required: [membership_id, user_id, user_code, status, version, roles, unit_ids, unit_admin_unit_ids, joined_at]
       properties:
         membership_id:
           type: string
@@ -1195,6 +1195,8 @@ components:
         user_id:
           type: string
           format: uuid
+        user_code:
+          $ref: "#/components/schemas/UserCode"
         display_name:
           type: [string, "null"]
         email:
@@ -1202,7 +1204,7 @@ components:
           format: email
         status:
           type: string
-          enum: [ACTIVE]
+          enum: [ACTIVE, SUSPENDED, REVOKED]
         version:
           type: integer
           minimum: 1
@@ -1213,6 +1215,12 @@ components:
             type: string
             enum: [OWNER, ORG_ADMIN, BILLING_ADMIN, ORG_MODEL_ADMIN, UNIT_ADMIN, MEMBER, AUDITOR]
         unit_ids:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            format: uuid
+        unit_admin_unit_ids:
           type: array
           uniqueItems: true
           items:

@@ -345,7 +345,7 @@ test('admin organization client uses protected organization, member, and unit en
     client.csrfToken = 'c'.repeat(32);
     await client.createOrganization('Example', 'owner-id');
     await client.organizations({ q:'研发 & AI', status:'DISABLED', cursor:'next/page' });
-    await client.organizationMembers('org-id');
+    await client.organizationMembers('org-id', { q:'vinpay', role:'AUDITOR', cursor:'member/page' });
     await client.transferOrganizationOwnership('org-id', 'new-owner-id');
     await client.organizationUnits('org-id');
     await client.createOrganizationUnit('org-id', 'Engineering', 'parent-id');
@@ -355,7 +355,7 @@ test('admin organization client uses protected organization, member, and unit en
     assert.deepEqual(calls.map(call => [call.url, call.options.method || 'GET']), [
       ['/portal/api/admin/account/admin/v1/organizations', 'POST'],
       ['/portal/api/admin/account/admin/v1/organizations?limit=25&q=%E7%A0%94%E5%8F%91+%26+AI&status=DISABLED&cursor=next%2Fpage', 'GET'],
-      ['/portal/api/admin/account/admin/v1/organizations/org-id/members', 'GET'],
+      ['/portal/api/admin/account/admin/v1/organizations/org-id/members?limit=25&q=vinpay&role=AUDITOR&cursor=member%2Fpage', 'GET'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/ownership', 'POST'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'GET'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'POST'],
@@ -406,6 +406,7 @@ test('admin user workspace uses cursor pages and all three protected repair rout
     const client = new AdminPlatformClient('/portal');
     client.csrfToken = 'c'.repeat(32);
     await client.users('vin pay', undefined, 'opaque-cursor');
+    await client.users({ q:'new owner', exclude_organization_id:'org-id' });
     await client.registrationRepairs({ status: 'REPAIR_REQUIRED', older_than_minutes: '30' });
     await client.profileChangeRepairs();
     await client.accountClosures();
@@ -414,6 +415,7 @@ test('admin user workspace uses cursor pages and all three protected repair rout
     await client.retryProfileChange('profile-id');
     assert.deepEqual(calls, [
       ['/portal/api/admin/account/admin/v1/users?limit=25&q=vin+pay&cursor=opaque-cursor', 'GET'],
+      ['/portal/api/admin/account/admin/v1/users?limit=25&q=new+owner&exclude_organization_id=org-id', 'GET'],
       ['/portal/api/admin/account/admin/v1/registration-operations?limit=100&status=REPAIR_REQUIRED&older_than_minutes=30', 'GET'],
       ['/portal/api/admin/account/admin/v1/profile-change-requests', 'GET'],
       ['/portal/api/admin/account/admin/v1/account-closure-requests', 'GET'],
@@ -901,6 +903,10 @@ test('admin console exposes users, roles, and organizations as independently nam
   assert.doesNotMatch(view, /copy\.accounts\.email/);
   assert.doesNotMatch(view, /function userLabel\(user\) \{[\s\S]*?user\?\.email[\s\S]*?\}/);
   assert.doesNotMatch(view, /item\.display_name \|\| item\.email/);
+  assert.doesNotMatch(view, /member\.email/);
+  assert.match(view, /client\.organizationMembers\(organization\.organization_id, filters\)/);
+  assert.match(view, /setSelectedMember\(member\)/);
+  assert.match(view, /memberCursorBack\.current/);
   assert.match(view, /client\.users\(search\.trim\(\), undefined, nextCursor\)/);
   assert.match(view, /client\.userByCode\(code\)/);
   assert.match(view, /copy\.userManagement\.confirmDisable/);

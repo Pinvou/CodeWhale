@@ -177,9 +177,9 @@ func (f *fakeRepository) AdminUnits(_ context.Context, organizationID uuid.UUID)
 func (f *fakeRepository) AdminUnitState(_ context.Context, organizationID, unitID uuid.UUID) (UnitMutationResult, error) {
 	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, Status: "DELETED", Version: 2}, StructureVersion: 2}, nil
 }
-func (f *fakeRepository) AdminMembers(_ context.Context, organizationID uuid.UUID) ([]Member, error) {
-	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":members")
-	return []Member{}, nil
+func (f *fakeRepository) AdminMembers(_ context.Context, organizationID uuid.UUID, filter AdminMemberFilter) (AdminMemberPage, error) {
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":members:"+filter.Search+":"+filter.Role)
+	return AdminMemberPage{Items: []Member{}}, nil
 }
 func (f *fakeRepository) AdminAddMember(_ context.Context, _ identity.Principal, organizationID, userID uuid.UUID, roles []string, unitIDs []uuid.UUID, _ string) (MembershipMutationResult, error) {
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":member:add:"+userID.String())
@@ -408,7 +408,7 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 	}{
 		{http.MethodPost, "/admin/v1/organizations", `{"name":"Example","owner_user_id":"` + ownerID.String() + `"}`, http.StatusCreated, "organization:create:" + ownerID.String() + ":Example"},
 		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/units", "", http.StatusOK, "organization:" + organizationID.String() + ":units"},
-		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/members", "", http.StatusOK, "organization:" + organizationID.String() + ":members"},
+		{http.MethodGet, "/admin/v1/organizations/" + organizationID.String() + "/members?q=alice&role=AUDITOR&limit=25", "", http.StatusOK, "organization:" + organizationID.String() + ":members:alice:AUDITOR"},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/ownership", `{"new_owner_user_id":"` + ownerID.String() + `"}`, http.StatusOK, "organization:" + organizationID.String() + ":owner:" + ownerID.String()},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/units", `{"name":"Engineering","parent_id":"` + parentID.String() + `"}`, http.StatusCreated, "organization:" + organizationID.String() + ":unit:create:" + parentID.String() + ":Engineering"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
@@ -446,18 +446,43 @@ func TestAdminOrganizationFilterCursorRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAdminMemberFilterCursorRoundTrip(t *testing.T) {
+	item := Member{MembershipID: uuid.Must(uuid.NewV7()), JoinedAt: time.Date(2026, time.September, 1, 13, 45, 0, 0, time.UTC)}
+	cursor, err := encodeAdminMemberCursor(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/organizations/example/members?q=vinpay&role=auditor&limit=25&cursor="+cursor, nil)
+	filter, err := parseAdminMemberFilter(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filter.Search != "vinpay" || filter.Role != "AUDITOR" || filter.Limit != 25 || filter.CursorID == nil || *filter.CursorID != item.MembershipID || filter.CursorJoinedAt == nil || !filter.CursorJoinedAt.Equal(item.JoinedAt) {
+		t.Fatalf("unexpected filter: %#v", filter)
+	}
+}
+
+func TestAdminMemberFilterRejectsUnknownRoleAndMalformedCursor(t *testing.T) {
+	for _, target := range []string{"/admin/v1/organizations/example/members?role=PLATFORM_SUPER_ADMIN", "/admin/v1/organizations/example/members?cursor=not-base64"} {
+		if _, err := parseAdminMemberFilter(httptest.NewRequest(http.MethodGet, target, nil)); err == nil {
+			t.Fatalf("expected invalid member filter for %s", target)
+		}
+	}
+}
+
 func TestAdminUserFilterCursorRoundTrip(t *testing.T) {
 	item := AdminUser{ID: uuid.Must(uuid.NewV7()), UpdatedAt: time.Date(2026, time.September, 1, 12, 34, 56, 0, time.UTC)}
+	excludeOrganizationID := uuid.Must(uuid.NewV7())
 	cursor, err := encodeAdminUserCursor(item)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/admin/v1/users?q=vinpay&limit=25&cursor="+cursor, nil)
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/users?q=vinpay&limit=25&exclude_organization_id="+excludeOrganizationID.String()+"&cursor="+cursor, nil)
 	filter, err := parseAdminUserFilter(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filter.Search != "vinpay" || filter.Limit != 25 || filter.CursorID == nil || *filter.CursorID != item.ID || filter.CursorUpdatedAt == nil || !filter.CursorUpdatedAt.Equal(item.UpdatedAt) {
+	if filter.Search != "vinpay" || filter.Limit != 25 || filter.ExcludeOrganizationID == nil || *filter.ExcludeOrganizationID != excludeOrganizationID || filter.CursorID == nil || *filter.CursorID != item.ID || filter.CursorUpdatedAt == nil || !filter.CursorUpdatedAt.Equal(item.UpdatedAt) {
 		t.Fatalf("unexpected filter: %#v", filter)
 	}
 }
