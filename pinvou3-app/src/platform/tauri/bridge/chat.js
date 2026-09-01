@@ -28,9 +28,7 @@
     var adoptManagedAttachments = context.adoptManagedAttachments || function () { return Promise.resolve(); };
     var discardManagedAttachment = context.discardManagedAttachment || function () { return Promise.resolve(); };
     var isScheduledRunSession = context.isScheduledRunSession;
-    var basename = context.basename;
     var userMessageDisplayText = context.userMessageDisplayText;
-    var extractArtifactPaths = context.extractArtifactPaths;
     var parseScheduledTaskDraftFromText = context.parseScheduledTaskDraftFromText;
     var autoCreateScheduledTaskDraft = context.autoCreateScheduledTaskDraft;
     var modelAvailabilityError = typeof context.modelAvailabilityError === "function"
@@ -92,20 +90,6 @@
   // (同一产物没改又 present 一次,模型常见啰嗦)。判据=「上一张同名卡之后有没有改过这个文件」。
   // 例外:扫到**用户发言**就放行——用户在上一张卡之后又开了口(典型「再推一次」「没看到」),
   // 这次 present 是新请求的响应,不是模型自发啰嗦;再去重 = 用户主动要却看不到任何反馈(实测 bug)。
-  function isDuplicateArtifactCard(pathv) {
-    var bn = basename(pathv);
-    if (!bn) return false;
-    for (var i = state.chatItems.length - 1; i >= 0; i--) {
-      var it = state.chatItems[i];
-      if (it.type === "tool" && context.fileMutationAction(it.name, it.args)) {
-        var changedPaths = extractArtifactPaths(it.args);
-        if (changedPaths.some(function (ap) { return basename(ap) === bn; })) return false;
-      }
-      if (it.type === "user") return false;
-      if (it.type === "artifact_card" && basename(it.path) === bn) return true;
-    }
-    return false;
-  }
   function addSystemItem(text, meta) {
     var item = { type: "system", text: text, time: timeStr() };
     if (meta) {
@@ -783,7 +767,6 @@
       toolCallAlreadyStarted: toolCallAlreadyStarted,
       toolCallAlreadyFinished: toolCallAlreadyFinished,
       hasChatItemForTool: hasChatItemForTool,
-      isDuplicateArtifactCard: isDuplicateArtifactCard,
       addSystemItem: addSystemItem,
       addAuthoritySyncNotice: addAuthoritySyncNotice,
       compactPruneRollupText: compactPruneRollupText,
