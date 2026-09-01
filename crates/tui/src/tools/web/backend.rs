@@ -113,9 +113,14 @@ impl<'a> SearchBackendChain<'a> {
             context, selected,
         )));
         if !matches!(selected, SearchProvider::Bing | SearchProvider::DuckDuckGo) {
+            // The keyless tail must stay reachable from mainland-China
+            // networks, where DuckDuckGo is DNS-poisoned and SNI-reset while
+            // Bing serves both its global and China endpoints without a key.
+            // The tail is picked by reachability, not by geo detection: the
+            // engine never guesses the user's location.
             backends.push(Box::new(ConfiguredSearchBackend::from_provider(
                 context,
-                SearchProvider::DuckDuckGo,
+                SearchProvider::Bing,
             )));
         }
         Self { backends }
@@ -134,13 +139,21 @@ impl<'a> SearchBackendChain<'a> {
         query: &SearchQuery,
         deadline: Instant,
         first_attempt_budget: Option<Duration>,
+        fallback_budget_after_first: Option<Duration>,
     ) -> Result<ChainedSearch, ToolError> {
         let backends = self
             .backends
             .iter()
             .map(|backend| backend.as_ref())
             .collect::<Vec<_>>();
-        run_backend_chain(&backends, query, deadline, first_attempt_budget).await
+        run_backend_chain(
+            &backends,
+            query,
+            deadline,
+            first_attempt_budget,
+            fallback_budget_after_first,
+        )
+        .await
     }
 }
 
@@ -161,14 +174,20 @@ const fn provider_native_is_available(capability_supported: bool, client_present
 async fn run_backend_chain(
     backends: &[&dyn SearchBackend],
     query: &SearchQuery,
-    deadline: Instant,
+    mut deadline: Instant,
     first_attempt_budget: Option<Duration>,
+    fallback_budget_after_first: Option<Duration>,
 ) -> Result<ChainedSearch, ToolError> {
     let mut degraded = Vec::new();
     let mut last_empty = None;
     let mut attempted = Vec::new();
 
     for (index, backend) in backends.iter().enumerate() {
+        if index == 1
+            && let Some(fallback_budget) = fallback_budget_after_first
+        {
+            deadline = Instant::now() + fallback_budget.max(Duration::from_millis(1));
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             break;
@@ -204,20 +223,19 @@ async fn run_backend_chain(
             .and_then(std::convert::identity);
 
         match result {
-            Ok(mut raw) if !raw.results.is_empty() => {
-                degraded.append(&mut raw.degraded);
-                raw.degraded = degraded;
-                return Ok(ChainedSearch {
-                    raw,
-                    capabilities: backend.capabilities(),
-                });
-            }
             Ok(mut raw) => {
+                let capabilities = backend.capabilities();
+                crate::tools::web_search::apply_domain_constraints(query, capabilities, &mut raw);
+                if !raw.results.is_empty() {
+                    degraded.append(&mut raw.degraded);
+                    raw.degraded = degraded;
+                    return Ok(ChainedSearch { raw, capabilities });
+                }
                 degraded.push(DegradedReason::NoUsableResults {
                     backend: backend_id,
                 });
                 degraded.append(&mut raw.degraded);
-                last_empty = Some((raw, backend.capabilities()));
+                last_empty = Some((raw, capabilities));
             }
             Err(error) if is_fail_closed(&error) => return Err(error),
             Err(error) if backends.len() == 1 => return Err(error),
@@ -242,7 +260,8 @@ async fn run_backend_chain(
         .collect::<Vec<_>>()
         .join(", ");
     Err(ToolError::not_available(format!(
-        "web search backends unavailable: {backend_ids}"
+        "web search backends unavailable: {backend_ids}; \
+         configure an API-backed [search] provider (tavily, bocha, metaso, baidu, volcengine) for dependable results"
     )))
 }
 
@@ -301,10 +320,19 @@ impl SearchBackend for ProviderNativeSearchBackend<'_> {
     }
 
     fn capabilities(&self) -> QueryCapabilities {
+        let domains = self
+            .context
+            .provider_native_search
+            .as_ref()
+            .is_some_and(crate::client::ProviderNativeSearchClient::supports_domain_filter);
         QueryCapabilities {
             max_results: QueryCapabilityState::Supported,
             recency: QueryCapabilityState::Unsupported,
-            domains: QueryCapabilityState::Supported,
+            domains: if domains {
+                QueryCapabilityState::Supported
+            } else {
+                QueryCapabilityState::Unsupported
+            },
             locale: QueryCapabilityState::Unsupported,
             published_date: QueryCapabilityState::Unknown,
         }
@@ -398,6 +426,12 @@ mod tests {
         result: Result<Vec<super::super::contract::SearchResult>, ToolError>,
     }
 
+    struct DeadlineBackend {
+        id: BackendId,
+        observed_budget: Arc<Mutex<Option<Duration>>>,
+        delay: Duration,
+    }
+
     #[async_trait]
     impl SearchBackend for FakeBackend {
         fn id(&self) -> BackendId {
@@ -418,6 +452,35 @@ mod tests {
                 source: self.id.as_str().to_string(),
                 backend_detail: None,
                 results: self.result.clone()?,
+                degraded: Vec::new(),
+                note: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl SearchBackend for DeadlineBackend {
+        fn id(&self) -> BackendId {
+            self.id
+        }
+
+        fn capabilities(&self) -> QueryCapabilities {
+            QueryCapabilities::count_only()
+        }
+
+        async fn search(
+            &self,
+            _query: &SearchQuery,
+            deadline: Instant,
+        ) -> Result<BackendSearch, ToolError> {
+            *self.observed_budget.lock().expect("budget lock") =
+                Some(deadline.saturating_duration_since(Instant::now()));
+            tokio::time::sleep(self.delay).await;
+            Ok(BackendSearch {
+                backend: self.id,
+                source: self.id.as_str().to_string(),
+                backend_detail: None,
+                results: vec![result()],
                 degraded: Vec::new(),
                 note: None,
             })
@@ -464,6 +527,47 @@ mod tests {
         }
     }
 
+    /// API-backed providers must fall back to the keyless Bing tail, not
+    /// DuckDuckGo: DDG is unreachable from mainland-China networks
+    /// (DNS poisoning + SNI reset), so a DDG tail turns every API outage
+    /// into a guaranteed total failure there, while Bing stays reachable
+    /// globally without a key. Bing and DuckDuckGo themselves stay
+    /// single-backend chains (their internal fallbacks own that job).
+    #[test]
+    fn forkguard_api_provider_chain_tail_is_bing() {
+        for selected in [
+            SearchProvider::Tavily,
+            SearchProvider::Bocha,
+            SearchProvider::Metaso,
+            SearchProvider::Baidu,
+            SearchProvider::Searxng,
+            SearchProvider::Volcengine,
+            SearchProvider::Sofya,
+        ] {
+            let mut context = ToolContext::new(std::path::PathBuf::from("."));
+            context.search_provider = selected;
+            let chain = SearchBackendChain::from_context(&context);
+            let ids: Vec<BackendId> = chain.backends.iter().map(|backend| backend.id()).collect();
+            let expected_tail = BackendId::Bing;
+            assert_eq!(
+                ids.last(),
+                Some(&expected_tail),
+                "{selected:?} chain must keep a reachable keyless Bing tail"
+            );
+        }
+
+        for selected in [SearchProvider::Bing, SearchProvider::DuckDuckGo] {
+            let mut context = ToolContext::new(std::path::PathBuf::from("."));
+            context.search_provider = selected;
+            let chain = SearchBackendChain::from_context(&context);
+            assert_eq!(
+                chain.backends.len(),
+                1,
+                "{selected:?} must stay a single-backend chain"
+            );
+        }
+    }
+
     #[test]
     fn provider_native_is_fail_closed_without_both_fact_and_client() {
         assert!(!provider_native_is_available(false, false));
@@ -488,6 +592,7 @@ mod tests {
             &[&api, &scrape],
             &query(),
             Instant::now() + Duration::from_secs(1),
+            None,
             None,
         )
         .await
@@ -528,6 +633,7 @@ mod tests {
             &query(),
             Instant::now() + Duration::from_secs(1),
             None,
+            None,
         )
         .await
         .expect("final scrape fallback should succeed");
@@ -556,41 +662,11 @@ mod tests {
 
     #[tokio::test]
     async fn first_attempt_budget_overrides_the_default_fair_share() {
-        struct DeadlineBackend {
-            observed_budget: Arc<Mutex<Option<Duration>>>,
-        }
-
-        #[async_trait]
-        impl SearchBackend for DeadlineBackend {
-            fn id(&self) -> BackendId {
-                BackendId::Volcengine
-            }
-
-            fn capabilities(&self) -> QueryCapabilities {
-                QueryCapabilities::count_only()
-            }
-
-            async fn search(
-                &self,
-                _query: &SearchQuery,
-                deadline: Instant,
-            ) -> Result<BackendSearch, ToolError> {
-                *self.observed_budget.lock().expect("budget lock") =
-                    Some(deadline.saturating_duration_since(Instant::now()));
-                Ok(BackendSearch {
-                    backend: BackendId::Volcengine,
-                    source: "volcengine".to_string(),
-                    backend_detail: None,
-                    results: vec![result()],
-                    degraded: Vec::new(),
-                    note: None,
-                })
-            }
-        }
-
         let observed_budget = Arc::new(Mutex::new(None));
         let volcengine = DeadlineBackend {
+            id: BackendId::Volcengine,
             observed_budget: Arc::clone(&observed_budget),
+            delay: Duration::ZERO,
         };
         let fallback = FakeBackend {
             id: BackendId::DuckDuckGo,
@@ -602,6 +678,7 @@ mod tests {
             &query(),
             Instant::now() + Duration::from_secs(2),
             Some(first_attempt_budget),
+            None,
         )
         .await
         .expect("the first backend should complete inside its dedicated budget");
@@ -616,6 +693,37 @@ mod tests {
             "dedicated first-attempt budget should exceed the default one-second fair share: {observed:?}"
         );
         assert!(observed <= first_attempt_budget);
+    }
+
+    #[tokio::test]
+    async fn provider_native_unused_budget_does_not_extend_fallback_deadline() {
+        let native = FakeBackend {
+            id: BackendId::ProviderNative,
+            result: Err(ToolError::execution_failed("native unavailable")),
+        };
+        let observed_budget = Arc::new(Mutex::new(None));
+        let fallback = DeadlineBackend {
+            id: BackendId::DuckDuckGo,
+            observed_budget: Arc::clone(&observed_budget),
+            delay: Duration::from_millis(200),
+        };
+        let fallback_budget = Duration::from_millis(30);
+        let error = run_backend_chain(
+            &[&native, &fallback],
+            &query(),
+            Instant::now() + Duration::from_millis(500),
+            Some(Duration::from_millis(500)),
+            Some(fallback_budget),
+        )
+        .await
+        .expect_err("blocking fallback must stop at its own budget");
+
+        assert!(matches!(error, ToolError::NotAvailable { .. }));
+        let observed = observed_budget
+            .lock()
+            .expect("budget lock")
+            .expect("fallback must observe a deadline");
+        assert!(observed <= fallback_budget);
     }
 
     #[tokio::test]
@@ -634,6 +742,7 @@ mod tests {
             &query(),
             Instant::now() + Duration::from_secs(1),
             None,
+            None,
         )
         .await
         .expect_err("all-down chain must fail");
@@ -641,6 +750,7 @@ mod tests {
 
         assert!(matches!(error, ToolError::NotAvailable { .. }));
         assert!(message.contains("bocha, duckduckgo"));
+        assert!(message.contains("configure an API-backed [search] provider"));
         assert!(!message.contains(private_error));
         assert!(!message.contains("different private response"));
     }
@@ -683,6 +793,7 @@ mod tests {
             &query(),
             Instant::now() + Duration::from_secs(1),
             None,
+            None,
         )
         .await
         .expect_err("policy error must fail closed");
@@ -705,6 +816,7 @@ mod tests {
             &[&api, &scrape],
             &query(),
             Instant::now() + Duration::from_secs(1),
+            None,
             None,
         )
         .await

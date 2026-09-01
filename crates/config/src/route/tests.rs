@@ -1258,7 +1258,7 @@ fn priced_deepseek_resolver() -> RouteResolver {
 }
 
 #[test]
-fn resolver_carries_exact_offering_capabilities_without_protocol_inference() {
+fn resolver_carries_exact_offering_capabilities_and_adds_sourced_route_search() {
     use crate::catalog::{CatalogOffering, CatalogSource};
     use crate::route::CapabilityState;
 
@@ -1289,7 +1289,7 @@ fn resolver_carries_exact_offering_capabilities_without_protocol_inference() {
     assert_eq!(capabilities.streaming, CapabilityState::Unknown);
     assert_eq!(
         capabilities.server_side_web_search,
-        CapabilityState::Unknown
+        CapabilityState::Supported
     );
 }
 

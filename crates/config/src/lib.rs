@@ -4458,10 +4458,9 @@ fn xiaomi_mimo_mode_uses_standard_endpoint(normalized_mode: &str) -> bool {
 }
 
 fn xiaomi_mimo_base_url_uses_token_plan(base_url: &str) -> bool {
-    let normalized = base_url.trim_end_matches('/').to_ascii_lowercase();
-    normalized == XIAOMI_MIMO_TOKEN_PLAN_CN_BASE_URL
-        || normalized == XIAOMI_MIMO_TOKEN_PLAN_SGP_BASE_URL
-        || normalized == XIAOMI_MIMO_TOKEN_PLAN_AMS_BASE_URL
+    provider::is_exact_url_route(base_url, XIAOMI_MIMO_TOKEN_PLAN_CN_BASE_URL)
+        || provider::is_exact_url_route(base_url, XIAOMI_MIMO_TOKEN_PLAN_SGP_BASE_URL)
+        || provider::is_exact_url_route(base_url, XIAOMI_MIMO_TOKEN_PLAN_AMS_BASE_URL)
 }
 
 fn xiaomi_mimo_env_var(candidates: &[&str]) -> Option<String> {
@@ -4543,10 +4542,8 @@ fn xiaomi_mimo_api_key_uses_token_plan(api_key: Option<&str>) -> bool {
 }
 
 fn xiaomi_mimo_base_url_is_pay_as_you_go(base_url: &str) -> bool {
-    matches!(
-        base_url.trim_end_matches('/').to_ascii_lowercase().as_str(),
-        "https://api.xiaomimimo.com" | "https://api.xiaomimimo.com/v1"
-    )
+    provider::is_exact_url_route(base_url, "https://api.xiaomimimo.com")
+        || provider::is_exact_url_route(base_url, "https://api.xiaomimimo.com/v1")
 }
 
 /// Whether `base_url` belongs to the provider's official endpoint family.
@@ -4556,24 +4553,29 @@ fn xiaomi_mimo_base_url_is_pay_as_you_go(base_url: &str) -> bool {
 /// canonicalization and credential scoping cannot disagree.
 #[must_use]
 pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> bool {
-    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let is_exact = |expected| provider::is_exact_url_route(base_url, expected);
     match provider {
-        ProviderKind::Deepseek => matches!(
-            normalized.as_str(),
-            "https://api.deepseek.com"
-                | "https://api.deepseek.com/v1"
-                | "https://api.deepseek.com/beta"
-        ),
-        ProviderKind::DeepseekAnthropic => matches!(
-            normalized.as_str(),
-            "https://api.deepseek.com/anthropic" | "https://api.deepseek.com/anthropic/v1"
-        ),
-        ProviderKind::Siliconflow | ProviderKind::SiliconflowCN => matches!(
-            normalized.as_str(),
-            "https://api.siliconflow.com/v1" | "https://api.siliconflow.cn/v1"
-        ),
+        ProviderKind::Deepseek => {
+            is_exact("https://api.deepseek.com")
+                || is_exact("https://api.deepseek.com/v1")
+                || is_exact("https://api.deepseek.com/beta")
+        }
+        ProviderKind::DeepseekAnthropic => {
+            is_exact("https://api.deepseek.com/anthropic")
+                || is_exact("https://api.deepseek.com/anthropic/v1")
+        }
+        ProviderKind::Siliconflow | ProviderKind::SiliconflowCN => {
+            is_exact("https://api.siliconflow.com/v1") || is_exact("https://api.siliconflow.cn/v1")
+        }
         ProviderKind::Moonshot => {
-            normalized == DEFAULT_MOONSHOT_BASE_URL || moonshot_base_url_uses_kimi_code(base_url)
+            is_exact(DEFAULT_MOONSHOT_BASE_URL)
+                || is_exact(MOONSHOT_CN_BASE_URL)
+                || moonshot_base_url_uses_kimi_code(base_url)
+        }
+        ProviderKind::Zai => {
+            is_exact("https://api.z.ai/api/coding/paas/v4")
+                || is_exact("https://api.z.ai/api/paas/v4")
+                || is_exact("https://open.bigmodel.cn/api/paas/v4")
         }
         ProviderKind::XiaomiMimo => {
             xiaomi_mimo_base_url_uses_token_plan(base_url)
@@ -4582,13 +4584,7 @@ pub fn provider_base_url_is_official(provider: ProviderKind, base_url: &str) -> 
         // Custom routes have no Codewhale-owned official endpoint. The
         // descriptor URL is a schema placeholder, never a credential scope.
         ProviderKind::Custom => false,
-        _ => {
-            normalized
-                == default_base_url_for_provider(provider)
-                    .trim()
-                    .trim_end_matches('/')
-                    .to_ascii_lowercase()
-        }
+        _ => is_exact(default_base_url_for_provider(provider)),
     }
 }
 
