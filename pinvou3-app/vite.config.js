@@ -65,17 +65,14 @@ function preserveAccountPortalExtensions() {
   const extensions = {
     'admin.html': {
       head: [
-        '<script type="module" crossorigin src="/assets/role-bindings.js"></script>',
         '<script type="module" crossorigin src="/assets/approval-requests.js"></script>',
         '<script type="module" crossorigin src="/assets/pricing-admin.js"></script>',
         '<script type="module" crossorigin src="/assets/product-admin.js"></script>',
-        '<link rel="stylesheet" crossorigin href="/assets/role-bindings.css">',
         '<link rel="stylesheet" crossorigin href="/assets/approval-requests.css">',
         '<link rel="stylesheet" crossorigin href="/assets/pricing-admin.css">',
         '<link rel="stylesheet" crossorigin href="/assets/product-admin.css">',
       ],
       body: [
-        '<div id="role-bindings-root"></div>',
         '<div id="approval-requests-root"></div>',
         '<div id="pricing-admin-root"></div>',
         '<div id="product-admin-root"></div>',
@@ -115,7 +112,7 @@ export default defineConfig(({ mode }) => {
   build: {
     outDir: accountPortalBuild ? '../../account-platform/internal/portal/static' : webBuild ? '../../remote-control-relay/web/dist' : '../dist',
     // The Portal directory also contains independently maintained approval,
-    // recovery, and role-lifecycle assets. Stable Vite outputs overwrite their
+    // recovery, and product assets. Stable Vite outputs overwrite their
     // own names without deleting those sibling entry points.
     emptyOutDir: !accountPortalBuild,
     rolldownOptions: {

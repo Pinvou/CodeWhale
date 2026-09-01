@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>角色与权限 · 全新设计稿</title>
+  <style>
+    :root {
+      --brand: #3159e8;
+      --brand-strong: #2447c7;
+      --brand-soft: #eef2ff;
+      --accent: #0f8f6f;
+      --accent-soft: #e9f7f2;
+      --warning: #a86008;
+      --warning-soft: #fff5df;
+      --danger: #c43c3c;
+      --danger-soft: #fff0f0;
+      --ink: #171b26;
+      --muted: #667085;
+      --subtle: #8992a5;
+      --line: #dfe4ee;
+      --line-strong: #cfd6e4;
+      --surface: #ffffff;
+      --canvas: #f4f6f9;
+      --radius: 12px;
+      --shadow: 0 6px 20px rgba(23, 32, 59, .07);
+      font-family: "PingFang SC", "Microsoft YaHei", Inter, system-ui, sans-serif;
+      color: var(--ink);
+      background: var(--canvas);
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; background: var(--canvas); }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, select:focus-visible, [tabindex]:focus-visible {
+      outline: 3px solid rgba(49, 89, 232, .25);
+      outline-offset: 2px;
+    }
+
+    .app { min-height: 100vh; display: grid; grid-template-columns: 232px minmax(0, 1fr); }
+    .sidebar {
+      position: sticky; top: 0; height: 100vh; overflow: auto;
+      border-right: 1px solid var(--line); background: var(--surface); padding: 18px 14px;
+    }
+    .brand { display: flex; gap: 11px; align-items: center; padding: 0 8px 20px; border-bottom: 1px solid var(--line); }
+    .brand-mark { width: 38px; height: 38px; border-radius: 11px; background: #121620; color: white; display: grid; place-items: center; font-weight: 800; }
+    .brand strong { display: block; font-size: 15px; }
+    .brand span { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; letter-spacing: .06em; }
+    .nav-group { margin-top: 22px; }
+    .nav-group small { display: block; padding: 0 10px 7px; color: var(--subtle); font-size: 11px; font-weight: 700; }
+    .nav-item { min-height: 42px; display: flex; align-items: center; gap: 11px; border-radius: 9px; color: #566176; padding: 0 11px; font-size: 14px; margin: 2px 0; }
+    .nav-item.active { color: var(--brand); background: var(--brand-soft); font-weight: 700; }
+    .nav-dot { width: 7px; height: 7px; border: 1.5px solid currentColor; border-radius: 50%; }
+    .sidebar-footer { margin-top: 26px; border-top: 1px solid var(--line); padding: 14px 10px; color: var(--muted); font-size: 12px; }
+
+    .shell { min-width: 0; }
+    .topbar { height: 72px; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; padding: 0 34px; }
+    .product-overline { font-size: 11px; color: var(--muted); font-weight: 800; letter-spacing: .04em; }
+    .top-title { margin-top: 4px; font-size: 15px; font-weight: 750; }
+    .profile { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+    .avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--brand-soft); color: var(--brand); display: grid; place-items: center; font-weight: 800; }
+    .profile strong { display: block; color: var(--ink); }
+
+    main { max-width: 1480px; margin: 0 auto; padding: 34px 36px 60px; }
+    .page-head { display: flex; gap: 24px; align-items: flex-end; justify-content: space-between; margin-bottom: 24px; }
+    .eyebrow { color: var(--brand); font-size: 12px; font-weight: 800; }
+    h1 { margin: 6px 0 6px; font-size: clamp(30px, 3vw, 42px); line-height: 1.15; letter-spacing: -.04em; }
+    .lead { margin: 0; color: var(--muted); font-size: 14px; }
+    .page-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .btn { min-height: 40px; border-radius: 9px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); padding: 0 15px; font-weight: 700; font-size: 13px; }
+    .btn:hover { border-color: #aeb7c9; }
+    .btn.primary { border-color: var(--brand); background: var(--brand); color: white; }
+    .btn.primary:hover { background: var(--brand-strong); }
+    .btn.danger { color: var(--danger); border-color: #f1caca; }
+    .updated { color: var(--subtle); font-size: 12px; }
+
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .summary-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+    .summary-card span { color: var(--muted); font-size: 12px; }
+    .summary-card strong { display: block; font-size: 23px; margin-top: 6px; }
+    .summary-card em { color: var(--subtle); font-size: 11px; font-style: normal; }
+
+    .workspace { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; }
+    .tabs { display: flex; gap: 22px; min-height: 58px; align-items: flex-end; padding: 0 20px; border-bottom: 1px solid var(--line); }
+    .tab { position: relative; height: 58px; padding: 0 2px; border: 0; background: none; color: var(--muted); font-weight: 750; }
+    .tab.active { color: var(--ink); }
+    .tab.active::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 3px 3px 0 0; background: var(--brand); }
+
+    .view { display: none; }
+    .view.active { display: block; }
+    .toolbar { display: flex; gap: 10px; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    .search { position: relative; flex: 1 1 280px; min-width: 220px; }
+    .search input { width: 100%; height: 40px; border: 1px solid var(--line-strong); border-radius: 9px; padding: 0 14px 0 38px; color: var(--ink); }
+    .search::before { content: "⌕"; position: absolute; left: 13px; top: 7px; color: var(--muted); font-size: 20px; }
+    .select { height: 40px; border: 1px solid var(--line-strong); border-radius: 9px; background: white; padding: 0 32px 0 11px; color: #3f4859; }
+    .toolbar-count { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+    .catalog-layout { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(320px, .8fr); min-height: 560px; }
+    .table-wrap { min-width: 0; overflow-x: auto; border-right: 1px solid var(--line); }
+    table { width: 100%; border-collapse: collapse; min-width: 720px; }
+    th { height: 42px; padding: 0 14px; text-align: left; background: #f8f9fb; color: var(--muted); font-size: 11px; font-weight: 750; border-bottom: 1px solid var(--line); }
+    td { padding: 15px 14px; border-bottom: 1px solid var(--line); font-size: 13px; vertical-align: middle; }
+    tbody tr { cursor: pointer; transition: background .15s ease; }
+    tbody tr:hover, tbody tr.selected { background: #f7f9ff; }
+    tbody tr.selected { box-shadow: inset 3px 0 var(--brand); }
+    .role-main { display: block; font-weight: 750; }
+    .role-code { display: block; margin-top: 4px; color: var(--subtle); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .tag { display: inline-flex; min-height: 24px; align-items: center; border-radius: 999px; padding: 0 9px; font-size: 11px; font-weight: 750; background: #f0f2f6; color: #596174; white-space: nowrap; }
+    .tag.platform { background: var(--brand-soft); color: var(--brand); }
+    .tag.org { background: var(--accent-soft); color: var(--accent); }
+    .tag.personal { background: #f4edff; color: #7042b3; }
+    .tag.unit { background: var(--warning-soft); color: var(--warning); }
+    .tag.risk { background: var(--danger-soft); color: var(--danger); }
+    .muted { color: var(--muted); }
+    .link-btn { border: 0; background: transparent; color: var(--brand); font-weight: 750; padding: 6px; }
+
+    .detail { padding: 22px; background: #fbfcfe; }
+    .detail-head { display: flex; justify-content: space-between; gap: 14px; }
+    .detail h2 { margin: 0; font-size: 19px; }
+    .detail-code { color: var(--subtle); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; margin-top: 5px; }
+    .detail-desc { color: var(--muted); line-height: 1.7; font-size: 13px; margin: 17px 0; }
+    .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 16px 0 22px; }
+    .meta { border: 1px solid var(--line); border-radius: 9px; background: white; padding: 11px; }
+    .meta span { color: var(--subtle); font-size: 11px; }
+    .meta strong { display: block; margin-top: 4px; font-size: 13px; }
+    .section-title { display: flex; align-items: center; justify-content: space-between; margin: 20px 0 9px; font-size: 13px; }
+    .section-title span { color: var(--muted); font-size: 11px; font-weight: 500; }
+    .permission-group { background: white; border: 1px solid var(--line); border-radius: 10px; margin-bottom: 9px; overflow: hidden; }
+    .permission-group h3 { margin: 0; padding: 10px 12px; font-size: 12px; background: #f8f9fb; border-bottom: 1px solid var(--line); }
+    .permission { padding: 10px 12px; border-bottom: 1px solid #edf0f5; }
+    .permission:last-child { border-bottom: 0; }
+    .permission strong { display: block; font-size: 12px; }
+    .permission code { display: block; margin-top: 4px; color: var(--subtle); font-size: 10px; word-break: break-all; }
+    .notice { margin-top: 15px; padding: 12px; border-radius: 9px; background: var(--warning-soft); color: #734a13; font-size: 12px; line-height: 1.6; }
+    .detail-action { width: 100%; margin-top: 15px; }
+
+    .auth-summary { padding: 14px 20px; border-bottom: 1px solid var(--line); background: #fbfcff; display: flex; gap: 18px; color: var(--muted); font-size: 12px; }
+    .auth-summary strong { color: var(--ink); font-size: 15px; }
+    .empty-note { padding: 20px; color: var(--muted); font-size: 12px; }
+    .pagination { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; color: var(--muted); font-size: 12px; }
+
+    .overlay { position: fixed; inset: 0; background: rgba(18, 22, 32, .35); opacity: 0; pointer-events: none; transition: opacity .18s ease; z-index: 20; }
+    .overlay.open { opacity: 1; pointer-events: auto; }
+    .drawer { position: absolute; right: 0; top: 0; bottom: 0; width: min(560px, 100%); background: white; display: flex; flex-direction: column; transform: translateX(100%); transition: transform .2s ease; }
+    .overlay.open .drawer { transform: translateX(0); }
+    .drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 20px 22px; border-bottom: 1px solid var(--line); }
+    .drawer-head h2 { margin: 0; font-size: 19px; }
+    .icon-btn { width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 9px; background: white; font-size: 20px; }
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 16px 22px; border-bottom: 1px solid var(--line); }
+    .step { color: var(--subtle); font-size: 11px; }
+    .step b { display: grid; place-items: center; width: 25px; height: 25px; margin-bottom: 5px; border-radius: 50%; border: 1px solid var(--line-strong); }
+    .step.active { color: var(--brand); font-weight: 750; }
+    .step.active b { color: white; background: var(--brand); border-color: var(--brand); }
+    .drawer-body { flex: 1; overflow: auto; padding: 22px; }
+    .drawer-body h3 { margin: 0 0 6px; font-size: 17px; }
+    .drawer-body > p { margin: 0 0 20px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .field { margin: 15px 0; }
+    .field label { display: block; margin-bottom: 7px; font-size: 12px; font-weight: 750; }
+    .field input, .field select { width: 100%; height: 44px; border: 1px solid var(--line-strong); border-radius: 9px; padding: 0 12px; background: white; }
+    .field small { display: block; color: var(--subtle); margin-top: 6px; line-height: 1.5; }
+    .person-option { border: 1px solid var(--brand); background: #f8faff; border-radius: 10px; padding: 13px; display: flex; justify-content: space-between; align-items: center; }
+    .person-option strong { display: block; font-size: 13px; }
+    .person-option span { color: var(--muted); font-size: 11px; }
+    .drawer-foot { border-top: 1px solid var(--line); padding: 15px 22px; display: flex; justify-content: space-between; }
+    .prototype-note { margin-top: 14px; padding: 11px 14px; border: 1px dashed #b9c4da; border-radius: 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .mobile-menu { display: none; }
+
+    @media (max-width: 1120px) {
+      .summary { grid-template-columns: repeat(2, 1fr); }
+      .catalog-layout { grid-template-columns: 1fr; }
+      .table-wrap { border-right: 0; }
+      .detail { border-top: 1px solid var(--line); }
+    }
+    @media (max-width: 760px) {
+      .app { display: block; }
+      .sidebar { display: none; }
+      .topbar { height: 60px; padding: 0 16px; }
+      .mobile-menu { display: inline-grid; place-items: center; width: 40px; height: 40px; border: 1px solid var(--line); background: white; border-radius: 9px; }
+      .topbar-left { display: flex; align-items: center; gap: 10px; }
+      .product-overline { display: none; }
+      main { padding: 24px 14px 40px; }
+      .page-head { align-items: flex-start; flex-direction: column; }
+      .page-actions { justify-content: flex-start; }
+      .updated { width: 100%; }
+      .summary { grid-template-columns: 1fr; }
+      .summary-card { padding: 13px; }
+      .workspace { max-width: 100%; }
+      .tabs { overflow-x: auto; }
+      .toolbar .search, .toolbar .select { flex: 1 1 100%; width: 100%; min-width: 0; }
+      .toolbar-count { margin-left: 0; width: 100%; }
+      .detail { padding: 18px; }
+      .profile-copy { display: none; }
+      .auth-summary { overflow-x: auto; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand"><div class="brand-mark">P</div><div><strong>平台管理台</strong><span>PINVOU OPERATIONS</span></div></div>
+      <nav>
+        <div class="nav-group"><small>工作台</small><div class="nav-item"><i class="nav-dot"></i>平台总览</div></div>
+        <div class="nav-group"><small>身份与组织</small><div class="nav-item"><i class="nav-dot"></i>用户管理</div><div class="nav-item active"><i class="nav-dot"></i>角色与权限</div><div class="nav-item"><i class="nav-dot"></i>组织管理</div></div>
+        <div class="nav-group"><small>财务与支付</small><div class="nav-item"><i class="nav-dot"></i>计费运营</div><div class="nav-item"><i class="nav-dot"></i>支付与资金</div></div>
+        <div class="nav-group"><small>治理与安全</small><div class="nav-item"><i class="nav-dot"></i>审批中心</div><div class="nav-item"><i class="nav-dot"></i>审计与导出</div><div class="nav-item"><i class="nav-dot"></i>系统与安全</div></div>
+      </nav>
+      <div class="sidebar-footer">权限开放<br><br>简体中文</div>
+    </aside>
+
+    <div class="shell">
+      <header class="topbar">
+        <div class="topbar-left"><button class="mobile-menu" aria-label="打开导航">☰</button><div><div class="product-overline">PINVOU OPERATIONS</div><div class="top-title">角色与权限</div></div></div>
+        <div class="profile"><div class="avatar">PA</div><div class="profile-copy"><strong>平台管理员</strong>退出登录</div></div>
+      </header>
+
+      <main>
+        <div class="page-head">
+          <div><div class="eyebrow">身份与组织</div><h1>角色与权限</h1><p class="lead">统一查看角色包含的权限，并管理用户在不同作用域下的授权。</p></div>
+          <div class="page-actions"><span class="updated">更新于 18:15:14</span><button class="btn" id="auditButton">查看变更记录</button><button class="btn primary open-grant">新增授权</button></div>
+        </div>
+
+        <section class="summary" aria-label="角色摘要">
+          <article class="summary-card"><span>个人角色</span><strong>1</strong><em>由账户生命周期维护</em></article>
+          <article class="summary-card"><span>平台角色</span><strong>9</strong><em>6 个可直接授权</em></article>
+          <article class="summary-card"><span>组织角色</span><strong>7</strong><em>4 个可直接授权</em></article>
+          <article class="summary-card"><span>组织节点角色</span><strong>1</strong><em>按节点及子树生效</em></article>
+        </section>
+
+        <section class="workspace">
+          <div class="tabs" role="tablist">
+            <button class="tab active" role="tab" aria-selected="true" data-view="catalog">角色目录</button>
+            <button class="tab" role="tab" aria-selected="false" data-view="bindings">授权管理</button>
+          </div>
+
+          <div class="view active" id="catalog" role="tabpanel">
+            <div class="toolbar">
+              <div class="search"><input aria-label="搜索角色" placeholder="搜索角色名称、代码或权限代码"></div>
+              <select class="select" aria-label="作用域"><option>全部作用域</option><option>个人</option><option>平台</option><option>组织</option><option>组织节点</option></select>
+              <select class="select" aria-label="授予方式"><option>全部授予方式</option><option>可直接授权</option><option>专属流程</option><option>生命周期维护</option></select>
+              <span class="toolbar-count">18 个角色</span>
+            </div>
+            <div class="catalog-layout">
+              <div class="table-wrap">
+                <table aria-label="角色目录">
+                  <thead><tr><th>角色</th><th>作用域</th><th>权限</th><th>类型</th><th>授予方式</th><th></th></tr></thead>
+                  <tbody>
+                    <tr class="role-row selected" tabindex="0" data-role="billing"><td><span class="role-main">平台计费操作员</span><span class="role-code">PLATFORM_BILLING_OPERATOR</span></td><td><span class="tag platform">平台</span></td><td>8 项</td><td>系统内置</td><td>直接授权</td><td><button class="link-btn">查看</button></td></tr>
+                    <tr class="role-row" tabindex="0" data-role="identity"><td><span class="role-main">平台身份管理员</span><span class="role-code">PLATFORM_IDENTITY_ADMIN</span></td><td><span class="tag platform">平台</span></td><td>6 项</td><td>系统内置</td><td>直接授权</td><td><button class="link-btn">查看</button></td></tr>
+                    <tr class="role-row" tabindex="0" data-role="personal"><td><span class="role-main">个人用户</span><span class="role-code">PERSONAL_USER</span></td><td><span class="tag personal">个人</span></td><td>4 项</td><td>系统内置</td><td>账户生命周期</td><td><button class="link-btn">查看</button></td></tr>
+                    <tr class="role-row" tabindex="0" data-role="owner"><td><span class="role-main">组织所有者</span><span class="role-code">OWNER</span></td><td><span class="tag org">组织</span></td><td>12 项</td><td>系统内置</td><td>所有权流程</td><td><button class="link-btn">查看</button></td></tr>
+                    <tr class="role-row" tabindex="0" data-role="orgadmin"><td><span class="role-main">组织管理员</span><span class="role-code">ORG_ADMIN</span></td><td><span class="tag org">组织</span></td><td>9 项</td><td>系统内置</td><td>直接授权</td><td><button class="link-btn">查看</button></td></tr>
+                    <tr class="role-row" tabindex="0" data-role="unit"><td><span class="role-main">组织节点管理员</span><span class="role-code">UNIT_ADMIN</span></td><td><span class="tag unit">组织节点</span></td><td>5 项</td><td>系统内置</td><td>直接授权</td><td><button class="link-btn">查看</button></td></tr>
+                    <tr class="role-row" tabindex="0" data-role="pii"><td><span class="role-main">临时敏感数据导出</span><span class="role-code">PLATFORM_AUDIT_PII_EXPORT</span></td><td><span class="tag platform">平台</span></td><td><span class="tag risk">1 项高风险</span></td><td>系统内置</td><td>专属安全流程</td><td><button class="link-btn">查看</button></td></tr>
+                  </tbody>
+                </table>
+                <div class="pagination"><span>显示 7 / 18 个角色</span><div><button class="btn">上一页</button> <button class="btn">下一页</button></div></div>
+              </div>
+
+              <aside class="detail" aria-live="polite">
+                <div class="detail-head"><div><h2 id="detailName">平台计费操作员</h2><div class="detail-code" id="detailCode">PLATFORM_BILLING_OPERATOR</div></div><span class="tag platform" id="detailScope">平台</span></div>
+                <p class="detail-desc" id="detailDesc">负责平台计费查询、修复、调账申请和支付恢复申请；不包含审批同一申请或 Token 管理能力。</p>
+                <div class="meta-grid"><div class="meta"><span>角色类型</span><strong>系统内置</strong></div><div class="meta"><span>授予方式</span><strong id="detailGrant">直接授权</strong></div><div class="meta"><span>权限数量</span><strong id="detailCount">8 项</strong></div><div class="meta"><span>状态</span><strong>生效中</strong></div></div>
+                <div class="section-title"><strong>包含权限</strong><span>按业务领域分组</span></div>
+                <div id="permissionGroups">
+                  <div class="permission-group"><h3>财务与支付 · 6</h3><div class="permission"><strong>查看平台钱包</strong><code>platform.billing.wallets.read</code></div><div class="permission"><strong>发起调账申请</strong><code>platform.billing.adjustments.request</code></div><div class="permission"><strong>发起支付恢复</strong><code>platform.payments.recovery.request</code></div></div>
+                  <div class="permission-group"><h3>用量 · 2</h3><div class="permission"><strong>查看平台用量</strong><code>platform.usage.read</code></div></div>
+                </div>
+                <div class="notice" id="detailNotice">职责分离：该角色不能审批自己发起的调账或支付恢复申请。</div>
+                <button class="btn primary detail-action open-grant">授权此角色</button>
+              </aside>
+            </div>
+          </div>
+
+          <div class="view" id="bindings" role="tabpanel">
+            <div class="toolbar">
+              <div class="search"><input aria-label="搜索授权" placeholder="搜索用户名、用户编码或角色"></div>
+              <select class="select"><option>全部作用域</option><option>平台</option><option>组织</option><option>组织节点</option></select>
+              <select class="select"><option>有效与待生效</option><option>已过期</option><option>已撤销</option><option>全部状态</option></select>
+              <button class="btn primary open-grant">新增授权</button>
+            </div>
+            <div class="auth-summary"><span>当前有效 <strong>12</strong></span><span>待生效 <strong>1</strong></span><span>30 天内到期 <strong>2</strong></span></div>
+            <div class="table-wrap" style="border-right:0">
+              <table aria-label="授权记录">
+                <thead><tr><th>用户</th><th>角色与作用域</th><th>有效期</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+                <tbody>
+                  <tr><td><span class="role-main">王敏</span><span class="role-code">vinpay · USR-0A8B-5P7R</span></td><td><span class="role-main">平台身份管理员</span><span class="tag platform">平台</span></td><td>永久</td><td>管理员授权</td><td><span class="tag org">有效</span></td><td><button class="link-btn">查看</button> <button class="link-btn" style="color:var(--danger)">撤销</button></td></tr>
+                  <tr><td><span class="role-main">陈宇</span><span class="role-code">chenyu · USR-CJ13-C5AP</span></td><td><span class="role-main">组织管理员</span><span class="muted">Pinvou 研发团队</span></td><td>2026-09-01 至永久</td><td>管理员授权</td><td><span class="tag org">有效</span></td><td><button class="link-btn">查看</button> <button class="link-btn" style="color:var(--danger)">撤销</button></td></tr>
+                  <tr><td><span class="role-main">刘晓</span><span class="role-code">liuxiao · USR-2SX6-PW52</span></td><td><span class="role-main">临时敏感数据导出</span><span class="tag risk">高风险</span></td><td>2026-09-01 18:00<br>至 2026-09-02 18:00</td><td>安全审批</td><td><span class="tag unit">待生效</span></td><td><button class="link-btn">查看</button></td></tr>
+                  <tr><td><span class="role-main">赵宁</span><span class="role-code">zhaoning · USR-7A13-2F4B</span></td><td><span class="role-main">个人用户</span><span class="tag personal">个人</span></td><td>永久</td><td>账户生命周期</td><td><span class="tag org">有效</span></td><td><button class="link-btn">查看</button></td></tr>
+                </tbody>
+              </table>
+              <div class="pagination"><span>第 1 页 · 每页 20 条</span><div><button class="btn">上一页</button> <button class="btn">下一页</button></div></div>
+            </div>
+          </div>
+        </section>
+
+        <div class="prototype-note"><strong>去重原则：</strong>完整角色定义只在本页出现。用户详情只展示该用户的有效角色与权限摘要；组织详情只展示成员在该组织/节点内的访问权。两处均通过深链回到本目录，不再复制 18 个角色卡片。</div>
+      </main>
+    </div>
+  </div>
+
+  <div class="overlay" id="grantOverlay" aria-hidden="true">
+    <section class="drawer" role="dialog" aria-modal="true" aria-labelledby="grantTitle">
+      <div class="drawer-head"><div><div class="eyebrow">引导式授权</div><h2 id="grantTitle">新增授权</h2></div><button class="icon-btn" id="closeGrant" aria-label="关闭">×</button></div>
+      <div class="steps"><div class="step active"><b>1</b>选择用户</div><div class="step"><b>2</b>确定作用域</div><div class="step"><b>3</b>角色与期限</div><div class="step"><b>4</b>预览确认</div></div>
+      <div class="drawer-body">
+        <h3>选择要授权的用户</h3>
+        <p>使用可识别信息完成搜索。用户、组织和节点 UUID 只在详情中作为技术标识提供复制。</p>
+        <div class="field"><label for="userSearch">用户名、显示名称或用户编码</label><input id="userSearch" value="vinpay" placeholder="例如：王敏、vinpay 或 USR-0A8B-5P7R"><small>当前系统没有可靠邮箱事实源，因此不提供邮箱搜索。</small></div>
+        <div class="person-option"><div><strong>王敏（vinpay）</strong><span>USR-0A8B-5P7R · 账户状态正常</span></div><span class="tag org">已选择</span></div>
+        <div class="field"><label>下一步将完成</label><div class="notice" style="margin-top:0">先选择平台、组织或组织节点作用域，再由服务端返回该作用域下可授权角色；选择组织节点时使用组织内节点树。最后展示权限影响、有效期、原因和安全要求后再提交。</div></div>
+      </div>
+      <div class="drawer-foot"><button class="btn" id="cancelGrant">取消</button><button class="btn primary" id="nextStep">下一步：确定作用域</button></div>
+    </section>
+  </div>
+
+  <script>
+    const tabs = document.querySelectorAll('.tab');
+    const views = document.querySelectorAll('.view');
+    tabs.forEach(tab => tab.addEventListener('click', () => {
+      tabs.forEach(item => { item.classList.remove('active'); item.setAttribute('aria-selected', 'false'); });
+      views.forEach(view => view.classList.remove('active'));
+      tab.classList.add('active'); tab.setAttribute('aria-selected', 'true');
+      document.getElementById(tab.dataset.view).classList.add('active');
+    }));
+
+    const roleData = {
+      billing: ['平台计费操作员', 'PLATFORM_BILLING_OPERATOR', '平台', '直接授权', '8 项', '负责平台计费查询、修复、调账申请和支付恢复申请；不包含审批同一申请或 Token 管理能力。', '职责分离：该角色不能审批自己发起的调账或支付恢复申请。'],
+      identity: ['平台身份管理员', 'PLATFORM_IDENTITY_ADMIN', '平台', '直接授权', '6 项', '管理平台用户身份、状态及受控修复，拥有角色定义与授权记录的只读能力。', '该角色不包含角色授予权限，不能自行扩大访问范围。'],
+      personal: ['个人用户', 'PERSONAL_USER', '个人', '账户生命周期', '4 项', '账户创建后自动维护的个人能力角色，仅作用于用户自己的资源。', '不可由管理员手工授予或撤销；随账户生命周期自动维护。'],
+      owner: ['组织所有者', 'OWNER', '组织', '所有权流程', '12 项', '拥有组织治理与成员管理能力，每个组织必须保持有效所有者。', '仅通过组织创建或所有权转移流程维护，不进入普通授权流程。'],
+      orgadmin: ['组织管理员', 'ORG_ADMIN', '组织', '直接授权', '9 项', '在指定组织范围内管理成员、组织结构和常规组织配置。', '授权前必须确认用户是目标组织的有效成员。'],
+      unit: ['组织节点管理员', 'UNIT_ADMIN', '组织节点', '直接授权', '5 项', '仅在指定组织节点及其子树内管理成员和访问权。', '必须先选择组织，再从该组织的有效节点树中选择作用范围。'],
+      pii: ['临时敏感数据导出', 'PLATFORM_AUDIT_PII_EXPORT', '平台', '专属安全流程', '1 项高风险', '用于短时间、受审计地导出未脱敏审计数据。', '必须填写充分原因、通过近期认证并设置不超过 24 小时的到期时间。']
+    };
+    document.querySelectorAll('.role-row').forEach(row => {
+      const select = () => {
+        document.querySelectorAll('.role-row').forEach(item => item.classList.remove('selected'));
+        row.classList.add('selected');
+        const data = roleData[row.dataset.role];
+        document.getElementById('detailName').textContent = data[0];
+        document.getElementById('detailCode').textContent = data[1];
+        document.getElementById('detailScope').textContent = data[2];
+        document.getElementById('detailGrant').textContent = data[3];
+        document.getElementById('detailCount').textContent = data[4];
+        document.getElementById('detailDesc').textContent = data[5];
+        document.getElementById('detailNotice').textContent = data[6];
+      };
+      row.addEventListener('click', select);
+      row.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(); } });
+    });
+
+    const overlay = document.getElementById('grantOverlay');
+    const openGrant = () => { overlay.classList.add('open'); overlay.setAttribute('aria-hidden', 'false'); document.getElementById('closeGrant').focus(); };
+    const closeGrant = () => { overlay.classList.remove('open'); overlay.setAttribute('aria-hidden', 'true'); };
+    document.querySelectorAll('.open-grant').forEach(button => button.addEventListener('click', openGrant));
+    document.getElementById('closeGrant').addEventListener('click', closeGrant);
+    document.getElementById('cancelGrant').addEventListener('click', closeGrant);
+    overlay.addEventListener('click', event => { if (event.target === overlay) closeGrant(); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeGrant(); });
+    document.getElementById('nextStep').addEventListener('click', () => alert('交互说明：下一步先选择作用域，再级联选择组织/节点与服务端允许授权的角色。'));
+    document.getElementById('auditButton').addEventListener('click', () => alert('跳转到独立「审计与导出」界面，并预置角色授权相关筛选；不在当前页面复制第二套日志。'));
+  </script>
+</body>
+</html>

@@ -26,6 +26,10 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   const location = { pathname: '/admin.html', search: '?trace=kept&section=users', hash: '#focus' };
   assert.equal(readAdminSection(location), 'users');
   assert.equal(adminSectionURL('billing', location), '/admin.html?trace=kept&section=billing#focus');
+  assert.equal(
+    adminSectionURL('roles', location, { role: 'ORG_ADMIN', trace: null }),
+    '/admin.html?section=roles&role=ORG_ADMIN#focus',
+  );
   const calls = [];
   const history = {
     pushState: (...args) => calls.push(['push', ...args]),
@@ -49,11 +53,16 @@ test('Keycloak security access and user operations have independent permission b
   assert.equal(adminSectionReadOnly(snapshot(['platform.account-closures.repair']), 'users'), false);
 });
 
-test('admin identity pages keep role extension and own all repair queues in React', async () => {
+test('admin identity pages own role and repair workspaces in React', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  const roles = await readFile(new URL('../src/features/account-platform/AdminRolesWorkspace.jsx', import.meta.url), 'utf8');
   const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
   assert.match(view, /function AdminExtensionSlot/);
-  assert.match(view, /'role-bindings-root'.*platform\.roles\.read/);
+  assert.doesNotMatch(view, /role-bindings-root/);
+  assert.match(view, /<AdminRolesWorkspace/);
+  assert.match(roles, /function GrantDrawer/);
+  assert.match(roles, /client\.grantRoleBinding/);
+  assert.match(roles, /client\.revokeRoleBinding/);
   assert.doesNotMatch(view, /registration-repair-root/);
   assert.match(view, /host\.append\(node\)/);
   assert.match(authorization, /users: \['platform\.users\.read', 'platform\.registrations\.repair', 'platform\.profile-changes\.repair', 'platform\.account-closures\.read'\]/);

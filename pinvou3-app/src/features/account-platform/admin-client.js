@@ -102,6 +102,19 @@ export class AdminPlatformClient {
   roles(signal) {
     return this.request('account', '/admin/v1/roles', signal);
   }
+  roleBindings(filters = {}, signal) {
+    const query = new URLSearchParams();
+    if (filters.user_id) query.set('user_id', filters.user_id);
+    if (filters.organization_id) query.set('organization_id', filters.organization_id);
+    const suffix = query.size ? `?${query}` : '';
+    return this.request('account', `/admin/v1/role-bindings${suffix}`, signal);
+  }
+  grantRoleBinding(input) {
+    return this.mutate('account', '/admin/v1/role-bindings', 'POST', input);
+  }
+  revokeRoleBinding(bindingID) {
+    return this.mutate('account', `/admin/v1/role-bindings/${encodeURIComponent(bindingID)}`, 'DELETE');
+  }
   users(search, signal, cursor = '') {
     const query = new URLSearchParams({ limit: '25' });
     if (search) query.set('q', search);

@@ -3,6 +3,7 @@ import { buildUnitTree } from './admin-organization-tree.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
 import { adminNavigationGroups, readAdminSection, writeAdminSection } from './admin-navigation.js';
+import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
 import './admin-platform.css';
@@ -46,6 +47,18 @@ function formatSummary(value) {
 }
 function userLabel(user) {
   return user?.username || user?.display_name || shortID(user?.user_id);
+}
+
+function readAuditQueryFilters(locationLike = globalThis.location) {
+  const search = new URLSearchParams(String(locationLike?.search || ''));
+  return {
+    actor: '',
+    action: search.get('audit_action') || '',
+    resource: search.get('audit_resource') || '',
+    result: '',
+    from: '',
+    to: '',
+  };
 }
 
 function Status({ value }) {
@@ -203,7 +216,6 @@ function AdminExtensionSlot({ section, authorization }) {
   const hostRef = useRef(null);
   const platformPermissions = new Set(authorization?.platform_permissions || []);
   const visible = {
-    'role-bindings-root': section === 'roles' && platformPermissions.has('platform.roles.read'),
     'approval-requests-root': section === 'approvals',
     'product-admin-root': section === 'products' && platformPermissions.has('platform.products.read'),
     'pricing-admin-root': false,
@@ -322,8 +334,18 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             },
           };
         } else if (target === 'roles') {
-          const roles = await client.roles(signal);
-          next = { roles: roles.items || [] };
+          const [roles, bindings, users, organizations] = await Promise.all([
+            client.roles(signal),
+            client.roleBindings({}, signal),
+            read('platform.users.read', () => client.users('', signal)),
+            read('platform.organizations.read', () => client.organizations('', signal)),
+          ]);
+          next = {
+            roles: roles.items || [],
+            roleBindings: bindings.items || [],
+            roleUsers: users.items || [],
+            roleOrganizations: organizations.items || [],
+          };
         } else if (target === 'billing') {
           const [overview, wallets, receivables, prices, adjustments, holds, reconciliations] = await Promise.all([read('platform.billing.wallets.read', () => client.billingOverview(signal), {}), read('platform.billing.wallets.read', () => client.wallets(signal)), read('platform.billing.wallets.read', () => client.receivables(signal)), read('platform.pricing.read', () => client.priceVersions(signal)), read('platform.billing.wallets.read', () => client.adjustments(signal)), read('platform.usage.read', () => client.holds(signal)), read('platform.usage.read', () => client.reconciliationRuns(signal))]);
           next = {
@@ -358,7 +380,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         } else if (target === 'system') {
           next = { systemStatus: await read('platform.system.status.read', () => client.systemStatus(signal), null) };
         } else if (target === 'audit') {
-          const audits = await client.audits({}, signal);
+          const audits = await client.audits(readAuditQueryFilters(), signal);
           next = { audits: audits.items || [] };
         } else {
           return;
@@ -487,10 +509,17 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     return () => globalThis.removeEventListener?.('popstate', onPopState);
   }, [auth, authorization, data, load, section]);
 
-  const navigate = (key) => {
+  const navigate = (key, query = {}) => {
     if (!adminVisibleSections(authorization).includes(key)) return;
     setSection(key);
-    writeAdminSection(key, 'push');
+    writeAdminSection(key, 'push', undefined, undefined, {
+      role: null,
+      role_scope: null,
+      role_view: null,
+      audit_action: null,
+      audit_resource: null,
+      ...query,
+    });
     if (!sectionHasData(key, data)) load(key, undefined, authorization);
   };
   const logout = async () => {
@@ -587,11 +616,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             </div>
           )}
           {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} onNavigate={navigate} />}
-          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
+          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
           {section === 'users' && (
-            <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} />
+            <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
           )}
-          {section === 'roles' && <RolesWorkspace copy={copy} roles={data.roles || []} />}
+          {section === 'roles' && <AdminRolesWorkspace copy={copy} roles={data.roles || []} bindings={data.roleBindings || []} users={data.roleUsers || []} organizations={data.roleOrganizations || []} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
           {section === 'billing' && <Billing key="billing" surface="billing" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'payments' && <Billing key="payments" surface="payments" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'tokens' && <Tokens copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
@@ -754,7 +783,7 @@ function OverviewFacts({ rows }) {
   return <dl className="adm-overview-facts">{rows.map(([label, value, formatter = formatNumber]) => <div key={label}><dt>{label}</dt><dd>{formatter(value)}</dd></div>)}</dl>;
 }
 
-function UsersWorkspace({ copy, data, client, setData, permissions, currentUserID }) {
+function UsersWorkspace({ copy, data, client, setData, permissions, currentUserID, onNavigate }) {
   const permissionSet = new Set(permissions || []);
   const repairCount = (data.registrationRepairs || []).length + (data.profileChangeRepairs || []).length + (data.accountClosures || []).length;
   const repairUnavailable = Object.values(data.userRepairAvailability || {}).includes('error');
@@ -768,13 +797,13 @@ function UsersWorkspace({ copy, data, client, setData, permissions, currentUserI
           <Metric label={copy.userManagement.pendingRepairs} value={repairUnavailable ? '—' : repairCount} formatter={(value) => value} tone={!repairUnavailable && repairCount ? 'warning' : ''} />
         </section>
       )}
-      {permissionSet.has('platform.users.read') && <AccountDirectory key={data.usersLoadVersion || 'users'} section="users" copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID} />}
+      {permissionSet.has('platform.users.read') && <AccountDirectory key={data.usersLoadVersion || 'users'} section="users" copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID} onNavigate={onNavigate} />}
       <UserRepairWorkspace copy={copy} data={data} client={client} setData={setData} permissions={permissions} />
     </div>
   );
 }
 
-function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '' }) {
+function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate }) {
   const [search, setSearch] = useState('');
   const [userCode, setUserCode] = useState('');
   const [userMode, setUserMode] = useState('directory');
@@ -993,7 +1022,7 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
       setActionKey('');
     }
   };
-  if (selectedUser) return <UserMembershipDetail copy={copy} user={selectedUser} roles={data.roles || []} client={client} permissions={permissions} onBack={() => setSelectedUser(null)} />;
+  if (selectedUser) return <UserMembershipDetail copy={copy} user={selectedUser} client={client} onBack={() => setSelectedUser(null)} onNavigate={onNavigate} />;
   if (selectedOrganization)
     return (
       <OrganizationDetail
@@ -1003,6 +1032,7 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
         roles={data.roles || []}
         client={client}
         permissions={permissions}
+        onNavigate={onNavigate}
         onBack={() => setSelectedOrganization(null)}
         onRenamed={(name) => {
           setSelectedOrganization((current) => ({ ...current, name }));
@@ -1073,36 +1103,6 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
   );
 }
 
-function RolesWorkspace({ copy, roles }) {
-  return (
-    <section className="adm-panel">
-      <SectionHeader title={copy.roles.title} count={roles.length} copy={copy} />
-      <RoleDefinitions copy={copy} roles={roles} expanded />
-    </section>
-  );
-}
-
-function RoleDefinitions({ copy, roles, expanded = false }) {
-  if (!roles.length) return null;
-  return (
-    <details className="adm-role-definitions" open={expanded}>
-      <summary>{copy.roles.definitions}</summary>
-      <div className="adm-role-grid">
-        {roles.map((role) => (
-          <article key={role.code}>
-            <strong>{role.code}</strong>
-            <span>{role.scope === 'UNIT' ? copy.roles.unitScope : copy.roles.organizationScope}</span>
-            <p>{role.description}</p>
-          </article>
-        ))}
-      </div>
-      <small>
-        {copy.roles.ownerRoleHint} {copy.roles.baseRoleHint}
-      </small>
-    </details>
-  );
-}
-
 function SettingsWorkspace({ copy, language, onLanguageChange }) {
   return (
     <section className="adm-panel adm-settings-panel">
@@ -1124,7 +1124,7 @@ function SettingsWorkspace({ copy, language, onLanguageChange }) {
   );
 }
 
-function UserMembershipDetail({ copy, user, roles, client, onBack }) {
+function UserMembershipDetail({ copy, user, client, onBack, onNavigate }) {
   const [items, setItems] = useState([]);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
@@ -1178,7 +1178,7 @@ function UserMembershipDetail({ copy, user, roles, client, onBack }) {
               </div>
               <div className="adm-role-badges">
                 {item.roles.map((role) => (
-                  <span key={role}>{role}</span>
+                  <button type="button" key={role} onClick={() => onNavigate('roles', { role })}>{role}</button>
                 ))}
               </div>
               {item.unit_admin_unit_ids?.length > 0 && (
@@ -1192,13 +1192,16 @@ function UserMembershipDetail({ copy, user, roles, client, onBack }) {
       ) : (
         <Empty copy={{ noData: copy.roles.noMemberships }} />
       )}
-      <RoleDefinitions copy={copy} roles={roles} />
+      <div className="adm-role-reference">
+        <p>{copy.roles.userRoleReference}</p>
+        <button type="button" onClick={() => onNavigate('roles')}>{copy.roles.viewRoleCatalog}</button>
+      </div>
     </section>
     </DetailDrawer>
   );
 }
 
-function OrganizationDetail({ copy, organization, users, roles, client, permissions, onBack, onRenamed }) {
+function OrganizationDetail({ copy, organization, users, roles, client, permissions, onBack, onRenamed, onNavigate }) {
   const [units, setUnits] = useState([]);
   const [members, setMembers] = useState([]);
   const [name, setName] = useState('');
@@ -1462,7 +1465,10 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
           <MemberAccessEditor key={member.user_id} copy={copy} member={member} units={units} roles={roles} disabled={!canManageOrganization || busy || organization.status !== 'ACTIVE'} onSave={saveMemberRoles} onRemove={removeMember} />
         ))}
       </div>
-      <RoleDefinitions copy={copy} roles={roles} />
+      <div className="adm-role-reference">
+        <p>{copy.roles.organizationRoleReference}</p>
+        <button type="button" onClick={() => onNavigate('roles', { role_scope: 'ORGANIZATION' })}>{copy.roles.viewOrganizationRoles}</button>
+      </div>
       {canManageOrganization && (
         <form className="adm-unit-form" onSubmit={createUnit}>
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder={copy.accounts.unitName} maxLength={120} />
@@ -4264,14 +4270,7 @@ function SecureCommand({ title, help, command, copied, copy, onCopy }) {
 }
 
 function Audit({ copy, data, client, setData, permissions }) {
-  const [filters, setFilters] = useState({
-    actor: '',
-    action: '',
-    resource: '',
-    result: '',
-    from: '',
-    to: '',
-  });
+  const [filters, setFilters] = useState(() => readAuditQueryFilters());
   const [detail, setDetail] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');

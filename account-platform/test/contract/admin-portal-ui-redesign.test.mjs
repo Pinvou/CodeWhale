@@ -46,7 +46,7 @@ test('source and built admin portal preserve the HTML prototype five-group navig
   assert.doesNotMatch(navigation, /key: 'operations'/);
   const exactSections = ['overview', 'users', 'roles', 'organizations', 'myorg', 'billing', 'payments', 'products', 'tokens', 'approvals', 'audit', 'system', 'settings'];
   for (const section of exactSections) assert.ok(navigation.includes(`'${section}'`), `${section} is part of the canonical information architecture`);
-  for (const label of ['工作台', '平台总览', '身份与组织', '用户管理', '角色与授权', '组织管理', '我的组织', '财务与支付', '计费运营', '支付与资金', '定价与商品', '模型与 Token', 'Token Gateway', '治理与安全', '审批中心', '审计与导出', '系统与安全', '偏好设置']) {
+  for (const label of ['工作台', '平台总览', '身份与组织', '用户管理', '角色与权限', '组织管理', '我的组织', '财务与支付', '计费运营', '支付与资金', '定价与商品', '模型与 Token', 'Token Gateway', '治理与安全', '审批中心', '审计与导出', '系统与安全', '偏好设置']) {
     assert.ok(prototype.includes(label), `${label} is defined by the HTML prototype`);
     assert.ok(i18n.includes(label), `${label} is preserved by source translations`);
     assert.ok(builtJS.includes(label), `${label} is preserved by the built portal`);
@@ -62,11 +62,13 @@ test('source and built admin portal preserve the HTML prototype five-group navig
   assert.match(view, /function SettingsWorkspace/);
   assert.match(view, /copy\.runbooks\.noExecution/);
   assert.doesNotMatch(view, /createUser\(|createRole\(|eventReplay\(/);
-  for (const root of ['approval-requests-root', 'pricing-admin-root', 'product-admin-root', 'role-bindings-root']) {
+  for (const root of ['approval-requests-root', 'pricing-admin-root', 'product-admin-root']) {
     assert.ok(builtHTML.includes(`id="${root}"`), `${root} is retained for permission-gated mounting`);
     assert.match(sourceCSS, new RegExp(`\\.admin-portal-body\\s*>\\s*#${root}`));
     assert.ok(builtCSS.includes(`#${root}`));
   }
+  assert.ok(!builtHTML.includes('role-bindings-root'), 'role binding management is owned by the React role workspace');
+  assert.match(view, /<AdminRolesWorkspace/);
   assert.ok(!builtHTML.includes('registration-repair-root'), 'registration repair is owned by the React user workspace');
   assert.match(view, /function UserRepairWorkspace/);
   assert.match(view, /function RegistrationRepairQueue/);

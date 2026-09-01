@@ -92,7 +92,7 @@
 | 导航组 | 页面 | 出现条件 |
 |---|---|---|
 | 工作台 | 平台总览 | 至少具有一个平台页面的精确读权限；卡片仍按各自读权限独立请求和展示 |
-| 身份与组织 | 用户管理、角色与授权、组织管理、我的组织 | 子页分别要求现有 `platform.users.*` 修复/读取权限、`platform.roles.read`、`platform.organizations.read` 或现有组织作用域读权限；没有可用接口的“我的组织”隐藏 |
+| 身份与组织 | 用户管理、角色与权限、组织管理、我的组织 | 子页分别要求现有 `platform.users.*` 修复/读取权限、`platform.roles.read`、`platform.organizations.read` 或现有组织作用域读权限；没有可用接口的“我的组织”隐藏 |
 | 财务与支付 | 计费运营、支付与资金、定价与商品 | 子页分别要求 `platform.billing.wallets.read` / `platform.pricing.read` / `platform.usage.read`、`platform.billing.wallets.read`、`platform.products.read`；一个子页的权限不解锁相邻子页 |
 | 模型与 Token | Token Gateway | 至少具有 `platform.models.read`、`platform.tokens.read` 或 `platform.usage.read` 中该页真实数据所需权限；写权限不替代读权限 |
 | 治理与安全 | 审批中心、审计与导出、系统与安全、偏好设置 | 审批读取沿用 `platform.billing.wallets.read` 且动作继续精确鉴权；审计和系统分别要求 `platform.audit.read`、`platform.system.status.read`；偏好设置只在已有管理页面可访问且存在真实本地偏好时显示 |
@@ -508,7 +508,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 
 - **平台总览**：首层采用身份与组织、资金与计费、模型与 Token 三张等宽领域摘要卡，系统健康作为独立横向状态条，不再把六个不同口径的总数拆成 `4+2` 孤立指标卡。卡片按 `platform.users.read` / `platform.organizations.read`、`platform.billing.wallets.read`、`platform.tokens.read` / `platform.usage.read`、`platform.system.status.read` 独立请求、独立隐藏和局部失败；无权或失败不得渲染为 0，也不得导致其他卡片清空。删除 KYC 卡和总览“只读权限”告警。身份卡突出活跃用户并补充组织、有效成员关系和停用账号；资金卡以 `posted_microcredits - reserved_microcredits - receivable_microcredits` 计算可用积分并同时展示已入账、使用中、应收占用和钱包数；模型卡的路由健康率以 `healthy_routes / routes` 计算，不得以 Token 账号数作分母，用量请求明确标注为累计值。待办只展示当前权限内的非零事项，按异常/警告分级，点击进入对应有权工作队列；全部为零时显示明确的无待办状态。
 - **用户管理**：`q` 搜索与 `user_code` 完整精确查询使用不同入口；目录每页 25 条并消费 `next_cursor`，页头总量与当前页条数分开；当前无状态筛选，在相应合同完成前不得显示；只有启用/停用等现有动作，停用确认必须说明会话立即失效并禁止当前管理员自停用；删除“新建用户”。
-- **角色与权限**：左侧显示内置角色定义，右侧显示绑定；只提供授予/撤销绑定；删除“新建角色”和任何角色定义编辑。
+- **角色与权限**：以“角色目录 / 授权管理”双工作区呈现；目录表格与右侧详情统一展示四类作用域、完整权限及授予方式，授权管理使用用户/组织/节点选择器和分步确认，只提供现有普通角色的授予与撤销。角色定义只在本页集中展示，用户和组织详情仅保留自身有效访问摘要及目录深链；变更记录进入独立审计页。删除“新建角色”和任何角色定义编辑。
 - **组织管理**：显示生命周期、节点、所有者和阻断摘要；DELETED 全只读且不可恢复；删除使用跨域预检。
 - **修复队列**：注册、资料变更和注销在同一异常工作台内分队列展示；空队列折叠为紧凑状态，注册筛选仅在存在队列数据时展开；每次重试展示现有 attempt、诊断字段和结果未知处理，不虚构服务端不存在的进度。
 

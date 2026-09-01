@@ -446,7 +446,7 @@
       ]},
       { label: '身份与组织', items: [
         { id:'users', label:'用户管理', icon:'users' },
-        { id:'roles', label:'角色与授权', icon:'shield' },
+        { id:'roles', label:'角色与权限', icon:'shield' },
         { id:'organizations', label:'组织管理', icon:'org' },
         { id:'myorg', label:'我的组织', icon:'org' }
       ]},
@@ -466,7 +466,7 @@
       ]}
     ];
     const meta = {
-      overview:['总览','平台总览'], users:['身份与组织','用户管理'], roles:['身份与组织','角色与授权'], organizations:['身份与组织','组织管理'], myorg:['我的组织','组织工作台'],
+      overview:['总览','平台总览'], users:['身份与组织','用户管理'], roles:['身份与组织','角色与权限'], organizations:['身份与组织','组织管理'], myorg:['我的组织','组织工作台'],
       billing:['财务与支付','计费运营'], payments:['财务与支付','支付与资金'], products:['财务与支付','定价与商品'], tokens:['模型与 Token','Token Gateway 运营'],
       approvals:['治理与安全','审批中心'], audit:['治理与安全','审计与导出'], system:['治理与安全','系统与安全'], settings:['治理与安全','偏好设置']
     };
@@ -507,7 +507,7 @@
 
     function rolesPage() {
       const roleCards=[['PLATFORM_SUPER_ADMIN','平台治理与身份组织等矩阵能力','不隐式包含 platform.tokens.*'],['PLATFORM_IDENTITY_ADMIN','用户状态、修复及角色绑定只读','无 platform.roles.assign'],['PLATFORM_BILLING_OPERATOR','财务读、修复与恢复申请','禁止自审、无 Token 权限'],['PLATFORM_MODEL_ADMIN','Token、路由、凭据验证与用量','无财务审批权限']];
-      return `${pageHead('Authorization','角色与授权','角色定义为内置事实；页面只允许查看定义，并按精确权限管理授权绑定。',state.role==='super'?`<button class="btn primary" data-action="grant-role">${icon('shield')}授予角色</button>`:'')}
+      return `${pageHead('Authorization','角色与权限','统一查看角色包含的权限，并按精确权限管理不同作用域下的授权。',state.role==='super'?`<button class="btn primary" data-action="grant-role">${icon('shield')}新增授权</button>`:'')}
         <div class="banner warning">${icon('alert')}<div><strong>角色名称不是授权依据</strong><p>导航、字段和动作均由原子权限集合决定。账号管理员只能查看角色绑定，不能授予或撤销。</p></div></div>
         <div class="grid two">${roleCards.map(r=>`<article class="card card-pad"><div class="approval-line"><h2 style="margin:0">${r[0]}</h2>${badge('内置角色','info')}</div><p class="subtitle" style="margin-top:10px">${r[1]}</p><div class="banner ${r[0].includes('SUPER')?'warning':'info'}" style="margin:16px 0 0"><div><strong>边界</strong><p>${r[2]}</p></div></div></article>`).join('')}</div>
         <section class="card section"><div class="section-head"><div><h2>最近授权绑定</h2><p>展示来源、作用域、有效期和绑定版本。</p></div></div><div class="table-wrap"><table><thead><tr><th>主体</th><th>角色</th><th>作用域</th><th>来源 / 有效期</th><th>操作</th></tr></thead><tbody><tr><td>${copy('USR-R5MF-TAAT-735X-9CD9-7Q')}</td><td class="mono">PLATFORM_BILLING_OPERATOR</td><td>PLATFORM</td><td>MANUAL · 永久</td><td>${state.role==='super'?'<button class="btn small danger" data-action="revoke-role">撤销</button>':'只读'}</td></tr><tr><td>${copy('USR-M4DC-7N2Q-P8KW-3RTA-9F')}</td><td class="mono">PLATFORM_AUDITOR</td><td>PLATFORM</td><td>TEMPORARY · 19:30 到期</td><td>${state.role==='super'?'<button class="btn small danger" data-action="revoke-role">撤销</button>':'只读'}</td></tr></tbody></table></div></section>`;
