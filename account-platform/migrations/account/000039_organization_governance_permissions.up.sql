@@ -20,17 +20,21 @@ SELECT inherited_roles.role_code,desired.permission_code
 FROM inherited_roles CROSS JOIN desired
 ON CONFLICT DO NOTHING;
 
-SELECT DISTINCT bump_role_assignment_scope_version(
-    ra.user_id,ra.role_code,ra.organization_id,ra.unit_id
+SELECT bump_role_assignment_scope_version(
+    assignment.user_id,assignment.role_code,
+    assignment.organization_id,assignment.unit_id
 )
-FROM role_assignments ra
-JOIN role_permissions rp ON rp.role_code=ra.role_code
-WHERE ra.revoked_at IS NULL
-  AND rp.permission_code IN (
-      'platform.organizations.profile.manage',
-      'platform.organizations.members.manage',
-      'platform.organizations.units.manage'
-  );
+FROM (
+    SELECT DISTINCT ra.user_id,ra.role_code,ra.organization_id,ra.unit_id
+    FROM role_assignments ra
+    JOIN role_permissions rp ON rp.role_code=ra.role_code
+    WHERE ra.revoked_at IS NULL
+      AND rp.permission_code IN (
+          'platform.organizations.profile.manage',
+          'platform.organizations.members.manage',
+          'platform.organizations.units.manage'
+      )
+) assignment;
 
 -- Approval policies are immutable. Publish version 2 instead of rewriting the
 -- historical version 1 rows whose requester permission was status.manage.

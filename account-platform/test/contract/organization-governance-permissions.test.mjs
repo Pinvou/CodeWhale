@@ -34,6 +34,8 @@ test('permission migration preserves previous role capabilities and approval his
   assert.match(up, /WHERE permission_code='platform\.organizations\.status\.manage'/u);
   assert.match(up, /ON CONFLICT DO NOTHING/u);
   assert.match(up, /bump_role_assignment_scope_version/u);
+  assert.match(up, /FROM \(\s*SELECT DISTINCT ra\.user_id,ra\.role_code,ra\.organization_id,ra\.unit_id/u);
+  assert.doesNotMatch(up, /SELECT DISTINCT\s+bump_role_assignment_scope_version/u);
   assert.match(up, /ACCOUNT_ORGANIZATION_RENAME',2,'AUDIT_ONLY','platform\.organizations\.profile\.manage'/u);
   assert.match(up, /ACCOUNT_MEMBER_ADD',2,'AUDIT_ONLY','platform\.organizations\.members\.manage'/u);
   assert.match(up, /ACCOUNT_UNIT_CREATE',2,'AUDIT_ONLY','platform\.organizations\.units\.manage'/u);

@@ -391,7 +391,7 @@
       {
         "file": "000039_organization_governance_permissions.up.sql",
         "version": 39,
-        "sha256": "6161e78dcd405ca4710c59d90dd20be079e18216050c53c4025509122e919d5f"
+        "sha256": "47aa9cccf678caaba684ee9d6d2cc133bb98b8f4d20389ded3037e28c6f330e7"
       },
       {
         "file": "000040_admin_organization_unit_move_policy.down.sql",
