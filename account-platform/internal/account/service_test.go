@@ -123,7 +123,9 @@ func (*fakeRepository) AdminGrantRoleBinding(context.Context, identity.Principal
 func (*fakeRepository) AdminRevokeRoleBinding(context.Context, identity.Principal, uuid.UUID) (RoleBinding, error) {
 	return RoleBinding{}, nil
 }
-func (*fakeRepository) AdminUsers(context.Context, string, int) ([]AdminUser, error) { return nil, nil }
+func (*fakeRepository) AdminUsers(context.Context, AdminUserFilter) (AdminUserPage, error) {
+	return AdminUserPage{}, nil
+}
 func (*fakeRepository) AdminUserMemberships(context.Context, uuid.UUID) ([]AdminUserMembership, error) {
 	return nil, nil
 }
@@ -436,6 +438,28 @@ func TestAdminOrganizationFilterCursorRoundTrip(t *testing.T) {
 	}
 	if filter.Status != "DISABLED" || filter.Limit != 25 || filter.CursorID == nil || *filter.CursorID != item.ID || filter.CursorUpdatedAt == nil || !filter.CursorUpdatedAt.Equal(item.UpdatedAt) {
 		t.Fatalf("unexpected filter: %#v", filter)
+	}
+}
+
+func TestAdminUserFilterCursorRoundTrip(t *testing.T) {
+	item := AdminUser{ID: uuid.Must(uuid.NewV7()), UpdatedAt: time.Date(2026, time.September, 1, 12, 34, 56, 0, time.UTC)}
+	cursor, err := encodeAdminUserCursor(item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/admin/v1/users?q=vinpay&limit=25&cursor="+cursor, nil)
+	filter, err := parseAdminUserFilter(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filter.Search != "vinpay" || filter.Limit != 25 || filter.CursorID == nil || *filter.CursorID != item.ID || filter.CursorUpdatedAt == nil || !filter.CursorUpdatedAt.Equal(item.UpdatedAt) {
+		t.Fatalf("unexpected filter: %#v", filter)
+	}
+}
+
+func TestAdminUserFilterRejectsMalformedCursor(t *testing.T) {
+	if _, err := parseAdminUserFilter(httptest.NewRequest(http.MethodGet, "/admin/v1/users?cursor=not-base64", nil)); err == nil {
+		t.Fatal("expected malformed user cursor to be rejected")
 	}
 }
 

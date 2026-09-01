@@ -32,9 +32,13 @@ paths:
     get:
       operationId: listAdminUsers
       summary: List and search platform users
-      parameters: [{ $ref: "#/components/parameters/Search" }, { $ref: "#/components/parameters/Limit" }]
+      parameters: [{ $ref: "#/components/parameters/Search" }, { $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" }]
       responses:
-        "200": { $ref: "#/components/responses/Collection" }
+        "200":
+          description: Stable user page ordered by update time and user ID
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUserPage" }
         "403": { $ref: "#/components/responses/Error" }
   /account/admin/v1/user-code-lookups/{user_code}:
     get:
@@ -1568,7 +1572,7 @@ components:
     Search:
       name: q
       in: query
-      description: Case-insensitive display name, email, or exact UUID search.
+      description: Case-insensitive username or display name search, or exact UUID search.
       schema: { type: string, maxLength: 320 }
     Limit:
       name: limit
@@ -2169,6 +2173,17 @@ components:
         last_seen_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    AdminUserPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: "#/components/schemas/AdminUser" }
+        next_cursor:
+          type: [string, "null"]
     NameChange:
       type: object
       additionalProperties: false

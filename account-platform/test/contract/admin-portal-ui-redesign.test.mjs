@@ -62,11 +62,37 @@ test('source and built admin portal preserve the HTML prototype five-group navig
   assert.match(view, /function SettingsWorkspace/);
   assert.match(view, /copy\.runbooks\.noExecution/);
   assert.doesNotMatch(view, /createUser\(|createRole\(|eventReplay\(/);
-  for (const root of ['approval-requests-root', 'pricing-admin-root', 'product-admin-root', 'registration-repair-root', 'role-bindings-root']) {
+  for (const root of ['approval-requests-root', 'pricing-admin-root', 'product-admin-root', 'role-bindings-root']) {
     assert.ok(builtHTML.includes(`id="${root}"`), `${root} is retained for permission-gated mounting`);
     assert.match(sourceCSS, new RegExp(`\\.admin-portal-body\\s*>\\s*#${root}`));
     assert.ok(builtCSS.includes(`#${root}`));
   }
+  assert.ok(!builtHTML.includes('registration-repair-root'), 'registration repair is owned by the React user workspace');
+  assert.match(view, /function UserRepairWorkspace/);
+  assert.match(view, /function RegistrationRepairQueue/);
+  assert.match(view, /function ProfileRepairQueue/);
+  assert.match(view, /function AccountClosureOperations/);
+});
+
+test('user management omits email from presentation and search while preserving backend compatibility', async () => {
+  const [view, i18n, account, openapi, design] = await Promise.all([
+    read('../../../pinvou3-app/src/features/account-platform/AdminPlatformView.jsx'),
+    read('../../../pinvou3-app/src/shared/admin-platform-i18n.js'),
+    read('../../internal/account/admin.go'),
+    read('../../contracts/openapi/admin.yaml'),
+    read('../../docs/admin-portal-ui-redesign.md'),
+  ]);
+
+  assert.doesNotMatch(view, /copy\.accounts\.email/);
+  assert.doesNotMatch(view, /function userLabel\(user\) \{[\s\S]*?user\?\.email[\s\S]*?\}/);
+  assert.doesNotMatch(view, /item\.display_name \|\| item\.email/);
+  assert.doesNotMatch(i18n, /搜索用户名、名称、邮箱/);
+  assert.doesNotMatch(i18n, /Search username, name, email/);
+  assert.doesNotMatch(i18n, /ユーザー名、名前、メール、ID を検索/);
+  assert.doesNotMatch(account, /lower\(COALESCE\(u\.email,''\)\) LIKE \$2/);
+  assert.match(openapi, /Case-insensitive username or display name search, or exact UUID search/);
+  assert.match(design, /当前账号生命周期不采集或维护邮箱，用户列表、详情和搜索不展示\/使用邮箱/);
+  assert.match(account, /Email\s+\*string\s+`json:"email,omitempty"`/);
 });
 
 test('admin portal follows the approved HTML visual system and business-page composition', async () => {

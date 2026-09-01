@@ -22,7 +22,7 @@ const NAV_ICONS = {
   settings: '⚙',
 };
 const okStatuses = new Set(['ACTIVE', 'PAID', 'SETTLED', 'HEALTHY', 'APPROVED', 'SUCCESS']);
-const warnStatuses = new Set(['PENDING', 'CREATED', 'SETTLEMENT_PENDING', 'REVIEW', 'MANUAL_REVIEW', 'PENDING_APPROVAL']);
+const warnStatuses = new Set(['PENDING', 'CREATED', 'SETTLEMENT_PENDING', 'REVIEW', 'MANUAL_REVIEW', 'PENDING_APPROVAL', 'REPAIR_REQUIRED', 'RETRY', 'COMPENSATION_PENDING', 'BLOCKED']);
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString();
@@ -45,7 +45,7 @@ function formatSummary(value) {
     : String(value || '—');
 }
 function userLabel(user) {
-  return user?.username || user?.display_name || user?.email || shortID(user?.user_id);
+  return user?.username || user?.display_name || shortID(user?.user_id);
 }
 
 function Status({ value }) {
@@ -104,7 +104,7 @@ function Table({ columns, items, copy }) {
         </thead>
         <tbody>
           {items.map((item, index) => (
-            <tr key={item.user_id || item.organization_id || item.model_id || item.provisioning_id || item.receivable_id || item.wallet_id || item.order_id || item.operation_id || item.package_id || item.adjustment_id || item.hold_id || item.case_id || item.event_id || item.evidence_id || item.token_account_id || item.usage_request_id || item.audit_id || index}>
+            <tr key={item.registration_operation_id || item.profile_change_request_id || item.closure_request_id || item.user_id || item.organization_id || item.model_id || item.provisioning_id || item.receivable_id || item.wallet_id || item.order_id || item.operation_id || item.package_id || item.adjustment_id || item.hold_id || item.case_id || item.event_id || item.evidence_id || item.token_account_id || item.usage_request_id || item.audit_id || index}>
               {columns.map((column) => (
                 <td key={column.key}>{column.render ? column.render(item) : (item[column.key] ?? '—')}</td>
               ))}
@@ -204,7 +204,6 @@ function AdminExtensionSlot({ section, authorization }) {
   const platformPermissions = new Set(authorization?.platform_permissions || []);
   const visible = {
     'role-bindings-root': section === 'roles' && platformPermissions.has('platform.roles.read'),
-    'registration-repair-root': section === 'users' && platformPermissions.has('platform.registrations.repair'),
     'approval-requests-root': section === 'approvals',
     'product-admin-root': section === 'products' && platformPermissions.has('platform.products.read'),
     'pricing-admin-root': false,
@@ -249,6 +248,15 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         const allowed = (permission) => hasPermission(granted, permission);
         const read = (permission, action, fallback = { items: [] }) => (allowed(permission) ? action() : Promise.resolve(fallback));
         const readAny = (permissions, action, fallback = { items: [] }) => (permissions.some(allowed) ? action() : Promise.resolve(fallback));
+        const readOptional = async (permission, action, fallback = { items: [] }) => {
+          if (!allowed(permission)) return fallback;
+          try {
+            return await action();
+          } catch (reason) {
+            if (reason?.name === 'AbortError' || reason?.status === 401 || reason?.status === 403) throw reason;
+            return { ...fallback, unavailable: true };
+          }
+        };
         let next = {};
         if (target === 'overview') {
           const sources = [
@@ -289,11 +297,29 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             roles: roles.items || [],
           };
         } else if (target === 'users') {
-          const [users, closures] = await Promise.all([
+          const [users, overview, roles, registrations, profileChanges, closures] = await Promise.all([
             read('platform.users.read', () => client.users('', signal)),
-            read('platform.account-closures.read', () => client.accountClosures(signal)),
+            read('platform.users.read', () => client.accountOverview(signal), {}),
+            read('platform.roles.read', () => client.roles(signal)),
+            readOptional('platform.registrations.repair', () => client.registrationRepairs({}, signal)),
+            readOptional('platform.profile-changes.repair', () => client.profileChangeRepairs(signal)),
+            readOptional('platform.account-closures.read', () => client.accountClosures(signal)),
           ]);
-          next = { users: users.items || [], accountClosures: closures.items || [] };
+          next = {
+            users: users.items || [],
+            userNextCursor: users.next_cursor || '',
+            usersLoadVersion: Date.now(),
+            accountOverview: overview,
+            roles: roles.items || [],
+            registrationRepairs: registrations.items || [],
+            profileChangeRepairs: profileChanges.items || [],
+            accountClosures: closures.items || [],
+            userRepairAvailability: {
+              registrations: registrations.unavailable ? 'error' : 'ready',
+              profileChanges: profileChanges.unavailable ? 'error' : 'ready',
+              closures: closures.unavailable ? 'error' : 'ready',
+            },
+          };
         } else if (target === 'roles') {
           const roles = await client.roles(signal);
           next = { roles: roles.items || [] };
@@ -555,10 +581,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
           {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} onNavigate={navigate} />}
           {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
           {section === 'users' && (
-            <>
-              {hasPermission(authorization, 'platform.users.read') && <AccountDirectory section="users" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} />}
-              {hasPermission(authorization, 'platform.account-closures.read') && <AccountClosureOperations copy={copy} closures={data.accountClosures || []} client={client} setData={setData} permissions={platformPermissions} />}
-            </>
+            <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} />
           )}
           {section === 'roles' && <RolesWorkspace copy={copy} roles={data.roles || []} />}
           {section === 'billing' && <Billing key="billing" surface="billing" copy={copy} language={language} data={data} client={client} setData={setData} permissions={platformPermissions} />}
@@ -723,8 +746,33 @@ function OverviewFacts({ rows }) {
   return <dl className="adm-overview-facts">{rows.map(([label, value, formatter = formatNumber]) => <div key={label}><dt>{label}</dt><dd>{formatter(value)}</dd></div>)}</dl>;
 }
 
-function AccountDirectory({ section, copy, data, client, setData, permissions }) {
+function UsersWorkspace({ copy, data, client, setData, permissions, currentUserID }) {
+  const permissionSet = new Set(permissions || []);
+  const repairCount = (data.registrationRepairs || []).length + (data.profileChangeRepairs || []).length + (data.accountClosures || []).length;
+  const repairUnavailable = Object.values(data.userRepairAvailability || {}).includes('error');
+  return (
+    <div className="adm-user-workspace">
+      {permissionSet.has('platform.users.read') && (
+        <section className="adm-user-summary" aria-label={copy.userManagement.summary}>
+          <Metric label={copy.userManagement.totalUsers} value={data.accountOverview?.users} />
+          <Metric label={copy.userManagement.activeUsers} value={data.accountOverview?.active_users} tone="positive" />
+          <Metric label={copy.userManagement.disabledUsers} value={data.accountOverview?.disabled_users} />
+          <Metric label={copy.userManagement.pendingRepairs} value={repairUnavailable ? '—' : repairCount} formatter={(value) => value} tone={!repairUnavailable && repairCount ? 'warning' : ''} />
+        </section>
+      )}
+      {permissionSet.has('platform.users.read') && <AccountDirectory key={data.usersLoadVersion || 'users'} section="users" copy={copy} data={data} client={client} setData={setData} permissions={permissions} currentUserID={currentUserID} />}
+      <UserRepairWorkspace copy={copy} data={data} client={client} setData={setData} permissions={permissions} />
+    </div>
+  );
+}
+
+function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '' }) {
   const [search, setSearch] = useState('');
+  const [userCode, setUserCode] = useState('');
+  const [userMode, setUserMode] = useState('directory');
+  const [currentCursor, setCurrentCursor] = useState('');
+  const [cursorHistory, setCursorHistory] = useState([]);
+  const [pageNumber, setPageNumber] = useState(1);
   const [actionKey, setActionKey] = useState('');
   const [notice, setNotice] = useState('');
   const [actionError, setActionError] = useState('');
@@ -743,21 +791,29 @@ function AccountDirectory({ section, copy, data, client, setData, permissions })
   useEffect(() => {
     if (!ownerUserID && activeUsers[0]) setOwnerUserID(activeUsers[0].user_id);
   }, [activeUsers, ownerUserID]);
-  const reload = async () => {
-    const compactCode = search.trim().replaceAll('-', '');
-    const userCodeLookup = isUserSection && /^USR/i.test(compactCode);
-    const result = userCodeLookup ? { items: [await client.userByCode(search.trim())] } : isUserSection ? await client.users(search) : await client.organizations(search);
+  const applyUserPage = (result, cursor = '') => {
     setData((current) => ({
       ...current,
-      [section]: result.items || [],
-      accountOverview: undefined,
+      users: result.items || [],
+      userNextCursor: result.next_cursor || '',
     }));
+  };
+  const reload = async (cursor = currentCursor) => {
+    if (isUserSection && userMode === 'code') {
+      const item = await client.userByCode(userCode.trim());
+      applyUserPage({ items: [item] });
+      return;
+    }
+    const result = isUserSection ? await client.users(search.trim(), undefined, cursor) : await client.organizations(search);
+    if (isUserSection) applyUserPage(result, cursor);
+    else setData((current) => ({ ...current, organizations: result.items || [], accountOverview: undefined }));
   };
   const perform = async (item, action) => {
     const isUser = isUserSection;
     const id = isUser ? item.user_id : item.organization_id;
     const label = isUser ? userLabel(item) : item.name;
     if (action === 'delete' && !window.confirm(copy.accounts.confirmOrganization(label))) return;
+    if (isUser && action === 'disable' && !window.confirm(copy.userManagement.confirmDisable(label, item.user_code || shortID(id)))) return;
     setActionKey(`${section}:${id}:${action}`);
     setNotice('');
     setActionError('');
@@ -779,6 +835,7 @@ function AccountDirectory({ section, copy, data, client, setData, permissions })
     const prefix = `${isUser ? 'users' : 'organizations'}:${id}:`;
     const buttons = [];
     const canManageStatus = isUser ? canManageUserStatus : canManageOrganizationStatus;
+    if (isUser && id === currentUserID) return <span className="adm-row-note" title={copy.userManagement.selfActionHelp}>{copy.userManagement.currentAccount}</span>;
     if (canManageStatus && item.status === 'DISABLED')
       buttons.push(
         <button key="enable" disabled={Boolean(actionKey)} onClick={() => perform(item, 'enable')}>
@@ -803,26 +860,25 @@ function AccountDirectory({ section, copy, data, client, setData, permissions })
     ? [
         {
           key: 'username',
-          label: copy.username,
+          label: copy.userManagement.account,
           render: (item) => (
-            <button className="adm-name-link" onClick={() => setSelectedUser(item)}>
-              {userLabel(item)}
-            </button>
+            <div className="adm-user-identity">
+              <button className="adm-name-link" onClick={() => setSelectedUser(item)}>{userLabel(item)}</button>
+              {item.display_name && item.display_name !== item.username && <small>{item.display_name}</small>}
+            </div>
           ),
         },
         {
           key: 'user_code',
           label: copy.accounts.userCode,
-          render: (item) => <code>{item.user_code || '—'}</code>,
+          render: (item) => <TechnicalID value={item.user_code} copy={copy} />,
         },
-        { key: 'display_name', label: copy.accounts.displayName },
-        { key: 'email', label: copy.accounts.email },
         {
           key: 'status',
           label: copy.accounts.status,
           render: (item) => <Status value={item.status} />,
         },
-        { key: 'organization_count', label: copy.accounts.memberships },
+        { key: 'organization_count', label: copy.userManagement.organizationCount },
         {
           key: 'last_seen_at',
           label: copy.accounts.lastSeen,
@@ -870,9 +926,46 @@ function AccountDirectory({ section, copy, data, client, setData, permissions })
     event.preventDefault();
     setActionError('');
     try {
-      await reload();
+      if (isUserSection) {
+        setUserMode('directory');
+        setCurrentCursor('');
+        setCursorHistory([]);
+        setPageNumber(1);
+        const result = await client.users(search.trim());
+        applyUserPage(result);
+      } else await reload();
     } catch {
       setActionError(copy.accounts.lookupUnavailable || copy.accounts.actionFailed);
+    }
+  };
+  const submitUserCode = async (event) => {
+    event.preventDefault();
+    const code = userCode.trim();
+    if (!code) return;
+    setActionError('');
+    try {
+      const item = await client.userByCode(code);
+      setUserMode('code');
+      setCurrentCursor('');
+      setCursorHistory([]);
+      setPageNumber(1);
+      applyUserPage({ items: [item] });
+    } catch {
+      setActionError(copy.userManagement.codeLookupFailed);
+    }
+  };
+  const changeUserPage = async (direction) => {
+    const nextCursor = direction === 'next' ? data.userNextCursor : cursorHistory.at(-1) || '';
+    const nextHistory = direction === 'next' ? [...cursorHistory, currentCursor] : cursorHistory.slice(0, -1);
+    setActionError('');
+    try {
+      const result = await client.users(search.trim(), undefined, nextCursor);
+      setCurrentCursor(nextCursor);
+      setCursorHistory(nextHistory);
+      setPageNumber((value) => Math.max(1, value + (direction === 'next' ? 1 : -1)));
+      applyUserPage(result, nextCursor);
+    } catch {
+      setActionError(copy.accounts.actionFailed);
     }
   };
   const createOrganization = async (event) => {
@@ -915,10 +1008,23 @@ function AccountDirectory({ section, copy, data, client, setData, permissions })
   return (
     <section className="adm-panel">
       <SectionHeader title={copy.accounts[section]} count={items.length} copy={copy}>
-        <form className="adm-search" onSubmit={submit}>
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={isUserSection ? copy.search : copy.accounts.organizationSearch} />
-          <button>{copy.searchAction}</button>
-        </form>
+        {isUserSection ? (
+          <div className="adm-user-searches">
+            <form className="adm-search" onSubmit={submit}>
+              <label><span>{copy.userManagement.fuzzySearch}</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={copy.search} /></label>
+              <button>{copy.searchAction}</button>
+            </form>
+            <form className="adm-search" onSubmit={submitUserCode}>
+              <label><span>{copy.userManagement.exactCode}</span><input value={userCode} onChange={(event) => setUserCode(event.target.value)} placeholder={copy.userManagement.codePlaceholder} /></label>
+              <button disabled={!userCode.trim()}>{copy.userManagement.lookup}</button>
+            </form>
+          </div>
+        ) : (
+          <form className="adm-search" onSubmit={submit}>
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={copy.accounts.organizationSearch} />
+            <button>{copy.searchAction}</button>
+          </form>
+        )}
       </SectionHeader>
       {!isUserSection && canCreateOrganization && (
         <form className="adm-create-row" onSubmit={createOrganization}>
@@ -946,6 +1052,15 @@ function AccountDirectory({ section, copy, data, client, setData, permissions })
         </div>
       )}
       <Table columns={columns} items={items} copy={copy} />
+      {isUserSection && userMode === 'directory' && (
+        <footer className="adm-pagination">
+          <span>{copy.userManagement.pageSummary(pageNumber, items.length)}</span>
+          <div>
+            <button type="button" disabled={!cursorHistory.length || Boolean(actionKey)} onClick={() => changeUserPage('previous')}>{copy.userManagement.previous}</button>
+            <button type="button" disabled={!data.userNextCursor || Boolean(actionKey)} onClick={() => changeUserPage('next')}>{copy.userManagement.next}</button>
+          </div>
+        </footer>
+      )}
     </section>
   );
 }
@@ -1032,6 +1147,16 @@ function UserMembershipDetail({ copy, user, roles, client, onBack }) {
         </div>
         <Status value={user.status} />
       </div>
+      <dl className="adm-user-detail-facts">
+        <div><dt>{copy.username}</dt><dd>{user.username || '—'}</dd></div>
+        <div><dt>{copy.accounts.displayName}</dt><dd>{user.display_name || '—'}</dd></div>
+        <div><dt>{copy.accounts.userCode}</dt><dd><TechnicalID value={user.user_code} copy={copy} compact={false} /></dd></div>
+        <div><dt>ID</dt><dd><TechnicalID value={user.user_id} copy={copy} /></dd></div>
+        <div><dt>{copy.userManagement.organizationCount}</dt><dd>{formatNumber(user.organization_count)}</dd></div>
+        <div><dt>{copy.accounts.lastSeen}</dt><dd>{formatDate(user.last_seen_at)}</dd></div>
+        <div><dt>{copy.accounts.created}</dt><dd>{formatDate(user.created_at)}</dd></div>
+        <div><dt>{copy.billing.updated}</dt><dd>{formatDate(user.updated_at)}</dd></div>
+      </dl>
       {error && <div className="adm-inline-message error">{error}</div>}
       {busy ? (
         <div className="adm-empty">{copy.loading}</div>
@@ -3888,10 +4013,121 @@ function RunbookBoundary({ copy, permissions, mode }) {
   );
 }
 
-function AccountClosureOperations({ copy, closures, client, setData, permissions }) {
+function RepairQueue({ title, lead, count, unavailable, forceOpen = false, copy, children }) {
+  return (
+    <details className="adm-repair-queue" open={count > 0 || unavailable || forceOpen}>
+      <summary><span><strong>{title}</strong><small>{lead}</small></span><b>{count}</b></summary>
+      {unavailable ? <div className="adm-inline-message error">{copy.userManagement.queueUnavailable}</div> : count || forceOpen ? children : <div className="adm-repair-empty">{copy.userManagement.noRepairs}</div>}
+    </details>
+  );
+}
+
+function UserRepairWorkspace({ copy, data, client, setData, permissions }) {
+  const permissionSet = new Set(permissions || []);
+  const canRegistration = permissionSet.has('platform.registrations.repair');
+  const canProfile = permissionSet.has('platform.profile-changes.repair');
+  const canReadClosures = permissionSet.has('platform.account-closures.read');
+  const canRepairClosures = permissionSet.has('platform.account-closures.repair');
+  if (!canRegistration && !canProfile && !canReadClosures) return null;
+  const registrations = data.registrationRepairs || [];
+  const profiles = data.profileChangeRepairs || [];
+  const closures = data.accountClosures || [];
+  const total = registrations.length + profiles.length + closures.length;
+  return (
+    <section className="adm-panel adm-repair-workspace">
+      <SectionHeader title={copy.userManagement.exceptionWorkbench} count={total} copy={copy} />
+      <p className="adm-help">{copy.userManagement.exceptionLead}</p>
+      {canRegistration && <RegistrationRepairQueue copy={copy} items={registrations} unavailable={data.userRepairAvailability?.registrations === 'error'} client={client} setData={setData} />}
+      {canProfile && <ProfileRepairQueue copy={copy} items={profiles} unavailable={data.userRepairAvailability?.profileChanges === 'error'} client={client} setData={setData} />}
+      {canReadClosures && <AccountClosureOperations copy={copy} closures={closures} unavailable={data.userRepairAvailability?.closures === 'error'} client={client} setData={setData} canRepair={canRepairClosures} />}
+    </section>
+  );
+}
+
+function RegistrationRepairQueue({ copy, items, unavailable, client, setData }) {
+  const [filters, setFilters] = useState({ status: '', stage: '', responsibility: '', sla: '', older_than_minutes: '' });
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const canRepairClosures = (permissions || []).includes('platform.account-closures.repair');
+  const hasActiveFilters = Object.values(filters).some(Boolean);
+  const reload = async (nextFilters = filters) => {
+    const result = await client.registrationRepairs(nextFilters);
+    setData((current) => ({ ...current, registrationRepairs: result.items || [] }));
+  };
+  const run = async (item, action) => {
+    if (action === 'compensate' && !window.confirm(copy.userManagement.confirmCompensation)) return;
+    setBusy(`${item.registration_operation_id}:${action}`);
+    setError('');
+    try {
+      if (action === 'compensate') await client.compensateRegistration(item.registration_operation_id);
+      else await client.retryRegistration(item.registration_operation_id);
+      await reload();
+    } catch {
+      setError(copy.userManagement.repairFailed);
+    } finally {
+      setBusy('');
+    }
+  };
+  const columns = [
+    { key: 'registration_operation_id', label: copy.userManagement.operation, render: (item) => <TechnicalID value={item.registration_operation_id} copy={copy} /> },
+    { key: 'stage', label: copy.closure.stage, render: (item) => <Status value={item.stage} /> },
+    { key: 'status', label: copy.accounts.status, render: (item) => <Status value={item.status} /> },
+    { key: 'responsibility', label: copy.userManagement.responsibility },
+    { key: 'attempts', label: copy.userManagement.attempts },
+    { key: 'reason', label: copy.userManagement.reason, render: (item) => item.reason || '—' },
+    { key: 'updated_at', label: copy.billing.updated, render: (item) => formatDate(item.updated_at) },
+    { key: 'actions', label: copy.accounts.actions, render: (item) => <div className="adm-row-actions"><button disabled={Boolean(busy)} onClick={() => run(item, 'retry')}>{busy === `${item.registration_operation_id}:retry` ? '…' : copy.userManagement.retry}</button>{item.compensation_allowed && <button className="danger" disabled={Boolean(busy)} onClick={() => run(item, 'compensate')}>{busy === `${item.registration_operation_id}:compensate` ? '…' : copy.userManagement.compensate}</button>}</div> },
+  ];
+  const submitFilters = async (event) => {
+    event.preventDefault();
+    setError('');
+    try { await reload(); } catch { setError(copy.userManagement.queueUnavailable); }
+  };
+  return (
+    <RepairQueue title={copy.userManagement.registrationRepair} lead={copy.userManagement.registrationRepairLead} count={items.length} unavailable={unavailable} forceOpen={hasActiveFilters || Boolean(error)} copy={copy}>
+      {error && <div className="adm-inline-message error">{error}</div>}
+      <form className="adm-repair-filters" onSubmit={submitFilters}>
+        {[
+          ['status', copy.accounts.status, ['', 'REPAIR_REQUIRED', 'COMPENSATION_PENDING']],
+          ['stage', copy.closure.stage, ['', 'IDENTITY_CREATING', 'ACCOUNT_COMMITTING', 'WALLET_PROVISIONING', 'COMPENSATION']],
+          ['responsibility', copy.userManagement.responsibility, ['', 'IDENTITY', 'ACCOUNT', 'BILLING']],
+          ['sla', copy.userManagement.sla, ['', 'OVERDUE', 'WITHIN']],
+        ].map(([key, label, options]) => <label key={key}><span>{label}</span><select value={filters[key]} onChange={(event) => setFilters((current) => ({ ...current, [key]: event.target.value }))}>{options.map((option) => <option key={option || 'all'} value={option}>{option || copy.userManagement.all}</option>)}</select></label>)}
+        <label><span>{copy.userManagement.olderThan}</span><input type="number" min="0" max="43200" value={filters.older_than_minutes} onChange={(event) => setFilters((current) => ({ ...current, older_than_minutes: event.target.value }))} placeholder="—" /></label>
+        <button>{copy.refresh}</button>
+      </form>
+      <Table columns={columns} items={items} copy={copy} />
+    </RepairQueue>
+  );
+}
+
+function ProfileRepairQueue({ copy, items, unavailable, client, setData }) {
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const retry = async (item) => {
+    if (!window.confirm(copy.userManagement.confirmRetry)) return;
+    setBusy(item.profile_change_request_id);
+    setError('');
+    try {
+      await client.retryProfileChange(item.profile_change_request_id);
+      const result = await client.profileChangeRepairs();
+      setData((current) => ({ ...current, profileChangeRepairs: result.items || [] }));
+    } catch { setError(copy.userManagement.repairFailed); } finally { setBusy(''); }
+  };
+  const columns = [
+    { key: 'profile_change_request_id', label: copy.userManagement.request, render: (item) => <TechnicalID value={item.profile_change_request_id} copy={copy} /> },
+    { key: 'user_id', label: copy.closure.user, render: (item) => <TechnicalID value={item.user_id} copy={copy} /> },
+    { key: 'field', label: copy.userManagement.field },
+    { key: 'status', label: copy.accounts.status, render: (item) => <Status value={item.status} /> },
+    { key: 'attempts', label: copy.userManagement.attempts },
+    { key: 'reason', label: copy.userManagement.reason, render: (item) => item.reason || '—' },
+    { key: 'actions', label: copy.accounts.actions, render: (item) => <button disabled={Boolean(busy)} onClick={() => retry(item)}>{busy === item.profile_change_request_id ? '…' : copy.userManagement.retry}</button> },
+  ];
+  return <RepairQueue title={copy.userManagement.profileRepair} lead={copy.userManagement.profileRepairLead} count={items.length} unavailable={unavailable} copy={copy}>{error && <div className="adm-inline-message error">{error}</div>}<Table columns={columns} items={items} copy={copy} /></RepairQueue>;
+}
+
+function AccountClosureOperations({ copy, closures, unavailable, client, setData, canRepair }) {
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
   const retryClosure = async (item) => {
     const reason = window.prompt(copy.closure.retryReason);
     if (!reason?.trim()) return;
@@ -3944,7 +4180,7 @@ function AccountClosureOperations({ copy, closures, client, setData, permissions
       key: 'actions',
       label: copy.accounts.actions,
       render: (item) =>
-        canRepairClosures ? (
+        canRepair ? (
           <button disabled={Boolean(busy)} onClick={() => retryClosure(item)}>
             {busy === item.closure_request_id ? '…' : copy.closure.retry}
           </button>
@@ -3954,14 +4190,10 @@ function AccountClosureOperations({ copy, closures, client, setData, permissions
     },
   ];
   return (
-    <section className="adm-security-grid">
-      <article className="adm-panel" style={{ gridColumn: '1 / -1' }}>
-        <SectionHeader title={copy.closure.title} count={closures.length} copy={copy} />
-        <p>{copy.closure.lead}</p>
-        {error && <div className="adm-inline-message error">{error}</div>}
-        <Table columns={closureColumns} items={closures} copy={copy} />
-      </article>
-    </section>
+    <RepairQueue title={copy.closure.title} lead={copy.closure.lead} count={closures.length} unavailable={unavailable} copy={copy}>
+      {error && <div className="adm-inline-message error">{error}</div>}
+      <Table columns={closureColumns} items={closures} copy={copy} />
+    </RepairQueue>
   );
 }
 

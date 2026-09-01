@@ -65,19 +65,16 @@ function preserveAccountPortalExtensions() {
   const extensions = {
     'admin.html': {
       head: [
-        '<script type="module" crossorigin src="/assets/registration-repair.js"></script>',
         '<script type="module" crossorigin src="/assets/role-bindings.js"></script>',
         '<script type="module" crossorigin src="/assets/approval-requests.js"></script>',
         '<script type="module" crossorigin src="/assets/pricing-admin.js"></script>',
         '<script type="module" crossorigin src="/assets/product-admin.js"></script>',
-        '<link rel="stylesheet" crossorigin href="/assets/registration-repair.css">',
         '<link rel="stylesheet" crossorigin href="/assets/role-bindings.css">',
         '<link rel="stylesheet" crossorigin href="/assets/approval-requests.css">',
         '<link rel="stylesheet" crossorigin href="/assets/pricing-admin.css">',
         '<link rel="stylesheet" crossorigin href="/assets/product-admin.css">',
       ],
       body: [
-        '<div id="registration-repair-root"></div>',
         '<div id="role-bindings-root"></div>',
         '<div id="approval-requests-root"></div>',
         '<div id="pricing-admin-root"></div>',

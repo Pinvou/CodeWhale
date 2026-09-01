@@ -371,7 +371,10 @@ test('permanent user codes are random, immutable, displayable, and exact-query o
   const exact = admin.paths['/account/admin/v1/user-code-lookups/{user_code}'].get;
   assert.equal(exact.parameters[0].$ref, '#/components/parameters/UserCode');
   assert.equal(exact.responses['200'].headers['Cache-Control'].schema.const, 'no-store');
-  assert.equal(admin.paths['/account/admin/v1/users'].get.parameters.length, 2);
+  const users = admin.paths['/account/admin/v1/users'].get;
+  assert.equal(users.parameters.length, 3);
+  assert.equal(users.parameters[2].$ref, '#/components/parameters/Cursor');
+  assert.equal(users.responses['200'].content['application/json'].schema.$ref, '#/components/schemas/AdminUserPage');
 });
 
 test('mobile authentication provisioning works in the minimal Keycloak image', async () => {

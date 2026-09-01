@@ -393,7 +393,7 @@
 
 | 真实 GET 端点/类别 | 当前参数 | cursor/排序事实 | 详情、脱敏与批量 |
 |---|---|---|---|
-| `/account/admin/v1/users` | `q`, `limit` | 无 cursor、无 sort；`q` 是展示名/email/精确 UUID 搜索 | 手机号等按响应脱敏；无批量状态变更；分页/状态筛选为 `API_GAP`（`UIA-007`） |
+| `/account/admin/v1/users` | `q`, `limit`, `cursor` | 按更新时间和用户 ID 稳定游标分页；`q` 是用户名/展示名模糊搜索或精确 UUID 搜索 | 当前账号生命周期不采集或维护邮箱，用户列表、详情和搜索不展示/使用邮箱；底层可选字段仅保留兼容性。完整 `user_code` 使用独立精确查询；无批量状态变更；状态筛选仍为 `API_GAP`（`UIA-007`） |
 | `/account/admin/v1/user-code-lookups/{user_code}` | 完整、校验和有效的 path `user_code` | 单条精确查询；禁止前缀、模糊、自动补全和批量 | 与 users 的 `q` 搜索完全分开；404 使用无枚举文案 |
 | `/account/admin/v1/roles` | 无 | 无分页/排序参数 | 内置定义只读；不得创建/编辑角色 |
 | `/account/admin/v1/role-bindings` | `user_id`, `organization_id` | 无 cursor/limit/sort | 显示有效期、来源、scope；无批量授予/撤销；大列表分页为 `UIA-007` |
@@ -419,7 +419,7 @@
 | 组织 units/members/role-bindings | units 可传 `root_unit_id`；members 可传 `unit_id`；role-bindings 无筛选 | 无 cursor/sort | UNIT 必须显式子树；跨节点结果由服务端排除；组织审计列表不存在 |
 | 组织额度/权益列表 | 依 token-gateway 现有 organization balance/packages/quota-grants 合同 | 仅端点已定义的分页字段 | 支持的 batch 仅限合同已有 quota allocate/reclaim；不能推广到其他资源 |
 
-所有真实筛选和 cursor 状态写入 URL。无 cursor 的接口刷新时重新执行相同查询并明确“数据可能已变化”，不能生成或复用虚构 cursor。Account、Billing、Token 服务缺口分别由 `UIA-007/UIA-013/UIA-014` 承担，Portal 统一适配由 `UIA-015` 承担；这些任务完成前只能使用现有上限和服务端返回顺序。
+所有真实筛选和 cursor 状态写入 URL。无 cursor 的接口刷新时重新执行相同查询并明确“数据可能已变化”，不能生成或复用虚构 cursor。用户目录已完成向后兼容的 Account cursor 与 Portal 翻页适配；其余 Account、Billing、Token 服务缺口仍分别由 `UIA-007/UIA-013/UIA-014` 承担，Portal 其余统一适配由 `UIA-015` 承担；这些任务完成前只能使用现有上限和服务端返回顺序。
 
 详情、脱敏与批量的统一落地边界：
 
@@ -507,10 +507,10 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 ### 12.1 总览与身份组织
 
 - **平台总览**：首层采用身份与组织、资金与计费、模型与 Token 三张等宽领域摘要卡，系统健康作为独立横向状态条，不再把六个不同口径的总数拆成 `4+2` 孤立指标卡。卡片按 `platform.users.read` / `platform.organizations.read`、`platform.billing.wallets.read`、`platform.tokens.read` / `platform.usage.read`、`platform.system.status.read` 独立请求、独立隐藏和局部失败；无权或失败不得渲染为 0，也不得导致其他卡片清空。删除 KYC 卡和总览“只读权限”告警。身份卡突出活跃用户并补充组织、有效成员关系和停用账号；资金卡以 `posted_microcredits - reserved_microcredits - receivable_microcredits` 计算可用积分并同时展示已入账、使用中、应收占用和钱包数；模型卡的路由健康率以 `healthy_routes / routes` 计算，不得以 Token 账号数作分母，用量请求明确标注为累计值。待办只展示当前权限内的非零事项，按异常/警告分级，点击进入对应有权工作队列；全部为零时显示明确的无待办状态。
-- **用户管理**：`q` 搜索与 `user_code` 完整精确查询使用不同入口；当前无状态筛选，`UIA-007/UIA-015` 前不得显示；只有启用/停用等现有动作；删除“新建用户”。
+- **用户管理**：`q` 搜索与 `user_code` 完整精确查询使用不同入口；目录每页 25 条并消费 `next_cursor`，页头总量与当前页条数分开；当前无状态筛选，在相应合同完成前不得显示；只有启用/停用等现有动作，停用确认必须说明会话立即失效并禁止当前管理员自停用；删除“新建用户”。
 - **角色与权限**：左侧显示内置角色定义，右侧显示绑定；只提供授予/撤销绑定；删除“新建角色”和任何角色定义编辑。
 - **组织管理**：显示生命周期、节点、所有者和阻断摘要；DELETED 全只读且不可恢复；删除使用跨域预检。
-- **修复队列**：注册、资料变更和注销分队列展示；每次重试显示 attempt、幂等关联和结果未知处理。
+- **修复队列**：注册、资料变更和注销在同一异常工作台内分队列展示；空队列折叠为紧凑状态，注册筛选仅在存在队列数据时展开；每次重试展示现有 attempt、诊断字段和结果未知处理，不虚构服务端不存在的进度。
 
 ### 12.2 财务、支付与商品
 
@@ -734,7 +734,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | `UIA-004` | `UIR-004` Token Account/状态/路由写合同强化 | APT-006、APT-028、APT-031、APT-069、APT-073、APT-075 | **Token 单提交**：OpenAPI、服务和秘密/并发测试 | 幂等、reason、版本与必要 step-up 有明确合同；秘密不回显；不改 Portal |
 | `UIA-005` | `UIR-005` 支付恢复只读现场探测 API | APT-008、APT-067、APT-092、APT-093 | **Billing 单提交**：OpenAPI、探测服务、证据存储和无收费副作用测试 | 失败/过期/未知证据不能生成可提交草稿；Provider/商品证据隔离；不改 Portal |
 | `UIA-006` | `UIR-006` 审计导出一次性密钥与配额可观察合同 | APT-006、APT-008、APT-055 | **Account 单提交**：OpenAPI、导出服务和安全测试 | create 首次响应后 replay/GET 不返密钥；丢失需新建；配额字段若不提供则合同明确；不改 Portal |
-| `UIA-007` | `UIR-007` Account 高数据量列表合同 | APT-003、APT-004、APT-009、APT-011、APT-014、APT-046、APT-055、APT-074、APT-075 | **Account 单提交**：仅 Account 列表 OpenAPI、查询实现和分页测试 | users 的 q 与 user_code 分离；Account cursor/筛选/排序稳定；不改 Billing、Token、Portal |
+| `UIA-007` | `UIR-007` Account 其余高数据量列表合同 | APT-003、APT-004、APT-009、APT-011、APT-014、APT-046、APT-055、APT-074、APT-075 | **Account 单提交**：仅尚未覆盖的 Account 列表 OpenAPI、查询实现和分页测试 | users 的 q 与 user_code 已分离且用户目录 cursor 已实现；继续补齐角色绑定及修复队列等剩余 Account cursor/筛选/稳定排序，不改 Billing、Token、Portal |
 | `UIA-008` | `UIR-008` Account Outbox 查询/重放 API | 产品批准；APT-006、APT-045、APT-069、APT-076 | **Account 单提交**：仅 Account OpenAPI、Account 自有 Outbox/`event_replay_requests`、授权委托与测试 | 完整实现 §4.2.1：GET 返回不可变包络 `event_digest`；POST 强制 `expected_digest`、16～128 字符幂等键、至少 20 字符 reason；仅未发布死信在 Serializable 事务中追加请求并重排队；人类授权与 `EVENT_REPLAY` 身份分别审计；摘要变化、非死信、已发布、跨域 ID、同键异请求均失败关闭 |
 | `UIA-009` | `UIR-009` 组织审计查询/导出 API | 产品批准；APT-045、APT-069、APT-075；若含导出再依赖 APT-055 | **Account 单提交**：组织审计 OpenAPI、scope 查询、脱敏/导出测试 | UNIT 子树不可越权；导出继承 NFR-48；不改 Portal |
 | `UIA-010` | `UIR-010` 现有异步领域的 Portal 刷新恢复 | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；APT-003、APT-004、APT-014、APT-028、APT-055、APT-074、APT-083、APT-084 | **Portal 单提交**：仅逐领域状态组件、URL 恢复和前端测试 | 只恢复审计导出/准入/Provisioning/审批等已有 GET；无统一任务服务、心跳或取消 |
@@ -742,7 +742,7 @@ Portal 必须优先读取当前 endpoint 返回的 `code/message/request_id`。�
 | `UIA-012` | `UIR-012` 我的组织资料更新/注销 Portal 闭环 | 产品单独批准资料/注销；APT-009、APT-014、APT-069、APT-075；唯一候选任务依赖：UIA-019 | **Portal 单提交**：只接入已完成的 Account 组织资料更新/注销合同 | `org.profile.update` 与 `org.delete.request` 独立鉴权；注销阻断完整；不读取全员用量、不依赖 UIA-016/UIA-024、不改 Account API |
 | `UIA-013` | `UIR-013` Billing 高数据量列表合同 | APT-018、APT-019、APT-020、APT-021、APT-022、APT-023、APT-024、APT-025、APT-083、APT-084、APT-093 | **Billing 单提交**：仅 Billing 列表 OpenAPI、查询实现和分页测试 | 订单/应收/案件/对账等 cursor、筛选、排序稳定；不改 Account、Token、Portal |
 | `UIA-014` | `UIR-014` Token 高数据量列表合同 | APT-028、APT-030、APT-031、APT-081 | **Token 单提交**：仅 Token 列表 OpenAPI、查询实现和分页测试 | Token Account/用量/Provisioning 的 cursor、筛选、排序稳定；不改 Account、Billing、Portal |
-| `UIA-015` | `UIR-015` 三领域列表 Portal 适配 | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；候选条件 UIA-007、UIA-013、UIA-014 | **Portal 单提交**：列表 URL、cursor、筛选、排序和前端合同测试 | Account/Billing/Token 参数不串用；旧无 cursor 响应安全降级；不改服务 |
+| `UIA-015` | `UIR-015` 三领域其余列表 Portal 适配 | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；候选条件 UIA-007、UIA-013、UIA-014 | **Portal 单提交**：用户目录之外的列表 URL、cursor、筛选、排序和前端合同测试 | 用户目录已消费 Account cursor；继续保证 Account/Billing/Token 参数不串用，旧无 cursor 响应安全降级；不改服务 |
 | `UIA-016` | `UIR-016` 组织全员/节点子树用量聚合 API | 产品批准；APT-030、APT-069、APT-075、APT-081 | **Token 单提交**：组织用量 OpenAPI、查询、UNIT scope 与脱敏测试 | `org.usage.read.all` 才可读；UNIT 仅目标子树；不返回模型正文；不改 Account/Portal |
 | `UIA-017` | `UIR-017` 已批准 API gap 的 Portal 适配（不含列表、我的组织和事件专项） | 正式 UI 需求/任务 UI-28、UI-29、UI-30、UI-31；以及 UIA-002、UIA-003、UIA-004、UIA-005、UIA-006、UIA-009、UIA-011、UIA-020 中产品已批准且正式任务已创建的子集 | **Portal 单提交**：只适配正式任务已完成的角色/写合同、探测、审计、审批及命令注册修复 | 未批准能力永久隐藏，已批准但对应正式任务未完成的能力继续隐藏；列表由 UIA-015、资料/注销由 UIA-012、全员用量由 UIA-024、事件由 UIA-023 负责；不改服务/API |
 | `UIA-019` | `UIR-019` 组织资料更新与组织注销申请 API | 产品批准；APT-009、APT-014、APT-069、APT-075 | **Account 单提交**：资料/注销 OpenAPI、服务、阻断和 scope 测试 | 无权/UNIT 写入拒绝；注销不绕过跨域阻断；不改 Token/Portal |

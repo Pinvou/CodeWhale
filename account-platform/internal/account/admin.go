@@ -44,6 +44,18 @@ type AdminUser struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
+type AdminUserFilter struct {
+	Search          string
+	Limit           int
+	CursorUpdatedAt *time.Time
+	CursorID        *uuid.UUID
+}
+
+type AdminUserPage struct {
+	Items      []AdminUser `json:"items"`
+	NextCursor *string     `json:"next_cursor"`
+}
+
 type AdminOrganization struct {
 	ID          uuid.UUID `json:"organization_id"`
 	Name        string    `json:"name"`
@@ -118,7 +130,7 @@ type adminRepository interface {
 	AdminRoleBindings(context.Context, *uuid.UUID, *uuid.UUID) ([]RoleBinding, error)
 	AdminGrantRoleBinding(context.Context, identity.Principal, RoleBindingGrant) (RoleBinding, error)
 	AdminRevokeRoleBinding(context.Context, identity.Principal, uuid.UUID) (RoleBinding, error)
-	AdminUsers(context.Context, string, int) ([]AdminUser, error)
+	AdminUsers(context.Context, AdminUserFilter) (AdminUserPage, error)
 	AdminUserMemberships(context.Context, uuid.UUID) ([]AdminUserMembership, error)
 	AdminSetUserStatus(context.Context, identity.Principal, uuid.UUID, string) error
 	AdminDeleteUser(context.Context, identity.Principal, uuid.UUID) error
@@ -162,6 +174,36 @@ func adminLimit(r *http.Request) int {
 		return 200
 	}
 	return limit
+}
+
+func parseAdminUserFilter(r *http.Request) (AdminUserFilter, error) {
+	filter := AdminUserFilter{Search: strings.TrimSpace(r.URL.Query().Get("q")), Limit: adminLimit(r)}
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor == "" {
+		return filter, nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return AdminUserFilter{}, err
+	}
+	var value struct {
+		UpdatedAt time.Time `json:"updated_at"`
+		ID        uuid.UUID `json:"user_id"`
+	}
+	if err := json.Unmarshal(raw, &value); err != nil || value.UpdatedAt.IsZero() || value.ID == uuid.Nil {
+		return AdminUserFilter{}, ErrConflict
+	}
+	value.UpdatedAt = value.UpdatedAt.UTC()
+	filter.CursorUpdatedAt, filter.CursorID = &value.UpdatedAt, &value.ID
+	return filter, nil
+}
+
+func encodeAdminUserCursor(item AdminUser) (string, error) {
+	body, err := json.Marshal(map[string]any{"updated_at": item.UpdatedAt.UTC(), "user_id": item.ID})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(body), nil
 }
 
 func parseAdminOrganizationFilter(r *http.Request) (AdminOrganizationFilter, error) {
@@ -312,12 +354,17 @@ func (s *Service) adminUsers(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	items, err := repository.AdminUsers(r.Context(), strings.TrimSpace(r.URL.Query().Get("q")), adminLimit(r))
+	filter, err := parseAdminUserFilter(r)
+	if err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_USER_FILTER", "user filters are invalid", httpserver.RequestID(r.Context()))
+		return
+	}
+	page, err := repository.AdminUsers(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
+	api.WriteJSON(w, http.StatusOK, page)
 }
 
 func (s *Service) adminUserMemberships(w http.ResponseWriter, r *http.Request) {
@@ -938,30 +985,48 @@ SELECT
 	return result, err
 }
 
-func (r *PostgresRepository) AdminUsers(ctx context.Context, search string, limit int) ([]AdminUser, error) {
-	pattern := "%" + strings.ToLower(search) + "%"
+func (r *PostgresRepository) AdminUsers(ctx context.Context, filter AdminUserFilter) (AdminUserPage, error) {
+	search := strings.ToLower(strings.TrimSpace(filter.Search))
+	pattern := "%" + search + "%"
+	limit := filter.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
 	rows, err := r.pool.Query(ctx, `
 SELECT u.id,u.user_code,u.username,u.display_name,u.email,u.status,
        (SELECT count(*) FROM memberships m WHERE m.user_id=u.id AND m.status='ACTIVE'),
        (SELECT max(s.last_seen_at) FROM user_sessions s WHERE s.user_id=u.id),
        u.created_at,u.updated_at
 FROM users u
-WHERE u.status<>'DELETED' AND ($1='' OR lower(COALESCE(u.username,'')) LIKE $2 OR lower(COALESCE(u.display_name,'')) LIKE $2 OR lower(COALESCE(u.email,'')) LIKE $2 OR u.id::text=$1)
-ORDER BY u.updated_at DESC,u.id LIMIT $3`, strings.ToLower(search), pattern, limit)
+WHERE u.status<>'DELETED' AND ($1='' OR lower(COALESCE(u.username,'')) LIKE $2 OR lower(COALESCE(u.display_name,'')) LIKE $2 OR u.id::text=$1)
+	AND ($3::timestamptz IS NULL OR u.updated_at<$3 OR (u.updated_at=$3 AND u.id<$4::uuid))
+ORDER BY u.updated_at DESC,u.id DESC LIMIT $5`, search, pattern, filter.CursorUpdatedAt, filter.CursorID, limit+1)
 	if err != nil {
-		return nil, err
+		return AdminUserPage{}, err
 	}
 	defer rows.Close()
-	items := make([]AdminUser, 0)
+	items := make([]AdminUser, 0, limit+1)
 	for rows.Next() {
 		var item AdminUser
 		if err := rows.Scan(&item.ID, &item.UserCode, &item.Username, &item.DisplayName, &item.Email, &item.Status, &item.OrganizationCount, &item.LastSeenAt, &item.CreatedAt, &item.UpdatedAt); err != nil {
-			return nil, err
+			return AdminUserPage{}, err
 		}
 		item.UserCode = FormatUserCode(item.UserCode)
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return AdminUserPage{}, err
+	}
+	page := AdminUserPage{Items: items}
+	if len(items) > limit {
+		cursor, err := encodeAdminUserCursor(items[limit-1])
+		if err != nil {
+			return AdminUserPage{}, err
+		}
+		page.Items = items[:limit]
+		page.NextCursor = &cursor
+	}
+	return page, nil
 }
 
 func (r *PostgresRepository) AdminUserMemberships(ctx context.Context, userID uuid.UUID) ([]AdminUserMembership, error) {

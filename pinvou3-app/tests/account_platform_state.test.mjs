@@ -49,23 +49,24 @@ test('Keycloak security access and user operations have independent permission b
   assert.equal(adminSectionReadOnly(snapshot(['platform.account-closures.repair']), 'users'), false);
 });
 
-test('admin identity pages mount role and repair extensions under independent permission-gated routes', async () => {
+test('admin identity pages keep role extension and own all repair queues in React', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
   const authorization = await readFile(new URL('../src/features/account-platform/authorization-ui.js', import.meta.url), 'utf8');
-  const repair = await readFile(new URL('../../account-platform/internal/portal/static/assets/registration-repair.js', import.meta.url), 'utf8');
   assert.match(view, /function AdminExtensionSlot/);
   assert.match(view, /'role-bindings-root'.*platform\.roles\.read/);
-  assert.match(view, /'registration-repair-root'.*platform\.registrations\.repair/);
+  assert.doesNotMatch(view, /registration-repair-root/);
   assert.match(view, /host\.append\(node\)/);
   assert.match(authorization, /users: \['platform\.users\.read', 'platform\.registrations\.repair', 'platform\.profile-changes\.repair', 'platform\.account-closures\.read'\]/);
   assert.match(authorization, /system: \['platform\.system\.status\.read', 'platform\.users\.identity\.repair'\]/);
-  assert.match(view, /section === 'users'.*AccountClosureOperations/s);
+  assert.match(view, /section === 'users'.*UsersWorkspace/s);
+  assert.match(view, /function UserRepairWorkspace/);
+  assert.match(view, /function RegistrationRepairQueue/);
+  assert.match(view, /function ProfileRepairQueue/);
+  assert.match(view, /function AccountClosureOperations/);
   assert.match(view, /section === 'system'.*KeycloakSecurityAccess/s);
   assert.doesNotMatch(view, /function IdentitySecurity/);
   assert.match(authorization, /roles: \['platform\.roles\.read'\]/);
   assert.doesNotMatch(authorization, /identity: \[/);
-  assert.match(repair, /localStorage\.getItem\('pinvou\.admin\.language'\)/);
-  assert.doesNotMatch(repair, /header\.append\(language\)/);
 });
 
 test('admin finance capabilities use independent permission-gated routes without unsupported drafts', async () => {
@@ -377,6 +378,35 @@ test('user code is displayed to its owner and resolved through a dedicated exact
   assert.match(admin, /key:\s*'user_code'/);
   assert.doesNotMatch(personal, /me\?\.user_id/);
   for (const locale of ['zh', 'en', 'ja']) assert.ok(accountPlatformCopy[locale].userCode);
+});
+
+test('admin user workspace uses cursor pages and all three protected repair routes', async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    calls.push([url, options.method || 'GET']);
+    return new Response(JSON.stringify({ items: [], next_cursor: null }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const client = new AdminPlatformClient('/portal');
+    client.csrfToken = 'c'.repeat(32);
+    await client.users('vin pay', undefined, 'opaque-cursor');
+    await client.registrationRepairs({ status: 'REPAIR_REQUIRED', older_than_minutes: '30' });
+    await client.profileChangeRepairs();
+    await client.accountClosures();
+    await client.retryRegistration('registration-id');
+    await client.compensateRegistration('registration-id');
+    await client.retryProfileChange('profile-id');
+    assert.deepEqual(calls, [
+      ['/portal/api/admin/account/admin/v1/users?limit=25&q=vin+pay&cursor=opaque-cursor', 'GET'],
+      ['/portal/api/admin/account/admin/v1/registration-operations?limit=100&status=REPAIR_REQUIRED&older_than_minutes=30', 'GET'],
+      ['/portal/api/admin/account/admin/v1/profile-change-requests', 'GET'],
+      ['/portal/api/admin/account/admin/v1/account-closure-requests', 'GET'],
+      ['/portal/api/admin/account/admin/v1/registration-operations/registration-id/actions/retry', 'POST'],
+      ['/portal/api/admin/account/admin/v1/registration-operations/registration-id/actions/compensate', 'POST'],
+      ['/portal/api/admin/account/admin/v1/profile-change-requests/profile-id/actions/retry', 'POST'],
+    ]);
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test('admin organization units form a nested management tree', () => {
@@ -832,8 +862,16 @@ test('admin console exposes users, roles, and organizations as independently nam
   assert.doesNotMatch(view, /section === 'accounts'/);
   assert.doesNotMatch(i18n, /账号与组织/);
   assert.match(i18n, /users:\s*'用户管理',\s*roles:\s*'角色与授权',\s*organizations:\s*'组织管理'/);
-  assert.match(view, /key:\s*'username',\s*label:\s*copy\.username/);
+  assert.match(view, /key:\s*'username',\s*label:\s*copy\.userManagement\.account/);
+  assert.doesNotMatch(view, /copy\.accounts\.email/);
+  assert.doesNotMatch(view, /function userLabel\(user\) \{[\s\S]*?user\?\.email[\s\S]*?\}/);
+  assert.doesNotMatch(view, /item\.display_name \|\| item\.email/);
+  assert.match(view, /client\.users\(search\.trim\(\), undefined, nextCursor\)/);
+  assert.match(view, /client\.userByCode\(code\)/);
+  assert.match(view, /copy\.userManagement\.confirmDisable/);
+  assert.match(view, /id === currentUserID/);
   assert.match(i18n, /username:\s*'用户名'/);
+  assert.doesNotMatch(i18n, /搜索用户名、名称、邮箱/);
 });
 
 test('personal center keeps context on overview and cannot create organizations', async () => {

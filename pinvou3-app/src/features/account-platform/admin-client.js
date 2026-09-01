@@ -102,8 +102,11 @@ export class AdminPlatformClient {
   roles(signal) {
     return this.request('account', '/admin/v1/roles', signal);
   }
-  users(search, signal) {
-    return this.request('account', `/admin/v1/users?limit=100&q=${encodeURIComponent(search || '')}`, signal);
+  users(search, signal, cursor = '') {
+    const query = new URLSearchParams({ limit: '25' });
+    if (search) query.set('q', search);
+    if (cursor) query.set('cursor', cursor);
+    return this.request('account', `/admin/v1/users?${query}`, signal);
   }
   userByCode(userCode, signal) {
     return this.request('account', `/admin/v1/user-code-lookups/${encodeURIComponent(userCode)}`, signal);
@@ -119,6 +122,23 @@ export class AdminPlatformClient {
   }
   retryAccountClosure(closureRequestID, reason) {
     return this.mutate('account', `/admin/v1/account-closure-requests/${encodeURIComponent(closureRequestID)}/actions/retry`, 'POST', { reason }, `account-closure-retry-${crypto.randomUUID()}`);
+  }
+  registrationRepairs(filters = {}, signal) {
+    const query = new URLSearchParams({ limit: '100' });
+    for (const key of ['status', 'stage', 'responsibility', 'sla', 'older_than_minutes']) if (filters[key]) query.set(key, filters[key]);
+    return this.request('account', `/admin/v1/registration-operations?${query}`, signal);
+  }
+  retryRegistration(operationID) {
+    return this.mutate('account', `/admin/v1/registration-operations/${encodeURIComponent(operationID)}/actions/retry`, 'POST');
+  }
+  compensateRegistration(operationID) {
+    return this.mutate('account', `/admin/v1/registration-operations/${encodeURIComponent(operationID)}/actions/compensate`, 'POST');
+  }
+  profileChangeRepairs(signal) {
+    return this.request('account', '/admin/v1/profile-change-requests', signal);
+  }
+  retryProfileChange(requestID) {
+    return this.mutate('account', `/admin/v1/profile-change-requests/${encodeURIComponent(requestID)}/actions/retry`, 'POST');
   }
   organizations(search, signal) {
     return this.request('account', `/admin/v1/organizations?limit=100&q=${encodeURIComponent(search || '')}`, signal);

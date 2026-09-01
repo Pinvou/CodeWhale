@@ -67,17 +67,15 @@ func TestAccountPortalRendersEntitlementListPointsAsIntegers(t *testing.T) {
 	}
 }
 
-func TestStaticHandlerServesRegistrationRepairConsole(t *testing.T) {
+func TestStaticHandlerServesReactIdentityRepairWorkspace(t *testing.T) {
 	page := httptest.NewRecorder()
 	StaticHandler().ServeHTTP(page, httptest.NewRequest(http.MethodGet, "/admin.html", nil))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `id="registration-repair-root"`) {
-		t.Fatal("expected registration repair root in the admin portal")
+	if page.Code != http.StatusOK || strings.Contains(page.Body.String(), `id="registration-repair-root"`) {
+		t.Fatal("expected registration repair to be owned by the React admin application")
 	}
-	for _, asset := range []string{"/assets/registration-repair.js", "/assets/registration-repair-i18n.js", "/assets/registration-repair.css"} {
-		response := httptest.NewRecorder()
-		StaticHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, asset, nil))
-		if response.Code != http.StatusOK || response.Body.Len() == 0 {
-			t.Fatalf("expected embedded repair asset %q", asset)
-		}
+	response := httptest.NewRecorder()
+	StaticHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/admin.js", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "profile-change-requests") || !strings.Contains(response.Body.String(), "registration-operations") {
+		t.Fatal("expected the built admin application to contain all identity repair queues")
 	}
 }

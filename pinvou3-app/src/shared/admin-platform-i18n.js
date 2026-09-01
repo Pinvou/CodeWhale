@@ -21,7 +21,7 @@ export const adminPlatformCopy = {
     refresh: '刷新',
     language: '界面语言',
     updated: '更新于',
-    search: '搜索用户名、名称、邮箱或 ID',
+    search: '搜索用户名、名称或 ID',
     searchAction: '搜索',
     username: '用户名',
     noData: '暂无数据',
@@ -110,7 +110,6 @@ export const adminPlatformCopy = {
       users: '用户',
       organizations: '组织',
       displayName: '显示名称',
-      email: '邮箱',
       status: '状态',
       memberships: '所属组织',
       lastSeen: '最近活动',
@@ -413,7 +412,7 @@ export const adminPlatformCopy = {
     refresh: 'Refresh',
     language: 'Language',
     updated: 'Updated',
-    search: 'Search username, name, email, or ID',
+    search: 'Search username, name, or ID',
     searchAction: 'Search',
     username: 'Username',
     noData: 'No data',
@@ -502,7 +501,6 @@ export const adminPlatformCopy = {
       users: 'Users',
       organizations: 'Organizations',
       displayName: 'Display name',
-      email: 'Email',
       status: 'Status',
       memberships: 'Organizations',
       lastSeen: 'Last active',
@@ -805,7 +803,7 @@ export const adminPlatformCopy = {
     refresh: '更新',
     language: '表示言語',
     updated: '更新日時',
-    search: 'ユーザー名、名前、メール、ID を検索',
+    search: 'ユーザー名、名前、ID を検索',
     searchAction: '検索',
     username: 'ユーザー名',
     noData: 'データがありません',
@@ -894,7 +892,6 @@ export const adminPlatformCopy = {
       users: 'ユーザー',
       organizations: '組織',
       displayName: '表示名',
-      email: 'メール',
       status: '状態',
       memberships: '所属組織',
       lastSeen: '最終利用',
@@ -1240,13 +1237,13 @@ Object.assign(adminPlatformCopy.ja.accounts, {
   lookupUnavailable: 'ユーザーコード検索を完了できません。完全なコードと権限を確認してください。',
 });
 Object.assign(adminPlatformCopy.zh, {
-  search: '搜索用户名、名称、邮箱、ID，或输入完整用户编码精确查询',
+  search: '搜索用户名、名称或 ID，或输入完整用户编码精确查询',
 });
 Object.assign(adminPlatformCopy.en, {
-  search: 'Search username, name, email, ID, or enter a complete user code',
+  search: 'Search username, name, or ID, or enter a complete user code',
 });
 Object.assign(adminPlatformCopy.ja, {
-  search: 'ユーザー名、名前、メール、ID を検索、または完全なユーザーコードを入力',
+  search: 'ユーザー名、名前、ID を検索、または完全なユーザーコードを入力',
 });
 
 Object.assign(adminPlatformCopy.zh.billing, {
@@ -1708,6 +1705,43 @@ Object.assign(adminPlatformCopy.ja.tokens, {
   protocol: 'プロトコル',
   adapterVersion: 'Adapter バージョン',
   upstreamReference: 'アップストリーム要求参照',
+});
+
+Object.assign(adminPlatformCopy.zh, {
+  userManagement: {
+    summary: '用户概况', totalUsers: '用户总数', activeUsers: '已启用用户', disabledUsers: '已停用用户', pendingRepairs: '待处理异常',
+    account: '用户账号', organizationCount: '组织数', fuzzySearch: '用户搜索', exactCode: '用户编码精确查询', codePlaceholder: '输入完整用户编码', lookup: '查询', codeLookupFailed: '未找到该用户编码，或查询暂时不可用。',
+    confirmDisable: (name, code) => `确定停用“${name}”（${code}）吗？停用后该用户的全部登录会话会立即失效，且无法继续访问平台。`, currentAccount: '当前账号', selfActionHelp: '不能在此停用当前登录的管理员账号。',
+    previous: '上一页', next: '下一页', pageSummary: (page, count) => `第 ${page} 页 · 本页 ${count} 条`,
+    exceptionWorkbench: '身份异常处理', exceptionLead: '仅展示需要人工介入的持久化流程；重试和补偿均受独立权限、审批策略与审计约束。', noRepairs: '当前没有需要处理的异常。', queueUnavailable: '该队列本次加载失败，可刷新页面后重试。',
+    registrationRepair: '注册恢复', registrationRepairLead: '处理身份创建、账号提交或钱包开通失败；补偿只在证据完整时开放。', profileRepair: '资料变更恢复', profileRepairLead: '重试用户名或手机号变更的失败阶段，不绕过校验。',
+    operation: '操作编号', request: '请求编号', responsibility: '责任服务', attempts: '尝试次数', reason: '诊断信息', field: '变更字段', retry: '重试', compensate: '补偿', repairFailed: '修复操作失败，请核对权限和当前状态。', confirmRetry: '确定重试当前失败阶段吗？', confirmCompensation: '确定执行注册补偿吗？该操作只清理未完成注册产生的孤立身份，且不可撤销。',
+    sla: 'SLA', olderThan: '早于（分钟）', all: '全部',
+  },
+});
+Object.assign(adminPlatformCopy.en, {
+  userManagement: {
+    summary: 'User summary', totalUsers: 'Total users', activeUsers: 'Enabled users', disabledUsers: 'Disabled users', pendingRepairs: 'Pending repairs',
+    account: 'User account', organizationCount: 'Organizations', fuzzySearch: 'User search', exactCode: 'Exact user-code lookup', codePlaceholder: 'Enter the complete user code', lookup: 'Look up', codeLookupFailed: 'The user code was not found or lookup is temporarily unavailable.',
+    confirmDisable: (name, code) => `Disable “${name}” (${code})? All of this user’s sessions will be revoked immediately and platform access will stop.`, currentAccount: 'Current account', selfActionHelp: 'The currently signed-in administrator cannot be disabled here.',
+    previous: 'Previous', next: 'Next', pageSummary: (page, count) => `Page ${page} · ${count} on this page`,
+    exceptionWorkbench: 'Identity exception handling', exceptionLead: 'Only durable workflows requiring manual intervention are shown. Retries and compensation remain permission-, policy-, and audit-controlled.', noRepairs: 'No exceptions currently require action.', queueUnavailable: 'This queue could not be loaded. Refresh the page to retry.',
+    registrationRepair: 'Registration recovery', registrationRepairLead: 'Handle identity creation, account commit, or wallet provisioning failures. Compensation appears only with complete evidence.', profileRepair: 'Profile-change recovery', profileRepairLead: 'Retry failed username or mobile-change stages without bypassing validation.',
+    operation: 'Operation', request: 'Request', responsibility: 'Responsible service', attempts: 'Attempts', reason: 'Diagnostics', field: 'Field', retry: 'Retry', compensate: 'Compensate', repairFailed: 'The repair action failed. Check permission and current state.', confirmRetry: 'Retry the current failed stage?', confirmCompensation: 'Run registration compensation? This irreversibly removes only an orphaned identity from an incomplete registration.',
+    sla: 'SLA', olderThan: 'Older than (minutes)', all: 'All',
+  },
+});
+Object.assign(adminPlatformCopy.ja, {
+  userManagement: {
+    summary: 'ユーザー概要', totalUsers: 'ユーザー総数', activeUsers: '有効ユーザー', disabledUsers: '無効ユーザー', pendingRepairs: '要対応の異常',
+    account: 'ユーザーアカウント', organizationCount: '組織数', fuzzySearch: 'ユーザー検索', exactCode: 'ユーザーコード完全一致検索', codePlaceholder: '完全なユーザーコードを入力', lookup: '検索', codeLookupFailed: 'ユーザーコードが見つからないか、検索を一時的に利用できません。',
+    confirmDisable: (name, code) => `「${name}」（${code}）を無効にしますか？このユーザーの全セッションは直ちに失効し、プラットフォームへアクセスできなくなります。`, currentAccount: '現在のアカウント', selfActionHelp: '現在ログイン中の管理者アカウントはここでは無効にできません。',
+    previous: '前へ', next: '次へ', pageSummary: (page, count) => `${page} ページ · このページ ${count} 件`,
+    exceptionWorkbench: 'ID 異常処理', exceptionLead: '手動介入が必要な永続ワークフローのみ表示します。再試行と補償は個別権限、ポリシー、監査で制御されます。', noRepairs: '現在対応が必要な異常はありません。', queueUnavailable: 'このキューを読み込めませんでした。ページを更新して再試行してください。',
+    registrationRepair: '登録復旧', registrationRepairLead: 'ID 作成、アカウント確定、ウォレット開通の失敗を処理します。証跡が揃った場合のみ補償できます。', profileRepair: 'プロフィール変更復旧', profileRepairLead: '検証を回避せず、ユーザー名または携帯番号変更の失敗段階を再試行します。',
+    operation: '操作番号', request: 'リクエスト番号', responsibility: '担当サービス', attempts: '試行回数', reason: '診断情報', field: '変更フィールド', retry: '再試行', compensate: '補償', repairFailed: '修復操作に失敗しました。権限と現在の状態を確認してください。', confirmRetry: '現在の失敗段階を再試行しますか？', confirmCompensation: '登録補償を実行しますか？未完了登録の孤立 ID のみを削除し、元に戻せません。',
+    sla: 'SLA', olderThan: '経過時間（分）', all: 'すべて',
+  },
 });
 
 Object.assign(adminPlatformCopy.zh, {
