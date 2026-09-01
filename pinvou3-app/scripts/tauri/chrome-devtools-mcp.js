@@ -15,7 +15,7 @@ const fs = require("node:fs");
 const https = require("node:https");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { pipeline } = require("node:stream/promises");
+const { finished, pipeline } = require("node:stream/promises");
 const { setTimeout: delay } = require("node:timers/promises");
 const { APP_ROOT } = require("./platform-config.js");
 
@@ -220,6 +220,11 @@ function requestHttps(url, { get = https.get, timeoutMs = DOWNLOAD_TIMEOUT_MS } 
   });
 }
 
+async function discardResponse(response) {
+  response.resume();
+  await finished(response);
+}
+
 async function downloadHttpsOnce(
   url,
   destination,
@@ -235,7 +240,7 @@ async function downloadHttpsOnce(
     const statusCode = response.statusCode || 0;
     if (statusCode >= 300 && statusCode < 400) {
       const location = response.headers.location;
-      response.resume();
+      await discardResponse(response);
       if (!location) {
         throw new Error(`Vendor download redirect ${statusCode} omitted Location`);
       }
@@ -247,7 +252,7 @@ async function downloadHttpsOnce(
       continue;
     }
     if (statusCode !== 200) {
-      response.resume();
+      await discardResponse(response);
       throw new Error(`Vendor download failed with HTTP ${statusCode}`);
     }
     fs.mkdirSync(path.dirname(destination), { recursive: true });

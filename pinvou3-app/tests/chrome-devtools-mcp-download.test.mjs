@@ -23,12 +23,13 @@ function fakeHttpsGet(routes, requests) {
     queueMicrotask(() => {
       const key = url.toString();
       requests.push({ url: key, options });
-      const route = routes.get(key);
-      if (!route) {
+      const configuredRoute = routes.get(key);
+      if (!configuredRoute) {
         request.emit("error", new Error(`unexpected request: ${key}`));
         return;
       }
-      const response = Readable.from(route.body ? [route.body] : []);
+      const route = typeof configuredRoute === "function" ? configuredRoute() : configuredRoute;
+      const response = route.response || Readable.from(route.body ? [route.body] : []);
       response.statusCode = route.statusCode;
       response.headers = route.headers || {};
       onResponse(response);
@@ -126,6 +127,58 @@ test("vendor download retries without retaining a partial tarball", async () => 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const discardedStatus of [302, 503]) {
+  test(`vendor download retries when a discarded HTTP ${discardedStatus} response errors`, async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-cdmcp-download-"));
+    const destination = path.join(root, "package.tgz");
+    const requests = [];
+    let discardedResponses = 0;
+    const get = fakeHttpsGet(
+      new Map([
+        [
+          "https://registry.example.test/package.tgz",
+          () => {
+            discardedResponses += 1;
+            if (discardedResponses === 1) {
+              const response = new Readable({
+                read: () => response.destroy(
+                  new Error(`discarded ${discardedStatus} response failed`),
+                ),
+              });
+              return {
+                statusCode: discardedStatus,
+                headers: discardedStatus === 302 ? { location: "/objects/package.tgz" } : {},
+                response,
+              };
+            }
+            return discardedStatus === 302
+              ? { statusCode: 302, headers: { location: "/objects/package.tgz" } }
+              : { statusCode: 200, body: Buffer.from("recovered tarball") };
+          },
+        ],
+        [
+          "https://registry.example.test/objects/package.tgz",
+          { statusCode: 200, body: Buffer.from("redirected tarball") },
+        ],
+      ]),
+      requests,
+    );
+    const expectedBody = discardedStatus === 302 ? "redirected tarball" : "recovered tarball";
+    try {
+      await downloadWithRetries("https://registry.example.test/package.tgz", destination, {
+        attempts: 2,
+        retryDelayMs: 0,
+        sleep: async () => {},
+        download: (url, file) => downloadHttpsOnce(url, file, { get }),
+      });
+      assert.equal(fs.readFileSync(destination, "utf8"), expectedBody);
+      assert.equal(discardedResponses, 2, "the discarded response error must reach the retry loop");
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("vendor script has no external curl dependency", () => {
   const source = fs.readFileSync(
