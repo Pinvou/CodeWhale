@@ -269,6 +269,10 @@ func TestSystemStatusAggregatesInternalHealthWithoutExposingEndpoints(t *testing
 				w.WriteHeader(http.StatusMethodNotAllowed)
 				return
 			}
+			if r.Header.Get("X-Pinvou-Client-Version") != "0.8.0" || r.Header.Get("X-Pinvou-Client-Source") == "" {
+				w.WriteHeader(http.StatusUpgradeRequired)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"platform_permissions":["platform.system.status.read"]}`)
 		case "/admin/v1/overview":
@@ -294,6 +298,7 @@ func TestSystemStatusAggregatesInternalHealthWithoutExposingEndpoints(t *testing
 		AuthorizationURL: parsed,
 		TokenURL:         parsed,
 		ClientID:         "portal",
+		ClientVersion:    "0.8.0",
 		AccountURL:       parsed,
 		BillingURL:       parsed,
 		TokenGatewayURL:  parsed,

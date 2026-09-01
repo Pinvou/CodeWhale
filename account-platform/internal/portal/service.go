@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/api"
+	"github.com/Pinvou/pinvou3/account-platform/internal/platform/clientcompat"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/httpserver"
 	"github.com/Pinvou/pinvou3/account-platform/internal/platform/observability"
 	"github.com/google/uuid"
@@ -274,10 +275,7 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	}
 	request.Header.Set("Authorization", "Bearer "+session.AccessToken)
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("X-Pinvou-Client-Source", portalClientSource(r))
-	if s.config.ClientVersion != "" {
-		request.Header.Set("X-Pinvou-Client-Version", s.config.ClientVersion)
-	}
+	s.applyClientCompatibilityHeaders(request, portalClientSource(r))
 	if contentType := r.Header.Get("Content-Type"); contentType != "" {
 		request.Header.Set("Content-Type", contentType)
 	}
@@ -315,6 +313,15 @@ func (s *Service) proxy(w http.ResponseWriter, r *http.Request, upstream *url.UR
 	}
 	w.WriteHeader(response.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(response.Body, 32<<20))
+}
+
+func (s *Service) applyClientCompatibilityHeaders(request *http.Request, source string) {
+	if source = strings.TrimSpace(source); source != "" {
+		request.Header.Set("X-Pinvou-Client-Source", source)
+	}
+	if version := strings.TrimSpace(s.config.ClientVersion); version != "" {
+		request.Header.Set(clientcompat.ClientVersionHeader, version)
+	}
 }
 
 func (s *Service) authenticatedSession(ctx context.Context, r *http.Request) (Session, error) {

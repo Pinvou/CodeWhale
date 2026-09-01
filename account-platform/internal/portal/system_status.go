@@ -74,7 +74,7 @@ func (s *Service) adminSystemStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authorizationContext, cancelAuthorization := context.WithTimeout(r.Context(), 5*time.Second)
-	authorized, available := s.hasSystemStatusPermission(authorizationContext, session.AccessToken)
+	authorized, available := s.hasSystemStatusPermission(authorizationContext, session.AccessToken, portalClientSource(r))
 	cancelAuthorization()
 	if !available {
 		api.WriteError(w, http.StatusServiceUnavailable, "ADMIN_AUTH_UNAVAILABLE", "administrator authorization could not be verified", httpserver.RequestID(r.Context()))
@@ -91,7 +91,7 @@ func (s *Service) adminSystemStatus(w http.ResponseWriter, r *http.Request) {
 	api.WriteJSON(w, http.StatusOK, result)
 }
 
-func (s *Service) hasSystemStatusPermission(ctx context.Context, accessToken string) (bool, bool) {
+func (s *Service) hasSystemStatusPermission(ctx context.Context, accessToken, clientSource string) (bool, bool) {
 	target := endpoint(s.config.AccountURL, "/v1/account/bootstrap")
 	if target == nil {
 		return false, false
@@ -103,6 +103,7 @@ func (s *Service) hasSystemStatusPermission(ctx context.Context, accessToken str
 	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer "+accessToken)
+	s.applyClientCompatibilityHeaders(request, clientSource)
 	response, err := s.client.Do(request)
 	if err != nil {
 		return false, false
