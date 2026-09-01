@@ -726,6 +726,11 @@ fn command_is_chained(command: &str) -> bool {
 /// direction. Matching stays anchored at the first positional token, so a
 /// non-flag token that isn't in the rule ends it — `git push` does not block
 /// `git checkout push`, and `rm` does not block `rmdir`.
+///
+/// One command-side spelling widens what a rule can name: cmd.exe-style
+/// single-letter `/` flags (`del /f /s /q`) are skippable like `-` flags, in
+/// any position, so a rule holds against every interleaving without the app
+/// enumerating canonical flag sequences.
 fn denied_prefix_matches(rule: &str, command: &str) -> bool {
     let rule_tokens: Vec<String> = normalize_command(rule)
         .split_whitespace()
@@ -776,11 +781,16 @@ fn denied_prefix_matches(rule: &str, command: &str) -> bool {
         if matches_rule_token {
             stack.push((i + 1, j + 1));
         }
-        if token.starts_with('-') {
+        if token.starts_with('-') || is_single_letter_slash_flag(token) {
             // An unrelated flag is skippable — alone, and (when it could take
             // a separate value) together with the token after it. Consuming it
-            // as a rule token above takes priority, so a rule that names a flag
-            // (`cargo test --danger`) still matches it.
+            // as a rule token above takes priority, so a rule that names a
+            // flag (`cargo test --danger`) still matches it. cmd.exe spells
+            // its flags the same way shells spell paths, so only the
+            // single-letter shape (`/f`, `/s`, `/q`, `/y`) may skip; anything
+            // longer is a POSIX path (`/tmp`, `/etc`, `/usr`, `/dev`) and must
+            // stay positional, or `cp /tmp/new_key ~/.ssh/authorized_keys`
+            // would slip past a rule guarding `~/.ssh/authorized_keys`.
             stack.push((i + 1, j));
             if !token.contains('=') {
                 stack.push((i + 2, j));
@@ -790,6 +800,18 @@ fn denied_prefix_matches(rule: &str, command: &str) -> bool {
         // this path, which is what keeps the match anchored.
     }
     false
+}
+
+/// True for a cmd.exe-style single-letter flag such as `/f`, `/s`, `/q`, `/y`.
+///
+/// cmd.exe flags are a slash plus exactly one letter (`del /f /s /q`, `xcopy
+/// /e /y`), so only that shape may skip like a `-` flag. The narrowness is
+/// load-bearing: multi-character `/`-tokens are real POSIX paths (`/tmp`,
+/// `/etc`, `/usr`, `/dev`) and must keep matching positionally. Case needs no
+/// handling here — `normalize_command` has already lowercased the token.
+fn is_single_letter_slash_flag(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    bytes.len() == 2 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic()
 }
 
 /// Whether a command word matches a deny rule's command word.
@@ -1392,6 +1414,75 @@ mod tests {
             .check(ctx("rmdir empty-dir", AskForApproval::UnlessTrusted))
             .unwrap();
         assert!(allowed.allow, "rmdir must not be denied: {allowed:?}");
+    }
+
+    #[test]
+    fn denied_prefix_skips_cmd_exe_single_letter_slash_flags() {
+        // cmd.exe spells its flags `/f`, `/s`, `/q` — a slash plus exactly one
+        // letter, in any order and position. A deny rule must hold against
+        // every interleaving (`del /f /s /q`, `del /q /s /f`, ...); the app
+        // would otherwise have to enumerate canonical flag sequences, so the
+        // engine skips the shape itself, like `-` flags.
+        let engine = ExecPolicyEngine::new(
+            vec![],
+            vec![
+                r"del c:\users\x\file".to_string(),
+                r"xcopy c:\src d:\dst".to_string(),
+            ],
+        );
+        for command in [
+            r"del c:\users\x\file",
+            r"del /f c:\users\x\file",
+            r"del /f /s /q c:\users\x\file",
+            r"del /q /s /f c:\users\x\file",
+            r"del /f c:\users\x\file /s /q",
+            r"xcopy /e /y c:\src d:\dst",
+        ] {
+            let decision = engine.check(ctx(command, AskForApproval::Never)).unwrap();
+            assert!(
+                !decision.allow,
+                "cmd.exe flag spelling evaded deny: {command:?} -> {decision:?}"
+            );
+        }
+        // A rule that NAMES a `/x` flag still consumes it as a rule token —
+        // the rule-token branch is tried before the skip branches.
+        let named = ExecPolicyEngine::new(vec![], vec![r"del /q c:\x".to_string()]);
+        let decision = named
+            .check(ctx(r"del /q c:\x", AskForApproval::Never))
+            .unwrap();
+        assert!(
+            !decision.allow,
+            "rule naming a slash flag missed: {decision:?}"
+        );
+    }
+
+    #[test]
+    fn denied_prefix_slash_skipping_keeps_multi_char_slash_tokens_positional() {
+        // The single-letter constraint is load-bearing: `/tmp` is a POSIX
+        // directory, not a flag. If multi-character `/`-tokens skipped, an
+        // exfil command could hide its real operand behind a skipped path and
+        // slip past a rule guarding the sensitive target.
+        let engine = ExecPolicyEngine::new(vec![], vec!["cp ~/.ssh/authorized_keys".to_string()]);
+        for command in [
+            "cp /tmp/new_key ~/.ssh/authorized_keys",
+            "cp /etc/passwd ~/.ssh/authorized_keys",
+        ] {
+            let decision = engine
+                .check(ctx(command, AskForApproval::UnlessTrusted))
+                .unwrap();
+            assert!(
+                decision.allow,
+                "POSIX path argument wrongly treated as a flag: {command:?} -> {decision:?}"
+            );
+        }
+        // The guarded target itself still denies, skip branches or not.
+        let denied = engine
+            .check(ctx(
+                "cp ~/.ssh/authorized_keys ~/.ssh/authorized_keys.bak",
+                AskForApproval::Never,
+            ))
+            .unwrap();
+        assert!(!denied.allow, "guarded target must stay denied: {denied:?}");
     }
 
     #[test]
