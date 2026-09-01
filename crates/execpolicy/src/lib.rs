@@ -379,7 +379,9 @@ impl ExecPolicyEngine {
     fn lock_rulesets(
         rulesets: &Arc<RwLock<Vec<Ruleset>>>,
     ) -> std::sync::RwLockWriteGuard<'_, Vec<Ruleset>> {
-        rulesets.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+        rulesets
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Read-only snapshot of the shared ruleset list.
