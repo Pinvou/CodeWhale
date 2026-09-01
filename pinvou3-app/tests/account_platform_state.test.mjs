@@ -5,7 +5,7 @@ import { createContextRequestGuard, eligibleForContext, rechargePollDelay } from
 import { formatPoints, formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT, microcreditsToPoints } from '../src/features/account-platform/credit-units.js';
 import { activeEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from '../src/features/account-platform/entitlement-view.js';
 import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from '../src/features/account-platform/order-view.js';
-import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
+import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from '../src/features/account-platform/portal-sections.js';
 import { AccountPlatformBffClient } from '../src/features/account-platform/bff-client.js';
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
@@ -191,6 +191,9 @@ test('Web personal center uses a permission-gated organization tab and describes
   assert.equal(availablePortalSection('?section=accountSettings', ['creditsUsage', 'accountSettings']), 'accountSettings');
   assert.equal(portalSectionLocation('ordersInvoices', '?profile=mobile&lang=zh', '/', false), '/?lang=zh&section=ordersInvoices');
   assert.equal(portalSectionLocation('accountSettings', '?profile=mobile', '/', true), '/?profile=mobile&section=accountSettings');
+  assert.equal(portalLoginLocation('/', '?section=creditsUsage'), '/auth/login?return_to=%2F%3Fsection%3DcreditsUsage');
+  assert.equal(portalLoginLocation('/admin.html', '?section=users'), '/auth/login?return_to=%2Fadmin.html%3Fsection%3Dusers');
+  assert.equal(portalLoginLocation('//evil.example', '?section=creditsUsage'), '/auth/login?return_to=%2F%3Fsection%3DcreditsUsage');
   for (const locale of ['zh', 'en', 'ja']) {
     assert.ok(accountPlatformCopy[locale].sections.creditsUsage);
     assert.ok(accountPlatformCopy[locale].sections.ordersInvoices);
@@ -459,6 +462,26 @@ test('BFF client keeps CSRF on mutations and never persists OIDC tokens', async 
     assert.equal(JSON.parse(calls[1].options.body).expected_context_version, 7);
     assert.equal('accessToken' in client, false);
     assert.equal('refreshToken' in client, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('BFF session distinguishes an expired login from a temporary service failure', async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ authenticated: false }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    const client = new AccountPlatformBffClient('https://portal.example');
+    assert.deepEqual(await client.session(), { authenticated: false });
+
+    globalThis.fetch = async () => new Response(JSON.stringify({ code: 'SESSION_STORE_UNAVAILABLE', message: 'temporary failure' }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json' },
+    });
+    await assert.rejects(client.session(), (error) => error.status === 503 && error.code === 'SESSION_STORE_UNAVAILABLE');
   } finally {
     globalThis.fetch = originalFetch;
   }

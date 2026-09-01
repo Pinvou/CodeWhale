@@ -21,3 +21,14 @@ export function portalSectionLocation(section, search = '', pathname = '/', pres
   const query = params.toString();
   return `${pathname || '/'}${query ? `?${query}` : ''}`;
 }
+
+export function portalLoginLocation(pathname = '/', search = '') {
+  const safePathname = typeof pathname === 'string'
+    && pathname.startsWith('/')
+    && !pathname.startsWith('//')
+    && !/[\r\n]/.test(pathname)
+    ? pathname
+    : '/';
+  const safeSearch = typeof search === 'string' && search.startsWith('?') && !/[\r\n]/.test(search) ? search : '';
+  return `/auth/login?return_to=${encodeURIComponent(`${safePathname}${safeSearch}`)}`;
+}

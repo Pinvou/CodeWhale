@@ -53,8 +53,9 @@ export class AccountPlatformBffClient {
       cache: 'no-store',
       signal,
     });
-    if (!response.ok) return { authenticated: false };
-    const payload = await response.json();
+    const payload = await response.json().catch(() => ({}));
+    if (response.status === 401) return { authenticated: false };
+    if (!response.ok) throw errorFromResponse(response, payload);
     this.csrfToken = payload.csrf_token || '';
     return payload;
   }

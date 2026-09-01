@@ -2,6 +2,7 @@ package portal
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,12 @@ type memoryStore struct {
 	mu       sync.Mutex
 	flows    map[string]LoginFlow
 	sessions map[string]Session
+}
+
+type unavailableSessionStore struct{ *memoryStore }
+
+func (s *unavailableSessionStore) GetSession(context.Context, string) (Session, error) {
+	return Session{}, errors.New("session store unavailable")
 }
 
 func newMemoryStore() *memoryStore {
@@ -143,6 +150,37 @@ func TestAnonymousPortalRootReturnsToCreditsAndUsageByDefault(t *testing.T) {
 	flow := store.flows[location.Query().Get("state")]
 	if flow.ReturnTo != "/?section=creditsUsage" {
 		t.Fatalf("default return target = %q", flow.ReturnTo)
+	}
+}
+
+func TestPortalDoesNotTurnSessionStoreFailureIntoLoginRedirect(t *testing.T) {
+	store := &unavailableSessionStore{memoryStore: newMemoryStore()}
+	service := testService(t, store)
+	request := httptest.NewRequest(http.MethodGet, "/?section=creditsUsage", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: "existing-session"})
+	response := httptest.NewRecorder()
+
+	service.Handler(http.NotFoundHandler()).ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if location := response.Header().Get("Location"); location != "" {
+		t.Fatalf("session store failure must not start a login loop: %q", location)
+	}
+}
+
+func TestSessionEndpointDistinguishesStoreFailureFromExpiredLogin(t *testing.T) {
+	store := &unavailableSessionStore{memoryStore: newMemoryStore()}
+	service := testService(t, store)
+	request := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	request.AddCookie(&http.Cookie{Name: service.sessionCookieName(), Value: "existing-session"})
+	response := httptest.NewRecorder()
+
+	service.Handler(nil).ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "SESSION_UNAVAILABLE") {
+		t.Fatalf("unexpected session response: %d %s", response.Code, response.Body.String())
 	}
 }
 

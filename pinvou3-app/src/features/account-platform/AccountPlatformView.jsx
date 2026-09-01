@@ -3,7 +3,7 @@ import { createContextRequestGuard, rechargePollDelay } from './context-guard.js
 import { formatUsagePoints, formatWholePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { activeEntitlementPackages, allEntitlementPackages, entitlementProgress, remainingEntitlementMicrocredits } from './entitlement-view.js';
 import { compactOrderID, isPayablePaymentOrder, orderDurationDays, orderHistoryTimestamp, orderSummaryStatus, payablePaymentOrders, paymentOrderHistory, paymentOrderRemainingSeconds } from './order-view.js';
-import { availablePortalSection, initialPortalSection, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
+import { availablePortalSection, initialPortalSection, portalLoginLocation, portalNavigationSections, portalSectionLocation } from './portal-sections.js';
 import { authorizationVersionChanged, authorizationVersions, canAccessOrganizationPortal, hasPermission, personalSurfaceAccess } from './authorization-ui.js';
 import { summarizeUsageRecords } from './usage-summary.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
@@ -415,7 +415,9 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   }, [portal]);
 
   useEffect(() => {
-    if (portal && (auth === 'guest' || auth === 'error')) globalThis.location.replace('/auth/login');
+    if (portal && auth === 'guest') {
+      globalThis.location.replace(portalLoginLocation(globalThis.location?.pathname || '/', globalThis.location?.search || ''));
+    }
   }, [auth, portal]);
 
   useEffect(() => {
@@ -606,7 +608,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
         {copy.loading}
       </div>
     );
-  if (portal && (auth === 'guest' || auth === 'error'))
+  if (portal && auth === 'guest')
     return (
       <div className="ap-shell ap-centered ap-portal">
         <div className="ap-spinner" />
@@ -626,9 +628,15 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             </div>
           )}
           {portal ? (
-            <a className="ap-primary" href="/auth/login">
-              {copy.login}
-            </a>
+            auth === 'error' ? (
+              <button className="ap-primary" onClick={() => globalThis.location.reload()}>
+                {copy.retry}
+              </button>
+            ) : (
+              <a className="ap-primary" href={portalLoginLocation(globalThis.location?.pathname || '/', globalThis.location?.search || '')}>
+                {copy.login}
+              </a>
+            )
           ) : (
             <button className="ap-primary" disabled={busy} onClick={login}>
               {busy ? copy.signingIn : copy.login}

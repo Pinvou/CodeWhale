@@ -99,7 +99,7 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 				portalQuery.Set("section", "creditsUsage")
 				portalURL.RawQuery = portalQuery.Encode()
 			}
-			if _, err := s.authenticatedSession(r.Context(), r); err != nil {
+			if _, err := s.authenticatedSession(r.Context(), r); errors.Is(err, ErrSessionNotFound) {
 				loginRequest := r.Clone(r.Context())
 				loginURL := *r.URL
 				query := loginURL.Query()
@@ -107,6 +107,9 @@ func (s *Service) Handler(static http.Handler) http.Handler {
 				loginURL.RawQuery = query.Encode()
 				loginRequest.URL = &loginURL
 				s.login(w, loginRequest)
+				return
+			} else if err != nil {
+				api.WriteError(w, http.StatusServiceUnavailable, "SESSION_UNAVAILABLE", "the login session could not be checked", httpserver.RequestID(r.Context()))
 				return
 			}
 			if portalURL.RawQuery != r.URL.RawQuery {
@@ -211,6 +214,10 @@ func (s *Service) callback(w http.ResponseWriter, r *http.Request) {
 func (s *Service) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	session, err := s.authenticatedSession(r.Context(), r)
 	if err != nil {
+		if !errors.Is(err, ErrSessionNotFound) {
+			api.WriteError(w, http.StatusServiceUnavailable, "SESSION_UNAVAILABLE", "the login session could not be checked", httpserver.RequestID(r.Context()))
+			return
+		}
 		api.WriteJSON(w, http.StatusUnauthorized, map[string]any{"authenticated": false})
 		return
 	}
@@ -330,7 +337,10 @@ func (s *Service) authenticatedSession(ctx context.Context, r *http.Request) (Se
 		return Session{}, ErrSessionNotFound
 	}
 	session, err := s.store.GetSession(ctx, cookie.Value)
-	if err != nil || !session.RefreshExpiresAt.After(s.now()) {
+	if err != nil {
+		return Session{}, err
+	}
+	if !session.RefreshExpiresAt.After(s.now()) {
 		return Session{}, ErrSessionNotFound
 	}
 	if session.AccessExpiresAt.After(s.now().Add(30 * time.Second)) {
