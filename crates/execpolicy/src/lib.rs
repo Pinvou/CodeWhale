@@ -844,6 +844,13 @@ fn is_single_letter_slash_flag(token: &str) -> bool {
 /// direction only: a rule that spells a path (`/usr/bin/rm`) still requires
 /// that path, because the rule author asked for it specifically. Both
 /// separators are honored so a Windows spelling cannot slip past.
+///
+/// A trailing `.exe` on the command's basename also folds: Windows spells the
+/// same binary `cat.exe` or `C:\Windows\System32\cat.exe`, and a `cat
+/// ~/.ssh/id_rsa` rule must hold against that spelling too. The fold is one
+/// direction only — when the RULE itself ends in `.exe` (`control.exe`) it
+/// keeps requiring that spelling, and `catalog` never matches `cat` because
+/// only a whole `.exe` suffix strips, never a prefix.
 fn command_word_matches(rule_token: &str, command_token: &str) -> bool {
     if command_token == rule_token {
         return true;
@@ -852,10 +859,15 @@ fn command_word_matches(rule_token: &str, command_token: &str) -> bool {
     if rule_token.contains('/') || rule_token.contains('\\') {
         return false;
     }
-    let basename = command_token
+    let mut basename = command_token
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(command_token);
+    if !rule_token.ends_with(".exe")
+        && let Some(stem) = basename.strip_suffix(".exe")
+    {
+        basename = stem;
+    }
     !basename.is_empty() && basename == rule_token
 }
 
@@ -1615,6 +1627,54 @@ mod tests {
             path.allow,
             "leading wildcard must not gain command-word folding: {path:?}"
         );
+    }
+
+    #[test]
+    fn denied_prefix_folds_windows_exe_suffix_on_the_command_word() {
+        // Windows spells the same binary `cat.exe` or
+        // `C:\Windows\System32\cat.exe`; a `cat ~/.ssh/id_rsa` rule must hold
+        // against those spellings. The fold is one-directional: a rule that
+        // names `.exe` itself keeps requiring it, and only a WHOLE `.exe`
+        // suffix strips — `catalog` never becomes `cat`.
+        let engine = ExecPolicyEngine::new(vec![], vec!["cat ~/.ssh/id_rsa".to_string()]);
+        for command in [
+            "cat ~/.ssh/id_rsa",
+            "cat.exe ~/.ssh/id_rsa",
+            "cat.EXE ~/.ssh/id_rsa",
+            r"C:\Windows\System32\cat.exe ~/.ssh/id_rsa",
+        ] {
+            let decision = engine.check(ctx(command, AskForApproval::Never)).unwrap();
+            assert!(
+                !decision.allow,
+                "`.exe` spelling evaded deny: {command:?} -> {decision:?}"
+            );
+        }
+
+        // A rule ending in `.exe` must still require that spelling: the bare
+        // `control` is a different binary and must not match `control.exe`.
+        let control = ExecPolicyEngine::new(vec![], vec!["control.exe".to_string()]);
+        let spelled = control
+            .check(ctx("control.exe", AskForApproval::Never))
+            .unwrap();
+        assert!(!spelled.allow, "control.exe must be denied: {spelled:?}");
+        let bare = control
+            .check(ctx("control", AskForApproval::UnlessTrusted))
+            .unwrap();
+        assert!(
+            bare.allow,
+            "bare `control` must not match rule `control.exe`: {bare:?}"
+        );
+
+        // Only a whole `.exe` suffix folds, never a word prefix.
+        for command in ["catalog ~/.ssh/id_rsa", "catalog.exe ~/.ssh/id_rsa"] {
+            let decision = engine
+                .check(ctx(command, AskForApproval::UnlessTrusted))
+                .unwrap();
+            assert!(
+                decision.allow,
+                "prefix word must not fold into the rule word: {command:?} -> {decision:?}"
+            );
+        }
     }
 
     #[test]
