@@ -38,6 +38,468 @@ fn tool_log_message_for_policy(
     }
 }
 
+/// Repair only benchmark read calls whose intent can be recovered without
+/// changing the requested resource. The caller is feature- and host-gated;
+/// normal engine calls retain strict schema validation.
+#[cfg(feature = "benchmark-eval-controls")]
+fn repair_benchmark_read_call(
+    tool_name: &str,
+    input: &mut serde_json::Value,
+    workspace: &std::path::Path,
+) -> Vec<&'static str> {
+    let Some(object) = input.as_object_mut() else {
+        return Vec::new();
+    };
+    let original_object = object.clone();
+    let mut repairs = Vec::new();
+    let is_web = matches!(tool_name, "Web" | "web" | "web_search" | "fetch_url");
+    let is_file = matches!(
+        tool_name,
+        "File" | "file" | "read_file" | "file_search" | "grep_files" | "list_files"
+    );
+    let is_image = tool_name == "image_analyze";
+
+    // Preserve the File execution layer's documented aliases before pruning
+    // cross-action parameters. Conflicting aliases are deliberately left for
+    // the strict execution layer to reject instead of being guessed away.
+    if is_file {
+        match fold_benchmark_alias_group(object, "path", &["file_path", "filePath"]) {
+            Ok(true) => repairs.push("file_parameter_alias"),
+            Ok(false) => {}
+            Err(()) => {
+                *object = original_object;
+                return Vec::new();
+            }
+        }
+    }
+    let has_action = object
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+
+    if !has_action {
+        let inferred = if is_web
+            && object
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            Some("fetch")
+        } else if is_web
+            && (object
+                .get("query")
+                .or_else(|| object.get("q"))
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+                || object
+                    .get("search_query")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some())
+        {
+            Some("search")
+        } else if is_file
+            && object
+                .get("pattern")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            Some("search_content")
+        } else if is_file
+            && object
+                .get("query")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+        {
+            Some("search_name")
+        } else if is_file
+            && object
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .is_some()
+            && !["content", "text", "data", "patch", "search", "replace"]
+                .iter()
+                .any(|key| object.contains_key(*key))
+        {
+            Some("read")
+        } else {
+            None
+        };
+        if let Some(inferred) = inferred {
+            object.insert(
+                "action".to_string(),
+                serde_json::Value::String(inferred.to_string()),
+            );
+            repairs.push("action");
+        }
+    }
+
+    if is_web {
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let has_url = object
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_query = object
+            .get("query")
+            .or_else(|| object.get("q"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+            || object
+                .get("search_query")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|value| !value.is_empty());
+        let normalized_action = match action {
+            "get" | "open" | "browse" | "read" if has_url => Some("fetch"),
+            "web_search" | "search_query" if has_query => Some("search"),
+            "fetch" if !has_url && has_query => Some("search"),
+            "search" if !has_query && has_url => Some("fetch"),
+            _ => None,
+        };
+        if let Some(action) = normalized_action {
+            object.insert(
+                "action".to_string(),
+                serde_json::Value::String(action.to_string()),
+            );
+            repairs.push("action_alias");
+        }
+
+        if object.remove("fields").is_some() {
+            // `fields` is an optional projection over a fetched JSON response,
+            // not part of the requested resource. Small local models emit a
+            // much wider JSONPath dialect than this tool implements and also
+            // attach the fetch-only parameter to searches. Returning the full,
+            // already size-bounded response is deterministic and preserves the
+            // evidence while avoiding a projection-only failure.
+            repairs.push("optional_fields_removed");
+        }
+
+        if let Some(max_chars) = object.remove("max_chars") {
+            if object.get("max_bytes").is_none() && max_chars.is_number() {
+                object.insert("max_bytes".to_string(), max_chars);
+            }
+            // When max_bytes already exists, max_chars is just an unsupported
+            // duplicate. Mapping characters to bytes is intentionally a
+            // stricter cap for multi-byte text. Either way the alias must not
+            // reach per-action validation.
+            repairs.push("max_chars_alias");
+        }
+
+        if let Some(format) = object
+            .get("format")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+        {
+            let normalized = match format.to_ascii_lowercase().as_str() {
+                "txt" | "plain" => Some("text"),
+                "md" => Some("markdown"),
+                "html" | "bytes" | "json" => Some("raw"),
+                _ => None,
+            };
+            if let Some(normalized) = normalized {
+                object.insert(
+                    "format".to_string(),
+                    serde_json::Value::String(normalized.to_string()),
+                );
+                repairs.push("format_alias");
+            }
+        }
+
+        for key in [
+            "max_results",
+            "timeout_ms",
+            "max_bytes",
+            "port",
+            "poll_interval_ms",
+        ] {
+            if normalize_benchmark_u64(object, key) {
+                repairs.push("numeric_string");
+            }
+        }
+
+        if let Some(domain) = object
+            .get("domains")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|domain| !domain.is_empty())
+            .map(str::to_owned)
+        {
+            object.insert(
+                "domains".to_string(),
+                serde_json::Value::Array(vec![serde_json::Value::String(domain)]),
+            );
+            repairs.push("domains_array");
+        }
+
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let irrelevant = match action {
+            "search" => &["url", "format", "max_bytes", "host", "port"][..],
+            "fetch" => &[
+                "query",
+                "q",
+                "search_query",
+                "max_results",
+                "recency",
+                "domains",
+                "locale",
+                "host",
+                "port",
+            ][..],
+            _ => &[][..],
+        };
+        let mut removed_irrelevant = false;
+        for key in irrelevant {
+            removed_irrelevant |= object.remove(*key).is_some();
+        }
+        if removed_irrelevant {
+            // These keys belong to a different explicit action. They cannot
+            // affect the selected URL/query and only make strict per-action
+            // validation reject an otherwise unambiguous read request.
+            repairs.push("cross_action_parameters");
+        }
+    }
+
+    if is_file {
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let normalized_action = match action {
+            "open" | "cat" | "get" | "read_file" => Some("read"),
+            "ls" | "dir" | "list_dir" => Some("list"),
+            "find" | "file_search" if object.get("query").is_some() => Some("search_name"),
+            "grep" | "grep_files" if object.get("pattern").is_some() => Some("search_content"),
+            _ => None,
+        };
+        if let Some(action) = normalized_action {
+            object.insert(
+                "action".to_string(),
+                serde_json::Value::String(action.to_string()),
+            );
+            repairs.push("file_action_alias");
+        }
+
+        if object.get("action").and_then(serde_json::Value::as_str) == Some("read") {
+            for (canonical, aliases) in [
+                ("start_line", &["offset", "line_offset"][..]),
+                ("max_lines", &["limit", "n_lines", "num_lines"][..]),
+            ] {
+                match fold_benchmark_alias_group(object, canonical, aliases) {
+                    Ok(true) => repairs.push("file_parameter_alias"),
+                    Ok(false) => {}
+                    Err(()) => {
+                        *object = original_object;
+                        return Vec::new();
+                    }
+                }
+            }
+        }
+
+        if object.get("action").and_then(serde_json::Value::as_str) == Some("search_name")
+            && object.get("extensions").is_none()
+        {
+            let extensions = object.get("include").and_then(simple_extension_filters);
+            if let Some(extensions) = extensions {
+                object.remove("include");
+                object.insert("extensions".to_string(), extensions);
+                repairs.push("extension_filter");
+            }
+        }
+
+        if let Some(page) = object.get("pages").and_then(serde_json::Value::as_u64) {
+            object.insert(
+                "pages".to_string(),
+                serde_json::Value::String(page.to_string()),
+            );
+            repairs.push("page_string");
+        }
+
+        for key in [
+            "start_line",
+            "max_lines",
+            "limit",
+            "max_results",
+            "context_lines",
+        ] {
+            if normalize_benchmark_u64(object, key) {
+                repairs.push("numeric_string");
+            }
+        }
+
+        if let Some(path) = object
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        {
+            let path_value = std::path::Path::new(&path);
+            if path_value.components().count() == 1 && !workspace.join(path_value).exists() {
+                let attachment = workspace.join("attachments").join(path_value);
+                if attachment.exists() {
+                    object.insert(
+                        "path".to_string(),
+                        serde_json::Value::String(format!("attachments/{path}")),
+                    );
+                    repairs.push("attachment_path");
+                }
+            }
+        }
+
+        if object.get("action").and_then(serde_json::Value::as_str) == Some("read") {
+            if let Some(path) = object.get("path").and_then(serde_json::Value::as_str) {
+                if workspace.join(path).is_dir() {
+                    object.insert(
+                        "action".to_string(),
+                        serde_json::Value::String("list".to_string()),
+                    );
+                    repairs.push("directory_list");
+                }
+            }
+        }
+
+        let action = object
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let allowed = match action {
+            "read" => &["action", "path", "start_line", "max_lines", "pages"][..],
+            "list" => &["action", "path"][..],
+            "search_name" => &[
+                "action",
+                "query",
+                "path",
+                "limit",
+                "max_results",
+                "extensions",
+                "exclude",
+            ][..],
+            "search_content" => &[
+                "action",
+                "pattern",
+                "query",
+                "path",
+                "include",
+                "exclude",
+                "context_lines",
+                "case_insensitive",
+                "max_results",
+                "limit",
+            ][..],
+            // Never sanitize write-shaped or unknown actions. The benchmark's
+            // read-only admission policy must continue to reject them.
+            _ => &[][..],
+        };
+        if !allowed.is_empty() {
+            let before = object.len();
+            object.retain(|key, _| allowed.contains(&key.as_str()));
+            if object.len() != before {
+                repairs.push("cross_action_parameters");
+            }
+        }
+    }
+
+    if is_image {
+        if let Some(path) = object
+            .get("image_path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        {
+            let path_value = std::path::Path::new(&path);
+            if path_value.components().count() == 1 && !workspace.join(path_value).exists() {
+                let attachment = workspace.join("attachments").join(path_value);
+                if attachment.is_file() {
+                    object.insert(
+                        "image_path".to_string(),
+                        serde_json::Value::String(format!("attachments/{path}")),
+                    );
+                    repairs.push("image_attachment_path");
+                }
+            }
+        }
+    }
+
+    repairs
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+fn fold_benchmark_alias_group(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    canonical: &str,
+    aliases: &[&str],
+) -> Result<bool, ()> {
+    let present = aliases
+        .iter()
+        .filter_map(|alias| object.get(*alias).map(|value| (*alias, value.clone())))
+        .collect::<Vec<_>>();
+    let Some((_, value)) = present.first() else {
+        return Ok(false);
+    };
+    if present.iter().any(|(_, candidate)| candidate != value)
+        || object
+            .get(canonical)
+            .is_some_and(|candidate| candidate != value)
+    {
+        return Err(());
+    }
+    object
+        .entry(canonical.to_string())
+        .or_insert_with(|| value.clone());
+    for (alias, _) in present {
+        object.remove(alias);
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+fn normalize_benchmark_u64(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> bool {
+    let Some(value) = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return false;
+    };
+    object.insert(key.to_string(), serde_json::Value::Number(value.into()));
+    true
+}
+
+#[cfg(feature = "benchmark-eval-controls")]
+fn simple_extension_filters(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let values = match value {
+        serde_json::Value::String(value) => vec![value.as_str()],
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(serde_json::Value::as_str)
+            .collect::<Option<Vec<_>>>()?,
+        _ => return None,
+    };
+    let mut extensions = Vec::with_capacity(values.len());
+    for value in values {
+        let extension = value
+            .trim()
+            .strip_prefix("*.")
+            .or_else(|| value.trim().strip_prefix('.'))
+            .unwrap_or(value.trim());
+        if extension.is_empty()
+            || !extension
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return None;
+        }
+        extensions.push(serde_json::Value::String(extension.to_string()));
+    }
+    Some(serde_json::Value::Array(extensions))
+}
+
 pub(super) fn append_stuck_runtime_notice(content: String) -> String {
     format!("{content}\n\n{STUCK_RUNTIME_NOTICE}")
 }
@@ -493,6 +955,21 @@ impl Engine {
         // catalog; the policy only carries the declared limit, and `None`
         // (no declared budget) leaves the gate below inert.
         let mut tool_call_budget = ToolCallBudget::new(tool_policy.max_tool_calls);
+        #[cfg(feature = "benchmark-eval-controls")]
+        let benchmark_final_only_on_budget = self
+            .active_turn_tool_security
+            .as_ref()
+            .is_some_and(|policy| policy.final_only_after_tool_budget());
+        #[cfg(feature = "benchmark-eval-controls")]
+        let benchmark_tools_disabled_from_start = self
+            .active_turn_tool_security
+            .as_ref()
+            .and_then(|policy| policy.exact_dispatch())
+            .is_some_and(|policy| policy.allowed_tools().is_empty());
+        #[cfg(feature = "benchmark-eval-controls")]
+        let mut benchmark_tool_budget_fused = false;
+        #[cfg(feature = "benchmark-eval-controls")]
+        let mut benchmark_final_only_violations = 0_u8;
         let mut goal_continuations_this_turn = 0u32;
         // Turn-scoped empty REPL guard (NOTE-turn-loop-wrongness §2): persists
         // across model steps so 3 consecutive empty blocks end the turn, not
@@ -887,6 +1364,8 @@ impl Engine {
                     })
                     .await;
             }
+            #[cfg(feature = "benchmark-observability")]
+            let mut benchmark_request_started = Instant::now();
             let stream_result = tokio::select! {
                 biased;
                 () = self.cancel_token.cancelled() => {
@@ -971,6 +1450,8 @@ impl Engine {
             // restarts the whole turn-step when a stream died with no
             // content-block delta delivered to the consumer).
             let mut any_content_received = false;
+            #[cfg(feature = "benchmark-observability")]
+            let mut benchmark_first_output_ms: Option<u64> = None;
             let mut transparent_stream_retries = 0u32;
             // `stream_start` is reset on a transparent retry so the wall-clock
             // budget restarts with the fresh stream.
@@ -1075,6 +1556,13 @@ impl Engine {
                             )
                         {
                             any_content_received = true;
+                            #[cfg(feature = "benchmark-observability")]
+                            {
+                                benchmark_first_output_ms = Some(
+                                    u64::try_from(benchmark_request_started.elapsed().as_millis())
+                                        .unwrap_or(u64::MAX),
+                                );
+                            }
                         }
                         e
                     }
@@ -1129,6 +1617,11 @@ impl Engine {
                                 Ok(fresh) => {
                                     stream = fresh;
                                     stream_start = Instant::now();
+                                    #[cfg(feature = "benchmark-observability")]
+                                    {
+                                        benchmark_request_started = Instant::now();
+                                        benchmark_first_output_ms = None;
+                                    }
                                     // Roll back the error counter — this one
                                     // didn't surface to the user.
                                     stream_errors = stream_errors.saturating_sub(1);
@@ -1716,6 +2209,13 @@ impl Engine {
                         usage: usage.clone(),
                         duration_ms: u64::try_from(stream_start.elapsed().as_millis())
                             .unwrap_or(u64::MAX),
+                        #[cfg(feature = "benchmark-observability")]
+                        request_duration_ms: u64::try_from(
+                            benchmark_request_started.elapsed().as_millis(),
+                        )
+                        .unwrap_or(u64::MAX),
+                        #[cfg(feature = "benchmark-observability")]
+                        ttft_ms: benchmark_first_output_ms,
                     })
                     .await;
             }
@@ -1780,6 +2280,40 @@ impl Engine {
                         "Normalized {repaired} schema-declared JSON container(s) for tool '{}'",
                         tool.name
                     ));
+                }
+            }
+
+            #[cfg(feature = "benchmark-eval-controls")]
+            if (benchmark_tool_budget_fused || benchmark_tools_disabled_from_start)
+                && !tool_uses.is_empty()
+            {
+                let discarded = tool_uses.len();
+                tool_uses.clear();
+                benchmark_final_only_violations = benchmark_final_only_violations.saturating_add(1);
+                emit_tool_audit_for_policy(
+                    true,
+                    json!({
+                        "event": "tool.benchmark_final_only_markers_discarded",
+                        "discarded": discarded,
+                        "violation": benchmark_final_only_violations,
+                    }),
+                );
+                if final_text.trim().is_empty() {
+                    if benchmark_final_only_violations >= 2 {
+                        let reason =
+                            "benchmark final-only mode produced repeated tool-only responses"
+                                .to_string();
+                        let _ = self.tx_event.send(Event::status(reason.clone())).await;
+                        return (TurnOutcomeStatus::Failed, Some(reason));
+                    }
+                    self.add_session_message(self.runtime_text_message_with_turn_metadata(
+                        "All tools are disabled. The previous tool markers were ignored. Respond now with only the requested final answer in the exact required format."
+                            .to_string(),
+                        UserInputProvenance::Runtime,
+                    ))
+                    .await;
+                    turn.next_step();
+                    continue;
                 }
             }
 
@@ -2134,6 +2668,13 @@ impl Engine {
                                     usage: child_usage,
                                     duration_ms: u64::try_from(repl_started.elapsed().as_millis())
                                         .unwrap_or(u64::MAX),
+                                    #[cfg(feature = "benchmark-observability")]
+                                    request_duration_ms: u64::try_from(
+                                        repl_started.elapsed().as_millis(),
+                                    )
+                                    .unwrap_or(u64::MAX),
+                                    #[cfg(feature = "benchmark-observability")]
+                                    ttft_ms: None,
                                 })
                                 .await;
                         }
@@ -2315,6 +2856,11 @@ impl Engine {
             };
 
             let active_tools_at_batch_start = active_tool_names.clone();
+            #[cfg(feature = "benchmark-eval-controls")]
+            let mut benchmark_budget_exhausted_in_batch = false;
+            #[cfg(feature = "benchmark-eval-controls")]
+            let mut benchmark_skipped_over_budget_tool_ids =
+                std::collections::HashSet::<String>::new();
             let mut deferred_tools_hydrated_this_batch: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             // #3026: `additionalContext` strings from tool_call_before hooks,
@@ -2340,9 +2886,21 @@ impl Engine {
             );
             for (index, tool) in tool_uses.iter_mut().enumerate() {
                 let tool_id = tool.id.clone();
+                #[cfg(feature = "benchmark-eval-controls")]
+                if benchmark_final_only_on_budget && benchmark_budget_exhausted_in_batch {
+                    // The first rejected proposal is kept as the single
+                    // model-visible budget receipt. Drop every later proposal
+                    // from this same provider batch: final-only mode has
+                    // already become authoritative, so producing more failed
+                    // observations would recreate the retry storm inside one
+                    // response.
+                    benchmark_skipped_over_budget_tool_ids.insert(tool_id);
+                    continue;
+                }
                 let mut tool_name = tool.name.clone();
                 let mut tool_input = tool.input.clone();
                 let tool_caller = tool.caller.clone();
+                #[cfg(not(feature = "benchmark-eval-controls"))]
                 crate::logging::info(tool_log_message_for_policy(
                     self.active_turn_tool_security.is_some(),
                     &tool_name,
@@ -2355,6 +2913,40 @@ impl Engine {
                 if requested_tool_name != tool_name {
                     tool.name = tool_name.clone();
                 }
+                // Resolve aliases/casing first. Local models sometimes emit a
+                // legacy spelling that the registry canonicalizes to File or
+                // Web; repairing before that seam would miss exactly those
+                // calls even though the final observation names the canonical
+                // family.
+                #[cfg(feature = "benchmark-eval-controls")]
+                if self
+                    .active_turn_tool_security
+                    .as_ref()
+                    .is_some_and(|policy| policy.repairs_missing_read_actions())
+                    && !repair_benchmark_read_call(
+                        &tool_name,
+                        &mut tool_input,
+                        &self.session.workspace,
+                    )
+                    .is_empty()
+                {
+                    tool.input = tool_input.clone();
+                    emit_tool_audit_for_policy(
+                        true,
+                        json!({
+                            "event": "tool.benchmark_read_call_repaired",
+                            "tool_id": tool_id.clone(),
+                            "tool_name": tool_name.clone(),
+                            "action": tool_input.get("action"),
+                        }),
+                    );
+                }
+                #[cfg(feature = "benchmark-eval-controls")]
+                crate::logging::info(tool_log_message_for_policy(
+                    self.active_turn_tool_security.is_some(),
+                    &tool_name,
+                    &tool_input,
+                ));
 
                 let interactive = (tool_name == "exec_shell"
                     && tool_input
@@ -2390,6 +2982,11 @@ impl Engine {
                 let budget_debited = admission.is_ok();
                 if let Err(exceeded) = admission {
                     blocked_error = Some(exceeded.into_tool_error(&tool_name));
+                    #[cfg(feature = "benchmark-eval-controls")]
+                    if benchmark_final_only_on_budget {
+                        benchmark_budget_exhausted_in_batch = true;
+                        benchmark_tool_budget_fused = true;
+                    }
                 }
 
                 if mode_blocks_command_execution(mode, &tool_name) {
@@ -2928,6 +3525,29 @@ impl Engine {
                     blocked_error,
                     guard_result,
                 });
+            }
+            #[cfg(feature = "benchmark-eval-controls")]
+            if !benchmark_skipped_over_budget_tool_ids.is_empty() {
+                tool_uses.retain(|tool| {
+                    !benchmark_skipped_over_budget_tool_ids.contains(tool.id.as_str())
+                });
+                if let Some(message) = self.session.messages.last_mut()
+                    && message.role == "assistant"
+                {
+                    message.content.retain(|block| match block {
+                        ContentBlock::ToolUse { id, .. } => {
+                            !benchmark_skipped_over_budget_tool_ids.contains(id.as_str())
+                        }
+                        _ => true,
+                    });
+                }
+                emit_tool_audit_for_policy(
+                    true,
+                    json!({
+                        "event": "tool.benchmark_over_budget_batch_truncated",
+                        "skipped": benchmark_skipped_over_budget_tool_ids.len(),
+                    }),
+                );
             }
             active_tool_names.extend(deferred_tools_hydrated_this_batch);
 
@@ -4078,6 +4698,28 @@ impl Engine {
                 consecutive_tool_error_steps = 0;
             }
 
+            #[cfg(feature = "benchmark-eval-controls")]
+            if benchmark_budget_exhausted_in_batch && benchmark_final_only_on_budget {
+                // Benchmark turns are untrusted, bounded workloads. Once their
+                // explicit tool budget is exhausted, remove the provider tool
+                // surface instead of letting a local model spend dozens of
+                // extra rounds proposing calls that can never execute.
+                tool_catalog.clear();
+                active_tool_names.clear();
+                self.add_session_message(self.runtime_text_message_with_turn_metadata(
+                    "Tool budget is exhausted. All tools are now disabled for this turn. Do not call any tool again. Use only the evidence already present in the conversation and provide the requested final answer now, in the exact output format requested by the user."
+                        .to_string(),
+                    UserInputProvenance::Runtime,
+                ))
+                .await;
+                let _ = self
+                    .tx_event
+                    .send(Event::status(
+                        "Tool budget exhausted — continuing once in final-only mode".to_string(),
+                    ))
+                    .await;
+            }
+
             // A successful tool step is productive progress, not a runaway
             // synthetic resume. Declared per-task tool budgets and max_steps
             // remain the explicit limits for tool-driven work.
@@ -4621,6 +5263,214 @@ mod stream_timeout_tests {
             stream_chunk_timeout_budget(&config),
             (42, Duration::from_secs(42))
         );
+    }
+}
+
+#[cfg(all(test, feature = "benchmark-eval-controls"))]
+mod benchmark_eval_control_tests {
+    use super::repair_benchmark_read_call;
+    use serde_json::json;
+
+    #[test]
+    fn forkguard_benchmark_repairs_only_unambiguous_read_actions() {
+        let workspace = tempfile::tempdir().unwrap();
+        for (tool, mut input, expected) in [
+            ("Web", json!({"url": "https://example.test"}), "fetch"),
+            ("Web", json!({"query": "example"}), "search"),
+            ("File", json!({"path": "/tmp/a"}), "read"),
+            (
+                "File",
+                json!({"path": "/tmp", "pattern": "needle"}),
+                "search_content",
+            ),
+            ("read_file", json!({"path": "/tmp/a"}), "read"),
+            ("web_search", json!({"query": "example"}), "search"),
+        ] {
+            assert!(!repair_benchmark_read_call(tool, &mut input, workspace.path()).is_empty());
+            assert_eq!(input["action"], expected);
+        }
+
+        let mut explicit = json!({"action": "search", "query": "example"});
+        assert!(repair_benchmark_read_call("Web", &mut explicit, workspace.path()).is_empty());
+        assert_eq!(explicit["action"], "search");
+
+        let mut ambiguous = json!({"content": "do not infer a write"});
+        assert!(repair_benchmark_read_call("File", &mut ambiguous, workspace.path()).is_empty());
+        assert!(ambiguous.get("action").is_none());
+    }
+
+    #[test]
+    fn forkguard_benchmark_repairs_read_schema_and_attachments() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("attachments")).unwrap();
+        std::fs::write(workspace.path().join("attachments/data.csv"), "a,b\n").unwrap();
+        std::fs::write(workspace.path().join("attachments/photo.png"), b"png").unwrap();
+
+        let mut web = json!({
+            "action": "open",
+            "url": "https://example.test/api",
+            "fields": ["query.pages.*.title", "$['ready']", "$title"]
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut web, workspace.path());
+        assert!(repairs.contains(&"action_alias"));
+        assert!(repairs.contains(&"optional_fields_removed"));
+        assert_eq!(web["action"], "fetch");
+        assert!(web.get("fields").is_none());
+
+        let mut malformed_fields = json!({
+            "action": "fetch",
+            "url": "https://example.test/page",
+            "fields": "{\"title\":\"$title\"}"
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut malformed_fields, workspace.path());
+        assert!(repairs.contains(&"optional_fields_removed"));
+        assert!(malformed_fields.get("fields").is_none());
+
+        let mut object_fields = json!({
+            "action": "fetch",
+            "url": "https://example.test/page",
+            "fields": [{"title": "$title"}]
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut object_fields, workspace.path());
+        assert!(repairs.contains(&"optional_fields_removed"));
+        assert!(object_fields.get("fields").is_none());
+
+        let mut search_fields = json!({
+            "action": "search",
+            "query": "example",
+            "fields": ["$"]
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut search_fields, workspace.path());
+        assert!(repairs.contains(&"optional_fields_removed"));
+        assert!(search_fields.get("fields").is_none());
+
+        let mut max_chars = json!({
+            "action": "fetch",
+            "url": "https://example.test/page",
+            "max_chars": 12000
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut max_chars, workspace.path());
+        assert!(repairs.contains(&"max_chars_alias"));
+        assert_eq!(max_chars["max_bytes"], 12000);
+        assert!(max_chars.get("max_chars").is_none());
+
+        let mut fetch_aliases = json!({
+            "action": "fetch",
+            "url": "https://example.test/data.json",
+            "format": "json"
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut fetch_aliases, workspace.path());
+        assert!(repairs.contains(&"format_alias"));
+        assert_eq!(fetch_aliases["format"], "raw");
+
+        let mut wait_poll = json!({
+            "action": "wait",
+            "host": "127.0.0.1",
+            "port": "3000",
+            "poll_interval_ms": "50"
+        });
+        let repairs = repair_benchmark_read_call("Web", &mut wait_poll, workspace.path());
+        assert!(repairs.contains(&"numeric_string"));
+        assert_eq!(wait_poll["poll_interval_ms"], 50);
+
+        let mut search_with_scalar_domain = json!({
+            "action": "search",
+            "query": "example",
+            "max_results": "5",
+            "domains": "example.test",
+            "url": "https://irrelevant.test",
+            "format": "markdown"
+        });
+        let repairs =
+            repair_benchmark_read_call("Web", &mut search_with_scalar_domain, workspace.path());
+        assert!(repairs.contains(&"domains_array"));
+        assert!(repairs.contains(&"cross_action_parameters"));
+        assert_eq!(
+            search_with_scalar_domain["domains"],
+            json!(["example.test"])
+        );
+        assert_eq!(search_with_scalar_domain["max_results"], 5);
+        assert!(search_with_scalar_domain.get("url").is_none());
+        assert!(search_with_scalar_domain.get("format").is_none());
+
+        let mut file = json!({
+            "action": "search_name",
+            "path": "data.csv",
+            "query": "data",
+            "include": ["*.csv", "txt"]
+        });
+        let repairs = repair_benchmark_read_call("File", &mut file, workspace.path());
+        assert!(repairs.contains(&"extension_filter"));
+        assert!(repairs.contains(&"attachment_path"));
+        assert_eq!(file["extensions"], json!(["csv", "txt"]));
+        assert_eq!(file["path"], "attachments/data.csv");
+        assert!(file.get("include").is_none());
+
+        let mut noisy_file_read = json!({
+            "action": "cat",
+            "path": "data.csv",
+            "max_lines": "200",
+            "query": "ignored",
+            "include": ["*.csv"],
+            "max_results": 10
+        });
+        let repairs = repair_benchmark_read_call("File", &mut noisy_file_read, workspace.path());
+        assert!(repairs.contains(&"file_action_alias"));
+        assert!(repairs.contains(&"cross_action_parameters"));
+        assert_eq!(noisy_file_read["action"], "read");
+        assert_eq!(noisy_file_read["path"], "attachments/data.csv");
+        assert_eq!(noisy_file_read["max_lines"], 200);
+        assert_eq!(noisy_file_read.as_object().unwrap().len(), 3);
+
+        let mut aliased_file_read = json!({
+            "action": "read",
+            "file_path": "data.csv",
+            "offset": "5",
+            "limit": 50
+        });
+        let repairs = repair_benchmark_read_call("File", &mut aliased_file_read, workspace.path());
+        assert!(repairs.contains(&"file_parameter_alias"));
+        assert_eq!(aliased_file_read["path"], "attachments/data.csv");
+        assert_eq!(aliased_file_read["start_line"], 5);
+        assert_eq!(aliased_file_read["max_lines"], 50);
+        assert!(aliased_file_read.get("file_path").is_none());
+        assert!(aliased_file_read.get("offset").is_none());
+        assert!(aliased_file_read.get("limit").is_none());
+
+        let mut conflicting_alias = json!({
+            "action": "read",
+            "path": "data.csv",
+            "file_path": "other.csv"
+        });
+        let original_conflict = conflicting_alias.clone();
+        assert!(
+            repair_benchmark_read_call("File", &mut conflicting_alias, workspace.path()).is_empty()
+        );
+        assert_eq!(conflicting_alias, original_conflict);
+
+        let mut write = json!({
+            "action": "write",
+            "path": "answer.txt",
+            "content": "must remain blocked",
+            "query": "do not sanitize"
+        });
+        assert!(repair_benchmark_read_call("File", &mut write, workspace.path()).is_empty());
+        assert_eq!(write["content"], "must remain blocked");
+
+        let mut implicit_write = json!({
+            "path": "answer.txt",
+            "content": "must not become a read"
+        });
+        assert!(
+            repair_benchmark_read_call("File", &mut implicit_write, workspace.path()).is_empty()
+        );
+        assert!(implicit_write.get("action").is_none());
+        assert_eq!(implicit_write["content"], "must not become a read");
+
+        let mut image = json!({"image_path": "photo.png", "prompt": "read the label"});
+        let repairs = repair_benchmark_read_call("image_analyze", &mut image, workspace.path());
+        assert!(repairs.contains(&"image_attachment_path"));
+        assert_eq!(image["image_path"], "attachments/photo.png");
     }
 }
 

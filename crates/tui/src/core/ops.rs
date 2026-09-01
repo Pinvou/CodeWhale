@@ -69,6 +69,10 @@ pub struct TurnToolSecurityPolicy {
     exact_dispatch: Option<ExactToolDispatchPolicy>,
     require_read_only_dispatch: bool,
     allow_hooks: bool,
+    #[cfg(feature = "benchmark-eval-controls")]
+    final_only_after_tool_budget: bool,
+    #[cfg(feature = "benchmark-eval-controls")]
+    repair_missing_read_actions: bool,
 }
 
 impl TurnToolSecurityPolicy {
@@ -84,7 +88,40 @@ impl TurnToolSecurityPolicy {
             exact_dispatch,
             require_read_only_dispatch: false,
             allow_hooks: false,
+            #[cfg(feature = "benchmark-eval-controls")]
+            final_only_after_tool_budget: false,
+            #[cfg(feature = "benchmark-eval-controls")]
+            repair_missing_read_actions: false,
         }
+    }
+
+    /// Once the hard tool budget is exhausted, remove tools from subsequent
+    /// provider requests and require the model to finish from existing evidence.
+    /// This control is compiled only for isolated benchmark hosts.
+    #[cfg(feature = "benchmark-eval-controls")]
+    pub fn with_final_only_after_tool_budget(mut self) -> Self {
+        self.final_only_after_tool_budget = true;
+        self
+    }
+
+    #[cfg(feature = "benchmark-eval-controls")]
+    pub(crate) fn final_only_after_tool_budget(&self) -> bool {
+        self.final_only_after_tool_budget
+    }
+
+    /// Enable deterministic repair of omitted action discriminators for the
+    /// benchmark host's read-only File/Web surface. This remains separate from
+    /// the schemas and execution behavior used by Desktop.
+    #[cfg(feature = "benchmark-eval-controls")]
+    #[must_use]
+    pub fn with_missing_read_action_repair(mut self) -> Self {
+        self.repair_missing_read_actions = true;
+        self
+    }
+
+    #[cfg(feature = "benchmark-eval-controls")]
+    pub(crate) fn repairs_missing_read_actions(&self) -> bool {
+        self.repair_missing_read_actions
     }
 
     pub fn trusted_external_paths_override(&self) -> Option<&[PathBuf]> {
@@ -125,6 +162,25 @@ impl TurnToolSecurityPolicy {
 #[cfg(test)]
 mod turn_security_tests {
     use super::*;
+
+    #[cfg(feature = "benchmark-eval-controls")]
+    #[test]
+    fn forkguard_benchmark_controls_are_explicit_and_default_off() {
+        let default = TurnToolSecurityPolicy::new(Some(Vec::new()), None);
+        assert!(!default.final_only_after_tool_budget());
+        assert!(!default.repairs_missing_read_actions());
+        assert!(
+            default
+                .clone()
+                .with_final_only_after_tool_budget()
+                .final_only_after_tool_budget()
+        );
+        assert!(
+            default
+                .with_missing_read_action_repair()
+                .repairs_missing_read_actions()
+        );
+    }
 
     #[test]
     fn forkguard_restricted_turn_hooks_require_explicit_host_opt_in() {

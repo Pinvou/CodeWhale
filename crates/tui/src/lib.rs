@@ -11493,7 +11493,9 @@ async fn run_exec_agent(
                     eprintln!("error: {}", envelope.message);
                 }
             }
-            Event::TurnUsage { usage, duration_ms } => {
+            Event::TurnUsage {
+                usage, duration_ms, ..
+            } => {
                 if output_format == ExecOutputFormat::StreamJson {
                     turn_usage_seq = turn_usage_seq.saturating_add(1);
                     emit_exec_stream_event(&ExecStreamEvent::TurnUsage {
