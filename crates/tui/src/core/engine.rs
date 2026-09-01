@@ -2607,6 +2607,10 @@ impl Engine {
                         .with_speech_output_dir(self.config.speech_output_dir.clone())
                         .with_mcp_pool(mcp_pool)
                         .with_parent_mode(self.current_mode)
+                        // Typed permission rules must bind delegated calls like
+                        // they bind the parent's own; the handle shares the
+                        // live rulesets, so mid-session updates stay effective.
+                        .with_exec_policy_engine(self.config.exec_policy_engine.clone())
                         // #4810: no `with_todos` here — this runtime *is* the
                         // spawned background agent, and `background_runtime()`
                         // gives it its own list. Binding the session list would
@@ -4317,7 +4321,11 @@ impl Engine {
                 .with_todos(self.config.todos.clone())
                 .with_parent_completion_tx(self.tx_subagent_completion.clone())
                 .with_runtime_cost_owner(self.config.compaction.runtime_cost_owner.as_deref())
-                .with_parent_mode(input_policy.mode);
+                .with_parent_mode(input_policy.mode)
+                // Typed permission rules must bind delegated calls like they
+                // bind the parent's own; the handle shares the live rulesets,
+                // so mid-session updates stay effective.
+                .with_exec_policy_engine(self.config.exec_policy_engine.clone());
                 if matches!(input_policy.mode, AppMode::Plan) {
                     rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
                 }
@@ -6131,7 +6139,7 @@ fn goal_objective_for_prompt(
 // outside messages[0].
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ToolAskRuleDecision {
+pub(crate) enum ToolAskRuleDecision {
     Allow,
     Prompt(String),
     Block(String),
@@ -6245,6 +6253,26 @@ pub(super) fn exec_shell_ask_rule_decision(
     workspace: &Path,
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
+    exec_shell_ask_rule_decision_for_engine(
+        &config.exec_policy_engine,
+        tool_name,
+        tool_input,
+        workspace,
+        approval_mode,
+    )
+}
+
+/// [`exec_shell_ask_rule_decision`] keyed on a bare [`ExecPolicyEngine`]
+/// handle instead of the full [`EngineConfig`], so executors that hold only
+/// the session engine (the nested sub-agent tool registry) evaluate exactly
+/// the same typed exec-rule decision the main-line turn loop would.
+pub(crate) fn exec_shell_ask_rule_decision_for_engine(
+    exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
+    tool_name: &str,
+    tool_input: &Value,
+    workspace: &Path,
+    approval_mode: crate::tui::approval::ApprovalMode,
+) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
     if policy_tool_name != "exec_shell" {
@@ -6252,7 +6280,7 @@ pub(super) fn exec_shell_ask_rule_decision(
     }
     let command = tool_input.get("command").and_then(Value::as_str)?;
     tool_ask_rule_decision_for_context(
-        config,
+        exec_policy_engine,
         policy_tool_name,
         command,
         None,
@@ -6268,12 +6296,30 @@ pub(super) fn file_tool_ask_rule_decision(
     workspace: &Path,
     approval_mode: crate::tui::approval::ApprovalMode,
 ) -> Option<ToolAskRuleDecision> {
+    file_tool_ask_rule_decision_for_engine(
+        &config.exec_policy_engine,
+        tool_name,
+        tool_input,
+        workspace,
+        approval_mode,
+    )
+}
+
+/// [`file_tool_ask_rule_decision`] keyed on a bare [`ExecPolicyEngine`]
+/// handle; see [`exec_shell_ask_rule_decision_for_engine`].
+pub(crate) fn file_tool_ask_rule_decision_for_engine(
+    exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
+    tool_name: &str,
+    tool_input: &Value,
+    workspace: &Path,
+    approval_mode: crate::tui::approval::ApprovalMode,
+) -> Option<ToolAskRuleDecision> {
     let policy_tool_name =
         crate::tools::canonical_action::canonical_action_alias(tool_name, tool_input);
     let paths = file_tool_permission_paths(policy_tool_name, tool_input)?;
     if paths.is_empty() {
         return tool_ask_rule_decision_for_context(
-            config,
+            exec_policy_engine,
             policy_tool_name,
             "",
             None,
@@ -6286,7 +6332,7 @@ pub(super) fn file_tool_ask_rule_decision(
     let mut all_allowed = true;
     for path in paths {
         match tool_ask_rule_decision_for_context(
-            config,
+            exec_policy_engine,
             policy_tool_name,
             "",
             Some(&path),
@@ -6314,7 +6360,7 @@ pub(super) fn file_tool_ask_rule_decision(
 }
 
 fn tool_ask_rule_decision_for_context(
-    config: &EngineConfig,
+    exec_policy_engine: &codewhale_execpolicy::ExecPolicyEngine,
     tool_name: &str,
     command: &str,
     path: Option<&str>,
@@ -6328,8 +6374,7 @@ fn tool_ask_rule_decision_for_context(
         | crate::tui::approval::ApprovalMode::Bypass
         | crate::tui::approval::ApprovalMode::Suggest => AskForApproval::OnFailure,
     };
-    let decision = config
-        .exec_policy_engine
+    let decision = exec_policy_engine
         .check(ExecPolicyContext {
             command,
             cwd: cwd.as_ref(),
