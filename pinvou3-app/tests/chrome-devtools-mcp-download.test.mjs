@@ -8,12 +8,22 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const {
   downloadHttpsOnce,
   downloadWithRetries,
 } = require("../scripts/tauri/chrome-devtools-mcp.js");
+
+// import.meta.dirname needs Node >= 20.11; resolve the script path portably instead.
+const SCRIPT_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "scripts",
+  "tauri",
+  "chrome-devtools-mcp.js",
+);
 
 function fakeHttpsGet(routes, requests) {
   return (url, options, onResponse) => {
@@ -180,11 +190,71 @@ for (const discardedStatus of [302, 503]) {
   });
 }
 
+test("vendor download enforces a wall-clock deadline on a stalled attempt", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-cdmcp-download-"));
+  const destination = path.join(root, "package.tgz");
+  let attempts = 0;
+  // The response never ends and keeps the stream "active", so only the wall-clock
+  // deadline can stop the attempt; request.setTimeout (inactivity) would never fire.
+  const get = (url, options, onResponse) => {
+    attempts += 1;
+    const response = new Readable({ read: () => {} });
+    response.statusCode = 200;
+    response.headers = {};
+    queueMicrotask(() => onResponse(response));
+    return { once: () => {}, setTimeout: () => {} };
+  };
+  try {
+    await assert.rejects(
+      downloadWithRetries("https://registry.example.test/package.tgz", destination, {
+        attempts: 2,
+        retryDelayMs: 0,
+        sleep: async () => {},
+        download: (url, file) => downloadHttpsOnce(url, file, { get, timeoutMs: 25 }),
+      }),
+      /timed out/,
+    );
+    assert.equal(attempts, 2, "the deadline failure must reach the retry loop");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("vendor download retry survives a locked partial tarball", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pinvou-cdmcp-download-"));
+  const destination = path.join(root, "package.tgz");
+  const cleanupFailures = [];
+  let attempts = 0;
+  try {
+    await downloadWithRetries("https://registry.example.test/package.tgz", destination, {
+      attempts: 3,
+      retryDelayMs: 0,
+      sleep: async () => {},
+      removePartial: (file, options) => {
+        if (attempts === 1) {
+          // Simulate Windows antimalware briefly locking the fresh tarball.
+          const error = new Error("EBUSY: resource busy or locked");
+          cleanupFailures.push(error.message);
+          throw error;
+        }
+        fs.rmSync(file, options);
+      },
+      download: async (_url, file) => {
+        attempts += 1;
+        fs.writeFileSync(file, attempts === 1 ? "partial" : "complete");
+        if (attempts === 1) throw new Error("transient network failure");
+      },
+    });
+    assert.equal(attempts, 2, "a failed cleanup must not abandon the remaining retries");
+    assert.deepEqual(cleanupFailures, ["EBUSY: resource busy or locked"]);
+    assert.equal(fs.readFileSync(destination, "utf8"), "complete");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("vendor script has no external curl dependency", () => {
-  const source = fs.readFileSync(
-    path.join(import.meta.dirname, "..", "scripts", "tauri", "chrome-devtools-mcp.js"),
-    "utf8",
-  );
+  const source = fs.readFileSync(SCRIPT_PATH, "utf8");
   assert.match(source, /require\("node:https"\)/);
   assert.doesNotMatch(source, /run\(\s*["']curl["']/);
 });
