@@ -78,9 +78,9 @@ command_protocol!(
     behavior_telemetry_protocol,
     "behavior_telemetry.rs",
     [
-        "track_behavior_event",
         "get_behavior_telemetry_status",
         "set_behavior_telemetry_enabled",
+        "track_behavior_event",
     ]
 );
 command_protocol!(chat_protocol, "chat.rs", ["chat"]);

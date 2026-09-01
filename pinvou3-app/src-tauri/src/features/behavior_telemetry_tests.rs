@@ -17,7 +17,8 @@ impl TestHome {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let directory = tempfile::tempdir().unwrap();
         let previous = std::env::var_os("PINVOU3_HOME");
-        std::env::set_var("PINVOU3_HOME", directory.path());
+        // SAFETY: ENV_LOCK serializes every environment mutation in this test module.
+        unsafe { std::env::set_var("PINVOU3_HOME", directory.path()) };
         Self {
             _lock: lock,
             previous,
@@ -29,36 +30,45 @@ impl TestHome {
 impl Drop for TestHome {
     fn drop(&mut self) {
         match self.previous.take() {
-            Some(value) => std::env::set_var("PINVOU3_HOME", value),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: TestHome retains ENV_LOCK until after this Drop completes.
+            Some(value) => unsafe { std::env::set_var("PINVOU3_HOME", value) },
+            // SAFETY: TestHome retains ENV_LOCK until after this Drop completes.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
     }
 }
 
-struct EnvRestore {
+struct EnvRestore<'a> {
+    _home: &'a TestHome,
     values: Vec<(&'static str, Option<OsString>)>,
 }
 
-impl EnvRestore {
-    fn set(values: &[(&'static str, &str)]) -> Self {
+impl<'a> EnvRestore<'a> {
+    fn set(home: &'a TestHome, values: &[(&'static str, &str)]) -> Self {
         let previous = values
             .iter()
             .map(|(key, value)| {
                 let old = std::env::var_os(key);
-                std::env::set_var(key, value);
+                // SAFETY: `home` proves this test owns ENV_LOCK for the restore lifetime.
+                unsafe { std::env::set_var(key, value) };
                 (*key, old)
             })
             .collect();
-        Self { values: previous }
+        Self {
+            _home: home,
+            values: previous,
+        }
     }
 }
 
-impl Drop for EnvRestore {
+impl Drop for EnvRestore<'_> {
     fn drop(&mut self) {
         for (key, value) in self.values.drain(..).rev() {
             match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+                // SAFETY: `_home` keeps TestHome (and ENV_LOCK) alive through this Drop.
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                // SAFETY: `_home` keeps TestHome (and ENV_LOCK) alive through this Drop.
+                None => unsafe { std::env::remove_var(key) },
             }
         }
     }
@@ -1418,15 +1428,18 @@ async fn operational_stop_discards_old_outbox_and_restore_starts_a_new_period() 
     outbox
         .enqueue(outbox_record("old_pending_event", "old_period", now_ms()))
         .unwrap();
-    let _env = EnvRestore::set(&[
-        ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "false"),
-        ("PINVOU_TELEMETRY_BASE_URL", &runtime.telemetry_base_url),
-        ("PINVOU_BEHAVIOR_EVENTS_URL", &runtime.behavior_events_url),
-        (
-            "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
-            "test-enrollment-token-1234567890",
-        ),
-    ]);
+    let _env = EnvRestore::set(
+        &_home,
+        &[
+            ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "false"),
+            ("PINVOU_TELEMETRY_BASE_URL", &runtime.telemetry_base_url),
+            ("PINVOU_BEHAVIOR_EVENTS_URL", &runtime.behavior_events_url),
+            (
+                "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+                "test-enrollment-token-1234567890",
+            ),
+        ],
+    );
 
     let stopped = BehaviorTelemetry::new();
     assert!(!stopped.collecting.load(Ordering::Acquire));
@@ -1542,15 +1555,18 @@ async fn max_generation_stop_persists_block_and_restart_discards_old_outbox() {
     ));
     drop(telemetry);
 
-    let _env = EnvRestore::set(&[
-        ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
-        ("PINVOU_TELEMETRY_BASE_URL", &runtime.telemetry_base_url),
-        ("PINVOU_BEHAVIOR_EVENTS_URL", &runtime.behavior_events_url),
-        (
-            "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
-            "test-enrollment-token-1234567890",
-        ),
-    ]);
+    let _env = EnvRestore::set(
+        &_home,
+        &[
+            ("PINVOU_BEHAVIOR_TELEMETRY_ENABLED", "true"),
+            ("PINVOU_TELEMETRY_BASE_URL", &runtime.telemetry_base_url),
+            ("PINVOU_BEHAVIOR_EVENTS_URL", &runtime.behavior_events_url),
+            (
+                "PINVOU_TELEMETRY_ENROLLMENT_TOKEN",
+                "test-enrollment-token-1234567890",
+            ),
+        ],
+    );
     let restarted = BehaviorTelemetry::new();
     assert!(!restarted.collecting.load(Ordering::Acquire));
     assert_eq!(
