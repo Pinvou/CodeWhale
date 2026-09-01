@@ -392,6 +392,16 @@
         "file": "000039_organization_governance_permissions.up.sql",
         "version": 39,
         "sha256": "6161e78dcd405ca4710c59d90dd20be079e18216050c53c4025509122e919d5f"
+      },
+      {
+        "file": "000040_admin_organization_unit_move_policy.down.sql",
+        "version": 40,
+        "sha256": "4ee8b8ce1eca02cfd4c7875d53facf6683f25937709bf6c3c1a34e2db421cbf6"
+      },
+      {
+        "file": "000040_admin_organization_unit_move_policy.up.sql",
+        "version": 40,
+        "sha256": "e981bc6c94e22fa34c5f4a6af12d5e6e7f7ce1eb674472523eba60b8d451daa7"
       }
     ],
     "billing": [

@@ -1456,6 +1456,7 @@ function UserMembershipDetail({ copy, user, client, onBack, onNavigate }) {
 
 function OrganizationDetail({ copy, organization, roles, client, permissions, onBack, onRenamed, onStatusChanged, onDeleted, onNavigate, activeTab = 'overview', refreshVersion = 0, onTabChange }) {
   const [units, setUnits] = useState([]);
+  const [structureVersion, setStructureVersion] = useState(0);
   const [members, setMembers] = useState([]);
   const [owners, setOwners] = useState([]);
   const [memberNextCursor, setMemberNextCursor] = useState('');
@@ -1502,6 +1503,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
           client.organizationMembers(organization.organization_id, { role:'OWNER' }, signal),
         ]);
         setUnits(unitResult.items || []);
+        setStructureVersion(Number(unitResult.structure_version || 0));
         setMembers(memberResult.items || []);
         setMemberNextCursor(memberResult.next_cursor || '');
         setOwners(ownerResult.items || []);
@@ -1563,6 +1565,8 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
   const refreshUnits = async () => {
     const result = await client.organizationUnits(organization.organization_id);
     setUnits(result.items || []);
+    setStructureVersion(Number(result.structure_version || 0));
+    return result;
   };
   const refreshMembers = async (filters = { q:memberQuery, role:memberQueryRole, cursor:memberCursor }) => {
     const result = await client.organizationMembers(organization.organization_id, filters);
@@ -1746,6 +1750,34 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
       return true;
     } catch {
       setError(copy.accounts.actionFailed);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const moveUnit = async (unit, nextParentID) => {
+    const normalizedParentID = nextParentID || null;
+    const currentParentID = unit.parent_id || null;
+    if (normalizedParentID === currentParentID) return true;
+    if (busy || currentStatus !== 'ACTIVE' || structureVersion < 1) return false;
+    setBusy(true);
+    setNotice('');
+    setError('');
+    try {
+      const result = await client.moveOrganizationUnit(organization.organization_id, unit.unit_id, normalizedParentID, structureVersion);
+      setStructureVersion(Number(result.structure_version || structureVersion));
+      await refreshUnits();
+      setNotice(copy.accounts.unitMoved);
+      return true;
+    } catch (reason) {
+      if (reason?.code === 'ACCOUNT_CONFLICT') {
+        try { await refreshUnits(); } catch { /* retain the original conflict feedback */ }
+        setError(copy.accounts.unitStructureConflict);
+      } else if (reason?.code === 'ORG_UNIT_HIERARCHY_INVALID') {
+        setError(copy.accounts.unitMoveInvalid);
+      } else {
+        setError(copy.accounts.actionFailed);
+      }
       return false;
     } finally {
       setBusy(false);
@@ -1941,11 +1973,13 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
               copy={copy}
               disabled={busy || !canManageOrganizationUnits}
               addDisabled={!canManageOrganizationUnits || currentStatus !== 'ACTIVE'}
+              allUnits={units}
               onAddChild={(id) => {
                 setParentID(id);
                 setName('');
               }}
               onRename={renameUnit}
+              onMove={moveUnit}
               onDelete={deleteUnit}
             />
           ))}
@@ -2042,13 +2076,31 @@ function MemberAccessEditor({ copy, member, units, roles, disabled, onSave, onRe
   );
 }
 
-function UnitBranch({ unit, copy, disabled, addDisabled, onAddChild, onRename, onDelete }) {
+function UnitBranch({ unit, copy, disabled, addDisabled, allUnits, onAddChild, onRename, onMove, onDelete }) {
   const [editing, setEditing] = useState(false);
+  const [moving, setMoving] = useState(false);
   const [name, setName] = useState(unit.name);
+  const [nextParentID, setNextParentID] = useState(unit.parent_id || '');
   useEffect(() => setName(unit.name), [unit.name]);
+  useEffect(() => setNextParentID(unit.parent_id || ''), [unit.parent_id]);
+  const excludedMoveTargets = useMemo(() => {
+    const result = new Set([unit.unit_id]);
+    const visit = (node) => {
+      for (const child of node.children || []) {
+        result.add(child.unit_id);
+        visit(child);
+      }
+    };
+    visit(unit);
+    return result;
+  }, [unit]);
   const submit = async (event) => {
     event.preventDefault();
     if (await onRename(unit, name)) setEditing(false);
+  };
+  const submitMove = async (event) => {
+    event.preventDefault();
+    if (await onMove(unit, nextParentID)) setMoving(false);
   };
   return (
     <div className="adm-unit-branch">
@@ -2074,6 +2126,20 @@ function UnitBranch({ unit, copy, disabled, addDisabled, onAddChild, onRename, o
           </div>
         )}
         <div className="adm-unit-actions">
+          {moving ? (
+            <form className="adm-unit-move" onSubmit={submitMove}>
+              <select value={nextParentID} onChange={(event) => setNextParentID(event.target.value)} aria-label={copy.accounts.moveToParent}>
+                <option value="">{copy.accounts.organizationRoot}</option>
+                {(allUnits || []).filter((candidate) => candidate.status === 'ACTIVE' && !excludedMoveTargets.has(candidate.unit_id)).map((candidate) => (
+                  <option key={candidate.unit_id} value={candidate.unit_id}>{candidate.name}</option>
+                ))}
+              </select>
+              <button disabled={disabled || (unit.parent_id || '') === nextParentID}>{copy.accounts.save}</button>
+              <button type="button" onClick={() => { setNextParentID(unit.parent_id || ''); setMoving(false); }}>{copy.accounts.cancel}</button>
+            </form>
+          ) : (
+            <button type="button" disabled={disabled || unit.status !== 'ACTIVE'} onClick={() => setMoving(true)}>{copy.accounts.moveUnit}</button>
+          )}
           <button type="button" disabled={disabled || addDisabled || unit.status !== 'ACTIVE'} onClick={() => onAddChild(unit.unit_id)}>
             {copy.accounts.addChild}
           </button>
@@ -2088,7 +2154,7 @@ function UnitBranch({ unit, copy, disabled, addDisabled, onAddChild, onRename, o
       {unit.children.length > 0 && (
         <div className="adm-unit-children">
           {unit.children.map((child) => (
-            <UnitBranch key={child.unit_id} unit={child} copy={copy} disabled={disabled} addDisabled={addDisabled} onAddChild={onAddChild} onRename={onRename} onDelete={onDelete} />
+            <UnitBranch key={child.unit_id} unit={child} copy={copy} disabled={disabled} addDisabled={addDisabled} allUnits={allUnits} onAddChild={onAddChild} onRename={onRename} onMove={onMove} onDelete={onDelete} />
           ))}
         </div>
       )}

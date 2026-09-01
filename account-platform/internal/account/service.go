@@ -171,6 +171,7 @@ func (s *Service) Handler(verify identity.VerifyFunc) http.Handler {
 	admin.POST("/organizations/:organization_id/ownership", s.requirePermission(PermissionPlatformOrganizationsOwnerTransfer), approvalpolicy.Require("ACCOUNT_OWNERSHIP_TRANSFER", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminTransferOwnership))
 	admin.POST("/organizations/:organization_id/units", s.requirePermission(PermissionPlatformOrganizationsUnitsManage), approvalpolicy.Require("ACCOUNT_UNIT_CREATE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminCreateUnit))
 	admin.PATCH("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsUnitsManage), approvalpolicy.Require("ACCOUNT_UNIT_RENAME", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminRenameUnit))
+	admin.PATCH("/organizations/:organization_id/units/:unit_id/parent", s.requirePermission(PermissionPlatformOrganizationsUnitsManage), approvalpolicy.Require("ACCOUNT_UNIT_MOVE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminMoveUnit))
 	admin.DELETE("/organizations/:organization_id/units/:unit_id", s.requirePermission(PermissionPlatformOrganizationsUnitsManage), approvalpolicy.Require("ACCOUNT_UNIT_DELETE", approvalpolicy.AuditOnly), httpserver.AdaptFunc(s.adminDeleteUnit))
 	admin.GET("/audit-logs", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLogs))
 	admin.GET("/audit-logs/:audit_id", s.requirePermission(PermissionPlatformAuditRead), httpserver.AdaptFunc(s.adminAuditLog))

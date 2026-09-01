@@ -213,6 +213,12 @@ export class AdminPlatformClient {
   renameOrganizationUnit(organizationID, unitID, name) {
     return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units/${encodeURIComponent(unitID)}`, 'PATCH', { name });
   }
+  moveOrganizationUnit(organizationID, unitID, parentID, expectedStructureVersion) {
+    return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units/${encodeURIComponent(unitID)}/parent`, 'PATCH', {
+      parent_id: parentID || null,
+      expected_structure_version: expectedStructureVersion,
+    });
+  }
   deleteOrganizationUnit(organizationID, unitID) {
     return this.mutate('account', `/admin/v1/organizations/${encodeURIComponent(organizationID)}/units/${encodeURIComponent(unitID)}`, 'DELETE');
   }

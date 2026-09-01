@@ -21,7 +21,7 @@ async function rejectedMutation(mutate, expected) {
 }
 
 test('authorization release gate classifies every HTTP task event callback and CLI entrypoint', async () => {
-  assert.deepEqual(await runAuthorizationCoverage(), { routes: 273, tasks: 23, events: 3, cli: 13 });
+  assert.deepEqual(await runAuthorizationCoverage(), { routes: 274, tasks: 23, events: 3, cli: 13 });
 });
 
 test('authorization release gate fails closed for removed unknown and scope-mismatched policies', async () => {

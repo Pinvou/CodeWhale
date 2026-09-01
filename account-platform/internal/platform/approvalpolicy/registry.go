@@ -79,7 +79,8 @@ func buildPolicies() map[string]Policy {
 		"ACCOUNT_MEMBER_ADD": "platform.organizations.members.manage", "ACCOUNT_MEMBER_ROLES_REPLACE": "platform.organizations.members.manage",
 		"ACCOUNT_MEMBER_REMOVE": "platform.organizations.members.manage", "ACCOUNT_OWNERSHIP_TRANSFER": "platform.organizations.owner.transfer",
 		"ACCOUNT_UNIT_CREATE": "platform.organizations.units.manage", "ACCOUNT_UNIT_RENAME": "platform.organizations.units.manage",
-		"ACCOUNT_UNIT_DELETE": "platform.organizations.units.manage", "ACCOUNT_REGISTRATION_RETRY": "platform.registrations.repair",
+		"ACCOUNT_UNIT_MOVE": "platform.organizations.units.manage", "ACCOUNT_UNIT_DELETE": "platform.organizations.units.manage",
+		"ACCOUNT_REGISTRATION_RETRY":      "platform.registrations.repair",
 		"ACCOUNT_REGISTRATION_COMPENSATE": "platform.registrations.repair", "ACCOUNT_PROFILE_CHANGE_RETRY": "platform.profile-changes.repair",
 		"ACCOUNT_CLOSURE_RETRY":                "platform.account-closures.repair",
 		"ACCOUNT_AUDIT_EXPORT_CREATE":          "platform.audit.export",
@@ -123,9 +124,13 @@ func buildPolicies() map[string]Policy {
 		"BILLING_MANUAL_REVIEW_SLA_ESCALATE": "internal.billing.manual-review.escalate",
 		"TOKEN_USAGE_RECONCILE":              "internal.token.usage.reconcile", "EVENT_OUTBOX_RELAY": "internal.events.relay",
 	}
+	versionTwoAuditCommands := map[string]struct{}{
+		"ACCOUNT_ORGANIZATION_RENAME": {}, "ACCOUNT_MEMBER_ADD": {}, "ACCOUNT_MEMBER_ROLES_REPLACE": {},
+		"ACCOUNT_MEMBER_REMOVE": {}, "ACCOUNT_UNIT_CREATE": {}, "ACCOUNT_UNIT_RENAME": {}, "ACCOUNT_UNIT_DELETE": {},
+	}
 	for commandType, permission := range auditCommands {
 		policyVersion := int64(Version)
-		if strings.HasPrefix(commandType, "ACCOUNT_MEMBER_") || strings.HasPrefix(commandType, "ACCOUNT_UNIT_") || commandType == "ACCOUNT_ORGANIZATION_RENAME" {
+		if _, ok := versionTwoAuditCommands[commandType]; ok {
 			policyVersion = 2
 		}
 		result[commandType] = Policy{

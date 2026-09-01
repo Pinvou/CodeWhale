@@ -85,3 +85,10 @@ func TestOrganizationGovernancePoliciesUseAtomicPermissions(t *testing.T) {
 		t.Fatalf("status permission must remain isolated on policy version 1: %#v %v", statusPolicy, err)
 	}
 }
+
+func TestAdminOrganizationUnitMoveUsesInitialAtomicPolicy(t *testing.T) {
+	policy, err := Lookup("ACCOUNT_UNIT_MOVE")
+	if err != nil || policy.PolicyVersion != 1 || policy.Mode != AuditOnly || policy.RequesterPermission != "platform.organizations.units.manage" {
+		t.Fatalf("unexpected organization unit move policy: %#v %v", policy, err)
+	}
+}

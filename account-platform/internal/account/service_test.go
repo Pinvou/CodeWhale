@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -209,6 +210,14 @@ func (f *fakeRepository) AdminRenameUnit(_ context.Context, _ identity.Principal
 	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":rename:"+name)
 	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, Name: name, Status: "ACTIVE", Version: 2}, StructureVersion: 2}, nil
 }
+func (f *fakeRepository) AdminMoveUnit(_ context.Context, _ identity.Principal, organizationID, unitID uuid.UUID, parentID *uuid.UUID, expectedStructureVersion int64, _ string) (UnitMutationResult, error) {
+	parent := "root"
+	if parentID != nil {
+		parent = parentID.String()
+	}
+	f.adminCalls = append(f.adminCalls, "organization:"+organizationID.String()+":unit:"+unitID.String()+":move:"+parent+":"+fmt.Sprint(expectedStructureVersion))
+	return UnitMutationResult{Unit: Unit{ID: unitID, OrganizationID: organizationID, ParentID: parentID, Name: "Platform", Status: "ACTIVE", Version: 2}, StructureVersion: expectedStructureVersion + 1}, nil
+}
 func (*fakeRepository) AdminUnitDeletionBlockers(context.Context, uuid.UUID, uuid.UUID) ([]OrganizationLifecycleBlocker, error) {
 	return []OrganizationLifecycleBlocker{}, nil
 }
@@ -412,6 +421,7 @@ func TestAdminOrganizationManagementRoutesCreateOrganizationsAndUnits(t *testing
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/ownership", `{"new_owner_user_id":"` + ownerID.String() + `"}`, http.StatusOK, "organization:" + organizationID.String() + ":owner:" + ownerID.String()},
 		{http.MethodPost, "/admin/v1/organizations/" + organizationID.String() + "/units", `{"name":"Engineering","parent_id":"` + parentID.String() + `"}`, http.StatusCreated, "organization:" + organizationID.String() + ":unit:create:" + parentID.String() + ":Engineering"},
 		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), `{"name":"Platform"}`, http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":rename:Platform"},
+		{http.MethodPatch, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String() + "/parent", `{"parent_id":"` + parentID.String() + `","expected_structure_version":2}`, http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":move:" + parentID.String() + ":2"},
 		{http.MethodDelete, "/admin/v1/organizations/" + organizationID.String() + "/units/" + unitID.String(), "", http.StatusOK, "organization:" + organizationID.String() + ":unit:" + unitID.String() + ":DELETE"},
 	}
 	for _, test := range tests {

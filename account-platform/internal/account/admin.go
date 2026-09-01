@@ -165,6 +165,7 @@ type adminRepository interface {
 	AdminTransferOwnership(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (OwnershipTransferResult, error)
 	AdminCreateUnit(context.Context, identity.Principal, uuid.UUID, *uuid.UUID, string, string) (UnitMutationResult, error)
 	AdminRenameUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string, string) (UnitMutationResult, error)
+	AdminMoveUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, *uuid.UUID, int64, string) (UnitMutationResult, error)
 	AdminUnitDeletionBlockers(context.Context, uuid.UUID, uuid.UUID) ([]OrganizationLifecycleBlocker, error)
 	AdminDeleteUnit(context.Context, identity.Principal, uuid.UUID, uuid.UUID, string) (UnitMutationResult, error)
 	AdminAuditLogs(context.Context, AdminAuditFilter) ([]AdminAuditLog, error)
@@ -761,6 +762,41 @@ func (s *Service) adminRenameUnit(w http.ResponseWriter, r *http.Request) {
 	}
 	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "admin-unit-rename:"+organizationID.String()+":"+unitID.String()+":"+strings.TrimSpace(body.Name))
 	result, err := repository.AdminRenameUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, body.Name, idempotencyKey)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, result)
+}
+
+func (s *Service) adminMoveUnit(w http.ResponseWriter, r *http.Request) {
+	repository, ok := s.requireAdminRepository(w, r)
+	if !ok {
+		return
+	}
+	organizationID, ok := pathUUID(w, r, "organization_id")
+	if !ok {
+		return
+	}
+	unitID, ok := pathUUID(w, r, "unit_id")
+	if !ok {
+		return
+	}
+	var body struct {
+		ParentID                 *uuid.UUID `json:"parent_id"`
+		ExpectedStructureVersion int64      `json:"expected_structure_version"`
+		IdempotencyKey           string     `json:"idempotency_key"`
+	}
+	if err := api.DecodeJSON(w, r, &body); err != nil {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid organization unit move request", httpserver.RequestID(r.Context()))
+		return
+	}
+	idempotencyKey := organizationUnitIdempotencyKey(r, body.IdempotencyKey, "admin-unit-move:"+organizationID.String()+":"+unitID.String()+":"+fmt.Sprint(body.ParentID)+":"+fmt.Sprint(body.ExpectedStructureVersion))
+	if body.ExpectedStructureVersion < 1 || !validOrganizationUnitIdempotencyKey(idempotencyKey) {
+		api.WriteError(w, http.StatusBadRequest, "INVALID_REQUEST", "expected_structure_version and a valid idempotency key are required", httpserver.RequestID(r.Context()))
+		return
+	}
+	result, err := repository.AdminMoveUnit(r.Context(), mustPrincipal(r.Context()), organizationID, unitID, body.ParentID, body.ExpectedStructureVersion, idempotencyKey)
 	if err != nil {
 		s.writeError(w, r, err)
 		return

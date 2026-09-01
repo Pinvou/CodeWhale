@@ -332,6 +332,38 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
         "422": { $ref: "#/components/responses/Error" }
+  /account/admin/v1/organizations/{organization_id}/units/{unit_id}/parent:
+    patch:
+      operationId: moveAdminOrganizationUnit
+      summary: Move an organization unit to another parent or the organization root with optimistic concurrency
+      description: Requires platform.organizations.units.manage. A stale structure version fails with ACCOUNT_CONFLICT and must be refreshed before retry.
+      parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [expected_structure_version]
+              properties:
+                parent_id:
+                  oneOf:
+                    - { type: string, format: uuid }
+                    - { type: "null" }
+                expected_structure_version: { type: integer, format: int64, minimum: 1 }
+                idempotency_key: { type: string, minLength: 8, maxLength: 120 }
+      responses:
+        "200":
+          description: Organization unit moved or idempotently replayed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationUnitMutation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
   /account/admin/v1/organizations/{organization_id}/status:
     patch:
       operationId: setAdminOrganizationStatus
