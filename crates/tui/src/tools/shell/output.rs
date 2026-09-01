@@ -60,14 +60,26 @@ impl ShellStreamDecoder {
                 self.pending_utf8.drain(..valid_up_to);
                 decoded
             }
-            Err(_) => {
+            Err(error) => {
+                // Only the bytes past valid_up_to are genuinely invalid; emit
+                // the certified UTF-8 prefix as-is so a single stray byte in
+                // otherwise valid output cannot corrupt the whole chunk.
+                let valid_up_to = error.valid_up_to();
+                let valid_prefix = std::str::from_utf8(&self.pending_utf8[..valid_up_to])
+                    .expect("Utf8Error::valid_up_to must delimit valid UTF-8");
+                decoded.push_str(valid_prefix);
+                let invalid_and_remaining = &self.pending_utf8[valid_up_to..];
                 if let Some(encoding) = self.legacy_encoding {
                     let mut decoder = encoding.new_decoder_without_bom_handling();
-                    decoded.push_str(&decode_legacy_chunk(&mut decoder, &self.pending_utf8, last));
+                    decoded.push_str(&decode_legacy_chunk(
+                        &mut decoder,
+                        invalid_and_remaining,
+                        last,
+                    ));
                     self.pending_utf8.clear();
                     self.stream_decoder = Some(decoder);
                 } else {
-                    decoded.push_str(&String::from_utf8_lossy(&self.pending_utf8));
+                    decoded.push_str(&String::from_utf8_lossy(invalid_and_remaining));
                     self.pending_utf8.clear();
                 }
                 self.finished = last;
@@ -295,6 +307,21 @@ mod tests {
         assert_eq!(
             decode_shell_bytes_with_legacy(b"ready \xE4", None, true),
             "ready \u{FFFD}"
+        );
+        assert_eq!(
+            decode_shell_bytes_with_legacy(b"ready \xE4", Some(encoding_rs::WINDOWS_1252), true),
+            "ready ä"
+        );
+    }
+
+    #[test]
+    fn forkguard_shell_valid_utf8_prefix_survives_legacy_fallback() {
+        let mut bytes = "中文".as_bytes().to_vec();
+        bytes.push(0x92);
+
+        assert_eq!(
+            decode_shell_bytes_with_legacy(&bytes, Some(encoding_rs::WINDOWS_1252), true),
+            "中文’"
         );
     }
 
