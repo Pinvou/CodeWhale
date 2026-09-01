@@ -727,10 +727,15 @@ fn command_is_chained(command: &str) -> bool {
 /// non-flag token that isn't in the rule ends it — `git push` does not block
 /// `git checkout push`, and `rm` does not block `rmdir`.
 ///
-/// One command-side spelling widens what a rule can name: cmd.exe-style
-/// single-letter `/` flags (`del /f /s /q`) are skippable like `-` flags, in
-/// any position, so a rule holds against every interleaving without the app
-/// enumerating canonical flag sequences.
+/// Two rule-side spellings widen what a rule can name. cmd.exe-style
+/// single-letter `/` flags (`del /f /s /q`) in the *command* are skippable like
+/// `-` flags, in any position. And a rule token of exactly `*` is a middle
+/// wildcard matching zero or more consecutive command tokens regardless of
+/// shape, so a rule can anchor on a tail (`grep * ~/.ssh/id_rsa`,
+/// `dd * of=/dev/sda`) without enumerating every flag spelling. A wildcard
+/// widens the deny face of a rule — each one must be justified by the rule
+/// author. This engine is deliberately permissive; the rulesets that feed it
+/// own the false-positive discipline of keeping wildcards narrow.
 fn denied_prefix_matches(rule: &str, command: &str) -> bool {
     let rule_tokens: Vec<String> = normalize_command(rule)
         .split_whitespace()
@@ -762,6 +767,24 @@ fn denied_prefix_matches(rule: &str, command: &str) -> bool {
     while let Some((i, j)) = stack.pop() {
         if j == rule_tokens.len() {
             return true;
+        }
+        // A rule token of exactly `*` is a middle wildcard: it matches zero or
+        // more consecutive command tokens regardless of shape — that is its
+        // point, since `grep -i PATTERN ~/.ssh/id_rsa` interleaves flags and
+        // positionals no flag rule could enumerate. `(i, j+1)` lets it match
+        // nothing; `(i+1, j)` skips one more command token. `seen` keeps the
+        // run of states finite. This branch runs BEFORE the end-of-command
+        // bail below so a trailing `*` can still match zero tokens once the
+        // command is exhausted, degrading to plain prefix semantics, and a
+        // wildcard is never itself treated as a command word.
+        if rule_tokens[j] == "*" {
+            if seen.insert((i, j)) {
+                stack.push((i, j + 1));
+                if i < command_tokens.len() {
+                    stack.push((i + 1, j));
+                }
+            }
+            continue;
         }
         if i >= command_tokens.len() || !seen.insert((i, j)) {
             continue;
@@ -1483,6 +1506,115 @@ mod tests {
             ))
             .unwrap();
         assert!(!denied.allow, "guarded target must stay denied: {denied:?}");
+    }
+
+    #[test]
+    fn denied_prefix_middle_wildcard_matches_zero_or_more_tokens() {
+        // A rule token of exactly `*` matches zero or more consecutive command
+        // tokens REGARDLESS of shape — flags, flag values, extra positionals —
+        // so a rule can anchor on its sensitive tail without the app
+        // enumerating every flag spelling.
+        let engine = ExecPolicyEngine::new(
+            vec![],
+            vec![
+                "grep * ~/.ssh/id_rsa".to_string(),
+                "dd * of=/dev/sda".to_string(),
+            ],
+        );
+        for command in [
+            "grep root ~/.ssh/id_rsa",
+            "grep -i root ~/.ssh/id_rsa",
+            "grep -r root ~/.ssh/id_rsa",
+            // The wildcard matches nothing at all.
+            "grep ~/.ssh/id_rsa",
+            // `dd` has no dash flags at all: its operands are `key=value`.
+            "dd if=/dev/zero of=/dev/sda",
+            "dd if=boot.img bs=1M of=/dev/sda",
+            // A trailing `*` is allowed and degrades to plain prefix
+            // semantics: once reached, the rule matches.
+            "grep -i root ~/.ssh/id_rsa > /tmp/out",
+        ] {
+            let decision = engine.check(ctx(command, AskForApproval::Never)).unwrap();
+            assert!(
+                !decision.allow,
+                "wildcard rule missed {command:?}: {decision:?}"
+            );
+        }
+
+        // A rule whose LAST token is `*` still matches a shorter command —
+        // prefix semantics, not suffix equality.
+        let trailing = ExecPolicyEngine::new(vec![], vec!["grep * ~/.ssh/id_rsa *".to_string()]);
+        for command in [
+            "grep root ~/.ssh/id_rsa",
+            "grep -i root ~/.ssh/id_rsa backup",
+        ] {
+            let decision = trailing.check(ctx(command, AskForApproval::Never)).unwrap();
+            assert!(
+                !decision.allow,
+                "trailing-wildcard rule missed {command:?}: {decision:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn denied_prefix_wildcard_stays_anchored_on_the_tail_token() {
+        // The wildcard bridges the MIDDLE of a rule; it does not relax the
+        // tail. A rule is still a prefix match: when the tail token never
+        // appears in the segment, there is no deny — here or inside a chain.
+        let engine = ExecPolicyEngine::new(vec![], vec!["grep * /home/z".to_string()]);
+        for command in ["grep x /etc/y", "ls && grep x /etc/y"] {
+            let decision = engine
+                .check(ctx(command, AskForApproval::UnlessTrusted))
+                .unwrap();
+            assert!(
+                decision.allow,
+                "wildcard rule over-matched {command:?}: {decision:?}"
+            );
+        }
+        // Chained segments are still scanned individually: a wildcard rule
+        // denies when its anchor appears in ANY segment, and does not leak
+        // across the chain boundary in either direction.
+        let chain = ExecPolicyEngine::new(vec![], vec!["grep * ~/.ssh/id_rsa".to_string()]);
+        let denied = chain
+            .check(ctx(
+                "echo hi && grep root ~/.ssh/id_rsa",
+                AskForApproval::Never,
+            ))
+            .unwrap();
+        assert!(!denied.allow, "chained segment must still deny: {denied:?}");
+        let shielded = chain
+            .check(ctx("grep x /etc/y && echo done", AskForApproval::Never))
+            .unwrap();
+        assert!(
+            shielded.allow,
+            "wildcard must not reach into unrelated segments: {shielded:?}"
+        );
+    }
+
+    #[test]
+    fn denied_prefix_leading_wildcard_follows_generic_wildcard_semantics() {
+        // Rules in practice anchor their first token, but a leading `*` is not
+        // an error: the generic DFS gives it the same two branches and it is
+        // never treated as a command word. Documented consequence of keeping
+        // the anchor at the rule's literal first token: the command word after
+        // a leading wildcard is matched exactly, so `/bin/rm` is NOT folded to
+        // `rm` for it. Rule authors should not start rules with `*`; this test
+        // only pins the behavior the generic DFS produces.
+        let engine = ExecPolicyEngine::new(vec![], vec!["* rm -rf /".to_string()]);
+        let bare = engine
+            .check(ctx("rm -rf /", AskForApproval::Never))
+            .unwrap();
+        assert!(
+            !bare.allow,
+            "leading-wildcard rule must match its bare spelling: {bare:?}"
+        );
+        let path = engine
+            .check(ctx("/bin/rm -rf /", AskForApproval::Never))
+            .unwrap();
+        assert!(
+            path.allow,
+            "leading wildcard must not gain command-word folding: {path:?}"
+        );
     }
 
     #[test]
