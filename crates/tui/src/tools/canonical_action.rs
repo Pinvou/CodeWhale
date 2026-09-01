@@ -235,6 +235,7 @@ mod tests {
             .with_test_runner_tool()
             .with_web_tools()
             .with_patch_tools()
+            .with_verify_tool(None, "guard-scan".to_string())
             .build(ToolContext::new(tmp.path().to_path_buf()));
 
         for tool in registry.to_api_tools() {

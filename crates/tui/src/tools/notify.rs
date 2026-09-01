@@ -6,18 +6,23 @@
 //! the tool is intended for "long task done, come back" beats and
 //! sub-agent-completion pings, not chatter.
 //!
-//! Auto-suppresses when `[notifications].method = "off"`. Output messages
+//! Honors the user's `[notifications]` config: `method = "off"` silences
+//! the tool entirely, and `quiet` / `events.model-notify = false` gate the
+//! category through the process-wide [`NotificationGate`]. Output messages
 //! are length-capped so a runaway model can't paint a paragraph into the
 //! terminal title bar.
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::io::Write;
 
 use super::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
     optional_str, required_str,
 };
-use crate::tui::notifications::{Method, NotificationPayload, notify_done};
+use crate::tui::notifications::{
+    Method, NotificationPayload, configured_method, current_notification_gate, notify_done_to,
+};
 
 /// Maximum chars passed through for the title — keeps the OSC 9 escape
 /// reasonable on terminals that wrap long titles awkwardly.
@@ -104,23 +109,50 @@ impl ToolSpec for NotifyTool {
             .map(|v| !v.is_empty())
             .unwrap_or(false);
 
-        // Threshold = 0 so the notification always fires; the model has
-        // already decided this is the moment.
-        notify_done(
-            Method::Auto,
+        // #1322 promise: the tool respects the user's configured
+        // `[notifications].method` — `off` makes this a silent no-op (the
+        // sink-level `Method::Off` check in `notify_done_to` returns before
+        // any write). Threshold = 0 so the notification always fires when
+        // not suppressed; the model has already decided this is the moment.
+        emit_model_notify(
+            configured_method(),
             in_tmux,
             &payload,
-            std::time::Duration::ZERO,
-            std::time::Duration::from_secs(1),
+            &mut std::io::stdout(),
         );
 
         Ok(ToolResult::success(format!("notified: {title}")))
     }
 }
 
+/// Deliver a model-authored payload through the configured method and the
+/// installed category gate to `sink`.
+///
+/// Split from [`NotifyTool::execute`] with a `Write` sink so tests can pin
+/// the suppression semantics (method `off`, gated category) without owning
+/// the process stdout; production calls it with `io::stdout()`, exactly what
+/// `notify_done` would have used.
+pub(crate) fn emit_model_notify<W: Write>(
+    method: Method,
+    in_tmux: bool,
+    payload: &NotificationPayload,
+    sink: &mut W,
+) {
+    notify_done_to(
+        method,
+        in_tmux,
+        payload,
+        std::time::Duration::ZERO,
+        std::time::Duration::from_secs(1),
+        current_notification_gate(),
+        sink,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::notifications::install_configured_method;
     use std::path::Path;
 
     fn ctx() -> ToolContext {
@@ -189,5 +221,63 @@ mod tests {
         let required = schema.get("required").unwrap().as_array().unwrap();
         assert!(required.iter().any(|v| v.as_str() == Some("title")));
         assert!(!required.iter().any(|v| v.as_str() == Some("body")));
+    }
+
+    /// Restores the process-wide configured method after a test mutates it,
+    /// mirroring `NotificationGateRestore` in `tui::notifications`.
+    struct ConfiguredMethodRestore(Method);
+
+    impl ConfiguredMethodRestore {
+        fn capture() -> Self {
+            Self(configured_method())
+        }
+    }
+
+    impl Drop for ConfiguredMethodRestore {
+        fn drop(&mut self) {
+            install_configured_method(self.0);
+        }
+    }
+
+    #[test]
+    fn method_off_makes_emission_a_silent_no_op() {
+        let payload = NotificationPayload::model_notify("done", None);
+        let mut sink = Vec::new();
+        emit_model_notify(Method::Off, false, &payload, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "method=off must not write any notification bytes"
+        );
+    }
+
+    #[test]
+    fn configured_method_off_silences_the_tool_emission() {
+        let _restore = ConfiguredMethodRestore::capture();
+        install_configured_method(Method::Off);
+
+        // The exact chain `execute` uses: the installed method decides, the
+        // gate is loaded from the process-wide state.
+        let payload = NotificationPayload::model_notify("done", None);
+        let mut sink = Vec::new();
+        emit_model_notify(configured_method(), false, &payload, &mut sink);
+        assert!(
+            sink.is_empty(),
+            "configured method=off must silence the notify tool path"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_method_off_still_reports_success_to_the_model() {
+        // The description promises a *silent* no-op: the model sees success
+        // (nothing to retry), the user's desktop stays quiet.
+        let _restore = ConfiguredMethodRestore::capture();
+        install_configured_method(Method::Off);
+
+        let result = NotifyTool
+            .execute(json!({"title": "done"}), &ctx())
+            .await
+            .expect("ok");
+        assert!(result.success);
+        assert!(result.content.contains("done"));
     }
 }

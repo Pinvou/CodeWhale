@@ -321,6 +321,55 @@ pub fn current_notification_gate() -> NotificationGate {
     NotificationGate::from_bits(NOTIFICATION_GATE.load(Ordering::SeqCst))
 }
 
+/// Process-wide effective `[notifications].method`, installed by
+/// [`settings`] alongside the category gate. The `notify` tool reads this
+/// instead of hardcoding `Auto` so a configured `method = "off"` silences
+/// model-callable notifications too — the promise its description and the
+/// registration comment in `tool_setup` both make. Default `Auto` mirrors
+/// the pre-install behavior for contexts that never call [`settings`]
+/// (unit tests, headless dispatch).
+static CONFIGURED_METHOD: AtomicU8 = AtomicU8::new(0);
+
+/// Install `method` as the process-wide notification method for paths that
+/// do not resolve a method of their own (the `notify` tool).
+pub fn install_configured_method(method: Method) {
+    CONFIGURED_METHOD.store(method_to_bits(method), Ordering::SeqCst);
+}
+
+/// The currently installed notification method (default `Auto`).
+#[must_use]
+pub fn configured_method() -> Method {
+    method_from_bits(CONFIGURED_METHOD.load(Ordering::SeqCst))
+}
+
+/// Pack a [`Method`] into the [`CONFIGURED_METHOD`] word. Kept next to the
+/// static (like `NotificationGate::to_bits`) so the encoding has one home.
+fn method_to_bits(method: Method) -> u8 {
+    match method {
+        Method::Auto => 0,
+        Method::Osc9 => 1,
+        Method::Bel => 2,
+        Method::MacOS => 3,
+        Method::Kitty => 4,
+        Method::Ghostty => 5,
+        Method::Off => 6,
+    }
+}
+
+/// Unpack a [`Method`] from the [`CONFIGURED_METHOD`] word. Unknown bits
+/// decode to `Auto`, the permissive pre-install default.
+fn method_from_bits(bits: u8) -> Method {
+    match bits {
+        1 => Method::Osc9,
+        2 => Method::Bel,
+        3 => Method::MacOS,
+        4 => Method::Kitty,
+        5 => Method::Ghostty,
+        6 => Method::Off,
+        _ => Method::Auto,
+    }
+}
+
 /// Emit a notification to `sink` if the elapsed time meets or exceeds
 /// `threshold`, `method` is not `Off`, and `gate` allows the payload's
 /// category.
@@ -937,6 +986,10 @@ pub fn settings(config: &crate::config::Config) -> Option<(Method, Duration, boo
         crate::config::NotificationMethod::Ghostty => Method::Ghostty,
         crate::config::NotificationMethod::Off => Method::Off,
     };
+    // Install the configured method alongside the gate so the `notify` tool
+    // (which has no method of its own) honors `[notifications].method`,
+    // including `off` (#1322 promise; previously it hardcoded `Auto`).
+    install_configured_method(method);
 
     if let Some(condition) = config
         .tui
@@ -1325,6 +1378,68 @@ mod tests {
         assert!(gate.quiet);
         assert!(!gate.approval_needed);
         assert!(gate.turn_complete);
+    }
+
+    /// Restores the process-wide configured method after a test mutates it.
+    struct ConfiguredMethodRestore(Method);
+
+    impl ConfiguredMethodRestore {
+        fn capture() -> Self {
+            Self(configured_method())
+        }
+    }
+
+    impl Drop for ConfiguredMethodRestore {
+        fn drop(&mut self) {
+            install_configured_method(self.0);
+        }
+    }
+
+    /// Same single-place contract as the gate: `settings()` must install the
+    /// configured `[notifications].method` so the `notify` tool (which has
+    /// no method of its own) honors it — including `off` (#1322 promise).
+    #[test]
+    fn settings_installs_configured_method_from_config() {
+        let _lock = env_lock();
+        let _method_restore = ConfiguredMethodRestore::capture();
+        let off: crate::config::Config = toml::from_str(
+            r#"
+            [notifications]
+            method = "off"
+            "#,
+        )
+        .expect("method=off config should parse");
+        let _ = settings(&off);
+        assert_eq!(configured_method(), Method::Off);
+
+        let osc9: crate::config::Config = toml::from_str(
+            r#"
+            [notifications]
+            method = "osc9"
+            "#,
+        )
+        .expect("method=osc9 config should parse");
+        let _ = settings(&osc9);
+        assert_eq!(configured_method(), Method::Osc9);
+    }
+
+    /// The packed encoding must round-trip every method so an install/read
+    /// pair can never silently fall back to `Auto`.
+    #[test]
+    fn configured_method_bits_round_trip_every_variant() {
+        for method in [
+            Method::Auto,
+            Method::Osc9,
+            Method::Bel,
+            Method::MacOS,
+            Method::Kitty,
+            Method::Ghostty,
+            Method::Off,
+        ] {
+            assert_eq!(method_from_bits(method_to_bits(method)), method);
+        }
+        // Unknown words decode permissively to the pre-install default.
+        assert_eq!(method_from_bits(255), Method::Auto);
     }
 
     /// #5041 copy contract: interactive banners lead with the action and
