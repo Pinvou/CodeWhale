@@ -10,7 +10,7 @@ import { AccountPlatformBffClient } from '../src/features/account-platform/bff-c
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
-import { adminNavigationGroups, adminSectionURL, readAdminSection, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
+import { adminNavigationGroups, adminSectionURL, readAdminOrganizationRoute, readAdminSection, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
@@ -25,6 +25,8 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   ]);
   const location = { pathname: '/admin.html', search: '?trace=kept&section=users', hash: '#focus' };
   assert.equal(readAdminSection(location), 'users');
+  assert.deepEqual(readAdminOrganizationRoute({ search: '?organization_id=org-1&organization_tab=members' }), { organizationID: 'org-1', tab: 'members' });
+  assert.deepEqual(readAdminOrganizationRoute({ search: '?organization_id=org-1&organization_tab=unknown' }), { organizationID: 'org-1', tab: 'overview' });
   assert.equal(adminSectionURL('billing', location), '/admin.html?trace=kept&section=billing#focus');
   assert.equal(
     adminSectionURL('roles', location, { role: 'ORG_ADMIN', trace: null }),
@@ -1068,6 +1070,12 @@ test('admin organization detail supports ownership transfer, rename, leaf deleti
   assert.match(view, /copy\.accounts\.organizationSearch/);
   assert.match(view, /editingOrganizationName \?\s*\(\s*<form/);
   assert.match(view, /setEditingOrganizationName\(true\)/);
+  assert.match(view, /readAdminOrganizationRoute/);
+  assert.match(view, /organization_id: item\.organization_id, organization_tab: 'overview'/);
+  assert.match(view, /activeTab === 'members'/);
+  assert.match(view, /activeTab === 'units'/);
+  assert.match(view, /activeTab === 'lifecycle'/);
+  assert.doesNotMatch(view, /<DetailDrawer label=\{`\$\{copy\.accounts\.organizationManagement\}/);
 });
 
 test('payment capabilities isolate provider limitations and enable reviewed-order repair', async () => {

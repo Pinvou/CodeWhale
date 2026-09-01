@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildUnitTree } from './admin-organization-tree.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminNavigationGroups, readAdminSection, writeAdminSection } from './admin-navigation.js';
+import { adminNavigationGroups, readAdminOrganizationRoute, readAdminSection, writeAdminSection } from './admin-navigation.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
@@ -249,6 +249,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [updatedAt, setUpdatedAt] = useState(null);
+  const [routeVersion, setRouteVersion] = useState(0);
   const authorizationRef = useRef(null);
   const authorizationRefreshRef = useRef(false);
 
@@ -511,8 +512,12 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         writeAdminSection(section, 'replace');
         return;
       }
-      if (requested === section) return;
+      if (requested === section) {
+        setRouteVersion((value) => value + 1);
+        return;
+      }
       setSection(requested);
+      setRouteVersion((value) => value + 1);
       if (!sectionHasData(requested, data)) void load(requested, undefined, authorization);
     };
     globalThis.addEventListener?.('popstate', onPopState);
@@ -528,8 +533,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       role_view: null,
       audit_action: null,
       audit_resource: null,
+      organization_id: null,
+      organization_tab: null,
       ...query,
     });
+    setRouteVersion((value) => value + 1);
     if (!sectionHasData(key, data)) load(key, undefined, authorization);
   };
   const logout = async () => {
@@ -549,6 +557,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const platformPermissions = authorization?.platform_permissions || [];
   const sectionIsReadOnly = section === 'settings' || section === 'overview' ? false : adminSectionReadOnly(authorization, section);
   const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
+  const organizationRoute = section === 'organizations' ? readAdminOrganizationRoute() : { organizationID: '', tab: 'overview' };
   const currentPageTitle = copy.nav[section];
   const currentPageLead = section === 'overview' ? copy.overview.lead : copy.pageLeads?.[section] || copy.subtitle;
 
@@ -605,7 +614,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
         </header>
         {busy && <div className="adm-progress" role="progressbar" aria-label={copy.loading} />}
         <div className="adm-page">
-          <PageHeader
+          {!organizationRoute.organizationID && <PageHeader
             eyebrow={copy.navGroups[currentGroup?.key] || copy.product}
             title={currentPageTitle}
             subtitle={currentPageLead}
@@ -613,8 +622,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             canRefresh={!['products', 'approvals', 'settings'].includes(section)}
             busy={busy}
             copy={copy}
-            onRefresh={() => load(section, undefined, authorization)}
-          />
+            onRefresh={() => {
+              void load(section, undefined, authorization);
+              if (organizationRoute.organizationID) setRouteVersion((value) => value + 1);
+            }}
+          />}
           {error && (
             <div role="alert" className="adm-alert">
               {error}
@@ -626,7 +638,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             </div>
           )}
           {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} onNavigate={navigate} />}
-          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} />}
+          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} organizationRoute={organizationRoute} routeVersion={routeVersion} />}
           {section === 'users' && (
             <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
           )}
@@ -901,7 +913,7 @@ function OrganizationDeletionDialog({ copy, organization, client, onClose, onDel
   );
 }
 
-function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate }) {
+function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, organizationRoute = { organizationID: '', tab: 'overview' }, routeVersion = 0 }) {
   const [search, setSearch] = useState('');
   const [userCode, setUserCode] = useState('');
   const [userMode, setUserMode] = useState('directory');
@@ -911,7 +923,8 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
   const [actionKey, setActionKey] = useState('');
   const [notice, setNotice] = useState('');
   const [actionError, setActionError] = useState('');
-  const [selectedOrganization, setSelectedOrganization] = useState(null);
+  const [routeOrganization, setRouteOrganization] = useState(null);
+  const [routeError, setRouteError] = useState('');
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
   const [organizationName, setOrganizationName] = useState('');
@@ -924,6 +937,36 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
   const canDeleteOrganization = permissionSet.has('platform.organizations.delete');
   const items = isUserSection ? data.users || [] : data.organizations || [];
   const activeUsers = useMemo(() => (data.users || []).filter((user) => user.status === 'ACTIVE'), [data.users]);
+  const selectedOrganization = !isUserSection && organizationRoute.organizationID ? items.find((item) => item.organization_id === organizationRoute.organizationID) || routeOrganization : null;
+  useEffect(() => {
+    if (isUserSection || !organizationRoute.organizationID) {
+      setRouteOrganization(null);
+      setRouteError('');
+      return undefined;
+    }
+    const existing = (data.organizations || []).find((item) => item.organization_id === organizationRoute.organizationID);
+    if (existing) {
+      setRouteOrganization(existing);
+      setRouteError('');
+      return undefined;
+    }
+    const controller = new globalThis.AbortController();
+    setRouteError('');
+    client.organizations(organizationRoute.organizationID, controller.signal).then((result) => {
+      const match = (result.items || []).find((item) => item.organization_id === organizationRoute.organizationID);
+      if (match) {
+        setRouteOrganization(match);
+        setData((current) => ({
+          ...current,
+          organizations: [...(current.organizations || []).filter((item) => item.organization_id !== match.organization_id), match],
+        }));
+      }
+      else setRouteError(copy.accounts.organizationNotFound);
+    }).catch((reason) => {
+      if (reason?.name !== 'AbortError') setRouteError(copy.accounts.organizationLoadFailed);
+    });
+    return () => controller.abort();
+  }, [client, copy.accounts.organizationLoadFailed, copy.accounts.organizationNotFound, data.organizations, isUserSection, organizationRoute.organizationID]);
   useEffect(() => {
     if (!ownerUserID && activeUsers[0]) setOwnerUserID(activeUsers[0].user_id);
   }, [activeUsers, ownerUserID]);
@@ -1028,7 +1071,7 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
           key: 'name',
           label: copy.accounts.organization,
           render: (item) => (
-            <button className="adm-name-link" onClick={() => setSelectedOrganization(item)}>
+            <button className="adm-name-link" onClick={() => onNavigate('organizations', { organization_id: item.organization_id, organization_tab: 'overview' })}>
               {item.name}
             </button>
           ),
@@ -1119,6 +1162,13 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
     }
   };
   if (selectedUser) return <UserMembershipDetail copy={copy} user={selectedUser} client={client} onBack={() => setSelectedUser(null)} onNavigate={onNavigate} />;
+  if (!isUserSection && organizationRoute.organizationID && !selectedOrganization)
+    return (
+      <section className="adm-panel adm-org-detail">
+        <button className="adm-back" onClick={() => onNavigate('organizations', { organization_id: null, organization_tab: null })}>← {copy.accounts.backToOrganizations}</button>
+        {routeError ? <div className="adm-inline-message error" role="alert">{routeError}</div> : <div className="adm-empty" role="status">{copy.loading}</div>}
+      </section>
+    );
   if (selectedOrganization)
     return (
       <OrganizationDetail
@@ -1129,9 +1179,24 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
         client={client}
         permissions={permissions}
         onNavigate={onNavigate}
-        onBack={() => setSelectedOrganization(null)}
+        activeTab={organizationRoute.tab}
+        refreshVersion={routeVersion}
+        onTabChange={(tab) => onNavigate('organizations', { organization_id: selectedOrganization.organization_id, organization_tab: tab })}
+        onBack={() => onNavigate('organizations', { organization_id: null, organization_tab: null })}
+        onStatusChanged={(status) => {
+          setRouteOrganization((current) => (current ? { ...current, status } : current));
+          setData((current) => ({
+            ...current,
+            organizations: (current.organizations || []).map((item) => (item.organization_id === selectedOrganization.organization_id ? { ...item, status } : item)),
+          }));
+        }}
+        onDeleted={() => {
+          onNavigate('organizations', { organization_id: null, organization_tab: null });
+          setNotice(copy.accounts.organizationDeleted);
+          reload().catch(() => setActionError(copy.accounts.lookupUnavailable || copy.accounts.actionFailed));
+        }}
         onRenamed={(name) => {
-          setSelectedOrganization((current) => ({ ...current, name }));
+          setRouteOrganization((current) => (current ? { ...current, name } : current));
           setData((current) => ({
             ...current,
             organizations: (current.organizations || []).map((item) => (item.organization_id === selectedOrganization.organization_id ? { ...item, name } : item)),
@@ -1300,12 +1365,14 @@ function UserMembershipDetail({ copy, user, client, onBack, onNavigate }) {
   );
 }
 
-function OrganizationDetail({ copy, organization, users, roles, client, permissions, onBack, onRenamed, onNavigate }) {
+function OrganizationDetail({ copy, organization, users, roles, client, permissions, onBack, onRenamed, onStatusChanged, onDeleted, onNavigate, activeTab = 'overview', refreshVersion = 0, onTabChange }) {
   const [units, setUnits] = useState([]);
   const [members, setMembers] = useState([]);
   const [name, setName] = useState('');
   const [organizationName, setOrganizationName] = useState(organization.name);
+  const [currentStatus, setCurrentStatus] = useState(organization.status);
   const [editingOrganizationName, setEditingOrganizationName] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [parentID, setParentID] = useState('');
   const [newOwnerUserID, setNewOwnerUserID] = useState('');
   const [newMemberUserID, setNewMemberUserID] = useState('');
@@ -1315,6 +1382,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
   const permissionSet = new Set(permissions || []);
   const canManageOrganization = permissionSet.has('platform.organizations.status.manage');
   const canTransferOwnership = permissionSet.has('platform.organizations.owner.transfer');
+  const canDeleteOrganization = permissionSet.has('platform.organizations.delete');
   const load = useCallback(
     async (signal) => {
       setBusy(true);
@@ -1335,8 +1403,9 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
     const controller = new globalThis.AbortController();
     void load(controller.signal);
     return () => controller.abort();
-  }, [load]);
+  }, [load, refreshVersion]);
   useEffect(() => setOrganizationName(organization.name), [organization.name]);
+  useEffect(() => setCurrentStatus(organization.status), [organization.status]);
   const roots = useMemo(() => buildUnitTree(units), [units]);
   const owners = useMemo(() => members.filter((member) => (member.roles || []).includes('OWNER')), [members]);
   const transferCandidates = useMemo(() => members.filter((member) => member.status === 'ACTIVE' && !(member.roles || []).includes('OWNER')), [members]);
@@ -1349,6 +1418,22 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
   const refreshMembers = async () => {
     const result = await client.organizationMembers(organization.organization_id);
     setMembers(result.items || []);
+  };
+  const changeStatus = async (status) => {
+    if (busy || status === currentStatus) return;
+    setBusy(true);
+    setNotice('');
+    setError('');
+    try {
+      await client.setOrganizationStatus(organization.organization_id, status);
+      setCurrentStatus(status);
+      onStatusChanged(status);
+      setNotice(copy.accounts.updated);
+    } catch {
+      setError(copy.accounts.actionFailed);
+    } finally {
+      setBusy(false);
+    }
   };
   const renameOrganization = async (event) => {
     event.preventDefault();
@@ -1370,7 +1455,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
   };
   const createUnit = async (event) => {
     event.preventDefault();
-    if (!name.trim() || busy || organization.status !== 'ACTIVE') return;
+    if (!name.trim() || busy || currentStatus !== 'ACTIVE') return;
     setBusy(true);
     setNotice('');
     setError('');
@@ -1389,7 +1474,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
   const transferOwnership = async (event) => {
     event.preventDefault();
     const target = transferCandidates.find((member) => member.user_id === newOwnerUserID);
-    if (!target || busy || organization.status !== 'ACTIVE' || !window.confirm(copy.accounts.confirmOwnership(memberLabel(target)))) return;
+    if (!target || busy || currentStatus !== 'ACTIVE' || !window.confirm(copy.accounts.confirmOwnership(memberLabel(target)))) return;
     setBusy(true);
     setNotice('');
     setError('');
@@ -1406,7 +1491,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
   };
   const addMember = async (event) => {
     event.preventDefault();
-    if (!newMemberUserID || busy || organization.status !== 'ACTIVE') return;
+    if (!newMemberUserID || busy || currentStatus !== 'ACTIVE') return;
     setBusy(true);
     setNotice('');
     setError('');
@@ -1484,7 +1569,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
     }
   };
   return (
-    <DetailDrawer label={`${copy.accounts.organizationManagement} · ${organizationName}`} onClose={onBack}>
+    <>
     <section className="adm-panel adm-org-detail">
       <button className="adm-back" onClick={onBack}>
         ← {copy.accounts.backToOrganizations}
@@ -1511,6 +1596,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
           ) : (
             <div className="adm-org-name-display">
               <h2>{organization.name}</h2>
+              <p>{copy.accounts.organizationDetailLead}</p>
               {canManageOrganization && (
                 <button type="button" disabled={busy} onClick={() => setEditingOrganizationName(true)}>
                   {copy.accounts.rename}
@@ -1519,9 +1605,33 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
             </div>
           )}
         </div>
-        <Status value={organization.status} />
+        <div className="adm-org-heading-actions">
+          <Status value={currentStatus} />
+          <button type="button" disabled={busy} onClick={() => load()}>{copy.refresh}</button>
+        </div>
       </div>
-      {organization.status !== 'ACTIVE' && <div className="adm-inline-message error">{copy.accounts.organizationDisabled}</div>}
+      <Tabs
+        items={[
+          { key: 'overview', label: copy.accounts.organizationTabs.overview },
+          { key: 'members', label: copy.accounts.organizationTabs.members },
+          { key: 'units', label: copy.accounts.organizationTabs.units },
+          { key: 'lifecycle', label: copy.accounts.organizationTabs.lifecycle },
+        ]}
+        active={activeTab}
+        onChange={onTabChange}
+      />
+      {notice && <div className="adm-inline-message ok" role="status">{notice}</div>}
+      {error && <div className="adm-inline-message error" role="alert">{error}</div>}
+      {activeTab === 'overview' && (
+        <div className="adm-org-section">
+      <dl className="adm-detail-list">
+        <div><dt>ID</dt><dd><TechnicalID value={organization.organization_id} copy={copy} compact={false} /></dd></div>
+        <div><dt>{copy.accounts.status}</dt><dd><Status value={currentStatus} /></dd></div>
+        <div><dt>{copy.accounts.members}</dt><dd>{members.length}</dd></div>
+        <div><dt>{copy.accounts.unitHierarchy}</dt><dd>{units.length}</dd></div>
+        <div><dt>{copy.accounts.created}</dt><dd>{formatDate(organization.created_at)}</dd></div>
+        <div><dt>{copy.accounts.updatedAt}</dt><dd>{formatDate(organization.updated_at)}</dd></div>
+      </dl>
       <div className="adm-owner-card">
         <div>
           <span>{copy.accounts.organizationOwner}</span>
@@ -1537,11 +1647,15 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
                 </option>
               ))}
             </select>
-            <button disabled={busy || organization.status !== 'ACTIVE' || !newOwnerUserID}>{copy.accounts.transferOwner}</button>
+            <button disabled={busy || currentStatus !== 'ACTIVE' || !newOwnerUserID}>{copy.accounts.transferOwner}</button>
           </form>
         )}
         {!busy && transferCandidates.length === 0 && <small>{copy.accounts.noTransferCandidate}</small>}
       </div>
+        </div>
+      )}
+      {activeTab === 'members' && (
+        <div className="adm-org-section">
       <div className="adm-unit-head">
         <h3>{copy.roles.organizationMembers}</h3>
         <span>{copy.items(members.length)}</span>
@@ -1561,13 +1675,17 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
       )}
       <div className="adm-member-access-list">
         {members.map((member) => (
-          <MemberAccessEditor key={member.user_id} copy={copy} member={member} units={units} roles={roles} disabled={!canManageOrganization || busy || organization.status !== 'ACTIVE'} onSave={saveMemberRoles} onRemove={removeMember} />
+          <MemberAccessEditor key={member.user_id} copy={copy} member={member} units={units} roles={roles} disabled={!canManageOrganization || busy || currentStatus !== 'ACTIVE'} onSave={saveMemberRoles} onRemove={removeMember} />
         ))}
       </div>
       <div className="adm-role-reference">
         <p>{copy.roles.organizationRoleReference}</p>
         <button type="button" onClick={() => onNavigate('roles', { role_scope: 'ORGANIZATION' })}>{copy.roles.viewOrganizationRoles}</button>
       </div>
+        </div>
+      )}
+      {activeTab === 'units' && (
+        <div className="adm-org-section">
       {canManageOrganization && (
         <form className="adm-unit-form" onSubmit={createUnit}>
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder={copy.accounts.unitName} maxLength={120} />
@@ -1581,18 +1699,8 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
                 </option>
               ))}
           </select>
-          <button disabled={busy || organization.status !== 'ACTIVE' || !name.trim()}>{copy.accounts.createUnit}</button>
+          <button disabled={busy || currentStatus !== 'ACTIVE' || !name.trim()}>{copy.accounts.createUnit}</button>
         </form>
-      )}
-      {notice && (
-        <div className="adm-inline-message ok" role="status">
-          {notice}
-        </div>
-      )}
-      {error && (
-        <div className="adm-inline-message error" role="alert">
-          {error}
-        </div>
       )}
       <div className="adm-unit-head">
         <h3>{copy.accounts.unitHierarchy}</h3>
@@ -1610,7 +1718,7 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
               unit={unit}
               copy={copy}
               disabled={busy || !canManageOrganization}
-              addDisabled={!canManageOrganization || organization.status !== 'ACTIVE'}
+              addDisabled={!canManageOrganization || currentStatus !== 'ACTIVE'}
               onAddChild={(id) => {
                 setParentID(id);
                 setName('');
@@ -1621,8 +1729,30 @@ function OrganizationDetail({ copy, organization, users, roles, client, permissi
           ))}
         </div>
       )}
+        </div>
+      )}
+      {activeTab === 'lifecycle' && (
+        <div className="adm-org-section adm-org-lifecycle">
+          <div className="adm-lifecycle-summary">
+            <div><span>{copy.accounts.currentStatus}</span><Status value={currentStatus} /></div>
+            <p>{currentStatus === 'ACTIVE' ? copy.accounts.activeOrganizationHelp : copy.accounts.disabledOrganizationHelp}</p>
+            {canManageOrganization && (
+              <div className="adm-row-actions">
+                {currentStatus === 'ACTIVE' ? <button type="button" onClick={() => changeStatus('DISABLED')} disabled={busy}>{copy.accounts.disable}</button> : currentStatus === 'DISABLED' ? <button type="button" onClick={() => changeStatus('ACTIVE')} disabled={busy}>{copy.accounts.enable}</button> : null}
+              </div>
+            )}
+          </div>
+          {currentStatus === 'DISABLED' && canDeleteOrganization && (
+            <div className="adm-danger-zone">
+              <div><strong>{copy.accounts.deletionReview}</strong><p>{copy.accounts.deletionReviewHelp}</p></div>
+              <button type="button" className="danger" onClick={() => setDeleteOpen(true)}>{copy.accounts.delete}</button>
+            </div>
+          )}
+        </div>
+      )}
     </section>
-    </DetailDrawer>
+    {deleteOpen && <OrganizationDeletionDialog copy={copy} organization={{ ...organization, status: currentStatus, name: organizationName }} client={client} onClose={() => setDeleteOpen(false)} onDeleted={onDeleted} />}
+    </>
   );
 }
 

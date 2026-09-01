@@ -11,6 +11,18 @@ export function readAdminSection(locationLike = globalThis.location) {
   return new URLSearchParams(String(locationLike.search || '')).get('section') || '';
 }
 
+const organizationTabs = new Set(['overview', 'members', 'units', 'lifecycle']);
+
+export function readAdminOrganizationRoute(locationLike = globalThis.location) {
+  const search = new URLSearchParams(String(locationLike?.search || ''));
+  const organizationID = search.get('organization_id') || '';
+  const requestedTab = search.get('organization_tab') || 'overview';
+  return {
+    organizationID,
+    tab: organizationTabs.has(requestedTab) ? requestedTab : 'overview',
+  };
+}
+
 export function adminSectionURL(section, locationLike = globalThis.location, queryUpdates = {}) {
   const pathname = String(locationLike?.pathname || '/admin.html');
   const search = new URLSearchParams(String(locationLike?.search || ''));
