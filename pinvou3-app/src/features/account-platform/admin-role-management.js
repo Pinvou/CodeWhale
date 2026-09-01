@@ -1,6 +1,8 @@
 export const roleScopes = Object.freeze(['PERSONAL', 'PLATFORM', 'ORGANIZATION', 'UNIT']);
 export const roleCatalogScopes = Object.freeze(['PERSONAL', 'PLATFORM', 'ORGANIZATION']);
 
+const roleCatalogSortOrder = Object.freeze({ ORGANIZATION: 0, PERSONAL: 1, PLATFORM: 2 });
+
 const protectedRoleCodes = new Set(['PERSONAL_USER', 'MEMBER', 'OWNER', 'PLATFORM_SUPER_ADMIN']);
 
 function normalized(value) {
@@ -71,13 +73,17 @@ export function permissionGroups(copy, role) {
 
 export function filterRoles(roles, filters, copy) {
   const query = normalized(filters?.query);
-  return (roles || []).filter((role) => {
+  const matched = (roles || []).filter((role) => {
     if (filters?.scope && roleCatalogScope(role.scope) !== filters.scope) return false;
     const direct = roleGrantMode(copy, role) === copy.roles.directGrant;
     if (filters?.grantable === 'direct' && !direct) return false;
     if (filters?.grantable === 'managed' && direct) return false;
     if (!query) return true;
     return [role.code, role.description, roleDescription(copy, role), roleName(copy, role.code), ...(role.permissions || [])].some((value) => normalized(value).includes(query));
+  });
+  return [...matched].sort((left, right) => {
+    const scopeOrder = roleCatalogSortOrder[roleCatalogScope(left.scope)] - roleCatalogSortOrder[roleCatalogScope(right.scope)];
+    return scopeOrder || left.code.localeCompare(right.code);
   });
 }
 

@@ -54,6 +54,7 @@ test('role catalog action column keeps its view action on one line', async () =>
 });
 
 test('role catalog searches localized names and exact permission codes', () => {
+  assert.deepEqual(filterRoles(roles, { query: '', scope: '', grantable: '' }, copy).map((role) => role.code), ['OWNER', 'UNIT_ADMIN', 'PERSONAL_USER', 'PLATFORM_BILLING_OPERATOR']);
   assert.deepEqual(filterRoles(roles, { query: '平台计费', scope: '', grantable: '' }, copy).map((role) => role.code), ['PLATFORM_BILLING_OPERATOR']);
   assert.deepEqual(filterRoles(roles, { query: 'wallets.read', scope: 'PLATFORM', grantable: 'direct' }, copy).map((role) => role.code), ['PLATFORM_BILLING_OPERATOR']);
   assert.deepEqual(filterRoles(roles, { query: '', scope: 'ORGANIZATION', grantable: '' }, copy).map((role) => role.code), ['OWNER', 'UNIT_ADMIN']);
