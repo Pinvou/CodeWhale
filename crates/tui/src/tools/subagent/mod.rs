@@ -2217,6 +2217,13 @@ pub struct SubAgentRuntime {
     pub todos: SharedTodoList,
     /// Session mode of the orchestrating parent at spawn time (Wave 7 M4/M5).
     pub parent_mode: AppMode,
+    /// The parent session's exec-policy engine. Because the engine shares its
+    /// live rulesets across clones, every child registry holding this handle
+    /// evaluates the same typed permission rules — including rules installed
+    /// mid-session — that the parent turn loop enforces on its own tool calls.
+    /// Defaults to an empty engine (no rules), which leaves child behavior
+    /// unchanged for embedders that never thread one.
+    pub exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
 }
 
 impl SubAgentRuntime {
@@ -2268,6 +2275,7 @@ impl SubAgentRuntime {
             speech_output_dir: None,
             todos: crate::tools::todo::new_shared_todo_list(),
             parent_mode: AppMode::Agent,
+            exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine::new(Vec::new(), Vec::new()),
         }
     }
 
@@ -2275,6 +2283,20 @@ impl SubAgentRuntime {
     #[must_use]
     pub fn with_parent_mode(mut self, mode: AppMode) -> Self {
         self.parent_mode = mode;
+        self
+    }
+
+    /// Carry the parent session's exec-policy engine into child registries so
+    /// typed deny rules bind sub-agent tool calls the same way they bind the
+    /// parent's. The engine shares its live rulesets across clones, so this
+    /// handle tracks later `set_ruleset` updates instead of freezing a
+    /// spawn-time snapshot.
+    #[must_use]
+    pub fn with_exec_policy_engine(
+        mut self,
+        exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
+    ) -> Self {
+        self.exec_policy_engine = exec_policy_engine;
         self
     }
 
@@ -2555,6 +2577,7 @@ impl SubAgentRuntime {
             // opt-in forked child as immutable `fork_context` text.
             todos: crate::tools::todo::new_shared_todo_list(),
             parent_mode: self.parent_mode,
+            exec_policy_engine: self.exec_policy_engine.clone(),
         }
     }
 
@@ -12704,6 +12727,11 @@ struct SubAgentToolRegistry {
     /// admitted worker identity. Production registries always enforce claims.
     enforce_write_claim: bool,
     registry: ToolRegistry,
+    /// The parent session's exec-policy engine (shared live rulesets; see
+    /// [`SubAgentRuntime::exec_policy_engine`]). Consulted by `execute` so a
+    /// command the parent turn loop would hard-deny cannot be delegated to
+    /// this child and run anyway. Empty by default → checks are no-ops.
+    exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
 }
 
 impl SubAgentToolRegistry {
@@ -12809,6 +12837,7 @@ impl SubAgentToolRegistry {
             coordination_manager,
             enforce_write_claim: true,
             registry,
+            exec_policy_engine: runtime.exec_policy_engine.clone(),
         }
     }
 
@@ -13318,6 +13347,38 @@ impl SubAgentToolRegistry {
                 self.execution_envelope(),
             )
             .map_err(|refusal| anyhow!(refusal))?;
+        }
+        // Fork delta (execpolicy wiring): delegated calls run through the same
+        // typed execpolicy gate the parent turn loop applies between hooks and
+        // approval (`exec_shell_ask_rule_decision` / `file_tool_ask_rule_decision`,
+        // reused verbatim). Positioned after the execution envelope so this
+        // child's own posture still speaks first. Only a hard Block refuses —
+        // children have no prompt surface, so a Prompt decision passes like any
+        // other parent-auto-approved call; that is also why the parent posture
+        // here is evaluated as `ApprovalMode::Auto` (→ `OnFailure`), never the
+        // fail-closed `Never` mapping. The engine handle shares the parent's
+        // live rulesets, so a rule installed mid-session binds delegated calls
+        // too, and an empty engine (no rules) leaves this check a no-op.
+        let ask_rule_decision = crate::core::engine::exec_shell_ask_rule_decision_for_engine(
+            &self.exec_policy_engine,
+            name,
+            &input,
+            &self.registry.context().workspace,
+            crate::tui::approval::ApprovalMode::Auto,
+        )
+        .or_else(|| {
+            crate::core::engine::file_tool_ask_rule_decision_for_engine(
+                &self.exec_policy_engine,
+                name,
+                &input,
+                &self.registry.context().workspace,
+                crate::tui::approval::ApprovalMode::Auto,
+            )
+        });
+        if let Some(crate::core::engine::ToolAskRuleDecision::Block(reason)) = ask_rule_decision {
+            // Mirror the main line's blocked refusal so a child model sees the
+            // same familiar wording the parent would have received.
+            return Err(anyhow!(reason));
         }
         let scope_aware_write = matches!(
             name,

@@ -10510,7 +10510,11 @@ async fn build_direct_workflow_tool(
     .with_speech_output_dir(config.speech_output_dir())
     .with_mcp_pool(mcp_pool)
     .with_todos(new_shared_todo_list())
-    .with_parent_mode(mode);
+    .with_parent_mode(mode)
+    // Typed permission rules must bind delegated calls like they bind the
+    // parent's own; the handle shares the live rulesets, so mid-session
+    // updates stay effective.
+    .with_exec_policy_engine(config.exec_policy_engine.clone());
 
     Ok((
         crate::tools::workflow::WorkflowTool::new(manager, runtime).with_explicit_cli_approval(),
