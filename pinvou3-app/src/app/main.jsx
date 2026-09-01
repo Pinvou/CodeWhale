@@ -3012,13 +3012,6 @@ function workspaceDisplayName(path) {
       };
 
       const apiKeyGateOpen = shouldShowApiKeyGate(bs, currentView, bridge.available);
-      const vllmSetupModalOpen = !!(
-        can('localModelSetup')
-        && bs
-        && bs.vllmSetup
-        && bs.vllmSetup.eligible
-        && !bs.vllmSetupDismissed
-      );
       const browserOverlayIntent = [
         archiveConfirm ? 'archive-confirm' : '',
         searchOverlayOpen ? 'search' : '',
@@ -3026,7 +3019,6 @@ function workspaceDisplayName(path) {
         savedConfirm ? 'saved-confirm' : '',
         can('webAccessAdmin') && webAccessOpen ? 'web-access' : '',
         apiKeyGateOpen ? 'api-key' : '',
-        vllmSetupModalOpen ? 'vllm-setup' : '',
         bs && bs.pinvouModal ? 'pinvou-review' : '',
         isCompactShell && isSidebarOpen ? 'mobile-sidebar' : '',
         isCompactShell && mobileMoreOpen ? 'mobile-more' : '',
