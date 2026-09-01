@@ -372,8 +372,9 @@ test('permanent user codes are random, immutable, displayable, and exact-query o
   assert.equal(exact.parameters[0].$ref, '#/components/parameters/UserCode');
   assert.equal(exact.responses['200'].headers['Cache-Control'].schema.const, 'no-store');
   const users = admin.paths['/account/admin/v1/users'].get;
-  assert.equal(users.parameters.length, 3);
+  assert.equal(users.parameters.length, 4);
   assert.equal(users.parameters[2].$ref, '#/components/parameters/Cursor');
+  assert.equal(users.parameters[3].name, 'exclude_organization_id');
   assert.equal(users.responses['200'].content['application/json'].schema.$ref, '#/components/schemas/AdminUserPage');
 });
 
