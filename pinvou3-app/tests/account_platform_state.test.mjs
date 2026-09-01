@@ -906,11 +906,14 @@ test('admin console exposes users, roles, and organizations as independently nam
   assert.doesNotMatch(i18n, /搜索用户名、名称、邮箱/);
 });
 
-test('admin authorization refresh clears a transient management-service warning after recovery', async () => {
+test('admin authorization refresh retries transient browser failures without reporting a service outage', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
-  assert.match(view, /const authorizationRefreshFailedRef = useRef\(false\)/);
-  assert.match(view, /const next = await client\.authorization\(\);[\s\S]*?authorizationRefreshFailedRef\.current = false;[\s\S]*?setError\(''\)/);
-  assert.match(view, /authorizationRefreshFailedRef\.current = true;[\s\S]*?setError\(copy\.failed\)/);
+  const refreshEffect = view.slice(view.indexOf("if (auth !== 'ready') return undefined;"), view.indexOf("if (auth !== 'ready' || !authorization) return undefined;"));
+  assert.match(refreshEffect, /refreshAuthorization = async \(isRetry = false\)/);
+  assert.match(refreshEffect, /setTimeout\?\.\(\(\) => \{[\s\S]*?refreshAuthorization\(true\)[\s\S]*?\}, 1500\)/);
+  assert.match(refreshEffect, /reason\?\.status === 401\) setAuth\('guest'\)/);
+  assert.match(refreshEffect, /reason\?\.status === 403\) setAuth\('denied'\)/);
+  assert.doesNotMatch(refreshEffect, /setError\(copy\.failed\)/);
 });
 
 test('personal center keeps context on overview and cannot create organizations', async () => {

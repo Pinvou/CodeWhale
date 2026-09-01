@@ -251,7 +251,6 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [updatedAt, setUpdatedAt] = useState(null);
   const authorizationRef = useRef(null);
   const authorizationRefreshRef = useRef(false);
-  const authorizationRefreshFailedRef = useRef(false);
 
   const load = useCallback(
     async (target, signal, granted = authorizationRef.current) => {
@@ -442,15 +441,16 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   useEffect(() => {
     if (auth !== 'ready') return undefined;
     let disposed = false;
-    const refreshAuthorization = async () => {
+    let retryTimer = null;
+    const refreshAuthorization = async (isRetry = false) => {
       if (authorizationRefreshRef.current) return;
       authorizationRefreshRef.current = true;
       try {
         const next = await client.authorization();
         if (disposed) return;
-        if (authorizationRefreshFailedRef.current) {
-          authorizationRefreshFailedRef.current = false;
-          setError('');
+        if (retryTimer !== null) {
+          globalThis.clearTimeout?.(retryTimer);
+          retryTimer = null;
         }
         const current = authorizationRef.current;
         const permissionsChanged = JSON.stringify(current?.platform_permissions || []) !== JSON.stringify(next?.platform_permissions || []);
@@ -471,9 +471,18 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       } catch (reason) {
         if (!disposed && reason?.name !== 'AbortError') {
           if (reason?.status === 401) setAuth('guest');
-          else {
-            authorizationRefreshFailedRef.current = true;
-            setError(copy.failed);
+          else if (reason?.status === 403) setAuth('denied');
+          else if (!isRetry && retryTimer === null) {
+            retryTimer = globalThis.setTimeout?.(() => {
+              retryTimer = null;
+              void refreshAuthorization(true);
+            }, 1500);
+          } else {
+            console.warn('[admin-platform] background authorization refresh failed', {
+              name: reason?.name || 'Error',
+              code: reason?.code || '',
+              status: reason?.status || 0,
+            });
           }
         }
       } finally {
@@ -487,10 +496,11 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
     globalThis.addEventListener?.('focus', onFocus);
     return () => {
       disposed = true;
+      if (retryTimer !== null) globalThis.clearTimeout?.(retryTimer);
       unsubscribe?.();
       globalThis.removeEventListener?.('focus', onFocus);
     };
-  }, [auth, client, copy.failed, load, section]);
+  }, [auth, client, load, section]);
 
   useEffect(() => {
     if (auth !== 'ready' || !authorization) return undefined;
