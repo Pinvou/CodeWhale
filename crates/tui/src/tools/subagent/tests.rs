@@ -6313,10 +6313,22 @@ fn auto_approved_worker_registry_with_engine(
     tmp: &tempfile::TempDir,
     exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
 ) -> SubAgentToolRegistry {
+    worker_registry_with_engine_and_approval(tmp, exec_policy_engine, true)
+}
+
+/// The same fixture with the parent session's approval posture under the
+/// caller's control: `false` models every prompting/fail-closed posture
+/// (Suggest/Auto/Never), where the main line would surface an approval
+/// prompt the child has no surface for.
+fn worker_registry_with_engine_and_approval(
+    tmp: &tempfile::TempDir,
+    exec_policy_engine: codewhale_execpolicy::ExecPolicyEngine,
+    auto_approve: bool,
+) -> SubAgentToolRegistry {
     let mut runtime =
         stub_runtime().with_agent_tool_surface_options(enabled_agent_surface_options());
     runtime.context = ToolContext::new(tmp.path().to_path_buf());
-    runtime.context.auto_approve = true;
+    runtime.context.auto_approve = auto_approve;
     runtime.allow_shell = true;
     runtime.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Worker);
     SubAgentToolRegistry::new(
@@ -6332,6 +6344,10 @@ fn auto_approved_worker_registry_with_engine(
 /// hard-denies must fail closed inside the child with the main line's deny
 /// wording — the auto-approve escape hatch this wiring closes — while a
 /// command no rule names still dispatches for real through the same registry.
+/// A typed ask rule mirrors the main line's #3790 posture authority: under a
+/// prompting/fail-closed parent the child refuses (it cannot show the
+/// approval prompt), while under an auto-approving parent it passes like the
+/// main line's auto-run.
 #[tokio::test]
 async fn forkguard_subagent_execpolicy_deny_matches_main_line() {
     let tmp = tempdir().expect("tempdir");
@@ -6366,6 +6382,48 @@ async fn forkguard_subagent_execpolicy_deny_matches_main_line() {
         !output.starts_with("Error:"),
         "allowed command must really dispatch: {output}"
     );
+
+    // Ask-rule face: a prompting/fail-closed parent session cannot let the
+    // child run what the main line would only run after approval.
+    let ask_engine = codewhale_execpolicy::ExecPolicyEngine::with_rulesets(vec![
+        codewhale_execpolicy::Ruleset::user(Vec::new(), Vec::new())
+            .with_ask_rules(vec![codewhale_execpolicy::ToolAskRule::exec_shell("curl")]),
+    ]);
+    let prompting = worker_registry_with_engine_and_approval(&tmp, ask_engine.clone(), false);
+    let error = prompting
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "curl --version"}),
+        )
+        .await
+        .expect_err("an ask rule under a non-auto parent must refuse in the child")
+        .to_string();
+    assert!(
+        error.contains("requires approval"),
+        "refusal must point at the approval surface: {error}"
+    );
+
+    let output = prompting
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "ls"}),
+        )
+        .await
+        .expect("a command no rule names must dispatch regardless of posture");
+    assert!(!output.starts_with("Error:"), "{output}");
+
+    let yolo = worker_registry_with_engine_and_approval(&tmp, ask_engine, true);
+    let output = yolo
+        .execute(
+            "agent_policy",
+            "Bash",
+            json!({"action": "run", "command": "curl --version"}),
+        )
+        .await
+        .expect("under parent auto-approve the ask rule must pass like the main line");
+    assert!(!output.starts_with("Error:"), "{output}");
 }
 
 /// Without a ruleset the delegated path is byte-identical to the unwired
