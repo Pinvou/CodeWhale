@@ -19,6 +19,18 @@ use serde_json::Value;
 pub(super) const MIN_RECENT_MESSAGES_TO_KEEP: usize = 4;
 /// Allow a few emergency recovery attempts before failing the turn.
 pub(super) const MAX_CONTEXT_RECOVERY_ATTEMPTS: u8 = 2;
+/// Emergency-recovery trim target: this fraction of the input budget below
+/// the budget itself. Trimming exactly to the budget re-triggers the preflight
+/// on the next step as soon as new output is appended — a per-step "trim a few
+/// oldest" thrash that eats the transcript from the front and invalidates the
+/// provider prefix cache each time.
+pub(super) const EMERGENCY_TRIM_MARGIN_DIVISOR: usize = 10;
+
+/// Local-trim target for emergency context recovery, strictly below the input
+/// budget so one recovery buys several steps of headroom.
+pub(super) fn emergency_trim_budget(input_budget: usize) -> usize {
+    input_budget.saturating_sub(input_budget / EMERGENCY_TRIM_MARGIN_DIVISOR)
+}
 /// Hard cap for any tool output inserted into model context.
 const TOOL_RESULT_CONTEXT_HARD_LIMIT_CHARS: usize = 12_000;
 /// Soft cap for known noisy tools inserted into model context.
@@ -605,4 +617,19 @@ pub(super) fn route_context_budget_for_route(
 
 pub(super) fn is_context_length_error_message(message: &str) -> bool {
     crate::error_taxonomy::classify_error_message(message) == ErrorCategory::InvalidInput
+}
+
+#[cfg(test)]
+mod tests {
+    use super::emergency_trim_budget;
+
+    #[test]
+    fn emergency_trim_budget_leaves_a_hysteresis_margin() {
+        assert_eq!(emergency_trim_budget(244_736), 220_263);
+        // Tiny budgets lose most of the margin to integer division but never
+        // trim past the line itself.
+        assert_eq!(emergency_trim_budget(10), 9);
+        assert_eq!(emergency_trim_budget(1), 1);
+        assert_eq!(emergency_trim_budget(0), 0);
+    }
 }

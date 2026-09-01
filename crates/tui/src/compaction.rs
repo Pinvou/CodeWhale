@@ -27,6 +27,12 @@ use crate::models::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionConfig {
     pub enabled: bool,
+    /// Auto-compaction trigger expressed in *conservative* estimate units —
+    /// the same ×3/2-over-raw scale as [`estimate_input_tokens_conservative`]
+    /// and the route input budget (`window − reserved output − headroom`).
+    /// Route-derived values are `percent × input_budget_ceiling`; comparing
+    /// them against raw estimates silently moves the trigger ~1.5× past the
+    /// preflight budget, where auto-compaction can never fire first.
     pub token_threshold: usize,
     pub model: String,
     /// Route-effective context window. `None` preserves compatibility for
@@ -559,17 +565,31 @@ pub fn plan_compaction(
     // Some OpenAI-compatible chat templates require at least one user text
     // message. Tool-heavy tails can otherwise compact down to only tool calls
     // and tool results, which makes those backends reject the next request.
-    if !pinned_indices
+    let reserved_user_query = pinned_indices
         .iter()
-        .any(|&idx| is_user_text_query(&messages[idx]))
-        && let Some(idx) = messages
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(idx, msg)| is_user_text_query(msg).then_some(idx))
-    {
+        .find(|&&idx| is_user_text_query(&messages[idx]))
+        .copied()
+        .or_else(|| {
+            messages
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, msg)| is_user_text_query(msg).then_some(idx))
+        });
+    if let Some(idx) = reserved_user_query {
         pinned_indices.insert(idx);
     }
+
+    // Pin heuristics (working-set path mentions, error/patch markers, external
+    // working-set pins) can pin virtually every message in a debugging
+    // session; an empty summarize set turns compaction into a no-op and leaves
+    // emergency front-trimming as the only reducer. Cap the protected share.
+    cap_pinned_token_share(
+        messages,
+        &mut pinned_indices,
+        reserved_user_query,
+        keep_recent,
+    );
 
     let summarize_indices = (0..len)
         .filter(|idx| !pinned_indices.contains(idx))
@@ -581,6 +601,83 @@ pub fn plan_compaction(
     CompactionPlan {
         pinned_indices,
         summarize_indices,
+    }
+}
+
+/// Sessions below this raw-estimate size skip the pinned-share cap: small
+/// transcripts keep their pin heuristics intact, and compaction is not a
+/// context-pressure concern at this scale.
+const PINNED_TOKEN_CAP_MIN_TOTAL: usize = 16_384;
+
+/// Denominator form of the pinned-token cap: pinning may protect at most
+/// `1/n` of a session's estimated tokens; the rest must stay summarizable.
+const PINNED_TOKEN_CAP_DENOMINATOR: usize = 2;
+
+/// Release the oldest pins until the protected share fits within
+/// [`PINNED_TOKEN_CAP_DENOMINATOR`], keeping the recent tail and the reserved
+/// user query pinned. Best-effort: a huge recent tail may still exceed the cap
+/// because the tail is never evicted. Evicting a tool-call message also
+/// evicts its pinned results — a retained result whose call was summarized is
+/// rejected by OpenAI-style backends.
+fn cap_pinned_token_share(
+    messages: &[Message],
+    pinned_indices: &mut BTreeSet<usize>,
+    reserved_user_query: Option<usize>,
+    keep_recent: usize,
+) {
+    if pinned_indices.is_empty() {
+        return;
+    }
+    let estimates: Vec<usize> = messages
+        .iter()
+        .map(|message| estimate_tokens_for_message(message, false))
+        .collect();
+    let total: usize = estimates.iter().sum();
+    if total < PINNED_TOKEN_CAP_MIN_TOTAL {
+        return;
+    }
+    let cap = total / PINNED_TOKEN_CAP_DENOMINATOR;
+    let mut pinned_tokens: usize = pinned_indices.iter().map(|&idx| estimates[idx]).sum();
+    if pinned_tokens <= cap {
+        return;
+    }
+
+    let tail_start = messages.len().saturating_sub(keep_recent);
+    let result_index_by_call_id: HashMap<&str, usize> = messages
+        .iter()
+        .enumerate()
+        .flat_map(|(idx, message)| {
+            message.content.iter().filter_map(move |block| match block {
+                ContentBlock::ToolResult { tool_use_id, .. } => Some((tool_use_id.as_str(), idx)),
+                _ => None,
+            })
+        })
+        .collect();
+
+    // BTreeSet iteration is index-ascending: evict the oldest evictable pins
+    // first, they are the furthest from the current working context. An index
+    // already gone (evicted below as a tool-result pair partner) must not be
+    // accounted twice.
+    for idx in pinned_indices.iter().copied().collect::<Vec<_>>() {
+        if idx >= tail_start || Some(idx) == reserved_user_query {
+            continue;
+        }
+        if !pinned_indices.remove(&idx) {
+            continue;
+        }
+        pinned_tokens = pinned_tokens.saturating_sub(estimates[idx]);
+        for block in &messages[idx].content {
+            if let ContentBlock::ToolUse { id, .. } = block
+                && let Some(&result_idx) = result_index_by_call_id.get(id.as_str())
+                && result_idx < tail_start
+                && pinned_indices.remove(&result_idx)
+            {
+                pinned_tokens = pinned_tokens.saturating_sub(estimates[result_idx]);
+            }
+        }
+        if pinned_tokens <= cap {
+            break;
+        }
     }
 }
 
@@ -780,17 +877,27 @@ pub fn should_compact(
         external_pins,
         external_working_set_paths,
     );
-    let pinned_tokens: usize = plan
-        .pinned_indices
-        .iter()
-        .map(|&idx| estimate_tokens_for_message(&messages[idx], false))
-        .sum();
+    // Both sides of the threshold comparison must share units. `token_threshold`
+    // is conservative-scaled (see the field docs): route-derived thresholds are
+    // a percent of the conservative input budget, and the preflight/emergency
+    // gate compares `estimate_input_tokens_conservative` against that same
+    // budget. Scale the plan's raw estimates to match, or the trigger line sits
+    // ~1.5× above the preflight budget and auto-compaction can never fire
+    // before the emergency path takes over.
+    let conservative = |tokens: usize| tokens.saturating_mul(3).div_ceil(2);
+    let pinned_tokens: usize = conservative(
+        plan.pinned_indices
+            .iter()
+            .map(|&idx| estimate_tokens_for_message(&messages[idx], false))
+            .sum(),
+    );
 
-    let token_estimate: usize = plan
-        .summarize_indices
-        .iter()
-        .map(|&idx| estimate_tokens_for_message(&messages[idx], false))
-        .sum();
+    let token_estimate: usize = conservative(
+        plan.summarize_indices
+            .iter()
+            .map(|&idx| estimate_tokens_for_message(&messages[idx], false))
+            .sum(),
+    );
     let message_count = plan.summarize_indices.len();
 
     // Pinned messages consume part of the budget, so compact earlier when needed.
@@ -3823,6 +3930,141 @@ mod tests {
 
         let messages: Vec<Message> = (0..10).map(|_| msg("user", &"x".repeat(50))).collect();
         assert!(should_compact(&messages, &config, None, None, None));
+    }
+
+    // ========================================================================
+    // Trigger-unit and pin-cap regressions (auto-compaction thrash)
+    // ========================================================================
+
+    #[test]
+    fn should_compact_threshold_compares_in_conservative_units() {
+        // 40 summarizable messages × 400 chars ≈ 4,000 raw tokens ≈ 6,000
+        // conservative. A threshold of 5,000 lies between the two scales: it
+        // must fire, which a raw-units comparison would never do.
+        let config = CompactionConfig {
+            enabled: true,
+            token_threshold: 5_000,
+            ..Default::default()
+        };
+        let messages: Vec<Message> = (0..44).map(|_| msg("user", &"x".repeat(400))).collect();
+        assert!(should_compact(&messages, &config, None, None, None));
+    }
+
+    #[test]
+    fn should_compact_fires_below_the_preflight_budget_for_route() {
+        // Route-derived thresholds are a percent of the conservative input
+        // budget. Regression for the unit mismatch where the plan's raw
+        // estimate was compared against that conservative threshold: the 80%
+        // auto line sat above what the preflight gate itself allows, so every
+        // overflow funneled into emergency recovery instead of
+        // auto-compaction.
+        let _lock = crate::test_support::lock_test_env();
+        let _codewhale = crate::test_support::EnvVarGuard::remove("CODEWHALE_MAX_OUTPUT_TOKENS");
+        let _deepseek = crate::test_support::EnvVarGuard::remove("DEEPSEEK_MAX_OUTPUT_TOKENS");
+        let limits = codewhale_config::route::RouteLimits {
+            context_tokens: Some(262_144),
+            output_tokens: Some(262_144),
+            ..codewhale_config::route::RouteLimits::default()
+        };
+        let provider = crate::config::ApiProvider::Moonshot;
+        let model = "kimi-k2.7-code";
+        let budget = crate::route_budget::route_context_budget(provider, model, Some(limits), 0)
+            .expect("route budget");
+        let threshold = crate::route_budget::compaction_threshold_for_route_at_percent(
+            provider,
+            model,
+            Some(limits),
+            80.0,
+        );
+
+        // ~130K raw over the summarizable body: conservative ~195K, above the
+        // 80% trigger yet still below the input budget ceiling, so the
+        // preflight gate would not have fired yet either.
+        let mut messages: Vec<Message> =
+            (0..40).map(|_| msg("user", &"x".repeat(13_000))).collect();
+        messages.extend((0..4).map(|_| msg("user", &"x".repeat(100))));
+
+        let config = CompactionConfig {
+            enabled: true,
+            token_threshold: threshold,
+            ..Default::default()
+        };
+        assert!(should_compact(&messages, &config, None, None, None));
+        assert!(
+            estimate_input_tokens_conservative(&messages, None)
+                < budget.input_budget_ceiling as usize
+        );
+    }
+
+    #[test]
+    fn plan_compaction_caps_pinned_token_share_for_large_sessions() {
+        // Debugging-shaped large session: every message matches the error-pin
+        // heuristic. Before the cap this pinned the whole transcript, leaving
+        // compaction nothing to summarize — the LLM summary became a no-op and
+        // emergency front-trimming was the only reducer left.
+        let messages: Vec<Message> = (0..24)
+            .map(|i| msg("assistant", &format!("error {i}: {}", "x".repeat(4_000))))
+            .collect();
+        let plan = plan_compaction(&messages, None, KEEP_RECENT_MESSAGES, None, None);
+
+        assert!(!plan.summarize_indices.is_empty());
+        // Oldest pins are released first; the recent tail always survives.
+        assert!(plan.summarize_indices.contains(&0));
+        assert!(!plan.pinned_indices.contains(&0));
+        for idx in messages.len() - KEEP_RECENT_MESSAGES..messages.len() {
+            assert!(plan.pinned_indices.contains(&idx));
+        }
+        let total: usize = messages
+            .iter()
+            .map(|message| estimate_tokens_for_message(message, false))
+            .sum();
+        let pinned: usize = plan
+            .pinned_indices
+            .iter()
+            .map(|&idx| estimate_tokens_for_message(&messages[idx], false))
+            .sum();
+        assert!(pinned * PINNED_TOKEN_CAP_DENOMINATOR <= total);
+    }
+
+    #[test]
+    fn plan_compaction_keeps_small_sessions_pin_heuristics() {
+        // Below the cap floor the heuristics keep their old behavior: a small
+        // fully-pinned session stays fully pinned.
+        let messages: Vec<Message> = (0..8).map(|_| msg("assistant", "error: boom")).collect();
+        let plan = plan_compaction(&messages, None, KEEP_RECENT_MESSAGES, None, None);
+        assert!(plan.summarize_indices.is_empty());
+        assert_eq!(plan.pinned_indices.len(), messages.len());
+    }
+
+    #[test]
+    fn pinned_token_cap_evicts_call_and_result_pairs_together() {
+        // Estimates: [4000, 4000, 4000, 4000, 2000, 2000] = 20,000 raw, cap
+        // 10,000, tail {4, 5}. Evicting call A must carry its result out with
+        // it, and an already-evicted pair partner must not be accounted twice
+        // (which would stop eviction early and leave the share over cap).
+        let messages = vec![
+            tool_use(
+                "a",
+                "exec_shell",
+                serde_json::json!({"c": "x".repeat(15_993)}),
+            ),
+            tool_result("a", &"y".repeat(16_000)),
+            tool_use(
+                "b",
+                "exec_shell",
+                serde_json::json!({"c": "x".repeat(15_993)}),
+            ),
+            tool_result("b", &"y".repeat(16_000)),
+            tool_result("c", &"z".repeat(8_000)),
+            tool_use(
+                "c",
+                "exec_shell",
+                serde_json::json!({"c": "x".repeat(7_993)}),
+            ),
+        ];
+        let mut pinned: BTreeSet<usize> = [0, 1, 2, 3, 4, 5].into_iter().collect();
+        cap_pinned_token_share(&messages, &mut pinned, None, 2);
+        assert_eq!(pinned, [4, 5].into_iter().collect::<BTreeSet<usize>>());
     }
 
     #[test]

@@ -5442,7 +5442,9 @@ impl Engine {
         }
         self.merge_compaction_summary(summary_prompt);
 
-        let trimmed = self.trim_oldest_messages_to_budget(target_budget);
+        // Trim with hysteresis: landing exactly on the input budget re-triggers
+        // the preflight on the next step as soon as new output is appended.
+        let trimmed = self.trim_oldest_messages_to_budget(emergency_trim_budget(target_budget));
         self.emit_session_updated().await;
         let after_tokens = self.estimated_input_tokens();
         let after_count = self.session.messages.len();
@@ -6808,9 +6810,9 @@ pub use context::context_input_budget_for_route;
 use context::route_context_budget_for_provider;
 use context::{
     MAX_CONTEXT_RECOVERY_ATTEMPTS, MIN_RECENT_MESSAGES_TO_KEEP,
-    effective_max_output_tokens_for_route, estimate_input_tokens_conservative,
-    extract_compaction_summary_prompt, is_context_length_error_message,
-    route_context_budget_for_route, summarize_text,
+    effective_max_output_tokens_for_route, emergency_trim_budget,
+    estimate_input_tokens_conservative, extract_compaction_summary_prompt,
+    is_context_length_error_message, route_context_budget_for_route, summarize_text,
 };
 #[cfg(test)]
 use context::{context_input_budget_for_provider, effective_max_output_tokens};
