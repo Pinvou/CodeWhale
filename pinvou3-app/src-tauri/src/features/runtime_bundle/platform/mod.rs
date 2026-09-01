@@ -157,8 +157,11 @@ const TMEET_SKILL_DIRS: [&str; 1] = ["tmeet-skill"];
 /// 0.29: 回流 Community #249 的受校验 Python 依赖环境、隔离启动器、事务恢复、
 ///       重试冷却与无引用环境清理。0.25 已由 #366 占用，0.26-0.28 也已有登记；
 ///       必须使用新值，确保已写入 0.25 的用户在升级后重新释放 runner 与 manifest。
+/// 0.30: 回流 Community #359 的 dws 文档审计修复与确认门禁契约，登记于
+///       NOTICE-dingtalk.md。钉钉技能树不参与内容哈希，必须递增语义版本，
+///       让已连接用户在启动时重新解包并刷新技能文档。
 pub const BUNDLE_VERSION: &str = concat!(
-    "0.29-",
+    "0.30-",
     env!("BUNDLE_INSTRUCTIONS_HASH"),
     "-",
     env!("BUNDLE_H3C_CLI_HASH"),
