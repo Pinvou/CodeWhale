@@ -157,6 +157,21 @@ function systemTarCommand({ platform = process.platform, systemRoot = process.en
   return fs.existsSync(bsdtar) ? bsdtar : "tar";
 }
 
+function tarExtractionArguments(tarball, stagingRoot, { pathApi = path } = {}) {
+  const relativeTarball = pathApi.relative(stagingRoot, tarball);
+  const escapesStagingRoot =
+    relativeTarball === ".." ||
+    relativeTarball.startsWith(`..${pathApi.sep}`) ||
+    pathApi.isAbsolute(relativeTarball);
+  if (!relativeTarball || escapesStagingRoot) {
+    throw new Error("Vendor tarball must stay inside its staging directory");
+  }
+  // GNU tar treats the colon in a Windows drive-qualified archive path as
+  // host:file remote syntax. Running inside staging with a relative archive
+  // keeps the command portable across GNU tar and Windows bsdtar.
+  return ["-xzf", relativeTarball, "-C", "."];
+}
+
 function isPreparedRoot(root, marker = expectedMarker()) {
   try {
     const actual = JSON.parse(fs.readFileSync(path.join(root, MARKER_NAME), "utf8"));
@@ -397,7 +412,7 @@ async function prepareChromeDevtoolsMcp({ platform = process.platform } = {}) {
     }
     // 3) Extract with tar (bsdtar on macOS/Linux and the System32 bsdtar on Windows;
     //    see systemTarCommand for why PATH order must not decide on Windows).
-    run(systemTarCommand(), ["-xzf", tarball, "-C", stagingRoot], { cwd: stagingRoot });
+    run(systemTarCommand(), tarExtractionArguments(tarball, stagingRoot), { cwd: stagingRoot });
     const unpacked = path.join(stagingRoot, "package");
     if (!fs.existsSync(unpacked)) {
       throw new Error("Extracted tarball is missing package/; the upstream layout changed");
@@ -441,6 +456,7 @@ module.exports = {
   isPreparedRoot,
   outputRoot,
   systemTarCommand,
+  tarExtractionArguments,
 };
 
 if (require.main === module) {
