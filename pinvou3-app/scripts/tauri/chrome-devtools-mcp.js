@@ -197,7 +197,7 @@ function run(cmd, args, { cwd, inherit = false, input, env } = {}) {
   return result;
 }
 
-function requestHttps(url, { get = https.get, timeoutMs = DOWNLOAD_TIMEOUT_MS } = {}) {
+function requestHttps(url, { get = https.get, timeoutMs = DOWNLOAD_TIMEOUT_MS, signal } = {}) {
   const parsed = new URL(url);
   if (parsed.protocol !== "https:") {
     throw new Error(`Refusing non-HTTPS vendor download: ${parsed.protocol}`);
@@ -206,6 +206,7 @@ function requestHttps(url, { get = https.get, timeoutMs = DOWNLOAD_TIMEOUT_MS } 
     const request = get(
       parsed,
       {
+        signal,
         headers: {
           Accept: "application/octet-stream",
           "User-Agent": `pinvou-chrome-devtools-mcp-vendor/${VERSION}`,
@@ -234,32 +235,53 @@ async function downloadHttpsOnce(
     maxRedirects = MAX_DOWNLOAD_REDIRECTS,
   } = {},
 ) {
-  let currentUrl = new URL(url);
-  for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
-    const response = await requestHttps(currentUrl, { get, timeoutMs });
-    const statusCode = response.statusCode || 0;
-    if (statusCode >= 300 && statusCode < 400) {
-      const location = response.headers.location;
-      await discardResponse(response);
-      if (!location) {
-        throw new Error(`Vendor download redirect ${statusCode} omitted Location`);
+  // Wall-clock deadline per attempt: request.setTimeout only detects socket inactivity,
+  // so a trickle download would otherwise keep the build alive forever.
+  const deadline = new AbortController();
+  const deadlineTimer = setTimeout(
+    () => deadline.abort(new Error(`Vendor download timed out after ${timeoutMs} ms`)),
+    timeoutMs,
+  );
+  try {
+    let currentUrl = new URL(url);
+    for (let redirectCount = 0; redirectCount <= maxRedirects; redirectCount += 1) {
+      const response = await requestHttps(currentUrl, { get, timeoutMs, signal: deadline.signal });
+      if (deadline.signal.aborted) {
+        response.destroy();
+        throw deadline.signal.reason;
       }
-      const redirectedUrl = new URL(location, currentUrl);
-      if (redirectedUrl.protocol !== "https:") {
-        throw new Error(`Refusing vendor download redirect to ${redirectedUrl.protocol}`);
+      const abortResponse = () => response.destroy(deadline.signal.reason);
+      deadline.signal.addEventListener("abort", abortResponse, { once: true });
+      try {
+        const statusCode = response.statusCode || 0;
+        if (statusCode >= 300 && statusCode < 400) {
+          const location = response.headers.location;
+          await discardResponse(response);
+          if (!location) {
+            throw new Error(`Vendor download redirect ${statusCode} omitted Location`);
+          }
+          const redirectedUrl = new URL(location, currentUrl);
+          if (redirectedUrl.protocol !== "https:") {
+            throw new Error(`Refusing vendor download redirect to ${redirectedUrl.protocol}`);
+          }
+          currentUrl = redirectedUrl;
+          continue;
+        }
+        if (statusCode !== 200) {
+          await discardResponse(response);
+          throw new Error(`Vendor download failed with HTTP ${statusCode}`);
+        }
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        await pipeline(response, fs.createWriteStream(destination, { mode: 0o600 }));
+        return;
+      } finally {
+        deadline.signal.removeEventListener("abort", abortResponse);
       }
-      currentUrl = redirectedUrl;
-      continue;
     }
-    if (statusCode !== 200) {
-      await discardResponse(response);
-      throw new Error(`Vendor download failed with HTTP ${statusCode}`);
-    }
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    await pipeline(response, fs.createWriteStream(destination, { mode: 0o600 }));
-    return;
+    throw new Error(`Vendor download exceeded ${maxRedirects} redirects`);
+  } finally {
+    clearTimeout(deadlineTimer);
   }
-  throw new Error(`Vendor download exceeded ${maxRedirects} redirects`);
 }
 
 async function downloadWithRetries(
@@ -270,6 +292,7 @@ async function downloadWithRetries(
     retryDelayMs = DOWNLOAD_RETRY_DELAY_MS,
     download = downloadHttpsOnce,
     sleep = delay,
+    removePartial = fs.rmSync,
   } = {},
 ) {
   if (!Number.isSafeInteger(attempts) || attempts < 1) {
@@ -282,7 +305,14 @@ async function downloadWithRetries(
       return;
     } catch (error) {
       lastError = error;
-      fs.rmSync(destination, { force: true });
+      // Best effort: Windows antimalware/indexer can briefly lock the freshly written
+      // tarball; a failed cleanup must not escape the loop and abandon the remaining
+      // retries. A leftover partial file is still truncated by the next attempt.
+      try {
+        removePartial(destination, { force: true });
+      } catch (cleanupError) {
+        console.warn(`[chrome-devtools-mcp] could not remove partial download: ${cleanupError.message}`);
+      }
       if (attempt < attempts) await sleep(retryDelayMs);
     }
   }
