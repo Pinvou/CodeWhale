@@ -3,8 +3,8 @@
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_marketplace_tools(
-) -> Result<Vec<crate::features::marketplace::MarketplaceToolInfo>, String> {
+pub fn list_marketplace_tools()
+-> Result<Vec<crate::features::marketplace::MarketplaceToolInfo>, String> {
     let mgr = crate::features::marketplace::MarketplaceManager::new();
     let tools = mgr.list_tools();
     Ok(tools)
@@ -496,8 +496,8 @@ pub(super) fn uninstall_marketplace_tool_sync(tool_id: &str) -> Result<(), Strin
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn list_marketplace_skills(
-) -> Result<Vec<crate::features::marketplace::skill_marketplace::MarketplaceSkillInfo>, String> {
+pub fn list_marketplace_skills()
+-> Result<Vec<crate::features::marketplace::skill_marketplace::MarketplaceSkillInfo>, String> {
     Ok(
         crate::features::marketplace::skill_marketplace::SkillMarketplaceManager::new()
             .list_skills(),
@@ -960,7 +960,7 @@ where
     S: CredentialStore + Send + 'static,
 {
     use crate::features::marketplace::bundle::{
-        keyring_target, readiness_for, BundleKind, BundleRegistry, Readiness,
+        BundleKind, BundleRegistry, Readiness, keyring_target, readiness_for,
     };
     let reg = BundleRegistry::new();
     let Some(bundle) = reg.bundle(&bundle_id) else {
@@ -1145,7 +1145,8 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("PINVOU3_HOME", &dir);
+        // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+        unsafe { std::env::set_var("PINVOU3_HOME", &dir) };
 
         // 带必填凭据的 MCP manifest + BundleStore 安装记录
         let manifest_dir = crate::features::marketplace::mcp_catalog::package_mcp_dir("weather");
@@ -1208,8 +1209,10 @@ mod tests {
         assert!(result.ready, "必填凭据已注入内存库应就绪");
 
         match prev {
-            Some(v) => std::env::set_var("PINVOU3_HOME", v),
-            None => std::env::remove_var("PINVOU3_HOME"),
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            Some(v) => unsafe { std::env::set_var("PINVOU3_HOME", v) },
+            // SAFETY: holding platform::paths::tests::ENV_LOCK; env writes serialized in-process.
+            None => unsafe { std::env::remove_var("PINVOU3_HOME") },
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

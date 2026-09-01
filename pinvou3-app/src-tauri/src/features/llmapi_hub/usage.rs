@@ -1,6 +1,6 @@
 use chrono::Utc;
 
-use super::models::{current_period, LlmUsageSnapshot};
+use super::models::{LlmUsageSnapshot, current_period};
 
 pub fn record_usage(snapshot: &mut LlmUsageSnapshot, total_tokens: u64) {
     rollover_period_if_needed(snapshot);

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::platform::credential_store::{redact_secret, CredentialError, CredentialReference};
+use crate::platform::credential_store::{CredentialError, CredentialReference, redact_secret};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

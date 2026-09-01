@@ -2,8 +2,8 @@
 /// 注入)。引导模型自调 `kb_search`、严格基于检索结果作答、无依据就说不知道——治本地小
 /// 模型"该查不查 → 凭记忆幻觉"(去掉注入式兜底后这是关键防线)。
 #[tauri::command]
-pub async fn ensure_llmapi_binding(
-) -> Result<crate::features::llmapi_hub::models::EnsureLlmApiBindingResponse, String> {
+pub async fn ensure_llmapi_binding()
+-> Result<crate::features::llmapi_hub::models::EnsureLlmApiBindingResponse, String> {
     crate::features::llmapi_hub::provisioning::ensure_binding_for_current_user()
         .map_err(|err| err.to_tauri_error())
 }
@@ -27,8 +27,8 @@ pub async fn save_llmapi_user_session(
 }
 
 #[tauri::command]
-pub async fn get_llmapi_status(
-) -> Result<crate::features::llmapi_hub::models::LlmApiStatusResponse, String> {
+pub async fn get_llmapi_status()
+-> Result<crate::features::llmapi_hub::models::LlmApiStatusResponse, String> {
     let started_at = std::time::Instant::now();
     log::info!("[llmapi_hub][commands] get_llmapi_status start");
     let remote = tokio::time::timeout(
@@ -50,7 +50,11 @@ pub async fn get_llmapi_status(
                 status.backend_display_name.as_deref().unwrap_or(""),
                 status.quota.as_ref().map(|q| q.limit_tokens).unwrap_or(0),
                 status.quota.as_ref().map(|q| q.used_tokens).unwrap_or(0),
-                status.quota.as_ref().map(|q| q.remaining_tokens).unwrap_or(0)
+                status
+                    .quota
+                    .as_ref()
+                    .map(|q| q.remaining_tokens)
+                    .unwrap_or(0)
             );
             Ok(status)
         }
@@ -93,8 +97,8 @@ pub async fn get_llmapi_status(
     }
 }
 #[tauri::command]
-pub async fn get_llmapi_models(
-) -> Result<crate::features::llmapi_hub::models::BuiltinLlmApiModelsResponse, String> {
+pub async fn get_llmapi_models()
+-> Result<crate::features::llmapi_hub::models::BuiltinLlmApiModelsResponse, String> {
     let started_at = std::time::Instant::now();
     log::info!("[llmapi_hub][commands] get_llmapi_models start");
     let result = tokio::task::spawn_blocking(

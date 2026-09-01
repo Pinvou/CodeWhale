@@ -34,7 +34,8 @@ fn isolated_store() -> (SessionStore, std::sync::MutexGuard<'static, ()>) {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    std::env::set_var("PINVOU3_HOME", &tmp);
+    // SAFETY: platform::paths::tests::ENV_LOCK held; env writes are serialized.
+    unsafe { std::env::set_var("PINVOU3_HOME", &tmp) };
     let store = SessionStore::boot_with_scheduled_root(tmp.join("scheduled")).expect("boot");
     // 注意：不 remove_var——锁还没 drop，下面的断言需要 PINVOU3_HOME 仍是这个值。
     (store, guard)
@@ -144,9 +145,10 @@ fn list_cache_shares_snapshot_and_invalidates_on_write() {
         !std::sync::Arc::ptr_eq(&a, &c),
         "write must invalidate the snapshot"
     );
-    assert!(c
-        .iter()
-        .any(|m| m.id == s1.metadata.id && m.title == "renamed"));
+    assert!(
+        c.iter()
+            .any(|m| m.id == s1.metadata.id && m.title == "renamed")
+    );
 
     // 删除路径同样失效
     store.delete(&s1.metadata.id).expect("delete");
@@ -172,9 +174,11 @@ fn list_cache_stale_generation_snapshot_is_never_served() {
         .set_title(&s1.metadata.id, "renamed".into())
         .expect("set title");
     let post_write = store.list_sessions_cached().expect("post-write read");
-    assert!(post_write
-        .iter()
-        .any(|m| m.id == s1.metadata.id && m.title == "renamed"));
+    assert!(
+        post_write
+            .iter()
+            .any(|m| m.id == s1.metadata.id && m.title == "renamed")
+    );
 
     // 模拟守卫失效的落地物:旧标题视图挂在过期代数上,读取不得返回它。
     let generation_now = store
@@ -542,9 +546,11 @@ fn forkguard_admitted_display_fallback_does_not_skip_unsupported_user_turn() {
             true,
         )
         .expect_err("unsupported latest user content must reject the fallback edit");
-    assert!(error
-        .to_string()
-        .contains("latest user content is not editable"));
+    assert!(
+        error
+            .to_string()
+            .contains("latest user content is not editable")
+    );
     assert_eq!(
         store.load(&session.metadata.id).unwrap().messages,
         baseline,
@@ -583,9 +589,11 @@ fn scheduled_session_is_isolated_but_directly_loadable() {
     assert!(!listed.iter().any(|item| item.id == eval_id));
     #[cfg(not(feature = "benchmark-hooks"))]
     assert!(listed.iter().any(|item| item.id == eval_id));
-    assert!(paths::sessions_root()
-        .join(format!("{}.json", scheduled.metadata.id))
-        .exists());
+    assert!(
+        paths::sessions_root()
+            .join(format!("{}.json", scheduled.metadata.id))
+            .exists()
+    );
     assert_eq!(
         store
             .load(&scheduled.metadata.id)
@@ -615,11 +623,13 @@ fn scheduled_profile_survives_restart_and_routes_message_updates() {
     reloaded
         .update_messages(&id, Vec::new())
         .expect("route scheduled update");
-    assert!(reloaded
-        .manager
-        .sessions_dir()
-        .join(format!("{id}.json"))
-        .exists());
+    assert!(
+        reloaded
+            .manager
+            .sessions_dir()
+            .join(format!("{id}.json"))
+            .exists()
+    );
 }
 
 #[test]
@@ -901,9 +911,11 @@ fn scheduled_engine_state_entry_rejects_normal_chat_without_mutation() {
     let token_error = store
         .persist_scheduled_token_total(&chat.metadata.id, 0, 99)
         .expect_err("normal chat must not use scheduled token persistence");
-    assert!(token_error
-        .to_string()
-        .contains("not a scheduled-run session"));
+    assert!(
+        token_error
+            .to_string()
+            .contains("not a scheduled-run session")
+    );
     let unchanged = store.load(&chat.metadata.id).expect("load unchanged chat");
     assert_eq!(unchanged.metadata.title, chat.metadata.title);
     assert_eq!(unchanged.metadata.model, chat.metadata.model);
@@ -929,10 +941,12 @@ fn public_artifact_replace_rejects_scheduled_without_mutation() {
     let error = store
         .update_artifacts(
             &id,
-            vec![std::env::temp_dir()
-                .join("ui-replacement.md")
-                .to_string_lossy()
-                .into_owned()],
+            vec![
+                std::env::temp_dir()
+                    .join("ui-replacement.md")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
         )
         .expect_err("public replacement must reject scheduled sessions");
 
@@ -1117,10 +1131,12 @@ fn checked_scheduled_delete_removes_profile_json_and_runtime_directory() {
         .delete_scheduled_run(&id, "another-task")
         .expect_err("wrong owner must fail");
     assert!(err.to_string().contains("task ownership"));
-    assert!(deletions
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .is_empty());
+    assert!(
+        deletions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    );
     assert!(runtime_dir.exists());
 
     store
@@ -1227,11 +1243,13 @@ fn scheduled_delete_retry_finishes_runtime_cleanup_after_profile_removal() {
         .expect_err("the first runtime cleanup failure must remain visible");
 
     assert!(error.to_string().contains("runtime cleanup"));
-    assert!(!store
-        .manager
-        .sessions_dir()
-        .join(format!("{id}.json"))
-        .exists());
+    assert!(
+        !store
+            .manager
+            .sessions_dir()
+            .join(format!("{id}.json"))
+            .exists()
+    );
     assert!(store.scheduled_profile(&id).is_none());
     assert!(runtime_dir.exists(), "failed cleanup must remain retryable");
     assert!(store.active_id().is_none());
@@ -1487,9 +1505,11 @@ fn orphan_transcript_does_not_consume_live_scheduled_retention_budget() {
         .expect("enforce retention");
 
     assert_eq!(store.scheduled_profiles.read().len(), MAX_SESSIONS_PER_KIND);
-    assert!(live_ids
-        .iter()
-        .all(|id| store.scheduled_profile(id).is_some() && store.load(id).is_ok()));
+    assert!(
+        live_ids
+            .iter()
+            .all(|id| store.scheduled_profile(id).is_some() && store.load(id).is_ok())
+    );
     assert!(store.load(orphan_id).is_ok(), "orphan must be preserved");
     assert!(store.scheduled_profile(orphan_id).is_none());
 }
@@ -1574,11 +1594,13 @@ fn retention_notifies_hook_when_record_commit_precedes_cleanup_error() {
             .kind(),
         ErrorKind::PermissionDenied
     );
-    assert!(!store
-        .manager
-        .sessions_dir()
-        .join(format!("{oldest_id}.json"))
-        .exists());
+    assert!(
+        !store
+            .manager
+            .sessions_dir()
+            .join(format!("{oldest_id}.json"))
+            .exists()
+    );
     assert_eq!(
         deletions
             .lock()
@@ -1667,11 +1689,13 @@ fn boot_retains_orphan_transcript_left_before_profile_commit() {
     assert!(!reloaded.scheduled_session_exists(id));
     assert!(paths::sessions_root().join(format!("{id}.json")).exists());
     assert!(runtime_dir.exists());
-    assert!(!reloaded
-        .list()
-        .expect("ordinary chat list")
-        .iter()
-        .any(|metadata| metadata.id == id));
+    assert!(
+        !reloaded
+            .list()
+            .expect("ordinary chat list")
+            .iter()
+            .any(|metadata| metadata.id == id)
+    );
 }
 
 #[test]
@@ -1696,9 +1720,10 @@ fn concurrent_scheduled_creates_do_not_lose_registry_entries() {
 
     let reloaded = reopen_store(&store).expect("reboot");
     assert_eq!(ids.len(), 12);
-    assert!(ids
-        .iter()
-        .all(|id| reloaded.scheduled_profile(id).is_some()));
+    assert!(
+        ids.iter()
+            .all(|id| reloaded.scheduled_profile(id).is_some())
+    );
 }
 
 #[test]
@@ -1975,10 +2000,12 @@ fn metadata_and_artifacts_do_not_change_transcript_revision() {
     store
         .update_artifacts(
             &session.metadata.id,
-            vec![std::env::temp_dir()
-                .join("transcript-revision-artifact.txt")
-                .to_string_lossy()
-                .into_owned()],
+            vec![
+                std::env::temp_dir()
+                    .join("transcript-revision-artifact.txt")
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
         )
         .expect("update artifacts");
 
@@ -2025,10 +2052,12 @@ fn concurrent_stale_transcript_write_cannot_overwrite_winner() {
 
     let durable = store.load(&session.metadata.id).expect("load winner");
     let durable_revision = transcript_revision(&durable.messages).expect("durable revision");
-    assert!(outcomes
-        .iter()
-        .filter_map(|result| result.as_ref().ok())
-        .any(|revision| revision == &durable_revision));
+    assert!(
+        outcomes
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .any(|revision| revision == &durable_revision)
+    );
 }
 
 #[test]
@@ -2128,10 +2157,12 @@ fn deletion_hooks_are_runtime_only_and_do_not_retain_process_history() {
     store.delete(&id).expect("delete before hook exists");
 
     let deletions = record_session_deletions(&store);
-    assert!(deletions
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .is_empty());
+    assert!(
+        deletions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    );
     store
         .delete(&id)
         .expect("idempotent runtime delete notifies the registered hook");
@@ -2197,10 +2228,12 @@ fn invalid_precommit_delete_does_not_emit_durable_deletion_hook() {
 
     assert!(!committed);
     assert!(result.is_err());
-    assert!(deletions
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .is_empty());
+    assert!(
+        deletions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2357,9 +2390,10 @@ fn hiding_session_clears_pinned_state() {
 #[test]
 fn generate_session_id_url_safe() {
     let id = generate_session_id();
-    assert!(id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+    assert!(
+        id.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    );
 }
 
 #[test]
@@ -3060,9 +3094,11 @@ fn session_model_update_rolls_back_memory_when_sidecar_write_fails() {
         .set_session_model_id("wf-model-test", Some("new-model".to_string()))
         .expect_err("an unwritable sidecar must fail the model transaction");
 
-    assert!(error
-        .to_string()
-        .contains("persist per-session model bindings"));
+    assert!(
+        error
+            .to_string()
+            .contains("persist per-session model bindings")
+    );
     assert_eq!(
         store.session_model_override("wf-model-test").as_deref(),
         Some("old-model"),
