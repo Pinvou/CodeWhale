@@ -6123,6 +6123,7 @@ dependencies = [
  "parking_lot",
  "pinvou-knowledge",
  "qrcode",
+ "quick-xml",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "rusqlite",
