@@ -239,6 +239,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const [updatedAt, setUpdatedAt] = useState(null);
   const authorizationRef = useRef(null);
   const authorizationRefreshRef = useRef(false);
+  const authorizationRefreshFailedRef = useRef(false);
 
   const load = useCallback(
     async (target, signal, granted = authorizationRef.current) => {
@@ -425,6 +426,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       try {
         const next = await client.authorization();
         if (disposed) return;
+        if (authorizationRefreshFailedRef.current) {
+          authorizationRefreshFailedRef.current = false;
+          setError('');
+        }
         const current = authorizationRef.current;
         const permissionsChanged = JSON.stringify(current?.platform_permissions || []) !== JSON.stringify(next?.platform_permissions || []);
         if (permissionsChanged || authorizationVersionChanged(authorizationVersions(current), authorizationVersions(next))) {
@@ -444,7 +449,10 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
       } catch (reason) {
         if (!disposed && reason?.name !== 'AbortError') {
           if (reason?.status === 401) setAuth('guest');
-          else setError(copy.failed);
+          else {
+            authorizationRefreshFailedRef.current = true;
+            setError(copy.failed);
+          }
         }
       } finally {
         authorizationRefreshRef.current = false;

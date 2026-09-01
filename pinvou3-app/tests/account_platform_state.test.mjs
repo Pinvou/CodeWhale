@@ -874,6 +874,13 @@ test('admin console exposes users, roles, and organizations as independently nam
   assert.doesNotMatch(i18n, /搜索用户名、名称、邮箱/);
 });
 
+test('admin authorization refresh clears a transient management-service warning after recovery', async () => {
+  const view = await readFile(new URL('../src/features/account-platform/AdminPlatformView.jsx', import.meta.url), 'utf8');
+  assert.match(view, /const authorizationRefreshFailedRef = useRef\(false\)/);
+  assert.match(view, /const next = await client\.authorization\(\);[\s\S]*?authorizationRefreshFailedRef\.current = false;[\s\S]*?setError\(''\)/);
+  assert.match(view, /authorizationRefreshFailedRef\.current = true;[\s\S]*?setError\(copy\.failed\)/);
+});
+
 test('personal center keeps context on overview and cannot create organizations', async () => {
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
   const styles = await readFile(new URL('../src/features/account-platform/account-platform.css', import.meta.url), 'utf8');
