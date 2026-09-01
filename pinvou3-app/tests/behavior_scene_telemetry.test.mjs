@@ -6,7 +6,10 @@ const chatView = readFileSync(new URL('../src/features/chat/ChatView.jsx', impor
 const desktopChat = readFileSync(new URL('../src/platform/tauri/bridge/chat.js', import.meta.url), 'utf8');
 const webChat = readFileSync(new URL('../src/platform/web/bridge.js', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
-const telemetry = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry.rs', import.meta.url), 'utf8');
+const telemetry = [
+  '../src-tauri/src/features/behavior_telemetry.rs',
+  '../src-tauri/src/features/behavior_telemetry_tests.rs',
+].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
 
 test('scene entries are recorded only after becoming visible and once per view', () => {
   assert.match(chatView, /new window\.IntersectionObserver/);

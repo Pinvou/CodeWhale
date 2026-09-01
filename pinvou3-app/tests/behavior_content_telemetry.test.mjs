@@ -7,7 +7,10 @@ const desktopArtifacts = readFileSync(new URL('../src/platform/tauri/bridge/arti
 const web = readFileSync(new URL('../src/platform/web/bridge.js', import.meta.url), 'utf8');
 const knowledge = readFileSync(new URL('../src/features/knowledge/KnowledgeView.jsx', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
-const telemetry = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry.rs', import.meta.url), 'utf8');
+const telemetry = [
+  '../src-tauri/src/features/behavior_telemetry.rs',
+  '../src-tauri/src/features/behavior_telemetry_tests.rs',
+].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
 
 test('desktop and web attachments emit a correlated, idempotent processing terminal', () => {
   for (const source of [desktopAttachments, web]) {
@@ -19,6 +22,8 @@ test('desktop and web attachments emit a correlated, idempotent processing termi
     assert.match(source, /["']composer["']/);
     assert.match(source, /errorCategory: success \? undefined/);
   }
+  const webPathAttachment = web.match(/async function addAttachmentByPath[\s\S]*?\n  }/)?.[0] || '';
+  assert.ok(webPathAttachment.indexOf('beginAttachmentTelemetry') < webPathAttachment.indexOf('await invoke'));
 });
 
 test('knowledge imports preserve one operation across polling and terminal phases', () => {

@@ -10,7 +10,10 @@ const voice = read('src', 'platform', 'tauri', 'bridge', 'voice.js');
 const webVoice = read('src', 'platform', 'web', 'bridge.js');
 const chat = read('src', 'platform', 'tauri', 'bridge', 'chat.js');
 const behaviorCommand = read('src-tauri', 'src', 'app', 'commands', 'behavior_telemetry.rs');
-const behaviorFeature = read('src-tauri', 'src', 'features', 'behavior_telemetry.rs');
+const behaviorFeature = [
+  read('src-tauri', 'src', 'features', 'behavior_telemetry.rs'),
+  read('src-tauri', 'src', 'features', 'behavior_telemetry_tests.rs'),
+].join('\n');
 const webPolicy = JSON.parse(read('src', 'platform', 'web', 'access-policy.json'));
 
 test('voice telemetry terminal helper is idempotent and uses controlled categories', async () => {

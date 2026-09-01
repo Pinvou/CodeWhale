@@ -1,5 +1,30 @@
 use super::prelude::*;
 
+fn telemetry(
+    app: &AppHandle,
+) -> Result<tauri::State<'_, crate::features::behavior_telemetry::BehaviorTelemetry>, String> {
+    app.try_state::<crate::features::behavior_telemetry::BehaviorTelemetry>()
+        .ok_or_else(|| "behavior telemetry is unavailable".to_string())
+}
+
+#[tauri::command]
+pub async fn get_behavior_telemetry_status(
+    app: AppHandle,
+) -> Result<crate::features::behavior_telemetry::BehaviorTelemetryStatus, String> {
+    Ok(telemetry(&app)?.status().await)
+}
+
+#[tauri::command]
+pub async fn set_behavior_telemetry_enabled(
+    enabled: bool,
+    app: AppHandle,
+) -> Result<crate::features::behavior_telemetry::BehaviorTelemetryStatus, String> {
+    telemetry(&app)?
+        .set_user_collection_enabled(enabled)
+        .await
+        .map_err(|error| format!("update behavior telemetry consent: {error:#}"))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackBehaviorEventRequest {
@@ -251,7 +276,10 @@ pub fn track_behavior_event(
         event = event.integer("attempt_index", u64::from(value));
     }
     if let Some(value) = request.entry_point {
-        event = event.string("entry_point", value);
+        event = event.string(
+            "entry_point",
+            crate::features::behavior_telemetry::entry_point_registry_key(&value),
+        );
     }
     if let Some(value) = request.duration_ms {
         event = event.integer("duration_ms", value.min(86_400_000));

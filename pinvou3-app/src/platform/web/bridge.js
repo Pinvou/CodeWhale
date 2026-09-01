@@ -6814,6 +6814,25 @@
   async function setSelectedPet(id) {
     return await invoke("set_selected_pet", { id: id });
   }
+  async function loadBehaviorTelemetryStatus() {
+    state.behaviorTelemetry = {
+      configured: false,
+      enabled: false,
+      user_enabled: null,
+      collection_period_id: null,
+      withdrawal_pending: false,
+      deletion_pending: false,
+      last_deletion_request_id: null,
+      retention_days: 35,
+      pending_event_count: 0,
+      dropped_event_count: 0,
+    };
+    notify();
+    return state.behaviorTelemetry;
+  }
+  async function setBehaviorTelemetryEnabled() {
+    throw new Error("behavior telemetry is unsupported by the Web host");
+  }
   async function loadEffectiveModelConfig(sessionId) {
     var requestedSessionId = arguments.length ? (sessionId || null) : (state.activeSessionId || null);
     try {
@@ -8318,12 +8337,12 @@
     var id = ++attachIdSeq;
     var att = { id: id, basename: basename(path), status: "parsing", result: null, error: null };
     state.attachments.push(att); notify();
+    beginAttachmentTelemetry(att, 0, "composer");
     try {
       var result = await invoke(IS_WEB ? "web_access_ingest_file" : "ingest_file", { path: path });
-      beginAttachmentTelemetry(att, result && (result.byteSize || result.byte_size), "composer");
       att.status = "ready"; att.result = result;
       finishAttachmentTelemetry(att, true);
-    } catch (e) { if (!att.telemetryAttempt) beginAttachmentTelemetry(att, 0, "composer"); att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, "validation_failed"); }
+    } catch (e) { att.status = "error"; att.error = String(e); finishAttachmentTelemetry(att, false, "validation_failed"); }
     notify();
   }
   async function addPasteImage(filename, bytes) {
@@ -9652,6 +9671,8 @@
     stopMonitorPolling: stopMonitorPolling,
     clearMonitorStats: clearMonitorStats,
     setSelectedPet: setSelectedPet,
+    loadBehaviorTelemetryStatus: loadBehaviorTelemetryStatus,
+    setBehaviorTelemetryEnabled: setBehaviorTelemetryEnabled,
     saveSettings: saveSettings,
     saveSettingsAndRestart: saveSettingsAndRestart,
     saveSearchSettings: saveSearchSettings,

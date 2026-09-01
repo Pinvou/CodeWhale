@@ -10,6 +10,7 @@ import { MaterialInspector } from './MaterialInspector.jsx';
 import { RelayAvatar } from './RelayAvatar.jsx';
 import { TeamBoard } from './TeamBoard.jsx';
 import { invokeTauri } from '../../platform/tauri/client.js';
+import { isWeb } from '../../shared/platform.js';
 import {
   TEAM_RELAY_SOURCE_FILTERS, TEAM_RELAY_VIEWS, canUpdateRelayProgress, matchesRelayView,
   matchesSourceFilter, projectSnapshot, projectTeamBoard, relayViewCounts,
@@ -706,7 +707,7 @@ export function TeamRelayView({ theme, t, onThemeChange, onUseAgent, onLoadCodeA
   const joinCodeFetchedAtRef = useRef(0);
 
   const relay = viewState.teamRelay || {};
-  const webHost = window.PinvouPlatform?.kind === 'web' || window.PinvouPlatform?.isWeb === true;
+  const webHost = isWeb;
   const capabilitiesLoaded = viewState.platformCapabilities?.loaded || webHost;
   const supported = !webHost && viewState.platformCapabilities?.teamRelaySupported === true;
   useEffect(() => bridge?.state?.subscribeMany ? bridge.state.subscribeMany(['platform', 'teamRelay'], setViewState) : undefined, [bridge]);

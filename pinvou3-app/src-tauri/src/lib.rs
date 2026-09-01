@@ -1110,6 +1110,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::chat::chat,
             commands::behavior_telemetry::track_behavior_event,
+            commands::behavior_telemetry::get_behavior_telemetry_status,
+            commands::behavior_telemetry::set_behavior_telemetry_enabled,
             commands::assistant_response::export_assistant_response,
             commands::assistant_response::open_assistant_share_target,
             commands::browser::browser_stop,

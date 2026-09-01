@@ -6,7 +6,7 @@ import { notifyComposerToolsChanged } from './tool-events.js';
 import { localizeTool, mergeConfigFields, TsActionBtn, tsCategories, tsSkillIconByName, tsSkillsData, tsToolsData, tsToolWelcomeData, TOOL_TYPE_GROUPS, getToolTypeGroup, TOOL_BUSINESS_GROUPS, getToolBusinessGroup } from './tool-common.jsx';
 import { MAX_SKILL_ZIP_BYTES, pickSkillDrop, fileToBase64 } from './skill-import-logic.js';
 import { invokeTauri, isTauriAvailable, tauriEvents } from '../../platform/tauri/client.js';
-import { can } from '../../shared/platform.js';
+import { can, isWeb } from '../../shared/platform.js';
 import { applyConnectorFailure, connectorFailure, connectorUiStep, localizeConnectorAlert } from './connector-ui-state.js';
 import { ConnectorSsoDialog } from './ConnectorSsoDialog.jsx';
 
@@ -15,7 +15,7 @@ const OAUTH_UI_TIMEOUT_MS = 90_000;
 const canStartExternalAuth = () => can('oauth') && can('externalAuth');
 
 const behaviorTelemetryCommand = () => (
-  window.PinvouPlatform?.kind === 'web'
+  isWeb
     ? 'web_access_track_behavior_event'
     : 'track_behavior_event'
 );
@@ -731,7 +731,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           },
         }).catch(() => {});
       };
-      const beginToolConfiguration = (tool, entryPoint = 'tool_store') => {
+      const beginToolConfiguration = (tool, entryPoint = 'marketplace') => {
         if (!tool?.backendId) return null;
         const existing = configurationAttemptsRef.current.get(tool.backendId);
         if (existing) return existing;
@@ -765,7 +765,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       const openToolDetail = (tool) => {
         trackToolBehavior('tool_detail_opened', tool, {
           viewId: behaviorViewIdRef.current,
-          entryPoint: 'tool_store',
+          entryPoint: 'marketplace',
         });
         setSelectedTool(tool);
       };
@@ -1341,7 +1341,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           behaviorImpressionsRef.current.add(backendId);
           trackToolBehavior('tool_impression', tool, {
             viewId: behaviorViewIdRef.current,
-            entryPoint: 'tool_store',
+            entryPoint: 'marketplace',
             positionBucket: element.dataset.toolAnalyticsPosition,
           });
         };
@@ -1487,7 +1487,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           return;
         }
         const tracksConfiguration = hasConfig || Boolean(t?.oauthMcp);
-        if (tracksConfiguration) beginToolConfiguration(t, 'tool_store');
+        if (tracksConfiguration) beginToolConfiguration(t, 'marketplace');
         let configurationSucceeded = false;
         const oauthRequestId = t?.oauthMcp ? beginOAuthRequest(backendId) : null;
         setBusyId(backendId);
@@ -1698,7 +1698,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
         setBusyId('ima');
         setAlert({ loading: true, visible: false, title: detailCopy.actions.connectingIma, subtitle: detailCopy.actions.validatingIma, isInstall: true, isError: false });
         const tool = findLocalizedTool('ima');
-        beginToolConfiguration(tool, 'tool_store');
+        beginToolConfiguration(tool, 'marketplace');
         let succeeded = false;
         try {
           await invokeTauri('ima_connect', { clientId, apiKey });
@@ -1741,7 +1741,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
       // 进度走后端事件 feishu:qr / feishu:phase / feishu:connected / feishu:error
       //(监听见下方 useEffect);这里只 ensure cli + 触发 begin。busyId 在事件里清。
       const connectFeishu = async () => {
-        beginToolConfiguration(findLocalizedTool('feishu'), 'tool_store');
+        beginToolConfiguration(findLocalizedTool('feishu'), 'marketplace');
         setBusyId('feishu');
         ensureFeishuListeners();
         // 开流程卡（无阻塞弹窗）：先起“准备运行时”步。写进跨视图 store，切走不丢。
@@ -1793,7 +1793,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接企业微信(单段扫码):流程卡驱动(镜像飞书),进度走 wecom:* 事件。
       const connectWecom = async () => {
-        beginToolConfiguration(findLocalizedTool('wecom'), 'tool_store');
+        beginToolConfiguration(findLocalizedTool('wecom'), 'marketplace');
         setBusyId('wecom');
         ensureWecomListeners();
         // 开流程卡(无阻塞弹窗):先起"准备运行时"步,写进跨视图 store,切走不丢。
@@ -1842,7 +1842,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接钉钉(单段扫码):流程卡驱动(镜像企微),进度走 dingtalk:* 事件。
       const connectDingtalk = async () => {
-        beginToolConfiguration(findLocalizedTool('dingtalk'), 'tool_store');
+        beginToolConfiguration(findLocalizedTool('dingtalk'), 'marketplace');
         setBusyId('dingtalk');
         ensureDingtalkListeners();
         dingtalkConn.setFlow({ phase: 'running', steps: { runtime: 'active' }, active: 'runtime', pct: 0, sec: 0, log: '' });
@@ -1887,7 +1887,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接 EIP(SSO 轮询自动收):事件驱动。二进制内置,无需 ensure_cli/扫码。
       const connectEip = async () => {
-        beginToolConfiguration(findLocalizedTool('eip'), 'tool_store');
+        beginToolConfiguration(findLocalizedTool('eip'), 'marketplace');
         setBusyId('eip');
         try {
           await invokeTauri('eip_connect_begin');
@@ -1916,7 +1916,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接知道知识库(SSO 轮询自动收):事件驱动。二进制内置,无需手工粘贴 token。
       const connectZhidao = async () => {
-        beginToolConfiguration(findLocalizedTool('zhidao'), 'tool_store');
+        beginToolConfiguration(findLocalizedTool('zhidao'), 'marketplace');
         setBusyId('zhidao');
         try {
           await invokeTauri('zhidao_connect_begin');
@@ -1944,7 +1944,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
 
       // 连接腾讯会议(单段 OAuth 授权):流程卡驱动(镜像钉钉),进度走 tmeet:* 事件。
       const connectTmeet = async () => {
-        beginToolConfiguration(findLocalizedTool('tmeet'), 'tool_store');
+        beginToolConfiguration(findLocalizedTool('tmeet'), 'marketplace');
         setBusyId('tmeet');
         ensureTmeetListeners();
         tmeetConn.setFlow({ phase: 'running', steps: { runtime: 'active' }, active: 'runtime', pct: 0, sec: 0, log: '' });
@@ -2052,7 +2052,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
           if (isInstalled) return disconnectIma();
           const it = tools.find(x => x.backendId === 'ima') || localizeTool(tsToolsData.find(x => x.backendId === 'ima'), t);
           if (!it) return;
-          beginToolConfiguration(it, 'tool_store');
+          beginToolConfiguration(it, 'marketplace');
           setConfigDialog({
             backendId,
             name: it.title,
@@ -2078,7 +2078,7 @@ const withUiTimeout = (promise, timeoutMs, fallbackResult) => {
             return doInstall(backendId, {});
           }
           if (tool?.configFields && tool.configFields.length > 0) {
-            beginToolConfiguration(tool, 'tool_store');
+            beginToolConfiguration(tool, 'marketplace');
             setConfigDialog({
               backendId,
               name,

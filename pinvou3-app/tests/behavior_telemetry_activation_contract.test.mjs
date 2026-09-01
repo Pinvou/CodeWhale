@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-const rust = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry.rs', import.meta.url), 'utf8');
+const rust = [
+  '../src-tauri/src/features/behavior_telemetry.rs',
+  '../src-tauri/src/features/behavior_telemetry_tests.rs',
+].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
 const usageRust = readFileSync(new URL('../src-tauri/src/platform/telemetry.rs', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
 const settingsBridge = readFileSync(new URL('../src/platform/tauri/bridge/settings.js', import.meta.url), 'utf8');
@@ -20,23 +23,37 @@ test('activation cohort is persisted before its one-time event is enqueued', () 
   assert.match(rust, /\.string\("eligibility_source", "first_open"\)/);
 });
 
-test('internal preview collection starts by default without user controls', () => {
+test('internal preview defaults on while persisting an explicit user on/off choice', () => {
   assert.match(rust, /fn behavior_telemetry_enabled_by_config[\s\S]*"0" \| "false" \| "no" \| "off"/);
-  assert.match(rust, /pub fn start_default_collection[\s\S]*set_collection_enabled\(true\)/);
-  assert.match(rust, /default collection start deferred[\s\S]*RETRY_MAX_DELAY/);
+  assert.match(rust, /pub fn start_default_collection[\s\S]*set_collection_enabled_inner\(true, None\)/);
+  assert.match(rust, /user_enabled: Option<bool>/);
+  assert.match(rust, /set_user_collection_enabled[\s\S]*Some\(enabled\)/);
+  assert.match(rust, /user_enabled == Some\(false\)/);
   assert.match(appLib, /behavior_telemetry\.start_default_collection\(\)/);
-  for (const removedCommand of [
+  for (const privacyCommand of [
     'get_behavior_telemetry_status',
     'set_behavior_telemetry_enabled',
+  ]) {
+    assert.ok(command.includes(privacyCommand));
+    assert.ok(appLib.includes(`commands::behavior_telemetry::${privacyCommand}`));
+    assert.ok(settingsBridge.includes(privacyCommand));
+  }
+  assert.ok(bridge.includes('loadBehaviorTelemetryStatus'));
+  assert.ok(bridge.includes('setBehaviorTelemetryEnabled'));
+  for (const hiddenCommand of [
     'delete_local_behavior_telemetry_data',
     'delete_remote_behavior_telemetry_data',
   ]) {
-    assert.ok(!command.includes(removedCommand));
-    assert.ok(!appLib.includes(`commands::behavior_telemetry::${removedCommand}`));
-    assert.ok(!settingsBridge.includes(removedCommand));
-    assert.ok(!bridge.includes(removedCommand));
+    assert.ok(!command.includes(hiddenCommand));
+    assert.ok(!appLib.includes(`commands::behavior_telemetry::${hiddenCommand}`));
+    assert.ok(!settingsBridge.includes(hiddenCommand));
   }
-  assert.doesNotMatch(settingsView, /behaviorTelemetry|behaviorAnalytics/);
+  assert.ok(!bridge.includes('deleteLocalBehaviorTelemetryData'));
+  assert.ok(!bridge.includes('deleteRemoteBehaviorTelemetryData'));
+  assert.match(settingsView, /behaviorTelemetry/);
+  assert.match(settingsView, /behaviorAnalyticsEnableConfirm/);
+  assert.match(settingsView, /behaviorAnalyticsDisableConfirm/);
+  assert.doesNotMatch(settingsView, /deleteBehaviorTelemetry|deleteRemoteBehaviorTelemetryData/);
 });
 
 test('provider setup and first task environment use the v1 lifecycle events', () => {
@@ -54,6 +71,7 @@ test('provider setup and first task environment use the v1 lifecycle events', ()
   assert(acpProviderForm.includes("eventName: 'provider_setup_started'"));
   assert(acpProviderForm.includes("eventName: 'provider_setup_completed'"));
   assert(acpProviderForm.includes("eventName: 'provider_setup_failed'"));
+  assert.match(acpProviderForm, /isWeb \? 'web_access_track_behavior_event' : 'track_behavior_event'/);
   assert(!settingsBridge.includes('apiKey: trimmedKey'));
 });
 

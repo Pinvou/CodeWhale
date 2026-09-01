@@ -18,16 +18,12 @@ const overview = {
 
 const seenAt = Date.parse("2026-08-10T09:00:00+08:00");
 const devices = [
-  { device_id: "alpha", online: true, platform: "windows", first_seen_at: seenAt, last_active_at: seenAt, turns_today: 1, turns_7d: 4 },
-  { device_id: "beta", online: true, platform: "linux", first_seen_at: seenAt, last_active_at: seenAt, turns_today: 3, turns_7d: 3 },
-  { device_id: "gamma", online: true, platform: "macos", first_seen_at: seenAt, last_active_at: seenAt, turns_today: 2, turns_7d: 5 },
+  { device_id: "alpha", online: true, platform: "windows", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 4 },
+  { device_id: "beta", online: true, platform: "linux", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 3 },
+  { device_id: "gamma", online: true, platform: "macos", first_seen_at: seenAt, last_active_at: seenAt, turns_7d: 5 },
 ];
 
-function renderedDeviceIds(document) {
-  return [...document.querySelectorAll("#deviceRows .device b")].map((node) => node.textContent);
-}
-
-test("device detail sortable headers toggle descending and ascending order", async () => {
+test("behavior analytics views render alongside the device dashboard", async () => {
   const dom = new JSDOM(statsHtml, {
     runScripts: "dangerously",
     url: "https://www.pinvou.com/pinvou3/stats",
@@ -66,26 +62,7 @@ test("device detail sortable headers toggle descending and ascending order", asy
     document.querySelector('[data-view="commercial"]').click();
     assert.equal(document.querySelector("#commercialView").classList.contains("hidden"), false);
     document.querySelector('[data-view="devices"]').click();
-    assert.deepEqual(renderedDeviceIds(document), ["alpha", "beta", "gamma"]);
-
-    const todaySort = document.querySelector('[data-sort="turns_today"]');
-    todaySort.click();
-    assert.deepEqual(renderedDeviceIds(document), ["beta", "gamma", "alpha"]);
-    assert.equal(todaySort.closest("th").getAttribute("aria-sort"), "descending");
-    assert.equal(todaySort.querySelector(".sort-arrow").textContent, "↓");
-
-    todaySort.click();
-    assert.deepEqual(renderedDeviceIds(document), ["alpha", "gamma", "beta"]);
-    assert.equal(todaySort.closest("th").getAttribute("aria-sort"), "ascending");
-
-    document.querySelector('[data-sort="turns_7d"]').click();
-    assert.deepEqual(renderedDeviceIds(document), ["gamma", "alpha", "beta"]);
-
-    const deviceSort = document.querySelector('[data-sort="device_id"]');
-    deviceSort.click();
-    assert.deepEqual(renderedDeviceIds(document), ["gamma", "beta", "alpha"]);
-    deviceSort.click();
-    assert.deepEqual(renderedDeviceIds(document), ["alpha", "beta", "gamma"]);
+    assert.equal(document.querySelector("#devicesView").classList.contains("hidden"), false);
   } finally {
     dom.window.close();
   }

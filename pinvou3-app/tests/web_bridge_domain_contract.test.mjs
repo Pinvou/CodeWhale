@@ -99,6 +99,15 @@ assert.ok(Object.hasOwn(state, 'sessions'));
 assert.ok(Object.hasOwn(state, 'settings'));
 assert.equal(Object.hasOwn(state, 'messages'), false);
 assert.throws(() => api.state.get('unknown'), /Unknown Tauri bridge state slice/);
+const webTelemetryStatus = await api.settings.loadBehaviorTelemetryStatus();
+assert.equal(webTelemetryStatus.configured, false,
+  'Web host must expose behavior telemetry as explicitly unsupported');
+assert.equal(webTelemetryStatus.enabled, false);
+await assert.rejects(
+  api.settings.setBehaviorTelemetryEnabled(true),
+  /unsupported by the Web host/,
+  'Web host must reject behavior telemetry mutations instead of silently accepting them',
+);
 
 const flatSnapshots = [];
 const secondFlatSnapshots = [];

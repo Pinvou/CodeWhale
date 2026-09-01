@@ -293,10 +293,9 @@ test("healthz exposes aggregate endpoint counters and no identifiers", async () 
   assert.equal(JSON.stringify(health).includes("token"), false);
 });
 
-test("stats page exposes today's device turns and telemetry keeps its dedicated path", async () => {
+test("stats and telemetry keep their dedicated top-level paths", async () => {
   const stats = await fetch(`${httpUrl}/pinvou3/stats`);
   assert.equal(stats.status, 200);
-  assert.match(await stats.text(), /data-sort="turns_today">今日对话/);
   const telemetryHealth = await fetch(`${httpUrl}/pinvou3/telemetry/healthz`);
   assert.equal(telemetryHealth.status, 200);
   assert.deepEqual(await telemetryHealth.json(), { ok: true });

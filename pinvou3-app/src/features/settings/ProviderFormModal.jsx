@@ -4,6 +4,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, X } from '../../components/icons.jsx';
 import { invokeTauri } from '../../platform/tauri/client.js';
+import { isWeb } from '../../shared/platform.js';
 
 function providerTelemetryToken(prefix) {
   const cryptoApi = globalThis.crypto;
@@ -311,7 +312,10 @@ export function ProviderFormModal({ agent, copy, initial, onClose, onSaved }) {
     const operationId = providerTelemetryToken('provider');
     const providerKey = String(agent || 'unknown').toLowerCase().replace(/[^a-z0-9_.-]+/g, '_').replace(/^[^a-z0-9]+/, '').slice(0, 64) || 'unknown';
     const startedAt = Date.now();
-    const trackSetup = request => invokeTauri('track_behavior_event', { request }).catch(() => {});
+    const trackSetup = request => invokeTauri(
+      isWeb ? 'web_access_track_behavior_event' : 'track_behavior_event',
+      { request },
+    ).catch(() => {});
     try {
       await trackSetup({ eventName: 'provider_setup_started', providerKey, entryPoint: 'settings', operationId, attemptIndex: 1 });
       const { slotPayload, contextWindowPayload } = payloadRef.current;

@@ -275,21 +275,18 @@ export function buildStatsOverview(devices, events, now = Date.now()) {
 }
 
 export function buildDeviceList(devices, events, now = Date.now()) {
-  const today = statsDay(now);
-  const weekStart = today - 6;
+  const weekStart = statsDay(now) - 6;
   const activity = new Map();
   for (const event of events) {
-    const eventDay = statsDay(event.occurred_at);
-    if (eventDay < weekStart) continue;
-    const row = activity.get(event.device_id) || { turnsToday: 0, turns7d: 0 };
-    row.turns7d += 1;
-    if (eventDay === today) row.turnsToday += 1;
+    if (statsDay(event.occurred_at) < weekStart) continue;
+    const row = activity.get(event.device_id) || { turns: 0 };
+    row.turns += 1;
     activity.set(event.device_id, row);
   }
 
   return devices
     .map((device) => {
-      const recent = activity.get(device.device_id) || { turnsToday: 0, turns7d: 0 };
+      const recent = activity.get(device.device_id) || { turns: 0 };
       const online = now - Number(device.last_seen_at || 0) <= ONLINE_WINDOW_MS;
       return {
         device_id: device.device_id,
@@ -300,8 +297,7 @@ export function buildDeviceList(devices, events, now = Date.now()) {
         region: formatDeviceRegion(device.region),
         first_seen_at: device.first_seen_at,
         last_active_at: device.last_active_at,
-        turns_today: recent.turnsToday,
-        turns_7d: recent.turns7d,
+        turns_7d: recent.turns,
       };
     })
     .sort((a, b) => Number(b.online) - Number(a.online)

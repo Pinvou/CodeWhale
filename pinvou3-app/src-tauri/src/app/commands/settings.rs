@@ -387,7 +387,7 @@ pub async fn set_session_model(
             model.preset.as_str(),
             &model.model,
             "session",
-            "session_model_picker",
+            "composer",
         );
     }
     Ok(())

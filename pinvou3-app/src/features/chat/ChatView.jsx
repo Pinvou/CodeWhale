@@ -813,7 +813,7 @@ const ToolWelcomeCard = ({ toolId, theme, t, onSend }) => {
             eventName,
             viewId: sceneViewIdRef.current,
             ...fields,
-            entryPoint: 'chat_home',
+            entryPoint: 'composer',
           },
         }).catch(() => {});
       }, []);

@@ -1179,11 +1179,7 @@ pub async fn web_access_set_codex_acp_model(
     let outcome = acp_pool.set_model(&session_id, &model_id).await;
     if outcome.is_ok() {
         crate::features::behavior_telemetry::track_model_selected(
-            &app,
-            provider,
-            &model_id,
-            "session",
-            "web_code_model_picker",
+            &app, provider, &model_id, "session", "composer",
         );
     }
     let outcome = outcome.and_then(project_acp_session_info_for_web);

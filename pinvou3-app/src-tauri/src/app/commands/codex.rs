@@ -239,11 +239,7 @@ pub async fn set_codex_acp_model(
         .await
         .map_err(|error| format!("切换 Codex 模型失败: {error:#}"))?;
     crate::features::behavior_telemetry::track_model_selected(
-        &app,
-        provider,
-        &model_id,
-        "session",
-        "code_model_picker",
+        &app, provider, &model_id, "session", "composer",
     );
     Ok(info)
 }

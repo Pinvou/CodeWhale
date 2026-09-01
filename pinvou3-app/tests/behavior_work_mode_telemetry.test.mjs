@@ -7,7 +7,10 @@ const teamView = readFileSync(new URL('../src/features/team-relay/TeamRelayView.
 const scheduledDesktop = readFileSync(new URL('../src/platform/tauri/bridge/scheduled.js', import.meta.url), 'utf8');
 const scheduledWeb = readFileSync(new URL('../src/platform/web/bridge.js', import.meta.url), 'utf8');
 const command = readFileSync(new URL('../src-tauri/src/app/commands/behavior_telemetry.rs', import.meta.url), 'utf8');
-const telemetry = readFileSync(new URL('../src-tauri/src/features/behavior_telemetry.rs', import.meta.url), 'utf8');
+const telemetry = [
+  '../src-tauri/src/features/behavior_telemetry.rs',
+  '../src-tauri/src/features/behavior_telemetry_tests.rs',
+].map(path => readFileSync(new URL(path, import.meta.url), 'utf8')).join('\n');
 
 test('code workspace reports one visible page instance with a controlled provider', () => {
   assert.match(codeView, /codeTelemetryReportedRef/);
@@ -20,6 +23,9 @@ test('code workspace reports one visible page instance with a controlled provide
 });
 
 test('team workspace reports one page instance without team identity or member details', () => {
+  assert.match(teamView, /import \{ isWeb \} from '..\/..\/shared\/platform\.js'/);
+  assert.match(teamView, /const webHost = isWeb/);
+  assert.doesNotMatch(teamView, /window\.PinvouPlatform/);
   assert.match(teamView, /teamTelemetryReportedRef/);
   assert.match(teamView, /eventName: 'team_mode_opened'/);
   assert.match(teamView, /sessionId: teamTelemetrySessionIdRef\.current/);
