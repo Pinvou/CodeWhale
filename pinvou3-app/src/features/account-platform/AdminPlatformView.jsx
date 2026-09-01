@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { buildUnitTree } from './admin-organization-tree.js';
 import { formatPoints, formatUsagePoints, MICROCREDITS_PER_POINT } from './credit-units.js';
 import { adminSectionReadOnly, adminVisibleSections, authorizationVersionChanged, authorizationVersions, hasPermission } from './authorization-ui.js';
-import { adminNavigationGroups, readAdminOrganizationRoute, readAdminSection, writeAdminSection } from './admin-navigation.js';
+import { adminNavigationGroups, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, writeAdminSection } from './admin-navigation.js';
 import { AdminRolesWorkspace } from './AdminRolesWorkspace.jsx';
 import { adminPlatformCopy } from '../../shared/admin-platform-i18n.js';
 import { localeNames, supportedLocales } from '../../shared/supported-locales.js';
@@ -303,10 +303,12 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             overviewAvailability,
           };
         } else if (target === 'organizations') {
-          const [users, organizations, roles] = await Promise.all([read('platform.users.read', () => client.users('', signal)), read('platform.organizations.read', () => client.organizations('', signal)), read('platform.roles.read', () => client.roles(signal))]);
+          const organizationDirectory = readAdminOrganizationDirectory();
+          const [users, organizations, roles] = await Promise.all([read('platform.users.read', () => client.users('', signal)), read('platform.organizations.read', () => client.organizations(organizationDirectory, signal)), read('platform.roles.read', () => client.roles(signal))]);
           next = {
             users: users.items || [],
             organizations: organizations.items || [],
+            organizationNextCursor: organizations.next_cursor || '',
             roles: roles.items || [],
           };
         } else if (target === 'users') {
@@ -558,6 +560,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
   const sectionIsReadOnly = section === 'settings' || section === 'overview' ? false : adminSectionReadOnly(authorization, section);
   const currentGroup = visibleGroups.find((group) => group.sections.includes(section));
   const organizationRoute = section === 'organizations' ? readAdminOrganizationRoute() : { organizationID: '', tab: 'overview' };
+  const organizationDirectory = section === 'organizations' ? readAdminOrganizationDirectory() : { q: '', status: '', cursor: '' };
   const currentPageTitle = copy.nav[section];
   const currentPageLead = section === 'overview' ? copy.overview.lead : copy.pageLeads?.[section] || copy.subtitle;
 
@@ -638,7 +641,7 @@ export function AdminPlatformView({ client, copy, language, onLanguageChange }) 
             </div>
           )}
           {section === 'overview' && <Overview copy={copy} language={language} data={data} permissions={platformPermissions} onNavigate={navigate} />}
-          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} organizationRoute={organizationRoute} routeVersion={routeVersion} />}
+          {section === 'organizations' && <AccountDirectory section="organizations" copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} onNavigate={navigate} organizationRoute={organizationRoute} organizationDirectory={organizationDirectory} routeVersion={routeVersion} />}
           {section === 'users' && (
             <UsersWorkspace copy={copy} data={data} client={client} setData={setData} permissions={platformPermissions} currentUserID={authorization?.user_id || ''} onNavigate={navigate} />
           )}
@@ -913,13 +916,14 @@ function OrganizationDeletionDialog({ copy, organization, client, onClose, onDel
   );
 }
 
-function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, organizationRoute = { organizationID: '', tab: 'overview' }, routeVersion = 0 }) {
+function AccountDirectory({ section, copy, data, client, setData, permissions, currentUserID = '', onNavigate, organizationRoute = { organizationID: '', tab: 'overview' }, organizationDirectory = { q: '', status: '', cursor: '' }, routeVersion = 0 }) {
   const [search, setSearch] = useState('');
   const [userCode, setUserCode] = useState('');
   const [userMode, setUserMode] = useState('directory');
   const [currentCursor, setCurrentCursor] = useState('');
   const [cursorHistory, setCursorHistory] = useState([]);
   const [pageNumber, setPageNumber] = useState(1);
+  const organizationCursorBack = useRef(new Map());
   const [actionKey, setActionKey] = useState('');
   const [notice, setNotice] = useState('');
   const [actionError, setActionError] = useState('');
@@ -928,15 +932,19 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [selectedUser, setSelectedUser] = useState(null);
   const [organizationName, setOrganizationName] = useState('');
+  const [organizationStatus, setOrganizationStatus] = useState(organizationDirectory.status || '');
+  const [createOpen, setCreateOpen] = useState(false);
+  const [ownerSearch, setOwnerSearch] = useState('');
+  const [ownerCandidates, setOwnerCandidates] = useState([]);
+  const [ownerLoading, setOwnerLoading] = useState(false);
   const [ownerUserID, setOwnerUserID] = useState('');
   const isUserSection = section === 'users';
   const permissionSet = new Set(permissions || []);
   const canManageUserStatus = permissionSet.has('platform.users.status.manage');
-  const canCreateOrganization = permissionSet.has('platform.organizations.create');
+  const canCreateOrganization = permissionSet.has('platform.organizations.create') && permissionSet.has('platform.users.read');
   const canManageOrganizationStatus = permissionSet.has('platform.organizations.status.manage');
   const canDeleteOrganization = permissionSet.has('platform.organizations.delete');
   const items = isUserSection ? data.users || [] : data.organizations || [];
-  const activeUsers = useMemo(() => (data.users || []).filter((user) => user.status === 'ACTIVE'), [data.users]);
   const selectedOrganization = !isUserSection && organizationRoute.organizationID ? items.find((item) => item.organization_id === organizationRoute.organizationID) || routeOrganization : null;
   useEffect(() => {
     if (isUserSection || !organizationRoute.organizationID) {
@@ -967,9 +975,6 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
     });
     return () => controller.abort();
   }, [client, copy.accounts.organizationLoadFailed, copy.accounts.organizationNotFound, data.organizations, isUserSection, organizationRoute.organizationID]);
-  useEffect(() => {
-    if (!ownerUserID && activeUsers[0]) setOwnerUserID(activeUsers[0].user_id);
-  }, [activeUsers, ownerUserID]);
   const applyUserPage = (result, cursor = '') => {
     setData((current) => ({
       ...current,
@@ -977,15 +982,59 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
       userNextCursor: result.next_cursor || '',
     }));
   };
+  const applyOrganizationPage = (result) => {
+    setData((current) => ({
+      ...current,
+      organizations: result.items || [],
+      organizationNextCursor: result.next_cursor || '',
+      accountOverview: undefined,
+    }));
+  };
+  useEffect(() => {
+    if (isUserSection || organizationRoute.organizationID) return undefined;
+    setSearch(organizationDirectory.q || '');
+    setOrganizationStatus(organizationDirectory.status || '');
+    setCurrentCursor(organizationDirectory.cursor || '');
+    let routedPage = 1;
+    let cursor = organizationDirectory.cursor || '';
+    const seen = new Set();
+    while (cursor && organizationCursorBack.current.has(cursor) && !seen.has(cursor)) {
+      seen.add(cursor);
+      cursor = organizationCursorBack.current.get(cursor) || '';
+      routedPage += 1;
+    }
+    setPageNumber(routedPage);
+    const controller = new globalThis.AbortController();
+    client.organizations(organizationDirectory, controller.signal).then(applyOrganizationPage).catch((reason) => {
+      if (reason?.name !== 'AbortError') setActionError(copy.accounts.lookupUnavailable || copy.accounts.actionFailed);
+    });
+    return () => controller.abort();
+  }, [client, copy.accounts.actionFailed, copy.accounts.lookupUnavailable, isUserSection, organizationDirectory.cursor, organizationDirectory.q, organizationDirectory.status, organizationRoute.organizationID, routeVersion]);
+  useEffect(() => {
+    if (isUserSection || !createOpen) return undefined;
+    const controller = new globalThis.AbortController();
+    const timer = globalThis.setTimeout?.(() => {
+      setOwnerLoading(true);
+      client.users(ownerSearch.trim(), controller.signal).then((result) => {
+        setOwnerCandidates((result.items || []).filter((user) => user.status === 'ACTIVE'));
+      }).catch((reason) => {
+        if (reason?.name !== 'AbortError') setActionError(copy.accounts.ownerSearchFailed);
+      }).finally(() => setOwnerLoading(false));
+    }, 250);
+    return () => {
+      if (timer) globalThis.clearTimeout?.(timer);
+      controller.abort();
+    };
+  }, [client, copy.accounts.ownerSearchFailed, createOpen, isUserSection, ownerSearch]);
   const reload = async (cursor = currentCursor) => {
     if (isUserSection && userMode === 'code') {
       const item = await client.userByCode(userCode.trim());
       applyUserPage({ items: [item] });
       return;
     }
-    const result = isUserSection ? await client.users(search.trim(), undefined, cursor) : await client.organizations(search);
+    const result = isUserSection ? await client.users(search.trim(), undefined, cursor) : await client.organizations({ q: search.trim(), status: organizationStatus, cursor });
     if (isUserSection) applyUserPage(result, cursor);
-    else setData((current) => ({ ...current, organizations: result.items || [], accountOverview: undefined }));
+    else applyOrganizationPage(result);
   };
   const perform = async (item, action) => {
     const isUser = isUserSection;
@@ -1106,10 +1155,20 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
         setUserMode('directory');
         setCurrentCursor('');
         setCursorHistory([]);
+        organizationCursorBack.current.clear();
         setPageNumber(1);
         const result = await client.users(search.trim());
         applyUserPage(result);
-      } else await reload();
+      } else {
+        setCurrentCursor('');
+        setCursorHistory([]);
+        setPageNumber(1);
+        onNavigate('organizations', {
+          organization_q: search.trim() || null,
+          organization_status: organizationStatus || null,
+          organization_cursor: null,
+        });
+      }
     } catch {
       setActionError(copy.accounts.lookupUnavailable || copy.accounts.actionFailed);
     }
@@ -1144,6 +1203,15 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
       setActionError(copy.accounts.actionFailed);
     }
   };
+  const changeOrganizationPage = (direction) => {
+    const nextCursor = direction === 'next' ? data.organizationNextCursor : organizationCursorBack.current.get(currentCursor) || '';
+    if (direction === 'next' && nextCursor) organizationCursorBack.current.set(nextCursor, currentCursor);
+    onNavigate('organizations', {
+      organization_q: search.trim() || null,
+      organization_status: organizationStatus || null,
+      organization_cursor: nextCursor || null,
+    });
+  };
   const createOrganization = async (event) => {
     event.preventDefault();
     if (!organizationName.trim() || !ownerUserID || actionKey) return;
@@ -1153,6 +1221,9 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
     try {
       await client.createOrganization(organizationName.trim(), ownerUserID);
       setOrganizationName('');
+      setOwnerSearch('');
+      setOwnerUserID('');
+      setCreateOpen(false);
       await reload();
       setNotice(copy.accounts.organizationCreated);
     } catch {
@@ -1220,25 +1291,35 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
             </form>
           </div>
         ) : (
-          <form className="adm-search" onSubmit={submit}>
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={copy.accounts.organizationSearch} />
-            <button>{copy.searchAction}</button>
-          </form>
+          <div className="adm-section-tools">
+            <form className="adm-search" onSubmit={submit}>
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={copy.accounts.organizationSearch} />
+              <select value={organizationStatus} onChange={(event) => setOrganizationStatus(event.target.value)} aria-label={copy.accounts.organizationStatusFilter}>
+                <option value="">{copy.accounts.allStatuses}</option>
+                <option value="ACTIVE">ACTIVE</option>
+                <option value="DISABLED">DISABLED</option>
+                <option value="DELETED">DELETED</option>
+              </select>
+              <button>{copy.searchAction}</button>
+            </form>
+            {canCreateOrganization && <button type="button" className="adm-primary-action" onClick={() => setCreateOpen((value) => !value)}>{createOpen ? copy.accounts.cancel : copy.accounts.createOrganization}</button>}
+          </div>
         )}
       </SectionHeader>
-      {!isUserSection && canCreateOrganization && (
-        <form className="adm-create-row" onSubmit={createOrganization}>
+      {!isUserSection && canCreateOrganization && createOpen && (
+        <form className="adm-create-row adm-organization-create" onSubmit={createOrganization}>
           <input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} placeholder={copy.accounts.organizationNamePlaceholder} maxLength={120} />
+          <label className="adm-owner-search"><span>{copy.accounts.searchOwner}</span><input value={ownerSearch} onChange={(event) => { setOwnerSearch(event.target.value); setOwnerUserID(''); }} placeholder={copy.accounts.ownerSearchPlaceholder} /></label>
           <select value={ownerUserID} onChange={(event) => setOwnerUserID(event.target.value)} aria-label={copy.accounts.initialOwner}>
-            <option value="">{copy.accounts.chooseOwner}</option>
-            {activeUsers.map((user) => (
+            <option value="">{ownerLoading ? copy.loading : copy.accounts.chooseOwner}</option>
+            {ownerCandidates.map((user) => (
               <option key={user.user_id} value={user.user_id}>
-                {userLabel(user)}
+                {userLabel(user)}{user.user_code ? ` · ${user.user_code}` : ''}
               </option>
             ))}
           </select>
           <button disabled={!organizationName.trim() || !ownerUserID || Boolean(actionKey)}>{copy.accounts.createOrganization}</button>
-          {activeUsers.length === 0 && <small>{copy.accounts.noActiveOwner}</small>}
+          {!ownerLoading && ownerCandidates.length === 0 && <small>{copy.accounts.noActiveOwner}</small>}
         </form>
       )}
       {notice && (
@@ -1258,6 +1339,15 @@ function AccountDirectory({ section, copy, data, client, setData, permissions, c
           <div>
             <button type="button" disabled={!cursorHistory.length || Boolean(actionKey)} onClick={() => changeUserPage('previous')}>{copy.userManagement.previous}</button>
             <button type="button" disabled={!data.userNextCursor || Boolean(actionKey)} onClick={() => changeUserPage('next')}>{copy.userManagement.next}</button>
+          </div>
+        </footer>
+      )}
+      {!isUserSection && (
+        <footer className="adm-pagination">
+          <span>{copy.accounts.organizationPageSummary(pageNumber, items.length)}</span>
+          <div>
+            <button type="button" disabled={!organizationCursorBack.current.has(currentCursor) || Boolean(actionKey)} onClick={() => changeOrganizationPage('previous')}>{copy.userManagement.previous}</button>
+            <button type="button" disabled={!data.organizationNextCursor || Boolean(actionKey)} onClick={() => changeOrganizationPage('next')}>{copy.userManagement.next}</button>
           </div>
         </footer>
       )}

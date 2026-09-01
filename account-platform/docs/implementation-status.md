@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 398 个目标编号给出实现结论并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 361`、`部分实现 30`、`未实现 5`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `398` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-100 已完成，其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 362`、`部分实现 30`、`未实现 4`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `398` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-101 已完成，其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -378,7 +378,7 @@
 | UI-30 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-FINANCE-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 计费运营、支付与资金、定价与商品、审批中心成为独立 section，删除旧财务聚合 Tab；各页继续复用现有 Billing API，并按精确读/写权限分别展示，未新增业务能力。 |
 | UI-31 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; ADMIN-MODEL-SYSTEM-UX; UI-LANGUAGE-COVERAGE; UI-BUILD | CLOUD_UAT `0.8.0@f6266799` 2026-08-31 | Token Gateway、审计与导出、系统与安全采用原型命名；Keycloak 受控入口迁入系统与安全并与系统状态按 `platform.users.identity.repair`、`platform.system.status.read` 独立显示，只读运行手册不形成第六导航组；公网仍无 Bootstrap、Break-glass、IdP 或服务身份执行入口。 |
 | UI-32 | 已实现 | DOC_CURRENT | ADMIN-PORTAL-UI-REVIEW; ADMIN-PORTAL-UI-INTEGRATION; ADMIN-PORTAL-PROTOTYPE-CONFORMANCE; UI-LANGUAGE-COVERAGE; UI-BUILD; ARCHITECTURE-GUARD | CLOUD_UAT `0.8.0@e8c3c929` 2026-08-28 | 总验收验证 HTML 原型定义的五组信息架构、独立 URL、精确权限与不可用能力隐藏，并继续覆盖源码/制品设计 Token、旧视觉禁用、详情抽屉、响应式、触控目标与减弱动画。 |
-| UI-33 | 未实现 | DOC_CURRENT | CODE-AUDIT | NOT_DEPLOYED | 组织目录固定加载 100 条、无状态筛选和分页，创建/成员候选受用户首屏 25 条限制，组织 ID 与状态展示尚未统一。由 APT-101 实现。 |
+| UI-33 | 已实现 | DOC_CURRENT | ACCOUNT-PLATFORM-STATE; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | 组织目录接入 25 条游标分页、状态筛选和 q/status/cursor URL 恢复；创建表单按需展开，初始所有者通过远程用户搜索选择，不再局限于页面首次加载的 25 个用户。 |
 | UI-34 | 已实现 | DOC_CURRENT | ACCOUNT-PLATFORM-STATE; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | 组织详情改为主内容区独立页面，以 organization_id 和 organization_tab 恢复目标及概览、成员权限、组织结构、生命周期四分区；支持刷新、分享、前进后退并保留目录查询参数。 |
 | UI-35 | 未实现 | DOC_CURRENT | CODE-AUDIT | NOT_DEPLOYED | 成员未分页且每个成员预渲染全部角色和节点复选框，仍残留邮箱标签。由 APT-102 实现。 |
 | UI-36 | 已实现 | DOC_CURRENT | CONTRACT; I18N; UI-LINT; UI-BUILD | NOT_DEPLOYED | ACTIVE 组织不再显示删除；DISABLED 组织通过删除检查界面展示跨域阻断，区分 409/503 与 request_id，并要求精确名称和审计理由后才可提交。 |
@@ -908,7 +908,7 @@
 | UI-30 | 财务、支付、审批、定价与充值商品后台界面改版 | 已实现 | 计费运营、支付与资金、定价与商品、审批中心成为独立页面，继续复用原 API；旧财务聚合 Tab 已删除。 |
 | UI-31 | 模型、Token、系统与审计后台界面改版 | 已实现 | Token Gateway、审计与导出、系统与安全按原型命名；Keycloak 受控入口归入系统与安全并与系统状态独立按权限显示，只读运行手册作为页面内容保留，不新增导航组或公网执行能力。 |
 | UI-32 | 管理后台跨页面集成与发布验收 | 已实现 | 验收覆盖 HTML 原型五组信息架构、独立 URL、源码/制品设计 Token、旧六组与旧配色禁用、精确权限、不可用能力隐藏、三语、读屏和响应式。 |
-| UI-33 | 组织目录可扩展交互 | 未实现 | 固定 100 条列表、常驻创建表单和首屏用户候选尚未收敛。 |
+| UI-33 | 组织目录可扩展交互 | 已实现 | 列表按 25 条游标分页并支持状态筛选和 URL 恢复；创建入口按需展开，初始所有者候选随用户名、显示名、用户编码或完整 ID 远程搜索。 |
 | UI-34 | 独立组织详情深链 | 已实现 | 详情占用主内容区并由 organization_id/organization_tab 深链恢复，浏览器前进后退和返回目录均保持 URL 状态；组织详情不再使用模态抽屉。 |
 | UI-35 | 紧凑成员权限工作区 | 未实现 | 成员未分页且角色/节点控件全部展开，邮箱残留未清理。 |
 | UI-36 | 组织删除交互闭环 | 已实现 | ACTIVE 不出现删除入口；DISABLED 的删除面板展示就绪度与结构化阻断，要求名称和原因双确认，并保留可重试错误与 request_id。 |

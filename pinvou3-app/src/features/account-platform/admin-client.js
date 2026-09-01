@@ -155,8 +155,13 @@ export class AdminPlatformClient {
   retryProfileChange(requestID) {
     return this.mutate('account', `/admin/v1/profile-change-requests/${encodeURIComponent(requestID)}/actions/retry`, 'POST');
   }
-  organizations(search, signal) {
-    return this.request('account', `/admin/v1/organizations?limit=100&q=${encodeURIComponent(search || '')}`, signal);
+  organizations(searchOrFilters = {}, signal) {
+    const filters = typeof searchOrFilters === 'string' ? { q: searchOrFilters } : searchOrFilters || {};
+    const query = new URLSearchParams({ limit: '25' });
+    if (filters.q) query.set('q', filters.q);
+    if (filters.status) query.set('status', filters.status);
+    if (filters.cursor) query.set('cursor', filters.cursor);
+    return this.request('account', `/admin/v1/organizations?${query}`, signal);
   }
   createOrganization(name, ownerUserID) {
     return this.mutate('account', '/admin/v1/organizations', 'POST', {

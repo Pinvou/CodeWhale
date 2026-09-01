@@ -23,6 +23,16 @@ export function readAdminOrganizationRoute(locationLike = globalThis.location) {
   };
 }
 
+export function readAdminOrganizationDirectory(locationLike = globalThis.location) {
+  const search = new URLSearchParams(String(locationLike?.search || ''));
+  const requestedStatus = search.get('organization_status') || '';
+  return {
+    q: search.get('organization_q') || '',
+    status: ['ACTIVE', 'DISABLED', 'DELETED'].includes(requestedStatus) ? requestedStatus : '',
+    cursor: search.get('organization_cursor') || '',
+  };
+}
+
 export function adminSectionURL(section, locationLike = globalThis.location, queryUpdates = {}) {
   const pathname = String(locationLike?.pathname || '/admin.html');
   const search = new URLSearchParams(String(locationLike?.search || ''));

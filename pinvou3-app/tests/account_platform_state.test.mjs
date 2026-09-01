@@ -10,7 +10,7 @@ import { AccountPlatformBffClient } from '../src/features/account-platform/bff-c
 import { AccountPlatformDesktopClient } from '../src/features/account-platform/desktop-client.js';
 import { AdminPlatformClient } from '../src/features/account-platform/admin-client.js';
 import { buildUnitTree } from '../src/features/account-platform/admin-organization-tree.js';
-import { adminNavigationGroups, adminSectionURL, readAdminOrganizationRoute, readAdminSection, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
+import { adminNavigationGroups, adminSectionURL, readAdminOrganizationDirectory, readAdminOrganizationRoute, readAdminSection, writeAdminSection } from '../src/features/account-platform/admin-navigation.js';
 import { adminSectionReadOnly, adminVisibleSections, canAccessOrganizationPortal } from '../src/features/account-platform/authorization-ui.js';
 import { summarizeUsageRecords } from '../src/features/account-platform/usage-summary.js';
 import { accountPlatformCopy } from '../src/shared/account-platform-i18n.js';
@@ -27,6 +27,7 @@ test('admin portal navigation groups and URL state remain deterministic', () => 
   assert.equal(readAdminSection(location), 'users');
   assert.deepEqual(readAdminOrganizationRoute({ search: '?organization_id=org-1&organization_tab=members' }), { organizationID: 'org-1', tab: 'members' });
   assert.deepEqual(readAdminOrganizationRoute({ search: '?organization_id=org-1&organization_tab=unknown' }), { organizationID: 'org-1', tab: 'overview' });
+  assert.deepEqual(readAdminOrganizationDirectory({ search: '?organization_q=AI&organization_status=DISABLED&organization_cursor=next%2Fpage' }), { q: 'AI', status: 'DISABLED', cursor: 'next/page' });
   assert.equal(adminSectionURL('billing', location), '/admin.html?trace=kept&section=billing#focus');
   assert.equal(
     adminSectionURL('roles', location, { role: 'ORG_ADMIN', trace: null }),
@@ -343,7 +344,7 @@ test('admin organization client uses protected organization, member, and unit en
     const client = new AdminPlatformClient('/portal');
     client.csrfToken = 'c'.repeat(32);
     await client.createOrganization('Example', 'owner-id');
-    await client.organizations('研发 & AI');
+    await client.organizations({ q:'研发 & AI', status:'DISABLED', cursor:'next/page' });
     await client.organizationMembers('org-id');
     await client.transferOrganizationOwnership('org-id', 'new-owner-id');
     await client.organizationUnits('org-id');
@@ -353,7 +354,7 @@ test('admin organization client uses protected organization, member, and unit en
     await client.deleteOrganizationUnit('org-id', 'unit-id');
     assert.deepEqual(calls.map(call => [call.url, call.options.method || 'GET']), [
       ['/portal/api/admin/account/admin/v1/organizations', 'POST'],
-      ['/portal/api/admin/account/admin/v1/organizations?limit=100&q=%E7%A0%94%E5%8F%91%20%26%20AI', 'GET'],
+      ['/portal/api/admin/account/admin/v1/organizations?limit=25&q=%E7%A0%94%E5%8F%91+%26+AI&status=DISABLED&cursor=next%2Fpage', 'GET'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/members', 'GET'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/ownership', 'POST'],
       ['/portal/api/admin/account/admin/v1/organizations/org-id/units', 'GET'],
@@ -1076,6 +1077,10 @@ test('admin organization detail supports ownership transfer, rename, leaf deleti
   assert.match(view, /activeTab === 'units'/);
   assert.match(view, /activeTab === 'lifecycle'/);
   assert.doesNotMatch(view, /<DetailDrawer label=\{`\$\{copy\.accounts\.organizationManagement\}/);
+  assert.match(view, /organization_status: organizationStatus \|\| null/);
+  assert.match(view, /organization_cursor: nextCursor \|\| null/);
+  assert.match(view, /client\.users\(ownerSearch\.trim\(\), controller\.signal\)/);
+  assert.match(view, /createOpen &&/);
 });
 
 test('payment capabilities isolate provider limitations and enable reviewed-order repair', async () => {
