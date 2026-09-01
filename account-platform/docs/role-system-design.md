@@ -131,7 +131,7 @@ flowchart LR
 |---|---|---|
 | `PLATFORM_SUPER_ADMIN` | 平台超级管理员 | 平台角色分配、安全配置和紧急处置；保留最后一个超级管理员保护 |
 | `PLATFORM_IDENTITY_ADMIN` | 账号管理员 | 用户查询、启停、资料修复、手机号/用户名异常和密码恢复运营 |
-| `PLATFORM_ORGANIZATION_ADMIN` | 组织管理员 | 顶层组织创建、状态、逻辑删除、所有者应急转让和组织结构修复 |
+| `PLATFORM_ORGANIZATION_ADMIN` | 组织管理员 | 顶层组织创建、资料、状态、成员、结构、逻辑删除和所有者应急转让 |
 | `PLATFORM_BILLING_OPERATOR` | 计费运营员 | 钱包、账本、订单同步、Hold、人工调整申请和人工财务修复申请 |
 | `PLATFORM_BILLING_APPROVER` | 财务审批员 | 审批人工积分调整和人工财务修复；不能审批自己的申请 |
 | `PLATFORM_PRICING_ADMIN` | 定价与商品管理员 | 全局/模型价格、版本化价格发布，以及充值商品添加、上架、下架和删除 |
@@ -149,6 +149,7 @@ flowchart LR
 | 用户查询/启停 | ✓ | ✓ | — | — | — | — | — | — | 只读 |
 | 用户资料安全修复 | ✓ | ✓ | — | — | — | — | — | — | 只读 |
 | 顶层组织创建/启停 | ✓ | — | ✓ | — | — | — | — | — | 只读 |
+| 组织资料、成员与结构治理 | ✓ | — | ✓ | — | — | — | — | — | 只读 |
 | 组织删除/所有者应急转让 | ✓ | — | ✓ | — | — | — | — | — | 只读 |
 | 钱包、账本、订单和 Hold | ✓ | — | — | ✓ | 只读 | — | — | — | 只读 |
 | 人工调整/财务修复申请 | ✓ | — | — | ✓ | — | — | — | — | 只读 |
@@ -172,9 +173,9 @@ flowchart LR
 
 | 角色 | 精确权限码 |
 |---|---|
-| `PLATFORM_SUPER_ADMIN` | `platform.roles.read`、`platform.roles.assign`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.status.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.repairs.approve`、`platform.billing.adjustments.request`、`platform.billing.adjustments.approve`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.billing.payment-controls.resume.approve`、`platform.pricing.read`、`platform.pricing.manage`、`platform.products.read`、`platform.products.create`、`platform.products.publish`、`platform.products.unpublish`、`platform.products.delete`、`platform.models.read`、`platform.models.sync`、`platform.models.manage`、`platform.usage.read`、`platform.usage.reconcile.retry`、`platform.system.status.read`、`platform.events.retry`、`platform.audit.read`、`platform.audit.export` |
+| `PLATFORM_SUPER_ADMIN` | `platform.roles.read`、`platform.roles.assign`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.profile.manage`、`platform.organizations.status.manage`、`platform.organizations.members.manage`、`platform.organizations.units.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer`、`platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.repairs.approve`、`platform.billing.adjustments.request`、`platform.billing.adjustments.approve`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.billing.payment-controls.resume.approve`、`platform.pricing.read`、`platform.pricing.manage`、`platform.products.read`、`platform.products.create`、`platform.products.publish`、`platform.products.unpublish`、`platform.products.delete`、`platform.models.read`、`platform.models.sync`、`platform.models.manage`、`platform.usage.read`、`platform.usage.reconcile.retry`、`platform.system.status.read`、`platform.events.retry`、`platform.audit.read`、`platform.audit.export` |
 | `PLATFORM_IDENTITY_ADMIN` | `platform.roles.read`、`platform.users.read`、`platform.users.status.manage`、`platform.users.identity.repair`、`platform.registrations.repair`、`platform.profile-changes.repair`、`platform.account-closures.read`、`platform.account-closures.repair` |
-| `PLATFORM_ORGANIZATION_ADMIN` | `platform.roles.read`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.status.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer` |
+| `PLATFORM_ORGANIZATION_ADMIN` | `platform.roles.read`、`platform.organizations.read`、`platform.organizations.create`、`platform.organizations.profile.manage`、`platform.organizations.status.manage`、`platform.organizations.members.manage`、`platform.organizations.units.manage`、`platform.organizations.delete`、`platform.organizations.owner.transfer` |
 | `PLATFORM_BILLING_OPERATOR` | `platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.orders.sync`、`platform.billing.repairs.request`、`platform.billing.adjustments.request`、`platform.billing.holds.release`、`platform.billing.payment-controls.resume.request`、`platform.products.read`、`platform.usage.read` |
 | `PLATFORM_BILLING_APPROVER` | `platform.billing.wallets.read`、`platform.billing.ledger.read`、`platform.billing.repairs.approve`、`platform.billing.adjustments.approve`、`platform.billing.payment-controls.resume.approve`、`platform.usage.read` |
 | `PLATFORM_PRICING_ADMIN` | `platform.pricing.read`、`platform.pricing.manage`、`platform.products.read`、`platform.products.create`、`platform.products.publish`、`platform.products.unpublish`、`platform.products.delete` |
@@ -316,7 +317,10 @@ platform.account-closures.read
 platform.account-closures.repair
 platform.organizations.read
 platform.organizations.create
+platform.organizations.profile.manage
 platform.organizations.status.manage
+platform.organizations.members.manage
+platform.organizations.units.manage
 platform.organizations.delete
 platform.organizations.owner.transfer
 platform.billing.wallets.read

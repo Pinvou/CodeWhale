@@ -26,7 +26,7 @@ export const adminSectionPermissions = Object.freeze({
 
 export const adminSectionMutationPermissions = Object.freeze({
   overview: [],
-  organizations: ['platform.organizations.create', 'platform.organizations.status.manage', 'platform.organizations.delete', 'platform.organizations.owner.transfer'],
+  organizations: ['platform.organizations.create', 'platform.organizations.profile.manage', 'platform.organizations.status.manage', 'platform.organizations.members.manage', 'platform.organizations.units.manage', 'platform.organizations.delete', 'platform.organizations.owner.transfer'],
   users: ['platform.users.status.manage', 'platform.registrations.repair', 'platform.profile-changes.repair', 'platform.account-closures.repair'],
   roles: ['platform.roles.assign'],
   billing: ['platform.billing.adjustments.request', 'platform.billing.adjustments.approve', 'platform.billing.holds.release', 'platform.pricing.manage', 'platform.usage.reconcile.retry'],

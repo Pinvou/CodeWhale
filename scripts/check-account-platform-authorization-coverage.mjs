@@ -49,13 +49,14 @@ async function productionGoSources(relativeDirectory) {
 }
 
 async function knownHumanPermissions() {
-  const [migration, authorization] = await Promise.all([
+  const sources = await Promise.all([
     source('account-platform/migrations/account/000034_three_scope_authorization.up.sql'),
     source('account-platform/migrations/account/000037_recharge_product_permissions.up.sql'),
+    source('account-platform/migrations/account/000039_organization_governance_permissions.up.sql'),
     source('account-platform/internal/account/authorization.go'),
   ]);
   const result = new Set();
-  for (const match of `${migration}\n${authorization}`.matchAll(/["']((?:personal|platform|org)\.[a-z0-9._-]+)["']/g)) result.add(match[1]);
+  for (const match of sources.join('\n').matchAll(/["']((?:personal|platform|org)\.[a-z0-9._-]+)["']/g)) result.add(match[1]);
   return result;
 }
 

@@ -184,6 +184,7 @@ paths:
     post:
       operationId: createAdminOrganizationUnit
       summary: Create a root or child organization unit
+      description: Requires platform.organizations.units.manage.
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -229,6 +230,7 @@ paths:
     post:
       operationId: addAdminOrganizationMember
       summary: Add or reactivate a platform user as an organization member
+      description: Requires platform.organizations.members.manage.
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -250,6 +252,7 @@ paths:
     delete:
       operationId: removeAdminOrganizationMember
       summary: Idempotently revoke a non-owner membership, reset its active sessions, and suspend grants
+      description: Requires platform.organizations.members.manage.
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "200":
@@ -262,6 +265,7 @@ paths:
     put:
       operationId: replaceAdminOrganizationMemberRoles
       summary: Replace assignable organization roles and unit administrator scopes
+      description: Requires platform.organizations.members.manage.
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UserID" }]
       requestBody:
         required: true
@@ -296,6 +300,7 @@ paths:
     patch:
       operationId: renameAdminOrganizationUnit
       summary: Rename an organization unit
+      description: Requires platform.organizations.units.manage.
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       requestBody:
         required: true
@@ -315,6 +320,7 @@ paths:
     delete:
       operationId: deleteAdminOrganizationUnit
       summary: Logically delete an unreferenced organization unit after cross-domain preflight
+      description: Requires platform.organizations.units.manage.
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }, { $ref: "#/components/parameters/UnitID" }, { $ref: "#/components/parameters/IdempotencyKey" }]
       responses:
         "200":
@@ -330,6 +336,7 @@ paths:
     patch:
       operationId: setAdminOrganizationStatus
       summary: Enable or disable an organization and its memberships
+      description: Requires platform.organizations.status.manage.
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
       requestBody:
         required: true
@@ -360,6 +367,7 @@ paths:
     patch:
       operationId: renameAdminOrganization
       summary: Rename an organization
+      description: Requires platform.organizations.profile.manage.
       parameters: [{ $ref: "#/components/parameters/OrganizationID" }]
       requestBody:
         required: true

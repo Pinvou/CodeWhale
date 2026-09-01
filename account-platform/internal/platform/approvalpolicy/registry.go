@@ -74,12 +74,12 @@ func buildPolicies() map[string]Policy {
 	auditCommands := map[string]string{
 		"ACCOUNT_ROLE_BINDING_GRANT": "platform.roles.assign", "ACCOUNT_ROLE_BINDING_REVOKE": "platform.roles.assign",
 		"ACCOUNT_USER_STATUS_CHANGE": "platform.users.status.manage", "ACCOUNT_USER_DELETE": "platform.users.status.manage",
-		"ACCOUNT_ORGANIZATION_CREATE": "platform.organizations.create", "ACCOUNT_ORGANIZATION_RENAME": "platform.organizations.status.manage",
+		"ACCOUNT_ORGANIZATION_CREATE": "platform.organizations.create", "ACCOUNT_ORGANIZATION_RENAME": "platform.organizations.profile.manage",
 		"ACCOUNT_ORGANIZATION_STATUS_CHANGE": "platform.organizations.status.manage", "ACCOUNT_ORGANIZATION_DELETE": "platform.organizations.delete",
-		"ACCOUNT_MEMBER_ADD": "platform.organizations.status.manage", "ACCOUNT_MEMBER_ROLES_REPLACE": "platform.organizations.status.manage",
-		"ACCOUNT_MEMBER_REMOVE": "platform.organizations.status.manage", "ACCOUNT_OWNERSHIP_TRANSFER": "platform.organizations.owner.transfer",
-		"ACCOUNT_UNIT_CREATE": "platform.organizations.status.manage", "ACCOUNT_UNIT_RENAME": "platform.organizations.status.manage",
-		"ACCOUNT_UNIT_DELETE": "platform.organizations.status.manage", "ACCOUNT_REGISTRATION_RETRY": "platform.registrations.repair",
+		"ACCOUNT_MEMBER_ADD": "platform.organizations.members.manage", "ACCOUNT_MEMBER_ROLES_REPLACE": "platform.organizations.members.manage",
+		"ACCOUNT_MEMBER_REMOVE": "platform.organizations.members.manage", "ACCOUNT_OWNERSHIP_TRANSFER": "platform.organizations.owner.transfer",
+		"ACCOUNT_UNIT_CREATE": "platform.organizations.units.manage", "ACCOUNT_UNIT_RENAME": "platform.organizations.units.manage",
+		"ACCOUNT_UNIT_DELETE": "platform.organizations.units.manage", "ACCOUNT_REGISTRATION_RETRY": "platform.registrations.repair",
 		"ACCOUNT_REGISTRATION_COMPENSATE": "platform.registrations.repair", "ACCOUNT_PROFILE_CHANGE_RETRY": "platform.profile-changes.repair",
 		"ACCOUNT_CLOSURE_RETRY":                "platform.account-closures.repair",
 		"ACCOUNT_AUDIT_EXPORT_CREATE":          "platform.audit.export",
@@ -124,8 +124,12 @@ func buildPolicies() map[string]Policy {
 		"TOKEN_USAGE_RECONCILE":              "internal.token.usage.reconcile", "EVENT_OUTBOX_RELAY": "internal.events.relay",
 	}
 	for commandType, permission := range auditCommands {
+		policyVersion := int64(Version)
+		if strings.HasPrefix(commandType, "ACCOUNT_MEMBER_") || strings.HasPrefix(commandType, "ACCOUNT_UNIT_") || commandType == "ACCOUNT_ORGANIZATION_RENAME" {
+			policyVersion = 2
+		}
 		result[commandType] = Policy{
-			CommandType: commandType, PolicyVersion: Version, Mode: AuditOnly, RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
+			CommandType: commandType, PolicyVersion: policyVersion, Mode: AuditOnly, RequesterPermission: permission, RiskClass: "GOVERNANCE_OR_NORMAL_STATE_MACHINE",
 			ApprovalCount: 0, SelfApprovalForbidden: false, SnapshotSchemaVersion: 1,
 			CriticalResourceFields: []string{"target_id", "request_fingerprint"}, ExpiresAfter: 24 * time.Hour,
 			ExecutionWindow: 5 * time.Minute, ExecutorIdentity: "requesting-domain-service",

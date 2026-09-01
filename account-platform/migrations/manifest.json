@@ -382,6 +382,16 @@
         "file": "000038_payment_product_resume_policy.up.sql",
         "version": 38,
         "sha256": "69b77f7346d0da582571eb90d22bed8c08a2c6a74312655dc01d47d64970dd34"
+      },
+      {
+        "file": "000039_organization_governance_permissions.down.sql",
+        "version": 39,
+        "sha256": "cdca3a2cb723c69bcf7b51943283881d18a05365b8c544c942ce77858e9b53be"
+      },
+      {
+        "file": "000039_organization_governance_permissions.up.sql",
+        "version": 39,
+        "sha256": "6161e78dcd405ca4710c59d90dd20be079e18216050c53c4025509122e919d5f"
       }
     ],
     "billing": [

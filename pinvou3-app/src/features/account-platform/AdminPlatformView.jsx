@@ -1485,7 +1485,10 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
   const permissionSet = new Set(permissions || []);
-  const canManageOrganization = permissionSet.has('platform.organizations.status.manage');
+  const canManageOrganizationProfile = permissionSet.has('platform.organizations.profile.manage');
+  const canManageOrganizationStatus = permissionSet.has('platform.organizations.status.manage');
+  const canManageOrganizationMembers = permissionSet.has('platform.organizations.members.manage');
+  const canManageOrganizationUnits = permissionSet.has('platform.organizations.units.manage');
   const canTransferOwnership = permissionSet.has('platform.organizations.owner.transfer');
   const canDeleteOrganization = permissionSet.has('platform.organizations.delete');
   const load = useCallback(
@@ -1772,7 +1775,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
       <div className="adm-org-title">
         <div>
           <span className="adm-eyebrow">{copy.accounts.organizationManagement}</span>
-          {canManageOrganization && editingOrganizationName ? (
+          {canManageOrganizationProfile && editingOrganizationName ? (
             <form className="adm-org-rename" onSubmit={renameOrganization}>
               <input value={organizationName} onChange={(event) => setOrganizationName(event.target.value)} maxLength={120} aria-label={copy.accounts.organizationName} autoFocus />
               <button disabled={busy || !organizationName.trim() || organizationName.trim() === organization.name}>{copy.accounts.save}</button>
@@ -1792,7 +1795,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
             <div className="adm-org-name-display">
               <h2>{organization.name}</h2>
               <p>{copy.accounts.organizationDetailLead}</p>
-              {canManageOrganization && (
+              {canManageOrganizationProfile && (
                 <button type="button" disabled={busy} onClick={() => setEditingOrganizationName(true)}>
                   {copy.accounts.rename}
                 </button>
@@ -1854,7 +1857,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
         <div className="adm-org-section">
       <div className="adm-unit-head">
         <h3>{copy.roles.organizationMembers}</h3>
-        <button type="button" disabled={!canManageOrganization || busy || currentStatus !== 'ACTIVE'} onClick={() => setAddMemberOpen((value) => !value)}>{addMemberOpen ? copy.accounts.cancel : copy.roles.addMember}</button>
+        <button type="button" disabled={!canManageOrganizationMembers || !permissionSet.has('platform.users.read') || busy || currentStatus !== 'ACTIVE'} onClick={() => setAddMemberOpen((value) => !value)}>{addMemberOpen ? copy.accounts.cancel : copy.roles.addMember}</button>
       </div>
       <form className="adm-member-search" onSubmit={searchMembers}>
         <input value={memberSearch} onChange={(event) => setMemberSearch(event.target.value)} placeholder={copy.roles.memberSearchPlaceholder} />
@@ -1864,7 +1867,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
         </select>
         <button disabled={busy}>{copy.searchAction}</button>
       </form>
-      {canManageOrganization && addMemberOpen && (
+      {canManageOrganizationMembers && permissionSet.has('platform.users.read') && addMemberOpen && (
         <form className="adm-create-row adm-member-add" onSubmit={addMember}>
           <input value={memberCandidateSearch} onChange={(event) => { setMemberCandidateSearch(event.target.value); setNewMemberUserID(''); }} placeholder={copy.roles.userSearchPlaceholder} />
           <select value={newMemberUserID} onChange={(event) => setNewMemberUserID(event.target.value)} aria-label={copy.roles.chooseMember}>
@@ -1887,7 +1890,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
           { key:'roles', label:copy.roles.role, render:(member) => <div className="adm-tag-list">{(member.roles || []).map((role) => <span key={role}>{copy.roles.names?.[role] || role}</span>)}</div> },
           { key:'unit_scope', label:copy.roles.unitAdminNodes, render:(member) => copy.roles.unitScopeCount((member.unit_admin_unit_ids || []).length) },
           { key:'joined_at', label:copy.roles.joinedAt, render:(member) => formatDate(member.joined_at) },
-          { key:'actions', label:copy.accounts.actions, render:(member) => <button type="button" disabled={!canManageOrganization || busy || currentStatus !== 'ACTIVE'} onClick={() => setSelectedMember(member)}>{copy.roles.editRoles}</button> },
+          { key:'actions', label:copy.accounts.actions, render:(member) => <button type="button" disabled={!canManageOrganizationMembers || busy || currentStatus !== 'ACTIVE'} onClick={() => setSelectedMember(member)}>{copy.roles.editRoles}</button> },
         ]}
       />
       <footer className="adm-pagination">
@@ -1905,7 +1908,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
       )}
       {activeTab === 'units' && (
         <div className="adm-org-section">
-      {canManageOrganization && (
+      {canManageOrganizationUnits && (
         <form className="adm-unit-form" onSubmit={createUnit}>
           <input value={name} onChange={(event) => setName(event.target.value)} placeholder={copy.accounts.unitName} maxLength={120} />
           <select value={parentID} onChange={(event) => setParentID(event.target.value)} aria-label={copy.accounts.parentUnit}>
@@ -1936,8 +1939,8 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
               key={unit.unit_id}
               unit={unit}
               copy={copy}
-              disabled={busy || !canManageOrganization}
-              addDisabled={!canManageOrganization || currentStatus !== 'ACTIVE'}
+              disabled={busy || !canManageOrganizationUnits}
+              addDisabled={!canManageOrganizationUnits || currentStatus !== 'ACTIVE'}
               onAddChild={(id) => {
                 setParentID(id);
                 setName('');
@@ -1955,7 +1958,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
           <div className="adm-lifecycle-summary">
             <div><span>{copy.accounts.currentStatus}</span><Status value={currentStatus} /></div>
             <p>{currentStatus === 'ACTIVE' ? copy.accounts.activeOrganizationHelp : copy.accounts.disabledOrganizationHelp}</p>
-            {canManageOrganization && (
+            {canManageOrganizationStatus && (
               <div className="adm-row-actions">
                 {currentStatus === 'ACTIVE' ? <button type="button" onClick={() => changeStatus('DISABLED')} disabled={busy}>{copy.accounts.disable}</button> : currentStatus === 'DISABLED' ? <button type="button" onClick={() => changeStatus('ACTIVE')} disabled={busy}>{copy.accounts.enable}</button> : null}
               </div>
@@ -1972,7 +1975,7 @@ function OrganizationDetail({ copy, organization, roles, client, permissions, on
     </section>
     {selectedMember && (
       <DetailDrawer label={`${copy.roles.editRoles} · ${memberLabel(selectedMember)}`} onClose={() => setSelectedMember(null)}>
-        <MemberAccessEditor copy={copy} member={selectedMember} units={units} roles={roles} disabled={!canManageOrganization || busy || currentStatus !== 'ACTIVE'} onSave={saveMemberRoles} onRemove={removeMember} />
+        <MemberAccessEditor copy={copy} member={selectedMember} units={units} roles={roles} disabled={!canManageOrganizationMembers || busy || currentStatus !== 'ACTIVE'} onSave={saveMemberRoles} onRemove={removeMember} />
       </DetailDrawer>
     )}
     {deleteOpen && <OrganizationDeletionDialog copy={copy} organization={{ ...organization, status: currentStatus, name: organizationName }} client={client} onClose={() => setDeleteOpen(false)} onDeleted={onDeleted} />}

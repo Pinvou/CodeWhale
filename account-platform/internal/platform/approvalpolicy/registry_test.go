@@ -60,3 +60,28 @@ func TestNormalRefundAndOrganizationDeleteAreAuditOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestOrganizationGovernancePoliciesUseAtomicPermissions(t *testing.T) {
+	expected := map[string]string{
+		"ACCOUNT_ORGANIZATION_RENAME":  "platform.organizations.profile.manage",
+		"ACCOUNT_MEMBER_ADD":           "platform.organizations.members.manage",
+		"ACCOUNT_MEMBER_ROLES_REPLACE": "platform.organizations.members.manage",
+		"ACCOUNT_MEMBER_REMOVE":        "platform.organizations.members.manage",
+		"ACCOUNT_UNIT_CREATE":          "platform.organizations.units.manage",
+		"ACCOUNT_UNIT_RENAME":          "platform.organizations.units.manage",
+		"ACCOUNT_UNIT_DELETE":          "platform.organizations.units.manage",
+	}
+	for commandType, permission := range expected {
+		policy, err := Lookup(commandType)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policy.PolicyVersion != 2 || policy.Mode != AuditOnly || policy.RequesterPermission != permission {
+			t.Fatalf("organization policy must use append-only atomic permission for %s: %#v", commandType, policy)
+		}
+	}
+	statusPolicy, err := Lookup("ACCOUNT_ORGANIZATION_STATUS_CHANGE")
+	if err != nil || statusPolicy.PolicyVersion != 1 || statusPolicy.RequesterPermission != "platform.organizations.status.manage" {
+		t.Fatalf("status permission must remain isolated on policy version 1: %#v %v", statusPolicy, err)
+	}
+}

@@ -21,7 +21,7 @@
 
 当前各矩阵中的“当前实现/边界”是 `known_gaps` 的展开说明。本轮已对 398 个目标编号给出实现结论并使用下列共享证据编号；只有取得明确版本、环境和验证结果的项目才填写部署版本，其余项目继续保持 `NOT_DEPLOYED`。
 
-全量核验汇总：`已实现 364`、`部分实现 30`、`未实现 2`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `398` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-102 已完成，其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
+全量核验汇总：`已实现 365`、`部分实现 30`、`未实现 1`、`降级实现 0`、`移除 1`、`非当前范围 1`，合计 `398` 项。新增 ACC-65～ACC-68、UI-33～UI-36 已获产品批准并拆分为 APT-099～APT-104；APT-099～APT-103 已完成，其余项目继续按真实差距保持未实现或部分实现，不能沿用 UI-29 的已完成结论。PAY-31、UI-12、ADM-20 已由独立于 Provider capability、默认关闭的产品门禁闭环。PAY-10、PAY-41–PAY-43 已按当前商城合同完成代码适配，真实支付仍需环境联合验收；具体商品配置不再由本文跟踪。PAY-48–PAY-54、ADM-50–ADM-52、UI-23、NFR-53 已由两层目录、可信准入、动态读取、原子权限、幂等审计 API、三语运营交互、精确代理和文档防回退门禁闭环。PAY-55～PAY-58、ADM-53、NFR-54 已由 APT-091～APT-093 收敛。UI-24～UI-32 已由 APT-087～APT-098 在代码基线全部闭环。版本 `0.8.0@79828dd1` 已于 2026-08-26 部署至 `CLOUD_UAT`：三套迁移任务退出码均为 0，Account/Billing/Identity/Token/Portal 与三套 Relay 均通过健康检查，公网 Portal readiness 返回 ready。管理后台原型一致性纠偏版本 `0.8.0@474a522e` 已于 2026-08-28 单独替换 Portal：容器健康，公网 `admin.html` 返回 200，CSS/JS 哈希与仓库制品一致；真实 Provider 商品准入和支付履约仍由 APT-048 联合验收。
 
 | 证据编号 | 审计内容 | 结果 |
 |---|---|---|
@@ -182,7 +182,7 @@
 | ACC-64 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-OBJECT-AUTHORIZATION | NOT_DEPLOYED | 组织管理使用显式组织和可选节点目标，不切换活动计费上下文；节点树、成员、节点移动和成员移除按目标实际归属及完整子树失败关闭。 |
 | ACC-65 | 已实现 | DOC_CURRENT | GO-UNIT; ORGANIZATION-LIFECYCLE; OPENAPI; UI-BUILD | NOT_DEPLOYED | 新增删除就绪度只读端点，聚合 Account、Billing、Token 阻断且不写生命周期投影；DELETE 保持二次强校验并把可选兼容请求中的原因写入审计。 |
 | ACC-66 | 已实现 | DOC_CURRENT | CONTRACT; ACCOUNT-SERVICE | NOT_DEPLOYED | 平台成员端点按加入时间与成员关系 ID 提供稳定游标页，支持显示名、用户编码、完整用户 ID 搜索及角色筛选，并拒绝非法游标和角色。 |
-| ACC-67 | 未实现 | DOC_CURRENT | CODE-AUDIT | NOT_DEPLOYED | 组织改名、成员和节点写操作仍复用 `platform.organizations.status.manage`，未达到最小权限。由 APT-103 实现并兼容迁移既有角色。 |
+| ACC-67 | 已实现 | DOC_CURRENT | GO-UNIT; CONTRACT; OPENAPI; UI-BUILD | NOT_DEPLOYED | 资料、状态、成员和结构写操作分别使用原子平台权限；迁移为既有 `status.manage` 角色补齐新能力并使活动绑定版本失效，审批策略以 v2 追加，历史策略不被改写。 |
 | ACC-68 | 部分实现 | DOC_CURRENT | ORGANIZATION-OBJECT-AUTHORIZATION | NOT_DEPLOYED | 普通组织管理端点已具备节点移动 CAS 和对象边界，但平台管理 API/Portal 尚未暴露同等能力。由 APT-104 补齐。 |
 | TOK-04 | 已实现 | DOC_CURRENT | GO-UNIT; GATEWAY-ADAPTER-NEUTRALITY | NOT_DEPLOYED | `/v1/model-protocols` 暴露 Adapter 版本和显式 `CHAT v1` JSON/SSE 能力；路由持久化 `protocol_code`，未声明的 Embedding/Rerank/Image 等协议不会被推断可用 |
 | TOK-07 | 已实现 | DOC_CURRENT | GO-UNIT; MODEL-CATALOG-LIFECYCLE | NOT_DEPLOYED | 独立版本化目录只把 PUBLISHED 及处于允许宽限期的 DEPRECATED 模型作为 `CATALOG_VISIBLE` 返回；目录展示不读取上下文资格、钱包或请求级预占结果 |
@@ -742,7 +742,7 @@
 | ACC-64 | 组织对象级授权 | 已实现 | 组织管理不依赖活动计费上下文；节点管理员必须提交明确节点目标，列表限于子树，移动同时校验源与新父节点，跨节点成员不向单子树管理者暴露或开放移除。 |
 | ACC-65 | 组织删除就绪度查询 | 已实现 | 只读端点返回当前状态、版本、ready 和结构化跨域 blockers；实际删除再次强一致预检，不信任前端检查结果。 |
 | ACC-66 | 平台组织成员稳定分页 | 已实现 | 管理端成员查询提供 q、role、cursor、limit，按加入时间与成员关系 ID 稳定翻页，并返回用户编码作为非邮箱识别事实。 |
-| ACC-67 | 平台组织治理最小权限 | 未实现 | 改名、成员和节点管理仍由状态权限隐式放行。 |
+| ACC-67 | 平台组织治理最小权限 | 已实现 | 改名、状态、成员和节点管理由四个原子权限独立门禁；兼容迁移保留既有角色能力并更新授权版本。 |
 | ACC-68 | 平台组织节点移动 | 部分实现 | 领域移动事务已实现，平台管理端点和界面尚未接入。 |
 
 ### 3.3 Token Account、路由和模型调用
