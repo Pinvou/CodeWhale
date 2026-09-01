@@ -1039,8 +1039,8 @@ jobs:
       # 多线程测试仍可能观察到其他测试的临时值。Mutex poison 后通过 into_inner()
       # 取得的仍是已加锁 guard，不会绕过互斥；根治需消除测试对进程级 env 的依赖
       # 或让所有读写都通过同一隔离层，超出本 PR 范围。
-      # strict_mode 的三个确定性回归已并入 pinvou3_lib 单测，和全量 lib tests
-      # 共用一次编译与链接，避免第二个 integration test 目标重复链接全依赖树。
+      # strict_mode 的三个确定性回归已并入 pinvou3_lib 单测并共用这次编译；
+      # 只有下方超出单进程内存预算的 behavior-telemetry 测试使用独立目标。
       - name: cargo test --lib --no-run（编译链接测试二进制）
         if: ${{ github.event_name != 'push' }}
         run: |
@@ -1063,6 +1063,26 @@ jobs:
           guard_pid=$!
           set +e
           cargo test --manifest-path pinvou3-app/src-tauri/Cargo.toml --lib -- --test-threads=1
+          status=$?
+          set -e
+          kill "$guard_pid" 2>/dev/null || true
+          exit "$status"
+
+      # The behavior-telemetry state-machine tests intentionally use a separate
+      # harness. Linking their 2,300+ source lines into the already-large lib
+      # harness pushed one rustc/ThinLTO process past the hosted-runner budget;
+      # a source-file-only split does not change that compilation boundary.
+      - name: cargo test --test behavior_telemetry (standalone memory-bounded harness)
+        if: ${{ github.event_name != 'push' }}
+        run: |
+          bash scripts/ci-memguard.sh &
+          guard_pid=$!
+          set +e
+          /usr/bin/time -v cargo test \
+            --manifest-path pinvou3-app/src-tauri/Cargo.toml \
+            --test behavior_telemetry \
+            --features behavior-telemetry-test \
+            -- --test-threads=1
           status=$?
           set -e
           kill "$guard_pid" 2>/dev/null || true

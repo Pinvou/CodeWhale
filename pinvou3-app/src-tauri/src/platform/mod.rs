@@ -20,3 +20,26 @@ pub mod super_permission;
 pub(crate) mod telemetry;
 pub(crate) mod ui_cache;
 pub(crate) mod window_startup;
+
+#[cfg(feature = "behavior-telemetry-test")]
+#[doc(hidden)]
+pub mod behavior_telemetry_test_support {
+    use std::io;
+    use std::path::Path;
+
+    pub fn atomic_write_private(path: &Path, content: &[u8]) -> io::Result<()> {
+        super::filesystem::atomic_write_private(path, content)
+    }
+
+    pub fn open_private_append_file(path: &Path) -> io::Result<std::fs::File> {
+        super::filesystem::open_private_append_file(path)
+    }
+
+    pub fn startup_elapsed_ms() -> u64 {
+        super::startup::elapsed_ms()
+    }
+
+    pub fn hex_lower(bytes: &[u8]) -> String {
+        super::encoding::hex_lower(bytes)
+    }
+}

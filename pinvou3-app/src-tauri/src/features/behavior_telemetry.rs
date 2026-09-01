@@ -4496,7 +4496,3 @@ fn controlled_registry_key(
         .then_some(candidate)
         .unwrap_or(fallback)
 }
-
-#[cfg(test)]
-#[path = "behavior_telemetry_tests.rs"]
-mod tests;
