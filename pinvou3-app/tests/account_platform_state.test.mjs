@@ -589,10 +589,18 @@ test('BFF client never retries a non-CSRF authorization denial', async () => {
 test('personal usage history supports opaque pagination without exposing routing secrets', async () => {
   const bffClient = await readFile(new URL('../src/features/account-platform/bff-client.js', import.meta.url), 'utf8');
   const view = await readFile(new URL('../src/features/account-platform/AccountPlatformView.jsx', import.meta.url), 'utf8');
+  const i18n = await readFile(new URL('../src/shared/account-platform-i18n.js', import.meta.url), 'utf8');
   assert.match(bffClient, /cursor=\$\{encodeURIComponent\(cursor\)\}/);
   assert.match(view, /record\.input_tokens/);
   assert.match(view, /record\.output_tokens/);
   assert.match(view, /page\.next_cursor/);
+  assert.match(view, /setUsageRecords\(page\.items \|\| \[\]\)/);
+  assert.match(view, /usagePageCursors\[targetPage - 1\]/);
+  assert.match(view, /copy\.pageNumber\(page\)/);
+  assert.match(view, /hasPrevious=\{usagePage > 1\}/);
+  assert.equal((i18n.match(/usagePagination:/g) || []).length, 3);
+  assert.equal((i18n.match(/previousPage:/g) || []).length, 3);
+  assert.equal((i18n.match(/nextPage:/g) || []).length, 3);
   assert.doesNotMatch(view, /record\.(?:token_account_id|credential_id|wallet_id|provider)/);
 });
 

@@ -176,6 +176,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   const [billingDetailsUnavailable, setBillingDetailsUnavailable] = useState(false);
   const [usageRecords, setUsageRecords] = useState([]);
   const [usageCursor, setUsageCursor] = useState(null);
+  const [usagePage, setUsagePage] = useState(1);
+  const [usagePageCursors, setUsagePageCursors] = useState(['']);
   const [usageUnavailable, setUsageUnavailable] = useState(false);
   const [section, setSection] = useState(() => (portal ? initialPortalSection(globalThis.location?.search || '') : 'overview'));
   const [busy, setBusy] = useState(false);
@@ -221,6 +223,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
     setBalance(null);
     setUsageRecords([]);
     setUsageCursor(null);
+    setUsagePage(1);
+    setUsagePageCursors(['']);
     setUsageUnavailable(false);
     setUnits([]);
     setMembers([]);
@@ -267,6 +271,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setMembers(value(5)?.items || []);
       setUsageRecords(value(6)?.items || []);
       setUsageCursor(value(6)?.next_cursor || null);
+      setUsagePage(1);
+      setUsagePageCursors(['']);
       setUsageUnavailable(serviceRequestFailed(results[6]));
       setPackages(value(7) || { summary: null, items: [] });
       setOrders(value(8)?.items || []);
@@ -518,6 +524,8 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       setBalance(null);
       setUsageRecords([]);
       setUsageCursor(null);
+      setUsagePage(1);
+      setUsagePageCursors(['']);
       setUsageUnavailable(false);
       setBillingDetailsUnavailable(false);
       setOrder(null);
@@ -551,17 +559,21 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
       }
     });
 
-  const loadMoreUsage = () =>
+  const changeUsagePage = (direction) =>
     run(async () => {
-      if (!usageCursor) return;
+      const targetPage = usagePage + direction;
+      if (targetPage < 1) return;
+      const cursor = direction > 0 ? usageCursor : usagePageCursors[targetPage - 1];
+      if (cursor == null) return;
       const request = guardRef.current.begin();
-      const page = await client.usageHistory(usageCursor, request.signal);
+      const page = await client.usageHistory(cursor, request.signal);
       if (!guardRef.current.isCurrent(request.generation)) return;
-      setUsageRecords((current) => {
-        const known = new Set(current.map((item) => item.usage_request_id));
-        return [...current, ...(page.items || []).filter((item) => !known.has(item.usage_request_id))];
-      });
+      setUsageRecords(page.items || []);
       setUsageCursor(page.next_cursor || null);
+      setUsagePage(targetPage);
+      if (direction > 0) {
+        setUsagePageCursors((current) => [...current.slice(0, targetPage - 1), cursor]);
+      }
     });
 
   const requestClosure = () =>
@@ -704,11 +716,13 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
             usageRecords={usageRecords}
             usageUnavailable={usageUnavailable}
             usageCursor={usageCursor}
+            usagePage={usagePage}
             canRecharge={access.rechargeCreate}
             canCancelUsage={access.usageCancel}
             onRecharge={createPersonalRecharge}
             onActivateRecharge={activatePersonalRecharge}
-            onLoadMoreUsage={loadMoreUsage}
+            onPreviousUsage={() => changeUsagePage(-1)}
+            onNextUsage={() => changeUsagePage(1)}
             onCancelUsage={(usageRequestID) =>
               run(async () => {
                 await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel'));
@@ -897,10 +911,13 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
                 language={language}
                 records={usageRecords}
                 unavailable={usageUnavailable}
+                page={usagePage}
+                hasPrevious={usagePage > 1}
                 hasMore={Boolean(usageCursor)}
                 busy={busy}
                 canCancel={access.usageCancel}
-                onLoadMore={loadMoreUsage}
+                onPrevious={() => changeUsagePage(-1)}
+                onNext={() => changeUsagePage(1)}
                 onCancel={(usageRequestID) =>
                   run(async () => {
                     await client.cancelUsage(usageRequestID, idempotencyKey('usage-cancel'));
@@ -919,7 +936,7 @@ export function AccountPlatformView({ client, copy, language, onLanguageChange, 
   );
 }
 
-function PortalCreditsUsage({ copy, language, personalContext, products, balance, packages, orders, billingUnavailable, detailsUnavailable, order, qrData, busy, usageRecords, usageUnavailable, usageCursor, canRecharge, canCancelUsage, onRecharge, onActivateRecharge, onLoadMoreUsage, onCancelUsage }) {
+function PortalCreditsUsage({ copy, language, personalContext, products, balance, packages, orders, billingUnavailable, detailsUnavailable, order, qrData, busy, usageRecords, usageUnavailable, usageCursor, usagePage, canRecharge, canCancelUsage, onRecharge, onActivateRecharge, onPreviousUsage, onNextUsage, onCancelUsage }) {
   return (
     <section className="ap-combined-tab">
       <p className="ap-eyebrow">{copy.sections.creditsUsage}</p>
@@ -932,7 +949,7 @@ function PortalCreditsUsage({ copy, language, personalContext, products, balance
           <EntitlementSummary copy={copy} language={language} packages={packages} detailsUnavailable={detailsUnavailable} />
         </>
       )}
-      <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} hasMore={Boolean(usageCursor)} busy={busy} canCancel={canCancelUsage} onLoadMore={onLoadMoreUsage} onCancel={onCancelUsage} embedded />
+      <Usage copy={copy} language={language} records={usageRecords} unavailable={usageUnavailable} page={usagePage} hasPrevious={usagePage > 1} hasMore={Boolean(usageCursor)} busy={busy} canCancel={canCancelUsage} onPrevious={onPreviousUsage} onNext={onNextUsage} onCancel={onCancelUsage} embedded />
     </section>
   );
 }
@@ -2372,7 +2389,7 @@ function formatUsageTime(value, language) {
       }).format(date);
 }
 
-function Usage({ copy, language, records, unavailable, hasMore, busy, canCancel = true, onLoadMore, onCancel, embedded = false }) {
+function Usage({ copy, language, records, unavailable, page, hasPrevious, hasMore, busy, canCancel = true, onPrevious, onNext, onCancel, embedded = false }) {
   const Heading = embedded ? 'h3' : 'h2';
   const summaries = summarizeUsageRecords(records);
   const header = (
@@ -2439,10 +2456,16 @@ function Usage({ copy, language, records, unavailable, hasMore, busy, canCancel 
               </article>
             );
           })}
-          {hasMore && (
-            <button className="ap-usage-more" disabled={busy} onClick={onLoadMore}>
-              {busy ? copy.loadingMore : copy.loadMore}
-            </button>
+          {(hasPrevious || hasMore) && (
+            <nav className="ap-usage-pagination" aria-label={copy.usagePagination}>
+              <button type="button" disabled={busy || !hasPrevious} onClick={onPrevious}>
+                {copy.previousPage}
+              </button>
+              <span aria-current="page">{copy.pageNumber(page)}</span>
+              <button type="button" disabled={busy || !hasMore} onClick={onNext}>
+                {copy.nextPage}
+              </button>
+            </nav>
           )}
         </div>
       ) : (
