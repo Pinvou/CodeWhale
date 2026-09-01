@@ -5022,7 +5022,11 @@ impl Engine {
                     self.session.approval_mode,
                     Arc::clone(&self.shared_auto_review_policy),
                     self.config.terminal_chrome_enabled,
-                );
+                )
+                // Typed permission rules must bind delegated calls like they
+                // bind the parent's own; the handle shares the live rulesets,
+                // so mid-session updates stay effective.
+                .with_exec_policy_engine(self.config.exec_policy_engine.clone());
                 if matches!(input_policy.mode, AppMode::Plan) {
                     rt.worker_profile = WorkerRuntimeProfile::for_role(FleetRole::Planner);
                 }
