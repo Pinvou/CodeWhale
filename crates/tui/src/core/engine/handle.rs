@@ -169,6 +169,59 @@ impl EngineHandle {
 
     /// Atomically publish the steer disposition and cancel the active turn.
     pub fn cancel_with_mode(&self, reason: CancelReason, mode: CancelMode) {
+        self.publish_cancel_disposition(reason, mode);
+        match self.cancel_token.lock() {
+            Ok(slot) => slot.token.cancel(),
+            Err(poisoned) => poisoned.into_inner().token.cancel(),
+        }
+        crate::retry_status::clear();
+    }
+
+    /// Cancel exactly the turn named by `turn_id`, and only while that turn
+    /// still holds the shared cancellation slot.
+    ///
+    /// Returns `true` when the slot named `turn_id` and its token fired;
+    /// `false` when the slot already moved on — the engine swapped tokens for
+    /// a newer turn (a host-driven send, or a runtime self-start such as an
+    /// idle sub-agent completion, a background shell wake, or a goal
+    /// continuation) before this cancel was observed. In the `false` case
+    /// nothing is cancelled and no steer disposition or cancel reason is
+    /// published: the target turn is already gone, and the newer turn belongs
+    /// to a different generation the caller never saw.
+    ///
+    /// The identity check, the steer disposition, and the token resolution
+    /// all happen under the same slot lock the engine's turn-start install
+    /// uses, so a concurrent turn start can neither race the decision nor
+    /// inherit this cancel's disposition: the install waits for the lock, and
+    /// by the time it swaps the slot the disposition has already landed on
+    /// the named turn. The token is cloned out while locked, and firing it
+    /// afterwards cancels only that cloned token — even if the slot moves on
+    /// in between, the fired object is still the target turn's own token.
+    #[must_use = "a false return means the target turn already ended; do not treat the cancel as delivered"]
+    pub fn cancel_turn(&self, turn_id: &str, reason: CancelReason, mode: CancelMode) -> bool {
+        let token = {
+            let slot = self
+                .cancel_token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.turn_id.as_deref() != Some(turn_id) {
+                return false;
+            }
+            // Publish while the slot lock is still held: a turn start that
+            // swaps the slot waits for this lock, so the disposition can
+            // never latch onto a follow-up turn the caller never targeted.
+            self.publish_cancel_disposition(reason, mode);
+            slot.token.clone()
+        };
+        token.cancel();
+        crate::retry_status::clear();
+        true
+    }
+
+    /// Publish the steer disposition and latch the cancel reason shared by
+    /// every cancel entry point. The token fire itself stays with the caller
+    /// so turn-bound cancels can resolve the exact token under the slot lock.
+    fn publish_cancel_disposition(&self, reason: CancelReason, mode: CancelMode) {
         self.steer_control
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -177,11 +230,6 @@ impl EngineHandle {
             Ok(mut slot) => *slot = Some(reason),
             Err(poisoned) => *poisoned.into_inner() = Some(reason),
         }
-        match self.cancel_token.lock() {
-            Ok(token) => token.cancel(),
-            Err(poisoned) => poisoned.into_inner().cancel(),
-        }
-        crate::retry_status::clear();
     }
 
     /// Check if a request is currently cancelled
@@ -189,8 +237,8 @@ impl EngineHandle {
     #[allow(dead_code)]
     pub fn is_cancelled(&self) -> bool {
         match self.cancel_token.lock() {
-            Ok(token) => token.is_cancelled(),
-            Err(poisoned) => poisoned.into_inner().is_cancelled(),
+            Ok(slot) => slot.token.is_cancelled(),
+            Err(poisoned) => poisoned.into_inner().token.is_cancelled(),
         }
     }
 
