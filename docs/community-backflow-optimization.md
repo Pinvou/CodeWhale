@@ -65,11 +65,67 @@ node scripts/community-backflow.mjs submit \
 
 `queue` 和 `submit` 优先使用 `GITHUB_TOKEN` 或 `GH_TOKEN`；使用 Git Credential Manager
 时由操作者显式传入 `--credential <github-username>`，工具不内置个人账号。GitHub API 请求
-使用 15 秒超时，并对网络错误、限流和临时 5xx 最多重试 3 次。请求正文始终以 UTF-8 字节发送，创建或更新后逐字回读
+使用 15 秒超时；只读请求（GET/HEAD）对网络错误、限流和临时 5xx 最多重试 3 次，写请求不自动
+重试（fail-closed 契约见下文“事件驱动自动推进”）。请求正文始终以 UTF-8 字节发送，创建或更新后逐字回读
 标题和正文。Token 不写入输出、文件或 PR。
 
 PR 正文包含与当前 head 绑定的 provenance，记录实际处理 OS、CLI 版本、base/head SHA
 和轻量检查。任何后续 push 都必须重新运行 `submit` 更新 provenance。
+
+## 事件驱动自动推进
+
+默认分支上的 `.github/workflows/community-backflow-automation.yml` 监听两个受信事件：
+
+1. `PR Check` 的 `workflow_run.completed` 成功事件触发 current-head 复核并加入 Merge Queue，
+   不再由操作者轮询 required checks。
+2. `pull_request_target.closed` 且 PR 已合并时触发普通回流 Issue 的幂等收尾。
+
+自动器默认关闭。只有仓库变量 `COMMUNITY_BACKFLOW_AUTOMATION_ENABLED` 精确设置为 `true`
+才允许写操作；变量缺失或其他值均输出 `automation-disabled` 并成功退出。工作流显式 checkout
+仓库默认分支，绝不 checkout 或执行 PR head 的代码。
+
+每次推进都从 GitHub 回读并同时验证：Official 同仓、base=`main`、固定
+`backflow/community-<source>` 分支、来源 marker/provenance/current head 一致、来源 Community
+PR 仍 merged、分页读取的真实 changed files、唯一关联 Official Issue、不带
+blocked/dependency-wait，以及该 head 的 `required-gate` 已 completed/success。只有来源根目录
+`VERSION` 发生变更（含重命名前路径）才判定为 Release，并与 Issue plan 交叉验证；响应未知或
+两者不一致时 fail closed。PR 来源/provenance 与 Issue 来源/plan 四类 marker 必须各恰好一个；
+重复、冲突或缺失一律停止，不根据事件载荷猜测状态。
+
+```shell
+# 本地或 Actions 事件载荷的完整只读演练；仍需显式启用变量才会进入验证路径
+COMMUNITY_BACKFLOW_AUTOMATION_ENABLED=true \
+node scripts/community-backflow.mjs automation \
+  --repo Pinvou/pinvou3 \
+  --event-file event.json \
+  --dry-run
+```
+
+入队和收尾均可安全重放：`enqueuePullRequest.expectedHeadOid` 绑定已通过门禁的 head，校验后
+分支推进会由 GitHub 原子拒绝；已经在 Merge Queue/已启用 auto-merge 的 PR 不重复入队。普通
+Issue 评论含稳定 marker；收尾各阶段重新回读 PR、Issue、head 和标签。先添加并回读确认
+`backflow:synced`，确认前始终保留 `backflow:processing`，随后才定向移除旧回流标签并关闭；
+`open+synced` 是可恢复中间态，重放会全面复核后继续关闭，不使用旧标签数组覆盖并发更新。
+GitHub API 只对 `GET/HEAD` 做透明重试；评论、标签、关闭、建 PR 与 GraphQL mutation 等写请求
+若在服务端可能已提交后丢失响应，会立即失败且不盲目重试。下一次事件重放通过 stable marker
+和远端状态回读收敛，因此响应丢失不会在同一次调用内写出重复评论。
+Release 回流第一阶段用幂等评论明确返回
+`deferred-release`，不删除分支、不改标签、不关闭 Issue；其 `release-packages.yml` 去重触发与
+构建链接回读仍按后文
+人工契约完成，避免缺失固件构建证据时错误收尾。
+
+事件消费与恢复边界：非 `backflow/community-<n>` 分支的 PR Check 成功事件或普通已合并 PR
+会被安全跳过（`not-a-backflow-pull-request`），不产生失败任务。收尾路径的写步骤没有天然的
+“下一次事件”：某一步失败后需人工重跑失败的 workflow run（重放按上文契约幂等收敛），或转
+人工按 Skill 收尾；自动器不主动通知。入队后被合并队列踢出时，若 head checks 重新成功，自动器
+会按同一契约再次入队，该重入队路径没有退避上限；持续组合失败应人工介入并改走人工收尾流程。
+
+GitHub 的 `enqueuePullRequest` 接口本身不接受逐 PR merge method，不能据此声称 squash。
+自动器在每次推进前通过 GraphQL 回读 Official `main` 的
+`mergeQueue.configuration.mergeMethod`，只接受 `SQUASH`；缺失、未知或实际为 `MERGE`/`REBASE`
+时给出管理员可操作的配置提示并拒绝入队，绝不修改远端规则或绕过 Queue。远端回流分支仅在
+人工收尾或具备服务端 SHA 原子绑定的安全 reaper 中删除。GitHub REST ref DELETE 没有
+compare-and-delete，事件自动器不得执行 GET→DELETE，以免校验后分支推进时误删新 head。
 
 ## 依赖调度
 

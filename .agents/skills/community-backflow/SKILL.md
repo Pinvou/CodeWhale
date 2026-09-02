@@ -144,6 +144,40 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 文件多、改动行数大、跨模块或触及某类路径本身都不是 blocker。没有上述问题时，
 不要等待人工复审，直接加入 Merge Queue。
 
+### 事件驱动推进
+
+仓库变量 `COMMUNITY_BACKFLOW_AUTOMATION_ENABLED` 精确配置为 `true` 后，默认分支上的
+`community-backflow-automation.yml` 接管普通回流的等待与收尾：
+
+- `PR Check` 的 `workflow_run` 成功后，使用默认分支受信代码重新回读 PR、来源 Community
+  PR 及分页 changed files、关联 Official Issue 和当前 head 的 `required-gate`，校验通过才加入
+  Merge Queue。根目录 `VERSION` 的真实变更必须与 Issue Release plan 一致，否则失败关闭。
+- `pull_request_target.closed` 确认 PR 实际 merged 后，在各收尾阶段重读 PR/Issue/head/标签。
+  先添加并回读确认 `backflow:synced`，确认前保留 `backflow:processing`；失败重放可从
+  `open+processing+synced` 或 `open+synced` 继续，且不覆盖非回流标签或并发更新。
+- GitHub REST ref DELETE 没有服务端 SHA compare-and-delete，事件自动器不得删除远端分支；
+  分支清理由人工流程或具备原子绑定能力的安全 reaper 完成，不能使用有 H→H2 窗口的
+  GET→DELETE 模式。
+- 入队 mutation 用 `expectedHeadOid` 绑定已通过门禁的 head，并先通过受信 GraphQL API 审计
+  Official `main` 的 `mergeQueue.configuration.mergeMethod`。只有实际为 `SQUASH` 才入队；
+  `MERGE`、`REBASE` 或未知配置都拒绝，自动器不得修改远端规则或绕过组合门禁。
+- 自动器只接受 Official 同仓、base 为 `main`、分支严格匹配
+  `backflow/community-<source-number>` 的 PR；来源 marker、provenance、Issue plan marker 和
+  Issue 来源 marker 都必须各恰好出现一次，重复、冲突或与当前 head 不一致都会失败关闭，
+  不猜测或修正远端状态。
+- workflow 不 checkout PR head，也不执行 PR 提供的脚本。未配置仓库变量时安全跳过；排障可用
+  `node scripts/community-backflow.mjs automation --repo OWNER/REPO --event-file EVENT.json --dry-run`
+  完整只读校验。
+- GitHub API 仅对 `GET/HEAD` 透明重试。评论、标签、关闭、建 PR 和 GraphQL mutation 等写请求
+  若在服务端可能已提交后丢失响应，立即停止而不盲目重试；后续事件通过 stable marker 和远端
+  状态回读幂等收敛，避免同一次调用产生重复评论或重复写入。
+- Release 回流在第一阶段以幂等评论返回 `deferred-release`，不删除分支、不修改标签、不关闭
+  Issue，继续按下方固件构建契约人工完成。自动器不会把缺失固件构建证据的 Release Issue
+  标记 synced。
+
+如果仓库未启用自动器，或自动器因真实 blocker 停止，继续使用上方
+`gh pr merge --auto --squash --delete-branch` 和人工收尾流程。
+
 ## Release 固件构建
 
 来源 PR 的 base→head diff 包含 `VERSION` 时，视为 release PR。完成回流合并或
