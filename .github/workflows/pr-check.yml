@@ -112,6 +112,7 @@ jobs:
       - name: 版本与 CI 路由脚本测试
         run: >-
           node --test
+          scripts/tests/community-backflow-automation.test.mjs
           scripts/tests/community-backflow.test.mjs
           scripts/tests/sync-version.test.mjs
           scripts/tests/select-frontend-smokes.test.mjs
@@ -370,6 +371,7 @@ jobs:
               - 'pinvou3-app/package.json'
             backflow_infra:
               - '.agents/skills/community-backflow/**'
+              - '.github/workflows/community-backflow-automation.yml'
               - '.github/workflows/community-backflow-monitor.yml'
               - '.github/workflows/pr-check.yml'
               - 'docs/community-backflow-optimization.md'
@@ -405,7 +407,10 @@ jobs:
           node-version: "22"
 
       - name: 回流调度与跨平台契约测试
-        run: node --test scripts/tests/community-backflow.test.mjs
+        run: >-
+          node --test
+          scripts/tests/community-backflow-automation.test.mjs
+          scripts/tests/community-backflow.test.mjs
 
       - name: 当前组合提交轻量预检
         env:

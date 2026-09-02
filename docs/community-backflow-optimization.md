@@ -71,6 +71,42 @@ node scripts/community-backflow.mjs submit \
 PR 正文包含与当前 head 绑定的 provenance，记录实际处理 OS、CLI 版本、base/head SHA
 和轻量检查。任何后续 push 都必须重新运行 `submit` 更新 provenance。
 
+## 事件驱动自动推进
+
+默认分支上的 `.github/workflows/community-backflow-automation.yml` 监听两个受信事件：
+
+1. `PR Check` 的 `workflow_run.completed` 成功事件触发 current-head 复核并加入 Merge Queue，
+   不再由操作者轮询 required checks。
+2. `pull_request_target.closed` 且 PR 已合并时触发普通回流 Issue 的幂等收尾。
+
+自动器默认关闭。只有仓库变量 `COMMUNITY_BACKFLOW_AUTOMATION_ENABLED` 精确设置为 `true`
+才允许写操作；变量缺失或其他值均输出 `automation-disabled` 并成功退出。工作流显式 checkout
+仓库默认分支，绝不 checkout 或执行 PR head 的代码。
+
+每次推进都从 GitHub 回读并同时验证：Official 同仓、base=`main`、固定
+`backflow/community-<source>` 分支、来源 marker/provenance/current head 一致、来源 Community
+PR 仍 merged、唯一关联 Official Issue、不带 blocked/dependency-wait，以及该 head 的
+`required-gate` 已 completed/success。任何一项不成立都停止，不根据事件载荷猜测状态。
+
+```shell
+# 本地或 Actions 事件载荷的完整只读演练；仍需显式启用变量才会进入验证路径
+COMMUNITY_BACKFLOW_AUTOMATION_ENABLED=true \
+node scripts/community-backflow.mjs automation \
+  --repo Pinvou/pinvou3 \
+  --event-file event.json \
+  --dry-run
+```
+
+入队和收尾均可安全重放：已经在 Merge Queue/已启用 auto-merge 的 PR 不重复入队；普通
+Issue 评论含稳定 marker，自动器保留非 `backflow:*` 标签，删除远端固定分支后再标记
+`backflow:synced` 并关闭。Release 回流第一阶段用幂等评论明确返回 `deferred-release`，不删除
+分支、不改标签、不关闭 Issue；其 `release-packages.yml` 去重触发与构建链接回读仍按后文
+人工契约完成，避免缺失固件构建证据时错误收尾。
+
+Official `main` 的 Merge Queue 继续以仓库规则配置的 squash 策略合并；GitHub 的
+`enqueuePullRequest` 接口本身不接受逐 PR merge method。远端回流分支在收到 merged 事件并
+完成上述复核后由收尾器删除，因此不会把分支删除提前到组合门禁之前。
+
 ## 依赖调度
 
 监控器在同一次扫描中提前读取所有新来源 PR 的文件列表并生成 DAG：

@@ -129,6 +129,30 @@ Community PR 已经过严格审核，默认视为可信上游实现；重点处�
 文件多、改动行数大、跨模块或触及某类路径本身都不是 blocker。没有上述问题时，
 不要等待人工复审，直接加入 Merge Queue。
 
+### 事件驱动推进
+
+仓库变量 `COMMUNITY_BACKFLOW_AUTOMATION_ENABLED` 精确配置为 `true` 后，默认分支上的
+`community-backflow-automation.yml` 接管普通回流的等待与收尾：
+
+- `PR Check` 的 `workflow_run` 成功后，使用默认分支受信代码重新回读 PR、来源 Community
+  PR、关联 Official Issue 和当前 head 的 `required-gate`，校验通过才加入 Merge Queue。
+- `pull_request_target.closed` 确认 PR 实际 merged 后，删除固定远端分支，以幂等 marker 评论
+  Issue，保留非回流标签、改为 `backflow:synced` 并关闭。
+- 入队使用 `enqueuePullRequest`，由 Official `main` 的 Merge Queue 仓库规则执行 squash；
+  分支只在 merged 事件收尾阶段删除，不提前绕过组合门禁。
+- 自动器只接受 Official 同仓、base 为 `main`、分支严格匹配
+  `backflow/community-<source-number>` 的 PR；来源 marker、provenance、Issue plan marker 和
+  当前 head 任一不一致都会失败关闭，不猜测或修正远端状态。
+- workflow 不 checkout PR head，也不执行 PR 提供的脚本。未配置仓库变量时安全跳过；排障可用
+  `node scripts/community-backflow.mjs automation --repo OWNER/REPO --event-file EVENT.json --dry-run`
+  完整只读校验。
+- Release 回流在第一阶段以幂等评论返回 `deferred-release`，不删除分支、不修改标签、不关闭
+  Issue，继续按下方固件构建契约人工完成。自动器不会把缺失固件构建证据的 Release Issue
+  标记 synced。
+
+如果仓库未启用自动器，或自动器因真实 blocker 停止，继续使用上方
+`gh pr merge --auto --squash --delete-branch` 和人工收尾流程。
+
 ## Release 固件构建
 
 来源 PR 的 base→head diff 包含 `VERSION` 时，视为 release PR。完成回流合并或
