@@ -1656,7 +1656,7 @@ dependencies = [
  "ignore",
  "image",
  "libc",
- "lru",
+ "lru 0.18.2",
  "mimalloc",
  "oauth2",
  "objc2",
@@ -4948,6 +4948,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6318,7 +6327,7 @@ dependencies = [
 
 [[package]]
 name = "pinvou-knowledge"
-version = "0.8.6"
+version = "0.8.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6353,7 +6362,7 @@ dependencies = [
 
 [[package]]
 name = "pinvou3-tauri"
-version = "0.8.6"
+version = "0.8.9"
 dependencies = [
  "age",
  "agent-backend-api",
@@ -6363,6 +6372,7 @@ dependencies = [
  "base64 0.22.1",
  "block2",
  "calamine",
+ "cc",
  "chrono",
  "codewhale-config",
  "codewhale-execpolicy",
@@ -6374,6 +6384,7 @@ dependencies = [
  "futures-util",
  "gtk",
  "include_dir",
+ "javascriptcore-rs",
  "libc",
  "log",
  "md5",
@@ -6383,9 +6394,11 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "objc2-speech",
+ "objc2-web-kit",
  "parking_lot",
  "pinvou-knowledge",
  "qrcode",
+ "quick-xml",
  "rand 0.10.2",
  "reqwest 0.13.4",
  "rusqlite",
@@ -6401,6 +6414,7 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
+ "tauri-runtime-wry",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -6945,7 +6959,7 @@ dependencies = [
  "indoc",
  "itertools 0.14.0",
  "kasuari",
- "lru",
+ "lru 0.16.4",
  "strum 0.27.2",
  "thiserror 2.0.20",
  "unicode-segmentation",
